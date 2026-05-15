@@ -433,7 +433,7 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 
 	recoverManaged := &cobra.Command{
 		Use:    "recover-managed",
-		Short:  "Recover the managed Dolt process for a city",
+		Short:  "Recover or reuse the managed Dolt process for a city",
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {

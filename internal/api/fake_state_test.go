@@ -43,6 +43,7 @@ type fakeState struct {
 	startedAt     time.Time
 	quarantined   map[string]bool
 	autos         []orders.Order
+	allOrders     []orders.Order
 	services      workspacesvc.Registry
 	pokeCount     int
 	extmsgSvc     *extmsg.Services
@@ -90,15 +91,21 @@ func (f *fakeState) MailProviders() map[string]mail.Provider {
 	}
 	return map[string]mail.Provider{f.cityName: f.cityMailProv}
 }
-func (f *fakeState) EventProvider() events.Provider           { return f.eventProv }
-func (f *fakeState) CityName() string                         { return f.cityName }
-func (f *fakeState) CityPath() string                         { return f.cityPath }
-func (f *fakeState) Version() string                          { return "test" }
-func (f *fakeState) StartedAt() time.Time                     { return f.startedAt }
-func (f *fakeState) IsQuarantined(sessionName string) bool    { return f.quarantined[sessionName] }
-func (f *fakeState) ClearCrashHistory(sessionName string)     { delete(f.quarantined, sessionName) }
-func (f *fakeState) CityBeadStore() beads.Store               { return f.cityBeadStore }
-func (f *fakeState) Orders() []orders.Order                   { return f.autos }
+func (f *fakeState) EventProvider() events.Provider        { return f.eventProv }
+func (f *fakeState) CityName() string                      { return f.cityName }
+func (f *fakeState) CityPath() string                      { return f.cityPath }
+func (f *fakeState) Version() string                       { return "test" }
+func (f *fakeState) StartedAt() time.Time                  { return f.startedAt }
+func (f *fakeState) IsQuarantined(sessionName string) bool { return f.quarantined[sessionName] }
+func (f *fakeState) ClearCrashHistory(sessionName string)  { delete(f.quarantined, sessionName) }
+func (f *fakeState) CityBeadStore() beads.Store            { return f.cityBeadStore }
+func (f *fakeState) Orders() []orders.Order                { return f.autos }
+func (f *fakeState) OrdersAll() []orders.Order {
+	if f.allOrders != nil {
+		return f.allOrders
+	}
+	return f.autos
+}
 func (f *fakeState) Poke()                                    { f.pokeCount++ }
 func (f *fakeState) ServiceRegistry() workspacesvc.Registry   { return f.services }
 func (f *fakeState) ExtMsgServices() *extmsg.Services         { return f.extmsgSvc }
@@ -254,6 +261,9 @@ func (f *fakeMutatorState) UpdateRig(name string, patch RigUpdate) error {
 			}
 			if patch.Prefix != "" {
 				f.cfg.Rigs[i].Prefix = patch.Prefix
+			}
+			if patch.DefaultBranch != "" {
+				f.cfg.Rigs[i].DefaultBranch = patch.DefaultBranch
 			}
 			if patch.Suspended != nil {
 				f.cfg.Rigs[i].Suspended = *patch.Suspended

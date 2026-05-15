@@ -6085,6 +6085,64 @@ func TestSessionToResponse_BaseOnlyDescendant_InheritsDisplayName(t *testing.T) 
 	}
 }
 
+// TestSessionToResponse_AgentKindClassification covers the three buckets the
+// dashboard uses to route sessions to panels (crew/pool/role) plus the
+// fallback when no agent matches the template. The classifier is structural
+// — never inspects role names — so the test agents avoid using any specific
+// role-name string.
+func TestSessionToResponse_AgentKindClassification(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "kind-city"},
+		Agents: []config.Agent{
+			// Crew member: dir ends with "/crew", singleton.
+			{Name: "alpha", Dir: "rig-a/crew", MaxActiveSessions: intPtr(1)},
+			// Pool agent: multi-instance, lives in a rig dir (not crew).
+			{Name: "scaler", Dir: "rig-a", MaxActiveSessions: intPtr(5)},
+			// Singleton role agent: max=1, no crew dir.
+			{Name: "singleton", Dir: "rig-a", MaxActiveSessions: intPtr(1)},
+			// Top-level crew agent: dir is exactly "crew".
+			{Name: "bravo", Dir: "crew", MaxActiveSessions: intPtr(1)},
+		},
+	}
+
+	cases := []struct {
+		name     string
+		template string
+		want     string
+	}{
+		{name: "crew-rig-scoped", template: "rig-a/crew/alpha", want: "crew"},
+		{name: "crew-top-level", template: "crew/bravo", want: "crew"},
+		{name: "pool-multi-instance", template: "rig-a/scaler", want: "pool"},
+		{name: "role-singleton", template: "rig-a/singleton", want: "role"},
+		{name: "unknown-template-omits-kind", template: "unrecognized/template", want: ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			info := session.Info{ID: "sess-" + tc.name, Template: tc.template, Provider: "fake"}
+			resp := sessionToResponse(info, cfg)
+			if resp.AgentKind != tc.want {
+				t.Errorf("AgentKind for template %q = %q, want %q", tc.template, resp.AgentKind, tc.want)
+			}
+		})
+	}
+}
+
+func TestSessionToResponse_ProjectsLastNudgeDeliveredAt(t *testing.T) {
+	stamp := time.Date(2026, 5, 13, 3, 45, 0, 0, time.UTC)
+	resp := sessionToResponse(session.Info{
+		ID:                   "sess-1",
+		Template:             "myrig/worker",
+		Provider:             "codex",
+		CreatedAt:            stamp.Add(-time.Hour),
+		LastNudgeDeliveredAt: stamp,
+	}, nil)
+
+	if resp.LastNudgeDeliveredAt != stamp.Format(time.RFC3339) {
+		t.Fatalf("LastNudgeDeliveredAt = %q, want %q", resp.LastNudgeDeliveredAt, stamp.Format(time.RFC3339))
+	}
+}
+
 func TestHandleSessionStopReturnsOKWithID(t *testing.T) {
 	fs := newSessionFakeState(t)
 	h := newTestCityHandler(t, fs)

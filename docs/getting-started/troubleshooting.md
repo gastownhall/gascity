@@ -100,6 +100,15 @@ check.
 | bd | 1.0.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
 | flock | -- | `brew install flock` | `apt install util-linux` |
 
+### Optional for GitHub gates
+
+| Tool | macOS | Linux |
+|------|-------|-------|
+| gh | `brew install gh` | [cli.github.com](https://cli.github.com/) |
+
+Gas City can run without `gh`. Maintenance skips GitHub gate checks when the
+GitHub CLI is not installed.
+
 If you do not want to install dolt, bd, and flock, switch to the file-based
 store:
 
@@ -133,7 +142,10 @@ Upgrade via Homebrew (`brew upgrade dolt`) or download a newer release from
 
 ## `bd` Version Too Old
 
-Gas City requires `bd` 1.0.0 or newer. Check your version:
+Gas City requires `bd` 1.0.0 or newer. The bd-backed store relies on wisps
+support, including `bd create --ephemeral` and `bd query ephemeral=true`, so
+older binaries can fail order-tracking and wisp cleanup paths. Check your
+version:
 
 ```bash
 bd version
@@ -153,12 +165,144 @@ brew install flock
 Alternatively, switch to the file-based beads provider (see above) to skip
 the flock requirement entirely.
 
+## Cursor MCP Tools Still Prompt or Appear Unavailable
+
+The built-in `cursor` provider starts `cursor-agent` with
+`-f --approve-mcps`. Cursor loads MCP servers from `.cursor/mcp.json` in the
+workspace, including files projected from Gas City's MCP catalog. The
+`--approve-mcps` flag approves every server visible to Cursor from that file
+or from `~/.cursor/mcp.json`.
+
+If you override Cursor `args` in `city.toml`, the override replaces the
+built-in args. Include both flags yourself:
+
+```toml
+[providers.cursor]
+args = ["-f", "--approve-mcps"]
+```
+
+Agent-level `args` overrides behave the same way. Existing Cursor sessions keep
+the command they were created with, so stop and restart those sessions to pick
+up the new built-in default. Operators who want Cursor's MCP approval prompt
+can intentionally omit `--approve-mcps` in an explicit override.
+
 ## `gc version` Prints Unexpected Output
 
 If `gc version` prints git progress lines (`Enumerating objects...`) instead
 of a clean version string, upgrade to Gas City v0.13.4 or later. This was a
 bug where remote pack fetches wrote git sideband output to the terminal,
 fixed in [PR #141](https://github.com/gastownhall/gascity/pull/141).
+
+## JSONL Archive Push Failures
+
+The maintenance pack runs `jsonl-export` every 15 minutes to dump each bead
+database to a text-diffable JSONL snapshot inside a local git repository
+(the "JSONL archive"). The archive serves as a disaster-recovery backup:
+if the live Dolt server loses data, the last-known-good bead graph can be
+reconstructed from the archive's commit history.
+
+### Local-only vs push mode
+
+The archive operates in one of two modes, detected from the state of its
+git remotes on every run:
+
+- **Local-only (default).** No `origin` remote is configured. Commits are
+  created and retained on the host but never leave the machine. This mode
+  is safe to run indefinitely; its only limitation is that the archive is
+  not backed up off-box, so a disk failure on this host loses the archive
+  alongside the live Dolt data.
+- **Push.** An `origin` remote is configured. Each run rebases onto
+  `origin/main` and pushes new commits so the archive survives a host
+  loss.
+
+On each run `jsonl-export` logs the active mode to stderr on transitions
+(e.g. after you add or remove `origin`) and re-logs it at least weekly so
+that an operator reading the log file can always find the current mode.
+
+### Enabling off-box backup
+
+Pick a repository that only this host will push to (the archive contains
+bead content and should not be shared across cities). Then:
+
+```bash
+# Create a private repo on your git host (example: GitHub via gh)
+gh repo create my-city-jsonl-archive --private
+
+# Point the archive at it
+ARCHIVE=$(gc config get state_dir)/packs/maintenance/jsonl-archive
+git -C "$ARCHIVE" remote add origin git@github.com:<you>/my-city-jsonl-archive.git
+
+# Seed the remote with the existing local history
+git -C "$ARCHIVE" push -u origin main
+```
+
+On the next 15-minute tick, `jsonl-export` detects the new `origin`,
+logs `archive running in push mode`, and resumes pushing every run.
+
+### Switching back to local-only
+
+Remove the remote:
+
+```bash
+git -C "$ARCHIVE" remote remove origin
+```
+
+Re-detection is automatic on the next run — no state-file edits are
+required. The next log line will read `archive running in local-only
+mode`. If push mode had accumulated failures before the remote was
+removed, local-only detection clears that stale failure counter while
+retaining `pending_archive_push` so deferred commits are still pushed if
+`origin` returns.
+
+### Reading a `JSONL push failed [HIGH]` escalation
+
+When push mode is active and `git push` fails `GC_JSONL_MAX_PUSH_FAILURES`
+times in a row (default: 3), the mayor's inbox receives an
+`ESCALATION: JSONL push failed [HIGH]` message with a body shaped like:
+
+```
+Order: mol-dog-jsonl
+Archive: /path/to/archive
+Consecutive failures: 3 (threshold: 3)
+
+Last git push stderr:
+<last ~20 lines of captured stderr from fetch / rebase / push>
+
+Remediation:
+- Check remote: git -C <archive> remote -v
+- Verify remote is reachable and credentials are valid
+- Temporarily suppress: export GC_JSONL_MAX_PUSH_FAILURES=99
+- See docs/getting-started/troubleshooting.md#jsonl-archive-push-failures
+```
+
+The exporter sends one HIGH escalation for a still-unresolved push
+failure. It continues recording `consecutive_push_failures` and
+`pending_archive_push` in state, but does not mail the same failure on
+every tick. A successful push or a switch back to local-only mode clears
+the escalation marker.
+
+Common root causes, in rough order of frequency:
+
+- **Credentials rotated or expired.** SSH key removed from the remote
+  host, HTTPS token expired. The captured stderr usually reads
+  `Permission denied (publickey)` or `remote: Invalid username or
+  password`.
+- **Remote URL typo or deleted repo.** stderr reads `does not appear to
+  be a git repository` or `repository not found`.
+- **Network partition.** stderr reads `Could not resolve host` or a
+  connection-timeout message. If the host is also firewalled from the
+  rest of the internet, this will recover once connectivity returns.
+- **Diverged history.** Very unusual — the archive rebases onto
+  `origin/main` automatically — but if the remote was force-pushed from
+  another host, rebase may fail with a conflict. Inspecting the archive
+  and resolving manually is the only option.
+
+If the underlying problem cannot be fixed immediately (e.g., the remote
+host is down for scheduled maintenance), set
+`GC_JSONL_MAX_PUSH_FAILURES=99` in the maintenance pack's environment and
+restart the city with `gc restart`. That bumps the escalation threshold
+from 3 to 99, which at the current 15-minute tick rate is ~24 hours of
+silence.
 
 ## WSL (Windows Subsystem for Linux)
 

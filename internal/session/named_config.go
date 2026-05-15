@@ -193,7 +193,7 @@ func NamedSessionContinuityEligible(b beads.Bead) bool {
 	switch strings.TrimSpace(b.Metadata["state"]) {
 	case "archived":
 		return continuity == "true"
-	case "closing", "closed":
+	case "closing", "closed", string(StateFailedCreate):
 		return false
 	default:
 		return true
@@ -481,11 +481,11 @@ func closedNamedSessionReopenEligible(b beads.Bead) bool {
 		return false
 	}
 	switch strings.TrimSpace(b.Metadata["close_reason"]) {
-	case "duplicate", "duplicate-repair", "gc_swept", "orphaned", "reconfigured", "stale-session":
+	case "duplicate", "duplicate-repair", "gc_swept", "orphaned", "reconfigured", "stale-session", string(StateFailedCreate):
 		return false
 	}
 	switch strings.TrimSpace(b.Metadata["state"]) {
-	case "duplicate", "duplicate-repair", "gc_swept", "orphaned", "reconfigured", "stale-session":
+	case "duplicate", "duplicate-repair", "gc_swept", "orphaned", "reconfigured", "stale-session", string(StateFailedCreate):
 		return false
 	}
 	return true

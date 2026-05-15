@@ -52,6 +52,22 @@ type operationEventPayload struct {
 	Queued      *bool           `json:"queued,omitempty"`
 	Delivered   *bool           `json:"delivered,omitempty"`
 	Error       string          `json:"error,omitempty"`
+
+	// 1a fields (issue #1252). Mirror api.WorkerOperationEventPayload —
+	// the api package re-uses the same JSON shape on the wire and the
+	// fields stay in sync via TestEveryKnownEventTypeHasRegisteredPayload.
+	// All fields are best-effort; absent data leaves zero values.
+	Model               string  `json:"model,omitempty"`
+	AgentName           string  `json:"agent_name,omitempty"`
+	PromptVersion       string  `json:"prompt_version,omitempty"`
+	PromptSHA           string  `json:"prompt_sha,omitempty"`
+	BeadID              string  `json:"bead_id,omitempty"`
+	PromptTokens        int     `json:"prompt_tokens,omitempty"`
+	CompletionTokens    int     `json:"completion_tokens,omitempty"`
+	CacheReadTokens     int     `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens int     `json:"cache_creation_tokens,omitempty"`
+	LatencyMs           int64   `json:"latency_ms,omitempty"`
+	CostUSDEstimate     float64 `json:"cost_usd_estimate,omitempty"`
 }
 
 type operationEventTarget interface {
@@ -135,6 +151,12 @@ func (h *SessionHandle) populateOperationEventIdentity(payload *operationEventPa
 		}
 		if strings.TrimSpace(payload.Template) == "" {
 			payload.Template = strings.TrimSpace(info.Template)
+		}
+		if strings.TrimSpace(payload.AgentName) == "" {
+			payload.AgentName = strings.TrimSpace(info.AgentName)
+		}
+		if strings.TrimSpace(payload.AgentName) == "" {
+			payload.AgentName = strings.TrimSpace(info.Alias)
 		}
 	}
 	if payload.SessionName == "" {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
@@ -36,6 +37,15 @@ func TestProviderKind_PreferenceOrder(t *testing.T) {
 			want: "claude",
 		},
 		{
+			name: "builtin_ancestor alias is normalized before provider_kind",
+			meta: map[string]string{
+				"builtin_ancestor": "my-pi/tmux",
+				"provider_kind":    "codex",
+				"provider":         "codex",
+			},
+			want: "pi",
+		},
+		{
 			name: "provider_kind wins over provider when builtin_ancestor absent",
 			meta: map[string]string{
 				"provider_kind": "claude",
@@ -44,11 +54,26 @@ func TestProviderKind_PreferenceOrder(t *testing.T) {
 			want: "claude",
 		},
 		{
+			name: "provider_kind alias is normalized before provider fallback",
+			meta: map[string]string{
+				"provider_kind": "my-pi/tmux",
+				"provider":      "codex",
+			},
+			want: "pi",
+		},
+		{
 			name: "provider is the last-resort fallback",
 			meta: map[string]string{
 				"provider": "codex",
 			},
 			want: "codex",
+		},
+		{
+			name: "provider fallback is normalized through transcript family",
+			meta: map[string]string{
+				"provider": "my-pi/tmux",
+			},
+			want: "pi",
 		},
 		{
 			name: "empty builtin_ancestor falls through",
@@ -89,6 +114,18 @@ func TestWaitsForIdleAfterInterrupt_WrappedClaude(t *testing.T) {
 	}}
 	if waitsForIdleAfterInterrupt(wrappedCodex) {
 		t.Error("wrapped codex (builtin_ancestor=codex) should not trigger claude-only branch")
+	}
+}
+
+func TestInterruptStrategyUsesPiProviderFamilyAlias(t *testing.T) {
+	wrappedPi := beads.Bead{Metadata: map[string]string{
+		"provider": "my-pi/tmux",
+	}}
+	if !requiresHardRestartInterrupt(wrappedPi) {
+		t.Fatal("wrapped pi provider alias should use hard-restart interrupt")
+	}
+	if waitsForIdleAfterHardRestart(wrappedPi) {
+		t.Fatal("wrapped pi provider alias should not wait for idle after hard restart")
 	}
 }
 
@@ -930,6 +967,436 @@ func TestSubmitInterruptNowFallsBackToRestartOnInterruptBoundaryTimeoutForCodex(
 	}
 	if !sawBoundary || !sawStop || !sawNudge {
 		t.Fatalf("calls = %#v, want WaitForInterruptBoundary + Stop + NudgeNow via restart fallback", sp.Calls)
+	}
+}
+
+func TestSubmitInterruptNowHardRestartsAndTruncatesPiPendingTurn(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "pi --session abc123", t.TempDir(), "pi", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionDir := t.TempDir()
+	piSessionPath := filepath.Join(sessionDir, "2026-05-11T00-00-00-000Z_abc123.jsonl")
+	piSession := strings.Join([]string{
+		fmt.Sprintf(`{"type":"session","id":"abc123","cwd":%q}`, info.WorkDir),
+		`{"type":"message","id":"u1","message":{"role":"user","content":[{"type":"text","text":"stable prompt"}]}}`,
+		`{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":[{"type":"text","text":"stable response"}]}}`,
+		`{"type":"message","id":"u2","parentId":"a1","message":{"role":"user","content":[{"type":"text","text":"interrupted prompt to replace"}]}}`,
+		`{"type":"message","id":"a2","parentId":"u2","message":{"role":"assistant","content":[{"type":"text","text":"partial output to discard"}]}`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(piSessionPath, []byte(piSession), 0o600); err != nil {
+		t.Fatalf("WriteFile pi session: %v", err)
+	}
+	mirrorDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(mirrorDir, "abc123.jsonl"), []byte(piSession), 0o600); err != nil {
+		t.Fatalf("WriteFile pi mirror: %v", err)
+	}
+
+	hints := runtime.Config{
+		WorkDir: info.WorkDir,
+		Env: map[string]string{
+			"PI_CODING_AGENT_SESSION_DIR": sessionDir,
+			"GC_PI_TRANSCRIPT_DIR":        mirrorDir,
+		},
+	}
+	outcome, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), hints, SubmitIntentInterruptNow)
+	if err != nil {
+		t.Fatalf("Submit(interrupt_now): %v", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(interrupt_now) unexpectedly queued")
+	}
+
+	var sawStop, sawStart, sawWaitForIdle, sawNudge, sawInterrupt, sawEscape bool
+	stopIdx := -1
+	startIdx := -1
+	nudgeIdx := -1
+	for i, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == info.SessionName {
+			sawStop = true
+			stopIdx = i
+		}
+		if call.Method == "Start" && call.Name == info.SessionName {
+			sawStart = true
+			startIdx = i
+		}
+		if call.Method == "WaitForIdle" && call.Name == info.SessionName {
+			sawWaitForIdle = true
+		}
+		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "replace the current turn" {
+			sawNudge = true
+			nudgeIdx = i
+		}
+		if call.Method == "Interrupt" && call.Name == info.SessionName {
+			sawInterrupt = true
+		}
+		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
+			sawEscape = true
+		}
+	}
+	if !sawStop || !sawStart || !sawNudge {
+		t.Fatalf("calls = %#v, want Stop + Start + NudgeNow", sp.Calls)
+	}
+	if stopIdx < 0 || startIdx < 0 || nudgeIdx < 0 || stopIdx >= startIdx || startIdx >= nudgeIdx {
+		t.Fatalf("calls = %#v, want Stop -> Start -> NudgeNow", sp.Calls)
+	}
+	if sawWaitForIdle {
+		t.Fatalf("calls = %#v, did not want idle wait for pi hard-restart interrupt", sp.Calls)
+	}
+	if sawInterrupt || sawEscape {
+		t.Fatalf("calls = %#v, did not want in-process interrupt for pi interrupt_now", sp.Calls)
+	}
+
+	truncated, err := os.ReadFile(piSessionPath)
+	if err != nil {
+		t.Fatalf("ReadFile pi session: %v", err)
+	}
+	if strings.Contains(string(truncated), "interrupted prompt to replace") {
+		t.Fatalf("pi session still contains replaced prompt:\n%s", truncated)
+	}
+	if strings.Contains(string(truncated), "partial output to discard") {
+		t.Fatalf("pi session still contains partial assistant output:\n%s", truncated)
+	}
+	if !strings.Contains(string(truncated), "stable response") {
+		t.Fatalf("pi session lost stable history:\n%s", truncated)
+	}
+	mirrored, err := os.ReadFile(filepath.Join(mirrorDir, "abc123.jsonl"))
+	if err != nil {
+		t.Fatalf("ReadFile pi mirror: %v", err)
+	}
+	if string(mirrored) != string(truncated) {
+		t.Fatalf("pi mirror differs from native transcript:\nmirror:\n%s\nnative:\n%s", mirrored, truncated)
+	}
+}
+
+func TestSubmitInterruptNowRestoresPiSessionWhenTranscriptResetFails(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "pi --session abc123", t.TempDir(), "pi", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionDir := t.TempDir()
+	piSessionPath := filepath.Join(sessionDir, "2026-05-11T00-00-00-000Z_abc123.jsonl")
+	piSession := strings.Join([]string{
+		fmt.Sprintf(`{"type":"session","id":"abc123","cwd":%q}`, info.WorkDir),
+		`{"type":"message","id":"u1","message":{"role":"user","content":"stable prompt"}}`,
+		`{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":"stable response","stopReason":"stop"}}`,
+		`{"type":"message","id":"u2","parentId":"a1","message":{"role":"user","content":"interrupted prompt to replace"}}`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(piSessionPath, []byte(piSession), 0o600); err != nil {
+		t.Fatalf("WriteFile pi session: %v", err)
+	}
+	if err := os.Chmod(sessionDir, 0o500); err != nil {
+		t.Fatalf("Chmod session dir read-only: %v", err)
+	}
+	defer func() {
+		if err := os.Chmod(sessionDir, 0o700); err != nil {
+			t.Fatalf("restore session dir permissions: %v", err)
+		}
+	}()
+
+	hints := runtime.Config{
+		WorkDir: info.WorkDir,
+		Env: map[string]string{
+			"PI_CODING_AGENT_SESSION_DIR": sessionDir,
+		},
+	}
+	_, err = mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), hints, SubmitIntentInterruptNow)
+	if err == nil {
+		t.Fatal("Submit(interrupt_now) error = nil, want transcript reset failure")
+	}
+	if !strings.Contains(err.Error(), "writing temp file") && !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("Submit(interrupt_now) error = %v, want transcript write failure", err)
+	}
+	if !sp.IsRunning(info.SessionName) {
+		t.Fatal("Pi session was not restored after transcript reset failure")
+	}
+
+	var sawStop, sawStart, sawNudge bool
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == info.SessionName {
+			sawStop = true
+		}
+		if call.Method == "Start" && call.Name == info.SessionName {
+			sawStart = true
+		}
+		if call.Method == "NudgeNow" && call.Name == info.SessionName {
+			sawNudge = true
+		}
+	}
+	if !sawStop || !sawStart {
+		t.Fatalf("calls = %#v, want Stop then Start restore after transcript reset failure", sp.Calls)
+	}
+	if sawNudge {
+		t.Fatalf("calls = %#v, did not want replacement nudge after transcript reset failure", sp.Calls)
+	}
+	got, readErr := os.ReadFile(piSessionPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile pi session: %v", readErr)
+	}
+	if !strings.Contains(string(got), "interrupted prompt to replace") {
+		t.Fatalf("pi transcript was unexpectedly truncated after reset failure:\n%s", got)
+	}
+}
+
+func TestSubmitInterruptNowTruncatesPiTranscriptBySessionKey(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "pi --session target", t.TempDir(), "pi", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "session_key", "target"); err != nil {
+		t.Fatalf("SetMetadata session_key: %v", err)
+	}
+
+	sessionDir := t.TempDir()
+	targetPath := filepath.Join(sessionDir, "target.jsonl")
+	otherPath := filepath.Join(sessionDir, "other.jsonl")
+	targetSession := strings.Join([]string{
+		fmt.Sprintf(`{"type":"session","id":"target","cwd":%q}`, info.WorkDir),
+		`{"type":"message","id":"u1","message":{"role":"user","content":"stable target prompt"}}`,
+		`{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":"stable target response","stopReason":"stop"}}`,
+		`{"type":"message","id":"u2","parentId":"a1","message":{"role":"user","content":"target interrupted prompt"}}`,
+		"",
+	}, "\n")
+	otherSession := strings.Join([]string{
+		fmt.Sprintf(`{"type":"session","id":"other","cwd":%q}`, info.WorkDir),
+		`{"type":"message","id":"u1","message":{"role":"user","content":"other stable prompt"}}`,
+		`{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":"other stable response","stopReason":"stop"}}`,
+		`{"type":"message","id":"u2","parentId":"a1","message":{"role":"user","content":"other pending prompt"}}`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(targetPath, []byte(targetSession), 0o600); err != nil {
+		t.Fatalf("WriteFile target pi session: %v", err)
+	}
+	if err := os.WriteFile(otherPath, []byte(otherSession), 0o600); err != nil {
+		t.Fatalf("WriteFile other pi session: %v", err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(otherPath, future, future); err != nil {
+		t.Fatalf("Chtimes other pi session: %v", err)
+	}
+
+	hints := runtime.Config{
+		WorkDir: info.WorkDir,
+		Env: map[string]string{
+			"PI_CODING_AGENT_SESSION_DIR": sessionDir,
+		},
+	}
+	outcome, err := mgr.Submit(context.Background(), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow)
+	if err != nil {
+		t.Fatalf("Submit(interrupt_now): %v", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(interrupt_now) unexpectedly queued")
+	}
+
+	targetData, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("ReadFile target pi session: %v", err)
+	}
+	if strings.Contains(string(targetData), "target interrupted prompt") {
+		t.Fatalf("target pi session still contains interrupted prompt:\n%s", targetData)
+	}
+	otherData, err := os.ReadFile(otherPath)
+	if err != nil {
+		t.Fatalf("ReadFile other pi session: %v", err)
+	}
+	if string(otherData) != otherSession {
+		t.Fatalf("other pi session was modified:\n%s", otherData)
+	}
+}
+
+func TestSubmitInterruptNowFailsClosedOnPiSessionKeyMismatch(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "pi --session target", t.TempDir(), "pi", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "session_key", "target"); err != nil {
+		t.Fatalf("SetMetadata session_key: %v", err)
+	}
+
+	sessionDir := t.TempDir()
+	otherPath := filepath.Join(sessionDir, "other.jsonl")
+	otherSession := strings.Join([]string{
+		fmt.Sprintf(`{"type":"session","id":"other","cwd":%q}`, info.WorkDir),
+		`{"type":"message","id":"u1","message":{"role":"user","content":"other pending prompt"}}`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(otherPath, []byte(otherSession), 0o600); err != nil {
+		t.Fatalf("WriteFile other pi session: %v", err)
+	}
+
+	hints := runtime.Config{
+		WorkDir: info.WorkDir,
+		Env: map[string]string{
+			"PI_CODING_AGENT_SESSION_DIR": sessionDir,
+		},
+	}
+	if _, err := mgr.Submit(context.Background(), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow); err == nil || !strings.Contains(err.Error(), "session_key") {
+		t.Fatalf("Submit(interrupt_now) error = %v, want session_key mismatch error", err)
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == info.SessionName {
+			t.Fatalf("calls = %#v, did not want Stop before resolving keyed Pi transcript", sp.Calls)
+		}
+	}
+	otherData, err := os.ReadFile(otherPath)
+	if err != nil {
+		t.Fatalf("ReadFile other pi session: %v", err)
+	}
+	if string(otherData) != otherSession {
+		t.Fatalf("mismatched Pi transcript was modified:\n%s", otherData)
+	}
+}
+
+func TestSubmitInterruptNowFailsClosedOnAmbiguousPiTranscript(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "pi", t.TempDir(), "pi", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	sessionDir := t.TempDir()
+	firstPath := filepath.Join(sessionDir, "first.jsonl")
+	secondPath := filepath.Join(sessionDir, "second.jsonl")
+	firstSession := strings.Join([]string{
+		fmt.Sprintf(`{"type":"session","id":"first","cwd":%q}`, info.WorkDir),
+		`{"type":"message","id":"u1","message":{"role":"user","content":"first pending prompt"}}`,
+		"",
+	}, "\n")
+	secondSession := strings.Join([]string{
+		fmt.Sprintf(`{"type":"session","id":"second","cwd":%q}`, info.WorkDir),
+		`{"type":"message","id":"u1","message":{"role":"user","content":"second pending prompt"}}`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(firstPath, []byte(firstSession), 0o600); err != nil {
+		t.Fatalf("WriteFile first pi session: %v", err)
+	}
+	if err := os.WriteFile(secondPath, []byte(secondSession), 0o600); err != nil {
+		t.Fatalf("WriteFile second pi session: %v", err)
+	}
+
+	hints := runtime.Config{
+		WorkDir: info.WorkDir,
+		Env: map[string]string{
+			"PI_CODING_AGENT_SESSION_DIR": sessionDir,
+		},
+	}
+	if _, err := mgr.Submit(context.Background(), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow); err == nil || !strings.Contains(err.Error(), "ambiguous pi session file") {
+		t.Fatalf("Submit(interrupt_now) error = %v, want ambiguous pi session file", err)
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == info.SessionName {
+			t.Fatalf("calls = %#v, did not want Stop before resolving an unambiguous Pi transcript", sp.Calls)
+		}
+	}
+	firstData, err := os.ReadFile(firstPath)
+	if err != nil {
+		t.Fatalf("ReadFile first pi session: %v", err)
+	}
+	secondData, err := os.ReadFile(secondPath)
+	if err != nil {
+		t.Fatalf("ReadFile second pi session: %v", err)
+	}
+	if string(firstData) != firstSession || string(secondData) != secondSession {
+		t.Fatalf("ambiguous Pi transcripts changed:\nfirst:\n%s\nsecond:\n%s", firstData, secondData)
+	}
+}
+
+func TestSubmitInterruptNowPiContinuesWhenSessionFileMissing(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "pi --session missing", t.TempDir(), "pi", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	hints := runtime.Config{
+		WorkDir: info.WorkDir,
+		Env: map[string]string{
+			"PI_CODING_AGENT_SESSION_DIR": t.TempDir(),
+		},
+	}
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "replacement prompt", BuildResumeCommand(info), hints, SubmitIntentInterruptNow)
+	if err != nil {
+		t.Fatalf("Submit(interrupt_now): %v", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(interrupt_now) unexpectedly queued")
+	}
+
+	var sawStop, sawStart, sawNudge bool
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == info.SessionName {
+			sawStop = true
+		}
+		if call.Method == "Start" && call.Name == info.SessionName {
+			sawStart = true
+		}
+		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "replacement prompt" {
+			sawNudge = true
+		}
+	}
+	if !sawStop || !sawStart || !sawNudge {
+		t.Fatalf("calls = %#v, want Stop + Start + NudgeNow despite missing Pi transcript", sp.Calls)
+	}
+}
+
+func TestSubmitInterruptNowFindsPiDefaultSessionPath(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "pi --session abc123", t.TempDir(), "pi", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionDir := filepath.Join(home, ".pi", "agent", "sessions")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll pi sessions: %v", err)
+	}
+	piSessionPath := filepath.Join(sessionDir, "default.jsonl")
+	piSession := strings.Join([]string{
+		fmt.Sprintf(`{"type":"session","id":"abc123","cwd":%q}`, info.WorkDir),
+		`{"type":"message","id":"u1","message":{"role":"user","content":"prompt"}}`,
+		`{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":"partial"}}`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(piSessionPath, []byte(piSession), 0o600); err != nil {
+		t.Fatalf("WriteFile pi session: %v", err)
+	}
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "replace the current turn", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
+	if err != nil {
+		t.Fatalf("Submit(interrupt_now): %v", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(interrupt_now) unexpectedly queued")
 	}
 }
 

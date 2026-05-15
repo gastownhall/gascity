@@ -33,11 +33,21 @@ type sessionResponse struct {
 	SessionName string `json:"session_name"`
 	CreatedAt   string `json:"created_at"`
 	LastActive  string `json:"last_active,omitempty"`
-	Attached    bool   `json:"attached"`
+	// LastNudgeDeliveredAt is the most recent successful nudge delivery
+	// timestamp for this session.
+	LastNudgeDeliveredAt string `json:"last_nudge_delivered_at,omitempty"`
+	Attached             bool   `json:"attached"`
 
 	// Classification fields derived from config (for dashboard grouping).
 	Rig  string `json:"rig,omitempty"`
 	Pool string `json:"pool,omitempty"`
+
+	// AgentKind classifies the agent backing the session so dashboards can
+	// route it to the right panel without re-deriving from template names.
+	// One of: "crew" (persistent named worker under a <rig>/crew dir),
+	// "pool" (multi-instance agent), or "role" (singleton). Empty when the
+	// session's template does not resolve to a configured agent.
+	AgentKind string `json:"agent_kind,omitempty"`
 
 	// Enrichment fields for dashboard consumption.
 	Running       bool   `json:"running"`
@@ -97,15 +107,23 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 		Attached:    info.Attached,
 		Rig:         rig,
 	}
-	// Populate pool from config lookup. The pool field is the agent's
-	// base name (e.g., "polecat"), useful for dashboard type classification.
+	// Populate pool and agent_kind from config lookup. The pool field is
+	// the agent's base name (e.g., "polecat"), useful for dashboard type
+	// classification. AgentKind tells the dashboard which panel a session
+	// belongs to (crew/pool/role).
 	if cfg != nil {
-		if agent, ok := findAgent(cfg, info.Template); ok && isMultiSessionAgent(agent) {
-			r.Pool = agent.Name
+		if agent, ok := findAgent(cfg, info.Template); ok {
+			if isMultiSessionAgent(agent) {
+				r.Pool = agent.Name
+			}
+			r.AgentKind = classifyAgentKind(agent)
 		}
 	}
 	if !info.LastActive.IsZero() {
 		r.LastActive = info.LastActive.Format(time.RFC3339)
+	}
+	if !info.LastNudgeDeliveredAt.IsZero() {
+		r.LastNudgeDeliveredAt = info.LastNudgeDeliveredAt.Format(time.RFC3339)
 	}
 	return r
 }

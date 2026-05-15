@@ -1,6 +1,7 @@
 package hooks
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -42,7 +43,7 @@ func claudeHookEntries(t *testing.T, data []byte, event string) []claudeHookEntr
 func TestSupportedProviders(t *testing.T) {
 	got := SupportedProviders()
 	want := map[string]bool{
-		"claude": true, "codex": true, "gemini": true, "opencode": true,
+		"claude": true, "codex": true, "gemini": true, "kiro": true, "opencode": true,
 		"copilot": true, "cursor": true, "pi": true, "omp": true,
 	}
 	if len(got) != len(want) {
@@ -66,11 +67,19 @@ func TestValidateRejectsUnsupported(t *testing.T) {
 	if err == nil {
 		t.Fatal("Validate should reject amp, auggie, and bogus")
 	}
-	if !strings.Contains(err.Error(), "amp (no hook mechanism)") {
-		t.Errorf("error should mention amp: %v", err)
+	// Amp and Auggie CLIs both DO expose hook mechanisms in their own
+	// docs; Gas Town just has not wired hook installation for them yet.
+	// The error message must reflect that accurately so users know to
+	// track gap 4 of #672 instead of believing the providers themselves
+	// are hookless.
+	if !strings.Contains(err.Error(), "amp (hooks not yet wired") {
+		t.Errorf("error should mention amp is unwired: %v", err)
 	}
-	if !strings.Contains(err.Error(), "auggie (no hook mechanism)") {
-		t.Errorf("error should mention auggie: %v", err)
+	if !strings.Contains(err.Error(), "auggie (hooks not yet wired") {
+		t.Errorf("error should mention auggie is unwired: %v", err)
+	}
+	if !strings.Contains(err.Error(), "#672") {
+		t.Errorf("error should reference the tracking audit issue: %v", err)
 	}
 	if !strings.Contains(err.Error(), "bogus (unknown)") {
 		t.Errorf("error should mention bogus: %v", err)
@@ -135,6 +144,9 @@ func TestInstallClaude(t *testing.T) {
 	}
 	if !strings.Contains(s, `"editorMode": "normal"`) {
 		t.Error("claude settings should contain editorMode")
+	}
+	if !strings.Contains(s, `"awaySummaryEnabled": false`) {
+		t.Error("claude settings should disable awaySummaryEnabled to prevent idle stalls (gh-1962)")
 	}
 	if !strings.Contains(s, `$HOME/go/bin`) {
 		t.Error("claude hook commands should include PATH export")
@@ -278,6 +290,90 @@ func TestInstallCodexUpgradesGeneratedFileMissingHookFormat(t *testing.T) {
 	if !strings.Contains(got, "--hook-format codex") {
 		t.Errorf("upgraded codex hooks missing Codex hook output format:\n%s", got)
 	}
+	if !strings.Contains(got, `"PreCompact"`) {
+		t.Errorf("upgraded codex hooks missing PreCompact:\n%s", got)
+	}
+	if !strings.Contains(got, `gc handoff --auto --hook-format codex \"context cycle\"`) {
+		t.Errorf("upgraded codex PreCompact missing auto handoff command:\n%s", got)
+	}
+}
+
+func TestInstallCodexUpgradesManagedFileMissingPreCompact(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/work/.codex/hooks.json"] = []byte(`{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc prime --hook --hook-format codex"
+      }]
+    }],
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc mail check --inject --hook-format codex"
+      }]
+    }]
+  }
+}`)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got := string(fs.Files["/work/.codex/hooks.json"])
+	if !strings.Contains(got, `"PreCompact"`) {
+		t.Errorf("upgraded codex hooks missing PreCompact:\n%s", got)
+	}
+	if !strings.Contains(got, `gc handoff --auto --hook-format codex \"context cycle\"`) {
+		t.Errorf("upgraded codex PreCompact missing auto handoff command:\n%s", got)
+	}
+}
+
+func TestInstallCodexWritesCanonicalHookBytes(t *testing.T) {
+	fs := fsys.NewFake()
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got := fs.Files["/work/.codex/hooks.json"]
+	normalized, changed, err := normalizeCodexHookCommands(got)
+	if err != nil {
+		t.Fatalf("normalizeCodexHookCommands: %v", err)
+	}
+	if changed || !bytes.Equal(normalized, got) {
+		t.Fatalf("codex hook install should write canonical bytes")
+	}
+}
+
+func TestInstallCodexIsByteStableAcrossRepeatedInstalls(t *testing.T) {
+	fs := fsys.NewFake()
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("first Install: %v", err)
+	}
+	before := append([]byte(nil), fs.Files["/work/.codex/hooks.json"]...)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("second Install: %v", err)
+	}
+	after := fs.Files["/work/.codex/hooks.json"]
+	if !bytes.Equal(before, after) {
+		t.Fatalf("second Install rewrote codex hooks:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+func TestInstallCodexPreservesCustomOnlyHooksByteForByte(t *testing.T) {
+	fs := fsys.NewFake()
+	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"printf custom-codex-hook","type":"command"}]}]}}`)
+	fs.Files["/work/.codex/hooks.json"] = append([]byte(nil), custom...)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	got := fs.Files["/work/.codex/hooks.json"]
+	if !bytes.Equal(custom, got) {
+		t.Fatalf("custom-only codex hooks were rewritten:\nbefore:\n%s\nafter:\n%s", custom, got)
+	}
 }
 
 func TestInstallCodexUpgradePreservesCustomHooks(t *testing.T) {
@@ -309,6 +405,126 @@ func TestInstallCodexUpgradePreservesCustomHooks(t *testing.T) {
 	}
 	if !strings.Contains(got, "printf custom-codex-hook") {
 		t.Errorf("custom codex hook was not preserved:\n%s", got)
+	}
+	if !strings.Contains(got, `"PreCompact"`) {
+		t.Errorf("managed codex upgrade should add PreCompact while preserving custom hooks:\n%s", got)
+	}
+}
+
+func TestInstallCodexPreservesFullyCustomHooks(t *testing.T) {
+	fs := fsys.NewFake()
+	custom := []byte(`{
+  "hooks": {
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "printf custom-codex-hook"
+      }]
+    }]
+  }
+}`)
+	fs.Files["/work/.codex/hooks.json"] = custom
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	if got := string(fs.Files["/work/.codex/hooks.json"]); got != string(custom) {
+		t.Fatalf("fully custom codex hooks were overwritten:\n%s", got)
+	}
+}
+
+func TestUpgradeCodexHooksSkipsWhenDesiredPreCompactUnavailable(t *testing.T) {
+	existing := []byte(`{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "gc prime --hook --hook-format codex"
+      }]
+    }]
+  }
+}`)
+	for name, desired := range map[string][]byte{
+		"malformed": []byte(`{not-json`),
+		"missing":   []byte(`{"hooks":{}}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, changed, err := upgradeCodexHooks(existing, desired); err != nil || changed {
+				t.Fatalf("changed = %v, err = %v, want unchanged without error", changed, err)
+			}
+		})
+	}
+}
+
+func TestAddCodexPreCompactHookRejectsInvalidRoots(t *testing.T) {
+	desired := []byte(`{"hooks":{"PreCompact":[{"hooks":[{"type":"command","command":"gc handoff --auto"}]}]}}`)
+	for name, root := range map[string]any{
+		"non-map-root": []any{},
+		"custom-only": map[string]any{
+			"hooks": map[string]any{
+				"UserPromptSubmit": []any{map[string]any{
+					"hooks": []any{map[string]any{"command": "printf custom"}},
+				}},
+			},
+		},
+		"missing-hooks-map": map[string]any{
+			"other": []any{map[string]any{"command": "gc prime --hook"}},
+		},
+		"already-has-precompact": map[string]any{
+			"hooks": map[string]any{
+				"SessionStart": []any{map[string]any{
+					"hooks": []any{map[string]any{"command": "gc prime --hook"}},
+				}},
+				"PreCompact": []any{},
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if addCodexPreCompactHook(root, desired) {
+				t.Fatalf("addCodexPreCompactHook(%s) = true, want false", name)
+			}
+		})
+	}
+}
+
+func TestDesiredCodexPreCompactHookFallsBackToEmbeddedOverlay(t *testing.T) {
+	if got := desiredCodexPreCompactHook(nil); got == nil {
+		t.Fatal("desiredCodexPreCompactHook(nil) = nil, want embedded PreCompact hook")
+	}
+}
+
+func TestInstallCodexPreservesUnreadableExistingHooks(t *testing.T) {
+	workDir := t.TempDir()
+	hookDir := filepath.Join(workDir, ".codex")
+	if err := os.MkdirAll(hookDir, 0o755); err != nil {
+		t.Fatalf("mkdir hooks dir: %v", err)
+	}
+	hookPath := filepath.Join(hookDir, "hooks.json")
+	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"printf custom"}]}]}}`)
+	if err := os.WriteFile(hookPath, custom, 0o644); err != nil {
+		t.Fatalf("write hooks: %v", err)
+	}
+	if err := os.Chmod(hookPath, 0); err != nil {
+		t.Fatalf("chmod hooks unreadable: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(hookPath, 0o644)
+	})
+
+	if err := Install(fsys.OSFS{}, "/city", workDir, []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	if err := os.Chmod(hookPath, 0o644); err != nil {
+		t.Fatalf("restore hooks mode: %v", err)
+	}
+	got, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read hooks: %v", err)
+	}
+	if string(got) != string(custom) {
+		t.Fatalf("unreadable codex hooks were overwritten:\n%s", string(got))
 	}
 }
 
@@ -393,6 +609,329 @@ func TestInstallClaudeUpgradesGeneratedFileWithAllKnownDrift(t *testing.T) {
 	}
 	if string(runtimeData) != string(hookData) {
 		t.Fatalf("runtime Claude settings should mirror upgraded all-drift hook settings:\n%s", string(runtimeData))
+	}
+}
+
+// TestInstallClaudeUpgradesPreCompactPreservingCustomHookEvent verifies that
+// a settings.json containing a stale managed PreCompact command (no --auto)
+// AND a custom user-added hook event (e.g. Stop) gets the managed command
+// upgraded while the custom hook event is preserved verbatim.
+//
+// Regression for the byte-enumerated claudeFileNeedsUpgrade brittleness
+// observed in pipex-city: the prior implementation matched files byte-exact
+// against 16 transforms of the embedded template; any custom addition
+// defeated every variant match, so the file fell through to "user override"
+// and never received upstream fixes (notably commit 7b3b913a's --auto patch).
+// The JSON-aware upgradeClaudeFile rewrite handles this case correctly.
+func TestInstallClaudeUpgradesPreCompactPreservingCustomHookEvent(t *testing.T) {
+	fs := fsys.NewFake()
+	current, err := readEmbedded("config/claude.json")
+	if err != nil {
+		t.Fatalf("readEmbedded: %v", err)
+	}
+	// Start from the canonical embedded shape, downgrade PreCompact to the
+	// bare-handoff legacy form, and inject a custom Stop hook event that
+	// is not part of the managed set.
+	stale := strings.Replace(string(current), `gc handoff --auto \"context cycle\"`, `gc handoff \"context cycle\"`, 1)
+	if stale == string(current) {
+		t.Fatal("PreCompact downgrade did not modify the fixture — check the legacy form pattern")
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(stale), &doc); err != nil {
+		t.Fatalf("parsing stale fixture: %v", err)
+	}
+	hooks, ok := doc["hooks"].(map[string]any)
+	if !ok {
+		t.Fatalf("stale fixture has no hooks map")
+	}
+	hooks["Stop"] = []any{
+		map[string]any{
+			"matcher": "",
+			"hooks": []any{
+				map[string]any{
+					"type":    "command",
+					"command": `export PATH="$HOME/go/bin:$HOME/.local/bin:$PATH" && gc hook --inject`,
+				},
+			},
+		},
+	}
+	staleWithCustom, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		t.Fatalf("re-marshaling stale fixture: %v", err)
+	}
+	fs.Files["/city/.gc/settings.json"] = staleWithCustom
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	runtime := fs.Files["/city/.gc/settings.json"]
+
+	// The managed PreCompact command must be upgraded to include --auto.
+	preCompactCmd := claudeHookCommand(t, runtime, "PreCompact")
+	if !strings.Contains(preCompactCmd, `gc handoff --auto "context cycle"`) {
+		t.Fatalf("PreCompact command not upgraded to include --auto:\n%s", preCompactCmd)
+	}
+
+	// The custom Stop hook must survive the upgrade verbatim.
+	stopCmd := claudeHookCommand(t, runtime, "Stop")
+	if !strings.Contains(stopCmd, `gc hook --inject`) {
+		t.Fatalf("custom Stop hook lost during upgrade — expected gc hook --inject in:\n%s", string(runtime))
+	}
+
+	// Sanity: the canonical SessionStart and UserPromptSubmit managed hooks
+	// must still be present (merged from base).
+	if !strings.Contains(string(runtime), "SessionStart") {
+		t.Fatalf("runtime lost SessionStart after upgrade:\n%s", string(runtime))
+	}
+	if !strings.Contains(string(runtime), "UserPromptSubmit") {
+		t.Fatalf("runtime lost UserPromptSubmit after upgrade:\n%s", string(runtime))
+	}
+}
+
+// TestInstallClaudeDoesNotClobberUserWrappedCommand is the regression test
+// for the heuristic-tightening fixup applied after PR #2072's adversarial
+// review surfaced two majors via Codex. The pre-fixup upgrade used bare
+// strings.Contains on "gc prime --hook", which would rewrite user-authored
+// wrapper variants like "my-wrapper gc prime --hook --foo" on every gc run.
+// The token-anchored fixup blocks this.
+func TestInstallClaudeDoesNotClobberUserWrappedCommand(t *testing.T) {
+	fs := fsys.NewFake()
+	userOwned := `{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "my-wrapper gc prime --hook --foo"
+          }
+        ]
+      }
+    ]
+  }
+}`
+	fs.Files["/city/hooks/claude.json"] = []byte(userOwned)
+	fs.Files["/city/.gc/settings.json"] = []byte(userOwned)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	hookData := fs.Files["/city/hooks/claude.json"]
+	if !strings.Contains(string(hookData), `my-wrapper gc prime --hook --foo`) {
+		t.Fatalf("user-wrapped SessionStart command was rewritten — gc must not touch wrapped variants:\n%s", string(hookData))
+	}
+}
+
+// TestInstallClaudeDoesNotNormalizeUserAuthoredEmptyMatcher is the second
+// regression for the heuristic-tightening fixup. Codex's major finding #2
+// flagged that upgradeClaudeHookEntry would rewrite ANY SessionStart entry
+// with matcher:"" to matcher:"startup", regardless of whether the entry's
+// commands were GC-managed. A user-authored entry with matcher:"" and a
+// non-managed command must survive untouched.
+func TestInstallClaudeDoesNotNormalizeUserAuthoredEmptyMatcher(t *testing.T) {
+	fs := fsys.NewFake()
+	userOwned := `{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo user-wrote-this"
+          }
+        ]
+      }
+    ]
+  }
+}`
+	fs.Files["/city/.gc/settings.json"] = []byte(userOwned)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	runtime := fs.Files["/city/.gc/settings.json"]
+	entries := claudeHookEntries(t, runtime, "SessionStart")
+	// The user-authored SessionStart entry should survive with matcher
+	// unchanged; merge may add the managed entry separately but the
+	// user-authored matcher:"" must not be normalized away.
+	foundUserOwned := false
+	for _, e := range entries {
+		if e.Matcher == "" {
+			foundUserOwned = true
+			break
+		}
+	}
+	if !foundUserOwned {
+		t.Fatalf("user-authored SessionStart entry with matcher:\"\" was rewritten — gc must not normalize matcher unless entry is identifiably GC-managed:\n%s", string(runtime))
+	}
+}
+
+// TestInstallClaudeDoesNotClobberUserSuffixAppendedCommand is the regression
+// test for the suffix-append class of silent rewrites surfaced by Codex's
+// pass-2 review of PR #2072. The pass-1 fixup blocked wrapper prefixes
+// via token-anchored prefix matching, but accepted any whitespace-bounded
+// suffix after the legacy token — so user-authored commands like
+// "gc prime --hook --my-flag" still matched as managed and were rewritten
+// to "GC_MANAGED_SESSION_HOOK=1 ... gc prime --hook --my-flag" plus an
+// unconditional matcher:"" → "startup" normalization. The exact-body
+// match fixup blocks the suffix-append class entirely.
+func TestInstallClaudeDoesNotClobberUserSuffixAppendedCommand(t *testing.T) {
+	fs := fsys.NewFake()
+	userOwned := `{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "gc prime --hook --my-flag"
+          }
+        ]
+      }
+    ]
+  }
+}`
+	fs.Files["/city/.gc/settings.json"] = []byte(userOwned)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	runtime := fs.Files["/city/.gc/settings.json"]
+	entries := claudeHookEntries(t, runtime, "SessionStart")
+	foundUserOwned := false
+	for _, e := range entries {
+		if e.Matcher != "" {
+			continue
+		}
+		for _, h := range e.Hooks {
+			if h.Command == "gc prime --hook --my-flag" {
+				foundUserOwned = true
+			}
+		}
+	}
+	if !foundUserOwned {
+		t.Fatalf("user-authored SessionStart command 'gc prime --hook --my-flag' was rewritten — gc must not mutate suffix-appended commands:\n%s", string(runtime))
+	}
+}
+
+// TestInstallClaudeDoesNotClobberUserChainedCommand is the second regression
+// for the suffix-append class. A user who chained their own step after the
+// legacy command body via "&&" must survive the upgrade verbatim. The
+// pass-1 token-anchored prefix accepted whitespace as a token boundary
+// and would have rewritten this; the exact-body match blocks it.
+func TestInstallClaudeDoesNotClobberUserChainedCommand(t *testing.T) {
+	fs := fsys.NewFake()
+	userOwned := `{
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "gc prime --hook && echo user-chained-step"
+          }
+        ]
+      }
+    ]
+  }
+}`
+	fs.Files["/city/.gc/settings.json"] = []byte(userOwned)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	runtime := fs.Files["/city/.gc/settings.json"]
+	entries := claudeHookEntries(t, runtime, "PreCompact")
+	foundUserOwned := false
+	for _, e := range entries {
+		for _, h := range e.Hooks {
+			if h.Command == "gc prime --hook && echo user-chained-step" {
+				foundUserOwned = true
+			}
+		}
+	}
+	if !foundUserOwned {
+		t.Fatalf("user-authored PreCompact chained command was rewritten — gc must not mutate &&-chained commands:\n%s", string(runtime))
+	}
+}
+
+// TestInstallClaudeDoesNotClobberUserSuffixAppendedCurrentForm covers the
+// current-form variant of the suffix-append class. A user-authored command
+// that begins with the canonical current-form env-var preamble but appends
+// extra arguments (e.g. a custom flag the user added on top of the
+// managed body) must not be classified as managed by isLegacyGCManagedCommand,
+// which would otherwise drive matcher normalization on the user-authored
+// entry. The fix tightens the current-form recognition path to exact-body
+// match.
+func TestInstallClaudeDoesNotClobberUserSuffixAppendedCurrentForm(t *testing.T) {
+	fs := fsys.NewFake()
+	userOwned := `{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --my-flag"
+          }
+        ]
+      }
+    ]
+  }
+}`
+	fs.Files["/city/.gc/settings.json"] = []byte(userOwned)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	runtime := fs.Files["/city/.gc/settings.json"]
+	entries := claudeHookEntries(t, runtime, "SessionStart")
+	foundUserOwned := false
+	for _, e := range entries {
+		if e.Matcher != "" {
+			continue
+		}
+		for _, h := range e.Hooks {
+			if h.Command == "GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --my-flag" {
+				foundUserOwned = true
+			}
+		}
+	}
+	if !foundUserOwned {
+		t.Fatalf("user-authored current-form SessionStart command with trailing arg was rewritten or had its matcher normalized — gc must require exact-body match for current-form recognition:\n%s", string(runtime))
+	}
+}
+
+// TestInstallClaudeIdempotent verifies that a second Install call on an
+// already-upgraded file is byte-stable. Matches the
+// TestInstallCodexIsByteStableAcrossRepeatedInstalls pattern in the Codex
+// path; was missing for the Claude path and surfaced by code-reviewer in
+// the #2072 adversarial review.
+func TestInstallClaudeIdempotent(t *testing.T) {
+	fs := fsys.NewFake()
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("first Install: %v", err)
+	}
+	first := append([]byte(nil), fs.Files["/city/.gc/settings.json"]...)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("second Install: %v", err)
+	}
+	second := fs.Files["/city/.gc/settings.json"]
+
+	if string(first) != string(second) {
+		t.Fatalf("second Install produced different bytes — upgrade is not idempotent:\nfirst:\n%s\n\nsecond:\n%s", string(first), string(second))
 	}
 }
 
@@ -747,7 +1286,7 @@ func TestInstallClaudeSurfacesMalformedOverride(t *testing.T) {
 // are materialized from the embedded core pack overlay into the workdir.
 func TestInstallOverlayManagedProviders(t *testing.T) {
 	fs := fsys.NewFake()
-	providers := []string{"codex", "gemini", "opencode", "copilot", "cursor", "pi", "omp"}
+	providers := []string{"codex", "gemini", "opencode", "copilot", "cursor", "kiro", "pi", "omp"}
 	if err := Install(fs, "/city", "/work", providers); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -758,6 +1297,8 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"/work/.github/hooks/gascity.json",
 		"/work/.github/copilot-instructions.md",
 		"/work/.cursor/hooks.json",
+		"/work/.kiro/agents/gascity.json",
+		"/work/AGENTS.md",
 		"/work/.pi/extensions/gc-hooks.js",
 		"/work/.omp/hooks/gc-hook.ts",
 	} {
@@ -769,18 +1310,79 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	if !strings.Contains(codexHooks, "--hook-format codex") {
 		t.Error("codex hooks should request Codex hook output format")
 	}
+	if !strings.Contains(codexHooks, `"PreCompact"`) {
+		t.Error("codex hooks should include PreCompact")
+	}
+	if !strings.Contains(codexHooks, `gc handoff --auto --hook-format codex \"context cycle\"`) {
+		t.Error("codex PreCompact should use auto handoff with Codex hook output format")
+	}
+	// Copilot CLI documents preCompact (camelCase). The hook fires before
+	// context compaction starts so handoff can capture state; without it,
+	// long Copilot sessions silently lose context at compact boundaries.
+	// See gastownhall/gascity#672 gap 3.
+	copilotHooks := string(fs.Files["/work/.github/hooks/gascity.json"])
+	if !strings.Contains(copilotHooks, `"preCompact"`) {
+		t.Error("copilot hooks should include preCompact (closes #672 gap 3)")
+	}
+	if !strings.Contains(copilotHooks, `gc handoff --auto \"context cycle\"`) {
+		t.Error("copilot preCompact should use auto handoff")
+	}
 	for _, rel := range []string{
 		"/work/.codex/hooks.json",
 		"/work/.gemini/settings.json",
 		"/work/.opencode/plugins/gascity.js",
 		"/work/.github/hooks/gascity.json",
 		"/work/.cursor/hooks.json",
-		"/work/.pi/extensions/gc-hooks.js",
+		"/work/.kiro/agents/gascity.json",
+		"/work/AGENTS.md",
 		"/work/.omp/hooks/gc-hook.ts",
 	} {
 		if strings.Contains(string(fs.Files[rel]), "gc hook --inject") {
 			t.Errorf("fresh overlay-managed provider file %s should not install no-op gc hook --inject", rel)
 		}
+	}
+	var kiroAgent struct {
+		Name   string `json:"name"`
+		Prompt string `json:"prompt"`
+		Hooks  map[string][]struct {
+			Command string `json:"command"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(fs.Files["/work/.kiro/agents/gascity.json"], &kiroAgent); err != nil {
+		t.Fatalf("unmarshal Kiro agent config: %v", err)
+	}
+	if kiroAgent.Name != "gascity" {
+		t.Errorf("Kiro agent name = %q, want gascity", kiroAgent.Name)
+	}
+	switch {
+	case kiroAgent.Prompt == "":
+		t.Error("Kiro agent config missing prompt")
+	case !strings.HasPrefix(kiroAgent.Prompt, "file://"):
+		t.Errorf("Kiro prompt = %q, want file:// URI", kiroAgent.Prompt)
+	default:
+		promptRel := strings.TrimPrefix(kiroAgent.Prompt, "file://")
+		promptPath := filepath.Clean(filepath.Join(filepath.Dir("/work/.kiro/agents/gascity.json"), promptRel))
+		if promptPath != "/work/AGENTS.md" {
+			t.Errorf("Kiro prompt resolves to %q, want /work/AGENTS.md", promptPath)
+		}
+		if _, ok := fs.Files[promptPath]; !ok {
+			t.Errorf("Kiro prompt target %s was not installed", promptPath)
+		}
+	}
+	for _, trigger := range []string{"agentSpawn", "userPromptSubmit"} {
+		if len(kiroAgent.Hooks[trigger]) == 0 {
+			t.Errorf("Kiro agent config missing documented %s hook", trigger)
+		}
+	}
+	for trigger := range kiroAgent.Hooks {
+		switch trigger {
+		case "agentSpawn", "userPromptSubmit", "preToolUse", "postToolUse", "stop":
+		default:
+			t.Errorf("Kiro agent config uses undocumented hook trigger %q", trigger)
+		}
+	}
+	if strings.Contains(string(fs.Files["/work/.kiro/agents/gascity.json"]), "gc handoff") {
+		t.Error("Kiro agent config should not install unsupported compaction handoff hooks")
 	}
 }
 
@@ -796,6 +1398,14 @@ func TestInstallPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
 		`pi.on("before_agent_start"`,
+		"GC_PI_HOOK_VERSION",
+		"gc hook --inject",
+		`run(["prime", "--hook"], ctx.cwd)`,
+		"gc handoff --auto",
+		"mirrorTempCounter",
+		"fs.rmSync(tmp",
+		"gc-hooks run:",
+		"gc-hooks mirrorTranscript:",
 	} {
 		if !strings.Contains(data, want) {
 			t.Errorf("Pi hook missing current extension API marker %q:\n%s", want, data)
@@ -835,6 +1445,54 @@ module.exports = {
 	}
 	if !strings.Contains(data, `pi.on("session_start"`) {
 		t.Fatalf("upgraded Pi hook does not use current extension API:\n%s", data)
+	}
+	backup := string(fs.Files["/work/.pi/extensions/gc-hooks.js.bak"])
+	if backup != string(legacy) {
+		t.Fatalf("legacy Pi hook backup = %q, want original legacy content", backup)
+	}
+}
+
+func TestPiHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
+	current := []byte(`// Gas City hooks for Pi Coding Agent.
+// gc prime --hook
+// gc hook --inject
+// gc handoff --auto
+const GC_PI_HOOK_VERSION = 4;
+run(["prime", "--hook"], ctx.cwd);
+run(["hook", "--inject"], ctx.cwd);
+run(["handoff", "--auto", "context cycle"], ctx.cwd);
+let mirrorTempCounter = 0;
+`)
+	stale := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 4"), []byte("GC_PI_HOOK_VERSION = 3"), 1)
+	future := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 4"), []byte("GC_PI_HOOK_VERSION = 5"), 1)
+
+	if !piHookNeedsUpgrade(stale) {
+		t.Fatal("stale Pi hook version did not request upgrade")
+	}
+	if piHookNeedsUpgrade(current) {
+		t.Fatal("current Pi hook version requested upgrade")
+	}
+	if piHookNeedsUpgrade(future) {
+		t.Fatal("newer Pi hook version requested downgrade")
+	}
+}
+
+func TestWriteEmbeddedManagedDoesNotClobberExistingBackup(t *testing.T) {
+	fs := fsys.NewFake()
+	dst := "/work/.pi/extensions/gc-hooks.js"
+	firstBackup := []byte("first customized hook")
+	existing := []byte("second customized hook")
+	fs.Files[dst] = existing
+	fs.Files[dst+".bak"] = firstBackup
+
+	if err := writeEmbeddedManaged(fs, dst, []byte("managed hook"), func([]byte) bool { return true }); err != nil {
+		t.Fatalf("writeEmbeddedManaged: %v", err)
+	}
+	if got := string(fs.Files[dst+".bak"]); got != string(firstBackup) {
+		t.Fatalf("first backup was clobbered: %q", got)
+	}
+	if got := string(fs.Files[dst+".bak.1"]); got != string(existing) {
+		t.Fatalf("second backup = %q, want existing hook", got)
 	}
 }
 
@@ -876,6 +1534,25 @@ func TestInstallMultipleProviders(t *testing.T) {
 		if _, ok := fs.Files[rel]; !ok {
 			t.Errorf("expected overlay-managed provider file %s via Install", rel)
 		}
+	}
+}
+
+func TestInstallCodexWritesCanonicalJSON(t *testing.T) {
+	fs := fsys.NewFake()
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	data := fs.Files["/work/.codex/hooks.json"]
+	if bytes.Contains(data, []byte(`\u0026`)) {
+		t.Fatalf("codex hook escaped command operator:\n%s", data)
+	}
+	if !bytes.Contains(data, []byte(` && gc prime`)) {
+		t.Fatalf("codex hook missing literal command operator:\n%s", data)
+	}
+	if !bytes.HasSuffix(data, []byte("\n")) {
+		t.Fatalf("codex hook missing trailing newline:\n%s", data)
 	}
 }
 

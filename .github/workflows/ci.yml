@@ -60,6 +60,7 @@ jobs:
       worker: ${{ steps.filter.outputs.worker }}
       worker_phase2: ${{ steps.filter.outputs.worker_phase2 }}
       cmd_gc_process: ${{ steps.filter.outputs.cmd_gc_process }}
+      integration: ${{ steps.filter.outputs.integration }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
@@ -116,14 +117,24 @@ jobs:
               - 'cmd/gc/**'
               - 'internal/**'
               - 'examples/gastown/packs/**'
+            integration:
+              - 'go.mod'
+              - 'go.sum'
+              - '.github/workflows/**'
+              - 'Makefile'
+              - '**/*.go'
+              - 'scripts/test-integration-shard'
+              - 'scripts/test-go-test-shard'
+              - 'scripts/go-test-observable'
+              - 'examples/gastown/packs/**'
 
-  preflight-smoke:
-    name: Preflight / lint and smoke
+  preflight-static:
+    name: Preflight / static checks
     needs: runner-policy
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
-      DOLT_VERSION: "1.86.6"
-      BD_VERSION: "v1.0.3"
+      DOLT_VERSION: "2.0.3"
+      BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -133,7 +144,16 @@ jobs:
           install-claude-cli: "false"
       - name: Install tools
         run: make install-tools
+      - name: Restore golangci-lint cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .cache/golangci-lint
+          key: ${{ runner.os }}-golangci-lint-${{ hashFiles('go.sum', '.golangci.yml', 'Makefile') }}
+          restore-keys: |
+            ${{ runner.os }}-golangci-lint-
       - name: Lint
+        env:
+          GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
         run: make lint
       - name: Format
         run: make fmt-check
@@ -141,18 +161,19 @@ jobs:
         run: make vet
       - name: Docs
         run: make check-docs
-      - name: Smoke unit tests
-        run: make test
 
   preflight-unit-cover:
     name: Preflight / unit cover
     needs:
       - runner-policy
-      - preflight-smoke
+    # Coverage reporting only matters on the main branch — codecov regression
+    # info doesn't need to gate every PR, and the full ./... unit suite is
+    # already covered by integration-shards, cmd-gc-process, and acceptance A.
+    if: github.event_name == 'push'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
-      DOLT_VERSION: "1.86.6"
-      BD_VERSION: "v1.0.3"
+      DOLT_VERSION: "2.0.3"
+      BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -175,11 +196,10 @@ jobs:
     name: Preflight / acceptance A
     needs:
       - runner-policy
-      - preflight-smoke
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
-      DOLT_VERSION: "1.86.6"
-      BD_VERSION: "v1.0.3"
+      DOLT_VERSION: "2.0.3"
+      BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -194,7 +214,6 @@ jobs:
     name: Preflight / generated artifacts
     needs:
       - runner-policy
-      - preflight-smoke
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
       # Make TestGeneratedClientInSync fatal on missing oapi-codegen so the
@@ -219,8 +238,7 @@ jobs:
     name: Check
     needs:
       - runner-policy
-      - preflight-smoke
-      - preflight-unit-cover
+      - preflight-static
       - preflight-acceptance
       - preflight-generated
     if: ${{ always() }}
@@ -267,27 +285,20 @@ jobs:
           args: check
 
   cmd-gc-process:
-    name: cmd/gc process / shards ${{ matrix.shard_group }}
+    name: cmd/gc process / shard ${{ matrix.shard }} of 12
     needs:
       - runner-policy
       - changes
-      - preflight-smoke
     if: needs.changes.outputs.cmd_gc_process == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    timeout-minutes: 35
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - shard_group: 1-2 of 6
-            shards: 1 2
-          - shard_group: 3-4 of 6
-            shards: 3 4
-          - shard_group: 5-6 of 6
-            shards: 5 6
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     env:
-      DOLT_VERSION: "1.86.6"
-      BD_VERSION: "v1.0.3"
+      DOLT_VERSION: "2.0.3"
+      BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -297,84 +308,129 @@ jobs:
           install-claude-cli: "true"
       - name: Install tools
         run: make install-tools
-      - name: Run cmd/gc process suite
-        run: |
-          for shard in ${{ matrix.shards }}; do
-            make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD="$shard" CMD_GC_PROCESS_TOTAL=6
-          done
+      - name: Run cmd/gc process shard
+        run: make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12
 
   integration-shards:
     name: Integration / ${{ matrix.shard_name }}
     needs:
       - runner-policy
-      - preflight-smoke
+      - changes
+    if: needs.changes.outputs.integration == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - shard_name: packages-core
-            timeout_minutes: 35
-            command: |
-              ./scripts/test-integration-shard packages-core-1-of-4
-              ./scripts/test-integration-shard packages-core-2-of-4
-              ./scripts/test-integration-shard packages-core-3-of-4
-              ./scripts/test-integration-shard packages-core-4-of-4
-          - shard_name: packages-cmd-gc
-            timeout_minutes: 45
-            command: |
-              ./scripts/test-integration-shard packages-cmd-gc-1-of-6
-              ./scripts/test-integration-shard packages-cmd-gc-2-of-6
-              ./scripts/test-integration-shard packages-cmd-gc-3-of-6
-              ./scripts/test-integration-shard packages-cmd-gc-4-of-6
-              ./scripts/test-integration-shard packages-cmd-gc-5-of-6
-              ./scripts/test-integration-shard packages-cmd-gc-6-of-6
-          - shard_name: packages-runtime-tmux
-            timeout_minutes: 30
-            command: |
-              ./scripts/test-integration-shard packages-runtime-tmux-1-of-3
-              ./scripts/test-integration-shard packages-runtime-tmux-2-of-3
-              ./scripts/test-integration-shard packages-runtime-tmux-3-of-3
-          - shard_name: review-formulas-basic
-            timeout_minutes: 30
-            command: make test-integration-review-formulas-basic
-          - shard_name: review-formulas-retries
-            timeout_minutes: 30
-            command: make test-integration-review-formulas-retries
-          - shard_name: review-formulas-recovery
-            timeout_minutes: 25
-            command: make test-integration-review-formulas-recovery
+          - shard_name: packages-core-1-of-4
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-core-1-of-4
+          - shard_name: packages-core-2-of-4
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-core-2-of-4
+          - shard_name: packages-core-3-of-4
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-core-3-of-4
+          - shard_name: packages-core-4-of-4
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-core-4-of-4
+          - shard_name: packages-cmd-gc-1-of-6
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-cmd-gc-1-of-6
+          - shard_name: packages-cmd-gc-2-of-6
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-cmd-gc-2-of-6
+          - shard_name: packages-cmd-gc-3-of-6
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-cmd-gc-3-of-6
+          - shard_name: packages-cmd-gc-4-of-6
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-cmd-gc-4-of-6
+          - shard_name: packages-cmd-gc-5-of-6
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-cmd-gc-5-of-6
+          - shard_name: packages-cmd-gc-6-of-6
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-cmd-gc-6-of-6
+          - shard_name: packages-runtime-tmux-1-of-6
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard packages-runtime-tmux-1-of-6
+          - shard_name: packages-runtime-tmux-2-of-6
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard packages-runtime-tmux-2-of-6
+          - shard_name: packages-runtime-tmux-3-of-6
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard packages-runtime-tmux-3-of-6
+          - shard_name: packages-runtime-tmux-4-of-6
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard packages-runtime-tmux-4-of-6
+          - shard_name: packages-runtime-tmux-5-of-6
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard packages-runtime-tmux-5-of-6
+          - shard_name: packages-runtime-tmux-6-of-6
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard packages-runtime-tmux-6-of-6
           - shard_name: bdstore
             timeout_minutes: 15
             command: make test-integration-bdstore
-          - shard_name: rest-smoke
-            timeout_minutes: 25
-            command: make test-integration-rest-smoke
-          - shard_name: rest-full-1-2-of-8
-            timeout_minutes: 35
-            command: |
-              ./scripts/test-integration-shard rest-full-1-of-8
-              ./scripts/test-integration-shard rest-full-2-of-8
-          - shard_name: rest-full-3-4-of-8
-            timeout_minutes: 35
-            command: |
-              ./scripts/test-integration-shard rest-full-3-of-8
-              ./scripts/test-integration-shard rest-full-4-of-8
-          - shard_name: rest-full-5-6-of-8
-            timeout_minutes: 35
-            command: |
-              ./scripts/test-integration-shard rest-full-5-of-8
-              ./scripts/test-integration-shard rest-full-6-of-8
-          - shard_name: rest-full-7-of-8
-            timeout_minutes: 35
-            command: ./scripts/test-integration-shard rest-full-7-of-8
-          - shard_name: rest-full-8-of-8
-            timeout_minutes: 35
-            command: ./scripts/test-integration-shard rest-full-8-of-8
+          - shard_name: rest-smoke-1-of-2
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard rest-smoke-1-of-2
+          - shard_name: rest-smoke-2-of-2
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard rest-smoke-2-of-2
+          - shard_name: rest-full-1-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-1-of-16
+          - shard_name: rest-full-2-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-2-of-16
+          - shard_name: rest-full-3-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-3-of-16
+          - shard_name: rest-full-4-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-4-of-16
+          - shard_name: rest-full-5-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-5-of-16
+          - shard_name: rest-full-6-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-6-of-16
+          - shard_name: rest-full-7-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-7-of-16
+          - shard_name: rest-full-8-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-8-of-16
+          - shard_name: rest-full-9-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-9-of-16
+          - shard_name: rest-full-10-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-10-of-16
+          - shard_name: rest-full-11-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-11-of-16
+          - shard_name: rest-full-12-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-12-of-16
+          - shard_name: rest-full-13-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-13-of-16
+          - shard_name: rest-full-14-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-14-of-16
+          - shard_name: rest-full-15-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-15-of-16
+          - shard_name: rest-full-16-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-16-of-16
     env:
-      DOLT_VERSION: "1.86.6"
-      BD_VERSION: "v1.0.3"
+      DOLT_VERSION: "2.0.3"
+      BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -392,7 +448,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-smoke
     if: needs.changes.outputs.worker == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
@@ -427,7 +482,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-smoke
     if: needs.changes.outputs.worker == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
@@ -462,7 +516,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-smoke
     if: needs.changes.outputs.worker == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
@@ -497,7 +550,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-smoke
       - worker-core-claude
       - worker-core-codex
       - worker-core-gemini
@@ -607,7 +659,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-smoke
     if: needs.changes.outputs.worker_phase2 == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
@@ -646,7 +697,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-smoke
     if: needs.changes.outputs.worker_phase2 == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
@@ -685,7 +735,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-smoke
     if: needs.changes.outputs.worker_phase2 == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
@@ -849,8 +898,8 @@ jobs:
       - name: Pack compatibility tests
         run: make test-acceptance
     env:
-      DOLT_VERSION: "1.86.6"
-      BD_VERSION: "v1.0.3"
+      DOLT_VERSION: "2.0.3"
+      BD_VERSION: "v1.0.4"
 
   # Dashboard SPA typecheck + tests + build. Runs on every push/PR
   # so TS drift against the spec (e.g. a query param tightening from
@@ -862,7 +911,6 @@ jobs:
     name: Dashboard SPA
     needs:
       - runner-policy
-      - preflight-smoke
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -899,7 +947,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-smoke
     if: needs.changes.outputs.mail == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
     continue-on-error: true  # upstream mcp_agent_mail API may drift
@@ -918,7 +965,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install mcp_agent_mail
-        run: python -m pip install --require-hashes -r .github/requirements/mcp-agent-mail.txt
+        run: python -m pip install --no-deps --require-hashes -r .github/requirements/mcp-agent-mail.txt
 
       - name: MCP mail conformance test
         run: make test-mcp-mail
@@ -929,7 +976,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-smoke
     if: needs.changes.outputs.docker == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     steps:
@@ -958,7 +1004,6 @@ jobs:
     needs:
       - runner-policy
       - changes
-      - preflight-smoke
     if: needs.changes.outputs.k8s == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
     steps:
@@ -1025,12 +1070,19 @@ jobs:
           import os
           import sys
 
+          # integration-shards is gated on path filters; a "skipped" result
+          # means the change didn't touch any Go code or shard scripts, which
+          # is the expected pass case for docs-only PRs.
+          allow_skipped = {"integration-shards"}
           needs = json.loads(os.environ["NEEDS_JSON"])
-          failed = {
-              job: meta.get("result", "unknown")
-              for job, meta in sorted(needs.items())
-              if meta.get("result") != "success"
-          }
+          failed = {}
+          for job, meta in sorted(needs.items()):
+              result = meta.get("result", "unknown")
+              if result == "success":
+                  continue
+              if result == "skipped" and job in allow_skipped:
+                  continue
+              failed[job] = result
           if failed:
               for job, result in failed.items():
                   print(f"{job}: {result}", file=sys.stderr)

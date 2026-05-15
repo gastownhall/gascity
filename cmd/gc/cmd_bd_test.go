@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pgauth"
 )
 
 func TestExtractRigFlag(t *testing.T) {
@@ -300,6 +302,10 @@ func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
 }
 
 func TestBdCommandEnvUsesCanonicalRigTarget(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	_ = os.Unsetenv("BEADS_ACTOR")
+
 	cityDir := t.TempDir()
 	wantPort := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
 	rigDir := filepath.Join(t.TempDir(), "repo")
@@ -314,12 +320,16 @@ dolt.auto-start: false
 		t.Fatal(err)
 	}
 	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}
-	env := listToMap(bdCommandEnv(cityDir, cfg, execStoreTarget{
+	envList, err := bdCommandEnv(cityDir, cfg, execStoreTarget{
 		ScopeRoot: rigDir,
 		ScopeKind: "rig",
 		Prefix:    "repo",
 		RigName:   "repo",
-	}))
+	})
+	if err != nil {
+		t.Fatalf("bdCommandEnv: %v", err)
+	}
+	env := listToMap(envList)
 	if got := env["GC_DOLT_PORT"]; got != wantPort {
 		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, wantPort)
 	}
@@ -340,6 +350,79 @@ dolt.auto-start: false
 	}
 	if got := env["GC_BEADS_PREFIX"]; got != "repo" {
 		t.Fatalf("GC_BEADS_PREFIX = %q, want %q", got, "repo")
+	}
+	if _, present := env["BEADS_ACTOR"]; present {
+		t.Fatalf("BEADS_ACTOR = %q, want absent for direct gc bd env without explicit actor", env["BEADS_ACTOR"])
+	}
+}
+
+func TestBdCommandEnvSurfacesPostgresProjectionError(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(cityDir, "rigs", "pg")
+	writePGScopeFixture(t, rigDir, "")
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "pg", Path: "rigs/pg", Prefix: "pg"}}}
+
+	_, err := bdCommandEnv(cityDir, cfg, execStoreTarget{
+		ScopeRoot: rigDir,
+		ScopeKind: "rig",
+		Prefix:    "pg",
+		RigName:   "pg",
+	})
+	if err == nil {
+		t.Fatal("bdCommandEnv err = nil, want postgres projection error")
+	}
+	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
+		t.Errorf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
+	}
+}
+
+func TestBdCommandRunnerForCityDoesNotDefaultBeadsActorWhenUnset(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	_ = os.Unsetenv("BEADS_ACTOR")
+
+	origRunner := beadsExecCommandRunnerWithEnv
+	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = origRunner })
+
+	var captured map[string]string
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		captured = map[string]string{}
+		for key, value := range env {
+			captured[key] = value
+		}
+		return func(_ string, _ string, _ ...string) ([]byte, error) {
+			return []byte("ok"), nil
+		}
+	}
+
+	cityPath := t.TempDir()
+	runner := bdCommandRunnerForCity(cityPath)
+	if _, err := runner(cityPath, "bd", "list", "--json"); err != nil {
+		t.Fatalf("bd runner error = %v, want nil", err)
+	}
+
+	if _, present := captured["BEADS_ACTOR"]; present {
+		t.Fatalf("BEADS_ACTOR = %q, want absent for normal bd runner without explicit actor", captured["BEADS_ACTOR"])
 	}
 }
 
@@ -408,7 +491,8 @@ set -eu
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
 	t.Setenv("CAPTURE_PATH", capture)
 	t.Setenv("GC_CITY_PATH", cityDir)
-	t.Setenv("GC_DOLT_HOST", "ambient-dolt.example.com")
+	t.Setenv("GC_DOLT_HOST", "")
+	_ = os.Unsetenv("GC_DOLT_HOST")
 	t.Setenv("GC_DOLT_PORT", "9999")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient-beads.example.com")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
@@ -468,7 +552,9 @@ set -eu
 	}
 }
 
-func TestGcBdSuppressesBdAutoExportForJsonShowAndUpdate(t *testing.T) {
+func TestGcBdSuppressesBdAutoExportInChildEnv(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
 	defer func() {
@@ -532,6 +618,8 @@ esac
 }
 
 func TestGcBdDoesNotAutoRouteHyphenatedFlagValue(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
 	origProbe := bdBeadExists
@@ -629,6 +717,13 @@ func TestGcBdRejectsGCBeadsFileOverride(t *testing.T) {
 	cityFlag = ""
 	rigFlag = ""
 
+	// Scrub inherited beads env (notably GC_BEADS_SCOPE_ROOT from a
+	// gc agent's outer city) so the explicit GC_BEADS override below
+	// is honored by configuredBeadsProviderValue. Without this, a leaked
+	// GC_BEADS_SCOPE_ROOT disqualifies the override and the provider
+	// resolution falls back to city.toml peek (which has no [beads]
+	// section here) → defaults to "bd" → rejection never fires.
+	clearInheritedBeadsEnv(t)
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
 name = "demo"
@@ -637,6 +732,11 @@ name = "demo"
 	}
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	// Clear any inherited scope pin so the GC_BEADS override applies to
+	// this test's city. When run from a polecat session, the ambient
+	// GC_BEADS_SCOPE_ROOT points at the rig repo and would suppress the
+	// override before the provider check could fire.
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
 	var stdout, stderr bytes.Buffer
 	if got := doBd([]string{"list"}, &stdout, &stderr); got == 0 {
@@ -1434,6 +1534,8 @@ func TestResolveBdScopeTargetRoutesExistingCityBeadFromRigCwd(t *testing.T) {
 }
 
 func TestGcBdRespectsRawCityFlag(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
 	origProbe := bdBeadExists
@@ -1506,6 +1608,8 @@ set -eu
 }
 
 func TestGcBdUsesEnclosingRigWhenNoFlag(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
 	origProbe := bdBeadExists
@@ -1591,6 +1695,8 @@ set -eu
 }
 
 func TestGcBdWarnsOnExternalOverrideDrift(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
 	defer func() {

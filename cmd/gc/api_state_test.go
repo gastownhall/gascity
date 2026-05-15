@@ -23,6 +23,8 @@ import (
 )
 
 func TestControllerStateReadAccess(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
 	sp := runtime.NewFake()
 	ep := events.NewFake()
 	cfg := &config.City{
@@ -71,6 +73,8 @@ func TestControllerStateReadAccess(t *testing.T) {
 }
 
 func TestControllerStateConcurrentAccess(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
 	sp := runtime.NewFake()
 	ep := events.NewFake()
 	cfg := &config.City{
@@ -101,6 +105,8 @@ func TestControllerStateConcurrentAccess(t *testing.T) {
 }
 
 func TestControllerStateUpdate(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
 	sp := runtime.NewFake()
 	ep := events.NewFake()
 	cfg1 := &config.City{
@@ -336,6 +342,7 @@ func TestControllerStateRuntimeUpdateIgnoresEmptyRevisionDuringPendingMutation(t
 
 func TestControllerStateRuntimeUpdateAcceptsBuiltinAwareRevision(t *testing.T) {
 	configureTestDoltIdentityEnv(t)
+	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "")
 
 	cityDir := shortSocketTempDir(t, "gc-state-runtime-builtin-")
@@ -373,6 +380,7 @@ func TestControllerStateRuntimeUpdateAcceptsBuiltinAwareRevision(t *testing.T) {
 
 func TestControllerStateMutationRefreshKeepsBuiltinOrdersAndClearsPending(t *testing.T) {
 	configureTestDoltIdentityEnv(t)
+	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "")
 
 	cityDir := shortSocketTempDir(t, "gc-state-mutation-builtin-")
@@ -602,6 +610,82 @@ func TestControllerStateCreateRigPokesReconciler(t *testing.T) {
 	}
 	if got := cs.Config(); got == nil || len(got.Rigs) != 1 || got.Rigs[0].Name != "rig1" {
 		t.Fatalf("Config() rigs = %+v, want in-memory rig snapshot to include rig1", got.Rigs)
+	}
+}
+
+func TestControllerStateCreateRigDetectsDefaultBranch(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+
+	rigDir := newRepoWithOriginHead(t, "master")
+	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: rigDir}); err != nil {
+		t.Fatalf("CreateRig: %v", err)
+	}
+
+	got := cs.Config()
+	if got == nil || len(got.Rigs) != 1 {
+		t.Fatalf("Config() rigs = %+v, want one rig", got.Rigs)
+	}
+	if got.Rigs[0].DefaultBranch != "master" {
+		t.Fatalf("DefaultBranch = %q, want %q", got.Rigs[0].DefaultBranch, "master")
+	}
+}
+
+func TestControllerStateCreateRigDetectsDefaultBranchForRelativePath(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	cityRigDir := filepath.Join(cityDir, "rig")
+	if err := os.MkdirAll(cityRigDir, 0o755); err != nil {
+		t.Fatalf("mkdir city rig: %v", err)
+	}
+	gitCmd(t, cityRigDir, "init")
+	gitCmd(t, cityRigDir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+
+	otherRoot := t.TempDir()
+	otherRigDir := filepath.Join(otherRoot, "rig")
+	if err := os.MkdirAll(otherRigDir, 0o755); err != nil {
+		t.Fatalf("mkdir other rig: %v", err)
+	}
+	gitCmd(t, otherRigDir, "init")
+	gitCmd(t, otherRigDir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
+	t.Chdir(otherRoot)
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+
+	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: "rig"}); err != nil {
+		t.Fatalf("CreateRig: %v", err)
+	}
+
+	got := cs.Config()
+	if got == nil || len(got.Rigs) != 1 {
+		t.Fatalf("Config() rigs = %+v, want one rig", got.Rigs)
+	}
+	if got.Rigs[0].DefaultBranch != "trunk" {
+		t.Fatalf("DefaultBranch = %q, want %q", got.Rigs[0].DefaultBranch, "trunk")
+	}
+}
+
+func TestDetectRigDefaultBranchSkipsEmptyPath(t *testing.T) {
+	got := detectRigDefaultBranch(t.TempDir(), config.Rig{Name: "rig1"})
+	if got.DefaultBranch != "" {
+		t.Fatalf("DefaultBranch = %q, want empty for empty rig path", got.DefaultBranch)
 	}
 }
 
@@ -1374,6 +1458,8 @@ provider = "file"
 }
 
 func TestControllerStateNilEventProvider(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
 	sp := runtime.NewFake()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -1387,6 +1473,8 @@ func TestControllerStateNilEventProvider(t *testing.T) {
 }
 
 func TestControllerStateOrdersIncludeVisibleCityRoot(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
 	cityDir := t.TempDir()
 	autoDir := filepath.Join(cityDir, "orders", "digest")
 	if err := os.MkdirAll(autoDir, 0o755); err != nil {

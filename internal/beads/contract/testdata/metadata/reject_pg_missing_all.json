@@ -1,0 +1,8 @@
+{
+  "database": "beads",
+  "backend": "postgres",
+  "postgres_host": "",
+  "postgres_port": "",
+  "postgres_user": "",
+  "postgres_database": ""
+}

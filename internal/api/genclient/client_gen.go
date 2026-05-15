@@ -289,6 +289,8 @@ type AgentPatch struct {
 	MCP                     *[]string         `json:"MCP"`
 	MCPAppend               *[]string         `json:"MCPAppend"`
 	MaxActiveSessions       *int64            `json:"MaxActiveSessions"`
+	MaxSessionAge           *string           `json:"MaxSessionAge"`
+	MaxSessionAgeJitter     *string           `json:"MaxSessionAgeJitter"`
 	MinActiveSessions       *int64            `json:"MinActiveSessions"`
 	Name                    string            `json:"Name"`
 	Nudge                   *string           `json:"Nudge"`
@@ -440,6 +442,7 @@ type Bead struct {
 	CreatedAt    time.Time          `json:"created_at"`
 	Dependencies *[]Dep             `json:"dependencies,omitempty"`
 	Description  *string            `json:"description,omitempty"`
+	Ephemeral    *bool              `json:"ephemeral,omitempty"`
 	From         *string            `json:"from,omitempty"`
 	Id           string             `json:"id"`
 	IssueType    string             `json:"issue_type"`
@@ -2083,6 +2086,9 @@ type RigActionBody struct {
 
 // RigCreateInputBody defines model for RigCreateInputBody.
 type RigCreateInputBody struct {
+	// DefaultBranch Mainline branch (e.g. main, master). Auto-detected when omitted.
+	DefaultBranch *string `json:"default_branch,omitempty"`
+
 	// Name Rig name.
 	Name string `json:"name"`
 
@@ -2104,14 +2110,19 @@ type RigCreatedOutputBody struct {
 
 // RigPatch defines model for RigPatch.
 type RigPatch struct {
-	Name      string  `json:"Name"`
-	Path      *string `json:"Path"`
-	Prefix    *string `json:"Prefix"`
-	Suspended *bool   `json:"Suspended"`
+	DefaultBranch *string           `json:"DefaultBranch"`
+	FormulaVars   map[string]string `json:"FormulaVars"`
+	Name          string            `json:"Name"`
+	Path          *string           `json:"Path"`
+	Prefix        *string           `json:"Prefix"`
+	Suspended     *bool             `json:"Suspended"`
 }
 
 // RigPatchSetInputBody defines model for RigPatchSetInputBody.
 type RigPatchSetInputBody struct {
+	// DefaultBranch Override mainline branch.
+	DefaultBranch *string `json:"default_branch,omitempty"`
+
 	// Name Rig name.
 	Name *string `json:"name,omitempty"`
 
@@ -2127,18 +2138,22 @@ type RigPatchSetInputBody struct {
 
 // RigResponse defines model for RigResponse.
 type RigResponse struct {
-	AgentCount   int64      `json:"agent_count"`
-	Git          *GitStatus `json:"git,omitempty"`
-	LastActivity *time.Time `json:"last_activity,omitempty"`
-	Name         string     `json:"name"`
-	Path         string     `json:"path"`
-	Prefix       *string    `json:"prefix,omitempty"`
-	RunningCount int64      `json:"running_count"`
-	Suspended    bool       `json:"suspended"`
+	AgentCount    int64      `json:"agent_count"`
+	DefaultBranch *string    `json:"default_branch,omitempty"`
+	Git           *GitStatus `json:"git,omitempty"`
+	LastActivity  *time.Time `json:"last_activity,omitempty"`
+	Name          string     `json:"name"`
+	Path          string     `json:"path"`
+	Prefix        *string    `json:"prefix,omitempty"`
+	RunningCount  int64      `json:"running_count"`
+	Suspended     bool       `json:"suspended"`
 }
 
 // RigUpdateInputBody defines model for RigUpdateInputBody.
 type RigUpdateInputBody struct {
+	// DefaultBranch Mainline branch (e.g. main, master).
+	DefaultBranch *string `json:"default_branch,omitempty"`
+
 	// Path Filesystem path.
 	Path *string `json:"path,omitempty"`
 
@@ -2240,6 +2255,18 @@ type SessionInfo struct {
 	Name         string     `json:"name"`
 }
 
+// SessionLifecyclePayload defines model for SessionLifecyclePayload.
+type SessionLifecyclePayload struct {
+	// Reason Short human-readable reason.
+	Reason *string `json:"reason,omitempty"`
+
+	// SessionId Canonical session bead ID. Always present.
+	SessionId string `json:"session_id"`
+
+	// Template Session template name when known at the emission site.
+	Template *string `json:"template,omitempty"`
+}
+
 // SessionMessageInputBody defines model for SessionMessageInputBody.
 type SessionMessageInputBody struct {
 	// Message Message text to send.
@@ -2307,6 +2334,7 @@ type SessionRespondOutputBody struct {
 type SessionResponse struct {
 	ActiveBead             *string                 `json:"active_bead,omitempty"`
 	Activity               *string                 `json:"activity,omitempty"`
+	AgentKind              *string                 `json:"agent_kind,omitempty"`
 	Alias                  *string                 `json:"alias,omitempty"`
 	Attached               bool                    `json:"attached"`
 	ConfiguredNamedSession *bool                   `json:"configured_named_session,omitempty"`
@@ -2317,6 +2345,7 @@ type SessionResponse struct {
 	Id                     string                  `json:"id"`
 	Kind                   *string                 `json:"kind,omitempty"`
 	LastActive             *string                 `json:"last_active,omitempty"`
+	LastNudgeDeliveredAt   *string                 `json:"last_nudge_delivered_at,omitempty"`
 	LastOutput             *string                 `json:"last_output,omitempty"`
 	Metadata               *map[string]string      `json:"metadata,omitempty"`
 	Model                  *string                 `json:"model,omitempty"`
@@ -2577,6 +2606,27 @@ type SupervisorEventListOutputBody struct {
 	EventCursor string                            `json:"event_cursor"`
 	Items       *[]TypedTaggedEventStreamEnvelope `json:"items"`
 	Total       int64                             `json:"total"`
+}
+
+// SupervisorFSPressureSkippedTickPayload defines model for SupervisorFSPressureSkippedTickPayload.
+type SupervisorFSPressureSkippedTickPayload struct {
+	// Avg60 The Linux PSI some avg60 value observed for filesystem IO pressure.
+	Avg60 float64 `json:"avg60"`
+
+	// ConsecutiveSkips Number of consecutive pressure skips including this tick.
+	ConsecutiveSkips int64 `json:"consecutive_skips"`
+
+	// MaxConsecutiveSkips Maximum consecutive skips before the supervisor forces one reconciliation tick.
+	MaxConsecutiveSkips int64 `json:"max_consecutive_skips"`
+
+	// Outcome The pressure decision outcome: skipped for a shed tick or forced for the bounded liveness tick.
+	Outcome string `json:"outcome"`
+
+	// Threshold The configured avg60 threshold that triggered the skip.
+	Threshold float64 `json:"threshold"`
+
+	// Trigger The daemon tick trigger, such as patrol or poke.
+	Trigger *string `json:"trigger,omitempty"`
 }
 
 // SupervisorHealthOutputBody defines model for SupervisorHealthOutputBody.
@@ -3070,7 +3120,7 @@ type TypedEventStreamEnvelopeRequestResultSessionSubmit struct {
 type TypedEventStreamEnvelopeSessionCrashed struct {
 	Actor    string                   `json:"actor"`
 	Message  *string                  `json:"message,omitempty"`
-	Payload  NoPayload                `json:"payload"`
+	Payload  SessionLifecyclePayload  `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -3102,6 +3152,18 @@ type TypedEventStreamEnvelopeSessionIdleKilled struct {
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionMaxAgeKilled defines model for TypedEventStreamEnvelopeSessionMaxAgeKilled.
+type TypedEventStreamEnvelopeSessionMaxAgeKilled struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionQuarantined defines model for TypedEventStreamEnvelopeSessionQuarantined.
 type TypedEventStreamEnvelopeSessionQuarantined struct {
 	Actor    string                   `json:"actor"`
@@ -3118,7 +3180,7 @@ type TypedEventStreamEnvelopeSessionQuarantined struct {
 type TypedEventStreamEnvelopeSessionStopped struct {
 	Actor    string                   `json:"actor"`
 	Message  *string                  `json:"message,omitempty"`
-	Payload  NoPayload                `json:"payload"`
+	Payload  SessionLifecyclePayload  `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -3172,6 +3234,18 @@ type TypedEventStreamEnvelopeSessionWoke struct {
 	Ts       time.Time                `json:"ts"`
 	Type     string                   `json:"type"`
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick defines model for TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick.
+type TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick struct {
+	Actor    string                                 `json:"actor"`
+	Message  *string                                `json:"message,omitempty"`
+	Payload  SupervisorFSPressureSkippedTickPayload `json:"payload"`
+	Seq      int64                                  `json:"seq"`
+	Subject  *string                                `json:"subject,omitempty"`
+	Ts       time.Time                              `json:"ts"`
+	Type     string                                 `json:"type"`
+	Workflow *WorkflowEventProjection               `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeWorkerOperation defines model for TypedEventStreamEnvelopeWorkerOperation.
@@ -3664,7 +3738,7 @@ type TypedTaggedEventStreamEnvelopeSessionCrashed struct {
 	Actor    string                   `json:"actor"`
 	City     string                   `json:"city"`
 	Message  *string                  `json:"message,omitempty"`
-	Payload  NoPayload                `json:"payload"`
+	Payload  SessionLifecyclePayload  `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -3698,6 +3772,19 @@ type TypedTaggedEventStreamEnvelopeSessionIdleKilled struct {
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled defines model for TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled.
+type TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeSessionQuarantined defines model for TypedTaggedEventStreamEnvelopeSessionQuarantined.
 type TypedTaggedEventStreamEnvelopeSessionQuarantined struct {
 	Actor    string                   `json:"actor"`
@@ -3716,7 +3803,7 @@ type TypedTaggedEventStreamEnvelopeSessionStopped struct {
 	Actor    string                   `json:"actor"`
 	City     string                   `json:"city"`
 	Message  *string                  `json:"message,omitempty"`
-	Payload  NoPayload                `json:"payload"`
+	Payload  SessionLifecyclePayload  `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -3776,6 +3863,19 @@ type TypedTaggedEventStreamEnvelopeSessionWoke struct {
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick defines model for TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick.
+type TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick struct {
+	Actor    string                                 `json:"actor"`
+	City     string                                 `json:"city"`
+	Message  *string                                `json:"message,omitempty"`
+	Payload  SupervisorFSPressureSkippedTickPayload `json:"payload"`
+	Seq      int64                                  `json:"seq"`
+	Subject  *string                                `json:"subject,omitempty"`
+	Ts       time.Time                              `json:"ts"`
+	Type     string                                 `json:"type"`
+	Workflow *WorkflowEventProjection               `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeWorkerOperation defines model for TypedTaggedEventStreamEnvelopeWorkerOperation.
 type TypedTaggedEventStreamEnvelopeWorkerOperation struct {
 	Actor    string                      `json:"actor"`
@@ -3797,20 +3897,52 @@ type UnboundEventPayload struct {
 
 // WorkerOperationEventPayload defines model for WorkerOperationEventPayload.
 type WorkerOperationEventPayload struct {
-	Delivered   *bool     `json:"delivered,omitempty"`
-	DurationMs  int64     `json:"duration_ms"`
-	Error       *string   `json:"error,omitempty"`
-	FinishedAt  time.Time `json:"finished_at"`
-	OpId        string    `json:"op_id"`
-	Operation   string    `json:"operation"`
-	Provider    *string   `json:"provider,omitempty"`
-	Queued      *bool     `json:"queued,omitempty"`
-	Result      string    `json:"result"`
-	SessionId   *string   `json:"session_id,omitempty"`
-	SessionName *string   `json:"session_name,omitempty"`
-	StartedAt   time.Time `json:"started_at"`
-	Template    *string   `json:"template,omitempty"`
-	Transport   *string   `json:"transport,omitempty"`
+	// AgentName Qualified agent identity (best-effort, absent if the session has no agent_name metadata or alias).
+	AgentName *string `json:"agent_name,omitempty"`
+
+	// BeadId Work bead this operation is acting on (best-effort, may be absent for non-bead-scoped ops).
+	BeadId *string `json:"bead_id,omitempty"`
+
+	// CacheCreationTokens Input tokens written into the prompt cache (best-effort, currently always absent).
+	CacheCreationTokens *int64 `json:"cache_creation_tokens,omitempty"`
+
+	// CacheReadTokens Cached input tokens read (best-effort, currently always absent).
+	CacheReadTokens *int64 `json:"cache_read_tokens,omitempty"`
+
+	// CompletionTokens Output tokens (best-effort, currently always absent).
+	CompletionTokens *int64 `json:"completion_tokens,omitempty"`
+
+	// CostUsdEstimate Estimated invocation cost in USD (best-effort, currently always absent; see #1255 for pricing seam).
+	CostUsdEstimate *float64  `json:"cost_usd_estimate,omitempty"`
+	Delivered       *bool     `json:"delivered,omitempty"`
+	DurationMs      int64     `json:"duration_ms"`
+	Error           *string   `json:"error,omitempty"`
+	FinishedAt      time.Time `json:"finished_at"`
+
+	// LatencyMs LLM invocation wall-clock latency (best-effort, currently always absent — no source).
+	LatencyMs *int64 `json:"latency_ms,omitempty"`
+
+	// Model LLM model identifier (best-effort, may be absent until follow-up wiring lands).
+	Model     *string `json:"model,omitempty"`
+	OpId      string  `json:"op_id"`
+	Operation string  `json:"operation"`
+
+	// PromptSha SHA-256 of the rendered prompt (best-effort, currently always absent; #1256 follow-up).
+	PromptSha *string `json:"prompt_sha,omitempty"`
+
+	// PromptTokens Non-cached input tokens (best-effort, currently always absent; treat zero as 'not measured', not 'free').
+	PromptTokens *int64 `json:"prompt_tokens,omitempty"`
+
+	// PromptVersion Template version frontmatter (best-effort, currently always absent; #1256 follow-up).
+	PromptVersion *string   `json:"prompt_version,omitempty"`
+	Provider      *string   `json:"provider,omitempty"`
+	Queued        *bool     `json:"queued,omitempty"`
+	Result        string    `json:"result"`
+	SessionId     *string   `json:"session_id,omitempty"`
+	SessionName   *string   `json:"session_name,omitempty"`
+	StartedAt     time.Time `json:"started_at"`
+	Template      *string   `json:"template,omitempty"`
+	Transport     *string   `json:"transport,omitempty"`
 }
 
 // WorkflowAttemptSummary defines model for WorkflowAttemptSummary.
@@ -5279,6 +5411,32 @@ func (t *EventPayload) MergeSessionCreateSucceededPayload(v SessionCreateSucceed
 	return err
 }
 
+// AsSessionLifecyclePayload returns the union data inside the EventPayload as a SessionLifecyclePayload
+func (t EventPayload) AsSessionLifecyclePayload() (SessionLifecyclePayload, error) {
+	var body SessionLifecyclePayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionLifecyclePayload overwrites any union data inside the EventPayload as the provided SessionLifecyclePayload
+func (t *EventPayload) FromSessionLifecyclePayload(v SessionLifecyclePayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionLifecyclePayload performs a merge with any union data inside the EventPayload, using the provided SessionLifecyclePayload
+func (t *EventPayload) MergeSessionLifecyclePayload(v SessionLifecyclePayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsSessionMessageSucceededPayload returns the union data inside the EventPayload as a SessionMessageSucceededPayload
 func (t EventPayload) AsSessionMessageSucceededPayload() (SessionMessageSucceededPayload, error) {
 	var body SessionMessageSucceededPayload
@@ -5321,6 +5479,32 @@ func (t *EventPayload) FromSessionSubmitSucceededPayload(v SessionSubmitSucceede
 
 // MergeSessionSubmitSucceededPayload performs a merge with any union data inside the EventPayload, using the provided SessionSubmitSucceededPayload
 func (t *EventPayload) MergeSessionSubmitSucceededPayload(v SessionSubmitSucceededPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSupervisorFSPressureSkippedTickPayload returns the union data inside the EventPayload as a SupervisorFSPressureSkippedTickPayload
+func (t EventPayload) AsSupervisorFSPressureSkippedTickPayload() (SupervisorFSPressureSkippedTickPayload, error) {
+	var body SupervisorFSPressureSkippedTickPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSupervisorFSPressureSkippedTickPayload overwrites any union data inside the EventPayload as the provided SupervisorFSPressureSkippedTickPayload
+func (t *EventPayload) FromSupervisorFSPressureSkippedTickPayload(v SupervisorFSPressureSkippedTickPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSupervisorFSPressureSkippedTickPayload performs a merge with any union data inside the EventPayload, using the provided SupervisorFSPressureSkippedTickPayload
+func (t *EventPayload) MergeSupervisorFSPressureSkippedTickPayload(v SupervisorFSPressureSkippedTickPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -6545,6 +6729,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionIdleKille
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionMaxAgeKilled returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionMaxAgeKilled
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionMaxAgeKilled() (TypedEventStreamEnvelopeSessionMaxAgeKilled, error) {
+	var body TypedEventStreamEnvelopeSessionMaxAgeKilled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionMaxAgeKilled overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionMaxAgeKilled
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionMaxAgeKilled(v TypedEventStreamEnvelopeSessionMaxAgeKilled) error {
+	v.Type = "session.max_age_killed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionMaxAgeKilled performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionMaxAgeKilled
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionMaxAgeKilled(v TypedEventStreamEnvelopeSessionMaxAgeKilled) error {
+	v.Type = "session.max_age_killed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionQuarantined returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionQuarantined
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionQuarantined() (TypedEventStreamEnvelopeSessionQuarantined, error) {
 	var body TypedEventStreamEnvelopeSessionQuarantined
@@ -6713,6 +6925,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionWoke(v Ty
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick() (TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick, error) {
+	var body TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick(v TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick) error {
+	v.Type = "supervisor.fs_pressure.skipped_tick"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick(v TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick) error {
+	v.Type = "supervisor.fs_pressure.skipped_tick"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeWorkerOperation returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkerOperation
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkerOperation() (TypedEventStreamEnvelopeWorkerOperation, error) {
 	var body TypedEventStreamEnvelopeWorkerOperation
@@ -6861,6 +7101,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionDraining()
 	case "session.idle_killed":
 		return t.AsTypedEventStreamEnvelopeSessionIdleKilled()
+	case "session.max_age_killed":
+		return t.AsTypedEventStreamEnvelopeSessionMaxAgeKilled()
 	case "session.quarantined":
 		return t.AsTypedEventStreamEnvelopeSessionQuarantined()
 	case "session.stopped":
@@ -6873,6 +7115,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionUpdated()
 	case "session.woke":
 		return t.AsTypedEventStreamEnvelopeSessionWoke()
+	case "supervisor.fs_pressure.skipped_tick":
+		return t.AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
 	case "worker.operation":
 		return t.AsTypedEventStreamEnvelopeWorkerOperation()
 	default:
@@ -7954,6 +8198,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled() (TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled(v TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled) error {
+	v.Type = "session.max_age_killed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled(v TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled) error {
+	v.Type = "session.max_age_killed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionQuarantined returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionQuarantined
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionQuarantined() (TypedTaggedEventStreamEnvelopeSessionQuarantined, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionQuarantined
@@ -8122,6 +8394,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick() (TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick, error) {
+	var body TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick(v TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick) error {
+	v.Type = "supervisor.fs_pressure.skipped_tick"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick(v TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick) error {
+	v.Type = "supervisor.fs_pressure.skipped_tick"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeWorkerOperation returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkerOperation
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkerOperation() (TypedTaggedEventStreamEnvelopeWorkerOperation, error) {
 	var body TypedTaggedEventStreamEnvelopeWorkerOperation
@@ -8270,6 +8570,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionDraining()
 	case "session.idle_killed":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionIdleKilled()
+	case "session.max_age_killed":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled()
 	case "session.quarantined":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionQuarantined()
 	case "session.stopped":
@@ -8282,6 +8584,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionUpdated()
 	case "session.woke":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionWoke()
+	case "supervisor.fs_pressure.skipped_tick":
+		return t.AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
 	case "worker.operation":
 		return t.AsTypedTaggedEventStreamEnvelopeWorkerOperation()
 	default:

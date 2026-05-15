@@ -58,6 +58,18 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 		if strings.Contains(cmd, "--label=gc:message") {
 			t.Fatalf("mail check used gc:message label supplement: %s", cmd)
 		}
+		if strings.Contains(cmd, "bd show --json mayor") {
+			return nil, errors.New("not found")
+		}
+		if strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--metadata-field") {
+			return []byte(`[]`), nil
+		}
+		if strings.Contains(cmd, "bd query --json") {
+			if !strings.Contains(cmd, "ephemeral=true") || !strings.Contains(cmd, "type=message") {
+				t.Fatalf("mail check used unexpected wisp query: %s", cmd)
+			}
+			return []byte(`[]`), nil
+		}
 		if strings.Contains(cmd, "--assignee=mayor") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open") {
 			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","labels":["gc:message"]}]`), nil
 		}
@@ -71,6 +83,96 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 	}
 	if len(msgs) != 1 || msgs[0].ID != "msg-1" {
 		t.Fatalf("Check = %#v, want msg-1", msgs)
+	}
+}
+
+func TestCheckSupportsSlashRecipientWithWispTier(t *testing.T) {
+	recipient := "gascity/workflows.codex-max"
+	sawWispQuery := false
+	runner := func(_ string, name string, args ...string) ([]byte, error) {
+		cmd := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.Contains(cmd, "bd show --json "+recipient):
+			return nil, errors.New("not found")
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--metadata-field"):
+			return []byte(`[]`), nil
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=session"):
+			return []byte(`[]`), nil
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--assignee="+recipient):
+			return []byte(`[]`), nil
+		case strings.Contains(cmd, "bd query --json"):
+			sawWispQuery = true
+			if strings.Contains(cmd, "assignee="+recipient) {
+				t.Fatalf("slash recipient leaked into bd query: %s", cmd)
+			}
+			if !strings.Contains(cmd, "ephemeral=true") || !strings.Contains(cmd, "type=message") {
+				t.Fatalf("unexpected wisp query: %s", cmd)
+			}
+			return []byte(`[{"id":"msg-w","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
+		}
+		return nil, errors.New("unexpected command: " + cmd)
+	}
+	p := New(beads.NewBdStore(t.TempDir(), runner))
+
+	msgs, err := p.Check(recipient)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if !sawWispQuery {
+		t.Fatal("Check did not query wisps tier")
+	}
+	if len(msgs) != 1 || msgs[0].ID != "msg-w" {
+		t.Fatalf("Check = %#v, want msg-w", msgs)
+	}
+}
+
+func TestMessageQueriesIncludeWispTier(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	msg, err := store.Create(beads.Bead{
+		Title:       "wisp status",
+		Type:        "message",
+		Assignee:    "mayor",
+		From:        "human",
+		Description: "wisp body",
+		Labels:      []string{"thread:t1"},
+		Ephemeral:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create ephemeral message: %v", err)
+	}
+
+	inbox, err := p.Check("mayor")
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(inbox) != 1 || inbox[0].ID != msg.ID {
+		t.Fatalf("Check = %#v, want ephemeral message %s", inbox, msg.ID)
+	}
+
+	all, err := p.All("")
+	if err != nil {
+		t.Fatalf("All: %v", err)
+	}
+	if len(all) != 1 || all[0].ID != msg.ID {
+		t.Fatalf("All = %#v, want ephemeral message %s", all, msg.ID)
+	}
+
+	total, unread, err := p.Count("mayor")
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if total != 1 || unread != 1 {
+		t.Fatalf("Count = (%d, %d), want (1, 1)", total, unread)
+	}
+
+	thread, err := p.Thread("t1")
+	if err != nil {
+		t.Fatalf("Thread: %v", err)
+	}
+	if len(thread) != 1 || thread[0].ID != msg.ID {
+		t.Fatalf("Thread = %#v, want ephemeral message %s", thread, msg.ID)
 	}
 }
 
@@ -683,6 +785,73 @@ func TestArchiveNotFound(t *testing.T) {
 	err := p.Archive("gc-999")
 	if err == nil {
 		t.Error("Archive should fail for nonexistent ID")
+	}
+}
+
+// TestArchiveStampsCloseReason verifies that Archive stamps
+// close_reason=MailArchivedCloseReason on the closed message bead.
+// Without this, bd's validation.on-close=error rejects the close and
+// leaves the message open silently.
+func TestArchiveStampsCloseReason(t *testing.T) {
+	if got := len(MailArchivedCloseReason); got < 20 {
+		t.Fatalf("MailArchivedCloseReason = %q (%d chars), want >=20", MailArchivedCloseReason, got)
+	}
+
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("human", "mayor", "", "dismiss me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Archive(sent.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+
+	b, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := b.Metadata["close_reason"]; got != MailArchivedCloseReason {
+		t.Errorf("close_reason = %q, want %q", got, MailArchivedCloseReason)
+	}
+}
+
+// TestArchiveManyStampsCloseReason verifies the batch-archive path also
+// stamps close_reason on every closed bead.
+func TestArchiveManyStampsCloseReason(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	a, err := p.Send("human", "mayor", "", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := p.Send("human", "mayor", "", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := p.ArchiveMany([]string{a.ID, b.ID})
+	if err != nil {
+		t.Fatalf("ArchiveMany: %v", err)
+	}
+	for i, r := range results {
+		if r.Err != nil {
+			t.Errorf("ArchiveMany[%d].Err = %v", i, r.Err)
+		}
+	}
+	for _, id := range []string{a.ID, b.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("store.Get(%s): %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Errorf("bead %s status = %q, want closed", id, got.Status)
+		}
+		if reason := got.Metadata["close_reason"]; reason != MailArchivedCloseReason {
+			t.Errorf("bead %s close_reason = %q, want %q", id, reason, MailArchivedCloseReason)
+		}
 	}
 }
 

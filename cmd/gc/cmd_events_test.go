@@ -783,6 +783,127 @@ func TestMatchPayload(t *testing.T) {
 			t.Fatal("expected OR payload match to succeed")
 		}
 	})
+
+	t.Run("matches nested payload via dotted path", func(t *testing.T) {
+		// bead.closed events have shape {"payload":{"bead":{"issue_type":"...",...}}}
+		// where the filterable fields live nested under "bead". A dotted-key
+		// filter must walk into the nested map.
+		payload := map[string]any{
+			"bead": map[string]any{
+				"id":         "pc-wisp-foo",
+				"issue_type": "molecule",
+				"status":     "closed",
+			},
+		}
+		if !matchPayload(payload, map[string][]string{"bead.issue_type": {"molecule"}}) {
+			t.Fatal("expected nested key bead.issue_type to match molecule")
+		}
+		if !matchPayload(payload, map[string][]string{"bead.status": {"closed"}}) {
+			t.Fatal("expected nested key bead.status to match closed")
+		}
+	})
+
+	t.Run("nested key value mismatch returns false", func(t *testing.T) {
+		payload := map[string]any{
+			"bead": map[string]any{"issue_type": "molecule"},
+		}
+		if matchPayload(payload, map[string][]string{"bead.issue_type": {"task"}}) {
+			t.Fatal("expected nested value mismatch to fail")
+		}
+	})
+
+	t.Run("missing intermediate path returns false", func(t *testing.T) {
+		payload := map[string]any{"foo": "bar"}
+		if matchPayload(payload, map[string][]string{"bead.issue_type": {"molecule"}}) {
+			t.Fatal("expected missing intermediate map to fail closed")
+		}
+	})
+
+	t.Run("intermediate non-object returns false", func(t *testing.T) {
+		// "bead" is a string here, not a map — walking should fail without panic.
+		payload := map[string]any{"bead": "not-an-object"}
+		if matchPayload(payload, map[string][]string{"bead.issue_type": {"molecule"}}) {
+			t.Fatal("expected non-object intermediate to fail closed")
+		}
+	})
+
+	t.Run("flat key still matches at top level (backward-compat)", func(t *testing.T) {
+		payload := map[string]any{"type": "merge-request"}
+		if !matchPayload(payload, map[string][]string{"type": {"merge-request"}}) {
+			t.Fatal("flat top-level key must still match")
+		}
+	})
+
+	t.Run("flat key with no dot does not silently traverse", func(t *testing.T) {
+		// Guard against future refactors where lookupPayloadKey accidentally
+		// walks even when there's no dot. A flat key "type" must not match
+		// a nested {"bead":{"type":"..."}} value.
+		payload := map[string]any{
+			"bead": map[string]any{"type": "merge-request"},
+		}
+		if matchPayload(payload, map[string][]string{"type": {"merge-request"}}) {
+			t.Fatal("flat key must not match nested value at the same name")
+		}
+	})
+
+	t.Run("nested OR works across siblings", func(t *testing.T) {
+		payload := map[string]any{
+			"bead": map[string]any{"issue_type": "task"},
+		}
+		filter := map[string][]string{"bead.issue_type": {"bug", "task", "molecule"}}
+		if !matchPayload(payload, filter) {
+			t.Fatal("expected nested key OR-list to match task")
+		}
+	})
+
+	t.Run("matches literal dotted key below nested map", func(t *testing.T) {
+		payload := map[string]any{
+			"bead": map[string]any{
+				"metadata": map[string]any{
+					"gc.root_bead_id": "ga-root",
+				},
+			},
+		}
+		if !matchPayload(payload, map[string][]string{"bead.metadata.gc.root_bead_id": {"ga-root"}}) {
+			t.Fatal("expected dotted path to match literal metadata key gc.root_bead_id")
+		}
+	})
+
+	t.Run("matches deeper nested payload via dotted path", func(t *testing.T) {
+		payload := map[string]any{
+			"request": map[string]any{
+				"result": map[string]any{
+					"status": "ok",
+				},
+			},
+		}
+		if !matchPayload(payload, map[string][]string{"request.result.status": {"ok"}}) {
+			t.Fatal("expected 3-segment nested key to match")
+		}
+	})
+
+	t.Run("matches flat and nested filters together", func(t *testing.T) {
+		payload := map[string]any{
+			"type": "bead.closed",
+			"bead": map[string]any{"issue_type": "task"},
+		}
+		filter := map[string][]string{
+			"type":            {"bead.closed"},
+			"bead.issue_type": {"task"},
+		}
+		if !matchPayload(payload, filter) {
+			t.Fatal("expected combined flat and nested filters to match")
+		}
+	})
+
+	t.Run("matches nested numeric payload value", func(t *testing.T) {
+		payload := map[string]any{
+			"bead": map[string]any{"priority": 2.0},
+		}
+		if !matchPayload(payload, map[string][]string{"bead.priority": {"2"}}) {
+			t.Fatal("expected nested numeric value to match string form")
+		}
+	})
 }
 
 func TestParsePayloadMatch(t *testing.T) {

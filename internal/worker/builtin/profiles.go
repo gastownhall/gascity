@@ -78,7 +78,7 @@ const (
 )
 
 var builtinProviderOrder = []string{
-	"claude", "codex", "gemini", "cursor", "copilot",
+	"claude", "codex", "gemini", "kiro", "cursor", "copilot",
 	"amp", "opencode", "auggie", "pi", "omp",
 }
 
@@ -131,6 +131,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 					{Value: "low", Label: "Low", FlagArgs: []string{"--effort", "low"}},
 					{Value: "medium", Label: "Medium", FlagArgs: []string{"--effort", "medium"}},
 					{Value: "high", Label: "High", FlagArgs: []string{"--effort", "high"}},
+					{Value: "xhigh", Label: "Extra High", FlagArgs: []string{"--effort", "xhigh"}},
 					{Value: "max", Label: "Max", FlagArgs: []string{"--effort", "max"}},
 				},
 			},
@@ -265,16 +266,34 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 			},
 		},
 	},
+	"kiro": {
+		DisplayName:      "Kiro",
+		Command:          "kiro-cli",
+		Args:             []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+		PromptMode:       "arg",
+		ReadyDelayMs:     5000,
+		ProcessNames:     []string{"kiro-cli", "kiro", "node"},
+		SupportsACP:      true,
+		SupportsHooks:    true,
+		InstructionsFile: "AGENTS.md",
+		ACPArgs:          []string{"acp", "--agent", "gascity"},
+	},
 	"cursor": {
-		DisplayName:       "Cursor Agent",
-		Command:           "cursor-agent",
-		Args:              []string{"-f"},
+		DisplayName: "Cursor Agent",
+		Command:     "cursor-agent",
+		// --approve-mcps is required for non-interactive sessions: without it,
+		// cursor-agent gates MCP tool use behind an approval prompt that pool
+		// workers cannot answer, causing MCPs projected to or configured in
+		// .cursor/mcp.json to appear unavailable.
+		Args:              []string{"-f", "--approve-mcps"},
 		PromptMode:        "arg",
 		ReadyPromptPrefix: "\u2192 ",
 		ReadyDelayMs:      10000,
 		ProcessNames:      []string{"cursor-agent"},
 		SupportsHooks:     true,
 		InstructionsFile:  "AGENTS.md",
+		ResumeFlag:        "--resume",
+		ResumeStyle:       "flag",
 	},
 	"copilot": {
 		DisplayName: "GitHub Copilot",
@@ -294,14 +313,26 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ProcessNames:      []string{"copilot"},
 		SupportsHooks:     true,
 		InstructionsFile:  "AGENTS.md",
+		ResumeFlag:        "--resume",
+		ResumeStyle:       "flag",
 	},
 	"amp": {
+		// Hook mechanism: Amp CLI's plugin system (session.start,
+		// tool.call) is documented at https://ampcode.com/manual.
+		// Gas Town has not yet wired hook installation for amp —
+		// tracked as gap 4 of gastownhall/gascity#672. Nudges still
+		// drain via the supervisor dispatcher / per-session poller
+		// without requiring provider hooks; the remaining work is
+		// event-driven coordination (session-start priming,
+		// pre-compaction handoff).
 		DisplayName:      "Sourcegraph AMP",
 		Command:          "amp",
 		Args:             []string{"--dangerously-allow-all", "--no-ide"},
 		PromptMode:       "arg",
 		ProcessNames:     []string{"amp"},
 		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "threads continue",
+		ResumeStyle:      "subcommand",
 	},
 	"opencode": {
 		DisplayName:      "OpenCode",
@@ -320,12 +351,24 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ACPArgs:          []string{"acp"},
 	},
 	"auggie": {
+		// Hook mechanism: Auggie CLI exposes SessionStart, SessionEnd,
+		// Stop, PreToolUse, PostToolUse hooks via ~/.augment/settings.json
+		// (https://docs.augmentcode.com/cli/overview). The config is
+		// USER-global rather than project-local, which complicates Gas
+		// Town's per-workdir installation model — wiring auggie hooks
+		// requires either merging into the user's existing config or
+		// designing a per-rig override mechanism. Tracked as gap 4 of
+		// gastownhall/gascity#672. Nudges still drain via the supervisor
+		// dispatcher / per-session poller without requiring provider
+		// hooks.
 		DisplayName:      "Auggie CLI",
 		Command:          "auggie",
 		Args:             []string{"--allow-indexing"},
 		PromptMode:       "arg",
 		ProcessNames:     []string{"auggie"},
 		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--resume",
+		ResumeStyle:      "flag",
 	},
 	"pi": {
 		DisplayName:      "Pi Coding Agent",
@@ -336,6 +379,19 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ProcessNames:     []string{"pi", "node", "bun"},
 		SupportsHooks:    true,
 		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--session",
+		ResumeStyle:      "flag",
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "ollama-cloud-gpt-oss-20b", Label: "Ollama Cloud GPT-OSS 20B", FlagArgs: []string{"--provider", "ollama-cloud", "--model", "gpt-oss:20b"}},
+				},
+			},
+		},
 	},
 	"omp": {
 		DisplayName:      "Oh My Pi (OMP)",
@@ -380,6 +436,8 @@ func CanonicalProfileIdentity(profile string) (ProfileIdentity, bool) {
 		return newProfileIdentity(profile, "gemini"), true
 	case "opencode/tmux-cli":
 		return newProfileIdentity(profile, "opencode"), true
+	case "pi/tmux-cli":
+		return newProfileIdentity(profile, "pi"), true
 	default:
 		return ProfileIdentity{}, false
 	}

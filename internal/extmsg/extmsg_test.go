@@ -2210,3 +2210,83 @@ func (f *flakyTranscriptService) MarkHydrationFailed(context.Context, Caller, Co
 func (f *flakyTranscriptService) State(context.Context, Caller, ConversationRef) (*ConversationTranscriptStateRecord, error) {
 	panic("unexpected State call")
 }
+
+func TestCloseSessionBindingsClosesGroupOwnedMembership(t *testing.T) {
+	freezeTestClock(t)
+	store := beads.NewMemStore()
+	fabric := NewServices(store)
+	ref := testConversationRef()
+
+	group, err := fabric.Groups.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
+		RootConversation: ref,
+		Mode:             GroupModeLauncher,
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if _, err := fabric.Groups.UpsertParticipant(context.Background(), testControllerCaller(), UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "alpha",
+		SessionID: "sess-a",
+	}); err != nil {
+		t.Fatalf("UpsertParticipant: %v", err)
+	}
+	if got := membershipSessionIDs(t, fabric.Transcript, ref); len(got) != 1 || got[0] != "sess-a" {
+		t.Fatalf("memberships(after participant upsert) = %#v, want [sess-a]", got)
+	}
+
+	if err := CloseSessionBindings(context.Background(), store, "sess-a", testNow().Add(time.Minute)); err != nil {
+		t.Fatalf("CloseSessionBindings: %v", err)
+	}
+
+	if got := membershipSessionIDs(t, fabric.Transcript, ref); len(got) != 0 {
+		t.Fatalf("memberships(after CloseSessionBindings) = %#v, want []", got)
+	}
+}
+
+func TestCloseSessionBindingsClosesGroupParticipants(t *testing.T) {
+	freezeTestClock(t)
+	store := beads.NewMemStore()
+	fabric := NewServices(store)
+	ref := testConversationRef()
+
+	group, err := fabric.Groups.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
+		RootConversation: ref,
+		Mode:             GroupModeLauncher,
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if _, err := fabric.Groups.UpsertParticipant(context.Background(), testControllerCaller(), UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "alpha",
+		SessionID: "sess-a",
+	}); err != nil {
+		t.Fatalf("UpsertParticipant: %v", err)
+	}
+	openParticipants := func() []string {
+		t.Helper()
+		items, err := store.ListByLabel(groupParticipantSessionLabel("sess-a"), 0)
+		if err != nil {
+			t.Fatalf("ListByLabel: %v", err)
+		}
+		open := make([]string, 0, len(items))
+		for _, item := range items {
+			if hasLabel(item, "gc:extmsg-participant") && item.Status != "closed" {
+				open = append(open, item.ID)
+			}
+		}
+		return open
+	}
+	if got := openParticipants(); len(got) != 1 {
+		t.Fatalf("open participants(after upsert) = %#v, want 1", got)
+	}
+
+	if err := CloseSessionBindings(context.Background(), store, "sess-a", testNow().Add(time.Minute)); err != nil {
+		t.Fatalf("CloseSessionBindings: %v", err)
+	}
+
+	if got := openParticipants(); len(got) != 0 {
+		t.Fatalf("open participants(after CloseSessionBindings) = %#v, want []", got)
+	}
+}

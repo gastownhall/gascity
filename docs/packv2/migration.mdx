@@ -1,0 +1,93 @@
+# Pack V2 Migration Guide
+
+This guide covers the migration path for packs that still declare agents with
+v1 `[[agent]]` blocks while also using v2 convention-discovered agent
+directories.
+
+The duplicate-agent diagnostic links here when Gas City finds both of these
+definitions for the same agent name after pack composition:
+
+```toml
+[[agent]]
+name = "worker"
+```
+
+```text
+agents/worker/agent.toml
+```
+
+Gas City cannot infer which definition should win. The pack author must choose
+one layout for each agent name.
+
+## Recommended Migration
+
+Use the v2 agent directory layout for new and migrated packs.
+
+1. Create `agents/NAME/`.
+2. Move the v1 `[[agent]]` fields for that agent into
+   `agents/NAME/agent.toml`.
+3. Move the agent prompt into `agents/NAME/prompt.md` when the prompt is part
+   of the pack.
+4. Move agent-specific assets into the same directory:
+   `overlay/`, `skills/`, `mcp/`, and `template-fragments/`.
+5. Delete the old `[[agent]]` block from `pack.toml` or `city.toml`.
+6. Run the config-loading tests or `gc doctor` flow that exposed the collision.
+
+For the full v2 agent directory contract, see
+[`doc-agent-v2.md`](doc-agent-v2.md). For the pack and city model, see
+[`doc-pack-v2.md`](doc-pack-v2.md).
+
+## Field Mapping
+
+Most scalar fields move directly from the v1 `[[agent]]` block into
+`agent.toml`:
+
+```toml
+# pack.toml before
+[[agent]]
+name = "worker"
+scope = "city"
+provider = "codex"
+prompt_template = "prompts/worker.md"
+```
+
+```toml
+# agents/worker/agent.toml after
+scope = "city"
+provider = "codex"
+prompt_template = "prompt.md"
+```
+
+If the prompt is shared across multiple agents, keep using a pack-relative
+`prompt_template` path. If the prompt belongs only to this agent, prefer
+`agents/worker/prompt.md` and reference it as `prompt.md`.
+
+## Collision Resolution
+
+When the diagnostic reports a v1/v2 layout collision, inspect both source
+lines:
+
+```text
+v1 source: ...
+v2 source: ...
+```
+
+Then use one of these resolutions:
+
+- Keep the v2 directory and remove the v1 `[[agent]]` block.
+- Keep the v1 block temporarily and remove the v2 directory.
+- Rename one agent if the two definitions are intentionally different roles.
+
+Do not keep both definitions with the same name in the same composed city. That
+keeps load order significant and prevents the operator from knowing which
+agent definition is active.
+
+## Imports And Patches
+
+Imported packs should define agents in their own pack directories. A city that
+needs to adjust an imported agent should use patches or overrides rather than
+redeclaring the same agent name in another layout.
+
+During a staged migration, migrate one agent name at a time and run validation
+after each step. The desired steady state is that every composed agent name has
+one canonical definition path.

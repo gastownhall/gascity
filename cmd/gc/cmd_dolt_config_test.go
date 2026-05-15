@@ -37,8 +37,15 @@ func TestDoltConfigWriteManagedCmd(t *testing.T) {
 		"host: 127.0.0.1",
 		`data_dir: "/tmp/city/.beads/dolt"`,
 		"archive_level: 0",
+		"enable: false",
 		"back_log: 50",
 		"max_connections_timeout_millis: 5000",
+		`dolt_auto_gc_enabled: "OFF"`,
+		`dolt_stats_enabled: "OFF"`,
+		`dolt_stats_gc_enabled: "OFF"`,
+		`dolt_stats_memory_only: "ON"`,
+		`dolt_stats_paused: "ON"`,
+		`wait_timeout: "30"`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("config missing %q:\n%s", want, text)
@@ -146,6 +153,21 @@ func TestWriteManagedDoltConfigFile_DefaultLogLevel(t *testing.T) {
 	text := string(data)
 	if !strings.Contains(text, "log_level: warning") {
 		t.Fatalf("empty logLevel should default to warning, got:\n%s", text)
+	}
+}
+
+func TestWriteManagedDoltConfigFile_WaitTimeoutCanBeDisabled(t *testing.T) {
+	t.Setenv("GC_DOLT_WAIT_TIMEOUT", "-1")
+	configPath := filepath.Join(t.TempDir(), "packs", "dolt", "dolt-config.yaml")
+	if err := writeManagedDoltConfigFile(configPath, "127.0.0.1", "3311", "/tmp/dolt-data", "", 0); err != nil {
+		t.Fatalf("writeManagedDoltConfigFile: %v", err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if strings.Contains(string(data), "wait_timeout") {
+		t.Fatalf("negative GC_DOLT_WAIT_TIMEOUT should disable wait_timeout override:\n%s", data)
 	}
 }
 

@@ -615,6 +615,8 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		WorkQuery:              "bd ready",
 		SlingQuery:             "bd update {}",
 		IdleTimeout:            "15m",
+		MaxSessionAge:          "5h",
+		MaxSessionAgeJitter:    "15m",
 		SleepAfterIdle:         "30s",
 		InstallAgentHooks:      []string{"claude"},
 		HooksInstalled:         &trueVal,
@@ -648,6 +650,9 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		"PoolName":                     true,
 		"BindingName":                  true,
 		"PackName":                     true,
+		// Runtime-only provenance consumed inside internal/config.
+		"source": true,
+		"layout": true,
 		// v0.15.1 tombstones — still on Agent but intentionally not propagated
 		// by migrate (removed in v0.16).
 		"Skills":       true,

@@ -155,6 +155,21 @@ func TestProjectIdentity(t *testing.T) {
 		}
 	})
 
+	t.Run("A6b_read_bare_project_section_treated_as_not_ok", func(t *testing.T) {
+		scope := t.TempDir()
+		writeIdentity(t, scope, "[project]\n")
+		id, ok, err := ReadProjectIdentity(fs, scope)
+		if err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if ok {
+			t.Fatalf("ok = true, want false (project.id is absent)")
+		}
+		if id != "" {
+			t.Fatalf("id = %q, want \"\"", id)
+		}
+	})
+
 	t.Run("A7_read_malformed_toml_errors", func(t *testing.T) {
 		scope := t.TempDir()
 		// Truncated section header — invalid TOML.
@@ -198,6 +213,36 @@ func TestProjectIdentity(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "name") {
 			t.Fatalf("err = %v, want message naming the unknown key %q", err, "name")
+		}
+		if ok {
+			t.Fatalf("ok = true, want false on parse error")
+		}
+	})
+
+	t.Run("A9b_read_non_string_project_id_errors", func(t *testing.T) {
+		scope := t.TempDir()
+		path := writeIdentity(t, scope, "[project]\nid = 123\n")
+		_, ok, err := ReadProjectIdentity(fs, scope)
+		if err == nil {
+			t.Fatalf("err = nil, want non-nil for non-string project.id")
+		}
+		if !strings.Contains(err.Error(), path) {
+			t.Fatalf("err = %v, want message containing path %q", err, path)
+		}
+		if ok {
+			t.Fatalf("ok = true, want false on parse error")
+		}
+	})
+
+	t.Run("A9c_read_nested_unknown_project_table_errors", func(t *testing.T) {
+		scope := t.TempDir()
+		writeIdentity(t, scope, "[project]\nid = \"gc-local-x\"\n[project.extra]\nvalue = \"unexpected\"\n")
+		_, ok, err := ReadProjectIdentity(fs, scope)
+		if err == nil {
+			t.Fatalf("err = nil, want non-nil for nested unknown project table")
+		}
+		if !strings.Contains(err.Error(), "project.extra") {
+			t.Fatalf("err = %v, want message naming the unknown nested table %q", err, "project.extra")
 		}
 		if ok {
 			t.Fatalf("ok = true, want false on parse error")

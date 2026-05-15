@@ -138,7 +138,11 @@ func loadSessionModelDoctorBeads(store beads.Store) ([]beads.Bead, error) {
 		},
 		{
 			name:  "open work",
-			query: beads.ListQuery{AllowScan: true, Sort: beads.SortCreatedAsc},
+			query: beads.ListQuery{Status: "open", Sort: beads.SortCreatedAsc},
+		},
+		{
+			name:  "in-progress work",
+			query: beads.ListQuery{Status: "in_progress", Sort: beads.SortCreatedAsc},
 		},
 	}
 

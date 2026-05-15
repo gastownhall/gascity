@@ -1336,7 +1336,7 @@ esac
 	}
 }
 
-func TestDoltStatePreflightCleanCmdRemovesStaleArtifacts(t *testing.T) {
+func TestDoltStatePreflightCleanCmdRemovesSocketsButPreservesDoltInternals(t *testing.T) {
 	if _, err := exec.LookPath("lsof"); err != nil {
 		t.Skip("lsof not installed")
 	}
@@ -1346,8 +1346,8 @@ func TestDoltStatePreflightCleanCmdRemovesStaleArtifacts(t *testing.T) {
 		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
 	}
 
-	phantomDir := filepath.Join(layout.DataDir, "phantom", ".dolt", "noms")
-	if err := os.MkdirAll(phantomDir, 0o755); err != nil {
+	phantomNomsDir := filepath.Join(layout.DataDir, "phantom", ".dolt", "noms")
+	if err := os.MkdirAll(phantomNomsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	staleLock := filepath.Join(layout.DataDir, "stale", ".dolt", "noms", "LOCK")
@@ -1384,17 +1384,20 @@ func TestDoltStatePreflightCleanCmdRemovesStaleArtifacts(t *testing.T) {
 	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
 		t.Fatalf("socket %s still present after preflight clean, stat err = %v", socketPath, err)
 	}
-	if _, err := os.Stat(staleLock); !os.IsNotExist(err) {
-		t.Fatalf("LOCK %s still present after preflight clean, stat err = %v", staleLock, err)
+	if _, err := os.Stat(staleLock); err != nil {
+		t.Fatalf("stale LOCK removed unexpectedly: %v", err)
 	}
-	quarantined, err := filepath.Glob(filepath.Join(layout.DataDir, ".quarantine", "*-phantom*"))
+	quarantined, err := filepath.Glob(filepath.Join(layout.DataDir, ".quarantine", "*"))
 	if err != nil {
 		t.Fatalf("Glob(quarantine): %v", err)
 	}
-	if len(quarantined) != 1 {
-		t.Fatalf("quarantined phantom databases = %d, want 1 (%v)", len(quarantined), quarantined)
+	if len(quarantined) != 0 {
+		t.Fatalf("quarantine directory contains %d entries (%v), want 0", len(quarantined), quarantined)
 	}
-	if _, err := os.Stat(filepath.Join(layout.DataDir, "healthy", ".dolt", "noms", "manifest")); err != nil {
+	if _, err := os.Stat(phantomNomsDir); err != nil {
+		t.Fatalf("phantom database removed unexpectedly: %v", err)
+	}
+	if _, err := os.Stat(healthyManifest); err != nil {
 		t.Fatalf("healthy manifest removed unexpectedly: %v", err)
 	}
 }
@@ -2768,6 +2771,9 @@ esac
 	if got["healthy"] != "true" {
 		t.Fatalf("healthy = %q, want true", got["healthy"])
 	}
+	if got["restarted"] != "true" {
+		t.Fatalf("restarted = %q, want true", got["restarted"])
+	}
 	invocation, err := os.ReadFile(invocationFile)
 	if err != nil {
 		t.Fatalf("ReadFile(invocation): %v", err)
@@ -3141,7 +3147,11 @@ INNERPY
     fi
     count=$((count + 1))
     printf '%s\n' "$count" > "$ACTIVE_BRANCH_COUNT"
-    if [ "$count" -le 4 ]; then
+    if [ "$count" -eq 1 ]; then
+      echo "pre-recovery probe failed" >&2
+      exit 1
+    fi
+    if [ "$count" -le 3 ]; then
       exit 0
     fi
     echo "final health probe failed" >&2

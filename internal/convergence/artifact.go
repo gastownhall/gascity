@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // EnsureArtifactDir creates the artifact directory for a given iteration
@@ -51,7 +52,7 @@ func ValidateArtifactDir(dir string) error {
 				return fmt.Errorf("resolving symlink %q: %w", path, err)
 			}
 			rel, err := filepath.Rel(absDir, resolved)
-			if err != nil || isOutsideDir(rel) {
+			if err != nil || pathutil.IsOutsideDir(rel) {
 				return fmt.Errorf("symlink %q points outside artifact directory: resolves to %q", path, resolved)
 			}
 			return nil
@@ -65,11 +66,4 @@ func ValidateArtifactDir(dir string) error {
 		// Reject everything else (FIFOs, device files, sockets).
 		return fmt.Errorf("unsafe file type in artifact directory: %q (mode %s)", path, typ)
 	})
-}
-
-// isOutsideDir checks if a relative path escapes the base directory.
-func isOutsideDir(rel string) bool {
-	// filepath.Rel returns a path starting with ".." if the target is
-	// outside the base directory.
-	return rel == ".." || len(rel) > 2 && rel[:3] == ".."+string(filepath.Separator)
 }

@@ -48,6 +48,15 @@ var (
 type reloadControlRequest struct {
 	Wait    bool   `json:"wait"`
 	Timeout string `json:"timeout,omitempty"`
+	// Soft requests that the reload tick accept any detected per-session
+	// config drift instead of draining the drifted sessions. The
+	// controller updates each open session's started_config_hash to the
+	// hash that the freshly reloaded config produces for that session,
+	// so the immediately-following reconcile tick sees no drift and
+	// doesn't fire config-drift drains. Sessions whose template no
+	// longer maps to a configured agent are NOT updated; normal
+	// orphan/suspended drain handles them on the next tick.
+	Soft bool `json:"soft,omitempty"`
 }
 
 type reloadControlReply struct {
@@ -55,18 +64,22 @@ type reloadControlReply struct {
 	Message  string        `json:"message,omitempty"`
 	Revision string        `json:"revision,omitempty"`
 	Warnings []string      `json:"warnings,omitempty"`
-	Error    string        `json:"error,omitempty"`
+	// AcceptedDriftCount is set only for soft reload requests.
+	AcceptedDriftCount *int   `json:"accepted_drift_count,omitempty"`
+	Error              string `json:"error,omitempty"`
 }
 
 type reloadRequest struct {
 	wait       bool
 	timeout    time.Duration
+	soft       bool
 	acceptedCh chan reloadControlReply
 	doneCh     chan reloadControlReply
 }
 
 func newReloadCmd(stdout, stderr io.Writer) *cobra.Command {
 	var async bool
+	var soft bool
 	var timeoutValue string
 	cmd := &cobra.Command{
 		Use:   "reload [path]",
@@ -75,23 +88,35 @@ func newReloadCmd(stdout, stderr io.Writer) *cobra.Command {
 process one reload tick without restarting the city/controller.
 
 Reload may fetch configured remote packs before recomputing effective
-config. Existing per-session restarts may still happen if normal config
-drift rules require them.`,
+config. By default, per-session restarts may still happen if normal
+config drift rules require them.
+
+With --soft, the controller accepts any detected per-session config
+drift instead of draining the drifted sessions: each open session's
+recorded config hash is updated to the hash the freshly reloaded
+config produces for it, the matching hash breakdown is refreshed, and
+any already queued config-drift drain for that session is canceled. The
+immediately-following reconcile tick sees no drift and no config-drift
+drains fire. Useful when editing a running city's .gc/settings.json
+without disrupting in-flight work. Sessions whose template no longer
+maps to a configured agent are NOT updated; normal orphan/suspended
+drain handles them on the next tick.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			timeoutChanged := cmd.Flags().Changed("timeout")
-			if cmdReload(args, async, timeoutValue, timeoutChanged, stdout, stderr) != 0 {
+			if cmdReload(args, async, soft, timeoutValue, timeoutChanged, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&async, "async", false, "Return after the controller accepts the reload request")
+	cmd.Flags().BoolVar(&soft, "soft", false, "Accept config drift on open sessions instead of draining them")
 	cmd.Flags().StringVar(&timeoutValue, "timeout", "5m", "How long to wait for reload completion")
 	return cmd
 }
 
-func cmdReload(args []string, async bool, timeoutValue string, timeoutChanged bool, stdout, stderr io.Writer) int {
+func cmdReload(args []string, async bool, soft bool, timeoutValue string, timeoutChanged bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCommandCity(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc reload: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -103,7 +128,7 @@ func cmdReload(args []string, async bool, timeoutValue string, timeoutChanged bo
 		return 1
 	}
 
-	req := reloadControlRequest{Wait: !async}
+	req := reloadControlRequest{Wait: !async, Soft: soft}
 	if !async {
 		timeout, err := time.ParseDuration(timeoutValue)
 		if err != nil {
@@ -133,6 +158,9 @@ func cmdReload(args []string, async bool, timeoutValue string, timeoutChanged bo
 	case reloadOutcomeAccepted, reloadOutcomeApplied, reloadOutcomeNoChange:
 		if strings.TrimSpace(reply.Message) != "" {
 			fmt.Fprintln(stdout, strings.TrimSpace(reply.Message)) //nolint:errcheck // best-effort stdout
+		}
+		if soft && reply.AcceptedDriftCount != nil {
+			fmt.Fprintf(stdout, "soft reload: accepted config drift on %d session(s)\n", *reply.AcceptedDriftCount) //nolint:errcheck // best-effort stdout
 		}
 		for _, warning := range reply.Warnings {
 			fmt.Fprintf(stderr, "gc reload: warning: %s\n", warning) //nolint:errcheck // best-effort stderr

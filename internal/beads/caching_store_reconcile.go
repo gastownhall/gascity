@@ -254,12 +254,21 @@ func (c *CachingStore) runReconciliation() {
 	if c.mutationSeq != startSeq {
 		var adds, removes, updates int64
 		notifications := make([]cacheNotification, 0, len(freshByID))
+		nextDepsComplete := useFreshDeps
 
 		for id, freshBead := range freshByID {
 			if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
+				if _, exists := c.beads[id]; exists {
+					if _, ok := c.deps[id]; !ok {
+						nextDepsComplete = false
+					}
+				}
 				continue
 			}
 			if _, keep := c.recentLocalBeadConflictLocked(id, freshBead, now); keep {
+				if _, ok := c.deps[id]; !ok {
+					nextDepsComplete = false
+				}
 				continue
 			}
 			freshDeps := c.depsForReconcileLocked(id, freshBead, depMap, useFreshDeps)
@@ -324,7 +333,7 @@ func (c *CachingStore) runReconciliation() {
 		}
 
 		c.syncFailures = 0
-		c.depsComplete = useFreshDeps
+		c.depsComplete = nextDepsComplete
 		c.primePartialErr = nil
 		if c.state == cacheDegraded {
 			c.state = cacheLive

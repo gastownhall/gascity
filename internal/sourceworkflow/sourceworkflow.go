@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/citylayout"
 )
 
@@ -40,6 +41,18 @@ type ConflictError struct {
 // a workflow root's source bead lives in (e.g. "city:foo" or "rig:alpha").
 // Used by WorkflowMatchesSource to scope cross-store singleton checks.
 const SourceStoreRefMetadataKey = "gc.source_store_ref"
+
+// WorkflowSkippedCloseReason is the canonical close_reason stamped on
+// workflow-subtree beads when they are force-closed via the
+// gc.outcome=skipped cleanup path (gc convoy delete --skip, force-replace
+// flows, or workflow-cleanup HTTP endpoints). Without an explicit reason
+// of >=20 chars, bd's validation.on-close=error rejects the close, the
+// bead stays open, and the cleanup is incomplete.
+//
+// Used in tandem with the gc.outcome=skipped metadata stamp (which
+// records the workflow-level outcome): close_reason satisfies the
+// validator; gc.outcome carries the semantic.
+const WorkflowSkippedCloseReason = "workflow cleanup: subtree bead force-closed via skip directive"
 
 // IsWorkflowRoot reports whether a bead is a source-workflow root. It must
 // stay in sync with sling.IsWorkflowAttachment: roots may be marked via the
@@ -371,8 +384,10 @@ func ListWorkflowBeads(store beads.Store, rootID string) ([]beads.Bead, error) {
 }
 
 // CloseWorkflowSubtree closes the root and every open descendant of a
-// workflow, marking each gc.outcome=skipped. Returns the count of newly
-// closed beads.
+// workflow, marking each gc.outcome=skipped. It closes descendants before the
+// root and honors in-batch "blocks" dependencies so strict stores can close
+// workflow step chains without rejecting blocked-before-blocker order. Returns
+// the count of newly closed beads.
 func CloseWorkflowSubtree(store beads.Store, rootID string) (int, error) {
 	matched, err := ListWorkflowBeads(store, rootID)
 	if err != nil {
@@ -427,7 +442,14 @@ func CloseWorkflowSubtree(store beads.Store, rootID string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	return store.CloseAll(ids, map[string]string{"gc.outcome": "skipped"})
+	ordered, err := closeorder.Order(store, ids)
+	if err != nil {
+		return 0, err
+	}
+	return store.CloseAll(ordered, map[string]string{
+		"gc.outcome":   "skipped",
+		"close_reason": WorkflowSkippedCloseReason,
+	})
 }
 
 // WorkflowBeadSnapshot captures the mutable fields of a workflow subtree

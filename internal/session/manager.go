@@ -32,6 +32,9 @@ const (
 	// StateCreating means the session bead has been written but the runtime
 	// process has not yet been confirmed alive. Counts against pool occupancy.
 	StateCreating State = "creating"
+	// StateFailedCreate means create rollback wrote terminal metadata but the
+	// bead status close did not complete. It is eligible for cleanup/replacement.
+	StateFailedCreate State = "failed-create"
 	// StateDraining means the session is being gracefully stopped (in-flight
 	// work completing). The pool routing label has been removed so no new
 	// work is routed to this session.
@@ -56,6 +59,10 @@ const BeadType = "session"
 // LabelSession is the label applied to all session beads for filtering.
 const LabelSession = "gc:session"
 
+// MetadataLastNudgeDeliveredAt is the session-bead metadata key that records
+// the wall-clock time of the most recent successful queued-nudge delivery.
+const MetadataLastNudgeDeliveredAt = "last_nudge_delivered_at"
+
 // Info holds the user-facing details of a chat session.
 type Info struct {
 	ID            string
@@ -76,7 +83,13 @@ type Info struct {
 	ResumeCommand string // explicit resume command template ({{.SessionKey}})
 	CreatedAt     time.Time
 	LastActive    time.Time
-	Attached      bool
+	// LastNudgeDeliveredAt records the wall-clock time of the most recent
+	// successful nudge delivery to this session. Zero when no nudge has
+	// been delivered yet (or the metadata predates the stamping path).
+	// Surfaced in `gc session list` so operators can spot warm sessions
+	// whose delivery loop has stalled.
+	LastNudgeDeliveredAt time.Time
+	Attached             bool
 }
 
 // RuntimeObservation reports the provider-backed live runtime state for a
@@ -472,7 +485,7 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 			DefaultContinuationEpoch,
 			meta["instance_token"],
 		))
-		if gcProvider := providerKindFromMetadata(meta, provider); gcProvider != "" {
+		if gcProvider := ProviderFamilyFromMetadata(meta, provider); gcProvider != "" {
 			cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 		}
 		cfg = runtime.SyncWorkDirEnv(cfg)
@@ -1169,13 +1182,19 @@ func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) Runtim
 		return obs
 	}
 	obs.Running = m.sp.IsRunning(info.SessionName)
-	if !obs.Running {
-		return obs
+	if len(processNames) > 0 {
+		obs.Alive = m.sp.ProcessAlive(info.SessionName, processNames)
+		if obs.Alive && !obs.Running {
+			obs.Running = true
+		}
+	} else {
+		obs.Alive = obs.Running
 	}
-	obs.Alive = m.sp.ProcessAlive(info.SessionName, processNames)
-	obs.Attached = m.sp.IsAttached(info.SessionName)
-	if lastActive, err := m.sp.GetLastActivity(info.SessionName); err == nil {
-		obs.LastActive = lastActive
+	if obs.Running {
+		obs.Attached = m.sp.IsAttached(info.SessionName)
+		if lastActive, err := m.sp.GetLastActivity(info.SessionName); err == nil {
+			obs.LastActive = lastActive
+		}
 	}
 	return obs
 }
@@ -1309,6 +1328,11 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 		ResumeStyle:   b.Metadata["resume_style"],
 		ResumeCommand: b.Metadata["resume_command"],
 		CreatedAt:     b.CreatedAt,
+	}
+	if raw := strings.TrimSpace(b.Metadata[MetadataLastNudgeDeliveredAt]); raw != "" {
+		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+			info.LastNudgeDeliveredAt = parsed
+		}
 	}
 
 	// Enrich with live runtime state if active.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -330,6 +331,65 @@ func TestBdStoreClose(t *testing.T) {
 	}
 }
 
+func TestBdStoreCloseForwardsStampedCloseReason(t *testing.T) {
+	const reason = "nudge failed: queue terminalization rejected delivery"
+	var closeArgs []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command name: %s", name)
+		}
+		switch strings.Join(args, " ") {
+		case "show --json bd-abc-123":
+			return []byte(`[{"id":"bd-abc-123","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":{"close_reason":"` + reason + `"}}]`), nil
+		case "close --force --json --reason " + reason + " bd-abc-123":
+			closeArgs = append([]string(nil), args...)
+			return []byte(`[{"id":"bd-abc-123","title":"test","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
+		}
+	}
+
+	s := beads.NewBdStore("/city", runner)
+	if err := s.Close("bd-abc-123"); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"close", "--force", "--json", "--reason", reason, "bd-abc-123"}
+	if got := fmt.Sprint(closeArgs); got != fmt.Sprint(want) {
+		t.Fatalf("close args = %v, want %v", closeArgs, want)
+	}
+}
+
+func TestBdStoreCloseWithReasonUsesExplicitReasonWithoutShow(t *testing.T) {
+	const reason = "convoy autoclose: all children closed"
+	var closeArgs []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command name: %s", name)
+		}
+		if len(args) > 0 && args[0] == "show" {
+			return nil, fmt.Errorf("unexpected bd show before explicit-reason close")
+		}
+		switch strings.Join(args, " ") {
+		case "close --force --json --reason " + reason + " bd-x":
+			closeArgs = append([]string(nil), args...)
+			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
+		}
+	}
+
+	s := beads.NewBdStore("/city", runner)
+	if err := s.CloseWithReason("bd-x", "  "+reason+"  "); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"close", "--force", "--json", "--reason", reason, "bd-x"}
+	if got := fmt.Sprint(closeArgs); got != fmt.Sprint(want) {
+		t.Fatalf("close args = %v, want %v", closeArgs, want)
+	}
+}
+
 func TestBdStoreReopenUsesReopenCommand(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte
@@ -373,6 +433,125 @@ func TestBdStoreCloseCLINotFound(t *testing.T) {
 	}
 	if !errors.Is(err, beads.ErrNotFound) {
 		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestBdStoreCloseForwardsMetadataReason verifies that when a bead has
+// metadata.close_reason set, BdStore.Close() forwards it as the
+// --reason argument to bd close. This is required for cities running
+// with validation.on-close=error, where bd rejects close calls without
+// an explicit reason. Callers (e.g. session_reconcile, convoy
+// autoclose) set metadata.close_reason before invoking Close; this
+// test pins that the value flows through.
+func TestBdStoreCloseForwardsMetadataReason(t *testing.T) {
+	const reason = "convoy autoclose: all children closed"
+	var closeArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "show":
+			return []byte(`[{"id":"bd-x","title":"t","status":"open","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z","metadata":{"close_reason":"convoy autoclose: all children closed"}}]`), nil
+		case "close":
+			closeArgs = append([]string{}, args...)
+			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %v", args)
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.Close("bd-x"); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"close", "--force", "--json", "--reason", reason, "bd-x"}
+	if !reflect.DeepEqual(closeArgs, want) {
+		t.Errorf("close args = %v, want %v", closeArgs, want)
+	}
+}
+
+// TestBdStoreCloseOmitsReasonWhenMetadataAbsent verifies that when no
+// close_reason metadata is present, BdStore.Close() does not pass
+// --reason and lets bd assign its default. This preserves backward
+// compatibility for callers that don't pre-stamp a reason.
+func TestBdStoreCloseOmitsReasonWhenMetadataAbsent(t *testing.T) {
+	var closeArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "show":
+			return []byte(`[{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		case "close":
+			closeArgs = append([]string{}, args...)
+			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %v", args)
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.Close("bd-x"); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"close", "--force", "--json", "bd-x"}
+	if !reflect.DeepEqual(closeArgs, want) {
+		t.Errorf("close args = %v, want %v (no --reason when metadata absent)", closeArgs, want)
+	}
+}
+
+// TestBdStoreCloseTrimsMetadataReason verifies that whitespace
+// surrounding metadata.close_reason is stripped before forwarding, so
+// leading/trailing newlines or spaces from metadata persistence don't
+// pass through to bd's validator.
+func TestBdStoreCloseTrimsMetadataReason(t *testing.T) {
+	var closeArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "show":
+			return []byte(`[{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":{"close_reason":"  convoy autoclose: all children closed  \n"}}]`), nil
+		case "close":
+			closeArgs = append([]string{}, args...)
+			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %v", args)
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.Close("bd-x"); err != nil {
+		t.Fatal(err)
+	}
+
+	const want = "convoy autoclose: all children closed"
+	for i, arg := range closeArgs {
+		if arg == "--reason" && i+1 < len(closeArgs) {
+			if closeArgs[i+1] != want {
+				t.Errorf("forwarded reason = %q, want %q (trimmed)", closeArgs[i+1], want)
+			}
+			return
+		}
+	}
+	t.Errorf("close args missing --reason: %v", closeArgs)
+}
+
+// TestBdStoreCloseWhitespaceMetadataReason verifies that a
+// whitespace-only metadata.close_reason is treated as absent — no
+// --reason is forwarded. Mirrors the trim-then-empty-check pattern.
+func TestBdStoreCloseWhitespaceMetadataReason(t *testing.T) {
+	var closeArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "show":
+			return []byte(`[{"id":"bd-x","title":"t","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":{"close_reason":"   "}}]`), nil
+		case "close":
+			closeArgs = append([]string{}, args...)
+			return []byte(`[{"id":"bd-x","title":"t","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command: %v", args)
+	}
+	s := beads.NewBdStore("/city", runner)
+	if err := s.Close("bd-x"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, arg := range closeArgs {
+		if arg == "--reason" {
+			t.Errorf("close args contain --reason for whitespace-only metadata: %v", closeArgs)
+			return
+		}
 	}
 }
 
@@ -676,6 +855,215 @@ func TestBdStoreCloseAllFallbackSuccessReturnsNil(t *testing.T) {
 	}
 }
 
+func TestBdStoreCloseAllFallbackForwardsCloseReason(t *testing.T) {
+	const reason = "order-tracking sweep: stale beyond watchdog window"
+	batchErr := errors.New("batch close failed")
+	var closeCalls [][]string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "update":
+			return []byte(`[]`), nil
+		case "close":
+			call := append([]string(nil), args...)
+			closeCalls = append(closeCalls, call)
+			key := strings.Join(args, " ")
+			switch key {
+			case "close --force --json --reason " + reason + " bd-1 bd-2":
+				return nil, batchErr
+			case "close --force --json --reason " + reason + " bd-1":
+				return []byte(`[{"id":"bd-1","title":"one","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+			case "close --force --json --reason " + reason + " bd-2":
+				return []byte(`[{"id":"bd-2","title":"two","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+			default:
+				return nil, fmt.Errorf("unexpected close args: %v", args)
+			}
+		case "show":
+			return []byte(`[{"id":"` + args[len(args)-1] + `","title":"open","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: %v", args)
+		}
+	}
+
+	s := beads.NewBdStore("/city", runner)
+	closed, err := s.CloseAll([]string{"bd-1", "bd-2"}, map[string]string{
+		"close_reason": reason,
+	})
+	if err != nil {
+		t.Fatalf("CloseAll returned error after reason-aware fallback: %v", err)
+	}
+	if closed != 2 {
+		t.Fatalf("closed = %d, want 2", closed)
+	}
+
+	want := [][]string{
+		{"close", "--force", "--json", "--reason", reason, "bd-1", "bd-2"},
+		{"close", "--force", "--json", "--reason", reason, "bd-1"},
+		{"close", "--force", "--json", "--reason", reason, "bd-2"},
+	}
+	if got := fmt.Sprint(closeCalls); got != fmt.Sprint(want) {
+		t.Fatalf("close calls = %v, want %v", closeCalls, want)
+	}
+}
+
+// captureCloseAllRunner returns a CommandRunner that records the args
+// of any `close` invocation into the provided slice and returns canned
+// closed-status JSON for every bead in the batch. update calls (from
+// SetMetadataBatch) succeed with empty output. Used by the
+// CloseAll-close-reason-forwarding tests below to assert the exact
+// shape of the bd close argv.
+func captureCloseAllRunner(closeArgs *[]string, ids ...string) beads.CommandRunner {
+	closedJSON := []byte(`[`)
+	for i, id := range ids {
+		if i > 0 {
+			closedJSON = append(closedJSON, ',')
+		}
+		closedJSON = append(closedJSON, []byte(`{"id":"`+id+`","title":"t","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}`)...)
+	}
+	closedJSON = append(closedJSON, ']')
+	return func(_, _ string, args ...string) ([]byte, error) {
+		if len(args) == 0 {
+			return nil, fmt.Errorf("empty args")
+		}
+		switch args[0] {
+		case "update":
+			return []byte(`[]`), nil
+		case "close":
+			*closeArgs = append([]string{}, args...)
+			return closedJSON, nil
+		}
+		return nil, fmt.Errorf("unexpected command: %v", args)
+	}
+}
+
+// TestBdStoreCloseAllForwardsCloseReason verifies that when the metadata
+// map passed to CloseAll contains a close_reason value, BdStore forwards
+// it as the --reason argument to bd close. This is required for cities
+// running with validation.on-close=error, where bd rejects close calls
+// without an explicit reason of >=20 characters. Mirrors the per-bead
+// BdStore.Close pattern for the batch path: CloseAll uses the shared
+// metadata map's close_reason because callers stamp the same metadata
+// on every bead in the batch.
+func TestBdStoreCloseAllForwardsCloseReason(t *testing.T) {
+	const reason = "order-tracking sweep: stale beyond watchdog window"
+	var closeArgs []string
+	runner := captureCloseAllRunner(&closeArgs, "bd-1", "bd-2")
+
+	s := beads.NewBdStore("/city", runner)
+	n, err := s.CloseAll([]string{"bd-1", "bd-2"}, map[string]string{
+		"close_reason": reason,
+	})
+	if err != nil {
+		t.Fatalf("CloseAll: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("closed = %d, want 2", n)
+	}
+
+	// Expected argv: close --force --json --reason "<phrase>" bd-1 bd-2
+	want := []string{"close", "--force", "--json", "--reason", reason, "bd-1", "bd-2"}
+	if len(closeArgs) != len(want) {
+		t.Fatalf("close args length = %d, want %d\ngot:  %v\nwant: %v", len(closeArgs), len(want), closeArgs, want)
+	}
+	for i := range want {
+		if closeArgs[i] != want[i] {
+			t.Errorf("close args[%d] = %q, want %q\nfull args: %v", i, closeArgs[i], want[i], closeArgs)
+		}
+	}
+}
+
+// TestBdStoreCloseAllOmitsReasonWhenAbsent verifies that when no
+// close_reason is present in the metadata map, CloseAll does not pass
+// --reason and lets bd assign its default. Preserves backward
+// compatibility for callers that don't pre-stamp a reason.
+func TestBdStoreCloseAllOmitsReasonWhenAbsent(t *testing.T) {
+	var closeArgs []string
+	runner := captureCloseAllRunner(&closeArgs, "bd-1")
+
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.CloseAll([]string{"bd-1"}, map[string]string{
+		"source": "wave1",
+	}); err != nil {
+		t.Fatalf("CloseAll: %v", err)
+	}
+
+	for _, arg := range closeArgs {
+		if arg == "--reason" {
+			t.Errorf("close args contain --reason for metadata without close_reason: %v", closeArgs)
+			return
+		}
+	}
+}
+
+// TestBdStoreCloseAllOmitsReasonWhenNilMetadata verifies that when nil
+// metadata is passed, CloseAll does not pass --reason. Same shape as
+// the absent-key case but exercises the empty-map branch (nil maps
+// read as empty in Go).
+func TestBdStoreCloseAllOmitsReasonWhenNilMetadata(t *testing.T) {
+	var closeArgs []string
+	runner := captureCloseAllRunner(&closeArgs, "bd-1")
+
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.CloseAll([]string{"bd-1"}, nil); err != nil {
+		t.Fatalf("CloseAll: %v", err)
+	}
+
+	for _, arg := range closeArgs {
+		if arg == "--reason" {
+			t.Errorf("close args contain --reason for nil metadata: %v", closeArgs)
+			return
+		}
+	}
+}
+
+// TestBdStoreCloseAllTrimsCloseReason verifies that whitespace
+// surrounding metadata.close_reason is stripped before forwarding, so
+// leading/trailing newlines or spaces from metadata persistence don't
+// pass through to bd's validator.
+func TestBdStoreCloseAllTrimsCloseReason(t *testing.T) {
+	var closeArgs []string
+	runner := captureCloseAllRunner(&closeArgs, "bd-1")
+
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.CloseAll([]string{"bd-1"}, map[string]string{
+		"close_reason": "  order-tracking sweep: stale beyond watchdog window  \n",
+	}); err != nil {
+		t.Fatalf("CloseAll: %v", err)
+	}
+
+	const want = "order-tracking sweep: stale beyond watchdog window"
+	for i, arg := range closeArgs {
+		if arg == "--reason" && i+1 < len(closeArgs) {
+			if closeArgs[i+1] != want {
+				t.Errorf("forwarded reason = %q, want %q (trimmed)", closeArgs[i+1], want)
+			}
+			return
+		}
+	}
+	t.Errorf("close args missing --reason: %v", closeArgs)
+}
+
+// TestBdStoreCloseAllWhitespaceCloseReason verifies that a
+// whitespace-only close_reason is treated as absent — no --reason is
+// forwarded. Mirrors the trim-then-empty-check pattern.
+func TestBdStoreCloseAllWhitespaceCloseReason(t *testing.T) {
+	var closeArgs []string
+	runner := captureCloseAllRunner(&closeArgs, "bd-1")
+
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.CloseAll([]string{"bd-1"}, map[string]string{
+		"close_reason": "   \n",
+	}); err != nil {
+		t.Fatalf("CloseAll: %v", err)
+	}
+
+	for _, arg := range closeArgs {
+		if arg == "--reason" {
+			t.Errorf("close args contain --reason for whitespace-only close_reason: %v", closeArgs)
+			return
+		}
+	}
+}
+
 // --- List ---
 
 func TestBdStoreList(t *testing.T) {
@@ -821,6 +1209,64 @@ func TestBdStoreListReturnsHardErrorWithoutUsableSurvivors(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "bd list") {
 				t.Fatalf("ListOpen() error = %q, want bd list context", err)
+			}
+		})
+	}
+}
+
+// TestBdStoreListErrorIncludesRawBdOutput is a regression net for the
+// gascity #1726 / #2040 failure mode: when `bd list --json` returns non-JSON
+// output, the resulting error must include the raw bd stdout so the failure
+// surface is diagnosable rather than the opaque json.Unmarshal message
+// (e.g. "invalid character 'N' looking for beginning of value" with no clue
+// what 'N' was). Historical example: bd shipped with Gas City v1.0.0
+// returned the literal string "None\n" instead of a JSON array.
+func TestBdStoreListErrorIncludesRawBdOutput(t *testing.T) {
+	tests := []struct {
+		name        string
+		out         []byte
+		wantInError string
+	}{
+		{
+			name:        "literal None (historical #1726 shape)",
+			out:         []byte("None\n"),
+			wantInError: "None",
+		},
+		{
+			name:        "plain text error accidentally on stdout",
+			out:         []byte("error: connection refused\n"),
+			wantInError: "connection refused",
+		},
+		{
+			name:        "truncated JSON",
+			out:         []byte(`[{"id":"bd-aaa","title":"first"`),
+			wantInError: `bd-aaa`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := fakeRunner(map[string]struct {
+				out []byte
+				err error
+			}{
+				`bd list --json --include-infra --include-gates --limit 0`: {out: tc.out},
+			})
+
+			s := beads.NewBdStore("/city", runner)
+			got, err := s.ListOpen()
+			if err == nil {
+				t.Fatalf("ListOpen() error = nil, want diagnostic parse error")
+			}
+			if len(got) != 0 {
+				t.Fatalf("ListOpen() returned %v, want no usable survivors", got)
+			}
+			if !strings.Contains(err.Error(), tc.wantInError) {
+				t.Errorf("ListOpen() error = %q; want substring %q so callers can see the raw bd output",
+					err.Error(), tc.wantInError)
+			}
+			if !strings.Contains(err.Error(), "bd list") {
+				t.Errorf("ListOpen() error = %q; want 'bd list' context prefix", err.Error())
 			}
 		})
 	}
@@ -2054,5 +2500,365 @@ func TestBdStoreApplyGraphPlanRejectsMissingIDs(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "missing IDs for keys: mol.step") {
 		t.Fatalf("error = %q, want missing key detail", err)
+	}
+}
+
+// --- Ephemeral / wisps tier ---
+
+func TestBdStoreCreatePassesEphemeralFlag(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"id":"bd-w","title":"wisp","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":true}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	created, err := s.Create(beads.Bead{Title: "wisp", Ephemeral: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--ephemeral") {
+		t.Fatalf("args = %q, want --ephemeral flag", args)
+	}
+	if !created.Ephemeral {
+		t.Fatalf("created.Ephemeral = false, want true")
+	}
+}
+
+func TestBdStoreCreateOmitsEphemeralFlagByDefault(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"id":"bd-x","title":"plain","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z"}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.Create(beads.Bead{Title: "plain"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(gotArgs, " "), "--ephemeral") {
+		t.Fatalf("args = %q, must not contain --ephemeral", gotArgs)
+	}
+}
+
+func TestBdStoreListWispsUsesQueryWithEphemeralPredicate(t *testing.T) {
+	var gotCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		gotCmd = name + " " + strings.Join(args, " ")
+		return []byte(`[{"id":"bd-w","title":"wisp","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":true,"labels":["order-tracking"]}]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{Label: "order-tracking", TierMode: beads.TierWisps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(gotCmd, "bd query --json ") {
+		t.Fatalf("cmd = %q, want bd query prefix", gotCmd)
+	}
+	if !strings.Contains(gotCmd, "ephemeral=true") {
+		t.Fatalf("cmd = %q, want ephemeral=true clause", gotCmd)
+	}
+	if !strings.Contains(gotCmd, "label=order-tracking") {
+		t.Fatalf("cmd = %q, want label clause", gotCmd)
+	}
+	if len(got) != 1 || got[0].ID != "bd-w" || !got[0].Ephemeral {
+		t.Fatalf("got = %+v, want one ephemeral bead bd-w", got)
+	}
+}
+
+func TestBdStoreListWispsRequestsUnlimitedResultsByDefault(t *testing.T) {
+	var gotCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		gotCmd = name + " " + strings.Join(args, " ")
+		var b strings.Builder
+		b.WriteByte('[')
+		for i := 0; i < 55; i++ {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, `{"id":"bd-w-%02d","title":"wisp","status":"open","issue_type":"task","created_at":"2026-05-01T00:%02d:00Z","ephemeral":true,"labels":["order-tracking"]}`, i, i)
+		}
+		b.WriteByte(']')
+		return []byte(b.String()), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{Label: "order-tracking", TierMode: beads.TierWisps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotCmd, "--limit 0") {
+		t.Fatalf("cmd = %q, want explicit --limit 0 so bd query does not apply its default page size", gotCmd)
+	}
+	if len(got) != 55 {
+		t.Fatalf("got %d wisps, want all 55 rows", len(got))
+	}
+}
+
+func TestBdStoreListWispsAppliesMetadataBeforeClientLimit(t *testing.T) {
+	var gotCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		gotCmd = name + " " + strings.Join(args, " ")
+		if !strings.Contains(gotCmd, "--limit 0") {
+			return []byte(`[{"id":"bd-new","title":"wrong first page","status":"closed","issue_type":"task","created_at":"2026-05-03T00:00:00Z","ephemeral":true,"labels":["order-run:o"],"metadata":{"phase":"skip"}}]`), nil
+		}
+		return []byte(`[
+			{"id":"bd-new","title":"wrong metadata","status":"closed","issue_type":"task","created_at":"2026-05-03T00:00:00Z","ephemeral":true,"labels":["order-run:o"],"metadata":{"phase":"skip"}},
+			{"id":"bd-old","title":"matching metadata","status":"closed","issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":true,"labels":["order-run:o"],"metadata":{"phase":"keep"}}
+		]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{
+		Label:         "order-run:o",
+		Metadata:      map[string]string{"phase": "keep"},
+		Limit:         1,
+		IncludeClosed: true,
+		TierMode:      beads.TierWisps,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotCmd, "--limit 0") {
+		t.Fatalf("wisps query = %q, want --limit 0 before client-side metadata filtering", gotCmd)
+	}
+	if len(got) != 1 || got[0].ID != "bd-old" {
+		t.Fatalf("got = %+v, want metadata-matching wisp after client filter then Limit", got)
+	}
+}
+
+func TestBdStoreListWispsReturnsPartialRowsWithErrorOnCorruptEntries(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd query --json ephemeral=true --limit 0`: {
+			out: []byte(`[
+				{"id":"bd-good","title":"good","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":true},
+				{"id":"bd-bad","title":"bad","status":"open","issue_type":"task","created_at":"not-a-time","ephemeral":true}
+			]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierWisps})
+	if len(got) != 1 || got[0].ID != "bd-good" {
+		t.Fatalf("List(wisps) = %v, want surviving row bd-good", got)
+	}
+	var partial *beads.PartialResultError
+	if !errors.As(err, &partial) {
+		t.Fatalf("List(wisps) error = %v, want *beads.PartialResultError", err)
+	}
+	if partial.Op != "bd query" {
+		t.Errorf("PartialResultError.Op = %q, want %q", partial.Op, "bd query")
+	}
+}
+
+func TestBdStoreListBothTiersMergesAndDedupes(t *testing.T) {
+	var calls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		full := name + " " + strings.Join(args, " ")
+		calls = append(calls, full)
+		switch {
+		case strings.HasPrefix(full, "bd list "):
+			return []byte(`[{"id":"bd-i","title":"issue","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["order-run:o"]}]`), nil
+		case strings.HasPrefix(full, "bd query "):
+			return []byte(`[{"id":"bd-w","title":"wisp","status":"open","issue_type":"task","created_at":"2026-05-02T00:00:00Z","ephemeral":true,"labels":["order-run:o"]}]`), nil
+		}
+		return nil, fmt.Errorf("unexpected: %s", full)
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{Label: "order-run:o", TierMode: beads.TierBoth, Sort: beads.SortCreatedDesc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("got %d runner calls, want 2: %v", len(calls), calls)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d beads, want 2: %+v", len(got), got)
+	}
+	if got[0].ID != "bd-w" || got[1].ID != "bd-i" {
+		t.Fatalf("merge order = [%s,%s], want [bd-w, bd-i] (desc by CreatedAt)", got[0].ID, got[1].ID)
+	}
+}
+
+func TestBdStoreListBothTiersAppliesCreatedBeforeBeforeMergedLimit(t *testing.T) {
+	before := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	var queryCmd string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		full := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.HasPrefix(full, "bd list "):
+			return []byte(`[]`), nil
+		case strings.HasPrefix(full, "bd query "):
+			queryCmd = full
+			if !strings.Contains(full, "--limit 0") {
+				return []byte(`[{"id":"bd-new","title":"newer","status":"closed","issue_type":"task","created_at":"2026-05-03T00:00:00Z","ephemeral":true,"labels":["order-run:o"]}]`), nil
+			}
+			return []byte(`[
+				{"id":"bd-new","title":"newer","status":"closed","issue_type":"task","created_at":"2026-05-03T00:00:00Z","ephemeral":true,"labels":["order-run:o"]},
+				{"id":"bd-old","title":"older","status":"closed","issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":true,"labels":["order-run:o"]}
+			]`), nil
+		}
+		return nil, fmt.Errorf("unexpected: %s", full)
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{
+		Label:         "order-run:o",
+		CreatedBefore: before,
+		Limit:         1,
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedDesc,
+		TierMode:      beads.TierBoth,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(queryCmd, "--limit 0") {
+		t.Fatalf("wisps query = %q, want unlimited --limit 0 before CreatedBefore client filtering", queryCmd)
+	}
+	if len(got) != 1 || got[0].ID != "bd-old" {
+		t.Fatalf("got = %+v, want only older wisp after CreatedBefore then Limit", got)
+	}
+}
+
+func TestBdStoreListIssuesTierDoesNotIssueQuery(t *testing.T) {
+	var calls []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		full := name + " " + strings.Join(args, " ")
+		calls = append(calls, full)
+		return []byte(`[]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	if _, err := s.List(beads.ListQuery{Label: "order-tracking"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range calls {
+		if strings.HasPrefix(c, "bd query ") {
+			t.Fatalf("default tier issued bd query: %v", calls)
+		}
+	}
+}
+
+// TestBdStoreListBothTiersReturnsPartialRowsWithErrorOnTierFailure pins the
+// contract that listBothTiers returns rows from the surviving tier together
+// with a non-nil error. Silent partial-success would let safety-critical
+// callers (e.g. order dispatch's hasOpenWorkStrict) see "no in-flight work"
+// when the wisps tier is actually unreachable, leading to double-fire.
+func TestBdStoreListBothTiersReturnsPartialRowsWithErrorOnTierFailure(t *testing.T) {
+	t.Run("wisps tier fails", func(t *testing.T) {
+		runner := func(_, name string, args ...string) ([]byte, error) {
+			full := name + " " + strings.Join(args, " ")
+			switch {
+			case strings.HasPrefix(full, "bd list "):
+				return []byte(`[{"id":"bd-i","title":"issue","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["order-run:o"]}]`), nil
+			case strings.HasPrefix(full, "bd query "):
+				return nil, fmt.Errorf("simulated wisps tier outage")
+			}
+			return nil, fmt.Errorf("unexpected: %s", full)
+		}
+		s := beads.NewBdStore("/city", runner)
+		got, err := s.List(beads.ListQuery{Label: "order-run:o", TierMode: beads.TierBoth})
+		if err == nil {
+			t.Fatalf("err = nil, want non-nil partial-failure error")
+		}
+		if !strings.Contains(err.Error(), "wisps tier") {
+			t.Fatalf("err = %v, want wisps tier in message", err)
+		}
+		if len(got) != 1 || got[0].ID != "bd-i" {
+			t.Fatalf("got = %+v, want surviving issues row bd-i", got)
+		}
+	})
+
+	t.Run("issues tier fails", func(t *testing.T) {
+		runner := func(_, name string, args ...string) ([]byte, error) {
+			full := name + " " + strings.Join(args, " ")
+			switch {
+			case strings.HasPrefix(full, "bd list "):
+				return nil, fmt.Errorf("simulated issues tier outage")
+			case strings.HasPrefix(full, "bd query "):
+				return []byte(`[{"id":"bd-w","title":"wisp","status":"open","issue_type":"task","created_at":"2026-05-02T00:00:00Z","ephemeral":true,"labels":["order-run:o"]}]`), nil
+			}
+			return nil, fmt.Errorf("unexpected: %s", full)
+		}
+		s := beads.NewBdStore("/city", runner)
+		got, err := s.List(beads.ListQuery{Label: "order-run:o", TierMode: beads.TierBoth})
+		if err == nil {
+			t.Fatalf("err = nil, want non-nil partial-failure error")
+		}
+		if !strings.Contains(err.Error(), "issues tier") {
+			t.Fatalf("err = %v, want issues tier in message", err)
+		}
+		if len(got) != 1 || got[0].ID != "bd-w" {
+			t.Fatalf("got = %+v, want surviving wisps row bd-w", got)
+		}
+	})
+
+	t.Run("both tiers fail", func(t *testing.T) {
+		runner := func(_, _ string, _ ...string) ([]byte, error) {
+			return nil, fmt.Errorf("simulated total outage")
+		}
+		s := beads.NewBdStore("/city", runner)
+		got, err := s.List(beads.ListQuery{Label: "order-run:o", TierMode: beads.TierBoth})
+		if err == nil {
+			t.Fatalf("err = nil, want joined error from both tiers")
+		}
+		if got != nil {
+			t.Fatalf("got = %+v, want nil rows on total failure", got)
+		}
+	})
+}
+
+// TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues pins the
+// bd-query DSL safety guard: values outside the supported bare-token subset
+// are filtered client-side instead of being emitted into a malformed query.
+func TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues(t *testing.T) {
+	cases := []struct {
+		name  string
+		query beads.ListQuery
+		want  string
+	}{
+		{
+			name:  "slash assignee",
+			query: beads.ListQuery{Assignee: "gascity/workflows.codex-max", Type: "message", Status: "open", TierMode: beads.TierWisps},
+			want:  "bd-match-assignee",
+		},
+		{
+			name:  "label with space",
+			query: beads.ListQuery{Label: "order tracking", TierMode: beads.TierWisps},
+			want:  "bd-match-label",
+		},
+		{
+			name:  "type reserved token",
+			query: beads.ListQuery{Type: "or", TierMode: beads.TierWisps},
+			want:  "bd-match-type",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotCmd string
+			runner := func(_, name string, args ...string) ([]byte, error) {
+				gotCmd = name + " " + strings.Join(args, " ")
+				if strings.Contains(gotCmd, "assignee=gascity/workflows.codex-max") ||
+					strings.Contains(gotCmd, "label=order tracking") ||
+					strings.Contains(gotCmd, "type=or") {
+					t.Fatalf("unsafe value leaked into bd query: %s", gotCmd)
+				}
+				return []byte(`[
+					{"id":"bd-match-assignee","title":"message","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","created_at":"2026-05-01T00:00:00Z","ephemeral":true},
+					{"id":"bd-match-label","title":"label","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":true,"labels":["order tracking"]},
+					{"id":"bd-match-type","title":"reserved","status":"open","issue_type":"or","created_at":"2026-05-01T00:00:00Z","ephemeral":true},
+					{"id":"bd-other","title":"other","status":"open","issue_type":"task","assignee":"someone-else","created_at":"2026-05-01T00:00:00Z","ephemeral":true}
+				]`), nil
+			}
+			s := beads.NewBdStore("/city", runner)
+			got, err := s.List(tc.query)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if !strings.Contains(gotCmd, "bd query --json ephemeral=true") {
+				t.Fatalf("cmd = %q, want wisps query", gotCmd)
+			}
+			if len(got) != 1 || got[0].ID != tc.want {
+				t.Fatalf("List() = %+v, want only %s after client filtering", got, tc.want)
+			}
+		})
 	}
 }

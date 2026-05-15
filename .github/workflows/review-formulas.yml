@@ -38,8 +38,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  DOLT_VERSION: "1.86.6"
-  BD_VERSION: "v1.0.3"
+  DOLT_VERSION: "2.0.3"
+  BD_VERSION: "v1.0.4"
 
 jobs:
   runner-policy:
@@ -107,6 +107,12 @@ jobs:
           run_shard=false
           reason="skipped"
 
+          # Review-formulas shards each run for ~10-15 min and exercise
+          # full agent workflows end-to-end. Keep them as a pre-merge
+          # opt-in (via the `needs-review-formulas` label) plus a
+          # post-merge safety net on pushes to main. Path-based opt-in
+          # on every Go-touching PR pushes the PR wall-clock past the
+          # Blacksmith 5-minute budget.
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             run_shard=true
             reason="manual dispatch"
@@ -114,11 +120,11 @@ jobs:
             run_shard=true
             reason="push to main safety net"
           elif [[ "$PR_DRAFT" != "true" ]]; then
-            if [[ "$PATH_HIT" == "true" || "$NEEDS_LABEL" == "true" ]]; then
+            if [[ "$NEEDS_LABEL" == "true" ]]; then
               run_shard=true
-              reason="pull request path/label match"
+              reason="pull request needs-review-formulas label"
             else
-              reason="pull request path/label miss"
+              reason="pull request without needs-review-formulas label (path hit: ${PATH_HIT})"
             fi
           else
             reason="draft pull request"
@@ -147,9 +153,16 @@ jobs:
           - label: basic
             command: make test-integration-review-formulas-basic-cover
             coverprofile: coverage.integration-review-formulas-basic.txt
-          - label: retries
-            command: make test-integration-review-formulas-retries-cover
-            coverprofile: coverage.integration-review-formulas-retries.txt
+          - label: retries-1-of-2
+            command: >-
+              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-retries-1-of-2.txt
+              ./scripts/test-integration-shard review-formulas-retries-1-of-2
+            coverprofile: coverage.integration-review-formulas-retries-1-of-2.txt
+          - label: retries-2-of-2
+            command: >-
+              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-retries-2-of-2.txt
+              ./scripts/test-integration-shard review-formulas-retries-2-of-2
+            coverprofile: coverage.integration-review-formulas-retries-2-of-2.txt
           - label: recovery
             command: make test-integration-review-formulas-recovery-cover
             coverprofile: coverage.integration-review-formulas-recovery.txt

@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -208,7 +209,11 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 			RigName:   rigName,
 		}, provider)
 		if execProviderNeedsScopedDoltStoreEnv(provider) {
-			copyExecProjectedDoltEnv(env, bdRuntimeEnvForRig(cs.cityPath, cfg, scopeRoot))
+			projected, err := bdRuntimeEnvForRigWithError(cs.cityPath, cfg, scopeRoot)
+			if err != nil {
+				return unavailableStore{err: fmt.Errorf("project rig store env %s: %w", scopeRoot, err)}
+			}
+			copyExecProjectedBackendEnv(env, projected)
 		}
 		s.SetEnv(env)
 		return s
@@ -690,8 +695,13 @@ func (cs *controllerState) CityBeadStore() beads.Store {
 	return cs.cityBeadStore
 }
 
-// Orders scans formula layers and returns all orders.
+// Orders scans formula layers and returns active orders.
 func (cs *controllerState) Orders() []orders.Order {
+	return orders.FilterEnabled(cs.OrdersAll())
+}
+
+// OrdersAll scans formula layers and returns all orders after overrides.
+func (cs *controllerState) OrdersAll() []orders.Order {
 	cs.mu.RLock()
 	cfg := cs.cfg
 	cs.mu.RUnlock()
@@ -702,7 +712,9 @@ func (cs *controllerState) Orders() []orders.Order {
 	}
 
 	if len(cfg.Orders.Overrides) > 0 {
-		orders.ApplyOverrides(allAA, convertOverrides(cfg.Orders.Overrides)) //nolint:errcheck // best-effort
+		if err := orders.ApplyOverrides(allAA, convertOverrides(cfg.Orders.Overrides)); err != nil {
+			log.Printf("gc api: applying order overrides for %s: %v", cs.cityPath, err)
+		}
 	}
 
 	return allAA
@@ -813,12 +825,30 @@ func (cs *controllerState) DeleteAgent(name string) error {
 
 // CreateRig adds a new rig to city.toml.
 func (cs *controllerState) CreateRig(r config.Rig) error {
+	r = detectRigDefaultBranch(cs.cityPath, r)
 	if err := cs.initializeRigStoreForCreate(r); err != nil {
 		return err
 	}
 	return cs.mutateAndPoke(func() error {
 		return cs.editor.CreateRig(r)
 	})
+}
+
+func detectRigDefaultBranch(cityPath string, r config.Rig) config.Rig {
+	r.DefaultBranch = strings.TrimSpace(r.DefaultBranch)
+	if r.DefaultBranch != "" {
+		return r
+	}
+	rigPath := strings.TrimSpace(r.Path)
+	if rigPath == "" {
+		return r
+	}
+	rigPath = resolveStoreScopeRoot(cityPath, rigPath)
+	if _, err := os.Stat(filepath.Join(rigPath, ".git")); err != nil {
+		return r
+	}
+	r.DefaultBranch = git.New(rigPath).ProbeDefaultBranch()
+	return r
 }
 
 func (cs *controllerState) initializeRigStoreForCreate(r config.Rig) error {
@@ -850,9 +880,10 @@ func (cs *controllerState) initializeRigStoreForCreate(r config.Rig) error {
 func (cs *controllerState) UpdateRig(name string, patch api.RigUpdate) error {
 	return cs.mutateAndPoke(func() error {
 		return cs.editor.UpdateRig(name, configedit.RigUpdate{
-			Path:      patch.Path,
-			Prefix:    patch.Prefix,
-			Suspended: patch.Suspended,
+			Path:          patch.Path,
+			Prefix:        patch.Prefix,
+			DefaultBranch: patch.DefaultBranch,
+			Suspended:     patch.Suspended,
 		})
 	})
 }

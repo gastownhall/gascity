@@ -111,7 +111,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 
 	vars := applyVarDefaults(opts.Vars, recipe.Vars)
 	priorityOverride := clonePriority(opts.PriorityOverride)
-	graphWorkflow := len(recipe.Steps) > 0 && recipe.Steps[0].Metadata["gc.kind"] == "workflow"
+	graphWorkflow := preservesGraphActionTypes(recipe)
 	rootKey := recipe.Steps[0].ID
 	rootIncluded := false
 
@@ -150,6 +150,13 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 				node.Metadata["idempotency_key"] = opts.IdempotencyKey
 			}
 		} else {
+			// graph.v2 workflows and their retry/Ralph attempt sub-recipes
+			// use step beads as independently routable actionable work, not
+			// scaffolding — skip the #1039 coercion so Ready() still surfaces
+			// them for worker claim.
+			if !graphWorkflow {
+				node.Type = nonRootStepBeadType(node.Type)
+			}
 			if node.Metadata == nil {
 				node.Metadata = make(map[string]string, 1)
 			}
@@ -296,6 +303,10 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 		if err != nil {
 			return nil, err
 		}
+		// Fragment entries stay "task" — unlike formula scaffolding steps,
+		// fanout-expanded fragment nodes are actionable work that pool
+		// workers claim from `bd ready`. Do not apply nonRootStepBeadType
+		// here (#1039).
 		if node.Metadata == nil {
 			node.Metadata = make(map[string]string, 2)
 		}

@@ -7,7 +7,7 @@ description: Install Gas City from Homebrew, a release tarball, or source.
 
 | Method | Best for | Installs deps? | Auto-upgrades? |
 |--------|----------|----------------|----------------|
-| [Homebrew](#homebrew-recommended) | macOS / Linux daily use | Yes (all 6) | `brew upgrade` |
+| [Homebrew](#homebrew-recommended) | macOS / Linux daily use | Yes (runtime deps) | `brew upgrade` |
 | [Direct download](#direct-download) | CI, containers, air-gapped hosts | No | Manual |
 | [Source build](#build-from-source) | Contributors, bleeding-edge | No | Manual |
 
@@ -29,6 +29,7 @@ for you; the other methods require manual installation.
 | dolt | Yes | 1.86.2 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
 | bd (Beads CLI) | Yes | 1.0.0 | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
 | flock | Yes | — | `brew install flock` | (built-in via util-linux) | File locking |
+| gh | Optional | — | `brew install gh` | [cli.github.com](https://cli.github.com/) | GitHub gate checks |
 | Go 1.25+ | Source only | 1.25 | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
 | make | Source only | — | (built-in) | `apt install make` (or `build-essential`) | Drives `make install` |
 
@@ -62,7 +63,8 @@ gc version
 <Warning>
 If you use Oh My Zsh with the `git` plugin, `gc` may already be an alias for
 `git commit --verbose`. Run `command gc version` once to bypass the alias. For
-a persistent fix, add `unalias gc 2>/dev/null` after Oh My Zsh loads in
+a persistent fix, add `unalias gc 2>/dev/null` or
+`zstyle ':omz:plugins:git' aliases no 'gc'` after Oh My Zsh loads in
 `~/.zshrc`, or put that line in a file such as
 `~/.oh-my-zsh/custom/gascity.zsh`.
 </Warning>
@@ -226,6 +228,11 @@ cd ~/my-city
 
 `gc init` registers the city with the supervisor and starts it automatically.
 See the [Quickstart](/getting-started/quickstart) for a complete walkthrough.
+
+Gas City ships a JSONL archive that snapshots every bead database for
+disaster recovery. By default it runs in local-only mode and keeps commits
+on this host. To enable off-box backup, see
+[JSONL archive push failures](/getting-started/troubleshooting#jsonl-archive-push-failures).
 
 ## Docs preview
 

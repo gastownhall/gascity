@@ -70,7 +70,7 @@ func (h *Handler) CreateHandler(_ context.Context, params CreateParams) (CreateR
 	// reconciler does not try to resume an incomplete convergence loop.
 	closeBead := func(cause error) error {
 		_ = h.Store.SetMetadata(beadID, FieldState, StateTerminated)
-		_ = h.Store.CloseBead(beadID)
+		_ = h.Store.CloseBead(beadID, CloseReasonCreateRollback)
 		return cause
 	}
 

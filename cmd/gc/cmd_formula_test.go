@@ -165,6 +165,56 @@ func TestResolveFormulaScope_UnboundRigErrors(t *testing.T) {
 	}
 }
 
+// TestRigFormulaVarsForScope verifies that rig-scoped formula_vars flow
+// through the scope resolver so `gc formula show --rig <name>` can surface
+// them as "(rig default=...)" annotations.
+func TestRigFormulaVarsForScope(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "mo")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{
+				Name: "mo",
+				Path: rigPath,
+				FormulaVars: map[string]string{
+					"test_command": "make test-fast",
+				},
+			},
+		},
+	}
+
+	t.Run("--rig populates FormulaVars via rigByName", func(t *testing.T) {
+		prev := rigFlag
+		t.Cleanup(func() { rigFlag = prev })
+		rigFlag = "mo"
+
+		r, ok := rigByName(cfg, "mo")
+		if !ok {
+			t.Fatalf("rigByName(mo) not found")
+		}
+		if got := r.FormulaVars["test_command"]; got != "make test-fast" {
+			t.Errorf("FormulaVars[test_command] = %q, want %q", got, "make test-fast")
+		}
+	})
+
+	t.Run("no --rig yields empty FormulaVars", func(t *testing.T) {
+		prev := rigFlag
+		t.Cleanup(func() { rigFlag = prev })
+		rigFlag = ""
+
+		t.Chdir(cityPath)
+		// Without --rig and outside a rig cwd, formula_vars are not injected.
+		vars := rigFormulaVarsForScope(cfg, cityPath)
+		if len(vars) != 0 {
+			t.Errorf("rigFormulaVarsForScope = %v, want empty (no rig context)", vars)
+		}
+	})
+}
+
 // TestResolveFormulaScope_RigFallsBackToCityLayers covers the case where a
 // rig is resolved but has no rig-specific FormulaLayers entry; SearchPaths
 // should fall back to city layers.

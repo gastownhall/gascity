@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"net"
 	"os"
@@ -63,8 +64,9 @@ func TestFileOpenedByAnyProcessBoundsLsof(t *testing.T) {
 	if err := os.WriteFile(path, []byte("stale\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	withManagedDoltProcPaths(t, filepath.Join(t.TempDir(), "missing-proc"), filepath.Join(t.TempDir(), "missing-unix"))
 	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "lsof"), []byte("#!/bin/sh\nexec sleep 10\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(binDir, "lsof"), []byte("#!/bin/sh\ntouch \"$1.ran\"\nexec sleep 10\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile(lsof): %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -77,96 +79,42 @@ func TestFileOpenedByAnyProcessBoundsLsof(t *testing.T) {
 	if open {
 		t.Fatal("fileOpenedByAnyProcess() = true, want false when lsof times out")
 	}
+	if _, err := os.Stat(path + ".ran"); err != nil {
+		t.Fatalf("fake lsof did not run: %v", err)
+	}
 	if elapsed := time.Since(start); elapsed > 4*time.Second {
 		t.Fatalf("fileOpenedByAnyProcess() took %s, want bounded timeout", elapsed)
 	}
 }
 
-func TestRemoveStaleManagedDoltLocksWithoutLsofUsesAvailableState(t *testing.T) {
-	skipSlowCmdGCTest(t, "runs managed-dolt preflight cleanup against filesystem locks; run make test-cmd-gc-process for full coverage")
-	dataDir := t.TempDir()
-	lockFile := filepath.Join(dataDir, "hq", ".dolt", "noms", "LOCK")
-	if err := os.MkdirAll(filepath.Dir(lockFile), 0o755); err != nil {
-		t.Fatal(err)
+func TestFileOpenedByAnyProcessFromProcHonorsCancelledContext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "LOCK")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	open, checked := fileOpenedByAnyProcessFromProc(ctx, path)
+	if open || checked {
+		t.Fatalf("fileOpenedByAnyProcessFromProc(canceled) = (%v, %v), want false, false", open, checked)
 	}
-	if err := os.WriteFile(lockFile, []byte("live\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", filepath.Join(t.TempDir(), "missing-bin"))
-	_, procChecked := fileOpenedByAnyProcessFromProc(lockFile)
-	if err := removeStaleManagedDoltLocks(dataDir); err != nil {
-		t.Fatalf("removeStaleManagedDoltLocks() error = %v", err)
-	}
-	if _, err := os.Stat(lockFile); procChecked {
-		if !os.IsNotExist(err) {
-			t.Fatalf("LOCK stat err = %v, want stale lock removed when proc state is available", err)
-		}
-	} else if err != nil {
-		t.Fatalf("LOCK stat err = %v, want preserved when open-file state is unknown", err)
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("fileOpenedByAnyProcessFromProc(canceled) took %s, want immediate cancellation", elapsed)
 	}
 }
 
-func TestQuarantinePhantomManagedDoltDatabasesQuarantinesRetiredReplacementDB(t *testing.T) {
-	dataDir := t.TempDir()
-	activeManifest := filepath.Join(dataDir, "ga", ".dolt", "noms", "manifest")
-	if err := os.MkdirAll(filepath.Dir(activeManifest), 0o755); err != nil {
-		t.Fatal(err)
+func TestUnixSocketInodesForPathHonorsCancelledContext(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "dolt.sock")
+	unixTable := filepath.Join(t.TempDir(), "unix")
+	if err := os.WriteFile(unixTable, []byte("Num RefCount Protocol Flags Type St Inode Path\n0000000000000000: 00000002 00000000 00010000 0001 01 12345 "+socketPath+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(unix table): %v", err)
 	}
-	if err := os.WriteFile(activeManifest, []byte("active\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	retiredManifest := filepath.Join(dataDir, "ga.replaced-20260428T100722Z", ".dolt", "noms", "manifest")
-	if err := os.MkdirAll(filepath.Dir(retiredManifest), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(retiredManifest, []byte("retired\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	replacementLikeManifest := filepath.Join(dataDir, "ga.replaced-pending", ".dolt", "noms", "manifest")
-	if err := os.MkdirAll(filepath.Dir(replacementLikeManifest), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(replacementLikeManifest, []byte("active\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	withManagedDoltProcPaths(t, t.TempDir(), unixTable)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 
-	now := time.Date(2026, 4, 29, 16, 20, 0, 0, time.UTC)
-	if err := quarantinePhantomManagedDoltDatabases(dataDir, now); err != nil {
-		t.Fatalf("quarantinePhantomManagedDoltDatabases: %v", err)
-	}
-
-	if _, err := os.Stat(activeManifest); err != nil {
-		t.Fatalf("active manifest stat: %v", err)
-	}
-	if _, err := os.Stat(replacementLikeManifest); err != nil {
-		t.Fatalf("replacement-like active manifest stat: %v", err)
-	}
-	if _, err := os.Stat(retiredManifest); !os.IsNotExist(err) {
-		t.Fatalf("retired manifest stat err = %v, want moved out of data dir", err)
-	}
-	quarantined := filepath.Join(dataDir, ".quarantine", "20260429T162000-ga.replaced-20260428T100722Z", ".dolt", "noms", "manifest")
-	if _, err := os.Stat(quarantined); err != nil {
-		t.Fatalf("quarantined manifest stat: %v", err)
-	}
-}
-
-func TestRetiredManagedDoltDatabaseNameRequiresTimestampSuffix(t *testing.T) {
-	tests := []struct {
-		name string
-		want bool
-	}{
-		{name: "ga.replaced-20260428T100722Z", want: true},
-		{name: "ga.replaced-20260428T100722Z.bak", want: false},
-		{name: "ga.replaced-20260428T100722", want: false},
-		{name: "ga.replaced-pending", want: false},
-		{name: "replaced-20260428T100722Z", want: false},
-		{name: ".replaced-20260428T100722Z", want: false},
-		{name: "ga", want: false},
-	}
-	for _, tt := range tests {
-		if got := retiredManagedDoltDatabaseName(tt.name); got != tt.want {
-			t.Fatalf("retiredManagedDoltDatabaseName(%q) = %v, want %v", tt.name, got, tt.want)
-		}
+	inodes, checked := unixSocketInodesForPath(ctx, socketPath)
+	if checked || len(inodes) != 0 {
+		t.Fatalf("unixSocketInodesForPath(canceled) = (%v, %v), want nil/empty, false", inodes, checked)
 	}
 }
 
@@ -188,4 +136,16 @@ func TestRemoveStaleManagedDoltSocketsWithoutLsofKeepsSocket(t *testing.T) {
 	if _, err := os.Stat(socketPath); err != nil {
 		t.Fatalf("socket stat err = %v, want preserved when lsof unavailable", err)
 	}
+}
+
+func withManagedDoltProcPaths(t *testing.T, procDir, unixSocketTable string) {
+	t.Helper()
+	oldProcDir := managedDoltProcDir
+	oldUnixSocketTable := managedDoltUnixSocketTable
+	managedDoltProcDir = procDir
+	managedDoltUnixSocketTable = unixSocketTable
+	t.Cleanup(func() {
+		managedDoltProcDir = oldProcDir
+		managedDoltUnixSocketTable = oldUnixSocketTable
+	})
 }

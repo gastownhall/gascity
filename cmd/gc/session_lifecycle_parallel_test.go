@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -212,6 +213,34 @@ func newShutdownWaitProvider() *shutdownWaitProvider {
 func (p *shutdownWaitProvider) ListRunning(prefix string) ([]string, error) {
 	p.listOnce.Do(func() { close(p.listCalled) })
 	return p.Fake.ListRunning(prefix)
+}
+
+type lateAsyncStartListProvider struct {
+	*gatedStartProvider
+	listCalls int
+}
+
+func newLateAsyncStartListProvider() *lateAsyncStartListProvider {
+	return &lateAsyncStartListProvider{
+		gatedStartProvider: newGatedStartProvider(),
+	}
+}
+
+func (p *lateAsyncStartListProvider) ListRunning(prefix string) ([]string, error) {
+	p.mu.Lock()
+	p.listCalls++
+	call := p.listCalls
+	p.mu.Unlock()
+
+	running, err := p.Fake.ListRunning(prefix)
+	if call == 1 {
+		p.release("worker")
+		deadline := time.Now().Add(2 * time.Second)
+		for !p.IsRunning("worker") && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	return running, err
 }
 
 func creatingMeta(meta map[string]string) map[string]string {
@@ -1877,6 +1906,78 @@ func TestCityRuntimeShutdownWaitsForTrackedAsyncStartsBeforeStopSnapshot(t *test
 	}
 }
 
+func TestCityRuntimeForceShutdownRelistsLateAsyncStart(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 26, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":         "worker",
+			"template":             "worker",
+			"generation":           "1",
+			"continuation_epoch":   "1",
+			"instance_token":       "tok-worker",
+			"pending_create_claim": "true",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := newLateAsyncStartListProvider()
+	cfg := &config.City{
+		Daemon: config.DaemonConfig{ShutdownTimeout: "500ms"},
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	forceStop := &atomic.Bool{}
+	forceStop.Store(true)
+	cr := &CityRuntime{
+		cfg:                 cfg,
+		sp:                  sp,
+		rec:                 events.Discard,
+		standaloneCityStore: store,
+		asyncStartLimiter:   newAsyncStartLimiter(maxParallelStartsPerTick(cfg)),
+		forceStopShutdown:   forceStop,
+		logPrefix:           "gc test",
+		stdout:              ioDiscard{},
+		stderr:              ioDiscard{},
+	}
+	tp := TemplateParams{Command: "worker", SessionName: "worker", TemplateName: "worker"}
+	if got := executePlannedStartsTraced(
+		context.Background(),
+		[]startCandidate{{session: &session, tp: tp}},
+		cfg,
+		map[string]TemplateParams{"worker": tp},
+		sp,
+		store,
+		"test-city",
+		"",
+		clk,
+		events.Discard,
+		time.Minute,
+		ioDiscard{},
+		ioDiscard{},
+		nil,
+		withAsyncStartExecution(),
+		withAsyncStartLimiter(cr.ensureAsyncStartLimiter()),
+		withAsyncStartTracker(&cr.asyncStarts),
+	); got != 1 {
+		t.Fatalf("woken = %d, want 1", got)
+	}
+	sp.waitForStarts(t, 1)
+
+	cr.shutdown()
+
+	if sp.IsRunning("worker") {
+		t.Fatal("force shutdown missed late async-started runtime")
+	}
+	if sp.listCalls < 2 {
+		t.Fatalf("ListRunning calls = %d, want a second snapshot for force async-start cleanup", sp.listCalls)
+	}
+}
+
 func TestExecutePlannedStartsTraced_AsyncPrepareFailureClearsPreWakeLease(t *testing.T) {
 	store := &failSetMetadataStore{MemStore: beads.NewMemStore(), failKey: "session_key"}
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 27, 0, time.UTC)}
@@ -3069,11 +3170,8 @@ func TestCommitAsyncStartResultWithContext_SkipsCanceledCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := updated.Metadata["state"]; got != "creating" {
-		t.Fatalf("state = %q, want creating", got)
-	}
-	if got := updated.Metadata["pending_create_claim"]; got != "true" {
-		t.Fatalf("pending_create_claim = %q, want true", got)
+	if updated.Status != "closed" {
+		t.Fatalf("status = %q, want closed so canceled create cannot strand a creating bead", updated.Status)
 	}
 }
 
@@ -3139,11 +3237,14 @@ func TestCommitAsyncStartResultWithContext_StopsCanceledSuccessfulPendingCreateR
 	if err != nil {
 		t.Fatal(err)
 	}
+	if updated.Status != "closed" {
+		t.Fatalf("status = %q, want closed so canceled create cannot strand a creating bead", updated.Status)
+	}
 	if got := updated.Metadata["last_woke_at"]; got != "" {
 		t.Fatalf("last_woke_at = %q, want cleared so the next controller can retry", got)
 	}
-	if got := updated.Metadata["pending_create_claim"]; got != "true" {
-		t.Fatalf("pending_create_claim = %q, want true for next-tick retry", got)
+	if got := updated.Metadata["pending_create_claim"]; got != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared on failed-create rollback", got)
 	}
 }
 
@@ -3196,6 +3297,64 @@ func TestCommitAsyncStartResultWithContext_RollsBackCanceledPendingCreateError(t
 	}
 	if updated.Status != "closed" {
 		t.Fatalf("status = %q, want closed so pending-create can be retried by replacement bead", updated.Status)
+	}
+}
+
+func TestCommitAsyncStartResultWithContext_RollsBackCanceledPendingCreateSuccess(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 7, 4, 17, 11, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-control",
+		Title:  "control",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":         "control",
+			"template":             "control",
+			"generation":           "2",
+			"continuation_epoch":   "1",
+			"instance_token":       "tok-control",
+			"pending_create_claim": "true",
+			"last_woke_at":         clk.Now().Format(time.RFC3339),
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := startResult{
+		prepared: preparedStart{
+			candidate: startCandidate{
+				session: &session,
+				tp: TemplateParams{
+					Command:      "control",
+					SessionName:  "control",
+					TemplateName: "control",
+				},
+			},
+		},
+		outcome:         "success",
+		started:         clk.Now(),
+		finished:        clk.Now(),
+		rollbackPending: true,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if commitAsyncStartResultWithContext(ctx, result, nil, store, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}, nil) {
+		t.Fatal("canceled async success commit should report not committed")
+	}
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "closed" {
+		t.Fatalf("status = %q, want closed so canceled create cannot strand a creating bead", updated.Status)
+	}
+	if got := updated.Metadata["pending_create_claim"]; got != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared on closed failed-create bead", got)
+	}
+	if pendingCreateStartInFlight(updated, clk, 0) {
+		t.Fatal("canceled async success left the pending-create bead leased")
 	}
 }
 
@@ -3306,8 +3465,8 @@ func TestCommitStartResult_RollbackPendingErrorClearsInFlightLeaseWhenCloseFails
 	if got := updated.Metadata["last_woke_at"]; got != "" {
 		t.Fatalf("last_woke_at = %q, want cleared so the next reconciler tick can retry", got)
 	}
-	if got := updated.Metadata["pending_create_claim"]; got != "true" {
-		t.Fatalf("pending_create_claim = %q, want true for pending-create retry", got)
+	if got := updated.Metadata["pending_create_claim"]; got != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared after failed-create metadata lands", got)
 	}
 	if pendingCreateStartInFlight(updated, clk, 0) {
 		t.Fatal("rollback-pending error left the pending-create bead leased")
@@ -4508,7 +4667,7 @@ func TestExecutePreparedStartWave_PanicIncludesStackTrace(t *testing.T) {
 }
 
 func TestExecuteTargetWave_PanicIncludesStackTrace(t *testing.T) {
-	results := executeTargetWave([]stopTarget{{name: "worker"}}, 1, func(stopTarget) error {
+	results := executeTargetWave([]stopTarget{{name: "worker"}}, 1, time.Second, func(stopTarget) error {
 		panic("boom")
 	})
 	if len(results) != 1 {
@@ -4730,6 +4889,88 @@ func (p *zombieAfterStartProvider) Start(ctx context.Context, name string, cfg r
 	return nil
 }
 
+type alreadyRunningThenFalseProvider struct {
+	*runtime.Fake
+	isRunning map[string][]bool
+}
+
+func (p *alreadyRunningThenFalseProvider) IsRunning(name string) bool {
+	sequence := p.isRunning[name]
+	if len(sequence) == 0 {
+		return p.Fake.IsRunning(name)
+	}
+	current := sequence[0]
+	p.isRunning[name] = sequence[1:]
+	return current
+}
+
+type falseNegativeAfterStartProvider struct {
+	*runtime.Fake
+	falseAfterStart map[string]bool
+}
+
+func (p *falseNegativeAfterStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := p.Fake.Start(ctx, name, cfg); err != nil {
+		return err
+	}
+	if p.falseAfterStart == nil {
+		p.falseAfterStart = make(map[string]bool)
+	}
+	p.falseAfterStart[name] = true
+	return nil
+}
+
+func (p *falseNegativeAfterStartProvider) IsRunning(name string) bool {
+	if p.falseAfterStart[name] {
+		_ = p.Fake.IsRunning(name)
+		return false
+	}
+	return p.Fake.IsRunning(name)
+}
+
+type falseNegativeExistingProvider struct {
+	*runtime.Fake
+}
+
+func (p *falseNegativeExistingProvider) IsRunning(name string) bool {
+	_ = p.Fake.IsRunning(name)
+	return false
+}
+
+type existingProcessAliveSequenceProvider struct {
+	*runtime.Fake
+	alive map[string][]bool
+}
+
+func (p *existingProcessAliveSequenceProvider) IsRunning(name string) bool {
+	_ = p.Fake.IsRunning(name)
+	return false
+}
+
+func (p *existingProcessAliveSequenceProvider) ProcessAlive(name string, processNames []string) bool {
+	if len(processNames) == 0 {
+		return p.Fake.ProcessAlive(name, processNames)
+	}
+	sequence := p.alive[name]
+	if len(sequence) == 0 {
+		return p.Fake.ProcessAlive(name, processNames)
+	}
+	current := sequence[0]
+	p.alive[name] = sequence[1:]
+	_ = p.Fake.ProcessAlive(name, processNames)
+	return current
+}
+
+func fakeRuntimeCallCount(fake *runtime.Fake, method string) int {
+	count := 0
+	for _, call := range fake.Calls {
+		if call.Method == method {
+			count++
+		}
+	}
+	return count
+}
+
 func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
 	skipSlowCmdGCTest(t, "waits through stale session-key detection; run make test-cmd-gc-process for full coverage")
 	sp := &dieAfterStartProvider{Fake: runtime.NewFake()}
@@ -4813,6 +5054,386 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetectedWhenPaneSurvives(t *tes
 	}
 	if !strings.Contains(r.err.Error(), "died during startup") {
 		t.Fatalf("unexpected error: %v", r.err)
+	}
+}
+
+func TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey(t *testing.T) {
+	sp := &dieAfterStartProvider{Fake: runtime.NewFake()}
+	item := preparedStart{
+		candidate: startCandidate{
+			session: &beads.Bead{
+				ID: "gc-99",
+				Metadata: map[string]string{
+					"session_name": "test-agent",
+					"template":     "worker",
+				},
+			},
+			tp: TemplateParams{
+				Command:      "claude",
+				SessionName:  "test-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{Command: "claude"},
+	}
+
+	results := executePreparedStartWave(
+		context.Background(),
+		[]preparedStart{item},
+		sp,
+		nil,
+		10*time.Second,
+	)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.err != nil {
+		t.Fatalf("session without session_key should not get stale key error, got: %v", r.err)
+	}
+}
+
+func TestExecutePreparedStartWave_SkipsStaleKeyProbeWhenSessionAlreadyRunning(t *testing.T) {
+	sp := &alreadyRunningThenFalseProvider{
+		Fake: runtime.NewFake(),
+		isRunning: map[string][]bool{
+			"test-agent": {true, false},
+		},
+	}
+	item := preparedStart{
+		candidate: startCandidate{
+			session: &beads.Bead{
+				ID: "gc-100",
+				Metadata: map[string]string{
+					"session_name": "test-agent",
+					"session_key":  "still-valid-key",
+					"template":     "worker",
+				},
+			},
+			tp: TemplateParams{
+				Command:      "claude --resume still-valid-key",
+				SessionName:  "test-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{Command: "claude --resume still-valid-key"},
+	}
+
+	results := executePreparedStartWave(
+		context.Background(),
+		[]preparedStart{item},
+		sp,
+		nil,
+		10*time.Second,
+	)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.err != nil {
+		t.Fatalf("already-running session should not fail stale-key detection, got: %v", r.err)
+	}
+	if got := fakeRuntimeCallCount(sp.Fake, "Start"); got != 0 {
+		t.Fatalf("Start calls = %d, want 0", got)
+	}
+	if remaining := len(sp.isRunning["test-agent"]); remaining != 1 {
+		t.Fatalf("remaining scripted IsRunning results = %d, want 1", remaining)
+	}
+}
+
+func TestExecutePreparedStartWave_AlreadyRunningRequiresLiveProcess(t *testing.T) {
+	sp := &zombieAfterStartProvider{Fake: runtime.NewFake()}
+	if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
+		t.Fatalf("Start existing session: %v", err)
+	}
+	item := preparedStart{
+		candidate: startCandidate{
+			session: &beads.Bead{
+				ID: "gc-101",
+				Metadata: map[string]string{
+					"session_name": "test-agent",
+					"session_key":  "still-valid-key",
+					"template":     "worker",
+				},
+			},
+			tp: TemplateParams{
+				Command:      "claude --resume still-valid-key",
+				SessionName:  "test-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{
+			Command:      "claude --resume still-valid-key",
+			ProcessNames: []string{"claude"},
+		},
+	}
+
+	results := executePreparedStartWave(
+		context.Background(),
+		[]preparedStart{item},
+		sp,
+		nil,
+		10*time.Second,
+	)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.err == nil {
+		t.Fatal("expected already-running dead agent process to fail liveness validation")
+	}
+	if !strings.Contains(r.err.Error(), "died during startup") {
+		t.Fatalf("unexpected error: %v", r.err)
+	}
+}
+
+func TestExecutePreparedStartWave_AlreadyRunningFalseNegativeUsesProcessAliveFallback(t *testing.T) {
+	sp := &falseNegativeExistingProvider{Fake: runtime.NewFake()}
+	if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
+		t.Fatalf("Start existing session: %v", err)
+	}
+	item := preparedStart{
+		candidate: startCandidate{
+			session: &beads.Bead{
+				ID: "gc-102",
+				Metadata: map[string]string{
+					"session_name": "test-agent",
+					"session_key":  "still-valid-key",
+					"template":     "worker",
+				},
+			},
+			tp: TemplateParams{
+				Command:      "claude --resume still-valid-key",
+				SessionName:  "test-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{
+			Command:      "claude --resume still-valid-key",
+			ProcessNames: []string{"claude"},
+		},
+	}
+
+	results := executePreparedStartWave(
+		context.Background(),
+		[]preparedStart{item},
+		sp,
+		nil,
+		10*time.Second,
+	)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.err != nil {
+		t.Fatalf("process liveness fallback should recover already-running IsRunning false negative, got: %v", r.err)
+	}
+	if got := fakeRuntimeCallCount(sp.Fake, "Start"); got != 1 {
+		t.Fatalf("Start calls = %d, want 1 existing setup call only", got)
+	}
+}
+
+func TestExecutePreparedStartWave_ErrSessionExistsRecoveryUsesProcessAliveFallback(t *testing.T) {
+	sp := &existingProcessAliveSequenceProvider{
+		Fake: runtime.NewFake(),
+		alive: map[string][]bool{
+			"test-agent": {false, true},
+		},
+	}
+	if err := sp.Start(context.Background(), "test-agent", runtime.Config{ProcessNames: []string{"claude"}}); err != nil {
+		t.Fatalf("Start existing session: %v", err)
+	}
+	item := preparedStart{
+		candidate: startCandidate{
+			session: &beads.Bead{
+				ID: "gc-103",
+				Metadata: map[string]string{
+					"session_name": "test-agent",
+					"template":     "worker",
+				},
+			},
+			tp: TemplateParams{
+				Command:      "claude",
+				SessionName:  "test-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{
+			Command:      "claude",
+			ProcessNames: []string{"claude"},
+		},
+	}
+
+	results := executePreparedStartWave(
+		context.Background(),
+		[]preparedStart{item},
+		sp,
+		nil,
+		10*time.Second,
+	)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.err != nil {
+		t.Fatalf("process liveness fallback should converge ErrSessionExists recovery, got: %v", r.err)
+	}
+	if r.outcome != "session_exists" {
+		t.Fatalf("outcome = %q, want session_exists", r.outcome)
+	}
+	if got := fakeRuntimeCallCount(sp.Fake, "Start"); got != 2 {
+		t.Fatalf("Start calls = %d, want setup plus recovery attempt", got)
+	}
+}
+
+func TestExecutePreparedStartWave_AlreadyRunningRejectsPendingCreateIdentityMismatch(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "test-agent", runtime.Config{}); err != nil {
+		t.Fatalf("Start existing session: %v", err)
+	}
+	if err := sp.SetMeta("test-agent", "GC_INSTANCE_TOKEN", "tok-old"); err != nil {
+		t.Fatalf("SetMeta token: %v", err)
+	}
+	item := preparedStart{
+		candidate: startCandidate{
+			session: &beads.Bead{
+				ID: "gc-creating",
+				Metadata: map[string]string{
+					"session_name":         "test-agent",
+					"template":             "worker",
+					"instance_token":       "tok-new",
+					"pending_create_claim": "true",
+				},
+			},
+			tp: TemplateParams{
+				Command:      "claude",
+				SessionName:  "test-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{Command: "claude"},
+	}
+
+	results := executePreparedStartWave(
+		context.Background(),
+		[]preparedStart{item},
+		sp,
+		nil,
+		10*time.Second,
+	)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.err == nil {
+		t.Fatal("expected pending-create identity mismatch to reject existing runtime")
+	}
+	if r.outcome != "session_exists" {
+		t.Fatalf("outcome = %q, want session_exists", r.outcome)
+	}
+	if !r.rollbackPending {
+		t.Fatal("rollbackPending = false, want true")
+	}
+}
+
+func TestExecutePreparedStartWave_AlreadyRunningRejectsPendingCreateSessionIDMismatch(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "test-agent", runtime.Config{}); err != nil {
+		t.Fatalf("Start existing session: %v", err)
+	}
+	if err := sp.SetMeta("test-agent", "GC_SESSION_ID", "gc-different"); err != nil {
+		t.Fatalf("SetMeta session ID: %v", err)
+	}
+	item := preparedStart{
+		candidate: startCandidate{
+			session: &beads.Bead{
+				ID: "gc-creating",
+				Metadata: map[string]string{
+					"session_name":         "test-agent",
+					"template":             "worker",
+					"instance_token":       "tok-new",
+					"pending_create_claim": "true",
+				},
+			},
+			tp: TemplateParams{
+				Command:      "claude",
+				SessionName:  "test-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{Command: "claude"},
+	}
+
+	results := executePreparedStartWave(
+		context.Background(),
+		[]preparedStart{item},
+		sp,
+		nil,
+		10*time.Second,
+	)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.err == nil {
+		t.Fatal("expected pending-create session ID mismatch to reject existing runtime")
+	}
+	if r.outcome != "session_exists" {
+		t.Fatalf("outcome = %q, want session_exists", r.outcome)
+	}
+	if !r.rollbackPending {
+		t.Fatal("rollbackPending = false, want true")
+	}
+}
+
+func TestExecutePreparedStartWave_RuntimeOnlyStaleKeyUsesProcessAliveFallback(t *testing.T) {
+	sp := &falseNegativeAfterStartProvider{
+		Fake:            runtime.NewFake(),
+		falseAfterStart: make(map[string]bool),
+	}
+	item := preparedStart{
+		candidate: startCandidate{
+			session: &beads.Bead{
+				ID: "",
+				Metadata: map[string]string{
+					"session_name": "test-agent",
+					"session_key":  "still-valid-key",
+					"template":     "worker",
+				},
+			},
+			tp: TemplateParams{
+				Command:      "claude --resume still-valid-key",
+				SessionName:  "test-agent",
+				TemplateName: "worker",
+			},
+		},
+		cfg: runtime.Config{
+			Command:      "claude --resume still-valid-key",
+			ProcessNames: []string{"claude"},
+		},
+	}
+
+	results := executePreparedStartWave(
+		context.Background(),
+		[]preparedStart{item},
+		sp,
+		nil,
+		10*time.Second,
+	)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if r.err != nil {
+		t.Fatalf("process liveness fallback should recover IsRunning false negative, got: %v", r.err)
 	}
 }
 
@@ -5003,45 +5624,6 @@ func TestExecutePreparedStartWave_RateLimitPendingCreateDeathClearsClaim(t *test
 	}
 }
 
-func TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey(t *testing.T) {
-	// Session without a session_key should not trigger stale detection,
-	// even if the session dies after start.
-	sp := &dieAfterStartProvider{Fake: runtime.NewFake()}
-	item := preparedStart{
-		candidate: startCandidate{
-			session: &beads.Bead{
-				ID: "gc-99",
-				Metadata: map[string]string{
-					"session_name": "test-agent",
-					"template":     "worker",
-				},
-			},
-			tp: TemplateParams{
-				Command:      "claude",
-				SessionName:  "test-agent",
-				TemplateName: "worker",
-			},
-		},
-		cfg: runtime.Config{Command: "claude"},
-	}
-
-	results := executePreparedStartWave(
-		context.Background(),
-		[]preparedStart{item},
-		sp,
-		nil,
-		10*time.Second,
-	)
-
-	if len(results) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(results))
-	}
-	r := results[0]
-	if r.err != nil {
-		t.Fatalf("session without session_key should not get stale key error, got: %v", r.err)
-	}
-}
-
 type ioDiscard struct{}
 
 func (ioDiscard) Write(p []byte) (int, error) { return len(p), nil }
@@ -5187,15 +5769,20 @@ func TestPrepareStartCandidateUsesBuiltinAncestorForGCProviderEnv(t *testing.T) 
 	}
 }
 
-func TestPrepareStartCandidate_EmptyBeadAliasPreservesTemplateGCAlias(t *testing.T) {
+func TestPrepareStartCandidate_EmptyPoolBeadAliasScrubsStampedTemplateIdentity(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
 		Title: "ants-ant-1",
 		Type:  "task",
 		Metadata: map[string]string{
-			"session_name": "ants-ant-1",
-			"provider":     "claude",
-			"state":        "creating",
+			"session_name":        "ants-pool-gc123",
+			"provider":            "claude",
+			"state":               "creating",
+			"template":            "ants",
+			"session_origin":      "ephemeral",
+			"pool_managed":        "true",
+			"pool_slot":           "1",
+			"pool_alias_conflict": "ants-ant-1",
 		},
 	})
 	if err != nil {
@@ -5204,11 +5791,12 @@ func TestPrepareStartCandidate_EmptyBeadAliasPreservesTemplateGCAlias(t *testing
 
 	tp := TemplateParams{
 		Command: "claude",
-		// Shape matches setTemplateEnvIdentity output (GC_ALIAS+GC_AGENT stamped)
-		// plus an unrelated template key to verify the merge preserves it.
+		// Shape matches a stale setTemplateEnvIdentity output from an earlier
+		// build. The persisted bead alias is authoritative; an empty alias must
+		// scrub this contested template identity before runtime launch.
 		Env:                map[string]string{"GC_ALIAS": "ants-ant-1", "GC_AGENT": "ants-ant-1", "TEMPLATE_KEY": "keep"},
 		WorkDir:            t.TempDir(),
-		SessionName:        "ants-ant-1",
+		SessionName:        "ants-pool-gc123",
 		InstanceName:       "ants-ant-1",
 		PoolSlot:           1,
 		EnvIdentityStamped: true,
@@ -5226,11 +5814,13 @@ func TestPrepareStartCandidate_EmptyBeadAliasPreservesTemplateGCAlias(t *testing
 		t.Fatalf("prepareStartCandidate: %v", err)
 	}
 
-	if got := prepared.cfg.Env["GC_ALIAS"]; got != "ants-ant-1" {
-		t.Fatalf("GC_ALIAS = %q, want %q (template value must survive merge when bead alias is empty)", got, "ants-ant-1")
+	if got, ok := prepared.cfg.Env["GC_ALIAS"]; !ok {
+		t.Fatalf("GC_ALIAS should be present with empty value so tmux emits `env -u GC_ALIAS`; got absent")
+	} else if got != "" {
+		t.Fatalf("GC_ALIAS = %q, want empty because the pool alias is deferred", got)
 	}
-	if got := prepared.cfg.Env["GC_AGENT"]; got != "ants-ant-1" {
-		t.Fatalf("GC_AGENT = %q, want %q (companion identity key must also survive)", got, "ants-ant-1")
+	if got := prepared.cfg.Env["GC_AGENT"]; got != "ants-pool-gc123" {
+		t.Fatalf("GC_AGENT = %q, want non-conflicting session name %q", got, "ants-pool-gc123")
 	}
 	if got := prepared.cfg.Env["TEMPLATE_KEY"]; got != "keep" {
 		t.Fatalf("TEMPLATE_KEY = %q, want %q (unrelated template env must survive merge)", got, "keep")

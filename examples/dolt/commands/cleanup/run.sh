@@ -101,8 +101,11 @@ for d in "$data_dir"/*/; do
   case "$referenced" in
     *" $name "*) continue ;; # referenced, not orphan
   esac
-  # Calculate size.
-  size_bytes=$(du -sb "$d" 2>/dev/null | cut -f1 || echo 0)
+  # Calculate size. Use du -sk (POSIX, KB) and multiply — du -sb is GNU-only;
+  # macOS BSD du has no -b flag, which would leave size_bytes empty and break
+  # the integer comparisons below.
+  size_kb=$(du -sk "$d" 2>/dev/null | cut -f1)
+  size_bytes=$(( ${size_kb:-0} * 1024 ))
   if [ "$size_bytes" -ge 1073741824 ]; then
     size=$(awk "BEGIN {printf \"%.1f GB\", $size_bytes/1073741824}")
   elif [ "$size_bytes" -ge 1048576 ]; then
@@ -317,9 +320,7 @@ echo "$orphans" | while IFS='|' read -r db_name size path; do
   # Identifier safety: dolt_database flows from operator-controlled metadata.json
   # straight into a backtick-quoted SQL identifier. Reject anything outside the
   # safe charset before interpolating, so an embedded backtick or semicolon
-  # cannot break out of the quoted identifier into arbitrary SQL. Charset
-  # matches `valid_database_name` in commands/gc-nudge/run.sh so a name probed
-  # by `gc dolt health` or nudged by `gc dolt gc-nudge` is also reachable here.
+  # cannot break out of the quoted identifier into arbitrary SQL.
   case "$db_name" in
     [A-Za-z0-9_]*)
       case "$db_name" in

@@ -273,6 +273,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		var ctx PromptContext
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
 			ctx = buildPrimeContext(cityPath, cityName, &a, cfg.Rigs, stderr)
+			ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(&a, &cfg.Workspace, cfg.Providers)
 		}
 		if a.PromptTemplate != "" {
 			fragments := effectivePromptFragments(
@@ -597,7 +598,7 @@ func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config
 	}
 
 	ctx.Branch = os.Getenv("GC_BRANCH")
-	ctx.DefaultBranch = defaultBranchFor(ctx.WorkDir)
+	ctx.DefaultBranch = defaultBranchForRig(ctx.RigName, rigs, ctx.WorkDir)
 	ctx.WorkQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "work_query", a.EffectiveWorkQuery(), stderr)
 	ctx.SlingQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "sling_query", a.EffectiveSlingQuery(), stderr)
 	return ctx

@@ -52,7 +52,7 @@
         },
         "description": {
           "type": "string",
-          "description": "Description is a human-readable description shown in a real-world app's session creation UI."
+          "description": "Description is a human-readable description shown in MC's session creation UI."
         },
         "dir": {
           "type": "string",
@@ -92,10 +92,9 @@
         "session": {
           "type": "string",
           "enum": [
-            "acp",
-            "tmux"
+            "acp"
           ],
-          "description": "Session overrides the session transport for this agent.\n\"\" (default) uses the provider default.\n\"tmux\" uses the tmux-backed CLI path even when the provider supports ACP.\n\"acp\" uses the Agent Client Protocol (JSON-RPC over stdio); the agent's\nresolved provider must have supports_acp = true."
+          "description": "Session overrides the session transport for this agent.\n\"\" (default) uses the city-level session provider (typically tmux).\n\"acp\" uses the Agent Client Protocol (JSON-RPC over stdio).\nThe agent's resolved provider must have supports_acp = true."
         },
         "provider": {
           "type": "string",
@@ -200,6 +199,14 @@
         "idle_timeout": {
           "type": "string",
           "description": "IdleTimeout is the maximum time an agent session can be inactive before\nthe controller kills and restarts it. Duration string (e.g., \"15m\", \"1h\").\nEmpty (default) disables idle checking."
+        },
+        "max_session_age": {
+          "type": "string",
+          "description": "MaxSessionAge is the maximum wall-clock lifetime of a single runtime\nsession before the controller preemptively restarts it. Duration string\n(e.g., \"5h\"). Empty (default) disables preemptive restarts. The restart\nis idle-gated: sessions with a pending interaction or an in-progress\nassigned work bead are left alone until they settle.\n\nMotivation: provider SDKs that cache credentials at session start (e.g.,\nClaude Code via Bedrock) can wedge when the underlying token expires if\nthe SDK doesn't re-chain providers. Cycling long-running sessions before\nthe token-expiry window prevents that failure mode without requiring\nupstream provider fixes."
+        },
+        "max_session_age_jitter": {
+          "type": "string",
+          "description": "MaxSessionAgeJitter bounds random jitter added to MaxSessionAge on a\nper-session basis so a fleet of identically-configured agents doesn't\nsynchronize restarts. Duration string (e.g., \"15m\"). Empty or 0\ndisables jitter (every session restarts at exactly MaxSessionAge).\nIgnored when MaxSessionAge is unset."
         },
         "sleep_after_idle": {
           "type": "string",
@@ -420,7 +427,7 @@
         },
         "session": {
           "type": "string",
-          "description": "Session overrides the session transport (\"acp\" or \"tmux\")."
+          "description": "Session overrides the session transport (\"acp\")."
         },
         "provider": {
           "type": "string",
@@ -437,6 +444,14 @@
         "idle_timeout": {
           "type": "string",
           "description": "IdleTimeout overrides the idle timeout duration string (e.g., \"30s\", \"5m\", \"1h\")."
+        },
+        "max_session_age": {
+          "type": "string",
+          "description": "MaxSessionAge overrides the max session age. Duration string (e.g., \"5h\").\nEmpty disables preemptive restart."
+        },
+        "max_session_age_jitter": {
+          "type": "string",
+          "description": "MaxSessionAgeJitter overrides the jitter added on top of MaxSessionAge.\nDuration string (e.g., \"15m\"). Empty disables jitter."
         },
         "sleep_after_idle": {
           "type": "string",
@@ -502,7 +517,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "InjectFragments overrides the agent's inject_fragments list."
+          "description": "InjectFragments overrides the agent's inject_fragments list. Leave this\nfield unset to keep inherited fragments; JSON callers may send null for\nthe same no-op. Set an empty list to clear fragments; set a populated\nlist to replace fragments."
         },
         "append_fragments": {
           "items": {
@@ -681,6 +696,14 @@
           "type": "string",
           "description": "IdleTimeout overrides the idle timeout. Duration string (e.g., \"30s\", \"5m\", \"1h\")."
         },
+        "max_session_age": {
+          "type": "string",
+          "description": "MaxSessionAge overrides the max session age. Duration string (e.g., \"5h\")."
+        },
+        "max_session_age_jitter": {
+          "type": "string",
+          "description": "MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., \"15m\")."
+        },
         "sleep_after_idle": {
           "type": "string",
           "description": "SleepAfterIdle overrides idle sleep policy for this agent. Accepts a\nduration string or \"off\"."
@@ -759,7 +782,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "InjectFragments overrides the agent's inject_fragments list."
+          "description": "InjectFragments overrides the agent's inject_fragments list. Leave this\nfield unset to keep inherited fragments; JSON callers may send null for\nthe same no-op. Set an empty list to clear fragments; set a populated\nlist to replace fragments."
         },
         "append_fragments": {
           "items": {
@@ -998,6 +1021,13 @@
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
           "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies default_sling_formula and append_fragments; the\nattachment-list fields remain tombstones, and the other fields are\nparsed/composed but not yet inherited automatically."
+        },
+        "pricing": {
+          "items": {
+            "$ref": "#/$defs/ModelPricing"
+          },
+          "type": "array",
+          "description": "Pricing holds per-model cost rate overrides keyed by (provider, model).\nCity-level entries override pack-level entries which override the\ndefaults shipped with the pricing package. See internal/pricing for the\nestimation seam introduced by issue #1255 (1d)."
         }
       },
       "additionalProperties": false,
@@ -1102,6 +1132,15 @@
           "type": "integer",
           "description": "MaxWakesPerTick caps how many sessions the reconciler may start in a\nsingle tick. Nil (unset) defaults to 5. Values \u003c= 0 are treated as the\ndefault — set a positive integer to override.",
           "default": 5
+        },
+        "nudge_dispatcher": {
+          "type": "string",
+          "enum": [
+            "legacy",
+            "supervisor"
+          ],
+          "description": "NudgeDispatcher selects how queued nudges get delivered to running\nsessions. \"legacy\" (default) auto-spawns a per-session `gc nudge poll`\nprocess that polls the file-backed queue every 2s. \"supervisor\" runs\nthe delivery loop inside the city runtime instead, with a unix-socket\nwake fast path triggered by enqueue, eliminating the per-session bd\nshellout storm.",
+          "default": "legacy"
         }
       },
       "additionalProperties": false,
@@ -1264,6 +1303,35 @@
       "type": "object",
       "description": "MailConfig holds mail provider settings."
     },
+    "ModelPricing": {
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Provider is the LLM provider label (e.g. \"claude\", \"codex\", \"gemini\")."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model is the provider-specific model identifier (e.g. \"claude-opus-4-7\")."
+        },
+        "tier": {
+          "$ref": "#/$defs/Tier",
+          "description": "Tier holds the per-token-type rates."
+        },
+        "last_verified": {
+          "type": "string",
+          "description": "LastVerified is the date these rates were confirmed (YYYY-MM-DD)."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "provider",
+        "model",
+        "tier",
+        "last_verified"
+      ],
+      "description": "ModelPricing is a complete pricing entry for a (Provider, Model) pair."
+    },
     "NamedSession": {
       "properties": {
         "name": {
@@ -1345,7 +1413,7 @@
         },
         "rig": {
           "type": "string",
-          "description": "Rig scopes the override to a specific rig's order. Empty matches\nONLY city-level orders (those with no rig); it does NOT match\nper-rig instances of the same name — those expand at scan time\nand require an explicit rig. Use rig = \"*\" as a wildcard to match\nevery instance of the named order (city-level + every rig-scoped\ncopy). The literal \"*\" is reserved and rejected as a real rig\nname by config validation."
+          "description": "Rig scopes the override to a specific rig's order.\nEmpty matches city-level orders."
         },
         "enabled": {
           "type": "boolean",
@@ -1658,7 +1726,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "Args are default command-line arguments passed to the provider."
+          "description": "Args are default command-line arguments passed to the provider. The\nbuilt-in Kiro provider defaults to\n[\"chat\", \"--no-interactive\", \"--agent\", \"gascity\", \"--trust-all-tools\"];\nremove or replace \"--trust-all-tools\" by defining [providers.kiro].args\nexplicitly in city.toml."
         },
         "prompt_mode": {
           "type": "string",
@@ -1795,6 +1863,10 @@
           "type": "string",
           "description": "Prefix overrides the auto-derived bead ID prefix for this rig."
         },
+        "default_branch": {
+          "type": "string",
+          "description": "DefaultBranch is the rig repository's mainline branch (e.g. \"main\",\n\"master\", \"develop\"). When set, routing formulas use this as the\ndefault merge target instead of probing origin/HEAD at sling time.\nCaptured by `gc rig add` from the rig's git config; set manually for\nrigs whose mainline isn't reachable via origin/HEAD."
+        },
         "suspended": {
           "type": "boolean",
           "description": "Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume."
@@ -1850,6 +1922,13 @@
         "dolt_port": {
           "type": "string",
           "description": "DoltPort overrides the city-level Dolt port for this rig's beads.\nWhen set, controller commands (scale_check, work_query) prefix their\nshell invocations with BEADS_DOLT_SERVER_PORT=\u003cport\u003e so bd connects to the\ncorrect server instead of the city-level default."
+        },
+        "formula_vars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "FormulaVars provides rig-scoped defaults for formula vars. Keys match\nvar names declared in formula `[vars.\u003cname\u003e]` blocks. Values are used\nwhen a formula runs in this rig and the caller did not pass an\nexplicit --var override. Takes precedence over formula-level defaults\nbut loses to --var flags."
         }
       },
       "additionalProperties": false,
@@ -1873,9 +1952,20 @@
           "type": "string",
           "description": "Prefix overrides the bead ID prefix."
         },
+        "default_branch": {
+          "type": "string",
+          "description": "DefaultBranch overrides the rig's recorded mainline branch."
+        },
         "suspended": {
           "type": "boolean",
           "description": "Suspended overrides the rig's suspended state."
+        },
+        "formula_vars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "FormulaVars adds or overrides rig-scoped formula var defaults.\nAdditive merge: patch keys win over existing rig keys, unspecified\nkeys are preserved."
         }
       },
       "additionalProperties": false,
@@ -2065,6 +2155,31 @@
       "type": "object",
       "description": "SessionSleepConfig configures default idle sleep policies by session class."
     },
+    "Tier": {
+      "properties": {
+        "prompt_usd_per_1m": {
+          "type": "number"
+        },
+        "completion_usd_per_1m": {
+          "type": "number"
+        },
+        "cache_read_usd_per_1m": {
+          "type": "number"
+        },
+        "cache_creation_usd_per_1m": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "prompt_usd_per_1m",
+        "completion_usd_per_1m",
+        "cache_read_usd_per_1m",
+        "cache_creation_usd_per_1m"
+      ],
+      "description": "Tier defines per-token-type rates in USD per 1 million tokens."
+    },
     "Workspace": {
       "properties": {
         "name": {
@@ -2100,7 +2215,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "InstallAgentHooks lists provider names whose hooks should be installed\ninto agent working directories. Agent-level overrides workspace-level\n(replace, not additive). Supported: \"claude\", \"codex\", \"gemini\",\n\"opencode\", \"copilot\", \"cursor\", \"pi\", \"omp\"."
+          "description": "InstallAgentHooks lists provider names whose hooks should be installed\ninto agent working directories. Agent-level overrides workspace-level\n(replace, not additive). Supported: \"claude\", \"codex\", \"gemini\",\n\"kiro\", \"opencode\", \"copilot\", \"cursor\", \"pi\", \"omp\"."
         },
         "global_fragments": {
           "items": {

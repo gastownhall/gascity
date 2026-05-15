@@ -195,6 +195,50 @@ append_fragments = ["footer"]
 	}
 }
 
+func TestLoadCityConfigFSEmitsLegacyV1SurfaceWarnings(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Dirs["/city/legacy-pack"] = true
+	fs.Files["/city/legacy-pack/pack.toml"] = []byte(`[pack]
+name = "legacy-pack"
+schema = 1
+`)
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+includes = ["legacy-pack"]
+default_rig_includes = ["default-pack"]
+
+[[agent]]
+name = "worker"
+
+[packs.legacy]
+source = "legacy-pack"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`[pack]
+name = "test-city"
+schema = 2
+`)
+
+	var stderr bytes.Buffer
+	cfg, err := loadCityConfigFS(fs, "/city/city.toml", &stderr)
+	if err != nil {
+		t.Fatalf("loadCityConfigFS: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("loadCityConfigFS returned nil config")
+	}
+	output := stderr.String()
+	for _, want := range []string{
+		"[[agent]] tables are deprecated",
+		"[packs] is deprecated",
+		"workspace.includes is deprecated",
+		"workspace.default_rig_includes is deprecated",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("stderr missing %q: %q", want, output)
+		}
+	}
+}
+
 func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 	var stderr bytes.Buffer
 	emitLoadCityConfigWarnings(&stderr, &config.Provenance{

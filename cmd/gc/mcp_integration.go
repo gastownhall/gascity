@@ -19,6 +19,8 @@ var managedMCPGitignoreEntries = []string{
 	".mcp.json",
 	filepath.ToSlash(filepath.Join(".gemini", "settings.json")),
 	filepath.ToSlash(filepath.Join(".codex", "config.toml")),
+	filepath.ToSlash(filepath.Join(".cursor", "mcp.json")),
+	"opencode.json",
 }
 
 type mcpTargetSpec struct {
@@ -40,7 +42,11 @@ type resolvedMCPProjection struct {
 
 func supportsMCPProviderKind(kind string) bool {
 	switch strings.TrimSpace(kind) {
-	case materialize.MCPProviderClaude, materialize.MCPProviderCodex, materialize.MCPProviderGemini:
+	case materialize.MCPProviderClaude,
+		materialize.MCPProviderCodex,
+		materialize.MCPProviderGemini,
+		materialize.MCPProviderOpenCode,
+		materialize.MCPProviderCursor:
 		return true
 	default:
 		return false

@@ -575,7 +575,7 @@ func RunStoreTests(t *testing.T, newStore func() beads.Store) {
 			t.Fatal(err)
 		}
 		// Create beads with types that bd ready excludes.
-		for _, typ := range []string{"molecule", "message", "gate", "merge-request", "session", "agent", "role", "rig"} {
+		for _, typ := range []string{"molecule", "step", "message", "gate", "merge-request", "session", "agent", "role", "rig"} {
 			if _, err := s.Create(beads.Bead{Title: typ, Type: typ}); err != nil {
 				t.Fatal(err)
 			}

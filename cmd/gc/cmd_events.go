@@ -177,7 +177,7 @@ DTO or SSE envelope.`,
 	cmd.Flags().StringVar(&timeoutFlag, "timeout", "30s", "Max wait duration for --watch (e.g. 30s, 5m)")
 	cmd.Flags().Uint64Var(&afterFlag, "after", 0, "Resume from this city event sequence number (city scope only)")
 	cmd.Flags().StringVar(&afterCursor, "after-cursor", "", "Resume from this supervisor event cursor (supervisor scope only)")
-	cmd.Flags().StringArrayVar(&payloadMatch, "payload-match", nil, "Filter by payload field (key=value, repeatable)")
+	cmd.Flags().StringArrayVar(&payloadMatch, "payload-match", nil, "Filter by payload field (key=value or key.subkey=value, repeatable)")
 	cmd.Flags().BoolVar(&jsonFlagDeprecated, "json", false, "Deprecated: output is always JSONL. Accepted for back-compat.")
 	_ = cmd.Flags().MarkDeprecated("json", "output is always JSONL; the flag is now a no-op and will be removed in a future release")
 	return cmd
@@ -1422,7 +1422,7 @@ func matchPayload(payload any, payloadMatch map[string][]string) bool {
 
 func matchPayloadObject(obj map[string]any, payloadMatch map[string][]string) bool {
 	for key, wants := range payloadMatch {
-		value, ok := obj[key]
+		value, ok := lookupPayloadKey(obj, key)
 		if !ok {
 			return false
 		}
@@ -1439,6 +1439,48 @@ func matchPayloadObject(obj map[string]any, payloadMatch map[string][]string) bo
 		}
 	}
 	return true
+}
+
+// lookupPayloadKey resolves a key against a payload object, supporting
+// dotted paths into nested map[string]any values. A flat key like "type"
+// looks up at the top level; "bead.issue_type" walks obj["bead"]["issue_type"].
+//
+// This allows --payload-match to filter nested event payloads such as
+// bead.closed (where the actually-filterable fields live under
+// payload.bead.*). At each object level, an exact match for the remaining
+// key wins before walking another segment, so literal dotted keys such as
+// "gc.root_bead_id" under bead.metadata remain filterable.
+//
+// Returns (value, true) if the path resolves; (nil, false) if any segment
+// is missing or an intermediate value is not an object.
+func lookupPayloadKey(obj map[string]any, key string) (any, bool) {
+	if value, ok := obj[key]; ok {
+		return value, true
+	}
+	if !strings.Contains(key, ".") {
+		return nil, false
+	}
+	parts := strings.Split(key, ".")
+	current := obj
+	for i, part := range parts {
+		remaining := strings.Join(parts[i:], ".")
+		if value, ok := current[remaining]; ok {
+			return value, true
+		}
+		value, ok := current[part]
+		if !ok {
+			return nil, false
+		}
+		if i == len(parts)-1 {
+			return value, true
+		}
+		next, ok := value.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		current = next
+	}
+	return nil, false
 }
 
 func payloadValueString(value any) string {

@@ -83,6 +83,8 @@ type agentFile struct {
 	WorkQuery              string            `toml:"work_query,omitempty"`
 	SlingQuery             string            `toml:"sling_query,omitempty"`
 	IdleTimeout            string            `toml:"idle_timeout,omitempty"`
+	MaxSessionAge          string            `toml:"max_session_age,omitempty"`
+	MaxSessionAgeJitter    string            `toml:"max_session_age_jitter,omitempty"`
 	SleepAfterIdle         string            `toml:"sleep_after_idle,omitempty"`
 	InstallAgentHooks      []string          `toml:"install_agent_hooks,omitempty"`
 	HooksInstalled         *bool             `toml:"hooks_installed,omitempty"`
@@ -827,6 +829,8 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		WorkQuery:              agent.WorkQuery,
 		SlingQuery:             agent.SlingQuery,
 		IdleTimeout:            agent.IdleTimeout,
+		MaxSessionAge:          agent.MaxSessionAge,
+		MaxSessionAgeJitter:    agent.MaxSessionAgeJitter,
 		SleepAfterIdle:         agent.SleepAfterIdle,
 		InstallAgentHooks:      agent.InstallAgentHooks,
 		HooksInstalled:         agent.HooksInstalled,
@@ -873,6 +877,8 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		cfg.WorkQuery == "" &&
 		cfg.SlingQuery == "" &&
 		cfg.IdleTimeout == "" &&
+		cfg.MaxSessionAge == "" &&
+		cfg.MaxSessionAgeJitter == "" &&
 		cfg.SleepAfterIdle == "" &&
 		len(cfg.InstallAgentHooks) == 0 &&
 		cfg.HooksInstalled == nil &&

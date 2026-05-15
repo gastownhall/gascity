@@ -26,7 +26,15 @@ fi
 
 DOLT_LOG_FILE="${GC_DOLT_LOG_FILE:-$DOLT_STATE_DIR/dolt.log}"
 DOLT_PID_FILE="${GC_DOLT_PID_FILE:-$DOLT_STATE_DIR/dolt.pid}"
-DOLT_STATE_FILE="${GC_DOLT_STATE_FILE:-$DOLT_STATE_DIR/dolt-state.json}"
+if [ -n "${GC_DOLT_STATE_FILE:-}" ]; then
+  DOLT_STATE_FILE="$GC_DOLT_STATE_FILE"
+elif [ -f "$DOLT_STATE_DIR/dolt-state.json" ]; then
+  DOLT_STATE_FILE="$DOLT_STATE_DIR/dolt-state.json"
+elif [ -f "$DOLT_STATE_DIR/dolt-provider-state.json" ]; then
+  DOLT_STATE_FILE="$DOLT_STATE_DIR/dolt-provider-state.json"
+else
+  DOLT_STATE_FILE="$DOLT_STATE_DIR/dolt-state.json"
+fi
 
 GC_BEADS_BD_SCRIPT="$GC_CITY_PATH/.gc/system/packs/bd/assets/scripts/gc-beads-bd.sh"
 

@@ -73,8 +73,7 @@ func (c *City) Init(provider string) {
 		c.t.Fatalf("gc init failed: %v\n%s", err, out)
 	}
 	c.t.Cleanup(func() {
-		RunGC(c.Env, c.Dir, "stop", c.Dir)       //nolint:errcheck
-		RunGC(c.Env, c.Dir, "unregister", c.Dir) //nolint:errcheck
+		c.cleanupRuntime()
 	})
 }
 
@@ -86,8 +85,7 @@ func (c *City) InitFrom(srcDir string) {
 		c.t.Fatalf("gc init --from %s failed: %v\n%s", srcDir, err, out)
 	}
 	c.t.Cleanup(func() {
-		RunGC(c.Env, c.Dir, "stop", c.Dir)       //nolint:errcheck
-		RunGC(c.Env, c.Dir, "unregister", c.Dir) //nolint:errcheck
+		c.cleanupRuntime()
 	})
 }
 
@@ -112,8 +110,7 @@ func (c *City) RigAdd(rigPath string, include string) {
 	// unregister cleanup here ensures those temp dirs are removed only after rig
 	// runtime state under .gc has been torn down.
 	c.t.Cleanup(func() {
-		RunGC(c.Env, c.Dir, "stop", c.Dir)       //nolint:errcheck
-		RunGC(c.Env, c.Dir, "unregister", c.Dir) //nolint:errcheck
+		c.cleanupRuntime()
 	})
 }
 
@@ -164,6 +161,25 @@ func (c *City) Stop() {
 		_ = c.logFile.Close()
 		c.logFile = nil
 	}
+}
+
+func (c *City) cleanupRuntime() {
+	c.t.Helper()
+	if out, err := RunGC(c.Env, c.Dir, "stop", c.Dir); err != nil {
+		c.t.Logf("cleanup: gc stop %s: %v\n%s", c.Dir, err, out)
+	}
+	if out, err := RunGC(c.Env, c.Dir, "unregister", c.Dir); err != nil {
+		c.t.Logf("cleanup: gc unregister %s: %v\n%s", c.Dir, err, out)
+	}
+	if out, err := RunGC(c.Env, "", "supervisor", "stop", "--wait"); err != nil {
+		c.t.Logf("cleanup: gc supervisor stop --wait: %v\n%s", err, out)
+	}
+}
+
+// CleanupRuntime tears down supervisor-backed runtime state for manually initialized test cities.
+func (c *City) CleanupRuntime() {
+	c.t.Helper()
+	c.cleanupRuntime()
 }
 
 // AgentEnv reads an agent's environment by inspecting the session metadata.

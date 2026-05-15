@@ -252,7 +252,14 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 			}
 			for i := 1; i <= poolMax; i++ {
 				memberName := poolInstanceNameForAPI(a.Name, i, a)
+				// V2 agents address instances with the binding prefix
+				// (matching Agent.QualifiedInstanceName), so accept both
+				// the bare and binding-qualified forms — same shape the
+				// unlimited path applies above.
 				if memberName == baseName {
+					return a, true
+				}
+				if a.BindingName != "" && a.BindingName+"."+memberName == baseName {
 					return a, true
 				}
 			}
@@ -534,6 +541,31 @@ func poolQualifiedNameForSlot(a config.Agent, slot int) string {
 func isMultiSessionAgent(a config.Agent) bool {
 	maxSess := a.EffectiveMaxActiveSessions()
 	return maxSess == nil || *maxSess != 1
+}
+
+// classifyAgentKind labels an agent so dashboards can route its sessions to
+// the correct panel without referencing specific role names. The signal is
+// purely structural:
+//   - "crew" when the agent's identity Dir ends in a "crew" segment, the
+//     convention for persistent named workspaces under <rig>/crew/<name>.
+//   - "pool" when the agent can host more than one concurrent session.
+//   - "role" otherwise — a singleton agent (e.g. mayor, witness) that lives
+//     outside the crew dir. The classifier never inspects role names.
+func classifyAgentKind(a config.Agent) string {
+	if isCrewDir(a.Dir) {
+		return "crew"
+	}
+	if isMultiSessionAgent(a) {
+		return "pool"
+	}
+	return "role"
+}
+
+// isCrewDir reports whether dir is a "crew" segment (e.g. "crew" or
+// "<rig>/crew"). Crew agents organize themselves under this convention so
+// the dashboard can list them as named workers separate from role agents.
+func isCrewDir(dir string) bool {
+	return dir == "crew" || strings.HasSuffix(dir, "/crew")
 }
 
 func poolInstanceNameForAPI(base string, slot int, a config.Agent) string {

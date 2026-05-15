@@ -143,7 +143,18 @@ managed_runtime_port() (
 )
 
 if [ -z "${GC_DOLT_PORT:-}" ]; then
-    DOLT_STATE_FILE="${GC_DOLT_STATE_FILE:-${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}/packs/dolt/dolt-state.json}"
+    if [ -n "${GC_DOLT_STATE_FILE:-}" ]; then
+        DOLT_STATE_FILE="$GC_DOLT_STATE_FILE"
+    else
+        DOLT_PACK_DIR="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}/packs/dolt"
+        if [ -f "$DOLT_PACK_DIR/dolt-state.json" ]; then
+            DOLT_STATE_FILE="$DOLT_PACK_DIR/dolt-state.json"
+        elif [ -f "$DOLT_PACK_DIR/dolt-provider-state.json" ]; then
+            DOLT_STATE_FILE="$DOLT_PACK_DIR/dolt-provider-state.json"
+        else
+            DOLT_STATE_FILE="$DOLT_PACK_DIR/dolt-state.json"
+        fi
+    fi
     GC_DOLT_PORT="$(managed_runtime_port "$DOLT_STATE_FILE" "$GC_CITY_PATH/.beads/dolt")"
 fi
 
@@ -165,3 +176,26 @@ DOLT_USER="${GC_DOLT_USER:-root}"
 dolt_sql() {
     DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" dolt --host "$DOLT_HOST" --port "$DOLT_PORT" --user "$DOLT_USER" --no-tls sql "$@"
 }
+
+# has_wisps_table reports whether $1 contains a `wisps` table. Maintenance
+# scripts that iterate user databases use this as a proxy for "is this DB
+# bd-managed?" — every bd-managed schema has a wisps table. Databases that
+# exist on the server without bd schema (orphan CREATE DATABASEs, system
+# schemas not on the is_user_database blocklist, partial migrations) have
+# nothing for the maintenance scripts to do, and querying their tables just
+# produces spurious "table not found" anomalies / failure-summary entries.
+# See gastownhall/gascity#1816.
+#
+# Caller must have already validated $1 via valid_database_identifier — this
+# helper does not re-quote against injection. On probe failure (dolt
+# unreachable, connection dropped, etc.) returns 0 (success/has-wisps) so
+# the caller falls through to its normal queries; those will fail in the
+# same way and surface the dolt-side problem through the script's regular
+# error-handling path.
+has_wisps_table() (
+    db="$1"
+    if ! output=$(dolt_sql -r csv -q "SHOW TABLES FROM \`$db\` LIKE 'wisps'" 2>/dev/null); then
+        return 0
+    fi
+    [ "$(printf '%s\n' "$output" | tail -n +2 | head -1 | tr -d '\r')" = "wisps" ]
+)

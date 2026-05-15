@@ -68,7 +68,7 @@ if [[ -z "$expected_sha" ]]; then
     exit 1
   fi
   manifest_url="https://downloads.claude.ai/claude-code-releases/${version}/manifest.json"
-  expected_sha="$(curl -fsSL "$manifest_url" | jq -r --arg platform "$platform" '.platforms[$platform].checksum // empty')"
+  expected_sha="$(curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --retry-connrefused "$manifest_url" | jq -r --arg platform "$platform" '.platforms[$platform].checksum // empty')"
   if [[ -z "$expected_sha" ]]; then
     echo "No Claude Code checksum found for ${version}/${platform}" >&2
     exit 1
@@ -118,7 +118,7 @@ else
   trap 'rm -rf "$tmp"' EXIT
   binary="${tmp}/claude"
   url="https://downloads.claude.ai/claude-code-releases/${version}/${platform}/claude"
-  curl -fsSL -o "$binary" "$url"
+  curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --retry-connrefused -o "$binary" "$url"
   actual_sha="$(sha256_file "$binary")"
   if [[ "$actual_sha" != "$expected_sha" ]]; then
     echo "Claude Code checksum mismatch for ${version}/${platform}" >&2

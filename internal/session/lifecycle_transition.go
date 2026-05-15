@@ -335,14 +335,58 @@ func ArchivePatch(now time.Time, reason string, continuityEligible bool) Metadat
 }
 
 // ClosePatch records terminal close metadata before the bead status is closed.
-func ClosePatch(now time.Time, reason string) MetadataPatch {
+//
+// state retains the canonical short stateCode (used by reconciler logic and
+// closedNamedSessionReopenEligible). close_reason is expanded via
+// CanonicalCloseReason so cities running with validation.on-close=error
+// (which rejects close reasons under 20 characters) accept the close.
+// Without the expansion, every short-code session-close call (gc_swept,
+// orphaned, drained, failed-create, ...) is silently rejected by the
+// validator, leaving close_reason/closed_at stamped on an OPEN bead and
+// triggering reconciler flap as the next tick clears them.
+func ClosePatch(now time.Time, stateCode string) MetadataPatch {
 	ts := now.UTC().Format(time.RFC3339)
 	return MetadataPatch{
-		"state":        reason,
-		"close_reason": reason,
+		"state":        stateCode,
+		"close_reason": CanonicalCloseReason(stateCode),
 		"closed_at":    ts,
 		"synced_at":    ts,
 	}
+}
+
+// CanonicalCloseReason maps a short session stateCode to a human-readable
+// close reason of at least 20 characters, suitable for use as
+// `bd close --reason` under validation.on-close=error.
+//
+// Unknown non-empty codes fall back to "session terminated: <code>".
+// Codes already 20+ characters pass through unchanged.
+func CanonicalCloseReason(stateCode string) string {
+	switch stateCode {
+	case "":
+		return "session terminated: unknown state"
+	case "gc_swept":
+		return "session swept: no assigned work in any rig"
+	case "orphaned":
+		return "session orphaned: configured agent removed"
+	case "drained":
+		return "session drained: pool slot retired by reconciler"
+	case "failed-create":
+		return "session create failed: aborted before creation_complete"
+	case "stale-session":
+		return "session stale: no liveness signal beyond threshold"
+	case "duplicate":
+		return "session retired: duplicate of canonical bead"
+	case "duplicate-repair":
+		return "session retired: duplicate-repair canonicalization"
+	case "reconfigured":
+		return "session reconfigured: superseded by new agent config"
+	case "suspended":
+		return "session suspended: agent disabled in city config"
+	}
+	if len(stateCode) >= 20 {
+		return stateCode
+	}
+	return fmt.Sprintf("session terminated: %s", stateCode)
 }
 
 // RetireNamedSessionPatch archives a named-session bead without closing it so

@@ -277,6 +277,18 @@
               "null"
             ]
           },
+          "MaxSessionAge": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "MaxSessionAgeJitter": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "MinActiveSessions": {
             "format": "int64",
             "type": [
@@ -469,6 +481,8 @@
           "StartCommand",
           "Nudge",
           "IdleTimeout",
+          "MaxSessionAge",
+          "MaxSessionAgeJitter",
           "SleepAfterIdle",
           "InstallAgentHooks",
           "Skills",
@@ -789,6 +803,9 @@
           },
           "description": {
             "type": "string"
+          },
+          "ephemeral": {
+            "type": "boolean"
           },
           "from": {
             "type": "string"
@@ -2023,10 +2040,16 @@
             "$ref": "#/components/schemas/SessionCreateSucceededPayload"
           },
           {
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionMessageSucceededPayload"
           },
           {
             "$ref": "#/components/schemas/SessionSubmitSucceededPayload"
+          },
+          {
+            "$ref": "#/components/schemas/SupervisorFSPressureSkippedTickPayload"
           },
           {
             "$ref": "#/components/schemas/UnboundEventPayload"
@@ -5293,6 +5316,10 @@
       "RigCreateInputBody": {
         "additionalProperties": false,
         "properties": {
+          "default_branch": {
+            "description": "Mainline branch (e.g. main, master). Auto-detected when omitted.",
+            "type": "string"
+          },
           "name": {
             "description": "Rig name.",
             "minLength": 1,
@@ -5338,6 +5365,18 @@
       "RigPatch": {
         "additionalProperties": false,
         "properties": {
+          "DefaultBranch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "FormulaVars": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
           "Name": {
             "type": "string"
           },
@@ -5364,13 +5403,19 @@
           "Name",
           "Path",
           "Prefix",
-          "Suspended"
+          "DefaultBranch",
+          "Suspended",
+          "FormulaVars"
         ],
         "type": "object"
       },
       "RigPatchSetInputBody": {
         "additionalProperties": false,
         "properties": {
+          "default_branch": {
+            "description": "Override mainline branch.",
+            "type": "string"
+          },
           "name": {
             "description": "Rig name.",
             "type": "string"
@@ -5396,6 +5441,9 @@
           "agent_count": {
             "format": "int64",
             "type": "integer"
+          },
+          "default_branch": {
+            "type": "string"
           },
           "git": {
             "$ref": "#/components/schemas/GitStatus"
@@ -5433,6 +5481,10 @@
       "RigUpdateInputBody": {
         "additionalProperties": false,
         "properties": {
+          "default_branch": {
+            "description": "Mainline branch (e.g. main, master).",
+            "type": "string"
+          },
           "path": {
             "description": "Filesystem path.",
             "type": "string"
@@ -5671,6 +5723,27 @@
         ],
         "type": "object"
       },
+      "SessionLifecyclePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "description": "Short human-readable reason.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Canonical session bead ID. Always present.",
+            "type": "string"
+          },
+          "template": {
+            "description": "Session template name when known at the emission site.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
       "SessionMessageInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -5811,6 +5884,9 @@
           "activity": {
             "type": "string"
           },
+          "agent_kind": {
+            "type": "string"
+          },
           "alias": {
             "type": "string"
           },
@@ -5841,6 +5917,9 @@
             "type": "string"
           },
           "last_active": {
+            "type": "string"
+          },
+          "last_nudge_delivered_at": {
             "type": "string"
           },
           "last_output": {
@@ -6516,6 +6595,47 @@
         ],
         "type": "object"
       },
+      "SupervisorFSPressureSkippedTickPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "avg60": {
+            "description": "The Linux PSI some avg60 value observed for filesystem IO pressure.",
+            "format": "double",
+            "type": "number"
+          },
+          "consecutive_skips": {
+            "description": "Number of consecutive pressure skips including this tick.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "max_consecutive_skips": {
+            "description": "Maximum consecutive skips before the supervisor forces one reconciliation tick.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "outcome": {
+            "description": "The pressure decision outcome: skipped for a shed tick or forced for the bounded liveness tick.",
+            "type": "string"
+          },
+          "threshold": {
+            "description": "The configured avg60 threshold that triggered the skip.",
+            "format": "double",
+            "type": "number"
+          },
+          "trigger": {
+            "description": "The daemon tick trigger, such as patrol or poke.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "avg60",
+          "threshold",
+          "consecutive_skips",
+          "max_consecutive_skips",
+          "outcome"
+        ],
+        "type": "object"
+      },
       "SupervisorHealthOutputBody": {
         "additionalProperties": false,
         "properties": {
@@ -6684,12 +6804,14 @@
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
+            "session.max_age_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled",
             "session.quarantined": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined",
             "session.stopped": "#/components/schemas/TypedEventStreamEnvelopeSessionStopped",
             "session.suspended": "#/components/schemas/TypedEventStreamEnvelopeSessionSuspended",
             "session.undrained": "#/components/schemas/TypedEventStreamEnvelopeSessionUndrained",
             "session.updated": "#/components/schemas/TypedEventStreamEnvelopeSessionUpdated",
             "session.woke": "#/components/schemas/TypedEventStreamEnvelopeSessionWoke",
+            "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
             "worker.operation": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -6810,6 +6932,9 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined"
           },
           {
@@ -6826,6 +6951,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionWoke"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
@@ -7330,6 +7458,7 @@
                 "session.undrained",
                 "session.quarantined",
                 "session.idle_killed",
+                "session.max_age_killed",
                 "session.suspended",
                 "session.updated",
                 "bead.created",
@@ -7361,6 +7490,7 @@
                 "order.failed",
                 "provider.swapped",
                 "worker.operation",
+                "supervisor.fs_pressure.skipped_tick",
                 "extmsg.bound",
                 "extmsg.unbound",
                 "extmsg.group_created",
@@ -8404,7 +8534,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/NoPayload"
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
           "seq": {
             "format": "int64",
@@ -8520,6 +8650,48 @@
         "title": "TypedEventStreamEnvelope session.idle_killed",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionMaxAgeKilled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.max_age_killed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.max_age_killed",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionQuarantined": {
         "additionalProperties": false,
         "properties": {
@@ -8572,7 +8744,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/NoPayload"
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
           "seq": {
             "format": "int64",
@@ -8772,6 +8944,48 @@
         "title": "TypedEventStreamEnvelope session.woke",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SupervisorFSPressureSkippedTickPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "supervisor.fs_pressure.skipped_tick",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope supervisor.fs_pressure.skipped_tick",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeWorkerOperation": {
         "additionalProperties": false,
         "properties": {
@@ -8856,12 +9070,14 @@
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
+            "session.max_age_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled",
             "session.quarantined": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined",
             "session.stopped": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStopped",
             "session.suspended": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionSuspended",
             "session.undrained": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUndrained",
             "session.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUpdated",
             "session.woke": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWoke",
+            "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
             "worker.operation": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -8982,6 +9198,9 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined"
           },
           {
@@ -8998,6 +9217,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWoke"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
@@ -9549,6 +9771,7 @@
                 "session.undrained",
                 "session.quarantined",
                 "session.idle_killed",
+                "session.max_age_killed",
                 "session.suspended",
                 "session.updated",
                 "bead.created",
@@ -9580,6 +9803,7 @@
                 "order.failed",
                 "provider.swapped",
                 "worker.operation",
+                "supervisor.fs_pressure.skipped_tick",
                 "extmsg.bound",
                 "extmsg.unbound",
                 "extmsg.group_created",
@@ -10723,7 +10947,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/NoPayload"
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
           "seq": {
             "format": "int64",
@@ -10848,6 +11072,52 @@
         "title": "TypedTaggedEventStreamEnvelope session.idle_killed",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.max_age_killed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.max_age_killed",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeSessionQuarantined": {
         "additionalProperties": false,
         "properties": {
@@ -10907,7 +11177,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/NoPayload"
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
           "seq": {
             "format": "int64",
@@ -11124,6 +11394,52 @@
         "title": "TypedTaggedEventStreamEnvelope session.woke",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SupervisorFSPressureSkippedTickPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "supervisor.fs_pressure.skipped_tick",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope supervisor.fs_pressure.skipped_tick",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeWorkerOperation": {
         "additionalProperties": false,
         "properties": {
@@ -11190,6 +11506,34 @@
       "WorkerOperationEventPayload": {
         "additionalProperties": false,
         "properties": {
+          "agent_name": {
+            "description": "Qualified agent identity (best-effort, absent if the session has no agent_name metadata or alias).",
+            "type": "string"
+          },
+          "bead_id": {
+            "description": "Work bead this operation is acting on (best-effort, may be absent for non-bead-scoped ops).",
+            "type": "string"
+          },
+          "cache_creation_tokens": {
+            "description": "Input tokens written into the prompt cache (best-effort, currently always absent).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "cache_read_tokens": {
+            "description": "Cached input tokens read (best-effort, currently always absent).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "completion_tokens": {
+            "description": "Output tokens (best-effort, currently always absent).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "cost_usd_estimate": {
+            "description": "Estimated invocation cost in USD (best-effort, currently always absent; see #1255 for pricing seam).",
+            "format": "double",
+            "type": "number"
+          },
           "delivered": {
             "type": "boolean"
           },
@@ -11204,10 +11548,32 @@
             "format": "date-time",
             "type": "string"
           },
+          "latency_ms": {
+            "description": "LLM invocation wall-clock latency (best-effort, currently always absent — no source).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "model": {
+            "description": "LLM model identifier (best-effort, may be absent until follow-up wiring lands).",
+            "type": "string"
+          },
           "op_id": {
             "type": "string"
           },
           "operation": {
+            "type": "string"
+          },
+          "prompt_sha": {
+            "description": "SHA-256 of the rendered prompt (best-effort, currently always absent; #1256 follow-up).",
+            "type": "string"
+          },
+          "prompt_tokens": {
+            "description": "Non-cached input tokens (best-effort, currently always absent; treat zero as 'not measured', not 'free').",
+            "format": "int64",
+            "type": "integer"
+          },
+          "prompt_version": {
+            "description": "Template version frontmatter (best-effort, currently always absent; #1256 follow-up).",
             "type": "string"
           },
           "provider": {

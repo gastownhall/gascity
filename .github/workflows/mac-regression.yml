@@ -46,8 +46,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 env:
-  DOLT_VERSION: "1.86.6"
-  BD_VERSION: "v1.0.3"
+  DOLT_VERSION: "2.0.3"
+  BD_VERSION: "v1.0.4"
 
 # Trigger gate re-used by every job below via `if:`.
 # We want each job to run when EITHER:
@@ -108,7 +108,16 @@ jobs:
           install-claude-cli: "false"
       - name: Install tools
         run: make install-tools
+      - name: Restore golangci-lint cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .cache/golangci-lint
+          key: ${{ runner.os }}-golangci-lint-${{ hashFiles('go.sum', '.golangci.yml', 'Makefile') }}
+          restore-keys: |
+            ${{ runner.os }}-golangci-lint-
       - name: Lint
+        env:
+          GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
         run: make lint
       - name: Format
         run: make fmt-check

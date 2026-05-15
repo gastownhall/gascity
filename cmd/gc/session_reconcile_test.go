@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // testStore wraps a bead slice for SetMetadata tracking in tests.
@@ -1014,6 +1015,25 @@ func TestCheckStability_PendingCreateInFlightNotCounted(t *testing.T) {
 	}
 }
 
+func TestCheckStability_PendingCreateClaimNotCountedAfterStartupLeaseExpires(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+	dt := newDrainTracker()
+	session := makeBead("b1", map[string]string{
+		"last_woke_at":         now.Add(-90 * time.Second).Format(time.RFC3339),
+		"pending_create_claim": "true",
+		"wake_attempts":        "0",
+	})
+
+	if checkStability(&session, nil, false, dt, store, clk, nil) {
+		t.Fatal("pending_create_claim should suppress stability counting until create recovery clears the claim")
+	}
+	if got := session.Metadata["wake_attempts"]; got != "0" {
+		t.Fatalf("wake_attempts = %q, want 0", got)
+	}
+}
+
 func TestCheckStability_DrainingNotCounted(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
@@ -1438,6 +1458,31 @@ func TestHealState_DeadActiveHealsToAsleep(t *testing.T) {
 	}
 }
 
+// TestHealState_NoopOnClosedBead verifies healState returns early without
+// writing when session.Status == "closed". Without this guard the lifecycle
+// projection still resolves to BaseStateDrained for closed beads, so
+// healState would rewrite state=asleep on every reconciler tick of a
+// terminal bead — alternating with the gc_swept / orphaned writes from
+// closeBead and producing the closed-bead metadata flap.
+func TestHealState_NoopOnClosedBead(t *testing.T) {
+	store := newTestStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 29, 4, 0, 0, 0, time.UTC)}
+
+	session := makeBead("b1", map[string]string{
+		"state": "active",
+	})
+	session.Status = "closed"
+
+	healState(&session, false, store, clk)
+	if got := len(store.metadata["b1"]); got != 0 {
+		t.Errorf("healState wrote %d metadata entries on closed bead; want 0", got)
+	}
+	if session.Metadata["state"] != "active" {
+		t.Errorf("session.Metadata[state] = %q, want active (no-op should not mutate in-memory bead)",
+			session.Metadata["state"])
+	}
+}
+
 func TestHealState_PreservesCreatingWhileStartRequested(t *testing.T) {
 	store := newTestStore()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 29, 4, 0, 0, 0, time.UTC)}
@@ -1583,6 +1628,48 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 				"continuation_reset_pending": "true",
 			},
 		},
+		{
+			name:  "failed-create heals to asleep with failed-create sleep reason",
+			alive: false,
+			session: makeBead("b1", map[string]string{
+				"state": "failed-create",
+			}),
+			want: map[string]string{
+				"state":        "asleep",
+				"sleep_reason": "failed-create",
+			},
+		},
+		{
+			name:  "failed-create with existing sleep_reason preserved",
+			alive: false,
+			session: makeBead("b1", map[string]string{
+				"state":        "failed-create",
+				"sleep_reason": "auth-failure",
+			}),
+			want: map[string]string{
+				"state": "asleep",
+			},
+		},
+		{
+			// Regression: previously pending_create_claim=true caused
+			// sessionStartRequested to flip target back to "creating",
+			// ping-ponging the bead between failed-create and creating
+			// and leaving pending_create_claim set forever. The heal path
+			// must force target=asleep for state=failed-create+!alive
+			// and clear the stale claim in the same batch.
+			name:  "failed-create with stale pending_create_claim heals to asleep and clears claim",
+			alive: false,
+			session: makeBead("b1", map[string]string{
+				"state":                "failed-create",
+				"pending_create_claim": "true",
+			}),
+			want: map[string]string{
+				"state":                     "asleep",
+				"sleep_reason":              "failed-create",
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1603,6 +1690,33 @@ func TestHealStatePatchNilClockKeepsCreatingFresh(t *testing.T) {
 
 	if got := healStatePatch(session, false, nil); got != nil {
 		t.Fatalf("healStatePatch with nil clock = %#v, want nil patch for fresh-compatible creating", got)
+	}
+}
+
+func TestIsDeliberateSleepReason(t *testing.T) {
+	cases := []struct {
+		reason string
+		want   bool
+	}{
+		{"idle", true},
+		{"idle-timeout", true},
+		{"no-wake-reason", true},
+		{"config-drift", true},
+		{"drained", true},
+		{"user-hold", true},
+		{"wait-hold", true},
+		{"failed-create", true},
+		{"", false},
+		{"crash", false},
+		{"context-churn", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.reason, func(t *testing.T) {
+			got := isDeliberateSleepReason(tc.reason)
+			if got != tc.want {
+				t.Fatalf("isDeliberateSleepReason(%q) = %v, want %v", tc.reason, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -1940,7 +2054,7 @@ func TestFindAgentByTemplate(t *testing.T) {
 func TestIsKnownState_KnownStates(t *testing.T) {
 	known := []string{
 		"active", "asleep", "awake", "stopped", "suspended",
-		"orphaned", "closed", "quarantined", "creating", "",
+		"orphaned", "closed", "quarantined", "creating", string(sessionpkg.StateFailedCreate), "",
 	}
 	for _, state := range known {
 		session := makeBead("b1", map[string]string{"state": state})
@@ -1980,6 +2094,37 @@ func TestForwardCompatibility_UnknownState(t *testing.T) {
 	// The warning should appear in stderr.
 	if !strings.Contains(env.stderr.String(), "unknown state") {
 		t.Errorf("expected warning about unknown state in stderr, got: %s", env.stderr.String())
+	}
+}
+
+// TestReconcileSessionBeads_FailedCreateDesiredTargetNotStarted verifies that
+// state=failed-create cannot reach the provider start path even if a stale
+// desired-state entry points at that session_name.
+func TestReconcileSessionBeads_FailedCreateDesiredTargetNotStarted(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+
+	// Simulate the mid-rollback failure: rollbackPendingCreate writes
+	// state=failed-create via ClosePatch, then tries to set Status=closed.
+	// If that Status write fails the bead is left with Status=open,
+	// state=failed-create, and pending_create_claim still "true" — ClosePatch
+	// does not clear pending_create_claim, and clearPendingStartInFlightLease
+	// only clears last_woke_at. The combination blocks the pool slot until
+	// the reconciler processes it.
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                string(sessionpkg.StateFailedCreate),
+		"pending_create_claim": "true",
+	})
+
+	woken := env.reconcile([]beads.Bead{session})
+
+	if woken != 0 {
+		t.Errorf("expected failed-create desired target not to start, got woken=%d", woken)
+	}
+	if env.sp.IsRunning("worker") {
+		t.Error("failed-create session was started via Provider")
 	}
 }
 
@@ -2038,6 +2183,25 @@ func TestCheckChurn_RapidExitIgnored(t *testing.T) {
 
 	if checkChurn(&session, nil, false, dt, store, clk) {
 		t.Error("rapid exit should not trigger churn (handled by checkStability)")
+	}
+}
+
+func TestCheckChurn_PendingCreateClaimNotCountedAfterStartupLeaseExpires(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := newTestStore()
+	dt := newDrainTracker()
+	session := makeBead("b1", map[string]string{
+		"last_woke_at":         now.Add(-90 * time.Second).Format(time.RFC3339),
+		"pending_create_claim": "true",
+		"churn_count":          "0",
+	})
+
+	if checkChurn(&session, nil, false, dt, store, clk) {
+		t.Fatal("pending_create_claim should suppress churn counting until create recovery clears the claim")
+	}
+	if got := session.Metadata["churn_count"]; got != "0" {
+		t.Fatalf("churn_count = %q, want 0", got)
 	}
 }
 

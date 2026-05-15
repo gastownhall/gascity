@@ -31,6 +31,27 @@ const (
 	orderTrackingSweepMetadataReason       = "stale-order-tracking"
 	orderTrackingSweepMetadataInitiator    = "order-tracking-sweep"
 	orderTrackingWatchdogMetadataInitiator = "controller-watchdog"
+
+	// orphanedOrderTrackingCloseReason is the canonical close_reason
+	// stamped on orphan-sweep closes. It satisfies bd's
+	// validation.on-close=error validator (which rejects closes without
+	// an explicit --reason of >=20 characters) and provides a meaningful
+	// audit trail in the closed bead's metadata. Without this, the close
+	// is rejected, the bead stays open, and the next sweep tick re-stamps
+	// identical metadata — generating one bead.updated event per tick per
+	// bead.
+	orphanedOrderTrackingCloseReason = "order-tracking sweep: orphaned by prior controller"
+
+	// staleOrderTrackingCloseReason is the canonical close_reason stamped
+	// on stale-sweep closes (both the periodic order-tracking-sweep order
+	// and the controller's runtime watchdog). Same rationale as
+	// orphanedOrderTrackingCloseReason — without an explicit reason of
+	// >=20 chars, validation.on-close=error rejects every close, the
+	// watchdog retries every 30s, and the order-firing pipeline silently
+	// wedges (no bead.created/closed events, only metadata churn).
+	staleOrderTrackingCloseReason = "order-tracking sweep: stale tracking bead exceeded retention window"
+
+	completedOrderTrackingCloseReason = "order dispatch completed: tracking bead lifecycle finished"
 )
 
 // orderDispatcher evaluates order trigger conditions and dispatches due
@@ -80,6 +101,28 @@ func logDispatchError(stderr io.Writer, format string, args ...any) {
 	if stderr != nil {
 		fmt.Fprintln(stderr, msg) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// lockedWriter serializes Write calls so concurrent dispatchOne goroutines
+// logging via logDispatchError(m.stderr, ...) do not interleave bytes.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (lw *lockedWriter) Write(p []byte) (int, error) {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	return lw.w.Write(p)
+}
+
+// lockedStderr wraps w for storage on memoryOrderDispatcher.stderr. Returns
+// nil unchanged so logDispatchError's nil-guard keeps its original semantics.
+func lockedStderr(w io.Writer) io.Writer {
+	if w == nil {
+		return nil
+	}
+	return &lockedWriter{w: w}
 }
 
 type orderStoreFunc func(execStoreTarget) (beads.Store, error)
@@ -132,6 +175,7 @@ func buildOrderDispatcher(cityPath string, cfg *config.City, rec events.Recorder
 			logDispatchError(stderr, "gc start: order overrides: %v", err)
 		}
 	}
+	allAA = orders.FilterEnabled(allAA)
 
 	// Filter out manual-trigger orders — they are never auto-dispatched.
 	var auto []orders.Order
@@ -160,7 +204,7 @@ func buildOrderDispatcher(cityPath string, cfg *config.City, rec events.Recorder
 		ep:             ep,
 		execRun:        shellExecRunner,
 		rec:            rec,
-		stderr:         stderr,
+		stderr:         lockedStderr(stderr),
 		maxTimeout:     cfg.Orders.MaxTimeoutDuration(),
 		cfg:            cfg,
 		cityName:       loadedCityName(cfg, cityPath),
@@ -236,7 +280,11 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 				return cursor
 			}
 		}
-		triggerOpts := orderTriggerOptionsForTarget(cityPath, m.cfg, target, a)
+		triggerOpts, err := orderTriggerOptionsForTarget(cityPath, m.cfg, target, a)
+		if err != nil {
+			logDispatchError(m.stderr, "gc: order dispatch: building trigger env for %s: %v", a.ScopedName(), err)
+			continue
+		}
 		result := orders.CheckTriggerWithOptions(a, now, lastRunFn, m.ep, cursorFn, triggerOpts)
 		if lastRunErr != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: reading last run for %s: %v", a.ScopedName(), lastRunErr)
@@ -277,8 +325,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// Create tracking bead synchronously BEFORE dispatch goroutine.
 		// This prevents the cooldown trigger from re-firing on the next tick.
 		trackingBead, err := store.Create(beads.Bead{
-			Title:  "order:" + scoped,
-			Labels: []string{"order-run:" + scoped, labelOrderTracking},
+			Title:     "order:" + scoped,
+			Labels:    []string{"order-run:" + scoped, labelOrderTracking},
+			Ephemeral: true,
 		})
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v", scoped, err)
@@ -441,7 +490,7 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	// Defer order matters: doneInflight runs last, after Close makes the
 	// tracking bead outcome observable to a waiting drain.
 	defer m.doneInflight()
-	defer store.Close(trackingID) //nolint:errcheck // best-effort close
+	defer closeOrderTrackingBead(store, trackingID) //nolint:errcheck // best-effort close
 
 	timeout := effectiveTimeout(a, m.maxTimeout)
 	childCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -459,6 +508,13 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	} else {
 		m.dispatchWisp(childCtx, store, a, cityPath, trackingID)
 	}
+}
+
+func closeOrderTrackingBead(store beads.Store, trackingID string) error {
+	_, err := store.CloseAll([]string{trackingID}, map[string]string{
+		"close_reason": completedOrderTrackingCloseReason,
+	})
+	return err
 }
 
 // dispatchExec runs an exec order's shell command.
@@ -504,16 +560,24 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 		}
 	}
 
-	env := orderExecEnv(cityPath, m.cfg, target, a)
-	output, err := m.execRun(ctx, a.Exec, target.ScopeRoot, env)
+	env, err := orderExecEnvWithError(cityPath, m.cfg, target, a)
+	var output []byte
 	var execErrMsg string
 	if err != nil {
 		redactionEnv := append(os.Environ(), env...)
 		execErrMsg = execenv.RedactText(err.Error(), redactionEnv)
 		labels = []string{"exec-failed"}
 		logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, execErrMsg)
-		if len(output) > 0 {
-			logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, execenv.RedactText(string(output), redactionEnv))
+	} else {
+		output, err = m.execRun(ctx, a.Exec, target.ScopeRoot, env)
+		if err != nil {
+			redactionEnv := append(os.Environ(), env...)
+			execErrMsg = execenv.RedactText(err.Error(), redactionEnv)
+			labels = []string{"exec-failed"}
+			logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, execErrMsg)
+			if len(output) > 0 {
+				logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, execenv.RedactText(string(output), redactionEnv))
+			}
 		}
 	}
 
@@ -728,20 +792,35 @@ func (m *memoryOrderDispatcher) rigSuspendedByName(rigName string) bool {
 	return false
 }
 
-// hasOpenWorkStrict reports whether any non-closed work or tracking bead
-// exists for this order. Open tracking beads represent in-flight dispatch and
-// must block condition/event orders that do not consult LastRun.
+// hasOpenWorkStrict reports whether an open tracking bead exists for this
+// order — i.e. a dispatchOne goroutine is still in flight. Tracking beads
+// carry both "order-run:<scoped>" and labelOrderTracking; dispatchOne closes
+// them via defer when dispatch returns.
+//
+// Wisp root beads also carry "order-run:<scoped>" (so gc order history and
+// the orders API feed can attribute the wisp to its order), but molecule
+// roots never auto-close when their step beads finish. A leftover open
+// root is not in-flight work and must not block re-dispatch — counting it
+// caused ga-jra/ga-lo8c, where formula+pool orders stalled indefinitely
+// after a city restart because the first auto-fire's wisp root permanently
+// tripped this check.
 func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName string) (bool, error) {
 	results, err := store.List(beads.ListQuery{
-		Label: "order-run:" + scopedName,
-		Sort:  beads.SortCreatedDesc,
+		Label:    "order-run:" + scopedName,
+		Sort:     beads.SortCreatedDesc,
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return false, fmt.Errorf("listing order work beads: %w", err)
 	}
 	for _, b := range results {
-		if b.Status != "closed" {
-			return true, nil
+		if b.Status == "closed" {
+			continue
+		}
+		for _, lbl := range b.Labels {
+			if lbl == labelOrderTracking {
+				return true, nil
+			}
 		}
 	}
 	return false, nil
@@ -768,7 +847,9 @@ func (m *memoryOrderDispatcher) hasOpenWorkInStoresStrict(stores []beads.Store, 
 // closed. This is non-fatal: dispatch proceeds even if the sweep fails.
 func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
 	// ListByLabel without IncludeClosed returns only open beads.
-	all, err := store.ListByLabel(labelOrderTracking, 0)
+	// New tracking beads live in the wisps tier, but legacy issues-tier
+	// tracking beads may still exist after upgrade; sweep both.
+	all, err := store.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
 	if err != nil {
 		return 0, fmt.Errorf("listing order-tracking beads: %w", err)
 	}
@@ -779,7 +860,9 @@ func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
 	for i, b := range all {
 		ids[i] = b.ID
 	}
-	n, err := store.CloseAll(ids, nil)
+	n, err := store.CloseAll(ids, map[string]string{
+		"close_reason": orphanedOrderTrackingCloseReason,
+	})
 	if err != nil {
 		return n, fmt.Errorf("closing orphaned order-tracking beads: %w", err)
 	}
@@ -793,7 +876,7 @@ func sweepStaleOrderTracking(store beads.Store, now time.Time, staleAfter time.D
 	if staleAfter <= 0 {
 		return 0, fmt.Errorf("stale-after must be positive")
 	}
-	all, err := store.ListByLabel(labelOrderTracking, 0)
+	all, err := store.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
 	if err != nil {
 		return 0, fmt.Errorf("listing order-tracking beads: %w", err)
 	}
@@ -820,6 +903,7 @@ func sweepStaleOrderTracking(store beads.Store, now time.Time, staleAfter time.D
 	}
 	metadata := map[string]string{
 		"order_tracking_sweep": orderTrackingSweepMetadataReason,
+		"close_reason":         staleOrderTrackingCloseReason,
 	}
 	if initiator != "" {
 		metadata["order_tracking_sweep_by"] = initiator

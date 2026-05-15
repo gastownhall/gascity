@@ -203,6 +203,8 @@ gc bd update <work-bead> \
   --notes "Implemented: <brief summary>"
 REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"
 gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"
+gc session wake "$REFINERY_TARGET" || true
+gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true
 gc runtime drain-ack
 exit
 ```
@@ -220,7 +222,7 @@ is the "Idle Polecat heresy."
 
 | Want to... | Correct command |
 |------------|----------------|
-| Signal work complete | Done sequence (push, set metadata, reassign, `gc runtime drain-ack`, exit) |
+| Signal work complete | Done sequence (push, set metadata, reassign, wake refinery, nudge refinery, `gc runtime drain-ack`, exit) |
 | Read formula steps | `gc bd show <wisp-id>` (shows formula ref) |
 | Escalate blocker | `WITNESS_TARGET="${GC_RIG:+$GC_RIG/}witness"; gc mail send "$WITNESS_TARGET" -s "ESCALATION: desc [HIGH]" -m "..."` |
 | Context exhaustion | `gc runtime request-restart` |

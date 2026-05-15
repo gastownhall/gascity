@@ -139,7 +139,7 @@ func TestRegisteredCityNamePreservesExistingRegistryAlias(t *testing.T) {
 func TestRestartRegistrationNameCapturesExistingRegistryAlias(t *testing.T) {
 	dir := t.TempDir()
 	cityPath := filepath.Join(dir, "my-city")
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+	if err := ensureCityScaffold(cityPath); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"workspace-name\"\n"), 0o644); err != nil {

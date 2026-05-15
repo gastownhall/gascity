@@ -16,3 +16,6 @@
 /internal/buildimage/ @gastownhall/gascity-admin
 /cmd/gc/dashboard/web/package.json @gastownhall/gascity-admin
 /cmd/gc/dashboard/web/package-lock.json @gastownhall/gascity-admin
+
+# Public docs are owned by csells.
+/docs/ @csells

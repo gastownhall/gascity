@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // canonicalConfigHash computes a SHA-256 hash over the behavioral fields of
@@ -17,12 +19,14 @@ import (
 // that require a session restart when changed are included:
 //
 // Included: command, prompt content hash, sorted env, work_dir, pre_start,
-// session_setup, session_setup_script, session_live, overlay_dir, copy_files.
+// session_setup, session_setup_script, session_live, overlay_dir, effective
+// provider overlay slots, copy_files.
 //
-// Excluded: name, title, pool scaling, provider name, rig name, and nudge.
-// Nudge is treated as delivery-time work, not stable session identity; hashing
-// it causes false config-drift restarts when the reconciler injects per-tick
-// work nudges (for example the control-dispatcher workflow lane).
+// Excluded: name, title, pool scaling, launch provider name outside overlay
+// fallback identity, rig name, and nudge. Nudge is treated as delivery-time
+// work, not stable session identity; hashing it causes false config-drift
+// restarts when the reconciler injects per-tick work nudges (for example the
+// control-dispatcher workflow lane).
 //
 // Returns the first 16 hex characters of the SHA-256. Same config always
 // produces the same hash regardless of map iteration order.
@@ -98,6 +102,12 @@ func canonicalConfigHash(params TemplateParams, overlay map[string]string) strin
 	// OverlayDir.
 	h.Write([]byte(params.Hints.OverlayDir)) //nolint:errcheck
 	h.Write([]byte{0})                       //nolint:errcheck
+
+	runtime.HashOverlayProviderNames(h, runtime.OverlayProviderNamesFromParts(
+		params.Hints.ProviderName,
+		params.Hints.ProviderOverlayName,
+		params.Hints.InstallAgentHooks,
+	))
 
 	// CopyFiles.
 	for _, cf := range params.Hints.CopyFiles {

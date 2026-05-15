@@ -2,6 +2,7 @@ package session
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -261,7 +262,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			patch: ClosePatch(now, "orphaned"),
 			want: MetadataPatch{
 				"state":        "orphaned",
-				"close_reason": "orphaned",
+				"close_reason": "session orphaned: configured agent removed",
 				"closed_at":    now.Format(time.RFC3339),
 				"synced_at":    now.Format(time.RFC3339),
 			},
@@ -632,5 +633,58 @@ func TestReactivatePatchDoesNotForceHistoricalBeadEligible(t *testing.T) {
 	}
 	if merged["continuity_eligible"] != "false" {
 		t.Fatalf("continuity_eligible = %q, want false", merged["continuity_eligible"])
+	}
+}
+
+func TestCanonicalCloseReasonMeetsValidatorThreshold(t *testing.T) {
+	// bd's validation.on-close=error rejects close reasons under 20 chars.
+	// Every short stateCode that ClosePatch may stamp must round-trip to a
+	// reason >=20 chars; this guards against future additions falling back
+	// to a too-short literal and reintroducing the reconciler-flap bug.
+	stateCodes := []string{
+		"gc_swept",
+		"orphaned",
+		"drained",
+		"failed-create",
+		"stale-session",
+		"duplicate",
+		"duplicate-repair",
+		"reconfigured",
+		"suspended",
+	}
+	for _, code := range stateCodes {
+		got := CanonicalCloseReason(code)
+		trimmed := strings.TrimSpace(got)
+		if len(trimmed) < 20 {
+			t.Errorf("CanonicalCloseReason(%q) = %q (%d trimmed chars); want >=20", code, got, len(trimmed))
+		}
+	}
+}
+
+func TestCanonicalCloseReasonUnknownCodeFallback(t *testing.T) {
+	got := CanonicalCloseReason("xyz")
+	if trimmed := strings.TrimSpace(got); len(trimmed) < 20 {
+		t.Errorf("fallback for unknown short code = %q (%d trimmed chars); want >=20", got, len(trimmed))
+	}
+	empty := CanonicalCloseReason("")
+	if trimmed := strings.TrimSpace(empty); len(trimmed) < 20 {
+		t.Errorf("fallback for empty code = %q (%d trimmed chars); want >=20", empty, len(trimmed))
+	}
+	long := "an-already-long-state-code-of-thirty-plus-characters"
+	if got := CanonicalCloseReason(long); got != long {
+		t.Errorf("CanonicalCloseReason(%q) = %q; want passthrough", long, got)
+	}
+}
+
+func TestClosePatchKeepsShortStateCode(t *testing.T) {
+	// state must remain the short canonical code so reconciler logic and
+	// closedNamedSessionReopenEligible (which switches on state) keep working.
+	patch := ClosePatch(time.Now().UTC(), "orphaned")
+	if patch["state"] != "orphaned" {
+		t.Errorf("state = %q, want %q (short stateCode preserved)", patch["state"], "orphaned")
+	}
+	if trimmed := strings.TrimSpace(patch["close_reason"]); len(trimmed) < 20 {
+		t.Errorf("close_reason = %q (%d trimmed chars); want >=20 to satisfy validator",
+			patch["close_reason"], len(trimmed))
 	}
 }

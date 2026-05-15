@@ -59,6 +59,7 @@ func newSlingCmd(stdout, stderr io.Writer) *cobra.Command {
 	var merge string
 	var noConvoy bool
 	var owned bool
+	var reassign bool
 	var onFormula string
 	var dryRun bool
 	var noFormula bool
@@ -113,7 +114,7 @@ Examples:
 				fmt.Fprintf(stderr, "gc sling: --scope-kind must be city or rig\n") //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			code := cmdSling(args, formula, nudge, force, title, vars, merge, noConvoy, owned, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, stdout, stderr)
+			code := cmdSling(args, formula, nudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, stdout, stderr)
 			return exitForCode(code)
 		},
 	}
@@ -125,6 +126,7 @@ Examples:
 	cmd.Flags().StringVar(&merge, "merge", "", "merge strategy: direct, mr, or local")
 	cmd.Flags().BoolVar(&noConvoy, "no-convoy", false, "skip auto-convoy creation")
 	cmd.Flags().BoolVar(&owned, "owned", false, "mark auto-convoy as owned (skip auto-close)")
+	cmd.Flags().BoolVar(&reassign, "reassign", false, "clear any existing human assignee before routing (for human→pool handoff)")
 	cmd.Flags().StringVar(&onFormula, "on", "", "attach wisp from formula to bead before routing")
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "show what would be done without executing")
 	cmd.Flags().BoolVar(&noFormula, "no-formula", false, "suppress default formula (route raw bead)")
@@ -174,7 +176,7 @@ func shellSlingRunner(dir, command string, env map[string]string) (string, error
 }
 
 // cmdSling is the CLI entry point for gc sling.
-func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, stdout, stderr io.Writer) int {
+func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, stdout, stderr io.Writer) int {
 	// --stdin: read bead text from stdin early (before city resolution)
 	// so errors are reported immediately. First line = title, rest = description.
 	var stdinDescription string
@@ -294,7 +296,11 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		}
 	}
 	storeRef := workflowStoreRefForDir(storeDir, cityPath, cityName, cfg)
-	storeEnv := slingStoreEnv(cfg, cityPath, storeDir)
+	storeEnv, err := slingStoreEnvWithError(cfg, cityPath, storeDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc sling: building store env: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if sourceBead.exists && looksLikeInlineText(cfg, beadOrFormula) {
 		fmt.Fprintf(stderr, "gc sling: found existing bead %q in %s; routing it instead of creating inline text\n", beadOrFormula, storeRef) //nolint:errcheck // best-effort stderr
 	}
@@ -336,6 +342,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		Merge:         merge,
 		NoConvoy:      noConvoy,
 		Owned:         owned,
+		Reassign:      reassign,
 		Nudge:         doNudge,
 		Force:         force,
 		DryRun:        dryRun,
@@ -393,6 +400,11 @@ func loadSlingCityConfig(cityPath string) (*config.City, *config.Provenance, err
 }
 
 func slingStoreEnv(cfg *config.City, cityPath, storeDir string) map[string]string {
+	env, _ := slingStoreEnvWithError(cfg, cityPath, storeDir)
+	return env
+}
+
+func slingStoreEnvWithError(cfg *config.City, cityPath, storeDir string) (map[string]string, error) {
 	storeEnv := map[string]string{}
 	switch provider := rawBeadsProviderForScope(storeDir, cityPath); {
 	case provider == "file":
@@ -401,12 +413,20 @@ func slingStoreEnv(cfg *config.City, cityPath, storeDir string) map[string]strin
 	case strings.HasPrefix(provider, "exec:"):
 		// Explicit custom sling_query commands own their env for exec providers.
 	default:
-		storeEnv = bdRuntimeEnv(cityPath)
+		var err error
 		if !samePath(storeDir, cityPath) {
-			storeEnv = bdRuntimeEnvForRig(cityPath, cfg, storeDir)
+			storeEnv, err = bdRuntimeEnvForRigWithError(cityPath, cfg, storeDir)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			storeEnv, err = bdRuntimeEnvWithError(cityPath)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
-	return storeEnv
+	return storeEnv, nil
 }
 
 // findRigByPrefix returns the rig whose effective prefix matches (case-insensitive).
@@ -417,8 +437,8 @@ func findRigByPrefix(cfg *config.City, prefix string) (config.Rig, bool) {
 // beadPrefix returns the rig prefix for beadID, preferring the longest
 // configured prefix when cfg is non-nil. Pass cfg whenever the caller
 // needs hyphenated rig prefixes (e.g. "agent-diagnostics-hnn") to
-// resolve correctly; otherwise the underlying sling.BeadPrefix's
-// first-dash split is used.
+// resolve correctly; otherwise sling.BeadPrefix uses a config-free
+// last-hyphen heuristic with prose fallback.
 func beadPrefix(cfg *config.City, beadID string) string {
 	return sling.BeadPrefixForCity(cfg, beadID)
 }
@@ -948,97 +968,15 @@ func collectConflictErrors(err error, visit func(*sourceworkflow.ConflictError))
 }
 
 // buildSlingFormulaVars merges caller-provided vars with the runtime context
-// needed by common work formulas. Explicit --var entries always win.
+// needed by common work formulas. Delegates to the canonical implementation
+// in internal/sling so CLI dry-run previews match production routing, but
+// injects cliBranchResolver so live `git symbolic-ref origin/HEAD` probes
+// fire when neither bead metadata nor rig.DefaultBranch supply a branch.
 func buildSlingFormulaVars(formulaName, beadID string, userVars []string, a config.Agent, deps slingDeps) map[string]string {
-	vars := make(map[string]string, len(userVars)+6)
-	for _, v := range userVars {
-		key, value, ok := strings.Cut(v, "=")
-		if ok && key != "" {
-			vars[key] = value
-		}
+	if deps.Branches == nil {
+		deps.Branches = cliBranchResolver{}
 	}
-	addVar := func(key, value string) {
-		if value == "" {
-			return
-		}
-		if _, explicit := vars[key]; explicit {
-			return
-		}
-		vars[key] = value
-	}
-	addRoutingVar := func(key, value string) {
-		if _, explicit := vars[key]; explicit {
-			return
-		}
-		vars[key] = value
-	}
-
-	if beadID != "" {
-		// Attached work formulas conventionally expect issue=<bead-id>.
-		addVar("issue", beadID)
-	}
-	addRoutingVar("rig_name", a.Dir)
-	addRoutingVar("binding_name", a.BindingName)
-	addRoutingVar("binding_prefix", a.BindingPrefix())
-
-	autoBranch := slingFormulaTargetBranch(beadID, deps, a)
-	if slingFormulaUsesBaseBranch(formulaName) {
-		addVar("base_branch", autoBranch)
-	}
-	if slingFormulaUsesTargetBranch(formulaName) {
-		addVar("target_branch", autoBranch)
-	}
-
-	return vars
-}
-
-// slingFormulaSearchPaths returns the formula search paths for the current
-// sling context. Uses the target agent's rig to select rig-specific layers,
-// falling back to city-level layers via FormulaLayers.SearchPaths.
-func slingFormulaTargetBranch(beadID string, deps slingDeps, a config.Agent) string {
-	if target := beadMetadataTarget(deps.Store, beadID); target != "" {
-		return target
-	}
-	return defaultBranchFor(slingFormulaRepoDir(beadID, deps, a))
-}
-
-func beadMetadataTarget(store beads.Store, beadID string) string {
-	if store == nil || beadID == "" {
-		return ""
-	}
-
-	seen := make(map[string]struct{}, 8)
-	rootID := beadID
-	for beadID != "" {
-		if _, ok := seen[beadID]; ok {
-			return ""
-		}
-		seen[beadID] = struct{}{}
-
-		b, err := store.Get(beadID)
-		if err != nil {
-			return ""
-		}
-		if target := strings.TrimSpace(b.Metadata["target"]); target != "" {
-			if beadID == rootID || b.Type == "convoy" {
-				return target
-			}
-		}
-		beadID = strings.TrimSpace(b.ParentID)
-	}
-	return ""
-}
-
-func slingFormulaRepoDir(beadID string, deps slingDeps, a config.Agent) string {
-	return resolveSlingStoreRoot(deps.Cfg, deps.CityPath, beadID, a)
-}
-
-func slingFormulaUsesBaseBranch(formula string) bool {
-	return strings.HasPrefix(formula, "mol-polecat-") || formula == "mol-scoped-work"
-}
-
-func slingFormulaUsesTargetBranch(formula string) bool {
-	return formula == "mol-refinery-patrol"
+	return sling.BuildSlingFormulaVars(formulaName, beadID, userVars, a, deps)
 }
 
 // resolveSlingEnv returns extra env vars for the sling command.
@@ -1519,6 +1457,7 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 			})
 			if nudgeErr == nil && result.Delivered {
 				telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
+				stampLastNudgeDeliveredAt(store, target.sessionID, time.Now())
 				fmt.Fprintf(stdout, "Nudged %s\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort
 				return
 			}
@@ -1870,6 +1809,9 @@ func looksLikeBeadID(s string) bool {
 	return looksLikeBeadIDSuffix(baseSuffix)
 }
 
+// looksLikeBeadIDSuffix is the CLI's config-free inline-text heuristic. It is
+// deliberately stricter than sling's configured-prefix suffix gate so longer
+// all-letter prose still creates inline work instead of being routed as an ID.
 func looksLikeBeadIDSuffix(baseSuffix string) bool {
 	if len(baseSuffix) <= 4 {
 		return true

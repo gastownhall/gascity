@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pgauth"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
@@ -930,6 +931,115 @@ func TestDoSlingNudgePoolNoMembers(t *testing.T) {
 	}
 }
 
+func TestBuiltInSlingPoolRouteContractUsesMetadataOnly(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	maxPolecats := 5
+	maxRefinery := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "saitoc", Path: "/tmp/saitoc", Prefix: "gc"}},
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "saitoc", MaxActiveSessions: &maxPolecats},
+			{Name: "refinery", Dir: "saitoc", MaxActiveSessions: &maxRefinery},
+		},
+	}
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	store := newSlingTestStore()
+	deps.Store = store
+
+	created, err := store.Create(beads.Bead{Title: "route contract work", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	opts := testOpts(cfg.Agents[0], created.ID)
+	code := doSling(opts, deps, &fakeQuerier{bead: created}, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("doSling returned %d; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	routed, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get routed bead: %v", err)
+	}
+	if got := routed.Metadata["gc.routed_to"]; got != "saitoc/polecat" {
+		t.Fatalf("gc.routed_to = %q, want saitoc/polecat", got)
+	}
+	for _, label := range routed.Labels {
+		if strings.HasPrefix(label, "pool:") {
+			t.Fatalf("built-in sling added legacy pool label %q; labels=%v", label, routed.Labels)
+		}
+	}
+
+	counts, partials, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{
+		defaultScaleCheckTargetForAgent(sharedTestCityDir, cfg, &cfg.Agents[0], nil, map[string]beads.Store{"saitoc": store}),
+	})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errors: %v", errs)
+	}
+	if len(partials) != 0 {
+		t.Fatalf("defaultScaleCheckCounts partials: %v", partials)
+	}
+	if got := counts["saitoc/polecat"]; got != 1 {
+		t.Fatalf("polecat scale count after sling = %d, want 1", got)
+	}
+
+	inProgress := "in_progress"
+	polecatSession := "pc-1"
+	if err := store.Update(created.ID, beads.UpdateOpts{
+		Status:   &inProgress,
+		Assignee: &polecatSession,
+	}); err != nil {
+		t.Fatalf("claim update: %v", err)
+	}
+	claimed, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get claimed bead: %v", err)
+	}
+	states := ComputePoolDesiredStates(cfg, []beads.Bead{claimed}, []beads.Bead{{
+		ID:     polecatSession,
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":     "saitoc/polecat",
+			"session_name": polecatSession,
+		},
+	}}, map[string]int{"saitoc/polecat": 0})
+	if len(states) != 1 || len(states[0].Requests) != 1 {
+		t.Fatalf("resume states = %#v, want one polecat resume request", states)
+	}
+	if req := states[0].Requests[0]; req.Tier != "resume" || req.WorkBeadID != created.ID || req.SessionBeadID != polecatSession {
+		t.Fatalf("resume request = %#v, want claimed work preserved for polecat session", req)
+	}
+
+	open := "open"
+	refinery := "saitoc/refinery"
+	if err := store.Update(created.ID, beads.UpdateOpts{
+		Status:   &open,
+		Assignee: &refinery,
+		Labels:   []string{"pool:saitoc/polecat"},
+		Metadata: map[string]string{"gc.routed_to": refinery},
+	}); err != nil {
+		t.Fatalf("handoff update: %v", err)
+	}
+	counts, partials, errs = defaultScaleCheckCounts([]defaultScaleCheckTarget{
+		defaultScaleCheckTargetForAgent(sharedTestCityDir, cfg, &cfg.Agents[0], nil, map[string]beads.Store{"saitoc": store}),
+		defaultScaleCheckTargetForAgent(sharedTestCityDir, cfg, &cfg.Agents[1], nil, map[string]beads.Store{"saitoc": store}),
+	})
+	if len(errs) != 0 {
+		t.Fatalf("post-handoff defaultScaleCheckCounts errors: %v", errs)
+	}
+	if len(partials) != 0 {
+		t.Fatalf("post-handoff defaultScaleCheckCounts partials: %v", partials)
+	}
+	if got := counts["saitoc/polecat"]; got != 0 {
+		t.Fatalf("polecat scale count after refinery handoff with stale pool label = %d, want 0", got)
+	}
+	if got := counts["saitoc/refinery"]; got != 0 {
+		t.Fatalf("refinery generic scale count for assigned handoff = %d, want 0", got)
+	}
+}
+
 func TestDoSlingCustomSlingQuery(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -1021,7 +1131,7 @@ dir = "frontend"
 	t.Chdir(cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdSling([]string{"frontend/worker", "ship feature"}, false, false, true, "", nil, "", true, false, "", false, false, false, "", "", &stdout, &stderr)
+	code := cmdSling([]string{"frontend/worker", "ship feature"}, false, false, true, "", nil, "", true, false, false, "", false, false, false, "", "", &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1215,7 +1325,7 @@ func TestCmdSlingInlineBeadRigScopedBdProvider(t *testing.T) {
 	t.Chdir(cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdSling([]string{"frontend/worker", "ship feature"}, false, false, true, "", nil, "", true, false, "", false, false, false, "", "", &stdout, &stderr)
+	code := cmdSling([]string{"frontend/worker", "ship feature"}, false, false, true, "", nil, "", true, false, false, "", false, false, false, "", "", &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1249,7 +1359,7 @@ func TestCmdSlingInlineBeadBareTargetFromRigCwdBdProvider(t *testing.T) {
 	t.Chdir(rigDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdSling([]string{"worker", "ship feature"}, false, false, true, "", nil, "", true, false, "", false, false, false, "", "", &stdout, &stderr)
+	code := cmdSling([]string{"worker", "ship feature"}, false, false, true, "", nil, "", true, false, false, "", false, false, false, "", "", &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1286,7 +1396,7 @@ func TestCmdSlingRefusesMissingBead(t *testing.T) {
 		[]string{"frontend/worker", "FE-ghost1"},
 		false, false, false, // isFormula, doNudge, force=false
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		false, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -1327,7 +1437,7 @@ func TestCmdSlingDryRunRefusesMissingBead(t *testing.T) {
 		[]string{"frontend/worker", "FE-ghost1"},
 		false, false, false,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		false, false, true,
 		"", "",
 		&stdout, &stderr,
@@ -1352,7 +1462,7 @@ func TestCmdSlingDryRunPreviewsInlineText(t *testing.T) {
 		[]string{"frontend/worker", "write docs"},
 		false, false, false,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		false, false, true,
 		"", "",
 		&stdout, &stderr,
@@ -1399,7 +1509,7 @@ func TestCmdSlingDryRunInlineTextHasNoFalsePositivePreCheck(t *testing.T) {
 		[]string{"frontend/worker", "write docs"},
 		false, false, false,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		false, false, true,
 		"", "",
 		&stdout, &stderr,
@@ -1676,7 +1786,7 @@ dir = "orders"
 		[]string{"orders/worker", "FE-abcde"},
 		false, false, true,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		true, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -1726,7 +1836,7 @@ func TestCmdSlingHyphenatedRigPrefixExistingBeadDoesNotOrphan(t *testing.T) {
 		[]string{"agent-diagnostics/worker", beadID},
 		false, false, true,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		true, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -1752,7 +1862,7 @@ func TestCmdSlingHyphenatedRigPrefixMultiDashExistingBeadDoesNotOrphan(t *testin
 		[]string{"agent-diagnostics/worker", beadID},
 		false, false, true,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		true, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -1776,7 +1886,7 @@ func TestCmdSlingOneArgHyphenatedPrefixMultiDashExistingBeadUsesDefaultTarget(t 
 		[]string{beadID},
 		false, false, false,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		false, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -1800,7 +1910,7 @@ func TestCmdSlingCrossRigHyphenatedPrefixMultiDashExistingBeadUsesPrefixStore(t 
 		[]string{"other/worker", beadID},
 		false, false, true,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		true, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -1918,7 +2028,7 @@ func TestCmdSlingConfiguredPrefixAllAlphaExistingBeadUsesSelectedPrefixStore(t *
 		[]string{"frontend/worker", "FE-abcde"},
 		false, false, false,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		true, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -1958,7 +2068,7 @@ func TestCmdSlingOneArgConfiguredPrefixAllAlphaExistingBeadUsesDefaultTarget(t *
 		[]string{"FE-abcde"},
 		false, false, false,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		true, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -2064,7 +2174,7 @@ func TestCmdSlingForceBypassesMissingBeadCheck(t *testing.T) {
 		[]string{"frontend/worker", "FE-ghost1"},
 		false, false, true, // force=true
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		false, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -2115,7 +2225,7 @@ sling_query = "true"
 		[]string{"frontend/worker", "FE-ghost1"},
 		false, false, true,
 		"", nil, "",
-		false, false, "",
+		false, false, false, "",
 		true, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -2151,7 +2261,7 @@ func TestCmdSlingAcceptsExistingBead(t *testing.T) {
 		[]string{"frontend/worker", seeded.ID},
 		false, false, false, // force=false; existence check should pass naturally
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		false, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -2171,7 +2281,7 @@ func TestCmdSlingMultiDashBeadIDRoutesExistingBead(t *testing.T) {
 		[]string{"foundations/worker", "fo-spawn-storm"},
 		false, false, false,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		false, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -2214,7 +2324,7 @@ func TestCmdSlingOneArgMultiDashExistingBeadUsesDefaultTarget(t *testing.T) {
 		[]string{"fo-spawn-storm"},
 		false, false, false,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		false, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -2284,7 +2394,7 @@ dir = "orders"
 		[]string{"orders/worker", "fo-spawn-storm"},
 		false, false, true,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		true, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -2383,7 +2493,7 @@ dir = "live_docs"
 		[]string{"live_docs/worker", beadID},
 		false, false, false,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		false, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -2509,7 +2619,7 @@ dir = "orders"
 		[]string{"orders/worker", "od-zzzz1"},
 		false, false, false,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		false, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -2533,7 +2643,7 @@ func TestCmdSlingRefusesMissingConfiguredPrefixAllAlphaBeadID(t *testing.T) {
 		[]string{"frontend/worker", "FE-abcde"},
 		false, false, false,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		true, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -2597,6 +2707,41 @@ dolt.auto-start: false
 	}
 	if got := env["GC_RIG"]; got != "repo" {
 		t.Fatalf("GC_RIG = %q, want %q", got, "repo")
+	}
+}
+
+func TestSlingStoreEnvWithError_SurfacesPostgresProjectionError(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(cityDir, "rigs", "pg")
+	writePGScopeFixture(t, rigDir, "")
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "pg", Path: rigDir}}}
+
+	_, err := slingStoreEnvWithError(cfg, cityDir, rigDir)
+	if err == nil {
+		t.Fatal("slingStoreEnvWithError() error = nil, want postgres projection error")
+	}
+	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
+		t.Fatalf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
 	}
 }
 
@@ -3965,10 +4110,10 @@ func TestSlingFormulaRepoDirUsesCanonicalRigRoot(t *testing.T) {
 		},
 	}
 
-	got := slingFormulaRepoDir("plain text", deps, config.Agent{Dir: "alpha"})
+	got := sling.SlingFormulaRepoDir("plain text", deps, config.Agent{Dir: "alpha"})
 	want := filepath.Join(cityPath, "rigs", "alpha")
 	if got != want {
-		t.Fatalf("slingFormulaRepoDir() = %q, want %q", got, want)
+		t.Fatalf("SlingFormulaRepoDir() = %q, want %q", got, want)
 	}
 }
 
@@ -6534,6 +6679,89 @@ func TestDefaultFormulaDryRun(t *testing.T) {
 	}
 }
 
+func TestBuildSlingFormulaVarsPrefersStoredRigDefaultBranchForPolecatFormula(t *testing.T) {
+	// Storing default_branch in city.toml must override the live probe so
+	// rigs whose origin/HEAD is unset still get the right base_branch.
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: "/scamper", Prefix: "SC", DefaultBranch: "master"},
+		},
+	}
+	store := &recordingStore{
+		Store: beads.NewMemStore(),
+		beadsByID: map[string]beads.Bead{
+			"SC-1": {ID: "SC-1"}, // no metadata.target — must fall through to rig default
+		},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Store = store
+
+	vars := buildSlingFormulaVars("mol-polecat-work", "SC-1", nil, config.Agent{Name: "polecat", Dir: "scamper"}, deps)
+
+	if got, ok := findVarValue(vars, "base_branch"); !ok || got != "master" {
+		t.Fatalf("base_branch var = %q, %v; want master, true (from rig DefaultBranch)", got, ok)
+	}
+}
+
+func TestBuildSlingFormulaVarsPrefersStoredRigDefaultBranchForHyphenatedPrefix(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "agent-diagnostics", Path: "/agent-diagnostics", Prefix: "agent-diagnostics", DefaultBranch: "master"},
+		},
+	}
+	store := &recordingStore{
+		Store: beads.NewMemStore(),
+		beadsByID: map[string]beads.Bead{
+			"agent-diagnostics-hnn": {ID: "agent-diagnostics-hnn"},
+		},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Store = store
+
+	vars := buildSlingFormulaVars("mol-polecat-work", "agent-diagnostics-hnn", nil, config.Agent{Name: "polecat"}, deps)
+
+	if got, ok := findVarValue(vars, "base_branch"); !ok || got != "master" {
+		t.Fatalf("base_branch var = %q, %v; want master, true (from hyphenated rig prefix DefaultBranch)", got, ok)
+	}
+}
+
+func TestBuildSlingFormulaVarsPrefersStoredRigDefaultBranchForAgentPath(t *testing.T) {
+	rigPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: rigPath, Prefix: "SC", DefaultBranch: "master"},
+		},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+
+	vars := buildSlingFormulaVars("mol-refinery-patrol", "", nil, config.Agent{Name: "refinery", Dir: rigPath}, deps)
+
+	if got, ok := findVarValue(vars, "target_branch"); !ok || got != "master" {
+		t.Fatalf("target_branch var = %q, %v; want master, true (from path-scoped agent DefaultBranch)", got, ok)
+	}
+}
+
+func TestBuildSlingFormulaVarsPrefersStoredRigDefaultBranchForRefineryFormula(t *testing.T) {
+	// The refinery's mol-refinery-patrol uses target_branch instead of
+	// base_branch, but the resolution path is identical.
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: "/scamper", Prefix: "SC", DefaultBranch: "master"},
+		},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+
+	vars := buildSlingFormulaVars("mol-refinery-patrol", "", nil, config.Agent{Name: "refinery", Dir: "scamper"}, deps)
+
+	if got, ok := findVarValue(vars, "target_branch"); !ok || got != "master" {
+		t.Fatalf("target_branch var = %q, %v; want master, true (from rig DefaultBranch)", got, ok)
+	}
+}
+
 func TestBuildSlingFormulaVarsUsesBeadTargetForPolecatFormula(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	store := &recordingStore{
@@ -6799,8 +7027,8 @@ func TestBeadMetadataTargetStopsOnParentCycle(t *testing.T) {
 		},
 	}
 
-	if got := beadMetadataTarget(store, "A"); got != "" {
-		t.Fatalf("beadMetadataTarget = %q, want empty string", got)
+	if got := sling.BeadMetadataTarget(store, "A"); got != "" {
+		t.Fatalf("BeadMetadataTarget = %q, want empty string", got)
 	}
 }
 
@@ -6854,6 +7082,100 @@ func TestBuildSlingFormulaVarsInjectsIssueAndBaseBranch(t *testing.T) {
 	if got, ok := findVarValue(vars, "base_branch"); !ok || got != "integration/convoy-7" {
 		t.Fatalf("base_branch var = %q, %v; want integration/convoy-7, true", got, ok)
 	}
+}
+
+// TestBuildSlingFormulaVarsRigDefaults covers rig-scoped formula var defaults
+// flowing into the final vars map, plus precedence:
+//
+//	--var > rig.formula_vars > routing-injected > formula default
+func TestBuildSlingFormulaVarsRigDefaults(t *testing.T) {
+	t.Run("rig defaults flow in when caller omits --var", func(t *testing.T) {
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs: []config.Rig{
+				{
+					Name: "mo",
+					Path: "/mo",
+					FormulaVars: map[string]string{
+						"test_command": "make test-fast",
+						"lint_command": "golangci-lint run",
+					},
+				},
+			},
+		}
+		deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+		vars := buildSlingFormulaVars("mol-polecat-work", "MO-1", nil,
+			config.Agent{Name: "polecat", Dir: "mo"}, deps)
+
+		if got, ok := findVarValue(vars, "test_command"); !ok || got != "make test-fast" {
+			t.Fatalf("test_command = %q, %v; want make test-fast (from rig defaults)", got, ok)
+		}
+		if got, ok := findVarValue(vars, "lint_command"); !ok || got != "golangci-lint run" {
+			t.Fatalf("lint_command = %q, %v; want golangci-lint run (from rig defaults)", got, ok)
+		}
+	})
+
+	t.Run("--var wins over rig defaults", func(t *testing.T) {
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs: []config.Rig{
+				{
+					Name:        "mo",
+					Path:        "/mo",
+					FormulaVars: map[string]string{"test_command": "make test-fast"},
+				},
+			},
+		}
+		deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+		vars := buildSlingFormulaVars("mol-polecat-work", "MO-1",
+			[]string{"test_command=go test -short ./..."},
+			config.Agent{Name: "polecat", Dir: "mo"}, deps)
+
+		if got, ok := findVarValue(vars, "test_command"); !ok || got != "go test -short ./..." {
+			t.Fatalf("test_command = %q, %v; want 'go test -short ./...' (--var override)", got, ok)
+		}
+	})
+
+	t.Run("no rig match is a no-op", func(t *testing.T) {
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs: []config.Rig{
+				{
+					Name:        "mo",
+					Path:        "/mo",
+					FormulaVars: map[string]string{"test_command": "make test-fast"},
+				},
+			},
+		}
+		deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+		vars := buildSlingFormulaVars("mol-polecat-work", "UNK-1", nil,
+			config.Agent{Name: "polecat", Dir: "other-rig"}, deps)
+
+		if _, ok := findVarValue(vars, "test_command"); ok {
+			t.Fatalf("test_command should not be set when agent rig does not match any rig with formula_vars")
+		}
+	})
+
+	t.Run("rig match by filesystem path resolves like Dir=rigName", func(t *testing.T) {
+		rigPath := "/abs/mo-path"
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs: []config.Rig{
+				{
+					Name:        "mo",
+					Path:        rigPath,
+					FormulaVars: map[string]string{"test_command": "make test-fast"},
+				},
+			},
+		}
+		deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+		vars := buildSlingFormulaVars("mol-polecat-work", "MO-1", nil,
+			config.Agent{Name: "polecat", Dir: rigPath}, deps)
+
+		if got, ok := findVarValue(vars, "test_command"); !ok || got != "make test-fast" {
+			t.Fatalf("test_command = %q, %v; want make test-fast (path-resolved rig lookup)", got, ok)
+		}
+	})
 }
 
 // --- 1-arg sling tests (via doSling, not cmdSling which needs a real city) ---

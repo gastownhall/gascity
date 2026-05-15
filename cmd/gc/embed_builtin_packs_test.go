@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,7 +12,57 @@ import (
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+// TestPeekEventsProvider asserts the fast city.toml read path used by
+// `gc event emit` (gastownhall/gascity#2099) — it must return the
+// configured provider without doing any pack-include resolution.
+func TestPeekEventsProvider(t *testing.T) {
+	t.Run("set_in_city_toml", func(t *testing.T) {
+		dir := t.TempDir()
+		tomlPath := filepath.Join(dir, "city.toml")
+		if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city\"\n\n[events]\nprovider = \"exec:/usr/local/bin/my-handler\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := peekEventsProvider(tomlPath); got != "exec:/usr/local/bin/my-handler" {
+			t.Fatalf("peekEventsProvider = %q, want %q", got, "exec:/usr/local/bin/my-handler")
+		}
+	})
+
+	t.Run("section_absent", func(t *testing.T) {
+		dir := t.TempDir()
+		tomlPath := filepath.Join(dir, "city.toml")
+		if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := peekEventsProvider(tomlPath); got != "" {
+			t.Fatalf("peekEventsProvider = %q, want empty", got)
+		}
+	})
+
+	t.Run("file_missing", func(t *testing.T) {
+		if got := peekEventsProvider(filepath.Join(t.TempDir(), "nope.toml")); got != "" {
+			t.Fatalf("peekEventsProvider missing-file = %q, want empty", got)
+		}
+	})
+
+	// The whole point of this helper is to skip pack resolution. A
+	// well-formed [imports] block referencing a remote pack with no
+	// matching packs.lock entry MUST NOT cause peekEventsProvider to
+	// error or shell out — it should still return the [events] value.
+	t.Run("ignores_unresolved_imports", func(t *testing.T) {
+		dir := t.TempDir()
+		tomlPath := filepath.Join(dir, "city.toml")
+		body := "[workspace]\nname = \"city\"\nincludes = [\"git://example.invalid/foo//bar\"]\n\n[events]\nprovider = \"exec:./my-handler\"\n"
+		if err := os.WriteFile(tomlPath, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := peekEventsProvider(tomlPath); got != "exec:./my-handler" {
+			t.Fatalf("peekEventsProvider = %q, want %q (unresolved imports must not block the peek)", got, "exec:./my-handler")
+		}
+	})
+}
 
 func TestMaterializeBuiltinPacks(t *testing.T) {
 	dir := t.TempDir()
@@ -219,8 +270,12 @@ func TestBuiltinDoltDoctorBoundsVersionProbe(t *testing.T) {
 		name string
 		body string
 	}{
+		// Named gtimeout so the script's gtimeout-first preference picks
+		// up the fake even on macOS dev hosts where Homebrew coreutils
+		// exposes a real gtimeout from /opt/homebrew/bin. binDir is
+		// prepended to PATH below, so the fake wins.
 		{
-			name: "timeout",
+			name: "gtimeout",
 			body: "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$TIMEOUT_CAPTURE\"\nif [ \"$1\" = \"--kill-after=2\" ]; then\n  shift\nfi\nshift\nexec \"$@\"\n",
 		},
 		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.86.10\\n'\n"},
@@ -264,7 +319,9 @@ func TestBuiltinDoltDoctorReportsTimedOutVersionProbe(t *testing.T) {
 		name string
 		body string
 	}{
-		{name: "timeout", body: "#!/bin/sh\nexit 124\n"},
+		// Named gtimeout for the same reason as
+		// TestBuiltinDoltDoctorBoundsVersionProbe.
+		{name: "gtimeout", body: "#!/bin/sh\nexit 124\n"},
 		{name: "dolt", body: "#!/bin/sh\nprintf 'dolt version 1.86.1\\n'\n"},
 		{name: "flock", body: "#!/bin/sh\nexit 0\n"},
 		{name: "lsof", body: "#!/bin/sh\nexit 0\n"},
@@ -355,13 +412,18 @@ func TestMaterializeBuiltinPacksPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
 		`pi.on("before_agent_start"`,
+		"GC_PI_HOOK_VERSION",
+		"gc hook --inject",
+		`run(["prime", "--hook"], ctx.cwd)`,
+		"gc handoff --auto",
+		"mirrorTempCounter",
+		"fs.rmSync(tmp",
+		"gc-hooks run:",
+		"gc-hooks mirrorTranscript:",
 	} {
 		if !strings.Contains(data, want) {
 			t.Errorf("materialized Pi hook missing current extension API marker %q:\n%s", want, data)
 		}
-	}
-	if strings.Contains(data, "gc hook --inject") {
-		t.Errorf("materialized Pi hook should not install no-op gc hook --inject:\n%s", data)
 	}
 	for _, legacy := range []string{
 		"module.exports = {",
@@ -580,6 +642,451 @@ func TestMaterializeBuiltinPacks_PrunesLegacyOrderDirs(t *testing.T) {
 			t.Fatalf("flat order missing after materialization: %v", err)
 		}
 	}
+}
+
+func TestMaterializeBuiltinPacks_PrunesStaleGeneratedPackFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	stalePaths := []string{
+		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "orders", "removed-order.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "removed-command", "run.sh"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "assets", "scripts", "removed-helper.sh"),
+	}
+	for _, path := range stalePaths {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir stale path: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("stale"), 0o644); err != nil {
+			t.Fatalf("write stale path: %v", err)
+		}
+	}
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() second call error: %v", err)
+	}
+
+	for _, path := range stalePaths {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("stale generated pack file still exists: %s", path)
+		}
+	}
+
+	for _, path := range []string{
+		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "compact", "run.sh"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "orders", "mol-dog-compactor.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "maintenance", "orders", "gate-sweep.toml"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("embedded pack file missing after stale prune: %v", err)
+		}
+	}
+}
+
+func TestMaterializeBuiltinPacks_PruneIgnoresAtomicTempFilesForDesiredAssets(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	finalPath := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "compact", "run.sh")
+	tempPath := finalPath + ".tmp.foreign-writer"
+	if err := os.WriteFile(tempPath, []byte("#!/bin/sh\necho temp\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", tempPath, err)
+	}
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() second call error: %v", err)
+	}
+
+	if _, err := os.Stat(tempPath); err != nil {
+		t.Fatalf("atomic temp file was pruned: %v", err)
+	}
+	if _, err := os.Stat(finalPath); err != nil {
+		t.Fatalf("final embedded file missing after prune: %v", err)
+	}
+}
+
+func TestLoadCityConfigMaterializesBuiltinPacks(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := loadCityConfig(dir); err != nil {
+		t.Fatalf("loadCityConfig() error: %v", err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "pack.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "compact", "run.sh"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("builtin pack file missing after loadCityConfig: %v", err)
+		}
+	}
+}
+
+func TestLoadCityConfigSuppressDeprecatedOrderWarningsMaterializesBuiltinPacks(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := loadCityConfigSuppressDeprecatedOrderWarnings(dir); err != nil {
+		t.Fatalf("loadCityConfigSuppressDeprecatedOrderWarnings() error: %v", err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "pack.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "bd", "pack.toml"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("builtin pack file missing after suppress-warnings load: %v", err)
+		}
+	}
+}
+
+func TestLoadCityConfigFSMaterializesBuiltinPacksForOSFS(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(dir, "city.toml")); err != nil {
+		t.Fatalf("loadCityConfigFS(OSFS) error: %v", err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(dir, citylayout.SystemPacksRoot, "core", "pack.toml"),
+		filepath.Join(dir, citylayout.SystemPacksRoot, "bd", "pack.toml"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("builtin pack file missing after loadCityConfigFS(OSFS): %v", err)
+		}
+	}
+}
+
+func TestLoadCityConfigWithoutBuiltinPackRefreshFSDoesNotMaterializeBuiltinPacks(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadCityConfigWithoutBuiltinPackRefreshFS(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("loadCityConfigWithoutBuiltinPackRefreshFS(OSFS) error: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("loadCityConfigWithoutBuiltinPackRefreshFS returned nil config")
+	}
+	if _, err := os.Stat(filepath.Join(dir, citylayout.SystemPacksRoot)); !os.IsNotExist(err) {
+		t.Fatalf("builtin packs were materialized on read-only load path: %v", err)
+	}
+}
+
+func TestLoadCityConfigFallsBackToExistingBuiltinPacksWhenRefreshFails(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	targetDir := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "compact")
+	targetFile := filepath.Join(targetDir, "run.sh")
+	wantContent, err := os.ReadFile(targetFile)
+	if err != nil {
+		t.Fatalf("ReadFile(initial run.sh): %v", err)
+	}
+	staleContent := []byte("#!/bin/sh\necho stale\n")
+	if err := os.WriteFile(targetFile, staleContent, 0o755); err != nil {
+		t.Fatalf("WriteFile(stale run.sh): %v", err)
+	}
+	if err := os.Chmod(targetDir, 0o555); err != nil {
+		t.Fatalf("Chmod(%s): %v", targetDir, err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(targetDir, 0o755)
+	})
+
+	var stderr bytes.Buffer
+	if _, err := loadCityConfig(dir, &stderr); err != nil {
+		t.Fatalf("loadCityConfig() fallback error: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "builtin pack refresh incomplete") {
+		t.Fatalf("expected suppressed refresh warning, got %q", stderr.String())
+	}
+
+	got, err := os.ReadFile(targetFile)
+	if err != nil {
+		t.Fatalf("ReadFile(run.sh): %v", err)
+	}
+	if !bytes.Equal(got, staleContent) {
+		t.Fatalf("run.sh changed during read-only fallback; got %q", got)
+	}
+
+	if err := os.Chmod(targetDir, 0o755); err != nil {
+		t.Fatalf("Chmod(%s): %v", targetDir, err)
+	}
+	stderr.Reset()
+	if _, err := loadCityConfig(dir, &stderr); err != nil {
+		t.Fatalf("loadCityConfig() retry error: %v", err)
+	}
+	got, err = os.ReadFile(targetFile)
+	if err != nil {
+		t.Fatalf("ReadFile(run.sh) after retry: %v", err)
+	}
+	if !bytes.Equal(got, wantContent) {
+		t.Fatalf("run.sh did not refresh after retry; got %q", got)
+	}
+	if strings.Contains(stderr.String(), "builtin pack refresh incomplete") {
+		t.Fatalf("unexpected refresh warning after retry: %q", stderr.String())
+	}
+}
+
+func TestLoadCityConfigDeduplicatesBuiltinPackRefreshWarningsPerProcess(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	targetDir := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "compact")
+	targetFile := filepath.Join(targetDir, "run.sh")
+	if err := os.WriteFile(targetFile, []byte("#!/bin/sh\necho stale\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(stale run.sh): %v", err)
+	}
+	if err := os.Chmod(targetDir, 0o555); err != nil {
+		t.Fatalf("Chmod(%s): %v", targetDir, err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(targetDir, 0o755)
+	})
+
+	var stderr bytes.Buffer
+	for i := 0; i < 2; i++ {
+		if _, err := loadCityConfig(dir, &stderr); err != nil {
+			t.Fatalf("loadCityConfig() fallback attempt %d error: %v", i+1, err)
+		}
+	}
+
+	if got := strings.Count(stderr.String(), "builtin pack refresh incomplete"); got != 1 {
+		t.Fatalf("warning count = %d, want 1; stderr=%q", got, stderr.String())
+	}
+}
+
+func TestLoadCityConfigSuppressDeprecatedOrderWarningsDoesNotSuppressBuiltinPackRefreshWarnings(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	targetDir := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "commands", "compact")
+	targetFile := filepath.Join(targetDir, "run.sh")
+	if err := os.WriteFile(targetFile, []byte("#!/bin/sh\necho stale\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(stale run.sh): %v", err)
+	}
+	if err := os.Chmod(targetDir, 0o555); err != nil {
+		t.Fatalf("Chmod(%s): %v", targetDir, err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(targetDir, 0o755)
+	})
+
+	origDefaultWarningWriter := loadCityConfigDefaultWarningWriter
+	var stderr bytes.Buffer
+	loadCityConfigDefaultWarningWriter = func() io.Writer { return &stderr }
+	t.Cleanup(func() {
+		loadCityConfigDefaultWarningWriter = origDefaultWarningWriter
+	})
+
+	if _, err := loadCityConfigSuppressDeprecatedOrderWarnings(dir); err != nil {
+		t.Fatalf("loadCityConfigSuppressDeprecatedOrderWarnings() fallback error: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "builtin pack refresh incomplete") {
+		t.Fatalf("expected builtin pack refresh warning, got %q", stderr.String())
+	}
+}
+
+func TestLoadCityConfigFailsWhenRequiredBuiltinPackRefreshFails(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	targetDir := filepath.Join(dir, citylayout.SystemPacksRoot, "bd")
+	targetFile := filepath.Join(targetDir, "pack.toml")
+	if err := os.Remove(targetFile); err != nil {
+		t.Fatalf("Remove(%s): %v", targetFile, err)
+	}
+	if err := os.Chmod(targetDir, 0o555); err != nil {
+		t.Fatalf("Chmod(%s): %v", targetDir, err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(targetDir, 0o755)
+	})
+
+	if _, err := loadCityConfig(dir); err == nil {
+		t.Fatal("loadCityConfig() error = nil, want required builtin pack refresh failure")
+	} else if !strings.Contains(err.Error(), "materializing builtin packs") {
+		t.Fatalf("loadCityConfig() error = %v, want materialization failure", err)
+	}
+}
+
+func TestLoadCityConfigFailsWhenRequiredBuiltinPackRemainsPartiallyMaterialized(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	targetDir := filepath.Join(dir, citylayout.SystemPacksRoot, "core", "assets", "prompts")
+	targetFile := filepath.Join(targetDir, "pool-worker.md")
+	if err := os.Remove(targetFile); err != nil {
+		t.Fatalf("Remove(%s): %v", targetFile, err)
+	}
+	if err := os.Chmod(targetDir, 0o555); err != nil {
+		t.Fatalf("Chmod(%s): %v", targetDir, err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(targetDir, 0o755)
+	})
+
+	if _, err := loadCityConfig(dir); err == nil {
+		t.Fatal("loadCityConfig() error = nil, want partial required builtin pack failure")
+	} else if !strings.Contains(err.Error(), "required builtin packs remain unusable (core)") {
+		t.Fatalf("loadCityConfig() error = %v, want unusable core pack failure", err)
+	}
+}
+
+func TestLoadCityConfigFailsWhenRequiredBuiltinPackRefreshLeavesStaleContent(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	targetDir := filepath.Join(dir, citylayout.SystemPacksRoot, "core", "assets", "prompts")
+	targetFile := filepath.Join(targetDir, "pool-worker.md")
+	if err := os.WriteFile(targetFile, []byte("stale core prompt\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", targetFile, err)
+	}
+	if err := os.Chmod(targetDir, 0o555); err != nil {
+		t.Fatalf("Chmod(%s): %v", targetDir, err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(targetDir, 0o755)
+	})
+
+	if _, err := loadCityConfig(dir); err == nil {
+		t.Fatal("loadCityConfig() error = nil, want stale required builtin pack failure")
+	} else if !strings.Contains(err.Error(), "required builtin packs remain unusable (core)") {
+		t.Fatalf("loadCityConfig() error = %v, want unusable core pack failure", err)
+	}
+}
+
+func TestLoadCityConfigFallsBackWhenRequiredBuiltinPackHasOnlyExtraStaleFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	staleDir := filepath.Join(dir, citylayout.SystemPacksRoot, "core", "stale")
+	if err := os.MkdirAll(staleDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", staleDir, err)
+	}
+	staleFile := filepath.Join(staleDir, "leftover.txt")
+	if err := os.WriteFile(staleFile, []byte("obsolete\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", staleFile, err)
+	}
+	if err := os.Chmod(staleDir, 0o555); err != nil {
+		t.Fatalf("Chmod(%s): %v", staleDir, err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(staleDir, 0o755)
+	})
+
+	var stderr bytes.Buffer
+	if _, err := loadCityConfig(dir, &stderr); err != nil {
+		t.Fatalf("loadCityConfig() fallback error = %v, want warning-only fallback", err)
+	}
+	if !strings.Contains(stderr.String(), "builtin pack refresh incomplete") {
+		t.Fatalf("expected builtin pack refresh warning, got %q", stderr.String())
+	}
+	if _, err := os.Stat(staleFile); err != nil {
+		t.Fatalf("expected extra stale file to remain after fallback, got stat error %v", err)
+	}
+}
+
+func TestLoadCityConfigRevalidatesRequiredBuiltinPacksAfterReadyCacheSuccess(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := loadCityConfig(dir); err != nil {
+		t.Fatalf("loadCityConfig() initial error: %v", err)
+	}
+
+	targetFile := filepath.Join(dir, citylayout.SystemPacksRoot, "core", "pack.toml")
+	if err := os.Remove(targetFile); err != nil {
+		t.Fatalf("Remove(%s): %v", targetFile, err)
+	}
+
+	if _, err := loadCityConfig(dir); err != nil {
+		t.Fatalf("loadCityConfig() repair error: %v", err)
+	}
+	if _, err := os.Stat(targetFile); err != nil {
+		t.Fatalf("required pack file missing after ready-cache revalidation: %v", err)
+	}
+}
+
+func TestLoadCityConfigRevalidatesRequiredBuiltinPackContentsAfterReadyCacheSuccess(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := loadCityConfig(dir); err != nil {
+		t.Fatalf("loadCityConfig() initial error: %v", err)
+	}
+
+	targetFile := filepath.Join(dir, citylayout.SystemPacksRoot, "core", "assets", "prompts", "pool-worker.md")
+	if err := os.Remove(targetFile); err != nil {
+		t.Fatalf("Remove(%s): %v", targetFile, err)
+	}
+
+	if _, err := loadCityConfig(dir); err != nil {
+		t.Fatalf("loadCityConfig() repair error: %v", err)
+	}
+	if _, err := os.Stat(targetFile); err != nil {
+		t.Fatalf("required builtin asset missing after ready-cache content revalidation: %v", err)
+	}
+}
+
+func writeBuiltinPackLoadTestCity(dir string) error {
+	return os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644)
 }
 
 func TestBuiltinPackIncludes_DefaultProvider(t *testing.T) {

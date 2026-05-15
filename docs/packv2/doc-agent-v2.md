@@ -156,6 +156,22 @@ The `<provider>` name matches the Gas City provider name (`claude`, `codex`, `cu
 
 This means a city can ship distinct `CLAUDE.md` and `AGENTS.md` files for different providers, and each agent only sees the one for its provider.
 
+Kiro has one file-level exception: `per-provider/kiro/AGENTS.md` is treated as
+a fallback instruction file. If an `AGENTS.md` already exists in the destination
+from the workspace or an earlier overlay layer, Kiro preserves it and emits an
+overlay warning naming the skipped fallback. Other Kiro overlay files continue
+to follow the normal provider-aware layering rules.
+
+The built-in Kiro provider launches `kiro-cli` with `chat`,
+`--no-interactive`, `--agent gascity`, and `--trust-all-tools` by default. To
+remove or replace the unrestricted tool-trust flag, define the complete
+replacement argv in `city.toml`:
+
+```toml
+[providers.kiro]
+args = ["chat", "--no-interactive", "--agent", "gascity"]
+```
+
 ### Skills
 
 Skills use the [Agent Skills](https://agentskills.io) open standard, adopted by 30+ providers including Claude Code, Codex, Gemini, Cursor, GitHub Copilot, JetBrains Junie, Goose, Roo Code, and many more.

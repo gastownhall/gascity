@@ -416,7 +416,11 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 			continue
 		}
 		seen[qn] = true
-		probeEnv := controllerQueryRuntimeEnv(cityDir, cfg, a)
+		probeEnv, err := controllerQueryRuntimeEnv(cityDir, cfg, a)
+		if err != nil {
+			fmt.Fprintf(stderr, "session reconcile: building probe env for %s: %v\n", qn, err) //nolint:errcheck
+			continue
+		}
 		wq := prefixedWorkQueryForProbeWithEnv(controllerQueryPrefixEnv(probeEnv), cfg, cityDir, cityName, store, sessionBeads, a, stderr)
 		if wq == "" {
 			continue
@@ -705,6 +709,12 @@ func checkChurn(session *beads.Bead, cfg *config.City, alive bool, dt *drainTrac
 	if alive {
 		return false
 	}
+	// Pending-create sessions have not completed startup yet. A stale create
+	// lease should trigger a retried wake, not a churn increment that blocks
+	// the retry before start execution.
+	if session != nil && strings.TrimSpace(session.Metadata["pending_create_claim"]) == "true" {
+		return false
+	}
 	// Subprocess sessions exit intentionally — not churn.
 	if cfg != nil && cfg.Session.Provider == "subprocess" {
 		return false
@@ -749,7 +759,7 @@ func checkChurn(session *beads.Bead, cfg *config.City, alive bool, dt *drainTrac
 func isDeliberateSleepReason(reason string) bool {
 	switch strings.TrimSpace(reason) {
 	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained",
-		sleepReasonCityStop, "user-hold", "wait-hold", "rate_limit":
+		sleepReasonCityStop, "user-hold", "wait-hold", "rate_limit", "failed-create":
 		return true
 	default:
 		return false
@@ -872,6 +882,15 @@ func healState(session *beads.Bead, alive bool, store beads.Store, clk clock.Clo
 	if session == nil {
 		return
 	}
+	// healState is the third writer in the closed-bead flap cycle. The
+	// lifecycle projection still resolves to BaseStateDrained for closed
+	// beads, so without this guard healState writes state=asleep on
+	// every reconciler tick of a terminal bead — alternating with the
+	// gc_swept / orphaned writes from the closeBead path. Closed beads
+	// are terminal; their advisory state metadata should not move.
+	if session.Status == "closed" {
+		return
+	}
 	batch := healStatePatch(*session, alive, clk)
 	if len(batch) == 0 {
 		return
@@ -927,16 +946,38 @@ func healStatePatch(session beads.Bead, alive bool, clk clock.Clock) map[string]
 			target = string(sessionpkg.StateCreating)
 		}
 	}
+	// failed-create is a terminal rollback marker written by
+	// rollbackPendingCreate when a start attempt failed. A bead in this state
+	// whose runtime is not alive must heal toward asleep, even if
+	// pending_create_claim is still set from the failed attempt — otherwise
+	// sessionStartRequested pulls the bead back to creating and the
+	// reconciler ping-pongs forever. Clearing the stale claim in the same
+	// batch finishes the rollback the lifecycle path started.
+	if !alive && strings.TrimSpace(meta["state"]) == "failed-create" {
+		if strings.TrimSpace(meta["pending_create_claim"]) == "true" && pendingCreateLeaseActive(session, clk, 0) {
+			return nil
+		}
+		target = string(sessionpkg.StateAsleep)
+		if strings.TrimSpace(meta["pending_create_claim"]) == "true" {
+			batch["pending_create_claim"] = ""
+			batch["pending_create_started_at"] = ""
+		}
+	}
 	if target == "" {
 		return nil
 	}
 	if meta["state"] != target {
 		batch["state"] = target
 	}
-	if target == string(sessionpkg.StateAsleep) && view.ResetContinuation {
-		batch["session_key"] = ""
-		batch["started_config_hash"] = ""
-		batch["continuation_reset_pending"] = "true"
+	if target == string(sessionpkg.StateAsleep) {
+		if strings.TrimSpace(meta["sleep_reason"]) == "" && strings.TrimSpace(meta["state"]) == "failed-create" {
+			batch["sleep_reason"] = "failed-create"
+		}
+		if view.ResetContinuation {
+			batch["session_key"] = ""
+			batch["started_config_hash"] = ""
+			batch["continuation_reset_pending"] = "true"
+		}
 	}
 	return emptyNil(batch)
 }
@@ -1086,17 +1127,18 @@ func topoOrder(sessions []beads.Bead, deps map[string][]string) []beads.Bead {
 // during reconciliation to allow forward-compatible rollback from newer
 // versions that add states like "draining" or "archived".
 var knownSessionStates = map[string]bool{
-	"active":      true,
-	"asleep":      true,
-	"awake":       true,
-	"stopped":     true,
-	"suspended":   true,
-	"orphaned":    true,
-	"closed":      true,
-	"quarantined": true,
-	"creating":    true,
-	"drained":     true,
-	"":            true, // empty state is valid (legacy beads)
+	"active":                             true,
+	"asleep":                             true,
+	"awake":                              true,
+	"stopped":                            true,
+	"suspended":                          true,
+	"orphaned":                           true,
+	"closed":                             true,
+	"quarantined":                        true,
+	"creating":                           true,
+	"drained":                            true,
+	string(sessionpkg.StateFailedCreate): true, // processed so skip/orphan-close can release the slot
+	"":                                   true, // empty state is valid (legacy beads)
 }
 
 // isKnownState returns true if the bead's metadata state is recognized by

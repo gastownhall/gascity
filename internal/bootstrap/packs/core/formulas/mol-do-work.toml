@@ -7,8 +7,9 @@ description, implements the solution in the current working directory,
 and closes the bead when done.
 
 Use this for demos and simple single-agent workflows. For production
-multi-agent setups with branch isolation and merge review, use
-mol-polecat-work instead.
+multi-agent setups with worktree isolation, use mol-polecat-commit
+instead (or mol-polecat-work from the gastown pack for full refinery
+review).
 
 ## Variables
 

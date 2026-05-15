@@ -1,13 +1,13 @@
 description = """
 Shutdown dance — due process for stuck agents.
 
-Dispatched by filing a warrant bead with `--label=pool:dog`:
+Dispatched by filing a warrant bead routed to the dog pool:
 
 ```bash
-gc bd create --type=warrant \
+gc bd create --type=task \
   --title="Stuck: <agent>" \
-  --metadata '{"target":"<session>","reason":"<reason>","requester":"<who>"}' \
-  --label=pool:dog
+  --metadata '{"target":"<session>","reason":"<reason>","requester":"<who>","gc.routed_to":"<binding-prefix>dog"}' \
+  --label=warrant
 ```
 
 The dog pool picks up the warrant and pours this formula. Each wisp is
@@ -86,7 +86,7 @@ cancelled): close this step, burn the wisp, exit.
 
 **3. Check if target session is alive:**
 ```bash
-gc session peek {{target}} 1
+gc session peek {{target}} --lines 1
 ```
 If target session doesn't exist (already dead):
 - Close warrant: `gc bd close {{warrant_id}} --reason "Target already dead"`
@@ -118,7 +118,7 @@ sleep 60
 
 **3. Check for response:**
 ```bash
-gc session peek {{target}} 50
+gc session peek {{target}} --lines 50
 ```
 
 Look for the ALIVE keyword in the output after your health check message.
@@ -157,7 +157,7 @@ sleep 120
 
 **3. Check for response:**
 ```bash
-gc session peek {{target}} 50
+gc session peek {{target}} --lines 50
 ```
 
 Same evaluation as attempt 1: ALIVE keyword or active output.
@@ -193,7 +193,7 @@ sleep 240
 
 **3. Check for response:**
 ```bash
-gc session peek {{target}} 50
+gc session peek {{target}} --lines 50
 ```
 
 **4. If ALIVE or active:**
@@ -212,7 +212,7 @@ Three attempts, no response. Execute the warrant.
 
 **1. Capture final pane output for forensics:**
 ```bash
-gc session peek {{target}} 100
+gc session peek {{target}} --lines 100
 ```
 Save this output — it's the last evidence of what the agent was doing.
 

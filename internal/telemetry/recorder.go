@@ -31,6 +31,7 @@ type recorderInstruments struct {
 	agentCrashTotal      metric.Int64Counter
 	agentQuarantineTotal metric.Int64Counter
 	agentIdleKillTotal   metric.Int64Counter
+	agentMaxAgeKillTotal metric.Int64Counter
 	reconcileCycleTotal  metric.Int64Counter
 	nudgeTotal           metric.Int64Counter
 	configReloadTotal    metric.Int64Counter
@@ -85,6 +86,9 @@ func initInstruments() {
 		)
 		inst.agentIdleKillTotal, _ = m.Int64Counter("gc.agent.idle_kills.total",
 			metric.WithDescription("Total agent idle timeout restarts"),
+		)
+		inst.agentMaxAgeKillTotal, _ = m.Int64Counter("gc.agent.max_age_kills.total",
+			metric.WithDescription("Total agent preemptive max-session-age restarts"),
 		)
 		inst.reconcileCycleTotal, _ = m.Int64Counter("gc.reconcile.cycles.total",
 			metric.WithDescription("Total reconciliation cycles"),
@@ -269,6 +273,17 @@ func RecordAgentIdleKill(ctx context.Context, agentName string) {
 		metric.WithAttributes(attribute.String("agent", agentName)),
 	)
 	emit(ctx, "agent.idle_kill", otellog.SeverityInfo,
+		otellog.String("agent", agentName),
+	)
+}
+
+// RecordAgentMaxAgeKill records a preemptive max-session-age restart (metrics + log event).
+func RecordAgentMaxAgeKill(ctx context.Context, agentName string) {
+	initInstruments()
+	inst.agentMaxAgeKillTotal.Add(ctx, 1,
+		metric.WithAttributes(attribute.String("agent", agentName)),
+	)
+	emit(ctx, "agent.max_age_kill", otellog.SeverityInfo,
 		otellog.String("agent", agentName),
 	)
 }

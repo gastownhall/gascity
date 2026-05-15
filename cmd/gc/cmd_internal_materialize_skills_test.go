@@ -76,9 +76,20 @@ template = "mayor"
 		t.Fatalf("symlink target = %q, want %q", tgt, wantTarget)
 	}
 
-	// Stdout should include the "materialized" summary line.
-	if !strings.Contains(stdout.String(), "materialized 1 skill") {
-		t.Errorf("stdout missing summary: %q", stdout.String())
+	absWorkdir, err := filepath.Abs(workdir)
+	if err != nil {
+		t.Fatalf("filepath.Abs(%s): %v", workdir, err)
+	}
+	sinkDir, ok := materialize.VendorSink("claude")
+	if !ok {
+		t.Fatal("materialize.VendorSink(claude) = not found")
+	}
+	wantStdout := fmt.Sprintf(
+		"materialized 8 skill(s) into %s: core.gc-agents, core.gc-city, core.gc-dashboard, core.gc-dispatch, core.gc-mail, core.gc-rigs, core.gc-work, plan\n",
+		filepath.Join(absWorkdir, sinkDir),
+	)
+	if stdout.String() != wantStdout {
+		t.Errorf("stdout = %q, want %q", stdout.String(), wantStdout)
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -34,6 +35,8 @@ import (
 // ---------------------------------------------------------------------------
 
 const pollInterval = 100 * time.Millisecond
+
+var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "gemini", "opencode", "pi"}
 
 // Config holds configurable timeouts and intervals for the tmux provider.
 // All fields have sensible defaults matching the original hardcoded values.
@@ -128,6 +131,12 @@ const (
 	hiddenAttachPollInterval = 50 * time.Millisecond
 )
 
+// tmuxSubprocessTimeout caps the wall-clock time any single tmux subprocess
+// invocation may run before the kernel SIGKILLs it. Bounds the shutdown path
+// against wedged tmux servers and FD/inode-exhausted hosts where fork()
+// blocks. Test-overridable; production value is 30s.
+var tmuxSubprocessTimeout = 30 * time.Second
+
 // validateSessionName checks that a session name contains only safe characters.
 // Returns ErrInvalidSessionName if the name contains dots, colons, or other
 // characters that cause tmux to silently fail or produce cryptic errors.
@@ -206,8 +215,13 @@ func (t *Tmux) approvalDedup() *approvalDedup {
 	return t.interactionDedup
 }
 
-// runCtx executes a tmux command with a context (for timeout/cancellation).
+// runCtx executes a tmux command with a context. The caller-supplied
+// context is composed with tmuxSubprocessTimeout so a wedged tmux server
+// or fork-blocked host cannot hang the call indefinitely. When the parent
+// already has an earlier deadline, that earlier deadline wins.
 func (t *Tmux) runCtx(ctx context.Context, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, tmuxSubprocessTimeout)
+	defer cancel()
 	allArgs := []string{"-u"}
 	if t.cfg.SocketName != "" {
 		allArgs = append(allArgs, "-L", t.cfg.SocketName)
@@ -216,18 +230,12 @@ func (t *Tmux) runCtx(ctx context.Context, args ...string) (string, error) {
 	return t.exec.executeCtx(ctx, allArgs)
 }
 
-// run executes a tmux command and returns stdout.
-// All commands include -u flag for UTF-8 support regardless of locale settings.
-// When SocketName is configured, -L <socket> is injected after -u.
-// See: https://github.com/steveyegge/gastown/issues/1219
+// run executes a tmux command and returns stdout. All commands include -u
+// for UTF-8 regardless of locale; when SocketName is set, -L <socket> is
+// injected after -u (see https://github.com/steveyegge/gastown/issues/1219).
+// Every invocation is bounded by tmuxSubprocessTimeout via runCtx.
 func (t *Tmux) run(args ...string) (string, error) {
-	allArgs := []string{"-u"}
-	if t.cfg.SocketName != "" {
-		allArgs = append(allArgs, "-L", t.cfg.SocketName)
-	}
-	allArgs = append(allArgs, args...)
-
-	return t.exec.execute(allArgs)
+	return t.runCtx(context.Background(), args...)
 }
 
 // wrapError wraps tmux errors with context.
@@ -1485,14 +1493,8 @@ func (t *Tmux) NudgePane(pane, message string) error {
 
 func (t *Tmux) shouldSendEscapeBeforeEnter(target string) bool {
 	provider, err := t.GetEnvironment(target, "GC_PROVIDER")
-	if err == nil {
-		switch strings.TrimSpace(provider) {
-		case "claude", "codex", "gemini", "opencode":
-			return false
-		default:
-			// Unrecognized provider (custom alias) — fall through to
-			// process-tree detection instead of assuming escape is needed.
-		}
+	if err == nil && providerEnvSkipsEscape(provider) {
+		return false
 	}
 	if t.targetLooksLikeNoEscapeProvider(target) {
 		return false
@@ -1500,9 +1502,18 @@ func (t *Tmux) shouldSendEscapeBeforeEnter(target string) bool {
 	return true
 }
 
+func providerEnvSkipsEscape(provider string) bool {
+	family := sessionlog.ProviderFamily(provider)
+	for _, noEscape := range providersSkippingEscapeBeforeEnter {
+		if family == noEscape {
+			return true
+		}
+	}
+	return false
+}
+
 func (t *Tmux) targetLooksLikeNoEscapeProvider(target string) bool {
-	noEscapeProviders := []string{"claude", "codex", "gemini", "opencode"}
-	return t.targetLooksLikeAnyProvider(target, noEscapeProviders...)
+	return t.targetLooksLikeAnyProvider(target, providersSkippingEscapeBeforeEnter...)
 }
 
 func (t *Tmux) targetLooksLikeProvider(target, provider string) bool {

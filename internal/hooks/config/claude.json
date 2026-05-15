@@ -1,6 +1,7 @@
 {
   "skipDangerousModePermissionPrompt": true,
   "editorMode": "normal",
+  "awaySummaryEnabled": false,
   "hooks": {
     "SessionStart": [
       {

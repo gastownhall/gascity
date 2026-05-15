@@ -38,7 +38,7 @@ func cmdRestart(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc restart: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if code := cmdStop(args, stdout, stderr); code != 0 {
+	if code := cmdStop(args, stdout, stderr, 0, false); code != 0 {
 		return code
 	}
 	return doStartWithNameOverride(args, false /*controllerMode*/, stdout, stderr, nameOverride)

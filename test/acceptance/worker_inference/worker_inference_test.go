@@ -59,7 +59,6 @@ const (
 var inferenceDisabledOrders = []string{
 	"beads-health",
 	"cross-rig-deps",
-	"dolt-gc-nudge",
 	"dolt-health",
 	"dolt-remotes-patrol",
 	"gate-sweep",
@@ -2406,16 +2405,28 @@ func freshWorkerNudgeDelivery(provider string) string {
 }
 
 func liveProviderArgsAppend() []string {
-	if liveSetup.Profile != workerpkg.ProfileOpenCodeTmuxCLI {
+	switch liveSetup.Profile {
+	case workerpkg.ProfileOpenCodeTmuxCLI:
+		return []string{"--model", liveOpenCodeModel()}
+	case workerpkg.ProfilePiTmuxCLI:
+		return []string{"-e", "npm:pi-ollama-cloud", "--provider", "ollama-cloud", "--model", livePiModel()}
+	default:
 		return nil
 	}
-	return []string{"--model", liveOpenCodeModel()}
 }
 
 func liveOpenCodeModel() string {
 	model := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_OPENCODE_MODEL"))
 	if model == "" {
 		return defaultOpenCodeGeminiModel
+	}
+	return model
+}
+
+func livePiModel() string {
+	model := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_PI_MODEL"))
+	if model == "" {
+		return defaultPiOllamaCloudModel
 	}
 	return model
 }
@@ -3163,7 +3174,8 @@ func inferenceProbeSessionLine(data []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(cfg.Workspace.Provider) == "opencode" {
+	switch strings.TrimSpace(cfg.Workspace.Provider) {
+	case "opencode", "pi":
 		return `session = "tmux"` + "\n", nil
 	}
 	return "", nil
@@ -3175,7 +3187,7 @@ func ensureInferenceProbeProviderHooks(data []byte) ([]byte, bool, error) {
 		return nil, false, err
 	}
 	provider := strings.TrimSpace(cfg.Workspace.Provider)
-	if provider != "gemini" && provider != "opencode" {
+	if provider != "gemini" && provider != "opencode" && provider != "pi" {
 		return data, false, nil
 	}
 	if stringListContains(cfg.Workspace.InstallAgentHooks, provider) {

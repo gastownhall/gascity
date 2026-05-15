@@ -7,6 +7,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // DiscoveredDoctor is a convention-discovered pack doctor check.
@@ -49,7 +50,7 @@ func resolveContainedDoctorPath(kind, packDir, checkDir, relPath string) (string
 	if err != nil {
 		return "", err
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if pathutil.IsOutsideDir(rel) {
 		return "", fmt.Errorf("%s path %q escapes the pack directory", kind, relPath)
 	}
 	return candidate, nil

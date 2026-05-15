@@ -1,6 +1,8 @@
+# Converted from formula+pool to exec. All doctor checks are read-only:
+# SQL probe, PROCESSLIST count, disk usage, orphan DB detection, backup
+# artifact freshness. No LLM judgment needed — runs inline in the controller.
 [order]
 description = "Probe Dolt server health and report status"
-formula = "mol-dog-doctor"
+exec = "$PACK_DIR/assets/scripts/mol-dog-doctor.sh"
 trigger = "cooldown"
 interval = "5m"
-pool = "dog"

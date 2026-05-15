@@ -5,11 +5,23 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+func putExecutableOnPath(t *testing.T, name string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write executable %s: %v", name, err)
+	}
+	t.Setenv("PATH", dir)
+}
 
 func TestRigList(t *testing.T) {
 	state := newFakeState(t)
@@ -83,6 +95,86 @@ func TestRigEnrichment(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&rig) //nolint:errcheck
 	if rig.AgentCount != 2 {
 		t.Errorf("AgentCount = %d, want 2", rig.AgentCount)
+	}
+	if rig.RunningCount != 1 {
+		t.Errorf("RunningCount = %d, want 1", rig.RunningCount)
+	}
+}
+
+type falseNegativeSessionProvider struct {
+	*runtime.Fake
+}
+
+func (p *falseNegativeSessionProvider) IsRunning(name string) bool {
+	_ = p.Fake.IsRunning(name)
+	return false
+}
+
+type sessionProviderOverrideState struct {
+	*fakeState
+	provider runtime.Provider
+}
+
+func (s *sessionProviderOverrideState) SessionProvider() runtime.Provider {
+	return s.provider
+}
+
+func TestRigEnrichmentUsesProcessNamesForRuntimeFalseNegative(t *testing.T) {
+	base := newFakeState(t)
+	base.cfg.Agents = []config.Agent{
+		{Name: "worker", Dir: "myrig", Provider: "test-agent", MaxActiveSessions: intPtr(1), ProcessNames: []string{"agent-cli"}},
+	}
+	sp := &falseNegativeSessionProvider{Fake: runtime.NewFake()}
+	if err := sp.Start(context.Background(), "myrig--worker", runtime.Config{ProcessNames: []string{"agent-cli"}}); err != nil {
+		t.Fatalf("Start existing session: %v", err)
+	}
+	state := &sessionProviderOverrideState{
+		fakeState: base,
+		provider:  sp,
+	}
+	h := newTestCityHandler(t, state)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/rig/myrig"), nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var rig rigResponse
+	if err := json.NewDecoder(rec.Body).Decode(&rig); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if rig.RunningCount != 1 {
+		t.Errorf("RunningCount = %d, want 1", rig.RunningCount)
+	}
+}
+
+func TestRigEnrichmentUsesProviderlessDetectedProcessNames(t *testing.T) {
+	putExecutableOnPath(t, "codex")
+	base := newFakeState(t)
+	base.cfg.Workspace.Provider = ""
+	base.cfg.Agents = []config.Agent{
+		{Name: "worker", Dir: "myrig", MaxActiveSessions: intPtr(1)},
+	}
+	sp := &falseNegativeSessionProvider{Fake: runtime.NewFake()}
+	if err := sp.Start(context.Background(), "myrig--worker", runtime.Config{ProcessNames: []string{"codex"}}); err != nil {
+		t.Fatalf("Start existing session: %v", err)
+	}
+	state := &sessionProviderOverrideState{
+		fakeState: base,
+		provider:  sp,
+	}
+	h := newTestCityHandler(t, state)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/rig/myrig"), nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var rig rigResponse
+	if err := json.NewDecoder(rec.Body).Decode(&rig); err != nil {
+		t.Fatalf("decode: %v", err)
 	}
 	if rig.RunningCount != 1 {
 		t.Errorf("RunningCount = %d, want 1", rig.RunningCount)

@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // SafePATH is the fallback PATH for gate script execution.
@@ -164,7 +165,7 @@ func ResolveConditionPath(cityPath, conditionPath string) (string, error) {
 	// for relative paths.
 	if !filepath.IsAbs(conditionPath) {
 		rel, err := filepath.Rel(canonCity, absPath)
-		if err != nil || isOutsideDir(rel) {
+		if err != nil || pathutil.IsOutsideDir(rel) {
 			return "", fmt.Errorf("resolving gate condition path: path traversal not allowed: %s", conditionPath)
 		}
 	}

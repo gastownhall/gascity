@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strconv"
 	"testing"
@@ -206,6 +208,35 @@ func TestHandleOrderGet_ScopedName(t *testing.T) {
 	}
 }
 
+func TestHandleOrderGetResolvesDisabledOrder(t *testing.T) {
+	fs := newFakeState(t)
+	enabled := false
+	fs.allOrders = []orders.Order{
+		{Name: "health", Exec: "echo ok", Trigger: "cooldown", Enabled: &enabled},
+	}
+	fs.autos = orders.FilterEnabled(fs.allOrders)
+	h := newTestCityHandler(t, fs)
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/order/health"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp orderResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Name != "health" {
+		t.Errorf("name = %q, want %q", resp.Name, "health")
+	}
+	if resp.Enabled {
+		t.Error("enabled = true, want false")
+	}
+}
+
 func TestHandleOrderGet_NotFound(t *testing.T) {
 	fs := newFakeState(t)
 	h := newTestCityHandler(t, fs)
@@ -271,6 +302,45 @@ func TestHandleOrderEnable(t *testing.T) {
 	}
 }
 
+func TestHandleOrderDisableThenEnableResolvesFilteredOrder(t *testing.T) {
+	fs := newFakeMutatorState(t)
+	fs.allOrders = []orders.Order{
+		{Name: "health", Exec: "echo ok", Trigger: "cooldown"},
+	}
+	fs.autos = orders.FilterEnabled(fs.allOrders)
+	h := newTestCityHandler(t, fs)
+
+	req := newPostRequest(cityURL(fs, "/order/health/disable"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	enabled := false
+	fs.allOrders = []orders.Order{
+		{Name: "health", Exec: "echo ok", Trigger: "cooldown", Enabled: &enabled},
+	}
+	fs.autos = orders.FilterEnabled(fs.allOrders)
+
+	req = newPostRequest(cityURL(fs, "/order/health/enable"), nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("enable status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	if len(fs.cfg.Orders.Overrides) != 1 {
+		t.Fatalf("expected 1 override, got %d", len(fs.cfg.Orders.Overrides))
+	}
+	ov := fs.cfg.Orders.Overrides[0]
+	if ov.Enabled == nil || !*ov.Enabled {
+		t.Error("expected enabled=true after re-enable")
+	}
+}
+
 func TestHandleOrdersFeedReturnsWorkflowAndScheduledOrderRuns(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cityBeadStore = beads.NewMemStore()
@@ -305,9 +375,10 @@ func TestHandleOrdersFeedReturnsWorkflowAndScheduledOrderRuns(t *testing.T) {
 	}
 
 	_, err = fs.cityBeadStore.Create(beads.Bead{
-		Title:  "order:nightly-review:rig:myrig",
-		Status: "closed",
-		Labels: []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp"},
+		Title:     "order:nightly-review:rig:myrig",
+		Status:    "closed",
+		Labels:    []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp"},
+		Ephemeral: true,
 	})
 	if err != nil {
 		t.Fatalf("create tracking bead: %v", err)
@@ -626,9 +697,10 @@ func TestHandleOrdersFeedIncludesRigStoreTrackingBeads(t *testing.T) {
 	}
 
 	tracking, err := rigStore.Create(beads.Bead{
-		Title:  "order:nightly-review:rig:myrig",
-		Status: "closed",
-		Labels: []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp"},
+		Title:     "order:nightly-review:rig:myrig",
+		Status:    "closed",
+		Labels:    []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp"},
+		Ephemeral: true,
 	})
 	if err != nil {
 		t.Fatalf("create tracking bead: %v", err)
@@ -680,6 +752,49 @@ func TestHandleOrdersFeedIncludesRigStoreTrackingBeads(t *testing.T) {
 	}
 	if item.UpdatedAt == item.StartedAt {
 		t.Fatalf("updated_at = %q, started_at = %q, want updated_at to reflect newer run activity", item.UpdatedAt, item.StartedAt)
+	}
+}
+
+func TestHandleOrdersFeedIncludesLegacyIssuesTierTrackingBeads(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	rigStore := fs.stores["myrig"]
+	if rigStore == nil {
+		t.Fatal("expected rig store")
+	}
+	fs.autos = []orders.Order{
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Trigger: "cron", Interval: "24h", Pool: "reviewers", Rig: "myrig"},
+	}
+
+	tracking, err := rigStore.Create(beads.Bead{
+		Title:  "order:nightly-review:rig:myrig",
+		Status: "open",
+		Labels: []string{"order-tracking", "order-run:nightly-review:rig:myrig", "wisp"},
+	})
+	if err != nil {
+		t.Fatalf("create legacy tracking bead: %v", err)
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/feed?scope_kind=rig&scope_ref=myrig"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Items []monitorFeedItemResponse `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("len(items) = %d, want legacy tracking item: %+v", len(resp.Items), resp.Items)
+	}
+	if resp.Items[0].BeadID != tracking.ID {
+		t.Fatalf("bead_id = %q, want legacy issues-tier tracking bead %q", resp.Items[0].BeadID, tracking.ID)
 	}
 }
 
@@ -776,6 +891,15 @@ func (s *cachedOnlyOrderHistoryStore) List(query beads.ListQuery) ([]beads.Bead,
 		s.includeClosedListCalls++
 	}
 	return s.Store.List(query)
+}
+
+type fixedOrderHistoryStore struct {
+	beads.Store
+	rows []beads.Bead
+}
+
+func (s *fixedOrderHistoryStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	return beads.ApplyListQuery(s.rows, query), nil
 }
 
 func TestHandleOrderCheckUsesCachedHistoryWhenAvailable(t *testing.T) {
@@ -962,6 +1086,53 @@ func TestHandleOrderHistoryUsesRigStore(t *testing.T) {
 	}
 }
 
+func TestHandleOrderHistoryUsesAllOrdersForDisabledExecMetadata(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	disabled := false
+	fs.allOrders = []orders.Order{
+		{Name: "nightly-review", Exec: "scripts/nightly.sh", Trigger: "cooldown", Interval: "1h", Enabled: &disabled},
+	}
+
+	run, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:  "nightly-review run",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review", "wisp"},
+	})
+	if err != nil {
+		t.Fatalf("create history bead: %v", err)
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Entries []struct {
+			BeadID        string `json:"bead_id"`
+			CaptureOutput bool   `json:"capture_output"`
+			HasOutput     bool   `json:"has_output"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(resp.Entries))
+	}
+	if resp.Entries[0].BeadID != run.ID {
+		t.Fatalf("bead_id = %q, want %q", resp.Entries[0].BeadID, run.ID)
+	}
+	if !resp.Entries[0].CaptureOutput || !resp.Entries[0].HasOutput {
+		t.Fatalf("entry = %+v, want disabled exec order output metadata", resp.Entries[0])
+	}
+}
+
 func TestHandleOrderHistoryMarksAdHocOutputMetadata(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cityBeadStore = beads.NewMemStore()
@@ -1008,6 +1179,49 @@ func TestHandleOrderHistoryMarksAdHocOutputMetadata(t *testing.T) {
 	}
 	if !resp.Entries[0].HasOutput {
 		t.Fatal("has_output = false, want true for captured output metadata")
+	}
+}
+
+func TestHandleOrderHistoryFallsBackToLiveStoreForTierBothCacheQuery(t *testing.T) {
+	fs := newFakeState(t)
+	backing := beads.NewMemStore()
+	run, err := backing.Create(beads.Bead{
+		Title:     "nightly-review tracking",
+		Status:    "closed",
+		Labels:    []string{"order-run:nightly-review", "order-tracking"},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("create wisp history bead: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	fs.cityBeadStore = cache
+	fs.autos = []orders.Order{
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2"},
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Entries []struct {
+			BeadID string `json:"bead_id"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Entries) != 1 || resp.Entries[0].BeadID != run.ID {
+		t.Fatalf("entries = %+v, want live ephemeral history bead %s", resp.Entries, run.ID)
 	}
 }
 
@@ -1112,7 +1326,7 @@ func TestHandleOrderHistoryBeforeUsesBufferedBoundedFetch(t *testing.T) {
 
 	h := newTestCityHandler(t, fs)
 	before := midRun.CreatedAt.Format(time.RFC3339Nano)
-	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review&limit=1&before="+before), nil)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review&limit=1&before="+url.QueryEscape(before)), nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -1133,6 +1347,76 @@ func TestHandleOrderHistoryBeforeUsesBufferedBoundedFetch(t *testing.T) {
 	}
 	if resp.Entries[0].BeadID != oldRun.ID {
 		t.Fatalf("bead_id = %q, want older run %q", resp.Entries[0].BeadID, oldRun.ID)
+	}
+}
+
+func TestHandleOrderHistoryBeforeRequiresEscapedPositiveOffsetCursor(t *testing.T) {
+	fs := newFakeState(t)
+	fs.autos = []orders.Order{
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2"},
+	}
+
+	plusTwo := time.FixedZone("plus-two", 2*60*60)
+	oldCreatedAt := time.Date(2026, 5, 9, 10, 0, 0, 123456789, plusTwo)
+	cursorCreatedAt := oldCreatedAt.Add(time.Minute)
+	newCreatedAt := cursorCreatedAt.Add(time.Minute)
+	fs.cityBeadStore = &fixedOrderHistoryStore{
+		Store: beads.NewMemStore(),
+		rows: []beads.Bead{
+			{
+				ID:        "old-run",
+				Title:     "old nightly-review",
+				Status:    "closed",
+				CreatedAt: oldCreatedAt,
+				Labels:    []string{"order-run:nightly-review", "wisp"},
+			},
+			{
+				ID:        "cursor-run",
+				Title:     "cursor nightly-review",
+				Status:    "closed",
+				CreatedAt: cursorCreatedAt,
+				Labels:    []string{"order-run:nightly-review", "wisp"},
+			},
+			{
+				ID:        "new-run",
+				Title:     "new nightly-review",
+				Status:    "closed",
+				CreatedAt: newCreatedAt,
+				Labels:    []string{"order-run:nightly-review", "wisp"},
+			},
+		},
+	}
+
+	h := newTestCityHandler(t, fs)
+	before := cursorCreatedAt.Format(time.RFC3339Nano)
+
+	rawReq := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review&limit=1&before="+before), nil)
+	rawW := httptest.NewRecorder()
+	h.ServeHTTP(rawW, rawReq)
+	if rawW.Code != http.StatusBadRequest {
+		t.Fatalf("raw status = %d, want %d; body = %s", rawW.Code, http.StatusBadRequest, rawW.Body.String())
+	}
+
+	escapedReq := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review&limit=1&before="+url.QueryEscape(before)), nil)
+	escapedW := httptest.NewRecorder()
+	h.ServeHTTP(escapedW, escapedReq)
+	if escapedW.Code != http.StatusOK {
+		t.Fatalf("escaped status = %d, want %d; body = %s", escapedW.Code, http.StatusOK, escapedW.Body.String())
+	}
+
+	var resp struct {
+		Entries []struct {
+			BeadID string `json:"bead_id"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(escapedW.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1: %+v", len(resp.Entries), resp.Entries)
+	}
+	if resp.Entries[0].BeadID != "old-run" {
+		t.Fatalf("bead_id = %q, want old-run", resp.Entries[0].BeadID)
 	}
 }
 
@@ -1174,7 +1458,7 @@ func TestHandleOrderHistoryBeforeFiltersBeforeStoreLimit(t *testing.T) {
 
 	h := newTestCityHandler(t, fs)
 	before := cursorRun.CreatedAt.Format(time.RFC3339Nano)
-	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review&limit=1&before="+before), nil)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review&limit=1&before="+url.QueryEscape(before)), nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -1240,7 +1524,7 @@ func TestHandleOrderHistoryBeforeFiltersBeforeMergedLimit(t *testing.T) {
 
 	h := newTestCityHandler(t, fs)
 	before := cursorRun.CreatedAt.Format(time.RFC3339Nano)
-	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review:rig:myrig&limit=1&before="+before), nil)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review:rig:myrig&limit=1&before="+url.QueryEscape(before)), nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
