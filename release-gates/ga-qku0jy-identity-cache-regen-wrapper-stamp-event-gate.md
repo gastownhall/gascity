@@ -24,7 +24,7 @@ Reviewers should merge #2211 first or review this PR with that dependency in min
 | 3 | Tests pass on final branch | PASS | `make test-fast-parallel` passed all 8 shards; `go vet ./...` passed; `make dashboard-check` passed; `git diff --check origin/main...HEAD` passed. |
 | 4 | No high-severity review findings open | PASS | Review note reports PASS and no security concerns; no HIGH findings were recorded in the deploy bead notes. |
 | 5 | Final branch is clean | PASS | `git status --short --branch` was clean on `builder/ga-qku0jy` before adding this gate file. |
-| 6 | Branch diverges cleanly from main | PASS | `git merge-tree --write-tree HEAD origin/main` completed successfully with tree `2605fcc7bc82df81012d3e099ae1e78d7a7231ea`; no merge conflicts reported. |
+| 6 | Branch diverges cleanly from main | PASS | After `origin/main` advanced to `245db7423`, `git merge-tree --write-tree HEAD origin/main` completed successfully with tree `166bb80b82bc04bfafe046ae9eebf971faad3b34`; no merge conflicts reported. |
 
 ## Acceptance evidence
 
