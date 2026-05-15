@@ -53,17 +53,67 @@ The most important immediate rule is stdout purity: when `--json` is passed, std
 
 - JSON commands should prefer one top-level object, not a bare array. Use collection fields such as `orders`, `sessions`, or `events`, plus `summary`.
 - Include `schema_version` as a string, starting at `"1"`, for new or newly touched JSON surfaces.
-- Keep human output as the default. `--json` changes stdout only; diagnostics and unexpected errors still go to stderr with nonzero exit.
-- In `--json` mode, stdout must contain only the intentional JSON payload.
-- Human stdout produced by shared helpers should be suppressed or routed to `io.Discard` in JSON mode, then the command should emit exactly one JSON document at the end.
-- Do not buffer incidental human stdout and include it in a JSON field. If output is meaningful to machines, model it as first-class JSON fields. Raw text belongs in JSON only when it is the command's product contract, for example a future `gc session peek --json` `output` field.
-- For first wave, do not introduce structured JSON errors globally. Add that as a separate root-level design because Cobra error paths are cross-cutting.
 - Warnings should eventually be represented as `warnings: [{code,message,field,path}]` while still emitting important diagnostics to stderr when compatible.
 - Partial/stale/offline data should use explicit booleans and nullable detail fields, for example `available`, `stale`, `source`, `reason`.
 - Timestamps should be RFC3339 strings.
 - Use consistent field names: `id`, `name`, `qualified_name`, `scoped_name`, `path`, `source`, `ref`, `status`, `state`, `type`, `target`, `created_at`, `updated_at`.
 - `--json` should ignore human formatting knobs such as `--quiet` unless a command documents a machine-readable terse mode separately.
 - Streaming commands should use JSONL for streams and object JSON for bounded snapshots.
+
+## Stdout And Stderr Contract
+
+`--json` is a stdout contract, not a promise that the process is silent.
+
+When `--json` is passed, stdout must contain only the command's intentional
+machine-readable payload:
+
+- Bounded commands emit exactly one JSON document to stdout.
+- Streaming commands that opt into JSON streaming emit JSONL to stdout, one
+  complete JSON object per line.
+- Commands that have no data to return should emit a valid JSON object with an
+  empty collection, `available: false`, or an explicit `summary`, not prose.
+- No progress lines, human summaries, debug banners, table headers, or copied
+  helper output may be written to stdout in JSON mode.
+
+Stderr remains available for operational diagnostics:
+
+- Unexpected failures may print human-readable diagnostics to stderr and exit
+  nonzero.
+- Debug or trace diagnostics may use stderr when the user has explicitly
+  enabled a diagnostic mode.
+- Warnings that matter to machine consumers should also appear in structured
+  JSON fields, but compatibility-sensitive human warnings may still be emitted
+  to stderr.
+- Stderr is not part of the stable machine-readable payload in the first wave.
+
+This gives agents and scripts a simple rule: parse stdout as JSON, treat the
+exit code as success/failure, and use stderr only as diagnostic text.
+
+The first-wave implementation should not introduce a global structured JSON
+error contract. Cobra error paths and command-local error handling are
+cross-cutting enough that structured errors should be a follow-up design. Until
+then, failed `--json` commands may produce no JSON payload, write diagnostics to
+stderr, and exit nonzero. Individual commands may emit structured error objects
+only if they can do so without weakening the CLI-wide stdout-purity rule.
+
+## Handling Incidental Human Output
+
+Some `gc` commands share helpers that currently write human output directly to a
+provided stdout writer. In JSON mode, those helpers need an explicit sink:
+
+- Prefer passing `io.Discard` to human-output paths while collecting typed
+  result data separately.
+- Emit the final JSON document once, at the end, using the real stdout writer.
+- Do not buffer arbitrary human stdout and add it to a JSON field such as
+  `stdout` or `messages`. That preserves accidental implementation details and
+  makes the JSON contract unstable.
+- If the text is meaningful product data, model it as a first-class field with a
+  command-specific name. For example, a future `gc session peek --json` can
+  include `output` because the captured session text is the command's actual
+  result.
+
+This approach keeps existing human output compatible while making `--json`
+strict enough for agents, scripts, tests, and future UI/API consumers.
 
 ## Extensibility
 
@@ -76,13 +126,14 @@ Recommended built-in command pattern:
 - Write the final JSON payload through the real stdout writer exactly once.
 - Use a top-level object with `schema_version`.
 - Put meaningful machine data in typed fields, not in copied human prose.
-- Add a stdout-purity test for every command touched: successful `--json` output must parse as JSON and must not include human banners, progress lines, or summaries.
+- Add a stdout-purity test for every command touched: successful `--json` stdout must parse as JSON and must not include human banners, progress lines, summaries, or stderr diagnostics.
 - Keep stderr available for diagnostics until structured JSON errors are standardized.
 
 In a later contract/helper PR, this should become a small shared helper layer so new commands can follow the same shape with very little ceremony:
 
 - `jsonStdout(jsonMode, stdout)` or equivalent, returning `io.Discard` for human-output paths in JSON mode.
 - `writeJSON(stdout, payload)` for final payload emission.
+- `jsonModeWriters(jsonMode, stdout, stderr)` or equivalent, making the stdout/stderr split hard to misuse.
 - shared warning/error structs.
 - test helpers that assert JSON-only stdout.
 
@@ -136,6 +187,8 @@ Stage 1: initial software-consumer batch.
 
 - Add or normalize JSON support for `gc status`, `gc session list`, `gc rig list`, and `gc sling`.
 - Add focused tests for parseable JSON and stdout purity.
+- Suppress incidental human stdout in JSON mode, usually with `io.Discard`,
+  while keeping stderr available for diagnostics.
 - Keep all current human output as the default.
 
 Stage 2: high-value inspection surfaces.
@@ -213,8 +266,8 @@ Proposed detail shape:
 6. Add `--json` to `gc config show` and `gc config explain`.
    Acceptance: resolved config/provenance data are machine-readable; warnings are included in JSON and still visible enough for humans.
 
-7. Define error/warning policy.
-   Acceptance: one documented CLI-wide policy for stderr, exit codes, JSON error objects, and partial/stale data.
+7. Define structured JSON error follow-up.
+   Acceptance: one follow-up design for command failures, Cobra error paths, exit codes, structured error objects, and how those interact with stderr diagnostics.
 
 8. Audit pack and registry commands after pack surface stabilizes.
    Acceptance: document which commands exist, which are planned, and which should support JSON in the first pack-focused wave.
@@ -225,7 +278,7 @@ Proposed detail shape:
 ## Product Decisions Needed
 
 - Are schema changes allowed for existing `--json` commands that currently emit arrays, or should they stay stable until a v2 flag or compatibility window?
-- Should structured JSON errors be CLI-wide for `--json`, or remain command-local for now?
+- When should the follow-up structured JSON error contract land relative to mutation-command JSON summaries?
 - Should `gc trace show --json` and `gc events --json` remain arrays for easy piping, or move to object envelopes in bounded modes?
 - Should mutation commands join the second wave with JSON summaries, or stay human-only until read surfaces are complete?
 - For pack-defined commands, should `gc` reserve `--json` globally or only pass it through when a command declares JSON support?
