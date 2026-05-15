@@ -319,14 +319,14 @@ func singletonSessionMigrationWarnings(cfg *config.City) []string {
 	var warnings []string
 	for i := range cfg.Agents {
 		agentCfg := &cfg.Agents[i]
-		if m := agentCfg.EffectiveMaxActiveSessions(); m == nil || *m != 1 {
+		if !agentCfg.UsesCanonicalSingletonPoolIdentity() {
 			continue
 		}
 		if namedByTemplate[agentCfg.QualifiedName()] {
 			continue
 		}
 		warnings = append(warnings,
-			fmt.Sprintf("agent %q: max_active_sessions=1 now limits ephemeral capacity but does not create a persistent singleton; declare [[named_session]] for a canonical session identity", agentCfg.QualifiedName()))
+			fmt.Sprintf("agent %q: max_active_sessions=1 creates a canonical singleton that drains when scale_check returns 0; declare [[named_session]] only if you need a session that survives empty-demand windows", agentCfg.QualifiedName()))
 	}
 	sort.Strings(warnings)
 	return warnings

@@ -253,6 +253,48 @@ func TestFindAgentUnlimitedPoolMember(t *testing.T) {
 	}
 }
 
+func TestFindAgentCanonicalSingletonPoolRejectsSuffix(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "myrig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1)},
+		},
+	}
+	if a, ok := findAgent(cfg, "myrig/worker"); !ok || a.QualifiedName() != "myrig/worker" {
+		t.Fatalf("findAgent(myrig/worker) = (%q, %v), want canonical template", a.QualifiedName(), ok)
+	}
+	if _, ok := findAgent(cfg, "myrig/worker-1"); ok {
+		t.Fatal("findAgent(myrig/worker-1) = true, want false for canonical singleton pool")
+	}
+	expanded := expandAgent(cfg.Agents[0], "city", "", nil)
+	if len(expanded) != 1 {
+		t.Fatalf("expandAgent() returned %d entries, want 1", len(expanded))
+	}
+	if expanded[0].qualifiedName != "myrig/worker" {
+		t.Fatalf("expandAgent()[0].qualifiedName = %q, want myrig/worker", expanded[0].qualifiedName)
+	}
+}
+
+func TestExpandAgentDisabledAgentUsesConfiguredIdentity(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "myrig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(0)},
+		},
+	}
+	if isMultiSessionAgent(cfg.Agents[0]) {
+		t.Fatal("isMultiSessionAgent(max=0) = true, want false")
+	}
+	expanded := expandAgent(cfg.Agents[0], "city", "", nil)
+	if len(expanded) != 1 {
+		t.Fatalf("expandAgent() returned %d entries, want 1", len(expanded))
+	}
+	if expanded[0].qualifiedName != "myrig/worker" {
+		t.Fatalf("expandAgent()[0].qualifiedName = %q, want myrig/worker", expanded[0].qualifiedName)
+	}
+	if expanded[0].pool != "" {
+		t.Fatalf("expandAgent()[0].pool = %q, want empty", expanded[0].pool)
+	}
+}
+
 // TestFindAgentBoundedPoolMember covers bounded multi-session pools — both
 // V1 (no BindingName) and V2 (with BindingName), with and without
 // NamepoolNames. The V2 cases regressed silently because the bounded

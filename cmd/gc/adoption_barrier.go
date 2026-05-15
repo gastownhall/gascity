@@ -133,8 +133,13 @@ func runAdoptionBarrier(
 		// base template name (e.g., "city-worker-3" -> "worker").
 		cfgAgent, isConfigAgent := agentBySession[sessionName]
 		isPoolInstance := false
+		staleSingletonSuffix := false
 		if !isConfigAgent {
-			if base := resolvePoolBase(sessionName, store, cityName, st, agentByQN); base != nil {
+			if base := resolveCanonicalSingletonSuffixBase(sessionName, store, cityName, st, agentByQN); base != nil {
+				cfgAgent = base
+				isConfigAgent = true
+				staleSingletonSuffix = true
+			} else if base := resolvePoolBase(sessionName, store, cityName, st, agentByQN); base != nil {
 				cfgAgent = base
 				isConfigAgent = true
 				isPoolInstance = true
@@ -189,7 +194,11 @@ func runAdoptionBarrier(
 		// instance expansion, to avoid false positives on direct session
 		// names that end in numbers.
 		slot := parsePoolSlot(sessionName)
-		if slot > 0 && isConfigAgent && cfgAgent.SupportsInstanceExpansion() {
+		switch {
+		case slot > 0 && staleSingletonSuffix:
+			fmt.Fprintf(stderr, "adoption barrier: adopting stale singleton suffix session %s as canonical agent %s without pool_slot metadata\n", //nolint:errcheck
+				sessionName, cfgAgent.QualifiedName())
+		case slot > 0 && isConfigAgent && cfgAgent.SupportsInstanceExpansion():
 			detail.PoolSlot = slot
 			meta["pool_slot"] = strconv.Itoa(slot)
 			if maxSess := cfgAgent.EffectiveMaxActiveSessions(); maxSess != nil && *maxSess >= 0 && slot > *maxSess {
@@ -197,7 +206,7 @@ func runAdoptionBarrier(
 				fmt.Fprintf(stderr, "adoption barrier: %s pool slot %d exceeds max %d (adopt-then-drain)\n", //nolint:errcheck
 					sessionName, slot, *maxSess)
 			}
-		} else if slot > 0 && !isConfigAgent {
+		case slot > 0 && !isConfigAgent:
 			// Defensive log (ga-fiw): a session ending in "-N" did not match
 			// any configured agent — either by exact session name or by pool
 			// base resolution. This is the orphan shape that produced the
@@ -295,6 +304,25 @@ func resolvePoolBase(sessionName string, store beads.Store, cityName, sessionTem
 	// Check each config agent to see if its session name matches the base.
 	for _, a := range agentByQN {
 		if !a.SupportsInstanceExpansion() {
+			continue
+		}
+		sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), sessionTemplate)
+		if sn == baseSessName {
+			return a
+		}
+	}
+	return nil
+}
+
+func resolveCanonicalSingletonSuffixBase(sessionName string, store beads.Store, cityName, sessionTemplate string, agentByQN map[string]*config.Agent) *config.Agent {
+	slot := parsePoolSlot(sessionName)
+	if slot == 0 {
+		return nil
+	}
+	suffix := fmt.Sprintf("-%d", slot)
+	baseSessName := sessionName[:len(sessionName)-len(suffix)]
+	for _, a := range agentByQN {
+		if !a.UsesCanonicalSingletonPoolIdentity() {
 			continue
 		}
 		sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), sessionTemplate)

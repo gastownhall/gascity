@@ -525,6 +525,71 @@ func TestResolveGraphStepBinding_AssigneeConcreteSessionBeatsTemplateCollision(t
 	}
 }
 
+func TestResolveGraphStepBinding_CanonicalSingletonPoolUsesConcreteSession(t *testing.T) {
+	zero := 0
+	one := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: &zero, MaxActiveSessions: &one},
+		},
+	}
+	stepByID := map[string]*formula.RecipeStep{
+		"demo.work": {
+			ID:       "demo.work",
+			Title:    "Work",
+			Metadata: map[string]string{"gc.run_target": "worker"},
+		},
+	}
+	cache := make(map[string]GraphRouteBinding)
+	resolving := make(map[string]bool)
+
+	binding, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
+	if err != nil {
+		t.Fatalf("ResolveGraphStepBinding: %v", err)
+	}
+	if binding.QualifiedName != "frontend/worker" {
+		t.Fatalf("QualifiedName = %q, want frontend/worker", binding.QualifiedName)
+	}
+	if binding.SessionName != "frontend--worker" {
+		t.Fatalf("SessionName = %q, want frontend--worker", binding.SessionName)
+	}
+	if binding.MetadataOnly {
+		t.Fatal("MetadataOnly = true, want false for canonical singleton pool")
+	}
+}
+
+func TestResolveGraphStepBinding_CanonicalSingletonPoolReportsMissingSessionName(t *testing.T) {
+	zero := 0
+	one := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Name:            "test-city",
+			SessionTemplate: `{{""}}`,
+		},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: &zero, MaxActiveSessions: &one},
+		},
+	}
+	stepByID := map[string]*formula.RecipeStep{
+		"demo.work": {
+			ID:       "demo.work",
+			Title:    "Work",
+			Metadata: map[string]string{"gc.run_target": "worker"},
+		},
+	}
+	cache := make(map[string]GraphRouteBinding)
+	resolving := make(map[string]bool)
+
+	_, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
+	if err == nil {
+		t.Fatal("ResolveGraphStepBinding succeeded; want missing session-name error")
+	}
+	if !strings.Contains(err.Error(), `could not resolve session name for "frontend/worker"`) {
+		t.Fatalf("ResolveGraphStepBinding error = %q, want missing session-name guidance", err)
+	}
+}
+
 func TestControlDispatcherBinding_NilConfig(t *testing.T) {
 	_, err := ControlDispatcherBinding(nil, "city", nil, "", Deps{})
 	if err == nil {

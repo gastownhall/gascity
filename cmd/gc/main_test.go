@@ -1190,6 +1190,28 @@ func TestFindSessionNameByTemplate_SkipsPoolSlotBeads(t *testing.T) {
 	}
 }
 
+func TestLookupSessionNameOrLegacy_CanonicalSingletonPoolManagedBead(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery",
+			"session_name":         "s-canonical-refinery",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := lookupSessionNameOrLegacy(store, "city", "cashmaster/refinery", "")
+	if got != "s-canonical-refinery" {
+		t.Fatalf("lookupSessionNameOrLegacy(canonical singleton pool bead) = %q, want s-canonical-refinery", got)
+	}
+}
+
 func TestFindSessionNameByTemplate_SkipsEmptySessionName(t *testing.T) {
 	store := beads.NewMemStore()
 	_, err := store.Create(beads.Bead{
@@ -1529,6 +1551,40 @@ func TestLookupPoolSessionNames_RejectsSharedPrefixSiblingTemplates(t *testing.T
 	}
 	if _, ok := got["frontend/worker-supervisor-1"]; ok {
 		t.Fatalf("lookupPoolSessionNames(frontend/worker) wrongly matched sibling template: %#v", got)
+	}
+}
+
+func TestLookupPoolSessionNames_AcceptsCanonicalSingletonPoolManagedBead(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "refinery", Dir: "cashmaster", MaxActiveSessions: intPtr(1), ScaleCheck: "printf 1"},
+		},
+	}
+	cfgAgent := &cfg.Agents[0]
+	if _, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery",
+			"session_name":         "s-canonical-refinery",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := lookupPoolSessionNames(store, cfg, cfgAgent)
+	if err != nil {
+		t.Fatalf("lookupPoolSessionNames: %v", err)
+	}
+	if got["cashmaster/refinery"] != "s-canonical-refinery" {
+		t.Fatalf("lookupPoolSessionNames(canonical singleton) = %#v, want canonical session", got)
+	}
+	if _, ok := got["cashmaster/refinery-1"]; ok {
+		t.Fatalf("lookupPoolSessionNames(canonical singleton) registered phantom slot: %#v", got)
 	}
 }
 
@@ -2150,6 +2206,46 @@ func TestSelectRunningPoolSessionRefs_ReturnsAllLiveCandidatesForLogicalInstance
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("selectRunningPoolSessionRefs(frontend/worker-7) = %v, want %v", got, want)
 	}
+}
+
+func TestSelectRunningPoolSessionRefs_CanonicalSingletonIncludesStaleBeadBackedSuffix(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1)},
+		},
+	}
+	agentCfg := cfg.Agents[0]
+	if _, err := store.Create(beads.Bead{
+		Title:  "stale singleton pool instance",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:frontend/worker-1", "template:frontend/worker"},
+		Metadata: map[string]string{
+			"template":             "frontend/worker",
+			"agent_name":           "frontend/worker-1",
+			"session_name":         "s-stale-worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "active",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "s-stale-worker", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+
+	refs, err := selectRunningPoolSessionRefs(store, sp, cfg, resolvePoolSessionRefs(store, cfg, agentCfg.Name, agentCfg.Dir, scaleParamsFor(&agentCfg), &agentCfg, "test-city", "", sp, io.Discard))
+	if err != nil {
+		t.Fatalf("selectRunningPoolSessionRefs: %v", err)
+	}
+	for _, ref := range refs {
+		if ref.qualifiedInstance == "frontend/worker-1" && ref.sessionName == "s-stale-worker" {
+			return
+		}
+	}
+	t.Fatalf("selectRunningPoolSessionRefs() = %#v, want stale bead-backed singleton suffix ref", refs)
 }
 
 func TestSelectRunningPoolSessionRefs_ReportsConcreteSessionOnProbeFailure(t *testing.T) {

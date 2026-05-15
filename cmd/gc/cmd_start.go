@@ -1282,14 +1282,9 @@ func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *c
 		return count
 	}
 
-	// Bounded: build the set of expected pool instance session names.
+	// Bounded: build the set of expected pool runtime session names.
 	expected := make(map[string]bool, sp0.Max)
-	for i := 1; i <= sp0.Max; i++ {
-		instanceName := poolInstanceName(agentName, i, a)
-		qualifiedInstance := instanceName
-		if agentDir != "" {
-			qualifiedInstance = agentDir + "/" + instanceName
-		}
+	for _, qualifiedInstance := range discoverPoolInstances(agentName, agentDir, sp0, a, cityName, sessionTemplate, sp) {
 		expected[sessionName(nil, cityName, qualifiedInstance, sessionTemplate)] = true
 	}
 

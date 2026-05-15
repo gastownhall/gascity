@@ -2541,22 +2541,49 @@ func (a *Agent) SupportsMultipleSessions() bool {
 	return maxSessions == nil || *maxSessions != 1
 }
 
+// UsesCanonicalSingletonPoolIdentity reports whether singleton pool-shaped
+// surfaces should use the configured agent identity instead of synthesizing a
+// slot identity such as "{name}-1".
+func (a *Agent) UsesCanonicalSingletonPoolIdentity() bool {
+	if a == nil {
+		return false
+	}
+	if strings.TrimSpace(a.Namepool) != "" || len(a.NamepoolNames) > 0 {
+		return false
+	}
+	maxSessions := a.EffectiveMaxActiveSessions()
+	return maxSessions != nil && *maxSessions == 1
+}
+
+// SupportsExpandedSessionIdentities reports whether callers should expose or
+// discover concrete member identities instead of only the configured identity.
+func (a *Agent) SupportsExpandedSessionIdentities() bool {
+	if a == nil {
+		return false
+	}
+	if m := a.EffectiveMaxActiveSessions(); m != nil && *m == 0 {
+		return false
+	}
+	return a.SupportsInstanceExpansion() && !a.UsesCanonicalSingletonPoolIdentity()
+}
+
 // SupportsInstanceExpansion reports whether the template may have multiple
 // simultaneously addressable concrete instances and therefore needs instance
 // discovery / synthetic member naming.
 //
 // max_active_sessions=1 has two distinct flavors:
 //
-//   - Pool agents (MinActiveSessions or ScaleCheck set) addressed as
-//     "{name}-1" — they participate in pool semantics even at capacity 1.
+//   - Pool agents (MinActiveSessions or ScaleCheck set) keep pool controller
+//     semantics. Non-namepool singleton pools still use the canonical
+//     configured identity; see UsesCanonicalSingletonPoolIdentity.
 //   - Named-session agents (MaxActiveSessions=1 with a [[named_session]]
 //     entry, no Min/ScaleCheck) addressed as just "{name}" — they have a
 //     stable canonical identity and a phantom "-1" suffix breaks tools that
-//     resolve by qualified name (e.g. refinery).
+//     resolve by qualified name.
 //
-// We keep instance expansion on for the pool flavor so existing identities
-// stay stable, and turn it off for the named-session flavor so the bare name
-// resolves correctly.
+// We keep instance expansion on for the pool flavor so controller paths still
+// run pool reconciliation, and turn it off for the named-session flavor so the
+// bare name resolves correctly.
 func (a *Agent) SupportsInstanceExpansion() bool {
 	if a == nil {
 		return false

@@ -363,6 +363,22 @@ func TestDiscoverPoolInstancesBoundedWithNamepool(t *testing.T) {
 	}
 }
 
+func TestDiscoverPoolInstancesCanonicalSingletonUsesBaseName(t *testing.T) {
+	sp := runtime.NewFake()
+	a := &config.Agent{
+		Name:              "refinery",
+		Dir:               "cashmaster",
+		MaxActiveSessions: intPtr(1),
+		ScaleCheck:        "echo 1",
+	}
+	pool := scaleParams{Min: 0, Max: 1}
+	instances := discoverPoolInstances("refinery", "cashmaster", pool, a, "city", "", sp)
+	want := []string{"cashmaster/refinery"}
+	if !reflect.DeepEqual(instances, want) {
+		t.Fatalf("instances = %v, want %v", instances, want)
+	}
+}
+
 func TestDiscoverPoolInstancesUnlimited(t *testing.T) {
 	sp := runtime.NewFake()
 	// Start some instances that look like pool members.
@@ -1112,15 +1128,14 @@ func TestComputePoolDeathHandlers(t *testing.T) {
 		Agents: []config.Agent{
 			{Name: "mayor", MaxActiveSessions: intPtr(1)}, // not a pool (no MinActiveSessions/ScaleCheck)
 			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), OnDeath: "echo death"},
-			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), OnDeath: "echo death"}, // max=1 POOL (MinActiveSessions set) — keeps cat-1 per the disambiguator
+			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), OnDeath: "echo death"}, // max=1 canonical singleton pool
 		},
 	}
 
 	handlers := computePoolDeathHandlers(cfg, "test", t.TempDir(), runtime.NewFake(), nil)
 
 	// dog has max=3, so 3 handlers (dog-1, dog-2, dog-3).
-	// cat is a max=1 POOL agent (MinActiveSessions set), so cat-1 keeps the
-	// `-N` suffix per SupportsInstanceExpansion's disambiguator — 1 handler.
+	// cat is a max=1 canonical singleton pool agent, so the handler uses cat.
 	// mayor is not a pool (neither MinActiveSessions nor ScaleCheck set).
 	if len(handlers) != 4 {
 		t.Fatalf("len(handlers) = %d, want 4", len(handlers))
@@ -1139,11 +1154,10 @@ func TestComputePoolDeathHandlers(t *testing.T) {
 		}
 	}
 
-	// cat-1 handler (max=1 pool keeps the suffix)
-	if info, ok := handlers["cat-1"]; !ok {
-		t.Errorf("missing handler for cat-1 (have keys: %v)", handlerKeys(handlers))
+	if info, ok := handlers["cat"]; !ok {
+		t.Errorf("missing handler for cat (have keys: %v)", handlerKeys(handlers))
 	} else if !strings.Contains(info.Command, "echo death") {
-		t.Errorf("handler[cat-1].Command = %q, want configured on_death command", info.Command)
+		t.Errorf("handler[cat].Command = %q, want configured on_death command", info.Command)
 	}
 }
 

@@ -123,6 +123,31 @@ func TestDoRigStatusWithDraining(t *testing.T) {
 	}
 }
 
+func TestDoRigStatusCanonicalSingletonPoolUsesCanonicalName(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "frontend--refinery", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+	dops := newFakeDrainOps()
+	rig := config.Rig{Name: "frontend", Path: "/tmp/frontend"}
+	agents := []config.Agent{
+		{Name: "refinery", Dir: "frontend", MaxActiveSessions: intPtr(1), ScaleCheck: "echo 1"},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runDoRigStatus(sp, dops, rig, agents, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "frontend/refinery") || !strings.Contains(out, "running") {
+		t.Fatalf("stdout missing canonical running singleton status, got:\n%s", out)
+	}
+	if strings.Contains(out, "frontend/refinery-1") {
+		t.Fatalf("stdout contains phantom singleton instance, got:\n%s", out)
+	}
+}
+
 func TestDoRigStatusSuspendedAgent(t *testing.T) {
 	sp := runtime.NewFake()
 	dops := newFakeDrainOps()

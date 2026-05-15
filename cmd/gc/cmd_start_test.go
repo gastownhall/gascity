@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"os"
 	"path"
@@ -91,6 +92,153 @@ func TestComputePoolSessions_NamepoolMaxOneUsesPoolInstance(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Fatalf("computePoolSessions len = %d, want 1 (%v)", len(got), got)
+	}
+}
+
+func TestComputePoolSessions_CanonicalSingletonUsesCanonicalSessionName(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{},
+		Agents: []config.Agent{
+			{
+				Name:              "refinery",
+				Dir:               "cashmaster",
+				MaxActiveSessions: intPtr(1),
+				ScaleCheck:        "echo 1",
+				DrainTimeout:      "2m",
+			},
+		},
+	}
+
+	got := computePoolSessions(cfg, "city", "", runtime.NewFake())
+	want := startupSessionName("city", "cashmaster/refinery", cfg.Workspace.SessionTemplate)
+	if _, ok := got[want]; !ok {
+		t.Fatalf("computePoolSessions missing %q in %v", want, got)
+	}
+	if _, ok := got[startupSessionName("city", "cashmaster/refinery-1", cfg.Workspace.SessionTemplate)]; ok {
+		t.Fatalf("computePoolSessions registered phantom singleton instance in %v", got)
+	}
+	if len(got) != 1 {
+		t.Fatalf("computePoolSessions len = %d, want 1 (%v)", len(got), got)
+	}
+}
+
+func TestBuildLifecycleTrackers_CanonicalSingletonUsesCanonicalSessionName(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{},
+		Agents: []config.Agent{
+			{
+				Name:              "refinery",
+				Dir:               "cashmaster",
+				MaxActiveSessions: intPtr(1),
+				ScaleCheck:        "echo 1",
+				IdleTimeout:       "5m",
+				MaxSessionAge:     "1h",
+			},
+		},
+	}
+	canonical := startupSessionName("city", "cashmaster/refinery", cfg.Workspace.SessionTemplate)
+	phantom := startupSessionName("city", "cashmaster/refinery-1", cfg.Workspace.SessionTemplate)
+
+	idle, ok := buildIdleTracker(cfg, "city", "", runtime.NewFake()).(*memoryIdleTracker)
+	if !ok {
+		t.Fatalf("buildIdleTracker returned %T, want *memoryIdleTracker", idle)
+	}
+	if _, ok := idle.timeouts[canonical]; !ok {
+		t.Fatalf("idle tracker missing canonical session %q in %v", canonical, idle.timeouts)
+	}
+	if _, ok := idle.timeouts[phantom]; ok {
+		t.Fatalf("idle tracker registered phantom singleton instance %q in %v", phantom, idle.timeouts)
+	}
+
+	maxAge, ok := buildMaxSessionAgeTracker(cfg, "city", runtime.NewFake()).(*memoryMaxSessionAgeTracker)
+	if !ok {
+		t.Fatalf("buildMaxSessionAgeTracker returned %T, want *memoryMaxSessionAgeTracker", maxAge)
+	}
+	if _, ok := maxAge.configs[canonical]; !ok {
+		t.Fatalf("max-age tracker missing canonical session %q in %v", canonical, maxAge.configs)
+	}
+	if _, ok := maxAge.configs[phantom]; ok {
+		t.Fatalf("max-age tracker registered phantom singleton instance %q in %v", phantom, maxAge.configs)
+	}
+}
+
+func TestBuildLifecycleTrackers_CanonicalSingletonIncludesLiveStaleSuffix(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{},
+		Agents: []config.Agent{
+			{
+				Name:              "refinery",
+				Dir:               "cashmaster",
+				MaxActiveSessions: intPtr(1),
+				ScaleCheck:        "echo 1",
+				IdleTimeout:       "5m",
+				MaxSessionAge:     "1h",
+			},
+		},
+	}
+	stale := startupSessionName("city", "cashmaster/refinery-1", cfg.Workspace.SessionTemplate)
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), stale, runtime.Config{}); err != nil {
+		t.Fatalf("Start(%q): %v", stale, err)
+	}
+
+	idle, ok := buildIdleTracker(cfg, "city", "", sp).(*memoryIdleTracker)
+	if !ok {
+		t.Fatalf("buildIdleTracker returned %T, want *memoryIdleTracker", idle)
+	}
+	if _, ok := idle.timeouts[stale]; !ok {
+		t.Fatalf("idle tracker missing live stale singleton suffix %q in %v", stale, idle.timeouts)
+	}
+
+	maxAge, ok := buildMaxSessionAgeTracker(cfg, "city", sp).(*memoryMaxSessionAgeTracker)
+	if !ok {
+		t.Fatalf("buildMaxSessionAgeTracker returned %T, want *memoryMaxSessionAgeTracker", maxAge)
+	}
+	if _, ok := maxAge.configs[stale]; !ok {
+		t.Fatalf("max-age tracker missing live stale singleton suffix %q in %v", stale, maxAge.configs)
+	}
+}
+
+func TestBuildLifecycleTrackers_CanonicalSingletonNamedSessionOverlayOneKey(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{},
+		Agents: []config.Agent{
+			{
+				Name:              "refinery",
+				Dir:               "cashmaster",
+				MaxActiveSessions: intPtr(1),
+				ScaleCheck:        "echo 1",
+				IdleTimeout:       "5m",
+				MaxSessionAge:     "1h",
+			},
+		},
+		NamedSessions: []config.NamedSession{{
+			Template: "refinery",
+			Dir:      "cashmaster",
+		}},
+	}
+	canonical := startupSessionName("city", "cashmaster/refinery", cfg.Workspace.SessionTemplate)
+
+	idle, ok := buildIdleTracker(cfg, "city", "", runtime.NewFake()).(*memoryIdleTracker)
+	if !ok {
+		t.Fatalf("buildIdleTracker returned %T, want *memoryIdleTracker", idle)
+	}
+	if len(idle.timeouts) != 1 {
+		t.Fatalf("idle tracker registered %d keys, want 1: %v", len(idle.timeouts), idle.timeouts)
+	}
+	if _, ok := idle.timeouts[canonical]; !ok {
+		t.Fatalf("idle tracker missing canonical session %q in %v", canonical, idle.timeouts)
+	}
+
+	maxAge, ok := buildMaxSessionAgeTracker(cfg, "city", runtime.NewFake()).(*memoryMaxSessionAgeTracker)
+	if !ok {
+		t.Fatalf("buildMaxSessionAgeTracker returned %T, want *memoryMaxSessionAgeTracker", maxAge)
+	}
+	if len(maxAge.configs) != 1 {
+		t.Fatalf("max-age tracker registered %d keys, want 1: %v", len(maxAge.configs), maxAge.configs)
+	}
+	if _, ok := maxAge.configs[canonical]; !ok {
+		t.Fatalf("max-age tracker missing canonical session %q in %v", canonical, maxAge.configs)
 	}
 }
 

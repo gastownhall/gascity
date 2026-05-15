@@ -580,7 +580,7 @@ func findAgentByName(cfg *config.City, name string) (config.Agent, bool) {
 	}
 	// Pool suffix stripping: "polecat-3" → try "polecat" if it's a pool.
 	for _, a := range cfg.Agents {
-		if a.SupportsInstanceExpansion() {
+		if a.SupportsInstanceExpansion() && !a.UsesCanonicalSingletonPoolIdentity() {
 			sp := scaleParamsFor(&a)
 			prefix := a.Name + "-"
 			if strings.HasPrefix(name, prefix) {
