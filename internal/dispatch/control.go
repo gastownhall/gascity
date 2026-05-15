@@ -569,6 +569,9 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		"gc.step_id":  stepID,
 		"gc.step_ref": attemptPrefix,
 	}
+	if step.OnComplete != nil {
+		rootMeta["gc.output_json_required"] = "true"
+	}
 	// Ralph iterations need scope metadata for grouping.
 	if rootKind == "scope" {
 		rootMeta["gc.scope_role"] = "body"
@@ -592,6 +595,8 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		Name:  attemptPrefix,
 		Steps: []formula.RecipeStep{rootStep},
 	}
+	var fanoutSteps []formula.RecipeStep
+	var fanoutDeps []formula.RecipeDep
 
 	// For steps with children (scoped ralph), add children as sub-steps.
 	// Children may have retry/ralph config — propagate their metadata
@@ -627,6 +632,9 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 				if _, exists := childMeta[k]; !exists {
 					childMeta[k] = v
 				}
+			}
+			if child.OnComplete != nil {
+				childMeta["gc.output_json_required"] = "true"
 			}
 			// Derive gc.kind and control metadata from retry/ralph config.
 			if child.Retry != nil {
@@ -673,6 +681,10 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 				childStep.Type = "task"
 			}
 			recipe.Steps = append(recipe.Steps, childStep)
+			if fanoutStep, fanoutDep, ok := buildAttemptRecipeFanoutControl(childStep, child.OnComplete); ok {
+				fanoutSteps = append(fanoutSteps, fanoutStep)
+				fanoutDeps = append(fanoutDeps, fanoutDep)
+			}
 			// No parent-child dep to the iteration scope — it creates a
 			// deadlock (scope waits for children, children wait for scope).
 			// Children are associated with the iteration via gc.scope_ref
@@ -691,8 +703,52 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 	}
 
 	applyAttemptRecipeScopeChecks(recipe)
+	recipe.Steps = append(recipe.Steps, fanoutSteps...)
+	recipe.Deps = append(recipe.Deps, fanoutDeps...)
 
 	return recipe
+}
+
+func buildAttemptRecipeFanoutControl(source formula.RecipeStep, onComplete *formula.OnCompleteSpec) (formula.RecipeStep, formula.RecipeDep, bool) {
+	if onComplete == nil {
+		return formula.RecipeStep{}, formula.RecipeDep{}, false
+	}
+	sourceRef := source.Metadata["gc.step_ref"]
+	if sourceRef == "" {
+		sourceRef = source.ID
+	}
+	meta := map[string]string{
+		"gc.kind":        "fanout",
+		"gc.control_for": sourceRef,
+		"gc.for_each":    onComplete.ForEach,
+		"gc.bond":        onComplete.Bond,
+		"gc.fanout_mode": "parallel",
+	}
+	if onComplete.Sequential {
+		meta["gc.fanout_mode"] = "sequential"
+	}
+	if len(onComplete.Vars) > 0 {
+		if data, err := json.Marshal(onComplete.Vars); err == nil {
+			meta["gc.bond_vars"] = string(data)
+		}
+	}
+	for _, key := range []string{"gc.scope_ref", "gc.scope_role", "gc.on_fail", "gc.step_id", "gc.ralph_step_id", "gc.attempt"} {
+		if value := source.Metadata[key]; value != "" {
+			meta[key] = value
+		}
+	}
+	control := formula.RecipeStep{
+		ID:       source.ID + "-fanout",
+		Title:    "Expand fanout for " + source.Title,
+		Type:     "task",
+		Metadata: meta,
+	}
+	dep := formula.RecipeDep{
+		StepID:      control.ID,
+		DependsOnID: source.ID,
+		Type:        "blocks",
+	}
+	return control, dep, true
 }
 
 func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {

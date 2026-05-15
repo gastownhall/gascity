@@ -2479,6 +2479,92 @@ func TestBuildAttemptRecipeComposeExpandFanout(t *testing.T) {
 	}
 }
 
+func TestBuildAttemptRecipeRalphChildOnCompleteCreatesScopedFanout(t *testing.T) {
+	t.Parallel()
+
+	step := &formula.Step{
+		ID:    "review-loop",
+		Title: "Review loop",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{MaxAttempts: 3},
+		Children: []*formula.Step{
+			{
+				ID:    "dc-members",
+				Title: "List design council members",
+				Type:  "task",
+				OnComplete: &formula.OnCompleteSpec{
+					ForEach:    "output.members",
+					Bond:       "review-member",
+					Sequential: true,
+					Vars: map[string]string{
+						"member": "{item.name}",
+					},
+				},
+			},
+		},
+	}
+	control := beads.Bead{
+		ID: "ctrl-fanout",
+		Metadata: map[string]string{
+			"gc.step_id":  "review-loop",
+			"gc.step_ref": "mol-review.review-loop",
+		},
+	}
+
+	recipe := buildAttemptRecipe(step, control, 2)
+	sourceID := "mol-review.review-loop.iteration.2.dc-members"
+	source := recipe.StepByID(sourceID)
+	if source == nil {
+		t.Fatal("missing dc-members source step")
+	}
+	if got := source.Metadata["gc.output_json_required"]; got != "true" {
+		t.Fatalf("source gc.output_json_required = %q, want true", got)
+	}
+
+	fanout := recipe.StepByID(sourceID + "-fanout")
+	if fanout == nil {
+		t.Fatal("missing dc-members fanout control")
+	}
+	if got := fanout.Metadata["gc.kind"]; got != "fanout" {
+		t.Fatalf("fanout gc.kind = %q, want fanout", got)
+	}
+	if got := fanout.Metadata["gc.control_for"]; got != sourceID {
+		t.Fatalf("fanout gc.control_for = %q, want %s", got, sourceID)
+	}
+	if got := fanout.Metadata["gc.scope_ref"]; got != "mol-review.review-loop.iteration.2" {
+		t.Fatalf("fanout gc.scope_ref = %q, want mol-review.review-loop.iteration.2", got)
+	}
+	if got := fanout.Metadata["gc.scope_role"]; got != "member" {
+		t.Fatalf("fanout gc.scope_role = %q, want member", got)
+	}
+	if got := fanout.Metadata["gc.attempt"]; got != "2" {
+		t.Fatalf("fanout gc.attempt = %q, want 2", got)
+	}
+	if got := fanout.Metadata["gc.for_each"]; got != "output.members" {
+		t.Fatalf("fanout gc.for_each = %q, want output.members", got)
+	}
+	if got := fanout.Metadata["gc.bond"]; got != "review-member" {
+		t.Fatalf("fanout gc.bond = %q, want review-member", got)
+	}
+	if got := fanout.Metadata["gc.fanout_mode"]; got != "sequential" {
+		t.Fatalf("fanout gc.fanout_mode = %q, want sequential", got)
+	}
+	if got := fanout.Metadata["gc.bond_vars"]; got != `{"member":"{item.name}"}` {
+		t.Fatalf("fanout gc.bond_vars = %q, want member binding", got)
+	}
+
+	foundFanoutDep := false
+	for _, dep := range recipe.Deps {
+		if dep.StepID == sourceID+"-fanout" && dep.DependsOnID == sourceID && dep.Type == "blocks" {
+			foundFanoutDep = true
+			break
+		}
+	}
+	if !foundFanoutDep {
+		t.Fatalf("missing fanout blocks dependency on source; deps = %+v", recipe.Deps)
+	}
+}
+
 func TestBuildAttemptRecipeScopeMetadataAndStepRef(t *testing.T) {
 	t.Parallel()
 
