@@ -3266,6 +3266,84 @@ func TestRunWorkflowServeTreatsTransientControllerSpawnPendingAsNonFatal(t *test
 	}
 }
 
+func TestRunControlDispatcherQuarantinesMalformedControlGraph(t *testing.T) {
+	clearGCEnv(t)
+
+	store := beads.NewMemStore()
+	workflow, err := store.Create(beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow: %v", err)
+	}
+	subject, err := store.Create(beads.Bead{
+		Title: "closed subject",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.scope_ref":    "missing-scope",
+			"gc.scope_role":   "member",
+			"gc.root_bead_id": workflow.ID,
+			"gc.outcome":      "fail",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create subject: %v", err)
+	}
+	if err := store.Close(subject.ID); err != nil {
+		t.Fatalf("close subject: %v", err)
+	}
+	control, err := store.Create(beads.Bead{
+		Title: "Finalize missing scope",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "missing-scope",
+			"gc.scope_role":   "control",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	if err := store.DepAdd(control.ID, subject.ID, "blocks"); err != nil {
+		t.Fatalf("add control dependency: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	if err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, control, control.ID, cfg, io.Discard, &stderr); err != nil {
+		t.Fatalf("runControlDispatcherWithStoreAndConfig: %v", err)
+	}
+
+	after, err := store.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control: %v", err)
+	}
+	if after.Status != "closed" {
+		t.Fatalf("control status = %q, want closed", after.Status)
+	}
+	if got := after.Metadata["gc.outcome"]; got != "quarantined" {
+		t.Fatalf("gc.outcome = %q, want quarantined", got)
+	}
+	if got := after.Metadata["gc.failure_reason"]; got != "malformed_control_graph" {
+		t.Fatalf("gc.failure_reason = %q, want malformed_control_graph", got)
+	}
+	if got := after.Metadata["gc.quarantined_at"]; got == "" {
+		t.Fatalf("gc.quarantined_at is empty")
+	}
+	if got := after.Metadata["gc.quarantine_reason"]; !strings.Contains(got, "scope body missing") {
+		t.Fatalf("gc.quarantine_reason = %q, want scope body missing", got)
+	}
+	if got := stderr.String(); !strings.Contains(got, "control dispatch: quarantined bead="+control.ID) {
+		t.Fatalf("stderr = %q, want quarantine message", got)
+	}
+}
+
 func TestRunWorkflowServeSkipsLegacyOversizedControlAndProcessesLaterReady(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -230,6 +231,13 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 
 	result, err := dispatch.ProcessControl(store, bead, opts)
 	if err != nil {
+		if errors.Is(err, dispatch.ErrControlGraphMalformed) {
+			if quarantineErr := quarantineControlGraphBead(store, beadID, err); quarantineErr != nil {
+				return errors.Join(err, quarantineErr)
+			}
+			_, _ = fmt.Fprintf(stderr, "control dispatch: quarantined bead=%s reason=%v\n", beadID, err)
+			return nil
+		}
 		return err
 	}
 	if result.Processed {
@@ -243,6 +251,24 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 		fmt.Fprintln(stdout) //nolint:errcheck
 	}
 	return nil
+}
+
+func quarantineControlGraphBead(store beads.Store, beadID string, cause error) error {
+	reason := strings.TrimSpace(cause.Error())
+	if reason == "" {
+		reason = dispatch.ErrControlGraphMalformed.Error()
+	}
+	status := "closed"
+	return store.Update(beadID, beads.UpdateOpts{
+		Status: &status,
+		Metadata: map[string]string{
+			"gc.outcome":           "quarantined",
+			"gc.failure_class":     "hard",
+			"gc.failure_reason":    "malformed_control_graph",
+			"gc.quarantined_at":    time.Now().UTC().Format(time.RFC3339),
+			"gc.quarantine_reason": reason,
+		},
+	})
 }
 
 // makeStoreRefResolver returns a dispatch.ProcessOptions.ResolveStoreRef

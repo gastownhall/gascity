@@ -71,6 +71,10 @@ const workflowFinalizeErrorMetadataKey = "gc.last_finalize_error"
 // should be retried later.
 var ErrControlPending = errors.New("workflow control pending")
 
+// ErrControlGraphMalformed reports that a control bead refers to graph state
+// that cannot become valid by waiting.
+var ErrControlGraphMalformed = errors.New("workflow control graph malformed")
+
 // ProcessControl executes a graph.v2 control bead.
 //
 // The current graph.v2 runtime assumes a single controller processes a given
@@ -171,7 +175,7 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	})
 	if err != nil {
 		if errors.Is(err, errScopeBodyMissing) {
-			return ControlResult{}, ErrControlPending
+			return ControlResult{}, fmt.Errorf("%w: %w", ErrControlGraphMalformed, err)
 		}
 		return ControlResult{}, fmt.Errorf("%s: loading scope body for %s: %w", bead.ID, scopeRef, err)
 	}

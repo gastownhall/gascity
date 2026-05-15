@@ -594,7 +594,7 @@ func TestProcessScopeCheckReturnsPendingWhenSubjectStillOpen(t *testing.T) {
 	}
 }
 
-func TestProcessScopeCheckReturnsPendingWhenScopeBodyMissing(t *testing.T) {
+func TestProcessScopeCheckReturnsMalformedWhenScopeBodyMissing(t *testing.T) {
 	t.Parallel()
 
 	store := beads.NewMemStore()
@@ -631,8 +631,8 @@ func TestProcessScopeCheckReturnsPendingWhenScopeBodyMissing(t *testing.T) {
 	mustDepAdd(t, store, control.ID, step.ID, "blocks")
 
 	_, err := ProcessControl(store, control, ProcessOptions{})
-	if !errors.Is(err, ErrControlPending) {
-		t.Fatalf("ProcessControl(scope-check missing body) err = %v, want %v", err, ErrControlPending)
+	if !errors.Is(err, ErrControlGraphMalformed) {
+		t.Fatalf("ProcessControl(scope-check missing body) err = %v, want %v", err, ErrControlGraphMalformed)
 	}
 
 	controlAfter := mustGetBead(t, store, control.ID)
