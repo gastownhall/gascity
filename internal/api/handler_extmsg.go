@@ -119,12 +119,12 @@ func (s *Server) extmsgNotifyMembers(
 	notifyResolved := func(sessionSelector, resolvedID string) {
 		handle := s.extmsgSessionHandleForResolvedID(resolvedID, sessionSelector)
 		nudge := formatExtmsgNotifyReminder(extmsgNotifyReminder{
-			Provider:        conv.Provider,
-			ConversationID:  conv.ConversationID,
-			ActorDisplay:    actorDisplayName,
-			ActorKind:       actorKind,
-			Text:            text,
-			Handle:          handle,
+			Provider:       conv.Provider,
+			ConversationID: conv.ConversationID,
+			ActorDisplay:   actorDisplayName,
+			ActorKind:      actorKind,
+			Text:           text,
+			Handle:         handle,
 		})
 		if err := s.sendBackgroundMessageToSession(ctx, store, resolvedID, nudge); err != nil {
 			log.Printf("extmsg: notify %s failed: %v", sessionSelector, err)
@@ -213,12 +213,13 @@ func formatExtmsgNotifyReminder(r extmsgNotifyReminder) string {
 	providerDisplay := titleCaseProvider(providerCLI)
 	safeActor := extmsg.SanitizeForSystemReminder(r.ActorDisplay)
 	safeText := extmsg.SanitizeForSystemReminder(r.Text)
-	return fmt.Sprintf("<system-reminder>\nNew message in shared conversation %s/%s:\n\n"+
-		"- %s (%s): %s\n\n"+
-		"To reply in %s, write your response to a file and run:\n"+
-		"  gc %s reply-current --conversation-id %s --body-file <path>\n"+
-		"Prefix your reply with your agent handle in bold (e.g., **%s:** your message).\n"+
-		"</system-reminder>",
+	return fmt.Sprintf(
+		"<system-reminder>\nNew message in shared conversation %s/%s:\n\n"+
+			"- %s (%s): %s\n\n"+
+			"To reply in %s, write your response to a file and run:\n"+
+			"  gc %s reply-current --conversation-id %s --body-file <path>\n"+
+			"Prefix your reply with your agent handle in bold (e.g., **%s:** your message).\n"+
+			"</system-reminder>",
 		r.Provider, r.ConversationID,
 		safeActor, r.ActorKind, safeText,
 		providerDisplay,
