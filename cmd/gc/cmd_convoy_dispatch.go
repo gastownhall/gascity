@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -22,6 +23,8 @@ import (
 )
 
 var dispatchControlSessionProvider = newSessionProvider
+
+const maxControlQuarantineReasonMetadata = 512
 
 func sourceWorkflowCommandContext() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -254,21 +257,38 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 }
 
 func quarantineControlGraphBead(store beads.Store, beadID string, cause error) error {
-	reason := strings.TrimSpace(cause.Error())
-	if reason == "" {
-		reason = dispatch.ErrControlGraphMalformed.Error()
-	}
+	reason := controlQuarantineReason(cause, dispatch.ErrControlGraphMalformed.Error())
 	status := "closed"
 	return store.Update(beadID, beads.UpdateOpts{
 		Status: &status,
+		Labels: []string{"gc:control-quarantined"},
 		Metadata: map[string]string{
-			"gc.outcome":           "quarantined",
-			"gc.failure_class":     "hard",
-			"gc.failure_reason":    "malformed_control_graph",
-			"gc.quarantined_at":    time.Now().UTC().Format(time.RFC3339),
-			"gc.quarantine_reason": reason,
+			"gc.outcome":                   "fail",
+			"gc.failure_class":             "hard",
+			"gc.failure_reason":            "malformed_control_graph",
+			"gc.control_quarantined":       "true",
+			"gc.control_quarantine_reason": reason,
+			"gc.control_quarantined_at":    workflowTraceNow().UTC().Format(time.RFC3339),
 		},
 	})
+}
+
+func controlQuarantineReason(cause error, fallback string) string {
+	reason := ""
+	if cause != nil {
+		reason = strings.TrimSpace(cause.Error())
+	}
+	if reason == "" {
+		reason = fallback
+	}
+	if len(reason) <= maxControlQuarantineReasonMetadata {
+		return reason
+	}
+	limit := maxControlQuarantineReasonMetadata
+	for limit > 0 && !utf8.ValidString(reason[:limit]) {
+		limit--
+	}
+	return reason[:limit]
 }
 
 // makeStoreRefResolver returns a dispatch.ProcessOptions.ResolveStoreRef
