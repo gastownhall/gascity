@@ -490,6 +490,7 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T)
 func TestCityRuntimeTickPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
+	cityPath := t.TempDir()
 	orderEvents := &orderedRuntimeEvents{}
 	store := &managedDoltPreflightOrderStore{
 		Store:  beads.NewMemStore(),
@@ -508,11 +509,16 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T
 		t.Fatal("expected non-nil dispatcher")
 	}
 	if mad, ok := ad.(*memoryOrderDispatcher); ok {
-		t.Cleanup(mad.cancel)
+		t.Cleanup(func() {
+			mad.cancel()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			mad.drain(ctx)
+		})
 	}
 	sp := runtime.NewFake()
 	cr := &CityRuntime{
-		cityPath: t.TempDir(),
+		cityPath: cityPath,
 		cityName: "test-city",
 		cfg:      &config.City{},
 		sp:       sp,
@@ -545,6 +551,11 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T
 	lastProviderName := ""
 	prevPoolRunning := map[string]bool{}
 	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), time.Second)
+	defer drainCancel()
+	if !ad.drain(drainCtx) {
+		t.Fatal("order dispatcher did not drain after tick")
+	}
 
 	preflightIndex := orderEvents.index("preflight")
 	orderListIndex := orderEvents.index("order-list")
