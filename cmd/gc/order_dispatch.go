@@ -281,7 +281,14 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 		triggerOpts, err := orderTriggerOptionsForTarget(cityPath, m.cfg, target, a)
 		if err != nil {
+			msg := fmt.Sprintf("building trigger env: %v", err)
 			logDispatchError(m.stderr, "gc: order dispatch: building trigger env for %s: %v", a.ScopedName(), err)
+			m.rec.Record(events.Event{
+				Type:    events.OrderFailed,
+				Actor:   "controller",
+				Subject: a.ScopedName(),
+				Message: msg,
+			})
 			continue
 		}
 		result := orders.CheckTriggerWithOptions(a, now, lastRunFn, m.ep, cursorFn, triggerOpts)
@@ -563,9 +570,10 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 	var execErrMsg string
 	if err != nil {
 		redactionEnv := append(os.Environ(), env...)
-		execErrMsg = execenv.RedactText(err.Error(), redactionEnv)
-		labels = []string{"exec-failed"}
-		logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, execErrMsg)
+		redacted := execenv.RedactText(err.Error(), redactionEnv)
+		execErrMsg = "exec env failed: " + redacted
+		labels = []string{"exec-env-failed"}
+		logDispatchError(m.stderr, "gc: order exec %s env failed: %s", scoped, redacted)
 	} else {
 		output, err = m.execRun(ctx, a.Exec, target.ScopeRoot, env)
 		if err != nil {

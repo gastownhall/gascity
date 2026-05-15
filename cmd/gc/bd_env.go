@@ -767,6 +767,25 @@ func applyLegacyRigExternalTarget(env map[string]string, rig config.Rig) {
 	}
 }
 
+func rigRuntimeEnvIndependentOfCityProjection(cityPath, rigPath string, explicitRig *config.Rig) bool {
+	if explicitRig != nil && (explicitRig.DoltHost != "" || explicitRig.DoltPort != "") {
+		return true
+	}
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, rigPath, "")
+	if err != nil {
+		return false
+	}
+	return resolved.Kind == contract.ScopeConfigAuthoritative && resolved.State.EndpointOrigin != contract.EndpointOriginInheritedCity
+}
+
+func cityPostgresProjectionErrorCanBeBypassed(cityPath string, err error) bool {
+	if err == nil {
+		return false
+	}
+	_, ok, metaErr := postgresMetadataForScope(cityPath, cityPath)
+	return metaErr == nil && ok
+}
+
 func bdRuntimeEnvForRigWithError(cityPath string, cfg *config.City, rigPath string) (map[string]string, error) {
 	env, cityErr := bdRuntimeEnvWithError(cityPath)
 	rigPath = filepath.Clean(rigPath)
@@ -782,9 +801,6 @@ func bdRuntimeEnvForRigWithError(cityPath string, cfg *config.City, rigPath stri
 			env["GC_RIG"] = explicitRig.Name
 		}
 	}
-	if cityErr != nil {
-		return env, cityErr
-	}
 	if err := applyResolvedRigDoltEnv(env, cityPath, rigPath, explicitRig, true); err != nil {
 		clearProjectedDoltEnv(env)
 		clearProjectedPostgresEnv(env)
@@ -793,6 +809,9 @@ func bdRuntimeEnvForRigWithError(cityPath string, cfg *config.City, rigPath stri
 			return env, nil
 		}
 		return env, err
+	}
+	if cityErr != nil && (!cityPostgresProjectionErrorCanBeBypassed(cityPath, cityErr) || !rigRuntimeEnvIndependentOfCityProjection(cityPath, rigPath, explicitRig)) {
+		return env, cityErr
 	}
 	return env, nil
 }

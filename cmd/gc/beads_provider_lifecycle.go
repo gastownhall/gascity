@@ -147,17 +147,13 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	} else {
 		clearCityDoltConfig(cityPath)
 	}
-	// Skip local Dolt startup only when canonical or compatibility topology
-	// says the city endpoint is external. Managed-local cities may not have a
-	// published runtime port yet on first startup, so this guard must not depend
-	// on runtime-state resolution.
 	skipLocalDolt := false
 	if cityUsesBdStoreContract(cityPath) {
-		_, _, ok, invalid := resolveConfiguredCityDoltTarget(cityPath)
-		if invalid {
-			return fmt.Errorf("invalid canonical city endpoint state")
+		owned, err := managedDoltLifecycleOwned(cityPath)
+		if err != nil {
+			return err
 		}
-		skipLocalDolt = ok
+		skipLocalDolt = !owned
 	}
 	if !skipLocalDolt {
 		if err := ensureBeadsProvider(cityPath); err != nil {
@@ -583,8 +579,14 @@ func shutdownBeadsProvider(cityPath string) error {
 	}
 	provider := beadsProvider(cityPath)
 	if strings.HasPrefix(provider, "exec:") {
-		if providerUsesBdStoreContract(provider) && isExternalDolt(cityPath) {
-			return clearManagedDoltRuntimeStateIfOwned(cityPath)
+		if providerUsesBdStoreContract(provider) {
+			owned, err := managedDoltLifecycleOwned(cityPath)
+			if err != nil {
+				return err
+			}
+			if !owned {
+				return clearManagedDoltRuntimeStateIfOwned(cityPath)
+			}
 		}
 		script := strings.TrimPrefix(provider, "exec:")
 		providerEnv, err := providerLifecycleProcessEnvWithError(cityPath, provider)

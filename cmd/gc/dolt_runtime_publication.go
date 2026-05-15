@@ -61,6 +61,13 @@ func readPublishedDoltRuntimeStateHint(cityPath string) (doltRuntimeState, bool,
 
 func managedDoltLifecycleOwned(cityPath string) (bool, error) {
 	if cityUsesBdStoreContract(cityPath) {
+		_, usesPostgres, err := postgresMetadataForScope(cityPath, cityPath)
+		if err != nil {
+			return false, err
+		}
+		if usesPostgres {
+			return false, nil
+		}
 		_, _, ok, invalid := resolveConfiguredCityDoltTarget(cityPath)
 		if invalid {
 			return false, fmt.Errorf("invalid canonical city endpoint state")
@@ -189,9 +196,6 @@ func publishManagedDoltRuntimeStateIfOwned(cityPath string) error {
 }
 
 func clearManagedDoltRuntimeStateIfOwned(cityPath string) error {
-	if cityUsesBdStoreContract(cityPath) {
-		return clearManagedDoltRuntimeState(cityPath)
-	}
 	owned, err := managedDoltLifecycleOwned(cityPath)
 	if err != nil {
 		return err
