@@ -208,6 +208,16 @@ func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
 			}
 			return true, nil
 		}
+		owned, err := managedDoltLifecycleOwned(cityPath)
+		if err != nil {
+			return false, err
+		}
+		if !owned {
+			if err := initDirIfReadyInitAndHookDir(cityPath, dir, prefix); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
 		if err := initDirIfReadyManagedDolt(cityPath, dir, prefix, provider); err != nil {
 			return false, err
 		}
