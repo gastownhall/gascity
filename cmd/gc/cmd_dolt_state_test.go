@@ -376,6 +376,46 @@ func TestManagedDoltExistingStatePortReturnsPublishedPortBeforeListenerReady(t *
 	}
 }
 
+func TestAssessExistingManagedDoltIgnoresStateWhenLifecycleNotOwned(t *testing.T) {
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	if err := os.MkdirAll(layout.DataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+	if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      43129,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+
+	report, err := assessExistingManagedDolt(cityPath, "127.0.0.1", "43129", "root", 0)
+	if err != nil {
+		t.Fatalf("assessExistingManagedDolt: %v", err)
+	}
+	if report.StatePort != 0 {
+		t.Fatalf("StatePort = %d, want 0 for postgres-backed city", report.StatePort)
+	}
+	if report.Reusable {
+		t.Fatal("Reusable = true, want false for postgres-backed city")
+	}
+}
+
 func TestValidDoltRuntimeStateRequiresExpectedDataDir(t *testing.T) {
 	cityPath := t.TempDir()
 	if got := validDoltRuntimeState(doltRuntimeState{

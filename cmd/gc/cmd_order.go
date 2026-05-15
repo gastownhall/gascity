@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"time"
@@ -648,12 +649,12 @@ func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, std
 
 	target, err := resolveOrderExecTarget(cityPath, cfg, a)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc order run: %s\n", redactOrderEnvError(err, os.Environ())) //nolint:errcheck // best-effort stderr
 		return orderRunExecResult{code: 1, failureLabel: "exec-failed"}
 	}
 	env, err := orderExecEnvWithError(cityPath, cfg, target, a)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc order run: %s\n", redactOrderEnvError(err, os.Environ())) //nolint:errcheck // best-effort stderr
 		return orderRunExecResult{code: 1, failureLabel: "exec-env-failed"}
 	}
 

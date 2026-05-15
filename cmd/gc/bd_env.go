@@ -779,7 +779,7 @@ func rigRuntimeEnvIndependentOfCityProjection(cityPath, rigPath string, explicit
 }
 
 func cityPostgresProjectionErrorCanBeBypassed(cityPath string, err error) bool {
-	if err == nil {
+	if err == nil || !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
 		return false
 	}
 	_, ok, metaErr := postgresMetadataForScope(cityPath, cityPath)

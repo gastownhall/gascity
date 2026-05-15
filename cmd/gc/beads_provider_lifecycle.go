@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -1013,7 +1014,11 @@ func managedDoltStatePath(cityPath string) string {
 
 func currentManagedDoltPort(cityPath string) string {
 	owned, err := managedDoltLifecycleOwned(cityPath)
-	if err != nil || !owned {
+	if err != nil {
+		log.Printf("gc: managed dolt ownership probe failed for %s: %v", cityPath, err)
+		return ""
+	}
+	if !owned {
 		return ""
 	}
 	data, err := os.ReadFile(managedDoltStatePath(cityPath))

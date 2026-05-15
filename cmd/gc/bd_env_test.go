@@ -3474,6 +3474,47 @@ dolt.auto-start: false
 	}
 }
 
+func TestBdRuntimeEnvForRig_ExplicitLegacyDoltRigSurfacesInvalidCityConfig(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityPath := t.TempDir()
+	writePGScopeFixture(t, cityPath, "citypw")
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: city-db.example.test
+dolt.port: 4406
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigDir := filepath.Join(cityPath, "rigs", "legacy-dolt")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{
+		Name:     "legacy-dolt",
+		Path:     "rigs/legacy-dolt",
+		Prefix:   "ld",
+		DoltHost: "rig-db.example.test",
+		DoltPort: "4406",
+	}}}
+
+	_, err := bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
+	if err == nil {
+		t.Fatal("bdRuntimeEnvForRigWithError() error = nil, want invalid city endpoint error")
+	}
+	if errors.Is(err, pgauth.ErrNoPasswordResolvable) {
+		t.Fatalf("bdRuntimeEnvForRigWithError() error = %v, want non-credential city config error", err)
+	}
+	if !strings.Contains(err.Error(), "invalid canonical endpoint state") {
+		t.Fatalf("bdRuntimeEnvForRigWithError() error = %v, want invalid canonical endpoint state", err)
+	}
+}
+
 func TestBdRuntimeEnvForRig_AuthoritativeDoltRigIgnoresUnresolvableCityPostgres(t *testing.T) {
 	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")

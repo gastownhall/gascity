@@ -1628,6 +1628,38 @@ dolt.auto-start: false
 	}
 }
 
+func TestOrderRunExecEnvBuildFailureRedactsProcessSecrets(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_ORDER_SECRET", "db.example.test")
+
+	cityDir := t.TempDir()
+	writePGScopeFixture(t, cityDir, "")
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := orders.Order{Name: "pg-env", Trigger: "cooldown", Interval: "1m", Exec: "true"}
+	var stdout, stderr bytes.Buffer
+	result := doOrderRunExecResult(a, cityDir, nil, &stdout, &stderr)
+	if result.code == 0 {
+		t.Fatalf("doOrderRunExecResult = 0, want env failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if result.failureLabel != "exec-env-failed" {
+		t.Fatalf("failureLabel = %q, want exec-env-failed", result.failureLabel)
+	}
+	if strings.Contains(stderr.String(), "db.example.test") {
+		t.Fatalf("stderr leaked process secret: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "[redacted]") {
+		t.Fatalf("stderr = %q, want redaction marker", stderr.String())
+	}
+}
+
 // --- gc order history ---
 
 func TestOrderHistory(t *testing.T) {

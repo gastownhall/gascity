@@ -1326,6 +1326,31 @@ func TestCurrentManagedDoltPortIgnoresStateWhenManagedDoltNotOwned(t *testing.T)
 	}
 }
 
+func TestCurrentManagedDoltPortLogsOwnershipProbeError(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: invalid-db.example.com
+dolt.port: 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := captureCmdOrderLogs(t, func() {
+		if got := currentManagedDoltPort(cityDir); got != "" {
+			t.Fatalf("currentManagedDoltPort() = %q, want empty for invalid ownership state", got)
+		}
+	})
+	if !strings.Contains(logs, "managed dolt ownership probe failed") {
+		t.Fatalf("logs = %q, want ownership probe failure", logs)
+	}
+}
+
 //nolint:unparam // test helper keeps signature aligned with call sites under comparison
 func requireSyncConfiguredDoltPortFiles(t *testing.T, cityPath, provider string, cityDolt config.DoltConfig, cityPrefix string, rigs []config.Rig) {
 	t.Helper()
