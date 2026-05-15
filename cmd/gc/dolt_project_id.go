@@ -14,7 +14,9 @@ import (
 	"strings"
 	"time"
 
+	gcapi "github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	mysql "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
@@ -71,6 +73,7 @@ func newEnsureProjectIDCmd(stdout, stderr io.Writer) *cobra.Command {
 		port         string
 		user         string
 		database     string
+		cityPath     string
 	)
 	cmd := &cobra.Command{
 		Use:    "ensure-project-id",
@@ -78,7 +81,9 @@ func newEnsureProjectIDCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			report, err := ensureManagedDoltProjectID(metadataPath, host, port, user, database)
+			rec, closeRecorder := openProjectIdentityEventRecorder(cityPath, stderr)
+			defer closeRecorder()
+			report, err := ensureManagedDoltProjectIDWithRecorder(metadataPath, host, port, user, database, cityPath, rec)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state ensure-project-id: %v\n", err) //nolint:errcheck
 				return errExit
@@ -97,13 +102,30 @@ func newEnsureProjectIDCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&port, "port", "", "Dolt port")
 	cmd.Flags().StringVar(&user, "user", "", "Dolt user")
 	cmd.Flags().StringVar(&database, "database", "", "Dolt database")
+	cmd.Flags().StringVar(&cityPath, "city", "", "city root (required for event emission)")
+	_ = cmd.MarkFlagRequired("city")
 	_ = cmd.MarkFlagRequired("metadata")
 	_ = cmd.MarkFlagRequired("port")
 	_ = cmd.MarkFlagRequired("database")
 	return cmd
 }
 
-func ensureManagedDoltProjectID(metadataPath, host, port, user, database string) (managedDoltProjectIDReport, error) {
+func ensureManagedDoltProjectID(metadataPath, port string) (managedDoltProjectIDReport, error) {
+	return ensureManagedDoltProjectIDWithRecorder(metadataPath, "127.0.0.1", port, "root", "hq", "", events.Discard)
+}
+
+func openProjectIdentityEventRecorder(cityPath string, stderr io.Writer) (events.Recorder, func()) {
+	rec, err := events.NewFileRecorder(filepath.Join(cityPath, ".gc", "events.jsonl"), io.Discard)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc dolt-state ensure-project-id: events recorder unavailable: %v\n", err) //nolint:errcheck
+		return events.Discard, func() {}
+	}
+	return rec, func() {
+		_ = rec.Close()
+	}
+}
+
+func ensureManagedDoltProjectIDWithRecorder(metadataPath, host, port, user, database string, cityPath string, rec events.Recorder) (managedDoltProjectIDReport, error) {
 	metadataPath = strings.TrimSpace(metadataPath)
 	if metadataPath == "" {
 		return managedDoltProjectIDReport{}, fmt.Errorf("missing metadata path")
@@ -147,7 +169,7 @@ func ensureManagedDoltProjectID(metadataPath, host, port, user, database string)
 	}
 
 	decision := decideReconcile(identityProjectID, identityOK, metadataProjectID, metadataOK, databaseProjectID, ok)
-	return applyReconcileDecision(ctx, fs, scopeRoot, metadataPath, db, decision)
+	return applyReconcileDecision(ctx, fs, scopeRoot, metadataPath, db, decision, cityPath, rec)
 }
 
 func managedDoltProjectIDFields(report managedDoltProjectIDReport) []string {
@@ -213,7 +235,7 @@ func decideReconcile(l1 string, l1ok bool, l2 string, l2ok bool, l3 string, l3ok
 	}
 }
 
-func applyReconcileDecision(ctx context.Context, fs fsys.FS, scopeRoot string, metadataPath string, db *sql.DB, decision reconcileDecision) (managedDoltProjectIDReport, error) {
+func applyReconcileDecision(ctx context.Context, fs fsys.FS, scopeRoot string, metadataPath string, db *sql.DB, decision reconcileDecision, cityPath string, rec events.Recorder) (managedDoltProjectIDReport, error) {
 	report := managedDoltProjectIDReport{
 		ProjectID: decision.ResolvedID,
 		Source:    decision.Source,
@@ -228,75 +250,88 @@ func applyReconcileDecision(ctx context.Context, fs fsys.FS, scopeRoot string, m
 	case actionRefuseLegacyMismatch:
 		return managedDoltProjectIDReport{}, formatLegacyL2L3MismatchError(decision.L2ID, decision.L3ID)
 	case actionRepairL2:
-		// TODO(ga-3ski1 child C / ga-ue241): emit project.identity.stamped event with
-		// source="l2-repair", before=l2ID, after=l1ID, layers_updated=[l2].
 		updated, err := writeManagedMetadataProjectID(metadataPath, decision.ResolvedID)
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
 		}
 		report.MetadataUpdated = updated
+		if updated {
+			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "cache_repair", "L2", decision.L2ID, decision.ResolvedID)
+		}
 		return report, nil
 	case actionSeedL3:
-		// TODO(ga-3ski1 child C / ga-ue241): emit project.identity.stamped event with
-		// source="l3-seed", before="", after=l1ID, layers_updated=[l3].
 		updated, err := seedDatabaseProjectID(ctx, db, decision.ResolvedID)
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
 		}
 		report.DatabaseUpdated = updated
+		if updated {
+			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "cache_repair", "L3", "", decision.ResolvedID)
+		}
 		return report, nil
 	case actionRepairL2SeedL3:
-		// TODO(ga-3ski1 child C / ga-ue241): emit project.identity.stamped event with
-		// source="l2-repair-l3-seed", before=l2ID, after=l1ID, layers_updated=[l2,l3].
 		metaUpdated, err := writeManagedMetadataProjectID(metadataPath, decision.ResolvedID)
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
 		}
+		if metaUpdated {
+			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "cache_repair", "L2", decision.L2ID, decision.ResolvedID)
+		}
 		dbUpdated, err := seedDatabaseProjectID(ctx, db, decision.ResolvedID)
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
+		}
+		if dbUpdated {
+			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "cache_repair", "L3", "", decision.ResolvedID)
 		}
 		report.MetadataUpdated = metaUpdated
 		report.DatabaseUpdated = dbUpdated
 		return report, nil
 	case actionSeedL2:
-		// TODO(ga-3ski1 child C / ga-ue241): emit project.identity.stamped event with
-		// source="l2-seed", before="", after=l1ID, layers_updated=[l2].
 		updated, err := writeManagedMetadataProjectID(metadataPath, decision.ResolvedID)
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
 		}
 		report.MetadataUpdated = updated
+		if updated {
+			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "cache_repair", "L2", "", decision.ResolvedID)
+		}
 		return report, nil
 	case actionSeedL2L3:
-		// TODO(ga-3ski1 child C / ga-ue241): emit project.identity.stamped event with
-		// source="l2-l3-seed", before="", after=l1ID, layers_updated=[l2,l3].
 		metaUpdated, err := writeManagedMetadataProjectID(metadataPath, decision.ResolvedID)
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
+		}
+		if metaUpdated {
+			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "cache_repair", "L2", "", decision.ResolvedID)
 		}
 		dbUpdated, err := seedDatabaseProjectID(ctx, db, decision.ResolvedID)
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
 		}
+		if dbUpdated {
+			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "cache_repair", "L3", "", decision.ResolvedID)
+		}
 		report.MetadataUpdated = metaUpdated
 		report.DatabaseUpdated = dbUpdated
 		return report, nil
 	case actionMigrateFromL2:
-		// TODO(ga-3ski1 child C / ga-ue241): emit project.identity.stamped event with
-		// source="l1-migrate-from-l2", before="", after=l2ID, layers_updated=[l1].
 		updated, err := writeProjectIdentityIfNeeded(fs, scopeRoot, decision.ResolvedID)
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
 		}
 		report.IdentityFileUpdated = updated
+		if updated {
+			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "migrated_from_metadata", "L1", "", decision.ResolvedID)
+		}
 		return report, nil
 	case actionMigrateL1SeedL3:
-		// TODO(ga-3ski1 child C / ga-ue241): emit project.identity.stamped event with
-		// source="l1-migrate-l3-seed", before="", after=l2ID, layers_updated=[l1,l3].
 		identityUpdated, err := writeProjectIdentityIfNeeded(fs, scopeRoot, decision.ResolvedID)
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
+		}
+		if identityUpdated {
+			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "migrated_from_metadata", "L1", "", decision.ResolvedID)
 		}
 		dbUpdated, err := seedDatabaseProjectID(ctx, db, decision.ResolvedID)
 		if err != nil {
@@ -306,11 +341,12 @@ func applyReconcileDecision(ctx context.Context, fs fsys.FS, scopeRoot string, m
 		report.DatabaseUpdated = dbUpdated
 		return report, nil
 	case actionAdoptFromL3SeedL2:
-		// TODO(ga-3ski1 child C / ga-ue241): emit project.identity.stamped event with
-		// source="l1-adopt-l2-seed", before="", after=l3ID, layers_updated=[l1,l2].
 		identityUpdated, err := writeProjectIdentityIfNeeded(fs, scopeRoot, decision.ResolvedID)
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
+		}
+		if identityUpdated {
+			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "migrated_from_database", "L1", "", decision.ResolvedID)
 		}
 		metaUpdated, err := writeManagedMetadataProjectID(metadataPath, decision.ResolvedID)
 		if err != nil {
@@ -324,7 +360,7 @@ func applyReconcileDecision(ctx context.Context, fs fsys.FS, scopeRoot string, m
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
 		}
-		identityUpdated, metaUpdated, dbUpdated, err := writeProjectIdentityToAllLayers(ctx, fs, scopeRoot, db, projectID, decision.Source)
+		identityUpdated, metaUpdated, dbUpdated, err := writeProjectIdentityToAllLayers(ctx, fs, scopeRoot, db, projectID)
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
 		}
@@ -332,10 +368,58 @@ func applyReconcileDecision(ctx context.Context, fs fsys.FS, scopeRoot string, m
 		report.IdentityFileUpdated = identityUpdated
 		report.MetadataUpdated = metaUpdated
 		report.DatabaseUpdated = dbUpdated
+		if identityUpdated {
+			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "generated", "L1", "", projectID)
+		}
+		if metaUpdated {
+			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "generated", "L2", "", projectID)
+		}
+		if dbUpdated {
+			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "generated", "L3", "", projectID)
+		}
 		return report, nil
 	default:
 		return managedDoltProjectIDReport{}, fmt.Errorf("unknown project identity reconcile action %d", decision.Action)
 	}
+}
+
+func emitProjectIdentityStampedEvent(rec events.Recorder, cityPath, scopeRoot, source, layer, oldID, newID string) {
+	if rec == nil {
+		return
+	}
+	payload := gcapi.ProjectIdentityStampedPayload{
+		ScopeRoot: projectIdentityEventScopeRoot(cityPath, scopeRoot),
+		Source:    source,
+		Layer:     layer,
+		OldID:     oldID,
+		NewID:     newID,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	rec.Record(events.Event{
+		Type:    events.ProjectIdentityStamped,
+		Actor:   "gc dolt-state ensure-project-id",
+		Subject: payload.ScopeRoot,
+		Payload: data,
+	})
+}
+
+func projectIdentityEventScopeRoot(cityPath, scopeRoot string) string {
+	cityPath = strings.TrimSpace(cityPath)
+	scopeRoot = strings.TrimSpace(scopeRoot)
+	if cityPath == "" || scopeRoot == "" {
+		return filepath.ToSlash(filepath.Clean(scopeRoot))
+	}
+	rel, err := filepath.Rel(filepath.Clean(cityPath), filepath.Clean(scopeRoot))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return filepath.ToSlash(filepath.Clean(scopeRoot))
+	}
+	if rel == "." {
+		return ""
+	}
+	return filepath.ToSlash(rel)
 }
 
 func writeProjectIdentityIfNeeded(fs fsys.FS, scopeRoot string, id string) (bool, error) {
@@ -355,7 +439,7 @@ func writeProjectIdentityIfNeeded(fs fsys.FS, scopeRoot string, id string) (bool
 	return true, nil
 }
 
-func writeProjectIdentityToAllLayers(ctx context.Context, fs fsys.FS, scopeRoot string, db *sql.DB, id string, source string) (l1Updated, l2Updated, l3Updated bool, err error) {
+func writeProjectIdentityToAllLayers(ctx context.Context, fs fsys.FS, scopeRoot string, db *sql.DB, id string) (l1Updated, l2Updated, l3Updated bool, err error) {
 	l1Updated, err = writeProjectIdentityIfNeeded(fs, scopeRoot, id)
 	if err != nil {
 		return false, false, false, err
@@ -369,9 +453,6 @@ func writeProjectIdentityToAllLayers(ctx context.Context, fs fsys.FS, scopeRoot 
 	if err != nil {
 		return l1Updated, l2Updated, false, err
 	}
-	// TODO(ga-3ski1 child C / ga-ue241): emit project.identity.stamped event here,
-	// payload {scope, source, before, after, layers_updated: [l1,l2,l3]}.
-	_ = source
 	return l1Updated, l2Updated, l3Updated, nil
 }
 

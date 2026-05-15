@@ -378,22 +378,14 @@ read_existing_dolt_database() {
     grep -o '"dolt_database"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta_file" 2>/dev/null |         sed 's/.*"dolt_database"[[:space:]]*:[[:space:]]*"//;s/"//' || true
 }
 
-metadata_has_project_id() {
-    local meta_file="$1"
-    [ -f "$meta_file" ] || return 1
-    grep -q '"project_id"[[:space:]]*:' "$meta_file" 2>/dev/null
+identity_toml_present() {
+    local dir="$1"
+    [ -f "$dir/.beads/identity.toml" ]
 }
 
-backfill_project_id_if_missing() {
+ensure_project_identity() {
     local dir="$1" meta_file gc_bin dolt_database host
     meta_file="$dir/.beads/metadata.json"
-    if metadata_has_project_id "$meta_file"; then
-        return 0
-    fi
-    run_bd_pinned "$dir" migrate --update-repo-id 2>/dev/null || true
-    if metadata_has_project_id "$meta_file"; then
-        return 0
-    fi
     gc_bin=$(resolve_gc_helper_bin)
     if [ -z "$gc_bin" ]; then
         return 0
@@ -403,7 +395,14 @@ backfill_project_id_if_missing() {
         return 0
     fi
     host=$(connect_host)
-    "$gc_bin" dolt-state ensure-project-id         --metadata "$meta_file"         --host "$host"         --port "$DOLT_PORT"         --user "$DOLT_USER"         --database "$dolt_database" >/dev/null || die "failed to ensure project identity for $dir"
+    "$gc_bin" dolt-state ensure-project-id \
+        --city "$GC_CITY_PATH" \
+        --metadata "$meta_file" \
+        --host "$host" \
+        --port "$DOLT_PORT" \
+        --user "$DOLT_USER" \
+        --database "$dolt_database" >/dev/null \
+        || die "failed to ensure project identity for $dir"
 }
 
 ensure_bd_runtime_issue_prefix() {
@@ -2115,7 +2114,7 @@ op_init() {
                 ensure_types_custom_in_yaml "$dir" "$custom_types"
                 ensure_bd_runtime_custom_types "$dolt_database" "$custom_types"
                 ensure_bd_runtime_issue_prefix "$dolt_database" "$prefix"
-                backfill_project_id_if_missing "$dir"
+                ensure_project_identity "$dir"
                 exit 0
             fi
             echo "warning: database '$dolt_database' missing bd schema; re-initializing" >&2
@@ -2189,10 +2188,7 @@ op_init() {
     # compatibility state for raw bd operations, not a second GC authority.
     ensure_bd_runtime_issue_prefix "$dolt_database" "$prefix"
 
-    # Ensure database has repository fingerprint (upstream GH #25).
-    # Fresh bd init already writes project_id on current upstream; only pay the
-    # migration cost when metadata still lacks it.
-    backfill_project_id_if_missing "$dir"
+    ensure_project_identity "$dir"
 
     # Drop orphan database created by bd init (upstream gt-sv1h) only after
     # the pinned database schema is visible. Some bd builds appear to stage

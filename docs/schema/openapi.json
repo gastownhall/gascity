@@ -2034,6 +2034,9 @@
             "$ref": "#/components/schemas/OutboundEventPayload"
           },
           {
+            "$ref": "#/components/schemas/ProjectIdentityStampedPayload"
+          },
+          {
             "$ref": "#/components/schemas/RequestFailedPayload"
           },
           {
@@ -4564,6 +4567,33 @@
         ],
         "type": "object"
       },
+      "ProjectIdentityStampedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "layer": {
+            "type": "string"
+          },
+          "new_id": {
+            "type": "string"
+          },
+          "old_id": {
+            "type": "string"
+          },
+          "scope_root": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope_root",
+          "source",
+          "layer",
+          "new_id"
+        ],
+        "type": "object"
+      },
       "ProviderCreateInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -6833,6 +6863,7 @@
             "order.completed": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedEventStreamEnvelopeOrderFired",
+            "project.identity.stamped": "#/components/schemas/TypedEventStreamEnvelopeProjectIdentityStamped",
             "provider.swapped": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped",
             "request.failed": "#/components/schemas/TypedEventStreamEnvelopeRequestFailed",
             "request.result.city.create": "#/components/schemas/TypedEventStreamEnvelopeRequestResultCityCreate",
@@ -6942,6 +6973,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderFired"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeProjectIdentityStamped"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped"
@@ -7532,6 +7566,7 @@
                 "order.failed",
                 "provider.swapped",
                 "worker.operation",
+                "project.identity.stamped",
                 "supervisor.fs_pressure.skipped_tick",
                 "extmsg.bound",
                 "extmsg.unbound",
@@ -8313,6 +8348,48 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope order.fired",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeProjectIdentityStamped": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ProjectIdentityStampedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "project.identity.stamped",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope project.identity.stamped",
         "type": "object"
       },
       "TypedEventStreamEnvelopeProviderSwapped": {
@@ -9146,6 +9223,7 @@
             "order.completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired",
+            "project.identity.stamped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProjectIdentityStamped",
             "provider.swapped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped",
             "request.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestFailed",
             "request.result.city.create": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultCityCreate",
@@ -9255,6 +9333,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProjectIdentityStamped"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped"
@@ -9892,6 +9973,7 @@
                 "order.failed",
                 "provider.swapped",
                 "worker.operation",
+                "project.identity.stamped",
                 "supervisor.fs_pressure.skipped_tick",
                 "extmsg.bound",
                 "extmsg.unbound",
@@ -10746,6 +10828,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope order.fired",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeProjectIdentityStamped": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ProjectIdentityStampedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "project.identity.stamped",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope project.identity.stamped",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeProviderSwapped": {

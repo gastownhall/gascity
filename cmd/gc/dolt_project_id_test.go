@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -12,7 +13,9 @@ import (
 	"testing"
 	"time"
 
+	gcapi "github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -106,7 +109,7 @@ func TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWhenMetadataAndDatabase
 		t.Fatalf("delete database _project_id: %v", err)
 	}
 
-	report, err := ensureManagedDoltProjectID(metadataPath, "127.0.0.1", port, "root", "hq")
+	report, err := ensureManagedDoltProjectID(metadataPath, port)
 	if err != nil {
 		t.Fatalf("ensureManagedDoltProjectID: %v", err)
 	}
@@ -163,6 +166,158 @@ func TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWhenMetadataAndDatabase
 	}
 }
 
+func TestEnsureProjectIDCmdRequiresCityFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := newEnsureProjectIDCmd(&stdout, &stderr)
+	metadataPath := filepath.Join(t.TempDir(), ".beads", "metadata.json")
+	cmd.SetArgs([]string{
+		"--metadata", metadataPath,
+		"--port", "3306",
+		"--database", "hq",
+	})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("ensure-project-id without --city succeeded")
+	}
+	if !strings.Contains(err.Error(), `required flag(s) "city" not set`) {
+		t.Fatalf("ensure-project-id error = %v, want required --city", err)
+	}
+}
+
+func TestEnsureProjectIDEmitsStampedEvent(t *testing.T) {
+	skipSlowCmdGCTest(t, "requires a managed dolt server; run make test-cmd-gc-process for full coverage")
+	cases := []struct {
+		name       string
+		l1         string
+		l2         string
+		l3         string
+		wantEvents []wantProjectIdentityStampedEvent
+	}{
+		{
+			name: "generated_emits_three_events_one_per_layer",
+			wantEvents: []wantProjectIdentityStampedEvent{
+				{source: "generated", layer: "L1"},
+				{source: "generated", layer: "L2"},
+				{source: "generated", layer: "L3"},
+			},
+		},
+		{
+			name: "migrated_from_metadata_emits_one_l1_event",
+			l2:   "metadata-id",
+			l3:   "metadata-id",
+			wantEvents: []wantProjectIdentityStampedEvent{
+				{source: "migrated_from_metadata", layer: "L1", newID: "metadata-id"},
+			},
+		},
+		{
+			name: "migrated_from_database_emits_one_l1_event",
+			l3:   "database-id",
+			wantEvents: []wantProjectIdentityStampedEvent{
+				{source: "migrated_from_database", layer: "L1", newID: "database-id"},
+			},
+		},
+		{
+			name: "cache_repair_l2_emits_one_l2_event",
+			l1:   "canonical-id",
+			l2:   "wrong-l2",
+			l3:   "canonical-id",
+			wantEvents: []wantProjectIdentityStampedEvent{
+				{source: "cache_repair", layer: "L2", oldID: "wrong-l2", newID: "canonical-id"},
+			},
+		},
+		{
+			name: "cache_repair_l3_emits_one_l3_event",
+			l1:   "canonical-id",
+			l2:   "canonical-id",
+			wantEvents: []wantProjectIdentityStampedEvent{
+				{source: "cache_repair", layer: "L3", newID: "canonical-id"},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			scopeRoot := filepath.Join(cityDir, "rigs", "demo")
+			metadataPath := writeProjectIDMetadataFile(t, scopeRoot, tc.l2)
+			if tc.l1 != "" {
+				if err := contract.WriteProjectIdentity(fsys.OSFS{}, scopeRoot, tc.l1); err != nil {
+					t.Fatalf("WriteProjectIdentity: %v", err)
+				}
+			}
+			var setup []string
+			if tc.l3 != "" {
+				setup = seedDatabaseProjectIDQueries(tc.l3)
+			}
+			port, cleanup := startProjectIDTestServer(t, setup...)
+			defer cleanup()
+
+			rec := &projectIdentityRecordingRecorder{}
+			report, err := ensureManagedDoltProjectIDWithRecorder(metadataPath, "127.0.0.1", port, "root", "hq", cityDir, rec)
+			if err != nil {
+				t.Fatalf("ensureManagedDoltProjectIDWithRecorder: %v", err)
+			}
+			assertProjectIdentityStampedEvents(t, rec.records, tc.wantEvents)
+			if tc.name == "generated_emits_three_events_one_per_layer" {
+				if report.ProjectID == "" {
+					t.Fatal("generated report.ProjectID empty")
+				}
+				payloads := decodeProjectIdentityStampedPayloads(t, rec.records)
+				for _, payload := range payloads {
+					if payload.NewID != report.ProjectID {
+						t.Fatalf("generated event NewID = %q, want report.ProjectID %q", payload.NewID, report.ProjectID)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestEnsureProjectIDEmitsNothingOnNoOp(t *testing.T) {
+	skipSlowCmdGCTest(t, "requires a managed dolt server; run make test-cmd-gc-process for full coverage")
+	cityDir := t.TempDir()
+	scopeRoot := filepath.Join(cityDir, "rigs", "demo")
+	metadataPath := writeProjectIDMetadataFile(t, scopeRoot, "canonical-id")
+	if err := contract.WriteProjectIdentity(fsys.OSFS{}, scopeRoot, "canonical-id"); err != nil {
+		t.Fatalf("WriteProjectIdentity: %v", err)
+	}
+	port, cleanup := startProjectIDTestServer(t, seedDatabaseProjectIDQueries("canonical-id")...)
+	defer cleanup()
+
+	rec := &projectIdentityRecordingRecorder{}
+	if _, err := ensureManagedDoltProjectIDWithRecorder(metadataPath, "127.0.0.1", port, "root", "hq", cityDir, rec); err != nil {
+		t.Fatalf("ensureManagedDoltProjectIDWithRecorder: %v", err)
+	}
+	if len(rec.records) != 0 {
+		t.Fatalf("recorded %d event(s), want none: %+v", len(rec.records), rec.records)
+	}
+}
+
+func TestEnsureProjectIDEmitsNothingOnRefusal(t *testing.T) {
+	skipSlowCmdGCTest(t, "requires a managed dolt server; run make test-cmd-gc-process for full coverage")
+	cityDir := t.TempDir()
+	scopeRoot := filepath.Join(cityDir, "rigs", "demo")
+	metadataPath := writeProjectIDMetadataFile(t, scopeRoot, "identity-id")
+	if err := contract.WriteProjectIdentity(fsys.OSFS{}, scopeRoot, "identity-id"); err != nil {
+		t.Fatalf("WriteProjectIdentity: %v", err)
+	}
+	port, cleanup := startProjectIDTestServer(t, seedDatabaseProjectIDQueries("database-id")...)
+	defer cleanup()
+
+	rec := &projectIdentityRecordingRecorder{}
+	_, err := ensureManagedDoltProjectIDWithRecorder(metadataPath, "127.0.0.1", port, "root", "hq", cityDir, rec)
+	if err == nil {
+		t.Fatal("ensureManagedDoltProjectIDWithRecorder unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "PROJECT IDENTITY MISMATCH") {
+		t.Fatalf("error = %v, want PROJECT IDENTITY MISMATCH", err)
+	}
+	if len(rec.records) != 0 {
+		t.Fatalf("recorded %d event(s), want none: %+v", len(rec.records), rec.records)
+	}
+}
+
 func TestEnsureManagedDoltProjectIDLegacyMigration(t *testing.T) {
 	skipSlowCmdGCTest(t, "requires a managed dolt server; run make test-cmd-gc-process for full coverage")
 	scopeRoot := t.TempDir()
@@ -170,7 +325,7 @@ func TestEnsureManagedDoltProjectIDLegacyMigration(t *testing.T) {
 	port, cleanup := startProjectIDTestServer(t)
 	defer cleanup()
 
-	report, err := ensureManagedDoltProjectID(metadataPath, "127.0.0.1", port, "root", "hq")
+	report, err := ensureManagedDoltProjectID(metadataPath, port)
 	if err != nil {
 		t.Fatalf("ensureManagedDoltProjectID: %v", err)
 	}
@@ -195,7 +350,7 @@ func TestEnsureManagedDoltProjectIDDBReseed(t *testing.T) {
 	port, cleanup := startProjectIDTestServer(t)
 	defer cleanup()
 
-	report, err := ensureManagedDoltProjectID(metadataPath, "127.0.0.1", port, "root", "hq")
+	report, err := ensureManagedDoltProjectID(metadataPath, port)
 	if err != nil {
 		t.Fatalf("ensureManagedDoltProjectID: %v", err)
 	}
@@ -222,7 +377,7 @@ func TestEnsureManagedDoltProjectIDHotPathNoOp(t *testing.T) {
 	beforeIdentity := mustReadFile(t, contract.ProjectIdentityPath(scopeRoot))
 	beforeMetadata := mustReadFile(t, metadataPath)
 
-	report, err := ensureManagedDoltProjectID(metadataPath, "127.0.0.1", port, "root", "hq")
+	report, err := ensureManagedDoltProjectID(metadataPath, port)
 	if err != nil {
 		t.Fatalf("ensureManagedDoltProjectID: %v", err)
 	}
@@ -252,7 +407,7 @@ func TestEnsureManagedDoltProjectIDRefusesL1L3Mismatch(t *testing.T) {
 	port, cleanup := startProjectIDTestServer(t, seedDatabaseProjectIDQueries("database-id")...)
 	defer cleanup()
 
-	_, err := ensureManagedDoltProjectID(metadataPath, "127.0.0.1", port, "root", "hq")
+	_, err := ensureManagedDoltProjectID(metadataPath, port)
 	if err == nil {
 		t.Fatal("ensureManagedDoltProjectID unexpectedly succeeded")
 	}
@@ -276,7 +431,7 @@ func TestEnsureManagedDoltProjectIDRepairsL2Drift(t *testing.T) {
 	port, cleanup := startProjectIDTestServer(t, seedDatabaseProjectIDQueries("canonical-id")...)
 	defer cleanup()
 
-	report, err := ensureManagedDoltProjectID(metadataPath, "127.0.0.1", port, "root", "hq")
+	report, err := ensureManagedDoltProjectID(metadataPath, port)
 	if err != nil {
 		t.Fatalf("ensureManagedDoltProjectID: %v", err)
 	}
@@ -298,7 +453,7 @@ func TestEnsureManagedDoltProjectIDAdoptsFromL3(t *testing.T) {
 	port, cleanup := startProjectIDTestServer(t, seedDatabaseProjectIDQueries("database-id")...)
 	defer cleanup()
 
-	report, err := ensureManagedDoltProjectID(metadataPath, "127.0.0.1", port, "root", "hq")
+	report, err := ensureManagedDoltProjectID(metadataPath, port)
 	if err != nil {
 		t.Fatalf("ensureManagedDoltProjectID: %v", err)
 	}
@@ -338,6 +493,65 @@ func writeProjectIDMetadataFile(t *testing.T, scopeRoot string, projectID string
 		t.Fatal(err)
 	}
 	return metadataPath
+}
+
+type projectIdentityRecordingRecorder struct {
+	records []events.Event
+}
+
+func (r *projectIdentityRecordingRecorder) Record(e events.Event) {
+	r.records = append(r.records, e)
+}
+
+type wantProjectIdentityStampedEvent struct {
+	source string
+	layer  string
+	oldID  string
+	newID  string
+}
+
+func assertProjectIdentityStampedEvents(t *testing.T, records []events.Event, want []wantProjectIdentityStampedEvent) {
+	t.Helper()
+	if len(records) != len(want) {
+		t.Fatalf("recorded %d event(s), want %d: %+v", len(records), len(want), records)
+	}
+	payloads := decodeProjectIdentityStampedPayloads(t, records)
+	for i, payload := range payloads {
+		if records[i].Type != events.ProjectIdentityStamped {
+			t.Fatalf("records[%d].Type = %q, want %q", i, records[i].Type, events.ProjectIdentityStamped)
+		}
+		if payload.ScopeRoot != "rigs/demo" {
+			t.Fatalf("payload[%d].ScopeRoot = %q, want rigs/demo", i, payload.ScopeRoot)
+		}
+		if payload.Source != want[i].source {
+			t.Fatalf("payload[%d].Source = %q, want %q", i, payload.Source, want[i].source)
+		}
+		if payload.Layer != want[i].layer {
+			t.Fatalf("payload[%d].Layer = %q, want %q", i, payload.Layer, want[i].layer)
+		}
+		if payload.OldID != want[i].oldID {
+			t.Fatalf("payload[%d].OldID = %q, want %q", i, payload.OldID, want[i].oldID)
+		}
+		if want[i].newID != "" && payload.NewID != want[i].newID {
+			t.Fatalf("payload[%d].NewID = %q, want %q", i, payload.NewID, want[i].newID)
+		}
+		if payload.NewID == "" {
+			t.Fatalf("payload[%d].NewID empty", i)
+		}
+	}
+}
+
+func decodeProjectIdentityStampedPayloads(t *testing.T, records []events.Event) []gcapi.ProjectIdentityStampedPayload {
+	t.Helper()
+	payloads := make([]gcapi.ProjectIdentityStampedPayload, 0, len(records))
+	for i, record := range records {
+		var payload gcapi.ProjectIdentityStampedPayload
+		if err := json.Unmarshal(record.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal records[%d].Payload: %v", i, err)
+		}
+		payloads = append(payloads, payload)
+	}
+	return payloads
 }
 
 func startProjectIDTestServer(t *testing.T, setupQueries ...string) (string, func()) {
@@ -599,7 +813,7 @@ func TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWithPasswordedServer(t 
 		t.Fatalf("delete database _project_id: %v", err)
 	}
 
-	report, err := ensureManagedDoltProjectID(metadataPath, "127.0.0.1", fmt.Sprintf("%d", port), "root", "hq")
+	report, err := ensureManagedDoltProjectID(metadataPath, fmt.Sprintf("%d", port))
 	if err != nil {
 		t.Fatalf("ensureManagedDoltProjectID: %v", err)
 	}

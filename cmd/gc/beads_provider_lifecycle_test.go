@@ -5272,12 +5272,12 @@ esac
 		"3307",
 		filepath.Join(rigDir, ".beads"),
 	}, "|")
-	data, err := os.ReadFile(filepath.Join(captureDir, "migrate.env"))
+	data, err := os.ReadFile(filepath.Join(captureDir, "init.env"))
 	if err != nil {
-		t.Fatalf("read migrate.env: %v", err)
+		t.Fatalf("read init.env: %v", err)
 	}
 	if got := strings.TrimSpace(string(data)); got != wantPinned {
-		t.Fatalf("migrate.env = %q, want %q", got, wantPinned)
+		t.Fatalf("init.env = %q, want %q", got, wantPinned)
 	}
 	if _, err := os.Stat(filepath.Join(captureDir, "config.env")); !os.IsNotExist(err) {
 		t.Fatalf("config.env exists after init; err=%v", err)
@@ -5298,7 +5298,7 @@ esac
 	}
 }
 
-func TestGcBeadsBdInitBackfillsRepoIDMigrationWhenMetadataExistsWithoutProjectID(t *testing.T) {
+func TestGcBeadsBdInitEnsuresProjectIdentityWhenMetadataExistsWithoutProjectID(t *testing.T) {
 	skipSlowCmdGCTest(t, "runs the materialized gc-beads-bd init script with GC_BIN helper; run make test-cmd-gc-process for full coverage")
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -5330,20 +5330,13 @@ func TestGcBeadsBdInitBackfillsRepoIDMigrationWhenMetadataExistsWithoutProjectID
 set -eu
 capture_dir=%q
 cmd="${1:-}"
-case "$cmd" in
+	case "$cmd" in
   init)
     : > "$capture_dir/init.called"
     exit 0
     ;;
   migrate)
     : > "$capture_dir/migrate.called"
-    python3 - <<'PY' "$PWD/.beads/metadata.json"
-import json, pathlib, sys
-path = pathlib.Path(sys.argv[1])
-data = json.loads(path.read_text())
-data["project_id"] = "backfilled-project-id"
-path.write_text(json.dumps(data, indent=2) + "\n")
-PY
     exit 0
     ;;
   config|list)
@@ -5358,6 +5351,51 @@ esac
 		t.Fatal(err)
 	}
 
+	fakeGC := filepath.Join(binDir, "gc-helper")
+	fakeGCScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+capture_dir=%q
+cmd="$1 $2"
+shift 2
+case "$cmd" in
+  'dolt-state ensure-project-id')
+    metadata=''
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --metadata)
+          metadata="$2"
+          shift 2
+          ;;
+        --city|--host|--port|--user|--database)
+          shift 2
+          ;;
+        *)
+          exit 64
+          ;;
+      esac
+    done
+    : > "$capture_dir/helper.called"
+    python3 - <<'PY' "$metadata"
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+data = json.loads(path.read_text())
+data['project_id'] = 'helper-project-id'
+path.write_text(json.dumps(data, indent=2) + '\n')
+PY
+    ;;
+  'dolt-config normalize-scope')
+    exit 0
+    ;;
+  *)
+    echo "unexpected gc helper args: $cmd $*" >&2
+    exit 64
+    ;;
+esac
+`, captureDir)
+	if err := os.WriteFile(fakeGC, []byte(fakeGCScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
 	fakeDolt := filepath.Join(binDir, "dolt")
 	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -5366,15 +5404,18 @@ esac
 	cmd := exec.Command(script, "init", cityPath, "gc", "gascity")
 	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
 		"GC_CITY_PATH="+cityPath,
-		"GC_BIN="+currentGCBinaryForTests(t),
+		"GC_BIN="+fakeGC,
 		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
 	)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
-	if _, err := os.Stat(filepath.Join(captureDir, "migrate.called")); err != nil {
-		t.Fatalf("expected migrate to run on metadata fast path, stat err = %v", err)
+	if _, err := os.Stat(filepath.Join(captureDir, "migrate.called")); !os.IsNotExist(err) {
+		t.Fatalf("migrate should not run on metadata fast path, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(captureDir, "helper.called")); err != nil {
+		t.Fatalf("expected project-id helper call, stat err = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(captureDir, "init.called")); !os.IsNotExist(err) {
 		t.Fatalf("bd init should be skipped on metadata fast path, stat err = %v", err)
@@ -5383,12 +5424,12 @@ esac
 	if err != nil {
 		t.Fatalf("ReadFile(metadata.json): %v", err)
 	}
-	if !strings.Contains(string(metaData), `"project_id": "backfilled-project-id"`) {
-		t.Fatalf("metadata.json missing backfilled project_id:\n%s", metaData)
+	if !strings.Contains(string(metaData), `"project_id": "helper-project-id"`) {
+		t.Fatalf("metadata.json missing helper project_id:\n%s", metaData)
 	}
 }
 
-func TestGcBeadsBdInitUsesProjectIDHelperWhenRepoIDMigrationFails(t *testing.T) {
+func TestGcBeadsBdInitUsesProjectIDHelperWithoutRepoIDMigration(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -5456,7 +5497,7 @@ case "$cmd" in
           metadata="$2"
           shift 2
           ;;
-        --host|--port|--user|--database)
+        --city|--host|--port|--user|--database)
           shift 2
           ;;
         *)
@@ -5503,8 +5544,8 @@ esac
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
-	if _, err := os.Stat(filepath.Join(captureDir, "migrate.called")); err != nil {
-		t.Fatalf("expected migrate attempt before helper fallback, stat err = %v", err)
+	if _, err := os.Stat(filepath.Join(captureDir, "migrate.called")); !os.IsNotExist(err) {
+		t.Fatalf("migrate should not run before helper, stat err = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(captureDir, "helper.called")); err != nil {
 		t.Fatalf("expected project-id helper fallback, stat err = %v", err)
@@ -5524,7 +5565,7 @@ esac
 	}
 }
 
-func TestGcBeadsBdInitSkipsRepoIDMigrationWhenProjectIDAlreadyPresent(t *testing.T) {
+func TestGcBeadsBdInitRunsProjectIDHelperWhenProjectIDAlreadyPresent(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -5577,6 +5618,29 @@ esac
 		t.Fatal(err)
 	}
 
+	fakeGC := filepath.Join(binDir, "gc-helper")
+	fakeGCScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+capture_dir=%q
+subcmd="$1 $2"
+case "$subcmd" in
+  "dolt-config normalize-scope")
+    exit 0
+    ;;
+  "dolt-state ensure-project-id")
+    : > "$capture_dir/helper.called"
+    exit 0
+    ;;
+  *)
+    echo "unexpected gc helper args: $subcmd $*" >&2
+    exit 64
+    ;;
+esac
+`, captureDir)
+	if err := os.WriteFile(fakeGC, []byte(fakeGCScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
 	fakeDolt := filepath.Join(binDir, "dolt")
 	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -5585,7 +5649,7 @@ esac
 	cmd := exec.Command(script, "init", cityPath, "gc", "gascity")
 	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
 		"GC_CITY_PATH="+cityPath,
-		"GC_BIN="+currentGCBinaryForTests(t),
+		"GC_BIN="+fakeGC,
 		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
 	)...)
 	out, err := cmd.CombinedOutput()
@@ -5594,6 +5658,9 @@ esac
 	}
 	if _, err := os.Stat(filepath.Join(captureDir, "migrate.called")); !os.IsNotExist(err) {
 		t.Fatalf("migrate should be skipped when project_id already exists, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(captureDir, "helper.called")); err != nil {
+		t.Fatalf("expected project-id helper call, stat err = %v", err)
 	}
 }
 
@@ -5722,8 +5789,9 @@ esac
 	}
 
 	fakeGC := filepath.Join(binDir, "gc-helper")
-	fakeGCScript := `#!/bin/sh
+	fakeGCScript := fmt.Sprintf(`#!/bin/sh
 set -eu
+capture_dir=%q
 subcmd="$1 $2"
 shift 2
 case "$subcmd" in
@@ -5755,6 +5823,28 @@ case "$subcmd" in
     exit 0
     ;;
   "dolt-state ensure-project-id")
+    metadata=""
+    database=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --metadata)
+          metadata="$2"
+          shift 2
+          ;;
+        --database)
+          database="$2"
+          shift 2
+          ;;
+        --city|--host|--port|--user)
+          shift 2
+          ;;
+        *)
+          exit 66
+          ;;
+      esac
+    done
+    printf '%%s\n' "$database" >> "$capture_dir/identity-db.log"
+    python3 -c 'import json, pathlib, sys; path = pathlib.Path(sys.argv[1]); meta = json.loads(path.read_text()); meta["project_id"] = "backfilled-project-id"; path.write_text(json.dumps(meta, indent=2) + "\n")' "$metadata"
     exit 0
     ;;
   *)
@@ -5762,7 +5852,7 @@ case "$subcmd" in
     exit 64
     ;;
 esac
-`
+`, captureDir)
 	if err := os.WriteFile(fakeGC, []byte(fakeGCScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -5783,17 +5873,17 @@ esac
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
 
-	data, err := os.ReadFile(filepath.Join(captureDir, "migrate-db.log"))
+	data, err := os.ReadFile(filepath.Join(captureDir, "identity-db.log"))
 	if err != nil {
-		t.Fatalf("ReadFile(migrate-db.log): %v", err)
+		t.Fatalf("ReadFile(identity-db.log): %v", err)
 	}
 	lines := strings.Fields(string(data))
 	if len(lines) == 0 {
-		t.Fatal("migrate-db.log empty")
+		t.Fatal("identity-db.log empty")
 	}
 	for _, line := range lines {
 		if line != "gascity" {
-			t.Fatalf("migrate-db.log line = %q, want gascity", line)
+			t.Fatalf("identity-db.log line = %q, want gascity", line)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(captureDir, "config-db.log")); !os.IsNotExist(err) {
@@ -5867,8 +5957,9 @@ esac
 	}
 
 	fakeGC := filepath.Join(binDir, "gc-helper")
-	fakeGCScript := `#!/bin/sh
+	fakeGCScript := fmt.Sprintf(`#!/bin/sh
 set -eu
+capture_dir=%q
 subcmd="$1 $2"
 shift 2
 case "$subcmd" in
@@ -5900,6 +5991,28 @@ case "$subcmd" in
     exit 0
     ;;
   "dolt-state ensure-project-id")
+    metadata=""
+    database=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --metadata)
+          metadata="$2"
+          shift 2
+          ;;
+        --database)
+          database="$2"
+          shift 2
+          ;;
+        --city|--host|--port|--user)
+          shift 2
+          ;;
+        *)
+          exit 66
+          ;;
+      esac
+    done
+    printf '%%s\n' "$database" >> "$capture_dir/identity-db.log"
+    python3 -c 'import json, pathlib, sys; path = pathlib.Path(sys.argv[1]); meta = json.loads(path.read_text()); meta["project_id"] = "backfilled-project-id"; path.write_text(json.dumps(meta, indent=2) + "\n")' "$metadata"
     exit 0
     ;;
   *)
@@ -5907,7 +6020,7 @@ case "$subcmd" in
     exit 64
     ;;
 esac
-`
+`, captureDir)
 	if err := os.WriteFile(fakeGC, []byte(fakeGCScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -5928,17 +6041,17 @@ esac
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
 
-	data, err := os.ReadFile(filepath.Join(captureDir, "migrate-db.log"))
+	data, err := os.ReadFile(filepath.Join(captureDir, "identity-db.log"))
 	if err != nil {
-		t.Fatalf("ReadFile(migrate-db.log): %v", err)
+		t.Fatalf("ReadFile(identity-db.log): %v", err)
 	}
 	lines := strings.Fields(string(data))
 	if len(lines) == 0 {
-		t.Fatal("migrate-db.log empty")
+		t.Fatal("identity-db.log empty")
 	}
 	for _, line := range lines {
 		if line != strings.ToUpper(managedDoltProbeDatabase) {
-			t.Fatalf("migrate-db.log line = %q, want %s", line, strings.ToUpper(managedDoltProbeDatabase))
+			t.Fatalf("identity-db.log line = %q, want %s", line, strings.ToUpper(managedDoltProbeDatabase))
 		}
 	}
 	if _, err := os.Stat(filepath.Join(captureDir, "config-db.log")); !os.IsNotExist(err) {
