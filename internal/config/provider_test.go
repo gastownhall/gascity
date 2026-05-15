@@ -145,11 +145,35 @@ func TestBuiltinProvidersCursor(t *testing.T) {
 	if p.Command != "cursor-agent" {
 		t.Errorf("Command = %q, want %q", p.Command, "cursor-agent")
 	}
-	if !reflect.DeepEqual(p.Args, []string{"-f", "--approve-mcps"}) {
-		t.Errorf("Args = %v, want [-f --approve-mcps]", p.Args)
+	if !reflect.DeepEqual(p.Args, []string{"-f"}) {
+		t.Errorf("Args = %v, want [-f]", p.Args)
 	}
-	if got := (&ResolvedProvider{Command: p.Command, Args: p.Args}).CommandString(); got != "cursor-agent -f --approve-mcps" {
-		t.Errorf("CommandString() = %q, want %q", got, "cursor-agent -f --approve-mcps")
+	rp := &ResolvedProvider{
+		Command:           p.Command,
+		Args:              p.Args,
+		OptionsSchema:     p.OptionsSchema,
+		EffectiveDefaults: ComputeEffectiveDefaults(p.OptionsSchema, p.OptionDefaults, nil),
+	}
+	if got := rp.CommandString(); got != "cursor-agent -f" {
+		t.Errorf("CommandString() = %q, want %q", got, "cursor-agent -f")
+	}
+	if got := rp.ResolveDefaultArgs(); len(got) != 0 {
+		t.Errorf("ResolveDefaultArgs() = %v, want no MCP approval args by default", got)
+	}
+	mcpApproval := findOption(p.OptionsSchema, "mcp_approval")
+	if mcpApproval == nil {
+		t.Fatal("OptionsSchema missing mcp_approval")
+	}
+	if mcpApproval.Default != "prompt" {
+		t.Errorf("mcp_approval default = %q, want prompt", mcpApproval.Default)
+	}
+	approve := findChoice(mcpApproval.Choices, "approve")
+	if approve == nil || !reflect.DeepEqual(approve.FlagArgs, []string{"--approve-mcps"}) {
+		t.Fatalf("mcp_approval approve choice = %+v, want --approve-mcps", approve)
+	}
+	rp.EffectiveDefaults = ComputeEffectiveDefaults(p.OptionsSchema, map[string]string{"mcp_approval": "approve"}, nil)
+	if got := rp.ResolveDefaultArgs(); !reflect.DeepEqual(got, []string{"--approve-mcps"}) {
+		t.Errorf("ResolveDefaultArgs(opt-in) = %v, want [--approve-mcps]", got)
 	}
 	if p.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "arg")

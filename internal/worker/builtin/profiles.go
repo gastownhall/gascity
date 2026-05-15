@@ -279,13 +279,9 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ACPArgs:          []string{"acp", "--agent", "gascity"},
 	},
 	"cursor": {
-		DisplayName: "Cursor Agent",
-		Command:     "cursor-agent",
-		// --approve-mcps is required for non-interactive sessions: without it,
-		// cursor-agent gates MCP tool use behind an approval prompt that pool
-		// workers cannot answer, causing MCPs projected to or configured in
-		// .cursor/mcp.json to appear unavailable.
-		Args:              []string{"-f", "--approve-mcps"},
+		DisplayName:       "Cursor Agent",
+		Command:           "cursor-agent",
+		Args:              []string{"-f"},
 		PromptMode:        "arg",
 		ReadyPromptPrefix: "\u2192 ",
 		ReadyDelayMs:      10000,
@@ -294,6 +290,18 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		InstructionsFile:  "AGENTS.md",
 		ResumeFlag:        "--resume",
 		ResumeStyle:       "flag",
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:     "mcp_approval",
+				Label:   "MCP Approval",
+				Type:    "select",
+				Default: "prompt",
+				Choices: []BuiltinOptionChoice{
+					{Value: "prompt", Label: "Prompt for MCP approval"},
+					{Value: "approve", Label: "Approve visible MCP servers", FlagArgs: []string{"--approve-mcps"}},
+				},
+			},
+		},
 	},
 	"copilot": {
 		DisplayName: "GitHub Copilot",

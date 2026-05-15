@@ -113,6 +113,9 @@ func (p MCPProjection) ApplyWithStderr(fs fsys.FS, stderr io.Writer) error {
 }
 
 func (p MCPProjection) applyWithStderr(fs fsys.FS, stderr io.Writer) error {
+	if err := p.validateProviderContract(); err != nil {
+		return err
+	}
 	if err := ensureNotSymlink(fs, p); err != nil {
 		return err
 	}
@@ -310,7 +313,7 @@ func (p MCPProjection) applyCursor(fs fsys.FS) error {
 			return removeManagedMCPFile(fs, p.markerPath())
 		}
 	} else {
-		doc["mcpServers"] = p.claudeServersDoc()
+		doc["mcpServers"] = p.cursorServersDoc()
 	}
 	data, err := marshalJSONDoc(doc)
 	if err != nil {
@@ -323,6 +326,24 @@ func (p MCPProjection) applyCursor(fs fsys.FS) error {
 		return removeManagedMCPFile(fs, p.markerPath())
 	}
 	return p.writeManagedMarker(fs)
+}
+
+func (p MCPProjection) validateProviderContract() error {
+	if p.Provider != MCPProviderCursor {
+		return nil
+	}
+	for _, server := range p.Servers {
+		switch server.Transport {
+		case MCPTransportStdio:
+		case MCPTransportHTTP, MCPTransportSSE:
+			return fmt.Errorf(
+				"cursor MCP projection does not support %s server %q: Cursor's HTTP/SSE mcpServers wire contract is not verified",
+				server.Transport,
+				server.Name,
+			)
+		}
+	}
+	return nil
 }
 
 func (p MCPProjection) claudeServersDoc() map[string]any {
@@ -343,6 +364,24 @@ func (p MCPProjection) claudeServersDoc() map[string]any {
 			entry["url"] = server.URL
 			if len(server.Headers) > 0 {
 				entry["headers"] = cloneStringMap(server.Headers)
+			}
+		}
+		out[server.Name] = entry
+	}
+	return out
+}
+
+func (p MCPProjection) cursorServersDoc() map[string]any {
+	out := make(map[string]any, len(p.Servers))
+	for _, server := range p.Servers {
+		entry := map[string]any{}
+		if server.Transport == MCPTransportStdio {
+			entry["command"] = server.Command
+			if len(server.Args) > 0 {
+				entry["args"] = append([]string(nil), server.Args...)
+			}
+			if len(server.Env) > 0 {
+				entry["env"] = cloneStringMap(server.Env)
 			}
 		}
 		out[server.Name] = entry

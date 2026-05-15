@@ -175,12 +175,6 @@ func TestApplyMCPProjectionCursorWritesManagedFile(t *testing.T) {
 			Args:      []string{"pkg"},
 			Env:       map[string]string{"TOKEN": "secret"},
 		},
-		{
-			Name:      "remote",
-			Transport: MCPTransportHTTP,
-			URL:       "https://mcp.example.com",
-			Headers:   map[string]string{"Authorization": "Bearer token"},
-		},
 	})
 	if err != nil {
 		t.Fatalf("BuildMCPProjection: %v", err)
@@ -201,9 +195,6 @@ func TestApplyMCPProjectionCursorWritesManagedFile(t *testing.T) {
 	}
 	if _, ok := doc.MCPServers["alpha"]["command"]; !ok {
 		t.Fatalf("stdio server missing command: %+v", doc.MCPServers["alpha"])
-	}
-	if got := doc.MCPServers["remote"]["type"]; got != "http" {
-		t.Fatalf("remote type = %v, want http", got)
 	}
 
 	info, err := os.Stat(filepath.Join(dir, ".cursor", "mcp.json"))
@@ -232,6 +223,46 @@ func TestApplyMCPProjectionCursorWritesManagedFile(t *testing.T) {
 	}
 }
 
+func TestApplyMCPProjectionCursorRejectsUnverifiedRemoteTransport(t *testing.T) {
+	for _, transport := range []MCPTransport{MCPTransportHTTP, MCPTransportSSE} {
+		t.Run(string(transport), func(t *testing.T) {
+			dir := t.TempDir()
+			target := filepath.Join(dir, ".cursor", "mcp.json")
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			existing := []byte(`{"mcpServers":{"user-authored":{"command":"custom"}}}` + "\n")
+			if err := os.WriteFile(target, existing, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			proj, err := BuildMCPProjection(MCPProviderCursor, dir, []MCPServer{
+				{Name: "remote", Transport: transport, URL: "https://mcp.example.com"},
+			})
+			if err != nil {
+				t.Fatalf("BuildMCPProjection: %v", err)
+			}
+			err = proj.Apply(fsys.OSFS{})
+			if err == nil {
+				t.Fatal("expected Cursor remote transport rejection, got nil")
+			}
+			if !strings.Contains(err.Error(), "Cursor's HTTP/SSE mcpServers wire contract is not verified") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			data, err := os.ReadFile(target)
+			if err != nil {
+				t.Fatalf("ReadFile(target): %v", err)
+			}
+			if !reflect.DeepEqual(data, existing) {
+				t.Fatalf("target should not be rewritten on validation failure\n got: %q\nwant: %q", data, existing)
+			}
+			if _, err := os.Stat(filepath.Join(dir, ".gc", "mcp-adopted", "cursor")); !os.IsNotExist(err) {
+				t.Fatalf("validation failure must not create adoption snapshot, stat err = %v", err)
+			}
+		})
+	}
+}
+
 func TestApplyMCPProjectionCursorPreservesNonMCPSettings(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, ".cursor", "mcp.json")
@@ -252,9 +283,10 @@ func TestApplyMCPProjectionCursorPreservesNonMCPSettings(t *testing.T) {
 
 	proj, err := BuildMCPProjection(MCPProviderCursor, dir, []MCPServer{
 		{
-			Name:      "remote",
-			Transport: MCPTransportHTTP,
-			URL:       "https://mcp.example.com",
+			Name:      "alpha",
+			Transport: MCPTransportStdio,
+			Command:   "uvx",
+			Args:      []string{"pkg"},
 		},
 	})
 	if err != nil {
@@ -282,12 +314,12 @@ func TestApplyMCPProjectionCursorPreservesNonMCPSettings(t *testing.T) {
 	if _, ok := mcpServers["stale"]; ok {
 		t.Fatalf("stale server remained after projection: %+v", mcpServers)
 	}
-	remote, ok := mcpServers["remote"].(map[string]any)
+	alpha, ok := mcpServers["alpha"].(map[string]any)
 	if !ok {
-		t.Fatalf("remote server missing: %+v", mcpServers)
+		t.Fatalf("alpha server missing: %+v", mcpServers)
 	}
-	if got := remote["type"]; got != "http" {
-		t.Fatalf("remote.type = %v, want http", got)
+	if got := alpha["command"]; got != "uvx" {
+		t.Fatalf("alpha.command = %v, want uvx", got)
 	}
 
 	empty, err := BuildMCPProjection(MCPProviderCursor, dir, nil)
@@ -742,6 +774,73 @@ func TestApplyMCPProjectionSnapshotsExistingContentBeforeFirstAdoption(t *testin
 	}
 
 	// The stderr warning must name both paths so operators can recover.
+	warning := stderr.String()
+	if !strings.Contains(warning, "adopting provider-native MCP at "+target) {
+		t.Fatalf("stderr missing target path: %q", warning)
+	}
+	if !strings.Contains(warning, "snapshotted to ") {
+		t.Fatalf("stderr missing snapshot path: %q", warning)
+	}
+}
+
+func TestApplyMCPProjectionCursorAdoptsExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, ".cursor", "mcp.json")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	existing := []byte(`{"mcpServers":{"user-authored":{"command":"custom"}}}` + "\n")
+	if err := os.WriteFile(target, existing, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr strings.Builder
+	restore := SetAdoptionStderr(&stderr)
+	defer restore()
+
+	proj, err := BuildMCPProjection(MCPProviderCursor, dir, []MCPServer{
+		{Name: "alpha", Transport: MCPTransportStdio, Command: "uvx"},
+	})
+	if err != nil {
+		t.Fatalf("BuildMCPProjection: %v", err)
+	}
+	if err := proj.Apply(fsys.OSFS{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	adoptedDir := filepath.Join(dir, ".gc", "mcp-adopted", "cursor")
+	entries, err := os.ReadDir(adoptedDir)
+	if err != nil {
+		t.Fatalf("ReadDir(adopted): %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 adoption snapshot, got %d: %v", len(entries), entries)
+	}
+	snapshot, err := os.ReadFile(filepath.Join(adoptedDir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("ReadFile(snapshot): %v", err)
+	}
+	if !reflect.DeepEqual(snapshot, existing) {
+		t.Fatalf("snapshot content mismatch\n  got:  %q\n  want: %q", snapshot, existing)
+	}
+
+	proj2, err := BuildMCPProjection(MCPProviderCursor, dir, []MCPServer{
+		{Name: "beta", Transport: MCPTransportStdio, Command: "uvx"},
+	})
+	if err != nil {
+		t.Fatalf("BuildMCPProjection(second): %v", err)
+	}
+	if err := proj2.Apply(fsys.OSFS{}); err != nil {
+		t.Fatalf("Apply(second): %v", err)
+	}
+	entries2, err := os.ReadDir(adoptedDir)
+	if err != nil {
+		t.Fatalf("ReadDir(adopted) second pass: %v", err)
+	}
+	if len(entries2) != 1 {
+		t.Fatalf("adoption snapshot must only be taken once; got %d: %v", len(entries2), entries2)
+	}
+
 	warning := stderr.String()
 	if !strings.Contains(warning, "adopting provider-native MCP at "+target) {
 		t.Fatalf("stderr missing target path: %q", warning)

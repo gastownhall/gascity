@@ -167,24 +167,29 @@ the flock requirement entirely.
 
 ## Cursor MCP Tools Still Prompt or Appear Unavailable
 
-The built-in `cursor` provider starts `cursor-agent` with
-`-f --approve-mcps`. Cursor loads MCP servers from `.cursor/mcp.json` in the
-workspace, including files projected from Gas City's MCP catalog. The
-`--approve-mcps` flag approves every server visible to Cursor from that file
-or from `~/.cursor/mcp.json`.
+The built-in `cursor` provider starts `cursor-agent` with `-f` and leaves
+Cursor's MCP approval prompt enabled by default. This avoids silently approving
+user or global MCP servers that Cursor can also see through `~/.cursor/mcp.json`.
 
-If you override Cursor `args` in `city.toml`, the override replaces the
-built-in args. Include both flags yourself:
+For unattended Cursor pool workers, opt in only after confirming that every
+workspace and user/global MCP server visible to Cursor is trusted. The
+`--approve-mcps` flag approves every visible server, including servers projected
+from Gas City's catalog into `.cursor/mcp.json` and servers from
+`~/.cursor/mcp.json`.
 
 ```toml
-[providers.cursor]
-args = ["-f", "--approve-mcps"]
+[providers.cursor.option_defaults]
+mcp_approval = "approve"
 ```
 
-Agent-level `args` overrides behave the same way. Existing Cursor sessions keep
-the command they were created with, so stop and restart those sessions to pick
-up the new built-in default. Operators who want Cursor's MCP approval prompt
-can intentionally omit `--approve-mcps` in an explicit override.
+If you override Cursor `args` directly, the override replaces the built-in
+args. Include `-f` yourself and add `--approve-mcps` only for the same explicit
+trust decision. Agent-level `args` overrides behave the same way.
+
+Existing Cursor sessions keep the command fingerprint they were created with.
+The supervisor reconciler restarts sessions automatically after the fingerprint
+changes. Drain the pool first when you need a controlled handoff rather than
+waiting for the next automatic restart.
 
 ## `gc version` Prints Unexpected Output
 
