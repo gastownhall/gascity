@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -112,6 +113,121 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 	cmd := resolveSessionCommand("claude --dangerously-skip-permissions", got.Metadata["session_key"], rp, firstStart, false)
 	if !strings.Contains(cmd, wantArg) {
 		t.Fatalf("resolveSessionCommand = %q, want substring %q", cmd, wantArg)
+	}
+}
+
+func TestReconcileSessionBeads_PreservesSessionKeyWhenNamedRestartDeferred(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Providers: map[string]config.ProviderSpec{
+			"resume-provider": {
+				Command:       "true",
+				PromptMode:    "none",
+				ResumeFlag:    "--resume",
+				ResumeStyle:   "flag",
+				SessionIDFlag: "--session-id",
+			},
+		},
+		Agents: []config.Agent{
+			{Name: "worker", Provider: "resume-provider", DependsOn: []string{"db"}},
+			{Name: "db"},
+		},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	tp := TemplateParams{
+		Command:                 "true",
+		SessionName:             sessionName,
+		TemplateName:            "worker",
+		InstanceName:            "worker",
+		Alias:                   "worker",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "always",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:          "resume-provider",
+			Command:       "true",
+			PromptMode:    "none",
+			ResumeFlag:    "--resume",
+			ResumeStyle:   "flag",
+			SessionIDFlag: "--session-id",
+		},
+	}
+	env.desiredState[sessionName] = tp
+
+	const priorSessionKey = "00a33290-c714-48e4-8a06-12aad53d3ffd"
+	oldRuntime := runtime.Config{Command: "old-cmd"}
+	priorStartedConfigHash := runtime.CoreFingerprint(oldRuntime)
+	if currentHash := runtime.CoreFingerprint(templateParamsToConfig(tp)); priorStartedConfigHash == currentHash {
+		t.Fatalf("test setup error: stored hash %q should differ from current %q", priorStartedConfigHash, currentHash)
+	}
+	if err := env.sp.Start(context.Background(), sessionName, oldRuntime); err != nil {
+		t.Fatalf("Start(old runtime): %v", err)
+	}
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"session_key":                priorSessionKey,
+		"started_config_hash":        priorStartedConfigHash,
+		"started_live_hash":          runtime.LiveFingerprint(oldRuntime),
+	})
+
+	woken := env.reconcile([]beads.Bead{session})
+	if woken != 0 {
+		t.Fatalf("first reconcile woken = %d, want 0 while dependency is down", woken)
+	}
+	deferred, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("get deferred restart: %v", err)
+	}
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("%s should have been stopped for in-place config-drift restart", sessionName)
+	}
+	if got := deferred.Metadata["state"]; got != "creating" {
+		t.Fatalf("state after deferred restart = %q, want creating", got)
+	}
+	if got := deferred.Metadata["pending_create_claim"]; got != "true" {
+		t.Fatalf("pending_create_claim after deferred restart = %q, want true", got)
+	}
+	if _, ok := parseRFC3339Metadata(deferred.Metadata["pending_create_started_at"]); !ok {
+		t.Fatalf("pending_create_started_at after deferred restart = %q, want valid timestamp",
+			deferred.Metadata["pending_create_started_at"])
+	}
+	if got := deferred.Metadata["session_key"]; got != priorSessionKey {
+		t.Fatalf("session_key after deferred restart = %q, want preserved %q", got, priorSessionKey)
+	}
+	if got := deferred.Metadata["started_config_hash"]; got != priorStartedConfigHash {
+		t.Fatalf("started_config_hash after deferred restart = %q, want preserved %q", got, priorStartedConfigHash)
+	}
+
+	if err := env.sp.Start(context.Background(), "db", runtime.Config{Command: "db"}); err != nil {
+		t.Fatalf("Start(db): %v", err)
+	}
+	woken = env.reconcile([]beads.Bead{deferred})
+	if woken != 1 {
+		t.Fatalf("second reconcile woken = %d, want 1 after dependency recovers; stderr=%s", woken, env.stderr.String())
+	}
+
+	var startCfg *runtime.Config
+	for i := range env.sp.Calls {
+		call := env.sp.Calls[i]
+		if call.Method == "Start" && call.Name == sessionName {
+			cfgCopy := call.Config
+			startCfg = &cfgCopy
+		}
+	}
+	if startCfg == nil {
+		t.Fatalf("expected resumed Start call for %s, calls=%#v", sessionName, env.sp.Calls)
+	}
+	wantArg := "--resume " + priorSessionKey
+	if !strings.Contains(startCfg.Command, wantArg) {
+		t.Fatalf("Start command = %q, want substring %q", startCfg.Command, wantArg)
+	}
+	if strings.Contains(startCfg.Command, "--session-id") {
+		t.Fatalf("Start command = %q, must NOT contain --session-id after deferred restart", startCfg.Command)
 	}
 }
 

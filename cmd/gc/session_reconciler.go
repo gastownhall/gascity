@@ -267,6 +267,28 @@ func pendingCreateLeaseExpiredForRollback(session beads.Bead, clk clock.Clock, s
 	return staleCreatingState(session, clk)
 }
 
+func pendingResumePreservingNamedRestart(session beads.Bead, clk clock.Clock, startupTimeout time.Duration) bool {
+	if strings.TrimSpace(session.Metadata["state"]) != string(sessionpkg.StateCreating) {
+		return false
+	}
+	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" {
+		return false
+	}
+	if strings.TrimSpace(session.Metadata["session_key"]) == "" {
+		return false
+	}
+	if strings.TrimSpace(session.Metadata["started_config_hash"]) == "" {
+		return false
+	}
+	if _, ok := parseRFC3339Metadata(session.Metadata["pending_create_started_at"]); !ok {
+		return false
+	}
+	if !pendingCreateLeaseActive(session, clk, startupTimeout) {
+		return false
+	}
+	return true
+}
+
 // reconcileSessionBeads performs bead-driven reconciliation using wake/sleep
 // semantics. For each session bead, it determines if the session should be
 // awake (has a matching entry in the desired state) and manages lifecycle
@@ -1299,14 +1321,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 
-		// Asleep-named-session drift repair. Skipped on the same tick when
-		// the alive-restart branch above already rotated this session into
-		// creating: the preserved started_config_hash from the resume-
-		// continuity path is intentionally still pointing at the previous-
-		// runtime hash until the new process commits. Without this guard,
-		// the asleep-repair would clear the preserved hash and rotate the
-		// session_key, undoing the resume in the same tick.
-		if !alive && isNamedSessionBead(*session) && !driftRestartedInPlace {
+		// Asleep-named-session drift repair. Skipped while an in-place
+		// restart is still leased in creating: the preserved
+		// started_config_hash intentionally points at the previous runtime
+		// hash until the new process commits. Without the durable guard,
+		// a deferred start's next reconcile tick would clear the preserved
+		// hash and rotate session_key before --resume can be prepared.
+		skipAsleepDriftRepair := driftRestartedInPlace ||
+			pendingResumePreservingNamedRestart(*session, clk, startupTimeout)
+		if !alive && isNamedSessionBead(*session) && !skipAsleepDriftRepair {
 			template := tp.TemplateName
 			if template == "" {
 				template = normalizedSessionTemplate(*session, cfg)
