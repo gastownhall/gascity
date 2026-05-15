@@ -2,9 +2,13 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -29,6 +33,17 @@ type adoptionLockProbeStore struct {
 	allowCreate       <-chan struct{}
 }
 
+type adoptionListFailureStore struct {
+	beads.Store
+}
+
+type adoptionClockAdvanceStore struct {
+	beads.Store
+
+	advance  func()
+	advanced bool
+}
+
 func (s *adoptionLockProbeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	result, err := s.Store.List(query)
 	if query.Label == sessionBeadLabel {
@@ -36,6 +51,22 @@ func (s *adoptionLockProbeStore) List(query beads.ListQuery) ([]beads.Bead, erro
 		case s.listed <- struct{}{}:
 		default:
 		}
+	}
+	return result, err
+}
+
+func (s *adoptionListFailureStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if strings.TrimSpace(query.Metadata["session_name"]) != "" {
+		return nil, errors.New("live list failed")
+	}
+	return s.Store.List(query)
+}
+
+func (s *adoptionClockAdvanceStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	result, err := s.Store.List(query)
+	if strings.TrimSpace(query.Metadata["session_name"]) != "" && !s.advanced {
+		s.advanced = true
+		s.advance()
 	}
 	return result, err
 }
@@ -261,12 +292,62 @@ func TestAdoptionBarrier_Rerunnable(t *testing.T) {
 	}
 }
 
+func TestAdoptionBarrier_IgnoresNonRepairableSessionBeadsInConfigSnapshot(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(1)}}}
+	sessionName := agent.SessionNameFor("test-city", "worker", cfg.Workspace.SessionTemplate)
+	if _, err := store.Create(beads.Bead{
+		Title:  "stale malformed worker",
+		Type:   "task",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"agent_name":   "worker",
+			"session_name": "stale-worker",
+			"template":     "worker",
+			"state":        "active",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sp := &fakeAdoptionProvider{running: []string{sessionName}}
+	var stderr bytes.Buffer
+
+	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	if !passed {
+		t.Fatalf("barrier should pass, result=%+v stderr=%q", result, stderr.String())
+	}
+	beadList, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing session beads: %v", err)
+	}
+	for _, b := range beadList {
+		if b.Type != sessionBeadType {
+			continue
+		}
+		if got := b.Metadata["agent_name"]; got != "worker" {
+			t.Fatalf("adopted bead agent_name = %q, want configured agent name", got)
+		}
+		if got := b.Metadata["session_name"]; got != sessionName {
+			t.Fatalf("adopted bead session_name = %q, want %q", got, sessionName)
+		}
+		return
+	}
+	t.Fatalf("adopted session bead not found; beads=%+v", beadList)
+}
+
 func TestAdoptionBarrier_SerializesCreateWithSessionIdentifierLock(t *testing.T) {
-	const sessionName = "worker-3"
 	const agentName = "worker-3"
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)}}}
+	sessionName := agent.SessionNameFor("test-city", "worker", cfg.Workspace.SessionTemplate) + "-3"
 	cityPath := t.TempDir()
 	baseStore := beads.NewMemStore()
 	allowCreate := make(chan struct{})
+	var releaseCreate sync.Once
+	t.Cleanup(func() {
+		releaseCreate.Do(func() {
+			close(allowCreate)
+		})
+	})
 	store := &adoptionLockProbeStore{
 		Store:             baseStore,
 		targetSessionName: sessionName,
@@ -275,7 +356,6 @@ func TestAdoptionBarrier_SerializesCreateWithSessionIdentifierLock(t *testing.T)
 		allowCreate:       allowCreate,
 	}
 	sp := &fakeAdoptionProvider{running: []string{sessionName}}
-	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)}}}
 	var stderr bytes.Buffer
 	done := make(chan adoptionBarrierOutcome, 1)
 
@@ -289,14 +369,6 @@ func TestAdoptionBarrier_SerializesCreateWithSessionIdentifierLock(t *testing.T)
 		case <-store.listed:
 		case <-time.After(time.Second):
 			t.Fatal("adoption barrier did not list existing session beads")
-		}
-
-		select {
-		case <-store.createAttempted:
-			close(allowCreate)
-			outcome := <-done
-			t.Fatalf("adoption barrier created while session_name lock was held; outcome=%+v stderr=%q", outcome, stderr.String())
-		case <-time.After(100 * time.Millisecond):
 		}
 
 		_, createErr := baseStore.Create(beads.Bead{
@@ -314,7 +386,9 @@ func TestAdoptionBarrier_SerializesCreateWithSessionIdentifierLock(t *testing.T)
 	if err != nil {
 		t.Fatalf("holding session identifier lock: %v", err)
 	}
-	close(allowCreate)
+	releaseCreate.Do(func() {
+		close(allowCreate)
+	})
 
 	var outcome adoptionBarrierOutcome
 	select {
@@ -331,6 +405,11 @@ func TestAdoptionBarrier_SerializesCreateWithSessionIdentifierLock(t *testing.T)
 	if outcome.result.AlreadyHadBead != 1 {
 		t.Fatalf("AlreadyHadBead = %d, want 1", outcome.result.AlreadyHadBead)
 	}
+	select {
+	case <-store.createAttempted:
+		t.Fatalf("adoption barrier attempted a duplicate create; outcome=%+v stderr=%q", outcome, stderr.String())
+	default:
+	}
 
 	beadList, err := baseStore.ListByLabel(sessionBeadLabel, 0)
 	if err != nil {
@@ -341,6 +420,56 @@ func TestAdoptionBarrier_SerializesCreateWithSessionIdentifierLock(t *testing.T)
 	}
 	if got := beadList[0].Metadata["session_name"]; got != sessionName {
 		t.Fatalf("session_name = %q, want %q", got, sessionName)
+	}
+}
+
+func TestAdoptionBarrier_ReportsInLockListFailuresAsChecks(t *testing.T) {
+	store := &adoptionListFailureStore{Store: beads.NewMemStore()}
+	sp := &fakeAdoptionProvider{running: []string{"test-city-worker"}}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(1)}}}
+	var stderr bytes.Buffer
+
+	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	if passed {
+		t.Fatal("barrier should fail when the in-lock bead check fails")
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("Skipped = %d, want 1", result.Skipped)
+	}
+	log := stderr.String()
+	if !strings.Contains(log, `listing session beads for "test-city-worker"`) {
+		t.Fatalf("stderr %q does not mention the failing session-bead check", log)
+	}
+	if strings.Contains(log, "creating bead for") {
+		t.Fatalf("stderr %q should not report a list failure as a create failure", log)
+	}
+}
+
+func TestAdoptionBarrier_StampsSyncedAtAtCreateTime(t *testing.T) {
+	fakeClock := &clock.Fake{Time: time.Date(2026, 5, 15, 8, 0, 0, 0, time.UTC)}
+	store := &adoptionClockAdvanceStore{
+		Store: beads.NewMemStore(),
+		advance: func() {
+			fakeClock.Advance(time.Hour)
+		},
+	}
+	sp := &fakeAdoptionProvider{running: []string{"test-city-worker"}}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(1)}}}
+	var stderr bytes.Buffer
+
+	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", fakeClock, &stderr, false)
+	if !passed {
+		t.Fatalf("barrier should pass, result=%+v stderr=%q", result, stderr.String())
+	}
+	beadList, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing session beads: %v", err)
+	}
+	if len(beadList) != 1 {
+		t.Fatalf("session bead count = %d, want 1", len(beadList))
+	}
+	if got, want := beadList[0].Metadata["synced_at"], "2026-05-15T09:00:00Z"; got != want {
+		t.Fatalf("synced_at = %q, want %q", got, want)
 	}
 }
 
@@ -531,7 +660,7 @@ func TestAdoptionBarrier_OrphanDashNSessionLogsWarning(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	result, _ := runAdoptionBarrier(store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	result, _ := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if result.Adopted != 1 {
 		t.Errorf("Adopted = %d, want 1", result.Adopted)
 	}

@@ -1014,11 +1014,32 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				})
 			}
 			var (
-				newBead   beads.Bead
-				createErr error
-				created   bool
-				blocked   bool
+				newBead            beads.Bead
+				createErr          error
+				finalizeErr        error
+				createdSessionName string
+				created            bool
+				blocked            bool
 			)
+			finalizeCreatedSessionName := func() {
+				createdSessionName = strings.TrimSpace(newBead.Metadata["session_name"])
+				if isPoolInstance {
+					createdSessionName = PoolSessionName(qualifiedTemplate, newBead.ID)
+					if err := store.SetMetadata(newBead.ID, "session_name", createdSessionName); err != nil {
+						finalizeErr = err
+						fmt.Fprintf(stderr, "session beads: setting pool session_name for %s: %v\n", agentName, err) //nolint:errcheck
+						closeFailedCreateBead(store, newBead.ID, now, stderr)
+						return
+					}
+					if newBead.Metadata == nil {
+						newBead.Metadata = make(map[string]string, 1)
+					}
+					newBead.Metadata["session_name"] = createdSessionName
+				}
+				if createdSessionName == "" {
+					createdSessionName = sn
+				}
+			}
 			if managedAlias != "" {
 				lockFn := func() error {
 					if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, managedAlias, "", managedAlias); err != nil {
@@ -1041,6 +1062,9 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 					}
 					newBead, createErr = createBead()
 					created = true
+					if createErr == nil {
+						finalizeCreatedSessionName()
+					}
 					return nil
 				}
 				var lockErr error
@@ -1055,26 +1079,17 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			}
 			if !created && !blocked {
 				newBead, createErr = createBead()
+				created = true
+				if createErr == nil {
+					finalizeCreatedSessionName()
+				}
 			}
-			if createErr != nil {
+			switch {
+			case createErr != nil:
 				fmt.Fprintf(stderr, "session beads: creating bead for %s: %v\n", agentName, createErr) //nolint:errcheck
-			} else {
-				createdSessionName := strings.TrimSpace(newBead.Metadata["session_name"])
-				if isPoolInstance {
-					createdSessionName = PoolSessionName(qualifiedTemplate, newBead.ID)
-					if err := store.SetMetadata(newBead.ID, "session_name", createdSessionName); err != nil {
-						fmt.Fprintf(stderr, "session beads: setting pool session_name for %s: %v\n", agentName, err) //nolint:errcheck
-						closeFailedCreateBead(store, newBead.ID, now, stderr)
-						continue
-					}
-					if newBead.Metadata == nil {
-						newBead.Metadata = make(map[string]string, 1)
-					}
-					newBead.Metadata["session_name"] = createdSessionName
-				}
-				if createdSessionName == "" {
-					createdSessionName = sn
-				}
+			case finalizeErr != nil:
+				continue
+			default:
 				desiredNames[createdSessionName] = true
 				openIndex[createdSessionName] = newBead.ID
 				openBeads = append(openBeads, newBead)

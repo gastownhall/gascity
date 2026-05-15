@@ -3,17 +3,21 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
@@ -124,6 +128,14 @@ type failingPoolSessionNameStore struct {
 	*beads.MemStore
 }
 
+type poolSessionNameLockProbeStore struct {
+	*beads.MemStore
+
+	cityPath string
+	alias    string
+	checked  bool
+}
+
 func (s *failingPoolSessionNameStore) SetMetadata(id, key, value string) error {
 	if key == "session_name" {
 		return errors.New("session_name metadata failed")
@@ -131,8 +143,41 @@ func (s *failingPoolSessionNameStore) SetMetadata(id, key, value string) error {
 	return s.MemStore.SetMetadata(id, key, value)
 }
 
+func (s *poolSessionNameLockProbeStore) SetMetadata(id, key, value string) error {
+	if key == "session_name" {
+		held, err := citySessionIdentifierLockHeld(s.cityPath, s.alias)
+		if err != nil {
+			return fmt.Errorf("checking session identifier lock for %q: %w", s.alias, err)
+		}
+		if !held {
+			return fmt.Errorf("session identifier lock for %q was not held while setting session_name", s.alias)
+		}
+		s.checked = true
+	}
+	return s.MemStore.SetMetadata(id, key, value)
+}
+
 func (s *failingPoolSessionNameStore) Close(_ string) error {
 	return errors.New("close failed")
+}
+
+func citySessionIdentifierLockHeld(cityPath, identifier string) (bool, error) {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(identifier)))
+	lockPath := filepath.Join(citylayout.SessionNameLocksDir(cityPath), hex.EncodeToString(sum[:])+".lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close() //nolint:errcheck
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err == nil {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		return false, nil
+	}
+	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+		return true, nil
+	}
+	return false, err
 }
 
 func newCountingMetadataStore() *countingMetadataStore {
@@ -2851,6 +2896,42 @@ func TestSyncSessionBeads_StalePoolSnapshotReusesVisibleOwner(t *testing.T) {
 				t.Fatalf("new pool bead session_name = %q, want %q", got, want)
 			}
 		}
+	}
+}
+
+func TestSyncSessionBeads_FinalizesPoolSessionNameUnderAliasLock(t *testing.T) {
+	alias := "pack/worker-1"
+	store := &poolSessionNameLockProbeStore{
+		MemStore: beads.NewMemStore(),
+		cityPath: t.TempDir(),
+		alias:    alias,
+	}
+	clk := &clock.Fake{Time: time.Date(2026, 5, 15, 8, 30, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	template := "pack/worker"
+	desired := map[string]TemplateParams{
+		"legacy-worker-1": {
+			TemplateName: template,
+			InstanceName: alias,
+			PoolSlot:     1,
+			Command:      "codex",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads(store.cityPath, store, desired, sp, allConfiguredDS(desired), nil, clk, &stderr, false)
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+	if !store.checked {
+		t.Fatal("pool session_name metadata was not finalized through SetMetadata")
+	}
+	all := allSessionBeads(t, store)
+	if len(all) != 1 {
+		t.Fatalf("session bead count = %d, want 1", len(all))
+	}
+	if got, want := all[0].Metadata["session_name"], PoolSessionName(template, all[0].ID); got != want {
+		t.Fatalf("session_name = %q, want %q", got, want)
 	}
 }
 
