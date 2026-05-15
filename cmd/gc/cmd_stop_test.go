@@ -367,6 +367,395 @@ func TestCmdStopForceEscalatesInProgressControllerStop(t *testing.T) {
 	}
 }
 
+func TestCmdStopExplicitRegisteredRigPathUsesSharedResolver(t *testing.T) {
+	resetFlags(t)
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := setupCity(t, "stop-registered-rig")
+	rigDir := filepath.Join(t.TempDir(), "registered-rig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := fmt.Sprintf("[workspace]\nname = \"stop-registered-rig\"\n\n[beads]\nprovider = \"file\"\n\n[[agent]]\nname = \"worker\"\n\n[[rigs]]\nname = \"registered-rig\"\npath = %q\n", rigDir)
+	writeRigAnywhereCityToml(t, cityDir, toml)
+	registerCityForRigResolution(t, gcHome, cityDir, "stop-registered-rig")
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 0 },
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	oldFactory := sessionProviderForStopCity
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+	var gotCityPath string
+	sessionProviderForStopCity = func(_ *config.City, cityPath string) runtime.Provider {
+		gotCityPath = cityPath
+		return runtime.NewFake()
+	}
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{rigDir}, &stdout, &stderr, 0, false)
+	if code != 0 {
+		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	assertSameTestPath(t, gotCityPath, cityDir)
+}
+
+func TestCmdStopExplicitCityPathIgnoresUnrelatedRegisteredCityLoadErrors(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		arg  func(string) string
+	}{
+		{
+			name: "city_root",
+			arg:  func(cityDir string) string { return cityDir },
+		},
+		{
+			name: "inside_city",
+			arg: func(cityDir string) string {
+				return filepath.Join(cityDir, "nested", "work")
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resetFlags(t)
+			clearInheritedBeadsEnv(t)
+			gcHome := t.TempDir()
+			t.Setenv("GC_HOME", gcHome)
+			t.Setenv("GC_CITY", "")
+			t.Setenv("GC_CITY_PATH", "")
+			t.Setenv("GC_CITY_ROOT", "")
+			t.Setenv("GC_DIR", "")
+			t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+			cityDir := setupCity(t, "stop-explicit-city")
+			writeRigAnywhereCityToml(t, cityDir, "[workspace]\nname = \"stop-explicit-city\"\n\n[beads]\nprovider = \"file\"\n\n[[agent]]\nname = \"worker\"\n")
+			arg := tt.arg(cityDir)
+			if err := os.MkdirAll(arg, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			badCity := setupCity(t, "broken-registered-city")
+			registerCityForRigResolution(t, gcHome, badCity, "broken-registered-city")
+			if err := os.WriteFile(filepath.Join(badCity, "city.toml"), []byte("[workspace\nname = \"broken\"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			withSupervisorTestHooks(
+				t,
+				func(_, _ io.Writer) int { return 0 },
+				func(_, _ io.Writer) int { return 0 },
+				func() int { return 0 },
+				func(string) (bool, string, bool) { return false, "", false },
+				20*time.Millisecond,
+				time.Millisecond,
+			)
+
+			oldFactory := sessionProviderForStopCity
+			t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+			var gotCityPath string
+			sessionProviderForStopCity = func(_ *config.City, cityPath string) runtime.Provider {
+				gotCityPath = cityPath
+				return runtime.NewFake()
+			}
+
+			var stdout, stderr lockedBuffer
+			code := cmdStop([]string{arg}, &stdout, &stderr, 0, false)
+			if code != 0 {
+				t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			assertSameTestPath(t, gotCityPath, cityDir)
+			if strings.Contains(stderr.String(), "loading registered city rig bindings") {
+				t.Fatalf("stderr = %q, want unrelated registered-city load error ignored for explicit city path", stderr.String())
+			}
+		})
+	}
+}
+
+func TestCmdStopSupervisorManagedInvalidCityTomlWaitsForControllerStop(t *testing.T) {
+	resetFlags(t)
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := filepath.Join(t.TempDir(), "invalid-supervisor-city")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace\nname = \"broken\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := registryAt(t, gcHome)
+	if err := reg.Register(cityDir, "invalid-supervisor-city"); err != nil {
+		t.Fatal(err)
+	}
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 4242 },
+		func(string) (bool, string, bool) { return false, "", true },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+	var waitedPath string
+	waitForSupervisorControllerStopHook = func(path string, _ time.Duration) error {
+		waitedPath = path
+		return nil
+	}
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, time.Second, false)
+	if code != 0 {
+		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	assertSameTestPath(t, waitedPath, cityDir)
+	if !strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout missing city stopped message: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "invalid config") {
+		t.Fatalf("stderr = %q, want invalid config warning", stderr.String())
+	}
+}
+
+func TestCmdStopSupervisorManagedInvalidCityTomlFailsWhenShutdownFails(t *testing.T) {
+	resetFlags(t)
+	cityDir := setupInvalidConfigManagedRuntime(t)
+	gcHome := os.Getenv("GC_HOME")
+	reg := registryAt(t, gcHome)
+	if err := reg.Register(cityDir, "invalid-supervisor-city"); err != nil {
+		t.Fatal(err)
+	}
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 4242 },
+		func(string) (bool, string, bool) { return false, "", true },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+	waitForSupervisorControllerStopHook = func(string, time.Duration) error {
+		return nil
+	}
+	overrideShutdownBeadsProviderForStop(t, func(path string) error {
+		assertSameTestPath(t, path, cityDir)
+		return fmt.Errorf("provider-stop-failed")
+	})
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, time.Second, false)
+	if code != 1 {
+		t.Fatalf("cmdStop() = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout = %q, did not want success message", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "bead store") || !strings.Contains(stderr.String(), "provider-stop-failed") {
+		t.Fatalf("stderr = %q, want bead-store shutdown error", stderr.String())
+	}
+}
+
+func TestCmdStopInvalidConfigManagedRuntimeStopsAfterVerifiedShutdown(t *testing.T) {
+	resetFlags(t)
+	cityDir := setupInvalidConfigManagedRuntime(t)
+	var shutdowns int
+	overrideShutdownBeadsProviderForStop(t, func(path string) error {
+		shutdowns++
+		assertSameTestPath(t, path, cityDir)
+		return nil
+	})
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, 0, false)
+	if code != 0 {
+		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout missing city stopped message: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "invalid config") {
+		t.Fatalf("stderr = %q, want invalid config warning", stderr.String())
+	}
+	if shutdowns != 1 {
+		t.Fatalf("shutdown calls = %d, want 1", shutdowns)
+	}
+}
+
+func TestCmdStopInvalidConfigManagedRuntimeStopsStandaloneController(t *testing.T) {
+	resetFlags(t)
+	cityDir := setupInvalidConfigManagedRuntime(t)
+	stopCommands := startAcknowledgingStandaloneController(t, cityDir)
+	var shutdowns int
+	overrideShutdownBeadsProviderForStop(t, func(path string) error {
+		shutdowns++
+		assertSameTestPath(t, path, cityDir)
+		return nil
+	})
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, 0, false)
+	if code != 0 {
+		t.Fatalf("cmdStop() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	select {
+	case cmd := <-stopCommands:
+		if cmd != "stop" {
+			t.Fatalf("controller command = %q, want stop", cmd)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("controller did not receive stop command; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if shutdowns != 1 {
+		t.Fatalf("shutdown calls = %d, want 1", shutdowns)
+	}
+	if !strings.Contains(stdout.String(), "Controller stopping...") {
+		t.Fatalf("stdout missing controller stop message: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout missing city stopped message: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "invalid config") {
+		t.Fatalf("stderr = %q, want invalid config warning", stderr.String())
+	}
+}
+
+func TestCmdStopInvalidConfigManagedRuntimeFailsWhenShutdownFails(t *testing.T) {
+	resetFlags(t)
+	cityDir := setupInvalidConfigManagedRuntime(t)
+	var shutdowns int
+	overrideShutdownBeadsProviderForStop(t, func(path string) error {
+		shutdowns++
+		assertSameTestPath(t, path, cityDir)
+		return fmt.Errorf("provider-stop-failed")
+	})
+
+	var stdout, stderr lockedBuffer
+	code := cmdStop([]string{cityDir}, &stdout, &stderr, 0, false)
+	if code != 1 {
+		t.Fatalf("cmdStop() = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "City stopped.") {
+		t.Fatalf("stdout = %q, did not want success message", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "bead store") || !strings.Contains(stderr.String(), "provider-stop-failed") {
+		t.Fatalf("stderr = %q, want bead-store shutdown error", stderr.String())
+	}
+	if shutdowns != 1 {
+		t.Fatalf("shutdown calls = %d, want 1", shutdowns)
+	}
+}
+
+func setupInvalidConfigManagedRuntime(t *testing.T) string {
+	t.Helper()
+
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_DOLT", "")
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace\nname = \"broken\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	state := doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      ln.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := writeDoltState(cityDir, state); err != nil {
+		t.Fatalf("writeDoltState: %v", err)
+	}
+
+	return cityDir
+}
+
+func overrideShutdownBeadsProviderForStop(t *testing.T, fn func(string) error) {
+	t.Helper()
+	old := shutdownBeadsProviderForStop
+	shutdownBeadsProviderForStop = fn
+	t.Cleanup(func() { shutdownBeadsProviderForStop = old })
+}
+
+func startAcknowledgingStandaloneController(t *testing.T, cityDir string) <-chan string {
+	t.Helper()
+
+	lock, err := acquireControllerLock(cityDir)
+	if err != nil {
+		t.Fatalf("acquireControllerLock: %v", err)
+	}
+	sockPath := controllerSocketPath(cityDir)
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen controller socket: %v", err)
+	}
+	commands := make(chan string, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := lis.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck // best-effort test cleanup
+		buf := make([]byte, 64)
+		n, err := conn.Read(buf)
+		if err != nil {
+			return
+		}
+		commands <- strings.TrimSpace(string(buf[:n]))
+		_, _ = conn.Write([]byte("ok\n"))
+		_ = lis.Close()
+		_ = os.Remove(sockPath)
+		_ = lock.Close()
+	}()
+	t.Cleanup(func() {
+		_ = lis.Close()
+		_ = os.Remove(sockPath)
+		_ = lock.Close()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+		}
+	})
+	return commands
+}
+
 func TestDefaultStopWallClockTimeoutScalesWithConfiguredStopTargets(t *testing.T) {
 	origStop := stopPerTargetTimeoutDefault
 	origMargin := interruptPerTargetTimeoutMargin
@@ -394,7 +783,7 @@ func TestDefaultStopWallClockTimeoutScalesWithConfiguredStopTargets(t *testing.T
 	}
 }
 
-func TestStopCityManagedBeadsProviderIfRunningStopsDefaultBD(t *testing.T) {
+func TestStopCityManagedBeadsProviderAfterSuccessfulStopStopsDefaultBD(t *testing.T) {
 	skipSlowCmdGCTest(t, "exercises managed bd provider shutdown; run make test-cmd-gc-process for full coverage")
 	t.Setenv("GC_BEADS", "bd")
 
@@ -437,7 +826,9 @@ func TestStopCityManagedBeadsProviderIfRunningStopsDefaultBD(t *testing.T) {
 	}
 
 	var stderr lockedBuffer
-	stopCityManagedBeadsProviderIfRunning(cityDir, &stderr)
+	if !stopCityManagedBeadsProviderAfterSuccessfulStop(cityDir, &stderr) {
+		t.Fatalf("stopCityManagedBeadsProviderAfterSuccessfulStop returned false; stderr=%q", stderr.String())
+	}
 	if stderr.String() != "" {
 		t.Fatalf("unexpected stderr: %q", stderr.String())
 	}

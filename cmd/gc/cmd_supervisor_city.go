@@ -435,20 +435,16 @@ func statusDisplayText(status string) string {
 }
 
 type supervisorUnregisterOptions struct {
-	Force                 bool
-	WaitForControllerStop bool
+	Force bool
 }
 
 func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer) (bool, int) {
-	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, "gc unregister", supervisorUnregisterOptions{
-		WaitForControllerStop: true,
-	})
+	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, "gc unregister", supervisorUnregisterOptions{})
 }
 
 func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Writer, commandName string, force bool) (bool, int) {
 	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, commandName, supervisorUnregisterOptions{
-		Force:                 force,
-		WaitForControllerStop: true,
+		Force: force,
 	})
 }
 
@@ -502,9 +498,6 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 				fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
 			}
 			return true, 1
-		}
-		if !opts.WaitForControllerStop {
-			return true, 0
 		}
 		if err := waitForSupervisorControllerStopHook(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
 			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {

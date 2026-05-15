@@ -66,15 +66,15 @@ func cmdStop(args []string, stdout, stderr io.Writer, wallClockTimeout time.Dura
 		return 1
 	}
 
-	if handled, code := unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, "gc stop", supervisorUnregisterOptions{
-		Force:                 force,
-		WaitForControllerStop: false,
-	}); handled {
+	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stdout, stderr, "gc stop", force); handled {
 		if code != 0 {
 			return code
 		}
 		if supervisorAliveHook() != 0 {
-			stopCityManagedBeadsProviderIfRunning(cityPath, stderr)
+			if !stopCityManagedBeadsProviderAfterSuccessfulStop(cityPath, stderr) {
+				return 1
+			}
+			warnInvalidConfigAfterSuccessfulStop(cityPath, stderr)
 			fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
 			return 0
 		}
@@ -82,8 +82,8 @@ func cmdStop(args []string, stdout, stderr io.Writer, wallClockTimeout time.Dura
 
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		if stopManagedRuntimeWithoutConfig(cityPath, stdout, stderr) {
-			return 0
+		if handled, code := stopManagedRuntimeWithoutConfig(cityPath, err, stdout, stderr, force); handled {
+			return code
 		}
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -110,38 +110,28 @@ func cmdStop(args []string, stdout, stderr io.Writer, wallClockTimeout time.Dura
 }
 
 func resolveStopCityPath(args []string) (string, error) {
-	if len(args) == 0 &&
-		strings.TrimSpace(cityFlag) == "" &&
-		strings.TrimSpace(os.Getenv("GC_CITY")) == "" &&
-		strings.TrimSpace(os.Getenv("GC_CITY_PATH")) == "" &&
-		strings.TrimSpace(os.Getenv("GC_CITY_ROOT")) == "" &&
-		strings.TrimSpace(os.Getenv("GC_DIR")) == "" {
+	if len(args) == 0 {
 		return resolveCommandCity(nil)
 	}
-	if len(args) > 0 {
-		abs, err := filepath.Abs(args[0])
-		if err != nil {
-			return "", err
-		}
-		if cityPath, err := validateCityPath(abs); err == nil {
-			return cityPath, nil
-		}
-		return findCity(abs)
-	}
-	if strings.TrimSpace(cityFlag) != "" {
-		return validateCityPath(cityFlag)
-	}
-	if gcCity, ok := resolveExplicitCityPathEnv(); ok {
-		return gcCity, nil
-	}
-	if gcDirCity, ok := resolveCityPathFromGCDir(); ok {
-		return gcDirCity, nil
-	}
-	cwd, err := os.Getwd()
+	abs, err := filepath.Abs(args[0])
 	if err != nil {
 		return "", err
 	}
-	return findCity(cwd)
+	if cityPath, err := validateCityPath(abs); err == nil {
+		return cityPath, nil
+	}
+	ctx, ok, rigErr := resolveRigPathToContext(abs)
+	if rigErr == nil && ok {
+		return ctx.CityPath, nil
+	}
+	cityPath, findErr := findCity(abs)
+	if findErr == nil {
+		return cityPath, nil
+	}
+	if rigErr != nil {
+		return "", rigErr
+	}
+	return "", findErr
 }
 
 // defaultStopWallClockTimeout returns the wall-clock cap used by cmdStop
@@ -223,7 +213,7 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 			return 1
 		}
 		// Controller handled the shutdown — still stop bead store below.
-		if err := shutdownBeadsProvider(cityPath); err != nil {
+		if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 			fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 		fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
@@ -269,7 +259,7 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 	stopOrphans(sp, desired, cfg, store, graceTimeout, recorder, stdout, stderr)
 
 	// Stop bead store's backing service after agents.
-	if err := shutdownBeadsProvider(cityPath); err != nil {
+	if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal warning.
 	}
@@ -300,25 +290,76 @@ func markCityStopSessionSleepReason(store beads.Store, stderr io.Writer) {
 	}
 }
 
-func stopCityManagedBeadsProviderIfRunning(cityPath string, stderr io.Writer) {
+func stopCityManagedBeadsProviderAfterSuccessfulStop(cityPath string, stderr io.Writer) bool {
+	_, err := stopCityManagedBeadsProvider(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
+		return false
+	}
+	return true
+}
+
+func stopCityManagedBeadsProvider(cityPath string) (bool, error) {
 	if rawBeadsProvider(cityPath) != "bd" {
-		return
+		return false, nil
 	}
 	if currentManagedDoltPort(cityPath) == "" {
-		return
+		return false, nil
 	}
-	if err := shutdownBeadsProvider(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort warning
+	return true, shutdownBeadsProviderForStop(cityPath)
+}
+
+var shutdownBeadsProviderForStop = shutdownBeadsProvider
+
+func stopManagedRuntimeWithoutConfig(cityPath string, cfgErr error, stdout, stderr io.Writer, force bool) (bool, int) {
+	controllerStopped, controllerErr := stopStandaloneControllerWithoutConfig(cityPath, stdout, force)
+	if controllerErr != nil {
+		fmt.Fprintf(stderr, "gc stop: %v\n", controllerErr) //nolint:errcheck // best-effort stderr
+		return true, 1
+	}
+	stopped, stopErr := stopCityManagedBeadsProvider(cityPath)
+	if stopErr != nil {
+		fmt.Fprintf(stderr, "gc stop: bead store: %v\n", stopErr) //nolint:errcheck // best-effort stderr
+		return true, 1
+	}
+	if !controllerStopped && !stopped {
+		return false, 0
+	}
+	warnInvalidConfigStopSuccess(cfgErr, stderr)
+	fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
+	return true, 0
+}
+
+func stopStandaloneControllerWithoutConfig(cityPath string, stdout io.Writer, force bool) (bool, error) {
+	if tryStopControllerWithForce(cityPath, stdout, force) {
+		if err := waitForStandaloneControllerStop(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
+			return true, err
+		}
+		return true, nil
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".gc")); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("probing standalone controller runtime dir: %w", err)
+	}
+	if err := waitForStandaloneControllerStop(cityPath, 0); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func warnInvalidConfigAfterSuccessfulStop(cityPath string, stderr io.Writer) {
+	if _, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard); err != nil {
+		warnInvalidConfigStopSuccess(err, stderr)
 	}
 }
 
-func stopManagedRuntimeWithoutConfig(cityPath string, stdout, stderr io.Writer) bool {
-	if currentManagedDoltPort(cityPath) == "" {
-		return false
+func warnInvalidConfigStopSuccess(err error, stderr io.Writer) {
+	if err == nil {
+		return
 	}
-	stopCityManagedBeadsProviderIfRunning(cityPath, stderr)
-	fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
-	return true
+	fmt.Fprintf(stderr, "gc stop: stopped city despite invalid config: %v\n", err) //nolint:errcheck // best-effort stderr
 }
 
 // stopOrphans stops sessions that are not in the desired set. Used by gc stop
