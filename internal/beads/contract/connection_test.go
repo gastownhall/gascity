@@ -1047,7 +1047,18 @@ func writeReachableRuntimeStateOnHostWithPIDAndDataDir(t *testing.T, fs fsys.FS,
 	t.Helper()
 	listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
 	if err != nil {
-		t.Fatal(err)
+		// Some hosts aren't bindable on every OS — notably, darwin doesn't
+		// auto-alias 127.0.0.0/8 secondary loopbacks (127.0.0.2+) to lo0 the
+		// way linux does, so `net.Listen("tcp", "127.0.0.2:0")` fails with
+		// "can't assign requested address". The test's premise needs a real
+		// listener on this host; without one, the reachability probe in
+		// validManagedRuntimeState would (correctly) reject the state. Skip
+		// rather than fail so the negative coverage on linux is preserved
+		// without forcing a macOS-only flake. Sibling tests that exercise
+		// the same env-override path against a routable host
+		// (reachableNonLoopbackHost) and a non-routable host (TEST-NET-1)
+		// still run on every OS.
+		t.Skipf("cannot bind %s: %v (typical on darwin where 127.0.0.0/8 secondary loopback aliases aren't installed by default)", net.JoinHostPort(host, "0"), err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 	port := listener.Addr().(*net.TCPAddr).Port

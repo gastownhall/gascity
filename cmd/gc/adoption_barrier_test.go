@@ -394,6 +394,39 @@ func TestAdoptionBarrier_SingletonWithNumericSuffix(t *testing.T) {
 	}
 }
 
+// TestAdoptionBarrier_OrphanDashNSessionLogsWarning verifies the ga-fiw
+// defensive log: when a running session ends in "-N" but no configured pool
+// agent claims it (because the matching base agent has max_active_sessions=1
+// and SupportsInstanceExpansion()=false), the barrier still adopts the
+// session but emits a stderr warning so the leak is traceable.
+func TestAdoptionBarrier_OrphanDashNSessionLogsWarning(t *testing.T) {
+	store := beads.NewMemStore()
+	// "refinery-1" looks like a pool instance but the base "refinery" agent
+	// has max_active_sessions=1, so resolvePoolBase rejects the suffix.
+	sp := &fakeAdoptionProvider{running: []string{"refinery-1"}}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "refinery", MaxActiveSessions: intPtr(1)},
+		},
+	}
+	var stderr bytes.Buffer
+
+	result, _ := runAdoptionBarrier(store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	if result.Adopted != 1 {
+		t.Errorf("Adopted = %d, want 1", result.Adopted)
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("refinery-1 ends in -1")) {
+		t.Errorf("stderr missing orphan -N warning; got: %s", stderr.String())
+	}
+	// Verify no pool_slot metadata (we explicitly decline to stamp it).
+	beadList, _ := store.ListByLabel(sessionBeadLabel, 0)
+	for _, b := range beadList {
+		if b.Metadata["pool_slot"] != "" {
+			t.Errorf("orphan -N session should not have pool_slot metadata, got %q", b.Metadata["pool_slot"])
+		}
+	}
+}
+
 func TestAdoptionBarrier_UnknownSession(t *testing.T) {
 	store := beads.NewMemStore()
 	// Running session that doesn't match any config agent.

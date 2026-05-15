@@ -745,8 +745,6 @@ run_preflight_cleanup() {
         fi
     fi
     clean_stale_sockets
-    quarantine_phantom_dbs
-    cleanup_stale_locks
 }
 
 # find_port_holder returns the PID of the process listening on DOLT_PORT.
@@ -952,71 +950,6 @@ kill_imposter() {
     sleep 1
 }
 
-retired_replacement_db_name() {
-    case "$1" in
-        ?*.replaced-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z)
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-# quarantine_phantom_dbs moves unservable database dirs to quarantine.
-# This includes missing-manifest phantom dirs and Dolt-retired replacement
-# dirs that still have manifests but are no longer the active database.
-quarantine_phantom_dbs() {
-    [ -d "$DATA_DIR" ] || return 0
-    local dir
-    for dir in "$DATA_DIR"/*/; do
-        [ -d "$dir" ] || continue
-        [ -d "$dir/.dolt" ] || continue
-
-        local name reason
-        name=$(basename "$dir")
-        if retired_replacement_db_name "$name"; then
-            reason="retired replacement"
-        elif [ ! -f "$dir/.dolt/noms/manifest" ]; then
-            reason="missing noms/manifest"
-        else
-            continue
-        fi
-
-        local quarantine_dir="$DATA_DIR/.quarantine/$(date +%Y%m%dT%H%M%S)-$name"
-        mkdir -p "$DATA_DIR/.quarantine"
-        echo "quarantining unservable database: $name ($reason) -> $quarantine_dir" >&2
-        mv -f "$dir" "$quarantine_dir"
-    done
-}
-
-# cleanup_stale_locks removes .dolt/noms/LOCK files not held by any process.
-cleanup_stale_locks() {
-    [ -d "$DATA_DIR" ] || return 0
-    local dir
-    for dir in "$DATA_DIR"/*/; do
-        [ -d "$dir" ] || continue
-        local lock_file="$dir/.dolt/noms/LOCK"
-        if [ -f "$lock_file" ]; then
-            local open_status
-            set +e
-            lsof_reports_open "$lock_file"
-            open_status=$?
-            set -e
-            case "$open_status" in
-                0)
-                    ;;
-                1)
-                    echo "removing stale LOCK: $lock_file" >&2
-                    rm -f "$lock_file"
-                    ;;
-                *)
-                    echo "preserving LOCK with unknown open-file state: $lock_file" >&2
-                    ;;
-            esac
-        fi
-    done
-}
 
 # write_config_yaml generates a managed dolt-config.yaml with timeouts and GC settings.
 # Overwritten on each server start. Without read/write timeouts, CLOSE_WAIT connections

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	iofs "io/fs"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -315,7 +316,24 @@ func desiredClaudeSettings(fs fsys.FS, cityDir string) ([]byte, claudeSettingsSo
 		return base, claudeSettingsSourceNone, nil
 	}
 
-	merged, err := overlay.MergeSettingsJSON(base, overrideData)
+	// Apply targeted in-place upgrades to legacy forms of managed gascity
+	// hook commands and matchers in the user's override before merging with
+	// the embedded base. Custom hook events and custom commands are
+	// preserved verbatim. The previous "use base instead" path discarded
+	// user customizations along with stale managed-hook bytes; this path
+	// patches the managed bytes while keeping customizations intact.
+	upgradedOverride, _, upgradeErr := upgradeClaudeFile(overrideData)
+	if upgradeErr != nil {
+		// Upgrade failure (e.g., malformed JSON) — fall back to original
+		// override; better to keep the user file as-is than fail install.
+		// Log so unexpected upgrade failures are discoverable rather than
+		// silent: a malformed user file is benign here, but a
+		// MarshalCanonicalJSON failure would indicate a gascity bug.
+		log.Printf("hooks: claude settings upgrade failed, using original override: %v", upgradeErr)
+		upgradedOverride = overrideData
+	}
+
+	merged, err := overlay.MergeSettingsJSON(base, upgradedOverride)
 	if err != nil {
 		return nil, claudeSettingsSourceNone, fmt.Errorf("merging Claude settings from %s: %w", overridePath, err)
 	}
@@ -343,14 +361,16 @@ func readClaudeSettingsOverride(fs fsys.FS, cityDir string, base []byte) (string
 
 	hookExists := hookState == candidateFound
 	runtimeExists := runtimeState == candidateFound
-	if hookExists &&
-		(!runtimeExists || !bytes.Equal(hookData, runtimeData)) &&
-		!claudeFileNeedsUpgrade(hookData) {
+	// The previous !claudeFileNeedsUpgrade gates here forced cities whose
+	// settings.json had stale managed-hook commands AND user customizations
+	// to fall through to the "use base" branch, silently discarding their
+	// customizations. desiredClaudeSettings now patches stale managed
+	// commands in-place via upgradeClaudeFile before merging with base, so
+	// customizations survive while managed commands get upgraded.
+	if hookExists && (!runtimeExists || !bytes.Equal(hookData, runtimeData)) {
 		return hookPath, hookData, claudeSettingsSourceLegacyHook, nil
 	}
-	if runtimeExists &&
-		!bytes.Equal(runtimeData, base) &&
-		!claudeFileNeedsUpgrade(runtimeData) {
+	if runtimeExists && !bytes.Equal(runtimeData, base) {
 		return runtimePath, runtimeData, claudeSettingsSourceLegacyRuntime, nil
 	}
 	return "", nil, claudeSettingsSourceNone, nil
@@ -635,41 +655,223 @@ func writeManagedFile(fs fsys.FS, dst string, data []byte, policy writeManagedFi
 	return nil
 }
 
+// claudeFileNeedsUpgrade reports whether the existing settings.json contains
+// known legacy forms of managed gascity hook commands or matchers that would
+// be patched by upgradeClaudeFile. Used by isStaleHookFile to decide whether
+// to overwrite the legacy hook-file path; readClaudeSettingsOverride no
+// longer gates on this since desiredClaudeSettings applies the upgrade
+// in-place before merge.
+//
+// The previous implementation enumerated 16 byte-exact transforms of the
+// embedded template and matched the user's bytes against that set. Any
+// custom addition (e.g. an extra Stop hook entry) defeated every variant
+// match, so cities with customizations never received upstream fixes —
+// most notably the PreCompact `--auto` patch from commit 7b3b913a, which
+// landed weeks before this rewrite but never propagated to cities like
+// pipex-city that had drifted from the canonical embedded shape.
 func claudeFileNeedsUpgrade(existing []byte) bool {
-	current, err := readEmbedded("config/claude.json")
+	_, changed, err := upgradeClaudeFile(existing)
 	if err != nil {
 		return false
 	}
-	transforms := []func(string) string{
-		func(s string) string {
-			return strings.Replace(s, `gc handoff --auto \"context cycle\"`, `gc handoff \"context cycle\"`, 1)
-		},
-		func(s string) string {
-			return strings.Replace(s, `gc handoff --auto \"context cycle\"`, `gc prime --hook`, 1)
-		},
-		func(s string) string {
-			return strings.Replace(s, `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`, `gc prime --hook`, 1)
-		},
-		func(s string) string {
-			return strings.Replace(s, `"matcher": "startup"`, `"matcher": ""`, 1)
-		},
-	}
+	return changed
+}
 
-	known := make(map[string]struct{})
-	var enumerate func(int, string, bool)
-	enumerate = func(idx int, candidate string, changed bool) {
-		if idx == len(transforms) {
-			if changed {
-				known[candidate] = struct{}{}
-			}
-			return
+// upgradeClaudeFile parses the existing Claude settings.json and patches
+// known legacy forms of managed gascity hook commands and matchers to their
+// current shape. Walks the hook events so upgrades can be event-aware
+// (e.g. SessionStart matcher upgrade, PreCompact command upgrade); custom
+// hook events and custom commands are preserved verbatim.
+//
+// Returns the (possibly re-marshaled) JSON bytes and whether any patch
+// was applied.
+func upgradeClaudeFile(existing []byte) ([]byte, bool, error) {
+	var root any
+	if err := json.Unmarshal(existing, &root); err != nil {
+		return nil, false, err
+	}
+	rootMap, ok := root.(map[string]any)
+	if !ok {
+		return existing, false, nil
+	}
+	hooks, ok := rootMap["hooks"].(map[string]any)
+	if !ok {
+		return existing, false, nil
+	}
+	changed := false
+	for event, entries := range hooks {
+		entriesArr, ok := entries.([]any)
+		if !ok {
+			continue
 		}
-		enumerate(idx+1, candidate, changed)
-		next := transforms[idx](candidate)
-		enumerate(idx+1, next, changed || next != candidate)
+		for _, entry := range entriesArr {
+			entryMap, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			if upgradeClaudeHookEntry(event, entryMap) {
+				changed = true
+			}
+		}
 	}
-	enumerate(0, string(current), false)
+	if !changed {
+		return existing, false, nil
+	}
+	data, err := overlay.MarshalCanonicalJSON(root)
+	if err != nil {
+		return nil, false, err
+	}
+	return data, true, nil
+}
 
-	_, ok := known[string(existing)]
-	return ok
+// upgradeClaudeHookEntry applies event-aware upgrades to a single
+// {matcher, hooks: [...]} entry under one of the hook event arrays.
+//
+// Upgrade applies only when the entry is identifiable as a GC-managed
+// legacy entry — at least one hook command must match a known legacy
+// form via isLegacyGCManagedCommand. User-authored entries that happen
+// to share an empty matcher or a wrapper that prefixes "gc prime --hook"
+// are left untouched.
+func upgradeClaudeHookEntry(event string, entry map[string]any) bool {
+	hookCmds, ok := entry["hooks"].([]any)
+	if !ok {
+		return false
+	}
+
+	// First pass: identify whether this entry has the GC-managed legacy
+	// shape (via at least one recognizable legacy command body), and
+	// upgrade any commands that match a known legacy form.
+	changed := false
+	hasManagedCommand := false
+	for _, h := range hookCmds {
+		hMap, ok := h.(map[string]any)
+		if !ok {
+			continue
+		}
+		cmd, ok := hMap["command"].(string)
+		if !ok {
+			continue
+		}
+		if isLegacyGCManagedCommand(event, cmd) {
+			hasManagedCommand = true
+		}
+		if upgraded, didUpgrade := upgradeClaudeHookCommand(event, cmd); didUpgrade {
+			hMap["command"] = upgraded
+			changed = true
+		}
+	}
+
+	// Second pass: normalize matcher only when the entry is identifiably
+	// GC-managed. Blocks user-authored SessionStart entries with
+	// matcher:"" from being silently rewritten to "startup".
+	if event == "SessionStart" && hasManagedCommand {
+		if matcher, ok := entry["matcher"].(string); ok && matcher == "" {
+			entry["matcher"] = "startup"
+			changed = true
+		}
+	}
+	return changed
+}
+
+// canonicalGCPathPrefix is the env-setup prefix gc prepends to every
+// managed hook command. Legacy command bodies always appear either bare
+// or with this prefix; user-wrapped variants never have this exact prefix.
+const canonicalGCPathPrefix = `export PATH="$HOME/go/bin:$HOME/.local/bin:$PATH" && `
+
+// commandBodyAfterCanonicalPrefix returns the portion of command following
+// the canonical gc PATH-export prefix if present, else returns command
+// unchanged. Used to anchor legacy-form matching against the post-prefix
+// body without matching arbitrary user-authored prefixes.
+func commandBodyAfterCanonicalPrefix(command string) string {
+	return strings.TrimPrefix(command, canonicalGCPathPrefix)
+}
+
+// isLegacyGCManagedCommand reports whether a hook command body matches a
+// known legacy form (or the already-upgraded current SessionStart form)
+// that gc previously generated. Used to gate matcher normalization in
+// upgradeClaudeHookEntry — user-authored commands that wrap,
+// suffix-append, or otherwise extend the legacy form (e.g.
+// "my-wrapper gc prime --hook --foo", "gc prime --hook --foo",
+// `gc prime --hook && my-extra-step`, or the current-form preamble
+// with extra trailing args appended) return false and are left alone.
+// All recognition paths require exact-body match — gc has only ever
+// emitted these tokens as the complete command body, never with
+// trailing args.
+func isLegacyGCManagedCommand(event, command string) bool {
+	body := commandBodyAfterCanonicalPrefix(command)
+	switch event {
+	case "PreCompact":
+		return equalsLegacyCommandBody(body, "gc prime --hook") ||
+			equalsLegacyCommandBody(body, `gc handoff "context cycle"`) ||
+			equalsLegacyCommandBody(body, `gc handoff --auto "context cycle"`)
+	case "SessionStart":
+		return equalsLegacyCommandBody(body, "gc prime --hook") ||
+			equalsLegacyCommandBody(body, sessionStartCurrentFormBody)
+	}
+	return false
+}
+
+// sessionStartCurrentFormBody is the canonical current-form managed
+// SessionStart command body (post-canonical-PATH-prefix). Recognized
+// via exact-body match in isLegacyGCManagedCommand so an already-upgraded
+// entry still gates matcher normalization, without matching user
+// commands that prefix-collide with the GC_MANAGED_SESSION_HOOK= or
+// full env-var preamble. If gc ever extends the current-form command
+// with additional arguments, update this constant alongside the
+// emission site so legacy detection remains tight.
+const sessionStartCurrentFormBody = `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`
+
+// equalsLegacyCommandBody reports whether the command body is exactly the
+// legacy token. gc historically emitted these tokens as the complete
+// command body (possibly with the canonical PATH-export prefix), never
+// with trailing arguments or chained commands. Treating any deviation —
+// wrappers, suffix-appended flags, "&&" chains, suffix-token collisions
+// like "gc prime --hookable" — as user authorship and leaving the
+// command alone is the only safe classification for an upgrade pass that
+// silently rewrites managed entries.
+func equalsLegacyCommandBody(command, token string) bool {
+	return command == token
+}
+
+// upgradeClaudeHookCommand returns the upgraded form of an event-scoped
+// command if it matches a known legacy shape via exact-body match.
+// Returns ("", false) when no upgrade applies.
+//
+// The match anchors against the command body following the canonical
+// gc PATH-export prefix (or against the bare body if there is no
+// prefix), and requires that body to equal a known legacy form
+// verbatim. This permits gc's own legacy commands (which always carry
+// the canonical PATH prefix and have no trailing args) to upgrade,
+// while blocking wrapped variants ("my-wrapper gc prime --hook --foo")
+// and suffix-appended variants ("gc prime --hook --foo",
+// `gc prime --hook && my-step`) from matching and being silently
+// rewritten.
+func upgradeClaudeHookCommand(event, command string) (string, bool) {
+	body := commandBodyAfterCanonicalPrefix(command)
+	switch event {
+	case "PreCompact":
+		// Older legacy: PreCompact used `gc prime --hook` before
+		// `gc handoff` was introduced. Upgrade to the current
+		// `gc handoff --auto "context cycle"` form. Tested first
+		// because it changes the same trailing token the bare-handoff
+		// form would otherwise patch.
+		if equalsLegacyCommandBody(body, `gc prime --hook`) {
+			return strings.Replace(command, `gc prime --hook`, `gc handoff --auto "context cycle"`, 1), true
+		}
+		// Legacy: bare `gc handoff "context cycle"` (no --auto)
+		// requests a controller restart on every Claude Code
+		// compaction event, killing the session (gc-flp1). Upstream
+		// fix landed in commit 7b3b913a; this patches existing cities.
+		if equalsLegacyCommandBody(body, `gc handoff "context cycle"`) {
+			return strings.Replace(command, `gc handoff "context cycle"`, `gc handoff --auto "context cycle"`, 1), true
+		}
+	case "SessionStart":
+		// Legacy: bare `gc prime --hook` without the
+		// GC_MANAGED_SESSION_HOOK / GC_HOOK_EVENT_NAME env vars the
+		// current managed form expects.
+		if equalsLegacyCommandBody(body, `gc prime --hook`) {
+			return strings.Replace(command, `gc prime --hook`, `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`, 1), true
+		}
+	}
+	return "", false
 }

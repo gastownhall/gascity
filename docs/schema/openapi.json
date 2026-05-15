@@ -5913,6 +5913,9 @@
           "last_active": {
             "type": "string"
           },
+          "last_nudge_delivered_at": {
+            "type": "string"
+          },
           "last_output": {
             "type": "string"
           },

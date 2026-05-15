@@ -8,35 +8,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 )
 
-var (
-	managedDoltPreflightCleanupFn     = preflightManagedDoltCleanup
-	retiredManagedDoltDatabasePattern = regexp.MustCompile(`^.+\.replaced-[0-9]{8}T[0-9]{6}Z$`)
-)
+var managedDoltPreflightCleanupFn = preflightManagedDoltCleanup
 
 const managedDoltLsofTimeout = 3 * time.Second
 
-func preflightManagedDoltCleanup(cityPath string) error {
-	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
-	if err != nil {
-		return err
-	}
-	if err := removeStaleManagedDoltSockets(); err != nil {
-		return err
-	}
-	if err := quarantinePhantomManagedDoltDatabases(layout.DataDir, time.Now().UTC()); err != nil {
-		return err
-	}
-	if err := removeStaleManagedDoltLocks(layout.DataDir); err != nil {
-		return err
-	}
-	return nil
+func preflightManagedDoltCleanup(_ string) error {
+	return removeStaleManagedDoltSockets()
 }
 
 var errManagedDoltOpenStateUnknown = errors.New("managed dolt open-file state unknown")
@@ -88,116 +71,6 @@ func staleManagedDoltSocketPaths() []string {
 		add(match)
 	}
 	return paths
-}
-
-func quarantinePhantomManagedDoltDatabases(dataDir string, now time.Time) error {
-	entries, err := os.ReadDir(dataDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	quarantineRoot := filepath.Join(dataDir, ".quarantine")
-	stamp := now.UTC().Format("20060102T150405")
-	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-		dbDir := filepath.Join(dataDir, entry.Name())
-		doltDir := filepath.Join(dbDir, ".dolt")
-		info, err := os.Stat(doltDir)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return err
-		}
-		if !info.IsDir() {
-			continue
-		}
-		reason := "retired replacement"
-		if !retiredManagedDoltDatabaseName(entry.Name()) {
-			reason = "missing noms/manifest"
-			manifest := filepath.Join(doltDir, "noms", "manifest")
-			if _, err := os.Stat(manifest); err == nil {
-				continue
-			} else if !os.IsNotExist(err) {
-				return err
-			}
-		}
-		if err := os.MkdirAll(quarantineRoot, 0o755); err != nil {
-			return err
-		}
-		dest, err := uniqueQuarantineDestination(quarantineRoot, stamp, entry.Name())
-		if err != nil {
-			return err
-		}
-		if err := os.Rename(dbDir, dest); err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "gc dolt preflight: quarantined unservable database (%s) %s -> %s\n", reason, dbDir, dest) //nolint:errcheck // best-effort warning
-	}
-	return nil
-}
-
-func retiredManagedDoltDatabaseName(name string) bool {
-	name = strings.TrimSpace(name)
-	return retiredManagedDoltDatabasePattern.MatchString(name)
-}
-
-func uniqueQuarantineDestination(root, stamp, name string) (string, error) {
-	base := filepath.Join(root, stamp+"-"+name)
-	if _, err := os.Stat(base); os.IsNotExist(err) {
-		return base, nil
-	} else if err != nil {
-		return "", err
-	}
-	for i := 2; i < 1000; i++ {
-		candidate := fmt.Sprintf("%s-%d", base, i)
-		if _, err := os.Stat(candidate); os.IsNotExist(err) {
-			return candidate, nil
-		} else if err != nil {
-			return "", err
-		}
-	}
-	return "", fmt.Errorf("could not allocate unique quarantine destination for %s", name)
-}
-
-func removeStaleManagedDoltLocks(dataDir string) error {
-	entries, err := os.ReadDir(dataDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-		lockFile := filepath.Join(dataDir, entry.Name(), ".dolt", "noms", "LOCK")
-		if _, err := os.Stat(lockFile); err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return err
-		}
-		open, err := fileOpenedByAnyProcess(lockFile)
-		if err != nil {
-			if errors.Is(err, errManagedDoltOpenStateUnknown) {
-				continue
-			}
-			return err
-		}
-		if open {
-			continue
-		}
-		if err := os.Remove(lockFile); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	}
-	return nil
 }
 
 func fileOpenedByAnyProcess(path string) (bool, error) {

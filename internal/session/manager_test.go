@@ -413,6 +413,63 @@ func TestGetSurfacesAgentNameMetadata(t *testing.T) {
 	}
 }
 
+// TestGetSurfacesLastNudgeDeliveredAtMetadata verifies that
+// `metadata.last_nudge_delivered_at` (stamped by the nudge dispatcher on
+// successful delivery) round-trips through Info.LastNudgeDeliveredAt so
+// `gc session list` can render the "LAST NUDGE" column. The stamp lives
+// on the session bead so operators can spot warm sessions whose delivery
+// loop has stalled (queued items piling up while the timestamp stays old).
+func TestGetSurfacesLastNudgeDeliveredAtMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateBeadOnly("helper", "my chat", "claude", "/tmp", "claude", "", nil, ProviderResume{})
+	if err != nil {
+		t.Fatalf("CreateBeadOnly: %v", err)
+	}
+
+	stamp := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	if err := store.SetMetadata(info.ID, MetadataLastNudgeDeliveredAt, stamp.Format(time.RFC3339)); err != nil {
+		t.Fatalf("SetMetadata(%s): %v", MetadataLastNudgeDeliveredAt, err)
+	}
+
+	got, err := mgr.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.LastNudgeDeliveredAt.Equal(stamp) {
+		t.Fatalf("LastNudgeDeliveredAt = %v, want %v", got.LastNudgeDeliveredAt, stamp)
+	}
+}
+
+// TestGetIgnoresInvalidLastNudgeDeliveredAtMetadata ensures a malformed
+// metadata value leaves Info.LastNudgeDeliveredAt zero rather than
+// surfacing a parser error. The stamp is best-effort observability —
+// any future schema drift must degrade gracefully instead of breaking
+// the read path that powers `gc session list`.
+func TestGetIgnoresInvalidLastNudgeDeliveredAtMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateBeadOnly("helper", "my chat", "claude", "/tmp", "claude", "", nil, ProviderResume{})
+	if err != nil {
+		t.Fatalf("CreateBeadOnly: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, MetadataLastNudgeDeliveredAt, "not-a-timestamp"); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+
+	got, err := mgr.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.LastNudgeDeliveredAt.IsZero() {
+		t.Fatalf("LastNudgeDeliveredAt = %v, want zero (unparsable RFC3339 must not surface)", got.LastNudgeDeliveredAt)
+	}
+}
+
 func TestCreateNamedWithTransport_UsesExplicitSessionName(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

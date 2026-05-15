@@ -1251,11 +1251,11 @@ func TestCompactScriptTableNameDoesNotClobberDatabaseName(t *testing.T) {
 	}
 }
 
-func TestPhantomDBScriptQuarantinesPhantomsAndRetiredReplacements(t *testing.T) {
+func TestPhantomDBScriptEscalatesAndPreservesAllDatabases(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")
 	binDir := t.TempDir()
-	_ = writeDogFakeGC(t, binDir)
+	gcLogPath := writeDogFakeGC(t, binDir)
 
 	for _, path := range []string{
 		filepath.Join(dataDir, "valid", ".dolt", "noms"),
@@ -1270,14 +1270,14 @@ func TestPhantomDBScriptQuarantinesPhantomsAndRetiredReplacements(t *testing.T) 
 	writeTestFile(t, filepath.Join(dataDir, "orders.replaced-20260509T010203Z", ".dolt", "noms", "manifest"), "ok")
 
 	out := runDogScript(t, "mol-dog-phantom-db.sh", binDir, cityPath, dataDir)
-	if !strings.Contains(out, "phantoms: 1") || !strings.Contains(out, "retired: 1") || !strings.Contains(out, "quarantined: 2") {
+	if !strings.Contains(out, "phantoms: 1") || !strings.Contains(out, "retired: 1") || !strings.Contains(out, "escalated: 2") {
 		t.Fatalf("unexpected phantom summary:\n%s", out)
 	}
-	if _, err := os.Stat(filepath.Join(dataDir, "phantom")); !os.IsNotExist(err) {
-		t.Fatalf("phantom source should be moved, stat err=%v", err)
+	if _, err := os.Stat(filepath.Join(dataDir, "phantom", ".dolt")); err != nil {
+		t.Fatalf("phantom source moved unexpectedly: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dataDir, "orders.replaced-20260509T010203Z")); !os.IsNotExist(err) {
-		t.Fatalf("retired replacement source should be moved, stat err=%v", err)
+	if _, err := os.Stat(filepath.Join(dataDir, "orders.replaced-20260509T010203Z", ".dolt", "noms", "manifest")); err != nil {
+		t.Fatalf("retired replacement moved unexpectedly: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, "valid", ".dolt", "noms", "manifest")); err != nil {
 		t.Fatalf("valid database should remain: %v", err)
@@ -1286,8 +1286,25 @@ func TestPhantomDBScriptQuarantinesPhantomsAndRetiredReplacements(t *testing.T) 
 	if err != nil {
 		t.Fatalf("glob quarantine: %v", err)
 	}
-	if len(matches) != 2 {
-		t.Fatalf("quarantined entries = %d, want 2: %v", len(matches), matches)
+	if len(matches) != 0 {
+		t.Fatalf("quarantine directory non-empty: got %d entries: %v", len(matches), matches)
+	}
+	gcLogData, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	gcLog := string(gcLogData)
+	if !strings.Contains(gcLog, "unservable database directories") {
+		t.Fatalf("escalation should use neutral unservable wording:\n%s", gcLog)
+	}
+	if !strings.Contains(gcLog, "Phantoms missing noms/manifest: 1 phantom") {
+		t.Fatalf("escalation should report phantom directories separately:\n%s", gcLog)
+	}
+	if !strings.Contains(gcLog, "Retired replacement directories: 1 orders.replaced-20260509T010203Z") {
+		t.Fatalf("escalation should report retired replacements separately:\n%s", gcLog)
+	}
+	if strings.Contains(gcLog, "phantom database(s)") {
+		t.Fatalf("escalation should not label all unservables as phantoms:\n%s", gcLog)
 	}
 }
 

@@ -62,6 +62,20 @@ func configureIsolatedRuntimeEnv(t *testing.T) {
 	}
 }
 
+func TestRunReportsMutuallyExclusiveFlagViolations(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sling", "target", "arg", "--formula", "--on", "bd-1"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("run returned 0; expected non-zero. stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "mutually") && !strings.Contains(stderr.String(), "none of the others") {
+		t.Fatalf("stderr did not describe the mutex violation; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "formula") || !strings.Contains(stderr.String(), "on") {
+		t.Fatalf("stderr did not name the conflicting flags; got %q", stderr.String())
+	}
+}
+
 func TestRunDoesNotLeakPersistentCityOrRigFlags(t *testing.T) {
 	prevCityFlag, prevRigFlag := cityFlag, rigFlag
 	t.Cleanup(func() {

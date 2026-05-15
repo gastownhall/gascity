@@ -2250,6 +2250,34 @@ func TestProcessRalphCheckRetriesThenPasses(t *testing.T) {
 	}
 }
 
+func TestProcessRalphCheckTransientAppendErrorStaysOpenForRetry(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	checkPath := writeCheckScript(t, cityPath, "retry-check.sh", "#!/bin/bash\nset -euo pipefail\nexit 1\n")
+	base, _, run1, check1 := newSimpleRalphLoop(t, "implement", checkPath, 2)
+	if err := base.Close(run1.ID); err != nil {
+		t.Fatalf("close run1: %v", err)
+	}
+
+	store := &failOnceCreateStore{
+		Store: base,
+		err:   errors.New("creating ralph retry bead: invalid connection: i/o timeout"),
+	}
+	_, err := ProcessControl(store, mustGetBead(t, store, check1.ID), ProcessOptions{CityPath: cityPath})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl(ralph check append) error = %v, want %v", err, ErrControlPending)
+	}
+
+	after := mustGetBead(t, store, check1.ID)
+	if after.Status != "open" {
+		t.Fatalf("check status = %q, want open", after.Status)
+	}
+	if after.Metadata["gc.controller_error_class"] != "transient" || after.Metadata["gc.controller_retryable"] != "true" {
+		t.Fatalf("controller retry metadata = %v, want transient retryable", after.Metadata)
+	}
+}
+
 func TestProcessRalphCheckPassClosesCheckBeforeLogicalAndPropagatesOutputJSON(t *testing.T) {
 	t.Parallel()
 
@@ -3358,6 +3386,77 @@ needs = ["{target}.review"]
 	fanoutClosed := mustGetBead(t, store, fanout.ID)
 	if fanoutClosed.Status != "closed" || fanoutClosed.Metadata["gc.outcome"] != "pass" {
 		t.Fatalf("fanout = status %q outcome %q, want closed/pass", fanoutClosed.Status, fanoutClosed.Metadata["gc.outcome"])
+	}
+}
+
+func TestProcessFanoutTransientFragmentInstantiationStaysOpenForRetry(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	dir := t.TempDir()
+	expansion := `
+formula = "expansion-review"
+type = "expansion"
+version = 2
+contract = "graph.v2"
+
+[[template]]
+id = "{target}.review"
+title = "Review {reviewer}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion formula: %v", err)
+	}
+
+	base := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, base, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	source := mustCreateWorkflowBead(t, base, beads.Bead{
+		Title:  "survey",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.survey",
+			"gc.outcome":      "pass",
+			"gc.output_json":  `{"items":[{"name":"claude"}]}`,
+		},
+	})
+	fanout := mustCreateWorkflowBead(t, base, beads.Bead{
+		Title: "Expand fanout for survey",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "fanout",
+			"gc.root_bead_id": workflow.ID,
+			"gc.control_for":  "demo.survey",
+			"gc.for_each":     "output.items",
+			"gc.bond":         "expansion-review",
+			"gc.bond_vars":    `{"reviewer":"{item.name}"}`,
+			"gc.fanout_mode":  "parallel",
+		},
+	})
+	mustDepAdd(t, base, fanout.ID, source.ID, "blocks")
+
+	store := &failOnceCreateStore{
+		Store: base,
+		err:   errors.New("creating fragment bead: invalid connection: i/o timeout"),
+	}
+	_, err := ProcessControl(store, mustGetBead(t, store, fanout.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl(fanout transient instantiate) error = %v, want %v", err, ErrControlPending)
+	}
+
+	after := mustGetBead(t, store, fanout.ID)
+	if after.Status != "open" {
+		t.Fatalf("fanout status = %q, want open", after.Status)
+	}
+	if after.Metadata["gc.controller_error_class"] != "transient" || after.Metadata["gc.controller_retryable"] != "true" {
+		t.Fatalf("controller retry metadata = %v, want transient retryable", after.Metadata)
 	}
 }
 

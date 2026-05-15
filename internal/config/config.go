@@ -2344,6 +2344,19 @@ func (a *Agent) SupportsMultipleSessions() bool {
 // SupportsInstanceExpansion reports whether the template may have multiple
 // simultaneously addressable concrete instances and therefore needs instance
 // discovery / synthetic member naming.
+//
+// max_active_sessions=1 has two distinct flavors:
+//
+//   - Pool agents (MinActiveSessions or ScaleCheck set) addressed as
+//     "{name}-1" — they participate in pool semantics even at capacity 1.
+//   - Named-session agents (MaxActiveSessions=1 with a [[named_session]]
+//     entry, no Min/ScaleCheck) addressed as just "{name}" — they have a
+//     stable canonical identity and a phantom "-1" suffix breaks tools that
+//     resolve by qualified name (e.g. refinery).
+//
+// We keep instance expansion on for the pool flavor so existing identities
+// stay stable, and turn it off for the named-session flavor so the bare name
+// resolves correctly.
 func (a *Agent) SupportsInstanceExpansion() bool {
 	if a == nil {
 		return false
@@ -2351,10 +2364,20 @@ func (a *Agent) SupportsInstanceExpansion() bool {
 	if strings.TrimSpace(a.Namepool) != "" || len(a.NamepoolNames) > 0 {
 		return true
 	}
-	if m := a.EffectiveMaxActiveSessions(); m != nil {
-		return *m < 0 || *m > 1
+	m := a.EffectiveMaxActiveSessions()
+	if m == nil {
+		return true
 	}
-	return true
+	if *m < 0 || *m > 1 {
+		return true
+	}
+	// *m == 1: distinguish pool agents (keep numbered instances) from
+	// named-session agents (collapse to base identity). Pool agents are
+	// identified by an explicit MinActiveSessions or a ScaleCheck override.
+	if a.MinActiveSessions != nil || strings.TrimSpace(a.ScaleCheck) != "" {
+		return true
+	}
+	return false
 }
 
 // HasUnlimitedSessionCapacity reports whether max_active_sessions is unbounded.

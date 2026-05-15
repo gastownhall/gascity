@@ -3,6 +3,8 @@
 // output, optional --fix support, and a summary report.
 package doctor
 
+import "io"
+
 // CheckStatus represents the outcome of a health check.
 type CheckStatus int
 
@@ -35,6 +37,10 @@ type CheckContext struct {
 	CityPath string
 	// Verbose enables extra diagnostic output in check results.
 	Verbose bool
+	// Output is the writer used for doctor output during Doctor.Run.
+	// Checks that need to surface fix-time diagnostics should use this
+	// writer so captured doctor output includes the diagnostics.
+	Output io.Writer
 }
 
 // CheckResult holds the outcome of a single check execution.

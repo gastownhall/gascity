@@ -117,6 +117,9 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 	}
 	if strings.TrimSpace(bead.Metadata["gc.fanout_state"]) == "" {
 		if err := store.SetMetadataBatch(bead.ID, map[string]string{"gc.fanout_state": "spawning"}); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err) {
+				return ControlResult{}, ErrControlPending
+			}
 			return ControlResult{}, fmt.Errorf("%s: recording fanout spawn start: %w", bead.ID, err)
 		}
 	}
@@ -168,6 +171,9 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 				ExternalDeps: externalDeps,
 			})
 			if err != nil {
+				if controllerSpawnBoundaryPending(store, bead.ID, err) {
+					return ControlResult{}, ErrControlPending
+				}
 				return ControlResult{}, fmt.Errorf("%s: instantiating fragment %d: %w", bead.ID, index+1, err)
 			}
 			totalCreated += inst.Created
@@ -177,6 +183,9 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		sinkIDs := mapStepIDs(fragment.Sinks, idMapping)
 		for _, sinkID := range sinkIDs {
 			if err := store.DepAdd(bead.ID, sinkID, "blocks"); err != nil {
+				if controllerSpawnBoundaryPending(store, bead.ID, err) {
+					return ControlResult{}, ErrControlPending
+				}
 				return ControlResult{}, fmt.Errorf("%s: wiring fanout blocker: %w", bead.ID, err)
 			}
 		}
@@ -185,10 +194,15 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		}
 	}
 
-	if err := store.SetMetadataBatch(bead.ID, map[string]string{
+	spawnedMetadata := map[string]string{
 		"gc.fanout_state":  "spawned",
 		"gc.spawned_count": strconv.Itoa(len(items)),
-	}); err != nil {
+	}
+	clearControllerSpawnErrorMetadata(spawnedMetadata)
+	if err := store.SetMetadataBatch(bead.ID, spawnedMetadata); err != nil {
+		if controllerSpawnBoundaryPending(store, bead.ID, err) {
+			return ControlResult{}, ErrControlPending
+		}
 		return ControlResult{}, fmt.Errorf("%s: recording fanout state: %w", bead.ID, err)
 	}
 	return ControlResult{Processed: true, Action: "fanout-spawn", Created: totalCreated}, nil

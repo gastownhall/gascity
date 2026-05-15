@@ -1536,6 +1536,14 @@ func realizePoolDesiredSessions(
 		var prefer *beads.Bead
 		if request.SessionBeadID != "" {
 			if bead, ok := findOpenSessionBeadByID(bp.sessionBeads, request.SessionBeadID); ok {
+				// Defense in depth: ComputePoolDesiredStates filters out
+				// named-session beads from pool resume requests. If one
+				// slipped through, materializing it here would create a
+				// phantom "{name}-N" sibling to the canonical named session.
+				if isNamedSessionBead(bead) {
+					fmt.Fprintf(stderr, "buildDesiredState: pool %q: refusing to materialize named-session bead %s as pool instance (would create phantom %q-N sibling)\n", qualifiedName, bead.ID, cfgAgent.Name) //nolint:errcheck
+					continue
+				}
 				prefer = &bead
 			}
 		}
@@ -1548,8 +1556,7 @@ func realizePoolDesiredSessions(
 			continue
 		}
 		used[sessionBead.ID] = true
-		instanceName := poolInstanceName(cfgAgent.Name, slot, cfgAgent)
-		qualifiedInstance := cfgAgent.QualifiedInstanceName(instanceName)
+		instanceName, qualifiedInstance := poolInstanceIdentity(cfgAgent, slot, stderr)
 		instanceAgent := deepCopyAgent(cfgAgent, instanceName, cfgAgent.Dir)
 		fpExtra := buildFingerprintExtra(&instanceAgent)
 		tp, err := resolveTemplateForSessionBead(bp, &instanceAgent, qualifiedInstance, fpExtra, sessionBead)
@@ -1971,8 +1978,7 @@ func selectOrCreatePoolSessionBead(
 		}
 	}
 	slot := claimPoolSlot(cfgAgent, beads.Bead{}, usedSlots)
-	instanceName := poolInstanceName(cfgAgent.Name, slot, cfgAgent)
-	qualifiedInstance := cfgAgent.QualifiedInstanceName(instanceName)
+	_, qualifiedInstance := poolInstanceIdentity(cfgAgent, slot, bp.stderr)
 	bead, err := createPoolSessionBeadWithGuardedAlias(bp, template, qualifiedInstance, slot)
 	if err != nil {
 		delete(usedSlots, slot)
@@ -2074,8 +2080,7 @@ func selectOrCreateDependencyPoolSessionBead(
 	if cfgAgent == nil {
 		return beads.Bead{}, fmt.Errorf("dependency pool template %q has no configured agent", template)
 	}
-	instanceName := poolInstanceName(cfgAgent.Name, 1, cfgAgent)
-	qualifiedInstance := cfgAgent.QualifiedInstanceName(instanceName)
+	_, qualifiedInstance := poolInstanceIdentity(cfgAgent, 1, bp.stderr)
 	return createPoolSessionBeadWithGuardedAlias(bp, template, qualifiedInstance, 1)
 }
 
@@ -2212,4 +2217,37 @@ func poolInstanceName(base string, slot int, a *config.Agent) string {
 		return a.NamepoolNames[slot-1]
 	}
 	return fmt.Sprintf("%s-%d", base, slot)
+}
+
+// poolInstanceIdentity returns the (instanceName, qualifiedInstance) pair for
+// a pool slot on the given agent. For agents that do NOT support instance
+// expansion (max_active_sessions=1, no namepool), it returns the base
+// identity and emits a defensive warning when a non-zero slot would have
+// produced a phantom "{base}-N" name. The warning is the diagnostic
+// breadcrumb the bug report (ga-fiw) asked for — it lets operators see when
+// a non-expansion agent was about to be materialized with a numeric suffix.
+func poolInstanceIdentity(cfgAgent *config.Agent, slot int, stderr io.Writer) (string, string) {
+	if cfgAgent == nil {
+		return "", ""
+	}
+	if !cfgAgent.SupportsInstanceExpansion() {
+		if slot > 0 && stderr != nil {
+			fmt.Fprintf(stderr, "buildDesiredState: pool %q: agent does not support instance expansion (max_active_sessions=%s) but slot %d was claimed; using base identity to avoid phantom %q-%d session\n", //nolint:errcheck
+				cfgAgent.QualifiedName(), formatMaxSessions(cfgAgent), slot, cfgAgent.Name, slot)
+		}
+		return cfgAgent.Name, cfgAgent.QualifiedName()
+	}
+	instanceName := poolInstanceName(cfgAgent.Name, slot, cfgAgent)
+	return instanceName, cfgAgent.QualifiedInstanceName(instanceName)
+}
+
+func formatMaxSessions(a *config.Agent) string {
+	if a == nil {
+		return "<nil>"
+	}
+	m := a.EffectiveMaxActiveSessions()
+	if m == nil {
+		return "unlimited"
+	}
+	return strconv.Itoa(*m)
 }

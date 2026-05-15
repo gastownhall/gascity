@@ -3742,6 +3742,7 @@ export interface components {
             id: string;
             kind?: string;
             last_active?: string;
+            last_nudge_delivered_at?: string;
             last_output?: string;
             metadata?: {
                 [key: string]: string;

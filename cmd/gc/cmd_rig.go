@@ -179,13 +179,6 @@ func resolveRigAddPath(cityPath, rigArg string) (string, error) {
 // This prevents partial-state bugs where city.toml lists a rig but the rig's
 // infrastructure (beads, routes) was never created.
 func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverride, prefixOverride, defaultBranchOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) int {
-	// Validate prefix format: hyphens break beadPrefix() which splits on
-	// the first '-' to extract the rig prefix from a bead ID.
-	if prefixOverride != "" && strings.Contains(prefixOverride, "-") {
-		fmt.Fprintf(stderr, "gc rig add: --prefix %q must not contain hyphens (conflicts with bead ID format)\n", prefixOverride) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
 	// Trim and drop empty --include entries so `--include=` or `--include " "`
 	// doesn't persist a blank pack path that downstream resolution reads
 	// as the city root.

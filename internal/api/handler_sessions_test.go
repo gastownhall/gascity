@@ -6128,6 +6128,21 @@ func TestSessionToResponse_AgentKindClassification(t *testing.T) {
 	}
 }
 
+func TestSessionToResponse_ProjectsLastNudgeDeliveredAt(t *testing.T) {
+	stamp := time.Date(2026, 5, 13, 3, 45, 0, 0, time.UTC)
+	resp := sessionToResponse(session.Info{
+		ID:                   "sess-1",
+		Template:             "myrig/worker",
+		Provider:             "codex",
+		CreatedAt:            stamp.Add(-time.Hour),
+		LastNudgeDeliveredAt: stamp,
+	}, nil)
+
+	if resp.LastNudgeDeliveredAt != stamp.Format(time.RFC3339) {
+		t.Fatalf("LastNudgeDeliveredAt = %q, want %q", resp.LastNudgeDeliveredAt, stamp.Format(time.RFC3339))
+	}
+}
+
 func TestHandleSessionStopReturnsOKWithID(t *testing.T) {
 	fs := newSessionFakeState(t)
 	h := newTestCityHandler(t, fs)

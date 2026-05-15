@@ -465,8 +465,9 @@ func TestCityRuntimeRunStartupPreflightsManagedDoltBeforeSessionSnapshot(t *test
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
-	t.Setenv("GC_BEADS", "bd")
+	// This preflight starts a managed Dolt sql-server; clean it up even if the test fails.
 	cleanupManagedDoltTestCity(t, cityPath)
+	t.Setenv("GC_BEADS", "bd")
 
 	cfg, err := config.Load(osFS{}, tomlPath)
 	if err != nil {
@@ -514,6 +515,7 @@ func TestCityRuntimeRunStartupPreflightsManagedDoltBeforeSessionSnapshot(t *test
 	cr.setControllerState(cs)
 	orderEvents.reset()
 	managedPort = ""
+	t.Setenv("GC_BEADS", "bd")
 
 	cr.run(ctx)
 

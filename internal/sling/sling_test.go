@@ -300,6 +300,16 @@ func TestBeadPrefixSling(t *testing.T) {
 		{"", ""},
 		{"nohyphen", ""},
 		{"-1", ""},
+		{"pieces-annotator-x8o", "pieces-annotator"},
+		{"pieces-annotator-a3f", "pieces-annotator"},
+		{"pieces-cli-5b8i", "pieces-cli"},
+		{" pieces-annotator-x8o ", "pieces-annotator"},
+		{"my-cool-app-123", "my-cool-app"},
+		{"beads-vscode-1", "beads-vscode"},
+		{"vc-baseline-test", "vc"},
+		{"pieces-annotator-baseline", "pieces"},
+		// All-letter suffixes are ambiguous without city config.
+		{"pieces-annotator-gnpgief", "pieces"},
 	}
 	for _, tt := range tests {
 		got := BeadPrefix(tt.id)
@@ -314,6 +324,7 @@ func TestBeadPrefixForCityLongestMatch(t *testing.T) {
 		Rigs: []config.Rig{
 			{Name: "agent", Path: "/agent", Prefix: "agent"},
 			{Name: "agent-diagnostics", Path: "/ad", Prefix: "agent-diagnostics"},
+			{Name: "pieces-annotator", Path: "/pa", Prefix: "pieces-annotator"},
 			{Name: "fe", Path: "/fe", Prefix: "fe"},
 		},
 	}
@@ -323,6 +334,7 @@ func TestBeadPrefixForCityLongestMatch(t *testing.T) {
 	}{
 		{"agent-diagnostics-hnn", "agent-diagnostics"},
 		{"agent-diagnostics-spawn-storm", "agent-diagnostics"},
+		{"pieces-annotator-gnpgief", "pieces-annotator"},
 		{"agent-x1", "agent"},
 		{"fe-42", "fe"},
 		{"unknown-7", "unknown"}, // falls back to BeadPrefix.
@@ -340,7 +352,7 @@ func TestBeadPrefixForCityFallsBackToBeadPrefix(t *testing.T) {
 	cfg := &config.City{
 		Rigs: []config.Rig{{Name: "fe", Path: "/fe", Prefix: "fe"}},
 	}
-	// Unknown prefix → fall back to BeadPrefix's first-dash split.
+	// Unknown prefix -> fall back to BeadPrefix's config-free heuristic.
 	if got := BeadPrefixForCity(cfg, "unknown-7"); got != "unknown" {
 		t.Errorf("BeadPrefixForCity(unknown-7) = %q, want unknown", got)
 	}
@@ -501,7 +513,7 @@ func TestRigDirForBeadHonorsUnderscoredPrefix(t *testing.T) {
 // RigDirForBead returns "" in two distinct ways: the prefix doesn't
 // parse at all (BeadPrefixForCity returns "") and the prefix parses
 // but doesn't match any configured rig (BeadPrefix falls back to
-// first-dash split for unknown prefixes). Cover both so a regression
+// the config-free heuristic for unknown prefixes). Cover both so a regression
 // that conflates the branches is caught.
 func TestRigDirForBeadEmptyPrefixAndUnknownRig(t *testing.T) {
 	cfg := &config.City{

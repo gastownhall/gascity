@@ -531,6 +531,54 @@ func TestComputePoolDesiredStates_ScaleCheckMerge(t *testing.T) {
 	}
 }
 
+// TestComputePoolDesiredStates_NamedSessionBeadSkipsPoolResume verifies that
+// when work is assigned to a configured named session, the pool path does NOT
+// emit a resume request for the named session bead. Without this guard, the
+// named-session bead leaks into realizePoolDesiredSessions, which renames it
+// to a phantom "{name}-1" pool-instance form even when the agent has
+// max_active_sessions=1 and SupportsInstanceExpansion()=false.
+func TestComputePoolDesiredStates_NamedSessionBeadSkipsPoolResume(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("refinery", "rig", intPtr(1), 0)},
+		NamedSessions: []config.NamedSession{
+			{Template: "refinery", Scope: "rig", Mode: "on_demand"},
+		},
+	}
+	// Work routed to the canonical named-session identity, with a
+	// matching named-session bead present.
+	work := []beads.Bead{
+		workBead("w1", "rig/refinery", "rig/refinery", "in_progress", 5),
+	}
+	namedBead := beads.Bead{
+		ID:     "sess-refinery",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"session_name":               "rig--refinery",
+			"template":                   "rig/refinery",
+			"agent_name":                 "rig/refinery",
+			"state":                      "active",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "rig/refinery",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, []beads.Bead{namedBead}, nil)
+
+	resumeCount := 0
+	for _, ds := range result {
+		for _, req := range ds.Requests {
+			if req.Tier == "resume" {
+				resumeCount++
+			}
+		}
+	}
+	if resumeCount != 0 {
+		t.Errorf("resume count = %d, want 0 (named-session beads are materialized by the named-session loop, not pool resume)", resumeCount)
+	}
+}
+
 func TestComputePoolDesiredStates_UnassignedRoutedBeadDoesNotCreateDemand(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(5), 0)},

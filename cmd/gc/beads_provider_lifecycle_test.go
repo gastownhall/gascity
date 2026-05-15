@@ -697,65 +697,6 @@ printf 'status=%%s\n' "$status"
 	}
 }
 
-func TestGcBeadsBdCleanupStaleLocksBoundsLsof(t *testing.T) {
-	cityPath := t.TempDir()
-	if err := MaterializeBuiltinPacks(cityPath); err != nil {
-		t.Fatalf("MaterializeBuiltinPacks: %v", err)
-	}
-	scriptData, err := os.ReadFile(gcBeadsBdScriptPath(cityPath))
-	if err != nil {
-		t.Fatalf("ReadFile(gc-beads-bd): %v", err)
-	}
-	prelude, _, ok := strings.Cut(string(scriptData), "# --- Main ---")
-	if !ok {
-		t.Fatal("gc-beads-bd script missing main marker")
-	}
-
-	dataDir := filepath.Join(cityPath, ".beads", "dolt")
-	lockFile := filepath.Join(dataDir, "hq", ".dolt", "noms", "LOCK")
-	if err := os.MkdirAll(filepath.Dir(lockFile), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(lockFile, []byte("lock\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "lsof"), []byte("#!/bin/sh\nexec sleep 2\n"), 0o755); err != nil {
-		t.Fatalf("WriteFile(lsof): %v", err)
-	}
-	harness := filepath.Join(t.TempDir(), "cleanup-locks.sh")
-	body := prelude + fmt.Sprintf(`
-DATA_DIR=%q
-cleanup_stale_locks
-`, dataDir)
-	if err := os.WriteFile(harness, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", harness)
-	cmd.Env = append(os.Environ(),
-		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"GC_LSOF_TIMEOUT_SECONDS=0.1",
-	)
-	start := time.Now()
-	out, err := cmd.CombinedOutput()
-	if ctx.Err() != nil {
-		t.Fatalf("cleanup_stale_locks timed out after %s\n%s", time.Since(start), out)
-	}
-	if err != nil {
-		t.Fatalf("cleanup_stale_locks failed: %v\n%s", err, out)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("cleanup_stale_locks took %s, want bounded lsof timeout", elapsed)
-	}
-	if _, err := os.Stat(lockFile); err != nil {
-		t.Fatalf("LOCK stat err = %v, want preserved when lsof times out", err)
-	}
-}
-
 func TestEnsureBeadsProviderPublishesManagedDoltRuntimeStateFromProviderState(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "frontend")

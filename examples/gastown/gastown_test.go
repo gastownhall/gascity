@@ -206,12 +206,18 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 		t.Fatalf("reading refinery formula: %v", err)
 	}
 	body := string(data)
+	normalizedBody := strings.Join(strings.Fields(body), " ")
+	unsetRationale := "`--unset-metadata rejection_reason` clears any stale rejection field"
+	if count := strings.Count(normalizedBody, unsetRationale); count != 2 {
+		t.Fatalf("refinery formula should explain rejection_reason cleanup in both close paths, found %d occurrences", count)
+	}
 
 	// Direct-merge path: metadata write must be chained into the close.
 	assertContainsInOrder(t, body,
 		"--set-metadata merge_result=merged",
 		"--set-metadata merged_sha=$MERGED_SHA",
-		"--set-metadata merged_target=$TARGET &&",
+		"--set-metadata merged_target=$TARGET",
+		"--unset-metadata rejection_reason &&",
 		`gc bd close $WORK --reason "Merged to $TARGET at $MERGED_SHORT"`,
 	)
 
@@ -220,8 +226,43 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 		"--set-metadata merge_result=pull_request",
 		`--set-metadata pr_url="$PR_URL"`,
 		`--set-metadata pr_number="$PR_NUMBER"`,
-		`--set-metadata merged_target="$TARGET" &&`,
+		`--set-metadata merged_target="$TARGET"`,
+		"--unset-metadata rejection_reason &&",
 		`gc bd close $WORK --reason "Pull request ready: $PR_URL"`,
+	)
+}
+
+// TestRefineryPromptRejectionFlowEnforcesClearOnMerge guards against
+// the regression observed in L5c (2026-05-10): the refinery agent
+// merged a previously-rejected work bead and closed it, but never ran
+// `gc bd update --unset-metadata rejection_reason`. The closed bead
+// retained the stale `rejection_reason` field, so downstream tooling
+// could not distinguish "rejected and resolved" from "rejected and
+// abandoned" by reading metadata.
+//
+// The formula's `merge-push` step chains `--unset-metadata
+// rejection_reason` into the terminal `gc bd update`, but the refinery
+// prompt's "Rejection Flow" section described only the set side of the
+// lifecycle — the LLM agent saw no closing-symmetry instruction in the
+// prompt and dropped the unset whenever it bypassed the formula's chained
+// command.
+//
+// The fix adds a closing-symmetry note to the Rejection Flow section
+// naming the obligation: on merging a previously-rejected bead, clear
+// `rejection_reason` before `gc bd close`.
+func TestRefineryPromptRejectionFlowEnforcesClearOnMerge(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "refinery", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery prompt: %v", err)
+	}
+	body := strings.Join(strings.Fields(string(data)), " ")
+
+	assertContainsInOrder(t, body,
+		"## Rejection Flow",
+		"clear `rejection_reason` before `gc bd close`",
+		"--unset-metadata rejection_reason",
 	)
 }
 
@@ -1804,4 +1845,58 @@ func TestDeaconPatrolDetectsQueueStarvation(t *testing.T) {
 		`id = "queue-starvation-check"`,
 		`id = "utility-agent-health"`,
 	)
+}
+
+// TestRefineryPromptUsesCanonicalAgentIdentity verifies the refinery
+// prompt's wisp lookup and assignment commands use $GC_AGENT, which the
+// session harness guarantees (internal/session/lifecycle.go). $GC_ALIAS
+// can be empty or stale, which was the root cause of the stuck self-poll
+// reported in upstream #1833.
+func TestRefineryPromptUsesCanonicalAgentIdentity(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "refinery", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery prompt: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		`gc bd list --assignee="$GC_AGENT" --status=in_progress`,
+		`gc bd update "$WISP" --assignee="$GC_AGENT"`,
+		`| Find assigned work | ` + "`" + `gc bd list --assignee="$GC_AGENT" --status=open` + "`" + ` |`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("refinery prompt missing canonical $GC_AGENT usage %q", want)
+		}
+	}
+
+	// The refinery prompt must NOT rely on $GC_ALIAS for its own identity
+	// (it can be empty; the harness-guaranteed identity is $GC_AGENT).
+	if strings.Contains(body, `--assignee="$GC_ALIAS"`) {
+		t.Errorf("refinery prompt still uses $GC_ALIAS for its own identity; switch to $GC_AGENT")
+	}
+}
+
+// TestRefineryFormulaValidatesAgentIdentityAtStartup verifies the
+// refinery formula fails fast when $GC_AGENT is unset or empty, instead
+// of silently returning no results and looking healthy-idle.
+func TestRefineryFormulaValidatesAgentIdentityAtStartup(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery formula: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		`if [ -z "${GC_AGENT:-}" ]; then`,
+		`GC_AGENT is empty`,
+		`gc runtime drain-ack`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("refinery formula missing $GC_AGENT startup validation %q", want)
+		}
+	}
 }

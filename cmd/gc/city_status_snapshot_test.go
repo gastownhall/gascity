@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 func TestCityStatusNamedSessionsUseProvidedStore(t *testing.T) {
@@ -499,5 +501,67 @@ func TestCityStatusNamedSessionsUseLoadedSnapshotWithoutGet(t *testing.T) {
 	out := stdout.String()
 	if strings.Contains(out, "lookup error:") || strings.Contains(out, "store offline") {
 		t.Fatalf("stdout = %q, want snapshot-backed named status without store lookup error", out)
+	}
+}
+
+// TestCityStatusObservationsRunInParallel guards against regression of the
+// serial per-agent observation loop that made `gc status` ~1.4s on multi-rig
+// cities. With N agents and an observer that blocks briefly, wall time should
+// be close to a single observation, not N times it.
+func TestCityStatusObservationsRunInParallel(t *testing.T) {
+	const observerDelay = 60 * time.Millisecond
+	const agentCount = 12
+
+	var mu sync.Mutex
+	inflight := 0
+	maxConcurrent := 0
+	totalCalls := 0
+
+	oldObserve := observeSessionTargetForStatus
+	observeSessionTargetForStatus = func(string, beads.Store, runtime.Provider, *config.City, string) (worker.LiveObservation, error) {
+		mu.Lock()
+		inflight++
+		totalCalls++
+		if inflight > maxConcurrent {
+			maxConcurrent = inflight
+		}
+		mu.Unlock()
+
+		time.Sleep(observerDelay)
+
+		mu.Lock()
+		inflight--
+		mu.Unlock()
+		return worker.LiveObservation{Running: true}, nil
+	}
+	t.Cleanup(func() { observeSessionTargetForStatus = oldObserve })
+
+	agents := make([]config.Agent, agentCount)
+	for i := range agents {
+		agents[i] = config.Agent{Name: fmt.Sprintf("a%d", i), MaxActiveSessions: intPtr(1)}
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents:    agents,
+	}
+
+	start := time.Now()
+	snapshot := collectCityStatusSnapshot(runtime.NewFake(), cfg, "/tmp/city", nil, io.Discard)
+	elapsed := time.Since(start)
+
+	if got := len(snapshot.Agents); got != agentCount {
+		t.Fatalf("agents = %d, want %d", got, agentCount)
+	}
+	if totalCalls != agentCount {
+		t.Fatalf("totalCalls = %d, want %d", totalCalls, agentCount)
+	}
+	if maxConcurrent < 2 {
+		t.Fatalf("maxConcurrent = %d, want >= 2 (observations ran serially)", maxConcurrent)
+	}
+	// Serial would be agentCount * observerDelay = 720ms. Allow generous
+	// slack for CI scheduling but well below the serial bound.
+	maxAllowed := time.Duration(agentCount) * observerDelay / 2
+	if elapsed > maxAllowed {
+		t.Fatalf("elapsed = %v, want < %v (likely serial); maxConcurrent = %d", elapsed, maxAllowed, maxConcurrent)
 	}
 }
