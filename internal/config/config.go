@@ -916,6 +916,30 @@ type Workspace struct {
 	DefaultRigIncludes []string `toml:"default_rig_includes,omitempty"`
 }
 
+// LegacyIncludes returns the compatibility-only city.toml include list.
+func (w *Workspace) LegacyIncludes() []string {
+	//lint:ignore SA1019 Wave 1 still needs to read the legacy field while migrating cities to pack.toml imports.
+	return w.Includes
+}
+
+// SetLegacyIncludes updates the compatibility-only city.toml include list.
+func (w *Workspace) SetLegacyIncludes(includes []string) {
+	//lint:ignore SA1019 Wave 1 still needs to rewrite the legacy field during migration and init normalization.
+	w.Includes = includes
+}
+
+// LegacyDefaultRigIncludes returns the compatibility-only city.toml default-rig include list.
+func (w *Workspace) LegacyDefaultRigIncludes() []string {
+	//lint:ignore SA1019 Wave 1 still needs to read the legacy field while migrating cities to pack.toml defaults.
+	return w.DefaultRigIncludes
+}
+
+// SetLegacyDefaultRigIncludes updates the compatibility-only city.toml default-rig include list.
+func (w *Workspace) SetLegacyDefaultRigIncludes(includes []string) {
+	//lint:ignore SA1019 Wave 1 still needs to rewrite the legacy field during migration and init normalization.
+	w.DefaultRigIncludes = includes
+}
+
 // BeadsConfig holds bead store settings.
 type BeadsConfig struct {
 	// Provider selects the bead store backend: "bd" (default), "file",

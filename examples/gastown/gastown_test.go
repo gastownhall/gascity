@@ -136,8 +136,8 @@ func TestCityTomlParses(t *testing.T) {
 	if cfg.Workspace.Name != "gastown" {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "gastown")
 	}
-	if len(cfg.Workspace.Includes) != 0 {
-		t.Errorf("Workspace.Includes = %v, want empty (migrated to pack.toml)", cfg.Workspace.Includes)
+	if len(cfg.Workspace.LegacyIncludes()) != 0 {
+		t.Errorf("Workspace.Includes = %v, want empty (migrated to pack.toml)", cfg.Workspace.LegacyIncludes())
 	}
 	// Imports live in pack.toml (portable definition), not city.toml (deployment).
 	if len(cfg.Imports) != 0 {

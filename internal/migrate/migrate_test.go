@@ -164,14 +164,14 @@ default_rig_includes = ["../packs/z-pack", "../packs/a-pack"]
 	if err != nil {
 		t.Fatalf("LoadWithIncludes after migration: %v", err)
 	}
-	if len(cfg.Workspace.DefaultRigIncludes) != 2 {
-		t.Fatalf("len(DefaultRigIncludes) = %d, want 2", len(cfg.Workspace.DefaultRigIncludes))
+	if len(cfg.Workspace.LegacyDefaultRigIncludes()) != 2 {
+		t.Fatalf("len(DefaultRigIncludes) = %d, want 2", len(cfg.Workspace.LegacyDefaultRigIncludes()))
 	}
-	if cfg.Workspace.DefaultRigIncludes[0] != "../packs/z-pack" {
-		t.Fatalf("DefaultRigIncludes[0] = %q, want %q", cfg.Workspace.DefaultRigIncludes[0], "../packs/z-pack")
+	if cfg.Workspace.LegacyDefaultRigIncludes()[0] != "../packs/z-pack" {
+		t.Fatalf("DefaultRigIncludes[0] = %q, want %q", cfg.Workspace.LegacyDefaultRigIncludes()[0], "../packs/z-pack")
 	}
-	if cfg.Workspace.DefaultRigIncludes[1] != "../packs/a-pack" {
-		t.Fatalf("DefaultRigIncludes[1] = %q, want %q", cfg.Workspace.DefaultRigIncludes[1], "../packs/a-pack")
+	if cfg.Workspace.LegacyDefaultRigIncludes()[1] != "../packs/a-pack" {
+		t.Fatalf("DefaultRigIncludes[1] = %q, want %q", cfg.Workspace.LegacyDefaultRigIncludes()[1], "../packs/a-pack")
 	}
 }
 

@@ -167,23 +167,23 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 		cityCfg.Agents = nil
 	}
 
-	if len(selectedAgents) > 0 || len(cityCfg.Workspace.Includes) > 0 || len(cityCfg.Workspace.DefaultRigIncludes) > 0 {
+	if len(selectedAgents) > 0 || len(cityCfg.Workspace.LegacyIncludes()) > 0 || len(cityCfg.Workspace.LegacyDefaultRigIncludes()) > 0 {
 		if ensurePackMeta(&packCfg, cityCfg, cityPath) {
 			packChanged = true
 		}
 	}
 
-	if len(cityCfg.Workspace.Includes) > 0 {
+	if len(cityCfg.Workspace.LegacyIncludes()) > 0 {
 		if packCfg.Imports == nil {
 			packCfg.Imports = make(map[string]config.Import)
 		}
-		if addImports(packCfg.Imports, cityCfg.Workspace.Includes, cityCfg.Packs) {
+		if addImports(packCfg.Imports, cityCfg.Workspace.LegacyIncludes(), cityCfg.Packs) {
 			packChanged = true
 		}
-		cityCfg.Workspace.Includes = nil
+		cityCfg.Workspace.SetLegacyIncludes(nil)
 	}
 
-	if len(cityCfg.Workspace.DefaultRigIncludes) > 0 {
+	if len(cityCfg.Workspace.LegacyDefaultRigIncludes()) > 0 {
 		if packCfg.Defaults.Rig.Imports == nil {
 			packCfg.Defaults.Rig.Imports = make(map[string]config.Import)
 		}
@@ -191,13 +191,13 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 		packCfg.defaultRigImportOrder, changed = addOrderedImports(
 			packCfg.Defaults.Rig.Imports,
 			packCfg.defaultRigImportOrder,
-			cityCfg.Workspace.DefaultRigIncludes,
+			cityCfg.Workspace.LegacyDefaultRigIncludes(),
 			cityCfg.Packs,
 		)
 		if changed {
 			packChanged = true
 		}
-		cityCfg.Workspace.DefaultRigIncludes = nil
+		cityCfg.Workspace.SetLegacyDefaultRigIncludes(nil)
 	}
 
 	cityContent, err := cityCfg.Marshal()

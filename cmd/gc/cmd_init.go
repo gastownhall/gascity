@@ -590,12 +590,12 @@ func splitInitConfig(cityName string, cfg *config.City) (initPackConfig, config.
 		packCfg.Services = append(packCfg.Services, svc)
 	}
 
-	if len(cfg.Workspace.Includes) > 0 {
+	if len(cfg.Workspace.LegacyIncludes()) > 0 {
 		packCfg.Pack.Includes = appendUniqueStrings(
 			append([]string(nil), packCfg.Pack.Includes...),
-			cfg.Workspace.Includes...,
+			cfg.Workspace.LegacyIncludes()...,
 		)
-		cityCfg.Workspace.Includes = nil
+		cityCfg.Workspace.SetLegacyIncludes(nil)
 	}
 	if len(cfg.DefaultRigImports) > 0 {
 		defaults := packDefaults{
@@ -607,7 +607,7 @@ func splitInitConfig(cityName string, cfg *config.City) (initPackConfig, config.
 			defaults.Rig.Imports[name] = imp
 		}
 		packCfg.Defaults = defaults
-		cityCfg.Workspace.DefaultRigIncludes = nil
+		cityCfg.Workspace.SetLegacyDefaultRigIncludes(nil)
 	}
 	return packCfg, cityCfg
 }

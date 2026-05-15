@@ -295,7 +295,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		fmt.Fprintf(stderr, "gc rig add: loading root pack defaults: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	legacyDefaultRigImports, err := boundImportsFromLegacySources(cfg.Workspace.DefaultRigIncludes)
+	legacyDefaultRigImports, err := boundImportsFromLegacySources(cfg.Workspace.LegacyDefaultRigIncludes())
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: converting legacy default_rig_includes: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
