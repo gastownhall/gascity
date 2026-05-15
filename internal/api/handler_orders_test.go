@@ -208,6 +208,35 @@ func TestHandleOrderGet_ScopedName(t *testing.T) {
 	}
 }
 
+func TestHandleOrderGetResolvesDisabledOrder(t *testing.T) {
+	fs := newFakeState(t)
+	enabled := false
+	fs.allOrders = []orders.Order{
+		{Name: "health", Exec: "echo ok", Trigger: "cooldown", Enabled: &enabled},
+	}
+	fs.autos = orders.FilterEnabled(fs.allOrders)
+	h := newTestCityHandler(t, fs)
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/order/health"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp orderResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Name != "health" {
+		t.Errorf("name = %q, want %q", resp.Name, "health")
+	}
+	if resp.Enabled {
+		t.Error("enabled = true, want false")
+	}
+}
+
 func TestHandleOrderGet_NotFound(t *testing.T) {
 	fs := newFakeState(t)
 	h := newTestCityHandler(t, fs)
@@ -270,6 +299,45 @@ func TestHandleOrderEnable(t *testing.T) {
 	ov := fs.cfg.Orders.Overrides[0]
 	if ov.Enabled == nil || !*ov.Enabled {
 		t.Error("expected enabled=true")
+	}
+}
+
+func TestHandleOrderDisableThenEnableResolvesFilteredOrder(t *testing.T) {
+	fs := newFakeMutatorState(t)
+	fs.allOrders = []orders.Order{
+		{Name: "health", Exec: "echo ok", Trigger: "cooldown"},
+	}
+	fs.autos = orders.FilterEnabled(fs.allOrders)
+	h := newTestCityHandler(t, fs)
+
+	req := newPostRequest(cityURL(fs, "/order/health/disable"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	enabled := false
+	fs.allOrders = []orders.Order{
+		{Name: "health", Exec: "echo ok", Trigger: "cooldown", Enabled: &enabled},
+	}
+	fs.autos = orders.FilterEnabled(fs.allOrders)
+
+	req = newPostRequest(cityURL(fs, "/order/health/enable"), nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("enable status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	if len(fs.cfg.Orders.Overrides) != 1 {
+		t.Fatalf("expected 1 override, got %d", len(fs.cfg.Orders.Overrides))
+	}
+	ov := fs.cfg.Orders.Overrides[0]
+	if ov.Enabled == nil || !*ov.Enabled {
+		t.Error("expected enabled=true after re-enable")
 	}
 }
 
@@ -1015,6 +1083,53 @@ func TestHandleOrderHistoryUsesRigStore(t *testing.T) {
 	}
 	if resp.Entries[0].Rig != "myrig" {
 		t.Fatalf("rig = %q, want myrig", resp.Entries[0].Rig)
+	}
+}
+
+func TestHandleOrderHistoryUsesAllOrdersForDisabledExecMetadata(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	disabled := false
+	fs.allOrders = []orders.Order{
+		{Name: "nightly-review", Exec: "scripts/nightly.sh", Trigger: "cooldown", Interval: "1h", Enabled: &disabled},
+	}
+
+	run, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:  "nightly-review run",
+		Status: "closed",
+		Labels: []string{"order-run:nightly-review", "wisp"},
+	})
+	if err != nil {
+		t.Fatalf("create history bead: %v", err)
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=nightly-review"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp struct {
+		Entries []struct {
+			BeadID        string `json:"bead_id"`
+			CaptureOutput bool   `json:"capture_output"`
+			HasOutput     bool   `json:"has_output"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(resp.Entries))
+	}
+	if resp.Entries[0].BeadID != run.ID {
+		t.Fatalf("bead_id = %q, want %q", resp.Entries[0].BeadID, run.ID)
+	}
+	if !resp.Entries[0].CaptureOutput || !resp.Entries[0].HasOutput {
+		t.Fatalf("entry = %+v, want disabled exec order output metadata", resp.Entries[0])
 	}
 }
 

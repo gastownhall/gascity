@@ -292,8 +292,9 @@ func listActiveWorkflowProjectionBeads(store beads.Store) ([]beads.Bead, error) 
 
 func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef string) (orderRunFeedResult, error) {
 	stores := workflowStores(state)
-	orderByScopedName := make(map[string]orders.Order, len(state.Orders()))
-	for _, order := range state.Orders() {
+	allOrders := state.OrdersAll()
+	orderByScopedName := make(map[string]orders.Order, len(allOrders))
+	for _, order := range allOrders {
 		orderByScopedName[order.ScopedName()] = order
 	}
 

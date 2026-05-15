@@ -188,14 +188,30 @@ older than --stale-after so a fresh in-flight order is not interrupted.`,
 	return cmd
 }
 
-// loadOrders is the common preamble for order commands: resolve city,
-// load config, scan formula layers for all orders (city + rig).
+// loadOrders is the common preamble for active order commands: resolve city,
+// load config, scan formula layers, apply overrides, and filter disabled orders.
 func loadOrders(stderr io.Writer, cmdName string) ([]orders.Order, int) {
-	_, _, aa, code := loadOrdersWithCity(stderr, cmdName)
+	return loadActiveOrders(stderr, cmdName)
+}
+
+func loadActiveOrders(stderr io.Writer, cmdName string) ([]orders.Order, int) {
+	_, _, aa, code := loadActiveOrdersWithCity(stderr, cmdName)
 	return aa, code
 }
 
 func loadOrdersWithCity(stderr io.Writer, cmdName string) (string, *config.City, []orders.Order, int) {
+	return loadActiveOrdersWithCity(stderr, cmdName)
+}
+
+func loadActiveOrdersWithCity(stderr io.Writer, cmdName string) (string, *config.City, []orders.Order, int) {
+	cityPath, cfg, allAA, code := loadAllOrdersWithCity(stderr, cmdName)
+	if code != 0 {
+		return cityPath, cfg, allAA, code
+	}
+	return cityPath, cfg, orders.FilterEnabled(allAA), 0
+}
+
+func loadAllOrdersWithCity(stderr io.Writer, cmdName string) (string, *config.City, []orders.Order, int) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
@@ -210,8 +226,9 @@ func loadOrdersWithCity(stderr io.Writer, cmdName string) (string, *config.City,
 	return cityPath, cfg, aa, code
 }
 
-// loadAllOrders scans city layers + per-rig exclusive layers for orders.
-// Rig orders get their Rig field stamped.
+// loadAllOrders scans city layers + per-rig exclusive layers for all orders
+// and applies configured overrides. Callers that execute or list active work
+// should use loadActiveOrders instead. Rig orders get their Rig field stamped.
 func loadAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, int) {
 	allAA, err := scanAllOrders(cityPath, cfg, stderr, cmdName)
 	if err != nil {
@@ -227,7 +244,15 @@ func loadAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName 
 		}
 	}
 
-	return filterEnabledOrders(allAA), 0
+	return allAA, 0
+}
+
+func loadActiveOrdersForCity(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, int) {
+	allAA, code := loadAllOrders(cityPath, cfg, stderr, cmdName)
+	if code != 0 {
+		return allAA, code
+	}
+	return orders.FilterEnabled(allAA), 0
 }
 
 func scanAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, error) {
@@ -261,19 +286,6 @@ func scanAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName 
 	allAA = append(allAA, cityAA...)
 	allAA = append(allAA, rigAA...)
 	return allAA, nil
-}
-
-func filterEnabledOrders(aa []orders.Order) []orders.Order {
-	if len(aa) == 0 {
-		return nil
-	}
-	filtered := aa[:0]
-	for _, a := range aa {
-		if a.IsEnabled() {
-			filtered = append(filtered, a)
-		}
-	}
-	return filtered
 }
 
 // cityFormulaLayers returns the formula directory layers for city-level order
@@ -401,7 +413,7 @@ func anyOrderHasRig(aa []orders.Order) bool {
 // --- gc order show ---
 
 func cmdOrderShow(name, rig string, stdout, stderr io.Writer) int {
-	aa, code := loadOrders(stderr, "gc order show")
+	_, _, aa, code := loadAllOrdersWithCity(stderr, "gc order show")
 	if code != 0 {
 		return code
 	}
@@ -815,7 +827,7 @@ func doOrderCheckWithStoresResolverScoped(cityPath string, cfg *config.City, aa 
 // --- gc order history ---
 
 func cmdOrderHistory(name, rig string, stdout, stderr io.Writer) int {
-	cityPath, cfg, aa, code := loadOrdersWithCity(stderr, "gc order history")
+	cityPath, cfg, aa, code := loadAllOrdersWithCity(stderr, "gc order history")
 	if code != 0 {
 		return code
 	}

@@ -175,7 +175,7 @@ func buildOrderDispatcher(cityPath string, cfg *config.City, rec events.Recorder
 			logDispatchError(stderr, "gc start: order overrides: %v", err)
 		}
 	}
-	allAA = filterEnabledOrders(allAA)
+	allAA = orders.FilterEnabled(allAA)
 
 	// Filter out manual-trigger orders — they are never auto-dispatched.
 	var auto []orders.Order

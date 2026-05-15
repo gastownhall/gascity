@@ -42,7 +42,7 @@ func (s *Server) humaHandleOrderGet(_ context.Context, input *OrderGetInput) (*s
 	Body orderResponse
 }, error,
 ) {
-	a, err := resolveOrder(s.state.Orders(), input.Name)
+	a, err := resolveOrder(s.state.OrdersAll(), input.Name)
 	if err != nil {
 		if errors.Is(err, errOrderAmbiguous) {
 			return nil, huma.Error409Conflict(err.Error())
@@ -194,7 +194,7 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 		beforeTime = t
 	}
 
-	aa := s.state.Orders()
+	aa := s.state.OrdersAll()
 	var auto *orders.Order
 	var orderDef orders.Order
 	for i, a := range aa {
@@ -654,7 +654,7 @@ func (s *Server) setOrderEnabledHuma(name string, enabled bool) (*OKResponse, er
 		return nil, errMutationsNotSupported
 	}
 
-	a, err := resolveOrder(s.state.Orders(), name)
+	a, err := resolveOrder(s.state.OrdersAll(), name)
 	if err != nil {
 		if errors.Is(err, errOrderAmbiguous) {
 			return nil, huma.Error409Conflict(err.Error())
