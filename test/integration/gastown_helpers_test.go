@@ -178,14 +178,16 @@ func sessionAssigneeForTemplate(t *testing.T, cityDir, template string) string {
 	for time.Now().Before(deadline) {
 		out, err := gc(cityDir, "session", "list", "--json", "--template", template)
 		if err == nil {
-			var sessions []struct {
-				Template    string
-				Closed      bool
-				State       string
-				SessionName string
+			var sessionList struct {
+				Sessions []struct {
+					Template    string `json:"template"`
+					Closed      bool   `json:"closed"`
+					State       string `json:"state"`
+					SessionName string `json:"session_name"`
+				} `json:"sessions"`
 			}
-			if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(out)), &sessions); jsonErr == nil {
-				for _, session := range sessions {
+			if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(out)), &sessionList); jsonErr == nil {
+				for _, session := range sessionList.Sessions {
 					if session.Closed || strings.TrimSpace(session.Template) != template {
 						continue
 					}

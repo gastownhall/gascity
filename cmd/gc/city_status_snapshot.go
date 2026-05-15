@@ -255,9 +255,11 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 			}
 		}
 		snapshot.Rigs = append(snapshot.Rigs, StatusRigJSON{
-			Name:      r.Name,
-			Path:      r.Path,
-			Suspended: suspended,
+			Name:               r.Name,
+			Path:               r.Path,
+			Prefix:             r.EffectivePrefix(),
+			Suspended:          suspended,
+			DefaultSlingTarget: r.DefaultSlingTarget,
 		})
 	}
 
@@ -384,18 +386,38 @@ func countCitySessionsFromSnapshot(snapshot *sessionBeadSnapshot) StatusSummaryJ
 }
 
 func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSummaryJSON) StatusJSON {
-	var agents []StatusAgentJSON
+	agents := make([]StatusAgentJSON, 0, len(snapshot.Agents))
 	for _, row := range snapshot.Agents {
 		agents = append(agents, row.Agent)
 	}
+	rigs := snapshot.Rigs
+	if rigs == nil {
+		rigs = []StatusRigJSON{}
+	}
+	var signals []string
+	if snapshot.Suspended {
+		signals = append(signals, "city_suspended")
+	}
+	if !snapshot.Controller.Running {
+		signals = append(signals, "controller_not_running")
+	}
+	if snapshot.Summary.TotalAgents > 0 && snapshot.Summary.RunningAgents == 0 {
+		signals = append(signals, "no_agents_running")
+	}
+	degraded := len(signals) > 0
+	running := snapshot.Controller.Running
 	return StatusJSON{
-		CityName:   snapshot.CityName,
-		CityPath:   snapshot.CityPath,
-		Controller: snapshot.Controller,
-		Suspended:  snapshot.Suspended,
-		Agents:     agents,
-		Rigs:       snapshot.Rigs,
-		Summary:    summary,
+		SchemaVersion: "1",
+		CityName:      snapshot.CityName,
+		Workspace:     WorkspaceJSON{Name: snapshot.CityName, Path: snapshot.CityPath},
+		CityPath:      snapshot.CityPath,
+		Controller:    snapshot.Controller,
+		Running:       running,
+		Suspended:     snapshot.Suspended,
+		Health:        HealthJSON{Usable: running && !snapshot.Suspended, Degraded: degraded, Signals: signals},
+		Agents:        agents,
+		Rigs:          rigs,
+		Summary:       summary,
 	}
 }
 
