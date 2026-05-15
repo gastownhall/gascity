@@ -3474,6 +3474,58 @@ dolt.auto-start: false
 	}
 }
 
+func TestBdRuntimeEnvForRig_AuthoritativeDoltRigIgnoresUnresolvableCityPostgres(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityPath := t.TempDir()
+	writePGScopeFixture(t, cityPath, "")
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigDir := filepath.Join(cityPath, "rigs", "canonical-dolt")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: cd
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.auto-start: false
+dolt.host: rig-db.example.test
+dolt.port: 4407
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{
+		Name:   "canonical-dolt",
+		Path:   "rigs/canonical-dolt",
+		Prefix: "cd",
+	}}}
+
+	env, err := bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
+	if err != nil {
+		t.Fatalf("bdRuntimeEnvForRigWithError() error = %v", err)
+	}
+
+	if got := env["GC_DOLT_HOST"]; got != "rig-db.example.test" {
+		t.Fatalf("GC_DOLT_HOST = %q, want rig-db.example.test", got)
+	}
+	if got := env["GC_DOLT_PORT"]; got != "4407" {
+		t.Fatalf("GC_DOLT_PORT = %q, want 4407", got)
+	}
+	for _, key := range projectedPostgresEnvKeys {
+		if value, ok := env[key]; ok && value != "" {
+			t.Errorf("env[%q] = %q, want empty/absent for authoritative Dolt rig", key, value)
+		}
+	}
+}
+
 func TestCityRuntimeProcessEnv_PostgresBackend(t *testing.T) {
 	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")

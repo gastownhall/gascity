@@ -4398,6 +4398,47 @@ func TestPublishManagedDoltRuntimeStateIfOwnedSkipsPostgresCity(t *testing.T) {
 	}
 }
 
+func TestClearManagedDoltRuntimeStateIfOwnedSkipsPostgresCity(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json"), contract.MetadataState{
+		Database:         "beads",
+		Backend:          "postgres",
+		PostgresHost:     "db.example.test",
+		PostgresPort:     "5432",
+		PostgresUser:     "bd",
+		PostgresDatabase: "beads_pg",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state := doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      33123,
+		DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), state); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := clearManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
+		t.Fatalf("clearManagedDoltRuntimeStateIfOwned: %v", err)
+	}
+	got, err := readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
+	if err != nil {
+		t.Fatalf("read managed Dolt state after skipped clear: %v", err)
+	}
+	if got.Port != state.Port {
+		t.Fatalf("managed Dolt state port = %d, want preserved %d", got.Port, state.Port)
+	}
+}
+
 func writeInheritedCityPostgresRigFixture(t *testing.T, rigMetadata string) (string, string, string) {
 	t.Helper()
 	cityPath := t.TempDir()

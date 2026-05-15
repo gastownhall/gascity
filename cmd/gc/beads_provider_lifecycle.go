@@ -255,7 +255,11 @@ func initDirIfReadyManagedDolt(cityPath, dir, prefix, provider string) error {
 }
 
 func shouldRetryInitDirIfReady(cityPath, provider string, err error) bool {
-	if !providerUsesBdStoreContract(provider) || isExternalDolt(cityPath) {
+	if !providerUsesBdStoreContract(provider) {
+		return false
+	}
+	owned, ownershipErr := managedDoltLifecycleOwned(cityPath)
+	if ownershipErr != nil || !owned {
 		return false
 	}
 	return isRetryableManagedDoltLifecycleError(err)
@@ -820,8 +824,14 @@ func healthBeadsProvider(cityPath string) error {
 			return err
 		}
 		if err := runProviderOpWithEnv(script, providerEnv, "health"); err != nil {
-			if providerUsesBdStoreContract(provider) && isExternalDolt(cityPath) {
-				return err
+			if providerUsesBdStoreContract(provider) {
+				owned, ownershipErr := managedDoltLifecycleOwned(cityPath)
+				if ownershipErr != nil {
+					return fmt.Errorf("determine managed dolt ownership: %w", ownershipErr)
+				}
+				if !owned {
+					return err
+				}
 			}
 			if recErr := runProviderOpWithEnv(script, providerEnv, "recover"); recErr != nil {
 				return fmt.Errorf("unhealthy (%w) and recovery failed: %w", err, recErr)
@@ -832,7 +842,14 @@ func healthBeadsProvider(cityPath string) error {
 			if waitErr := waitForAllBeadsScopesReadyAfterRecovery(cityPath, 10*time.Second); waitErr != nil {
 				return fmt.Errorf("recovered but store not ready: %w", waitErr)
 			}
-		} else if providerUsesBdStoreContract(provider) && !isExternalDolt(cityPath) && currentManagedDoltPort(cityPath) == "" {
+		} else if providerUsesBdStoreContract(provider) && currentManagedDoltPort(cityPath) == "" {
+			owned, ownershipErr := managedDoltLifecycleOwned(cityPath)
+			if ownershipErr != nil {
+				return fmt.Errorf("determine managed dolt ownership: %w", ownershipErr)
+			}
+			if !owned {
+				return nil
+			}
 			if pubErr := publishManagedDoltRuntimeStateIfOwned(cityPath); pubErr != nil {
 				return fmt.Errorf("healthy but failed to publish managed dolt runtime state: %w", pubErr)
 			}

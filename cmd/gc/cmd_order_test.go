@@ -1591,6 +1591,43 @@ func TestOrderRunExecHonorsOrdersMaxTimeout(t *testing.T) {
 	}
 }
 
+func TestOrderRunExecTrackedLabelsEnvBuildFailure(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	writePGScopeFixture(t, cityDir, "")
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := beads.NewMemStore()
+	eventLog := events.NewFake()
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	a := orders.Order{Name: "pg-env", Trigger: "event", On: events.BeadClosed, Exec: "true"}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunExecTracked(a, cityDir, nil, store, eventLog, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("doOrderRunExecTracked = 0, want env failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+
+	all := trackingBeads(t, store, "order-run:pg-env")
+	if len(all) != 1 {
+		t.Fatalf("tracking bead count = %d, want 1", len(all))
+	}
+	if !slicesContain(all[0].Labels, "exec-env-failed") {
+		t.Fatalf("tracking bead labels = %v, want exec-env-failed", all[0].Labels)
+	}
+	if slicesContain(all[0].Labels, "exec-failed") {
+		t.Fatalf("tracking bead labels = %v, want no exec-failed for env-build failure", all[0].Labels)
+	}
+}
+
 // --- gc order history ---
 
 func TestOrderHistory(t *testing.T) {

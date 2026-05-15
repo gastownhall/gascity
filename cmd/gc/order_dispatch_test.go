@@ -1600,6 +1600,18 @@ dolt.auto-start: false
 	}
 }
 
+func TestRedactOrderEnvErrorUsesProcessEnv(t *testing.T) {
+	t.Setenv("GC_ORDER_SECRET", "super-secret-token")
+
+	got := redactOrderEnvError(fmt.Errorf("projection leaked super-secret-token"), os.Environ())
+	if strings.Contains(got, "super-secret-token") {
+		t.Fatalf("redacted error = %q, want secret removed", got)
+	}
+	if !strings.Contains(got, "projection leaked") {
+		t.Fatalf("redacted error = %q, want non-secret context preserved", got)
+	}
+}
+
 func TestOrderDispatchFormulaLabelFailureLabelsTrackingBead(t *testing.T) {
 	store := beads.NewMemStore()
 	var rec memRecorder

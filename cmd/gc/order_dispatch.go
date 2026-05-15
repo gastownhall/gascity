@@ -281,8 +281,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 		triggerOpts, err := orderTriggerOptionsForTarget(cityPath, m.cfg, target, a)
 		if err != nil {
-			msg := fmt.Sprintf("building trigger env: %v", err)
-			logDispatchError(m.stderr, "gc: order dispatch: building trigger env for %s: %v", a.ScopedName(), err)
+			redacted := redactOrderEnvError(err, os.Environ())
+			msg := fmt.Sprintf("building trigger env: %s", redacted)
+			logDispatchError(m.stderr, "gc: order dispatch: building trigger env for %s: %s", a.ScopedName(), redacted)
 			m.rec.Record(events.Event{
 				Type:    events.OrderFailed,
 				Actor:   "controller",
@@ -570,7 +571,7 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 	var execErrMsg string
 	if err != nil {
 		redactionEnv := append(os.Environ(), env...)
-		redacted := execenv.RedactText(err.Error(), redactionEnv)
+		redacted := redactOrderEnvError(err, redactionEnv)
 		execErrMsg = "exec env failed: " + redacted
 		labels = []string{"exec-env-failed"}
 		logDispatchError(m.stderr, "gc: order exec %s env failed: %s", scoped, redacted)
@@ -620,6 +621,13 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 		Actor:   "controller",
 		Subject: scoped,
 	})
+}
+
+func redactOrderEnvError(err error, env []string) string {
+	if err == nil {
+		return ""
+	}
+	return execenv.RedactText(err.Error(), env)
 }
 
 // dispatchWisp instantiates a wisp from the order's formula.

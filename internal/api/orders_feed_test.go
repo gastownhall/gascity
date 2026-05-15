@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 func TestParseOrdersFeedLimitCapsLargeValues(t *testing.T) {
@@ -29,6 +30,22 @@ func TestOrderTrackingStatusTreatsWispFailedAsFailed(t *testing.T) {
 	}
 	if got := orderTrackingStatus(bead); got != "failed" {
 		t.Fatalf("orderTrackingStatus = %q, want failed", got)
+	}
+}
+
+func TestOrderTrackingExecEnvFailedClassifiesAsFailedExec(t *testing.T) {
+	bead := beads.Bead{
+		Status: "closed",
+		Labels: []string{"order-tracking", "order-run:nightly", "exec-env-failed"},
+	}
+	if got := orderTrackingStatus(bead); got != "failed" {
+		t.Fatalf("orderTrackingStatus = %q, want failed", got)
+	}
+	if got := orderTrackingTarget(orders.Order{}, false, bead); got != "exec" {
+		t.Fatalf("orderTrackingTarget = %q, want exec", got)
+	}
+	if got := orderTrackingType(orders.Order{}, false, bead); got != "exec" {
+		t.Fatalf("orderTrackingType = %q, want exec", got)
 	}
 }
 

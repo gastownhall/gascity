@@ -444,6 +444,7 @@ func TestLastRunOutcomeFromLabelsPrioritizesTerminalLabels(t *testing.T) {
 		{name: "wisp failed dominates success", labels: []string{"wisp", "wisp-failed"}, want: "failed"},
 		{name: "failed alone", labels: []string{"wisp-failed"}, want: "failed"},
 		{name: "exec failed dominates success", labels: []string{"exec", "exec-failed"}, want: "failed"},
+		{name: "exec env failed is failed", labels: []string{"exec-env-failed"}, want: "failed"},
 		{name: "canceled dominates success", labels: []string{"wisp", "wisp-canceled"}, want: "canceled"},
 		{name: "success fallback", labels: []string{"exec"}, want: "success"},
 		{name: "unknown", labels: []string{"order-tracking"}, want: ""},
