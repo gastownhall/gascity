@@ -1396,6 +1396,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	// work_query remains the agent-side gc hook claim path; running every
 	// work_query here can block assigned-work resumes behind unrelated probes.
 	workSet := make(map[string]bool)
+	traceWorkRequested := traceWorkRequestedByTemplate(result.ScaleCheckCounts, result.NamedSessionDemand, workSet, cr.cfg)
 	if trace != nil {
 		templateNames := make(map[string]struct{})
 		openCounts := make(map[string]int)
@@ -1425,6 +1426,9 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		for template := range workSet {
 			templateNames[template] = struct{}{}
 		}
+		for template := range traceWorkRequested {
+			templateNames[template] = struct{}{}
+		}
 		for _, template := range traceSetStrings(templateNames) {
 			status := TraceEvaluationEligible
 			reason := TraceReasonRetained
@@ -1436,7 +1440,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 				"desired_count":  desiredCounts[template],
 				"open_count":     openCounts[template],
 				"pool_desired":   poolDesired[template],
-				"work_requested": workSet[template],
+				"work_requested": traceWorkRequested[template],
 			})
 		}
 		trace.RecordCycleInputSnapshot(map[string]any{
@@ -1565,6 +1569,34 @@ func filterReleasedAssignedWorkSnapshot(assignedWorkBeads []beads.Bead, assigned
 		filteredStoreRefs = assignedWorkStoreRefs
 	}
 	return filtered, filteredStoreRefs
+}
+
+func traceWorkRequestedByTemplate(scaleCheckCounts map[string]int, namedDemand map[string]bool, workSet map[string]bool, cfg *config.City) map[string]bool {
+	result := make(map[string]bool)
+	for template, requested := range workSet {
+		if requested {
+			result[template] = true
+		}
+	}
+	for template, count := range scaleCheckCounts {
+		if count > 0 {
+			result[template] = true
+		}
+	}
+	for identity, requested := range namedDemand {
+		if !requested {
+			continue
+		}
+		spec, ok := findNamedSessionSpec(cfg, "", identity)
+		if !ok {
+			continue
+		}
+		template := spec.Agent.QualifiedName()
+		if template != "" {
+			result[template] = true
+		}
+	}
+	return result
 }
 
 func (cr *CityRuntime) requestDeferredDrainFollowUpTick() {

@@ -1906,6 +1906,16 @@ func TestBuildDesiredState_GH1654PoolReadyWorkGrowsPastMinActiveSessions(t *test
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	const template = "worker"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              template,
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(3),
+			MaxActiveSessions: intPtr(100),
+		}},
+	}
+	cfgAgent := &cfg.Agents[0]
 
 	for i := 0; i < 6; i++ {
 		if _, err := store.Create(beads.Bead{
@@ -1922,44 +1932,31 @@ func TestBuildDesiredState_GH1654PoolReadyWorkGrowsPastMinActiveSessions(t *test
 
 	existingSessionNames := make(map[string]bool)
 	for slot := 1; slot <= 3; slot++ {
-		agentName := poolInstanceName(template, slot, nil)
-		session, err := store.Create(beads.Bead{
-			Title:  agentName,
-			Type:   sessionBeadType,
-			Status: "open",
-			Labels: []string{sessionBeadLabel, "agent:" + agentName},
-			Metadata: map[string]string{
-				"agent_name":           agentName,
-				"pool_slot":            strconv.Itoa(slot),
-				"state":                "active",
-				"template":             template,
-				poolManagedMetadataKey: boolMetadata(true),
-			},
+		_, qualifiedInstance := poolInstanceIdentity(cfgAgent, slot, io.Discard)
+		session, err := createPoolSessionBead(store, cfgAgent.QualifiedName(), nil, time.Now().UTC(), poolSessionCreateIdentity{
+			AgentName: qualifiedInstance,
+			Alias:     qualifiedInstance,
+			Slot:      slot,
 		})
 		if err != nil {
 			t.Fatalf("create active pool session: %v", err)
 		}
-		sessionName := PoolSessionName(template, session.ID)
-		if err := store.SetMetadata(session.ID, "session_name", sessionName); err != nil {
-			t.Fatalf("set session_name: %v", err)
+		if err := store.SetMetadata(session.ID, "state", "active"); err != nil {
+			t.Fatalf("set state: %v", err)
 		}
-		existingSessionNames[sessionName] = true
+		if err := store.SetMetadata(session.ID, "pending_create_claim", ""); err != nil {
+			t.Fatalf("clear pending_create_claim: %v", err)
+		}
+		if err := store.SetMetadata(session.ID, "pending_create_started_at", ""); err != nil {
+			t.Fatalf("clear pending_create_started_at: %v", err)
+		}
+		existingSessionNames[session.Metadata["session_name"]] = true
 	}
 
 	sessionSnapshot, err := loadSessionBeadSnapshot(store)
 	if err != nil {
 		t.Fatalf("load session snapshot: %v", err)
 	}
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test-city"},
-		Agents: []config.Agent{{
-			Name:              template,
-			StartCommand:      "true",
-			MinActiveSessions: intPtr(3),
-			MaxActiveSessions: intPtr(100),
-		}},
-	}
-
 	var stderr strings.Builder
 	dsResult := buildDesiredStateWithSessionBeads(
 		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
