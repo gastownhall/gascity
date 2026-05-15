@@ -5,13 +5,29 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/spf13/cobra"
 )
+
+// runtimeRequestRestartBlock blocks until the controller kills this process.
+// It is a package var so tests can override it to avoid blocking forever.
+// Default: park on a signal channel so the Go runtime's deadlock detector
+// (which fires when *all* goroutines are asleep) does not trip — os/signal
+// keeps a live goroutine in syscall. The controller normally SIGKILLs the
+// process tree before any caught signal arrives, but SIGTERM/SIGINT/SIGHUP
+// are honored as a graceful path.
+var runtimeRequestRestartBlock = func() {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	<-sigCh
+}
 
 // drainOps abstracts drain signal operations for testability.
 type drainOps interface {
@@ -458,8 +474,11 @@ func doRuntimeRequestRestart(dops drainOps, persistRestart func() error, rec eve
 	})
 	fmt.Fprintln(stdout, "Restart requested. Blocking until controller kills this session...") //nolint:errcheck // best-effort stdout
 
-	// Block forever. The controller will kill the entire process tree.
-	select {}
+	// Block until the controller kills the process tree (or a termination
+	// signal arrives). Using signal.Notify rather than a bare `select {}`
+	// avoids the Go runtime's all-goroutines-asleep deadlock panic.
+	runtimeRequestRestartBlock()
+	return 0
 }
 
 // doRuntimeDrainAck sets the drain-ack flag on the session. The controller

@@ -488,6 +488,50 @@ func TestDoRuntimeRequestRestartError(t *testing.T) {
 	}
 }
 
+// TestDoRuntimeRequestRestartDoesNotDeadlock guards against the regression
+// in gc-6rm: a bare `select {}` after writing the restart flag tripped the
+// Go runtime's all-goroutines-asleep deadlock detector and aborted the
+// process with exit 2, so the controller never observed the request in
+// time. doRuntimeRequestRestart must block via a live waiter (signal park)
+// and return 0 once unblocked.
+func TestDoRuntimeRequestRestartDoesNotDeadlock(t *testing.T) {
+	prev := runtimeRequestRestartBlock
+	unblock := make(chan struct{})
+	runtimeRequestRestartBlock = func() { <-unblock }
+	t.Cleanup(func() { runtimeRequestRestartBlock = prev })
+
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+
+	done := make(chan int, 1)
+	go func() {
+		done <- doRuntimeRequestRestart(dops, nil, events.Discard, "worker", "worker", &stdout, &stderr)
+	}()
+
+	// Should have set the restart flag and be parked in the block func.
+	select {
+	case code := <-done:
+		t.Fatalf("returned without blocking, code=%d stderr=%q", code, stderr.String())
+	case <-time.After(50 * time.Millisecond):
+	}
+	if !dops.restartRequested["worker"] {
+		t.Fatalf("restart_requested flag not set on dops")
+	}
+
+	close(unblock)
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("code = %d, want 0; stderr=%q", code, stderr.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("doRuntimeRequestRestart did not return after unblock")
+	}
+	if !strings.Contains(stdout.String(), "Blocking until controller kills this session") {
+		t.Errorf("stdout = %q, want blocking notice", stdout.String())
+	}
+}
+
 func TestRequestRestartAcceptsNoArgs(t *testing.T) {
 	// Verify the cobra command accepts no args.
 	var stdout, stderr bytes.Buffer
