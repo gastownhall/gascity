@@ -3965,6 +3965,75 @@ interval = "2m"
 	t.Error("wasteland-poll not found in dispatcher orders")
 }
 
+// TestBuildOrderDispatcherOverrideDisablesDropsFromDispatcher is the
+// regression test for gastownhall/gascity#2191's post-override
+// filterEnabledOrders behavior. Without filtering after overrides are
+// applied, an order whose enabled flag is flipped to false via
+// [orders.overrides] survived to the dispatcher and was treated as
+// runnable — the bug that #2191 closed. See gastownhall/gascity#2202.
+func TestBuildOrderDispatcherOverrideDisablesDropsFromDispatcher(t *testing.T) {
+	// Two on-disk orders, both enabled by default. The config overrides
+	// wasteland-poll to enabled=false; only beads-health should reach
+	// the dispatcher's auto-set.
+	sysDir := t.TempDir()
+	topoDir := t.TempDir()
+
+	sysAutoDir := sysDir + "/orders/beads-health"
+	if err := mkdirAll(sysAutoDir); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, sysAutoDir+"/order.toml", `[order]
+exec = "scripts/beads-health.sh"
+trigger = "cooldown"
+interval = "30s"
+`)
+
+	topoAutoDir := topoDir + "/orders/wasteland-poll"
+	if err := mkdirAll(topoAutoDir); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, topoAutoDir+"/order.toml", `[order]
+exec = "scripts/wasteland-poll.sh"
+trigger = "cooldown"
+interval = "2m"
+`)
+
+	disabled := false
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{sysDir, topoDir},
+		},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{
+				{Name: "wasteland-poll", Enabled: &disabled},
+			},
+		},
+	}
+
+	var stderr bytes.Buffer
+	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
+	if ad == nil {
+		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
+	}
+
+	mad := ad.(*memoryOrderDispatcher)
+	if len(mad.aa) != 1 {
+		var names []string
+		for _, a := range mad.aa {
+			names = append(names, a.Name)
+		}
+		t.Fatalf("dispatcher orders = %d (%v), want 1 (override-disabled wasteland-poll must be filtered)", len(mad.aa), names)
+	}
+	if got := mad.aa[0].Name; got != "beads-health" {
+		t.Fatalf("dispatcher order = %q, want %q", got, "beads-health")
+	}
+	for _, a := range mad.aa {
+		if a.Name == "wasteland-poll" {
+			t.Fatalf("wasteland-poll reached the dispatcher despite enabled=false override (this is the #2191 bug)")
+		}
+	}
+}
+
 func TestBuildOrderDispatcherOverrideNotFoundNonFatal(t *testing.T) {
 	// Single formula layer with beads-health only.
 	// Override targets wasteland-poll (nonexistent).
