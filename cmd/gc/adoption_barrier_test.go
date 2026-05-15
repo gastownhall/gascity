@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,12 +18,23 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
+func putExecutableOnPath(t *testing.T, name string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write executable %s: %v", name, err)
+	}
+	t.Setenv("PATH", dir)
+}
+
 // fakeAdoptionProvider implements runtime.Provider for adoption barrier tests.
 type fakeAdoptionProvider struct {
 	runtime.Provider
-	running []string
-	alive   map[string]bool
-	listErr error
+	running          []string
+	alive            map[string]bool
+	processNameCalls map[string][]string
+	listErr          error
 }
 
 type adoptionLockProbeStore struct {
@@ -100,7 +113,11 @@ func (f *fakeAdoptionProvider) IsRunning(name string) bool {
 	return false
 }
 
-func (f *fakeAdoptionProvider) ProcessAlive(name string, _ []string) bool {
+func (f *fakeAdoptionProvider) ProcessAlive(name string, processNames []string) bool {
+	if f.processNameCalls == nil {
+		f.processNameCalls = make(map[string][]string)
+	}
+	f.processNameCalls[name] = append([]string(nil), processNames...)
 	if f.alive == nil {
 		return true
 	}
@@ -509,9 +526,10 @@ func TestAdoptionBarrier_SkipsDeadSessions(t *testing.T) {
 		},
 	}
 	cfg := &config.City{
+		Workspace: config.Workspace{SessionTemplate: "{{.City}}-{{.Agent}}"},
 		Agents: []config.Agent{
-			{Name: "mayor", MaxActiveSessions: intPtr(1)},
-			{Name: "worker"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1), ProcessNames: []string{"agent-cli"}},
+			{Name: "worker", ProcessNames: []string{"agent-cli"}},
 		},
 	}
 	var stderr bytes.Buffer
@@ -532,6 +550,75 @@ func TestAdoptionBarrier_SkipsDeadSessions(t *testing.T) {
 	}
 	if beadList[0].Metadata["session_name"] != "test-city-mayor" {
 		t.Fatalf("adopted bead = %q, want live mayor", beadList[0].Metadata["session_name"])
+	}
+}
+
+func TestAdoptionBarrier_UsesResolvedProviderProcessNames(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &fakeAdoptionProvider{
+		running: []string{"test-city-worker"},
+		alive: map[string]bool{
+			"test-city-worker": true,
+		},
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Provider:        "custom-provider",
+			SessionTemplate: "{{.City}}-{{.Agent}}",
+		},
+		Providers: map[string]config.ProviderSpec{
+			"custom-provider": {ProcessNames: []string{"custom-agent", "node"}},
+		},
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	var stderr bytes.Buffer
+
+	_, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	if !passed {
+		t.Fatalf("barrier should pass, stderr: %s", stderr.String())
+	}
+	got := sp.processNameCalls["test-city-worker"]
+	want := []string{"custom-agent", "node"}
+	if len(got) != len(want) {
+		t.Fatalf("process names = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("process names = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestAdoptionBarrier_UsesProviderlessDetectedProcessNames(t *testing.T) {
+	putExecutableOnPath(t, "codex")
+	store := beads.NewMemStore()
+	sp := &fakeAdoptionProvider{
+		running: []string{"test-city-worker"},
+		alive: map[string]bool{
+			"test-city-worker": true,
+		},
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			SessionTemplate: "{{.City}}-{{.Agent}}",
+		},
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	var stderr bytes.Buffer
+
+	_, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	if !passed {
+		t.Fatalf("barrier should pass, stderr: %s", stderr.String())
+	}
+	got := sp.processNameCalls["test-city-worker"]
+	want := []string{"codex"}
+	if len(got) != len(want) {
+		t.Fatalf("process names = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("process names = %v, want %v", got, want)
+		}
 	}
 }
 

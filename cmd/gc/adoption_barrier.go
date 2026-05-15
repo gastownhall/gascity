@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os/exec"
 	"regexp"
 	"strconv"
 
@@ -139,7 +140,8 @@ func runAdoptionBarrier(
 				isPoolInstance = true
 			}
 		}
-		alive, err := workerSessionTargetAliveWithConfig(nil, sp, nil, sessionName, processHints(cfgAgent))
+		processNames := processHints(cfg, cfgAgent)
+		alive, err := workerSessionTargetAliveWithConfig(nil, sp, nil, sessionName, processNames)
 		if err != nil || !alive {
 			result.Total--
 			continue
@@ -317,9 +319,9 @@ func parsePoolSlot(sessionName string) int {
 	return slot
 }
 
-func processHints(a *config.Agent) []string {
+func processHints(cfg *config.City, a *config.Agent) []string {
 	if a == nil {
 		return nil
 	}
-	return a.ProcessNames
+	return config.AgentProcessNames(cfg, *a, exec.LookPath)
 }
