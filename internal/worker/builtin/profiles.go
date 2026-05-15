@@ -283,8 +283,8 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		Command:     "cursor-agent",
 		// --approve-mcps is required for non-interactive sessions: without it,
 		// cursor-agent gates MCP tool use behind an approval prompt that pool
-		// workers cannot answer, causing MCPs configured in .cursor/mcp.json
-		// to appear unavailable.
+		// workers cannot answer, causing MCPs projected to or configured in
+		// .cursor/mcp.json to appear unavailable.
 		Args:              []string{"-f", "--approve-mcps"},
 		PromptMode:        "arg",
 		ReadyPromptPrefix: "\u2192 ",

@@ -165,6 +165,27 @@ brew install flock
 Alternatively, switch to the file-based beads provider (see above) to skip
 the flock requirement entirely.
 
+## Cursor MCP Tools Still Prompt or Appear Unavailable
+
+The built-in `cursor` provider starts `cursor-agent` with
+`-f --approve-mcps`. Cursor loads MCP servers from `.cursor/mcp.json` in the
+workspace, including files projected from Gas City's MCP catalog. The
+`--approve-mcps` flag approves every server visible to Cursor from that file
+or from `~/.cursor/mcp.json`.
+
+If you override Cursor `args` in `city.toml`, the override replaces the
+built-in args. Include both flags yourself:
+
+```toml
+[providers.cursor]
+args = ["-f", "--approve-mcps"]
+```
+
+Agent-level `args` overrides behave the same way. Existing Cursor sessions keep
+the command they were created with, so stop and restart those sessions to pick
+up the new built-in default. Operators who want Cursor's MCP approval prompt
+can intentionally omit `--approve-mcps` in an explicit override.
+
 ## `gc version` Prints Unexpected Output
 
 If `gc version` prints git progress lines (`Enumerating objects...`) instead
