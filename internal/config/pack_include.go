@@ -9,19 +9,11 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/citylayout"
 )
 
 var runRepoCacheGit = defaultRunRepoCacheGit
-
-const bundledPackCacheMarker = ".gc-bundled-pack-cache.toml"
-
-type bundledPackCacheState struct {
-	Schema      int    `toml:"schema"`
-	Repository  string `toml:"repository"`
-	Commit      string `toml:"commit"`
-	ContentHash string `toml:"content_hash"`
-}
 
 // includeCacheDir is the subdirectory under .gc/cache/includes/ where
 // remote pack includes are cached.
@@ -222,19 +214,7 @@ func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
 	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
 	if err := WithRepoCacheReadLock(cacheRoot, func() error {
-		if _, err := os.Stat(filepath.Join(cacheDir, ".git")); err != nil {
-			if validateBundledPackCache(source, cacheDir, entry.Commit) == nil {
-				return nil
-			}
-			if os.IsNotExist(err) {
-				return fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc import install\"", source, cacheDir)
-			}
-			return fmt.Errorf("checking cached import %s: %w", source, err)
-		}
-		if err := validateLockedRemoteCache(source, cacheDir, entry.Commit); err != nil {
-			return err
-		}
-		return nil
+		return validateInstalledRemoteCache(source, cacheDir, entry.Commit)
 	}); err != nil {
 		return "", false, err
 	}
@@ -268,42 +248,32 @@ func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
 	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
 	if err := WithRepoCacheReadLock(cacheRoot, func() error {
-		if _, err := os.Stat(filepath.Join(cacheDir, ".git")); err != nil {
-			if validateBundledPackCache(source, cacheDir, entry.Commit) == nil {
-				return nil
-			}
-			if os.IsNotExist(err) {
-				return fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc import install\"", source, cacheDir)
-			}
-			return fmt.Errorf("checking cached import %s: %w", source, err)
-		}
-		if err := validateLockedRemoteCache(source, cacheDir, entry.Commit); err != nil {
-			return err
-		}
-		return nil
+		return validateInstalledRemoteCache(source, cacheDir, entry.Commit)
 	}); err != nil {
 		return "", err
 	}
 	return cacheDir, nil
 }
 
-func validateBundledPackCache(source, cacheDir, commit string) error {
-	data, err := os.ReadFile(filepath.Join(cacheDir, bundledPackCacheMarker))
-	if err != nil {
+func validateInstalledRemoteCache(source, cacheDir, commit string) error {
+	if builtinpacks.IsSource(source) {
+		if err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit); err == nil {
+			return nil
+		} else if _, statErr := os.Stat(filepath.Join(cacheDir, ".git")); statErr != nil {
+			if os.IsNotExist(statErr) {
+				return fmt.Errorf("remote import %s is locked but synthetic cache is invalid at %s: %w; run \"gc import install\"", source, cacheDir, err)
+			}
+			return fmt.Errorf("checking cached import %s: %w", source, statErr)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, ".git")); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc import install\"", source, cacheDir)
+		}
+		return fmt.Errorf("checking cached import %s: %w", source, err)
+	}
+	if err := validateLockedRemoteCache(source, cacheDir, commit); err != nil {
 		return err
-	}
-	var state bundledPackCacheState
-	if _, err := toml.Decode(string(data), &state); err != nil {
-		return err
-	}
-	if state.Schema != 1 {
-		return fmt.Errorf("unsupported bundled pack cache schema %d", state.Schema)
-	}
-	if !sameRepoCacheCommit(state.Commit, commit) {
-		return fmt.Errorf("bundled pack cache is at %s, expected %s", state.Commit, commit)
-	}
-	if NormalizeRemoteSource(source) != NormalizeRemoteSource(state.Repository) {
-		return fmt.Errorf("bundled pack cache repository is %s, expected %s", state.Repository, source)
 	}
 	return nil
 }
