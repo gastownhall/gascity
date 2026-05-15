@@ -434,11 +434,25 @@ func statusDisplayText(status string) string {
 	}
 }
 
+type supervisorUnregisterOptions struct {
+	Force                 bool
+	WaitForControllerStop bool
+}
+
 func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer) (bool, int) {
-	return unregisterCityFromSupervisorWithForce(cityPath, stdout, stderr, "gc unregister", false)
+	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, "gc unregister", supervisorUnregisterOptions{
+		WaitForControllerStop: true,
+	})
 }
 
 func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Writer, commandName string, force bool) (bool, int) {
+	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, commandName, supervisorUnregisterOptions{
+		Force:                 force,
+		WaitForControllerStop: true,
+	})
+}
+
+func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.Writer, commandName string, opts supervisorUnregisterOptions) (bool, int) {
 	cityPath = normalizePathForCompare(cityPath)
 	entry, registered, err := registeredCityEntry(cityPath)
 	if err != nil {
@@ -450,7 +464,7 @@ func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Wr
 	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-	if force && supervisorAliveHook() != 0 {
+	if opts.Force && supervisorAliveHook() != 0 {
 		tryStopControllerWithForce(cityPath, io.Discard, true)
 	}
 	if err := reg.Unregister(cityPath); err != nil {
@@ -488,6 +502,9 @@ func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Wr
 				fmt.Fprintf(stderr, "%s: %v; restored registration for '%s'\n", commandName, err, entry.EffectiveName()) //nolint:errcheck
 			}
 			return true, 1
+		}
+		if !opts.WaitForControllerStop {
+			return true, 0
 		}
 		if err := waitForSupervisorControllerStopHook(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
 			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -59,13 +60,31 @@ const sleepReasonCityStop = "city-stop"
 // is used. force=true skips the interrupt grace period (gracefulStopAll
 // runs with timeout=0, going straight to kill).
 func cmdStop(args []string, stdout, stderr io.Writer, wallClockTimeout time.Duration, force bool) int {
-	cityPath, err := resolveCommandCity(args)
+	cityPath, err := resolveStopCityPath(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+
+	if handled, code := unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, "gc stop", supervisorUnregisterOptions{
+		Force:                 force,
+		WaitForControllerStop: false,
+	}); handled {
+		if code != 0 {
+			return code
+		}
+		if supervisorAliveHook() != 0 {
+			stopCityManagedBeadsProviderIfRunning(cityPath, stderr)
+			fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
+			return 0
+		}
+	}
+
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
+		if stopManagedRuntimeWithoutConfig(cityPath, stdout, stderr) {
+			return 0
+		}
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -88,6 +107,41 @@ func cmdStop(args []string, stdout, stderr io.Writer, wallClockTimeout time.Dura
 		fmt.Fprintf(stderr, "gc stop: timed out after %s; some sessions may not have stopped — retry with --force if stop is wedged, or raise --timeout for large stop sets\n", wallClockCap) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+}
+
+func resolveStopCityPath(args []string) (string, error) {
+	if len(args) == 0 &&
+		strings.TrimSpace(cityFlag) == "" &&
+		strings.TrimSpace(os.Getenv("GC_CITY")) == "" &&
+		strings.TrimSpace(os.Getenv("GC_CITY_PATH")) == "" &&
+		strings.TrimSpace(os.Getenv("GC_CITY_ROOT")) == "" &&
+		strings.TrimSpace(os.Getenv("GC_DIR")) == "" {
+		return resolveCommandCity(nil)
+	}
+	if len(args) > 0 {
+		abs, err := filepath.Abs(args[0])
+		if err != nil {
+			return "", err
+		}
+		if cityPath, err := validateCityPath(abs); err == nil {
+			return cityPath, nil
+		}
+		return findCity(abs)
+	}
+	if strings.TrimSpace(cityFlag) != "" {
+		return validateCityPath(cityFlag)
+	}
+	if gcCity, ok := resolveExplicitCityPathEnv(); ok {
+		return gcCity, nil
+	}
+	if gcDirCity, ok := resolveCityPathFromGCDir(); ok {
+		return gcDirCity, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return findCity(cwd)
 }
 
 // defaultStopWallClockTimeout returns the wall-clock cap used by cmdStop
@@ -158,17 +212,6 @@ func ceilDiv(n, d int) int {
 // can apply a wall-clock cap by running it in a goroutine.
 func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr io.Writer) int {
 	cityName := loadedCityName(cfg, cityPath)
-
-	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stdout, stderr, "gc stop", force); handled {
-		if code != 0 {
-			return code
-		}
-		if supervisorAliveHook() != 0 {
-			stopCityManagedBeadsProviderIfRunning(cityPath, stderr)
-			fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
-			return 0
-		}
-	}
 
 	store, _ := openCityStoreAt(cityPath)
 	markCityStopSessionSleepReason(store, stderr)
@@ -267,6 +310,15 @@ func stopCityManagedBeadsProviderIfRunning(cityPath string, stderr io.Writer) {
 	if err := shutdownBeadsProvider(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort warning
 	}
+}
+
+func stopManagedRuntimeWithoutConfig(cityPath string, stdout, stderr io.Writer) bool {
+	if currentManagedDoltPort(cityPath) == "" {
+		return false
+	}
+	stopCityManagedBeadsProviderIfRunning(cityPath, stderr)
+	fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
+	return true
 }
 
 // stopOrphans stops sessions that are not in the desired set. Used by gc stop
