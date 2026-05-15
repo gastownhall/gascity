@@ -1645,9 +1645,10 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 				"pending_create_claim": "true",
 			}),
 			want: map[string]string{
-				"state":                "asleep",
-				"sleep_reason":         "failed-create",
-				"pending_create_claim": "",
+				"state":                     "asleep",
+				"sleep_reason":              "failed-create",
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
 			},
 		},
 	}
