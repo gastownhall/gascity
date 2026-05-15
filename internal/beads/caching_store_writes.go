@@ -35,6 +35,9 @@ func (c *CachingStore) Create(b Bead) (Bead, error) {
 
 // Update passes through to the backing store and refreshes the cache.
 func (c *CachingStore) Update(id string, opts UpdateOpts) error {
+	if c.updateAlreadyMatchesCached(id, opts) {
+		return nil
+	}
 	if err := c.backing.Update(id, opts); err != nil {
 		return err
 	}
@@ -62,6 +65,24 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 
 	c.notifyChange("bead.updated", fresh)
 	return nil
+}
+
+// updateAlreadyMatchesCached returns true when the cache holds a primed copy of
+// the bead and applying opts would leave every cached bead field unchanged.
+// Cache misses fall through because they cannot prove the backing write is a
+// no-op.
+func (c *CachingStore) updateAlreadyMatchesCached(id string, opts UpdateOpts) bool {
+	if id == "" {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	b, ok := c.beads[id]
+	if !ok {
+		return false
+	}
+	updated := applyUpdateOptsToBead(cloneBead(b), opts)
+	return !beadChanged(b, updated)
 }
 
 // Close marks a bead as closed in the backing store and cache.

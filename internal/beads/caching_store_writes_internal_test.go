@@ -2,16 +2,22 @@ package beads
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 )
 
-// countingBackingStore wraps a Store and counts SetMetadata /
-// SetMetadataBatch invocations so tests can assert when CachingStore
-// short-circuits a no-op write before the backing call.
+// countingBackingStore wraps a Store and counts write invocations so tests can
+// assert when CachingStore short-circuits a no-op write before the backing call.
 type countingBackingStore struct {
 	Store
+	updateCalls           int
 	setMetadataCalls      int
 	setMetadataBatchCalls int
+}
+
+func (c *countingBackingStore) Update(id string, opts UpdateOpts) error {
+	c.updateCalls++
+	return c.Store.Update(id, opts)
 }
 
 func (c *countingBackingStore) SetMetadata(id, key, value string) error {
@@ -22,6 +28,97 @@ func (c *countingBackingStore) SetMetadata(id, key, value string) error {
 func (c *countingBackingStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	c.setMetadataBatchCalls++
 	return c.Store.SetMetadataBatch(id, kvs)
+}
+
+func testStringPtr(s string) *string { return &s }
+
+func testIntPtr(i int) *int { return &i }
+
+// TestCachingStoreUpdateSkipsBackingAndNotificationWhenCachedBeadMatches
+// verifies that Update short-circuits before the backing write and cache
+// notification when applying opts would leave the cached bead unchanged.
+func TestCachingStoreUpdateSkipsBackingAndNotificationWhenCachedBeadMatches(t *testing.T) {
+	t.Parallel()
+
+	backing := &countingBackingStore{Store: NewMemStore()}
+	priority := 2
+	bead, err := backing.Create(Bead{
+		Title:       "identity",
+		Type:        "session",
+		Priority:    &priority,
+		Description: "already current",
+		Assignee:    "agent/one",
+		ParentID:    "gc-parent",
+		Labels:      []string{"gc:session", "agent:one"},
+		Metadata:    map[string]string{"heartbeat": "123", "state": "ready"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var notifications []string
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
+		notifications = append(notifications, eventType+":"+beadID)
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	backing.updateCalls = 0
+
+	if err := cache.Update(bead.ID, UpdateOpts{
+		Title:        testStringPtr("identity"),
+		Status:       testStringPtr("open"),
+		Type:         testStringPtr("session"),
+		Priority:     testIntPtr(2),
+		Description:  testStringPtr("already current"),
+		ParentID:     testStringPtr("gc-parent"),
+		Assignee:     testStringPtr("agent/one"),
+		Labels:       []string{"gc:session"},
+		RemoveLabels: []string{"missing"},
+		Metadata:     map[string]string{"heartbeat": "123"},
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if backing.updateCalls != 0 {
+		t.Errorf("backing.Update called %d times; want 0 (identity update must short-circuit)",
+			backing.updateCalls)
+	}
+	if len(notifications) != 0 {
+		t.Errorf("notifications = %v; want none for no-op Update", notifications)
+	}
+}
+
+// TestCachingStoreUpdateFallsThroughOnCachedMismatch verifies that a real field
+// change still propagates to the backing store and emits bead.updated.
+func TestCachingStoreUpdateFallsThroughOnCachedMismatch(t *testing.T) {
+	t.Parallel()
+
+	backing := &countingBackingStore{Store: NewMemStore()}
+	bead, err := backing.Create(Bead{Title: "before"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var notifications []string
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
+		notifications = append(notifications, eventType+":"+beadID)
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	backing.updateCalls = 0
+
+	if err := cache.Update(bead.ID, UpdateOpts{Title: testStringPtr("after")}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if backing.updateCalls != 1 {
+		t.Errorf("backing.Update called %d times; want 1 (real change must propagate)",
+			backing.updateCalls)
+	}
+	want := "bead.updated:" + bead.ID
+	if len(notifications) != 1 || notifications[0] != want {
+		t.Errorf("notifications = %v; want [%s]", notifications, want)
+	}
 }
 
 // TestCachingStoreSetMetadataSkipsBackingWhenCachedValueMatches verifies that
