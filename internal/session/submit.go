@@ -1,9 +1,7 @@
 package session
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -140,10 +138,20 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 		return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
 	}
 	if requiresHardRestartInterrupt(b) {
+		piTranscriptPath, err := piPendingTurnPath(b, hints)
+		if err != nil {
+			return err
+		}
 		if err := m.sp.Stop(sessName); err != nil {
 			return fmt.Errorf("stopping session for interrupt replacement: %w", err)
 		}
-		if err := discardPiPendingTurn(b, hints); err != nil {
+		if err := discardPiPendingTurn(piTranscriptPath, hints); err != nil {
+			// Pi must be stopped before transcript truncation so it cannot race the
+			// write. If truncation fails, restart on the dirty transcript; the
+			// caller's retry will repeat this stop-and-discard sequence.
+			if restartErr := m.restoreAfterHardRestartFailureLocked(ctx, id, b, sessName, resumeCommand, hints); restartErr != nil {
+				return fmt.Errorf("%w; additionally failed to restore session: %w", err, restartErr)
+			}
 			return err
 		}
 		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
@@ -272,38 +280,43 @@ func (m *Manager) waitForInterruptBoundaryLocked(ctx context.Context, b beads.Be
 	return nil
 }
 
-// providerKind returns the canonical provider kind for a session bead.
+// ProviderFamilyFromMetadata returns the canonical provider family for session
+// metadata. It prefers metadata stamped at session-bead creation over raw
+// provider names so wrapped custom aliases inherit their built-in family.
 // Preference order:
 //  1. builtin_ancestor — stamped from ResolvedProvider.BuiltinAncestor
 //     at session-bead creation for custom providers with explicit
 //     `base = "builtin:..."` (see cmd/gc session-bead creation sites).
 //  2. provider_kind — stamped for command-matched custom aliases
 //     (legacy Phase A auto-inheritance path).
-//  3. provider — raw provider metadata value as a last-resort fallback.
+//  3. provider — normalized through sessionlog.ProviderFamily as a
+//     last-resort fallback.
 //
 // Callers that branch on Claude/Codex/Gemini-family behavior
 // (idle-wait-after-interrupt, soft-escape interrupt, default submit,
 // etc.) consume this helper so wrapped custom aliases inherit the
 // correct family behavior without every call site re-deriving it.
-func providerKindFromMetadata(meta map[string]string, fallback string) string {
+func ProviderFamilyFromMetadata(meta map[string]string, fallback string) string {
 	if ancestor := strings.TrimSpace(meta["builtin_ancestor"]); ancestor != "" {
-		return ancestor
+		return sessionlog.ProviderFamily(ancestor)
 	}
 	if kind := strings.TrimSpace(meta["provider_kind"]); kind != "" {
-		return kind
+		return sessionlog.ProviderFamily(kind)
 	}
 	if provider := strings.TrimSpace(meta["provider"]); provider != "" {
-		return provider
+		return sessionlog.ProviderFamily(provider)
 	}
-	return strings.TrimSpace(fallback)
+	return sessionlog.ProviderFamily(fallback)
 }
 
 func providerKind(b beads.Bead) string {
-	return providerKindFromMetadata(b.Metadata, "")
+	return ProviderFamilyFromMetadata(b.Metadata, "")
 }
 
 func wrappedProviderFamily(b beads.Bead, family string) bool {
-	ancestor := strings.TrimSpace(b.Metadata["builtin_ancestor"])
+	ancestor := sessionlog.ProviderFamily(b.Metadata["builtin_ancestor"])
+	// Leave provider raw: normalizing it would collapse wrapped aliases such as
+	// "my-pi" onto their family and hide that the provider is wrapped.
 	provider := strings.TrimSpace(b.Metadata["provider"])
 	return ancestor == family && provider != "" && provider != family
 }
@@ -414,12 +427,47 @@ func waitsForIdleAfterHardRestart(b beads.Bead) bool {
 	return providerKind(b) != "pi"
 }
 
-func discardPiPendingTurn(b beads.Bead, hints runtime.Config) error {
-	path := sessionlog.FindPiSessionFile(piSessionSearchPaths(hints), b.Metadata["work_dir"])
-	if strings.TrimSpace(path) == "" {
-		return fmt.Errorf("discarding pi interrupted turn: session file not found for work dir %q", b.Metadata["work_dir"])
+func (m *Manager) restoreAfterHardRestartFailureLocked(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
+		return err
 	}
-	if err := truncatePiSessionBeforeLastUserMessage(path); err != nil {
+	return m.waitUntilRunningLocked(ctx, id, sessName, 2*time.Second)
+}
+
+func piPendingTurnPath(b beads.Bead, hints runtime.Config) (string, error) {
+	searchPaths := piSessionSearchPaths(hints)
+	workDir := b.Metadata["work_dir"]
+	if sessionKey := strings.TrimSpace(b.Metadata["session_key"]); sessionKey != "" {
+		if path := strings.TrimSpace(sessionlog.FindPiSessionFileByID(searchPaths, workDir, sessionKey)); path != "" {
+			return path, nil
+		}
+		fallback, err := sessionlog.FindPiSessionFileStrict(searchPaths, workDir)
+		if err != nil {
+			if errors.Is(err, sessionlog.ErrAmbiguousPiSessionFile) {
+				return "", fmt.Errorf("resolving pi interrupted transcript for session_key %q workdir %q: %w", sessionKey, workDir, err)
+			}
+			return "", err
+		}
+		if fallback != "" {
+			return "", fmt.Errorf("resolving pi interrupted transcript for session_key %q workdir %q: keyed transcript not found; refusing same-workdir fallback %q", sessionKey, workDir, fallback)
+		}
+		return "", nil
+	}
+	path, err := sessionlog.FindPiSessionFileStrict(searchPaths, workDir)
+	if err != nil {
+		if errors.Is(err, sessionlog.ErrAmbiguousPiSessionFile) {
+			return "", fmt.Errorf("resolving pi interrupted transcript for workdir %q: %w", workDir, err)
+		}
+		return "", err
+	}
+	return strings.TrimSpace(path), nil
+}
+
+func discardPiPendingTurn(path string, hints runtime.Config) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	if err := sessionlog.ResetPiInterruptedTurn(path, strings.TrimSpace(hints.Env["GC_PI_TRANSCRIPT_DIR"])); err != nil {
 		return fmt.Errorf("discarding pi interrupted turn: %w", err)
 	}
 	return nil
@@ -433,43 +481,8 @@ func piSessionSearchPaths(hints runtime.Config) []string {
 	if dir := strings.TrimSpace(hints.Env["PI_CODING_AGENT_DIR"]); dir != "" {
 		paths = append(paths, filepath.Join(dir, "sessions"))
 	}
+	paths = append(paths, sessionlog.DefaultPiSearchPaths()...)
 	return paths
-}
-
-func truncatePiSessionBeforeLastUserMessage(path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-
-	cutOffset := -1
-	offset := 0
-	for _, line := range bytes.SplitAfter(data, []byte("\n")) {
-		trimmed := bytes.TrimSpace(line)
-		if len(trimmed) > 0 {
-			var entry struct {
-				Type    string `json:"type"`
-				Message struct {
-					Role string `json:"role"`
-				} `json:"message"`
-			}
-			if err := json.Unmarshal(trimmed, &entry); err == nil &&
-				entry.Type == "message" &&
-				strings.EqualFold(strings.TrimSpace(entry.Message.Role), "user") {
-				cutOffset = offset
-			}
-		}
-		offset += len(line)
-	}
-	if cutOffset < 0 {
-		return nil
-	}
-
-	perm := os.FileMode(0o600)
-	if info, err := os.Stat(path); err == nil {
-		perm = info.Mode().Perm()
-	}
-	return fsys.WriteFileAtomic(fsys.OSFS{}, path, data[:cutOffset], perm)
 }
 
 func usesImmediateDefaultSubmit(b beads.Bead, resuming ...bool) bool {

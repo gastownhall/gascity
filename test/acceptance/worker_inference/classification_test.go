@@ -546,19 +546,30 @@ func TestStagePiOllamaCloudAuthFromEnv(t *testing.T) {
 	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 }
 
-func TestWaitForBusyTurnStartPiUsesAcceptedPromptBoundary(t *testing.T) {
+func TestWaitForBusyTurnStartPiUsesAssistantTranscriptSignal(t *testing.T) {
+	gcHome := t.TempDir()
+	sessionDir := filepath.Join(gcHome, ".pi", "agent", "sessions")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "busy.jsonl"), []byte(strings.Join([]string{
+		`{"type":"session","id":"pi-busy","cwd":"/tmp/project"}`,
+		`{"type":"message","id":"u1","message":{"role":"user","content":"produce interrupt-pi lines"}}`,
+		`{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":[{"type":"text","text":"interrupt-pi line 1"}]}}`,
+		"",
+	}, "\n")), 0o600))
+
 	harness := &liveWorkerHandleHarness{
 		profile:    workerpkg.ProfilePiTmuxCLI,
 		provider:   "pi",
 		workDir:    t.TempDir(),
-		gcHome:     t.TempDir(),
+		gcHome:     gcHome,
 		authSource: "test",
 	}
 
 	evidence, err := harness.waitForBusyTurnStart("missing-session", "interrupt-pi line 1")
 	require.NoError(t, err)
-	require.Equal(t, "pi-transcript-accepted", evidence["busy_detection"])
+	require.Equal(t, "pi-transcript-assistant-output", evidence["busy_detection"])
 	require.Equal(t, "interrupt-pi line 1", evidence["busy_output_needle"])
+	require.Equal(t, filepath.Join(sessionDir, "busy.jsonl"), evidence["busy_transcript_path"])
 }
 
 func TestSeedLiveProviderStateCodexMarksTrustedProject(t *testing.T) {

@@ -2,14 +2,22 @@ package sessionlog
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+// ErrAmbiguousPiSessionFile reports multiple Pi transcripts for one workdir.
+var ErrAmbiguousPiSessionFile = errors.New("ambiguous pi session file")
 
 // ReadPiFile reads a Pi Coding Agent native JSONL session file and converts it
 // to the standard Session format used by gc session logs.
@@ -22,12 +30,13 @@ func ReadPiFile(path string, tailCompactions int) (*Session, error) {
 		sessionID = piSessionID(path)
 	}
 
-	messages := piActiveBranch(entries, sessionID)
-	orphanedToolUseIDs := findOrphanedToolUses(messages, collectAllToolResultIDs(messages))
+	dag := BuildDag(piEntriesToStandard(entries, sessionID))
+	messages := dag.ActiveBranch
 	sess := &Session{
 		ID:                 sessionID,
 		Messages:           messages,
-		OrphanedToolUseIDs: orphanedToolUseIDs,
+		OrphanedToolUseIDs: dag.OrphanedToolUseIDs,
+		HasBranches:        dag.HasBranches,
 		Diagnostics:        diagnostics,
 	}
 	if len(sess.OrphanedToolUseIDs) == 0 {
@@ -41,46 +50,116 @@ func ReadPiFile(path string, tailCompactions int) (*Session, error) {
 	return sess, nil
 }
 
-// FindPiSessionFile searches Pi JSONL session directories for the most
-// recently modified session whose header cwd matches workDir.
-func FindPiSessionFile(searchPaths []string, workDir string) string {
-	workDir = cleanPiWorkDir(workDir)
-	if workDir == "" {
-		return ""
+// ResetPiInterruptedTurn removes Pi's interrupted tail before a replacement
+// prompt is sent. Native transcript reset failures are returned; the optional
+// mirror update is best effort and logs path-bearing diagnostics on failure.
+func ResetPiInterruptedTurn(path, mirrorDir string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
 	}
-
-	var (
-		bestPath string
-		bestTime time.Time
-	)
-	for _, root := range mergePiSearchPaths(searchPaths) {
-		path := findPiSessionFileIn(root, workDir)
-		if path == "" {
-			continue
-		}
-		info, err := os.Stat(path)
-		if err != nil {
-			continue
-		}
-		if bestPath == "" || info.ModTime().After(bestTime) {
-			bestPath = path
-			bestTime = info.ModTime()
+	truncated, changed := truncatePiSessionAfterLastUserMessage(data)
+	perm := os.FileMode(0o600)
+	if info, err := os.Stat(path); err == nil {
+		perm = info.Mode().Perm()
+	}
+	if changed {
+		if err := fsys.WriteFileAtomic(fsys.OSFS{}, path, truncated, perm); err != nil {
+			return err
 		}
 	}
-	return bestPath
+	if strings.TrimSpace(mirrorDir) == "" {
+		return nil
+	}
+	sessionID := safePiSessionID(piSessionIDFromData(data))
+	if sessionID == "" {
+		sessionID = safePiSessionID(piSessionID(path))
+	}
+	if sessionID == "" {
+		return nil
+	}
+	if err := os.MkdirAll(mirrorDir, 0o755); err != nil {
+		log.Printf("sessionlog: pi mirror reset mkdir_failed path=%q err=%v", mirrorDir, err)
+		return nil
+	}
+	mirrorPath := filepath.Join(mirrorDir, sessionID+".jsonl")
+	if err := fsys.WriteFileAtomic(fsys.OSFS{}, mirrorPath, truncated, perm); err != nil {
+		log.Printf("sessionlog: pi mirror reset write_failed path=%q err=%v", mirrorPath, err)
+		return nil
+	}
+	return nil
 }
 
-func findPiSessionFileIn(root, workDir string) string {
-	info, err := os.Stat(root)
-	if err != nil || !info.IsDir() {
+// FindPiSessionFile searches Pi JSONL session directories for the most
+// recently modified session whose header cwd matches workDir. If more than one
+// matching session exists, it returns an empty path so callers do not guess
+// which same-workdir transcript is safe to mutate.
+func FindPiSessionFile(searchPaths []string, workDir string) string {
+	path, err := FindPiSessionFileStrict(searchPaths, workDir)
+	if err != nil {
 		return ""
 	}
+	return path
+}
 
-	type candidate struct {
-		path    string
-		modTime time.Time
+// FindPiSessionFileStrict searches Pi JSONL session directories for one
+// unambiguous session whose header cwd matches workDir.
+func FindPiSessionFileStrict(searchPaths []string, workDir string) (string, error) {
+	candidates := findPiSessionCandidates(searchPaths, workDir)
+	switch len(candidates) {
+	case 0:
+		return "", nil
+	case 1:
+		return candidates[0].path, nil
+	default:
+		return "", ErrAmbiguousPiSessionFile
 	}
-	var candidates []candidate
+}
+
+// FindPiSessionFileByID searches Pi JSONL session directories for the session
+// whose header cwd and provider session ID match the supplied values.
+func FindPiSessionFileByID(searchPaths []string, workDir, sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	for _, candidate := range findPiSessionCandidates(searchPaths, workDir) {
+		if candidate.sessionID == sessionID {
+			return candidate.path
+		}
+	}
+	return ""
+}
+
+type piSessionCandidate struct {
+	path      string
+	sessionID string
+	modTime   time.Time
+}
+
+func findPiSessionCandidates(searchPaths []string, workDir string) []piSessionCandidate {
+	workDir = cleanPiWorkDir(workDir)
+	if workDir == "" {
+		return nil
+	}
+
+	var candidates []piSessionCandidate
+	for _, root := range mergePiSearchPaths(searchPaths) {
+		candidates = append(candidates, findPiSessionCandidatesIn(root, workDir)...)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].modTime.After(candidates[j].modTime)
+	})
+	return candidates
+}
+
+func findPiSessionCandidatesIn(root, workDir string) []piSessionCandidate {
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() {
+		return nil
+	}
+
+	var candidates []piSessionCandidate
 	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil || entry.IsDir() {
 			return nil
@@ -88,109 +167,204 @@ func findPiSessionFileIn(root, workDir string) string {
 		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".jsonl") {
 			return nil
 		}
-		if cleanPiWorkDir(piSessionCWD(path)) != workDir {
+		sessionID, cwd := piSessionHeader(path)
+		if cleanPiWorkDir(cwd) != workDir {
 			return nil
 		}
 		info, err := entry.Info()
 		if err != nil {
 			return nil
 		}
-		candidates = append(candidates, candidate{path: path, modTime: info.ModTime()})
+		if sessionID == "" {
+			sessionID = piSessionID(path)
+		}
+		candidates = append(candidates, piSessionCandidate{path: path, sessionID: sessionID, modTime: info.ModTime()})
 		return nil
 	})
 	if err != nil {
-		return ""
+		return nil
 	}
-
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].modTime.After(candidates[j].modTime)
-	})
-	if len(candidates) == 0 {
-		return ""
-	}
-	return candidates[0].path
+	return candidates
 }
 
 func parsePiFileDetailed(path string) ([]piEntry, string, SessionDiagnostics, error) {
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, "", SessionDiagnostics{}, fmt.Errorf("opening pi session file: %w", err)
 	}
-	defer f.Close() //nolint:errcheck // read-only file
 
-	var (
-		entries                   []piEntry
-		diagnostics               SessionDiagnostics
-		sessionID                 string
-		lastNonEmptyLineMalformed bool
-	)
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 256*1024), 50*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var entry piEntry
-		if err := json.Unmarshal(line, &entry); err != nil {
-			diagnostics.MalformedLineCount++
-			lastNonEmptyLineMalformed = true
-			continue
-		}
-		lastNonEmptyLineMalformed = false
-		entry.Raw = append(json.RawMessage(nil), line...)
+	lines, diagnostics := parsePiEntryLines(data)
+	entries := make([]piEntry, 0, len(lines))
+	var sessionID string
+	for _, line := range lines {
+		entry := line.Entry
 		if entry.Type == "session" && sessionID == "" {
 			sessionID = strings.TrimSpace(entry.ID)
 		}
 		entries = append(entries, entry)
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, "", SessionDiagnostics{}, fmt.Errorf("scanning pi session file: %w", err)
-	}
-	diagnostics.MalformedTail = lastNonEmptyLineMalformed
 	return entries, sessionID, diagnostics, nil
 }
 
-func piActiveBranch(entries []piEntry, sessionID string) []*Entry {
-	nodeByID := make(map[string]piEntry, len(entries))
-	var leafID string
+func piEntriesToStandard(entries []piEntry, sessionID string) []*Entry {
+	out := make([]*Entry, 0, len(entries))
 	for _, entry := range entries {
-		if entry.Type == "session" || strings.TrimSpace(entry.ID) == "" {
-			continue
-		}
-		nodeByID[entry.ID] = entry
-		leafID = entry.ID
-	}
-	if leafID == "" {
-		return nil
-	}
-
-	var branch []piEntry
-	seen := map[string]bool{}
-	for id := leafID; id != ""; {
-		if seen[id] {
-			break
-		}
-		seen[id] = true
-		entry, ok := nodeByID[id]
-		if !ok {
-			break
-		}
-		branch = append(branch, entry)
-		id = strings.TrimSpace(entry.ParentID)
-	}
-	for i, j := 0, len(branch)-1; i < j; i, j = i+1, j-1 {
-		branch[i], branch[j] = branch[j], branch[i]
-	}
-
-	out := make([]*Entry, 0, len(branch))
-	for _, entry := range branch {
 		converted := convertPiEntry(entry, sessionID)
 		if converted != nil {
 			out = append(out, converted)
 		}
 	}
 	return out
+}
+
+func truncatePiSessionAfterLastUserMessage(data []byte) ([]byte, bool) {
+	lines, diagnostics := parsePiEntryLines(data)
+	lastUser := -1
+	for i, line := range lines {
+		if piEntryRole(line.Entry, "user") {
+			lastUser = i
+		}
+	}
+	if lastUser < 0 {
+		return data, false
+	}
+	if completedEnd, ok := piCompletedTurnEndAfterUser(lines, lastUser); ok {
+		if diagnostics.MalformedTail {
+			return data[:completedEnd], true
+		}
+		return data, false
+	}
+	cutOffset := lines[lastUser].Start
+	if cutOffset >= len(data) {
+		return data, false
+	}
+	return data[:cutOffset], true
+}
+
+type piEntryLine struct {
+	Entry piEntry
+	Start int
+	End   int
+}
+
+func parsePiEntryLines(data []byte) ([]piEntryLine, SessionDiagnostics) {
+	var lines []piEntryLine
+	offset := 0
+	var diagnostics SessionDiagnostics
+	for _, line := range bytes.SplitAfter(data, []byte("\n")) {
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) > 0 {
+			entry, ok := parsePiEntryLine(trimmed)
+			if ok {
+				lines = append(lines, piEntryLine{
+					Entry: entry,
+					Start: offset,
+					End:   offset + len(line),
+				})
+				diagnostics.MalformedTail = false
+			} else {
+				diagnostics.MalformedLineCount++
+				diagnostics.MalformedTail = true
+			}
+		}
+		offset += len(line)
+	}
+	return lines, diagnostics
+}
+
+func parsePiEntryLine(line []byte) (piEntry, bool) {
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) == 0 {
+		return piEntry{}, false
+	}
+	var entry piEntry
+	if err := json.Unmarshal(trimmed, &entry); err != nil {
+		return piEntry{}, false
+	}
+	entry.Raw = append(json.RawMessage(nil), trimmed...)
+	return entry, true
+}
+
+func piEntryRole(entry piEntry, role string) bool {
+	return strings.EqualFold(strings.TrimSpace(entry.Type), "message") &&
+		strings.EqualFold(strings.TrimSpace(entry.Message.Role), role)
+}
+
+func piCompletedTurnEndAfterUser(lines []piEntryLine, lastUser int) (int, bool) {
+	openToolCalls := map[string]struct{}{}
+	for i := lastUser + 1; i < len(lines); i++ {
+		entry := lines[i].Entry
+		if !strings.EqualFold(strings.TrimSpace(entry.Type), "message") {
+			continue
+		}
+		switch {
+		case piEntryRole(entry, "assistant"):
+			for _, toolCallID := range piAssistantToolCallIDs(entry) {
+				openToolCalls[toolCallID] = struct{}{}
+			}
+			if len(openToolCalls) == 0 && strings.TrimSpace(entry.Message.StopReason) != "" {
+				return lines[i].End, true
+			}
+		case piEntryRole(entry, "toolResult"):
+			toolCallID := strings.TrimSpace(entry.Message.ToolCallID)
+			if toolCallID != "" {
+				delete(openToolCalls, toolCallID)
+			}
+		}
+	}
+	return 0, false
+}
+
+func piAssistantToolCallIDs(entry piEntry) []string {
+	if !piEntryRole(entry, "assistant") {
+		return nil
+	}
+	blocks := piMessageBlocks(entry.Message)
+	ids := make([]string, 0, len(blocks))
+	for i, block := range blocks {
+		if block.Type != "tool_use" {
+			continue
+		}
+		id := strings.TrimSpace(block.ID)
+		if id == "" {
+			// Missing tool IDs are intentionally unmatched by toolResult entries
+			// without toolCallId, so the turn remains incomplete and is truncated.
+			id = fmt.Sprintf("line-tool-call-%d", i)
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func piSessionIDFromData(data []byte) string {
+	lines, _ := parsePiEntryLines(data)
+	for _, line := range lines {
+		if line.Entry.Type == "session" {
+			return strings.TrimSpace(line.Entry.ID)
+		}
+	}
+	return ""
+}
+
+func safePiSessionID(sessionID string) string {
+	// Keep this filename contract in sync with safeSessionID in the managed Pi
+	// hook overlay.
+	var b strings.Builder
+	for _, r := range sessionID {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '_' || r == '.' || r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 func convertPiEntry(entry piEntry, sessionID string) *Entry {
@@ -371,29 +545,30 @@ func parsePiTimestamp(raw string) time.Time {
 	return ts
 }
 
-func piSessionCWD(path string) string {
+func piSessionHeader(path string) (string, string) {
 	f, err := os.Open(path)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	defer f.Close() //nolint:errcheck // read-only
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	if !scanner.Scan() {
-		return ""
+		return "", ""
 	}
 	var header struct {
 		Type string `json:"type"`
+		ID   string `json:"id"`
 		CWD  string `json:"cwd"`
 	}
 	if err := json.Unmarshal(scanner.Bytes(), &header); err != nil {
-		return ""
+		return "", ""
 	}
 	if header.Type != "session" {
-		return ""
+		return "", ""
 	}
-	return header.CWD
+	return strings.TrimSpace(header.ID), header.CWD
 }
 
 func cleanPiWorkDir(path string) string {
@@ -440,6 +615,7 @@ type piMessage struct {
 	Role       string          `json:"role"`
 	Content    json.RawMessage `json:"content"`
 	Timestamp  int64           `json:"timestamp"`
+	StopReason string          `json:"stopReason"`
 	ToolCallID string          `json:"toolCallId"`
 	ToolName   string          `json:"toolName"`
 	IsError    bool            `json:"isError"`

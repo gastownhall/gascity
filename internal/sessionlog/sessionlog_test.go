@@ -119,6 +119,29 @@ func TestContentBlocksPlainString(t *testing.T) {
 	}
 }
 
+func TestProviderFamilyPiAliasAnchoring(t *testing.T) {
+	tests := []struct {
+		provider string
+		want     string
+	}{
+		{provider: "pi", want: "pi"},
+		{provider: "pi/tmux", want: "pi"},
+		{provider: "my-pi", want: "pi"},
+		{provider: "my-pi/tmux", want: "pi"},
+		{provider: "wrapped/pi", want: "pi"},
+		{provider: "happy-pirate", want: "happy-pirate"},
+		{provider: "claude-pirep", want: "claude-pirep"},
+		{provider: "user-pid", want: "user-pid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			if got := ProviderFamily(tt.provider); got != tt.want {
+				t.Fatalf("ProviderFamily(%q) = %q, want %q", tt.provider, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestContentBlocksEmpty(t *testing.T) {
 	e := &Entry{}
 	if blocks := e.ContentBlocks(); blocks != nil {
@@ -1719,6 +1742,20 @@ func TestFindSessionFileFallsBackToCodex(t *testing.T) {
 	got := FindSessionFile([]string{t.TempDir()}, "/nonexistent/codex/project")
 	if got != "" {
 		t.Errorf("expected empty, got %q", got)
+	}
+}
+
+func TestFindSessionFileFallsBackToPi(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "pi-project")
+	want := filepath.Join(base, "session.jsonl")
+	body := `{"type":"session","version":3,"id":"ses_pi","timestamp":"2026-02-02T00:00:00.000Z","cwd":"` + filepath.ToSlash(workDir) + `"}`
+	if err := os.WriteFile(want, []byte(body+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := FindSessionFile([]string{base}, workDir); got != want {
+		t.Fatalf("FindSessionFile() = %q, want Pi fallback %q", got, want)
 	}
 }
 

@@ -485,7 +485,7 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 			DefaultContinuationEpoch,
 			meta["instance_token"],
 		))
-		if gcProvider := providerKindFromMetadata(meta, provider); gcProvider != "" {
+		if gcProvider := ProviderFamilyFromMetadata(meta, provider); gcProvider != "" {
 			cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 		}
 		cfg = runtime.SyncWorkDirEnv(cfg)
