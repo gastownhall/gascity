@@ -213,6 +213,8 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 	}
 
 	// Direct-merge path: metadata write must be chained into the close.
+	// --unset-metadata rejection_reason follows merged_target; the &&
+	// that gates gc bd close must appear after --unset-metadata.
 	assertContainsInOrder(t, body,
 		"--set-metadata merge_result=merged",
 		"--set-metadata merged_sha=$MERGED_SHA",
@@ -311,6 +313,61 @@ func TestPolecatFormulaRecordsExistingPRMetadataOnSubmit(t *testing.T) {
 	}
 	if strings.Contains(body, "gh pr create") {
 		t.Fatalf("polecat submit flow must not create pull requests directly")
+	}
+}
+
+func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat formula: %v", err)
+	}
+	body := string(data)
+	refineryTarget := `REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery"`
+	nudge := `gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true`
+
+	assertContainsInOrder(t, body,
+		"**5. Reassign to refinery:**",
+		refineryTarget,
+		`gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"`,
+		"**6. Signal refinery to check for work immediately",
+		refineryTarget,
+		`gc session wake "$REFINERY_TARGET" || true`,
+		nudge,
+		"**7. Signal reconciler and exit.**",
+	)
+
+	for _, bad := range []string{
+		`gc session wake "$REFINERY_TARGET" 2>/dev/null`,
+		`gc session nudge "$REFINERY_TARGET" 2>/dev/null`,
+		`gc session nudge "$REFINERY_TARGET" || true`,
+	} {
+		if strings.Contains(body, bad) {
+			t.Fatalf("polecat formula must preserve refinery handoff diagnostics and pass a nudge message; found %q", bad)
+		}
+	}
+}
+
+func TestPolecatPromptDoneSequenceSignalsRefinery(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "polecat", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat prompt: %v", err)
+	}
+	body := string(data)
+
+	assertContainsInOrder(t, body,
+		"## FINAL REMINDER: RUN THE DONE SEQUENCE",
+		`REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"`,
+		`gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"`,
+		`gc session wake "$REFINERY_TARGET" || true`,
+		`gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true`,
+		`gc runtime drain-ack`,
+	)
+	if !strings.Contains(body, "Done sequence (push, set metadata, reassign, wake refinery, nudge refinery, `gc runtime drain-ack`, exit)") {
+		t.Fatalf("polecat quick reference must include the refinery wake+nudge handoff")
 	}
 }
 

@@ -46,6 +46,18 @@ func namedSessionIdentity(b beads.Bead) string {
 	return session.NamedSessionIdentity(b)
 }
 
+func configuredNamedSessionBeadHasSpec(b beads.Bead, cfg *config.City, cityName string) bool {
+	if cfg == nil || !isNamedSessionBead(b) {
+		return false
+	}
+	identity := namedSessionIdentity(b)
+	if identity == "" {
+		return false
+	}
+	_, ok := findNamedSessionSpec(cfg, cityName, identity)
+	return ok
+}
+
 func namedSessionMode(b beads.Bead) string {
 	return session.NamedSessionMode(b)
 }

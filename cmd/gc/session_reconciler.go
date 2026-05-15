@@ -580,7 +580,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// remaining stale beads roll back on subsequent ticks.
 	const maxRollbacksPerTick = 5
 	rollbacksThisTick := 0
-	attemptRollbackPendingCreate := func(session *beads.Bead, templateName, name, action, detail string) {
+	attemptRollbackPendingCreate := func(session *beads.Bead, templateName, name, action, detail string, clearClaim bool) {
 		if rollbacksThisTick >= maxRollbacksPerTick {
 			fmt.Fprintf(stderr, "session reconciler: deferring rollback of %s (%s): rollback budget exhausted this tick\n", name, detail) //nolint:errcheck
 			if trace != nil {
@@ -595,6 +595,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		fmt.Fprintf(stderr, "session reconciler: rolling back pending create %s: %s\n", name, detail) //nolint:errcheck
 		if trace != nil {
 			trace.recordDecision("reconciler.session.pending_create", templateName, name, action, "rollback", nil, nil, "")
+		}
+		if clearClaim {
+			rollbackPendingCreateClearingClaim(session, store, clk.Now().UTC(), stderr)
+			return
 		}
 		rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
 	}
@@ -628,6 +632,29 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			providerAlive, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, session.ID)
 			if err != nil {
 				providerAlive = false
+			}
+			// Run this before configured named-session preservation. A stale
+			// state=creating bead with an expired pending-create lease would
+			// otherwise stay open and keep holding its alias forever.
+			if !storeQueryPartial && !providerAlive && shouldRollbackPendingCreate(session) {
+				var startupTimeout time.Duration
+				if cfg != nil {
+					startupTimeout = cfg.Session.StartupTimeoutDuration()
+				}
+				if pendingCreateLeaseExpiredForRollback(*session, clk, startupTimeout) {
+					template := normalizedSessionTemplate(*session, cfg)
+					if template == "" {
+						template = session.Metadata["template"]
+					}
+					peek := cachedSessionPeek(cityPath, store, sp, cfg, session.ID, nil)
+					rateLimitHit, rateLimitErr := checkRateLimitStability(session, cfg, providerAlive, dt, store, clk, peek)
+					if rateLimitHit || rateLimitErr != nil {
+						continue
+					}
+					clearClaim := configuredNamedSessionBeadHasSpec(*session, cfg, cityName)
+					attemptRollbackPendingCreate(session, template, name, "pending_create_lease_expired", "lease expired and no live runtime", clearClaim)
+					continue
+				}
 			}
 			preserveNamed := preserveConfiguredNamedSessionBead(*session, cfg, cityName)
 			var (
@@ -867,7 +894,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 		if alive && shouldRollbackPendingCreate(session) && !runningSessionMatchesPendingCreate(session, name, sp) {
-			attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_rollback", "live runtime belongs to another session")
+			attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_rollback", "live runtime belongs to another session", false)
 			continue
 		}
 		// Desired-branch counterpart to pendingCreateSessionStillLeased: a
@@ -887,7 +914,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				if rateLimitHit || rateLimitErr != nil {
 					continue
 				}
-				attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_lease_expired", "lease expired and no live runtime")
+				attemptRollbackPendingCreate(session, tp.TemplateName, name, "pending_create_lease_expired", "lease expired and no live runtime", false)
 				continue
 			}
 		}
@@ -899,10 +926,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if dops != nil {
 			if acked, _ := dops.isDrainAcked(name); acked {
 				if !alive && staleOrLegacyDrainAckBeforeStart(*session, sp, name) {
-					clearReconcilerDrainAckMetadata(sp, name)
+					_ = clearReconcilerDrainAckMetadata(sp, name)
 				} else {
 					if staleReconcilerDrainAck(*session, sp, name) {
-						clearReconcilerDrainAckMetadata(sp, name)
+						_ = clearReconcilerDrainAckMetadata(sp, name)
 						if trace != nil {
 							trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, "stale_generation", "clear", nil, nil, "")
 						}
@@ -923,7 +950,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 							drainCancelled := cancelSessionConfigDriftDrain(*session, sp, dt)
 							if !drainCancelled {
-								clearReconcilerDrainAckMetadata(sp, name)
+								_ = clearReconcilerDrainAckMetadata(sp, name)
 							}
 							if trace != nil {
 								trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, "config_drift_attached", "cancel_reconciler_ack", traceRecordPayload{
@@ -935,7 +962,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						if driftKey != "" && recentlyDeferredSessionAttachedConfigDrift(*session, clk, driftKey) {
 							drainCancelled := cancelSessionConfigDriftDrain(*session, sp, dt)
 							if !drainCancelled {
-								clearReconcilerDrainAckMetadata(sp, name)
+								_ = clearReconcilerDrainAckMetadata(sp, name)
 							}
 							if trace != nil {
 								trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, "config_drift_recently_attached", "cancel_reconciler_ack", traceRecordPayload{
@@ -1140,11 +1167,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if template != "" && storedHash != "" {
 				cfgAgent := findAgentByTemplate(cfg, template)
 				if cfgAgent != nil {
-					agentCfg := templateParamsToConfig(tp)
-					// Apply template_overrides using the same resolution as
-					// prepareSessionStart: merge defaults + overrides, then
-					// replaceSchemaFlags to strip and re-add all schema flags.
-					applyTemplateOverridesToConfig(&agentCfg, *session, tp)
+					agentCfg := sessionCoreConfigForHash(tp, *session)
 					currentHash := runtime.CoreFingerprint(agentCfg)
 					if storedHash != currentHash {
 						fmt.Fprintf(stderr, "config-drift %s: stored=%s current=%s cmd=%q\n", name, storedHash[:12], currentHash[:12], agentCfg.Command) //nolint:errcheck
@@ -1337,7 +1360,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			storedHash := session.Metadata["started_config_hash"]
 			if template != "" && storedHash != "" {
 				if cfgAgent := findAgentByTemplate(cfg, template); cfgAgent != nil {
-					agentCfg := templateParamsToConfig(tp)
+					agentCfg := sessionCoreConfigForHash(tp, *session)
 					currentHash := runtime.CoreFingerprint(agentCfg)
 					if storedHash != currentHash {
 						var storedBreakdown map[string]string
@@ -2056,8 +2079,7 @@ func sessionConfigDriftKey(session beads.Bead, cfg *config.City, tp TemplatePara
 	if findAgentByTemplate(cfg, template) == nil {
 		return ""
 	}
-	agentCfg := templateParamsToConfig(tp)
-	applyTemplateOverridesToConfig(&agentCfg, session, tp)
+	agentCfg := sessionCoreConfigForHash(tp, session)
 	currentHash := runtime.CoreFingerprint(agentCfg)
 	if storedHash == currentHash {
 		return ""

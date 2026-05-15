@@ -62,6 +62,57 @@ func TestCmdReloadApplied(t *testing.T) {
 	}
 }
 
+func TestCmdReloadSoftPrintsAcceptedDriftCount(t *testing.T) {
+	dir := shortSocketTempDir(t, "gc-reload-soft-cli-")
+	writeCityTOML(t, dir, "test", "mayor")
+
+	oldSend := sendReloadControlRequestHook
+	oldUnavailable := reloadUnavailableMessageHook
+	t.Cleanup(func() {
+		sendReloadControlRequestHook = oldSend
+		reloadUnavailableMessageHook = oldUnavailable
+	})
+
+	accepted := 2
+	sendReloadControlRequestHook = func(cityPath string, req reloadControlRequest) (reloadControlReply, error) {
+		if !samePath(cityPath, dir) {
+			t.Fatalf("cityPath = %q, want %q", cityPath, canonicalTestPath(dir))
+		}
+		if !req.Soft {
+			t.Fatalf("req.Soft = false, want true")
+		}
+		return reloadControlReply{
+			Outcome:            reloadOutcomeApplied,
+			Message:            "Config reloaded: 1 agents, 0 rigs (rev abc123def456)",
+			Revision:           "abc123def4567890",
+			AcceptedDriftCount: &accepted,
+		}, nil
+	}
+	reloadUnavailableMessageHook = func(string) string { return "" }
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdReload([]string{dir}, false, true, "30s", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdReload = %d; stderr=%s", code, stderr.String())
+	}
+	wantStdout := "Config reloaded: 1 agents, 0 rigs (rev abc123def456)\nsoft reload: accepted config drift on 2 session(s)"
+	if got := strings.TrimSpace(stdout.String()); got != wantStdout {
+		t.Fatalf("stdout = %q, want %q", got, wantStdout)
+	}
+	if got := strings.TrimSpace(stderr.String()); got != "" {
+		t.Fatalf("stderr = %q", got)
+	}
+}
+
+func TestReloadControlReplyOmitsAcceptedDriftCountByDefault(t *testing.T) {
+	data, err := json.Marshal(reloadControlReply{})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "accepted_drift_count") {
+		t.Fatalf("zero-value reloadControlReply JSON = %s, want accepted_drift_count omitted", data)
+	}
+}
+
 func TestCmdReloadAsyncExplicitTimeoutInvalid(t *testing.T) {
 	dir := shortSocketTempDir(t, "gc-reload-flags-")
 	writeCityTOML(t, dir, "test", "mayor")
@@ -226,6 +277,39 @@ func TestHandleReloadSocketCmdAsyncAccepted(t *testing.T) {
 	}
 	if reply.Message != "Reload requested." {
 		t.Fatalf("reply.Message = %q", reply.Message)
+	}
+
+	client.Close() //nolint:errcheck
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reload socket handler did not exit")
+	}
+}
+
+func TestHandleReloadSocketCmdPropagatesSoft(t *testing.T) {
+	server, client := net.Pipe()
+	defer client.Close() //nolint:errcheck
+
+	reloadReqCh := make(chan reloadRequest)
+	done := make(chan struct{})
+	go func() {
+		handleReloadSocketCmd(server, `{"wait":false,"soft":true}`, reloadReqCh)
+		close(done)
+	}()
+
+	req := <-reloadReqCh
+	if !req.soft {
+		t.Fatal("req.soft = false, want true")
+	}
+	req.acceptedCh <- reloadControlReply{
+		Outcome: reloadOutcomeAccepted,
+		Message: "Reload requested.",
+	}
+
+	reply := readReloadSocketReply(t, client)
+	if reply.Outcome != reloadOutcomeAccepted {
+		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeAccepted)
 	}
 
 	client.Close() //nolint:errcheck

@@ -233,7 +233,20 @@ merge, and close the bead. If there's a conflict, the refinery puts the
 bead back in the pool with `rejection_reason` metadata — a new polecat
 picks it up and resumes from the existing branch.
 
-**6. Signal reconciler and exit.**
+**6. Signal refinery to check for work immediately (belt-and-suspenders):**
+```bash
+REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery"
+gc session wake "$REFINERY_TARGET" || true
+gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true
+```
+
+The `gc bd update` in step 5 generates a `bead.updated` event the refinery's
+event-watch will see, but that can take up to `event_timeout` seconds. Wake
+starts a stopped on_demand session; nudge leaves a visible prompt for a running
+one as soon as it is ready for input. Failure is non-fatal: the refinery finds
+the work on its next poll.
+
+**7. Signal reconciler and exit.**
 ```bash
 gc runtime drain-ack
 exit
@@ -243,4 +256,4 @@ exit
 reconciler only restarts you if the pool check command finds more work.
 You are GONE. Done means gone. There is no idle state.
 
-**Exit criteria:** Branch pushed, metadata set, bead reassigned, drain acknowledged, session exited."""
+**Exit criteria:** Branch pushed, metadata set, bead reassigned, refinery signaled, drain acknowledged, session exited."""

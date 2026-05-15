@@ -1960,12 +1960,13 @@ config drift rules require them.
 With --soft, the controller accepts any detected per-session config
 drift instead of draining the drifted sessions: each open session's
 recorded config hash is updated to the hash the freshly reloaded
-config produces for it, so the immediately-following reconcile tick
-sees no drift and no config-drift drains fire. Useful when editing a
-running city's .gc/settings.json without disrupting in-flight work.
-Sessions whose template no longer maps to a configured agent are
-NOT updated; normal orphan/suspended drain handles them on the next
-tick.
+config produces for it, the matching hash breakdown is refreshed, and
+any already queued config-drift drain for that session is canceled. The
+immediately-following reconcile tick sees no drift and no config-drift
+drains fire. Useful when editing a running city's .gc/settings.json
+without disrupting in-flight work. Sessions whose template no longer
+maps to a configured agent are NOT updated; normal orphan/suspended
+drain handles them on the next tick.
 
 ```
 gc reload [path] [flags]
