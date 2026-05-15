@@ -58,13 +58,14 @@ const (
 
 	// Non-terminal city lifecycle events recorded in the per-city
 	// event log during init/unregister for diagnostics.
-	CityCreated             = "city.created"
-	CityUnregisterRequested = "city.unregister_requested"
-	OrderFired              = "order.fired"
-	OrderCompleted          = "order.completed"
-	OrderFailed             = "order.failed"
-	ProviderSwapped         = "provider.swapped"
-	WorkerOperation         = "worker.operation"
+	CityCreated                     = "city.created"
+	CityUnregisterRequested         = "city.unregister_requested"
+	OrderFired                      = "order.fired"
+	OrderCompleted                  = "order.completed"
+	OrderFailed                     = "order.failed"
+	ProviderSwapped                 = "provider.swapped"
+	WorkerOperation                 = "worker.operation"
+	SupervisorFSPressureSkippedTick = "supervisor.fs_pressure.skipped_tick"
 
 	// External messaging events.
 	ExtMsgBound          = "extmsg.bound"
@@ -95,7 +96,7 @@ var KnownEventTypes = []string{
 	RequestResultSessionSubmit, RequestFailed,
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed,
-	ProviderSwapped, WorkerOperation,
+	ProviderSwapped, WorkerOperation, SupervisorFSPressureSkippedTick,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,

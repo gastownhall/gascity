@@ -86,6 +86,9 @@ type CityRuntime struct {
 	asyncStarts       asyncStartTracker
 	demandSnapshot    *runtimeDemandSnapshot
 
+	fsPressureConsecutiveSkips int
+	fsPressureEpisodeLogged    bool
+
 	convHandler         *convergence.Handler     // nil until bead store available
 	convStoreAdapter    *convergenceStoreAdapter // typed reference; avoids type assertions in tick/reconcile
 	convergenceReqCh    chan convergenceRequest  // receives CLI commands from controller.sock
@@ -691,8 +694,6 @@ func (cr *CityRuntime) tick(
 	if ctx.Err() != nil {
 		return
 	}
-	cr.ensureManagedDoltPublishedForTick()
-	sessionBeads := cr.loadSessionBeadSnapshot()
 	traceTrigger := trigger
 	traceDetail := "controller_tick"
 	cr.reloadMu.Lock()
@@ -701,7 +702,7 @@ func (cr *CityRuntime) tick(
 	if hasActive {
 		traceDetail = "manual_reload"
 	}
-	trace := cr.beginTraceCycle(traceTrigger, traceDetail, sessionBeads)
+	trace := cr.beginTraceCycle(traceTrigger, traceDetail, nil)
 	// End the trace via defer so a panic recovered by safeTick still
 	// closes the cycle (aborted). completion flips to Completed at the
 	// normal end of the tick body below.
@@ -749,6 +750,16 @@ func (cr *CityRuntime) tick(
 	manualReloadReplied := false
 	dirtyCleared := false
 	tickCompleted := false
+	completeManualReload := func() {
+		if manualReload == nil || manualReloadReplied {
+			return
+		}
+		cr.sendReloadReply(manualReload.doneCh, manualReply)
+		manualReloadReplied = true
+		cr.reloadMu.Lock()
+		cr.activeReload = nil
+		cr.reloadMu.Unlock()
+	}
 	defer func() {
 		if dirtyCleared && !tickCompleted && manualReload == nil {
 			dirty.Store(true)
@@ -787,11 +798,36 @@ func (cr *CityRuntime) tick(
 		return
 	}
 
+	if !configChanged && cr.shouldSkipTickForFSPressure(trace, trigger) {
+		cr.processConvergenceRequests(ctx)
+		completion = TraceCompletionCompleted
+		tickCompleted = true
+		return
+	}
+	if configChanged {
+		cr.resetFSPressureEpisode()
+	}
+
+	cr.ensureManagedDoltPublishedForTick()
+	if ctx.Err() != nil {
+		return
+	}
+
 	// Order dispatch is intentionally before the expensive session reconcile
-	// phases so due formulas are not starved by slow startup/config drift work.
+	// phases so due formulas are not starved by slow startup/config drift work,
+	// but after the pressure gate and managed-Dolt preflight so skipped or
+	// endpoint-repair ticks do not add tracking writes first.
 	cr.dispatchOrders(ctx, cityRoot)
 	if ctx.Err() != nil {
 		return
+	}
+
+	sessionBeads := cr.loadSessionBeadSnapshot()
+	if trace != nil && sessionBeads != nil {
+		trace.RecordSessionBaseline("", "", traceRecordPayload{
+			"open_count": len(sessionBeads.Open()),
+		})
+		_ = trace.flushCurrentBatch(TraceDurabilityDurable)
 	}
 
 	// Session bead sync BEFORE reconciliation (one-tick state lag; see run()).
@@ -879,13 +915,7 @@ func (cr *CityRuntime) tick(
 
 	// Convergence tick: process active convergence loops.
 	cr.convergenceTick(ctx)
-	if manualReload != nil {
-		cr.sendReloadReply(manualReload.doneCh, manualReply)
-		manualReloadReplied = true
-		cr.reloadMu.Lock()
-		cr.activeReload = nil
-		cr.reloadMu.Unlock()
-	}
+	completeManualReload()
 	completion = TraceCompletionCompleted
 	tickCompleted = true
 }
@@ -1236,6 +1266,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	cr.sp = nextSp
 	cr.dops = nextDops
 	cr.serviceStateMu.Unlock()
+	cr.demandSnapshot = nil
 
 	if cr.cs != nil {
 		cr.cs.updateFromRuntime(nextCfg, nextSp, result.Revision)

@@ -2049,6 +2049,9 @@
             "$ref": "#/components/schemas/SessionSubmitSucceededPayload"
           },
           {
+            "$ref": "#/components/schemas/SupervisorFSPressureSkippedTickPayload"
+          },
+          {
             "$ref": "#/components/schemas/UnboundEventPayload"
           },
           {
@@ -6592,6 +6595,47 @@
         ],
         "type": "object"
       },
+      "SupervisorFSPressureSkippedTickPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "avg60": {
+            "description": "The Linux PSI some avg60 value observed for filesystem IO pressure.",
+            "format": "double",
+            "type": "number"
+          },
+          "consecutive_skips": {
+            "description": "Number of consecutive pressure skips including this tick.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "max_consecutive_skips": {
+            "description": "Maximum consecutive skips before the supervisor forces one reconciliation tick.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "outcome": {
+            "description": "The pressure decision outcome: skipped for a shed tick or forced for the bounded liveness tick.",
+            "type": "string"
+          },
+          "threshold": {
+            "description": "The configured avg60 threshold that triggered the skip.",
+            "format": "double",
+            "type": "number"
+          },
+          "trigger": {
+            "description": "The daemon tick trigger, such as patrol or poke.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "avg60",
+          "threshold",
+          "consecutive_skips",
+          "max_consecutive_skips",
+          "outcome"
+        ],
+        "type": "object"
+      },
       "SupervisorHealthOutputBody": {
         "additionalProperties": false,
         "properties": {
@@ -6767,6 +6811,7 @@
             "session.undrained": "#/components/schemas/TypedEventStreamEnvelopeSessionUndrained",
             "session.updated": "#/components/schemas/TypedEventStreamEnvelopeSessionUpdated",
             "session.woke": "#/components/schemas/TypedEventStreamEnvelopeSessionWoke",
+            "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
             "worker.operation": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -6906,6 +6951,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionWoke"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
@@ -7442,6 +7490,7 @@
                 "order.failed",
                 "provider.swapped",
                 "worker.operation",
+                "supervisor.fs_pressure.skipped_tick",
                 "extmsg.bound",
                 "extmsg.unbound",
                 "extmsg.group_created",
@@ -8895,6 +8944,48 @@
         "title": "TypedEventStreamEnvelope session.woke",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SupervisorFSPressureSkippedTickPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "supervisor.fs_pressure.skipped_tick",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope supervisor.fs_pressure.skipped_tick",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeWorkerOperation": {
         "additionalProperties": false,
         "properties": {
@@ -8986,6 +9077,7 @@
             "session.undrained": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUndrained",
             "session.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUpdated",
             "session.woke": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWoke",
+            "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
             "worker.operation": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -9125,6 +9217,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWoke"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
@@ -9708,6 +9803,7 @@
                 "order.failed",
                 "provider.swapped",
                 "worker.operation",
+                "supervisor.fs_pressure.skipped_tick",
                 "extmsg.bound",
                 "extmsg.unbound",
                 "extmsg.group_created",
@@ -11296,6 +11392,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.woke",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SupervisorFSPressureSkippedTickPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "supervisor.fs_pressure.skipped_tick",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope supervisor.fs_pressure.skipped_tick",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeWorkerOperation": {

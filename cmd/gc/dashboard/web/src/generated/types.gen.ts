@@ -748,7 +748,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | RequestFailedPayload | SessionCreateSucceededPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | RequestFailedPayload | SessionCreateSucceededPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | SupervisorFsPressureSkippedTickPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventStreamEnvelope = {
     actor: string;
@@ -2785,6 +2785,33 @@ export type SupervisorEventListOutputBody = {
     total: number;
 };
 
+export type SupervisorFsPressureSkippedTickPayload = {
+    /**
+     * The Linux PSI some avg60 value observed for filesystem IO pressure.
+     */
+    avg60: number;
+    /**
+     * Number of consecutive pressure skips including this tick.
+     */
+    consecutive_skips: number;
+    /**
+     * Maximum consecutive skips before the supervisor forces one reconciliation tick.
+     */
+    max_consecutive_skips: number;
+    /**
+     * The pressure decision outcome: skipped for a shed tick or forced for the bounded liveness tick.
+     */
+    outcome: string;
+    /**
+     * The configured avg60 threshold that triggered the skip.
+     */
+    threshold: number;
+    /**
+     * The daemon tick trigger, such as patrol or poke.
+     */
+    trigger?: string;
+};
+
 export type SupervisorHealthOutputBody = {
     /**
      * Cities currently running.
@@ -2945,6 +2972,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionUpdated) | ({
     type: 'session.woke';
 } & TypedEventStreamEnvelopeSessionWoke) | ({
+    type: 'supervisor.fs_pressure.skipped_tick';
+} & TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
     type: 'worker.operation';
 } & TypedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedEventStreamEnvelopeCustom';
@@ -3595,6 +3624,20 @@ export type TypedEventStreamEnvelopeSessionWoke = {
 };
 
 /**
+ * TypedEventStreamEnvelope supervisor.fs_pressure.skipped_tick
+ */
+export type TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
+    actor: string;
+    message?: string;
+    payload: SupervisorFsPressureSkippedTickPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.fs_pressure.skipped_tick';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope worker.operation
  */
 export type TypedEventStreamEnvelopeWorkerOperation = {
@@ -3704,6 +3747,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionUpdated) | ({
     type: 'session.woke';
 } & TypedTaggedEventStreamEnvelopeSessionWoke) | ({
+    type: 'supervisor.fs_pressure.skipped_tick';
+} & TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
     type: 'worker.operation';
 } & TypedTaggedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedTaggedEventStreamEnvelopeCustom';
@@ -4396,6 +4441,21 @@ export type TypedTaggedEventStreamEnvelopeSessionWoke = {
     subject?: string;
     ts: string;
     type: 'session.woke';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope supervisor.fs_pressure.skipped_tick
+ */
+export type TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SupervisorFsPressureSkippedTickPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.fs_pressure.skipped_tick';
     workflow?: WorkflowEventProjection;
 };
 

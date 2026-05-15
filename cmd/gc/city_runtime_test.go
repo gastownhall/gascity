@@ -185,11 +185,37 @@ type managedDoltPreflightOrderStore struct {
 	events *orderedRuntimeEvents
 }
 
+func hasLabelPrefix(labels []string, prefix string) bool {
+	for _, label := range labels {
+		if strings.HasPrefix(label, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *managedDoltPreflightOrderStore) Create(b beads.Bead) (beads.Bead, error) {
+	if hasLabelPrefix(b.Labels, "order-run:") {
+		s.events.record("order-create")
+	}
+	return s.Store.Create(b)
+}
+
 func (s *managedDoltPreflightOrderStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	if query.Label == sessionBeadLabel {
 		s.events.record("session-list")
 	}
+	if query.Label == labelOrderTracking || strings.HasPrefix(query.Label, "order-run:") {
+		s.events.record("order-list")
+	}
 	return s.Store.List(query)
+}
+
+func (s *managedDoltPreflightOrderStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	if label == labelOrderTracking || strings.HasPrefix(label, "order-run:") {
+		s.events.record("order-list")
+	}
+	return s.Store.ListByLabel(label, limit, opts...)
 }
 
 func TestCityRuntimeRequestDeferredDrainFollowUpTick_PokesOnce(t *testing.T) {
@@ -458,6 +484,83 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T)
 	sessionListIndex := orderEvents.index("session-list")
 	if preflightIndex == -1 || sessionListIndex == -1 || preflightIndex > sessionListIndex {
 		t.Fatalf("events = %#v, want preflight before first session-list", orderEvents.snapshot())
+	}
+}
+
+func TestCityRuntimeTickPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	orderEvents := &orderedRuntimeEvents{}
+	store := &managedDoltPreflightOrderStore{
+		Store:  beads.NewMemStore(),
+		events: orderEvents,
+	}
+	ad := buildOrderDispatcherFromListExec(
+		[]orders.Order{{Name: "preflight-due", Trigger: "cooldown", Interval: "1s", Exec: "scripts/noop.sh"}},
+		store,
+		nil,
+		func(context.Context, string, string, []string) ([]byte, error) {
+			return []byte("ok\n"), nil
+		},
+		nil,
+	)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	if mad, ok := ad.(*memoryOrderDispatcher); ok {
+		t.Cleanup(mad.cancel)
+	}
+	sp := runtime.NewFake()
+	cr := &CityRuntime{
+		cityPath: t.TempDir(),
+		cityName: "test-city",
+		cfg:      &config.City{},
+		sp:       sp,
+		buildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		dops:          newDrainOps(sp),
+		od:            ad,
+		rec:           events.Discard,
+		sessionDrains: newDrainTracker(),
+		logPrefix:     "gc test",
+		stdout:        io.Discard,
+		stderr:        io.Discard,
+		managedDoltHealth: func(string) error {
+			orderEvents.record("preflight")
+			return nil
+		},
+		managedDoltOwned: func(string) (bool, error) {
+			return true, nil
+		},
+		managedDoltPort: func(string) string {
+			return ""
+		},
+	}
+	cs := newControllerState(context.Background(), cr.cfg, sp, events.NewFake(), "test-city", cr.cityPath)
+	cs.cityBeadStore = store
+	cr.setControllerState(cs)
+
+	dirty := &atomic.Bool{}
+	lastProviderName := ""
+	prevPoolRunning := map[string]bool{}
+	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+
+	preflightIndex := orderEvents.index("preflight")
+	orderListIndex := orderEvents.index("order-list")
+	orderCreateIndex := orderEvents.index("order-create")
+	if preflightIndex == -1 || orderListIndex == -1 || preflightIndex > orderListIndex {
+		t.Fatalf("events = %#v, want preflight before order dispatch store read", orderEvents.snapshot())
+	}
+	if orderCreateIndex == -1 || preflightIndex > orderCreateIndex {
+		t.Fatalf("events = %#v, want preflight before order tracking create", orderEvents.snapshot())
+	}
+	tracking, err := store.ListByLabel("order-run:preflight-due", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("list tracking beads: %v", err)
+	}
+	if len(tracking) == 0 {
+		t.Fatalf("events = %#v, want due order to dispatch after preflight", orderEvents.snapshot())
 	}
 }
 

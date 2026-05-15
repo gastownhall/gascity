@@ -93,6 +93,7 @@ const (
 	TraceSiteLifecycleStartCommit    TraceSiteCode = "lifecycle.start.commit"
 	TraceSiteLifecycleDrainBegin     TraceSiteCode = "lifecycle.drain.begin"
 	TraceSiteLifecycleDrainAdvance   TraceSiteCode = "lifecycle.drain.advance"
+	TraceSiteSupervisorFSPressure    TraceSiteCode = "supervisor.fs_pressure"
 	TraceSiteTraceControl            TraceSiteCode = "trace.control"
 )
 
@@ -129,6 +130,7 @@ const (
 	TraceReasonDrainTimeout           TraceReasonCode = "drain_timeout"
 	TraceReasonStoreQueryPartial      TraceReasonCode = "store_query_partial"
 	TraceReasonNoWakeReason           TraceReasonCode = "no_wake_reason"
+	TraceReasonFSPressure             TraceReasonCode = "fs_pressure"
 )
 
 type TraceOutcomeCode string
@@ -559,6 +561,7 @@ func normalizeTraceSiteCode(raw string) (TraceSiteCode, string) {
 		TraceSiteLifecycleStartCommit,
 		TraceSiteLifecycleDrainBegin,
 		TraceSiteLifecycleDrainAdvance,
+		TraceSiteSupervisorFSPressure,
 		TraceSiteTraceControl:
 		return TraceSiteCode(raw), ""
 	default:
@@ -606,7 +609,8 @@ func normalizeTraceReasonCode(raw string) (TraceReasonCode, string) {
 		TraceReasonOrphaned,
 		TraceReasonDrainTimeout,
 		TraceReasonStoreQueryPartial,
-		TraceReasonNoWakeReason:
+		TraceReasonNoWakeReason,
+		TraceReasonFSPressure:
 		return TraceReasonCode(raw), ""
 	default:
 		return TraceReasonUnknown, raw
