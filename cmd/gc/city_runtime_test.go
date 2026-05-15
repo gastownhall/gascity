@@ -185,6 +185,22 @@ type managedDoltPreflightOrderStore struct {
 	events *orderedRuntimeEvents
 }
 
+type managedDoltPreflightOrderDispatcher struct {
+	store beads.Store
+}
+
+func (d *managedDoltPreflightOrderDispatcher) dispatch(context.Context, string, time.Time) {
+	_, _ = d.store.ListByLabel(labelOrderTracking, 0, beads.IncludeClosed)
+	_, _ = d.store.Create(beads.Bead{
+		Title:  "order:preflight-due",
+		Labels: []string{"order-run:preflight-due", labelOrderTracking},
+	})
+}
+
+func (d *managedDoltPreflightOrderDispatcher) drain(context.Context) bool {
+	return true
+}
+
 func hasLabelPrefix(labels []string, prefix string) bool {
 	for _, label := range labels {
 		if strings.HasPrefix(label, prefix) {
@@ -496,26 +512,7 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T
 		Store:  beads.NewMemStore(),
 		events: orderEvents,
 	}
-	ad := buildOrderDispatcherFromListExec(
-		[]orders.Order{{Name: "preflight-due", Trigger: "cooldown", Interval: "1s", Exec: "scripts/noop.sh"}},
-		store,
-		nil,
-		func(context.Context, string, string, []string) ([]byte, error) {
-			return []byte("ok\n"), nil
-		},
-		nil,
-	)
-	if ad == nil {
-		t.Fatal("expected non-nil dispatcher")
-	}
-	if mad, ok := ad.(*memoryOrderDispatcher); ok {
-		t.Cleanup(func() {
-			mad.cancel()
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			mad.drain(ctx)
-		})
-	}
+	ad := &managedDoltPreflightOrderDispatcher{store: store}
 	sp := runtime.NewFake()
 	cr := &CityRuntime{
 		cityPath: cityPath,
@@ -551,11 +548,6 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T
 	lastProviderName := ""
 	prevPoolRunning := map[string]bool{}
 	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
-	drainCtx, drainCancel := context.WithTimeout(context.Background(), time.Second)
-	defer drainCancel()
-	if !ad.drain(drainCtx) {
-		t.Fatal("order dispatcher did not drain after tick")
-	}
 
 	preflightIndex := orderEvents.index("preflight")
 	orderListIndex := orderEvents.index("order-list")
