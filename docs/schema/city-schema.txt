@@ -2237,14 +2237,14 @@
             "type": "string"
           },
           "type": "array",
-          "description": "Includes is the legacy city.toml pack-composition list.\nDeprecated: use root pack.toml [imports.*] instead. Run\ngc doctor to inspect; gc doctor --fix handles the safe mechanical\nrewrites available in this release wave. Each entry is a local\npath, a git source//sub#ref URL, or a GitHub tree URL."
+          "description": "Includes is the legacy city.toml pack-composition list.\n\nDeprecated: use root pack.toml [imports.*] instead. Run gc doctor to\ninspect; gc doctor --fix handles the safe mechanical rewrites available\nin this release wave. Each entry is a local path, a git source//sub#ref\nURL, or a GitHub tree URL."
         },
         "default_rig_includes": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "DefaultRigIncludes is the legacy city.toml default-rig pack list.\nDeprecated: use root pack.toml\n[defaults.rig.imports.\u003cbinding\u003e] instead. Run gc doctor to\ninspect; gc doctor --fix handles the safe mechanical rewrites\navailable in this release wave."
+          "description": "DefaultRigIncludes is the legacy city.toml default-rig pack list.\n\nDeprecated: use root pack.toml [defaults.rig.imports.\u003cbinding\u003e] instead.\nRun gc doctor to inspect; gc doctor --fix handles the safe mechanical\nrewrites available in this release wave."
         }
       },
       "additionalProperties": false,
