@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -18,16 +19,23 @@ import (
 	"github.com/gastownhall/gascity/examples/gastown/packs/maintenance"
 	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/fsys"
+	gitutil "github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/remotesource"
 )
 
 const (
 	// Repository is the canonical clone URL for bundled pack imports.
 	Repository = "https://github.com/gastownhall/gascity.git"
 
+	// SyntheticCacheNamespace separates bundled synthetic repo caches from
+	// ordinary git checkouts that point at the same repository and commit.
+	SyntheticCacheNamespace = "bundled-synthetic-v1"
+
 	syntheticMarkerFile = ".gc-bundled-pack-cache.toml"
 )
 
-// Pack describes a bundled pack and its canonical import source.
+// Pack describes a bundled pack and its canonical import source. Bundled
+// sources resolve to the pack content embedded in the running gc binary.
 type Pack struct {
 	Name    string
 	Subpath string
@@ -93,14 +101,19 @@ func IsSource(source string) bool {
 	return ok
 }
 
-// MaterializeSyntheticRepo writes the bundled pack tree to dst as a synthetic
-// repository cache for commit. The cache is repo-shaped so relative imports
-// between bundled pack subpaths resolve like a real checkout. Callers must
-// hold any repo-cache write lock for dst and pass only a disposable cache
+// MaterializeSyntheticRepo writes the running binary's bundled pack tree to dst
+// as a synthetic repository cache for commit. The commit is the lock/cache tag
+// requested by the import resolver; the marker content hash is what binds the
+// cache to the current binary content. The cache is repo-shaped so relative
+// imports between bundled pack subpaths resolve like a real checkout. Callers
+// must hold any repo-cache write lock for dst and pass only a disposable cache
 // directory; existing contents are removed unconditionally before writing.
 func MaterializeSyntheticRepo(dst, commit string) error {
 	if strings.TrimSpace(commit) == "" {
 		return fmt.Errorf("commit is required")
+	}
+	if err := validateSyntheticDestination(dst); err != nil {
+		return err
 	}
 	if err := os.RemoveAll(dst); err != nil {
 		return fmt.Errorf("removing stale bundled pack cache %q: %w", dst, err)
@@ -132,8 +145,22 @@ func MaterializeSyntheticRepo(dst, commit string) error {
 }
 
 // ValidateSyntheticRepo verifies that dir is a synthetic bundled-pack cache
-// created for the current binary content and requested commit.
+// created for the current binary content and requested lock/cache commit tag.
 func ValidateSyntheticRepo(dir, commit string) error {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("missing bundled pack cache marker")
+		}
+		return fmt.Errorf("checking bundled pack cache root: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("bundled pack cache root %q is a symlink", dir)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("bundled pack cache root %q is not a directory", dir)
+	}
+
 	data, err := os.ReadFile(filepath.Join(dir, syntheticMarkerFile))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -151,7 +178,7 @@ func ValidateSyntheticRepo(dir, commit string) error {
 	if marker.Repository != Repository {
 		return fmt.Errorf("bundled pack cache repository %q does not match %q", marker.Repository, Repository)
 	}
-	if !sameCommit(marker.Commit, commit) {
+	if !gitutil.SameCommit(marker.Commit, commit) {
 		return fmt.Errorf("bundled pack cache commit %q does not match %q", marker.Commit, commit)
 	}
 	wantHash, err := SyntheticContentHash()
@@ -161,12 +188,26 @@ func ValidateSyntheticRepo(dir, commit string) error {
 	if marker.ContentHash != wantHash {
 		return fmt.Errorf("bundled pack cache content hash %q does not match current binary %q", marker.ContentHash, wantHash)
 	}
+	if err := validateSyntheticRepoFileSet(dir); err != nil {
+		return err
+	}
 	for _, pack := range All() {
 		if err := validatePackFiles(pack, filepath.Join(dir, filepath.FromSlash(pack.Subpath))); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// MaterializedFileMode returns the filesystem mode used for bundled pack files
+// when they are materialized from embed.FS.
+func MaterializedFileMode(path string) os.FileMode {
+	for _, suffix := range []string{".sh", ".py", ".bash"} {
+		if strings.HasSuffix(path, suffix) {
+			return 0o755
+		}
+	}
+	return 0o644
 }
 
 // SyntheticContentHash returns a stable hash of all bundled pack file content
@@ -267,6 +308,69 @@ func validatePackFiles(pack Pack, dst string) error {
 	return nil
 }
 
+func validateSyntheticRepoFileSet(dir string) error {
+	allowedFiles, allowedDirs, err := syntheticRepoAllowedPaths()
+	if err != nil {
+		return err
+	}
+	firstUnexpectedDir := ""
+	if err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == dir {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("bundled pack cache contains symlink %s", rel)
+		}
+		if entry.IsDir() {
+			if _, ok := allowedDirs[rel]; ok {
+				return nil
+			}
+			if firstUnexpectedDir == "" {
+				firstUnexpectedDir = rel
+			}
+			return nil
+		}
+		if _, ok := allowedFiles[rel]; ok {
+			return nil
+		}
+		return fmt.Errorf("bundled pack cache contains unexpected file %s", rel)
+	}); err != nil {
+		return fmt.Errorf("validating bundled pack cache file set: %w", err)
+	}
+	if firstUnexpectedDir != "" {
+		return fmt.Errorf("validating bundled pack cache file set: bundled pack cache contains unexpected directory %s", firstUnexpectedDir)
+	}
+	return nil
+}
+
+func syntheticRepoAllowedPaths() (map[string]struct{}, map[string]struct{}, error) {
+	files := map[string]struct{}{syntheticMarkerFile: {}}
+	dirs := make(map[string]struct{})
+	for _, pack := range All() {
+		subpath := filepath.ToSlash(pack.Subpath)
+		manifest, err := manifestForFS(pack.FS)
+		if err != nil {
+			return nil, nil, fmt.Errorf("reading bundled pack %q manifest: %w", pack.Name, err)
+		}
+		for rel := range manifest {
+			full := path.Join(subpath, rel)
+			files[full] = struct{}{}
+			for dir := path.Dir(full); dir != "." && dir != "/"; dir = path.Dir(dir) {
+				dirs[dir] = struct{}{}
+			}
+		}
+	}
+	return files, dirs, nil
+}
+
 func manifestForFS(src fs.FS) (map[string]fileEntry, error) {
 	manifest := make(map[string]fileEntry)
 	if err := fs.WalkDir(src, ".", func(path string, d fs.DirEntry, err error) error {
@@ -282,40 +386,24 @@ func manifestForFS(src fs.FS) (map[string]fileEntry, error) {
 		}
 		manifest[filepath.ToSlash(path)] = fileEntry{
 			data: data,
-			perm: fileMode(path),
+			perm: MaterializedFileMode(path),
 		}
 		return nil
 	}); err != nil {
 		return nil, err
 	}
+	if len(manifest) == 0 {
+		return nil, fmt.Errorf("bundled pack manifest is empty")
+	}
+	if _, ok := manifest["pack.toml"]; !ok {
+		return nil, fmt.Errorf("bundled pack manifest is missing pack.toml")
+	}
 	return manifest, nil
 }
 
-func fileMode(path string) os.FileMode {
-	if strings.HasSuffix(path, ".sh") {
-		return 0o755
-	}
-	return 0o644
-}
-
 func splitSource(source string) (repository, subpath string) {
-	withoutRef := source
-	if i := strings.LastIndex(withoutRef, "#"); i >= 0 {
-		withoutRef = withoutRef[:i]
-	}
-	searchFrom := 0
-	if i := strings.Index(withoutRef, "://"); i >= 0 {
-		searchFrom = i + 3
-	}
-	if i := strings.Index(withoutRef[searchFrom:], "//"); i >= 0 {
-		pos := searchFrom + i
-		repository = withoutRef[:pos]
-		subpath = strings.Trim(withoutRef[pos+2:], "/")
-	} else {
-		repository = withoutRef
-	}
-	repository = normalizeRepository(repository)
-	return repository, subpath
+	parsed := remotesource.Parse(source)
+	return normalizeRepository(parsed.CloneURL), strings.Trim(parsed.Subpath, "/")
 }
 
 func normalizeRepository(repo string) string {
@@ -329,14 +417,14 @@ func normalizeRepository(repo string) string {
 	return repo
 }
 
-func sameCommit(actual, expected string) bool {
-	actual = strings.TrimSpace(actual)
-	expected = strings.TrimSpace(expected)
-	if actual == "" || expected == "" {
-		return false
+func validateSyntheticDestination(dst string) error {
+	if strings.TrimSpace(dst) == "" {
+		return fmt.Errorf("refusing to materialize synthetic repo to unsafe path %q", dst)
 	}
-	if strings.EqualFold(actual, expected) {
-		return true
+	clean := filepath.Clean(dst)
+	root := filepath.VolumeName(clean) + string(filepath.Separator)
+	if clean == "." || clean == root {
+		return fmt.Errorf("refusing to materialize synthetic repo to unsafe path %q", dst)
 	}
-	return len(expected) >= 7 && len(expected) < len(actual) && strings.HasPrefix(strings.ToLower(actual), strings.ToLower(expected))
+	return nil
 }

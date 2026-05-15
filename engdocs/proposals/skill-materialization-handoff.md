@@ -167,10 +167,12 @@ Non-obvious lessons the future you should know:
 
 4. **Bootstrap pack cache path.** Bootstrap packs resolve to
    `<gcHome>/cache/repos/<GlobalRepoCacheDirName(source, commit)>/` — a
-   **single** directory component keyed on source+commit hash (not
-   `<gcHome>/cache/packs/<name>/` as an earlier spec draft said). Use
-   `config.ReadImplicitImports` + `config.GlobalRepoCachePath` from
-   the materializer (Phase 2A).
+   **single** directory component keyed by `config.RepoCacheKey` (not
+   `<gcHome>/cache/packs/<name>/` as an earlier spec draft said). The key
+   includes a separate bundled-synthetic namespace for built-in Gas City pack
+   imports so those caches do not collide with ordinary same-repo git
+   checkouts. Use `config.ReadImplicitImports` + `config.GlobalRepoCachePath`
+   from the materializer (Phase 2A).
 
 5. **Deletion-surface table in the spec is authoritative.** When
    removing code, trust the table in the spec's "No attachment

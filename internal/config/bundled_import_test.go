@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -174,6 +175,24 @@ content_hash = "sha256:deadbeef"
 	}
 	if !ok {
 		t.Fatal("resolveLockedRemoteImport ok = false, want true")
+	}
+}
+
+func TestValidateInstalledRemoteCacheTreatsBundledGitENOTDIRAsNonCheckout(t *testing.T) {
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+	if err := os.WriteFile(cacheDir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", cacheDir, err)
+	}
+
+	err := validateInstalledRemoteCache(bundledPackSource(), cacheDir, "abc123def456")
+	if err == nil {
+		t.Fatal("validateInstalledRemoteCache accepted file cache")
+	}
+	if !strings.Contains(err.Error(), "synthetic cache is invalid") || !strings.Contains(err.Error(), "is not a directory") {
+		t.Fatalf("error = %v, want synthetic validation context", err)
+	}
+	if strings.Contains(err.Error(), "checking cached import") {
+		t.Fatalf("error = %v, want ENOTDIR classified as non-checkout", err)
 	}
 }
 

@@ -12,21 +12,11 @@ import (
 	"sync"
 
 	"github.com/BurntSushi/toml"
-	"github.com/gastownhall/gascity/examples/bd"
-	"github.com/gastownhall/gascity/examples/dolt"
-	"github.com/gastownhall/gascity/examples/gastown/packs/gastown"
-	"github.com/gastownhall/gascity/examples/gastown/packs/maintenance"
-	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 )
-
-// builtinPack pairs an embedded FS with the subdirectory name used under .gc/system/packs/.
-type builtinPack struct {
-	fs   fs.FS
-	name string // e.g. "bd", "dolt"
-}
 
 const (
 	legacyOrderConfigFile = "order.toml"
@@ -34,13 +24,7 @@ const (
 
 // builtinPacks lists all packs embedded in the gc binary. These are
 // materialized to .gc/system/packs/ on every gc start and gc init.
-var builtinPacks = []builtinPack{
-	{fs: core.PackFS, name: "core"},
-	{fs: bd.PackFS, name: "bd"},
-	{fs: dolt.PackFS, name: "dolt"},
-	{fs: maintenance.PackFS, name: "maintenance"},
-	{fs: gastown.PackFS, name: "gastown"},
-}
+var builtinPacks = builtinpacks.All()
 
 var builtinPackRefreshCache sync.Map
 
@@ -64,21 +48,21 @@ type builtinPackFile struct {
 // MaterializeBuiltinPacks writes all embedded pack files to
 // .gc/system/packs/{name}/ in the city directory. Files whose content and mode
 // already match are left in place; changed content or mode is repaired with an
-// atomic rename so readers never observe a truncated file. Shell scripts get
-// 0755; everything else 0644.
+// atomic rename so readers never observe a truncated file. Executable scripts
+// get 0755; everything else 0644.
 // Idempotent: safe to call on every gc start and gc init.
 func MaterializeBuiltinPacks(cityPath string) error {
 	for _, bp := range builtinPacks {
-		dst := filepath.Join(cityPath, citylayout.SystemPacksRoot, bp.name)
-		desired, err := materializeFS(bp.fs, ".", dst)
+		dst := filepath.Join(cityPath, citylayout.SystemPacksRoot, bp.Name)
+		desired, err := materializeFS(bp.FS, ".", dst)
 		if err != nil {
-			return fmt.Errorf("materializing %s pack: %w", bp.name, err)
+			return fmt.Errorf("materializing %s pack: %w", bp.Name, err)
 		}
 		if err := pruneStaleGeneratedPackFiles(dst, desired); err != nil {
-			return fmt.Errorf("pruning stale %s pack files: %w", bp.name, err)
+			return fmt.Errorf("pruning stale %s pack files: %w", bp.Name, err)
 		}
-		if err := pruneLegacyEmbeddedOrders(bp.fs, dst); err != nil {
-			return fmt.Errorf("pruning legacy %s order paths: %w", bp.name, err)
+		if err := pruneLegacyEmbeddedOrders(bp.FS, dst); err != nil {
+			return fmt.Errorf("pruning legacy %s order paths: %w", bp.Name, err)
 		}
 	}
 	return nil
@@ -155,20 +139,20 @@ func unusableRequiredBuiltinPackNames(cityPath string) []string {
 	var missing []string
 	for _, name := range requiredBuiltinPackNames(cityPath) {
 		bp, ok := builtinPackByName(name)
-		if !ok || !packContainsEmbeddedState(bp.fs, filepath.Join(systemRoot, name)) {
+		if !ok || !packContainsEmbeddedState(bp.FS, filepath.Join(systemRoot, name)) {
 			missing = append(missing, name)
 		}
 	}
 	return missing
 }
 
-func builtinPackByName(name string) (builtinPack, bool) {
+func builtinPackByName(name string) (builtinpacks.Pack, bool) {
 	for _, bp := range builtinPacks {
-		if bp.name == name {
+		if bp.Name == name {
 			return bp, true
 		}
 	}
-	return builtinPack{}, false
+	return builtinpacks.Pack{}, false
 }
 
 func packContainsEmbeddedState(embedded fs.FS, dstDir string) bool {
@@ -213,7 +197,7 @@ func embeddedPackManifest(embedded fs.FS) (map[string]builtinPackFile, error) {
 		}
 		manifest[filepath.ToSlash(path)] = builtinPackFile{
 			data: data,
-			perm: builtinPackFileMode(path),
+			perm: builtinpacks.MaterializedFileMode(path),
 		}
 		return nil
 	})
@@ -359,34 +343,13 @@ func materializeFS(embedded fs.FS, root, dstDir string) (map[string]struct{}, er
 			return err
 		}
 
-		perm := builtinPackFileMode(path)
+		perm := builtinpacks.MaterializedFileMode(path)
 		return fsys.WriteFileIfContentOrModeChangedAtomic(fsys.OSFS{}, dst, data, perm)
 	})
 	if err != nil {
 		return nil, err
 	}
 	return desired, nil
-}
-
-// isExecutableScriptFilename reports whether a materialized pack asset
-// should be marked executable. Shell, Python, and bash interpreters all
-// rely on shebang-based direct execution, so the file needs +x regardless
-// of extension — gc invokes resolved run paths directly rather than
-// wrapping them with an explicit interpreter command.
-func isExecutableScriptFilename(name string) bool {
-	for _, suffix := range []string{".sh", ".py", ".bash"} {
-		if strings.HasSuffix(name, suffix) {
-			return true
-		}
-	}
-	return false
-}
-
-func builtinPackFileMode(name string) os.FileMode {
-	if isExecutableScriptFilename(name) {
-		return 0o755
-	}
-	return 0o644
 }
 
 // pruneLegacyEmbeddedOrders removes deprecated order directory layouts when the
