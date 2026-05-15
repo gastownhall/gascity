@@ -118,6 +118,76 @@ func TestUnixSocketInodesForPathHonorsCancelledContext(t *testing.T) {
 	}
 }
 
+func TestFileOpenedByAnyProcessFromProcDetectsBoundSocketFromUnixTable(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "dolt.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("net.Listen(unix): %v", err)
+	}
+	defer func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	}()
+	unixTable := filepath.Join(t.TempDir(), "unix")
+	if err := os.WriteFile(unixTable, []byte("Num RefCount Protocol Flags Type St Inode Path\n0000000000000000: 00000002 00000000 00010000 0001 01 12345 "+socketPath+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(unix table): %v", err)
+	}
+	withManagedDoltProcPaths(t, t.TempDir(), unixTable)
+
+	open, checked := fileOpenedByAnyProcessFromProc(context.Background(), socketPath)
+	if !open || !checked {
+		t.Fatalf("fileOpenedByAnyProcessFromProc(bound socket) = (%v, %v), want true, true", open, checked)
+	}
+}
+
+func TestFileOpenedByAnyProcessFromProcTreatsUnlistedSocketAsClosed(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "dolt.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("net.Listen(unix): %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("Close(listener): %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	unixTable := filepath.Join(t.TempDir(), "unix")
+	if err := os.WriteFile(unixTable, []byte("Num RefCount Protocol Flags Type St Inode Path\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(unix table): %v", err)
+	}
+	withManagedDoltProcPaths(t, t.TempDir(), unixTable)
+
+	open, checked := fileOpenedByAnyProcessFromProc(context.Background(), socketPath)
+	if open || !checked {
+		t.Fatalf("fileOpenedByAnyProcessFromProc(unlisted socket) = (%v, %v), want false, true", open, checked)
+	}
+}
+
+func TestFileOpenedByAnyProcessFromProcFallsBackWhenUnixTableUnreadable(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "dolt.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("net.Listen(unix): %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("Close(listener): %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	procDir := t.TempDir()
+	fdDir := filepath.Join(procDir, "123", "fd")
+	if err := os.MkdirAll(fdDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(socketPath, filepath.Join(fdDir, "7")); err != nil {
+		t.Fatalf("Symlink(fd): %v", err)
+	}
+	withManagedDoltProcPaths(t, procDir, filepath.Join(t.TempDir(), "missing-unix"))
+
+	open, checked := fileOpenedByAnyProcessFromProc(context.Background(), socketPath)
+	if !open || !checked {
+		t.Fatalf("fileOpenedByAnyProcessFromProc(fd fallback) = (%v, %v), want true, true", open, checked)
+	}
+}
+
 func TestRemoveStaleManagedDoltSocketsWithoutLsofKeepsSocket(t *testing.T) {
 	socketPath := filepath.Join("/tmp", "dolt-preflight-cleanup-live-test.sock")
 	_ = os.Remove(socketPath)

@@ -9604,6 +9604,57 @@ dolt.port: "4406"
 	}
 }
 
+func TestShutdownBeadsProviderExternalBdClearsStaleManagedRuntimeState(t *testing.T) {
+	cityPath := t.TempDir()
+	callLog := filepath.Join(cityPath, "op-calls.log")
+	script := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"$1\" >> "+callLog+"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.host: 127.0.0.1
+dolt.port: "4406"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state := doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      33123,
+		DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := writeDoltState(cityPath, state); err != nil {
+		t.Fatalf("writeDoltState: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "dolt-server.port"), []byte("33123\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+	if err := shutdownBeadsProvider(cityPath); err != nil {
+		t.Fatalf("shutdownBeadsProvider() error = %v", err)
+	}
+	if _, err := os.Stat(callLog); !os.IsNotExist(err) {
+		t.Fatalf("shutdownBeadsProvider() should not invoke stop for external loopback target, stat err = %v", err)
+	}
+	if _, err := os.Stat(managedDoltStatePath(cityPath)); !os.IsNotExist(err) {
+		t.Fatalf("published dolt runtime state still present, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
+		t.Fatalf("stale dolt-server.port still present, stat err = %v", err)
+	}
+}
+
 func TestShutdownBeadsProviderSkipsPostgresCity(t *testing.T) {
 	cityPath := t.TempDir()
 	callLog := filepath.Join(cityPath, "op-calls.log")

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -1241,6 +1242,52 @@ port = 3307
 
 	if status := checkDoltAuthorIdentity(cityDir); status.blocked() {
 		t.Fatalf("checkDoltAuthorIdentity blocked for city external Dolt: %#v", status)
+	}
+}
+
+func TestCheckDoltAuthorIdentitySkipsPostgresCityWithManagedDoltConfig(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	stubInitDependencyChecks(t)
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "bd"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(cityDir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:         "beads",
+		Backend:          "postgres",
+		PostgresHost:     "db.example.test",
+		PostgresPort:     "5432",
+		PostgresUser:     "bd",
+		PostgresDatabase: "beads_pg",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	old := initRunDoltConfigGet
+	initRunDoltConfigGet = func(string) (string, error) {
+		t.Fatal("postgres-backed city should not require local Dolt identity")
+		return "", nil
+	}
+	t.Cleanup(func() { initRunDoltConfigGet = old })
+
+	if status := checkDoltAuthorIdentity(cityDir); status.blocked() {
+		t.Fatalf("checkDoltAuthorIdentity blocked for postgres city: %#v", status)
 	}
 }
 

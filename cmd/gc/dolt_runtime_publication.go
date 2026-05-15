@@ -198,6 +198,19 @@ func clearManagedDoltRuntimeState(cityPath string) error {
 	return nil
 }
 
+func clearManagedDoltRuntimeStateUnlessPostgres(cityPath string) error {
+	if cityUsesBdStoreContract(cityPath) {
+		_, usesPostgres, err := postgresMetadataForScope(cityPath, cityPath)
+		if err != nil {
+			return err
+		}
+		if usesPostgres {
+			return nil
+		}
+	}
+	return clearManagedDoltRuntimeState(cityPath)
+}
+
 func publishManagedDoltRuntimeStateIfOwned(cityPath string) error {
 	owned, err := managedDoltLifecycleOwned(cityPath)
 	if err != nil {

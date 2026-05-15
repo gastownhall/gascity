@@ -656,7 +656,7 @@ func ensureBeadsProvider(cityPath string) error {
 // For exec providers, fires "stop". For file providers, always available.
 func shutdownBeadsProvider(cityPath string) error {
 	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
-		return clearManagedDoltRuntimeStateIfOwned(cityPath)
+		return clearManagedDoltRuntimeStateUnlessPostgres(cityPath)
 	}
 	provider := beadsProvider(cityPath)
 	if strings.HasPrefix(provider, "exec:") {
@@ -666,7 +666,7 @@ func shutdownBeadsProvider(cityPath string) error {
 				return err
 			}
 			if !owned {
-				return clearManagedDoltRuntimeStateIfOwned(cityPath)
+				return clearManagedDoltRuntimeStateUnlessPostgres(cityPath)
 			}
 		}
 		script := strings.TrimPrefix(provider, "exec:")
