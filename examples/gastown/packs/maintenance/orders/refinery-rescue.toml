@@ -1,0 +1,12 @@
+# Refinery rescue: every 30min, nudge refineries that have queued beads
+# but no in-progress patrol wisp. Safety net for when the refinery's own
+# pour-next-wisp discipline (see gastown/agents/refinery/prompt.template.md)
+# fails — agent crash mid-cycle, controller respawn miss, or the agent
+# wrongly judging "queue empty, done" at the wrong moment.
+#
+# Runs as an exec order: no LLM, no agent, no wisp.
+[order]
+description = "Nudge refineries with queued beads but no in-progress patrol wisp"
+exec = "$PACK_DIR/assets/scripts/refinery-rescue.sh"
+trigger = "cooldown"
+interval = "30m"
