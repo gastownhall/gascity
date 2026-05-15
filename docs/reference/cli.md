@@ -20,6 +20,7 @@ gc [flags]
 | Subcommand | Description |
 |------------|-------------|
 | [gc agent](#gc-agent) | Manage agent configuration |
+| [gc analyze](#gc-analyze) | Read-only analysis over events and beads |
 | [gc bd](#gc-bd) | Run bd in the correct rig directory |
 | [gc beads](#gc-beads) | Manage the beads provider |
 | [gc build-image](#gc-build-image) | Build a prebaked agent container image |
@@ -139,6 +140,54 @@ replaced if they exit. Use "gc agent resume" to restore.
 ```
 gc agent suspend <name>
 ```
+
+## gc analyze
+
+Analyze produces correlated reports over the events log and
+bead state. All subcommands are read-only and safe to run alongside a
+live controller.
+
+```
+gc analyze
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc analyze reliability](#gc-analyze-reliability) | Correlate session-lifecycle events with model/version/rig |
+
+## gc analyze reliability
+
+Reliability reports per-(model, prompt_version, rig) counts of
+the tracked session-lifecycle events:
+
+  session.crashed
+  session.quarantined (reserved; current production paths do not emit it)
+  session.idle_killed
+  session.draining
+
+Worker.operation events from #1252 supply the (model, prompt_version,
+agent_name) tuple per session. Lifecycle events get attributed via the
+session id or producer aliases from worker.operation payloads. Sessions
+with worker.operation events but no lifecycle events count toward the
+per-group total — they're the denominator side of crash-rate
+calculations. Model and prompt_version are best-effort dimensions; the
+report warns when the source event stream is missing them.
+
+Read-only: this command never writes events or beads.
+
+```
+gc analyze reliability [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--city` | string |  | city directory (default: discover from cwd) |
+| `--events` | string |  | explicit events.jsonl path (overrides city discovery) |
+| `--json` | bool |  | emit JSON instead of a table |
+| `--model` | string |  | filter to a specific model |
+| `--rig` | string |  | filter to a specific rig |
+| `--since` | string | `7d` | start of the analysis window — duration (1h, 7d) or RFC3339 timestamp |
+| `--until` | string |  | end of the analysis window — duration (0s = now, 30m = 30 minutes ago) or RFC3339 timestamp |
 
 ## gc bd
 
