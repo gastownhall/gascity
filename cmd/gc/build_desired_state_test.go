@@ -4550,6 +4550,26 @@ func TestBuildDesiredState_DoesNotPreserveOutOfBoundsBoundedPoolSlotWithoutIdent
 	}
 }
 
+func TestBuildDesiredState_PrefersInBoundsPoolSlotOverOutOfBoundsAgentName(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(5)},
+		},
+	}
+	cfgAgent := &cfg.Agents[0]
+	bead := beads.Bead{
+		Metadata: map[string]string{
+			"template":   "frontend/worker",
+			"pool_slot":  "2",
+			"agent_name": "frontend/worker-99",
+		},
+	}
+
+	if slot := existingPoolSlotWithConfig(cfg, cfgAgent, bead); slot != 2 {
+		t.Fatalf("existingPoolSlotWithConfig(in-bounds pool_slot, out-of-bounds agent_name) = %d, want 2", slot)
+	}
+}
+
 func TestBuildDesiredState_DoesNotRecoverOutOfBoundsAliasOnlyBoundedPoolSlot(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -4578,7 +4598,7 @@ func TestBuildDesiredState_DoesNotRecoverOutOfBoundsAliasOnlyBoundedPoolSlot(t *
 	}
 }
 
-func TestClaimPoolSlot_PreservesStampedOutOfBoundsLiveIdentity(t *testing.T) {
+func TestExistingPoolSlot_PreservesStampedOutOfBoundsLiveIdentity(t *testing.T) {
 	cfgAgent := &config.Agent{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(5)}
 	bead := beads.Bead{
 		Metadata: map[string]string{
@@ -4590,10 +4610,6 @@ func TestClaimPoolSlot_PreservesStampedOutOfBoundsLiveIdentity(t *testing.T) {
 
 	if slot := existingPoolSlot(cfgAgent, bead); slot != 7 {
 		t.Fatalf("existingPoolSlot(stamped live slot) = %d, want 7", slot)
-	}
-	used := map[int]bool{}
-	if slot := claimPoolSlot(cfgAgent, bead, used); slot != 7 {
-		t.Fatalf("claimPoolSlot(stamped live slot) = %d, want 7", slot)
 	}
 }
 

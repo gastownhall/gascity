@@ -95,7 +95,7 @@ func computePoolDesiredStates(
 		if sb.Status == "closed" {
 			continue
 		}
-		template := strings.TrimSpace(sb.Metadata["template"])
+		template := strings.TrimSpace(normalizedSessionTemplate(sb, cfg))
 		if template != "" {
 			sessionBeadTemplate[sb.ID] = template
 		}
