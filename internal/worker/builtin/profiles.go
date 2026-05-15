@@ -290,6 +290,18 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		InstructionsFile:  "AGENTS.md",
 		ResumeFlag:        "--resume",
 		ResumeStyle:       "flag",
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:     "mcp_approval",
+				Label:   "MCP Approval",
+				Type:    "select",
+				Default: "prompt",
+				Choices: []BuiltinOptionChoice{
+					{Value: "prompt", Label: "Prompt for MCP approval"},
+					{Value: "approve", Label: "Approve visible MCP servers", FlagArgs: []string{"--approve-mcps"}},
+				},
+			},
+		},
 	},
 	"copilot": {
 		DisplayName: "GitHub Copilot",
@@ -375,6 +387,19 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ProcessNames:     []string{"pi", "node", "bun"},
 		SupportsHooks:    true,
 		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--session",
+		ResumeStyle:      "flag",
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "ollama-cloud-gpt-oss-20b", Label: "Ollama Cloud GPT-OSS 20B", FlagArgs: []string{"--provider", "ollama-cloud", "--model", "gpt-oss:20b"}},
+				},
+			},
+		},
 	},
 	"omp": {
 		DisplayName:      "Oh My Pi (OMP)",
@@ -419,6 +444,8 @@ func CanonicalProfileIdentity(profile string) (ProfileIdentity, bool) {
 		return newProfileIdentity(profile, "gemini"), true
 	case "opencode/tmux-cli":
 		return newProfileIdentity(profile, "opencode"), true
+	case "pi/tmux-cli":
+		return newProfileIdentity(profile, "pi"), true
 	default:
 		return ProfileIdentity{}, false
 	}

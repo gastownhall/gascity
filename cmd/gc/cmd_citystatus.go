@@ -271,6 +271,11 @@ func doCityStatusWithStoreAndSnapshot(
 	snapshot := collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, statusSnapshot, stderr)
 	renderCityStatusText(snapshot, dops, stdout)
 
+	// Track session-snapshot degradation so we can render the textual report
+	// AND signal the failure via exit code. Restores the pre-#2005 contract
+	// that monitoring callers rely on (see #2147).
+	snapshotDegraded := statusSnapshot.LoadError() != nil
+
 	if store != nil {
 		sessions, err := collectCitySessionCounts(cityPath, store, sp, cfg, statusSnapshot)
 		if err != nil {
@@ -283,6 +288,9 @@ func doCityStatusWithStoreAndSnapshot(
 		}
 	}
 
+	if snapshotDegraded {
+		return 1
+	}
 	return 0
 }
 
@@ -310,6 +318,10 @@ func doCityStatusJSONWithStoreAndSnapshot(
 	stdout, stderr io.Writer,
 ) int {
 	snapshot := collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, statusSnapshot, stderr)
+	// Track session-snapshot degradation so we can emit the JSON payload AND
+	// signal the failure via exit code. Restores the pre-#2005 contract that
+	// monitoring callers rely on (see #2147).
+	snapshotDegraded := statusSnapshot.LoadError() != nil
 	if store != nil {
 		sessions, err := collectCitySessionCounts(cityPath, store, sp, cfg, statusSnapshot)
 		if err != nil {
@@ -327,6 +339,9 @@ func doCityStatusJSONWithStoreAndSnapshot(
 		return 1
 	}
 	fmt.Fprintln(stdout, string(data)) //nolint:errcheck // best-effort stdout
+	if snapshotDegraded {
+		return 1
+	}
 	return 0
 }
 

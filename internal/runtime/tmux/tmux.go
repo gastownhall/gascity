@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -34,6 +35,8 @@ import (
 // ---------------------------------------------------------------------------
 
 const pollInterval = 100 * time.Millisecond
+
+var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "gemini", "opencode", "pi"}
 
 // Config holds configurable timeouts and intervals for the tmux provider.
 // All fields have sensible defaults matching the original hardcoded values.
@@ -1490,14 +1493,8 @@ func (t *Tmux) NudgePane(pane, message string) error {
 
 func (t *Tmux) shouldSendEscapeBeforeEnter(target string) bool {
 	provider, err := t.GetEnvironment(target, "GC_PROVIDER")
-	if err == nil {
-		switch strings.TrimSpace(provider) {
-		case "claude", "codex", "gemini", "opencode":
-			return false
-		default:
-			// Unrecognized provider (custom alias) — fall through to
-			// process-tree detection instead of assuming escape is needed.
-		}
+	if err == nil && providerEnvSkipsEscape(provider) {
+		return false
 	}
 	if t.targetLooksLikeNoEscapeProvider(target) {
 		return false
@@ -1505,9 +1502,18 @@ func (t *Tmux) shouldSendEscapeBeforeEnter(target string) bool {
 	return true
 }
 
+func providerEnvSkipsEscape(provider string) bool {
+	family := sessionlog.ProviderFamily(provider)
+	for _, noEscape := range providersSkippingEscapeBeforeEnter {
+		if family == noEscape {
+			return true
+		}
+	}
+	return false
+}
+
 func (t *Tmux) targetLooksLikeNoEscapeProvider(target string) bool {
-	noEscapeProviders := []string{"claude", "codex", "gemini", "opencode"}
-	return t.targetLooksLikeAnyProvider(target, noEscapeProviders...)
+	return t.targetLooksLikeAnyProvider(target, providersSkippingEscapeBeforeEnter...)
 }
 
 func (t *Tmux) targetLooksLikeProvider(target, provider string) bool {

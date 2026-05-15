@@ -145,7 +145,8 @@ bd_to_gc() {
     metadata: ((
       ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
       + (.metadata // {})
-    ) | map_values(tostring))
+    ) | map_values(tostring)),
+    ephemeral: (.ephemeral // false)
   }'
 }
 
@@ -168,8 +169,17 @@ bd_list_to_gc() {
     metadata: ((
       ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
       + (.metadata // {})
-    ) | map_values(tostring))
+    ) | map_values(tostring)),
+    ephemeral: (.ephemeral // false)
   }]'
+}
+
+# bd_list_all_tiers returns raw bd JSON for permanent issues plus ephemeral
+# wisps. The Go exec store applies final filters and tier selection.
+bd_list_all_tiers() {
+  jq -s 'map(select(type == "array")) | add // [] | unique_by(.id)' \
+    <(run_bd list --json --limit 0 --all) \
+    <(run_bd query --json "ephemeral=true" --all --limit 0)
 }
 
 # join_labels joins an array of labels with commas for bd --labels flag.
@@ -326,6 +336,9 @@ case "$op" in
     # Build create command.
     cmd_args=(create --json --type="$bead_type")
     [ -n "$description" ] && cmd_args+=(--description "$description")
+    if [ "$(echo "$input" | jq -r '.ephemeral // false')" = "true" ]; then
+      cmd_args+=(--ephemeral)
+    fi
     if [ ${#all_labels[@]} -gt 0 ]; then
       cmd_args+=(--labels "$(join_labels "${all_labels[@]}")")
     fi
@@ -374,7 +387,7 @@ case "$op" in
     ;;
 
   list)
-    run_bd list --json --limit 0 --all | bd_list_to_gc
+    bd_list_all_tiers | bd_list_to_gc
     ;;
 
   ready)
@@ -384,17 +397,19 @@ case "$op" in
   children)
     parent_id="${1:?children: missing parent_id}"
     # Sort by created_at to match the "in creation order" contract.
-    run_bd list --json --all --label "parent:$parent_id" | bd_list_to_gc | jq 'sort_by(.created_at)'
+    bd_list_all_tiers | bd_list_to_gc | jq --arg pid "$parent_id" '[.[] | select(.parent_id == $pid)] | sort_by(.created_at)'
     ;;
 
   list-by-label)
     label="${1:?list-by-label: missing label}"
     limit="${2:-0}"
-    if [ "$limit" -gt 0 ] 2>/dev/null; then
-      run_bd list --json --all --label "$label" --limit "$limit" | bd_list_to_gc
-    else
-      run_bd list --json --all --label "$label" | bd_list_to_gc
+    if ! [[ "$limit" =~ ^[0-9]+$ ]]; then
+      limit=0
     fi
+    bd_list_all_tiers | bd_list_to_gc | jq --arg label "$label" --argjson lim "$limit" '
+      [.[] | select(.labels | index($label))]
+      | if $lim > 0 then .[:$lim] else . end
+    '
     ;;
 
   set-metadata)

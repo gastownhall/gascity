@@ -695,8 +695,13 @@ func (cs *controllerState) CityBeadStore() beads.Store {
 	return cs.cityBeadStore
 }
 
-// Orders scans formula layers and returns all orders.
+// Orders scans formula layers and returns active orders.
 func (cs *controllerState) Orders() []orders.Order {
+	return orders.FilterEnabled(cs.OrdersAll())
+}
+
+// OrdersAll scans formula layers and returns all orders after overrides.
+func (cs *controllerState) OrdersAll() []orders.Order {
 	cs.mu.RLock()
 	cfg := cs.cfg
 	cs.mu.RUnlock()
@@ -707,7 +712,9 @@ func (cs *controllerState) Orders() []orders.Order {
 	}
 
 	if len(cfg.Orders.Overrides) > 0 {
-		orders.ApplyOverrides(allAA, convertOverrides(cfg.Orders.Overrides)) //nolint:errcheck // best-effort
+		if err := orders.ApplyOverrides(allAA, convertOverrides(cfg.Orders.Overrides)); err != nil {
+			log.Printf("gc api: applying order overrides for %s: %v", cs.cityPath, err)
+		}
 	}
 
 	return allAA

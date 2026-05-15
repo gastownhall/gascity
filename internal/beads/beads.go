@@ -33,6 +33,11 @@ type Bead struct {
 	Labels       []string          `json:"labels,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	Dependencies []Dep             `json:"dependencies,omitempty"`
+	// Ephemeral routes the bead to the wisps tier on Create. Wisps live in
+	// a separate Dolt table, are not git-synced, and are eligible for TTL
+	// garbage collection. Reads must opt in via ListQuery.TierMode (or the
+	// WithEphemeral/WithBothTiers QueryOpts on the legacy label helpers).
+	Ephemeral bool `json:"ephemeral,omitempty"`
 }
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.
@@ -120,6 +125,13 @@ const (
 	// IncludeClosed extends the query to include closed beads.
 	// Without this, cached queries only return non-closed beads.
 	IncludeClosed QueryOpt = iota + 1
+	// WithEphemeral routes the legacy label helpers (ListByLabel,
+	// ListByMetadata) at the wisps tier instead of the default issues tier.
+	WithEphemeral
+	// WithBothTiers unions the issues and wisps tiers in a single query.
+	// Mutually exclusive with WithEphemeral; if both are passed,
+	// WithBothTiers wins.
+	WithBothTiers
 )
 
 // HasOpt returns true if opts contains the given option.

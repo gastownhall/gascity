@@ -21,7 +21,10 @@ var (
 	liveSetup providerSetup
 )
 
-const defaultOpenCodeGeminiModel = "google/gemini-2.5-flash"
+const (
+	defaultOpenCodeGeminiModel = "google/gemini-2.5-flash"
+	defaultPiOllamaCloudModel  = "gpt-oss:20b"
+)
 
 type providerSetup struct {
 	Profile      workerpkg.Profile
@@ -127,6 +130,8 @@ func resolveProfile(raw string) workerpkg.Profile {
 		return workerpkg.ProfileGeminiTmuxCLI
 	case string(workerpkg.ProfileOpenCodeTmuxCLI):
 		return workerpkg.ProfileOpenCodeTmuxCLI
+	case string(workerpkg.ProfilePiTmuxCLI):
+		return workerpkg.ProfilePiTmuxCLI
 	default:
 		return workerpkg.Profile(strings.TrimSpace(raw))
 	}
@@ -142,6 +147,8 @@ func profileProvider(profile workerpkg.Profile) string {
 		return "gemini"
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return "opencode"
+	case workerpkg.ProfilePiTmuxCLI:
+		return "pi"
 	default:
 		return ""
 	}
@@ -155,6 +162,8 @@ func profileSearchPaths(gcHome string, profile workerpkg.Profile) []string {
 		return []string{filepath.Join(gcHome, ".gemini", "tmp")}
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return []string{filepath.Join(gcHome, ".local", "share", "gascity", "opencode-transcripts")}
+	case workerpkg.ProfilePiTmuxCLI:
+		return []string{filepath.Join(gcHome, ".pi", "agent", "sessions")}
 	default:
 		return []string{filepath.Join(gcHome, ".claude", "projects")}
 	}
@@ -170,6 +179,8 @@ func stageProviderAuth(gcHome string, env *helpers.Env, profile workerpkg.Profil
 		return stageGeminiAuth(gcHome, env)
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return stageOpenCodeGeminiAuth(gcHome, env)
+	case workerpkg.ProfilePiTmuxCLI:
+		return stagePiOllamaCloudAuth(gcHome, env)
 	default:
 		return "", fmt.Errorf("unsupported worker-inference profile %q", profile)
 	}
@@ -430,6 +441,66 @@ func stageOpenCodeGeminiAuth(gcHome string, env *helpers.Env) (string, error) {
 		return "env:OPENCODE_AUTH_CONTENT", nil
 	}
 	return "", fmt.Errorf("opencode gemini auth unavailable: set GOOGLE_GENERATIVE_AI_API_KEY/GEMINI_API_KEY/GOOGLE_API_KEY or OPENCODE_AUTH_CONTENT")
+}
+
+func stagePiOllamaCloudAuth(gcHome string, env *helpers.Env) (string, error) {
+	piDir := filepath.Join(gcHome, ".pi", "agent")
+	sessionDir := filepath.Join(piDir, "sessions")
+	xdgData := filepath.Join(gcHome, ".local", "share")
+	transcriptDir := filepath.Join(xdgData, "gascity", "pi-transcripts")
+	for _, dir := range []string{piDir, sessionDir, transcriptDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+	}
+	env.With("PI_CODING_AGENT_DIR", piDir).
+		With("PI_CODING_AGENT_SESSION_DIR", sessionDir).
+		With("GC_PI_TRANSCRIPT_DIR", transcriptDir)
+
+	stagedKey, keyFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_PI_OLLAMA_API_KEY",
+		"GC_WORKER_INFERENCE_PI_OLLAMA_API_KEY_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("pi ollama cloud auth unavailable: %w", err)
+	}
+	if stagedKey != "" {
+		if err := writePiOllamaCloudAuth(piDir, stagedKey); err != nil {
+			return "", fmt.Errorf("pi ollama cloud auth unavailable: %w", err)
+		}
+		env.Without("OLLAMA_API_KEY")
+		return stagedSecretSource("pi-ollama-cloud", keyFromFile), nil
+	}
+	if apiKey := strings.TrimSpace(os.Getenv("OLLAMA_API_KEY")); apiKey != "" {
+		if err := writePiOllamaCloudAuth(piDir, apiKey); err != nil {
+			return "", fmt.Errorf("pi ollama cloud auth unavailable: %w", err)
+		}
+		env.Without("OLLAMA_API_KEY")
+		return "env:OLLAMA_API_KEY", nil
+	}
+	return "", fmt.Errorf("pi ollama cloud auth unavailable: set OLLAMA_API_KEY or stage GC_WORKER_INFERENCE_PI_OLLAMA_API_KEY")
+}
+
+func writePiOllamaCloudAuth(piDir, apiKey string) error {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return fmt.Errorf("empty ollama cloud api key")
+	}
+	auth := map[string]map[string]string{
+		"ollama-cloud": {
+			"type": "api_key",
+			"key":  apiKey,
+		},
+	}
+	data, err := json.MarshalIndent(auth, "", "  ")
+	if err != nil {
+		return err
+	}
+	authPath := filepath.Join(piDir, "auth.json")
+	if err := os.WriteFile(authPath, append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(authPath, 0o600)
 }
 
 func copySanitizedGeminiSettingsIfExists(src, dst string) error {

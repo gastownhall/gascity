@@ -297,6 +297,34 @@ func peekBeadsProvider(tomlPath string) string {
 	return peek.Beads.Provider
 }
 
+// peekEventsProvider reads just the events.provider field from a city.toml
+// without doing full config parsing. Returns "" if not set or on error.
+//
+// Used by gc event emit (called from bd hooks on every bead write) to avoid
+// the full loadCityConfig path, which resolves [imports] and runs
+// `git status --porcelain --ignored` against every cached pack-source repo
+// — slow on hosts where a pack source is a large monorepo, and fan-out
+// concurrent across a bd-write burst (see gastownhall/gascity#2099).
+//
+// Trade-off: include/import/pack-provided overrides of [events].provider are
+// not honored on this hook fast path. Operators that need this path to bypass
+// city.toml should use the GC_EVENTS env var.
+func peekEventsProvider(tomlPath string) string {
+	data, err := os.ReadFile(tomlPath)
+	if err != nil {
+		return ""
+	}
+	var peek struct {
+		Events struct {
+			Provider string `toml:"provider"`
+		} `toml:"events"`
+	}
+	if _, err := toml.Decode(string(data), &peek); err != nil {
+		return ""
+	}
+	return peek.Events.Provider
+}
+
 // materializeFS walks an embed.FS rooted at root, writes all files to dstDir,
 // and returns the relative file paths that belong in the generated directory.
 func materializeFS(embedded fs.FS, root, dstDir string) (map[string]struct{}, error) {

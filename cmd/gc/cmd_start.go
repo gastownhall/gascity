@@ -360,6 +360,10 @@ func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr 
 		fmt.Fprintln(stderr, "gc start: install the missing dependencies, then try again") //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if status := checkDoltAuthorIdentity(cityPath); status.blocked() {
+		printDoltAuthorIdentityBlock(stderr, "gc start", status)
+		return 1
+	}
 	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, stdout, stderr, "gc start", true); code != 0 {
 		return code
 	}
@@ -425,6 +429,23 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	}
 	if err := ensureCityScaffold(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc start: runtime scaffold: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if missing := checkHardDependencies(cityPath); len(missing) > 0 {
+		fmt.Fprintf(stderr, "gc start: missing required dependencies:\n\n") //nolint:errcheck // best-effort stderr
+		for _, dep := range missing {
+			fmt.Fprintf(stderr, "  - %s", dep.name) //nolint:errcheck // best-effort stderr
+			if dep.installHint != "" {
+				fmt.Fprintf(stderr, "\n    Install: %s", dep.installHint) //nolint:errcheck // best-effort stderr
+			}
+			fmt.Fprintln(stderr) //nolint:errcheck // best-effort stderr
+		}
+		fmt.Fprintln(stderr)                                                               //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "gc start: install the missing dependencies, then try again") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if status := checkDoltAuthorIdentity(cityPath); status.blocked() {
+		printDoltAuthorIdentityBlock(stderr, "gc start", status)
 		return 1
 	}
 	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
@@ -625,7 +646,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		oneShotStore = store
 
 		// Run adoption barrier before sync.
-		result, passed := runAdoptionBarrier(store, sp, cfg, cityName, clock.Real{}, stderr, false)
+		result, passed := runAdoptionBarrier(cityPath, store, sp, cfg, cityName, clock.Real{}, stderr, false)
 		if result.Adopted > 0 {
 			fmt.Fprintf(stdout, "Adopted %d running session(s) into bead store.\n", result.Adopted) //nolint:errcheck
 		}

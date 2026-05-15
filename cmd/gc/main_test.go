@@ -156,6 +156,16 @@ func explicitAgents(agents []config.Agent) []config.Agent {
 	return out
 }
 
+func configureFSPressureForTests() {
+	fsPressurePath = "/test/pressure/io"
+	fsPressureReadFile = func(path string) ([]byte, error) {
+		if path != fsPressurePath {
+			return nil, fmt.Errorf("unexpected FS pressure path %q", path)
+		}
+		return []byte("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"), nil
+	}
+}
+
 func TestMain(m *testing.M) {
 	gcHome, err := os.MkdirTemp("", "gascity-gc-home-*")
 	if err != nil {
@@ -183,6 +193,7 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("PATH", pathValue); err != nil {
 		panic(err)
 	}
+	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
 	testscript.Main(m, map[string]func(){
 		"gc": func() {

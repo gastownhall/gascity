@@ -71,6 +71,10 @@ const workflowFinalizeErrorMetadataKey = "gc.last_finalize_error"
 // should be retried later.
 var ErrControlPending = errors.New("workflow control pending")
 
+// ErrControlGraphMalformed reports that a control bead refers to graph state
+// that cannot become valid by waiting.
+var ErrControlGraphMalformed = errors.New("workflow control graph malformed")
+
 // ProcessControl executes a graph.v2 control bead.
 //
 // The current graph.v2 runtime assumes a single controller processes a given
@@ -171,7 +175,7 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	})
 	if err != nil {
 		if errors.Is(err, errScopeBodyMissing) {
-			return ControlResult{}, ErrControlPending
+			return ControlResult{}, fmt.Errorf("%w: %w", ErrControlGraphMalformed, err)
 		}
 		return ControlResult{}, fmt.Errorf("%s: loading scope body for %s: %w", bead.ID, scopeRef, err)
 	}
@@ -333,7 +337,7 @@ func loadScopeSnapshotForControl(store beads.Store, rootID, scopeRef string, bod
 	})
 	if err != nil {
 		if errors.Is(err, errScopeBodyMissing) {
-			return scopeSnapshot{}, ErrControlPending
+			return scopeSnapshot{}, fmt.Errorf("%w: %w", ErrControlGraphMalformed, err)
 		}
 		return scopeSnapshot{}, fmt.Errorf("%s: loading scope snapshot for %s: %w", controlID, scopeRef, err)
 	}
@@ -349,14 +353,6 @@ type scopeSnapshot struct {
 	allComplete bool
 	members     []beads.Bead
 	body        beads.Bead
-}
-
-func loadScopeSnapshot(store beads.Store, rootID, scopeRef string) (scopeSnapshot, error) {
-	body, err := resolveScopeBody(store, rootID, scopeRef)
-	if err != nil {
-		return scopeSnapshot{}, err
-	}
-	return loadScopeSnapshotWithBody(store, rootID, scopeRef, body)
 }
 
 func loadScopeSnapshotWithBody(store beads.Store, rootID, scopeRef string, body beads.Bead) (scopeSnapshot, error) {
@@ -570,17 +566,6 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.Store, skipControlID str
 	}
 
 	return skipped, nil
-}
-
-// propagateScopeMemberMetadata merges non-gc metadata from all closed scope
-// members onto the scope body. Later members overwrite earlier ones for the
-// same key, so the final state reflects the last step's output.
-func propagateScopeMemberMetadata(store beads.Store, rootID, scopeRef, bodyID string) error {
-	snapshot, err := loadScopeSnapshot(store, rootID, scopeRef)
-	if err != nil {
-		return err
-	}
-	return snapshot.propagateScopeMemberMetadata(store, bodyID)
 }
 
 func isRetryAttemptSubject(subject beads.Bead) bool {
@@ -1008,20 +993,24 @@ func reconcileTerminalScopedMember(store beads.Store, bead beads.Bead) (ControlR
 	body, err := resolveScopeBody(store, rootID, scopeRef)
 	if err != nil {
 		if errors.Is(err, errScopeBodyMissing) {
-			return ControlResult{}, ErrControlPending
+			return ControlResult{}, fmt.Errorf("%w: %w", ErrControlGraphMalformed, err)
 		}
 		return ControlResult{}, fmt.Errorf("%s: loading scope body for %s: %w", bead.ID, scopeRef, err)
 	}
 
 	if bead.Metadata["gc.outcome"] == "fail" {
-		skipped, err := skipOpenScopeMembers(store, rootID, scopeRef, bead.ID)
+		snapshot, err := loadScopeSnapshotWithBody(store, rootID, scopeRef, body)
+		if err != nil {
+			return ControlResult{}, fmt.Errorf("%s: loading scope snapshot for %s: %w", bead.ID, scopeRef, err)
+		}
+		skipped, err := snapshot.skipOpenScopeMembers(store, bead.ID)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: aborting scope: %w", bead.ID, err)
 		}
 		if body.Status != "closed" {
 			// Propagate non-gc.* member metadata (e.g., review.verdict) onto the
 			// scope body before closing, so diagnostics survive failure auto-close.
-			if err := propagateScopeMemberMetadata(store, rootID, scopeRef, body.ID); err != nil {
+			if err := snapshot.propagateScopeMemberMetadata(store, body.ID); err != nil {
 				return ControlResult{}, fmt.Errorf("%s: propagating scope metadata: %w", bead.ID, err)
 			}
 			if err := setOutcomeAndClose(store, body.ID, "fail"); err != nil {
@@ -1046,10 +1035,14 @@ func reconcileTerminalScopedMember(store beads.Store, bead beads.Bead) (ControlR
 	if bodyAfter.Status == "closed" {
 		return ControlResult{}, nil
 	}
-	if err := propagateScopeMemberMetadata(store, rootID, scopeRef, body.ID); err != nil {
+	snapshot, err := loadScopeSnapshotWithBody(store, rootID, scopeRef, body)
+	if err != nil {
+		return ControlResult{}, fmt.Errorf("%s: loading scope snapshot for %s: %w", bead.ID, scopeRef, err)
+	}
+	if err := snapshot.propagateScopeMemberMetadata(store, body.ID); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: propagating scope metadata: %w", bead.ID, err)
 	}
-	outputJSON, err := resolveScopeOutputJSON(store, rootID, scopeRef, bead)
+	outputJSON, err := snapshot.resolveScopeOutputJSON(bead)
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: resolving scope output: %w", bead.ID, err)
 	}
@@ -1116,14 +1109,6 @@ func resolveScopeBodyByRole(store beads.Store, rootID, scopeRef string, includeC
 		}
 	}
 	return beads.Bead{}, false, nil
-}
-
-func skipOpenScopeMembers(store beads.Store, rootID, scopeRef, skipControlID string) (int, error) {
-	snapshot, err := loadScopeSnapshot(store, rootID, scopeRef)
-	if err != nil {
-		return 0, err
-	}
-	return snapshot.skipOpenScopeMembers(store, skipControlID)
 }
 
 func canSkipScopeMember(store beads.Store, beadID string, pending map[string]beads.Bead) bool {
@@ -1286,12 +1271,4 @@ func resolveFinalizeOutcome(store beads.Store, beadID string) (string, error) {
 		}
 	}
 	return outcome, nil
-}
-
-func resolveScopeOutputJSON(store beads.Store, rootID, scopeRef string, subject beads.Bead) (string, error) {
-	snapshot, err := loadScopeSnapshot(store, rootID, scopeRef)
-	if err != nil {
-		return "", err
-	}
-	return snapshot.resolveScopeOutputJSON(subject)
 }

@@ -15,6 +15,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
@@ -29,6 +31,10 @@ var configFS embed.FS
 // supported lists provider names that have hook support wired into
 // Gas Town's installer.
 var supported = []string{"claude", "codex", "gemini", "kiro", "opencode", "copilot", "cursor", "pi", "omp"}
+
+const managedPiHookVersion = 4
+
+var piHookVersionPattern = regexp.MustCompile(`\bGC_PI_HOOK_VERSION\s*=\s*([0-9]+)\b`)
 
 // unwiredHookProviders lists provider names whose own CLIs do expose a
 // hook mechanism (per upstream documentation) but for which Gas Town
@@ -198,6 +204,13 @@ func piHookNeedsUpgrade(existing []byte) bool {
 	if !strings.Contains(content, "Gas City hooks for Pi Coding Agent") {
 		return false
 	}
+	if piHookVersion(content) < managedPiHookVersion ||
+		!strings.Contains(content, "gc prime --hook") ||
+		!strings.Contains(content, "gc hook --inject") ||
+		!strings.Contains(content, "gc handoff --auto") ||
+		!strings.Contains(content, "mirrorTempCounter") {
+		return true
+	}
 	for _, marker := range []string{
 		"module.exports = {",
 		`"session.created"`,
@@ -210,6 +223,18 @@ func piHookNeedsUpgrade(existing []byte) bool {
 		}
 	}
 	return false
+}
+
+func piHookVersion(content string) int {
+	match := piHookVersionPattern.FindStringSubmatch(content)
+	if len(match) != 2 {
+		return 0
+	}
+	version, err := strconv.Atoi(match[1])
+	if err != nil {
+		return 0
+	}
+	return version
 }
 
 // installClaude writes the runtime settings file (.gc/settings.json) in the
@@ -267,10 +292,12 @@ func readEmbedded(embedPath ...string) ([]byte, error) {
 }
 
 func writeEmbeddedManaged(fs fsys.FS, dst string, data []byte, needsUpgrade func([]byte) bool) error {
+	var backup []byte
 	if existing, err := fs.ReadFile(dst); err == nil {
 		if needsUpgrade == nil || !needsUpgrade(existing) {
 			return nil
 		}
+		backup = append([]byte(nil), existing...)
 	} else if _, statErr := fs.Stat(dst); statErr == nil {
 		// File exists but isn't readable. Preserve it rather than clobbering it.
 		return nil
@@ -280,11 +307,36 @@ func writeEmbeddedManaged(fs fsys.FS, dst string, data []byte, needsUpgrade func
 	if err := fs.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", dir, err)
 	}
+	if backup != nil {
+		backupPath, err := nextManagedBackupPath(fs, dst)
+		if err != nil {
+			return err
+		}
+		if err := fs.WriteFile(backupPath, backup, 0o644); err != nil {
+			return fmt.Errorf("backing up %s to %s: %w", dst, backupPath, err)
+		}
+	}
 
 	if err := fs.WriteFile(dst, data, 0o644); err != nil {
 		return fmt.Errorf("writing %s: %w", dst, err)
 	}
 	return nil
+}
+
+func nextManagedBackupPath(fs fsys.FS, dst string) (string, error) {
+	base := dst + ".bak"
+	for i := 0; ; i++ {
+		candidate := base
+		if i > 0 {
+			candidate = fmt.Sprintf("%s.%d", base, i)
+		}
+		if _, err := fs.Stat(candidate); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return candidate, nil
+			}
+			return "", fmt.Errorf("checking backup %s: %w", candidate, err)
+		}
+	}
 }
 
 type claudeSettingsSourceKind int

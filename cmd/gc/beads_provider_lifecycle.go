@@ -200,7 +200,7 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
 	provider := beadsProvider(cityPath)
 	if cityUsesBdStoreContract(cityPath) {
-		if os.Getenv("GC_DOLT") == "skip" {
+		if gcDoltSkip() {
 			// Defer to controller/startup without forcing a new dolt_database:
 			// preserve existing metadata identity when present.
 			if err := seedDeferredManagedBeadsErr(cityPath, dir, prefix, ""); err != nil {
@@ -442,6 +442,19 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		if err := initAndHookDirWaitForScopeReady(dir, cityPath, time.Now().Add(10*time.Second)); err != nil {
 			return fmt.Errorf("waiting for initialized bead scope readiness: %w", err)
 		}
+		// Strong post-init validation: confirm the canonical database
+		// actually exists on the running Dolt server. The scope-ready
+		// check above pings via the bead store, which has historically
+		// returned ok against a server that knows the database name in
+		// metadata but doesn't have it in its catalog (gascity-3
+		// reproducer where bd init's CREATE DATABASE was silently
+		// swallowed and the city's hq was never created). An explicit
+		// SHOW DATABASES check fails fast at the actual init step
+		// instead of leaking the failure to a downstream "database not
+		// found" at gc session attach time.
+		if err := verifyManagedDoltDatabaseExistsAfterInit(cityPath, dir, doltDatabase); err != nil {
+			return fmt.Errorf("verifying canonical scope database after init: %w", err)
+		}
 	}
 	// Non-fatal: hooks are convenience (event forwarding), not critical.
 	if err := installBeadHooks(dir); err != nil {
@@ -502,6 +515,69 @@ func allowLegacyDoltMetadataRepair(fs fsys.FS, path string, err error) bool {
 		strings.TrimSpace(raw.PostgresDatabase) == ""
 }
 
+// verifyManagedDoltDatabaseExistsAfterInit confirms the named database is
+// present in the running managed Dolt server's catalog. Used as a post-init
+// guardrail to catch the silent-init failure mode where bd init reports
+// success but the database was never actually created. Returns nil when
+// the database is found, or an actionable error otherwise.
+//
+// The function is a no-op (returns nil) when the city does not use the bd
+// store contract or when no managed Dolt port is published — the caller
+// already gates on those conditions, but we double-check defensively so
+// the helper is safe to call from new sites without re-checking.
+var verifyManagedDoltDatabaseExistsAfterInit = func(cityPath, dir, dbName string) error {
+	if !cityUsesBdStoreContract(cityPath) {
+		return nil
+	}
+	port := currentManagedDoltPort(cityPath)
+	if port == "" {
+		return nil
+	}
+	dbName = strings.TrimSpace(dbName)
+	if dbName == "" {
+		return nil
+	}
+	if isLegacyManagedDoltProbeDatabase(dbName) {
+		// Startup normalization preserves this one legacy reserved database
+		// when existing metadata already uses it as the real bead store.
+		return nil
+	}
+
+	dbs, err := managedDoltListUserDatabasesAfterInit(port)
+	if err != nil {
+		return err
+	}
+	for _, d := range dbs {
+		if strings.EqualFold(d, dbName) {
+			return nil
+		}
+	}
+	return fmt.Errorf("database %q not found in managed Dolt server catalog after init for scope %s (server-visible: %v); bd init reported success but the database was never created — usually means CREATE DATABASE was swallowed (see gc-beads-bd.sh)", dbName, dir, dbs)
+}
+
+var managedDoltListUserDatabasesAfterInit = func(port string) ([]string, error) {
+	host, user := managedDoltConnectHost(""), "root"
+	db, err := managedDoltOpenDB(host, port, user)
+	if err != nil {
+		return nil, fmt.Errorf("connect to managed Dolt at %s:%s: %w", host, port, err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire connection to managed Dolt: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck
+
+	dbs, err := managedDoltSelectUserDatabasesFromConn(ctx, conn)
+	if err != nil {
+		return nil, fmt.Errorf("list databases on managed Dolt: %w", err)
+	}
+	return dbs, nil
+}
+
 func shouldRetryExecBdInit(err error) bool {
 	if err == nil {
 		return false
@@ -537,7 +613,7 @@ func resolveRigPaths(cityPath string, rigs []config.Rig) {
 // Acquires a per-city semaphore to prevent concurrent start operations
 // from causing spawn storms.
 func ensureBeadsProvider(cityPath string) error {
-	if cityUsesBdStoreContract(cityPath) && strings.TrimSpace(os.Getenv("GC_DOLT")) == "skip" {
+	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
 		return nil
 	}
 	provider := beadsProvider(cityPath)
@@ -579,7 +655,7 @@ func ensureBeadsProvider(cityPath string) error {
 // Called by gc stop after agents have been terminated.
 // For exec providers, fires "stop". For file providers, always available.
 func shutdownBeadsProvider(cityPath string) error {
-	if cityUsesBdStoreContract(cityPath) && strings.TrimSpace(os.Getenv("GC_DOLT")) == "skip" {
+	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
 		return clearManagedDoltRuntimeStateIfOwned(cityPath)
 	}
 	provider := beadsProvider(cityPath)
@@ -619,7 +695,7 @@ func shutdownBeadsProvider(cityPath string) error {
 // providers that run bd init elsewhere (for example gc-beads-k8s inside the
 // pod) must set it in their own wrapper before invoking bd init.
 func initBeadsForDir(cityPath, dir, prefix, doltDatabase string) error {
-	if cityUsesBdStoreContract(cityPath) && os.Getenv("GC_DOLT") == "skip" {
+	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
 		if err := seedDeferredManagedBeadsErr(cityPath, dir, prefix, doltDatabase); err != nil {
 			return err
 		}
@@ -808,7 +884,7 @@ func initFileStoreForDir(cityPath, dir string) error {
 // Acquires a per-city semaphore to prevent concurrent health/recovery
 // operations from causing a thundering herd when dolt bounces.
 func healthBeadsProvider(cityPath string) error {
-	if cityUsesBdStoreContract(cityPath) && strings.TrimSpace(os.Getenv("GC_DOLT")) == "skip" {
+	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
 		return nil
 	}
 	provider := beadsProvider(cityPath)

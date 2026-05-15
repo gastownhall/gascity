@@ -15,6 +15,55 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+// TestPeekEventsProvider asserts the fast city.toml read path used by
+// `gc event emit` (gastownhall/gascity#2099) — it must return the
+// configured provider without doing any pack-include resolution.
+func TestPeekEventsProvider(t *testing.T) {
+	t.Run("set_in_city_toml", func(t *testing.T) {
+		dir := t.TempDir()
+		tomlPath := filepath.Join(dir, "city.toml")
+		if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city\"\n\n[events]\nprovider = \"exec:/usr/local/bin/my-handler\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := peekEventsProvider(tomlPath); got != "exec:/usr/local/bin/my-handler" {
+			t.Fatalf("peekEventsProvider = %q, want %q", got, "exec:/usr/local/bin/my-handler")
+		}
+	})
+
+	t.Run("section_absent", func(t *testing.T) {
+		dir := t.TempDir()
+		tomlPath := filepath.Join(dir, "city.toml")
+		if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"city\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := peekEventsProvider(tomlPath); got != "" {
+			t.Fatalf("peekEventsProvider = %q, want empty", got)
+		}
+	})
+
+	t.Run("file_missing", func(t *testing.T) {
+		if got := peekEventsProvider(filepath.Join(t.TempDir(), "nope.toml")); got != "" {
+			t.Fatalf("peekEventsProvider missing-file = %q, want empty", got)
+		}
+	})
+
+	// The whole point of this helper is to skip pack resolution. A
+	// well-formed [imports] block referencing a remote pack with no
+	// matching packs.lock entry MUST NOT cause peekEventsProvider to
+	// error or shell out — it should still return the [events] value.
+	t.Run("ignores_unresolved_imports", func(t *testing.T) {
+		dir := t.TempDir()
+		tomlPath := filepath.Join(dir, "city.toml")
+		body := "[workspace]\nname = \"city\"\nincludes = [\"git://example.invalid/foo//bar\"]\n\n[events]\nprovider = \"exec:./my-handler\"\n"
+		if err := os.WriteFile(tomlPath, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := peekEventsProvider(tomlPath); got != "exec:./my-handler" {
+			t.Fatalf("peekEventsProvider = %q, want %q (unresolved imports must not block the peek)", got, "exec:./my-handler")
+		}
+	})
+}
+
 func TestMaterializeBuiltinPacks(t *testing.T) {
 	dir := t.TempDir()
 
@@ -363,13 +412,18 @@ func TestMaterializeBuiltinPacksPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
 		`pi.on("before_agent_start"`,
+		"GC_PI_HOOK_VERSION",
+		"gc hook --inject",
+		`run(["prime", "--hook"], ctx.cwd)`,
+		"gc handoff --auto",
+		"mirrorTempCounter",
+		"fs.rmSync(tmp",
+		"gc-hooks run:",
+		"gc-hooks mirrorTranscript:",
 	} {
 		if !strings.Contains(data, want) {
 			t.Errorf("materialized Pi hook missing current extension API marker %q:\n%s", want, data)
 		}
-	}
-	if strings.Contains(data, "gc hook --inject") {
-		t.Errorf("materialized Pi hook should not install no-op gc hook --inject:\n%s", data)
 	}
 	for _, legacy := range []string{
 		"module.exports = {",

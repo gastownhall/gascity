@@ -1334,6 +1334,71 @@ func TestRuntimeHandleLiveObservationUsesRuntimeMetadataAndLiveness(t *testing.T
 	}
 }
 
+type falseNegativeRuntimeProvider struct {
+	*runtime.Fake
+	falseNames map[string]bool
+}
+
+func (p *falseNegativeRuntimeProvider) IsRunning(name string) bool {
+	if p.falseNames[name] {
+		return false
+	}
+	return p.Fake.IsRunning(name)
+}
+
+func TestRuntimeHandleLiveObservationTreatsLiveProcessAsRunningWhenSessionProbeFalseNegatives(t *testing.T) {
+	base := runtime.NewFake()
+	if err := base.Start(context.Background(), "runtime-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp := &falseNegativeRuntimeProvider{
+		Fake:       base,
+		falseNames: map[string]bool{"runtime-worker": true},
+	}
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "runtime-worker",
+		ProviderName: "claude",
+		ProcessNames: []string{"claude"},
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	obs, err := handle.LiveObservation(context.Background())
+	if err != nil {
+		t.Fatalf("LiveObservation: %v", err)
+	}
+	if !obs.Running || !obs.Alive {
+		t.Fatalf("LiveObservation() = %#v, want running+alive true despite IsRunning false-negative", obs)
+	}
+}
+
+func TestRuntimeHandleLiveObservationWithoutProcessNamesTreatsRunningSessionAsAlive(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "runtime-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "runtime-worker",
+		ProviderName: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	obs, err := handle.LiveObservation(context.Background())
+	if err != nil {
+		t.Fatalf("LiveObservation: %v", err)
+	}
+	if !obs.Running || !obs.Alive {
+		t.Fatalf("LiveObservation() = %#v, want running+alive true when no process names are configured", obs)
+	}
+}
+
 func TestRuntimeHandleStartResolvedStartsLegacyRuntimeSession(t *testing.T) {
 	sp := runtime.NewFake()
 

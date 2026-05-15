@@ -461,7 +461,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 			return 1
 		}
 		if deferred {
-			if cityUsesBdStoreContract(cityPath) && os.Getenv("GC_DOLT") == "skip" {
+			if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
 				w("  Beads init deferred to controller")
 			} else if err := initAndHookDir(cityPath, rigPath, prefix); err != nil {
 				w("  Beads init deferred to controller")

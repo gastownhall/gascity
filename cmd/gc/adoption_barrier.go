@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os/exec"
 	"regexp"
 	"strconv"
 
@@ -51,6 +52,7 @@ var poolSlotPattern = regexp.MustCompile(`-(\d+)$`)
 // Returns the adoption result and whether the barrier passed (all running
 // sessions have beads).
 func runAdoptionBarrier(
+	cityPath string,
 	store beads.Store,
 	sp runtime.Provider,
 	cfg *config.City,
@@ -107,7 +109,7 @@ func runAdoptionBarrier(
 	st := cfg.Workspace.SessionTemplate
 	snapshot := &sessionBeadSnapshot{}
 	for _, b := range existing {
-		if b.Status != "closed" {
+		if b.Status != "closed" && sessionpkg.IsSessionBeadOrRepairable(b) {
 			snapshot.add(b)
 		}
 	}
@@ -122,8 +124,6 @@ func runAdoptionBarrier(
 		agentBySession[sn] = a
 		agentByQN[a.QualifiedName()] = a
 	}
-
-	now := clk.Now().UTC()
 
 	// Step 3: For each running session, adopt if no open bead exists.
 	for _, sessionName := range running {
@@ -140,7 +140,8 @@ func runAdoptionBarrier(
 				isPoolInstance = true
 			}
 		}
-		alive, err := workerSessionTargetAliveWithConfig(nil, sp, nil, sessionName, processHints(cfgAgent))
+		processNames := processHints(cfg, cfgAgent)
+		alive, err := workerSessionTargetAliveWithConfig(nil, sp, nil, sessionName, processNames)
 		if err != nil || !alive {
 			result.Total--
 			continue
@@ -162,7 +163,6 @@ func runAdoptionBarrier(
 			"generation":         strconv.Itoa(sessionpkg.DefaultGeneration),
 			"continuation_epoch": strconv.Itoa(sessionpkg.DefaultContinuationEpoch),
 			"instance_token":     sessionpkg.NewInstanceToken(),
-			"synced_at":          now.Format("2006-01-02T15:04:05Z07:00"),
 		}
 
 		detail := adoptionDetail{SessionName: sessionName}
@@ -215,14 +215,39 @@ func runAdoptionBarrier(
 			continue
 		}
 
-		_, createErr := store.Create(beads.Bead{
-			Title:    detail.AgentName,
-			Type:     sessionBeadType,
-			Labels:   []string{sessionBeadLabel, "agent:" + detail.AgentName},
-			Metadata: meta,
+		alreadyHadBead := false
+		createSessionBead := func() error {
+			meta["synced_at"] = clk.Now().UTC().Format("2006-01-02T15:04:05Z07:00")
+			_, err := store.Create(beads.Bead{
+				Title:    detail.AgentName,
+				Type:     sessionBeadType,
+				Labels:   []string{sessionBeadLabel, "agent:" + detail.AgentName},
+				Metadata: meta,
+			})
+			if err != nil {
+				return fmt.Errorf("creating session bead for %q: %w", sessionName, err)
+			}
+			return nil
+		}
+		createErr := sessionpkg.WithCitySessionIdentifierLocks(cityPath, []string{sessionName, detail.AgentName}, func() error {
+			hasBead, err := openSessionBeadExists(store, sessionName)
+			if err != nil {
+				return err
+			}
+			if hasBead {
+				alreadyHadBead = true
+				return nil
+			}
+			return createSessionBead()
 		})
+		if alreadyHadBead {
+			result.AlreadyHadBead++
+			detail.HasBead = true
+			result.Details = append(result.Details, detail)
+			continue
+		}
 		if createErr != nil {
-			fmt.Fprintf(stderr, "adoption barrier: creating bead for %s: %v\n", sessionName, createErr) //nolint:errcheck
+			fmt.Fprintf(stderr, "adoption barrier: %v\n", createErr) //nolint:errcheck
 			result.Skipped++
 			continue
 		}
@@ -233,6 +258,26 @@ func runAdoptionBarrier(
 	// Step 4: Barrier gate — all running sessions must have beads.
 	passed := result.Skipped == 0 && !partialList
 	return result, passed
+}
+
+func openSessionBeadExists(store beads.Store, sessionName string) (bool, error) {
+	existing, err := store.List(beads.ListQuery{
+		Label:    sessionBeadLabel,
+		Metadata: map[string]string{"session_name": sessionName},
+		Live:     true,
+	})
+	if err != nil {
+		return false, fmt.Errorf("listing session beads for %q: %w", sessionName, err)
+	}
+	for _, b := range existing {
+		if b.Status == "closed" {
+			continue
+		}
+		if sessionpkg.IsSessionBeadOrRepairable(b) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // resolvePoolBase attempts to match a pool instance session name back to its
@@ -274,9 +319,9 @@ func parsePoolSlot(sessionName string) int {
 	return slot
 }
 
-func processHints(a *config.Agent) []string {
+func processHints(cfg *config.City, a *config.Agent) []string {
 	if a == nil {
 		return nil
 	}
-	return a.ProcessNames
+	return config.AgentProcessNames(cfg, *a, exec.LookPath)
 }

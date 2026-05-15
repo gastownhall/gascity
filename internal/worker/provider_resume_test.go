@@ -15,3 +15,10 @@ func TestDerivedResumeSessionKeyNonResumeProviderStaysEmpty(t *testing.T) {
 		t.Fatalf("derivedResumeSessionKey(gemini) = %q, want empty", got)
 	}
 }
+
+func TestDerivedResumeSessionKeyDoesNotClassifyPiSubstringAsPi(t *testing.T) {
+	got := derivedResumeSessionKey("api/tmux-cli", "ses_21523e55fffeqoQOyaIoQtfdf5")
+	if got != "" {
+		t.Fatalf("derivedResumeSessionKey(api) = %q, want empty", got)
+	}
+}

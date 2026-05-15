@@ -1335,7 +1335,6 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		"/work/.cursor/hooks.json",
 		"/work/.kiro/agents/gascity.json",
 		"/work/AGENTS.md",
-		"/work/.pi/extensions/gc-hooks.js",
 		"/work/.omp/hooks/gc-hook.ts",
 	} {
 		if strings.Contains(string(fs.Files[rel]), "gc hook --inject") {
@@ -1399,6 +1398,14 @@ func TestInstallPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
 		`pi.on("before_agent_start"`,
+		"GC_PI_HOOK_VERSION",
+		"gc hook --inject",
+		`run(["prime", "--hook"], ctx.cwd)`,
+		"gc handoff --auto",
+		"mirrorTempCounter",
+		"fs.rmSync(tmp",
+		"gc-hooks run:",
+		"gc-hooks mirrorTranscript:",
 	} {
 		if !strings.Contains(data, want) {
 			t.Errorf("Pi hook missing current extension API marker %q:\n%s", want, data)
@@ -1438,6 +1445,54 @@ module.exports = {
 	}
 	if !strings.Contains(data, `pi.on("session_start"`) {
 		t.Fatalf("upgraded Pi hook does not use current extension API:\n%s", data)
+	}
+	backup := string(fs.Files["/work/.pi/extensions/gc-hooks.js.bak"])
+	if backup != string(legacy) {
+		t.Fatalf("legacy Pi hook backup = %q, want original legacy content", backup)
+	}
+}
+
+func TestPiHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
+	current := []byte(`// Gas City hooks for Pi Coding Agent.
+// gc prime --hook
+// gc hook --inject
+// gc handoff --auto
+const GC_PI_HOOK_VERSION = 4;
+run(["prime", "--hook"], ctx.cwd);
+run(["hook", "--inject"], ctx.cwd);
+run(["handoff", "--auto", "context cycle"], ctx.cwd);
+let mirrorTempCounter = 0;
+`)
+	stale := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 4"), []byte("GC_PI_HOOK_VERSION = 3"), 1)
+	future := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 4"), []byte("GC_PI_HOOK_VERSION = 5"), 1)
+
+	if !piHookNeedsUpgrade(stale) {
+		t.Fatal("stale Pi hook version did not request upgrade")
+	}
+	if piHookNeedsUpgrade(current) {
+		t.Fatal("current Pi hook version requested upgrade")
+	}
+	if piHookNeedsUpgrade(future) {
+		t.Fatal("newer Pi hook version requested downgrade")
+	}
+}
+
+func TestWriteEmbeddedManagedDoesNotClobberExistingBackup(t *testing.T) {
+	fs := fsys.NewFake()
+	dst := "/work/.pi/extensions/gc-hooks.js"
+	firstBackup := []byte("first customized hook")
+	existing := []byte("second customized hook")
+	fs.Files[dst] = existing
+	fs.Files[dst+".bak"] = firstBackup
+
+	if err := writeEmbeddedManaged(fs, dst, []byte("managed hook"), func([]byte) bool { return true }); err != nil {
+		t.Fatalf("writeEmbeddedManaged: %v", err)
+	}
+	if got := string(fs.Files[dst+".bak"]); got != string(firstBackup) {
+		t.Fatalf("first backup was clobbered: %q", got)
+	}
+	if got := string(fs.Files[dst+".bak.1"]); got != string(existing) {
+		t.Fatalf("second backup = %q, want existing hook", got)
 	}
 }
 
