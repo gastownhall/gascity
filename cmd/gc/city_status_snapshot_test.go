@@ -165,6 +165,76 @@ func TestLoadStatusSessionSnapshotTimesOut(t *testing.T) {
 	if !strings.Contains(stderr.String(), "loading session snapshot timed out") {
 		t.Fatalf("stderr = %q, want timeout warning", stderr.String())
 	}
+	loadErr := snapshot.LoadError()
+	if loadErr == nil {
+		t.Fatal("snapshot.LoadError() = nil, want timeout error so downstream named-session lookup can surface it (gastownhall/gascity#2148)")
+	}
+	if !strings.Contains(loadErr.Error(), "timed out") {
+		t.Fatalf("snapshot.LoadError() = %v, want timeout text", loadErr)
+	}
+}
+
+// TestCityStatusNamedSessionSurfacesLookupErrorWhenSnapshotDegraded is the
+// regression test for gastownhall/gascity#2148. PR #2005 added a snapshot
+// fast path in namedSessionStatusForCity that returned the cfg-derived
+// status ("reserved-unmaterialized" / "degraded blocked") whenever a named
+// identity was absent from the snapshot — including the case where the
+// snapshot itself failed to load. That silently dropped the "lookup error:"
+// signal operators relied on when debugging.
+func TestCityStatusNamedSessionSurfacesLookupErrorWhenSnapshotDegraded(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{{
+			Name: "refinery",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "refinery",
+		}},
+	}
+
+	store := beads.NewMemStore()
+	degraded := newSessionBeadSnapshotWithError(nil, errors.New("loading session snapshot timed out after 20ms"))
+
+	status := namedSessionStatusForCity(
+		"/home/user/city", cfg, store, degraded,
+		"city", "refinery", "on_demand", nil,
+	)
+	if !strings.HasPrefix(status, "lookup error:") {
+		t.Fatalf("named session status = %q, want a 'lookup error: ...' prefix when snapshot is degraded", status)
+	}
+	if !strings.Contains(status, "timed out") {
+		t.Fatalf("named session status = %q, want underlying load-error text in the surfaced lookup error", status)
+	}
+}
+
+// TestCityStatusNamedSessionsCleanSnapshotStillSilent confirms the perf goal
+// from PR #2005 is preserved when the snapshot loaded cleanly: a missing
+// named identity returns the cfg-derived status (no "lookup error:" string,
+// no bead Get fallback).
+func TestCityStatusNamedSessionsCleanSnapshotStillSilent(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{{
+			Name: "refinery",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "refinery",
+		}},
+	}
+
+	store := beads.NewMemStore()
+	clean := newSessionBeadSnapshot(nil)
+	if clean.LoadError() != nil {
+		t.Fatalf("clean snapshot LoadError = %v, want nil", clean.LoadError())
+	}
+
+	status := namedSessionStatusForCity(
+		"/home/user/city", cfg, store, clean,
+		"city", "refinery", "on_demand", nil,
+	)
+	if strings.HasPrefix(status, "lookup error:") {
+		t.Fatalf("named session status = %q, want cfg-derived status (no lookup error) when snapshot loaded cleanly", status)
+	}
 }
 
 type failingStatusStore struct {
