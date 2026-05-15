@@ -9245,8 +9245,8 @@ func TestStartBeadsLifecycleManagedDeferredDoesNotRequireRuntimeState(t *testing
 	// server. This test wires only a bare TCP listener as the "managed
 	// Dolt port", which is enough for the rest of the lifecycle but not
 	// for SHOW DATABASES. Stub the verifier — coverage for the verifier
-	// itself lives in TestVerifyManagedDoltDatabaseExistsAfterInitNoOps
-	// (unit-level guards) and the integration suite (full path).
+	// itself lives in focused unit tests below; this lifecycle test only
+	// needs to prove startup does not require pre-existing runtime state.
 	originalVerifier := verifyManagedDoltDatabaseExistsAfterInit
 	verifyManagedDoltDatabaseExistsAfterInit = func(_, _, _ string) error { return nil }
 	t.Cleanup(func() { verifyManagedDoltDatabaseExistsAfterInit = originalVerifier })
@@ -9981,24 +9981,125 @@ exit 2
 // these conditions but the helper double-checks defensively so it's
 // safe to call from new sites.
 func TestVerifyManagedDoltDatabaseExistsAfterInitNoOps(t *testing.T) {
-	// Capture the production verifier and restore at end of test.
 	original := verifyManagedDoltDatabaseExistsAfterInit
-	t.Cleanup(func() { verifyManagedDoltDatabaseExistsAfterInit = original })
 
-	tmp := t.TempDir()
-	// City without the bd store contract → no-op.
-	if err := original(tmp, tmp, "hq"); err != nil {
-		t.Errorf("city without bd contract should be no-op, got %v", err)
-	}
+	t.Run("non bd contract", func(t *testing.T) {
+		cityPath := setupFileProviderCityForTest(t)
+		stop := publishRejectingManagedDoltRuntimeForTest(t, cityPath)
+		defer stop()
 
-	// Empty db name → no-op (defensive).
+		if err := original(cityPath, cityPath, "hq"); err != nil {
+			t.Errorf("city without bd contract should be no-op, got %v", err)
+		}
+	})
+
+	t.Run("no managed port", func(t *testing.T) {
+		cityPath := setupBdContractCityForTest(t)
+
+		if err := original(cityPath, cityPath, "hq"); err != nil {
+			t.Errorf("city without managed Dolt port should be no-op, got %v", err)
+		}
+	})
+
+	t.Run("empty db name", func(t *testing.T) {
+		cityPath := setupBdContractCityForTest(t)
+		stop := publishRejectingManagedDoltRuntimeForTest(t, cityPath)
+		defer stop()
+
+		if err := original(cityPath, cityPath, ""); err != nil {
+			t.Errorf("empty dbName should be no-op, got %v", err)
+		}
+		if err := original(cityPath, cityPath, "  "); err != nil {
+			t.Errorf("whitespace dbName should be no-op, got %v", err)
+		}
+	})
+}
+
+func TestVerifyManagedDoltDatabaseExistsAfterInitSkipsLegacyProbeDatabase(t *testing.T) {
+	original := verifyManagedDoltDatabaseExistsAfterInit
+
 	cityPath := setupBdContractCityForTest(t)
-	if err := original(cityPath, cityPath, ""); err != nil {
-		t.Errorf("empty dbName should be no-op, got %v", err)
+	metadataPath := filepath.Join(cityPath, ".beads", "metadata.json")
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, metadataPath, contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: strings.ToUpper(managedDoltProbeDatabase),
+	}); err != nil {
+		t.Fatalf("EnsureCanonicalMetadata: %v", err)
 	}
-	if err := original(cityPath, cityPath, "  "); err != nil {
-		t.Errorf("whitespace dbName should be no-op, got %v", err)
+	stop := publishRejectingManagedDoltRuntimeForTest(t, cityPath)
+	defer stop()
+
+	if err := original(cityPath, cityPath, strings.ToUpper(managedDoltProbeDatabase)); err != nil {
+		t.Fatalf("legacy probe database should be accepted without catalog lookup, got %v", err)
 	}
+}
+
+func TestVerifyManagedDoltDatabaseExistsAfterInitCatalogMatch(t *testing.T) {
+	original := verifyManagedDoltDatabaseExistsAfterInit
+	originalListDatabases := managedDoltListUserDatabasesAfterInit
+	t.Cleanup(func() { managedDoltListUserDatabasesAfterInit = originalListDatabases })
+
+	cityPath := setupBdContractCityForTest(t)
+	stop := publishRejectingManagedDoltRuntimeForTest(t, cityPath)
+	defer stop()
+
+	called := false
+	managedDoltListUserDatabasesAfterInit = func(port string) ([]string, error) {
+		called = true
+		if strings.TrimSpace(port) == "" {
+			t.Fatal("managed Dolt port was empty")
+		}
+		return []string{"archive", "HQ"}, nil
+	}
+
+	if err := original(cityPath, filepath.Join(cityPath, "scope"), "hq"); err != nil {
+		t.Fatalf("catalog containing database should pass: %v", err)
+	}
+	if !called {
+		t.Fatal("catalog listing was not reached")
+	}
+}
+
+func TestVerifyManagedDoltDatabaseExistsAfterInitCatalogMiss(t *testing.T) {
+	original := verifyManagedDoltDatabaseExistsAfterInit
+	originalListDatabases := managedDoltListUserDatabasesAfterInit
+	t.Cleanup(func() { managedDoltListUserDatabasesAfterInit = originalListDatabases })
+
+	cityPath := setupBdContractCityForTest(t)
+	stop := publishRejectingManagedDoltRuntimeForTest(t, cityPath)
+	defer stop()
+
+	managedDoltListUserDatabasesAfterInit = func(port string) ([]string, error) {
+		if strings.TrimSpace(port) == "" {
+			t.Fatal("managed Dolt port was empty")
+		}
+		return []string{"archive", "other"}, nil
+	}
+
+	scopeDir := filepath.Join(cityPath, "rigs", "alpha")
+	err := original(cityPath, scopeDir, "hq")
+	if err == nil {
+		t.Fatal("catalog missing database should fail")
+	}
+	msg := err.Error()
+	for _, want := range []string{`database "hq"`, scopeDir, "archive", "other", "CREATE DATABASE was swallowed"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q does not contain %q", msg, want)
+		}
+	}
+}
+
+func setupFileProviderCityForTest(t *testing.T) string {
+	t.Helper()
+	tmp := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", tmp)
+	if err := os.MkdirAll(filepath.Join(tmp, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir beads: %v", err)
+	}
+	return tmp
 }
 
 // setupBdContractCityForTest returns a temp city dir that satisfies
@@ -10006,6 +10107,8 @@ func TestVerifyManagedDoltDatabaseExistsAfterInitNoOps(t *testing.T) {
 func setupBdContractCityForTest(t *testing.T) string {
 	t.Helper()
 	tmp := t.TempDir()
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", tmp)
 	beadsDir := filepath.Join(tmp, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatalf("mkdir beads: %v", err)
@@ -10022,7 +10125,35 @@ func setupBdContractCityForTest(t *testing.T) string {
 	return tmp
 }
 
-// (Integration-level coverage of the full verifier path — connect to a
-// running Dolt server and resolve SHOW DATABASES — lives in the
-// integration test suite. Unit tests here cover the no-op early-return
-// guards, which is what the helper's defensive contract requires.)
+func publishRejectingManagedDoltRuntimeForTest(t *testing.T, cityPath string) func() {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      port,
+		DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("write managed Dolt runtime state: %v", err)
+	}
+	return func() {
+		_ = ln.Close()
+		<-done
+	}
+}

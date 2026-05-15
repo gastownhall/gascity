@@ -536,25 +536,15 @@ var verifyManagedDoltDatabaseExistsAfterInit = func(cityPath, dir, dbName string
 	if dbName == "" {
 		return nil
 	}
-
-	host, user := managedDoltConnectHost(""), "root"
-	db, err := managedDoltOpenDB(host, port, user)
-	if err != nil {
-		return fmt.Errorf("connect to managed Dolt at %s:%s: %w", host, port, err)
+	if isLegacyManagedDoltProbeDatabase(dbName) {
+		// Startup normalization preserves this one legacy reserved database
+		// when existing metadata already uses it as the real bead store.
+		return nil
 	}
-	defer db.Close() //nolint:errcheck
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	conn, err := db.Conn(ctx)
+	dbs, err := managedDoltListUserDatabasesAfterInit(port)
 	if err != nil {
-		return fmt.Errorf("acquire connection to managed Dolt: %w", err)
-	}
-	defer conn.Close() //nolint:errcheck
-
-	dbs, err := managedDoltSelectUserDatabasesFromConn(ctx, conn)
-	if err != nil {
-		return fmt.Errorf("list databases on managed Dolt: %w", err)
+		return err
 	}
 	for _, d := range dbs {
 		if strings.EqualFold(d, dbName) {
@@ -562,6 +552,29 @@ var verifyManagedDoltDatabaseExistsAfterInit = func(cityPath, dir, dbName string
 		}
 	}
 	return fmt.Errorf("database %q not found in managed Dolt server catalog after init for scope %s (server-visible: %v); bd init reported success but the database was never created — usually means CREATE DATABASE was swallowed (see gc-beads-bd.sh)", dbName, dir, dbs)
+}
+
+var managedDoltListUserDatabasesAfterInit = func(port string) ([]string, error) {
+	host, user := managedDoltConnectHost(""), "root"
+	db, err := managedDoltOpenDB(host, port, user)
+	if err != nil {
+		return nil, fmt.Errorf("connect to managed Dolt at %s:%s: %w", host, port, err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire connection to managed Dolt: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck
+
+	dbs, err := managedDoltSelectUserDatabasesFromConn(ctx, conn)
+	if err != nil {
+		return nil, fmt.Errorf("list databases on managed Dolt: %w", err)
+	}
+	return dbs, nil
 }
 
 func shouldRetryExecBdInit(err error) bool {
