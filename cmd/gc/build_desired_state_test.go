@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -1643,6 +1646,1389 @@ func TestBuildDesiredState_NewPoolSessionBeadCreatedWithConcreteIdentity(t *test
 	}
 }
 
+func TestBuildDesiredState_MaxOneAgentDemandUsesCanonicalIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "cashmaster",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "printf 1",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if len(dsResult.State) != 1 {
+		t.Fatalf("desired sessions = %d, want 1", len(dsResult.State))
+	}
+	var tp TemplateParams
+	for _, candidate := range dsResult.State {
+		tp = candidate
+	}
+	if tp.InstanceName != "cashmaster/refinery" {
+		t.Fatalf("InstanceName = %q, want canonical non-pool identity", tp.InstanceName)
+	}
+	if tp.Alias != "cashmaster/refinery" {
+		t.Fatalf("Alias = %q, want canonical non-pool identity", tp.Alias)
+	}
+	if tp.PoolSlot != 0 {
+		t.Fatalf("PoolSlot = %d, want 0 for max_active_sessions=1", tp.PoolSlot)
+	}
+
+	sessionBeads, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("load session beads: %v", err)
+	}
+	if len(sessionBeads) != 1 {
+		t.Fatalf("session beads = %d, want 1", len(sessionBeads))
+	}
+	got := sessionBeads[0]
+	if got.Metadata["agent_name"] != "cashmaster/refinery" {
+		t.Fatalf("agent_name = %q, want canonical non-pool identity", got.Metadata["agent_name"])
+	}
+	if got.Metadata["alias"] != "cashmaster/refinery" {
+		t.Fatalf("alias = %q, want canonical non-pool identity", got.Metadata["alias"])
+	}
+	if got.Metadata["pool_slot"] != "" {
+		t.Fatalf("pool_slot = %q, want empty for max_active_sessions=1", got.Metadata["pool_slot"])
+	}
+	if got.Title != "cashmaster/refinery" {
+		t.Fatalf("title = %q, want canonical non-pool identity", got.Title)
+	}
+	if containsString(got.Labels, "agent:cashmaster/refinery-1") {
+		t.Fatalf("labels = %#v, must not include phantom pool identity", got.Labels)
+	}
+	if !containsString(got.Labels, "agent:cashmaster/refinery") {
+		t.Fatalf("labels = %#v, want canonical agent label", got.Labels)
+	}
+}
+
+func TestBuildDesiredState_NoStoreMaxOneAgentDemandUsesCanonicalSlotZero(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "cashmaster",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "printf 1",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
+	if len(dsResult.State) != 1 {
+		t.Fatalf("desired sessions = %d, want 1", len(dsResult.State))
+	}
+	var tp TemplateParams
+	for _, candidate := range dsResult.State {
+		tp = candidate
+	}
+	if tp.InstanceName != "cashmaster/refinery" {
+		t.Fatalf("InstanceName = %q, want canonical non-pool identity", tp.InstanceName)
+	}
+	if tp.Alias != "cashmaster/refinery" {
+		t.Fatalf("Alias = %q, want canonical non-pool identity", tp.Alias)
+	}
+	if tp.PoolSlot != 0 {
+		t.Fatalf("PoolSlot = %d, want 0 for no-store max_active_sessions=1", tp.PoolSlot)
+	}
+}
+
+func TestSyncSessionBeads_DoesNotBackfillPoolSlotForCanonicalMaxOneDemand(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "cashmaster",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "printf 1",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	var stderr bytes.Buffer
+	syncSessionBeads(
+		cityPath,
+		store,
+		dsResult.State,
+		runtime.NewFake(),
+		allConfiguredDS(dsResult.State),
+		cfg,
+		&clock.Fake{Time: time.Date(2026, 5, 15, 10, 0, 0, 0, time.UTC)},
+		&stderr,
+		false,
+	)
+
+	sessionBeads, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("load session beads: %v", err)
+	}
+	if len(sessionBeads) != 1 {
+		t.Fatalf("session beads = %d, want 1", len(sessionBeads))
+	}
+	got := sessionBeads[0]
+	if got.Metadata["agent_name"] != "cashmaster/refinery" {
+		t.Fatalf("agent_name = %q, want canonical singleton identity; sync stderr=%q", got.Metadata["agent_name"], stderr.String())
+	}
+	if got.Metadata["pool_slot"] != "" {
+		t.Fatalf("pool_slot = %q, want empty after build plus sync for canonical singleton", got.Metadata["pool_slot"])
+	}
+	if got.Metadata["alias"] != "cashmaster/refinery" {
+		t.Fatalf("alias = %q, want canonical singleton identity", got.Metadata["alias"])
+	}
+}
+
+func TestBuildDesiredState_MaxOneAgentNormalizesStalePoolIdentityBead(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	stale, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery-1", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery-1",
+			"alias":                "cashmaster/refinery-1",
+			"session_name":         "s-refinery-stale",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot":            "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "cashmaster",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "printf 1",
+		}},
+	}
+
+	var stderr bytes.Buffer
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+	if len(dsResult.State) != 1 {
+		t.Fatalf("desired sessions = %d, want 1", len(dsResult.State))
+	}
+	var tp TemplateParams
+	for _, candidate := range dsResult.State {
+		tp = candidate
+	}
+	if tp.InstanceName != "cashmaster/refinery" {
+		t.Fatalf("InstanceName = %q, want canonical non-pool identity", tp.InstanceName)
+	}
+	if tp.Alias != "cashmaster/refinery" {
+		t.Fatalf("Alias = %q, want canonical non-pool identity", tp.Alias)
+	}
+	if tp.PoolSlot != 0 {
+		t.Fatalf("PoolSlot = %d, want 0 for normalized max_active_sessions=1 bead", tp.PoolSlot)
+	}
+
+	got, err := store.Get(stale.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", stale.ID, err)
+	}
+	if got.Metadata["agent_name"] != "cashmaster/refinery" {
+		t.Fatalf("agent_name = %q, want canonical non-pool identity", got.Metadata["agent_name"])
+	}
+	if got.Metadata["alias"] != "cashmaster/refinery" {
+		t.Fatalf("alias = %q, want canonical non-pool identity", got.Metadata["alias"])
+	}
+	if got.Metadata["pool_slot"] != "" {
+		t.Fatalf("pool_slot = %q, want empty after singleton normalization", got.Metadata["pool_slot"])
+	}
+	if got.Title != "cashmaster/refinery" {
+		t.Fatalf("title = %q, want canonical non-pool identity", got.Title)
+	}
+	if containsString(got.Labels, "agent:cashmaster/refinery-1") {
+		t.Fatalf("labels = %#v, must not include phantom pool identity", got.Labels)
+	}
+	if !containsString(got.Labels, "agent:cashmaster/refinery") {
+		t.Fatalf("labels = %#v, want canonical agent label", got.Labels)
+	}
+	if !strings.Contains(stderr.String(), "collapsing phantom pool identity") {
+		t.Fatalf("stderr = %q, want scoped phantom identity diagnostic", stderr.String())
+	}
+}
+
+func TestBuildDesiredState_MaxOneAgentPrefersCanonicalWhenStaleDuplicateExists(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	stale, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery-1", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery-1",
+			"alias":                "cashmaster/refinery-1",
+			"session_name":         "s-refinery-stale",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot":            "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery",
+			"alias":                "cashmaster/refinery",
+			"session_name":         "s-refinery-canonical",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "cashmaster",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "printf 1",
+		}},
+	}
+
+	var stderr bytes.Buffer
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	if strings.Contains(stderr.String(), "(skipping)") {
+		t.Fatalf("stderr = %q, want stale duplicate to remain recoverable", stderr.String())
+	}
+	if _, ok := dsResult.State[stale.Metadata["session_name"]]; ok {
+		t.Fatalf("desired state includes stale duplicate %q; keys=%v", stale.Metadata["session_name"], mapKeys(dsResult.State))
+	}
+	tp, ok := dsResult.State[canonical.Metadata["session_name"]]
+	if !ok {
+		t.Fatalf("desired state missing canonical singleton %q; keys=%v", canonical.Metadata["session_name"], mapKeys(dsResult.State))
+	}
+	if tp.InstanceName != "cashmaster/refinery" {
+		t.Fatalf("InstanceName = %q, want canonical singleton identity", tp.InstanceName)
+	}
+	if tp.PoolSlot != 0 {
+		t.Fatalf("PoolSlot = %d, want 0 for max_active_sessions=1", tp.PoolSlot)
+	}
+}
+
+func TestBuildDesiredState_MaxOneAgentPreservesManualStaleIdentityBesideCanonicalDemand(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	manual, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery-1", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery-1",
+			"alias":                "cashmaster/refinery-1",
+			"session_name":         "s-refinery-manual",
+			"state":                "awake",
+			"session_origin":       "manual",
+			"manual_session":       "true",
+			poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot":            "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "cashmaster",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "printf 1",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	manualTP, ok := dsResult.State[manual.Metadata["session_name"]]
+	if !ok {
+		t.Fatalf("desired state missing manual stale singleton %q; keys=%v", manual.Metadata["session_name"], mapKeys(dsResult.State))
+	}
+	if !manualTP.ManualSession {
+		t.Fatalf("manual stale singleton ManualSession = false, want true")
+	}
+	if manualTP.InstanceName != "cashmaster/refinery-1" {
+		t.Fatalf("manual stale singleton InstanceName = %q, want preserved identity", manualTP.InstanceName)
+	}
+	if manualTP.Alias != "cashmaster/refinery-1" {
+		t.Fatalf("manual stale singleton Alias = %q, want preserved identity", manualTP.Alias)
+	}
+	if len(dsResult.State) != 2 {
+		t.Fatalf("desired sessions = %d, want manual stale session beside canonical demand; keys=%v", len(dsResult.State), mapKeys(dsResult.State))
+	}
+	canonicalFound := false
+	for sessionName, tp := range dsResult.State {
+		if sessionName == manual.Metadata["session_name"] {
+			continue
+		}
+		if tp.InstanceName == "cashmaster/refinery" && tp.Alias == "cashmaster/refinery" {
+			canonicalFound = true
+		}
+	}
+	if !canonicalFound {
+		t.Fatalf("desired state missing canonical singleton demand beside manual stale session; state=%#v", dsResult.State)
+	}
+}
+
+func TestBuildDesiredState_MaxOneManualAssignedWorkPreservesManualIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	manual, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery-1", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery-1",
+			"alias":                "cashmaster/refinery-1",
+			"session_name":         "s-refinery-manual",
+			"state":                "awake",
+			"session_origin":       "manual",
+			"manual_session":       "true",
+			poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot":            "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	priority := 10
+	if _, err := store.Create(beads.Bead{
+		Title:    "manual assigned work",
+		Type:     "task",
+		Status:   "in_progress",
+		Priority: &priority,
+		Assignee: "cashmaster/refinery-1",
+		Metadata: map[string]string{
+			"gc.routed_to": "cashmaster/refinery",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "cashmaster",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "printf 0",
+		}},
+	}
+
+	var stderr bytes.Buffer
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	manualTP, ok := dsResult.State[manual.Metadata["session_name"]]
+	if !ok {
+		t.Fatalf("desired state missing manual resume session %q; keys=%v stderr=%q", manual.Metadata["session_name"], mapKeys(dsResult.State), stderr.String())
+	}
+	if len(dsResult.State) != 1 {
+		t.Fatalf("desired sessions = %d, want only manual assigned-work session; keys=%v", len(dsResult.State), mapKeys(dsResult.State))
+	}
+	if !manualTP.ManualSession {
+		t.Fatal("manual assigned-work singleton ManualSession = false, want true")
+	}
+	if manualTP.InstanceName != "cashmaster/refinery-1" {
+		t.Fatalf("manual assigned-work singleton InstanceName = %q, want preserved identity", manualTP.InstanceName)
+	}
+	if manualTP.Alias != "cashmaster/refinery-1" {
+		t.Fatalf("manual assigned-work singleton Alias = %q, want preserved identity", manualTP.Alias)
+	}
+	stored, err := store.Get(manual.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", manual.ID, err)
+	}
+	if got := stored.Metadata["agent_name"]; got != "cashmaster/refinery-1" {
+		t.Fatalf("stored agent_name = %q, want preserved manual identity", got)
+	}
+	if got := stored.Metadata["alias"]; got != "cashmaster/refinery-1" {
+		t.Fatalf("stored alias = %q, want preserved manual identity", got)
+	}
+	if got := stored.Metadata["pool_slot"]; got != "1" {
+		t.Fatalf("stored pool_slot = %q, want preserved manual identity", got)
+	}
+}
+
+func TestBuildDesiredState_MaxOneAgentSkipsCanonicalDuplicateWhenStaleAssignedWorkWinsCap(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	stale, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery-1", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery-1",
+			"alias":                "cashmaster/refinery-1",
+			"session_name":         "s-refinery-stale",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot":            "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery",
+			"alias":                "cashmaster/refinery",
+			"session_name":         "s-refinery-canonical",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stalePriority := 10
+	if _, err := store.Create(beads.Bead{
+		Title:    "stale assigned work",
+		Type:     "task",
+		Status:   "in_progress",
+		Priority: &stalePriority,
+		Assignee: "cashmaster/refinery-1",
+		Metadata: map[string]string{
+			"gc.routed_to": "cashmaster/refinery",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	canonicalPriority := 1
+	if _, err := store.Create(beads.Bead{
+		Title:    "canonical assigned work",
+		Type:     "task",
+		Status:   "in_progress",
+		Priority: &canonicalPriority,
+		Assignee: "cashmaster/refinery",
+		Metadata: map[string]string{
+			"gc.routed_to": "cashmaster/refinery",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "cashmaster",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "printf 0",
+		}},
+	}
+
+	var stderr bytes.Buffer
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	if _, ok := dsResult.State[canonical.Metadata["session_name"]]; ok {
+		t.Fatalf("desired state includes unselected canonical duplicate %q; keys=%v", canonical.Metadata["session_name"], mapKeys(dsResult.State))
+	}
+	tp, ok := dsResult.State[stale.Metadata["session_name"]]
+	if !ok {
+		t.Fatalf("desired state missing stale resume session %q; keys=%v stderr=%q", stale.Metadata["session_name"], mapKeys(dsResult.State), stderr.String())
+	}
+	if len(dsResult.State) != 1 {
+		t.Fatalf("desired state has %d sessions, want singleton cap enforced; keys=%v", len(dsResult.State), mapKeys(dsResult.State))
+	}
+	if tp.InstanceName != "cashmaster/refinery" {
+		t.Fatalf("InstanceName = %q, want canonical singleton identity", tp.InstanceName)
+	}
+	if tp.Alias != "" {
+		t.Fatalf("Alias = %q, want deferred alias while canonical duplicate owns it", tp.Alias)
+	}
+
+	storedStale, err := store.Get(stale.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", stale.ID, err)
+	}
+	if !containsString(sessionpkg.AliasHistory(storedStale.Metadata), "cashmaster/refinery-1") {
+		t.Fatalf("alias_history = %#v, want stale singleton alias preserved for next tick", sessionpkg.AliasHistory(storedStale.Metadata))
+	}
+
+	var secondStderr bytes.Buffer
+	secondResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &secondStderr)
+	if _, ok := secondResult.State[canonical.Metadata["session_name"]]; ok {
+		t.Fatalf("second desired state includes unselected canonical duplicate %q; keys=%v", canonical.Metadata["session_name"], mapKeys(secondResult.State))
+	}
+	secondTP, ok := secondResult.State[stale.Metadata["session_name"]]
+	if !ok {
+		t.Fatalf("second desired state missing stale resume session %q; keys=%v stderr=%q", stale.Metadata["session_name"], mapKeys(secondResult.State), secondStderr.String())
+	}
+	if len(secondResult.State) != 1 {
+		t.Fatalf("second desired state has %d sessions, want singleton cap enforced; keys=%v", len(secondResult.State), mapKeys(secondResult.State))
+	}
+	if secondTP.InstanceName != "cashmaster/refinery" {
+		t.Fatalf("second InstanceName = %q, want canonical singleton identity", secondTP.InstanceName)
+	}
+	if secondTP.Alias != "" {
+		t.Fatalf("second Alias = %q, want deferred alias while canonical duplicate owns it", secondTP.Alias)
+	}
+}
+
+func TestNormalizeNonExpandingPoolSessionBeadDoesNotMutateSnapshotLabels(t *testing.T) {
+	store := beads.NewMemStore()
+	stale, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery-1", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery-1",
+			"alias":                "cashmaster/refinery-1",
+			"session_name":         "s-refinery-stale",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot":            "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.add(stale)
+	cfgAgent := config.Agent{
+		Name:              "refinery",
+		Dir:               "cashmaster",
+		StartCommand:      "true",
+		MaxActiveSessions: intPtr(1),
+		ScaleCheck:        "printf 1",
+	}
+	bp := &agentBuildParams{
+		cityPath:     t.TempDir(),
+		beadStore:    store,
+		sessionBeads: snapshot,
+		agents:       []config.Agent{cfgAgent},
+		stderr:       io.Discard,
+	}
+
+	if _, _, err := selectOrCreatePoolSessionBead(bp, &cfgAgent, "cashmaster/refinery", nil, map[string]bool{}, map[int]bool{}); err != nil {
+		t.Fatalf("selectOrCreatePoolSessionBead: %v", err)
+	}
+
+	snapshotBeads := snapshot.Open()
+	if len(snapshotBeads) != 1 {
+		t.Fatalf("snapshot beads = %d, want 1", len(snapshotBeads))
+	}
+	if !containsString(snapshotBeads[0].Labels, "agent:cashmaster/refinery-1") {
+		t.Fatalf("snapshot labels = %#v, want original stale agent label preserved", snapshotBeads[0].Labels)
+	}
+	if containsString(snapshotBeads[0].Labels, "agent:cashmaster/refinery") {
+		t.Fatalf("snapshot labels = %#v, must not be mutated to canonical label", snapshotBeads[0].Labels)
+	}
+	if got := snapshotBeads[0].Metadata["agent_name"]; got != "cashmaster/refinery-1" {
+		t.Fatalf("snapshot agent_name = %q, want original stale identity preserved", got)
+	}
+	if got := snapshotBeads[0].Metadata["alias"]; got != "cashmaster/refinery-1" {
+		t.Fatalf("snapshot alias = %q, want original stale identity preserved", got)
+	}
+	if got := snapshotBeads[0].Metadata["pool_slot"]; got != "1" {
+		t.Fatalf("snapshot pool_slot = %q, want original stale slot preserved", got)
+	}
+	got, err := store.Get(stale.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", stale.ID, err)
+	}
+	if !containsString(got.Labels, "agent:cashmaster/refinery") {
+		t.Fatalf("stored labels = %#v, want canonical label after normalization", got.Labels)
+	}
+	if containsString(got.Labels, "agent:cashmaster/refinery-1") {
+		t.Fatalf("stored labels = %#v, must not include stale label after normalization", got.Labels)
+	}
+}
+
+func TestNormalizeNonExpandingPoolSessionBeadCopiesSnapshotLabelsBeforeAddOnlyAppend(t *testing.T) {
+	store := beads.NewMemStore()
+	stale, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery-1",
+			"alias":                "cashmaster/refinery-1",
+			"session_name":         "s-refinery-stale",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot":            "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := make([]string, 2, 4)
+	labels[0] = sessionBeadLabel
+	labels[1] = "template:cashmaster/refinery"
+	stale.Labels = labels
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.add(stale)
+	cfgAgent := config.Agent{
+		Name:              "refinery",
+		Dir:               "cashmaster",
+		StartCommand:      "true",
+		MaxActiveSessions: intPtr(1),
+		ScaleCheck:        "printf 1",
+	}
+	bp := &agentBuildParams{
+		cityPath:     t.TempDir(),
+		beadStore:    store,
+		sessionBeads: snapshot,
+		agents:       []config.Agent{cfgAgent},
+		stderr:       io.Discard,
+	}
+
+	if _, _, err := selectOrCreatePoolSessionBead(bp, &cfgAgent, "cashmaster/refinery", nil, map[string]bool{}, map[int]bool{}); err != nil {
+		t.Fatalf("selectOrCreatePoolSessionBead: %v", err)
+	}
+
+	snapshotBeads := snapshot.Open()
+	if len(snapshotBeads) != 1 {
+		t.Fatalf("snapshot beads = %d, want 1", len(snapshotBeads))
+	}
+	if cap(snapshotBeads[0].Labels) <= len(snapshotBeads[0].Labels) {
+		t.Fatalf("snapshot labels capacity = %d, want spare capacity to exercise add-only append", cap(snapshotBeads[0].Labels))
+	}
+	expanded := snapshotBeads[0].Labels[:cap(snapshotBeads[0].Labels)]
+	if got := expanded[len(snapshotBeads[0].Labels)]; got != "" {
+		t.Fatalf("snapshot labels backing array was mutated at append slot: %q", got)
+	}
+	got, err := store.Get(stale.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", stale.ID, err)
+	}
+	if !containsString(got.Labels, "agent:cashmaster/refinery") {
+		t.Fatalf("stored labels = %#v, want canonical label after normalization", got.Labels)
+	}
+}
+
+func TestRealizePoolDesiredSessionsDefersAliasWhenNormalizationCollides(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	stale, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery-1", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":                        "cashmaster/refinery",
+			"agent_name":                      "cashmaster/refinery-1",
+			"alias":                           "cashmaster/refinery-1",
+			"session_name":                    "s-refinery-stale",
+			"state":                           "awake",
+			poolManagedMetadataKey:            boolMetadata(true),
+			"pool_slot":                       "1",
+			poolAliasConflictCountMetadataKey: "2",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery",
+			"alias":                "cashmaster/refinery",
+			"session_name":         "s-refinery-canonical",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "cashmaster",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.add(stale)
+	snapshot.add(canonical)
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = snapshot
+	desired := map[string]TemplateParams{}
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "cashmaster/refinery",
+		Requests: []SessionRequest{{
+			Template:      "cashmaster/refinery",
+			Tier:          "resume",
+			SessionBeadID: stale.ID,
+		}},
+	}, desired, &stderr)
+
+	tp, ok := desired[stale.Metadata["session_name"]]
+	if !ok {
+		t.Fatalf("desired state missing stale resume session; keys=%v stderr=%q", mapKeys(desired), stderr.String())
+	}
+	if got := tp.Alias; got != "" {
+		t.Fatalf("deferred singleton TemplateParams.Alias = %q, want empty while canonical alias is unavailable", got)
+	}
+	if got := tp.Env["GC_ALIAS"]; got != "" {
+		t.Fatalf("deferred singleton GC_ALIAS = %q, want empty while canonical alias is unavailable", got)
+	}
+	if got := tp.Env["GC_AGENT"]; got != tp.SessionName {
+		t.Fatalf("deferred singleton GC_AGENT = %q, want bead session name %q", got, tp.SessionName)
+	}
+	if tp.EnvIdentityStamped {
+		t.Fatal("deferred singleton EnvIdentityStamped = true, want false until alias is available")
+	}
+	stored, err := store.Get(stale.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", stale.ID, err)
+	}
+	if got := stored.Metadata["alias"]; got != "" {
+		t.Fatalf("stored deferred singleton alias = %q, want empty while canonical alias is unavailable", got)
+	}
+	if got := stored.Metadata[poolAliasConflictMetadataKey]; got != "cashmaster/refinery" {
+		t.Fatalf("stored pool_alias_conflict = %q, want canonical alias", got)
+	}
+	if got := stored.Metadata[poolAliasConflictCountMetadataKey]; got != "3" {
+		t.Fatalf("stored pool_alias_conflict_count = %q, want incremented retry count", got)
+	}
+	if _, err := time.Parse(time.RFC3339, stored.Metadata[poolAliasConflictAtMetadataKey]); err != nil {
+		t.Fatalf("stored pool_alias_conflict_at = %q, want RFC3339 timestamp: %v", stored.Metadata[poolAliasConflictAtMetadataKey], err)
+	}
+	if !strings.Contains(stderr.String(), "deferring singleton pool identity normalization") {
+		t.Fatalf("stderr = %q, want normalization deferral diagnostic", stderr.String())
+	}
+}
+
+func TestSyncSessionBeads_ReclaimsDeferredSingletonAliasAfterConflictClears(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	stale, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery-1", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery-1",
+			"alias":                "cashmaster/refinery-1",
+			"session_name":         "s-refinery-stale",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot":            "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery",
+			"alias":                "cashmaster/refinery",
+			"session_name":         "s-refinery-canonical",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "cashmaster",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.add(stale)
+	snapshot.add(canonical)
+	var buildStderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &buildStderr)
+	bp.sessionBeads = snapshot
+	desired := map[string]TemplateParams{}
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "cashmaster/refinery",
+		Requests: []SessionRequest{{
+			Template:      "cashmaster/refinery",
+			Tier:          "resume",
+			SessionBeadID: stale.ID,
+		}},
+	}, desired, &buildStderr)
+
+	var persistentStderr bytes.Buffer
+	persistentClk := &clock.Fake{Time: time.Date(2026, 5, 6, 2, 30, 0, 0, time.UTC)}
+	syncSessionBeads(cityPath, store, desired, runtime.NewFake(), allConfiguredDS(desired), cfg, persistentClk, &persistentStderr, false)
+
+	stillConflicted, err := store.Get(stale.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", stale.ID, err)
+	}
+	if got := stillConflicted.Metadata["alias"]; got != "" {
+		t.Fatalf("persistent-conflict alias = %q, want still deferred while canonical owner exists", got)
+	}
+	if got := stillConflicted.Metadata[poolAliasConflictMetadataKey]; got != "cashmaster/refinery" {
+		t.Fatalf("persistent-conflict pool_alias_conflict = %q, want canonical alias", got)
+	}
+	if got := stillConflicted.Metadata[poolAliasConflictCountMetadataKey]; got != "2" {
+		t.Fatalf("persistent-conflict pool_alias_conflict_count = %q, want sync retry increment", got)
+	}
+
+	if err := store.Close(canonical.ID); err != nil {
+		t.Fatalf("Close(%s): %v", canonical.ID, err)
+	}
+	var syncStderr bytes.Buffer
+	clk := &clock.Fake{Time: time.Date(2026, 5, 6, 3, 0, 0, 0, time.UTC)}
+	syncSessionBeads(cityPath, store, desired, runtime.NewFake(), allConfiguredDS(desired), cfg, clk, &syncStderr, false)
+
+	got, err := store.Get(stale.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", stale.ID, err)
+	}
+	if got.Metadata["alias"] != "cashmaster/refinery" {
+		t.Fatalf("alias = %q, want canonical alias after conflict clears; sync stderr=%q", got.Metadata["alias"], syncStderr.String())
+	}
+	if got.Metadata[poolAliasConflictMetadataKey] != "" {
+		t.Fatalf("pool_alias_conflict = %q, want cleared", got.Metadata[poolAliasConflictMetadataKey])
+	}
+	if got.Metadata[poolAliasConflictCountMetadataKey] != "" {
+		t.Fatalf("pool_alias_conflict_count = %q, want cleared", got.Metadata[poolAliasConflictCountMetadataKey])
+	}
+	if got.Metadata[poolAliasConflictAtMetadataKey] != "" {
+		t.Fatalf("pool_alias_conflict_at = %q, want cleared", got.Metadata[poolAliasConflictAtMetadataKey])
+	}
+}
+
+func TestNormalizeNonExpandingPoolSessionBeadReclaimsDeferredAlias(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	stale, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery-1", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":                        "cashmaster/refinery",
+			"agent_name":                      "cashmaster/refinery-1",
+			"alias":                           "",
+			"session_name":                    "s-refinery-stale",
+			"state":                           "awake",
+			poolManagedMetadataKey:            boolMetadata(true),
+			"pool_slot":                       "1",
+			poolAliasConflictMetadataKey:      "cashmaster/refinery",
+			poolAliasConflictCountMetadataKey: "3",
+			poolAliasConflictAtMetadataKey:    "2026-05-06T02:30:00Z",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "cashmaster",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+
+	result, err := normalizeNonExpandingPoolSessionBead(bp, &cfg.Agents[0], stale)
+	if err != nil {
+		t.Fatalf("normalizeNonExpandingPoolSessionBead: %v", err)
+	}
+	if got := result.Metadata["alias"]; got != "cashmaster/refinery" {
+		t.Fatalf("result alias = %q, want canonical alias", got)
+	}
+	if got := result.Metadata[poolAliasConflictMetadataKey]; got != "" {
+		t.Fatalf("result pool_alias_conflict = %q, want cleared", got)
+	}
+	stored, err := store.Get(stale.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", stale.ID, err)
+	}
+	if got := stored.Metadata["alias"]; got != "cashmaster/refinery" {
+		t.Fatalf("stored alias = %q, want canonical alias", got)
+	}
+	if got := stored.Metadata[poolAliasConflictMetadataKey]; got != "" {
+		t.Fatalf("stored pool_alias_conflict = %q, want cleared", got)
+	}
+	if got := stored.Metadata[poolAliasConflictCountMetadataKey]; got != "" {
+		t.Fatalf("stored pool_alias_conflict_count = %q, want cleared", got)
+	}
+	if got := stored.Metadata[poolAliasConflictAtMetadataKey]; got != "" {
+		t.Fatalf("stored pool_alias_conflict_at = %q, want cleared", got)
+	}
+}
+
+func TestReconcilerClosesUnselectedCanonicalSingletonBeforeAliasReclaim(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	stale, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery-1", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery-1",
+			"alias":                "cashmaster/refinery-1",
+			"session_name":         "s-refinery-stale",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot":            "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery",
+			"alias":                "cashmaster/refinery",
+			"session_name":         "s-refinery-canonical",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	priority := 10
+	if _, err := store.Create(beads.Bead{
+		Title:    "stale assigned work",
+		Type:     "task",
+		Status:   "in_progress",
+		Priority: &priority,
+		Assignee: "cashmaster/refinery-1",
+		Metadata: map[string]string{
+			"gc.routed_to": "cashmaster/refinery",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "cashmaster",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "printf 0",
+		}},
+	}
+
+	var buildStderr bytes.Buffer
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &buildStderr)
+	if _, ok := dsResult.State[canonical.Metadata["session_name"]]; ok {
+		t.Fatalf("desired state includes unselected canonical singleton %q; keys=%v", canonical.Metadata["session_name"], mapKeys(dsResult.State))
+	}
+	if _, ok := dsResult.State[stale.Metadata["session_name"]]; !ok {
+		t.Fatalf("desired state missing stale singleton resume %q; keys=%v stderr=%q", stale.Metadata["session_name"], mapKeys(dsResult.State), buildStderr.String())
+	}
+
+	sessions, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 6, 4, 0, 0, 0, time.UTC)}
+	var reconcileStdout, reconcileStderr bytes.Buffer
+	reconcileSessionBeads(
+		context.Background(), sessions, dsResult.State, configuredSessionNames(cfg, "", store), cfg, sp,
+		store, nil, nil, nil, newDrainTracker(), map[string]int{"cashmaster/refinery": 1}, false, nil, "",
+		nil, clk, events.Discard, 0, 0, &reconcileStdout, &reconcileStderr,
+	)
+
+	closedCanonical, err := store.Get(canonical.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", canonical.ID, err)
+	}
+	if closedCanonical.Status != "closed" {
+		t.Fatalf("canonical status = %q, want closed; stdout=%q stderr=%q", closedCanonical.Status, reconcileStdout.String(), reconcileStderr.String())
+	}
+	if want := sessionpkg.CanonicalCloseReason("orphaned"); closedCanonical.Metadata["close_reason"] != want {
+		t.Fatalf("canonical close_reason = %q, want %q", closedCanonical.Metadata["close_reason"], want)
+	}
+
+	var syncStderr bytes.Buffer
+	syncSessionBeads(cityPath, store, dsResult.State, sp, allConfiguredDS(dsResult.State), cfg, clk, &syncStderr, false)
+	reclaimed, err := store.Get(stale.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", stale.ID, err)
+	}
+	if got := reclaimed.Metadata["alias"]; got != "cashmaster/refinery" {
+		t.Fatalf("reclaimed alias = %q, want canonical alias; sync stderr=%q", got, syncStderr.String())
+	}
+	if got := reclaimed.Metadata[poolAliasConflictMetadataKey]; got != "" {
+		t.Fatalf("pool_alias_conflict = %q, want cleared", got)
+	}
+}
+
+func TestProductionOrderDeferredSingletonAliasReclaimsOnSecondTick(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	stale, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery-1", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery-1",
+			"alias":                "cashmaster/refinery-1",
+			"session_name":         "s-refinery-stale",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot":            "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery",
+			"alias":                "cashmaster/refinery",
+			"session_name":         "s-refinery-canonical",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	priority := 10
+	if _, err := store.Create(beads.Bead{
+		Title:    "stale assigned work",
+		Type:     "task",
+		Status:   "in_progress",
+		Priority: &priority,
+		Assignee: "cashmaster/refinery-1",
+		Metadata: map[string]string{
+			"gc.routed_to": "cashmaster/refinery",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "cashmaster",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "printf 0",
+		}},
+	}
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 6, 4, 0, 0, 0, time.UTC)}
+
+	var firstBuildStderr bytes.Buffer
+	firstTick := buildDesiredState("test-city", cityPath, clk.Now().UTC(), cfg, sp, store, &firstBuildStderr)
+	if _, ok := firstTick.State[stale.Metadata["session_name"]]; !ok {
+		t.Fatalf("first tick desired state missing stale singleton resume %q; keys=%v stderr=%q", stale.Metadata["session_name"], mapKeys(firstTick.State), firstBuildStderr.String())
+	}
+
+	var firstSyncStderr bytes.Buffer
+	_, updated := syncSessionBeadsWithSnapshotAndRigStores(
+		cityPath,
+		store,
+		nil,
+		firstTick.State,
+		sp,
+		configuredSessionNames(cfg, "", store),
+		cfg,
+		clk,
+		&firstSyncStderr,
+		true,
+		nil,
+	)
+	stillDeferred, err := store.Get(stale.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", stale.ID, err)
+	}
+	if got := stillDeferred.Metadata["alias"]; got != "" {
+		t.Fatalf("first sync alias = %q, want deferred while canonical owner remains open", got)
+	}
+	if got := stillDeferred.Metadata[poolAliasConflictMetadataKey]; got != "cashmaster/refinery" {
+		t.Fatalf("first sync pool_alias_conflict = %q, want canonical alias; sync stderr=%q", got, firstSyncStderr.String())
+	}
+
+	open := updated.Open()
+	var reconcileStdout, reconcileStderr bytes.Buffer
+	reconcileSessionBeads(
+		context.Background(), open, firstTick.State, configuredSessionNames(cfg, "", store), cfg, sp,
+		store, nil, nil, nil, newDrainTracker(), map[string]int{"cashmaster/refinery": 1}, false, nil, "",
+		nil, clk, events.Discard, 0, 0, &reconcileStdout, &reconcileStderr,
+	)
+	closedCanonical, err := store.Get(canonical.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", canonical.ID, err)
+	}
+	if closedCanonical.Status != "closed" {
+		t.Fatalf("canonical status = %q, want closed after first production-order reconcile; stdout=%q stderr=%q", closedCanonical.Status, reconcileStdout.String(), reconcileStderr.String())
+	}
+
+	clk.Advance(time.Minute)
+	var secondBuildStderr bytes.Buffer
+	secondTick := buildDesiredState("test-city", cityPath, clk.Now().UTC(), cfg, sp, store, &secondBuildStderr)
+	var secondSyncStderr bytes.Buffer
+	syncSessionBeads(
+		cityPath,
+		store,
+		secondTick.State,
+		sp,
+		allConfiguredDS(secondTick.State),
+		cfg,
+		clk,
+		&secondSyncStderr,
+		true,
+	)
+
+	reclaimed, err := store.Get(stale.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", stale.ID, err)
+	}
+	if got := reclaimed.Metadata["alias"]; got != "cashmaster/refinery" {
+		t.Fatalf("second tick alias = %q, want canonical alias; build stderr=%q sync stderr=%q", got, secondBuildStderr.String(), secondSyncStderr.String())
+	}
+	if got := reclaimed.Metadata["pool_slot"]; got != "" {
+		t.Fatalf("second tick pool_slot = %q, want empty after singleton recovery", got)
+	}
+	if got := reclaimed.Metadata[poolAliasConflictMetadataKey]; got != "" {
+		t.Fatalf("pool_alias_conflict = %q, want cleared", got)
+	}
+	if got := reclaimed.Metadata[poolAliasConflictCountMetadataKey]; got != "" {
+		t.Fatalf("pool_alias_conflict_count = %q, want cleared", got)
+	}
+	if got := reclaimed.Metadata[poolAliasConflictAtMetadataKey]; got != "" {
+		t.Fatalf("pool_alias_conflict_at = %q, want cleared", got)
+	}
+}
+
+func TestDiscoverSessionBeadsSkipsStaleMaxOneWhenDependencyFloorDesired(t *testing.T) {
+	store := beads.NewMemStore()
+	stale, err := store.Create(beads.Bead{
+		Title:  "gascity/db-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:gascity/db-1", "template:gascity/db"},
+		Metadata: map[string]string{
+			"template":             "gascity/db",
+			"agent_name":           "gascity/db-1",
+			"alias":                "gascity/db-1",
+			"session_name":         "s-db-stale",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot":            "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.add(stale)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "db",
+			Dir:               "gascity",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	desired := map[string]TemplateParams{
+		"s-db-canonical": {
+			TemplateName:   "gascity/db",
+			InstanceName:   "s-db-canonical",
+			DependencyOnly: true,
+		},
+	}
+	bp := &agentBuildParams{
+		cityPath:     t.TempDir(),
+		city:         cfg,
+		beadStore:    store,
+		sessionBeads: snapshot,
+		agents:       cfg.Agents,
+	}
+
+	discoverSessionBeadsWithRoots(bp, cfg, desired, nil, map[string]bool{"gascity/db": true}, nil, io.Discard)
+
+	if _, ok := desired[stale.Metadata["session_name"]]; ok {
+		t.Fatalf("desired state includes stale duplicate dependency-floor sibling; keys=%v", mapKeys(desired))
+	}
+}
+
+func TestNonExpandingPoolIdentitySlotRecognizesOutOfRangeNumericSuffix(t *testing.T) {
+	cfgAgent := &config.Agent{
+		Name:              "refinery",
+		Dir:               "cashmaster",
+		StartCommand:      "true",
+		MaxActiveSessions: intPtr(1),
+	}
+
+	if got := nonExpandingPoolIdentitySlot(cfgAgent, "cashmaster/refinery-10"); got != 10 {
+		t.Fatalf("slot = %d, want out-of-range stale singleton suffix 10 recognized", got)
+	}
+}
+
+func TestBuildDesiredState_MaxOneCanonicalBeadIsIdempotent(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	canonical, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery",
+			"alias":                "cashmaster/refinery",
+			"session_name":         "s-refinery-canonical",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "cashmaster",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "printf 1",
+		}},
+	}
+
+	before, err := store.Get(canonical.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", canonical.ID, err)
+	}
+	var stderr bytes.Buffer
+	first := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+	afterFirst, err := store.Get(canonical.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) after first pass: %v", canonical.ID, err)
+	}
+	second := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+	afterSecond, err := store.Get(canonical.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) after second pass: %v", canonical.ID, err)
+	}
+
+	if _, ok := first.State[canonical.Metadata["session_name"]]; !ok {
+		t.Fatalf("first desired state missing canonical singleton; keys=%v", mapKeys(first.State))
+	}
+	if _, ok := second.State[canonical.Metadata["session_name"]]; !ok {
+		t.Fatalf("second desired state missing canonical singleton; keys=%v", mapKeys(second.State))
+	}
+	if before.Title != afterFirst.Title || !reflect.DeepEqual(before.Metadata, afterFirst.Metadata) || !reflect.DeepEqual(before.Labels, afterFirst.Labels) {
+		t.Fatalf("first pass mutated canonical bead: before=%#v after=%#v", before, afterFirst)
+	}
+	if afterFirst.Title != afterSecond.Title || !reflect.DeepEqual(afterFirst.Metadata, afterSecond.Metadata) || !reflect.DeepEqual(afterFirst.Labels, afterSecond.Labels) {
+		t.Fatalf("second pass mutated canonical bead: first=%#v second=%#v", afterFirst, afterSecond)
+	}
+	if strings.Contains(stderr.String(), "collapsing phantom pool identity") {
+		t.Fatalf("stderr = %q, want no normalization diagnostic for canonical bead", stderr.String())
+	}
+}
+
+func TestBuildDesiredState_NamepoolMaxOneUsesNamepoolIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "rig",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			NamepoolNames:     []string{"furiosa"},
+			ScaleCheck:        "printf 1",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if len(dsResult.State) != 1 {
+		t.Fatalf("desired sessions = %d, want 1", len(dsResult.State))
+	}
+	var tp TemplateParams
+	for _, candidate := range dsResult.State {
+		tp = candidate
+	}
+	if tp.InstanceName != "rig/furiosa" {
+		t.Fatalf("InstanceName = %q, want namepool identity", tp.InstanceName)
+	}
+	if tp.PoolSlot != 1 {
+		t.Fatalf("PoolSlot = %d, want namepool slot 1", tp.PoolSlot)
+	}
+	sessionBeads, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("load session beads: %v", err)
+	}
+	if len(sessionBeads) != 1 {
+		t.Fatalf("session beads = %d, want 1", len(sessionBeads))
+	}
+	got := sessionBeads[0]
+	if got.Metadata["agent_name"] != "rig/furiosa" {
+		t.Fatalf("agent_name = %q, want namepool identity", got.Metadata["agent_name"])
+	}
+	if got.Metadata["alias"] != "rig/furiosa" {
+		t.Fatalf("alias = %q, want namepool identity", got.Metadata["alias"])
+	}
+	if got.Metadata["pool_slot"] != "1" {
+		t.Fatalf("pool_slot = %q, want 1 for namepool singleton", got.Metadata["pool_slot"])
+	}
+}
+
 func TestBuildDesiredState_NewPoolSessionBeadDefersAliasWhenConcreteAliasTaken(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -1825,7 +3211,7 @@ func TestCreatePoolSessionBeadWithGuardedAlias_LogsAliasLockSetupFailure(t *test
 		stderr:       &stderr,
 	}
 
-	bead, err := createPoolSessionBeadWithGuardedAlias(bp, "claude", "claude-1", 1)
+	bead, err := createPoolSessionBeadWithGuardedAlias(bp, nil, "claude", "claude-1", 1)
 	if err != nil {
 		t.Fatalf("createPoolSessionBeadWithGuardedAlias: %v", err)
 	}
@@ -1834,6 +3220,44 @@ func TestCreatePoolSessionBeadWithGuardedAlias_LogsAliasLockSetupFailure(t *test
 	}
 	if !strings.Contains(stderr.String(), "locking alias \"claude-1\"") || !strings.Contains(stderr.String(), "creating without alias") {
 		t.Fatalf("stderr = %q, want alias-lock setup failure and unaliased fallback", stderr.String())
+	}
+}
+
+func TestCreatePoolSessionBeadWithGuardedAliasRejectsUnsupportedTransport(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Provider: "opencode"},
+		Session:   config.SessionConfig{Provider: config.SessionTransportACP},
+		Providers: map[string]config.ProviderSpec{
+			"opencode": {
+				Command:     "echo",
+				Args:        []string{"provider"},
+				ACPCommand:  "echo",
+				ACPArgs:     []string{"acp"},
+				PromptMode:  "none",
+				SupportsACP: boolPtr(true),
+			},
+		},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Provider:          "opencode",
+			Session:           config.SessionTransportTmux,
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	store := beads.NewMemStore()
+	sp := &acpOnlyDesiredStateProvider{Fake: runtime.NewFake()}
+	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, sp, time.Now().UTC(), store, io.Discard)
+
+	_, err := createPoolSessionBeadWithGuardedAlias(bp, &cfg.Agents[0], "worker", "worker", 0)
+	if err == nil || !strings.Contains(err.Error(), "cannot route tmux sessions") {
+		t.Fatalf("createPoolSessionBeadWithGuardedAlias error = %v, want tmux routing rejection", err)
+	}
+	beads, listErr := store.ListByLabel(sessionBeadLabel, 0)
+	if listErr != nil {
+		t.Fatalf("ListByLabel(%q): %v", sessionBeadLabel, listErr)
+	}
+	if len(beads) != 0 {
+		t.Fatalf("session bead count = %d, want 0 after rejected transport: %#v", len(beads), beads)
 	}
 }
 
@@ -4700,6 +6124,31 @@ func TestExistingPoolSlot_PreservesStampedOutOfBoundsLiveIdentity(t *testing.T) 
 	}
 }
 
+func TestValidateAgentSessionTransportForBuild_ProductionShapeRunsTransportValidation(t *testing.T) {
+	bp := &agentBuildParams{
+		workspace: &config.Workspace{},
+		providers: map[string]config.ProviderSpec{
+			"test-agent": {
+				Command:     "test-agent",
+				SupportsACP: boolPtr(true),
+			},
+		},
+		lookPath: func(string) (string, error) {
+			return "/usr/bin/test-agent", nil
+		},
+		sp: runtime.NewFake(),
+	}
+	cfgAgent := &config.Agent{Name: "worker", Provider: "test-agent", Session: config.SessionTransportACP}
+
+	err := validateAgentSessionTransportForBuild(bp, cfgAgent, cfgAgent.QualifiedName())
+	if err == nil {
+		t.Fatal("validateAgentSessionTransportForBuild returned nil, want transport routing error")
+	}
+	if !strings.Contains(err.Error(), "requires ACP transport") {
+		t.Fatalf("validateAgentSessionTransportForBuild error = %v, want ACP transport validation error", err)
+	}
+}
+
 func TestBuildDesiredState_DoesNotCreateDuplicatePoolBeadForDiscoveredSession(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -5311,6 +6760,312 @@ func TestSelectOrCreateDependencyPoolSessionBead_SkipsDrained(t *testing.T) {
 	}
 }
 
+func TestSelectOrCreateDependencyPoolSessionBead_MaxOneUsesCanonicalIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	cfgAgent := config.Agent{
+		Name:              "refinery",
+		Dir:               "cashmaster",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(1),
+	}
+	bp := &agentBuildParams{
+		cityPath:     t.TempDir(),
+		beadStore:    store,
+		sessionBeads: &sessionBeadSnapshot{},
+		agents:       []config.Agent{cfgAgent},
+	}
+
+	result, err := selectOrCreateDependencyPoolSessionBead(bp, &cfgAgent, "cashmaster/refinery")
+	if err != nil {
+		t.Fatalf("selectOrCreateDependencyPoolSessionBead: %v", err)
+	}
+	if got := result.Metadata["agent_name"]; got != "cashmaster/refinery" {
+		t.Fatalf("dependency agent_name = %q, want canonical non-pool identity", got)
+	}
+	if got := result.Metadata["alias"]; got != "cashmaster/refinery" {
+		t.Fatalf("dependency alias = %q, want canonical non-pool identity", got)
+	}
+	if got := result.Metadata["pool_slot"]; got != "" {
+		t.Fatalf("dependency pool_slot = %q, want empty for max_active_sessions=1", got)
+	}
+	if got := result.Title; got != "cashmaster/refinery" {
+		t.Fatalf("dependency title = %q, want canonical non-pool identity", got)
+	}
+	if containsString(result.Labels, "agent:cashmaster/refinery-1") {
+		t.Fatalf("dependency labels = %#v, must not include phantom pool identity", result.Labels)
+	}
+	if !containsString(result.Labels, "agent:cashmaster/refinery") {
+		t.Fatalf("dependency labels = %#v, want canonical agent label", result.Labels)
+	}
+}
+
+func TestSelectOrCreateDependencyPoolSessionBead_MaxOneNormalizesExistingStaleIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	stale, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery-1", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":                        "cashmaster/refinery",
+			"agent_name":                      "cashmaster/refinery-1",
+			"alias":                           "cashmaster/refinery-1",
+			"session_name":                    "s-refinery-dep-stale",
+			"state":                           "awake",
+			"dependency_only":                 boolMetadata(true),
+			poolManagedMetadataKey:            boolMetadata(true),
+			"pool_slot":                       "1",
+			poolAliasConflictMetadataKey:      "cashmaster/refinery",
+			poolAliasConflictCountMetadataKey: "4",
+			poolAliasConflictAtMetadataKey:    "2026-05-06T01:00:00Z",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.add(stale)
+	cfgAgent := config.Agent{
+		Name:              "refinery",
+		Dir:               "cashmaster",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(1),
+	}
+	bp := &agentBuildParams{
+		cityPath:     t.TempDir(),
+		beadStore:    store,
+		sessionBeads: snapshot,
+		agents:       []config.Agent{cfgAgent},
+	}
+
+	result, err := selectOrCreateDependencyPoolSessionBead(bp, &cfgAgent, "cashmaster/refinery")
+	if err != nil {
+		t.Fatalf("selectOrCreateDependencyPoolSessionBead: %v", err)
+	}
+	if result.ID != stale.ID {
+		t.Fatalf("dependency reuse ID = %q, want stale bead %q", result.ID, stale.ID)
+	}
+	if got := result.Metadata["agent_name"]; got != "cashmaster/refinery" {
+		t.Fatalf("dependency agent_name = %q, want canonical non-pool identity", got)
+	}
+	if got := result.Metadata["alias"]; got != "cashmaster/refinery" {
+		t.Fatalf("dependency alias = %q, want canonical non-pool identity", got)
+	}
+	if got := result.Metadata["pool_slot"]; got != "" {
+		t.Fatalf("dependency pool_slot = %q, want empty after normalization", got)
+	}
+	if got := result.Metadata[poolAliasConflictMetadataKey]; got != "" {
+		t.Fatalf("dependency pool_alias_conflict = %q, want cleared after successful normalization", got)
+	}
+	if got := result.Metadata[poolAliasConflictCountMetadataKey]; got != "" {
+		t.Fatalf("dependency pool_alias_conflict_count = %q, want cleared after successful normalization", got)
+	}
+	if got := result.Metadata[poolAliasConflictAtMetadataKey]; got != "" {
+		t.Fatalf("dependency pool_alias_conflict_at = %q, want cleared after successful normalization", got)
+	}
+	if containsString(result.Labels, "agent:cashmaster/refinery-1") {
+		t.Fatalf("dependency labels = %#v, must not include stale label", result.Labels)
+	}
+	if !containsString(result.Labels, "agent:cashmaster/refinery") {
+		t.Fatalf("dependency labels = %#v, want canonical agent label", result.Labels)
+	}
+	stored, err := store.Get(stale.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", stale.ID, err)
+	}
+	if stored.Metadata["agent_name"] != "cashmaster/refinery" || stored.Metadata["alias"] != "cashmaster/refinery" || stored.Metadata["pool_slot"] != "" {
+		t.Fatalf("stored dependency metadata = %#v, want normalized singleton identity", stored.Metadata)
+	}
+	if stored.Metadata[poolAliasConflictMetadataKey] != "" || stored.Metadata[poolAliasConflictCountMetadataKey] != "" || stored.Metadata[poolAliasConflictAtMetadataKey] != "" {
+		t.Fatalf("stored dependency conflict metadata = %#v, want cleared after successful normalization", stored.Metadata)
+	}
+}
+
+func TestSelectOrCreateDependencyPoolSessionBead_MaxOnePrefersCanonicalDependencyDuplicate(t *testing.T) {
+	store := beads.NewMemStore()
+	stale, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery-1", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery-1",
+			"alias":                "cashmaster/refinery-1",
+			"session_name":         "s-refinery-dep-stale",
+			"state":                "awake",
+			"dependency_only":      boolMetadata(true),
+			poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot":            "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery",
+			"alias":                "cashmaster/refinery",
+			"session_name":         "s-refinery-dep-canonical",
+			"state":                "awake",
+			"dependency_only":      boolMetadata(true),
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.add(stale)
+	snapshot.add(canonical)
+	cfgAgent := config.Agent{
+		Name:              "refinery",
+		Dir:               "cashmaster",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(1),
+	}
+	bp := &agentBuildParams{
+		cityPath:     t.TempDir(),
+		beadStore:    store,
+		sessionBeads: snapshot,
+		agents:       []config.Agent{cfgAgent},
+	}
+
+	result, err := selectOrCreateDependencyPoolSessionBead(bp, &cfgAgent, "cashmaster/refinery")
+	if err != nil {
+		t.Fatalf("selectOrCreateDependencyPoolSessionBead: %v", err)
+	}
+	if result.ID != canonical.ID {
+		t.Fatalf("dependency reuse ID = %q, want canonical bead %q instead of stale duplicate %q", result.ID, canonical.ID, stale.ID)
+	}
+	if got := result.Metadata["agent_name"]; got != "cashmaster/refinery" {
+		t.Fatalf("dependency agent_name = %q, want canonical non-pool identity", got)
+	}
+	if got := result.Metadata["pool_slot"]; got != "" {
+		t.Fatalf("dependency pool_slot = %q, want empty for canonical max-one bead", got)
+	}
+}
+
+func TestSelectOrCreateDependencyPoolSessionBead_MaxOnePicksEarliestCanonicalDuplicate(t *testing.T) {
+	base := time.Date(2026, 5, 16, 10, 20, 0, 0, time.UTC)
+	later := beads.Bead{
+		ID:        "session-later",
+		Title:     "cashmaster/refinery",
+		Type:      sessionBeadType,
+		Status:    "open",
+		CreatedAt: base.Add(time.Minute),
+		Labels:    []string{sessionBeadLabel, "agent:cashmaster/refinery", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery",
+			"alias":                "cashmaster/refinery",
+			"session_name":         "s-refinery-dep-later",
+			"state":                "awake",
+			"dependency_only":      boolMetadata(true),
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}
+	earliest := beads.Bead{
+		ID:        "session-earliest",
+		Title:     "cashmaster/refinery",
+		Type:      sessionBeadType,
+		Status:    "open",
+		CreatedAt: base,
+		Labels:    []string{sessionBeadLabel, "agent:cashmaster/refinery", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery",
+			"alias":                "cashmaster/refinery",
+			"session_name":         "s-refinery-dep-earliest",
+			"state":                "awake",
+			"dependency_only":      boolMetadata(true),
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}
+	cfgAgent := config.Agent{
+		Name:              "refinery",
+		Dir:               "cashmaster",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(1),
+	}
+	bp := &agentBuildParams{
+		sessionBeads: newSessionBeadSnapshot([]beads.Bead{later, earliest}),
+		agents:       []config.Agent{cfgAgent},
+	}
+
+	result, err := selectOrCreateDependencyPoolSessionBead(bp, &cfgAgent, "cashmaster/refinery")
+	if err != nil {
+		t.Fatalf("selectOrCreateDependencyPoolSessionBead: %v", err)
+	}
+	if result.ID != earliest.ID {
+		t.Fatalf("dependency reuse ID = %q, want earliest canonical duplicate %q", result.ID, earliest.ID)
+	}
+}
+
+func TestSelectOrCreatePoolSessionBeadPicksEarliestReusableSingletonCandidate(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	earliest, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery-2",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery-2", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery-2",
+			"alias":                "cashmaster/refinery-2",
+			"session_name":         "s-refinery-earliest",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot":            "2",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	later, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery-1", "template:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery-1",
+			"alias":                "cashmaster/refinery-1",
+			"session_name":         "s-refinery-later",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot":            "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.add(later)
+	snapshot.add(earliest)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "cashmaster",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = snapshot
+
+	result, _, err := selectOrCreatePoolSessionBead(bp, &cfg.Agents[0], "cashmaster/refinery", nil, map[string]bool{}, map[int]bool{})
+	if err != nil {
+		t.Fatalf("selectOrCreatePoolSessionBead: %v", err)
+	}
+	if result.ID != earliest.ID {
+		t.Fatalf("selected bead = %q, want earliest reusable candidate %q", result.ID, earliest.ID)
+	}
+}
+
 func TestSelectOrCreateDependencyPoolSessionBead_DefersAliasWhenConcreteAliasTaken(t *testing.T) {
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{
@@ -5349,6 +7104,48 @@ func TestSelectOrCreateDependencyPoolSessionBead_DefersAliasWhenConcreteAliasTak
 	}
 	if got := result.Metadata["pool_slot"]; got != "1" {
 		t.Fatalf("dependency pool_slot = %q, want 1", got)
+	}
+}
+
+func TestSelectOrCreateDependencyPoolSessionBead_ReusesLegacyUnqualifiedTemplateWithFullConfig(t *testing.T) {
+	store := beads.NewMemStore()
+	legacy, err := store.Create(beads.Bead{
+		Title:  "legacy db dependency",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":        "db",
+			"session_name":    "s-db-dep-legacy",
+			"state":           "awake",
+			"dependency_only": "true",
+			"pool_managed":    "true",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.add(legacy)
+	cfg := &config.City{Agents: []config.Agent{{
+		Name:              "db",
+		Dir:               "gascity",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(3),
+	}}}
+	bp := &agentBuildParams{
+		city:         cfg,
+		cityPath:     t.TempDir(),
+		beadStore:    store,
+		sessionBeads: snapshot,
+		agents:       cfg.Agents,
+	}
+
+	result, err := selectOrCreateDependencyPoolSessionBead(bp, &cfg.Agents[0], "gascity/db")
+	if err != nil {
+		t.Fatalf("selectOrCreateDependencyPoolSessionBead: %v", err)
+	}
+	if result.ID != legacy.ID {
+		t.Fatalf("dependency reuse ID = %q, want legacy bead %q", result.ID, legacy.ID)
 	}
 }
 
@@ -5391,6 +7188,46 @@ func TestSelectOrCreatePoolSessionBead_ReusesAvailableForNewTier(t *testing.T) {
 	}
 	if slot != 3 {
 		t.Fatalf("available reuse slot = %d, want 3", slot)
+	}
+}
+
+func TestSelectOrCreatePoolSessionBead_ReusesLegacyUnqualifiedTemplateWithFullConfig(t *testing.T) {
+	store := beads.NewMemStore()
+	legacy, err := store.Create(beads.Bead{
+		Title:  "legacy refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "refinery",
+			"session_name": "s-refinery-legacy",
+			"state":        "awake",
+			"pool_managed": "true",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.add(legacy)
+	cfg := &config.City{Agents: []config.Agent{{
+		Name:              "refinery",
+		Dir:               "cashmaster",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(3),
+	}}}
+	bp := &agentBuildParams{
+		city:         cfg,
+		beadStore:    store,
+		sessionBeads: snapshot,
+		agents:       cfg.Agents,
+	}
+
+	result, _, err := selectOrCreatePoolSessionBead(bp, &cfg.Agents[0], "cashmaster/refinery", nil, map[string]bool{}, map[int]bool{})
+	if err != nil {
+		t.Fatalf("selectOrCreatePoolSessionBead: %v", err)
+	}
+	if result.ID != legacy.ID {
+		t.Fatalf("pool reuse ID = %q, want legacy bead %q", result.ID, legacy.ID)
 	}
 }
 
@@ -5836,6 +7673,106 @@ func TestEnsureDependencyOnlyTemplate_StoreBackedUsesInstanceIdentity(t *testing
 	}
 	if template := tp.Env["GC_TEMPLATE"]; template != "gascity/db" {
 		t.Fatalf("store-backed dep-floor GC_TEMPLATE = %q, want base %q", template, "gascity/db")
+	}
+}
+
+func TestEnsureDependencyOnlyTemplate_StoreBackedMaxOneUsesCanonicalIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{
+				Name:              "db",
+				Dir:               "gascity",
+				StartCommand:      "true",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(1),
+				ScaleCheck:        "printf 0",
+			},
+			{
+				Name:              "api",
+				Dir:               "gascity",
+				StartCommand:      "true",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(3),
+				ScaleCheck:        "printf 0",
+				DependsOn:         []string{"gascity/db"},
+			},
+		},
+	}
+
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "api",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:gascity/api"},
+		Metadata: map[string]string{
+			"template":             "gascity/api",
+			"agent_name":           "gascity/api",
+			"session_name":         "s-api-root",
+			"state":                "active",
+			poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot":            "1",
+		},
+	}); err != nil {
+		t.Fatalf("seed api root bead: %v", err)
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+
+	var tp TemplateParams
+	var found bool
+	for _, entry := range dsResult.State {
+		if entry.TemplateName == "gascity/db" && entry.DependencyOnly {
+			tp = entry
+			found = true
+			break
+		}
+	}
+	if !found {
+		entries := make([]string, 0, len(dsResult.State))
+		for k, v := range dsResult.State {
+			entries = append(entries, fmt.Sprintf("%s{template=%s depOnly=%v alias=%s}", k, v.TemplateName, v.DependencyOnly, v.Env["GC_ALIAS"]))
+		}
+		t.Fatalf("store-backed dependency floor for db not found, desired = %v", entries)
+	}
+	if alias := tp.Env["GC_ALIAS"]; alias != "gascity/db" {
+		t.Fatalf("store-backed dep-floor GC_ALIAS = %q, want canonical identity %q", alias, "gascity/db")
+	}
+
+	sessionBeads, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("load session beads: %v", err)
+	}
+	var depBead beads.Bead
+	found = false
+	for _, candidate := range sessionBeads {
+		if candidate.Metadata["template"] == "gascity/db" && candidate.Metadata["agent_name"] == "gascity/db" {
+			depBead = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("dependency-floor bead for db not found; beads=%#v", sessionBeads)
+	}
+	if got := depBead.Metadata["agent_name"]; got != "gascity/db" {
+		t.Fatalf("dependency agent_name = %q, want canonical non-pool identity", got)
+	}
+	if got := depBead.Metadata["alias"]; got != "gascity/db" {
+		t.Fatalf("dependency alias = %q, want canonical non-pool identity", got)
+	}
+	if got := depBead.Metadata["pool_slot"]; got != "" {
+		t.Fatalf("dependency pool_slot = %q, want empty for max_active_sessions=1", got)
+	}
+	if depBead.Title != "gascity/db" {
+		t.Fatalf("dependency title = %q, want canonical non-pool identity", depBead.Title)
+	}
+	if containsString(depBead.Labels, "agent:gascity/db-1") {
+		t.Fatalf("dependency labels = %#v, must not include phantom pool identity", depBead.Labels)
+	}
+	if !containsString(depBead.Labels, "agent:gascity/db") {
+		t.Fatalf("dependency labels = %#v, want canonical agent label", depBead.Labels)
 	}
 }
 

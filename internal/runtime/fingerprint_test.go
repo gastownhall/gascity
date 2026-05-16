@@ -101,6 +101,24 @@ func TestConfigFingerprintIgnoresEmitsPermissionWarning(t *testing.T) {
 	}
 }
 
+func TestConfigFingerprintIncludesAcceptStartupDialogs(t *testing.T) {
+	accept := true
+	reject := false
+	unset := Config{Command: "kimi"}
+	withAccept := Config{Command: "kimi", AcceptStartupDialogs: &accept}
+	withReject := Config{Command: "kimi", AcceptStartupDialogs: &reject}
+
+	if CoreFingerprint(unset) == CoreFingerprint(withAccept) {
+		t.Fatal("AcceptStartupDialogs=true should affect core fingerprint")
+	}
+	if CoreFingerprint(withAccept) == CoreFingerprint(withReject) {
+		t.Fatal("AcceptStartupDialogs true and false should produce different core fingerprints")
+	}
+	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(unset), withAccept); len(got) != 1 || got[0] != "AcceptStartupDialogs" {
+		t.Fatalf("CoreFingerprintDriftFields = %v, want [AcceptStartupDialogs]", got)
+	}
+}
+
 func TestConfigFingerprintIgnoresWorkDir(t *testing.T) {
 	a := Config{Command: "claude", WorkDir: "/tmp"}
 	b := Config{Command: "claude", WorkDir: "/home/user"}

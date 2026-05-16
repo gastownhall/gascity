@@ -325,6 +325,45 @@ func TestLifecycleCoordination_InitDirIfReady_BdDeferred(t *testing.T) {
 	}
 }
 
+func TestLifecycleCoordination_InitDirIfReadySkipsProviderForPostgresCityAndRig(t *testing.T) {
+	cityPath, rigPath, _ := writeInheritedCityPostgresRigFixture(t, "")
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+
+	originalEnsure := initDirIfReadyEnsureBeadsProvider
+	t.Cleanup(func() {
+		initDirIfReadyEnsureBeadsProvider = originalEnsure
+	})
+
+	var ensureCalls int
+	initDirIfReadyEnsureBeadsProvider = func(string) error {
+		ensureCalls++
+		return fmt.Errorf("managed Dolt provider start should not run for postgres-backed scopes")
+	}
+
+	deferred, err := initDirIfReady(cityPath, cityPath, "gc")
+	if err != nil {
+		t.Fatalf("initDirIfReady(city) error = %v, want nil", err)
+	}
+	if deferred {
+		t.Fatal("initDirIfReady(city) deferred = true, want false")
+	}
+	assertHooksExist(t, cityPath, "after postgres city init")
+
+	deferred, err = initDirIfReady(cityPath, rigPath, "pg")
+	if err != nil {
+		t.Fatalf("initDirIfReady(rig) error = %v, want nil", err)
+	}
+	if deferred {
+		t.Fatal("initDirIfReady(rig) deferred = true, want false")
+	}
+	assertHooksExist(t, rigPath, "after postgres rig add")
+
+	if ensureCalls != 0 {
+		t.Fatalf("managed Dolt provider start calls = %d, want 0", ensureCalls)
+	}
+}
+
 func TestLifecycleCoordination_InitDirIfReady_RetriesTransientManagedDoltFailure(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {

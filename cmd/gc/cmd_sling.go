@@ -399,11 +399,6 @@ func loadSlingCityConfig(cityPath string) (*config.City, *config.Provenance, err
 	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
 }
 
-func slingStoreEnv(cfg *config.City, cityPath, storeDir string) map[string]string {
-	env, _ := slingStoreEnvWithError(cfg, cityPath, storeDir)
-	return env
-}
-
 func slingStoreEnvWithError(cfg *config.City, cityPath, storeDir string) (map[string]string, error) {
 	storeEnv := map[string]string{}
 	switch provider := rawBeadsProviderForScope(storeDir, cityPath); {

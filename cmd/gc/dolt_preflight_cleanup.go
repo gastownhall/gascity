@@ -144,14 +144,21 @@ func fileOpenedByAnyProcessFromProc(ctx context.Context, path string) (bool, boo
 	if ctx != nil && ctx.Err() != nil {
 		return false, false
 	}
+	info, statErr := os.Lstat(path)
+	isSocketPath := statErr == nil && info.Mode()&os.ModeSocket != 0
+	if isSocketPath {
+		socketInodes, checked := unixSocketInodesForPath(ctx, path)
+		if ctx != nil && ctx.Err() != nil {
+			return false, false
+		}
+		if checked {
+			return len(socketInodes) > 0, true
+		}
+	}
 	entries, err := os.ReadDir(managedDoltProcDir)
 	if err != nil {
 		return false, false
 	}
-	if ctx != nil && ctx.Err() != nil {
-		return false, false
-	}
-	socketInodes, _ := unixSocketInodesForPath(ctx, path)
 	if ctx != nil && ctx.Err() != nil {
 		return false, false
 	}
@@ -181,12 +188,6 @@ func fileOpenedByAnyProcessFromProc(ctx context.Context, path string) (bool, boo
 			target = strings.TrimSuffix(target, " (deleted)")
 			if samePath(target, path) {
 				return true, true
-			}
-			if len(socketInodes) > 0 && strings.HasPrefix(target, "socket:[") && strings.HasSuffix(target, "]") {
-				inode := strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")
-				if _, ok := socketInodes[inode]; ok {
-					return true, true
-				}
 			}
 		}
 	}

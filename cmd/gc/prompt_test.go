@@ -424,6 +424,45 @@ Binding: {{ .BindingName }} {{ .BindingPrefix }}
 	}
 }
 
+func TestRenderPromptBindingPrefixReachesTemplate(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/peer.template.md"] = []byte("peer={{ .RigName }}/{{ .BindingPrefix }}worker\nbinding={{ .BindingName }}\n")
+	cases := []struct {
+		name string
+		ctx  PromptContext
+		want string
+	}{
+		{
+			name: "bound",
+			ctx: PromptContext{
+				BindingName:   "gastown",
+				BindingPrefix: "gastown.",
+				RigName:       "demo",
+			},
+			want: "peer=demo/gastown.worker\nbinding=gastown\n",
+		},
+		{
+			name: "unbound",
+			ctx: PromptContext{
+				RigName: "demo",
+			},
+			want: "peer=demo/worker\nbinding=\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr strings.Builder
+			got := renderPrompt(f, "/city", "", "prompts/peer.template.md", tc.ctx, "", &stderr, nil, nil, nil)
+			if stderr.Len() > 0 {
+				t.Fatalf("renderPrompt stderr: %s", stderr.String())
+			}
+			if got != tc.want {
+				t.Errorf("renderPrompt() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRenderPromptWorkQuery(t *testing.T) {
 	f := fsys.NewFake()
 	f.Files["/city/prompts/test.md.tmpl"] = []byte("Work: {{ .WorkQuery }}")

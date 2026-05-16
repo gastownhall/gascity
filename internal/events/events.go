@@ -58,13 +58,14 @@ const (
 
 	// Non-terminal city lifecycle events recorded in the per-city
 	// event log during init/unregister for diagnostics.
-	CityCreated             = "city.created"
-	CityUnregisterRequested = "city.unregister_requested"
-	OrderFired              = "order.fired"
-	OrderCompleted          = "order.completed"
-	OrderFailed             = "order.failed"
-	ProviderSwapped         = "provider.swapped"
-	WorkerOperation         = "worker.operation"
+	CityCreated                     = "city.created"
+	CityUnregisterRequested         = "city.unregister_requested"
+	OrderFired                      = "order.fired"
+	OrderCompleted                  = "order.completed"
+	OrderFailed                     = "order.failed"
+	ProviderSwapped                 = "provider.swapped"
+	WorkerOperation                 = "worker.operation"
+	SupervisorFSPressureSkippedTick = "supervisor.fs_pressure.skipped_tick"
 
 	// External messaging events.
 	ExtMsgBound          = "extmsg.bound"
@@ -74,6 +75,12 @@ const (
 	ExtMsgAdapterRemoved = "extmsg.adapter_removed"
 	ExtMsgInbound        = "extmsg.inbound"
 	ExtMsgOutbound       = "extmsg.outbound"
+
+	// EventsRotated is the forensic anchor written as the first event in
+	// a freshly-rotated active log. Its payload carries the prior
+	// archive's filename and seq range so log readers can stitch back
+	// across rotations.
+	EventsRotated = "events.rotated"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -95,10 +102,11 @@ var KnownEventTypes = []string{
 	RequestResultSessionSubmit, RequestFailed,
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed,
-	ProviderSwapped, WorkerOperation,
+	ProviderSwapped, WorkerOperation, SupervisorFSPressureSkippedTick,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,
+	EventsRotated,
 }
 
 // Event is a single recorded occurrence in the system.

@@ -54,13 +54,13 @@ func (v2ImportFormatCheck) Fix(ctx *doctor.CheckContext) error {
 
 func (v2ImportFormatCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	cfg, ok := parseCityConfig(filepath.Join(ctx.CityPath, "city.toml"))
-	if !ok || len(cfg.Workspace.Includes) == 0 {
+	if !ok || len(cfg.Workspace.LegacyIncludes()) == 0 {
 		return okCheck("v2-import-format", "workspace.includes already migrated")
 	}
 	return warnCheck("v2-import-format",
 		"workspace.includes is deprecated; migrate this city to [imports] before gc can load it from pack.toml and city.toml",
 		v2MigrationHint(),
-		cfg.Workspace.Includes)
+		cfg.Workspace.LegacyIncludes())
 }
 
 type v2DefaultRigImportFormatCheck struct{}
@@ -73,13 +73,13 @@ func (v2DefaultRigImportFormatCheck) Fix(ctx *doctor.CheckContext) error {
 
 func (v2DefaultRigImportFormatCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	cfg, ok := parseCityConfig(filepath.Join(ctx.CityPath, "city.toml"))
-	if !ok || len(cfg.Workspace.DefaultRigIncludes) == 0 {
+	if !ok || len(cfg.Workspace.LegacyDefaultRigIncludes()) == 0 {
 		return okCheck("v2-default-rig-import-format", "workspace.default_rig_includes already migrated")
 	}
 	return warnCheck("v2-default-rig-import-format",
 		"workspace.default_rig_includes is deprecated; migrate to root pack.toml [defaults.rig.imports.<binding>]",
 		v2MigrationHint(),
-		cfg.Workspace.DefaultRigIncludes)
+		cfg.Workspace.LegacyDefaultRigIncludes())
 }
 
 type v2RigPathSiteBindingCheck struct{}
@@ -450,7 +450,7 @@ func warnCheck(name, message, hint string, details []string) *doctor.CheckResult
 }
 
 func v2MigrationHint() string {
-	return `run "gc doctor --fix" to rewrite safe mechanical cases, then rerun "gc doctor"`
+	return `run "gc doctor" to inspect; use "gc doctor --fix" for the safe mechanical cases that currently have automatic rewrites, then rerun "gc doctor"`
 }
 
 // runV2PackMigration applies the pack-shape migration (legacy [[agent]]

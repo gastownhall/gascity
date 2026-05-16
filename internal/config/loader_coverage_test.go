@@ -146,14 +146,15 @@ default_rig_includes = ["pack-b"]
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if len(cfg.Workspace.DefaultRigIncludes) != 2 {
-		t.Fatalf("len(DefaultRigIncludes) = %d, want 2", len(cfg.Workspace.DefaultRigIncludes))
+	defaultRigIncludes := cfg.Workspace.LegacyDefaultRigIncludes()
+	if len(defaultRigIncludes) != 2 {
+		t.Fatalf("len(DefaultRigIncludes) = %d, want 2", len(defaultRigIncludes))
 	}
-	if cfg.Workspace.DefaultRigIncludes[0] != "pack-a" {
-		t.Errorf("DefaultRigIncludes[0] = %q, want %q", cfg.Workspace.DefaultRigIncludes[0], "pack-a")
+	if defaultRigIncludes[0] != "pack-a" {
+		t.Errorf("DefaultRigIncludes[0] = %q, want %q", defaultRigIncludes[0], "pack-a")
 	}
-	if cfg.Workspace.DefaultRigIncludes[1] != "pack-b" {
-		t.Errorf("DefaultRigIncludes[1] = %q, want %q", cfg.Workspace.DefaultRigIncludes[1], "pack-b")
+	if defaultRigIncludes[1] != "pack-b" {
+		t.Errorf("DefaultRigIncludes[1] = %q, want %q", defaultRigIncludes[1], "pack-b")
 	}
 }
 

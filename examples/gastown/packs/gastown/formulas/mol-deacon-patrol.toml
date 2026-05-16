@@ -49,6 +49,10 @@ formula = "mol-deacon-patrol"
 version = 13
 
 [vars]
+[vars.binding_prefix]
+description = "Import binding prefix for gastown agent identities, including trailing dot when bound."
+default = ""
+
 [vars.event_timeout]
 description = "Seconds to wait for events before re-checking (exponential backoff)"
 default = "30"

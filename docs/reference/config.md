@@ -478,6 +478,7 @@ ProviderPatch modifies an existing provider identified by Name.
 | `prompt_mode` | string |  |  | PromptMode overrides prompt delivery mode. Enum: `arg`, `flag`, `none` |
 | `prompt_flag` | string |  |  | PromptFlag overrides the prompt flag. |
 | `ready_delay_ms` | integer |  |  | ReadyDelayMs overrides the ready delay in milliseconds. |
+| `accept_startup_dialogs` | boolean |  |  | AcceptStartupDialogs overrides startup dialog acceptance behavior. |
 | `env` | map[string]string |  |  | Env adds or overrides environment variables. |
 | `env_remove` | []string |  |  | EnvRemove lists env var keys to remove. |
 | `_replace` | boolean |  |  | Replace replaces the entire provider block instead of deep-merging. |
@@ -500,6 +501,7 @@ ProviderSpec defines a named provider's startup parameters.
 | `ready_prompt_prefix` | string |  |  | ReadyPromptPrefix is the string prefix that indicates the provider is ready for input. |
 | `process_names` | []string |  |  | ProcessNames lists process names to look for when checking if the provider is running. |
 | `emits_permission_warning` | boolean |  |  | EmitsPermissionWarning is tri-state: nil = inherit, &true = enable, &false = explicit disable. |
+| `accept_startup_dialogs` | boolean |  |  | AcceptStartupDialogs is tri-state: nil = default startup dialog handling, &true = force dialog acceptance, &false = suppress it for providers that handle permissions entirely through launch flags. |
 | `env` | map[string]string |  |  | Env sets additional environment variables for the provider process. |
 | `path_check` | string |  |  | PathCheck overrides the binary name used for PATH detection. When set, lookupProvider and detectProviderName use this instead of Command for exec.LookPath checks. Useful when Command is a shell wrapper (e.g. sh -c '...') but we need to verify the real binary is installed. |
 | `supports_acp` | boolean |  |  | SupportsACP indicates the binary speaks the Agent Client Protocol (JSON-RPC 2.0 over stdio). When an agent sets session = "acp", its resolved provider must have SupportsACP = true. |
@@ -512,7 +514,7 @@ ProviderSpec defines a named provider's startup parameters.
 | `permission_modes` | map[string]string |  |  | PermissionModes maps permission mode names to CLI flags. Example: &#123;"unrestricted": "--dangerously-skip-permissions", "plan": "--permission-mode plan"&#125; This is a config-only lookup table consumed by external clients (e.g., real-world app) to populate permission mode dropdowns. Launch-time flag substitution is planned for a follow-up PR — currently no runtime code reads this field. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults overrides the Default value in OptionsSchema entries without redefining the schema itself. Keys are option keys (e.g., "permission_mode"), values are choice values (e.g., "unrestricted"). city.toml users set this to customize provider behavior without touching Args or OptionsSchema. |
 | `options_schema` | []ProviderOption |  |  | OptionsSchema declares the configurable options this provider supports. Each option maps to CLI args via its Choices[].FlagArgs field. Serialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side. |
-| `print_args` | []string |  |  | PrintArgs are CLI arguments that enable one-shot non-interactive mode. The provider prints its response to stdout and exits. When empty, the provider does not support one-shot invocation. Examples: ["-p"] (claude, gemini), ["exec"] (codex) |
+| `print_args` | []string |  |  | PrintArgs are CLI arguments that enable one-shot non-interactive mode. The provider prints its response to stdout and exits. When empty, the provider does not support one-shot invocation. Examples: ["-p"] (claude, gemini), ["exec"] (codex), ["--quiet", "--prompt"] (kimi) |
 | `title_model` | string |  |  | TitleModel is the OptionsSchema model key used for title generation. Resolved via the "model" option in OptionsSchema to get FlagArgs. Defaults to the cheapest/fastest model for each provider. Examples: "haiku" (claude), "o4-mini" (codex), "gemini-2.5-flash" (gemini) |
 | `acp_command` | string |  |  | ACPCommand overrides Command when the session transport is ACP. When empty, Command is used for both tmux and ACP transports. |
 | `acp_args` | []string |  |  | ACPArgs overrides Args when the session transport is ACP. When nil, Args is used for both tmux and ACP transports. |
@@ -649,6 +651,6 @@ Workspace holds city-level metadata and optional defaults that apply to all agen
 | `session_template` | string |  |  | SessionTemplate is a template string supporting placeholders: &#123;&#123;.City&#125;&#125;, &#123;&#123;.Agent&#125;&#125; (sanitized), &#123;&#123;.Dir&#125;&#125;, &#123;&#123;.Name&#125;&#125;. Controls tmux session naming. Default (empty): "&#123;&#123;.Agent&#125;&#125;" — just the sanitized agent name. Per-city tmux socket isolation makes a city prefix unnecessary. |
 | `install_agent_hooks` | []string |  |  | InstallAgentHooks lists provider names whose hooks should be installed into agent working directories. Agent-level overrides workspace-level (replace, not additive). Supported: "claude", "codex", "gemini", "kiro", "opencode", "copilot", "cursor", "pi", "omp". |
 | `global_fragments` | []string |  |  | GlobalFragments lists named template fragments injected into every agent's rendered prompt. Applied before per-agent InjectFragments. Each name must match a &#123;&#123; define "name" &#125;&#125; block from a pack's prompts/shared/ directory. |
-| `includes` | []string |  |  | Includes lists pack directories or URLs to compose into this workspace. Replaces the older pack/packs fields. Each entry is a local path, a git source//sub#ref URL, or a GitHub tree URL. |
-| `default_rig_includes` | []string |  |  | DefaultRigIncludes lists pack directories applied to new rigs when "gc rig add" is called without --include. Allows cities to define a default pack for all rigs. |
+| `includes` | []string |  |  | Includes is the legacy city.toml pack-composition list.  Deprecated: use root pack.toml [imports.*] instead. Run gc doctor to inspect; gc doctor --fix handles the safe mechanical rewrites available in this release wave. Each entry is a local path, a git source//sub#ref URL, or a GitHub tree URL. |
+| `default_rig_includes` | []string |  |  | DefaultRigIncludes is the legacy city.toml default-rig pack list.  Deprecated: use root pack.toml [defaults.rig.imports.&lt;binding&gt;] instead. Run gc doctor to inspect; gc doctor --fix handles the safe mechanical rewrites available in this release wave. |
 

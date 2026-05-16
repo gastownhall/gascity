@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -31,7 +30,9 @@ func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
 Checks city structure, config validity, binary dependencies (tmux, git,
 bd, dolt), controller status, agent sessions, zombie/orphan sessions,
 bead stores, Dolt server health, event log integrity, and per-rig
-health. Use --fix to attempt automatic repairs.`,
+health. Use --fix for the canonical remediation path, including any
+safe mechanical PackV1-to-PackV2 rewrites that are available on this
+branch.`,
 		Example: `  gc doctor
   gc doctor --fix
   gc doctor --verbose`,
@@ -43,14 +44,14 @@ health. Use --fix to attempt automatic repairs.`,
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&fix, "fix", false, "attempt to fix issues automatically")
+	cmd.Flags().BoolVar(&fix, "fix", false, "attempt automatic repairs and safe mechanical migrations")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show extra diagnostic details")
 	return cmd
 }
 
 // doDoctor runs all health checks and prints results.
 func doctorSkipsDoltChecks(cityPath string) bool {
-	if os.Getenv("GC_DOLT") == "skip" {
+	if gcDoltSkip() {
 		return true
 	}
 	cfg, err := loadCityConfig(cityPath, io.Discard)
@@ -78,7 +79,7 @@ func workspaceNeedsCityDoltCheck(cityPath string, cfg *config.City) bool {
 }
 
 func managedDoltOpsCheckSkip(cityPath string, cfg *config.City, cfgErr error) bool {
-	if os.Getenv("GC_DOLT") == "skip" {
+	if gcDoltSkip() {
 		return true
 	}
 	return !doctor.ManagedLocalDoltChecksApplicableForConfig(cityPath, cfg, cfgErr)
@@ -206,7 +207,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		d.Register(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
 		d.Register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 	}
-	skipCityDoltCheck := os.Getenv("GC_DOLT") == "skip" || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
+	skipCityDoltCheck := gcDoltSkip() || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
 	d.Register(newDoctorDoltServerCheck(cityPath, skipCityDoltCheck))
 	// Managed Dolt ops checks (PR 3). Size + config drift are only
 	// meaningful when the workspace uses the managed bd/Dolt backend; rigs
@@ -247,7 +248,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 			d.Register(doctor.NewRigGitCheck(rig))
 			d.Register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
 			d.Register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
-			d.Register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || os.Getenv("GC_DOLT") == "skip"))
+			d.Register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || gcDoltSkip()))
 			// Custom types check — rig store.
 			d.Register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
 		}

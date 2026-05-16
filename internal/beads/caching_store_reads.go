@@ -15,6 +15,13 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
+	// The cache only holds the issues tier (PrimeActive/Prime call the
+	// backing store without a TierMode). Wisps and union queries must
+	// reach the backing store directly so we do not return a stale or
+	// incomplete snapshot of the wisps table.
+	if query.TierMode != TierIssues {
+		return c.backing.List(query)
+	}
 	if query.Live || query.ParentID != "" {
 		c.mu.RLock()
 		startSeq := c.mutationSeq
@@ -102,6 +109,9 @@ func liveListQuery(query ListQuery) ListQuery {
 // snapshot; callers must treat this as a read model that may lag writes or
 // reconciliation by one tick.
 func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
+	if query.TierMode != TierIssues {
+		return nil, false
+	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if c.state != cacheLive && c.state != cachePartial {
@@ -341,7 +351,7 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		openBeads := make([]Bead, 0, len(c.beads))
 		for _, b := range c.beads {
 			statusByID[b.ID] = b.Status
-			if b.Status == "open" && !IsReadyExcludedType(b.Type) {
+			if b.Status == "open" && !b.Ephemeral && !IsReadyExcludedType(b.Type) {
 				openBeads = append(openBeads, cloneBead(b))
 			}
 		}
@@ -393,7 +403,7 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	openBeads := make([]Bead, 0, len(c.beads))
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
-		if b.Status == "open" && !IsReadyExcludedType(b.Type) {
+		if b.Status == "open" && !b.Ephemeral && !IsReadyExcludedType(b.Type) {
 			openBeads = append(openBeads, cloneBead(b))
 		}
 	}
@@ -447,6 +457,7 @@ func (c *CachingStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([
 		Limit:         limit,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedDesc,
+		TierMode:      TierModeFromOpts(opts),
 	})
 }
 
@@ -469,6 +480,7 @@ func (c *CachingStore) ListByMetadata(filters map[string]string, limit int, opts
 		Limit:         limit,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedDesc,
+		TierMode:      TierModeFromOpts(opts),
 	})
 }
 

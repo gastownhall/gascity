@@ -103,6 +103,35 @@ func TestDoltDriftCheckCleanManagedCityIsOK(t *testing.T) {
 	}
 }
 
+func TestDoltDriftCheckUsesProviderStateWhenPublishedStateIsMissing(t *testing.T) {
+	cityDir, rigDir, managedPort, cfg := managedCityDriftFixture(t, "provider")
+	state, err := readDoltRuntimeStateFile(managedDoltStatePath(cityDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDoltRuntimeStateFile(providerManagedDoltStatePath(cityDir), state); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(managedDoltStatePath(cityDir)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "dolt-server.port"), []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newDoltDriftCheck(cityDir, cfg).Run(&doctor.CheckContext{CityPath: cityDir})
+	if r.Status != doctor.StatusError {
+		t.Fatalf("Run() status = %v, want StatusError; message=%q details=%v", r.Status, r.Message, r.Details)
+	}
+	joined := r.Message + " " + strings.Join(r.Details, " ")
+	if !strings.Contains(joined, managedPort) {
+		t.Fatalf("drift output = %q, want managed provider-state port %s", joined, managedPort)
+	}
+	if _, err := os.Stat(managedDoltStatePath(cityDir)); !os.IsNotExist(err) {
+		t.Fatalf("drift check should not publish runtime state, stat err = %v", err)
+	}
+}
+
 func TestDoltDriftCheckDetectsLiveRigLocalDolt(t *testing.T) {
 	cityDir, rigDir, _, cfg := managedCityDriftFixture(t, "runner")
 	ln := listenOnRandomPort(t)

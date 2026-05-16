@@ -1946,6 +1946,121 @@ func TestPruneDetailedReportsWaitNudges(t *testing.T) {
 	}
 }
 
+type falseNegativeRuntimeProvider struct {
+	*runtime.Fake
+	falseNames map[string]bool
+}
+
+func (p *falseNegativeRuntimeProvider) IsRunning(name string) bool {
+	if p.falseNames[name] {
+		return false
+	}
+	return p.Fake.IsRunning(name)
+}
+
+func TestObserveRuntime_TreatsLiveProcessAsRunningWhenSessionProbeFalseNegatives(t *testing.T) {
+	base := runtime.NewFake()
+	mgr := NewManager(beads.NewMemStore(), &falseNegativeRuntimeProvider{
+		Fake:       base,
+		falseNames: map[string]bool{"runtime-worker": true},
+	})
+
+	info, err := mgr.Create(context.Background(), "worker", "runtime-worker", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	obs := mgr.ObserveRuntimeForInfo(info, []string{"claude"})
+	if !obs.Running || !obs.Alive {
+		t.Fatalf("ObserveRuntimeForInfo() = %#v, want running+alive true despite IsRunning false-negative", obs)
+	}
+}
+
+func TestObserveRuntime_WithoutProcessNamesTreatsRunningSessionAsAlive(t *testing.T) {
+	sp := runtime.NewFake()
+	mgr := NewManager(beads.NewMemStore(), sp)
+
+	info, err := mgr.Create(context.Background(), "worker", "runtime-worker", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	obs := mgr.ObserveRuntimeForInfo(info, nil)
+	if !obs.Running || !obs.Alive {
+		t.Fatalf("ObserveRuntimeForInfo() = %#v, want running+alive true when no process names are configured", obs)
+	}
+}
+
+func TestPruneDetailedContinuesAfterWaitLookupLimit(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "default", "S1", "echo s1", "/tmp", "test", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < SessionWaitLookupLimit+1; i++ {
+		if _, err := store.Create(beads.Bead{
+			Title:  fmt.Sprintf("wait-%d", i),
+			Type:   WaitBeadType,
+			Labels: []string{WaitBeadLabel, "session:" + info.ID},
+			Metadata: map[string]string{
+				"session_id": info.ID,
+				"state":      "pending",
+				"nudge_id":   fmt.Sprintf("wait-nudge-%d", i),
+			},
+		}); err != nil {
+			t.Fatalf("create wait %d: %v", i, err)
+		}
+	}
+
+	result, err := mgr.PruneDetailed(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("PruneDetailed: %v", err)
+	}
+	if result.Count != 1 {
+		t.Fatalf("result.Count = %d, want 1", result.Count)
+	}
+	if len(result.SessionIDs) != 1 || result.SessionIDs[0] != info.ID {
+		t.Fatalf("result.SessionIDs = %#v, want [%q]", result.SessionIDs, info.ID)
+	}
+	if len(result.WaitNudgeIDs) != SessionWaitLookupLimit+1 {
+		t.Fatalf("result.WaitNudgeIDs count = %d, want full capped count %d", len(result.WaitNudgeIDs), SessionWaitLookupLimit+1)
+	}
+	seen := map[string]bool{}
+	for _, id := range result.WaitNudgeIDs {
+		seen[id] = true
+	}
+	for _, id := range []string{"wait-nudge-0", fmt.Sprintf("wait-nudge-%d", SessionWaitLookupLimit)} {
+		if !seen[id] {
+			t.Fatalf("result.WaitNudgeIDs missing %q from first or later capped page", id)
+		}
+	}
+	sessionBead, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if sessionBead.Status != "closed" {
+		t.Fatalf("session status = %q, want closed", sessionBead.Status)
+	}
+	waits, err := store.List(beads.ListQuery{Label: "session:" + info.ID, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("list waits: %v", err)
+	}
+	for _, wait := range waits {
+		if !IsWaitBead(wait) {
+			continue
+		}
+		if wait.Status != "closed" || wait.Metadata["state"] != waitStateCanceled {
+			t.Fatalf("wait %s status/state = %q/%q, want closed/canceled", wait.ID, wait.Status, wait.Metadata["state"])
+		}
+	}
+}
+
 func TestPruneUsesSuspendedAt(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

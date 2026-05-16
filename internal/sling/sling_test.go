@@ -1404,6 +1404,78 @@ func TestSlingRouteBeadWithTypedRouter(t *testing.T) {
 	}
 }
 
+func TestSlingAttachFormulaRoutesSourceBeadWithTypedRouter(t *testing.T) {
+	router := &fakeBeadRouter{}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Router = router
+	b, _ := deps.Store.Create(beads.Bead{Title: "work", Type: "task"})
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := s.AttachFormula(context.Background(), "code-review", b.ID, a, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+
+	if result.WispRootID == "" {
+		t.Fatal("WispRootID is empty")
+	}
+	if len(router.routed) != 1 {
+		t.Fatalf("got %d route calls, want 1", len(router.routed))
+	}
+	if router.routed[0].BeadID != b.ID {
+		t.Fatalf("routed BeadID = %q, want source bead %q", router.routed[0].BeadID, b.ID)
+	}
+	got, err := deps.Store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", b.ID, err)
+	}
+	if got.Metadata["molecule_id"] != result.WispRootID {
+		t.Fatalf("molecule_id metadata = %q, want %q", got.Metadata["molecule_id"], result.WispRootID)
+	}
+}
+
+func TestSlingRouteBeadDefaultFormulaRoutesSourceBeadWithTypedRouter(t *testing.T) {
+	router := &fakeBeadRouter{}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Router = router
+	deps.Store = seededStore("BL-42")
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := config.Agent{Name: "mayor", DefaultSlingFormula: stringPtr("code-review"), MaxActiveSessions: intPtr(1)}
+	result, err := s.RouteBead(context.Background(), "BL-42", a, RouteOpts{})
+	if err != nil {
+		t.Fatalf("RouteBead: %v", err)
+	}
+
+	if result.WispRootID == "" {
+		t.Fatal("WispRootID is empty")
+	}
+	if len(router.routed) != 1 {
+		t.Fatalf("got %d route calls, want 1", len(router.routed))
+	}
+	if router.routed[0].BeadID != "BL-42" {
+		t.Fatalf("routed BeadID = %q, want source bead BL-42", router.routed[0].BeadID)
+	}
+	got, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("Get(BL-42): %v", err)
+	}
+	if got.Metadata["molecule_id"] != result.WispRootID {
+		t.Fatalf("molecule_id metadata = %q, want %q", got.Metadata["molecule_id"], result.WispRootID)
+	}
+}
+
 // --- Missing coverage tests ---
 
 func TestSlingAttachFormula(t *testing.T) {

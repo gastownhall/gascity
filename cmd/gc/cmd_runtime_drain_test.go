@@ -1007,12 +1007,10 @@ func TestResolveAgentIdentity(t *testing.T) {
 		// Pool instance negative (parsed as non-numeric due to dash).
 		{"pool instance worker--1", "worker--1", false, "", false, ""},
 
-		// Max=1 POOL agent (has MinActiveSessions or ScaleCheck): keeps the
-		// `-N` suffix per the new disambiguator. {name}-1 resolves to the
-		// pool instance with PoolName=base. Contrast with max=1 NAMED-session
-		// agents (no MinActiveSessions, no ScaleCheck) which collapse to the
-		// base identity — see TestBuildDesiredState_OnDemandNamedSession_NoPhantomPoolInstance.
-		{"singleton-1 matches max=1 pool", "singleton-1", true, "singleton-1", true, "singleton"},
+		// Max=1 pool-shaped agents still run through pool reconciliation, but
+		// non-namepool singleton pools use the canonical configured identity.
+		// A numeric suffix would materialize a phantom concrete agent.
+		{"singleton-1 rejected for canonical max=1 pool", "singleton-1", false, "", false, ""},
 
 		// Nonexistent agent.
 		{"nonexistent", "nobody", false, "", false, ""},
@@ -1216,23 +1214,14 @@ func TestFindAgentByNamePoolOutOfRange(t *testing.T) {
 	}
 }
 
-func TestFindAgentByNameSingletonPoolMatches(t *testing.T) {
+func TestFindAgentByNameSingletonPoolRejectsSuffix(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
 			{Name: "singleton", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), ScaleCheck: "echo 1"},
 		},
 	}
-	// Max=1 POOL agents (with MinActiveSessions or ScaleCheck set) keep the
-	// `-N` suffix per the disambiguator in SupportsInstanceExpansion. The
-	// instance name `singleton-1` resolves to the base agent. Contrast with
-	// max=1 NAMED-session agents (neither field set) which collapse to the
-	// base identity.
-	a, ok := findAgentByName(cfg, "singleton-1")
-	if !ok {
-		t.Fatal("singleton-1 should match the max=1 pool agent")
-	}
-	if a.Name != "singleton" {
-		t.Errorf("agent.Name = %q, want %q", a.Name, "singleton")
+	if _, ok := findAgentByName(cfg, "singleton-1"); ok {
+		t.Fatal("singleton-1 should not match a canonical singleton pool agent")
 	}
 }
 

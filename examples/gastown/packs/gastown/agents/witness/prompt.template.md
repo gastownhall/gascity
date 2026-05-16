@@ -183,14 +183,14 @@ re-reads formula steps and resumes from context.
 
 ```bash
 gc mail send mayor/ -s "Subject" -m "Message"              # Escalate to mayor
-gc mail send {{ .RigName }}/refinery -s "Subject" -m "..."  # Refinery questions
-gc session nudge {{ .RigName }}/<polecat-name> "Run gc hook; it checks assigned work before routed pool work"
-gc session peek {{ .RigName }}/<polecat-name> --lines 50     # View polecat output
+gc mail send {{ .RigName }}/{{ .BindingPrefix }}refinery -s "Subject" -m "..."  # Refinery questions
+gc session nudge {{ .RigName }}/{{ .BindingPrefix }}<polecat-suffix> "Run gc hook; it checks assigned work before routed pool work"
+gc session peek {{ .RigName }}/{{ .BindingPrefix }}<polecat-suffix> --lines 50     # View polecat output
 ```
 
-Use the concrete polecat name from `gc status` or `gc session list`;
-Gastown's default namepool yields names like `furiosa` or `nux`. There is no
-`{{ .RigName }}/polecats/<name>` address form.
+Use the bare polecat suffix after the binding prefix; Gastown's default
+namepool yields suffixes like `furiosa` or `nux`{{ if .BindingPrefix }}, not `{{ .BindingPrefix }}furiosa`{{ end }}.
+There is no `{{ .RigName }}/polecats/<name>` address form.
 
 Nudging a polecat does not assign work. It only wakes that session; actual
 work still arrives through bead assignment or pool routing.
@@ -257,5 +257,5 @@ gc mail send mayor/ -s "ESCALATION: Brief description [HIGH]" -m "Details"
 
 Rig: {{ .RigName }}
 Working directory: {{ .WorkDir }}
-Your mail address: {{ .RigName }}/witness
+Your mail address: {{ .AgentName }}
 Formula: mol-witness-patrol

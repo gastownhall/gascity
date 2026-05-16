@@ -125,6 +125,23 @@ func TestResolveAgentPoolMemberAllowed(t *testing.T) {
 	}
 }
 
+func TestResolveAgentPoolMemberRejectsCanonicalSingletonPoolSuffix(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "myrig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1)},
+		},
+	}
+	if a, ok := ResolveAgent(cfg, "myrig/worker", ResolveOpts{AllowPoolMembers: true}); !ok || a.QualifiedName() != "myrig/worker" {
+		t.Fatalf("ResolveAgent(myrig/worker) = (%q, %v), want canonical template", a.QualifiedName(), ok)
+	}
+	if _, ok := ResolveAgent(cfg, "myrig/worker-1", ResolveOpts{AllowPoolMembers: true}); ok {
+		t.Fatal("ResolveAgent(myrig/worker-1) = true, want false for canonical singleton pool")
+	}
+	if _, ok := ResolveAgent(cfg, "worker-1", ResolveOpts{AllowPoolMembers: true}); ok {
+		t.Fatal("ResolveAgent(worker-1) = true, want false for canonical singleton pool")
+	}
+}
+
 func TestResolveAgentCityScopedBindingQualifiedPoolMemberAllowed(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{

@@ -45,6 +45,17 @@ func TestSessionProviderFamily_RawProviderLastResort(t *testing.T) {
 	}
 }
 
+func TestSessionProviderFamily_NormalizesProviderAliases(t *testing.T) {
+	b := beads.Bead{Metadata: map[string]string{
+		"builtin_ancestor": "my-pi/tmux",
+		"provider_kind":    "codex",
+		"provider":         "codex",
+	}}
+	if got := sessionProviderFamily(b); got != "pi" {
+		t.Errorf("sessionProviderFamily alias = %q, want pi", got)
+	}
+}
+
 // TestSessionProviderFamily_WrappedCodexPollerGate documents the wait-
 // ready-nudge site: if a session bead reports codex-family (via any
 // preference), the wait-ready nudge path must start the codex poller.
@@ -57,5 +68,16 @@ func TestSessionProviderFamily_WrappedCodexPollerGate(t *testing.T) {
 	}}
 	if sessionProviderFamily(wrapped) != "codex" {
 		t.Fatal("wrapped codex must surface as codex-family so the wait poller starts")
+	}
+}
+
+func TestWaitNudgeProviderNeedsPollerIncludesPi(t *testing.T) {
+	for _, provider := range []string{"codex", "pi"} {
+		if !waitNudgeProviderNeedsPoller(beads.Bead{Metadata: map[string]string{"provider": provider}}) {
+			t.Fatalf("%s wait nudge should start a poller", provider)
+		}
+	}
+	if waitNudgeProviderNeedsPoller(beads.Bead{Metadata: map[string]string{"provider": "claude"}}) {
+		t.Fatal("claude wait nudge should not start a per-session poller")
 	}
 }
