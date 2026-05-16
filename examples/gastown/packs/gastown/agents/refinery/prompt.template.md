@@ -55,10 +55,7 @@ external observers (witness, mayor) only catch on a slow patrol cycle.
 ### 1. ALWAYS pour the next wisp before burning the current one
 
 ```bash
-gc bd mol wisp mol-refinery-patrol --root-only \
-  --var target_branch={{ .DefaultBranch }} \
-  --var rig_name={{ .RigName }} \
-  --var binding_prefix={{ .BindingPrefix }}
+gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }}
 gc bd mol burn <wisp-id> --force
 ```
 
@@ -94,10 +91,7 @@ prematurely), then **pour the next wisp first (per Rule 1), THEN
 request restart**:
 
 ```bash
-gc bd mol wisp mol-refinery-patrol --root-only \
-  --var target_branch={{ .DefaultBranch }} \
-  --var rig_name={{ .RigName }} \
-  --var binding_prefix={{ .BindingPrefix }}
+gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }}
 gc runtime request-restart
 ```
 
