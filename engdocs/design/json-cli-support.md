@@ -41,7 +41,7 @@ The most important immediate rule is stdout purity: when `--json` is passed, std
 - Prefer one top-level JSON object record with `schema_version` for newly
   touched bounded commands.
 - Make JSONL record count part of the command schema contract.
-- Return structured JSON error payloads for nonzero exits in JSON mode.
+- Return structured JSON error payloads for `gc` command failures in JSON mode.
 - Keep stderr available for operational diagnostics, but do not make it part of
   the first command-output schema model.
 - Avoid broad CLI redesign or command-family rewrites.
@@ -56,6 +56,9 @@ The most important immediate rule is stdout purity: when `--json` is passed, std
 - Do not globally convert all errors into JSON in the first wave.
 - Do not promise automatic JSON support for arbitrary pack-defined commands.
 - Do not preserve incidental human stdout by stuffing it into JSON fields.
+- Do not make `--json` a general subprocess stdout/stderr capture API. If a
+  caller needs raw subprocess capture, that should be an explicit feature such
+  as `--json --capture`, not the default `--json` command contract.
 
 ## JSON Output Contract
 
@@ -355,6 +358,14 @@ provided stdout writer. In JSON mode, those helpers need an explicit sink:
   include `output` because the captured session text is the command's actual
   result.
 
+This is intentionally different from capturing subprocess stdout or stderr. For
+commands that execute external programs, native `--json` should describe the
+`gc` action and its product-level result. It should not automatically wrap the
+child process's raw stdout/stderr as command JSON. A command may expose raw
+captured output only when that output is the command's meaningful result, and it
+should use command-specific field names. A future explicit capture mode can be
+designed separately if consumers need a transport for subprocess results.
+
 This approach keeps existing human output compatible while making `--json`
 strict enough for agents, scripts, tests, and future UI/API consumers.
 
@@ -380,6 +391,7 @@ compatibility note with:
 - any consumer-facing mitigation, such as keeping old fields temporarily,
   adding `schema_version`, or documenting the first standardization wave as the
   compatibility boundary.
+- any changelog entry that should ship with the release.
 
 The first standardization wave may still choose to normalize existing JSON
 surfaces when the benefit is high, but that choice must be visible and
@@ -429,8 +441,8 @@ Proposed pack command contract:
   output.
 - A JSON-capable pack command owns stdout purity for its command-specific
   output and should provide role schemas by convention.
-- `gc` may validate the transport contract later, but the first contract should
-  avoid surprising transformations of arbitrary pack command stdout.
+- The first contract should avoid surprising transformations of arbitrary pack
+  command stdout.
 
 Pack-defined command schemas should live next to the command implementation
 rather than requiring a TOML file for the common case. Nested command
@@ -467,10 +479,23 @@ schemas/
 
 Open design questions for pack-defined commands:
 
-- How much runtime validation should `gc` do for pack-command JSONL record count
-  and stdout purity?
-- Should pack commands emit their own schema version, or should `gc` eventually
-  wrap them in a common envelope?
+- Which examples and external packs already expose `--json`, and what migration
+  notes do they need?
+- What conformance tests should verify pack-command JSONL record count and
+  stdout purity?
+- How should external pack schema revisions be decoupled from built-in `gc`
+  schema revisions?
+
+The bias should be toward testing-layer validation for pack-defined commands
+rather than runtime wrapping. Pack commands should own their result schema and
+`schema_version`; `gc` should discover that contract, pass `--json` through only
+when the contract exists, and avoid introducing a common wrapper around arbitrary
+pack output in the first wave.
+
+Known local examples already use JSON-capable scripts or commands, including
+`examples/dolt/commands/sync/run.sh` and `examples/dolt` health formulas/tests.
+Those should be part of the pack-command inventory before tightening enforcement
+around pack-defined `--json`.
 
 ## First Batch
 
