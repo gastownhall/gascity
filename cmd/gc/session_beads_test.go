@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
@@ -6087,6 +6088,65 @@ func TestPreserveConfiguredNamedSessionBead_StateGate(t *testing.T) {
 			if got != tc.want {
 				t.Fatalf("preserveConfiguredNamedSessionBead(state=%q sleep_reason=%q last_woke_at=%q) = %v, want %v",
 					tc.state, tc.sleepReason, tc.lastWokeAt, got, tc.want)
+			}
+		})
+	}
+}
+
+// validPoolSessionNamePattern mirrors the tmux session-name validator in
+// internal/runtime/tmux/tmux.go (^[a-zA-Z0-9_-]+$). Replicated here as a
+// regression-test guard so future drift in the validator surfaces locally.
+var validPoolSessionNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// TestPendingPoolSessionName_SanitizesDottedTemplate is the regression test
+// for gastownhall/gascity#2205. Templates like "gastown.dog" (imported from
+// packs) used to produce session names with a literal dot — e.g.
+// "gastown.dog-pending-<uuid>" — which the tmux session-name validator
+// (^[a-zA-Z0-9_-]+$) rejects. That landed sessions in "failed-create" state
+// and pinned dolt CPU at 70%+ as the reconciler iterated over the wedged
+// beads every tick.
+func TestPendingPoolSessionName_SanitizesDottedTemplate(t *testing.T) {
+	cases := []struct {
+		name     string
+		template string
+		token    string
+		want     string
+	}{
+		{
+			name:     "dotted template (the #2205 bug)",
+			template: "gastown.dog",
+			token:    "04bac82a08846ba44210744efd0e9e15",
+			want:     "gastown__dog-pending-04bac82a08846ba44210744efd0e9e15",
+		},
+		{
+			name:     "slashed template (rig-qualified)",
+			template: "saitoc/refinery",
+			token:    "abc123",
+			want:     "refinery-pending-abc123", // targetBasename strips the rig prefix
+		},
+		{
+			name:     "dotted template with rig prefix",
+			template: "saitoc/gastown.dog",
+			token:    "deadbeef",
+			want:     "gastown__dog-pending-deadbeef",
+		},
+		{
+			name:     "plain template (no separators)",
+			template: "mayor",
+			token:    "00000000",
+			want:     "mayor-pending-00000000",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pendingPoolSessionName(tc.template, tc.token)
+			if got != tc.want {
+				t.Errorf("pendingPoolSessionName(%q, %q) = %q, want %q",
+					tc.template, tc.token, got, tc.want)
+			}
+			if !validPoolSessionNamePattern.MatchString(got) {
+				t.Errorf("pendingPoolSessionName(%q, %q) = %q, fails tmux session-name validator ^[a-zA-Z0-9_-]+$ (this is the #2205 bug)",
+					tc.template, tc.token, got)
 			}
 		})
 	}
