@@ -211,13 +211,6 @@ func TestEnsureProjectIDEmitsStampedEvent(t *testing.T) {
 			},
 		},
 		{
-			name: "migrated_from_database_emits_one_l1_event",
-			l3:   "database-id",
-			wantEvents: []wantProjectIdentityStampedEvent{
-				{source: "migrated_from_database", layer: "L1", newID: "database-id"},
-			},
-		},
-		{
 			name: "cache_repair_l2_emits_one_l2_event",
 			l1:   "canonical-id",
 			l2:   "wrong-l2",
@@ -232,6 +225,22 @@ func TestEnsureProjectIDEmitsStampedEvent(t *testing.T) {
 			l2:   "canonical-id",
 			wantEvents: []wantProjectIdentityStampedEvent{
 				{source: "cache_repair", layer: "L3", newID: "canonical-id"},
+			},
+		},
+		{
+			name: "migrated_from_metadata_with_l3_seed_emits_l1_and_l3",
+			l2:   "metadata-id",
+			wantEvents: []wantProjectIdentityStampedEvent{
+				{source: "migrated_from_metadata", layer: "L1", newID: "metadata-id"},
+				{source: "migrated_from_metadata", layer: "L3", newID: "metadata-id"},
+			},
+		},
+		{
+			name: "migrated_from_database_with_l2_seed_emits_l1_and_l2",
+			l3:   "database-id",
+			wantEvents: []wantProjectIdentityStampedEvent{
+				{source: "migrated_from_database", layer: "L1", newID: "database-id"},
+				{source: "migrated_from_database", layer: "L2", newID: "database-id"},
 			},
 		},
 	}

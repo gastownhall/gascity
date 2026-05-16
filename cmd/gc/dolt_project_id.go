@@ -337,6 +337,9 @@ func applyReconcileDecision(ctx context.Context, fs fsys.FS, scopeRoot string, m
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
 		}
+		if dbUpdated {
+			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "migrated_from_metadata", "L3", "", decision.ResolvedID)
+		}
 		report.IdentityFileUpdated = identityUpdated
 		report.DatabaseUpdated = dbUpdated
 		return report, nil
@@ -351,6 +354,9 @@ func applyReconcileDecision(ctx context.Context, fs fsys.FS, scopeRoot string, m
 		metaUpdated, err := writeManagedMetadataProjectID(metadataPath, decision.ResolvedID)
 		if err != nil {
 			return managedDoltProjectIDReport{}, err
+		}
+		if metaUpdated {
+			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "migrated_from_database", "L2", "", decision.ResolvedID)
 		}
 		report.IdentityFileUpdated = identityUpdated
 		report.MetadataUpdated = metaUpdated
