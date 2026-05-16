@@ -1370,10 +1370,10 @@ ref = "v1.2.3"
 func TestNewRigAddCmdIncludeFlagIsRepeatable(t *testing.T) {
 	cmd := newRigAddCmd(&bytes.Buffer{}, &bytes.Buffer{})
 	flag := cmd.Flags().Lookup("include")
-	if flag == nil {
+	switch {
+	case flag == nil:
 		t.Fatal("include flag not registered")
-	}
-	if flag.Value.Type() != "stringArray" {
+	case flag.Value.Type() != "stringArray":
 		t.Fatalf("include flag type = %q, want stringArray", flag.Value.Type())
 	}
 }
@@ -2131,7 +2131,7 @@ func TestDoRigAdd_ExistingBeadsMetadataOnlyRequiresAdopt(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 
 	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("expected failure for pre-existing .beads/ store without --adopt, got code %d; stdout: %s", code, stdout.String())
 	}
@@ -2173,7 +2173,7 @@ func TestDoRigAdd_BeadsDirWithUnrelatedContentSucceeds(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 
 	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", false, false, &stdout, &stderr)
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doRigAdd should succeed when .beads/ has only unrelated content, got code %d; stderr: %s", code, stderr.String())
 	}
