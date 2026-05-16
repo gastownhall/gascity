@@ -591,14 +591,15 @@ func logCopyFilesEntryDiff(w io.Writer, stored, current []BreakdownCopyEntry) {
 		currentByDst[e.RelDst] = e
 	}
 
-	// Guard the signed-int sum against CWE-190 wrap; len() inputs trace
-	// through parsed JSON to potentially-unbounded data.
-	totalCap := len(storedByDst) + len(currentByDst)
-	if totalCap < len(storedByDst) {
-		totalCap = 0
+	// Size hint to the larger of the two inputs; map/slice grow as needed.
+	// Avoids len(a)+len(b) so the size computation can't overflow when the
+	// inputs trace back through parsed JSON metadata (CWE-190).
+	capHint := len(storedByDst)
+	if len(currentByDst) > capHint {
+		capHint = len(currentByDst)
 	}
-	keys := make([]string, 0, totalCap)
-	seen := make(map[string]bool, totalCap)
+	keys := make([]string, 0, capHint)
+	seen := make(map[string]bool, capHint)
 	for k := range storedByDst {
 		if !seen[k] {
 			seen[k] = true
