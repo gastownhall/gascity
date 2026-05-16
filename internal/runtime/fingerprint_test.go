@@ -762,7 +762,7 @@ func TestFingerprintVersionedOutputFormat(t *testing.T) {
 				t.Errorf("%s = %q, hex tail must not contain ':'", tc.name, tc.got)
 			}
 			for _, r := range tail {
-				if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+				if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
 					t.Errorf("%s = %q, non-hex character %q in tail", tc.name, tc.got, r)
 					break
 				}
