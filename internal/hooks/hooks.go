@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	iofs "io/fs"
-	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -369,20 +368,32 @@ func desiredClaudeSettings(fs fsys.FS, cityDir string) ([]byte, claudeSettingsSo
 	}
 
 	// Apply targeted in-place upgrades to legacy forms of managed gascity
-	// hook commands and matchers in the user's override before merging with
-	// the embedded base. Custom hook events and custom commands are
-	// preserved verbatim. The previous "use base instead" path discarded
-	// user customizations along with stale managed-hook bytes; this path
-	// patches the managed bytes while keeping customizations intact.
+	// hook commands and matchers in the user's override before merging
+	// with the embedded base. Custom hook events and custom commands are
+	// preserved semantically: command strings and hook entries are not
+	// modified, though MarshalCanonicalJSON may re-order keys or arrays
+	// when an upgrade rewrite is applied. The previous "use base instead"
+	// path discarded user customizations along with stale managed-hook
+	// bytes; this path patches the managed bytes while keeping
+	// customizations intact.
 	upgradedOverride, _, upgradeErr := upgradeClaudeFile(overrideData)
 	if upgradeErr != nil {
-		// Upgrade failure (e.g., malformed JSON) — fall back to original
-		// override; better to keep the user file as-is than fail install.
-		// Log so unexpected upgrade failures are discoverable rather than
-		// silent: a malformed user file is benign here, but a
-		// MarshalCanonicalJSON failure would indicate a gascity bug.
-		log.Printf("hooks: claude settings upgrade failed, using original override: %v", upgradeErr)
-		upgradedOverride = overrideData
+		// Distinguish a malformed user file from a gascity-side
+		// MarshalCanonicalJSON failure. JSON parse errors point at the
+		// user's override; the canonical recovery is to skip the merge
+		// and surface a clear, actionable error that names the file —
+		// previously this path silently re-assigned the malformed bytes
+		// and crashed downstream with a cryptic "merging ... : invalid
+		// character" error from MergeSettingsJSON. Marshal failures
+		// shouldn't happen on user data (we already parsed it
+		// successfully above) so they indicate a gascity bug worth
+		// surfacing too. See gastownhall/gascity#2109.
+		var syntaxErr *json.SyntaxError
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(upgradeErr, &syntaxErr) || errors.As(upgradeErr, &typeErr) {
+			return nil, claudeSettingsSourceNone, fmt.Errorf("invalid JSON in Claude settings override at %s; fix or remove the file to proceed with install: %w", overridePath, upgradeErr)
+		}
+		return nil, claudeSettingsSourceNone, fmt.Errorf("upgrading Claude settings from %s: %w", overridePath, upgradeErr)
 	}
 
 	merged, err := overlay.MergeSettingsJSON(base, upgradedOverride)
@@ -742,7 +753,10 @@ func claudeFileNeedsUpgrade(existing []byte) bool {
 // known legacy forms of managed gascity hook commands and matchers to their
 // current shape. Walks the hook events so upgrades can be event-aware
 // (e.g. SessionStart matcher upgrade, PreCompact command upgrade); custom
-// hook events and custom commands are preserved verbatim.
+// hook events and custom commands are preserved semantically — their
+// command strings and entry contents are untouched, though
+// MarshalCanonicalJSON may reorder keys or arrays when an upgrade
+// rewrite is applied.
 //
 // Returns the (possibly re-marshaled) JSON bytes and whether any patch
 // was applied.
