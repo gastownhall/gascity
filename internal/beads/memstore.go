@@ -260,6 +260,9 @@ func (m *MemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		if b.Status != "open" {
 			continue
 		}
+		if b.Ephemeral {
+			continue
+		}
 		if IsReadyExcludedType(b.Type) {
 			continue
 		}
@@ -324,6 +327,7 @@ func (m *MemStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bea
 		Limit:         limit,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedDesc,
+		TierMode:      TierModeFromOpts(opts),
 	})
 }
 
@@ -347,6 +351,7 @@ func (m *MemStore) ListByMetadata(filters map[string]string, limit int, opts ...
 		Limit:         limit,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedDesc,
+		TierMode:      TierModeFromOpts(opts),
 	})
 }
 

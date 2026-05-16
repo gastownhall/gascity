@@ -1946,6 +1946,51 @@ func TestPruneDetailedReportsWaitNudges(t *testing.T) {
 	}
 }
 
+type falseNegativeRuntimeProvider struct {
+	*runtime.Fake
+	falseNames map[string]bool
+}
+
+func (p *falseNegativeRuntimeProvider) IsRunning(name string) bool {
+	if p.falseNames[name] {
+		return false
+	}
+	return p.Fake.IsRunning(name)
+}
+
+func TestObserveRuntime_TreatsLiveProcessAsRunningWhenSessionProbeFalseNegatives(t *testing.T) {
+	base := runtime.NewFake()
+	mgr := NewManager(beads.NewMemStore(), &falseNegativeRuntimeProvider{
+		Fake:       base,
+		falseNames: map[string]bool{"runtime-worker": true},
+	})
+
+	info, err := mgr.Create(context.Background(), "worker", "runtime-worker", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	obs := mgr.ObserveRuntimeForInfo(info, []string{"claude"})
+	if !obs.Running || !obs.Alive {
+		t.Fatalf("ObserveRuntimeForInfo() = %#v, want running+alive true despite IsRunning false-negative", obs)
+	}
+}
+
+func TestObserveRuntime_WithoutProcessNamesTreatsRunningSessionAsAlive(t *testing.T) {
+	sp := runtime.NewFake()
+	mgr := NewManager(beads.NewMemStore(), sp)
+
+	info, err := mgr.Create(context.Background(), "worker", "runtime-worker", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	obs := mgr.ObserveRuntimeForInfo(info, nil)
+	if !obs.Running || !obs.Alive {
+		t.Fatalf("ObserveRuntimeForInfo() = %#v, want running+alive true when no process names are configured", obs)
+	}
+}
+
 func TestPruneUsesSuspendedAt(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

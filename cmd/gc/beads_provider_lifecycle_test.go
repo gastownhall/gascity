@@ -48,6 +48,15 @@ func setScopedBeadsProviderForTest(t *testing.T, scopeRoot, provider string) {
 	t.Setenv("GC_BEADS_SCOPE_ROOT", scopeRoot)
 }
 
+func mustProviderLifecycleProcessEnv(t *testing.T, cityPath, provider string) []string {
+	t.Helper()
+	env, err := providerLifecycleProcessEnvWithError(cityPath, provider)
+	if err != nil {
+		t.Fatalf("providerLifecycleProcessEnvWithError: %v", err)
+	}
+	return env
+}
+
 // TestEnsureBeadsProvider_file verifies that file provider is a no-op.
 func TestEnsureBeadsProvider_file(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
@@ -78,7 +87,7 @@ func TestProviderLifecycleProcessEnvProjectsCanonicalDoltPaths(t *testing.T) {
 	t.Setenv("GC_DOLT_LOCK_FILE", "/tmp/wrong-lock")
 	t.Setenv("GC_DOLT_CONFIG_FILE", "/tmp/wrong-config")
 
-	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
 	env := map[string]string{}
 	for _, entry := range envEntries {
 		key, value, ok := strings.Cut(entry, "=")
@@ -121,7 +130,7 @@ func TestProviderLifecycleProcessEnvCanonicalizesSymlinkedCityPath(t *testing.T)
 	}
 	wantCityPath := normalizePathForCompare(realCity)
 
-	envEntries := providerLifecycleProcessEnv(aliasCity, "exec:"+gcBeadsBdScriptPath(aliasCity))
+	envEntries := mustProviderLifecycleProcessEnv(t, aliasCity, "exec:"+gcBeadsBdScriptPath(aliasCity))
 	env := map[string]string{}
 	for _, entry := range envEntries {
 		key, value, ok := strings.Cut(entry, "=")
@@ -154,7 +163,7 @@ func TestProviderLifecycleProcessEnvProjectsResolvedGCBin(t *testing.T) {
 	resolveProviderLifecycleGCBinary = func() string { return "/opt/gc/bin/gc" }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
-	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
 	env := map[string]string{}
 	for _, entry := range envEntries {
 		key, value, ok := strings.Cut(entry, "=")
@@ -175,7 +184,7 @@ func TestProviderLifecycleProcessEnvPropagatesArchiveLevel(t *testing.T) {
 	cityDoltConfigs.Store(normPath, config.DoltConfig{ArchiveLevel: &level})
 	t.Cleanup(func() { cityDoltConfigs.Delete(normPath) })
 
-	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
 	env := map[string]string{}
 	for _, entry := range envEntries {
 		key, value, ok := strings.Cut(entry, "=")
@@ -195,7 +204,7 @@ func TestProviderLifecycleProcessEnvOmitsArchiveLevelWhenNil(t *testing.T) {
 	cityDoltConfigs.Store(normPath, config.DoltConfig{})
 	t.Cleanup(func() { cityDoltConfigs.Delete(normPath) })
 
-	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
 	for _, entry := range envEntries {
 		if strings.HasPrefix(entry, "GC_DOLT_ARCHIVE_LEVEL=") {
 			t.Fatalf("GC_DOLT_ARCHIVE_LEVEL should not be set when ArchiveLevel is nil, got %q", entry)
@@ -221,7 +230,7 @@ func TestProviderLifecycleProcessEnvFallsBackToLaunchctlGetenvForLoglevel(t *tes
 	t.Cleanup(func() { providerLifecycleLaunchctlGetenv = prev })
 
 	cityPath := t.TempDir()
-	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
 	got := ""
 	for _, entry := range envEntries {
 		if strings.HasPrefix(entry, "GC_DOLT_LOGLEVEL=") {
@@ -249,7 +258,7 @@ func TestProviderLifecycleProcessEnvPrefersOSEnvOverLaunchctlForLoglevel(t *test
 	t.Cleanup(func() { providerLifecycleLaunchctlGetenv = prev })
 
 	cityPath := t.TempDir()
-	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
 	got := ""
 	for _, entry := range envEntries {
 		if strings.HasPrefix(entry, "GC_DOLT_LOGLEVEL=") {
@@ -274,7 +283,7 @@ func TestProviderLifecycleProcessEnvOmitsLoglevelWhenLaunchctlEmpty(t *testing.T
 	t.Cleanup(func() { providerLifecycleLaunchctlGetenv = prev })
 
 	cityPath := t.TempDir()
-	envEntries := providerLifecycleProcessEnv(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
 	for _, entry := range envEntries {
 		if strings.HasPrefix(entry, "GC_DOLT_LOGLEVEL=") {
 			t.Fatalf("GC_DOLT_LOGLEVEL should be absent when neither os.Environ nor launchctl has it, got %q", entry)
@@ -417,6 +426,39 @@ func TestNormalizeCanonicalBdScopeFilesPreservesExistingManagedProbeDatabase(t *
 	}
 	if !ok || got != strings.ToUpper(managedDoltProbeDatabase) {
 		t.Fatalf("dolt_database = %q, ok=%v; want existing reserved name preserved", got, ok)
+	}
+}
+
+func TestNormalizeCanonicalBdScopeFilesPreservesExistingPostgresMetadata(t *testing.T) {
+	cityPath := t.TempDir()
+	metadataPath := filepath.Join(cityPath, ".beads", "metadata.json")
+	if err := os.MkdirAll(filepath.Dir(metadataPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadataPath, []byte(`{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: hq\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{Workspace: config.Workspace{Name: "dogfood-city"}}
+	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg, io.Discard); err != nil {
+		t.Fatalf("normalizeCanonicalBdScopeFiles: %v", err)
+	}
+
+	state, ok, err := contract.LoadMetadataState(fsys.OSFS{}, metadataPath)
+	if err != nil {
+		t.Fatalf("LoadMetadataState: %v", err)
+	}
+	if !ok {
+		t.Fatal("metadata.json missing after normalization")
+	}
+	if state.Backend != "postgres" || state.PostgresHost != "db.example.test" || state.PostgresDatabase != "beads_pg" {
+		t.Fatalf("metadata state = %+v, want existing postgres metadata preserved", state)
+	}
+	if state.DoltDatabase != "" || state.DoltMode != "" {
+		t.Fatalf("metadata state = %+v, want dolt fields absent on postgres metadata", state)
 	}
 }
 
@@ -1183,6 +1225,29 @@ func TestCurrentDoltPortPrefersRuntimeState(t *testing.T) {
 	}
 	if strings.TrimSpace(string(data)) != fmt.Sprintf("%d", ln.Addr().(*net.TCPAddr).Port) {
 		t.Fatalf("city port file = %q, want %d", strings.TrimSpace(string(data)), ln.Addr().(*net.TCPAddr).Port)
+	}
+}
+
+func TestCurrentDoltPortUsesProviderStateWhenPublishedStateIsMissing(t *testing.T) {
+	cityDir := setupBdContractCityForTest(t)
+	port := writeReachableProviderManagedDoltState(t, cityDir)
+
+	if _, err := os.Stat(managedDoltStatePath(cityDir)); !os.IsNotExist(err) {
+		t.Fatalf("published state should start absent, stat err = %v", err)
+	}
+	if got := currentDoltPort(cityDir); got != strconv.Itoa(port) {
+		t.Fatalf("currentDoltPort() = %q, want provider-state port %d", got, port)
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityDir, ".beads", "dolt-server.port"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(data)); got != strconv.Itoa(port) {
+		t.Fatalf("city port file = %q, want %d", got, port)
+	}
+	if _, err := os.Stat(managedDoltStatePath(cityDir)); !os.IsNotExist(err) {
+		t.Fatalf("currentDoltPort should not publish runtime state, stat err = %v", err)
 	}
 }
 
@@ -3054,7 +3119,7 @@ set -eu
 case "${1:-}" in
   init)
     mkdir -p "$PWD/.beads"
-    printf '{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}\n' > "$PWD/.beads/metadata.json"
+    printf '{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq","project_id":"test-project"}\n' > "$PWD/.beads/metadata.json"
     exit 0
     ;;
   config|migrate|list)
@@ -3104,7 +3169,7 @@ set -eu
 case "${1:-}" in
   init)
     mkdir -p "$PWD/.beads"
-    printf '{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}\n' > "$PWD/.beads/metadata.json"
+    printf '{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq","project_id":"test-project"}\n' > "$PWD/.beads/metadata.json"
     printf '%%s|%%s|%%s|%%s\n' \
       "${GC_CITY_PATH:-}" \
       "${GC_CITY_RUNTIME_DIR:-}" \
@@ -3649,7 +3714,7 @@ func TestGcBeadsBdInitRetriesRootStoreVerification(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"mc"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"mc","project_id":"test-project"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4265,6 +4330,223 @@ esac
 		if strings.Contains(metaText, forbidden) {
 			t.Fatalf("metadata should scrub %s: %s", forbidden, metaText)
 		}
+	}
+}
+
+func TestInitAndHookDirPreservesPostgresMetadataAndSkipsDoltInit(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metadataPath := filepath.Join(cityPath, ".beads", "metadata.json")
+	if err := os.WriteFile(metadataPath, []byte(`{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	callsFile := filepath.Join(t.TempDir(), "provider-calls.log")
+	script := filepath.Join(t.TempDir(), "gc-beads-bd")
+	scriptBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s
+' "$*" >> %q
+exit 99
+`, callsFile)
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+
+	if err := initAndHookDir(cityPath, cityPath, "gc"); err != nil {
+		t.Fatalf("initAndHookDir: %v", err)
+	}
+	if data, err := os.ReadFile(callsFile); err == nil {
+		t.Fatalf("provider init should not run for postgres metadata; calls:\n%s", data)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("read provider calls: %v", err)
+	}
+	state, ok, err := contract.LoadMetadataState(fsys.OSFS{}, metadataPath)
+	if err != nil {
+		t.Fatalf("LoadMetadataState: %v", err)
+	}
+	if !ok || state.Backend != "postgres" || state.PostgresDatabase != "beads_pg" {
+		t.Fatalf("metadata state = %+v, ok=%v; want postgres metadata preserved", state, ok)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "hooks", "on_create")); err != nil {
+		t.Fatalf("expected hooks installed for postgres scope: %v", err)
+	}
+}
+
+func writeInheritedCityPostgresRigFixture(t *testing.T, rigMetadata string) (string, string, string) {
+	t.Helper()
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "pg")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", ".env"), []byte("BEADS_POSTGRES_PASSWORD=citypw\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("issue_prefix: pg\ngc.endpoint_origin: inherited_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metadataPath := filepath.Join(rigPath, ".beads", "metadata.json")
+	if rigMetadata != "" {
+		if err := os.WriteFile(metadataPath, []byte(rigMetadata), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return cityPath, rigPath, metadataPath
+}
+
+func TestInitAndHookDirSkipsDoltInitForInheritedCityPostgresRig(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "pg")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", ".env"), []byte("BEADS_POSTGRES_PASSWORD=citypw\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("issue_prefix: pg\ngc.endpoint_origin: inherited_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	callsFile := filepath.Join(t.TempDir(), "provider-calls.log")
+	script := filepath.Join(t.TempDir(), "gc-beads-bd")
+	scriptBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s
+' "$*" >> %q
+exit 99
+`, callsFile)
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+
+	if err := initAndHookDir(cityPath, rigPath, "pg"); err != nil {
+		t.Fatalf("initAndHookDir: %v", err)
+	}
+	if data, err := os.ReadFile(callsFile); err == nil {
+		t.Fatalf("provider init should not run for inherited postgres rig; calls:\n%s", data)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("read provider calls: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rigPath, ".beads", "metadata.json")); !os.IsNotExist(err) {
+		t.Fatalf("inherited postgres rig should not be pinned with local metadata, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rigPath, ".beads", "hooks", "on_create")); err != nil {
+		t.Fatalf("expected hooks installed for inherited postgres rig: %v", err)
+	}
+}
+
+func TestInitAndHookDirSkipsDoltInitForInheritedCityPostgresRigWithEmptyMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		metadata string
+	}{
+		{name: "empty_object", metadata: `{}`},
+		{name: "database_only", metadata: `{"database":"beads"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, rigPath, metadataPath := writeInheritedCityPostgresRigFixture(t, tc.metadata)
+			callsFile := filepath.Join(t.TempDir(), "provider-calls.log")
+			script := filepath.Join(t.TempDir(), "gc-beads-bd")
+			scriptBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s
+' "$*" >> %q
+exit 99
+`, callsFile)
+			if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GC_BEADS", "exec:"+script)
+			t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+
+			if err := initAndHookDir(cityPath, rigPath, "pg"); err != nil {
+				t.Fatalf("initAndHookDir: %v", err)
+			}
+			if data, err := os.ReadFile(callsFile); err == nil {
+				t.Fatalf("provider init should not run for inherited postgres rig; calls:\n%s", data)
+			} else if !os.IsNotExist(err) {
+				t.Fatalf("read provider calls: %v", err)
+			}
+			data, err := os.ReadFile(metadataPath)
+			if err != nil {
+				t.Fatalf("read metadata: %v", err)
+			}
+			if string(data) != tc.metadata {
+				t.Fatalf("metadata = %s, want preserved %s", data, tc.metadata)
+			}
+			if _, err := os.Stat(filepath.Join(rigPath, ".beads", "hooks", "on_create")); err != nil {
+				t.Fatalf("expected hooks installed for inherited postgres rig: %v", err)
+			}
+		})
+	}
+}
+
+func TestSeedDeferredManagedBeadsSkipsDoltMetadataForInheritedCityPostgresRigWithEmptyMetadata(t *testing.T) {
+	cityPath, rigPath, metadataPath := writeInheritedCityPostgresRigFixture(t, `{"database":"beads"}`)
+
+	if err := seedDeferredManagedBeadsErr(cityPath, rigPath, "pg", ""); err != nil {
+		t.Fatalf("seedDeferredManagedBeadsErr: %v", err)
+	}
+	data, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	if got, want := string(data), `{"database":"beads"}`; got != want {
+		t.Fatalf("metadata = %s, want preserved %s", got, want)
+	}
+}
+
+func TestNormalizeCanonicalBdScopeFilesSkipsInheritedCityPostgresRigWithEmptyMetadata(t *testing.T) {
+	cityPath, _, metadataPath := writeInheritedCityPostgresRigFixture(t, `{}`)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs:      []config.Rig{{Name: "pg", Path: "rigs/pg", Prefix: "pg"}},
+	}
+
+	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg); err != nil {
+		t.Fatalf("normalizeCanonicalBdScopeFiles: %v", err)
+	}
+	data, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	if got, want := string(data), `{}`; got != want {
+		t.Fatalf("metadata = %s, want preserved %s", got, want)
 	}
 }
 
@@ -8968,7 +9250,7 @@ func TestStartBeadsLifecycleRegistersArchiveLevelOnlyDoltConfig(t *testing.T) {
 	}
 	t.Cleanup(func() { cityDoltConfigs.Delete(normalizePathForCompare(realCity)) })
 
-	envEntries := providerLifecycleProcessEnv(realCity, "exec:"+gcBeadsBdScriptPath(realCity))
+	envEntries := mustProviderLifecycleProcessEnv(t, realCity, "exec:"+gcBeadsBdScriptPath(realCity))
 	env := map[string]string{}
 	for _, entry := range envEntries {
 		key, value, ok := strings.Cut(entry, "=")
@@ -8982,6 +9264,16 @@ func TestStartBeadsLifecycleRegistersArchiveLevelOnlyDoltConfig(t *testing.T) {
 }
 
 func TestStartBeadsLifecycleManagedDeferredDoesNotRequireRuntimeState(t *testing.T) {
+	// The post-init Dolt catalog verifier needs a real MySQL-speaking
+	// server. This test wires only a bare TCP listener as the "managed
+	// Dolt port", which is enough for the rest of the lifecycle but not
+	// for SHOW DATABASES. Stub the verifier — coverage for the verifier
+	// itself lives in focused unit tests below; this lifecycle test only
+	// needs to prove startup does not require pre-existing runtime state.
+	originalVerifier := verifyManagedDoltDatabaseExistsAfterInit
+	verifyManagedDoltDatabaseExistsAfterInit = func(_, _, _ string) error { return nil }
+	t.Cleanup(func() { verifyManagedDoltDatabaseExistsAfterInit = originalVerifier })
+
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rig")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
@@ -9702,5 +9994,217 @@ exit 2
 	}
 	if got := strings.Count(string(data), "health"); got != 2 {
 		t.Fatalf("health call count = %d, want 2; log:\n%s", got, data)
+	}
+}
+
+// TestVerifyManagedDoltDatabaseExistsAfterInitNoOps confirms the early
+// returns: when the city doesn't use the bd store contract, OR when no
+// managed Dolt port is published, OR when the database name is empty,
+// the verifier is a no-op (returns nil) — the caller already gates on
+// these conditions but the helper double-checks defensively so it's
+// safe to call from new sites.
+func TestVerifyManagedDoltDatabaseExistsAfterInitNoOps(t *testing.T) {
+	original := verifyManagedDoltDatabaseExistsAfterInit
+
+	t.Run("non bd contract", func(t *testing.T) {
+		cityPath := setupFileProviderCityForTest(t)
+		stop := publishRejectingManagedDoltRuntimeForTest(t, cityPath)
+		defer stop()
+
+		if err := original(cityPath, cityPath, "hq"); err != nil {
+			t.Errorf("city without bd contract should be no-op, got %v", err)
+		}
+	})
+
+	t.Run("no managed port", func(t *testing.T) {
+		cityPath := setupBdContractCityForTest(t)
+
+		if err := original(cityPath, cityPath, "hq"); err != nil {
+			t.Errorf("city without managed Dolt port should be no-op, got %v", err)
+		}
+	})
+
+	t.Run("empty db name", func(t *testing.T) {
+		cityPath := setupBdContractCityForTest(t)
+		stop := publishRejectingManagedDoltRuntimeForTest(t, cityPath)
+		defer stop()
+
+		if err := original(cityPath, cityPath, ""); err != nil {
+			t.Errorf("empty dbName should be no-op, got %v", err)
+		}
+		if err := original(cityPath, cityPath, "  "); err != nil {
+			t.Errorf("whitespace dbName should be no-op, got %v", err)
+		}
+	})
+}
+
+func TestVerifyManagedDoltDatabaseExistsAfterInitSkipsLegacyProbeDatabase(t *testing.T) {
+	original := verifyManagedDoltDatabaseExistsAfterInit
+
+	cityPath := setupBdContractCityForTest(t)
+	metadataPath := filepath.Join(cityPath, ".beads", "metadata.json")
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, metadataPath, contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: strings.ToUpper(managedDoltProbeDatabase),
+	}); err != nil {
+		t.Fatalf("EnsureCanonicalMetadata: %v", err)
+	}
+	stop := publishRejectingManagedDoltRuntimeForTest(t, cityPath)
+	defer stop()
+
+	if err := original(cityPath, cityPath, strings.ToUpper(managedDoltProbeDatabase)); err != nil {
+		t.Fatalf("legacy probe database should be accepted without catalog lookup, got %v", err)
+	}
+}
+
+func TestVerifyManagedDoltDatabaseExistsAfterInitCatalogMatch(t *testing.T) {
+	original := verifyManagedDoltDatabaseExistsAfterInit
+	originalListDatabases := managedDoltListUserDatabasesAfterInit
+	t.Cleanup(func() { managedDoltListUserDatabasesAfterInit = originalListDatabases })
+
+	cityPath := setupBdContractCityForTest(t)
+	stop := publishRejectingManagedDoltRuntimeForTest(t, cityPath)
+	defer stop()
+
+	called := false
+	managedDoltListUserDatabasesAfterInit = func(port string) ([]string, error) {
+		called = true
+		if strings.TrimSpace(port) == "" {
+			t.Fatal("managed Dolt port was empty")
+		}
+		return []string{"archive", "HQ"}, nil
+	}
+
+	if err := original(cityPath, filepath.Join(cityPath, "scope"), "hq"); err != nil {
+		t.Fatalf("catalog containing database should pass: %v", err)
+	}
+	if !called {
+		t.Fatal("catalog listing was not reached")
+	}
+}
+
+func TestVerifyManagedDoltDatabaseExistsAfterInitUsesProviderStateWhenPublishedStateIsMissing(t *testing.T) {
+	original := verifyManagedDoltDatabaseExistsAfterInit
+	originalListDatabases := managedDoltListUserDatabasesAfterInit
+	t.Cleanup(func() { managedDoltListUserDatabasesAfterInit = originalListDatabases })
+
+	cityPath := setupBdContractCityForTest(t)
+	port := writeReachableProviderManagedDoltState(t, cityPath)
+
+	called := false
+	managedDoltListUserDatabasesAfterInit = func(gotPort string) ([]string, error) {
+		called = true
+		if gotPort != strconv.Itoa(port) {
+			t.Fatalf("managed Dolt port = %q, want provider-state port %d", gotPort, port)
+		}
+		return []string{"archive", "HQ"}, nil
+	}
+
+	if err := original(cityPath, filepath.Join(cityPath, "scope"), "hq"); err != nil {
+		t.Fatalf("catalog containing database should pass: %v", err)
+	}
+	if !called {
+		t.Fatal("catalog listing was not reached")
+	}
+	if _, err := os.Stat(managedDoltStatePath(cityPath)); !os.IsNotExist(err) {
+		t.Fatalf("post-init verification should not publish runtime state, stat err = %v", err)
+	}
+}
+
+func TestVerifyManagedDoltDatabaseExistsAfterInitCatalogMiss(t *testing.T) {
+	original := verifyManagedDoltDatabaseExistsAfterInit
+	originalListDatabases := managedDoltListUserDatabasesAfterInit
+	t.Cleanup(func() { managedDoltListUserDatabasesAfterInit = originalListDatabases })
+
+	cityPath := setupBdContractCityForTest(t)
+	stop := publishRejectingManagedDoltRuntimeForTest(t, cityPath)
+	defer stop()
+
+	managedDoltListUserDatabasesAfterInit = func(port string) ([]string, error) {
+		if strings.TrimSpace(port) == "" {
+			t.Fatal("managed Dolt port was empty")
+		}
+		return []string{"archive", "other"}, nil
+	}
+
+	scopeDir := filepath.Join(cityPath, "rigs", "alpha")
+	err := original(cityPath, scopeDir, "hq")
+	if err == nil {
+		t.Fatal("catalog missing database should fail")
+	}
+	msg := err.Error()
+	for _, want := range []string{`database "hq"`, scopeDir, "archive", "other", "CREATE DATABASE was swallowed"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q does not contain %q", msg, want)
+		}
+	}
+}
+
+func setupFileProviderCityForTest(t *testing.T) string {
+	t.Helper()
+	tmp := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", tmp)
+	if err := os.MkdirAll(filepath.Join(tmp, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir beads: %v", err)
+	}
+	return tmp
+}
+
+// setupBdContractCityForTest returns a temp city dir that satisfies
+// cityUsesBdStoreContract but has no published Dolt port.
+func setupBdContractCityForTest(t *testing.T) string {
+	t.Helper()
+	tmp := t.TempDir()
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", tmp)
+	beadsDir := filepath.Join(tmp, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir beads: %v", err)
+	}
+	// Minimum to make cityUsesBdStoreContract return true: the
+	// canonical config file presence is what's checked. Drop the file
+	// the function expects.
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: tc\nissue-prefix: tc\n"), 0o644); err != nil {
+		t.Fatalf("seed config.yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_database":"hq","dolt_mode":"server"}`), 0o644); err != nil {
+		t.Fatalf("seed metadata: %v", err)
+	}
+	return tmp
+}
+
+func publishRejectingManagedDoltRuntimeForTest(t *testing.T, cityPath string) func() {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      port,
+		DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("write managed Dolt runtime state: %v", err)
+	}
+	return func() {
+		_ = ln.Close()
+		<-done
 	}
 }

@@ -1148,6 +1148,27 @@ func TestReleaseOrphanedPoolAssignments_ReleasesRigWorkAssignedToUnreachableOpen
 	}
 }
 
+func TestStoreForPoolAssignment_UsesConfiguredHyphenatedIDPrefix(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	cfg := &config.City{
+		Rigs: []config.Rig{{
+			Name:   "pieces",
+			Prefix: "Pieces-Annotator",
+			Path:   t.TempDir(),
+		}},
+	}
+	work := beads.Bead{
+		ID:       "pieces-annotator-x8o",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	}
+
+	got := storeForPoolAssignment(cfg, cityStore, map[string]beads.Store{"pieces": rigStore}, work)
+	if got != rigStore {
+		t.Fatalf("storeForPoolAssignment() = %p, want rig store %p", got, rigStore)
+	}
+}
+
 func TestReleaseOrphanedPoolAssignments_KeepsSameStoreScopedOpenSessionOwnership(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()

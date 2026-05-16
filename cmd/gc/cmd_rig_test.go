@@ -1894,7 +1894,7 @@ func TestDoRigAdd_PrefixCanonicalizedToLowercase(t *testing.T) {
 	}
 }
 
-func TestDoRigAdd_PrefixRejectsHyphens(t *testing.T) {
+func TestDoRigAdd_PrefixAllowsHyphens(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -1908,13 +1908,16 @@ func TestDoRigAdd_PrefixRejectsHyphens(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
 	var stdout, stderr bytes.Buffer
 	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "my-app", "", false, false, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("expected failure for hyphenated prefix, got code %d", code)
+	if code != 0 {
+		t.Fatalf("expected success for hyphenated prefix, got code %d, stderr: %s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "must not contain hyphens") {
-		t.Errorf("expected hyphen error, got: %s", stderr.String())
+	if !strings.Contains(stdout.String(), "Prefix: my-app") {
+		t.Errorf("expected prefix my-app in output: %s", stdout.String())
 	}
 }
 

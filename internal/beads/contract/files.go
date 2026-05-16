@@ -46,11 +46,38 @@ type ConfigState struct {
 }
 
 // MetadataState is the canonical subset of .beads/metadata.json used by GC.
+//
+// Backend determines which backend-specific fields are meaningful. When
+// returned from LoadMetadataState the populated backend-specific fields are
+// guaranteed consistent with Backend — i.e. a state with Backend == "postgres"
+// always has every Postgres field non-empty and PostgresPort already verified
+// as a TCP-port-shaped string.
 type MetadataState struct {
-	Database     string
-	Backend      string
-	DoltMode     string
-	DoltDatabase string
+	Database         string `json:"database"`
+	Backend          string `json:"backend"`
+	DoltMode         string `json:"dolt_mode,omitempty"`
+	DoltDatabase     string `json:"dolt_database,omitempty"`
+	PostgresHost     string `json:"postgres_host,omitempty"`
+	PostgresPort     string `json:"postgres_port,omitempty"`
+	PostgresUser     string `json:"postgres_user,omitempty"`
+	PostgresDatabase string `json:"postgres_database,omitempty"`
+}
+
+// MetadataParseError reports a failure to parse or validate metadata.json.
+//
+// Returned by LoadMetadataState for JSON parse failures and for every E1–E5
+// rejection in the metadata contract. Callers may use errors.As to
+// discriminate parse failures from I/O failures (which surface as plain OS
+// errors).
+type MetadataParseError struct {
+	// Path is the absolute path to the metadata.json file that failed.
+	Path string
+	// Reason is the verbatim rejection reason text (the part after `: `).
+	Reason string
+}
+
+func (e *MetadataParseError) Error() string {
+	return fmt.Sprintf("load metadata %s: %s", e.Path, e.Reason)
 }
 
 var deprecatedMetadataKeys = []string{
@@ -61,6 +88,33 @@ var deprecatedMetadataKeys = []string{
 	"dolt_server_port",
 	"dolt_server_user",
 	"dolt_port",
+}
+
+var doltBackendKeys = []string{
+	"dolt_mode",
+	"dolt_database",
+}
+
+var postgresBackendKeys = []string{
+	"postgres_host",
+	"postgres_port",
+	"postgres_user",
+	"postgres_database",
+}
+
+// crossBackendKeysToScrub returns the on-disk metadata keys that should be
+// removed when canonicalising for the given backend. An empty backend
+// preserves all backend-specific keys (today's behavior for unknown-shape
+// metadata).
+func crossBackendKeysToScrub(backend string) []string {
+	switch backend {
+	case "dolt":
+		return postgresBackendKeys
+	case "postgres":
+		return doltBackendKeys
+	default:
+		return nil
+	}
 }
 
 var deprecatedConfigKeys = []string{
@@ -191,6 +245,132 @@ func ReadDoltDatabase(fs fsys.FS, path string) (string, bool, error) {
 	return "", false, nil
 }
 
+// LoadMetadataState parses .beads/metadata.json at path and returns the
+// canonical MetadataState if the file exists and validates.
+//
+// Returns (zero, false, nil) when the file does not exist — callers decide
+// whether absence is an error in their context (mirrors ReadIssuePrefix and
+// ReadDoltDatabase). Returns a non-nil error for read failures other than
+// ENOENT and for any of the E1–E5 rejection cases. Validation failures are
+// wrapped in *MetadataParseError; callers may use errors.As to discriminate.
+//
+// Validation order is deterministic: the operator always sees the same
+// top-most message when several things are wrong. Order is JSON parse (E1) →
+// mixed-backend (E3) → unknown backend (E2) → postgres-required (E4) →
+// postgres-port-format (E5). An empty Backend is permitted at the parse
+// layer; downstream consumers that need a backend must check
+// state.Backend != "" themselves.
+func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return MetadataState{}, false, nil
+		}
+		return MetadataState{}, false, err
+	}
+
+	abs, absErr := filepath.Abs(path)
+	if absErr != nil {
+		abs = path
+	}
+
+	var state MetadataState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return MetadataState{}, false, &MetadataParseError{
+			Path:   abs,
+			Reason: fmt.Sprintf("invalid metadata.json: %v", err),
+		}
+	}
+
+	if other, ok := mixedBackendField(state); ok {
+		return MetadataState{}, false, &MetadataParseError{
+			Path:   abs,
+			Reason: fmt.Sprintf("cannot mix dolt and postgres fields in a single scope (backend=%s but %s is also set)", state.Backend, other),
+		}
+	}
+
+	switch state.Backend {
+	case "", "dolt", "postgres":
+		// allowed
+	default:
+		return MetadataState{}, false, &MetadataParseError{
+			Path:   abs,
+			Reason: fmt.Sprintf("unsupported backend %q (supported: dolt, postgres)", state.Backend),
+		}
+	}
+
+	if state.Backend == "postgres" {
+		if state.PostgresHost == "" || state.PostgresPort == "" || state.PostgresUser == "" || state.PostgresDatabase == "" {
+			return MetadataState{}, false, &MetadataParseError{
+				Path:   abs,
+				Reason: "backend=postgres requires postgres_host, postgres_port, postgres_user, postgres_database (all four must be non-empty)",
+			}
+		}
+		port, err := strconv.Atoi(state.PostgresPort)
+		if err != nil || port < 1 || port > 65535 {
+			return MetadataState{}, false, &MetadataParseError{
+				Path:   abs,
+				Reason: fmt.Sprintf("postgres_port must be a TCP port (1..65535), got %q", state.PostgresPort),
+			}
+		}
+	}
+
+	return state, true, nil
+}
+
+// mixedBackendField reports the first populated "other-backend" field name
+// (relative to state.Backend). For explicit backends, any populated field from
+// the opposite backend is mixed. For empty or unknown backends, mixed still
+// means both Dolt-shaped and Postgres-shaped fields are populated.
+//
+// Field-iteration order is the JSON-key declaration order on MetadataState
+// (dolt_mode, dolt_database, postgres_host, postgres_port, postgres_user,
+// postgres_database). When state.Backend is empty or unknown and both backend
+// families appear, the first populated field across both backends wins (with
+// Dolt fields preferred per declaration order).
+func mixedBackendField(state MetadataState) (string, bool) {
+	type entry struct {
+		name    string
+		value   string
+		backend string
+	}
+	fields := []entry{
+		{"dolt_mode", state.DoltMode, "dolt"},
+		{"dolt_database", state.DoltDatabase, "dolt"},
+		{"postgres_host", state.PostgresHost, "postgres"},
+		{"postgres_port", state.PostgresPort, "postgres"},
+		{"postgres_user", state.PostgresUser, "postgres"},
+		{"postgres_database", state.PostgresDatabase, "postgres"},
+	}
+	var firstDolt, firstPostgres string
+	for _, f := range fields {
+		if f.value == "" {
+			continue
+		}
+		if f.backend == "dolt" && firstDolt == "" {
+			firstDolt = f.name
+		}
+		if f.backend == "postgres" && firstPostgres == "" {
+			firstPostgres = f.name
+		}
+	}
+	switch state.Backend {
+	case "postgres":
+		if firstDolt != "" {
+			return firstDolt, true
+		}
+	case "dolt":
+		if firstPostgres != "" {
+			return firstPostgres, true
+		}
+	default:
+		if firstDolt != "" && firstPostgres != "" {
+			return firstDolt, true
+		}
+	}
+	return "", false
+}
+
 // EnsureCanonicalConfig rewrites config.yaml into canonical GC-managed form.
 func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, error) {
 	missing := false
@@ -278,10 +458,14 @@ func EnsureCanonicalMetadata(fs fsys.FS, path string, state MetadataState) (bool
 
 	changed := false
 	defaults := map[string]string{
-		"database":      strings.TrimSpace(state.Database),
-		"backend":       strings.TrimSpace(state.Backend),
-		"dolt_mode":     strings.TrimSpace(state.DoltMode),
-		"dolt_database": strings.TrimSpace(state.DoltDatabase),
+		"database":          strings.TrimSpace(state.Database),
+		"backend":           strings.TrimSpace(state.Backend),
+		"dolt_mode":         strings.TrimSpace(state.DoltMode),
+		"dolt_database":     strings.TrimSpace(state.DoltDatabase),
+		"postgres_host":     strings.TrimSpace(state.PostgresHost),
+		"postgres_port":     strings.TrimSpace(state.PostgresPort),
+		"postgres_user":     strings.TrimSpace(state.PostgresUser),
+		"postgres_database": strings.TrimSpace(state.PostgresDatabase),
 	}
 	for key, want := range defaults {
 		if want == "" {
@@ -293,6 +477,12 @@ func EnsureCanonicalMetadata(fs fsys.FS, path string, state MetadataState) (bool
 		}
 	}
 	for _, key := range deprecatedMetadataKeys {
+		if _, ok := meta[key]; ok {
+			delete(meta, key)
+			changed = true
+		}
+	}
+	for _, key := range crossBackendKeysToScrub(strings.TrimSpace(state.Backend)) {
 		if _, ok := meta[key]; ok {
 			delete(meta, key)
 			changed = true

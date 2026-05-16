@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -8,6 +9,46 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+type softReloadAcceptanceResult struct {
+	Updated        int
+	Failed         int
+	FailedSessions []string
+	CanceledDrains int
+	OpenSessions   int
+	DesiredEmpty   bool
+}
+
+func (r softReloadAcceptanceResult) warnings() []string {
+	var warnings []string
+	if r.Failed > 0 {
+		detail := formatSoftReloadFailedSessions(r.FailedSessions)
+		if detail != "" {
+			detail = " (" + detail + ")"
+		}
+		warnings = append(warnings, fmt.Sprintf("soft reload: failed to accept config drift on %d session(s)%s; affected sessions may still drain", r.Failed, detail))
+	}
+	if r.DesiredEmpty && r.OpenSessions > 0 {
+		warnings = append(warnings, fmt.Sprintf("soft reload: desired state is empty; %d open session(s) will not have config drift accepted", r.OpenSessions))
+	}
+	return warnings
+}
+
+func formatSoftReloadFailedSessions(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	const limit = 5
+	shown := names
+	if len(shown) > limit {
+		shown = shown[:limit]
+	}
+	detail := strings.Join(shown, ", ")
+	if extra := len(names) - len(shown); extra > 0 {
+		detail = fmt.Sprintf("%s, and %d more", detail, extra)
+	}
+	return detail
+}
 
 // acceptConfigDriftAcrossSessions writes the current per-session config
 // hash into every open session bead's started_config_hash metadata
@@ -33,33 +74,40 @@ import (
 //     next tick)
 //   - the recomputed current hash already equals the stored hash
 //
-// The hash computation mirrors the canonical reconciler path:
-// templateParamsToConfig → applyTemplateOverridesToConfig →
-// runtime.CoreFingerprint. Any future change to that sequence in the
-// reconciler must be mirrored here, otherwise --soft will write a
-// stale hash and the next tick will still detect drift.
+// The hash computation uses sessionCoreConfigForHash, the same canonical
+// reconciler drift-hash helper used by live and asleep drift detection.
 //
-// Returns the number of session beads whose started_config_hash was
-// updated.
+// Returns accepted-session, failed-session, stale-drain-cancelation, and
+// empty-desired-state diagnostics for the controller reply.
 func acceptConfigDriftAcrossSessions(
 	store beads.Store,
 	desired map[string]TemplateParams,
+	sessionBeads *sessionBeadSnapshot,
+	sp runtime.Provider,
+	dt *drainTracker,
 	stderr io.Writer,
-) int {
-	if store == nil || len(desired) == 0 {
-		return 0
+) softReloadAcceptanceResult {
+	result := softReloadAcceptanceResult{DesiredEmpty: len(desired) == 0}
+	if store == nil {
+		return result
 	}
-	sessionBeads, err := loadSessionBeadSnapshot(store)
-	if err != nil {
-		fmt.Fprintf(stderr, "soft reload: listing session beads: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 0
+	if sessionBeads == nil {
+		var err error
+		sessionBeads, err = loadSessionBeadSnapshot(store)
+		if err != nil {
+			fmt.Fprintf(stderr, "soft reload: listing session beads: %v\n", err) //nolint:errcheck // best-effort stderr
+			return result
+		}
 	}
 	open := sessionBeads.Open()
+	result.OpenSessions = len(open)
 	if len(open) == 0 {
-		return 0
+		return result
+	}
+	if len(desired) == 0 {
+		return result
 	}
 
-	updated := 0
 	for i := range open {
 		session := open[i]
 		if session.Status == "closed" {
@@ -77,17 +125,72 @@ func acceptConfigDriftAcrossSessions(
 		if !ok {
 			continue
 		}
-		agentCfg := templateParamsToConfig(tp)
-		applyTemplateOverridesToConfig(&agentCfg, session, tp)
+		agentCfg := sessionCoreConfigForHash(tp, session)
 		currentHash := runtime.CoreFingerprint(agentCfg)
 		if storedHash == currentHash {
 			continue
 		}
-		if err := store.SetMetadata(session.ID, "started_config_hash", currentHash); err != nil {
-			fmt.Fprintf(stderr, "soft reload: updating started_config_hash for %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
+		if err := clearSoftReloadConfigDriftDrainAck(session, sp, dt); err != nil {
+			result.Failed++
+			result.FailedSessions = append(result.FailedSessions, name)
+			fmt.Fprintf(stderr, "soft reload: clearing config-drift drain ack metadata for %s: %v; leaving config hash unchanged\n", name, err) //nolint:errcheck // best-effort stderr
 			continue
 		}
-		updated++
+		metadata, err := softReloadAcceptedHashMetadata(agentCfg, currentHash)
+		if err != nil {
+			result.Failed++
+			result.FailedSessions = append(result.FailedSessions, name)
+			fmt.Fprintf(stderr, "soft reload: preparing config hash metadata for %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
+			continue
+		}
+		if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
+			result.Failed++
+			result.FailedSessions = append(result.FailedSessions, name)
+			fmt.Fprintf(stderr, "soft reload: updating config hash metadata for %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
+			continue
+		}
+		if cancelSoftReloadConfigDriftDrain(session, sp, dt) {
+			result.CanceledDrains++
+		}
+		result.Updated++
 	}
-	return updated
+	return result
+}
+
+func softReloadAcceptedHashMetadata(agentCfg runtime.Config, currentHash string) (map[string]string, error) {
+	breakdown, err := json.Marshal(runtime.CoreFingerprintBreakdown(agentCfg))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{
+		"started_config_hash": currentHash,
+		"core_hash_breakdown": string(breakdown),
+	}, nil
+}
+
+func cancelSoftReloadConfigDriftDrain(session beads.Bead, sp runtime.Provider, dt *drainTracker) bool {
+	if dt == nil {
+		return false
+	}
+	ds := dt.get(session.ID)
+	if ds == nil || ds.reason != "config-drift" {
+		return false
+	}
+	return cancelSessionConfigDriftDrain(session, sp, dt)
+}
+
+func clearSoftReloadConfigDriftDrainAck(session beads.Bead, sp runtime.Provider, dt *drainTracker) error {
+	if dt == nil {
+		return nil
+	}
+	ds := dt.get(session.ID)
+	if ds == nil || ds.reason != "config-drift" || !ds.ackSet {
+		return nil
+	}
+	name := strings.TrimSpace(session.Metadata["session_name"])
+	if err := clearReconcilerDrainAckMetadata(sp, name); err != nil {
+		return err
+	}
+	ds.ackSet = false
+	return nil
 }

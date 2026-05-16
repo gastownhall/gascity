@@ -95,7 +95,7 @@ func computePoolDesiredStates(
 		if sb.Status == "closed" {
 			continue
 		}
-		template := strings.TrimSpace(sb.Metadata["template"])
+		template := strings.TrimSpace(normalizedSessionTemplate(sb, cfg))
 		if template != "" {
 			sessionBeadTemplate[sb.ID] = template
 		}
@@ -135,6 +135,12 @@ func computePoolDesiredStates(
 				routedTo = sessionBeadTemplate[sessionBeadID]
 				if routedTo == "" && len(cfg.Agents) == 1 {
 					routedTo = cfg.Agents[0].QualifiedName()
+				}
+			}
+			if sessionBeadID != "" {
+				sessionTemplate := strings.TrimSpace(sessionBeadTemplate[sessionBeadID])
+				if sessionTemplate != "" && routedTo != "" && routedTo != sessionTemplate {
+					continue
 				}
 			}
 			if routedTo != template {

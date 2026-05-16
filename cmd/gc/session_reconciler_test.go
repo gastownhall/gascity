@@ -3149,6 +3149,30 @@ func TestReconcileSessionBeads_SuspendedNotRunningClosed(t *testing.T) {
 	}
 }
 
+// TestReconcileSessionBeads_FailedCreateNotDesiredClosed verifies that a bead
+// in the failed-create state is recognized by the reconciler (not skipped as
+// unknown) and closed when it is not in the desired set and not running.
+// Regression: previously failed-create was missing from knownSessionStates,
+// so dead pool beads blocked slots forever.
+func TestReconcileSessionBeads_FailedCreateNotDesiredClosed(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "polecat", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)}}}
+	session := env.createSessionBead("polecat", "polecat-ga-mg0")
+	session.Metadata["state"] = "failed-create"
+	session.Metadata["pool_managed"] = "true"
+	session.Metadata["pool_slot"] = "1"
+
+	env.reconcile([]beads.Bead{session})
+
+	b, _ := env.store.Get(session.ID)
+	if b.Status != "closed" {
+		t.Errorf("failed-create bead status = %q, want closed", b.Status)
+	}
+	if want := sessionpkg.CanonicalCloseReason(string(sessionpkg.StateFailedCreate)); b.Metadata["close_reason"] != want {
+		t.Errorf("close_reason = %q, want %q", b.Metadata["close_reason"], want)
+	}
+}
+
 func TestReconcileSessionBeads_PreservesConfiguredNamedSessionOutsideDesiredState(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{

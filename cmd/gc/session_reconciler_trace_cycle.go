@@ -28,8 +28,6 @@ func (m *SessionReconcilerTracer) beginCycle(info sessionReconcilerTraceCycleInf
 		cycle.RecordSessionBaseline("", "", traceRecordPayload{
 			"open_count": len(sessionBeads.Open()),
 		})
-	}
-	if cycle != nil {
 		_ = cycle.flushCurrentBatch(TraceDurabilityDurable)
 	}
 	return cycle
@@ -74,6 +72,27 @@ func (c *SessionReconcilerTraceCycle) recordDecision(siteCode, template, session
 		fields["raw_outcome_code"] = rawOutcome
 	}
 	c.RecordDecision(normSite, normReason, normOutcome, template, sessionName, fields)
+}
+
+// RecordControllerDecision records a baseline daemon-level decision that is
+// not scoped to a specific session template.
+func (c *SessionReconcilerTraceCycle) RecordControllerDecision(site TraceSiteCode, reason TraceReasonCode, outcome TraceOutcomeCode, fields map[string]any) {
+	if c == nil {
+		return
+	}
+	rec := newTraceRecord(TraceRecordDecision).withCycle(c, time.Now().UTC())
+	rec.SiteCode = site
+	rec.ReasonCode = reason
+	rec.OutcomeCode = outcome
+	rec.TraceMode = TraceModeBaseline
+	rec.TraceSource = TraceSourceAlwaysOn
+	if len(fields) > 0 {
+		rec.ensureFields()
+		for k, v := range fields {
+			rec.Fields[k] = v
+		}
+	}
+	c.addRecord(rec)
 }
 
 func (c *SessionReconcilerTraceCycle) recordOperation(siteCode, template, sessionName, _ string, reason, outcome string, data traceRecordPayload, _ string) {

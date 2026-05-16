@@ -41,7 +41,7 @@ lifecycle.
 ### Step 1: Check if deacon session exists
 
 ```bash
-{{ cmd }} session peek deacon --lines 1
+{{ cmd }} session peek {{ .BindingPrefix }}deacon --lines 1
 ```
 
 If the deacon session doesn't exist: do nothing and exit. The controller
@@ -51,13 +51,13 @@ detects dead agents and restarts them — that's its job, not yours.
 
 ```bash
 # Recent pane output — is the deacon actively working?
-{{ cmd }} session peek deacon --lines 30
+{{ cmd }} session peek {{ .BindingPrefix }}deacon --lines 30
 
 # Deacon's current patrol wisp — how fresh is it?
-gc bd list --assignee=deacon --status=in_progress --json --limit=5
+gc bd list --assignee={{ .BindingPrefix }}deacon --status=in_progress --json --limit=5
 
 # Does the deacon have unread mail? (may explain idle state)
-gc mail count deacon 2>/dev/null
+gc mail count {{ .BindingPrefix }}deacon 2>/dev/null
 ```
 
 Read the wisp timestamps and pane output. Build a picture:
@@ -88,15 +88,15 @@ Use judgment — there are no hardcoded thresholds. Consider:
 
 **Possibly stuck (stale wisp, no activity, but ambiguous):** Nudge:
 ```bash
-{{ cmd }} session nudge deacon "Boot check: are you making progress?"
+{{ cmd }} session nudge {{ .BindingPrefix }}deacon "Boot check: are you making progress?"
 ```
 Drain-ack and exit. Next Boot wake will re-evaluate.
 
 **Clearly stuck (very stale wisp, no output, errors visible):** File a warrant:
 ```bash
 gc bd create --type=task \
-  --title="Stuck: deacon" \
-  --metadata '{"target":"deacon","reason":"Stale patrol wisp, no activity","requester":"boot","gc.routed_to":"{{ .BindingPrefix }}dog"}' \
+  --title="Stuck: {{ .BindingPrefix }}deacon" \
+  --metadata '{"target":"{{ .BindingPrefix }}deacon","reason":"Stale patrol wisp, no activity","requester":"boot","gc.routed_to":"{{ .BindingPrefix }}dog"}' \
   --label=warrant
 ```
 The dog pool picks up the warrant and runs the shutdown dance.
@@ -127,10 +127,10 @@ with a fresh provider context.
 
 | Want to... | Correct command |
 |------------|----------------|
-| View deacon output | `{{ cmd }} session peek deacon --lines 30` |
-| Check deacon work | `gc bd list --assignee=deacon --status=in_progress --json` |
-| Nudge deacon | `{{ cmd }} session nudge deacon "message"` |
-| File stuck warrant | `gc bd create --type=task --label=warrant --metadata '{"target":"deacon","reason":"...","requester":"boot","gc.routed_to":"{{ .BindingPrefix }}dog"}'` |
+| View deacon output | `{{ cmd }} session peek {{ .BindingPrefix }}deacon --lines 30` |
+| Check deacon work | `gc bd list --assignee={{ .BindingPrefix }}deacon --status=in_progress --json` |
+| Nudge deacon | `{{ cmd }} session nudge {{ .BindingPrefix }}deacon "message"` |
+| File stuck warrant | `gc bd create --type=task --label=warrant --metadata '{"target":"{{ .BindingPrefix }}deacon","reason":"...","requester":"boot","gc.routed_to":"{{ .BindingPrefix }}dog"}'` |
 | Check active sessions | `{{ cmd }} session list` |
 
 Working directory: {{ .WorkDir }}

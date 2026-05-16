@@ -26,6 +26,8 @@ const (
 	MCPProviderGemini = "gemini"
 	// MCPProviderOpenCode projects to OpenCode's project-native JSON config.
 	MCPProviderOpenCode = "opencode"
+	// MCPProviderCursor projects to Cursor Agent's project-native MCP file.
+	MCPProviderCursor = "cursor"
 )
 
 // MCPProjection is one provider-native MCP payload for a single target file.
@@ -46,6 +48,7 @@ func BuildMCPProjection(providerKind, workdir string, servers []MCPServer) (MCPP
 	case MCPProviderCodex:
 	case MCPProviderGemini:
 	case MCPProviderOpenCode:
+	case MCPProviderCursor:
 	default:
 		return MCPProjection{}, fmt.Errorf("unsupported MCP provider %q", providerKind)
 	}
@@ -66,6 +69,8 @@ func BuildMCPProjection(providerKind, workdir string, servers []MCPServer) (MCPP
 		out.Target = filepath.Join(workdir, ".gemini", "settings.json")
 	case MCPProviderOpenCode:
 		out.Target = filepath.Join(workdir, "opencode.json")
+	case MCPProviderCursor:
+		out.Target = filepath.Join(workdir, ".cursor", "mcp.json")
 	}
 	return out, nil
 }
@@ -84,8 +89,8 @@ func (p MCPProjection) Hash() string {
 // managed marker gates later cleanup when the effective catalog becomes
 // empty so GC does not remove an unmanaged file it never adopted.
 //
-// Claude owns the whole file; Gemini and Codex preserve unrelated config
-// while replacing the MCP subtree.
+// Claude owns the whole file; Gemini, Codex, Cursor, and OpenCode preserve
+// unrelated config while replacing the MCP subtree.
 //
 // Apply is safe against concurrent writers for the same target: when the
 // backing FS is the real OS filesystem, the read-validate-write sequence
@@ -108,6 +113,9 @@ func (p MCPProjection) ApplyWithStderr(fs fsys.FS, stderr io.Writer) error {
 }
 
 func (p MCPProjection) applyWithStderr(fs fsys.FS, stderr io.Writer) error {
+	if err := p.validateProviderContract(); err != nil {
+		return err
+	}
 	if err := ensureNotSymlink(fs, p); err != nil {
 		return err
 	}
@@ -141,6 +149,8 @@ func (p MCPProjection) applyWithStderr(fs fsys.FS, stderr io.Writer) error {
 			return p.applyGemini(fs)
 		case MCPProviderOpenCode:
 			return p.applyOpenCode(fs)
+		case MCPProviderCursor:
+			return p.applyCursor(fs)
 		default:
 			return fmt.Errorf("unsupported MCP provider %q", p.Provider)
 		}
@@ -285,6 +295,57 @@ func (p MCPProjection) applyOpenCode(fs fsys.FS) error {
 	return p.writeManagedMarker(fs)
 }
 
+func (p MCPProjection) applyCursor(fs fsys.FS) error {
+	managed := p.isManaged(fs)
+	if len(p.Servers) == 0 && !managed {
+		return nil
+	}
+	doc, err := readJSONDoc(fs, p.Target)
+	if err != nil {
+		return err
+	}
+	if len(p.Servers) == 0 {
+		delete(doc, "mcpServers")
+		if len(doc) == 0 {
+			if err := removeManagedMCPFile(fs, p.Target); err != nil {
+				return err
+			}
+			return removeManagedMCPFile(fs, p.markerPath())
+		}
+	} else {
+		doc["mcpServers"] = p.cursorServersDoc()
+	}
+	data, err := marshalJSONDoc(doc)
+	if err != nil {
+		return err
+	}
+	if err := writeManagedMCPFile(fs, p.Target, data); err != nil {
+		return err
+	}
+	if len(p.Servers) == 0 {
+		return removeManagedMCPFile(fs, p.markerPath())
+	}
+	return p.writeManagedMarker(fs)
+}
+
+func (p MCPProjection) validateProviderContract() error {
+	if p.Provider != MCPProviderCursor {
+		return nil
+	}
+	for _, server := range p.Servers {
+		switch server.Transport {
+		case MCPTransportStdio:
+		case MCPTransportHTTP, MCPTransportSSE:
+			return fmt.Errorf(
+				"cursor MCP projection does not support %s server %q: Cursor's HTTP/SSE mcpServers wire contract is not verified",
+				server.Transport,
+				server.Name,
+			)
+		}
+	}
+	return nil
+}
+
 func (p MCPProjection) claudeServersDoc() map[string]any {
 	out := make(map[string]any, len(p.Servers))
 	for _, server := range p.Servers {
@@ -303,6 +364,24 @@ func (p MCPProjection) claudeServersDoc() map[string]any {
 			entry["url"] = server.URL
 			if len(server.Headers) > 0 {
 				entry["headers"] = cloneStringMap(server.Headers)
+			}
+		}
+		out[server.Name] = entry
+	}
+	return out
+}
+
+func (p MCPProjection) cursorServersDoc() map[string]any {
+	out := make(map[string]any, len(p.Servers))
+	for _, server := range p.Servers {
+		entry := map[string]any{}
+		if server.Transport == MCPTransportStdio {
+			entry["command"] = server.Command
+			if len(server.Args) > 0 {
+				entry["args"] = append([]string(nil), server.Args...)
+			}
+			if len(server.Env) > 0 {
+				entry["env"] = cloneStringMap(server.Env)
 			}
 		}
 		out[server.Name] = entry

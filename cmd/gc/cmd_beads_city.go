@@ -185,7 +185,12 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 				}
 				managedStopScript = gcBeadsBdScriptPath(cityPath)
 			}
-			managedStopEnv = append([]string(nil), providerLifecycleProcessEnv(cityPath, provider)...)
+			providerEnv, err := providerLifecycleProcessEnvWithError(cityPath, provider)
+			if err != nil {
+				fmt.Fprintf(stderr, "%s: building managed provider env: %v\n", name, err) //nolint:errcheck
+				return 1
+			}
+			managedStopEnv = append([]string(nil), providerEnv...)
 		}
 	}
 

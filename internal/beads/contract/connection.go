@@ -688,6 +688,9 @@ type managedRuntimeState struct {
 func readManagedRuntimeState(fs fsys.FS, cityRoot string) (managedRuntimeState, error) {
 	data, err := fs.ReadFile(filepath.Join(cityRoot, ".gc", "runtime", "packs", "dolt", "dolt-state.json"))
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return managedRuntimeState{}, fmt.Errorf("read dolt runtime state: %w: %w", ErrManagedRuntimeUnavailable, err)
+		}
 		return managedRuntimeState{}, fmt.Errorf("read dolt runtime state: %w", err)
 	}
 	var state managedRuntimeState

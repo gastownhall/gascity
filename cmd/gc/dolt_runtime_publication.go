@@ -158,6 +158,10 @@ func publishManagedDoltRuntimeState(cityPath string) error {
 		state = repaired
 	}
 
+	return publishManagedDoltRuntimeStateFromState(cityPath, state)
+}
+
+func publishManagedDoltRuntimeStateFromState(cityPath string, state doltRuntimeState) error {
 	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), state); err != nil {
 		return fmt.Errorf("write published dolt runtime state: %w", err)
 	}
@@ -178,14 +182,36 @@ func clearManagedDoltRuntimeState(cityPath string) error {
 }
 
 func publishManagedDoltRuntimeStateIfOwned(cityPath string) error {
+	_, err := publishManagedDoltRuntimeStateIfOwnedResult(cityPath)
+	return err
+}
+
+func publishManagedDoltRuntimeStateIfOwnedResult(cityPath string) (bool, error) {
 	owned, err := managedDoltLifecycleOwned(cityPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !owned {
-		return nil
+		return false, nil
 	}
-	return publishManagedDoltRuntimeState(cityPath)
+	if err := publishManagedDoltRuntimeState(cityPath); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func publishManagedDoltRuntimeStateIfOwnedResultFromState(cityPath string, state doltRuntimeState) (bool, error) {
+	owned, err := managedDoltLifecycleOwned(cityPath)
+	if err != nil {
+		return false, err
+	}
+	if !owned {
+		return false, nil
+	}
+	if err := publishManagedDoltRuntimeStateFromState(cityPath, state); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func clearManagedDoltRuntimeStateIfOwned(cityPath string) error {

@@ -3,7 +3,10 @@
 package workerinference_test
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -146,6 +149,8 @@ func installLiveHandleProviderHooks(workDir string, profile workerpkg.Profile) e
 	switch profile {
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"opencode"})
+	case workerpkg.ProfilePiTmuxCLI:
+		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"pi"})
 	default:
 		return nil
 	}
@@ -342,6 +347,30 @@ func (h *liveWorkerHandleHarness) waitForBusyTurnStart(sessionName, outputNeedle
 	evidence["busy_session_name"] = sessionName
 	evidence["busy_output_needle"] = outputNeedle
 
+	if h.profile == workerpkg.ProfilePiTmuxCLI {
+		var (
+			transcriptPath string
+			lastErr        error
+		)
+		found := pollForCondition(30*time.Second, 500*time.Millisecond, func() bool {
+			transcriptPath, lastErr = findPiAssistantOutputTranscript(h.gcHome, outputNeedle)
+			return transcriptPath != ""
+		})
+		if pane, err := captureTmuxPane(h.workDir, sessionName, 120); err == nil && strings.TrimSpace(pane) != "" {
+			evidence["pane_tail"] = pane
+		}
+		if found {
+			evidence["busy_detection"] = "pi-transcript-assistant-output"
+			evidence["busy_transcript_path"] = transcriptPath
+			return evidence, nil
+		}
+		evidence["busy_detection"] = "pi-transcript-assistant-output-missing"
+		if lastErr != nil {
+			return evidence, lastErr
+		}
+		return evidence, fmt.Errorf("pi transcript did not show assistant output for %q", outputNeedle)
+	}
+
 	var (
 		lastPane string
 		lastErr  error
@@ -369,6 +398,89 @@ func (h *liveWorkerHandleHarness) waitForBusyTurnStart(sessionName, outputNeedle
 		return evidence, lastErr
 	}
 	return evidence, fmt.Errorf("busy turn did not show in-flight activity for %q", outputNeedle)
+}
+
+func findPiAssistantOutputTranscript(gcHome, outputNeedle string) (string, error) {
+	needle := strings.TrimSpace(outputNeedle)
+	if needle == "" {
+		return "", nil
+	}
+	roots := []string{
+		filepath.Join(gcHome, ".pi", "agent", "sessions"),
+		filepath.Join(gcHome, ".local", "share", "gascity", "pi-transcripts"),
+	}
+	var lastErr error
+	for _, root := range roots {
+		info, err := os.Stat(root)
+		if err != nil || !info.IsDir() {
+			if err != nil && !os.IsNotExist(err) {
+				lastErr = err
+			}
+			continue
+		}
+		var found string
+		walkErr := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				lastErr = walkErr
+				return nil
+			}
+			if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".jsonl") {
+				return nil
+			}
+			ok, err := piTranscriptContainsAssistantOutput(path, needle)
+			if err != nil {
+				lastErr = err
+				return nil
+			}
+			if ok {
+				found = path
+				return filepath.SkipAll
+			}
+			return nil
+		})
+		if walkErr != nil && !errors.Is(walkErr, filepath.SkipAll) {
+			lastErr = walkErr
+		}
+		if found != "" {
+			return found, nil
+		}
+	}
+	return "", lastErr
+}
+
+func piTranscriptContainsAssistantOutput(path, needle string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close() //nolint:errcheck // read-only file
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 256*1024), 50*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var entry struct {
+			Type    string `json:"type"`
+			Message struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if entry.Type == "message" &&
+			strings.EqualFold(strings.TrimSpace(entry.Message.Role), "assistant") &&
+			strings.Contains(string(entry.Message.Content), needle) {
+			return true, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 func livePaneShowsBusyIndicator(lines []string) bool {

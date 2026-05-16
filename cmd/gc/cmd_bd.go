@@ -53,12 +53,18 @@ var bdBeadExists = func(cityPath string, target execStoreTarget, beadID string) 
 	return err == nil && strings.TrimSpace(bead.ID) != ""
 }
 
-func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) []string {
+func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]string, error) {
 	var overrides map[string]string
+	var err error
 	if target.ScopeKind == "rig" {
-		overrides = bdRuntimeEnvForRig(cityPath, cfg, target.ScopeRoot)
+		overrides, err = bdRuntimeEnvForRigWithError(cityPath, cfg, target.ScopeRoot)
 	} else {
-		overrides = bdRuntimeEnv(cityPath)
+		overrides, err = bdRuntimeEnvWithError(cityPath)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if target.ScopeKind != "rig" {
 		overrides["GC_RIG"] = ""
 		overrides["GC_RIG_ROOT"] = ""
 		overrides["BEADS_DIR"] = filepath.Join(target.ScopeRoot, ".beads")
@@ -66,8 +72,8 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) []s
 	overrides["GC_STORE_ROOT"] = target.ScopeRoot
 	overrides["GC_STORE_SCOPE"] = target.ScopeKind
 	overrides["GC_BEADS_PREFIX"] = target.Prefix
-	applyControlBdEnv(overrides)
-	return mergeRuntimeEnv(os.Environ(), overrides)
+	applyExportSuppressionEnv(overrides)
+	return mergeRuntimeEnv(os.Environ(), overrides), nil
 }
 
 func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execStoreTarget) {
@@ -134,7 +140,12 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Env = workQueryEnvForDir(bdCommandEnv(cityPath, cfg, target), cmd.Dir)
+	env, err := bdCommandEnv(cityPath, cfg, target)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
 
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError

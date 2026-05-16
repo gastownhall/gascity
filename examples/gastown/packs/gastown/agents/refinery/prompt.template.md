@@ -164,13 +164,13 @@ and then ignored by landing directly to the target branch.
 
 ```bash
 gc mail inbox                                          # Check for messages
-gc session nudge {{ .RigName }}/<polecat-name> "Run gc hook; it checks assigned work before routed pool work"
+gc session nudge {{ .RigName }}/{{ .BindingPrefix }}<polecat-suffix> "Run gc hook; it checks assigned work before routed pool work"
 gc mail send mayor/ -s "ESCALATION: ..." -m "..."      # Escalate (mail — must survive)
 ```
 
-Use the concrete polecat name from `gc status` or `gc session list`;
-Gastown's default namepool yields names like `furiosa` or `nux`. There is no
-`{{ .RigName }}/polecats/<name>` address form.
+Use the bare polecat suffix after the binding prefix; Gastown's default
+namepool yields suffixes like `furiosa` or `nux`{{ if .BindingPrefix }}, not `{{ .BindingPrefix }}furiosa`{{ end }}.
+There is no `{{ .RigName }}/polecats/<name>` address form.
 
 Nudging a polecat does not assign work. It only wakes that session; actual
 work still arrives through bead assignment or pool routing.
@@ -206,5 +206,5 @@ alert the witness, not `gc mail send`.
 
 Rig: {{ .RigName }}
 Working directory: {{ .WorkDir }}
-Mail identity: {{ .RigName }}/refinery
+Mail identity: {{ .AgentName }}
 Formula: mol-refinery-patrol

@@ -1614,31 +1614,66 @@ ensure_beads_role() {
 }
 
 # ensure_dolt_identity ensures dolt has user.name and user.email configured.
+#
+# Resolution order per field, in order of precedence:
+#   1. dolt config --global (returned as-is if already set)
+#   2. git config --global  (copied into dolt config)
+#
+# If a field is missing from BOTH dolt and git, fail with an error that
+# names the specific field(s) the user must set — never instruct the user
+# to set a value they have already configured. Historically this function
+# would report "user.name not available" whenever EITHER field was missing
+# (because the dolt-side guard required both), which left users running
+# `dolt config --add user.name` over and over while the real culprit was
+# user.email.
 ensure_dolt_identity() {
-    # Check if already configured.
-    if dolt config --global --get user.name >/dev/null 2>&1 && \
-       dolt config --global --get user.email >/dev/null 2>&1; then
+    # Use dolt's exit code as the canonical "is this field configured?"
+    # signal. Real dolt returns 0 with the value on stdout when the field
+    # is set, non-zero otherwise; some tests stub dolt to return 0 with
+    # empty stdout for any `config` invocation, and we treat that as
+    # configured too (matches historical behavior of this helper).
+    local dolt_has_name=0 dolt_has_email=0
+    local dolt_name="" dolt_email="" git_name git_email
+    if dolt config --global --get user.name >/dev/null 2>&1; then
+        dolt_has_name=1
+        dolt_name=$(dolt config --global --get user.name 2>/dev/null || true)
+    fi
+    if dolt config --global --get user.email >/dev/null 2>&1; then
+        dolt_has_email=1
+        dolt_email=$(dolt config --global --get user.email 2>/dev/null || true)
+    fi
+    if [ "$dolt_has_name" -eq 1 ] && [ "$dolt_has_email" -eq 1 ]; then
         return 0
     fi
 
-    # Copy from git config.
-    local name email
-    name=$(git config --global user.name 2>/dev/null || true)
-    email=$(git config --global user.email 2>/dev/null || true)
+    git_name=$(git config --global user.name 2>/dev/null || true)
+    git_email=$(git config --global user.email 2>/dev/null || true)
 
-    if [ -z "$name" ]; then
-        die "dolt identity not configured and git user.name not available; run: dolt config --global --add user.name \"Your Name\""
+    # Accumulate missing-field hints in a semicolon-joined string rather
+    # than a bash array so this stays runnable under POSIX /bin/sh
+    # (matches the script's shebang). Each branch reports only the field
+    # that is truly missing from BOTH dolt and git — never instruct the
+    # user to set a value they have already configured.
+    local missing=""
+    if [ "$dolt_has_name" -ne 1 ] && [ -z "$git_name" ]; then
+        missing='dolt config --global --add user.name "Your Name"'
     fi
-    if [ -z "$email" ]; then
-        die "dolt identity not configured and git user.email not available; run: dolt config --global --add user.email \"you@example.com\""
+    if [ "$dolt_has_email" -ne 1 ] && [ -z "$git_email" ]; then
+        if [ -n "$missing" ]; then
+            missing="$missing; "
+        fi
+        missing="${missing}dolt config --global --add user.email \"you@example.com\""
+    fi
+    if [ -n "$missing" ]; then
+        die "dolt identity incomplete; run: $missing"
     fi
 
-    # Set missing fields.
-    if ! dolt config --global --get user.name >/dev/null 2>&1; then
-        dolt config --global --add user.name "$name" || die "failed to set dolt user.name"
+    # Backfill missing dolt fields from git.
+    if [ "$dolt_has_name" -ne 1 ]; then
+        dolt config --global --add user.name "$git_name" || die "failed to set dolt user.name"
     fi
-    if ! dolt config --global --get user.email >/dev/null 2>&1; then
-        dolt config --global --add user.email "$email" || die "failed to set dolt user.email"
+    if [ "$dolt_has_email" -ne 1 ]; then
+        dolt config --global --add user.email "$git_email" || die "failed to set dolt user.email"
     fi
 }
 
@@ -2100,7 +2135,15 @@ op_init() {
     # IF NOT EXISTS both creates the on-disk directory and registers it in
     # the server's catalog. This is the upstream gastown pattern — when the
     # server is running, always go through SQL rather than dolt init on disk.
-    ensure_database_registered "$dolt_database" || true
+    #
+    # Failure here is a hard stop: bd init in server mode requires the
+    # database to exist on the server. The previous `|| true` swallowed
+    # CREATE DATABASE failures and let bd init fail later with a cryptic
+    # "database not found" error — root cause of the gascity-3 reproducer
+    # where the city's hq database was never created on first start.
+    if ! ensure_database_registered "$dolt_database"; then
+        die "failed to register Dolt database '$dolt_database' on running server (CREATE DATABASE failed); see warnings above. cannot proceed with bd init."
+    fi
 
     # Run bd init in server mode through the pinned wrapper so the fallback
     # path uses the same authenticated Dolt target as the rest of init.
@@ -2112,7 +2155,14 @@ op_init() {
     # and leave the pinned database schema-less.
     run_bd_init_pinned "$dir" "$prefix" "$dolt_database" "$host" "${bd_init_force:+true}"
 
-    ensure_database_registered "$dolt_database" || true
+    # Re-register post-init: if bd init didn't catalog-register the DB
+    # (server-mode quirk), do it now. After a successful bd init this is a
+    # no-op via the USE check inside ensure_database_registered. Failure
+    # here means bd init claimed success but the server can't see the DB —
+    # equally a hard stop, equally previously swallowed by `|| true`.
+    if ! ensure_database_registered "$dolt_database"; then
+        die "Dolt database '$dolt_database' is unreachable on the server after bd init reported success; see warnings above. probable causes: server crashed mid-init, port collision, or stale catalog state."
+    fi
 
     # GC owns canonical metadata/config normalization after this backend
     # bridge returns. Keep bd-specific config/migration here only.

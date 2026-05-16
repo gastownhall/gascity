@@ -1,7 +1,10 @@
 package contract
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -676,4 +679,488 @@ func countLineOccurrences(text, needle string) int {
 		}
 	}
 	return count
+}
+
+// metadataFixturePath joins the testdata fixture directory.
+func metadataFixturePath(t *testing.T, name string) string {
+	t.Helper()
+	return filepath.Join("testdata", "metadata", name)
+}
+
+// copyMetadataFixture copies a fixture into a temp dir and returns the
+// destination path. The fixture is read with the OS filesystem so its bytes
+// match what would land on disk in production.
+func copyMetadataFixture(t *testing.T, fs fsys.FS, name string) (dst string, original []byte) {
+	t.Helper()
+	src := metadataFixturePath(t, name)
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", src, err)
+	}
+	dst = filepath.Join(t.TempDir(), "metadata.json")
+	if err := fs.WriteFile(dst, data, 0o644); err != nil {
+		t.Fatalf("write fixture copy: %v", err)
+	}
+	return dst, data
+}
+
+func TestLoadMetadataStateReturnsZeroWhenFileMissing(t *testing.T) {
+	fs := fsys.OSFS{}
+	path := filepath.Join(t.TempDir(), "metadata.json")
+
+	state, ok, err := LoadMetadataState(fs, path)
+	if err != nil {
+		t.Fatalf("LoadMetadataState() error = %v, want nil", err)
+	}
+	if ok {
+		t.Fatal("LoadMetadataState() ok = true, want false for missing file")
+	}
+	if state != (MetadataState{}) {
+		t.Fatalf("LoadMetadataState() state = %+v, want zero value", state)
+	}
+}
+
+func TestLoadMetadataStateAcceptsEmptyObject(t *testing.T) {
+	fs := fsys.OSFS{}
+	path := filepath.Join(t.TempDir(), "metadata.json")
+	if err := fs.WriteFile(path, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	state, ok, err := LoadMetadataState(fs, path)
+	if err != nil {
+		t.Fatalf("LoadMetadataState({}) error = %v, want nil", err)
+	}
+	if !ok {
+		t.Fatal("LoadMetadataState({}) ok = false, want true")
+	}
+	if state != (MetadataState{}) {
+		t.Fatalf("LoadMetadataState({}) state = %+v, want zero value", state)
+	}
+}
+
+func TestLoadMetadataStateValidFixtures(t *testing.T) {
+	fs := fsys.OSFS{}
+	cases := []struct {
+		name    string
+		fixture string
+		want    MetadataState
+	}{
+		{
+			name:    "dolt round-trip",
+			fixture: "valid_dolt.json",
+			want: MetadataState{
+				Database:     "dolt",
+				Backend:      "dolt",
+				DoltMode:     "server",
+				DoltDatabase: "hq",
+			},
+		},
+		{
+			name:    "postgres round-trip",
+			fixture: "valid_postgres.json",
+			want: MetadataState{
+				Database:         "beads",
+				Backend:          "postgres",
+				PostgresHost:     "db.example.com",
+				PostgresPort:     "5432",
+				PostgresUser:     "bd",
+				PostgresDatabase: "beads_pwu",
+			},
+		},
+		{
+			name:    "postgres round-trip with unknown key",
+			fixture: "valid_postgres_with_unknown.json",
+			want: MetadataState{
+				Database:         "beads",
+				Backend:          "postgres",
+				PostgresHost:     "db.example.com",
+				PostgresPort:     "5432",
+				PostgresUser:     "bd",
+				PostgresDatabase: "beads_pwu",
+			},
+		},
+		{
+			name:    "empty backend permitted",
+			fixture: "valid_empty_backend.json",
+			want: MetadataState{
+				Database: "beads",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, _ := copyMetadataFixture(t, fs, tc.fixture)
+			got, ok, err := LoadMetadataState(fs, path)
+			if err != nil {
+				t.Fatalf("LoadMetadataState(%s) error = %v, want nil", tc.fixture, err)
+			}
+			if !ok {
+				t.Fatalf("LoadMetadataState(%s) ok = false, want true", tc.fixture)
+			}
+			if got != tc.want {
+				t.Fatalf("LoadMetadataState(%s) = %+v, want %+v", tc.fixture, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadMetadataStateRejectFixtures(t *testing.T) {
+	fs := fsys.OSFS{}
+	cases := []struct {
+		name            string
+		fixture         string
+		wantErrContains string
+	}{
+		{
+			name:            "E1 invalid json",
+			fixture:         "reject_invalid_json.json",
+			wantErrContains: "invalid metadata.json:",
+		},
+		{
+			name:            "E2 unknown backend",
+			fixture:         "reject_unknown_backend.json",
+			wantErrContains: `unsupported backend "postgress" (supported: dolt, postgres)`,
+		},
+		{
+			name:            "E3 mixed backends fires before required-fields",
+			fixture:         "reject_mixed_backends.json",
+			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=dolt but postgres_database is also set)",
+		},
+		{
+			name:            "E3 rejects explicit dolt with postgres fields",
+			fixture:         "reject_dolt_with_postgres_field.json",
+			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=dolt but postgres_host is also set)",
+		},
+		{
+			name:            "E3 surfaces dolt field when backend=postgres",
+			fixture:         "reject_mixed_pg_backend_with_dolt.json",
+			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=postgres but dolt_database is also set)",
+		},
+		{
+			name:            "E3 rejects explicit postgres with dolt fields",
+			fixture:         "reject_postgres_with_dolt_field.json",
+			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=postgres but dolt_database is also set)",
+		},
+		{
+			name:            "E3 surfaces dolt field first when backend is empty",
+			fixture:         "reject_mixed_empty_backend.json",
+			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend= but dolt_database is also set)",
+		},
+		{
+			name:            "E4 postgres missing host",
+			fixture:         "reject_pg_missing_host.json",
+			wantErrContains: "backend=postgres requires postgres_host, postgres_port, postgres_user, postgres_database (all four must be non-empty)",
+		},
+		{
+			name:            "E4 postgres missing all fields",
+			fixture:         "reject_pg_missing_all.json",
+			wantErrContains: "backend=postgres requires postgres_host, postgres_port, postgres_user, postgres_database (all four must be non-empty)",
+		},
+		{
+			name:            "E5 postgres_port non-numeric",
+			fixture:         "reject_pg_port_nonnumeric.json",
+			wantErrContains: `postgres_port must be a TCP port (1..65535), got "abc"`,
+		},
+		{
+			name:            "E5 postgres_port zero",
+			fixture:         "reject_pg_port_zero.json",
+			wantErrContains: `postgres_port must be a TCP port (1..65535), got "0"`,
+		},
+		{
+			name:            "E5 postgres_port too high",
+			fixture:         "reject_pg_port_too_high.json",
+			wantErrContains: `postgres_port must be a TCP port (1..65535), got "99999"`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, _ := copyMetadataFixture(t, fs, tc.fixture)
+
+			state, ok, err := LoadMetadataState(fs, path)
+			if err == nil {
+				t.Fatalf("LoadMetadataState(%s) error = nil, want %q", tc.fixture, tc.wantErrContains)
+			}
+			if ok {
+				t.Fatalf("LoadMetadataState(%s) ok = true, want false on rejection", tc.fixture)
+			}
+			if state != (MetadataState{}) {
+				t.Fatalf("LoadMetadataState(%s) state = %+v, want zero value on rejection", tc.fixture, state)
+			}
+
+			var parseErr *MetadataParseError
+			if !errors.As(err, &parseErr) {
+				t.Fatalf("LoadMetadataState(%s) error %T = %v, want *MetadataParseError", tc.fixture, err, err)
+			}
+			if parseErr.Path != path {
+				t.Fatalf("MetadataParseError.Path = %q, want %q", parseErr.Path, path)
+			}
+			if !strings.Contains(parseErr.Reason, tc.wantErrContains) {
+				t.Fatalf("MetadataParseError.Reason = %q, want substring %q", parseErr.Reason, tc.wantErrContains)
+			}
+			wantWrapped := "load metadata " + path + ": " + parseErr.Reason
+			if err.Error() != wantWrapped {
+				t.Fatalf("MetadataParseError.Error() = %q, want %q", err.Error(), wantWrapped)
+			}
+		})
+	}
+}
+
+func TestLoadMetadataStateSurfacesIOErrors(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "subdir")
+	if err := fs.MkdirAll(subdir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(subdir, 0o755) })
+
+	state, ok, err := LoadMetadataState(fs, filepath.Join(subdir, "metadata.json"))
+	if err == nil {
+		t.Skip("filesystem does not enforce mode 0000 (likely running as root); cannot exercise IO error path")
+	}
+	if ok {
+		t.Fatalf("LoadMetadataState() ok = true on IO error")
+	}
+	if state != (MetadataState{}) {
+		t.Fatalf("LoadMetadataState() state = %+v on IO error, want zero", state)
+	}
+	var parseErr *MetadataParseError
+	if errors.As(err, &parseErr) {
+		t.Fatalf("LoadMetadataState() returned *MetadataParseError on IO error; want plain error: %v", err)
+	}
+}
+
+func TestEnsureCanonicalMetadataIsByteIdempotentOnValidFixtures(t *testing.T) {
+	fs := fsys.OSFS{}
+	cases := []struct {
+		name    string
+		fixture string
+		state   MetadataState
+	}{
+		{
+			name:    "dolt",
+			fixture: "valid_dolt.json",
+			state: MetadataState{
+				Database:     "dolt",
+				Backend:      "dolt",
+				DoltMode:     "server",
+				DoltDatabase: "hq",
+			},
+		},
+		{
+			name:    "postgres",
+			fixture: "valid_postgres.json",
+			state: MetadataState{
+				Database:         "beads",
+				Backend:          "postgres",
+				PostgresHost:     "db.example.com",
+				PostgresPort:     "5432",
+				PostgresUser:     "bd",
+				PostgresDatabase: "beads_pwu",
+			},
+		},
+		{
+			name:    "postgres with unknown key",
+			fixture: "valid_postgres_with_unknown.json",
+			state: MetadataState{
+				Database:         "beads",
+				Backend:          "postgres",
+				PostgresHost:     "db.example.com",
+				PostgresPort:     "5432",
+				PostgresUser:     "bd",
+				PostgresDatabase: "beads_pwu",
+			},
+		},
+		{
+			name:    "empty backend",
+			fixture: "valid_empty_backend.json",
+			state: MetadataState{
+				Database: "beads",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, original := copyMetadataFixture(t, fs, tc.fixture)
+
+			changed, err := EnsureCanonicalMetadata(fs, path, tc.state)
+			if err != nil {
+				t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+			}
+			if changed {
+				got, readErr := fs.ReadFile(path)
+				if readErr != nil {
+					t.Fatalf("read after canonicalise: %v", readErr)
+				}
+				t.Fatalf("EnsureCanonicalMetadata() reported changes for canonical fixture %s\nbefore: %s\nafter:  %s", tc.fixture, original, got)
+			}
+
+			got, err := fs.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read after no-op canonicalise: %v", err)
+			}
+			if !bytes.Equal(got, original) {
+				t.Fatalf("EnsureCanonicalMetadata() rewrote bytes for canonical fixture %s\nbefore: %s\nafter:  %s", tc.fixture, original, got)
+			}
+		})
+	}
+}
+
+func TestEnsureCanonicalMetadataPreservesExistingPostgresHostWhenStateOmitsIt(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "metadata.json")
+	input := `{"backend":"postgres","database":"beads","postgres_host":"db.example.com","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pwu","custom":"keep"}`
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database:         "beads",
+		Backend:          "postgres",
+		PostgresPort:     "5432",
+		PostgresUser:     "bd",
+		PostgresDatabase: "beads_pwu",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+	}
+	if changed {
+		t.Fatal("EnsureCanonicalMetadata() should preserve existing postgres_host when state omits it")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if got := trimmedString(meta["postgres_host"]); got != "db.example.com" {
+		t.Fatalf("postgres_host = %q, want %q", got, "db.example.com")
+	}
+	if got := trimmedString(meta["custom"]); got != "keep" {
+		t.Fatalf("custom = %q, want %q", got, "keep")
+	}
+}
+
+func TestEnsureCanonicalMetadataScrubsPostgresKeysOnDoltCanonicalise(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "metadata.json")
+	input := `{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"hq","postgres_host":"stale.example.com","postgres_port":"5432","postgres_user":"stale","postgres_database":"stale","custom":"keep"}`
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "hq",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalMetadata() should scrub postgres_* keys when canonicalising for backend=dolt")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	for _, key := range []string{"postgres_host", "postgres_port", "postgres_user", "postgres_database"} {
+		if _, ok := meta[key]; ok {
+			t.Fatalf("metadata should scrub %q on backend=dolt: %s", key, data)
+		}
+	}
+	if got := trimmedString(meta["custom"]); got != "keep" {
+		t.Fatalf("custom = %q, want %q", got, "keep")
+	}
+	if got := trimmedString(meta["dolt_database"]); got != "hq" {
+		t.Fatalf("dolt_database = %q, want %q", got, "hq")
+	}
+}
+
+func TestEnsureCanonicalMetadataScrubsDoltKeysOnPostgresCanonicalise(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "metadata.json")
+	input := `{"backend":"postgres","database":"beads","dolt_mode":"server","dolt_database":"stale","postgres_host":"db.example.com","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pwu"}`
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database:         "beads",
+		Backend:          "postgres",
+		PostgresHost:     "db.example.com",
+		PostgresPort:     "5432",
+		PostgresUser:     "bd",
+		PostgresDatabase: "beads_pwu",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalMetadata() should scrub dolt_* keys when canonicalising for backend=postgres")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	for _, key := range []string{"dolt_mode", "dolt_database"} {
+		if _, ok := meta[key]; ok {
+			t.Fatalf("metadata should scrub %q on backend=postgres: %s", key, data)
+		}
+	}
+	if got := trimmedString(meta["postgres_host"]); got != "db.example.com" {
+		t.Fatalf("postgres_host = %q, want %q", got, "db.example.com")
+	}
+}
+
+func TestEnsureCanonicalMetadataPreservesAllKeysOnEmptyBackend(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "metadata.json")
+	input := `{"database":"beads","backend":"","dolt_mode":"server","dolt_database":"hq","postgres_host":"db.example.com","custom":"keep"}`
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database: "beads",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+	}
+	if changed {
+		t.Fatal("EnsureCanonicalMetadata() should be a no-op for backend=\"\" with all unknowns preserved")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	for _, key := range []string{"dolt_mode", "dolt_database", "postgres_host", "custom"} {
+		if _, ok := meta[key]; !ok {
+			t.Fatalf("metadata should preserve %q when backend is empty: %s", key, data)
+		}
+	}
 }

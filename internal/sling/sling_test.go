@@ -300,6 +300,16 @@ func TestBeadPrefixSling(t *testing.T) {
 		{"", ""},
 		{"nohyphen", ""},
 		{"-1", ""},
+		{"pieces-annotator-x8o", "pieces-annotator"},
+		{"pieces-annotator-a3f", "pieces-annotator"},
+		{"pieces-cli-5b8i", "pieces-cli"},
+		{" pieces-annotator-x8o ", "pieces-annotator"},
+		{"my-cool-app-123", "my-cool-app"},
+		{"beads-vscode-1", "beads-vscode"},
+		{"vc-baseline-test", "vc"},
+		{"pieces-annotator-baseline", "pieces"},
+		// All-letter suffixes are ambiguous without city config.
+		{"pieces-annotator-gnpgief", "pieces"},
 	}
 	for _, tt := range tests {
 		got := BeadPrefix(tt.id)
@@ -314,6 +324,7 @@ func TestBeadPrefixForCityLongestMatch(t *testing.T) {
 		Rigs: []config.Rig{
 			{Name: "agent", Path: "/agent", Prefix: "agent"},
 			{Name: "agent-diagnostics", Path: "/ad", Prefix: "agent-diagnostics"},
+			{Name: "pieces-annotator", Path: "/pa", Prefix: "pieces-annotator"},
 			{Name: "fe", Path: "/fe", Prefix: "fe"},
 		},
 	}
@@ -323,6 +334,7 @@ func TestBeadPrefixForCityLongestMatch(t *testing.T) {
 	}{
 		{"agent-diagnostics-hnn", "agent-diagnostics"},
 		{"agent-diagnostics-spawn-storm", "agent-diagnostics"},
+		{"pieces-annotator-gnpgief", "pieces-annotator"},
 		{"agent-x1", "agent"},
 		{"fe-42", "fe"},
 		{"unknown-7", "unknown"}, // falls back to BeadPrefix.
@@ -340,7 +352,7 @@ func TestBeadPrefixForCityFallsBackToBeadPrefix(t *testing.T) {
 	cfg := &config.City{
 		Rigs: []config.Rig{{Name: "fe", Path: "/fe", Prefix: "fe"}},
 	}
-	// Unknown prefix → fall back to BeadPrefix's first-dash split.
+	// Unknown prefix -> fall back to BeadPrefix's config-free heuristic.
 	if got := BeadPrefixForCity(cfg, "unknown-7"); got != "unknown" {
 		t.Errorf("BeadPrefixForCity(unknown-7) = %q, want unknown", got)
 	}
@@ -501,7 +513,7 @@ func TestRigDirForBeadHonorsUnderscoredPrefix(t *testing.T) {
 // RigDirForBead returns "" in two distinct ways: the prefix doesn't
 // parse at all (BeadPrefixForCity returns "") and the prefix parses
 // but doesn't match any configured rig (BeadPrefix falls back to
-// first-dash split for unknown prefixes). Cover both so a regression
+// the config-free heuristic for unknown prefixes). Cover both so a regression
 // that conflates the branches is caught.
 func TestRigDirForBeadEmptyPrefixAndUnknownRig(t *testing.T) {
 	cfg := &config.City{
@@ -1389,6 +1401,78 @@ func TestSlingRouteBeadWithTypedRouter(t *testing.T) {
 	}
 	if router.routed[0].Target != "mayor" {
 		t.Errorf("Target = %q, want mayor", router.routed[0].Target)
+	}
+}
+
+func TestSlingAttachFormulaRoutesSourceBeadWithTypedRouter(t *testing.T) {
+	router := &fakeBeadRouter{}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Router = router
+	b, _ := deps.Store.Create(beads.Bead{Title: "work", Type: "task"})
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := s.AttachFormula(context.Background(), "code-review", b.ID, a, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+
+	if result.WispRootID == "" {
+		t.Fatal("WispRootID is empty")
+	}
+	if len(router.routed) != 1 {
+		t.Fatalf("got %d route calls, want 1", len(router.routed))
+	}
+	if router.routed[0].BeadID != b.ID {
+		t.Fatalf("routed BeadID = %q, want source bead %q", router.routed[0].BeadID, b.ID)
+	}
+	got, err := deps.Store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", b.ID, err)
+	}
+	if got.Metadata["molecule_id"] != result.WispRootID {
+		t.Fatalf("molecule_id metadata = %q, want %q", got.Metadata["molecule_id"], result.WispRootID)
+	}
+}
+
+func TestSlingRouteBeadDefaultFormulaRoutesSourceBeadWithTypedRouter(t *testing.T) {
+	router := &fakeBeadRouter{}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Router = router
+	deps.Store = seededStore("BL-42")
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := config.Agent{Name: "mayor", DefaultSlingFormula: stringPtr("code-review"), MaxActiveSessions: intPtr(1)}
+	result, err := s.RouteBead(context.Background(), "BL-42", a, RouteOpts{})
+	if err != nil {
+		t.Fatalf("RouteBead: %v", err)
+	}
+
+	if result.WispRootID == "" {
+		t.Fatal("WispRootID is empty")
+	}
+	if len(router.routed) != 1 {
+		t.Fatalf("got %d route calls, want 1", len(router.routed))
+	}
+	if router.routed[0].BeadID != "BL-42" {
+		t.Fatalf("routed BeadID = %q, want source bead BL-42", router.routed[0].BeadID)
+	}
+	got, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("Get(BL-42): %v", err)
+	}
+	if got.Metadata["molecule_id"] != result.WispRootID {
+		t.Fatalf("molecule_id metadata = %q, want %q", got.Metadata["molecule_id"], result.WispRootID)
 	}
 }
 

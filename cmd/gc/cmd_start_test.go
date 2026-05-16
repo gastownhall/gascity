@@ -474,7 +474,7 @@ func TestStageHookFilesIncludesCanonicalClaudeHook(t *testing.T) {
 		t.Fatalf("WriteFile(%q): %v", settingsPath, err)
 	}
 
-	got := stageHookFiles(nil, cityDir, workDir)
+	got := stageHookFiles(nil, cityDir, workDir, []string{"claude"})
 	for _, entry := range got {
 		// City-root-relative hook: no workDir prefix in RelDst.
 		if entry.RelDst == path.Join(".gc", "settings.json") {
@@ -504,7 +504,7 @@ func TestStageHookFilesFallsBackToLegacyClaudeHook(t *testing.T) {
 		t.Fatalf("WriteFile(%q): %v", hookPath, err)
 	}
 
-	got := stageHookFiles(nil, cityDir, workDir)
+	got := stageHookFiles(nil, cityDir, workDir, []string{"claude"})
 	for _, entry := range got {
 		if entry.RelDst == path.Join("hooks", "claude.json") {
 			if entry.Src != hookPath {
@@ -534,11 +534,30 @@ func TestStageHookFilesDoesNotStageClaudeSkillsDir(t *testing.T) {
 		t.Fatalf("WriteFile(%q): %v", skillPath, err)
 	}
 
-	got := stageHookFiles(nil, cityDir, workDir)
+	got := stageHookFiles(nil, cityDir, workDir, []string{"claude"})
 	wantRelDst := path.Join("worker", ".claude", "skills")
 	for _, entry := range got {
 		if entry.RelDst == wantRelDst {
 			t.Fatalf("stageHookFiles() staged %q at %q; want skills drift tracked via FingerprintExtra only", entry.Src, entry.RelDst)
+		}
+	}
+}
+
+func TestStageHookFilesSkipsUnrequestedWorkDirHooks(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "city")
+	workDir := filepath.Join(cityDir, "worker")
+	hookPath := filepath.Join(workDir, ".gemini", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", hookPath, err)
+	}
+	if err := os.WriteFile(hookPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", hookPath, err)
+	}
+
+	got := stageHookFiles(nil, cityDir, workDir, []string{"claude"})
+	for _, entry := range got {
+		if entry.RelDst == path.Join("worker", ".gemini", "settings.json") {
+			t.Fatalf("stageHookFiles() staged unrequested hook %q", entry.Src)
 		}
 	}
 }

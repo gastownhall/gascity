@@ -74,6 +74,10 @@ type ProviderSpec struct {
 	// EmitsPermissionWarning is tri-state: nil = inherit, &true = enable,
 	// &false = explicit disable.
 	EmitsPermissionWarning *bool `toml:"emits_permission_warning,omitempty"`
+	// AcceptStartupDialogs is tri-state: nil = default startup dialog handling,
+	// &true = force dialog acceptance, &false = suppress it for providers that
+	// handle permissions entirely through launch flags.
+	AcceptStartupDialogs *bool `toml:"accept_startup_dialogs,omitempty"`
 	// Env sets additional environment variables for the provider process.
 	Env map[string]string `toml:"env,omitempty"`
 	// PathCheck overrides the binary name used for PATH detection.
@@ -133,7 +137,7 @@ type ProviderSpec struct {
 	// PrintArgs are CLI arguments that enable one-shot non-interactive mode.
 	// The provider prints its response to stdout and exits. When empty, the
 	// provider does not support one-shot invocation.
-	// Examples: ["-p"] (claude, gemini), ["exec"] (codex)
+	// Examples: ["-p"] (claude, gemini), ["exec"] (codex), ["--quiet", "--prompt"] (kimi)
 	PrintArgs []string `toml:"print_args,omitempty"`
 	// TitleModel is the OptionsSchema model key used for title generation.
 	// Resolved via the "model" option in OptionsSchema to get FlagArgs.
@@ -194,6 +198,7 @@ type ResolvedProvider struct {
 	ReadyPromptPrefix      string
 	ProcessNames           []string
 	EmitsPermissionWarning bool
+	AcceptStartupDialogs   *bool
 	Env                    map[string]string
 	SupportsACP            bool
 	SupportsHooks          bool
@@ -415,6 +420,7 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 		ReadyPromptPrefix:      spec.ReadyPromptPrefix,
 		ProcessNames:           cloneStrings(spec.ProcessNames),
 		EmitsPermissionWarning: boolPtr(spec.EmitsPermissionWarning),
+		AcceptStartupDialogs:   cloneBoolPtr(spec.AcceptStartupDialogs),
 		Env:                    cloneStringMap(spec.Env),
 		PathCheck:              spec.PathCheck,
 		SupportsACP:            boolPtr(spec.SupportsACP),
@@ -476,6 +482,14 @@ func cloneStringMap(values map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+func cloneBoolPtr(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func cloneStrings(values []string) []string {
