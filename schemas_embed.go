@@ -1,3 +1,4 @@
+// Package gascity provides repository-level embedded assets shared by CLI packages.
 package gascity
 
 import "embed"
