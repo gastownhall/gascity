@@ -1,17 +1,70 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "type": "array",
-  "items": {
-    "type": "object",
-    "properties": {
-      "id": { "type": "string" },
-      "name": { "type": "string" },
-      "template": { "type": "string" },
-      "provider": { "type": "string" },
-      "state": { "type": "string" },
-      "title": { "type": "string" },
-      "rig": { "type": "string" }
+  "title": "gc session list --json result",
+  "description": "One JSONL record listing durable Gas City sessions and summary counts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "filters", "sessions", "summary"],
+  "properties": {
+    "schema_version": { "type": "string", "description": "Schema version for this command output." },
+    "filters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state": { "type": "string", "description": "State filter requested by the caller, when present." },
+        "template": { "type": "string", "description": "Template filter requested by the caller, when present." }
+      }
     },
-    "additionalProperties": true
+    "sessions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "template",
+          "state",
+          "created_at",
+          "last_active",
+          "attached",
+          "closed"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "template": { "type": "string" },
+          "provider": { "type": "string" },
+          "state": { "type": "string" },
+          "title": { "type": "string" },
+          "rig": { "type": "string" },
+          "alias": { "type": "string" },
+          "agent_name": { "type": "string" },
+          "transport": { "type": "string" },
+          "command": { "type": "string" },
+          "work_dir": { "type": "string" },
+          "session_name": { "type": "string" },
+          "session_key": { "type": "string" },
+          "resume_flag": { "type": "string" },
+          "resume_style": { "type": "string" },
+          "resume_command": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "last_active": { "type": "string", "format": "date-time" },
+          "last_nudge_delivered_at": { "type": "string", "format": "date-time" },
+          "attached": { "type": "boolean" },
+          "closed": { "type": "boolean" }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "active", "suspended", "closed"],
+      "properties": {
+        "total": { "type": "integer" },
+        "active": { "type": "integer" },
+        "suspended": { "type": "integer" },
+        "closed": { "type": "integer" }
+      }
+    }
   }
 }
