@@ -48,6 +48,16 @@ type CachingStore struct {
 	cancelFn     context.CancelFunc
 	problemf     func(string)
 
+	// latencyWindow holds the most recent reconciliation bd-list
+	// durations for adaptive cadence decisions. Bounded at
+	// cacheLatencyWindowSize.
+	latencyWindow []time.Duration
+	// latencyDriverActive tracks whether sustained high P95 latency has
+	// promoted the cadence to MEDIUM and is keeping it there. Bead-count
+	// pressure is independent and not reflected here. Demotion happens
+	// once the rolling window has drained — see recomputeCadenceLocked.
+	latencyDriverActive bool
+
 	applyEventBeforeCommitForTest func()
 }
 
@@ -81,6 +91,19 @@ type CacheStats struct {
 	// and the first reconciler tick, in milliseconds. Set once when
 	// StartReconciler runs; zero if stagger is disabled.
 	StaggerOffsetMs int64
+	// CurrentReconcileInterval is the effective bd-list cadence the
+	// reconciler is currently using. Composed as max(bead-count cadence,
+	// latency cadence) — see adaptiveIntervalLocked.
+	CurrentReconcileInterval time.Duration
+	// LatencyP95Ms is the P95 of the most recent N=cacheLatencyWindowSize
+	// reconciliation bd-list durations, in milliseconds. Zero until the
+	// window has been filled.
+	LatencyP95Ms float64
+	// CadenceDriver names which input drives the current cadence:
+	// "default" (SMALL, nothing pressuring), "bead-count" (>=1000 beads),
+	// "latency" (P95 above the high-water mark), or "both" (bead count
+	// and latency both push to MEDIUM).
+	CadenceDriver string
 }
 
 const (

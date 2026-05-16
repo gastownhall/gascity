@@ -31,6 +31,8 @@ type Override struct {
 }
 
 // ApplyOverrides applies each override to the matching order in aa.
+// Callers that need an active-only view should call FilterEnabled after
+// applying overrides because overrides can change an order's Enabled state.
 //
 // Matching rules:
 //   - ov.Rig == "":  matches only city-level orders (those with no rig).

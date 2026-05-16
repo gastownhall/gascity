@@ -59,7 +59,7 @@ func (m *memoryWispGC) runGC(store beads.Store, now time.Time) (int, error) {
 	cutoff := now.Add(-m.ttl)
 	purged, deleteErr := purgeExpiredBeadClosures(store, entries, cutoff)
 
-	trackEntries, trackErr := store.List(beads.ListQuery{Status: "closed", Label: labelOrderTracking})
+	trackEntries, trackErr := store.List(beads.ListQuery{Status: "closed", Label: labelOrderTracking, TierMode: beads.TierBoth})
 	if trackErr == nil {
 		trackPurged, trackDeleteErr := purgeExpiredBeadRoots(store, trackEntries, cutoff)
 		purged += trackPurged

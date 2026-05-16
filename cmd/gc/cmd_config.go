@@ -651,6 +651,7 @@ func renderProviderExplainText(w io.Writer, r config.ResolvedProvider, name stri
 	explainResolvedBool(w, "supports_hooks", r.SupportsHooks, r.Provenance.FieldLayer["supports_hooks"])
 	explainResolvedBool(w, "supports_acp", r.SupportsACP, r.Provenance.FieldLayer["supports_acp"])
 	explainResolvedBool(w, "emits_permission_warning", r.EmitsPermissionWarning, r.Provenance.FieldLayer["emits_permission_warning"])
+	explainResolvedBoolPtr(w, "accept_startup_dialogs", r.AcceptStartupDialogs, r.Provenance.FieldLayer["accept_startup_dialogs"])
 
 	explainProviderMap(w, "env", r.Env, r.Provenance.MapKeyLayer["env"])
 	explainProviderMap(w, "permission_modes", r.PermissionModes, r.Provenance.MapKeyLayer["permission_modes"])
@@ -685,6 +686,17 @@ func explainResolvedBool(w io.Writer, key string, value bool, layer string) {
 	}
 	v := "false"
 	if value {
+		v = "true"
+	}
+	explainProviderField(w, key, v, layer)
+}
+
+func explainResolvedBoolPtr(w io.Writer, key string, value *bool, layer string) {
+	if layer == "" || value == nil {
+		return
+	}
+	v := "false"
+	if *value {
 		v = "true"
 	}
 	explainProviderField(w, key, v, layer)
@@ -745,6 +757,7 @@ func renderProviderExplainJSON(r config.ResolvedProvider, name string, stdout, s
 			"supports_hooks":           triStateFromProvenance("supports_hooks", r.SupportsHooks),
 			"supports_acp":             triStateFromProvenance("supports_acp", r.SupportsACP),
 			"emits_permission_warning": triStateFromProvenance("emits_permission_warning", r.EmitsPermissionWarning),
+			"accept_startup_dialogs":   r.AcceptStartupDialogs,
 			"env":                      r.Env,
 			"permission_modes":         r.PermissionModes,
 			"option_defaults":          r.EffectiveDefaults,

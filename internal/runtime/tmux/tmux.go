@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -34,6 +35,8 @@ import (
 // ---------------------------------------------------------------------------
 
 const pollInterval = 100 * time.Millisecond
+
+var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "gemini", "kimi", "opencode", "pi"}
 
 // Config holds configurable timeouts and intervals for the tmux provider.
 // All fields have sensible defaults matching the original hardcoded values.
@@ -1407,8 +1410,9 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		return err
 	}
 
-	// 2. Wait 500ms for paste to complete (tested, required)
-	time.Sleep(500 * time.Millisecond)
+	// 2. Wait for paste to complete (tested, required). Kimi's TUI can take
+	// longer to accept large pasted prompts in detached panes.
+	time.Sleep(t.nudgeSubmitDebounce(target))
 
 	// 3. Send Escape only for TUIs where it's an insert-mode escape, not a
 	// semantic input key. Claude, Codex, Gemini, and OpenCode all treat
@@ -1490,14 +1494,8 @@ func (t *Tmux) NudgePane(pane, message string) error {
 
 func (t *Tmux) shouldSendEscapeBeforeEnter(target string) bool {
 	provider, err := t.GetEnvironment(target, "GC_PROVIDER")
-	if err == nil {
-		switch strings.TrimSpace(provider) {
-		case "claude", "codex", "gemini", "opencode":
-			return false
-		default:
-			// Unrecognized provider (custom alias) — fall through to
-			// process-tree detection instead of assuming escape is needed.
-		}
+	if err == nil && providerEnvSkipsEscape(provider) {
+		return false
 	}
 	if t.targetLooksLikeNoEscapeProvider(target) {
 		return false
@@ -1505,9 +1503,26 @@ func (t *Tmux) shouldSendEscapeBeforeEnter(target string) bool {
 	return true
 }
 
+func providerEnvSkipsEscape(provider string) bool {
+	family := sessionlog.ProviderFamily(provider)
+	for _, noEscape := range providersSkippingEscapeBeforeEnter {
+		if family == noEscape {
+			return true
+		}
+	}
+	return false
+}
+
 func (t *Tmux) targetLooksLikeNoEscapeProvider(target string) bool {
-	noEscapeProviders := []string{"claude", "codex", "gemini", "opencode"}
-	return t.targetLooksLikeAnyProvider(target, noEscapeProviders...)
+	return t.targetLooksLikeAnyProvider(target, providersSkippingEscapeBeforeEnter...)
+}
+
+func (t *Tmux) nudgeSubmitDebounce(target string) time.Duration {
+	provider := t.providerEnv(target)
+	if provider == "kimi" || (provider == "" && t.targetLooksLikeProvider(target, "kimi")) {
+		return 1500 * time.Millisecond
+	}
+	return 500 * time.Millisecond
 }
 
 func (t *Tmux) targetLooksLikeProvider(target, provider string) bool {

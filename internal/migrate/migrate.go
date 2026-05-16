@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -119,11 +118,6 @@ type agentEntry struct {
 	Origin agentOrigin
 }
 
-var (
-	invalidBindingChars = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
-	repeatedDash        = regexp.MustCompile(`-+`)
-)
-
 // Apply migrates a city directory to the pack-first agent layout.
 func Apply(cityPath string, opts Options) (*Report, error) {
 	report := &Report{}
@@ -167,23 +161,26 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 		cityCfg.Agents = nil
 	}
 
-	if len(selectedAgents) > 0 || len(cityCfg.Workspace.Includes) > 0 || len(cityCfg.Workspace.DefaultRigIncludes) > 0 {
+	migratedPacks := packNamesReferencedByLegacyIncludes(nil, cityCfg.Workspace.LegacyIncludes(), cityCfg.Packs)
+	migratedPacks = packNamesReferencedByLegacyIncludes(migratedPacks, cityCfg.Workspace.LegacyDefaultRigIncludes(), cityCfg.Packs)
+
+	if len(selectedAgents) > 0 || len(cityCfg.Workspace.LegacyIncludes()) > 0 || len(cityCfg.Workspace.LegacyDefaultRigIncludes()) > 0 {
 		if ensurePackMeta(&packCfg, cityCfg, cityPath) {
 			packChanged = true
 		}
 	}
 
-	if len(cityCfg.Workspace.Includes) > 0 {
+	if len(cityCfg.Workspace.LegacyIncludes()) > 0 {
 		if packCfg.Imports == nil {
 			packCfg.Imports = make(map[string]config.Import)
 		}
-		if addImports(packCfg.Imports, cityCfg.Workspace.Includes, cityCfg.Packs) {
+		if addImports(packCfg.Imports, cityCfg.Workspace.LegacyIncludes(), cityCfg.Packs) {
 			packChanged = true
 		}
-		cityCfg.Workspace.Includes = nil
+		cityCfg.Workspace.SetLegacyIncludes(nil)
 	}
 
-	if len(cityCfg.Workspace.DefaultRigIncludes) > 0 {
+	if len(cityCfg.Workspace.LegacyDefaultRigIncludes()) > 0 {
 		if packCfg.Defaults.Rig.Imports == nil {
 			packCfg.Defaults.Rig.Imports = make(map[string]config.Import)
 		}
@@ -191,14 +188,16 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 		packCfg.defaultRigImportOrder, changed = addOrderedImports(
 			packCfg.Defaults.Rig.Imports,
 			packCfg.defaultRigImportOrder,
-			cityCfg.Workspace.DefaultRigIncludes,
+			cityCfg.Workspace.LegacyDefaultRigIncludes(),
 			cityCfg.Packs,
 		)
 		if changed {
 			packChanged = true
 		}
-		cityCfg.Workspace.DefaultRigIncludes = nil
+		cityCfg.Workspace.SetLegacyDefaultRigIncludes(nil)
 	}
+
+	removeMigratedPackSources(cityCfg, migratedPacks)
 
 	cityContent, err := cityCfg.Marshal()
 	if err != nil {
@@ -219,6 +218,48 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 	}
 
 	return report, nil
+}
+
+func packNamesReferencedByLegacyIncludes(names map[string]struct{}, includes []string, packs map[string]config.PackSource) map[string]struct{} {
+	if len(includes) == 0 || len(packs) == 0 {
+		return names
+	}
+	for _, include := range includes {
+		if _, ok := packs[include]; !ok {
+			continue
+		}
+		if names == nil {
+			names = make(map[string]struct{})
+		}
+		names[include] = struct{}{}
+	}
+	return names
+}
+
+func removeMigratedPackSources(cityCfg *config.City, names map[string]struct{}) {
+	if cityCfg == nil || len(names) == 0 || len(cityCfg.Packs) == 0 {
+		return
+	}
+	for name := range names {
+		if packNameStillReferencedByRigIncludes(cityCfg, name) {
+			continue
+		}
+		delete(cityCfg.Packs, name)
+	}
+	if len(cityCfg.Packs) == 0 {
+		cityCfg.Packs = nil
+	}
+}
+
+func packNameStillReferencedByRigIncludes(cityCfg *config.City, name string) bool {
+	for _, rig := range cityCfg.Rigs {
+		for _, include := range rig.Includes {
+			if include == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func loadCityFile(path string) (*config.City, error) {
@@ -436,123 +477,11 @@ func ensurePackMeta(packCfg *packFile, cityCfg *config.City, cityPath string) bo
 }
 
 func addImports(target map[string]config.Import, includes []string, packs map[string]config.PackSource) bool {
-	changed := false
-	for _, include := range includes {
-		source := importSourceFor(include, packs)
-		if _, exists := existingDefaultImportBindingForSource(target, source); exists {
-			continue
-		}
-		binding := uniqueBinding(target, deriveBindingName(include, source, packs))
-		target[binding] = config.Import{Source: source}
-		changed = true
-	}
-	return changed
+	return config.AddLegacyImports(target, includes, packs)
 }
 
 func addOrderedImports(target map[string]config.Import, order []string, includes []string, packs map[string]config.PackSource) ([]string, bool) {
-	changed := false
-	for _, include := range includes {
-		source := importSourceFor(include, packs)
-		binding, exists := existingDefaultImportBindingForSource(target, source)
-		if !exists {
-			binding = uniqueBinding(target, deriveBindingName(include, source, packs))
-			target[binding] = config.Import{Source: source}
-			changed = true
-		}
-		if !stringSliceContains(order, binding) {
-			order = append(order, binding)
-			changed = true
-		}
-	}
-	return order, changed
-}
-
-func existingDefaultImportBindingForSource(target map[string]config.Import, source string) (string, bool) {
-	for binding, imp := range target {
-		if imp.Source == source && importMatchesLegacyDefault(imp) {
-			return binding, true
-		}
-	}
-	return "", false
-}
-
-func importMatchesLegacyDefault(imp config.Import) bool {
-	if strings.TrimSpace(imp.Version) != "" || imp.Export {
-		return false
-	}
-	if imp.Transitive != nil && !*imp.Transitive {
-		return false
-	}
-	shadow := strings.TrimSpace(imp.Shadow)
-	return shadow == "" || shadow == "warn"
-}
-
-func stringSliceContains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
-}
-
-func importSourceFor(include string, packs map[string]config.PackSource) string {
-	if spec, ok := packs[include]; ok {
-		source := spec.Source
-		if spec.Path != "" {
-			source += "//" + strings.TrimPrefix(spec.Path, "/")
-		}
-		if spec.Ref != "" {
-			source += "#" + spec.Ref
-		}
-		return source
-	}
-	if looksLikeLocalPath(include) && !strings.HasPrefix(include, "./") && !strings.HasPrefix(include, "../") && !filepath.IsAbs(include) {
-		return "./" + include
-	}
-	return include
-}
-
-func deriveBindingName(include, source string, packs map[string]config.PackSource) string {
-	if _, ok := packs[include]; ok {
-		return sanitizeBindingName(include)
-	}
-	base := source
-	if idx := strings.Index(base, "#"); idx >= 0 {
-		base = base[:idx]
-	}
-	if idx := strings.LastIndex(base, "//"); idx >= 0 && idx > strings.Index(base, "://")+2 {
-		base = base[idx+2:]
-	}
-	base = strings.TrimSuffix(base, "/")
-	base = strings.TrimSuffix(base, ".git")
-	base = pathBase(base)
-	return sanitizeBindingName(base)
-}
-
-func uniqueBinding(target map[string]config.Import, base string) string {
-	if base == "" {
-		base = "import"
-	}
-	if _, exists := target[base]; !exists {
-		return base
-	}
-	for i := 2; ; i++ {
-		candidate := fmt.Sprintf("%s-%d", base, i)
-		if _, exists := target[candidate]; !exists {
-			return candidate
-		}
-	}
-}
-
-func sanitizeBindingName(value string) string {
-	value = invalidBindingChars.ReplaceAllString(value, "-")
-	value = repeatedDash.ReplaceAllString(value, "-")
-	value = strings.Trim(value, "-")
-	if value == "" {
-		return "import"
-	}
-	return value
+	return config.AddOrderedLegacyImports(target, order, includes, packs)
 }
 
 func resolvePath(root, ref string) string {
@@ -560,24 +489,6 @@ func resolvePath(root, ref string) string {
 		return filepath.Clean(ref)
 	}
 	return filepath.Clean(filepath.Join(root, ref))
-}
-
-func looksLikeLocalPath(value string) bool {
-	if strings.Contains(value, "://") || strings.HasPrefix(value, "git@") {
-		return false
-	}
-	if strings.HasPrefix(value, "github.com/") {
-		return false
-	}
-	return true
-}
-
-func pathBase(value string) string {
-	value = strings.TrimRight(value, "/")
-	if idx := strings.LastIndex(value, "/"); idx >= 0 {
-		return value[idx+1:]
-	}
-	return value
 }
 
 func ensureDir(path string, report *Report, dryRun bool) error {

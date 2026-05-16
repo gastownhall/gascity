@@ -26,6 +26,11 @@ POLECAT_TARGET="${TARGET_RIG:+$TARGET_RIG/}{{ .BindingPrefix }}polecat"
 gc sling "$POLECAT_TARGET" <bead-id>                     # dispatch to polecat pool (sets gc.routed_to metadata for controller scale_check)
 ```
 
+**Pool dispatch leaves the assignee empty.** The polecat that picks the bead up sets the
+assignee on claim. If you set `--assignee` yourself, the supervisor's scale_check
+(`bd ready --metadata-field gc.routed_to=<canonical> --unassigned`) won't count the bead as
+pool demand and no session will spawn. Set `gc.routed_to` only.
+
 **Why this is the default:**
 - Every polecat completion is a ledger entry — transparent, auditable work
 - Polecats preserve YOUR context for coordination and strategic decisions
@@ -144,7 +149,8 @@ Wrong. The issue is about beads code, so it goes in the beads rig.
 - **Strategic decisions**: Architecture, priorities, integration planning
 
 **NOT your job**: Per-worker cleanup, session killing, routine nudging (Witness handles that)
-**Exception**: If refinery/witness is stuck, use `{{ cmd }} session nudge refinery "Process MQ"`
+**Exception**: If refinery/witness is stuck, nudge the concrete rig-scoped session,
+e.g. `{{ cmd }} session nudge <rig>/{{ .BindingPrefix }}refinery "Process MQ"`
 
 ## Rig Wake/Sleep Protocol
 

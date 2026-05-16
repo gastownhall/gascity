@@ -204,6 +204,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newDoltConfigCmd(stdout, stderr),
 		newDoltStateCmd(stdout, stderr),
 		newShellCmd(stdout, stderr),
+		newAnalyzeCmd(stdout, stderr),
 	)
 	// gen-doc needs the root command to walk the tree; add after construction.
 	root.AddCommand(newGenDocCmd(stdout, stderr, root))
@@ -898,9 +899,17 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 				if err != nil {
 					return nil, err
 				}
-				copyExecProjectedDoltEnv(env, bdRuntimeEnvForRig(runtimeCityPath, cfg, target.ScopeRoot))
+				projected, err := bdRuntimeEnvForRigWithError(runtimeCityPath, cfg, target.ScopeRoot)
+				if err != nil {
+					return nil, err
+				}
+				copyExecProjectedBackendEnv(env, projected)
 			} else {
-				copyExecProjectedDoltEnv(env, bdRuntimeEnv(runtimeCityPath))
+				projected, err := bdRuntimeEnvWithError(runtimeCityPath)
+				if err != nil {
+					return nil, err
+				}
+				copyExecProjectedBackendEnv(env, projected)
 			}
 		}
 		store := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))

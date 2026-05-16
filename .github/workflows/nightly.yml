@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 env:
-  DOLT_VERSION: "1.86.6"
-  BD_VERSION: "v1.0.3"
+  DOLT_VERSION: "2.0.3"
+  BD_VERSION: "v1.0.4"
 
 jobs:
   tier-b:
@@ -98,8 +98,8 @@ jobs:
     env:
       PROFILE: claude/tmux-cli
       WORKER_REPORT_DIR: ${{ github.workspace }}/.nightly-tmp/worker-inference-claude-reports
-      DOLT_VERSION: "1.85.0"
-      BD_COMMIT: "9d9d0e53c2330bd081bef350883f56c2557eb78b"
+      DOLT_VERSION: "2.0.3"
+      BD_REF: "v1.0.4"
       ANTHROPIC_BASE_URL: https://ollama.com
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.OLLAMA_API_KEY }}
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
@@ -114,7 +114,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: gastownhall/beads
-          ref: ${{ env.BD_COMMIT }}
+          ref: ${{ env.BD_REF }}
           path: .beads-src
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
@@ -171,8 +171,8 @@ jobs:
     env:
       PROFILE: codex/tmux-cli
       WORKER_REPORT_DIR: ${{ github.workspace }}/.nightly-tmp/worker-inference-codex-reports
-      DOLT_VERSION: "1.85.0"
-      BD_COMMIT: "9d9d0e53c2330bd081bef350883f56c2557eb78b"
+      DOLT_VERSION: "2.0.3"
+      BD_REF: "v1.0.4"
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       GC_WORKER_INFERENCE_CODEX_AUTH_JSON: ${{ secrets.GC_WORKER_INFERENCE_CODEX_AUTH_JSON }}
     steps:
@@ -180,7 +180,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: gastownhall/beads
-          ref: ${{ env.BD_COMMIT }}
+          ref: ${{ env.BD_REF }}
           path: .beads-src
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
@@ -225,8 +225,8 @@ jobs:
     env:
       PROFILE: gemini/tmux-cli
       WORKER_REPORT_DIR: ${{ github.workspace }}/.nightly-tmp/worker-inference-gemini-reports
-      DOLT_VERSION: "1.85.0"
-      BD_COMMIT: "9d9d0e53c2330bd081bef350883f56c2557eb78b"
+      DOLT_VERSION: "2.0.3"
+      BD_REF: "v1.0.4"
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
       GC_WORKER_INFERENCE_GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.GC_WORKER_INFERENCE_GOOGLE_APPLICATION_CREDENTIALS_JSON }}
@@ -237,7 +237,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: gastownhall/beads
-          ref: ${{ env.BD_COMMIT }}
+          ref: ${{ env.BD_REF }}
           path: .beads-src
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:

@@ -301,6 +301,13 @@ func namedSessionStatusForCity(
 			}
 			return "materialized"
 		}
+		// Bead not in snapshot. If the snapshot itself is degraded
+		// (load timeout or list error), surface that as a lookup error
+		// so operators see the same signal the pre-snapshot resolver
+		// path produced. See gastownhall/gascity#2148.
+		if err := statusSnapshot.LoadError(); err != nil {
+			return "lookup error: " + err.Error()
+		}
 		return status
 	}
 

@@ -15,7 +15,7 @@ import (
 //
 // Included: Command, Env, FingerprintExtra (pool config, etc.),
 // PreStart, SessionSetup, SessionSetupScript, OverlayDir, effective provider
-// overlay slots, CopyFiles, SessionLive.
+// overlay slots, CopyFiles, AcceptStartupDialogs, SessionLive.
 //
 // Excluded (observation-only hints): WorkDir, ReadyPromptPrefix,
 // ReadyDelayMs, ProcessNames, EmitsPermissionWarning.
@@ -156,6 +156,7 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 	h.Write([]byte{0})              //nolint:errcheck // hash.Write never errors
 
 	hashOverlayProviders(h, OverlayProviderNames(cfg))
+	hashOptionalBool(h, "accept_startup_dialogs", cfg.AcceptStartupDialogs)
 
 	// CopyFiles — probed entries use ContentHash (stable when content
 	// unchanged, even if files are recreated). Config-derived entries
@@ -179,6 +180,20 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 			h.Write([]byte{0})         //nolint:errcheck // separator between entries
 		}
 	}
+}
+
+func hashOptionalBool(h hash.Hash, name string, value *bool) {
+	if value == nil {
+		return
+	}
+	h.Write([]byte(name)) //nolint:errcheck // hash.Write never errors
+	h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors
+	if *value {
+		h.Write([]byte("true")) //nolint:errcheck // hash.Write never errors
+	} else {
+		h.Write([]byte("false")) //nolint:errcheck // hash.Write never errors
+	}
+	h.Write([]byte{0}) //nolint:errcheck // hash.Write never errors
 }
 
 // hashLiveFields writes SessionLive fields to the hash.
@@ -310,6 +325,9 @@ func CoreFingerprintBreakdown(cfg Config) map[string]string {
 		}),
 		"OverlayProviders": fieldHash(func(h hash.Hash) {
 			hashOverlayProviders(h, OverlayProviderNames(cfg))
+		}),
+		"AcceptStartupDialogs": fieldHash(func(h hash.Hash) {
+			hashOptionalBool(h, "accept_startup_dialogs", cfg.AcceptStartupDialogs)
 		}),
 		"CopyFiles": fieldHash(func(h hash.Hash) {
 			for _, cf := range cfg.CopyFiles {

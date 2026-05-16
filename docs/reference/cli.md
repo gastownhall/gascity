@@ -20,6 +20,7 @@ gc [flags]
 | Subcommand | Description |
 |------------|-------------|
 | [gc agent](#gc-agent) | Manage agent configuration |
+| [gc analyze](#gc-analyze) | Read-only analysis over events and beads |
 | [gc bd](#gc-bd) | Run bd in the correct rig directory |
 | [gc beads](#gc-beads) | Manage the beads provider |
 | [gc build-image](#gc-build-image) | Build a prebaked agent container image |
@@ -139,6 +140,54 @@ replaced if they exit. Use "gc agent resume" to restore.
 ```
 gc agent suspend <name>
 ```
+
+## gc analyze
+
+Analyze produces correlated reports over the events log and
+bead state. All subcommands are read-only and safe to run alongside a
+live controller.
+
+```
+gc analyze
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc analyze reliability](#gc-analyze-reliability) | Correlate session-lifecycle events with model/version/rig |
+
+## gc analyze reliability
+
+Reliability reports per-(model, prompt_version, rig) counts of
+the tracked session-lifecycle events:
+
+  session.crashed
+  session.quarantined (reserved; current production paths do not emit it)
+  session.idle_killed
+  session.draining
+
+Worker.operation events from #1252 supply the (model, prompt_version,
+agent_name) tuple per session. Lifecycle events get attributed via the
+session id or producer aliases from worker.operation payloads. Sessions
+with worker.operation events but no lifecycle events count toward the
+per-group total — they're the denominator side of crash-rate
+calculations. Model and prompt_version are best-effort dimensions; the
+report warns when the source event stream is missing them.
+
+Read-only: this command never writes events or beads.
+
+```
+gc analyze reliability [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--city` | string |  | city directory (default: discover from cwd) |
+| `--events` | string |  | explicit events.jsonl path (overrides city discovery) |
+| `--json` | bool |  | emit JSON instead of a table |
+| `--model` | string |  | filter to a specific model |
+| `--rig` | string |  | filter to a specific rig |
+| `--since` | string | `7d` | start of the analysis window — duration (1h, 7d) or RFC3339 timestamp |
+| `--until` | string |  | end of the analysis window — duration (0s = now, 30m = 30 minutes ago) or RFC3339 timestamp |
 
 ## gc bd
 
@@ -897,7 +946,9 @@ Run diagnostic health checks on the city workspace.
 Checks city structure, config validity, binary dependencies (tmux, git,
 bd, dolt), controller status, agent sessions, zombie/orphan sessions,
 bead stores, Dolt server health, event log integrity, and per-rig
-health. Use --fix to attempt automatic repairs.
+health. Use --fix for the canonical remediation path, including any
+safe mechanical PackV1-to-PackV2 rewrites that are available on this
+branch.
 
 ```
 gc doctor [flags]
@@ -913,7 +964,7 @@ gc doctor
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--fix` | bool |  | attempt to fix issues automatically |
+| `--fix` | bool |  | attempt automatic repairs and safe mechanical migrations |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |
 
 ## gc dolt-cleanup
@@ -1227,7 +1278,6 @@ gc import
 | [gc import check](#gc-import-check) | Validate installed pack import state |
 | [gc import install](#gc-import-install) | Install imports from pack.toml and packs.lock |
 | [gc import list](#gc-import-list) | List imported packs |
-| [gc import migrate](#gc-import-migrate) | Migrate a V1 city layout to the V2 pack shape |
 | [gc import remove](#gc-import-remove) | Remove a pack import |
 | [gc import upgrade](#gc-import-upgrade) | Upgrade imported packs within their constraints |
 | [gc import why](#gc-import-why) | Explain why an import is present |
@@ -1272,22 +1322,6 @@ gc import list [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--tree` | bool |  | Show the import dependency tree |
-
-## gc import migrate
-
-Rewrite a legacy city into the V2 migration shape.
-
-Moves workspace.includes into pack imports, converts [[agent]] tables
-into agents/&lt;name&gt;/ directories, and stages prompt/overlay/namepool
-assets into their V2 locations.
-
-```
-gc import migrate [flags]
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--dry-run` | bool |  | print what would change without writing |
 
 ## gc import remove
 
@@ -1911,12 +1945,13 @@ config drift rules require them.
 With --soft, the controller accepts any detected per-session config
 drift instead of draining the drifted sessions: each open session's
 recorded config hash is updated to the hash the freshly reloaded
-config produces for it, so the immediately-following reconcile tick
-sees no drift and no config-drift drains fire. Useful when editing a
-running city's .gc/settings.json without disrupting in-flight work.
-Sessions whose template no longer maps to a configured agent are
-NOT updated; normal orphan/suspended drain handles them on the next
-tick.
+config produces for it, the matching hash breakdown is refreshed, and
+any already queued config-drift drain for that session is canceled. The
+immediately-following reconcile tick sees no drift and no config-drift
+drains fire. Useful when editing a running city's .gc/settings.json
+without disrupting in-flight work. Sessions whose template no longer
+maps to a configured agent are NOT updated; normal orphan/suspended
+drain handles them on the next tick.
 
 ```
 gc reload [path] [flags]
@@ -1982,8 +2017,9 @@ Register an external project directory as a rig.
 Initializes beads database, installs agent hooks if configured,
 generates cross-rig routes, and appends the rig to city.toml.
 If the target directory doesn't exist, it is created. Use --include
-to apply a pack directory that defines the rig's agent configuration;
-repeat the flag to compose multiple packs for one rig.
+to apply a pack source that defines the rig's agent configuration;
+repeat the flag to compose multiple packs for one rig. The flag is
+compatibility sugar: gc rig add writes canonical rig imports.
 
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
@@ -2019,7 +2055,7 @@ gc rig add /path/to/project
 |------|------|---------|-------------|
 | `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
 | `--default-branch` | string |  | mainline branch (default: auto-detect from origin/HEAD or current branch) |
-| `--include` | stringArray |  | pack directory for rig agents (repeatable) |
+| `--include` | stringArray |  | pack source for rig agents (repeatable; writes canonical rig imports) |
 | `--name` | string |  | rig name (default: directory basename) |
 | `--prefix` | string |  | bead ID prefix (default: derived from name) |
 | `--start-suspended` | bool |  | add rig in suspended state (dormant-by-default) |

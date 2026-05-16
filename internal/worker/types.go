@@ -14,7 +14,9 @@ const ( //nolint:revive // exported enum values are documented by the enclosing 
 	ProfileClaudeTmuxCLI   Profile = "claude/tmux-cli"
 	ProfileCodexTmuxCLI    Profile = "codex/tmux-cli"
 	ProfileGeminiTmuxCLI   Profile = "gemini/tmux-cli"
+	ProfileKimiTmuxCLI     Profile = "kimi/tmux-cli"
 	ProfileOpenCodeTmuxCLI Profile = "opencode/tmux-cli"
+	ProfilePiTmuxCLI       Profile = "pi/tmux-cli"
 )
 
 // CapabilityStatus expresses whether a Phase 1 capability is available.

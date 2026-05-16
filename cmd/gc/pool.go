@@ -410,7 +410,12 @@ func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, s
 		}
 		cmd = expandAgentCommandTemplate(cityPath, cityName, &a, cfg.Rigs, "on_boot", cmd, stderr)
 		dir := agentCommandDir(cityPath, &a, cfg.Rigs)
-		if _, err := runner(cmd, dir, controllerQueryRuntimeEnv(cityPath, cfg, &a)); err != nil {
+		env, err := controllerQueryRuntimeEnv(cityPath, cfg, &a)
+		if err != nil {
+			fmt.Fprintf(stderr, "on_boot %s env: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
+			continue
+		}
+		if _, err := runner(cmd, dir, env); err != nil {
 			fmt.Fprintf(stderr, "on_boot %s: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
 		}
 	}

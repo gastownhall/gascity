@@ -927,6 +927,72 @@ func TestComputePoolDesiredStates_InFlightResumeBeadsDoNotConsumeNewDemand(t *te
 	}
 }
 
+func TestComputePoolDesiredStates_DoesNotResumeSessionAcrossExplicitRouteMismatch(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			poolAgent("codex-max", "", intPtr(10), 0),
+			poolAgent("codex-min", "", intPtr(10), 0),
+		},
+	}
+	session := beads.Bead{
+		ID:     "mc-codex-max",
+		Status: "open",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:codex-max"},
+		Metadata: map[string]string{
+			"template":     "codex-max",
+			"session_name": "workflows__codex-max-mc-codex-max",
+			"state":        "asleep",
+		},
+	}
+	work := []beads.Bead{
+		workBead("w-mismatched-route", "codex-min", "workflows__codex-max-mc-codex-max", "in_progress", 5),
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, []beads.Bead{session}, nil)
+
+	for _, state := range result {
+		for _, req := range state.Requests {
+			if req.SessionBeadID == session.ID {
+				t.Fatalf("mismatched routed work produced resume request under %q: %+v", state.Template, req)
+			}
+		}
+	}
+}
+
+func TestComputePoolDesiredStates_DoesNotResumeLegacySessionAcrossExplicitRouteMismatch(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			poolAgent("codex-max", "", intPtr(10), 0),
+			poolAgent("codex-min", "", intPtr(10), 0),
+		},
+	}
+	session := beads.Bead{
+		ID:     "mc-codex-max",
+		Status: "open",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"agent_name":   "codex-max-1",
+			"session_name": "workflows__codex-max-mc-codex-max",
+			"state":        "asleep",
+		},
+	}
+	work := []beads.Bead{
+		workBead("w-mismatched-route", "codex-min", "workflows__codex-max-mc-codex-max", "in_progress", 5),
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, []beads.Bead{session}, nil)
+
+	for _, state := range result {
+		for _, req := range state.Requests {
+			if req.SessionBeadID == session.ID {
+				t.Fatalf("legacy mismatched routed work produced resume request under %q: %+v", state.Template, req)
+			}
+		}
+	}
+}
+
 func TestComputePoolDesiredStates_InFlightPredicateBranches(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},

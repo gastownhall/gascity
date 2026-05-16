@@ -713,6 +713,181 @@ type BoundImport struct {
 	Import  Import
 }
 
+var (
+	legacyImportInvalidBindingChars = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
+	legacyImportRepeatedDash        = regexp.MustCompile(`-+`)
+)
+
+// AddLegacyImports converts legacy include tokens into canonical V2 imports.
+func AddLegacyImports(target map[string]Import, includes []string, packs map[string]PackSource) bool {
+	changed := false
+	for _, include := range includes {
+		source := legacyImportSourceFor(include, packs)
+		if _, exists := existingDefaultImportBindingForSource(target, source); exists {
+			continue
+		}
+		binding := uniqueLegacyImportBinding(target, legacyImportBindingName(include, source, packs))
+		target[binding] = Import{Source: source}
+		changed = true
+	}
+	return changed
+}
+
+// AddOrderedLegacyImports converts legacy include tokens while preserving the import order list.
+func AddOrderedLegacyImports(target map[string]Import, order []string, includes []string, packs map[string]PackSource) ([]string, bool) {
+	changed := false
+	for _, include := range includes {
+		source := legacyImportSourceFor(include, packs)
+		binding, exists := existingDefaultImportBindingForSource(target, source)
+		if !exists {
+			binding = uniqueLegacyImportBinding(target, legacyImportBindingName(include, source, packs))
+			target[binding] = Import{Source: source}
+			changed = true
+		}
+		if !stringSliceContains(order, binding) {
+			order = append(order, binding)
+			changed = true
+		}
+	}
+	return order, changed
+}
+
+// BoundImportsFromLegacySources converts legacy include tokens into sorted bound imports.
+func BoundImportsFromLegacySources(sources []string, packs map[string]PackSource) []BoundImport {
+	if len(sources) == 0 {
+		return nil
+	}
+	target := make(map[string]Import, len(sources))
+	AddLegacyImports(target, sources, packs)
+	return sortedBoundImports(target)
+}
+
+func legacyImportSourceFor(include string, packs map[string]PackSource) string {
+	include = strings.TrimSpace(include)
+	if spec, ok := packs[include]; ok {
+		source := spec.Source
+		if spec.Path != "" {
+			source += "//" + strings.TrimPrefix(spec.Path, "/")
+		}
+		if spec.Ref != "" {
+			source += "#" + spec.Ref
+		}
+		return source
+	}
+	if looksLikeLegacyLocalImportPath(include) && !strings.HasPrefix(include, "./") && !strings.HasPrefix(include, "../") && !filepath.IsAbs(include) {
+		return "./" + include
+	}
+	return include
+}
+
+func legacyImportBindingName(include, source string, packs map[string]PackSource) string {
+	include = strings.TrimSpace(include)
+	if _, ok := packs[include]; ok {
+		return sanitizeLegacyImportBindingName(include)
+	}
+	base := source
+	if idx := strings.Index(base, "#"); idx >= 0 {
+		base = base[:idx]
+	}
+	if idx := strings.LastIndex(base, "//"); idx >= 0 && idx > strings.Index(base, "://")+2 {
+		base = base[idx+2:]
+	}
+	base = strings.TrimSuffix(base, "/")
+	base = strings.TrimSuffix(base, ".git")
+	base = pathBase(base)
+	return sanitizeLegacyImportBindingName(base)
+}
+
+func existingDefaultImportBindingForSource(target map[string]Import, source string) (string, bool) {
+	for binding, imp := range target {
+		if imp.Source != source {
+			continue
+		}
+		if strings.TrimSpace(imp.Version) != "" || imp.Export {
+			continue
+		}
+		if imp.Transitive != nil && !*imp.Transitive {
+			continue
+		}
+		shadow := strings.TrimSpace(imp.Shadow)
+		if shadow == "" || shadow == "warn" {
+			return binding, true
+		}
+	}
+	return "", false
+}
+
+func uniqueLegacyImportBinding(target map[string]Import, base string) string {
+	if base == "" {
+		base = "import"
+	}
+	if _, exists := target[base]; !exists {
+		return base
+	}
+	for i := 2; ; i++ {
+		candidate := fmt.Sprintf("%s-%d", base, i)
+		if _, exists := target[candidate]; !exists {
+			return candidate
+		}
+	}
+}
+
+func sanitizeLegacyImportBindingName(value string) string {
+	value = legacyImportInvalidBindingChars.ReplaceAllString(value, "-")
+	value = legacyImportRepeatedDash.ReplaceAllString(value, "-")
+	value = strings.Trim(value, "-")
+	if value == "" {
+		return "import"
+	}
+	return value
+}
+
+func looksLikeLegacyLocalImportPath(value string) bool {
+	if strings.Contains(value, "://") || strings.HasPrefix(value, "git@") {
+		return false
+	}
+	if strings.HasPrefix(value, "github.com/") {
+		return false
+	}
+	return true
+}
+
+func pathBase(value string) string {
+	value = strings.TrimRight(value, "/")
+	if idx := strings.LastIndex(value, "/"); idx >= 0 {
+		return value[idx+1:]
+	}
+	return value
+}
+
+func sortedBoundImports(imports map[string]Import) []BoundImport {
+	if len(imports) == 0 {
+		return nil
+	}
+	bindings := make([]string, 0, len(imports))
+	for binding := range imports {
+		bindings = append(bindings, binding)
+	}
+	sort.Strings(bindings)
+	bound := make([]BoundImport, 0, len(bindings))
+	for _, binding := range bindings {
+		bound = append(bound, BoundImport{
+			Binding: binding,
+			Import:  imports[binding],
+		})
+	}
+	return bound
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 // PackRequirement declares an agent that must exist in the
 // expanded config for this pack's formulas/orders to function.
 type PackRequirement struct {
@@ -901,14 +1076,39 @@ type Workspace struct {
 	// Each name must match a {{ define "name" }} block from a pack's
 	// prompts/shared/ directory.
 	GlobalFragments []string `toml:"global_fragments,omitempty"`
-	// Includes lists pack directories or URLs to compose into this
-	// workspace. Replaces the older pack/packs fields. Each entry
-	// is a local path, a git source//sub#ref URL, or a GitHub tree URL.
+	// Includes is the legacy city.toml pack-composition list.
+	//
+	// Deprecated: use root pack.toml [imports.*] instead. Run gc doctor to
+	// inspect; gc doctor --fix handles the safe mechanical rewrites available
+	// in this release wave. Each entry is a local path, a git source//sub#ref
+	// URL, or a GitHub tree URL.
 	Includes []string `toml:"includes,omitempty"`
-	// DefaultRigIncludes lists pack directories applied to new rigs when
-	// "gc rig add" is called without --include. Allows cities to define
-	// a default pack for all rigs.
+	// DefaultRigIncludes is the legacy city.toml default-rig pack list.
+	//
+	// Deprecated: use root pack.toml [defaults.rig.imports.<binding>] instead.
+	// Run gc doctor to inspect; gc doctor --fix handles the safe mechanical
+	// rewrites available in this release wave.
 	DefaultRigIncludes []string `toml:"default_rig_includes,omitempty"`
+}
+
+// LegacyIncludes returns the compatibility-only city.toml include list.
+func (w *Workspace) LegacyIncludes() []string {
+	return w.Includes
+}
+
+// SetLegacyIncludes updates the compatibility-only city.toml include list.
+func (w *Workspace) SetLegacyIncludes(includes []string) {
+	w.Includes = includes
+}
+
+// LegacyDefaultRigIncludes returns the compatibility-only city.toml default-rig include list.
+func (w *Workspace) LegacyDefaultRigIncludes() []string {
+	return w.DefaultRigIncludes
+}
+
+// SetLegacyDefaultRigIncludes updates the compatibility-only city.toml default-rig include list.
+func (w *Workspace) SetLegacyDefaultRigIncludes(includes []string) {
+	w.DefaultRigIncludes = includes
 }
 
 // BeadsConfig holds bead store settings.
@@ -3066,9 +3266,10 @@ func WizardCity(name, provider, startCommand string) City {
 }
 
 // GastownCity returns a City configured for the gastown orchestration pack.
-// Agents come from the pack (packs/gastown); no inline agents are defined.
-// Sets workspace.includes, default_rig_includes, global_fragments, and daemon
-// config. If startCommand is set, it takes precedence over provider.
+// Agents come from the pack (.gc/system/packs/gastown); no inline agents are
+// defined. The root city pack imports gastown and sets canonical
+// DefaultRigImports so newly added rigs inherit the same pack by default. If
+// startCommand is set, it takes precedence over provider.
 func GastownCity(name, provider, startCommand string) City {
 	ws := Workspace{
 		Name:            name,

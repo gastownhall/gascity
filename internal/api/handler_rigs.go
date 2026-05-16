@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -42,11 +43,12 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 		if workdirutil.ConfiguredRigName(cityPath, a, cfg.Rigs) != rig.Name {
 			continue
 		}
+		processNames := config.AgentProcessNames(cfg, a, exec.LookPath)
 		expanded := expandAgent(a, cityName, tmpl, sp)
 		for _, ea := range expanded {
 			agentCount++
 			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)
-			obs := observeProviderSession(sp, sessionName, nil)
+			obs := observeProviderSession(sp, sessionName, processNames)
 			if obs.Running {
 				runningCount++
 			}
@@ -84,11 +86,12 @@ func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provi
 		if workdirutil.ConfiguredRigName(cityPath, a, cfg.Rigs) != rig.Name {
 			continue
 		}
+		processNames := config.AgentProcessNames(cfg, a, exec.LookPath)
 		expanded := expandAgent(a, cityName, tmpl, sp)
 		for _, ea := range expanded {
 			agentCount++
 			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)
-			obs := observeProviderSession(sp, sessionName, nil)
+			obs := observeProviderSession(sp, sessionName, processNames)
 			if obs.Suspended {
 				suspendedCount++
 			}

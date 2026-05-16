@@ -15,12 +15,41 @@ import (
 // reconciler calls this several times per tick, and closed history grows
 // without bound. Callers that need a closed record must fetch that one ID
 // explicitly.
+//
+// loadErr captures a non-fatal load failure (timeout, list error) so callers
+// can distinguish "snapshot loaded clean, the bead simply isn't present" from
+// "snapshot is degraded and may be missing entries it would otherwise have".
+// See gastownhall/gascity#2148 for the named-session lookup-error visibility
+// regression this field exists to surface.
 type sessionBeadSnapshot struct {
 	open                      []beads.Bead
 	beadIDByAgentName         map[string]string
 	beadIDByTemplateHint      map[string]string
 	sessionNameByAgentName    map[string]string
 	sessionNameByTemplateHint map[string]string
+	loadErr                   error
+}
+
+// LoadError reports a non-fatal error from the snapshot's load path (timeout
+// or list error). Returns nil when the snapshot loaded cleanly or when the
+// receiver is nil. Callers in degraded-fail-soft paths (status rendering,
+// named-session lookups) check this to surface the failure to operators
+// instead of returning a synthetic "not present" result.
+func (s *sessionBeadSnapshot) LoadError() error {
+	if s == nil {
+		return nil
+	}
+	return s.loadErr
+}
+
+// newSessionBeadSnapshotWithError builds a snapshot from beadsIn and tags it
+// with a non-fatal load error. Callers that fail-soft on load (returning an
+// empty snapshot instead of nil) use this so downstream consumers can still
+// see the underlying failure via LoadError.
+func newSessionBeadSnapshotWithError(beadsIn []beads.Bead, err error) *sessionBeadSnapshot {
+	s := newSessionBeadSnapshot(beadsIn)
+	s.loadErr = err
+	return s
 }
 
 func loadSessionBeadSnapshot(store beads.Store) (*sessionBeadSnapshot, error) {

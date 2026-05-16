@@ -88,8 +88,8 @@ source = "packs/a-pack"
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
 	want := []string{"packs/z-pack", "packs/a-pack"}
-	if !reflect.DeepEqual(cfg.Workspace.DefaultRigIncludes, want) {
-		t.Fatalf("DefaultRigIncludes = %v, want %v", cfg.Workspace.DefaultRigIncludes, want)
+	if got := cfg.Workspace.LegacyDefaultRigIncludes(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("DefaultRigIncludes = %v, want %v", got, want)
 	}
 }
 

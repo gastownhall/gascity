@@ -87,13 +87,17 @@ func orderStoreTargetKey(target execStoreTarget) string {
 	return target.ScopeKind + "\x00" + filepath.Clean(target.ScopeRoot)
 }
 
-func orderExecEnv(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) []string {
+func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) ([]string, error) {
 	var env map[string]string
+	var err error
 	if target.ScopeKind == "rig" {
-		env = bdRuntimeEnvForRig(cityPath, cfg, target.ScopeRoot)
+		env, err = bdRuntimeEnvForRigWithError(cityPath, cfg, target.ScopeRoot)
 	} else {
-		env = bdRuntimeEnv(cityPath)
+		env, err = bdRuntimeEnvWithError(cityPath)
 		env["BEADS_DIR"] = filepath.Join(target.ScopeRoot, ".beads")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("building order env for %s: %w", a.ScopedName(), err)
 	}
 	env["GC_STORE_ROOT"] = target.ScopeRoot
 	env["GC_STORE_SCOPE"] = target.ScopeKind
@@ -130,7 +134,8 @@ func orderExecEnv(cityPath string, cfg *config.City, target execStoreTarget, a o
 	}
 	applyOrderExecCanonicalDoltEnv(cityPath, target.ScopeRoot, env)
 	ensureProjectedDoltEnvExplicit(env)
-	return mergeRuntimeEnv(nil, env)
+	ensureProjectedPostgresEnvExplicit(env)
+	return mergeRuntimeEnv(nil, env), nil
 }
 
 func orderTriggerOptions(cityPath string, cfg *config.City, a orders.Order) (orders.TriggerOptions, error) {
@@ -141,17 +146,21 @@ func orderTriggerOptions(cityPath string, cfg *config.City, a orders.Order) (ord
 	if err != nil {
 		return orders.TriggerOptions{}, err
 	}
-	return orderTriggerOptionsForTarget(cityPath, cfg, target, a), nil
+	return orderTriggerOptionsForTarget(cityPath, cfg, target, a)
 }
 
-func orderTriggerOptionsForTarget(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) orders.TriggerOptions {
+func orderTriggerOptionsForTarget(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) (orders.TriggerOptions, error) {
 	if a.Trigger != "condition" || strings.TrimSpace(cityPath) == "" {
-		return orders.TriggerOptions{}
+		return orders.TriggerOptions{}, nil
+	}
+	env, err := orderExecEnvWithError(cityPath, cfg, target, a)
+	if err != nil {
+		return orders.TriggerOptions{}, err
 	}
 	return orders.TriggerOptions{
 		ConditionDir: target.ScopeRoot,
-		ConditionEnv: orderExecEnv(cityPath, cfg, target, a),
-	}
+		ConditionEnv: env,
+	}, nil
 }
 
 func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]string) {
@@ -160,6 +169,9 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 	}
 	if strings.TrimSpace(scopeRoot) == "" {
 		scopeRoot = cityPath
+	}
+	if scopeBackendIsPostgres(cityPath, scopeRoot) {
+		return
 	}
 	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
 	if err != nil {
@@ -184,6 +196,9 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 }
 
 func applyOrderExecManagedDoltFallback(cityPath, scopeRoot string, env map[string]string, _ error) bool {
+	if scopeBackendIsPostgres(cityPath, scopeRoot) {
+		return false
+	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
 	if err != nil || resolved.Kind != contract.ScopeConfigAuthoritative {
 		return false

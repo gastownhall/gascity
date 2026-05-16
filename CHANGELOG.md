@@ -51,6 +51,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Pack import cache validation now requires commit abbreviations in
+  `packs.lock` to be at least seven characters long. Shorter abbreviations
+  should be refreshed with `gc import install`.
+- City discovery now treats a `city.toml` at `$HOME` or an explicit
+  `GC_CEILING_DIRECTORIES` entry as a valid city. The ceiling directory is
+  searched but never crossed, so existing stray `$HOME/city.toml` files may now
+  be discovered from subdirectories where they were previously ignored.
+- `gc import migrate` is now a hidden, deprecated guidance shim that exits
+  non-zero after pointing operators to `gc doctor` and `gc doctor --fix`.
+  Update any scripts that treated `gc import migrate` as a successful
+  compatibility migration step.
+- `gc rig add --include` now writes canonical `rig.Imports`, which are
+  processed alphabetically by binding rather than in legacy declaration order.
+- `examples/swarm` now inherits the system-maintenance `dog` agent, so the
+  example city has the same fallback agent as other maintenance-enabled
+  cities.
 - ACP, subprocess, and Kubernetes session staging now apply pack and agent
   overlays through the provider-aware `per-provider/<provider>/` contract.
   Custom ACP overlays that previously expected a literal `per-provider/`

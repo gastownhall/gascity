@@ -224,12 +224,24 @@ The wire format matches `beads.Bead` JSON tags — the same shape that
   "ref": "",
   "needs": [],
   "description": "",
-  "labels": ["order-run:digest", "pool:dog"]
+  "labels": ["order-run:digest", "pool:dog"],
+  "ephemeral": true
 }
 ```
 
 Fields omitted from the JSON are treated as zero values. The `id` field
 on `create` input is ignored (the script assigns IDs).
+
+`ephemeral=true` is part of the exec provider contract. Scripts must preserve
+it on create/read paths so Gas City can keep wisps-tier work out of normal
+ready-work and issues-tier queries. Backends without a native wisps table may
+store the bit internally, such as with a private label, but must return it as
+the `ephemeral` JSON field.
+
+`list`, `children`, and `list-by-label` should return every matching bead the
+script can see, including ephemeral beads. Gas City applies the caller's tier
+mode after parsing the JSON, so scripts do not receive a separate
+issues/wisps/both argument.
 
 #### Create Request
 
@@ -238,7 +250,8 @@ on `create` input is ignored (the script assigns IDs).
   "title": "my task",
   "type": "task",
   "labels": ["pool:dog"],
-  "parent_id": "WP-1"
+  "parent_id": "WP-1",
+  "ephemeral": false
 }
 ```
 

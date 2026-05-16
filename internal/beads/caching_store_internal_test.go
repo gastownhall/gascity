@@ -1478,6 +1478,28 @@ func TestCachingStoreCachedListReturnsSnapshotWithDirtyEntries(t *testing.T) {
 	}
 }
 
+func TestCachingStoreCachedListRefusesNonIssuesTierQueries(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	if _, err := backing.Create(Bead{Title: "plain", Labels: []string{"k"}}); err != nil {
+		t.Fatalf("Create plain: %v", err)
+	}
+	if _, err := backing.Create(Bead{Title: "wisp", Labels: []string{"k"}, Ephemeral: true}); err != nil {
+		t.Fatalf("Create wisp: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	for _, tier := range []TierMode{TierWisps, TierBoth} {
+		if rows, ok := cache.CachedList(ListQuery{Label: "k", TierMode: tier}); ok {
+			t.Fatalf("CachedList tier %v ok=true rows=%#v, want ok=false", tier, rows)
+		}
+	}
+}
+
 type refreshFailingStore struct {
 	Store
 	failNextGet bool
@@ -1767,6 +1789,45 @@ func TestCachingStoreBdPrimeActiveUsesListDependenciesForCachedReady(t *testing.
 	}
 	if depListCalls != 0 {
 		t.Fatalf("dep list calls = %d, want 0", depListCalls)
+	}
+}
+
+func TestCachingStoreReadySkipsEphemeralOpenTasks(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	ready, err := cache.Create(Bead{Title: "ready", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create ready: %v", err)
+	}
+	ephemeral, err := cache.Create(Bead{Title: "tracking", Type: "task", Ephemeral: true})
+	if err != nil {
+		t.Fatalf("Create ephemeral: %v", err)
+	}
+
+	got, err := cache.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != ready.ID {
+		t.Fatalf("Ready() = %+v, want only non-ephemeral task %s", got, ready.ID)
+	}
+	cached, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	if len(cached) != 1 || cached[0].ID != ready.ID {
+		t.Fatalf("CachedReady() = %+v, want only non-ephemeral task %s", cached, ready.ID)
+	}
+	for _, bead := range append(got, cached...) {
+		if bead.ID == ephemeral.ID {
+			t.Fatalf("ephemeral bead %s leaked into cached ready paths", ephemeral.ID)
+		}
 	}
 }
 

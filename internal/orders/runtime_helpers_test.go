@@ -1,11 +1,24 @@
 package orders
 
 import (
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+type rowsErrorStore struct {
+	*beads.MemStore
+	rows []beads.Bead
+	err  error
+}
+
+func (s *rowsErrorStore) List(_ beads.ListQuery) ([]beads.Bead, error) {
+	return s.rows, s.err
+}
 
 func TestLastRunFuncForStoreReturnsLatestRun(t *testing.T) {
 	store := beads.NewMemStore()
@@ -51,5 +64,54 @@ func TestLastRunFuncForStoreReturnsZeroWhenNoRunsExist(t *testing.T) {
 	}
 	if !got.IsZero() {
 		t.Fatalf("LastRunFuncForStore() = %s, want zero time", got)
+	}
+}
+
+func TestLastRunFuncForStoreUsesRowsFromPartialTierError(t *testing.T) {
+	want := time.Date(2026, 5, 15, 7, 0, 0, 0, time.UTC)
+	store := &rowsErrorStore{
+		MemStore: beads.NewMemStore(),
+		rows: []beads.Bead{{
+			ID:        "run-1",
+			Title:     "digest",
+			CreatedAt: want,
+			Labels:    []string{"order-run:digest"},
+		}},
+		err: errors.New("wisps tier unavailable"),
+	}
+
+	got, err := LastRunFuncForStore(store)("digest")
+	if err != nil {
+		t.Fatalf("LastRunFuncForStore(): %v", err)
+	}
+	if !got.Equal(want) {
+		t.Fatalf("LastRunFuncForStore() = %s, want %s from surviving rows", got, want)
+	}
+}
+
+func TestCursorFuncForStoreUsesRowsAndLogsPartialTierError(t *testing.T) {
+	oldLogf := runtimeHelpersLogf
+	var logs []string
+	runtimeHelpersLogf = func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+	t.Cleanup(func() {
+		runtimeHelpersLogf = oldLogf
+	})
+	store := &rowsErrorStore{
+		MemStore: beads.NewMemStore(),
+		rows: []beads.Bead{{
+			ID:     "run-1",
+			Labels: []string{"order-run:digest", "seq:42"},
+		}},
+		err: errors.New("wisps tier unavailable"),
+	}
+
+	got := CursorFuncForStore(store)("digest")
+	if got != 42 {
+		t.Fatalf("CursorFuncForStore() = %d, want 42 from surviving rows", got)
+	}
+	if len(logs) == 0 || !strings.Contains(logs[0], "partially failed") {
+		t.Fatalf("logs = %#v, want partial failure log", logs)
 	}
 }

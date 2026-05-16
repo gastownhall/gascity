@@ -442,6 +442,7 @@ type Bead struct {
 	CreatedAt    time.Time          `json:"created_at"`
 	Dependencies *[]Dep             `json:"dependencies,omitempty"`
 	Description  *string            `json:"description,omitempty"`
+	Ephemeral    *bool              `json:"ephemeral,omitempty"`
 	From         *string            `json:"from,omitempty"`
 	Id           string             `json:"id"`
 	IssueType    string             `json:"issue_type"`
@@ -1875,24 +1876,28 @@ type ProviderOptionDTO struct {
 
 // ProviderPatch defines model for ProviderPatch.
 type ProviderPatch struct {
-	ACPArgs            *[]string         `json:"ACPArgs"`
-	ACPCommand         *string           `json:"ACPCommand"`
-	Args               *[]string         `json:"Args"`
-	ArgsAppend         *[]string         `json:"ArgsAppend"`
-	Base               *string           `json:"Base"`
-	Command            *string           `json:"Command"`
-	Env                map[string]string `json:"Env"`
-	EnvRemove          *[]string         `json:"EnvRemove"`
-	Name               string            `json:"Name"`
-	OptionsSchemaMerge *string           `json:"OptionsSchemaMerge"`
-	PromptFlag         *string           `json:"PromptFlag"`
-	PromptMode         *string           `json:"PromptMode"`
-	ReadyDelayMs       *int64            `json:"ReadyDelayMs"`
-	Replace            bool              `json:"Replace"`
+	ACPArgs              *[]string         `json:"ACPArgs"`
+	ACPCommand           *string           `json:"ACPCommand"`
+	AcceptStartupDialogs *bool             `json:"AcceptStartupDialogs"`
+	Args                 *[]string         `json:"Args"`
+	ArgsAppend           *[]string         `json:"ArgsAppend"`
+	Base                 *string           `json:"Base"`
+	Command              *string           `json:"Command"`
+	Env                  map[string]string `json:"Env"`
+	EnvRemove            *[]string         `json:"EnvRemove"`
+	Name                 string            `json:"Name"`
+	OptionsSchemaMerge   *string           `json:"OptionsSchemaMerge"`
+	PromptFlag           *string           `json:"PromptFlag"`
+	PromptMode           *string           `json:"PromptMode"`
+	ReadyDelayMs         *int64            `json:"ReadyDelayMs"`
+	Replace              bool              `json:"Replace"`
 }
 
 // ProviderPatchSetInputBody defines model for ProviderPatchSetInputBody.
 type ProviderPatchSetInputBody struct {
+	// AcceptStartupDialogs Override startup dialog acceptance behavior.
+	AcceptStartupDialogs *bool `json:"accept_startup_dialogs,omitempty"`
+
 	// AcpArgs Override ACP transport command arguments.
 	AcpArgs *[]string `json:"acp_args,omitempty"`
 
@@ -2161,6 +2166,13 @@ type RigUpdateInputBody struct {
 
 	// Suspended Whether rig is suspended.
 	Suspended *bool `json:"suspended,omitempty"`
+}
+
+// RotatedPayload defines model for RotatedPayload.
+type RotatedPayload struct {
+	PriorArchive  string `json:"prior_archive"`
+	PriorFirstSeq int64  `json:"prior_first_seq"`
+	PriorLastSeq  int64  `json:"prior_last_seq"`
 }
 
 // ScopeGroup defines model for ScopeGroup.
@@ -2607,6 +2619,27 @@ type SupervisorEventListOutputBody struct {
 	Total       int64                             `json:"total"`
 }
 
+// SupervisorFSPressureSkippedTickPayload defines model for SupervisorFSPressureSkippedTickPayload.
+type SupervisorFSPressureSkippedTickPayload struct {
+	// Avg60 The Linux PSI some avg60 value observed for filesystem IO pressure.
+	Avg60 float64 `json:"avg60"`
+
+	// ConsecutiveSkips Number of consecutive pressure skips including this tick.
+	ConsecutiveSkips int64 `json:"consecutive_skips"`
+
+	// MaxConsecutiveSkips Maximum consecutive skips before the supervisor forces one reconciliation tick.
+	MaxConsecutiveSkips int64 `json:"max_consecutive_skips"`
+
+	// Outcome The pressure decision outcome: skipped for a shed tick or forced for the bounded liveness tick.
+	Outcome string `json:"outcome"`
+
+	// Threshold The configured avg60 threshold that triggered the skip.
+	Threshold float64 `json:"threshold"`
+
+	// Trigger The daemon tick trigger, such as patrol or poke.
+	Trigger *string `json:"trigger,omitempty"`
+}
+
 // SupervisorHealthOutputBody defines model for SupervisorHealthOutputBody.
 type SupervisorHealthOutputBody struct {
 	// CitiesRunning Cities currently running.
@@ -2799,6 +2832,18 @@ type TypedEventStreamEnvelopeCustom struct {
 	Actor    string                   `json:"actor"`
 	Message  *string                  `json:"message,omitempty"`
 	Payload  interface{}              `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeEventsRotated defines model for TypedEventStreamEnvelopeEventsRotated.
+type TypedEventStreamEnvelopeEventsRotated struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  RotatedPayload           `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -3214,6 +3259,18 @@ type TypedEventStreamEnvelopeSessionWoke struct {
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick defines model for TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick.
+type TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick struct {
+	Actor    string                                 `json:"actor"`
+	Message  *string                                `json:"message,omitempty"`
+	Payload  SupervisorFSPressureSkippedTickPayload `json:"payload"`
+	Seq      int64                                  `json:"seq"`
+	Subject  *string                                `json:"subject,omitempty"`
+	Ts       time.Time                              `json:"ts"`
+	Type     string                                 `json:"type"`
+	Workflow *WorkflowEventProjection               `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeWorkerOperation defines model for TypedEventStreamEnvelopeWorkerOperation.
 type TypedEventStreamEnvelopeWorkerOperation struct {
 	Actor    string                      `json:"actor"`
@@ -3380,6 +3437,19 @@ type TypedTaggedEventStreamEnvelopeCustom struct {
 	City     string                   `json:"city"`
 	Message  *string                  `json:"message,omitempty"`
 	Payload  interface{}              `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeEventsRotated defines model for TypedTaggedEventStreamEnvelopeEventsRotated.
+type TypedTaggedEventStreamEnvelopeEventsRotated struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  RotatedPayload           `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -3827,6 +3897,19 @@ type TypedTaggedEventStreamEnvelopeSessionWoke struct {
 	Ts       time.Time                `json:"ts"`
 	Type     string                   `json:"type"`
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick defines model for TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick.
+type TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick struct {
+	Actor    string                                 `json:"actor"`
+	City     string                                 `json:"city"`
+	Message  *string                                `json:"message,omitempty"`
+	Payload  SupervisorFSPressureSkippedTickPayload `json:"payload"`
+	Seq      int64                                  `json:"seq"`
+	Subject  *string                                `json:"subject,omitempty"`
+	Ts       time.Time                              `json:"ts"`
+	Type     string                                 `json:"type"`
+	Workflow *WorkflowEventProjection               `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeWorkerOperation defines model for TypedTaggedEventStreamEnvelopeWorkerOperation.
@@ -5338,6 +5421,32 @@ func (t *EventPayload) MergeRequestFailedPayload(v RequestFailedPayload) error {
 	return err
 }
 
+// AsRotatedPayload returns the union data inside the EventPayload as a RotatedPayload
+func (t EventPayload) AsRotatedPayload() (RotatedPayload, error) {
+	var body RotatedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromRotatedPayload overwrites any union data inside the EventPayload as the provided RotatedPayload
+func (t *EventPayload) FromRotatedPayload(v RotatedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeRotatedPayload performs a merge with any union data inside the EventPayload, using the provided RotatedPayload
+func (t *EventPayload) MergeRotatedPayload(v RotatedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsSessionCreateSucceededPayload returns the union data inside the EventPayload as a SessionCreateSucceededPayload
 func (t EventPayload) AsSessionCreateSucceededPayload() (SessionCreateSucceededPayload, error) {
 	var body SessionCreateSucceededPayload
@@ -5432,6 +5541,32 @@ func (t *EventPayload) FromSessionSubmitSucceededPayload(v SessionSubmitSucceede
 
 // MergeSessionSubmitSucceededPayload performs a merge with any union data inside the EventPayload, using the provided SessionSubmitSucceededPayload
 func (t *EventPayload) MergeSessionSubmitSucceededPayload(v SessionSubmitSucceededPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSupervisorFSPressureSkippedTickPayload returns the union data inside the EventPayload as a SupervisorFSPressureSkippedTickPayload
+func (t EventPayload) AsSupervisorFSPressureSkippedTickPayload() (SupervisorFSPressureSkippedTickPayload, error) {
+	var body SupervisorFSPressureSkippedTickPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSupervisorFSPressureSkippedTickPayload overwrites any union data inside the EventPayload as the provided SupervisorFSPressureSkippedTickPayload
+func (t *EventPayload) FromSupervisorFSPressureSkippedTickPayload(v SupervisorFSPressureSkippedTickPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSupervisorFSPressureSkippedTickPayload performs a merge with any union data inside the EventPayload, using the provided SupervisorFSPressureSkippedTickPayload
+func (t *EventPayload) MergeSupervisorFSPressureSkippedTickPayload(v SupervisorFSPressureSkippedTickPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -5890,6 +6025,34 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeConvoyCreated(v T
 // MergeTypedEventStreamEnvelopeConvoyCreated performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeConvoyCreated
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeConvoyCreated(v TypedEventStreamEnvelopeConvoyCreated) error {
 	v.Type = "convoy.created"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeEventsRotated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeEventsRotated
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeEventsRotated() (TypedEventStreamEnvelopeEventsRotated, error) {
+	var body TypedEventStreamEnvelopeEventsRotated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeEventsRotated overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeEventsRotated
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeEventsRotated(v TypedEventStreamEnvelopeEventsRotated) error {
+	v.Type = "events.rotated"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeEventsRotated performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeEventsRotated
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeEventsRotated(v TypedEventStreamEnvelopeEventsRotated) error {
+	v.Type = "events.rotated"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -6852,6 +7015,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionWoke(v Ty
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick() (TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick, error) {
+	var body TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick(v TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick) error {
+	v.Type = "supervisor.fs_pressure.skipped_tick"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick(v TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick) error {
+	v.Type = "supervisor.fs_pressure.skipped_tick"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeWorkerOperation returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkerOperation
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkerOperation() (TypedEventStreamEnvelopeWorkerOperation, error) {
 	var body TypedEventStreamEnvelopeWorkerOperation
@@ -6946,6 +7137,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeConvoyClosed()
 	case "convoy.created":
 		return t.AsTypedEventStreamEnvelopeConvoyCreated()
+	case "events.rotated":
+		return t.AsTypedEventStreamEnvelopeEventsRotated()
 	case "extmsg.adapter_added":
 		return t.AsTypedEventStreamEnvelopeExtmsgAdapterAdded()
 	case "extmsg.adapter_removed":
@@ -7014,6 +7207,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionUpdated()
 	case "session.woke":
 		return t.AsTypedEventStreamEnvelopeSessionWoke()
+	case "supervisor.fs_pressure.skipped_tick":
+		return t.AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
 	case "worker.operation":
 		return t.AsTypedEventStreamEnvelopeWorkerOperation()
 	default:
@@ -7329,6 +7524,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeConvo
 // MergeTypedTaggedEventStreamEnvelopeConvoyCreated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeConvoyCreated
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeConvoyCreated(v TypedTaggedEventStreamEnvelopeConvoyCreated) error {
 	v.Type = "convoy.created"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeEventsRotated returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeEventsRotated
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeEventsRotated() (TypedTaggedEventStreamEnvelopeEventsRotated, error) {
+	var body TypedTaggedEventStreamEnvelopeEventsRotated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeEventsRotated overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeEventsRotated
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeEventsRotated(v TypedTaggedEventStreamEnvelopeEventsRotated) error {
+	v.Type = "events.rotated"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeEventsRotated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeEventsRotated
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeEventsRotated(v TypedTaggedEventStreamEnvelopeEventsRotated) error {
+	v.Type = "events.rotated"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -8291,6 +8514,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick() (TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick, error) {
+	var body TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick(v TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick) error {
+	v.Type = "supervisor.fs_pressure.skipped_tick"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick(v TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick) error {
+	v.Type = "supervisor.fs_pressure.skipped_tick"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeWorkerOperation returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkerOperation
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkerOperation() (TypedTaggedEventStreamEnvelopeWorkerOperation, error) {
 	var body TypedTaggedEventStreamEnvelopeWorkerOperation
@@ -8385,6 +8636,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeConvoyClosed()
 	case "convoy.created":
 		return t.AsTypedTaggedEventStreamEnvelopeConvoyCreated()
+	case "events.rotated":
+		return t.AsTypedTaggedEventStreamEnvelopeEventsRotated()
 	case "extmsg.adapter_added":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgAdapterAdded()
 	case "extmsg.adapter_removed":
@@ -8453,6 +8706,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionUpdated()
 	case "session.woke":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionWoke()
+	case "supervisor.fs_pressure.skipped_tick":
+		return t.AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
 	case "worker.operation":
 		return t.AsTypedTaggedEventStreamEnvelopeWorkerOperation()
 	default:

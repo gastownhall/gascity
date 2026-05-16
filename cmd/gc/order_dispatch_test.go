@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -17,11 +18,15 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/pgauth"
 )
 
 func trackingBeads(t *testing.T, store beads.Store, label string) []beads.Bead {
 	t.Helper()
-	all, err := store.ListByLabel(label, 0, beads.IncludeClosed)
+	// Tracking beads dispatched by the production order dispatcher live in
+	// the ephemeral (wisps) tier; seeded test beads typically live in the
+	// issues tier. Query both so tests covering either path stay green.
+	all, err := store.ListByLabel(label, 0, beads.IncludeClosed, beads.WithBothTiers)
 	if err != nil {
 		t.Fatalf("ListByLabel(%q): %v", label, err)
 	}
@@ -2590,21 +2595,30 @@ func TestOrderRigSuspendedFallsBackToOrderRigOnPoolResolutionError(t *testing.T)
 func TestSweepOrphanedOrderTracking_ClosesOpenTrackingBeads(t *testing.T) {
 	store := beads.NewMemStore()
 
-	// Create some open tracking beads (simulating goroutines killed on restart).
+	// Create some open ephemeral tracking beads (simulating goroutines killed on restart).
 	for _, name := range []string{"dolt-health", "gate-sweep", "beads-health"} {
 		_, err := store.Create(beads.Bead{
-			Title:  "order:" + name,
-			Labels: []string{"order-run:" + name, labelOrderTracking},
+			Title:     "order:" + name,
+			Labels:    []string{"order-run:" + name, labelOrderTracking},
+			Ephemeral: true,
 		})
 		if err != nil {
 			t.Fatalf("Create(%s): %v", name, err)
 		}
 	}
+	_, err := store.Create(beads.Bead{
+		Title:  "order:legacy-issues-tier",
+		Labels: []string{"order-run:legacy-issues-tier", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(legacy-issues-tier): %v", err)
+	}
 
 	// Create one that's already closed (should be left alone).
 	b, err := store.Create(beads.Bead{
-		Title:  "order:old-sweep",
-		Labels: []string{"order-run:old-sweep", labelOrderTracking},
+		Title:     "order:old-sweep",
+		Labels:    []string{"order-run:old-sweep", labelOrderTracking},
+		Ephemeral: true,
 	})
 	if err != nil {
 		t.Fatalf("Create(old-sweep): %v", err)
@@ -2626,11 +2640,11 @@ func TestSweepOrphanedOrderTracking_ClosesOpenTrackingBeads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sweepOrphanedOrderTracking: %v", err)
 	}
-	if closed != 3 {
-		t.Fatalf("closed = %d, want 3", closed)
+	if closed != 4 {
+		t.Fatalf("closed = %d, want 4", closed)
 	}
 
-	// Verify the 3 open tracking beads are now closed.
+	// Verify the open tracking beads in both tiers are now closed.
 	all := trackingBeads(t, store, labelOrderTracking)
 	for _, b := range all {
 		if b.Status != "closed" {
@@ -2695,6 +2709,14 @@ func TestSweepStaleOrderTracking_ClosesOnlyOldOpenTrackingBeads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(old): %v", err)
 	}
+	oldEphemeral, err := store.Create(beads.Bead{
+		Title:     "order:old-sweep-wisp-tier",
+		Labels:    []string{"order-run:old-sweep-wisp-tier", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(old ephemeral): %v", err)
+	}
 	oldWork, err := store.Create(beads.Bead{
 		Title:  "real work",
 		Labels: []string{"order-run:old-sweep"},
@@ -2713,12 +2735,13 @@ func TestSweepStaleOrderTracking_ClosesOnlyOldOpenTrackingBeads(t *testing.T) {
 		t.Fatalf("Create(fresh): %v", err)
 	}
 
+	const expectedClosedTrackingBeads = 2 // issues-tier legacy bead + wisps-tier tracking bead
 	closed, err := sweepStaleOrderTracking(store, time.Now(), 100*time.Millisecond, nil, orderTrackingSweepMetadataInitiator)
 	if err != nil {
 		t.Fatalf("sweepStaleOrderTracking: %v", err)
 	}
-	if closed != 1 {
-		t.Fatalf("closed = %d, want 1", closed)
+	if closed != expectedClosedTrackingBeads {
+		t.Fatalf("closed = %d, want %d", closed, expectedClosedTrackingBeads)
 	}
 
 	gotOld, err := store.Get(old.ID)
@@ -2727,6 +2750,13 @@ func TestSweepStaleOrderTracking_ClosesOnlyOldOpenTrackingBeads(t *testing.T) {
 	}
 	if gotOld.Status != "closed" {
 		t.Fatalf("old tracking status = %s, want closed", gotOld.Status)
+	}
+	gotOldEphemeral, err := store.Get(oldEphemeral.ID)
+	if err != nil {
+		t.Fatalf("Get(old ephemeral): %v", err)
+	}
+	if gotOldEphemeral.Status != "closed" {
+		t.Fatalf("old ephemeral tracking status = %s, want closed", gotOldEphemeral.Status)
 	}
 	gotFresh, err := store.Get(fresh.ID)
 	if err != nil {
@@ -3935,6 +3965,75 @@ interval = "2m"
 	t.Error("wasteland-poll not found in dispatcher orders")
 }
 
+// TestBuildOrderDispatcherOverrideDisablesDropsFromDispatcher is the
+// regression test for gastownhall/gascity#2191's post-override
+// filterEnabledOrders behavior. Without filtering after overrides are
+// applied, an order whose enabled flag is flipped to false via
+// [orders.overrides] survived to the dispatcher and was treated as
+// runnable — the bug that #2191 closed. See gastownhall/gascity#2202.
+func TestBuildOrderDispatcherOverrideDisablesDropsFromDispatcher(t *testing.T) {
+	// Two on-disk orders, both enabled by default. The config overrides
+	// wasteland-poll to enabled=false; only beads-health should reach
+	// the dispatcher's auto-set.
+	sysDir := t.TempDir()
+	topoDir := t.TempDir()
+
+	sysAutoDir := sysDir + "/orders/beads-health"
+	if err := mkdirAll(sysAutoDir); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, sysAutoDir+"/order.toml", `[order]
+exec = "scripts/beads-health.sh"
+trigger = "cooldown"
+interval = "30s"
+`)
+
+	topoAutoDir := topoDir + "/orders/wasteland-poll"
+	if err := mkdirAll(topoAutoDir); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, topoAutoDir+"/order.toml", `[order]
+exec = "scripts/wasteland-poll.sh"
+trigger = "cooldown"
+interval = "2m"
+`)
+
+	disabled := false
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{sysDir, topoDir},
+		},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{
+				{Name: "wasteland-poll", Enabled: &disabled},
+			},
+		},
+	}
+
+	var stderr bytes.Buffer
+	ad := buildOrderDispatcher(t.TempDir(), cfg, events.Discard, &stderr)
+	if ad == nil {
+		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
+	}
+
+	mad := ad.(*memoryOrderDispatcher)
+	if len(mad.aa) != 1 {
+		var names []string
+		for _, a := range mad.aa {
+			names = append(names, a.Name)
+		}
+		t.Fatalf("dispatcher orders = %d (%v), want 1 (override-disabled wasteland-poll must be filtered)", len(mad.aa), names)
+	}
+	if got := mad.aa[0].Name; got != "beads-health" {
+		t.Fatalf("dispatcher order = %q, want %q", got, "beads-health")
+	}
+	for _, a := range mad.aa {
+		if a.Name == "wasteland-poll" {
+			t.Fatalf("wasteland-poll reached the dispatcher despite enabled=false override (this is the #2191 bug)")
+		}
+	}
+}
+
 func TestBuildOrderDispatcherOverrideNotFoundNonFatal(t *testing.T) {
 	// Single formula layer with beads-health only.
 	// Override targets wasteland-poll (nonexistent).
@@ -4660,7 +4759,10 @@ func TestOrderExecEnvSetsBeadsActorToOrderName(t *testing.T) {
 	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
 	a := orders.Order{Name: "order-tracking-sweep", Trigger: "cooldown", Interval: "1m", Exec: "true"}
 
-	envSlice := orderExecEnv(cityDir, nil, target, a)
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError() error = %v", err)
+	}
 
 	want := "BEADS_ACTOR=order:order-tracking-sweep"
 	found := false
@@ -4688,11 +4790,152 @@ func TestOrderExecEnvSkipsBeadsActorForUnnamedOrder(t *testing.T) {
 	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
 	a := orders.Order{Trigger: "cooldown", Interval: "1m", Exec: "true"} // no Name
 
-	envSlice := orderExecEnv(cityDir, nil, target, a)
+	envSlice, err := orderExecEnvWithError(cityDir, nil, target, a)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError() error = %v", err)
+	}
 
 	for _, entry := range envSlice {
 		if entry == "BEADS_ACTOR=order:" {
 			t.Fatalf("orderExecEnv emitted bare order: prefix for unnamed order; env=%v", envSlice)
+		}
+	}
+}
+
+func TestOrderExecEnvWithError_SurfacesPostgresProjectionError(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	writePGScopeFixture(t, cityDir, "")
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "pc"}
+	a := orders.Order{Name: "pg-order", Trigger: "cooldown", Interval: "1m", Exec: "true"}
+
+	_, err := orderExecEnvWithError(cityDir, nil, target, a)
+	if err == nil {
+		t.Fatal("orderExecEnvWithError() error = nil, want postgres projection error")
+	}
+	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
+		t.Fatalf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
+	}
+}
+
+func TestOrderExecEnvWithError_PostgresCityClearsDoltOverlay(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	writePGScopeFixture(t, cityDir, "citypw")
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = writeReachableManagedDoltState(t, cityDir)
+
+	target := execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "ct"}
+	a := orders.Order{Name: "pg-city-order", Trigger: "cooldown", Interval: "1m", Exec: "true"}
+
+	env, err := orderExecEnvWithError(cityDir, nil, target, a)
+	if err != nil {
+		t.Fatalf("orderExecEnvWithError() error = %v", err)
+	}
+	got := listToMap(env)
+
+	assertPostgresOrderEnv(t, got, "citypw")
+	assertNoDoltOrderEnv(t, got)
+}
+
+func TestOrderTriggerOptionsForTarget_PostgresRigClearsDoltOverlay(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = writeReachableManagedDoltState(t, cityDir)
+
+	rigDir := filepath.Join(cityDir, "rigs", "pg")
+	writePGScopeFixture(t, rigDir, "rigpw")
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "pg", Path: "rigs/pg", Prefix: "pg"}}}
+	resolveRigPaths(cityDir, cfg.Rigs)
+	target := execStoreTarget{ScopeRoot: rigDir, ScopeKind: "rig", Prefix: "pg", RigName: "pg"}
+	a := orders.Order{Name: "pg-rig-order", Rig: "pg", Trigger: "condition", Check: "bd ready --json", Exec: "true"}
+
+	opts, err := orderTriggerOptionsForTarget(cityDir, cfg, target, a)
+	if err != nil {
+		t.Fatalf("orderTriggerOptionsForTarget() error = %v", err)
+	}
+	got := listToMap(opts.ConditionEnv)
+
+	if opts.ConditionDir != rigDir {
+		t.Fatalf("ConditionDir = %q, want %q", opts.ConditionDir, rigDir)
+	}
+	assertPostgresOrderEnv(t, got, "rigpw")
+	assertNoDoltOrderEnv(t, got)
+}
+
+func assertPostgresOrderEnv(t *testing.T, env map[string]string, wantPassword string) {
+	t.Helper()
+	want := map[string]string{
+		"GC_POSTGRES_PASSWORD":    wantPassword,
+		"BEADS_POSTGRES_PASSWORD": wantPassword,
+		"BEADS_POSTGRES_HOST":     "db.example.test",
+		"BEADS_POSTGRES_PORT":     "5432",
+		"BEADS_POSTGRES_USER":     "bd",
+		"BEADS_POSTGRES_DATABASE": "beads",
+	}
+	for key, value := range want {
+		if got := env[key]; got != value {
+			t.Errorf("env[%q] = %q, want %q", key, got, value)
+		}
+	}
+}
+
+func assertNoDoltOrderEnv(t *testing.T, env map[string]string) {
+	t.Helper()
+	for _, key := range projectedDoltEnvKeys {
+		if value, ok := env[key]; ok && value != "" {
+			t.Errorf("env[%q] = %q, want empty/absent for PG-backed order", key, value)
+		}
+	}
+	for _, key := range []string{
+		"GC_DOLT_MANAGED_LOCAL",
+		"GC_DOLT_DATA_DIR",
+		"GC_DOLT_LOG_FILE",
+		"GC_DOLT_STATE_FILE",
+		"GC_DOLT_PID_FILE",
+		"GC_DOLT_LOCK_FILE",
+		"GC_DOLT_CONFIG_FILE",
+	} {
+		if value, ok := env[key]; ok && value != "" {
+			t.Errorf("env[%q] = %q, want empty/absent for PG-backed order", key, value)
 		}
 	}
 }
@@ -4708,5 +4951,101 @@ func TestLockedStderrWrapsNonNil(t *testing.T) {
 	w := lockedStderr(&buf)
 	if _, ok := w.(*lockedWriter); !ok {
 		t.Fatalf("lockedStderr(non-nil): got %T, want *lockedWriter", w)
+	}
+}
+
+// TestOrderDispatchTrackingBeadIsEphemeral asserts the dispatcher routes the
+// tracking bead to the wisps tier (Ephemeral=true), so each cooldown cycle
+// does not produce a full Dolt commit on the permanent issues tier.
+func TestOrderDispatchTrackingBeadIsEphemeral(t *testing.T) {
+	store := beads.NewMemStore()
+
+	aa := []orders.Order{{
+		Name:         "wisp-order",
+		Trigger:      "cooldown",
+		Interval:     "1m",
+		Formula:      "test-formula",
+		Pool:         "worker",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+	ad := buildOrderDispatcherFromList(aa, store, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	all := trackingBeads(t, store, "order-run:wisp-order")
+	var tb *beads.Bead
+	for i := range all {
+		if strings.HasPrefix(all[i].Title, "order:") {
+			tb = &all[i]
+			break
+		}
+	}
+	if tb == nil {
+		t.Fatal("no tracking bead found")
+	}
+	if !tb.Ephemeral {
+		t.Errorf("tracking bead Ephemeral = false, want true")
+	}
+	// Tracking bead must NOT be visible to issues-tier-only queries —
+	// that is the whole point of routing it to the wisps tier.
+	issuesOnly, err := store.ListByLabel("order-run:wisp-order", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range issuesOnly {
+		if strings.HasPrefix(b.Title, "order:") {
+			t.Errorf("ephemeral tracking bead leaked into issues-tier query: %+v", b)
+		}
+	}
+}
+
+// TestOrderDispatchSingleFlightLockSeesEphemeralTracker is the regression
+// guard for the single-flight lock (`hasOpenWorkInStoresStrict`) after the
+// tracking bead moved to the wisps tier. If the lock query were not
+// tier-aware, the dispatcher would re-fire the same cooldown order on the
+// next tick.
+func TestOrderDispatchSingleFlightLockSeesEphemeralTracker(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:     "order:double-fire",
+		Labels:    []string{"order-run:double-fire", labelOrderTracking},
+		Ephemeral: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &memoryOrderDispatcher{}
+	hasOpen, err := m.hasOpenWorkStrict(store, "double-fire")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasOpen {
+		t.Fatal("single-flight lock missed ephemeral tracking bead — would dispatch again")
+	}
+}
+
+func TestOrderDispatchSingleFlightLockFailsClosedOnPartialTierError(t *testing.T) {
+	store := &partialListStore{
+		Store: beads.NewMemStore(),
+		rows: []beads.Bead{{
+			ID:     "tracker-1",
+			Title:  "order:double-fire",
+			Status: "open",
+			Labels: []string{"order-run:double-fire", labelOrderTracking},
+		}},
+		err: fmt.Errorf("wisps tier unavailable"),
+	}
+
+	m := &memoryOrderDispatcher{}
+	hasOpen, err := m.hasOpenWorkStrict(store, "double-fire")
+	if err == nil {
+		t.Fatal("hasOpenWorkStrict err = nil, want conservative failure on partial tier error")
+	}
+	if hasOpen {
+		t.Fatal("hasOpenWorkStrict returned true with partial tier error; caller must fail closed instead")
 	}
 }

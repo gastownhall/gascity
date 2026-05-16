@@ -24,6 +24,32 @@ var (
 	rawDurationIntervalRe = regexp.MustCompile(`(?i)\bINTERVAL\s+\{\{(?:max_age|purge_age|stale_issue_age)\}\}`)
 )
 
+func TestMaintenanceCheckBinariesTreatsGhAsOptional(t *testing.T) {
+	binDir := t.TempDir()
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	if err := os.Symlink(bashPath, filepath.Join(binDir, "bash")); err != nil {
+		t.Fatalf("Symlink(bash): %v", err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "jq"), "#!/bin/sh\nexit 0\n")
+
+	cmd := exec.Command(filepath.Join(exampleDir(), "packs", "maintenance", "doctor", "check-binaries", "run.sh"))
+	cmd.Env = mergeTestEnv(map[string]string{"PATH": binDir})
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("check-binaries failed without gh: %v\n%s", err, out)
+	}
+	text := string(out)
+	if !strings.Contains(text, "all required binaries available (jq)") {
+		t.Fatalf("output = %q, want required jq success", text)
+	}
+	if !strings.Contains(text, "optional gh not found") {
+		t.Fatalf("output = %q, want optional gh warning", text)
+	}
+}
+
 func TestMaintenanceDoltScriptsUseProjectedConnectionTarget(t *testing.T) {
 	tests := []struct {
 		name   string

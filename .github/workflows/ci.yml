@@ -133,8 +133,8 @@ jobs:
     needs: runner-policy
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
-      DOLT_VERSION: "1.86.6"
-      BD_VERSION: "v1.0.3"
+      DOLT_VERSION: "2.0.3"
+      BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -172,8 +172,8 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
-      DOLT_VERSION: "1.86.6"
-      BD_VERSION: "v1.0.3"
+      DOLT_VERSION: "2.0.3"
+      BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -198,8 +198,8 @@ jobs:
       - runner-policy
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
-      DOLT_VERSION: "1.86.6"
-      BD_VERSION: "v1.0.3"
+      DOLT_VERSION: "2.0.3"
+      BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -297,8 +297,8 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     env:
-      DOLT_VERSION: "1.86.6"
-      BD_VERSION: "v1.0.3"
+      DOLT_VERSION: "2.0.3"
+      BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -429,8 +429,8 @@ jobs:
             timeout_minutes: 10
             command: ./scripts/test-integration-shard rest-full-16-of-16
     env:
-      DOLT_VERSION: "1.86.6"
-      BD_VERSION: "v1.0.3"
+      DOLT_VERSION: "2.0.3"
+      BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -898,8 +898,8 @@ jobs:
       - name: Pack compatibility tests
         run: make test-acceptance
     env:
-      DOLT_VERSION: "1.86.6"
-      BD_VERSION: "v1.0.3"
+      DOLT_VERSION: "2.0.3"
+      BD_VERSION: "v1.0.4"
 
   # Dashboard SPA typecheck + tests + build. Runs on every push/PR
   # so TS drift against the spec (e.g. a query param tightening from
@@ -965,7 +965,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install mcp_agent_mail
-        run: python -m pip install --require-hashes -r .github/requirements/mcp-agent-mail.txt
+        run: python -m pip install --no-deps --require-hashes -r .github/requirements/mcp-agent-mail.txt
 
       - name: MCP mail conformance test
         run: make test-mcp-mail

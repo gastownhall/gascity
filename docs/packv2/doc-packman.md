@@ -213,8 +213,9 @@ hint to run `gc import install`.
 
 ### `gc import migrate`
 
-- migration tool for older city layouts
-- not the primary day-2 surface for schema-2 cities
+- deprecated compatibility shim for older city layouts
+- no longer performs in-place rewrites
+- `gc doctor` / `gc doctor --fix` own migration and remediation
 
 ## Fresh clone, cold start, and offline behavior
 
