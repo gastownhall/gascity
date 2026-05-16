@@ -297,11 +297,10 @@ func managedDoltQueryProbeDirect(host, port, user string) error {
 	if err := db.PingContext(ctx); err != nil {
 		return err
 	}
-	rows, err := db.QueryContext(ctx, "SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA")
-	if err != nil {
+	var cnt int64
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA").Scan(&cnt); err != nil {
 		return err
 	}
-	defer rows.Close() //nolint:errcheck
 	return nil
 }
 
