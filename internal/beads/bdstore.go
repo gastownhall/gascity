@@ -36,6 +36,9 @@ var (
 	// bdGraphApplyCommandTimeout bounds atomic graph creation below callers'
 	// outer command budgets so transient Dolt stalls can retry or fall back.
 	bdGraphApplyCommandTimeout = 45 * time.Second
+	// bdSlowTelemetryThreshold is fixed in production via telemetry.BDSlowThreshold:
+	// high enough to avoid normal bd list calls, but below the wrapper timeout.
+	bdSlowTelemetryThreshold = telemetry.BDSlowThreshold
 )
 
 // ExecCommandRunner returns a CommandRunner that uses os/exec to run commands.
@@ -72,6 +75,15 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 		timeout := bdCommandTimeoutFor(name, args)
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
+		var slowTimer *time.Timer
+		if name == "bd" {
+			bdArgs := append([]string(nil), args...)
+			agentID := bdTelemetryAgentID(env)
+			slowTimer = time.AfterFunc(bdSlowTelemetryThreshold, func() {
+				telemetry.RecordBDSlow(ctx, bdArgs, dir, agentID)
+			})
+			defer slowTimer.Stop()
+		}
 		cmd := exec.CommandContext(ctx, name, args...)
 		cmd.WaitDelay = 2 * time.Second
 		prepareCommandForTimeout(cmd)
@@ -115,6 +127,20 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 		trace("done", err)
 		return out, err
 	}
+}
+
+func bdTelemetryAgentID(env map[string]string) string {
+	for _, key := range []string{"GC_ALIAS", "GC_AGENT"} {
+		if env != nil {
+			if value := strings.TrimSpace(env[key]); value != "" {
+				return value
+			}
+		}
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func bdCommandTimeoutFor(name string, args []string) time.Duration {
