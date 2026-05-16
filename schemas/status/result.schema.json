@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["city_name", "city_path", "controller", "suspended", "agents", "rigs", "summary"],
+  "properties": {
+    "city_name": { "type": "string" },
+    "city_path": { "type": "string" },
+    "controller": {
+      "type": "object",
+      "required": ["running"],
+      "properties": {
+        "running": { "type": "boolean" },
+        "pid": { "type": "integer" },
+        "mode": { "type": "string" },
+        "status": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "suspended": { "type": "boolean" },
+    "agents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "qualified_name", "scope", "running", "suspended"],
+        "properties": {
+          "name": { "type": "string" },
+          "qualified_name": { "type": "string" },
+          "scope": { "type": "string" },
+          "running": { "type": "boolean" },
+          "suspended": { "type": "boolean" },
+          "pool": {
+            "type": "object",
+            "properties": {
+              "min": { "type": "integer" },
+              "max": { "type": "integer" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "rigs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "path", "suspended"],
+        "properties": {
+          "name": { "type": "string" },
+          "path": { "type": "string" },
+          "suspended": { "type": "boolean" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["total_agents", "running_agents"],
+      "properties": {
+        "total_agents": { "type": "integer" },
+        "running_agents": { "type": "integer" },
+        "active_sessions": { "type": "integer" },
+        "suspended_sessions": { "type": "integer" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

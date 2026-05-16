@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "id": { "type": "string" },
+      "name": { "type": "string" },
+      "template": { "type": "string" },
+      "provider": { "type": "string" },
+      "state": { "type": "string" },
+      "title": { "type": "string" },
+      "rig": { "type": "string" }
+    },
+    "additionalProperties": true
+  }
+}

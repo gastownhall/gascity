@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["groups", "total", "skipped", "ambiguous_aliases", "instrumentation"],
+  "properties": {
+    "groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "sessions", "crashed", "quarantined", "idle_killed", "drained", "unhealthy_total"],
+        "properties": {
+          "key": { "type": "object", "additionalProperties": true },
+          "sessions": { "type": "integer" },
+          "crashed": { "type": "integer" },
+          "quarantined": { "type": "integer" },
+          "idle_killed": { "type": "integer" },
+          "drained": { "type": "integer" },
+          "unhealthy_total": { "type": "integer" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "total": { "type": "object", "additionalProperties": true },
+    "skipped": { "type": "integer" },
+    "ambiguous_aliases": { "type": "integer" },
+    "instrumentation": { "type": "object", "additionalProperties": true }
+  },
+  "additionalProperties": true
+}

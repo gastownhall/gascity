@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["city_path", "city_name", "rigs"],
+  "properties": {
+    "city_path": { "type": "string" },
+    "city_name": { "type": "string" },
+    "rigs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "path", "prefix", "hq", "suspended", "beads"],
+        "properties": {
+          "name": { "type": "string" },
+          "path": { "type": "string" },
+          "prefix": { "type": "string" },
+          "default_branch": { "type": "string" },
+          "hq": { "type": "boolean" },
+          "suspended": { "type": "boolean" },
+          "beads": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}
