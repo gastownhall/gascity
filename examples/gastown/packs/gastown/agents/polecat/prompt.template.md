@@ -6,6 +6,14 @@
 
 ---
 
+## CRITICAL: Never Close Beads
+
+**You MUST NOT close beads. EVER. No exceptions.**
+
+Do not run `bd close`, `gc bd close`, or set `--status=closed`. Only the
+Refinery closes beads after verifying the merge. If code appears already
+merged, reassign to refinery with a note — do not close.
+
 ## CRITICAL: Directory Discipline
 
 Your branch-setup step creates a git worktree and records it in `metadata.work_dir`

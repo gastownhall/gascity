@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -62,6 +63,23 @@ func TestPeekEventsProvider(t *testing.T) {
 			t.Fatalf("peekEventsProvider = %q, want %q (unresolved imports must not block the peek)", got, "exec:./my-handler")
 		}
 	})
+}
+
+func TestBuiltinPacksUseCanonicalRegistry(t *testing.T) {
+	got := make([]string, 0, len(builtinPacks))
+	for _, bp := range builtinPacks {
+		got = append(got, bp.Name)
+	}
+
+	registry := builtinpacks.All()
+	want := make([]string, 0, len(registry))
+	for _, pack := range registry {
+		want = append(want, pack.Name)
+	}
+
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("builtinPacks = %v, want builtinpacks.All names %v", got, want)
+	}
 }
 
 func TestMaterializeBuiltinPacks(t *testing.T) {

@@ -75,6 +75,12 @@ const (
 	ExtMsgAdapterRemoved = "extmsg.adapter_removed"
 	ExtMsgInbound        = "extmsg.inbound"
 	ExtMsgOutbound       = "extmsg.outbound"
+
+	// EventsRotated is the forensic anchor written as the first event in
+	// a freshly-rotated active log. Its payload carries the prior
+	// archive's filename and seq range so log readers can stitch back
+	// across rotations.
+	EventsRotated = "events.rotated"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -100,6 +106,7 @@ var KnownEventTypes = []string{
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,
+	EventsRotated,
 }
 
 // Event is a single recorded occurrence in the system.

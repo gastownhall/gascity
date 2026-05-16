@@ -139,6 +139,16 @@ purchase more credits or try again at 11:26 PM.
 	require.Equal(t, "rate_limit", blocked.Kind)
 }
 
+func TestClassifyLivePaneBlockedClaudeHitLimit(t *testing.T) {
+	blocked := classifyLivePaneBlocked(`
+⎿  You've hit your limit · resets May 13, 4am (UTC)
+   /extra-usage to finish what you’re working on.
+`)
+
+	require.NotNil(t, blocked)
+	require.Equal(t, "rate_limit", blocked.Kind)
+}
+
 func TestClassifyLivePaneBlockedOpenCodeGeminiCapacity(t *testing.T) {
 	blocked := classifyLivePaneBlocked(`
 gemini is way too hot right now (click to expand) [retrying in 31s attempt 4]

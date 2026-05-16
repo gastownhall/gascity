@@ -47,6 +47,7 @@ const (
 	inferenceProbeManualID    = "probe-live"
 	inferenceProbePromptPath  = "prompts/worker-inference-probe.md"
 	inferenceSlingTarget      = inferenceProbeTemplate
+	inferenceDefaultPoolAgent = "default-pool"
 	namedSessionModeMetadata  = "configured_named_mode"
 	liveBootstrapTimeout      = 90 * time.Second
 	liveControlTimeout        = 45 * time.Second
@@ -284,6 +285,71 @@ func TestWorkerInferenceWorkspaceTask(t *testing.T) {
 		t.FailNow()
 	}
 	reporter.Require(t, workertest.Pass(profileID, workertest.RequirementInferenceWorkspaceTask, "live worker read workspace state and produced the expected machine-checkable output").WithEvidence(taskEvidence))
+}
+
+func TestWorkerInferenceDefaultPoolMolDoWork(t *testing.T) {
+	if testing.Short() {
+		t.Skip("WorkerInference: skipping in short mode")
+	}
+
+	profileID := workertest.ProfileID(liveSetup.Profile)
+	reporter := workertest.NewSuiteReporter(t, "worker-inference-default-pool-mol-do-work", map[string]string{
+		"lane":        "live",
+		"profile":     string(liveSetup.Profile),
+		"provider":    liveSetup.Provider,
+		"auth_source": liveSetup.AuthSource,
+	})
+
+	if liveSetup.SetupError != "" {
+		reporter.Record(workertest.EnvironmentError(profileID, workertest.RequirementInferenceFreshSpawn, liveSetup.SetupError).WithEvidence(map[string]string{
+			"profile":  string(liveSetup.Profile),
+			"provider": liveSetup.Provider,
+		}))
+		t.FailNow()
+	}
+
+	outputRel := fmt.Sprintf("worker-inference-default-mol-do-work-%s.txt", liveSetup.Provider)
+	expected := fmt.Sprintf("%s default pool mol-do-work ok", liveSetup.Provider)
+	prompt := fmt.Sprintf(
+		"Create a file named %s containing exactly %q and nothing else. This is a small verification task for the default pool worker prompt and the mol-do-work formula.",
+		outputRel,
+		expected,
+	)
+
+	run, spawnEvidence, taskEvidence, stage, err := runFreshInitDefaultPoolSlingWork(t, liveSetup.Provider, prompt, outputRel)
+	taskEvidence["expected_output"] = expected
+	if err != nil {
+		requirement := workertest.RequirementInferenceFreshTask
+		evidence := taskEvidence
+		if stage == "spawn" {
+			requirement = workertest.RequirementInferenceFreshSpawn
+			evidence = spawnEvidence
+		}
+		reporter.Record(liveFailureResult(profileID, requirement, err.Error(), evidence))
+		t.FailNow()
+	}
+
+	reporter.Record(workertest.Pass(profileID, workertest.RequirementInferenceFreshSpawn, "default implicit provider pool session spawned for gc sling work").WithEvidence(spawnEvidence))
+	if strings.TrimSpace(run.OutputContents) != expected {
+		taskEvidence["actual_output"] = run.OutputContents
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshTask, "default pool mol-do-work output did not match requested content", taskEvidence))
+		t.FailNow()
+	}
+	if run.WorkBead.Status != "closed" {
+		taskEvidence["work_status"] = run.WorkBead.Status
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshTask, "default pool mol-do-work did not close the routed work bead", taskEvidence))
+		t.FailNow()
+	}
+	if got := metaString(run.WorkBead.Metadata, "gc.outcome"); got != "pass" {
+		taskEvidence["gc_outcome"] = got
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshTask, "default pool mol-do-work did not record gc.outcome=pass on the routed work bead", taskEvidence))
+		t.FailNow()
+	}
+	if got := metaString(run.WorkBead.Metadata, "molecule_id"); got == "" {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceFreshTask, "default pool sling work bead did not retain molecule_id metadata", taskEvidence))
+		t.FailNow()
+	}
+	reporter.Require(t, workertest.Pass(profileID, workertest.RequirementInferenceFreshTask, "default pool prompt completed a mol-do-work assignment and closed the routed bead").WithEvidence(taskEvidence))
 }
 
 func TestWorkerInferenceContinuationSmoke(t *testing.T) {
@@ -1313,6 +1379,10 @@ func runFreshInitSlingWork(t *testing.T, provider, prompt, outputRel string) (in
 	return runFreshInitSlingWorkWithSetup(t, provider, prompt, outputRel, nil)
 }
 
+func runFreshInitDefaultPoolSlingWork(t *testing.T, provider, prompt, outputRel string) (inferenceRun, map[string]string, map[string]string, string, error) {
+	return runFreshInitSlingWorkForTarget(t, provider, inferenceDefaultPoolAgent, prompt, outputRel, nil, false)
+}
+
 func newLiveCity(t *testing.T) *helpers.City {
 	t.Helper()
 
@@ -1389,6 +1459,143 @@ func installLiveProviderCommandOverrideWithArgs(cityDir, provider, command strin
 			fmt.Fprintf(&b, "args_append = [%s]\n", strings.Join(quoted, ", "))
 		}
 	}
+	return os.WriteFile(cityPath, []byte(b.String()), 0o644)
+}
+
+func defaultPoolInferenceProviderName(provider string) string {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		provider = "live"
+	}
+	return provider + "-default-pool-no-skills"
+}
+
+func installNoSkillLiveProviderCommandOverride(cityDir, provider, sourceProvider, command string, processNames, argsAppend []string) error {
+	provider = strings.TrimSpace(provider)
+	sourceProvider = strings.TrimSpace(sourceProvider)
+	command = strings.TrimSpace(command)
+	if provider == "" || command == "" {
+		return nil
+	}
+
+	cityPath := filepath.Join(cityDir, "city.toml")
+	data, err := os.ReadFile(cityPath)
+	if err != nil {
+		return err
+	}
+	header := fmt.Sprintf("[providers.%s]", provider)
+	if strings.Contains(string(data), header) {
+		return fmt.Errorf("city.toml already defines %s", header)
+	}
+
+	var b strings.Builder
+	b.Write(data)
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		b.WriteByte('\n')
+	}
+	promptMode, promptFlag, readyDelay, args := noSkillLiveProviderDefaults(sourceProvider)
+	fmt.Fprintf(&b, "\n[providers.%s]\nbase = \"\"\ncommand = %s\npath_check = %s\nprompt_mode = %s\nready_delay_ms = %d\n", provider, strconv.Quote(command), strconv.Quote(command), strconv.Quote(promptMode), readyDelay)
+	if promptFlag != "" {
+		fmt.Fprintf(&b, "prompt_flag = %s\n", strconv.Quote(promptFlag))
+	}
+	if len(processNames) > 0 {
+		quoted := make([]string, 0, len(processNames))
+		for _, name := range processNames {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			quoted = append(quoted, strconv.Quote(name))
+		}
+		if len(quoted) > 0 {
+			fmt.Fprintf(&b, "process_names = [%s]\n", strings.Join(quoted, ", "))
+		}
+	}
+	args = append(args, argsAppend...)
+	quotedArgs := make([]string, 0, len(args))
+	for _, arg := range args {
+		arg = strings.TrimSpace(arg)
+		if arg == "" {
+			continue
+		}
+		quotedArgs = append(quotedArgs, strconv.Quote(arg))
+	}
+	if len(quotedArgs) > 0 {
+		fmt.Fprintf(&b, "args = [%s]\n", strings.Join(quotedArgs, ", "))
+	}
+	return os.WriteFile(cityPath, []byte(b.String()), 0o644)
+}
+
+func noSkillLiveProviderDefaults(provider string) (promptMode, promptFlag string, readyDelay int, args []string) {
+	switch strings.TrimSpace(provider) {
+	case "codex":
+		return "arg", "", 3000, []string{"--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-5.5", "-c", "model_reasoning_effort=xhigh"}
+	case "gemini":
+		return "arg", "", 5000, []string{"--approval-mode", "yolo"}
+	case "opencode":
+		return "flag", "--prompt", 8000, nil
+	default:
+		return "arg", "", 10000, []string{"--dangerously-skip-permissions", "--effort", "max"}
+	}
+}
+
+func installDefaultPoolInferenceGitBaseline(cityDir string) error {
+	if _, err := exec.LookPath("git"); err != nil {
+		return fmt.Errorf("git not found in PATH: %w", err)
+	}
+	ignorePath := filepath.Join(cityDir, ".gitignore")
+	ignore := strings.Join([]string{
+		".gc/",
+		".runtime/",
+		"",
+	}, "\n")
+	if err := os.WriteFile(ignorePath, []byte(ignore), 0o644); err != nil {
+		return fmt.Errorf("writing .gitignore: %w", err)
+	}
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.name", "Gas City Test"},
+		{"config", "user.email", "gc-test@test.local"},
+		{"add", ".gitignore", "city.toml"},
+		{"commit", "-m", "test: baseline default pool city"},
+	} {
+		cmd := exec.Command("git", append([]string{"-C", cityDir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
+}
+
+func installDefaultPoolInferenceAgent(cityDir, name, provider string) error {
+	name = strings.TrimSpace(name)
+	provider = strings.TrimSpace(provider)
+	if name == "" || provider == "" {
+		return fmt.Errorf("default pool inference agent requires name and provider")
+	}
+	cityPath := filepath.Join(cityDir, "city.toml")
+	data, err := os.ReadFile(cityPath)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(string(data), "\nname = "+strconv.Quote(name)) {
+		return nil
+	}
+	var b strings.Builder
+	b.Write(data)
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		b.WriteByte('\n')
+	}
+	fmt.Fprintf(&b, `
+
+[[agent]]
+name = %q
+provider = %q
+prompt_template = %q
+default_sling_formula = "mol-do-work"
+min_active_sessions = 0
+max_active_sessions = 2
+`, name, provider, citylayout.SystemPacksRoot+"/core/assets/prompts/pool-worker.md")
 	return os.WriteFile(cityPath, []byte(b.String()), 0o644)
 }
 
@@ -2058,9 +2265,17 @@ func startManagedInferenceSession(
 }
 
 func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel string, setupFn func(cityDir string) error) (inferenceRun, map[string]string, map[string]string, string, error) {
+	return runFreshInitSlingWorkForTarget(t, provider, inferenceSlingTarget, prompt, outputRel, setupFn, true)
+}
+
+func runFreshInitSlingWorkForTarget(t *testing.T, provider, slingTarget, prompt, outputRel string, setupFn func(cityDir string) error, installProbe bool) (inferenceRun, map[string]string, map[string]string, string, error) {
 	t.Helper()
 
 	c := newLiveCity(t)
+	slingTarget = strings.TrimSpace(slingTarget)
+	if slingTarget == "" {
+		slingTarget = provider
+	}
 	initArgs := []string{"init", "--skip-provider-readiness"}
 	if provider != "" {
 		initArgs = append(initArgs, "--provider", provider)
@@ -2094,14 +2309,39 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 			"init_out":    strings.TrimSpace(initOut),
 		}, nil, "spawn", fmt.Errorf("seeding live provider state: %w", err)
 	}
-	if err := installInferenceProbeAgent(c.Dir, true); err != nil {
-		return inferenceRun{}, map[string]string{
-			"city_dir":    c.Dir,
-			"binary_path": liveSetup.BinaryPath,
-			"provider":    provider,
-			"output_rel":  outputRel,
-			"init_out":    strings.TrimSpace(initOut),
-		}, nil, "spawn", fmt.Errorf("installing worker inference probe agent: %w", err)
+	if installProbe {
+		if err := installInferenceProbeAgent(c.Dir, true); err != nil {
+			return inferenceRun{}, map[string]string{
+				"city_dir":    c.Dir,
+				"binary_path": liveSetup.BinaryPath,
+				"provider":    provider,
+				"output_rel":  outputRel,
+				"init_out":    strings.TrimSpace(initOut),
+			}, nil, "spawn", fmt.Errorf("installing worker inference probe agent: %w", err)
+		}
+	} else {
+		agentProvider := defaultPoolInferenceProviderName(provider)
+		if err := installNoSkillLiveProviderCommandOverride(c.Dir, agentProvider, provider, liveSetup.BinaryPath, liveSetup.ProcessNames, liveProviderArgsAppend()); err != nil {
+			return inferenceRun{}, map[string]string{
+				"city_dir":       c.Dir,
+				"binary_path":    liveSetup.BinaryPath,
+				"provider":       provider,
+				"agent_provider": agentProvider,
+				"sling_target":   slingTarget,
+				"output_rel":     outputRel,
+				"init_out":       strings.TrimSpace(initOut),
+			}, nil, "spawn", fmt.Errorf("installing no-skill live provider command override: %w", err)
+		}
+		if err := installDefaultPoolInferenceAgent(c.Dir, slingTarget, agentProvider); err != nil {
+			return inferenceRun{}, map[string]string{
+				"city_dir":     c.Dir,
+				"binary_path":  liveSetup.BinaryPath,
+				"provider":     provider,
+				"sling_target": slingTarget,
+				"output_rel":   outputRel,
+				"init_out":     strings.TrimSpace(initOut),
+			}, nil, "spawn", fmt.Errorf("installing default pool inference agent: %w", err)
+		}
 	}
 	if err := installLiveProviderCommandOverrideWithArgs(c.Dir, liveSetup.Provider, liveSetup.BinaryPath, liveSetup.ProcessNames, liveProviderArgsAppend()); err != nil {
 		return inferenceRun{}, map[string]string{
@@ -2112,45 +2352,59 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 			"init_out":    strings.TrimSpace(initOut),
 		}, nil, "spawn", fmt.Errorf("installing live provider command override: %w", err)
 	}
-	if err := setNamedSessionMode(c.Dir, inferenceSlingTarget, "on_demand"); err != nil {
-		return inferenceRun{}, map[string]string{
-			"city_dir":     c.Dir,
-			"binary_path":  liveSetup.BinaryPath,
-			"provider":     provider,
-			"sling_target": inferenceSlingTarget,
-			"output_rel":   outputRel,
-			"init_out":     strings.TrimSpace(initOut),
-		}, nil, "spawn", fmt.Errorf("setting %s named session to on_demand: %w", inferenceSlingTarget, err)
+	if installProbe {
+		if err := setNamedSessionMode(c.Dir, slingTarget, "on_demand"); err != nil {
+			return inferenceRun{}, map[string]string{
+				"city_dir":     c.Dir,
+				"binary_path":  liveSetup.BinaryPath,
+				"provider":     provider,
+				"sling_target": slingTarget,
+				"output_rel":   outputRel,
+				"init_out":     strings.TrimSpace(initOut),
+			}, nil, "spawn", fmt.Errorf("setting %s named session to on_demand: %w", slingTarget, err)
+		}
 	}
 	if err := setAgentSuspended(c.Dir, "mayor", true); err != nil {
 		return inferenceRun{}, map[string]string{
 			"city_dir":     c.Dir,
 			"binary_path":  liveSetup.BinaryPath,
 			"provider":     provider,
-			"sling_target": inferenceSlingTarget,
+			"sling_target": slingTarget,
 			"output_rel":   outputRel,
 			"init_out":     strings.TrimSpace(initOut),
 		}, nil, "spawn", fmt.Errorf("suspending default mayor session: %w", err)
+	}
+	if !installProbe && setupFn == nil {
+		if err := installDefaultPoolInferenceGitBaseline(c.Dir); err != nil {
+			return inferenceRun{}, map[string]string{
+				"city_dir":     c.Dir,
+				"binary_path":  liveSetup.BinaryPath,
+				"provider":     provider,
+				"sling_target": slingTarget,
+				"output_rel":   outputRel,
+				"init_out":     strings.TrimSpace(initOut),
+			}, nil, "spawn", fmt.Errorf("preparing default pool git baseline: %w", err)
+		}
 	}
 	if err := closeLiveSessionsByTemplate(c.Dir, "mayor"); err != nil {
 		return inferenceRun{}, map[string]string{
 			"city_dir":     c.Dir,
 			"binary_path":  liveSetup.BinaryPath,
 			"provider":     provider,
-			"sling_target": inferenceSlingTarget,
+			"sling_target": slingTarget,
 			"output_rel":   outputRel,
 			"init_out":     strings.TrimSpace(initOut),
 		}, nil, "spawn", fmt.Errorf("closing stale mayor sessions before live start: %w", err)
 	}
-	if err := closeLiveSessionsByTemplate(c.Dir, inferenceSlingTarget); err != nil {
+	if err := closeLiveSessionsByTemplate(c.Dir, slingTarget); err != nil {
 		return inferenceRun{}, map[string]string{
 			"city_dir":     c.Dir,
 			"binary_path":  liveSetup.BinaryPath,
 			"provider":     provider,
-			"sling_target": inferenceSlingTarget,
+			"sling_target": slingTarget,
 			"output_rel":   outputRel,
 			"init_out":     strings.TrimSpace(initOut),
-		}, nil, "spawn", fmt.Errorf("closing stale %s sessions before live start: %w", inferenceSlingTarget, err)
+		}, nil, "spawn", fmt.Errorf("closing stale %s sessions before live start: %w", slingTarget, err)
 	}
 	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
 	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
@@ -2180,7 +2434,7 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 		}, nil, "spawn", errors.New(detail)
 	}
 
-	out, err := runGCWithTimeout(liveControlTimeout, liveEnv, c.Dir, "sling", provider, prompt)
+	out, err := runGCWithTimeout(liveControlTimeout, liveEnv, c.Dir, "sling", slingTarget, prompt)
 	workBeadID := parseCreatedBeadID(out)
 	slingTimedOut := isRunTimeout(err)
 	if err != nil && !(slingTimedOut && workBeadID != "") {
@@ -2246,7 +2500,7 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 			return false
 		}
 
-		detected, ok, detectErr := selectInferenceSpawnedSession(sessions, inferenceSlingTarget, func(name string) (bool, error) {
+		detected, ok, detectErr := selectSpawnedSessionForTemplate(sessions, slingTarget, slingTarget, func(name string) (bool, error) {
 			return tmuxSessionLive(c.Dir, name)
 		})
 		if detectErr != nil {
@@ -2341,6 +2595,7 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 	spawnEvidence := map[string]string{
 		"city_dir":      c.Dir,
 		"provider":      provider,
+		"sling_target":  slingTarget,
 		"init_out":      strings.TrimSpace(initOut),
 		"start_out":     strings.TrimSpace(startOut),
 		"work_bead_id":  workBeadID,
@@ -2359,6 +2614,7 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 	taskEvidence := map[string]string{
 		"city_dir":        c.Dir,
 		"provider":        provider,
+		"sling_target":    slingTarget,
 		"init_out":        strings.TrimSpace(initOut),
 		"start_out":       strings.TrimSpace(startOut),
 		"work_bead_id":    workBeadID,
@@ -2367,6 +2623,12 @@ func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel st
 		"session_name":    spawnedSession.SessionName,
 		"session_state":   spawnedSession.State,
 		"nudge_delivery":  hookNudgeDelivery,
+	}
+	if strings.TrimSpace(lastWorkBead.ID) != "" {
+		taskEvidence["work_status"] = lastWorkBead.Status
+		taskEvidence["gc_outcome"] = metaString(lastWorkBead.Metadata, "gc.outcome")
+		taskEvidence["molecule_id"] = metaString(lastWorkBead.Metadata, "molecule_id")
+		taskEvidence["routed_to"] = metaString(lastWorkBead.Metadata, "gc.routed_to")
 	}
 	if trimmed := strings.TrimSpace(hookNudgeOut); trimmed != "" {
 		taskEvidence["hook_nudge_out"] = trimmed
@@ -3693,8 +3955,13 @@ func sessionStateCountsAsRunning(state string) bool {
 }
 
 func selectInferenceSpawnedSession(sessions []sessionJSON, fallbackSessionName string, isSessionLive func(string) (bool, error)) (sessionJSON, bool, error) {
+	return selectSpawnedSessionForTemplate(sessions, inferenceSlingTarget, fallbackSessionName, isSessionLive)
+}
+
+func selectSpawnedSessionForTemplate(sessions []sessionJSON, template, fallbackSessionName string, isSessionLive func(string) (bool, error)) (sessionJSON, bool, error) {
+	template = strings.TrimSpace(template)
 	for _, session := range sessions {
-		if session.Template != inferenceSlingTarget {
+		if strings.TrimSpace(session.Template) != template {
 			continue
 		}
 		if strings.TrimSpace(session.SessionName) == "" {
@@ -3723,7 +3990,7 @@ func selectInferenceSpawnedSession(sessions []sessionJSON, fallbackSessionName s
 		return sessionJSON{}, false, nil
 	}
 	return sessionJSON{
-		Template:    inferenceSlingTarget,
+		Template:    template,
 		Alias:       fallbackSessionName,
 		State:       "active",
 		SessionName: fallbackSessionName,
@@ -5252,6 +5519,7 @@ func classifyLivePaneBlocked(paneTail string) *liveBlockedInteraction {
 			PaneTail: paneTail,
 		}
 	case containsAny(haystack,
+		"hit your limit",
 		"usage limit",
 		"approaching rate limits",
 		"usage limit reached",
