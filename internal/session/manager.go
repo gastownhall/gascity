@@ -145,6 +145,11 @@ type PruneResult struct {
 	WaitNudgeIDs []string
 }
 
+// CloseResult reports session-close cleanup artifacts needed by callers.
+type CloseResult struct {
+	WaitNudgeIDs []string
+}
+
 type acpRouteRegistrar interface {
 	RouteACP(name string)
 	Unroute(name string)
@@ -808,7 +813,14 @@ func (m *Manager) RequestFreshRestart(id string) error {
 
 // Close ends a conversation permanently.
 func (m *Manager) Close(id string) error {
-	return withSessionMutationLock(id, func() error {
+	_, err := m.CloseDetailed(id)
+	return err
+}
+
+// CloseDetailed ends a conversation permanently and reports cleanup artifacts.
+func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
+	result := CloseResult{}
+	err := withSessionMutationLock(id, func() error {
 		b, sessName, err := m.loadSessionBead(id, true)
 		if err != nil {
 			return err
@@ -836,7 +848,14 @@ func (m *Manager) Close(id string) error {
 		// Best-effort stop cleans up any live runtime and allows auto.Provider
 		// to discard stale ACP route entries for suspended sessions as well.
 		_ = m.sp.Stop(sessName)
-		_ = CancelWaits(m.store, id, time.Now().UTC())
+		nudgeIDs, capped, err := CancelWaitsAndCollectNudgeIDs(m.store, id, time.Now().UTC())
+		if err != nil {
+			log.Printf("session %s: closing after wait cancellation lookup failed: %v", id, err)
+		}
+		if capped {
+			log.Printf("session %s: closing after capped wait cancellation lookup", id)
+		}
+		result.WaitNudgeIDs = append(result.WaitNudgeIDs, nudgeIDs...)
 		if err := m.clearWakeAndHoldOverrides(id); err != nil {
 			return err
 		}
@@ -850,6 +869,7 @@ func (m *Manager) Close(id string) error {
 		_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
 		return nil
 	})
+	return result, err
 }
 
 func (m *Manager) clearWakeAndHoldOverrides(id string) error {
@@ -1135,12 +1155,14 @@ func (m *Manager) PruneDetailed(before time.Time) (PruneResult, error) {
 		if !ts.Before(before) {
 			continue
 		}
-		nudgeIDs, err := WaitNudgeIDs(m.store, b.ID)
-		if err != nil {
-			return result, fmt.Errorf("listing wait nudges for session %s: %w", b.ID, err)
+		nudgeIDs, capped, err := CancelWaitsAndCollectNudgeIDs(m.store, b.ID, time.Now().UTC())
+		if err != nil && !beads.IsLookupLimitError(err) {
+			return result, fmt.Errorf("canceling waits for session %s: %w", b.ID, err)
+		}
+		if capped || beads.IsLookupLimitError(err) {
+			log.Printf("session %s: pruning after capped wait nudge lookup: %v", b.ID, err)
 		}
 		result.WaitNudgeIDs = append(result.WaitNudgeIDs, nudgeIDs...)
-		_ = CancelWaits(m.store, b.ID, time.Now().UTC())
 		if err := m.store.Close(b.ID); err != nil {
 			return result, fmt.Errorf("closing session %s: %w", b.ID, err)
 		}

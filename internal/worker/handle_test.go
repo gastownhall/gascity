@@ -1270,6 +1270,32 @@ func TestRuntimeHandleExpandedWorkerSurface(t *testing.T) {
 	}
 }
 
+func TestRuntimeHandleCloseDetailedStopsRuntimeAndReturnsZeroResult(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "stub",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	result, err := handle.CloseDetailed(context.Background())
+	if err != nil {
+		t.Fatalf("CloseDetailed: %v", err)
+	}
+	if len(result.WaitNudgeIDs) != 0 {
+		t.Fatalf("WaitNudgeIDs = %#v, want empty", result.WaitNudgeIDs)
+	}
+	if sp.IsRunning("legacy-worker") {
+		t.Fatal("legacy-worker should be stopped after CloseDetailed")
+	}
+}
+
 func TestRuntimeHandleStateStoppedSkipsPendingProbe(t *testing.T) {
 	sp := runtime.NewFake()
 	sp.SetPendingInteraction("legacy-worker", &runtime.PendingInteraction{

@@ -660,6 +660,7 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	// need wait-state computation.
 	type waitResult struct {
 		set map[string]bool
+		err error
 	}
 	var waitCh chan waitResult
 
@@ -667,7 +668,8 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 		waitCh = make(chan waitResult, 1)
 
 		go func() {
-			waitCh <- waitResult{set: readyWaitSetForList(store)}
+			set, err := readyWaitSetForList(store)
+			waitCh <- waitResult{set: set, err: err}
 		}()
 	}
 
@@ -703,7 +705,11 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 		beadIndex[b.ID] = b
 	}
 
-	readyWaitSet := (<-waitCh).set
+	waitRes := <-waitCh
+	if waitRes.err != nil {
+		fmt.Fprintf(stderr, "gc session list: ready wait indicators degraded: %v\n", waitRes.err) //nolint:errcheck // best-effort stderr
+	}
+	readyWaitSet := waitRes.set
 	cfg := providerCtx.cfg
 	poolDesired := cliPoolDesired(cfg)
 
@@ -988,11 +994,8 @@ func metadataTimeInFuture(raw string, now time.Time) bool {
 	return err == nil && !t.IsZero() && now.Before(t)
 }
 
-func readyWaitSetForList(store beads.Store) map[string]bool {
+func readyWaitSetForList(store beads.Store) (map[string]bool, error) {
 	items, err := loadWaitBeads(store)
-	if err != nil {
-		return nil
-	}
 	ready := make(map[string]bool)
 	for _, item := range items {
 		if item.Metadata["state"] != waitStateReady {
@@ -1003,7 +1006,7 @@ func readyWaitSetForList(store beads.Store) map[string]bool {
 			ready[sessionID] = true
 		}
 	}
-	return ready
+	return ready, err
 }
 
 // cliPoolDesired computes a static pool desired count from config.
@@ -1311,22 +1314,18 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer) int {
 	}
 
 	sp := newSessionProvider()
-	nudgeIDs, err := waitNudgeIDsForSession(store, sessionID)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := handle.Close(context.Background()); err != nil {
+	closeResult, err := handle.CloseDetailed(context.Background())
+	if err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if cityErr == nil {
-		if err := withdrawQueuedWaitNudges(cityPath, nudgeIDs); err != nil {
+		if err := withdrawQueuedWaitNudges(cityPath, closeResult.WaitNudgeIDs); err != nil {
 			fmt.Fprintf(stderr, "gc session close: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 	}

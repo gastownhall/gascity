@@ -584,6 +584,7 @@ provider = "bash"
 
 func TestControllerStateCreateRigPokesReconciler(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
@@ -691,6 +692,7 @@ func TestDetectRigDefaultBranchSkipsEmptyPath(t *testing.T) {
 
 func TestControllerStateCreateRigInitializesStoreBeforePublishing(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
