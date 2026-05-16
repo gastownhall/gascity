@@ -665,32 +665,3 @@ func rigFormulaVarsForScope(cfg *config.City, cityPath string) map[string]string
 	}
 	return map[string]string{}
 }
-
-// allFormulaSearchPaths returns the deduplicated union of formula search
-// paths across city and all rigs. Used by gc formula list to discover
-// every available formula regardless of scope.
-func allFormulaSearchPaths(warningWriter ...io.Writer) []string {
-	cityPath, err := resolveCity()
-	if err != nil {
-		return nil
-	}
-	cfg, err := loadCityConfig(cityPath, warningWriter...)
-	if err != nil {
-		return nil
-	}
-	seen := make(map[string]struct{})
-	var all []string
-	add := func(paths []string) {
-		for _, p := range paths {
-			if _, ok := seen[p]; !ok {
-				seen[p] = struct{}{}
-				all = append(all, p)
-			}
-		}
-	}
-	add(cfg.FormulaLayers.City)
-	for _, layers := range cfg.FormulaLayers.Rigs {
-		add(layers)
-	}
-	return all
-}

@@ -362,12 +362,6 @@ func rigOrderRoots(_ string, _ *config.City, formulaLayers []string) []orders.Sc
 	return roots
 }
 
-// --- gc order list ---
-
-func cmdOrderList(stdout, stderr io.Writer) int {
-	return cmdOrderListWithOptions(stdout, stderr, false)
-}
-
 func cmdOrderListWithOptions(stdout, stderr io.Writer, jsonOutput bool) int {
 	if jsonOutput {
 		cityPath, cfg, aa, code := loadOrdersWithCity(stderr, "gc order list")
