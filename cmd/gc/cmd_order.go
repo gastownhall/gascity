@@ -55,7 +55,8 @@ tick and dispatches work when a trigger opens.`,
 }
 
 func newOrderListCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List available orders",
 		Long: `List all available orders with their trigger type, schedule, and target.
@@ -64,16 +65,19 @@ Scans orders/ directories for flat .toml files defining trigger conditions,
 scheduling parameters, and target pools.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdOrderList(stdout, stderr) != 0 {
+			if cmdOrderListWithOptions(stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON")
+	return cmd
 }
 
 func newOrderShowCmd(stdout, stderr io.Writer) *cobra.Command {
 	var rig string
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "show <name>",
 		Short: "Show details of an order",
@@ -84,7 +88,7 @@ scheduling parameters, check command, target, and source file.
 Use --rig to disambiguate same-name orders in different rigs.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdOrderShow(args[0], rig, stdout, stderr) != 0 {
+			if cmdOrderShowWithOptions(args[0], rig, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
@@ -92,6 +96,7 @@ Use --rig to disambiguate same-name orders in different rigs.`,
 		ValidArgsFunction: completeOrderNames,
 	}
 	cmd.Flags().StringVar(&rig, "rig", "", "rig name to disambiguate same-name orders")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON")
 	_ = cmd.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	return cmd
 }
@@ -360,6 +365,17 @@ func rigOrderRoots(_ string, _ *config.City, formulaLayers []string) []orders.Sc
 // --- gc order list ---
 
 func cmdOrderList(stdout, stderr io.Writer) int {
+	return cmdOrderListWithOptions(stdout, stderr, false)
+}
+
+func cmdOrderListWithOptions(stdout, stderr io.Writer, jsonOutput bool) int {
+	if jsonOutput {
+		cityPath, cfg, aa, code := loadOrdersWithCity(stderr, "gc order list")
+		if code != 0 {
+			return code
+		}
+		return doOrderListJSON(cityPath, cfg, aa, stdout)
+	}
 	aa, code := loadOrders(stderr, "gc order list")
 	if code != 0 {
 		return code
@@ -412,6 +428,116 @@ func doOrderList(aa []orders.Order, stdout io.Writer) int {
 	return 0
 }
 
+type orderListJSON struct {
+	SchemaVersion string                `json:"schema_version"`
+	CityPath      string                `json:"city_path,omitempty"`
+	CityName      string                `json:"city_name,omitempty"`
+	Orders        []orderJSON           `json:"orders"`
+	Summary       orderListSummaryJSON  `json:"summary"`
+	Warnings      []jsonContractWarning `json:"warnings,omitempty"`
+}
+
+type orderListSummaryJSON struct {
+	Count int `json:"count"`
+}
+
+type orderShowJSON struct {
+	SchemaVersion string                `json:"schema_version"`
+	CityPath      string                `json:"city_path,omitempty"`
+	CityName      string                `json:"city_name,omitempty"`
+	Order         orderJSON             `json:"order"`
+	Warnings      []jsonContractWarning `json:"warnings,omitempty"`
+}
+
+type orderJSON struct {
+	Name         string `json:"name"`
+	ScopedName   string `json:"scoped_name"`
+	Rig          string `json:"rig,omitempty"`
+	Description  string `json:"description,omitempty"`
+	Type         string `json:"type"`
+	Formula      string `json:"formula,omitempty"`
+	Exec         string `json:"exec,omitempty"`
+	Trigger      string `json:"trigger"`
+	Interval     string `json:"interval,omitempty"`
+	Schedule     string `json:"schedule,omitempty"`
+	Check        string `json:"check,omitempty"`
+	On           string `json:"on,omitempty"`
+	Target       string `json:"target,omitempty"`
+	Timeout      string `json:"timeout,omitempty"`
+	Enabled      bool   `json:"enabled"`
+	Source       string `json:"source,omitempty"`
+	FormulaLayer string `json:"formula_layer,omitempty"`
+}
+
+func doOrderListJSON(cityPath string, cfg *config.City, aa []orders.Order, stdout io.Writer) int {
+	rows := make([]orderJSON, 0, len(aa))
+	for _, a := range aa {
+		rows = append(rows, orderToJSON(a))
+	}
+	payload := orderListJSON{
+		SchemaVersion: "1",
+		CityPath:      cityPath,
+		CityName:      effectiveJSONCityName(cfg, cityPath),
+		Orders:        rows,
+		Summary:       orderListSummaryJSON{Count: len(rows)},
+	}
+	if err := writeCLIJSONLine(stdout, payload); err != nil {
+		return 1
+	}
+	return 0
+}
+
+func doOrderShowJSON(cityPath string, cfg *config.City, aa []orders.Order, name, rig string, stdout, stderr io.Writer) int {
+	a, ok := findOrder(aa, name, rig)
+	if !ok {
+		fmt.Fprintf(stderr, "gc order show: order %q not found\n", name) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	payload := orderShowJSON{
+		SchemaVersion: "1",
+		CityPath:      cityPath,
+		CityName:      effectiveJSONCityName(cfg, cityPath),
+		Order:         orderToJSON(a),
+	}
+	if err := writeCLIJSONLine(stdout, payload); err != nil {
+		return 1
+	}
+	return 0
+}
+
+func effectiveJSONCityName(cfg *config.City, cityPath string) string {
+	if cfg == nil {
+		return ""
+	}
+	return config.EffectiveCityName(cfg, filepath.Base(cityPath))
+}
+
+func orderToJSON(a orders.Order) orderJSON {
+	typ := "formula"
+	if a.IsExec() {
+		typ = "exec"
+	}
+	return orderJSON{
+		Name:         a.Name,
+		ScopedName:   a.ScopedName(),
+		Rig:          a.Rig,
+		Description:  a.Description,
+		Type:         typ,
+		Formula:      a.Formula,
+		Exec:         a.Exec,
+		Trigger:      a.Trigger,
+		Interval:     a.Interval,
+		Schedule:     a.Schedule,
+		Check:        a.Check,
+		On:           a.On,
+		Target:       a.Pool,
+		Timeout:      a.Timeout,
+		Enabled:      a.IsEnabled(),
+		Source:       a.Source,
+		FormulaLayer: a.FormulaLayer,
+	}
+}
+
 // anyOrderHasRig returns true if any order in the list has a non-empty Rig.
 func anyOrderHasRig(aa []orders.Order) bool {
 	for _, a := range aa {
@@ -425,9 +551,16 @@ func anyOrderHasRig(aa []orders.Order) bool {
 // --- gc order show ---
 
 func cmdOrderShow(name, rig string, stdout, stderr io.Writer) int {
-	_, _, aa, code := loadAllOrdersWithCity(stderr, "gc order show")
+	return cmdOrderShowWithOptions(name, rig, stdout, stderr, false)
+}
+
+func cmdOrderShowWithOptions(name, rig string, stdout, stderr io.Writer, jsonOutput bool) int {
+	cityPath, cfg, aa, code := loadAllOrdersWithCity(stderr, "gc order show")
 	if code != 0 {
 		return code
+	}
+	if jsonOutput {
+		return doOrderShowJSON(cityPath, cfg, aa, name, rig, stdout, stderr)
 	}
 	return doOrderShow(aa, name, rig, stdout, stderr)
 }

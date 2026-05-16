@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -70,6 +71,46 @@ func TestOrderList(t *testing.T) {
 	}
 }
 
+func TestOrderListJSON(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", Formula: "mol-digest", Source: "/city/orders/digest.toml"},
+		{Name: "poll", Trigger: "condition", Check: "bd ready --json", Exec: "scripts/poll.sh", Rig: "frontend"},
+	}
+
+	var stdout bytes.Buffer
+	code := doOrderListJSON("/city", &config.City{Workspace: config.Workspace{Name: "bright-lights"}}, aa, &stdout)
+	if code != 0 {
+		t.Fatalf("doOrderListJSON = %d, want 0", code)
+	}
+
+	var got struct {
+		SchemaVersion string `json:"schema_version"`
+		CityName      string `json:"city_name"`
+		Orders        []struct {
+			Name       string `json:"name"`
+			ScopedName string `json:"scoped_name"`
+			Type       string `json:"type"`
+			Target     string `json:"target"`
+			Enabled    bool   `json:"enabled"`
+		} `json:"orders"`
+		Summary struct {
+			Count int `json:"count"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("order list JSON invalid: %v\n%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || got.CityName != "bright-lights" || got.Summary.Count != 2 {
+		t.Fatalf("payload = %+v", got)
+	}
+	if got.Orders[0].Name != "digest" || got.Orders[0].Type != "formula" || got.Orders[0].Target != "dog" || !got.Orders[0].Enabled {
+		t.Fatalf("first order = %+v", got.Orders[0])
+	}
+	if got.Orders[1].ScopedName != "poll:rig:frontend" || got.Orders[1].Type != "exec" {
+		t.Fatalf("second order = %+v", got.Orders[1])
+	}
+}
+
 func TestOrderListExecType(t *testing.T) {
 	aa := []orders.Order{
 		{Name: "poll", Trigger: "cooldown", Interval: "2m", Exec: "scripts/poll.sh"},
@@ -87,6 +128,61 @@ func TestOrderListExecType(t *testing.T) {
 	}
 	if !strings.Contains(out, "formula") {
 		t.Errorf("stdout missing 'formula' type:\n%s", out)
+	}
+}
+
+func TestOrderShowJSON(t *testing.T) {
+	aa := []orders.Order{{
+		Name:         "digest",
+		Description:  "nightly digest",
+		Formula:      "mol-digest",
+		Trigger:      "cron",
+		Schedule:     "0 3 * * *",
+		Pool:         "dog",
+		Source:       "/city/orders/digest.toml",
+		FormulaLayer: "/city/formulas",
+	}}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderShowJSON("/city", &config.City{Workspace: config.Workspace{Name: "bright-lights"}}, aa, "digest", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderShowJSON = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	var got struct {
+		SchemaVersion string `json:"schema_version"`
+		Order         struct {
+			Name         string `json:"name"`
+			Description  string `json:"description"`
+			Formula      string `json:"formula"`
+			Trigger      string `json:"trigger"`
+			Schedule     string `json:"schedule"`
+			Target       string `json:"target"`
+			FormulaLayer string `json:"formula_layer"`
+		} `json:"order"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("order show JSON invalid: %v\n%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || got.Order.Name != "digest" || got.Order.Target != "dog" || got.Order.FormulaLayer != "/city/formulas" {
+		t.Fatalf("payload = %+v", got)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestOrderShowJSONMissingOrderKeepsHumanError(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := doOrderShowJSON("/city", nil, nil, "missing", "", &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("doOrderShowJSON missing order = 0, want nonzero")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty before global JSON failure wrapper", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), `order "missing" not found`) {
+		t.Fatalf("stderr = %q, want missing order diagnostic", stderr.String())
 	}
 }
 
