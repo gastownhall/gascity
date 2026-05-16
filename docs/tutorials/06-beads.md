@@ -72,6 +72,7 @@ $ bd list
 ○ mc-io4 ● P2 mayor
 ○ mc-xp7 ● P2 Update API docs
 
+Total: 7 issues (7 open, 0 in progress)
 Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred
 ```
 
@@ -130,6 +131,11 @@ $ bd create "Refactor auth module" --type feature
   Priority: P2
   Status: open
 ```
+
+The exact trailing lines under the `Created issue` header (`Priority:`,
+`Status:`) can vary depending on your installed `bd` version — some builds
+only print `Priority:`, others print both. Either is fine; the bead gets
+created identically.
 
 ## Bead lifecycle
 
