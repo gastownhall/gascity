@@ -255,10 +255,12 @@ func (f *fakeRestartHelpers) Systemctl(args ...string) error {
 	f.systemctlArgs = append([]string(nil), args...)
 	return f.systemctlErr
 }
+
 func (f *fakeRestartHelpers) Kill(pid int) error {
 	f.killedPID = pid
 	return f.killErr
 }
+
 func (f *fakeRestartHelpers) Spawn(exe string, argv ...string) error {
 	f.spawnExe = exe
 	f.spawnArgv = append([]string(nil), argv...)

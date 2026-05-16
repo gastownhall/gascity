@@ -19,7 +19,7 @@ func TestHTTPSupervisorClient_StatusRoundTrips(t *testing.T) {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"status":"ok","version":"v0","build_id":"deadbeef-dirty","uptime_sec":12,"cities_total":1,"cities_running":1}`)
+		_, _ = fmt.Fprint(w, `{"status":"ok","version":"v0","build_id":"deadbeef-dirty","uptime_sec":12,"cities_total":1,"cities_running":1}`)
 	}))
 	t.Cleanup(srv.Close)
 
@@ -40,7 +40,7 @@ func TestHTTPSupervisorClient_StatusRoundTrips(t *testing.T) {
 func TestHTTPSupervisorClient_StatusEmptyBuildID(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"status":"ok","version":"v0","uptime_sec":1,"cities_total":0,"cities_running":0}`)
+		_, _ = fmt.Fprint(w, `{"status":"ok","version":"v0","uptime_sec":1,"cities_total":0,"cities_running":0}`)
 	}))
 	t.Cleanup(srv.Close)
 
@@ -59,7 +59,7 @@ func TestHTTPSupervisorClient_StatusEmptyBuildID(t *testing.T) {
 func TestHTTPSupervisorClient_StatusNon200(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, `{"detail":"boom"}`)
+		_, _ = fmt.Fprint(w, `{"detail":"boom"}`)
 	}))
 	t.Cleanup(srv.Close)
 
@@ -78,7 +78,7 @@ func TestHTTPSupervisorClient_StatusNon200(t *testing.T) {
 func TestHTTPSupervisorClient_PingOnSuccessful200(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"status":"ok","version":"v0","uptime_sec":1,"cities_total":0,"cities_running":0}`)
+		_, _ = fmt.Fprint(w, `{"status":"ok","version":"v0","uptime_sec":1,"cities_total":0,"cities_running":0}`)
 	}))
 	t.Cleanup(srv.Close)
 
