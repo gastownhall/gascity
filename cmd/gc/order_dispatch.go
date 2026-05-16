@@ -258,15 +258,13 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			storeKeysForGate = append(storeKeysForGate, orderStoreTargetKey(legacyOrderCityTarget(cityPath, m.cfg)))
 		}
 		scoped := a.ScopedName()
-		if a.Trigger == "condition" {
-			hasOpenWork, err := m.hasOpenWorkInStoresStrict(storesForGate, scoped)
-			if err != nil {
-				logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
-				continue
-			}
-			if hasOpenWork {
-				continue
-			}
+		hasOpenWork, err := m.hasOpenWorkInStoresStrict(storesForGate, scoped)
+		if err != nil {
+			logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
+			continue
+		}
+		if hasOpenWork {
+			continue
 		}
 
 		baseLastRunFn := orders.LastRunAcrossStores(storesForGate...)
@@ -345,7 +343,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 
 		// Skip dispatch if previous work hasn't been processed yet.
-		hasOpenWork, err := m.hasOpenWorkInStoresStrict(storesForGate, scoped)
+		hasOpenWork, err = m.hasOpenWorkInStoresStrict(storesForGate, scoped)
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
 			continue
