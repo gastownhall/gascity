@@ -3047,6 +3047,64 @@ func TestStartupSweepThenBuildDispatcher(t *testing.T) {
 	}
 }
 
+func TestStartupSweepPreservesTriggerEnvFailureMarker(t *testing.T) {
+	store := beads.NewMemStore()
+
+	marker, err := store.Create(beads.Bead{
+		Title:     "order:pg-cooldown",
+		Labels:    []string{"order-run:pg-cooldown", labelOrderTracking, labelTriggerEnvFailed},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	closed, err := sweepOrphanedOrderTrackingRetry(store, 3, time.Millisecond)
+	if err != nil {
+		t.Fatalf("sweepOrphanedOrderTrackingRetry: %v", err)
+	}
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+	gotMarker, err := store.Get(marker.ID)
+	if err != nil {
+		t.Fatalf("Get(marker): %v", err)
+	}
+	if gotMarker.Status != "open" {
+		t.Fatalf("trigger env failure marker status = %q, want open", gotMarker.Status)
+	}
+
+	order := orders.Order{Name: "pg-cooldown", Trigger: "cooldown", Interval: "1s", Exec: "true"}
+	rec := memRecorder{}
+	rec.Record(events.Event{Type: events.OrderFailed, Subject: order.Name, Message: "building trigger env: previous failure"})
+	var stderr bytes.Buffer
+	ad := buildOrderDispatcherFromListExec([]orders.Order{order}, triggerEvaluationFailStore{
+		Store:        store,
+		lastRunOrder: order.Name,
+	}, nil, successfulExec, &rec)
+	mad := ad.(*memoryOrderDispatcher)
+	mad.stderr = &stderr
+
+	mad.dispatch(context.Background(), t.TempDir(), time.Now().Add(2*time.Second))
+	mad.drain(context.Background())
+
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want preserved trigger-env marker to suppress trigger evaluation", stderr.String())
+	}
+	rec.mu.Lock()
+	eventsSnapshot := append([]events.Event(nil), rec.events...)
+	rec.mu.Unlock()
+	failedEvents := 0
+	for _, event := range eventsSnapshot {
+		if event.Type == events.OrderFailed && event.Subject == order.Name {
+			failedEvents++
+		}
+	}
+	if failedEvents != 1 {
+		t.Fatalf("order.failed count after restart-like sweep and dispatch = %d, want 1", failedEvents)
+	}
+}
+
 // TestSweepOrphanedOrderTracking_StampsCloseReason verifies that the
 // startup-time orphan sweep also stamps close_reason. The original
 // callsite passed nil metadata; under validation.on-close=error this

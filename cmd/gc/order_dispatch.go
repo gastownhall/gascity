@@ -894,9 +894,15 @@ func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
 	if len(all) == 0 {
 		return 0, nil
 	}
-	ids := make([]string, len(all))
-	for i, b := range all {
-		ids[i] = b.ID
+	ids := make([]string, 0, len(all))
+	for _, b := range all {
+		if beadLabelsContain(b.Labels, labelTriggerEnvFailed) {
+			continue
+		}
+		ids = append(ids, b.ID)
+	}
+	if len(ids) == 0 {
+		return 0, nil
 	}
 	n, err := store.CloseAll(ids, map[string]string{
 		"close_reason": orphanedOrderTrackingCloseReason,
@@ -905,6 +911,15 @@ func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
 		return n, fmt.Errorf("closing orphaned order-tracking beads: %w", err)
 	}
 	return n, nil
+}
+
+func beadLabelsContain(labels []string, want string) bool {
+	for _, label := range labels {
+		if label == want {
+			return true
+		}
+	}
+	return false
 }
 
 // sweepStaleOrderTracking closes open order-tracking beads whose creation

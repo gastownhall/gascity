@@ -49,6 +49,20 @@ func TestOrderTrackingExecEnvFailedClassifiesAsFailedExec(t *testing.T) {
 	}
 }
 
+func TestOrderTrackingTriggerEnvFailedClassifiesOpenAndClosedAsFailed(t *testing.T) {
+	for _, status := range []string{"open", "closed"} {
+		t.Run(status, func(t *testing.T) {
+			bead := beads.Bead{
+				Status: status,
+				Labels: []string{"order-tracking", "order-run:nightly", "trigger-env-failed"},
+			}
+			if got := orderTrackingStatus(bead); got != "failed" {
+				t.Fatalf("orderTrackingStatus(%s) = %q, want failed", status, got)
+			}
+		})
+	}
+}
+
 func TestParseMonitorTimestampAcceptsRFC3339AndNano(t *testing.T) {
 	base := "2026-03-26T14:06:31+01:00"
 	if got := parseMonitorTimestamp(base); got.IsZero() {

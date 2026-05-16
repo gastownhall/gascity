@@ -526,13 +526,14 @@ func orderTrackingType(orderDef orders.Order, found bool, bead beads.Bead) strin
 }
 
 func orderTrackingStatus(bead beads.Bead) string {
-	if strings.TrimSpace(bead.Status) != "closed" {
-		return "active"
-	}
 	if orderLabelsContainExecFailure(bead.Labels) ||
+		orderLabelsContainTriggerEnvFailure(bead.Labels) ||
 		containsString(bead.Labels, "wisp-canceled") ||
 		containsString(bead.Labels, "wisp-failed") {
 		return "failed"
+	}
+	if strings.TrimSpace(bead.Status) != "closed" {
+		return "active"
 	}
 	return "completed"
 }
@@ -546,6 +547,10 @@ func orderLabelsContainExec(labels []string) bool {
 func orderLabelsContainExecFailure(labels []string) bool {
 	return containsString(labels, "exec-failed") ||
 		containsString(labels, "exec-env-failed")
+}
+
+func orderLabelsContainTriggerEnvFailure(labels []string) bool {
+	return containsString(labels, "trigger-env-failed")
 }
 
 // normalizeFeedLimit clamps a caller-supplied feed limit to a sensible

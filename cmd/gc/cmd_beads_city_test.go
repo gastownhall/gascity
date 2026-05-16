@@ -353,6 +353,70 @@ func TestDoBeadsCityUseExternalValidationFailureDoesNotStopManagedLocalProvider(
 	}
 }
 
+func TestSyncCityManagedPortArtifactsSkipsNonOwnedPostgresCity(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	inheritDir := filepath.Join(t.TempDir(), "frontend")
+	if err := os.MkdirAll(inheritDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeCityEndpointCityConfigWithCompat(t, cityDir, config.DoltConfig{}, []config.Rig{{Name: "frontend", Path: inheritDir, Prefix: "fe"}})
+	writePGScopeFixture(t, cityDir, "")
+	for _, dir := range []string{cityDir, inheritDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "dolt-server.port"), []byte("3311\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	plans := []cityRigEndpointPlan{{
+		Update: true,
+		Rig:    config.Rig{Name: "frontend", Path: inheritDir, Prefix: "fe"},
+		Target: contract.ConfigState{
+			EndpointOrigin: contract.EndpointOriginInheritedCity,
+		},
+	}}
+	err := syncCityManagedPortArtifacts(fsys.OSFS{}, cityDir, contract.ConfigState{
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+	}, plans)
+	if err != nil {
+		t.Fatalf("syncCityManagedPortArtifacts: %v", err)
+	}
+	for _, dir := range []string{cityDir, inheritDir} {
+		if got := strings.TrimSpace(string(mustReadFile(t, filepath.Join(dir, ".beads", "dolt-server.port")))); got != "3311" {
+			t.Fatalf("%s port file = %q, want preserved stale managed port for non-owned city", dir, got)
+		}
+	}
+}
+
+func TestSyncCityManagedPortArtifactsPropagatesOwnedPortReadError(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	writeCityEndpointCityConfigWithCompat(t, cityDir, config.DoltConfig{}, nil)
+	writeRigEndpointMetadata(t, cityDir, "hq")
+	if err := os.MkdirAll(filepath.Dir(managedDoltStatePath(cityDir)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(managedDoltStatePath(cityDir), []byte("not-json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := syncCityManagedPortArtifacts(fsys.OSFS{}, cityDir, contract.ConfigState{
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+	}, nil)
+	if err == nil {
+		t.Fatal("syncCityManagedPortArtifacts error = nil, want malformed managed runtime state error")
+	}
+	if !strings.Contains(err.Error(), "reading managed runtime published port") {
+		t.Fatalf("syncCityManagedPortArtifacts error = %v, want published port context", err)
+	}
+}
+
 func TestDoBeadsCityUseExternalStopFailureKeepsExternalConfig(t *testing.T) {
 	cityDir := t.TempDir()
 	inheritDir := filepath.Join(t.TempDir(), "frontend")
