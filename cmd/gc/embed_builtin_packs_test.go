@@ -148,6 +148,11 @@ func TestMaterializeBuiltinPacks(t *testing.T) {
 		t.Errorf("dolt assets/scripts/runtime.sh not executable: mode %v", info.Mode())
 	}
 
+	healthSchema := filepath.Join(cmds, "health", "schemas", "result.schema.json")
+	if _, err := os.Stat(healthSchema); err != nil {
+		t.Errorf("dolt command health result schema missing: %v", err)
+	}
+
 	// Verify formulas exist.
 	formulasDir := filepath.Join(dir, citylayout.SystemPacksRoot, "dolt", "formulas")
 	if _, err := os.Stat(formulasDir); err != nil {
