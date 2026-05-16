@@ -96,9 +96,7 @@ func LegacyV1SurfaceErrors(cfg *City, source string) []string {
 
 	var errors []string
 	if len(cfg.Agents) > 0 {
-		errors = append(errors, fmt.Sprintf(
-			"%s: unsupported PackV1 [[agent]] tables; move each agent to agents/<name>/agent.toml",
-			source))
+		errors = append(errors, LegacyInlineAgentSurfaceErrors(cfg, source)...)
 	}
 	if len(cfg.Packs) > 0 {
 		errors = append(errors, fmt.Sprintf(
@@ -126,5 +124,26 @@ func LegacyV1SurfaceError(cfg *City, source string) error {
 		return nil
 	}
 	return fmt.Errorf("PackV1 config surfaces are no longer supported:\n  - %s",
+		strings.Join(violations, "\n  - "))
+}
+
+// LegacyInlineAgentSurfaceErrors returns hard-error diagnostics for inline
+// [[agent]] tables. Unlike other fragment-level legacy surfaces, inline agents
+// have a direct portable replacement and do not require machine-local state.
+func LegacyInlineAgentSurfaceErrors(cfg *City, source string) []string {
+	if cfg == nil || len(cfg.Agents) == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"%s: unsupported PackV1 [[agent]] tables; move each agent to agents/<name>/agent.toml",
+		source)}
+}
+
+func LegacyInlineAgentSurfaceError(cfg *City, source string) error {
+	violations := LegacyInlineAgentSurfaceErrors(cfg, source)
+	if len(violations) == 0 {
+		return nil
+	}
+	return fmt.Errorf("PackV1 inline agent tables are no longer supported:\n  - %s",
 		strings.Join(violations, "\n  - "))
 }

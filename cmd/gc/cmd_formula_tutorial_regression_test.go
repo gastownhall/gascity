@@ -275,6 +275,6 @@ func writeTutorialFormulaCity(t *testing.T, formulaName, formulaBody string) str
 	}
 
 	writeFile("city.toml", "[workspace]\nname = \"my-city\"\nprovider = \"claude\"\n")
-	writeFile("formulas/"+formulaName+".formula.toml", formulaBody)
+	writeFile("formulas/"+formulaName+".toml", formulaBody)
 	return cityDir
 }

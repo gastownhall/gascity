@@ -391,6 +391,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 		prov.Warnings = append(prov.Warnings, fragWarnings...)
 		if legacyV1SurfaceWarningsEnabled {
+			if err := LegacyInlineAgentSurfaceError(frag, fragPath); err != nil {
+				return nil, nil, err
+			}
 			prov.Warnings = append(prov.Warnings, DetectLegacyV1Surfaces(frag, fragPath)...)
 			prov.Warnings = append(prov.Warnings, DetectLegacySiteBindingSurfaces(frag, fragPath)...)
 		}

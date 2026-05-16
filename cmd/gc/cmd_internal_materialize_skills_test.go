@@ -154,7 +154,7 @@ func TestInternalMaterializeSkillsCityScopedDirMatchingRigDoesNotMaterializeRigS
 	if err := os.MkdirAll(helperDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(helper): %v", err)
 	}
-	cityToml := fmt.Sprintf(`[workspace]
+	cityToml := `[workspace]
 name = "test-city"
 
 [beads]
@@ -165,7 +165,7 @@ name = "fe"
 
 [rigs.imports.helper]
 source = "./assets/helper"
-`)
+`
 	writeMaterializeTestCityFile(t, cityDir, "city.toml", cityToml)
 	writeMaterializeTestCityFile(t, cityDir, "pack.toml", "[pack]\nname = \"test\"\nversion = \"0.1.0\"\nschema = 2\n")
 	writeMaterializeTestCityFile(t, filepath.Join(cityDir, ".gc"), "site.toml", fmt.Sprintf("[[rig]]\nname = \"fe\"\npath = %q\n", rigDir))

@@ -572,12 +572,12 @@ func TestNonTestLoadCityConfigCallersPassWarningWriter(t *testing.T) {
 func v2CityWithPack(t *testing.T) *fsys.Fake {
 	t.Helper()
 	fs := fsys.NewFake()
-	fs.Files["/city/city.toml"] = []byte(`[workspace]
-name = "test-city"
-`)
+	fs.Files["/city/city.toml"] = []byte("")
 	fs.Files["/city/pack.toml"] = []byte(`[pack]
 name = "test-city"
 schema = 2
+`)
+	fs.Files["/city/.gc/site.toml"] = []byte(`workspace_name = "test-city"
 `)
 	return fs
 }

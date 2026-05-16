@@ -197,7 +197,7 @@ source = "legacy-pack"
 	}
 }
 
-func TestLoadWithIncludesWarnsOnLegacyV1SurfacesInSchema2Fragments(t *testing.T) {
+func TestLoadWithIncludesRejectsInlineAgentInSchema2Fragments(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 include = ["fragments/legacy.toml"]
@@ -212,22 +212,59 @@ schema = 2
 name = "fragment-worker"
 `)
 
+	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err == nil {
+		t.Fatal("LoadWithIncludes succeeded, want hard error for schema-2 fragment inline agent")
+	}
+	for _, want := range []string{
+		"PackV1 inline agent tables are no longer supported",
+		"/city/fragments/legacy.toml: unsupported PackV1 [[agent]] tables",
+		"move each agent to agents/<name>/agent.toml",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want substring %q", err, want)
+		}
+	}
+}
+
+func TestLoadWithIncludesWarnsOnNonAgentLegacyV1SurfacesInSchema2Fragments(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragments/legacy.toml"]
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "schema2-city"
+schema = 2
+`)
+	fs.Files["/city/fragments/legacy.toml"] = []byte(`
+[workspace]
+includes = ["legacy-pack"]
+default_rig_includes = ["default-pack"]
+
+[packs.legacy]
+source = "legacy-pack"
+`)
+
 	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if got := warningsExcludingV1Surfaces(prov.Warnings); len(got) != 0 {
-		t.Fatalf("unexpected unrelated warnings: %v", got)
-	}
-	var found bool
-	for _, warning := range prov.Warnings {
-		if strings.Contains(warning, "/city/fragments/legacy.toml: [[agent]] tables are deprecated") {
-			found = true
-			break
+	for _, want := range []string{
+		"/city/fragments/legacy.toml: [packs] is deprecated",
+		"/city/fragments/legacy.toml: workspace.includes is deprecated",
+		"/city/fragments/legacy.toml: workspace.default_rig_includes is deprecated",
+	} {
+		var found bool
+		for _, warning := range prov.Warnings {
+			if strings.Contains(warning, want) {
+				found = true
+				break
+			}
 		}
-	}
-	if !found {
-		t.Fatalf("warnings = %v, want schema-2 fragment legacy surface guidance", prov.Warnings)
+		if !found {
+			t.Fatalf("warnings = %v, want substring %q", prov.Warnings, want)
+		}
 	}
 }
 
