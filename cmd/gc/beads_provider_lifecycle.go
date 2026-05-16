@@ -1701,7 +1701,9 @@ func providerLifecycleProcessEnvForScopeInitWithError(cityPath, scopeRoot, provi
 	}
 	cityPath = normalizePathForCompare(cityPath)
 	overrides := cityRuntimeEnvMapForCity(cityPath)
+	setExecProjectedBackendEnvEmpty(overrides)
 	overrides["BEADS_DOLT_AUTO_START"] = "0"
+	applyLegacyRigScopeInitDoltEnv(overrides, cityPath, scopeRoot)
 	baseEnv := mergeRuntimeEnv(os.Environ(), overrides)
 	return providerLifecycleProcessEnvFromBase(cityPath, provider, baseEnv), nil
 }
@@ -1715,6 +1717,22 @@ func scopeRuntimeEnvIndependentOfCityProjection(cityPath, scopeRoot string) bool
 		explicitRig = rigConfigForScopeRoot(cityPath, scopeRoot, cfg.Rigs)
 	}
 	return rigRuntimeEnvIndependentOfCityProjection(cityPath, scopeRoot, explicitRig)
+}
+
+func applyLegacyRigScopeInitDoltEnv(env map[string]string, cityPath, scopeRoot string) {
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil || cfg == nil {
+		return
+	}
+	explicitRig := rigConfigForScopeRoot(cityPath, scopeRoot, cfg.Rigs)
+	if explicitRig == nil || (explicitRig.DoltHost == "" && explicitRig.DoltPort == "") {
+		return
+	}
+	clearProjectedPostgresEnv(env)
+	applyLegacyRigExternalTarget(env, *explicitRig)
+	clearProjectedDoltPasswordEnv(env)
+	applyResolvedDoltAuthEnv(env, scopeRoot, "")
+	mirrorBeadsDoltEnv(env)
 }
 
 func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string) []string {

@@ -274,6 +274,18 @@ func TestDoBeadsCityUseExternalStopsManagedLocalProvider(t *testing.T) {
 		EndpointOrigin: contract.EndpointOriginManagedCity,
 		EndpointStatus: contract.EndpointStatusVerified,
 	})
+	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityDir), doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      33123,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: "2026-05-15T00:00:00Z",
+	}); err != nil {
+		t.Fatalf("write managed runtime state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "dolt-server.port"), []byte("33123\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	origVerify := verifyCityExternalEndpoint
 	defer func() { verifyCityExternalEndpoint = origVerify }()
@@ -299,6 +311,12 @@ func TestDoBeadsCityUseExternalStopsManagedLocalProvider(t *testing.T) {
 	ops := strings.TrimSpace(string(data))
 	if ops != "stop||" {
 		t.Fatalf("provider call log = %q, want stop with managed env captured before external rewrite", ops)
+	}
+	if _, err := os.Stat(managedDoltStatePath(cityDir)); !os.IsNotExist(err) {
+		t.Fatalf("published managed runtime state still present, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, ".beads", "dolt-server.port")); !os.IsNotExist(err) {
+		t.Fatalf("managed port mirror still present, stat err = %v", err)
 	}
 }
 
