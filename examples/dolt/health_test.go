@@ -823,6 +823,82 @@ func TestHealthScriptZombieScanExcludesRigLocalServers(t *testing.T) {
 	}
 }
 
+func TestHealthScriptZombieScanExcludesOtherCityManagedServers(t *testing.T) {
+	cityPath := t.TempDir()
+	otherCityPath := filepath.Join(t.TempDir(), "other-city")
+	fakeBin := t.TempDir()
+
+	mainPort := "19911"
+	mainPID := "424211"
+	otherPID := "424212"
+	otherConfig := filepath.Join(otherCityPath, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
+		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\n", mainPID, otherPID))
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
+		fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    -iTCP:%s) echo %s; exit 0 ;;
+  esac
+done
+exit 1
+`, mainPort, mainPID))
+	writeExecutable(t, filepath.Join(fakeBin, "ps"),
+		fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "-p" ] && [ "$3" = "-o" ]; then
+  case "$4" in
+    pid=) printf ' %%s\n' "$2"; exit 0 ;;
+    args=)
+      case "$2" in
+        %s) echo "dolt sql-server"; exit 0 ;;
+        %s) echo "dolt sql-server --config %s"; exit 0 ;;
+      esac
+      ;;
+  esac
+fi
+exit 1
+`, mainPID, otherPID, otherConfig))
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 1\n")
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(
+		filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+mainPort,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+
+	output := string(out)
+	if !strings.Contains(output, `"zombie_count": 0`) {
+		t.Errorf("expected other city Dolt server to be ignored; got:\n%s", output)
+	}
+	if strings.Contains(output, otherPID) {
+		t.Errorf("other city Dolt PID %s should not be in zombie_pids; got:\n%s", otherPID, output)
+	}
+}
+
 // TestHealthScriptJSONAlwaysExitsZero guards the JSON-mode exit
 // contract. Automation consumers (notably the deacon patrol formula)
 // parse the JSON payload and key health decisions off `server.reachable`.

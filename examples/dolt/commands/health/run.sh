@@ -88,6 +88,49 @@ now_ms() {
   esac
 }
 
+# Returns success when a process config path belongs to this city; stale
+# same-city servers should still be reported for operator review.
+path_is_under() (
+  child=$(canonical_path "$1")
+  parent=$(canonical_path "$2")
+  case "$child" in
+    "$parent"|"$parent"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+)
+
+# Extracts the managed Dolt config path from common `dolt sql-server`
+# invocations without evaluating the process command line.
+dolt_sql_server_config_path() (
+  cmd="$1"
+  case "$cmd" in
+    *" --config="*)
+      config=${cmd#*" --config="}
+      ;;
+    *" --config "*)
+      config=${cmd#*" --config "}
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+  set -- $config
+  printf '%s\n' "$1"
+)
+
+# Other Gas City workspaces can run their own healthy managed Dolt
+# servers. They are not zombies for this city and must never be kill targets.
+other_city_managed_dolt() (
+  config=$(dolt_sql_server_config_path "$1")
+  [ -n "$config" ] || return 1
+  case "$config" in
+    */.gc/runtime/packs/dolt/*|*/.gc/runtime/dolt*|*/.gc/dolt*) ;;
+    *) return 1 ;;
+  esac
+  path_is_under "$config" "$GC_CITY_PATH" && return 1
+  return 0
+)
+
 # Find dolt PID by port.
 pid=$(managed_runtime_listener_pid "$GC_DOLT_PORT" || true)
 if [ -n "$pid" ] || managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
@@ -268,6 +311,9 @@ if [ "${GC_HEALTH_SKIP_ZOMBIE_SCAN:-0}" != "1" ]; then
       *sql-server*) ;;
       *) continue ;;
     esac
+    if other_city_managed_dolt "$cmd"; then
+      continue
+    fi
     zombie_count=$((zombie_count + 1))
     zombie_pids="$zombie_pids $p"
   done
