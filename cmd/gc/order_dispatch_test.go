@@ -1581,25 +1581,53 @@ dolt.auto-start: false
 	mad := ad.(*memoryOrderDispatcher)
 	mad.stderr = &stderr
 
-	mad.dispatch(context.Background(), cityDir, time.Now())
+	now := time.Now()
+	mad.dispatch(context.Background(), cityDir, now)
 	mad.drain(context.Background())
 
 	if !rec.hasType(events.OrderFailed) {
 		t.Fatal("missing order.failed event for trigger env failure")
 	}
 	rec.mu.Lock()
-	defer rec.mu.Unlock()
-	if len(rec.events) != 1 {
-		t.Fatalf("recorded events = %#v, want one order.failed event", rec.events)
+	eventsSnapshot := append([]events.Event(nil), rec.events...)
+	rec.mu.Unlock()
+	if len(eventsSnapshot) != 1 {
+		t.Fatalf("recorded events = %#v, want one order.failed event", eventsSnapshot)
 	}
-	if rec.events[0].Subject != "pg-condition" {
-		t.Fatalf("order.failed subject = %q, want pg-condition", rec.events[0].Subject)
+	if eventsSnapshot[0].Subject != "pg-condition" {
+		t.Fatalf("order.failed subject = %q, want pg-condition", eventsSnapshot[0].Subject)
 	}
-	if !strings.Contains(rec.events[0].Message, "building trigger env") {
-		t.Fatalf("order.failed message = %q, want trigger env context", rec.events[0].Message)
+	if !strings.Contains(eventsSnapshot[0].Message, "building trigger env") {
+		t.Fatalf("order.failed message = %q, want trigger env context", eventsSnapshot[0].Message)
 	}
-	if all := trackingBeads(t, store, "order-run:pg-condition"); len(all) != 0 {
-		t.Fatalf("tracking beads = %#v, want none before trigger env is available", all)
+	all := trackingBeads(t, store, "order-run:pg-condition")
+	if len(all) != 1 {
+		t.Fatalf("tracking beads = %#v, want one trigger env failure marker", all)
+	}
+	for _, want := range []string{labelOrderTracking, labelTriggerEnvFailed} {
+		if !slicesContain(all[0].Labels, want) {
+			t.Fatalf("tracking bead labels = %v, want %s", all[0].Labels, want)
+		}
+	}
+
+	mad.dispatch(context.Background(), cityDir, now.Add(10*time.Second))
+	mad.drain(context.Background())
+
+	rec.mu.Lock()
+	eventsSnapshot = append([]events.Event(nil), rec.events...)
+	rec.mu.Unlock()
+	failedEvents := 0
+	for _, event := range eventsSnapshot {
+		if event.Type == events.OrderFailed && event.Subject == "pg-condition" {
+			failedEvents++
+		}
+	}
+	if failedEvents != 1 {
+		t.Fatalf("order.failed count after second dispatch = %d, want 1", failedEvents)
+	}
+	all = trackingBeads(t, store, "order-run:pg-condition")
+	if len(all) != 1 {
+		t.Fatalf("tracking beads after second dispatch = %#v, want original failure marker only", all)
 	}
 }
 

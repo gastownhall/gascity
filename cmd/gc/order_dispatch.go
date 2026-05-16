@@ -22,7 +22,8 @@ import (
 )
 
 const (
-	labelOrderTracking = "order-tracking"
+	labelOrderTracking    = "order-tracking"
+	labelTriggerEnvFailed = "trigger-env-failed"
 
 	orderTrackingSweepOrder                = "order-tracking-sweep"
 	defaultOrderTrackingSweepStaleAfter    = 10 * time.Minute
@@ -256,6 +257,18 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if legacyStore != nil {
 			storeKeysForGate = append(storeKeysForGate, orderStoreTargetKey(legacyOrderCityTarget(cityPath, m.cfg)))
 		}
+		scoped := a.ScopedName()
+		if a.Trigger == "condition" {
+			hasOpenWork, err := m.hasOpenWorkInStoresStrict(storesForGate, scoped)
+			if err != nil {
+				logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
+				continue
+			}
+			if hasOpenWork {
+				continue
+			}
+		}
+
 		baseLastRunFn := orders.LastRunAcrossStores(storesForGate...)
 		var lastRunErr error
 		var lastRunFromCache bool
@@ -285,6 +298,18 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			redacted := redactOrderEnvError(err, os.Environ())
 			msg := fmt.Sprintf("building trigger env: %s", redacted)
 			logDispatchError(m.stderr, "gc: order dispatch: building trigger env for %s: %s", a.ScopedName(), redacted)
+			// Leave this open so the existing open-work gate suppresses repeat
+			// ticks until the normal stale tracking sweep gives the order another try.
+			trackingBead, createErr := store.Create(beads.Bead{
+				Title:     "order:" + scoped,
+				Labels:    []string{"order-run:" + scoped, labelOrderTracking, labelTriggerEnvFailed},
+				Ephemeral: true,
+			})
+			if createErr != nil {
+				logDispatchError(m.stderr, "gc: order dispatch: creating trigger env failure tracking bead for %s: %v", scoped, createErr)
+			} else {
+				m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
+			}
 			m.rec.Record(events.Event{
 				Type:    events.OrderFailed,
 				Actor:   "controller",
@@ -320,7 +345,6 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 
 		// Skip dispatch if previous work hasn't been processed yet.
-		scoped := a.ScopedName()
 		hasOpenWork, err := m.hasOpenWorkInStoresStrict(storesForGate, scoped)
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
