@@ -751,7 +751,7 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 		return fmt.Errorf("verifying session: %w", err)
 	}
 	if !alive {
-		return fmt.Errorf("session %q died during startup", name)
+		return fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, name)
 	}
 
 	// Step 5.5: Run session setup commands and script.

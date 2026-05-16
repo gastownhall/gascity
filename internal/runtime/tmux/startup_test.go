@@ -494,6 +494,9 @@ func TestDoStartSession_SessionDiesDuringStartup(t *testing.T) {
 	if !strings.Contains(err.Error(), "died during startup") {
 		t.Errorf("error = %q, want 'died during startup'", err)
 	}
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Errorf("error = %v, want ErrSessionDiedDuringStartup", err)
+	}
 }
 
 func TestDoStartSession_HasSessionError(t *testing.T) {
