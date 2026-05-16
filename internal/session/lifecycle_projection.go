@@ -562,6 +562,9 @@ func projectWakeCauses(input LifecycleInput, meta map[string]string) []WakeCause
 	if strings.TrimSpace(meta["pending_create_claim"]) == "true" {
 		causes = appendUniqueWakeCause(causes, WakeCausePendingCreate)
 	}
+	if strings.TrimSpace(meta["wake_request"]) == string(WakeCauseExplicit) {
+		causes = appendUniqueWakeCause(causes, WakeCauseExplicit)
+	}
 	if strings.TrimSpace(meta["pin_awake"]) == "true" {
 		causes = appendUniqueWakeCause(causes, WakeCausePinned)
 	}
