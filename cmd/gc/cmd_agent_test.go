@@ -246,7 +246,7 @@ append_fragments = ["footer"]
 	}
 }
 
-func TestLoadCityConfigFSEmitsLegacyV1SurfaceWarnings(t *testing.T) {
+func TestLoadCityConfigFSHardErrorsOnUnsupportedLegacyV1Surfaces(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Dirs["/city/legacy-pack"] = true
 	fs.Files["/city/legacy-pack/pack.toml"] = []byte(`[pack]
@@ -270,22 +270,19 @@ schema = 2
 `)
 
 	var stderr bytes.Buffer
-	cfg, err := loadCityConfigFS(fs, "/city/city.toml", &stderr)
-	if err != nil {
-		t.Fatalf("loadCityConfigFS: %v", err)
+	_, err := loadCityConfigFS(fs, "/city/city.toml", &stderr)
+	if err == nil {
+		t.Fatal("loadCityConfigFS unexpectedly accepted unsupported legacy PackV1 surfaces")
 	}
-	if cfg == nil {
-		t.Fatal("loadCityConfigFS returned nil config")
-	}
-	output := stderr.String()
+	output := err.Error()
 	for _, want := range []string{
-		"[[agent]] tables are deprecated",
-		"[packs] is deprecated",
-		"workspace.includes is deprecated",
-		"workspace.default_rig_includes is deprecated",
+		"unsupported PackV1 [[agent]] tables",
+		"unsupported PackV1 [packs] entries",
+		"unsupported PackV1 workspace.includes",
+		"unsupported PackV1 workspace.default_rig_includes",
 	} {
 		if !strings.Contains(output, want) {
-			t.Fatalf("stderr missing %q: %q", want, output)
+			t.Fatalf("error missing %q: %q", want, output)
 		}
 	}
 }

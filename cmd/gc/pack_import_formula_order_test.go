@@ -18,6 +18,7 @@ func TestPackV2ImportedFormulasAndOrdersVisibleToCityAndRig(t *testing.T) {
 	sidecarPackDir := filepath.Join(cityDir, "packs", "sidecar")
 
 	for _, dir := range []string{
+		filepath.Join(cityDir, ".gc"),
 		rigDir,
 		filepath.Join(opsPackDir, "formulas"),
 		filepath.Join(opsPackDir, "orders"),
@@ -39,14 +40,19 @@ source = "./packs/ops"
 `)
 	writeFile(t, filepath.Join(cityDir, "city.toml"), `
 [workspace]
-name = "testcity"
 
 [[rigs]]
 name = "frontend"
-path = "./frontend"
 
 [rigs.imports.sidecar]
 source = "./packs/sidecar"
+`)
+	writeFile(t, filepath.Join(cityDir, ".gc", "site.toml"), `
+workspace_name = "testcity"
+
+[[rig]]
+name = "frontend"
+path = "./frontend"
 `)
 	writeFile(t, filepath.Join(opsPackDir, "pack.toml"), `
 [pack]

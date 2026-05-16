@@ -1973,23 +1973,27 @@ func writeNamedSessionCityTOML(t *testing.T, dir string) {
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
-	data := []byte(`[workspace]
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte(`[pack]
 name = "test-city"
-
-[beads]
-provider = "file"
-
-[[agent]]
-name = "mayor"
-provider = "codex"
-start_command = "echo"
+schema = 2
 
 [[named_session]]
 template = "mayor"
-`)
-	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`[workspace]
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, ".gc", "site.toml"), []byte(`workspace_name = "test-city"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(.gc/site.toml): %v", err)
+	}
+	writeCatalogFile(t, dir, "agents/mayor/agent.toml", "provider = \"codex\"\nstart_command = \"echo\"\n")
 }
 
 func writePoolSessionCityTOML(t *testing.T, dir string) {

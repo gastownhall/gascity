@@ -350,7 +350,6 @@ func init() {
 	} {
 		content := fmt.Sprintf("formula = %q\nversion = 1\n\n[[steps]]\nid = \"work\"\ntitle = \"Work\"\n", name)
 		_ = os.WriteFile(filepath.Join(dir, name+".toml"), []byte(content), 0o644)
-		_ = os.WriteFile(filepath.Join(dir, name+".formula.toml"), []byte(content), 0o644)
 	}
 	sharedTestFormulaDir = dir
 

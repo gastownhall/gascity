@@ -139,6 +139,8 @@ func LegacyInlineAgentSurfaceErrors(cfg *City, source string) []string {
 		source)}
 }
 
+// LegacyInlineAgentSurfaceError aggregates unsupported inline [[agent]]
+// surfaces into one load-time error for schema=2 enforcement paths.
 func LegacyInlineAgentSurfaceError(cfg *City, source string) error {
 	violations := LegacyInlineAgentSurfaceErrors(cfg, source)
 	if len(violations) == 0 {

@@ -621,8 +621,12 @@ includes = ["../packs/gastown"]
 	if !check.CanFix() {
 		t.Fatal("v2ImportFormatCheck should advertise CanFix()=true")
 	}
-	if got := check.Run(&doctor.CheckContext{CityPath: cityDir}); got.Status != doctor.StatusWarning {
-		t.Fatalf("pre-fix status = %v, want warning", got.Status)
+	got := check.Run(&doctor.CheckContext{CityPath: cityDir})
+	if got.Status != doctor.StatusError {
+		t.Fatalf("pre-fix status = %v, want error", got.Status)
+	}
+	if !strings.Contains(got.FixHint, "replace workspace.includes") {
+		t.Fatalf("FixHint = %q, want actionable workspace.includes guidance", got.FixHint)
 	}
 	if err := check.Fix(&doctor.CheckContext{CityPath: cityDir}); err != nil {
 		t.Fatalf("Fix: %v", err)
@@ -650,11 +654,11 @@ default_rig_includes = ["../packs/default-rig"]
 		t.Fatal("v2DefaultRigImportFormatCheck should advertise CanFix()=true")
 	}
 	got := check.Run(&doctor.CheckContext{CityPath: cityDir})
-	if got.Status != doctor.StatusWarning {
-		t.Fatalf("pre-fix status = %v, want warning", got.Status)
+	if got.Status != doctor.StatusError {
+		t.Fatalf("pre-fix status = %v, want error", got.Status)
 	}
-	if !strings.Contains(got.FixHint, "gc doctor --fix") {
-		t.Fatalf("FixHint = %q, want gc doctor --fix hint", got.FixHint)
+	if !strings.Contains(got.FixHint, "move each entry") {
+		t.Fatalf("FixHint = %q, want actionable default rig import guidance", got.FixHint)
 	}
 	if err := check.Fix(&doctor.CheckContext{CityPath: cityDir}); err != nil {
 		t.Fatalf("Fix: %v", err)

@@ -143,7 +143,7 @@ id = "work"
 title = "Do work"
 type = "task"
 `
-	if err := os.WriteFile(filepath.Join(formulaDir, "wf-test.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(formulaDir, "wf-test.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

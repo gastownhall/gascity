@@ -26,7 +26,7 @@ func setupCity(t *testing.T, name string) string {
 	if err := ensureCityScaffold(dir); err != nil {
 		t.Fatal(err)
 	}
-	toml := "[workspace]\nname = \"" + name + "\"\n\n[[agent]]\nname = \"mayor\"\n"
+	toml := "[workspace]\nname = \"" + name + "\"\n"
 	writeRigAnywhereCityToml(t, dir, toml)
 	return canonicalTestPath(dir)
 }
@@ -37,9 +37,27 @@ func writeRigAnywhereCityToml(t *testing.T, cityPath, toml string) {
 	if err != nil {
 		t.Fatalf("Parse(city.toml fixture): %v", err)
 	}
+	workspaceName := strings.TrimSpace(cfg.Workspace.Name)
+	if workspaceName == "" {
+		workspaceName = filepath.Base(cityPath)
+	}
+	workspacePrefix := strings.TrimSpace(cfg.Workspace.Prefix)
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	packToml := fmt.Sprintf("[pack]\nname = %q\nschema = 2\n", workspaceName)
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte(packToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.PersistWorkspaceSiteBinding(fsys.OSFS{}, cityPath, workspaceName, workspacePrefix); err != nil {
+		t.Fatalf("PersistWorkspaceSiteBinding: %v", err)
+	}
 	if err := config.PersistRigSiteBindings(fsys.OSFS{}, cityPath, cfg.Rigs); err != nil {
 		t.Fatalf("PersistRigSiteBindings: %v", err)
 	}
+	cfg.Workspace.Name = ""
+	cfg.Workspace.Prefix = ""
+	cfg.Agents = nil
 	data, err := cfg.MarshalForWrite()
 	if err != nil {
 		t.Fatalf("MarshalForWrite: %v", err)
@@ -1265,11 +1283,14 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		if err := os.MkdirAll(rigDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		legacy := fmt.Sprintf("[workspace]\nname = \"legacy-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"legacy-rig\"\npath = %q\n", rigDir)
+		legacy := fmt.Sprintf("[workspace]\nname = \"legacy-city\"\n\n[[rigs]]\nname = \"legacy-rig\"\npath = %q\n", rigDir)
 		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(legacy), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Remove(config.SiteBindingPath(cityPath)); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(cityPath, "pack.toml")); err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
 		registerCityForRigResolution(t, gcHome, cityPath, "legacy-city")
@@ -1870,9 +1891,6 @@ include = ["missing.toml"]
 
 [workspace]
 name = "missing-include-broken"
-
-[[agent]]
-name = "missing-include-agent"
 `), 0o644); err != nil {
 			t.Fatal(err)
 		}

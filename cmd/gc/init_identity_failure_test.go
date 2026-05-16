@@ -93,12 +93,7 @@ func TestDoInitFromFileRestoresLegacyIdentityWhenSiteBindingWriteFails(t *testin
 
 func TestDoInitFromDirRestoresLegacyIdentityWhenSiteBindingWriteFails(t *testing.T) {
 	srcDir := t.TempDir()
-	srcCfg := config.DefaultCity("declared-city")
-	srcCfg.Workspace.Prefix = "dc"
-	srcData, err := srcCfg.Marshal()
-	if err != nil {
-		t.Fatalf("marshal source config: %v", err)
-	}
+	srcData := []byte("[workspace]\nname = \"declared-city\"\nprefix = \"dc\"\n")
 	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"), srcData, 0o644); err != nil {
 		t.Fatalf("write source city.toml: %v", err)
 	}

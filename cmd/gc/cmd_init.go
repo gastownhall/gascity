@@ -804,6 +804,15 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 	rewriteInitPromptTemplates(cfg)
 	packCfg, cityCfg := splitInitConfig(cityName, cfg)
 	applyInitPackTemplateExtras(&packCfg, templatePack)
+	if hasInitRigSiteBindings(cityCfg.Rigs) {
+		if err := config.PersistRigSiteBindings(fs, cityPath, cityCfg.Rigs); err != nil {
+			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		for i := range cityCfg.Rigs {
+			cityCfg.Rigs[i].Path = ""
+		}
+	}
 	wrotePack, err := writeInitPackTomlOpts(fs, cityPath, packCfg, preserveExisting)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -860,6 +869,15 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 		skipProviderReadiness: skipProviderReadiness,
 		commandName:           "gc init",
 	})
+}
+
+func hasInitRigSiteBindings(rigs []config.Rig) bool {
+	for _, rig := range rigs {
+		if strings.TrimSpace(rig.Path) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // doInit is the pure logic for "gc init". It creates the city directory

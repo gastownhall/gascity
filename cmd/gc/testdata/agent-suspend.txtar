@@ -16,16 +16,16 @@ stdout 'mayor'
 stdout 'builder'
 stdout 'suspended = true'
 
-# 3. gc agent resume clears suspended (use qualified name).
-exec gc agent resume hello-world/builder
+# 3. gc agent resume clears suspended.
+exec gc agent resume builder
 stdout 'Resumed agent'
 
 # 4. After resume, gc start spawns the agent.
 exec gc start $WORK/city
 stdout 'City started.'
 
-# 5. gc agent suspend sets suspended (use qualified name).
-exec gc agent suspend hello-world/builder
+# 5. gc agent suspend sets suspended.
+exec gc agent suspend builder
 stdout 'Suspended agent'
 
 # 6. gc config show confirms suspended status.
@@ -55,21 +55,19 @@ stderr 'not found'
 stderr 'not found'
 
 -- city/.gc/.keep --
+-- city/.gc/site.toml --
+workspace_name = "bright-lights"
 -- city/rigs/.keep --
 -- city/city.toml --
 [workspace]
-name = "bright-lights"
-
-[[agent]]
-name = "mayor"
-start_command = "echo hello"
-
-[[agent]]
-name = "builder"
-dir = "hello-world"
-suspended = true
-start_command = "echo hello"
 -- city/pack.toml --
 [pack]
 name = "bright-lights"
 schema = 2
+-- city/agents/mayor/agent.toml --
+start_command = "echo hello"
+-- city/agents/builder/agent.toml --
+suspended = true
+start_command = "echo hello"
+-- city/agents/builder/prompt.template.md --
+You are the builder.

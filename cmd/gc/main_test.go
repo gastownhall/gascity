@@ -3685,6 +3685,58 @@ scale_check = "echo 3"
 	}
 }
 
+func TestCmdInitFromTOMLFileMovesRigPathsToSiteBinding(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	src := filepath.Join(dir, "my-config.toml")
+	tomlContent := []byte(`[workspace]
+name = "placeholder"
+
+[[rigs]]
+name = "frontend"
+path = "./frontend"
+`)
+	if err := os.WriteFile(src, tomlContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdInitFromTOMLFileWithOptions(fsys.OSFS{}, src, cityPath, "", &stdout, &stderr, true, false)
+	if code != 0 {
+		t.Fatalf("cmdInitFromTOMLFileWithOptions = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	cityData, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("reading city.toml: %v", err)
+	}
+	if strings.Contains(string(cityData), "path =") {
+		t.Fatalf("city.toml retained rig path:\n%s", cityData)
+	}
+
+	siteData, err := os.ReadFile(filepath.Join(cityPath, ".gc", "site.toml"))
+	if err != nil {
+		t.Fatalf("reading .gc/site.toml: %v", err)
+	}
+	for _, want := range []string{`workspace_name = "bright-lights"`, `name = "frontend"`, `path = "./frontend"`} {
+		if !strings.Contains(string(siteData), want) {
+			t.Fatalf(".gc/site.toml missing %q:\n%s", want, siteData)
+		}
+	}
+
+	if _, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); err != nil {
+		t.Fatalf("loading initialized config: %v", err)
+	}
+}
+
 func TestCmdInitFromTOMLFileNotFound(t *testing.T) {
 	f := fsys.NewFake()
 	var stderr bytes.Buffer

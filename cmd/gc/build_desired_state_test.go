@@ -1501,15 +1501,20 @@ source = "./assets/sidecar"
 `,
 		filepath.Join(cityPath, "city.toml"): `
 [workspace]
-name = "import-regression"
 provider = "claude"
 
 [[rigs]]
 name = "repo"
-path = "./repo"
 
 [rigs.imports.gs]
 source = "./assets/sidecar"
+`,
+		filepath.Join(cityPath, ".gc", "site.toml"): `
+workspace_name = "import-regression"
+
+[[rig]]
+name = "repo"
+path = "./repo"
 `,
 		filepath.Join(cityPath, "assets", "sidecar", "pack.toml"): `
 [pack]

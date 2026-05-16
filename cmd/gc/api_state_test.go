@@ -1561,11 +1561,11 @@ func TestControllerStateOrdersIncludeVisibleCityRoot(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 
 	cityDir := t.TempDir()
-	autoDir := filepath.Join(cityDir, "orders", "digest")
+	autoDir := filepath.Join(cityDir, "orders")
 	if err := os.MkdirAll(autoDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(autoDir, "order.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(autoDir, "digest.toml"), []byte(`
 [order]
 formula = "mol-digest"
 trigger = "cooldown"

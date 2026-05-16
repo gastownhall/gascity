@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -357,12 +359,7 @@ func TestCompleteOrderNames_DistinguishesSameNameRigOrders(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	writeFile(t, filepath.Join(cityPath, "pack.toml"), `
-[pack]
-name = "orders-city"
-schema = 2
-`)
-	writeFile(t, filepath.Join(cityPath, "city.toml"), `
+	writeCompletionCity(t, cityPath, `
 [workspace]
 name = "orders-city"
 
@@ -438,7 +435,66 @@ func writeCompletionCity(t *testing.T, cityPath, cityToml string) {
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+	cfg, err := config.Parse([]byte(cityToml))
+	if err != nil {
+		t.Fatalf("Parse(city.toml fixture): %v", err)
+	}
+	workspaceName := strings.TrimSpace(cfg.Workspace.Name)
+	if workspaceName == "" {
+		workspaceName = filepath.Base(cityPath)
+	}
+	workspacePrefix := strings.TrimSpace(cfg.Workspace.Prefix)
+	packToml := fmt.Sprintf("[pack]\nname = %q\nschema = 2\n", workspaceName)
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte(packToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.PersistWorkspaceSiteBinding(fsys.OSFS{}, cityPath, workspaceName, workspacePrefix); err != nil {
+		t.Fatalf("PersistWorkspaceSiteBinding: %v", err)
+	}
+	if err := config.PersistRigSiteBindings(fsys.OSFS{}, cityPath, cfg.Rigs); err != nil {
+		t.Fatalf("PersistRigSiteBindings: %v", err)
+	}
+	for _, agent := range cfg.Agents {
+		writeCompletionAgentToml(t, cityPath, agent)
+	}
+	cfg.Workspace.Name = ""
+	cfg.Workspace.Prefix = ""
+	cfg.Agents = nil
+	data, err := cfg.MarshalForWrite()
+	if err != nil {
+		t.Fatalf("MarshalForWrite: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeCompletionAgentToml(t *testing.T, cityPath string, agent config.Agent) {
+	t.Helper()
+	if strings.TrimSpace(agent.Name) == "" {
+		return
+	}
+	agentDir := filepath.Join(cityPath, "agents", agent.Name)
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	if agent.Provider != "" {
+		fmt.Fprintf(&b, "provider = %q\n", agent.Provider)
+	}
+	if agent.Session != "" {
+		fmt.Fprintf(&b, "session = %q\n", agent.Session)
+	}
+	if agent.Dir != "" {
+		fmt.Fprintf(&b, "dir = %q\n", agent.Dir)
+	}
+	if agent.WorkDir != "" {
+		fmt.Fprintf(&b, "work_dir = %q\n", agent.WorkDir)
+	}
+	if agent.StartCommand != "" {
+		fmt.Fprintf(&b, "start_command = %q\n", agent.StartCommand)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte(b.String()), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
