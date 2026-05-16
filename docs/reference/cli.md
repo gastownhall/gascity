@@ -2816,6 +2816,7 @@ gc start
 |------|------|---------|-------------|
 | `-n`, `--dry-run` | bool |  | preview what agents would start without starting them |
 | `--no-auto-restart` | bool |  | detect supervisor binary drift but do not auto-restart; exits non-zero on drift |
+| `--verbose` | bool |  | disable warning deduplication and print every supervisor warning |
 
 ## gc status
 

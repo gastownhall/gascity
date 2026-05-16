@@ -21,9 +21,12 @@ import (
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 )
+
+var startDeprecatedOrderWarningDedup = logutil.NewDedup(logutil.DefaultDedupCapacity)
 
 const (
 	labelOrderTracking    = "order-tracking"
@@ -180,7 +183,11 @@ func buildOrderDispatcher(cityPath string, cfg *config.City, rec events.Recorder
 }
 
 func buildOrderDispatcherWithSnapshot(cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer, cmdName string) (orderDispatcher, orderSetSnapshot) {
-	snapshot, err := scanOrderSetSnapshotFS(fsys.OSFS{}, cityPath, cfg, stderr, cmdName)
+	snapshot, err := scanOrderSetSnapshotFSWithOptions(fsys.OSFS{}, cityPath, cfg, stderr, cmdName, orders.ScanOptions{
+		DeprecatedPathWarningDedup:    startDeprecatedOrderWarningDedup,
+		DeprecatedPathWarningWriter:   stderr,
+		VerboseDeprecatedPathWarnings: startVerboseMode,
+	})
 	if err != nil {
 		logDispatchError(stderr, "%s: %v", cmdName, err)
 		return nil, orderSetSnapshot{}
@@ -189,10 +196,14 @@ func buildOrderDispatcherWithSnapshot(cityPath string, cfg *config.City, rec eve
 }
 
 func scanOrderSetSnapshotFS(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string) (orderSetSnapshot, error) {
+	return scanOrderSetSnapshotFSWithOptions(fs, cityPath, cfg, stderr, cmdName, orders.ScanOptions{})
+}
+
+func scanOrderSetSnapshotFSWithOptions(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string, opts orders.ScanOptions) (orderSetSnapshot, error) {
 	if cfg == nil {
 		cfg = &config.City{}
 	}
-	allAA, err := scanAllOrdersFS(fs, cityPath, cfg, stderr, cmdName)
+	allAA, err := scanAllOrdersFSWithOptions(fs, cityPath, cfg, stderr, cmdName, opts)
 	if err != nil {
 		return orderSetSnapshot{}, err
 	}

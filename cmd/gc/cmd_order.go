@@ -257,17 +257,25 @@ func loadActiveOrdersForCity(cityPath string, cfg *config.City, stderr io.Writer
 }
 
 func scanAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, error) {
-	return scanAllOrdersFS(fsys.OSFS{}, cityPath, cfg, stderr, cmdName)
+	return scanAllOrdersWithOptions(cityPath, cfg, stderr, cmdName, orders.ScanOptions{})
 }
 
 func scanAllOrdersFS(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, error) {
+	return scanAllOrdersFSWithOptions(fs, cityPath, cfg, stderr, cmdName, orders.ScanOptions{})
+}
+
+func scanAllOrdersWithOptions(cityPath string, cfg *config.City, stderr io.Writer, cmdName string, opts orders.ScanOptions) ([]orders.Order, error) {
+	return scanAllOrdersFSWithOptions(fsys.OSFS{}, cityPath, cfg, stderr, cmdName, opts)
+}
+
+func scanAllOrdersFSWithOptions(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string, opts orders.ScanOptions) ([]orders.Order, error) {
 	if cfg == nil {
 		cfg = &config.City{}
 	}
 	// City-level orders.
 	cRoots := cityOrderRoots(cityPath, cfg)
 	cLayers := cityFormulaLayers(cityPath, cfg)
-	cityAA, err := orders.ScanRoots(fs, cRoots, cfg.Orders.Skip)
+	cityAA, err := orders.ScanRootsWithOptions(fs, cRoots, cfg.Orders.Skip, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +287,7 @@ func scanAllOrdersFS(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Wr
 		if len(exclusive) == 0 {
 			continue
 		}
-		ra, err := orders.ScanRoots(fs, rigOrderRoots(cityPath, cfg, exclusive), cfg.Orders.Skip)
+		ra, err := orders.ScanRootsWithOptions(fs, rigOrderRoots(cityPath, cfg, exclusive), cfg.Orders.Skip, opts)
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: rig %s: %v\n", cmdName, rigName, err) //nolint:errcheck // best-effort stderr
 			continue
