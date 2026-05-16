@@ -167,6 +167,13 @@ func configureFSPressureForTests() {
 }
 
 func TestMain(m *testing.M) {
+	testTempRoot, err := os.MkdirTemp("", "gascity-cmd-gc-test-*")
+	if err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
+		panic(err)
+	}
 	gcHome, err := os.MkdirTemp("", "gascity-gc-home-*")
 	if err != nil {
 		panic(err)
@@ -185,7 +192,6 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	defer func() { _ = os.RemoveAll(providerStubDir) }()
 	pathValue := providerStubDir
 	if existingPath := os.Getenv("PATH"); existingPath != "" {
 		pathValue += string(os.PathListSeparator) + existingPath
@@ -195,7 +201,7 @@ func TestMain(m *testing.M) {
 	}
 	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
-	testscript.Main(m, map[string]func(){
+	testscript.Main(newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir), map[string]func(){
 		"gc": func() {
 			configureTestscriptEnvDefaults()
 			os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))

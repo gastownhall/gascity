@@ -1503,7 +1503,10 @@ func TestRequireWorkflowServeFollowSessionEnvAllowsManagedSession(t *testing.T) 
 }
 
 func TestRunWorkflowServeReturnsControlErrorWithoutQuarantine(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
