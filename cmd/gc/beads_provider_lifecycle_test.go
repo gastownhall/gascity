@@ -10429,10 +10429,43 @@ esac
 		t.Fatal(err)
 	}
 
+	realGC := currentGCBinaryForTests(t)
+	gcWrapper := filepath.Join(binDir, "gc-wrapper")
+	gcWrapperScript := fmt.Sprintf(`#!/bin/sh
+set -eu
+real_gc=%q
+if [ "${1:-}" = "dolt-state" ] && [ "${2:-}" = "ensure-project-id" ]; then
+    metadata=""
+    shift 2
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --metadata)
+                metadata="$2"
+                shift 2
+                ;;
+            --city|--host|--port|--user|--database)
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    if [ -n "$metadata" ] && [ -f "$metadata" ]; then
+        python3 -c 'import json, pathlib, sys; path = pathlib.Path(sys.argv[1]); data = json.loads(path.read_text()); data["project_id"] = "stubbed-project-id"; path.write_text(json.dumps(data, indent=2) + "\n")' "$metadata"
+    fi
+    exit 0
+fi
+exec "$real_gc" "$@"
+`, realGC)
+	if err := os.WriteFile(gcWrapper, []byte(gcWrapperScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
 	cmd := exec.Command(script, "init", rigPath, "fe", "fe")
 	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
 		"GC_CITY_PATH="+cityPath,
-		"GC_BIN="+currentGCBinaryForTests(t),
+		"GC_BIN="+gcWrapper,
 		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
 	)...)
 	out, err := cmd.CombinedOutput()
