@@ -10,7 +10,7 @@ package integration
 // issue_prefix so that `bd config get issue_prefix` returns the derived prefix
 // and rig-scoped bead creation works without a "database not initialized" error.
 //
-// This test is RED against current code and goes GREEN once the fix is in.
+// This test passes against current main (post-#1477) and guards against future regressions of #1670.
 
 import (
 	"fmt"
