@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -1202,4 +1203,111 @@ func writeEmpty(path string) error {
 		return err
 	}
 	return f.Close()
+}
+
+// mustOpenSiblingLock opens a separate file descriptor against path and
+// takes a non-blocking exclusive flock on it. The returned *os.File is
+// the caller's to close (which also releases the flock).
+func mustOpenSiblingLock(t *testing.T, path string) *os.File {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("open sibling: %v", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		t.Fatalf("sibling flock: %v", err)
+	}
+	return f
+}
+
+func TestFileRecorderFlockTimeoutFiresWithinBudget(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	sib := mustOpenSiblingLock(t, path)
+	defer func() {
+		_ = syscall.Flock(int(sib.Fd()), syscall.LOCK_UN)
+		_ = sib.Close()
+	}()
+
+	start := time.Now()
+	rec.Record(Event{Type: "test"})
+	elapsed := time.Since(start)
+
+	if elapsed < recordFlockTimeout {
+		t.Errorf("elapsed = %v, want >= %v", elapsed, recordFlockTimeout)
+	}
+	if elapsed >= recordFlockTimeout+100*time.Millisecond {
+		t.Errorf("elapsed = %v, want < %v", elapsed, recordFlockTimeout+100*time.Millisecond)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "events: lock: timed out") {
+		t.Errorf("stderr = %q, want substring %q", out, "events: lock: timed out")
+	}
+	if !strings.Contains(out, "waiting on flock at") {
+		t.Errorf("stderr = %q, want substring %q", out, "waiting on flock at")
+	}
+	if !strings.Contains(out, path) {
+		t.Errorf("stderr = %q, want substring %q", out, path)
+	}
+}
+
+func TestFileRecorderFlockSucceedsAfterShortContention(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	sib := mustOpenSiblingLock(t, path)
+	time.AfterFunc(50*time.Millisecond, func() {
+		_ = syscall.Flock(int(sib.Fd()), syscall.LOCK_UN)
+		_ = sib.Close()
+	})
+
+	start := time.Now()
+	rec.Record(Event{Type: "test"})
+	elapsed := time.Since(start)
+
+	if elapsed < 40*time.Millisecond {
+		t.Errorf("elapsed = %v, want >= %v", elapsed, 40*time.Millisecond)
+	}
+	if elapsed >= recordFlockTimeout {
+		t.Errorf("elapsed = %v, want < %v", elapsed, recordFlockTimeout)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestFileRecorderFlockSucceedsWithoutContention(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	start := time.Now()
+	rec.Record(Event{Type: "test"})
+	elapsed := time.Since(start)
+
+	if elapsed >= 50*time.Millisecond {
+		t.Errorf("elapsed = %v, want < %v", elapsed, 50*time.Millisecond)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
 }

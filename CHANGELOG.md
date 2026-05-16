@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `events.FileRecorder.Record` no longer blocks indefinitely on `flock` when
+  a prior `gc event emit` process died holding the lock. Acquisition now
+  uses non-blocking `LOCK_EX|LOCK_NB` retried at a 5 ms cadence for up to
+  250 ms total, then logs `events: lock: timed out after 250ms waiting on
+  flock at <path>` to stderr and returns without recording. The deferred
+  `LOCK_UN` still runs after a successful acquire; the happy path and
+  non-`EWOULDBLOCK` flock-error path are unchanged. Operators previously
+  saw hundreds of stuck `gc event emit` processes after a `SIGKILL` of the
+  holder; the new bounded wait drops the stuck event recorder instead of
+  stacking processes.
 - Kiro provider launch behavior is now explicit in release notes and provider
   docs: the built-in Kiro provider starts `kiro-cli` with `chat`,
   `--no-interactive`, `--agent gascity`, and `--trust-all-tools` by default.
