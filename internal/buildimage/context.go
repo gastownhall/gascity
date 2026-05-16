@@ -149,6 +149,17 @@ func copyDirFiltered(src, dst string) error {
 			return os.MkdirAll(target, info.Mode())
 		}
 
+		if info.Mode()&os.ModeSymlink != 0 {
+			resolved, err := os.Stat(path)
+			if err != nil {
+				return nil // broken symlink, skip
+			}
+			if resolved.IsDir() {
+				return nil // skip symlinks to directories
+			}
+			return copyFile(path, target, resolved.Mode())
+		}
+
 		return copyFile(path, target, info.Mode())
 	})
 }

@@ -191,6 +191,38 @@ prompt_template = "prompts/mayor.md"
 	assertFileExists(t, outputDir, "workspace/prompts/mayor.md")
 }
 
+func TestAssembleContextSkipsSymlinkedDirs(t *testing.T) {
+	cityDir := t.TempDir()
+	outputDir := t.TempDir()
+	targetDir := t.TempDir()
+
+	writeFile(t, cityDir, "city.toml", `[workspace]
+name = "test-city"
+`)
+	// Create a symlink to a directory (simulates .claude/skills/core.gc-agents).
+	writeFile(t, targetDir, "skill.md", "# skill")
+	if err := os.Symlink(targetDir, filepath.Join(cityDir, ".claude", "skills", "core.gc-agents")); err != nil {
+		// Need to create the parent first.
+		if err2 := os.MkdirAll(filepath.Join(cityDir, ".claude", "skills"), 0o755); err2 != nil {
+			t.Fatal(err2)
+		}
+		if err2 := os.Symlink(targetDir, filepath.Join(cityDir, ".claude", "skills", "core.gc-agents")); err2 != nil {
+			t.Fatal(err2)
+		}
+	}
+
+	err := AssembleContext(Options{
+		CityPath:  cityDir,
+		OutputDir: outputDir,
+	})
+	if err != nil {
+		t.Fatalf("AssembleContext: %v", err)
+	}
+
+	// Symlinked directory should be skipped, not cause an error.
+	assertFileNotExists(t, outputDir, "workspace/.claude/skills/core.gc-agents")
+}
+
 func TestAssembleContextRequiresCityPath(t *testing.T) {
 	err := AssembleContext(Options{OutputDir: t.TempDir()})
 	if err == nil {
