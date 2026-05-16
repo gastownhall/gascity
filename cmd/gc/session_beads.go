@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -113,6 +114,13 @@ func pendingPoolSessionName(template, instanceToken string) string {
 	if base == "" {
 		base = "pool"
 	}
+	// SanitizeQualifiedNameForSession encodes "." → "__" and "/" → "--"
+	// so the result satisfies tmux's session-name validator
+	// (^[a-zA-Z0-9_-]+$ — no dots, no slashes). Pack-imported templates
+	// like "gastown.dog" otherwise produce names with a literal dot that
+	// fail validation and wedge the pool at the create-session step. See
+	// gastownhall/gascity#2205.
+	base = agent.SanitizeQualifiedNameForSession(base)
 	token := strings.TrimSpace(instanceToken)
 	if token == "" {
 		token = session.NewInstanceToken()
