@@ -1350,6 +1350,14 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 	}
 	resolveRigPaths(cityPath, rigs)
 	cityUsesBd := scopeUsesManagedBdStoreContract(cityPath, cityPath)
+	cityUsesPostgres := false
+	if cityUsesBd {
+		usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, cityPath)
+		if err != nil {
+			return fmt.Errorf("classifying city backend: %w", err)
+		}
+		cityUsesPostgres = usesPostgres
+	}
 	anyRigUsesBd := false
 	for _, rig := range rigs {
 		if rigUsesManagedBdStoreContract(cityPath, rig) {
@@ -1371,17 +1379,19 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 		return err
 	}
 	managedPort := ""
-	if cityState.EndpointOrigin == contract.EndpointOriginManagedCity {
+	if cityState.EndpointOrigin == contract.EndpointOriginManagedCity && !cityUsesPostgres {
 		managedPort = currentDoltPort(cityPath)
 	}
 	if cityUsesBd {
 		if err := normalizeScopeDoltConfig(cityPath, cityState); err != nil {
 			return err
 		}
-		if managedPort != "" {
-			writeDoltPortFile(cityPath, managedPort, "city", warn)
-		} else {
-			removeDoltPortFile(cityPath)
+		if !cityUsesPostgres {
+			if managedPort != "" {
+				writeDoltPortFile(cityPath, managedPort, "city", warn)
+			} else {
+				removeDoltPortFile(cityPath)
+			}
 		}
 	} else {
 		removeDoltPortFile(cityPath)
@@ -1694,6 +1704,9 @@ func providerLifecycleProcessEnvWithError(cityPath, provider string) ([]string, 
 func providerLifecycleProcessEnvForScopeInitWithError(cityPath, scopeRoot, provider string) ([]string, error) {
 	env, err := providerLifecycleProcessEnvWithError(cityPath, provider)
 	if err == nil {
+		if providerUsesBdStoreContract(provider) && scopeRuntimeEnvIndependentOfCityProjection(cityPath, scopeRoot) {
+			env = providerLifecycleIndependentScopeInitEnv(cityPath, scopeRoot, env)
+		}
 		return env, nil
 	}
 	if !providerUsesBdStoreContract(provider) || !cityPostgresProjectionErrorCanBeBypassed(cityPath, err) || !scopeRuntimeEnvIndependentOfCityProjection(cityPath, scopeRoot) {
@@ -1706,6 +1719,14 @@ func providerLifecycleProcessEnvForScopeInitWithError(cityPath, scopeRoot, provi
 	applyLegacyRigScopeInitDoltEnv(overrides, cityPath, scopeRoot)
 	baseEnv := mergeRuntimeEnv(os.Environ(), overrides)
 	return providerLifecycleProcessEnvFromBase(cityPath, provider, baseEnv), nil
+}
+
+func providerLifecycleIndependentScopeInitEnv(cityPath, scopeRoot string, env []string) []string {
+	cityPath = normalizePathForCompare(cityPath)
+	overrides := map[string]string{}
+	applyLegacyRigScopeInitDoltEnv(overrides, cityPath, scopeRoot)
+	ensureProjectedPostgresEnvExplicit(overrides)
+	return overlayEnvEntries(env, overrides)
 }
 
 func scopeRuntimeEnvIndependentOfCityProjection(cityPath, scopeRoot string) bool {
