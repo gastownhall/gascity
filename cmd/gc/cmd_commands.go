@@ -93,6 +93,7 @@ func addDiscoveredLeaf(root *cobra.Command, entry config.DiscoveredCommand, city
 		Use:                leafWord,
 		Short:              entry.Description,
 		Long:               readDiscoveredHelp(entry),
+		Annotations:        map[string]string{jsonSchemaDirAnnotation: filepath.Join(entry.SourceDir, "schemas")},
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if discoveredHelpRequested(args) {

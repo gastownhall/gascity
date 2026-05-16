@@ -114,6 +114,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	root.SetArgs(args)
 	root.SetOut(stdout)
 	root.SetErr(stderr)
+	if handled, code := handleJSONSchemaRequest(root, args, stdout); handled {
+		return code
+	}
 	if err := root.Execute(); err != nil {
 		return commandExitCode(err)
 	}
@@ -150,6 +153,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		"path to the city directory (default: walk up from cwd)")
 	root.PersistentFlags().StringVar(&rigFlag, "rig", "",
 		"rig name or path (default: discover from cwd)")
+	configureJSONSchemaFlag(root)
 	_ = root.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	root.AddCommand(
 		newStartCmd(stdout, stderr),
