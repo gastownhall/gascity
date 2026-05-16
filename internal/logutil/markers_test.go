@@ -7,7 +7,8 @@ import (
 
 func TestFatalFormattingUsesMarkerAndCauseURL(t *testing.T) {
 	line := FormatFatalLine(`agent "worker": pack v1/v2 layout collision`)
-	if got, want := line, `gc-fatal: agent "worker": pack v1/v2 layout collision see: https://docs.gascityhall.com/packv2/migration`; got != want {
+	want := `gc-fatal: agent "worker": pack v1/v2 layout collision see: ` + WalkthroughURL["duplicate_name_v1v2"]
+	if got := line; got != want {
 		t.Fatalf("FormatFatalLine() = %q, want %q", got, want)
 	}
 
@@ -22,7 +23,8 @@ func TestFatalFormattingUsesMarkerAndCauseURL(t *testing.T) {
 
 func TestFatalFormattingRoutesV1V2DuplicateNamesToMigration(t *testing.T) {
 	line := FormatFatalLine(`pack v1/v2 duplicate name "worker"`)
-	if got, want := line, `gc-fatal: pack v1/v2 duplicate name "worker" see: https://docs.gascityhall.com/packv2/migration`; got != want {
+	want := `gc-fatal: pack v1/v2 duplicate name "worker" see: ` + WalkthroughURL["duplicate_name_v1v2"]
+	if got := line; got != want {
 		t.Fatalf("FormatFatalLine() = %q, want %q", got, want)
 	}
 }

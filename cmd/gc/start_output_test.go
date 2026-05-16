@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/logutil"
 )
 
 func TestStartOutputProxyDedupsWarningsAndDefersFatal(t *testing.T) {
@@ -28,7 +30,8 @@ func TestStartOutputProxyDedupsWarningsAndDefersFatal(t *testing.T) {
 		t.Fatalf("output missing suppression suffix:\n%s", out)
 	}
 	lines := nonEmptyLines(out)
-	if got, want := lines[len(lines)-1], `gc-fatal: agent "worker": pack v1/v2 layout collision see: https://docs.gascityhall.com/packv2/migration`; got != want {
+	want := `gc-fatal: agent "worker": pack v1/v2 layout collision see: ` + logutil.WalkthroughURL["duplicate_name_v1v2"]
+	if got := lines[len(lines)-1]; got != want {
 		t.Fatalf("last line = %q, want %q", got, want)
 	}
 	if got, want := proxy.WarningCount(), 2; got != want {

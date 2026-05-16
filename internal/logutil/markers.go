@@ -5,16 +5,7 @@ import "strings"
 // FatalMarker prefixes fatal lines emitted for gc start output proxies.
 const FatalMarker = "gc-fatal:"
 
-// Troubleshooting URLs attached to known gc start failure causes.
 const (
-	URLBDOpInitTimeout     = "https://docs.gascityhall.com/troubleshooting/gc-start-walkthrough#bd-op-init-timeout"
-	URLPackSchemaMismatch  = "https://docs.gascityhall.com/troubleshooting/gc-start-walkthrough#pack-schema-mismatch"
-	URLPackV1V2Migration   = "https://docs.gascityhall.com/packv2/migration"
-	URLDuplicateName       = "https://docs.gascityhall.com/troubleshooting/gc-start-walkthrough#duplicate-name"
-	URLUnknownField        = "https://docs.gascityhall.com/troubleshooting/gc-start-walkthrough#unknown-field-agent-pool"
-	URLRigPathRequired     = "https://docs.gascityhall.com/troubleshooting/gc-start-walkthrough#rig-path-required"
-	URLTemplateNotFound    = "https://docs.gascityhall.com/troubleshooting/gc-start-walkthrough#template-not-found"
-	URLDuplicateIdentity   = "https://docs.gascityhall.com/troubleshooting/gc-start-walkthrough#duplicate-identity"
 	ansiBoldRed            = "\x1b[1;31m"
 	ansiReset              = "\x1b[0m"
 	docsBaseURL            = "https://docs.gascityhall.com/"
@@ -94,21 +85,21 @@ func FatalCause(message string) string {
 func FatalSeeURL(message string) string {
 	switch FatalCause(message) {
 	case "op-init-timeout":
-		return URLBDOpInitTimeout
+		return WalkthroughURL["bd_op_init_timeout"]
 	case "pack-schema-mismatch":
-		return URLPackSchemaMismatch
+		return WalkthroughURL["pack_schema_mismatch"]
 	case "pack-v1-v2-collision":
-		return URLPackV1V2Migration
+		return WalkthroughURL["duplicate_name_v1v2"]
 	case "duplicate-name":
-		return URLDuplicateName
+		return WalkthroughURL["duplicate_name_other"]
 	case "unknown-field-agent-pool":
-		return URLUnknownField
+		return WalkthroughURL["unknown_field"]
 	case "rig-path-required":
-		return URLRigPathRequired
+		return WalkthroughURL["rig_path_required"]
 	case "template-not-found":
-		return URLTemplateNotFound
+		return WalkthroughURL["template_not_found"]
 	case "duplicate-identity":
-		return URLDuplicateIdentity
+		return WalkthroughURL["duplicate_identity"]
 	default:
 		return ""
 	}
