@@ -591,8 +591,14 @@ func logCopyFilesEntryDiff(w io.Writer, stored, current []BreakdownCopyEntry) {
 		currentByDst[e.RelDst] = e
 	}
 
-	keys := make([]string, 0, len(storedByDst)+len(currentByDst))
-	seen := make(map[string]bool, len(storedByDst)+len(currentByDst))
+	// Guard the signed-int sum against CWE-190 wrap; len() inputs trace
+	// through parsed JSON to potentially-unbounded data.
+	totalCap := len(storedByDst) + len(currentByDst)
+	if totalCap < len(storedByDst) {
+		totalCap = 0
+	}
+	keys := make([]string, 0, totalCap)
+	seen := make(map[string]bool, totalCap)
 	for k := range storedByDst {
 		if !seen[k] {
 			seen[k] = true
