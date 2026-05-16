@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -107,18 +108,37 @@ func run(args []string, stdout, stderr io.Writer) int {
 		telemetry.SetProcessOTELAttrs()
 	}
 
-	root := newRootCmd(stdout, stderr)
+	jsonExecution := shouldBufferJSONExecution(args)
+	execStdout := stdout
+	var jsonStdout bytes.Buffer
+	if jsonExecution {
+		execStdout = &jsonStdout
+	}
+
+	root := newRootCmd(execStdout, stderr)
 	if args == nil {
 		args = []string{}
 	}
 	root.SetArgs(args)
-	root.SetOut(stdout)
+	root.SetOut(execStdout)
 	root.SetErr(stderr)
 	if handled, code := handleJSONSchemaRequest(root, args, stdout); handled {
 		return code
 	}
+	if handled, code := handleJSONContractRequest(root, args, stdout); handled {
+		return code
+	}
 	if err := root.Execute(); err != nil {
-		return commandExitCode(err)
+		code := commandExitCode(err)
+		if jsonExecution {
+			_ = writeJSONFailure(stdout, "command_failed", "command failed; see stderr for diagnostics", code)
+		}
+		return code
+	}
+	if jsonExecution {
+		if _, err := io.Copy(stdout, &jsonStdout); err != nil {
+			return 1
+		}
 	}
 	return 0
 }

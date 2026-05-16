@@ -153,6 +153,69 @@ func TestJSONSchemaUnavailableRoleFailureIsStructured(t *testing.T) {
 	}
 }
 
+func TestJSONUnsupportedCommandFailureIsStructured(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"version", "--json"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("run(version --json) = 0, want nonzero")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+
+	var payload struct {
+		SchemaVersion string `json:"schema_version"`
+		OK            bool   `json:"ok"`
+		Error         struct {
+			Code     string `json:"code"`
+			Message  string `json:"message"`
+			ExitCode int    `json:"exit_code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("failure payload is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.OK || payload.Error.ExitCode != code || payload.Error.Code != "json_unsupported" {
+		t.Fatalf("payload = %+v, code=%d", payload, code)
+	}
+}
+
+func TestJSONContractAllowsBdPassthrough(t *testing.T) {
+	root := &cobra.Command{Use: "gc"}
+	root.AddCommand(&cobra.Command{Use: "bd [bd-args...]"})
+
+	var stdout bytes.Buffer
+	handled, code := handleJSONContractRequest(root, []string{"bd", "list", "--json"}, &stdout)
+	if handled || code != 0 {
+		t.Fatalf("handled=%v code=%d stdout=%q", handled, code, stdout.String())
+	}
+}
+
+func TestJSONExecutionFailureIsStructured(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"config", "explain", "--json"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("run(config explain --json) = 0, want nonzero")
+	}
+	if stderr.Len() == 0 {
+		t.Fatalf("stderr empty, want command diagnostics")
+	}
+
+	var payload struct {
+		OK    bool `json:"ok"`
+		Error struct {
+			Code     string `json:"code"`
+			ExitCode int    `json:"exit_code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("failure payload is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.OK || payload.Error.Code != "command_failed" || payload.Error.ExitCode != code {
+		t.Fatalf("payload = %+v, code=%d", payload, code)
+	}
+}
+
 func TestJSONSchemaManifestForDiscoveredPackCommand(t *testing.T) {
 	dir := t.TempDir()
 	commandDir := filepath.Join(dir, "commands", "review", "pr")

@@ -81,9 +81,80 @@ func handleJSONSchemaRequest(root *cobra.Command, args []string, stdout io.Write
 	return true, 0
 }
 
+func handleJSONContractRequest(root *cobra.Command, args []string, stdout io.Writer) (bool, int) {
+	request, ok := parseJSONRequest(args)
+	if !ok {
+		return false, 0
+	}
+
+	cmd, _, err := root.Find(request.commandArgs)
+	if err != nil || cmd == nil {
+		return true, writeJSONSchemaUnavailable(stdout, "json_command_not_found",
+			fmt.Sprintf("command %q was not found", strings.Join(request.commandArgs, " ")))
+	}
+	if cmd == root && len(request.commandArgs) > 0 {
+		return true, writeJSONSchemaUnavailable(stdout, "json_command_not_found",
+			fmt.Sprintf("command %q was not found", strings.Join(request.commandArgs, " ")))
+	}
+
+	commandPath := commandPathWords(cmd)
+	if len(commandPath) > 0 && commandPath[0] == "bd" {
+		return false, 0
+	}
+	if _, err := readCommandSchema(cmd, commandPath, jsonSchemaResultRole); err != nil {
+		return true, writeJSONSchemaUnavailable(stdout, "json_unsupported",
+			fmt.Sprintf("command %q does not declare JSON support", strings.Join(commandPath, " ")))
+	}
+	return false, 0
+}
+
+func shouldBufferJSONExecution(args []string) bool {
+	request, ok := parseJSONRequest(args)
+	if !ok {
+		return false
+	}
+	return len(request.commandArgs) == 0 || request.commandArgs[0] != "bd"
+}
+
 type jsonSchemaRequest struct {
 	role        string
 	commandArgs []string
+}
+
+type jsonRequest struct {
+	commandArgs []string
+}
+
+func parseJSONRequest(args []string) (jsonRequest, bool) {
+	var request jsonRequest
+	jsonRequested := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		switch {
+		case arg == "--json":
+			jsonRequested = true
+		case strings.HasPrefix(arg, "--json="):
+			value := strings.TrimPrefix(arg, "--json=")
+			jsonRequested = value == "" || value == "true" || value == "1"
+		case arg == "--city" || arg == "--rig":
+			i++
+		case strings.HasPrefix(arg, "--city=") || strings.HasPrefix(arg, "--rig="):
+			continue
+		case strings.HasPrefix(arg, "-"):
+			if !strings.Contains(arg, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+			}
+		default:
+			request.commandArgs = append(request.commandArgs, arg)
+		}
+	}
+	if !jsonRequested {
+		return jsonRequest{}, false
+	}
+	return request, true
 }
 
 func parseJSONSchemaRequest(args []string) (jsonSchemaRequest, bool) {
@@ -214,7 +285,12 @@ func readEmbeddedSchema(path string) (json.RawMessage, error) {
 
 func writeJSONSchemaUnavailable(stdout io.Writer, code, message string) int {
 	const exitCode = 1
-	_ = writeCLIJSONLine(stdout, jsonSchemaErrorPayload{
+	_ = writeJSONFailure(stdout, code, message, exitCode)
+	return exitCode
+}
+
+func writeJSONFailure(stdout io.Writer, code, message string, exitCode int) error {
+	return writeCLIJSONLine(stdout, jsonSchemaErrorPayload{
 		SchemaVersion: "1",
 		OK:            false,
 		Error: jsonSchemaErrorDetail{
@@ -223,7 +299,6 @@ func writeJSONSchemaUnavailable(stdout io.Writer, code, message string) int {
 			ExitCode: exitCode,
 		},
 	})
-	return exitCode
 }
 
 func writeCLIJSONLine(stdout io.Writer, value any) error {
