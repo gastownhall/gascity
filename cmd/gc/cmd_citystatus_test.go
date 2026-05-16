@@ -117,6 +117,44 @@ func TestCityStatusReportsObservationErrors(t *testing.T) {
 	}
 }
 
+func TestCityStatusObservationTimesOut(t *testing.T) {
+	oldTimeout := statusObservationTimeout
+	statusObservationTimeout = 20 * time.Millisecond
+	t.Cleanup(func() {
+		statusObservationTimeout = oldTimeout
+	})
+
+	release := make(chan struct{})
+	defer close(release)
+	oldObserve := observeSessionTargetForStatus
+	observeSessionTargetForStatus = func(string, beads.Store, runtime.Provider, *config.City, string) (worker.LiveObservation, error) {
+		<-release
+		return worker.LiveObservation{Running: true}, nil
+	}
+	t.Cleanup(func() { observeSessionTargetForStatus = oldObserve })
+
+	var stderr bytes.Buffer
+	start := time.Now()
+	obs := observeSessionTargetWithWarning(
+		"gc status",
+		"/city",
+		nil,
+		runtime.NewFake(),
+		&config.City{},
+		statusObservationTarget{runtimeSessionName: "slow-session"},
+		&stderr,
+	)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("observeSessionTargetWithWarning elapsed %s, want bounded timeout", elapsed)
+	}
+	if obs.Running {
+		t.Fatal("observation should not report running after timeout")
+	}
+	if !strings.Contains(stderr.String(), "observing \"slow-session\" timed out") {
+		t.Fatalf("stderr = %q, want timeout warning", stderr.String())
+	}
+}
+
 func TestCityStatusSuspended(t *testing.T) {
 	sp := runtime.NewFake()
 	dops := newFakeDrainOps()
@@ -389,6 +427,12 @@ func TestCityStatusJSONReportsStoreOpenError(t *testing.T) {
 	}
 }
 
+// TestCityStatusJSONReportsCatalogListError asserts the pre-#2005 contract:
+// when the bead store fails to list session beads, `gc status --json` still
+// emits the JSON payload (so callers can parse partial status) but exits
+// rc=1 so monitoring scripts using `$?` can detect the degraded state. See
+// #2147 for the regression history — PR #2005 inadvertently flipped this
+// from rc=1 to rc=0 along with renaming the test.
 func TestCityStatusJSONReportsCatalogListError(t *testing.T) {
 	sp := runtime.NewFake()
 	oldOpen := openCityStoreAtForStatus
@@ -407,10 +451,49 @@ func TestCityStatusJSONReportsCatalogListError(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := doCityStatusJSON(sp, cfg, cityPath, &stdout, &stderr)
 	if code != 1 {
-		t.Fatalf("code = %d, want 1", code)
+		t.Fatalf("code = %d, want 1 (degraded session snapshot); stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "gc status: building session catalog") || !strings.Contains(stderr.String(), "catalog unavailable") {
-		t.Fatalf("stderr = %q, want catalog list error", stderr.String())
+	if !strings.Contains(stderr.String(), "gc status: loading session snapshot") || !strings.Contains(stderr.String(), "catalog unavailable") {
+		t.Fatalf("stderr = %q, want session snapshot warning", stderr.String())
+	}
+	// JSON payload must still be emitted so callers can parse the partial
+	// status — only the exit code signals the degraded state.
+	var status StatusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
+		t.Fatalf("unmarshal: %v; output: %s", err, stdout.String())
+	}
+}
+
+func TestCityStatusReportsCatalogListError(t *testing.T) {
+	sp := runtime.NewFake()
+	dops := newFakeDrainOps()
+	oldOpen := openCityStoreAtForStatus
+	openCityStoreAtForStatus = func(string) (beads.Store, error) {
+		return &listErrorStore{Store: beads.NewMemStore()}, nil
+	}
+	t.Cleanup(func() { openCityStoreAtForStatus = oldOpen })
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{
+			{Name: "status-checker", MaxActiveSessions: intPtr(1)},
+		},
+	}
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.beads): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doCityStatus(sp, dops, cfg, cityPath, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (degraded session snapshot); stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc status: loading session snapshot") || !strings.Contains(stderr.String(), "catalog unavailable") {
+		t.Fatalf("stderr = %q, want session snapshot warning", stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Agents:") || !strings.Contains(out, "status-checker") {
+		t.Fatalf("stdout = %q, want partial text status report", out)
 	}
 }
 

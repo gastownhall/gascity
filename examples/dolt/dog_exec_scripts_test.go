@@ -662,14 +662,14 @@ func TestCompactScriptUsesExplicitRemote(t *testing.T) {
 	}
 }
 
-func TestCompactScriptAbortsPushWhenRemoteHeadChangesAfterCompaction(t *testing.T) {
+func TestCompactScriptRecordsPendingPushWhenRemoteHeadChangesAfterCompaction(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "remote_advances_before_push", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("compact succeeded despite remote HEAD changing before push:\n%s", out)
+	if err != nil {
+		t.Fatalf("compact should keep local compaction successful when remote HEAD changes before push: %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "remote=origin HEAD changed before push") {
-		t.Fatalf("output missing remote compare-and-push failure:\n%s", out)
+		t.Fatalf("output missing remote compare-and-push marker:\n%s", out)
 	}
 	data, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
@@ -693,11 +693,11 @@ func TestCompactScriptAbortsPushWhenRemoteHeadChangesAfterCompaction(t *testing.
 	}
 }
 
-func TestCompactScriptFailsBeforeFlattenWhenRemoteAheadIsUnknown(t *testing.T) {
+func TestCompactScriptCompactsFromLocalSourceOfTruthWhenRemoteAheadIsUnknown(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "remote_ahead", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("compact succeeded despite unknown remote HEAD:\n%s", out)
+	if err != nil {
+		t.Fatalf("compact should proceed from local source of truth despite unknown remote HEAD: %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "remote HEAD=remotecommit is not in local history") {
 		t.Fatalf("output missing remote divergence notice:\n%s", out)
@@ -707,39 +707,36 @@ func TestCompactScriptFailsBeforeFlattenWhenRemoteAheadIsUnknown(t *testing.T) {
 		t.Fatalf("read dolt log: %v", err)
 	}
 	log := string(data)
-	for _, forbidden := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_GC", "DOLT_PUSH"} {
-		if strings.Contains(log, forbidden) {
-			t.Fatalf("remote divergence must block local compaction before %s:\n%s", forbidden, log)
+	for _, want := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_GC", "DOLT_PUSH"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("remote divergence should not block local compaction; missing %s:\n%s", want, log)
 		}
 	}
 }
 
-func TestCompactScriptFailsWhenHeadChangesBeforeFlatten(t *testing.T) {
+func TestCompactScriptCompactsWhenHeadChangesBeforeFlatten(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "head_changes_before_flatten", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("compact succeeded despite live-server moving HEAD:\n%s", out)
-	}
-	if !strings.Contains(out, "HEAD changed before flatten") {
-		t.Fatalf("output missing moving-HEAD failure:\n%s", out)
+	if err != nil {
+		t.Fatalf("compact should tolerate live-server moving HEAD before flatten: %v\n%s", err, out)
 	}
 	data, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
 		t.Fatalf("read dolt log: %v", err)
 	}
 	log := string(data)
-	for _, forbidden := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_GC"} {
-		if strings.Contains(log, forbidden) {
-			t.Fatalf("moving HEAD must block local compaction before %s:\n%s", forbidden, log)
+	for _, want := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_GC"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("moving HEAD should not block local compaction; missing %s:\n%s", want, log)
 		}
 	}
 }
 
-func TestCompactScriptFailsBeforeFlattenWhenRemoteFetchFails(t *testing.T) {
+func TestCompactScriptCompactsFromLocalSourceOfTruthWhenRemoteFetchFails(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "remote_fetch_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("compact succeeded despite remote fetch failure:\n%s", out)
+	if err != nil {
+		t.Fatalf("compact should proceed from local source of truth despite remote fetch failure: %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "remote=origin fetch failed") {
 		t.Fatalf("output missing fetch failure:\n%s", out)
@@ -752,18 +749,22 @@ func TestCompactScriptFailsBeforeFlattenWhenRemoteFetchFails(t *testing.T) {
 	if strings.Contains(log, "dolt_remote_branches") {
 		t.Fatalf("fetch failure must skip remote-head comparison:\n%s", log)
 	}
-	for _, forbidden := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_GC", "DOLT_PUSH"} {
-		if strings.Contains(log, forbidden) {
-			t.Fatalf("fetch failure must block local compaction before %s:\n%s", forbidden, log)
+	for _, want := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_GC"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("fetch failure should not block local compaction; missing %s:\n%s", want, log)
 		}
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("fetch failure before post-compaction push should write pending-push marker: %v", err)
 	}
 }
 
-func TestCompactScriptTreatsRemotePushFailureAsFatal(t *testing.T) {
+func TestCompactScriptRecordsPendingPushWhenRemotePushFails(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("compact succeeded despite remote push failure:\n%s", out)
+	if err != nil {
+		t.Fatalf("compact should keep local compaction successful despite remote push failure: %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "remote=origin push failed") {
 		t.Fatalf("output missing push failure:\n%s", out)
@@ -824,28 +825,21 @@ func TestCompactScriptFailsOnCommitCountProbeFailure(t *testing.T) {
 	}
 }
 
-func TestCompactScriptFailsOnRowCountIncreaseBeforeGC(t *testing.T) {
+func TestCompactScriptAllowsRowCountIncreaseDuringFlatten(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "row_count_diverges", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("compact succeeded despite row-count increase:\n%s", out)
+	if err != nil {
+		t.Fatalf("compact should allow concurrent row-count increase: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "post-flatten INTEGRITY check failed") {
-		t.Fatalf("output missing integrity failure:\n%s", out)
-	}
-	if !strings.Contains(out, "row counts diverged; investigate before re-running") {
-		t.Fatalf("integrity failure missing investigation guidance:\n%s", out)
+	if !strings.Contains(out, "gained rows during flatten") {
+		t.Fatalf("output missing concurrent-write preservation notice:\n%s", out)
 	}
 	data, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
 		t.Fatalf("read dolt log: %v", err)
 	}
-	if strings.Contains(string(data), "DOLT_GC") {
-		t.Fatalf("row-count increase must not run full GC:\n%s", data)
-	}
-	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("row-count increase should write quarantine marker: %v", err)
+	if !strings.Contains(string(data), "DOLT_GC") {
+		t.Fatalf("row-count increase should still run full GC:\n%s", data)
 	}
 }
 
@@ -858,7 +852,7 @@ func TestCompactScriptFailsOnRowCountDecreaseBeforeGC(t *testing.T) {
 	if !strings.Contains(out, "post-flatten INTEGRITY check failed") {
 		t.Fatalf("output missing integrity failure:\n%s", out)
 	}
-	if !strings.Contains(out, "row counts diverged; investigate before re-running") {
+	if !strings.Contains(out, "row counts decreased; investigate before re-running") {
 		t.Fatalf("integrity failure missing investigation guidance:\n%s", out)
 	}
 	data, err := os.ReadFile(fixture.doltLog)
@@ -874,42 +868,18 @@ func TestCompactScriptFailsOnRowCountDecreaseBeforeGC(t *testing.T) {
 	}
 }
 
-func TestCompactScriptFailsOnSameRowCountWriterBeforeGC(t *testing.T) {
+func TestCompactScriptAllowsSameRowCountWriter(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "same_row_count_writer", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("compact succeeded despite same-row-count live writer:\n%s", out)
-	}
-	if !strings.Contains(out, "value hash changed after flatten") {
-		t.Fatalf("output missing value-hash integrity failure:\n%s", out)
-	}
-	data, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
-		t.Fatalf("read dolt log: %v", err)
-	}
-	if strings.Contains(string(data), "DOLT_GC") {
-		t.Fatalf("same-row-count writer must not run full GC:\n%s", data)
-	}
-	if !strings.Contains(out, "leaving post-flatten HEAD=compactcommit in place") {
-		t.Fatalf("integrity failure should preserve possible writer data for manual repair:\n%s", out)
-	}
-	state, err := os.ReadFile(fixture.stateFile)
-	if err != nil {
-		t.Fatalf("read fake dolt state: %v", err)
-	}
-	if strings.TrimSpace(string(state)) != "compactcommit" {
-		t.Fatalf("integrity failure should not roll back possible writer data, state=%q", state)
+		t.Fatalf("compact should tolerate same-row-count live writer: %v\n%s", err, out)
 	}
 	logData, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
 		t.Fatalf("read dolt log: %v", err)
 	}
-	if strings.Contains(string(logData), "DOLT_RESET('--hard', 'headcommit')") {
-		t.Fatalf("integrity failure must not hard-reset over possible writer data:\n%s", logData)
-	}
-	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("same-row-count writer should write quarantine marker: %v", err)
+	if !strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("same-row-count writer should still run full GC:\n%s", logData)
 	}
 }
 
@@ -1251,11 +1221,11 @@ func TestCompactScriptTableNameDoesNotClobberDatabaseName(t *testing.T) {
 	}
 }
 
-func TestPhantomDBScriptQuarantinesPhantomsAndRetiredReplacements(t *testing.T) {
+func TestPhantomDBScriptEscalatesAndPreservesAllDatabases(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")
 	binDir := t.TempDir()
-	_ = writeDogFakeGC(t, binDir)
+	gcLogPath := writeDogFakeGC(t, binDir)
 
 	for _, path := range []string{
 		filepath.Join(dataDir, "valid", ".dolt", "noms"),
@@ -1270,14 +1240,14 @@ func TestPhantomDBScriptQuarantinesPhantomsAndRetiredReplacements(t *testing.T) 
 	writeTestFile(t, filepath.Join(dataDir, "orders.replaced-20260509T010203Z", ".dolt", "noms", "manifest"), "ok")
 
 	out := runDogScript(t, "mol-dog-phantom-db.sh", binDir, cityPath, dataDir)
-	if !strings.Contains(out, "phantoms: 1") || !strings.Contains(out, "retired: 1") || !strings.Contains(out, "quarantined: 2") {
+	if !strings.Contains(out, "phantoms: 1") || !strings.Contains(out, "retired: 1") || !strings.Contains(out, "escalated: 2") {
 		t.Fatalf("unexpected phantom summary:\n%s", out)
 	}
-	if _, err := os.Stat(filepath.Join(dataDir, "phantom")); !os.IsNotExist(err) {
-		t.Fatalf("phantom source should be moved, stat err=%v", err)
+	if _, err := os.Stat(filepath.Join(dataDir, "phantom", ".dolt")); err != nil {
+		t.Fatalf("phantom source moved unexpectedly: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dataDir, "orders.replaced-20260509T010203Z")); !os.IsNotExist(err) {
-		t.Fatalf("retired replacement source should be moved, stat err=%v", err)
+	if _, err := os.Stat(filepath.Join(dataDir, "orders.replaced-20260509T010203Z", ".dolt", "noms", "manifest")); err != nil {
+		t.Fatalf("retired replacement moved unexpectedly: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, "valid", ".dolt", "noms", "manifest")); err != nil {
 		t.Fatalf("valid database should remain: %v", err)
@@ -1286,8 +1256,25 @@ func TestPhantomDBScriptQuarantinesPhantomsAndRetiredReplacements(t *testing.T) 
 	if err != nil {
 		t.Fatalf("glob quarantine: %v", err)
 	}
-	if len(matches) != 2 {
-		t.Fatalf("quarantined entries = %d, want 2: %v", len(matches), matches)
+	if len(matches) != 0 {
+		t.Fatalf("quarantine directory non-empty: got %d entries: %v", len(matches), matches)
+	}
+	gcLogData, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	gcLog := string(gcLogData)
+	if !strings.Contains(gcLog, "unservable database directories") {
+		t.Fatalf("escalation should use neutral unservable wording:\n%s", gcLog)
+	}
+	if !strings.Contains(gcLog, "Phantoms missing noms/manifest: 1 phantom") {
+		t.Fatalf("escalation should report phantom directories separately:\n%s", gcLog)
+	}
+	if !strings.Contains(gcLog, "Retired replacement directories: 1 orders.replaced-20260509T010203Z") {
+		t.Fatalf("escalation should report retired replacements separately:\n%s", gcLog)
+	}
+	if strings.Contains(gcLog, "phantom database(s)") {
+		t.Fatalf("escalation should not label all unservables as phantoms:\n%s", gcLog)
 	}
 }
 

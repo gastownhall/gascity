@@ -995,10 +995,7 @@ func TestDispatchReadyWaitNudges_SkipsClosedSessionWithoutBackingGet(t *testing.
 func TestDispatchReadyWaitNudges_StartsCodexPoller(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
-	store, err := openCityStoreAt(dir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt: %v", err)
-	}
+	store := beads.NewMemStore()
 	sessionBead, err := store.Create(beads.Bead{
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel},
@@ -1007,6 +1004,62 @@ func TestDispatchReadyWaitNudges_StartsCodexPoller(t *testing.T) {
 			"agent_name":         "worker",
 			"continuation_epoch": "1",
 			"provider":           "codex",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"dep_ids":          "gc-1",
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+		},
+	}); err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	called := false
+	prev := startNudgePoller
+	startNudgePoller = func(cityPath, agentName, sessionName string) error {
+		called = true
+		if cityPath != dir || agentName != "worker" || sessionName != "worker" {
+			t.Fatalf("unexpected poller args city=%q agent=%q session=%q", cityPath, agentName, sessionName)
+		}
+		return nil
+	}
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	if err := dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC()); err != nil {
+		t.Fatalf("dispatchReadyWaitNudges: %v", err)
+	}
+	if !called {
+		t.Fatal("startNudgePoller was not called")
+	}
+}
+
+func TestDispatchReadyWaitNudges_StartsPiPoller(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "1",
+			"provider":           "pi",
 		},
 	})
 	if err != nil {

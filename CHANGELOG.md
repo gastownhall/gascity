@@ -51,6 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Pack import cache validation now requires commit abbreviations in
+  `packs.lock` to be at least seven characters long. Shorter abbreviations
+  should be refreshed with `gc import install`.
 - ACP, subprocess, and Kubernetes session staging now apply pack and agent
   overlays through the provider-aware `per-provider/<provider>/` contract.
   Custom ACP overlays that previously expected a literal `per-provider/`

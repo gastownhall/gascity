@@ -188,6 +188,9 @@ source = "`+gastownPackDir+`"
 	if resolvedPool != "wrapper.dog" {
 		t.Fatalf("qualifyOrderPool(digest-generate) = %q, want wrapper.dog", resolvedPool)
 	}
+	if config.FindAgent(cfg, resolvedPool) == nil {
+		t.Fatalf("resolved pool %q does not match a configured agent", resolvedPool)
+	}
 
 	if err := ResolveFormulas(cityDir, cfg.FormulaLayers.City); err != nil {
 		t.Fatalf("ResolveFormulas(city): %v", err)

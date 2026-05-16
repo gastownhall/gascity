@@ -594,7 +594,7 @@ func TestProcessScopeCheckReturnsPendingWhenSubjectStillOpen(t *testing.T) {
 	}
 }
 
-func TestProcessScopeCheckReturnsPendingWhenScopeBodyMissing(t *testing.T) {
+func TestProcessScopeCheckReturnsMalformedWhenScopeBodyMissing(t *testing.T) {
 	t.Parallel()
 
 	store := beads.NewMemStore()
@@ -631,13 +631,188 @@ func TestProcessScopeCheckReturnsPendingWhenScopeBodyMissing(t *testing.T) {
 	mustDepAdd(t, store, control.ID, step.ID, "blocks")
 
 	_, err := ProcessControl(store, control, ProcessOptions{})
-	if !errors.Is(err, ErrControlPending) {
-		t.Fatalf("ProcessControl(scope-check missing body) err = %v, want %v", err, ErrControlPending)
+	if !errors.Is(err, ErrControlGraphMalformed) {
+		t.Fatalf("ProcessControl(scope-check missing body) err = %v, want %v", err, ErrControlGraphMalformed)
 	}
 
 	controlAfter := mustGetBead(t, store, control.ID)
 	if controlAfter.Status != "open" {
 		t.Fatalf("control status = %q, want open", controlAfter.Status)
+	}
+}
+
+func TestProcessFanoutReturnsMalformedWhenScopeBodyMissing(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "fanout",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "fanout",
+			"gc.fanout_state": "spawned",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "missing-scope",
+			"gc.scope_role":   "member",
+		},
+	})
+
+	_, err := ProcessControl(store, fanout, ProcessOptions{})
+	if !errors.Is(err, ErrControlGraphMalformed) {
+		t.Fatalf("ProcessControl(fanout missing scope body) err = %v, want %v", err, ErrControlGraphMalformed)
+	}
+}
+
+func TestReconcileTerminalScopedMemberReusesResolvedBodyForFailingScope(t *testing.T) {
+	t.Parallel()
+
+	mem := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	body := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	failed := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title:  "failed step",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "fail",
+			"review.verdict":  "iterate",
+		},
+	})
+	openStep := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title: "later step",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+		},
+	})
+	store := &scopeBodyVanishAfterFirstResolveStore{
+		MemStore: mem,
+		bodyID:   body.ID,
+		rootID:   workflow.ID,
+	}
+
+	result, err := reconcileTerminalScopedMember(store, failed)
+	if err != nil {
+		t.Fatalf("reconcileTerminalScopedMember(fail): %v", err)
+	}
+	if result.Action != "scope-fail" {
+		t.Fatalf("action = %q, want scope-fail", result.Action)
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("skipped = %d, want 1", result.Skipped)
+	}
+	bodyAfter := mustGetBead(t, mem, body.ID)
+	if bodyAfter.Status != "closed" {
+		t.Fatalf("body status = %q, want closed", bodyAfter.Status)
+	}
+	if got := bodyAfter.Metadata["gc.outcome"]; got != "fail" {
+		t.Fatalf("body outcome = %q, want fail", got)
+	}
+	if got := bodyAfter.Metadata["review.verdict"]; got != "iterate" {
+		t.Fatalf("body review.verdict = %q, want iterate", got)
+	}
+	openAfter := mustGetBead(t, mem, openStep.ID)
+	if openAfter.Status != "closed" {
+		t.Fatalf("open step status = %q, want closed", openAfter.Status)
+	}
+	if got := openAfter.Metadata["gc.outcome"]; got != "skipped" {
+		t.Fatalf("open step outcome = %q, want skipped", got)
+	}
+}
+
+func TestReconcileTerminalScopedMemberReusesResolvedBodyForPassingScope(t *testing.T) {
+	t.Parallel()
+
+	mem := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	body := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	step := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title:  "finished step",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id":  workflow.ID,
+			"gc.scope_ref":     "body",
+			"gc.scope_role":    "member",
+			"gc.outcome":       "pass",
+			"gc.output_json":   `{"verdict":"approved"}`,
+			"review.verdict":   "done",
+			"operator.summary": "complete",
+		},
+	})
+	store := &scopeBodyVanishAfterFirstResolveStore{
+		MemStore: mem,
+		bodyID:   body.ID,
+		rootID:   workflow.ID,
+	}
+
+	result, err := reconcileTerminalScopedMember(store, step)
+	if err != nil {
+		t.Fatalf("reconcileTerminalScopedMember(pass): %v", err)
+	}
+	if result.Action != "scope-pass" {
+		t.Fatalf("action = %q, want scope-pass", result.Action)
+	}
+	bodyAfter := mustGetBead(t, mem, body.ID)
+	if bodyAfter.Status != "closed" {
+		t.Fatalf("body status = %q, want closed", bodyAfter.Status)
+	}
+	if got := bodyAfter.Metadata["gc.outcome"]; got != "pass" {
+		t.Fatalf("body outcome = %q, want pass", got)
+	}
+	if got := bodyAfter.Metadata["gc.output_json"]; got != `{"verdict":"approved"}` {
+		t.Fatalf("body gc.output_json = %q, want propagated output", got)
+	}
+	if got := bodyAfter.Metadata["review.verdict"]; got != "done" {
+		t.Fatalf("body review.verdict = %q, want done", got)
+	}
+	if got := bodyAfter.Metadata["operator.summary"]; got != "complete" {
+		t.Fatalf("body operator.summary = %q, want complete", got)
 	}
 }
 
@@ -756,6 +931,14 @@ type countingListStore struct {
 	queries   []beads.ListQuery
 }
 
+type scopeBodyVanishAfterFirstResolveStore struct {
+	*beads.MemStore
+	mu       sync.Mutex
+	bodyID   string
+	rootID   string
+	resolved bool
+}
+
 type workflowFinalizeCloseFailStore struct {
 	beads.Store
 	finalizerID string
@@ -765,6 +948,56 @@ func (s *countingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	s.listCalls++
 	s.queries = append(s.queries, query)
 	return s.MemStore.List(query)
+}
+
+func (s *scopeBodyVanishAfterFirstResolveStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	result, err := s.MemStore.List(query)
+	if err != nil {
+		return nil, err
+	}
+	if !s.canResolveScopeBody(query) {
+		return result, nil
+	}
+
+	s.mu.Lock()
+	hideBody := s.resolved
+	if !s.resolved && containsBeadID(result, s.bodyID) {
+		s.resolved = true
+	}
+	s.mu.Unlock()
+	if !hideBody {
+		return result, nil
+	}
+	return filterBeadID(result, s.bodyID), nil
+}
+
+func (s *scopeBodyVanishAfterFirstResolveStore) canResolveScopeBody(query beads.ListQuery) bool {
+	if query.Metadata["gc.root_bead_id"] != s.rootID {
+		return false
+	}
+	if query.Metadata["gc.kind"] == "scope" && query.Metadata["gc.scope_role"] == "body" {
+		return true
+	}
+	return len(query.Metadata) == 1
+}
+
+func containsBeadID(items []beads.Bead, id string) bool {
+	for _, bead := range items {
+		if bead.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func filterBeadID(items []beads.Bead, id string) []beads.Bead {
+	filtered := items[:0]
+	for _, bead := range items {
+		if bead.ID != id {
+			filtered = append(filtered, bead)
+		}
+	}
+	return filtered
 }
 
 func (s *workflowFinalizeCloseFailStore) Update(id string, opts beads.UpdateOpts) error {
@@ -892,6 +1125,54 @@ func TestProcessWorkflowFinalizeClosesWorkflow(t *testing.T) {
 	}
 	if got := rootAfter.Metadata["gc.outcome"]; got != "fail" {
 		t.Fatalf("workflow outcome = %q, want fail", got)
+	}
+}
+
+func TestProcessWorkflowFinalizeTreatsQuarantinedControlAsFailure(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "quarantined control",
+		Type:   "task",
+		Status: "closed",
+		Labels: []string{"gc:control-quarantined"},
+		Metadata: map[string]string{
+			"gc.outcome":             "fail",
+			"gc.control_quarantined": "true",
+			"gc.failure_reason":      "malformed_control_graph",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+
+	mustDepAdd(t, store, finalizer.ID, control.ID, "blocks")
+	mustDepAdd(t, store, workflow.ID, finalizer.ID, "blocks")
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-fail" {
+		t.Fatalf("workflow result = %+v, want processed workflow-fail", result)
+	}
+	rootAfter := mustGetBead(t, store, workflow.ID)
+	if rootAfter.Status != "closed" || rootAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("workflow = status %q outcome %q, want closed/fail", rootAfter.Status, rootAfter.Metadata["gc.outcome"])
 	}
 }
 
@@ -2250,6 +2531,34 @@ func TestProcessRalphCheckRetriesThenPasses(t *testing.T) {
 	}
 }
 
+func TestProcessRalphCheckTransientAppendErrorStaysOpenForRetry(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	checkPath := writeCheckScript(t, cityPath, "retry-check.sh", "#!/bin/bash\nset -euo pipefail\nexit 1\n")
+	base, _, run1, check1 := newSimpleRalphLoop(t, "implement", checkPath, 2)
+	if err := base.Close(run1.ID); err != nil {
+		t.Fatalf("close run1: %v", err)
+	}
+
+	store := &failOnceCreateStore{
+		Store: base,
+		err:   errors.New("creating ralph retry bead: invalid connection: i/o timeout"),
+	}
+	_, err := ProcessControl(store, mustGetBead(t, store, check1.ID), ProcessOptions{CityPath: cityPath})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl(ralph check append) error = %v, want %v", err, ErrControlPending)
+	}
+
+	after := mustGetBead(t, store, check1.ID)
+	if after.Status != "open" {
+		t.Fatalf("check status = %q, want open", after.Status)
+	}
+	if after.Metadata["gc.controller_error_class"] != "transient" || after.Metadata["gc.controller_retryable"] != "true" {
+		t.Fatalf("controller retry metadata = %v, want transient retryable", after.Metadata)
+	}
+}
+
 func TestProcessRalphCheckPassClosesCheckBeforeLogicalAndPropagatesOutputJSON(t *testing.T) {
 	t.Parallel()
 
@@ -3358,6 +3667,77 @@ needs = ["{target}.review"]
 	fanoutClosed := mustGetBead(t, store, fanout.ID)
 	if fanoutClosed.Status != "closed" || fanoutClosed.Metadata["gc.outcome"] != "pass" {
 		t.Fatalf("fanout = status %q outcome %q, want closed/pass", fanoutClosed.Status, fanoutClosed.Metadata["gc.outcome"])
+	}
+}
+
+func TestProcessFanoutTransientFragmentInstantiationStaysOpenForRetry(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	dir := t.TempDir()
+	expansion := `
+formula = "expansion-review"
+type = "expansion"
+version = 2
+contract = "graph.v2"
+
+[[template]]
+id = "{target}.review"
+title = "Review {reviewer}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion formula: %v", err)
+	}
+
+	base := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, base, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	source := mustCreateWorkflowBead(t, base, beads.Bead{
+		Title:  "survey",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.survey",
+			"gc.outcome":      "pass",
+			"gc.output_json":  `{"items":[{"name":"claude"}]}`,
+		},
+	})
+	fanout := mustCreateWorkflowBead(t, base, beads.Bead{
+		Title: "Expand fanout for survey",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "fanout",
+			"gc.root_bead_id": workflow.ID,
+			"gc.control_for":  "demo.survey",
+			"gc.for_each":     "output.items",
+			"gc.bond":         "expansion-review",
+			"gc.bond_vars":    `{"reviewer":"{item.name}"}`,
+			"gc.fanout_mode":  "parallel",
+		},
+	})
+	mustDepAdd(t, base, fanout.ID, source.ID, "blocks")
+
+	store := &failOnceCreateStore{
+		Store: base,
+		err:   errors.New("creating fragment bead: invalid connection: i/o timeout"),
+	}
+	_, err := ProcessControl(store, mustGetBead(t, store, fanout.ID), ProcessOptions{FormulaSearchPaths: []string{dir}})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl(fanout transient instantiate) error = %v, want %v", err, ErrControlPending)
+	}
+
+	after := mustGetBead(t, store, fanout.ID)
+	if after.Status != "open" {
+		t.Fatalf("fanout status = %q, want open", after.Status)
+	}
+	if after.Metadata["gc.controller_error_class"] != "transient" || after.Metadata["gc.controller_retryable"] != "true" {
+		t.Fatalf("controller retry metadata = %v, want transient retryable", after.Metadata)
 	}
 }
 

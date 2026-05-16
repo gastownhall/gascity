@@ -138,6 +138,35 @@ func TestResolveProviderWorkspaceProvider(t *testing.T) {
 	}
 }
 
+func TestAgentProcessNamesResolvesProviderlessDetectedProvider(t *testing.T) {
+	cfg := &City{
+		Workspace: Workspace{Name: "city"},
+	}
+
+	got := AgentProcessNames(cfg, Agent{Name: "worker"}, lookPathOnly("codex"))
+	want := []string{"codex"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("AgentProcessNames() = %v, want %v", got, want)
+	}
+}
+
+func TestAgentProcessNamesPrefersAgentOverride(t *testing.T) {
+	agent := Agent{Name: "worker", ProcessNames: []string{"custom-agent"}}
+	cfg := &City{
+		Workspace: Workspace{Name: "city", Provider: "codex"},
+	}
+
+	got := AgentProcessNames(cfg, agent, lookPathNone)
+	want := []string{"custom-agent"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("AgentProcessNames() = %v, want %v", got, want)
+	}
+	got[0] = "mutated"
+	if agent.ProcessNames[0] != "custom-agent" {
+		t.Fatalf("agent process name mutated to %q", agent.ProcessNames[0])
+	}
+}
+
 func TestResolveProviderWorkspaceStartCommand(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{Name: "city", StartCommand: "my-agent --flag"}

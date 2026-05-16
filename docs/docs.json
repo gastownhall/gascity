@@ -118,6 +118,13 @@
           "reference/exec-session-provider",
           "reference/exec-beads-provider"
         ]
+      },
+      {
+        "group": "Internals",
+        "pages": [
+          "internals/index",
+          "internals/beads-topology"
+        ]
       }
     ]
   }

@@ -45,6 +45,7 @@ var (
 	providerProbePathEnv        = "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
 	providerProbeGOOS           = runtime.GOOS
 	providerProbeCommandContext = exec.CommandContext
+	providerProbeExpandDirs     = searchpath.Expand
 	providerProbeCache          = newCachedProviderProbeStore()
 
 	defaultProviderReadinessItems = []string{"claude", "codex", "gemini"}
@@ -534,11 +535,11 @@ func findProbeBinary(name, homeDir string) (string, bool) {
 }
 
 func providerProbeSearchDirs(homeDir, goos, basePath string) []string {
-	return searchpath.Expand(homeDir, goos, basePath)
+	return providerProbeExpandDirs(homeDir, goos, basePath)
 }
 
 func providerProbeSearchPath(homeDir string) string {
-	return searchpath.ExpandPath(homeDir, providerProbeGOOS, providerProbePathEnv)
+	return strings.Join(providerProbeSearchDirs(homeDir, providerProbeGOOS, providerProbePathEnv), string(os.PathListSeparator))
 }
 
 func runProbeCommandWithEnv(

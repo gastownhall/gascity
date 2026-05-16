@@ -82,7 +82,7 @@ func cmdRigStatus(args []string, stdout, stderr io.Writer) int {
 			store = opened
 		}
 	}
-	statusSnapshot := loadStatusSessionSnapshot(store)
+	statusSnapshot := loadStatusSessionSnapshot(store, stderr)
 	sp := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, statusSnapshot)
 	dops := newDrainOps(sp)
 	return doRigStatusWithStoreAndSnapshot(sp, dops, rig, rigAgents, cityPath, cityName, cfg.Workspace.SessionTemplate, cfg, store, statusSnapshot, stdout, stderr)
@@ -131,17 +131,18 @@ func doRigStatusWithStoreAndSnapshot(
 }
 
 // agentStatusLine returns a human-readable status string for an agent session.
+// The drain probe is a runtime metadata lookup (tmux show-environment) per
+// session; skip it when the session is not running because the draining flag
+// is meaningless then and the probe dominates wall time on idle cities.
 func agentStatusLine(running bool, dops drainOps, sn string, suspended bool) string {
-	draining, _ := dops.isDraining(sn)
-
-	switch {
-	case running && draining:
-		return "running  (draining)"
-	case running:
-		return "running"
-	case suspended:
-		return "stopped  (suspended)"
-	default:
+	if !running {
+		if suspended {
+			return "stopped  (suspended)"
+		}
 		return "stopped"
 	}
+	if draining, _ := dops.isDraining(sn); draining {
+		return "running  (draining)"
+	}
+	return "running"
 }

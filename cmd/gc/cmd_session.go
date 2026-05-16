@@ -693,7 +693,7 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	if jsonOutput {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
-		_ = enc.Encode(sessions) //nolint:errcheck // best-effort stdout
+		_ = enc.Encode(sessionListJSONRows(sessions)) //nolint:errcheck // best-effort stdout
 		return 0
 	}
 
@@ -729,7 +729,7 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	cachedSP := &attachmentCachingProvider{Provider: sp, cache: attachedSet}
 
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tAGE\tLAST ACTIVE") //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tAGE\tLAST ACTIVE\tLAST NUDGE") //nolint:errcheck // best-effort stdout
 	for _, s := range sessions {
 		state := string(s.State)
 		if s.State == "" {
@@ -743,10 +743,69 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 		if !s.LastActive.IsZero() {
 			lastActive = formatDuration(time.Since(s.LastActive)) + " ago"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, age, lastActive) //nolint:errcheck // best-effort stdout
+		lastNudge := "-"
+		if !s.LastNudgeDeliveredAt.IsZero() {
+			lastNudge = formatDuration(time.Since(s.LastNudgeDeliveredAt)) + " ago"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, age, lastActive, lastNudge) //nolint:errcheck // best-effort stdout
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+type sessionListJSONRow struct {
+	ID                   string
+	Template             string
+	State                session.State
+	Closed               bool
+	Title                string
+	Alias                string
+	AgentName            string
+	Provider             string
+	Transport            string
+	Command              string
+	WorkDir              string
+	SessionName          string
+	SessionKey           string
+	ResumeFlag           string
+	ResumeStyle          string
+	ResumeCommand        string
+	CreatedAt            time.Time
+	LastActive           time.Time
+	LastNudgeDeliveredAt *time.Time `json:"last_nudge_delivered_at,omitempty"`
+	Attached             bool
+}
+
+func sessionListJSONRows(sessions []session.Info) []sessionListJSONRow {
+	rows := make([]sessionListJSONRow, len(sessions))
+	for i, s := range sessions {
+		rows[i] = sessionListJSONRow{
+			ID:            s.ID,
+			Template:      s.Template,
+			State:         s.State,
+			Closed:        s.Closed,
+			Title:         s.Title,
+			Alias:         s.Alias,
+			AgentName:     s.AgentName,
+			Provider:      s.Provider,
+			Transport:     s.Transport,
+			Command:       s.Command,
+			WorkDir:       s.WorkDir,
+			SessionName:   s.SessionName,
+			SessionKey:    s.SessionKey,
+			ResumeFlag:    s.ResumeFlag,
+			ResumeStyle:   s.ResumeStyle,
+			ResumeCommand: s.ResumeCommand,
+			CreatedAt:     s.CreatedAt,
+			LastActive:    s.LastActive,
+			Attached:      s.Attached,
+		}
+		if !s.LastNudgeDeliveredAt.IsZero() {
+			stamp := s.LastNudgeDeliveredAt.UTC()
+			rows[i].LastNudgeDeliveredAt = &stamp
+		}
+	}
+	return rows
 }
 
 func sessionListTarget(s session.Info) string {

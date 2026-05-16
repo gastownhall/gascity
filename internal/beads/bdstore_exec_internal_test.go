@@ -34,6 +34,21 @@ func TestExecCommandRunnerTimesOut(t *testing.T) {
 	}
 }
 
+func TestBDCommandTimeoutForReadCommands(t *testing.T) {
+	if got := bdCommandTimeoutFor("bd", []string{"list", "--json"}); got != bdReadCommandTimeout {
+		t.Fatalf("bd list timeout = %s, want %s", got, bdReadCommandTimeout)
+	}
+	if got := bdCommandTimeoutFor("bd", []string{"ready", "--json"}); got != bdReadCommandTimeout {
+		t.Fatalf("bd ready timeout = %s, want %s", got, bdReadCommandTimeout)
+	}
+	if got := bdCommandTimeoutFor("bd", []string{"update", "gc-1", "--status", "open"}); got != bdCommandTimeout {
+		t.Fatalf("bd update timeout = %s, want %s", got, bdCommandTimeout)
+	}
+	if got := bdCommandTimeoutFor("git", []string{"status"}); got != bdCommandTimeout {
+		t.Fatalf("non-bd timeout = %s, want %s", got, bdCommandTimeout)
+	}
+}
+
 // TestKillCommandTreeKillsProcessGroup verifies killCommandTree kills
 // the entire process group, not just the direct child. The script
 // backgrounds a `sleep 30`; without process-group cleanup, that sleep

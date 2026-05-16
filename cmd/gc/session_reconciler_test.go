@@ -1751,6 +1751,72 @@ func TestReconcileSessionBeads_AlwaysNamedSessionWakesAfterLiveChurnSequence(t *
 	}
 }
 
+// TestReconcileSessionBeads_AlwaysNamedSessionWakesPostChurnWithMissingConfiguredIdentity
+// pins the production-shaped failure described in #1493: a qualified
+// named-always session bead whose configured_named_identity metadata is
+// missing (legacy bead, unmigrated config change, or any path that lost
+// the identity tag) must still wake when its session_name matches the
+// deterministic runtime name for the configured identity.
+//
+// Without the fallback in ComputeAwakeSet, findNamedSessionName returns
+// "" because no bead has bead.NamedIdentity == ns.Identity, so the
+// awake-set pass keys `desired` by ns.Identity (the qualified name) while
+// the wake loop looks it up by bead.SessionName (the deterministic
+// runtime name). The two never match, ShouldWake stays false, no Start
+// is issued, and the session is stuck asleep forever even though
+// `gc session pin` (which keys off pin_awake, not identity) unsticks it.
+func TestReconcileSessionBeads_AlwaysNamedSessionWakesPostChurnWithMissingConfiguredIdentity(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", Dir: "hello-world", StartCommand: "true"}},
+		NamedSessions: []config.NamedSession{{Dir: "hello-world", Template: "worker", Mode: "always"}},
+	}
+	identity := env.cfg.NamedSessions[0].QualifiedName()
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, identity)
+	if identity == sessionName {
+		t.Fatalf("test setup invalid: identity and sessionName both %q; the regression requires them to differ", identity)
+	}
+	env.desiredState[sessionName] = TemplateParams{
+		Command:                 "true",
+		SessionName:             sessionName,
+		TemplateName:            "hello-world/worker",
+		ConfiguredNamedIdentity: identity,
+		ConfiguredNamedMode:     "always",
+	}
+	session := env.createSessionBead(sessionName, "hello-world/worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey: "true",
+		// configured_named_identity intentionally NOT set — this is the
+		// production-shaped failure mode the reporter hypothesized.
+		namedSessionModeMetadata:     "always",
+		"state":                      "asleep",
+		"sleep_reason":               "",
+		"state_reason":               "creation_complete",
+		"last_woke_at":               "",
+		"wake_attempts":              "0",
+		"churn_count":                "1",
+		"session_key":                "",
+		"continuation_reset_pending": "",
+		"pending_create_claim":       "",
+		"pin_awake":                  "",
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		final, _ := env.store.Get(session.ID)
+		t.Fatalf(
+			"named-always with missing configured_named_identity must wake (#1493); identity=%q sessionName=%q state=%q sleep_reason=%q churn_count=%q wake_attempts=%q",
+			identity, sessionName,
+			final.Metadata["state"],
+			final.Metadata["sleep_reason"],
+			final.Metadata["churn_count"],
+			final.Metadata["wake_attempts"],
+		)
+	}
+}
+
 // TestReconcileSessionBeads_QuarantinedNamedSessionStaysAsleepAfterChurn pins
 // the negative half of the post-churn invariant: when churn pushes the
 // session into quarantine, the session must stay asleep until the
@@ -2396,6 +2462,51 @@ func TestReconcileSessionBeads_ConfigDriftInitiatesDrain(t *testing.T) {
 	}
 }
 
+// TestReconcileSessionBeads_ConfigDriftDeferredOnLiveAssignedWork verifies
+// that a pool session with live in-progress work assigned to it is NOT
+// drained when its config_hash drifts. Draining mid-work would orphan the
+// assigned bead (assignee still pointing at the dead session, status stuck
+// at in_progress) and kill the agent mid-task. The drain must wait until
+// the assigned work completes — the next reconcile tick will see no
+// assigned work and drain naturally.
+//
+// Regression for the 2026-05-12 live-edit drain cascade incident: editing
+// a city's .gc/settings.json on a running city flips the config hash and
+// triggers config-drift drains across the pool. The orphan/suspended
+// branch (line 754) already skips drain when sessionHasOpenAssignedWork
+// returns true; the config-drift branch did not. Pool sessions actively
+// processing work could be drained, orphaning their assignments. Named
+// sessions are protected separately via shouldDeferNamedSessionConfigDrift
+// (line 1161) so this case is specifically about pool-routed sessions
+// reaching the !restartedInPlace branch at line 1186.
+func TestReconcileSessionBeads_ConfigDriftDeferredOnLiveAssignedWork(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addRunningWorkerDesiredWithNewConfig()
+	session := env.createSessionBead("worker", "worker")
+	startedHash := runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"})
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": startedHash,
+	})
+
+	// Assign live in-progress work to this session.
+	if _, err := env.store.Create(beads.Bead{
+		Title:    "in-flight work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	}); err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("expected config-drift drain to be deferred for live assigned work, got drain=%+v stderr=%s",
+			ds, env.stderr.String())
+	}
+}
+
 func TestReconcileSessionBeads_NoDriftWhenHashMatches(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
@@ -3035,6 +3146,30 @@ func TestReconcileSessionBeads_SuspendedNotRunningClosed(t *testing.T) {
 	}
 	if b.Metadata["state"] != "suspended" {
 		t.Errorf("state = %q, want %q", b.Metadata["state"], "suspended")
+	}
+}
+
+// TestReconcileSessionBeads_FailedCreateNotDesiredClosed verifies that a bead
+// in the failed-create state is recognized by the reconciler (not skipped as
+// unknown) and closed when it is not in the desired set and not running.
+// Regression: previously failed-create was missing from knownSessionStates,
+// so dead pool beads blocked slots forever.
+func TestReconcileSessionBeads_FailedCreateNotDesiredClosed(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "polecat", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)}}}
+	session := env.createSessionBead("polecat", "polecat-ga-mg0")
+	session.Metadata["state"] = "failed-create"
+	session.Metadata["pool_managed"] = "true"
+	session.Metadata["pool_slot"] = "1"
+
+	env.reconcile([]beads.Bead{session})
+
+	b, _ := env.store.Get(session.ID)
+	if b.Status != "closed" {
+		t.Errorf("failed-create bead status = %q, want closed", b.Status)
+	}
+	if want := sessionpkg.CanonicalCloseReason(string(sessionpkg.StateFailedCreate)); b.Metadata["close_reason"] != want {
+		t.Errorf("close_reason = %q, want %q", b.Metadata["close_reason"], want)
 	}
 }
 
@@ -5100,6 +5235,236 @@ func TestReconcileSessionBeads_IdleTimeoutNilTrackerSkipped(t *testing.T) {
 	}
 }
 
+// --- max session age tests ---
+
+// maxAgeReconcile runs the reconciler with the given max-age tracker
+// installed via withMaxSessionAgeTracker. Mirrors env.reconcile but routes
+// through reconcileSessionBeadsTraced so the option wiring is exercised.
+func (e *reconcilerTestEnv) maxAgeReconcile(sessions []beads.Bead, tr maxSessionAgeTracker) {
+	poolDesired := make(map[string]int)
+	for _, tp := range e.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	cfgNames := configuredSessionNames(e.cfg, "", e.store)
+	reconcileSessionBeadsTraced(
+		context.Background(), "", sessions, e.desiredState, cfgNames, e.cfg, e.sp,
+		e.store, nil, nil, nil, nil, e.dt, poolDesired, false, nil, "",
+		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr, nil,
+		withMaxSessionAgeTracker(tr),
+	)
+}
+
+func TestReconcileSessionBeads_MaxSessionAgeKillsAgedSession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	// creation_complete_at well past the configured 5h threshold.
+	env.setSessionMetadata(&session, map[string]string{
+		"creation_complete_at": env.clk.Now().Add(-6 * time.Hour).UTC().Format(time.RFC3339),
+	})
+
+	tr := newMaxSessionAgeTracker()
+	tr.setConfig("witness", 5*time.Hour, 0)
+	rec := events.NewFake()
+	env.rec = rec
+
+	env.maxAgeReconcile([]beads.Bead{session}, tr)
+
+	if env.sp.IsRunning("witness") {
+		t.Error("aged witness should have been stopped")
+	}
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["sleep_reason"] != "max-session-age" {
+		t.Errorf("sleep_reason = %q, want max-session-age", b.Metadata["sleep_reason"])
+	}
+	fired := false
+	for _, e := range rec.Events {
+		if e.Type == events.SessionMaxAgeKilled {
+			fired = true
+			break
+		}
+	}
+	if !fired {
+		t.Error("expected SessionMaxAgeKilled event")
+	}
+}
+
+func TestReconcileSessionBeads_MaxSessionAgeSkippedWhenYoung(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"creation_complete_at": env.clk.Now().Add(-30 * time.Minute).UTC().Format(time.RFC3339),
+	})
+
+	tr := newMaxSessionAgeTracker()
+	tr.setConfig("witness", 5*time.Hour, 0)
+	env.maxAgeReconcile([]beads.Bead{session}, tr)
+
+	if !env.sp.IsRunning("witness") {
+		t.Error("young witness should still be running")
+	}
+}
+
+func TestReconcileSessionBeads_MaxSessionAgeSkippedWithoutAnchor(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	// No creation_complete_at — predates the feature or was cleared. The
+	// tracker must tolerate this and skip the restart rather than treating
+	// a missing anchor as age=0 or age=infinity.
+
+	tr := newMaxSessionAgeTracker()
+	tr.setConfig("witness", 5*time.Hour, 0)
+	env.maxAgeReconcile([]beads.Bead{session}, tr)
+
+	if !env.sp.IsRunning("witness") {
+		t.Error("witness without creation_complete_at must not be killed")
+	}
+}
+
+func TestReconcileSessionBeads_MaxSessionAgeNilTrackerSkipped(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"creation_complete_at": env.clk.Now().Add(-10 * time.Hour).UTC().Format(time.RFC3339),
+	})
+
+	env.maxAgeReconcile([]beads.Bead{session}, nil) // disabled globally
+
+	if !env.sp.IsRunning("worker") {
+		t.Error("worker should still be running when max-age feature is disabled")
+	}
+}
+
+func TestReconcileSessionBeads_MaxSessionAgeSkippedWhenPending(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"creation_complete_at": env.clk.Now().Add(-6 * time.Hour).UTC().Format(time.RFC3339),
+	})
+	// Simulate a pending interaction — the reconciler must defer restart
+	// until the session settles so we don't interrupt mid-turn work.
+	env.sp.SetPendingInteraction("witness", &runtime.PendingInteraction{Kind: "approval", RequestID: "req-1"})
+
+	tr := newMaxSessionAgeTracker()
+	tr.setConfig("witness", 5*time.Hour, 0)
+	rec := events.NewFake()
+	env.rec = rec
+	env.maxAgeReconcile([]beads.Bead{session}, tr)
+
+	if !env.sp.IsRunning("witness") {
+		t.Error("pending-interaction witness should not be max-age killed")
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionMaxAgeKilled {
+			t.Error("SessionMaxAgeKilled must not fire while a pending interaction keeps the session awake")
+		}
+	}
+}
+
+func TestReconcileSessionBeads_MaxSessionAgeSkippedWhenBusyWithAssignedWork(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"creation_complete_at": env.clk.Now().Add(-6 * time.Hour).UTC().Format(time.RFC3339),
+	})
+	if _, err := env.store.Create(beads.Bead{
+		Title:    "in-flight work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	}); err != nil {
+		t.Fatalf("Create(in-flight work): %v", err)
+	}
+
+	tr := newMaxSessionAgeTracker()
+	tr.setConfig("witness", 5*time.Hour, 0)
+	rec := events.NewFake()
+	env.rec = rec
+	env.maxAgeReconcile([]beads.Bead{session}, tr)
+
+	if !env.sp.IsRunning("witness") {
+		t.Error("witness with open assigned work should not be max-age killed")
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionMaxAgeKilled {
+			t.Error("SessionMaxAgeKilled must not fire while an in-progress assigned bead is held")
+		}
+	}
+}
+
+// TestReconcileSessionBeads_MaxSessionAgeFailsClosedOnStoreError verifies
+// that a transient store error during the assigned-work check defers the
+// max-age restart rather than killing the session. This guards the fix at
+// session_reconciler.go where the error from
+// sessionHasOpenAssignedWorkForReachableStore was previously discarded
+// with `_`, which could drop in-flight work on a transient blip.
+func TestReconcileSessionBeads_MaxSessionAgeFailsClosedOnStoreError(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"creation_complete_at": env.clk.Now().Add(-6 * time.Hour).UTC().Format(time.RFC3339),
+	})
+
+	// Wrap the city store so the assigned-work check sees an error.
+	failingStore := &listErrStore{Store: env.store, err: fmt.Errorf("simulated transient store failure")}
+
+	tr := newMaxSessionAgeTracker()
+	tr.setConfig("witness", 5*time.Hour, 0)
+	rec := events.NewFake()
+	env.rec = rec
+
+	poolDesired := make(map[string]int)
+	for _, tp := range env.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	reconcileSessionBeadsTraced(
+		context.Background(), "", []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+		failingStore, nil, nil, nil, nil, env.dt, poolDesired, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, nil,
+		withMaxSessionAgeTracker(tr),
+	)
+
+	if !env.sp.IsRunning("witness") {
+		t.Error("witness should remain running when assigned-work check errored (fail-closed)")
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionMaxAgeKilled {
+			t.Error("SessionMaxAgeKilled must not fire when assigned-work check returned an error")
+		}
+	}
+	if !strings.Contains(env.stderr.String(), "simulated transient store failure") {
+		t.Errorf("expected stderr to log the store error; got %q", env.stderr.String())
+	}
+}
+
 // --- zombie scrollback capture tests ---
 
 func TestReconcileSessionBeads_ZombieCapturesScrollback(t *testing.T) {
@@ -5639,7 +6004,8 @@ func testHasRunningPoolSessionForTemplate(sessions []beads.Bead, sp *runtime.Fak
 func sessionBeadDebug(sessions []beads.Bead) []string {
 	out := make([]string, 0, len(sessions))
 	for _, sessionBead := range sessions {
-		out = append(out, fmt.Sprintf("%s:name=%s template=%s named=%t pool=%t state=%s status=%s",
+		out = append(out, fmt.Sprintf(
+			"%s:name=%s template=%s named=%t pool=%t state=%s status=%s",
 			sessionBead.ID,
 			sessionBead.Metadata["session_name"],
 			sessionBead.Metadata["template"],

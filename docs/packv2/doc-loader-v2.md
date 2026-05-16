@@ -437,8 +437,20 @@ version (or pin to a commit). The loader rejects ambiguity.
 The actual fetch / cache mechanism is owned by `gc import`
 ([doc-packman.md](doc-packman.md)), not the loader. The loader assumes
 imports have already been resolved into local directories under the
-hidden cache (`~/.gc/cache/repos/<sha256(url+commit)>/`) and reads the
-lock file (`packs.lock`) to know which commit to use.
+hidden cache (`~/.gc/cache/repos/<cache-key>/`) and reads the lock file
+(`packs.lock`) to know which commit to use. Ordinary remote imports use a
+normalized clone URL plus commit cache key. Bundled Gas City pack imports use a
+separate synthetic-cache namespace for the same source and commit so embedded
+current-binary content never collides with an ordinary git checkout from the
+same repository.
+
+Bundled synthetic caches are repo-shaped because relative imports between
+bundled pack subpaths should resolve like a real checkout. Their marker records
+the requested lock/cache commit and a hash of the bundled pack content embedded
+in the running `gc` binary. The commit is the lock identity; the content hash is
+the cache integrity proof. If the binary's bundled content changes, validation
+rejects the old synthetic cache and `gc import install` refreshes it from the
+current binary.
 
 This is a significant separation-of-concerns change. In V1, the loader
 itself clones git repos. In V2, that responsibility moves to
@@ -470,7 +482,7 @@ parent  = "(root)"
 ```
 
 For each declared import, the loader looks up the matching `[packs.X]`
-record, finds the cached directory under the corresponding sha256 key,
+record, finds the cached directory under the corresponding cache key,
 and proceeds. If no match exists, or the cache entry is missing, that's
 a load-time error telling the user to run `gc import install`.
 
@@ -529,7 +541,7 @@ that escapes the pack directory is a hard error. This is the new
 For each entry in `Pack.Imports`:
 
 1. Look up the matching `[packs.X]` lock record. Error if missing.
-2. Resolve the on-disk path (the sha256 cache directory).
+2. Resolve the on-disk path (the import cache directory).
 3. Parse the imported pack's `pack.toml`.
 4. Validate the imported pack is self-contained.
 5. Validate the imported pack's `pack.name` matches the lock record (or

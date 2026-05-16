@@ -103,6 +103,22 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 	return resolved, nil
 }
 
+// AgentProcessNames resolves the process-name hints used to observe an agent's
+// runtime liveness, following the same provider resolution path as launch.
+func AgentProcessNames(cfg *City, agent Agent, lookPath LookPathFunc) []string {
+	if len(agent.ProcessNames) > 0 {
+		return append([]string(nil), agent.ProcessNames...)
+	}
+	if cfg == nil || lookPath == nil {
+		return nil
+	}
+	resolved, err := ResolveProvider(&agent, &cfg.Workspace, cfg.Providers, lookPath)
+	if err != nil || len(resolved.ProcessNames) == 0 {
+		return nil
+	}
+	return append([]string(nil), resolved.ProcessNames...)
+}
+
 // ResolveInstallHooks returns the hook providers to install for an agent.
 // Agent-level overrides workspace-level (replace, not additive).
 // Returns nil if neither specifies hooks.

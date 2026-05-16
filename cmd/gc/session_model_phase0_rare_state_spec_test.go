@@ -570,6 +570,69 @@ func TestPhase0ConfigDrift_AsleepNamedSessionRepairsInPlaceWithoutWaking(t *test
 	}
 }
 
+func TestPhase0ConfigDrift_AsleepNamedSessionAppliesTemplateOverrides(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Provider:          "custom",
+			StartCommand:      "agent --effort low",
+			MaxActiveSessions: intPtr(1),
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "worker",
+			Mode:     "on_demand",
+		}},
+	}
+
+	provider := &config.ResolvedProvider{
+		OptionsSchema: []config.ProviderOption{{
+			Key:  "effort",
+			Type: "select",
+			Choices: []config.OptionChoice{
+				{Value: "low", FlagArgs: []string{"--effort", "low"}},
+				{Value: "high", FlagArgs: []string{"--effort", "high"}},
+			},
+		}},
+		EffectiveDefaults: map[string]string{"effort": "low"},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		TemplateName:            "worker",
+		InstanceName:            "worker",
+		Alias:                   "worker",
+		Command:                 "agent --effort low",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "on_demand",
+		ResolvedProvider:        provider,
+	}
+
+	acceptedRuntime := runtime.Config{Command: "agent --effort high"}
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"started_config_hash":        runtime.CoreFingerprint(acceptedRuntime),
+		"started_live_hash":          runtime.LiveFingerprint(acceptedRuntime),
+		"template_overrides":         `{"effort":"high"}`,
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["started_config_hash"] != runtime.CoreFingerprint(acceptedRuntime) {
+		t.Fatalf("started_config_hash = %q, want preserved override-aware hash", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["continuation_reset_pending"] == "true" {
+		t.Fatal("asleep named session was repaired for drift even though template_overrides made the hash match")
+	}
+}
+
 func TestConfigDrift_AttachedSessionPersistsAcrossCycles(t *testing.T) {
 	// Config-drift deferral for attached sessions must persist across
 	// reconciler cycles — the session must never be killed while attached.

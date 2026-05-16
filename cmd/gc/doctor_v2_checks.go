@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/migrate"
 )
 
 func registerV2DeprecationChecks(d *doctor.Doctor) {
@@ -25,9 +27,12 @@ func registerV2DeprecationChecks(d *doctor.Doctor) {
 
 type v2AgentFormatCheck struct{}
 
-func (v2AgentFormatCheck) Name() string                     { return "v2-agent-format" }
-func (v2AgentFormatCheck) CanFix() bool                     { return false }
-func (v2AgentFormatCheck) Fix(_ *doctor.CheckContext) error { return nil }
+func (v2AgentFormatCheck) Name() string { return "v2-agent-format" }
+func (v2AgentFormatCheck) CanFix() bool { return true }
+func (v2AgentFormatCheck) Fix(ctx *doctor.CheckContext) error {
+	return runV2PackMigration(ctx, v2MigrationWarnSink(ctx))
+}
+
 func (v2AgentFormatCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	files := legacyAgentFiles(ctx.CityPath)
 	if len(files) == 0 {
@@ -41,9 +46,12 @@ func (v2AgentFormatCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 
 type v2ImportFormatCheck struct{}
 
-func (v2ImportFormatCheck) Name() string                     { return "v2-import-format" }
-func (v2ImportFormatCheck) CanFix() bool                     { return false }
-func (v2ImportFormatCheck) Fix(_ *doctor.CheckContext) error { return nil }
+func (v2ImportFormatCheck) Name() string { return "v2-import-format" }
+func (v2ImportFormatCheck) CanFix() bool { return true }
+func (v2ImportFormatCheck) Fix(ctx *doctor.CheckContext) error {
+	return runV2PackMigration(ctx, v2MigrationWarnSink(ctx))
+}
+
 func (v2ImportFormatCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	cfg, ok := parseCityConfig(filepath.Join(ctx.CityPath, "city.toml"))
 	if !ok || len(cfg.Workspace.Includes) == 0 {
@@ -57,9 +65,12 @@ func (v2ImportFormatCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 
 type v2DefaultRigImportFormatCheck struct{}
 
-func (v2DefaultRigImportFormatCheck) Name() string                     { return "v2-default-rig-import-format" }
-func (v2DefaultRigImportFormatCheck) CanFix() bool                     { return false }
-func (v2DefaultRigImportFormatCheck) Fix(_ *doctor.CheckContext) error { return nil }
+func (v2DefaultRigImportFormatCheck) Name() string { return "v2-default-rig-import-format" }
+func (v2DefaultRigImportFormatCheck) CanFix() bool { return true }
+func (v2DefaultRigImportFormatCheck) Fix(ctx *doctor.CheckContext) error {
+	return runV2PackMigration(ctx, v2MigrationWarnSink(ctx))
+}
+
 func (v2DefaultRigImportFormatCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	cfg, ok := parseCityConfig(filepath.Join(ctx.CityPath, "city.toml"))
 	if !ok || len(cfg.Workspace.DefaultRigIncludes) == 0 {
@@ -67,7 +78,7 @@ func (v2DefaultRigImportFormatCheck) Run(ctx *doctor.CheckContext) *doctor.Check
 	}
 	return warnCheck("v2-default-rig-import-format",
 		"workspace.default_rig_includes is deprecated; migrate to root pack.toml [defaults.rig.imports.<binding>]",
-		`move each entry into root pack.toml [defaults.rig.imports.<binding>]`,
+		v2MigrationHint(),
 		cfg.Workspace.DefaultRigIncludes)
 }
 
@@ -441,6 +452,44 @@ func warnCheck(name, message, hint string, details []string) *doctor.CheckResult
 func v2MigrationHint() string {
 	return `run "gc doctor --fix" to rewrite safe mechanical cases, then rerun "gc doctor"`
 }
+
+// runV2PackMigration applies the pack-shape migration (legacy [[agent]]
+// tables, workspace.includes, default_rig_includes) for a doctor --fix run.
+// It is safe to call from multiple checks: migrate.Apply is idempotent on a
+// city that has already been migrated (it returns an empty change set).
+//
+// migrate.Apply can return warnings about behavior-affecting fields it had
+// to drop (e.g. legacy [[agent]] entries with fallback = true — the
+// fallback field has no v2 counterpart and shadowing must be reviewed by
+// hand). doctor --fix must not silently swallow those, otherwise the next
+// gc doctor run reports a green check and the manual follow-up is lost
+// forever. The warnings are emitted to warnSink so Doctor.Run callers see
+// them in the same captured output stream as the check results.
+func runV2PackMigration(ctx *doctor.CheckContext, warnSink io.Writer) error {
+	report, err := migrate.Apply(ctx.CityPath, migrate.Options{})
+	if err != nil {
+		return err
+	}
+	if warnSink == nil {
+		warnSink = io.Discard
+	}
+	for _, w := range report.Warnings {
+		fmt.Fprintf(warnSink, "      gc doctor --fix: %s\n", w) //nolint:errcheck // best-effort diagnostic
+	}
+	return nil
+}
+
+func v2MigrationWarnSink(ctx *doctor.CheckContext) io.Writer {
+	if ctx != nil && ctx.Output != nil {
+		return ctx.Output
+	}
+	return defaultV2MigrationWarnSink
+}
+
+// defaultV2MigrationWarnSink is the production warning sink for
+// direct Fix calls outside Doctor.Run. Doctor.Run sets CheckContext.Output,
+// and production doctor commands normally use that writer instead.
+var defaultV2MigrationWarnSink io.Writer = os.Stderr
 
 func parseCityConfig(path string) (*config.City, bool) {
 	data, err := os.ReadFile(path)

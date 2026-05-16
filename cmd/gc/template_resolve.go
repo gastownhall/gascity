@@ -171,6 +171,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		command = command + " " + shellquote.Join(defaultArgs)
 	}
 	providerFamily := resolvedProviderLaunchFamily(resolved)
+	installHooks := config.ResolveInstallHooks(cfgAgent, p.workspace)
 	sa, err := ensureClaudeSettingsArgs(p.fs, p.cityPath, providerFamily, p.stderr)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
@@ -192,7 +193,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			Probed: true, ContentHash: runtime.HashPathContent(scriptsDir),
 		})
 	}
-	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir)
+	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir, hookFileProvidersForResolved(resolved, installHooks, p.providers))
 
 	// Step 6: Compute session name.
 	// Uses bead-derived naming ("s-{beadID}") when a bead store is available,
@@ -271,7 +272,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
 	}
-	for key, value := range sessionDoltEnv(p.cityPath, rigRoot, p.rigs) {
+	sessionBackendEnv, err := sessionBackendEnvWithError(p.cityPath, rigRoot, p.rigs)
+	if err != nil {
+		return TemplateParams{}, fmt.Errorf("agent %q: building session backend env: %w", qualifiedName, err)
+	}
+	for key, value := range sessionBackendEnv {
 		agentEnv[key] = value
 	}
 	if rigName != "" {
@@ -293,20 +298,23 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		cfgAgent.InheritedAppendFragments,
 		p.appendFragments,
 	)
+	providerKey, providerDisplayName := providerInfoForAgent(cfgAgent, p.workspace, p.providers)
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
-		CityRoot:      p.cityPath,
-		AgentName:     qualifiedName,
-		TemplateName:  cfgAgent.Name,
-		BindingName:   cfgAgent.BindingName,
-		BindingPrefix: cfgAgent.BindingPrefix(),
-		RigName:       rigName,
-		RigRoot:       rigRoot,
-		WorkDir:       workDir,
-		IssuePrefix:   findRigPrefix(rigName, p.rigs),
-		DefaultBranch: defaultBranchForRig(rigName, p.rigs, workDir),
-		WorkQuery:     expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQuery(), p.stderr),
-		SlingQuery:    expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
-		Env:           cfgAgent.Env,
+		CityRoot:            p.cityPath,
+		AgentName:           qualifiedName,
+		TemplateName:        cfgAgent.Name,
+		BindingName:         cfgAgent.BindingName,
+		BindingPrefix:       cfgAgent.BindingPrefix(),
+		RigName:             rigName,
+		RigRoot:             rigRoot,
+		WorkDir:             workDir,
+		IssuePrefix:         findRigPrefix(rigName, p.rigs),
+		DefaultBranch:       defaultBranchForRig(rigName, p.rigs, workDir),
+		WorkQuery:           expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQuery(), p.stderr),
+		SlingQuery:          expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
+		ProviderKey:         providerKey,
+		ProviderDisplayName: providerDisplayName,
+		Env:                 cfgAgent.Env,
 	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
@@ -520,7 +528,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		SessionLive:            expandedLive,
 		ProviderName:           resolvedProviderLaunchFamily(resolved),
 		ProviderOverlayName:    strings.TrimSpace(resolved.Name),
-		InstallAgentHooks:      config.ResolveInstallHooks(cfgAgent, p.workspace),
+		InstallAgentHooks:      installHooks,
 		PackOverlayDirs:        effectiveOverlayDirs(p.packOverlayDirs, p.rigOverlayDirs, rigName),
 		OverlayDir:             overlayDir,
 		CopyFiles:              copyFiles,
@@ -547,7 +555,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}, nil
 }
 
-func sessionDoltEnv(cityPath, rigRoot string, rigs []config.Rig) map[string]string {
+func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (map[string]string, error) {
 	env := map[string]string{
 		// Suppress bd's built-in Dolt auto-start. The gc controller manages
 		// the server; bd's CLI auto-start launches rogue servers from the
@@ -557,21 +565,47 @@ func sessionDoltEnv(cityPath, rigRoot string, rigs []config.Rig) map[string]stri
 	// Explicit empty values let tmux unset stale Dolt vars inherited from
 	// the server environment when the current city/rig does not use them.
 	setProjectedDoltEnvEmpty(env)
+	ensureProjectedPostgresEnvExplicit(env)
 
 	// Session env projection must not trigger provider recovery. Session setup
 	// only publishes the currently resolved target; store operations use the
 	// bd runtime env when recovery is allowed.
 	if rigRoot == "" {
+		if cityUsesBdStoreContract(cityPath) {
+			if usedPostgres, err := applyCityPostgresBackendEnv(env, cityPath); err != nil {
+				// On PG projection errors, keep explicit empty keys so tmux
+				// clears stale inherited backend variables for the session.
+				clearProjectedDoltEnv(env)
+				clearProjectedPostgresEnv(env)
+				mirrorBeadsDoltEnv(env)
+				ensureProjectedDoltEnvExplicit(env)
+				ensureProjectedPostgresEnvExplicit(env)
+				return env, err
+			} else if usedPostgres {
+				ensureProjectedDoltEnvExplicit(env)
+				return env, nil
+			}
+		}
 		if err := applyResolvedCityDoltEnv(env, cityPath, false); err != nil {
 			mirrorBeadsDoltEnv(env)
+			ensureProjectedPostgresEnvExplicit(env)
+			if !isRecoverableManagedDoltEnvError(err) {
+				return env, err
+			}
 		}
-		return env
+		ensureProjectedPostgresEnvExplicit(env)
+		return env, nil
 	}
 
 	if err := applyResolvedRigDoltEnv(env, cityPath, rigRoot, rigConfigForScopeRoot(cityPath, rigRoot, rigs), false); err != nil {
 		mirrorBeadsDoltEnv(env)
+		ensureProjectedPostgresEnvExplicit(env)
+		if !isRecoverableManagedDoltEnvError(err) {
+			return env, err
+		}
 	}
-	return env
+	ensureProjectedPostgresEnvExplicit(env)
+	return env, nil
 }
 
 // templateParamsToConfig converts TemplateParams to the runtime.Config

@@ -358,3 +358,79 @@ func TestHandleEventEmit_NoEventsProvider(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
 	}
 }
+
+// TestEventListLimitReturnsTail is a regression test for the perf bug where
+// the city events handler ignored the query limit and parsed the entire
+// events.jsonl on every request (O(file size), ~4s on a 100 MB log).
+// The fix routes limit=N through the TailProvider to return the N newest
+// events without scanning history.
+func TestEventListLimitReturnsTail(t *testing.T) {
+	state := newFakeState(t)
+	ep := state.eventProv.(*events.Fake)
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "old"})
+	ep.Record(events.Event{Type: events.BeadCreated, Actor: "worker", Subject: "middle"})
+	ep.Record(events.Event{Type: events.SessionStopped, Actor: "gc", Subject: "new"})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/events?limit=1"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []map[string]any `json:"items"`
+		Total int              `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(resp.Items))
+	}
+	if got := resp.Items[0]["subject"]; got != "new" {
+		t.Fatalf("subject = %v, want \"new\" (newest event); tail semantics regressed", got)
+	}
+	// Total should report the full match count, not the page size, so
+	// callers can tell "server has N events" from "limit truncated".
+	if resp.Total != 3 {
+		t.Fatalf("total = %d, want 3", resp.Total)
+	}
+}
+
+// TestEventListLimitWithTypeFilterReturnsTail verifies the TailProvider
+// path still yields newest-first semantics when a type filter narrows
+// the result set. Total is best-effort (= returned count) because we
+// can't cheaply compute the filtered match count.
+func TestEventListLimitWithTypeFilterReturnsTail(t *testing.T) {
+	state := newFakeState(t)
+	ep := state.eventProv.(*events.Fake)
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "woke-old"})
+	ep.Record(events.Event{Type: events.BeadCreated, Actor: "gc", Subject: "ignored"})
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "woke-new"})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/events?type=session.woke&limit=1"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []map[string]any `json:"items"`
+		Total int              `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(resp.Items))
+	}
+	if got := resp.Items[0]["subject"]; got != "woke-new" {
+		t.Fatalf("subject = %v, want \"woke-new\" (newest matching); tail regressed", got)
+	}
+}

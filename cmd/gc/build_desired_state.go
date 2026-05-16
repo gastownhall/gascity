@@ -296,7 +296,12 @@ func buildDesiredStateWithSessionBeads(
 			defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores))
 			continue
 		}
-		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, env: controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[i]), newDemand: store != nil})
+		env, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[i])
+		if err != nil {
+			fmt.Fprintf(stderr, "scaleCheck: building env for %s: %v\n", cfg.Agents[i].QualifiedName(), err) //nolint:errcheck
+			continue
+		}
+		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, env: env, newDemand: store != nil})
 	}
 
 	// Collect work beads with assignees — used for both pool demand and
@@ -734,14 +739,10 @@ func expandSkipAssigneesWithSessionIdentities(skip map[string]struct{}, sessionB
 		return
 	}
 	for _, session := range sessionBeads.Open() {
-		ids := []string{
-			session.ID,
-			session.Metadata["session_name"],
-			session.Metadata["configured_named_identity"],
-		}
+		ids := sessionBeadAssigneeIdentities(session)
 		matched := false
 		for _, id := range ids {
-			if _, ok := skip[strings.TrimSpace(id)]; ok {
+			if _, ok := skip[id]; ok {
 				matched = true
 				break
 			}
@@ -750,10 +751,7 @@ func expandSkipAssigneesWithSessionIdentities(skip map[string]struct{}, sessionB
 			continue
 		}
 		for _, id := range ids {
-			id = strings.TrimSpace(id)
-			if id != "" {
-				skip[id] = struct{}{}
-			}
+			skip[id] = struct{}{}
 		}
 	}
 }
@@ -780,9 +778,9 @@ func readyAssignedWorkAssignees(cfg *config.City, sessionBeads *sessionBeadSnaps
 			if session.Status == "closed" {
 				continue
 			}
-			add(session.ID)
-			add(session.Metadata["session_name"])
-			add(session.Metadata["configured_named_identity"])
+			for _, id := range sessionBeadAssigneeIdentities(session) {
+				add(id)
+			}
 		}
 	}
 	if cfg != nil {
@@ -1262,10 +1260,10 @@ func discoverSessionBeadsWithRoots(
 		if isFailedCreateSessionBead(b) {
 			continue
 		}
-		// Skip beads already in desired state (from config iteration).
-		if _, exists := desired[sn]; exists {
-			continue
-		}
+		// Remember whether the main config/pool pass already selected this
+		// exact session bead. Pool-managed capacity not selected there should
+		// not be recovered merely because it is pending or creating.
+		_, sessionAlreadyDesired := desired[sn]
 		// Skip held beads — the reconciler's wakeReasons handles held_until,
 		// but we still need the bead in desired state so the reconciler
 		// doesn't classify it as orphaned. Only skip if we can't resolve
@@ -1302,12 +1300,26 @@ func discoverSessionBeadsWithRoots(
 			manualSession := isManualSessionBeadForAgent(b, cfgAgent)
 			creating := b.Metadata["state"] == "creating"
 			pendingCreate := isPendingPoolCreate(b)
-			if isPoolManagedSessionBead(b) && !manualSession && !isNamedSessionBead(b) && !creating && !pendingCreate && !scaleCheckPartial {
+			templateDesired := desiredHasTemplate(desired, template)
+			// Pool-managed beads are controller-created capacity. A pending
+			// or creating bead that the pool pass did not select is stale
+			// capacity, not a reason to spawn a worker with an empty hook.
+			controllerManagedPool := strings.TrimSpace(b.Metadata[poolManagedMetadataKey]) == boolMetadata(true) ||
+				strings.TrimSpace(b.Metadata["pool_slot"]) != "" || pendingCreate
+			if controllerManagedPool && isDrainedSessionBead(b) {
 				continue
 			}
-			if !manualSession && (!creating || isStaleCreating(b)) && !desiredHasTemplate(desired, template) && !pendingCreate && !scaleCheckPartial {
+			if controllerManagedPool && !manualSession && !isNamedSessionBead(b) &&
+				!sessionAlreadyDesired && !templateDesired && !scaleCheckPartial {
 				continue
 			}
+			if !manualSession && (!creating || isStaleCreating(b)) && !templateDesired && !pendingCreate && !scaleCheckPartial {
+				continue
+			}
+		}
+		// Skip beads already in desired state (from config iteration).
+		if sessionAlreadyDesired {
+			continue
 		}
 		// Resolve TemplateParams for this bead's session.
 		//
@@ -1529,6 +1541,14 @@ func realizePoolDesiredSessions(
 		var prefer *beads.Bead
 		if request.SessionBeadID != "" {
 			if bead, ok := findOpenSessionBeadByID(bp.sessionBeads, request.SessionBeadID); ok {
+				// Defense in depth: ComputePoolDesiredStates filters out
+				// named-session beads from pool resume requests. If one
+				// slipped through, materializing it here would create a
+				// phantom "{name}-N" sibling to the canonical named session.
+				if isNamedSessionBead(bead) {
+					fmt.Fprintf(stderr, "buildDesiredState: pool %q: refusing to materialize named-session bead %s as pool instance (would create phantom %q-N sibling)\n", qualifiedName, bead.ID, cfgAgent.Name) //nolint:errcheck
+					continue
+				}
 				prefer = &bead
 			}
 		}
@@ -1541,8 +1561,7 @@ func realizePoolDesiredSessions(
 			continue
 		}
 		used[sessionBead.ID] = true
-		instanceName := poolInstanceName(cfgAgent.Name, slot, cfgAgent)
-		qualifiedInstance := cfgAgent.QualifiedInstanceName(instanceName)
+		instanceName, qualifiedInstance := poolInstanceIdentity(cfgAgent, slot, stderr)
 		instanceAgent := deepCopyAgent(cfgAgent, instanceName, cfgAgent.Dir)
 		fpExtra := buildFingerprintExtra(&instanceAgent)
 		tp, err := resolveTemplateForSessionBead(bp, &instanceAgent, qualifiedInstance, fpExtra, sessionBead)
@@ -1739,8 +1758,11 @@ func sessionBeadConfigAgent(cfgAgent *config.Agent, qualifiedName string) *confi
 	return &instanceAgent
 }
 
-func claimPoolSlot(cfgAgent *config.Agent, sessionBead beads.Bead, used map[int]bool) int {
-	if slot := existingPoolSlot(cfgAgent, sessionBead); slot > 0 && !used[slot] {
+func claimPoolSlotWithConfig(cfg *config.City, cfgAgent *config.Agent, sessionBead beads.Bead, used map[int]bool) int {
+	if slot := existingPoolSlotWithConfig(cfg, cfgAgent, sessionBead); slot > 0 {
+		if used[slot] {
+			return 0
+		}
 		used[slot] = true
 		return slot
 	}
@@ -1837,6 +1859,16 @@ func inBoundsPoolSlot(cfgAgent *config.Agent, slot int) bool {
 	return true
 }
 
+func usablePoolIdentitySlot(cfgAgent *config.Agent, slot int) bool {
+	if slot <= 0 {
+		return false
+	}
+	if !poolSlotHasConfiguredBound(cfgAgent) {
+		return true
+	}
+	return inBoundsPoolSlot(cfgAgent, slot)
+}
+
 func existingPoolSlotWithConfig(cfg *config.City, cfgAgent *config.Agent, sessionBead beads.Bead) int {
 	if cfgAgent == nil {
 		return 0
@@ -1850,20 +1882,20 @@ func existingPoolSlotWithConfig(cfg *config.City, cfgAgent *config.Agent, sessio
 	}
 	if sessionBead.Metadata["pool_slot"] != "" {
 		if slot, err := strconv.Atoi(strings.TrimSpace(sessionBead.Metadata["pool_slot"])); err == nil && slot > 0 {
-			if agentSlot > 0 && agentSlot == aliasSlot && agentSlot != slot {
+			if agentSlot > 0 && agentSlot != slot && usablePoolIdentitySlot(cfgAgent, agentSlot) {
 				return agentSlot
 			}
 			if !storedTemplateMatches && agentSlot == 0 && aliasSlot == 0 {
 				return 0
 			}
 			if !inBoundsPoolSlot(cfgAgent, slot) {
-				if agentSlot > 0 {
+				if usablePoolIdentitySlot(cfgAgent, agentSlot) {
 					return agentSlot
 				}
-				if aliasSlot > 0 {
+				if usablePoolIdentitySlot(cfgAgent, aliasSlot) {
 					return aliasSlot
 				}
-				if sessionNameSlot > 0 {
+				if usablePoolIdentitySlot(cfgAgent, sessionNameSlot) {
 					return sessionNameSlot
 				}
 				if poolSlotHasConfiguredBound(cfgAgent) {
@@ -1874,13 +1906,13 @@ func existingPoolSlotWithConfig(cfg *config.City, cfgAgent *config.Agent, sessio
 		}
 	}
 	if poolSlotHasConfiguredBound(cfgAgent) {
-		if agentSlot > 0 && !inBoundsPoolSlot(cfgAgent, agentSlot) {
+		if !usablePoolIdentitySlot(cfgAgent, agentSlot) {
 			agentSlot = 0
 		}
-		if aliasSlot > 0 && !inBoundsPoolSlot(cfgAgent, aliasSlot) {
+		if !usablePoolIdentitySlot(cfgAgent, aliasSlot) {
 			aliasSlot = 0
 		}
-		if sessionNameSlot > 0 && !inBoundsPoolSlot(cfgAgent, sessionNameSlot) {
+		if !usablePoolIdentitySlot(cfgAgent, sessionNameSlot) {
 			sessionNameSlot = 0
 		}
 	}
@@ -1924,7 +1956,10 @@ func selectOrCreatePoolSessionBead(
 	}
 	// Resume tier: reuse the session that has in-progress work assigned.
 	if preferred != nil && preferred.ID != "" && !used[preferred.ID] && !isFailedCreateSessionBead(*preferred) {
-		slot := claimPoolSlot(cfgAgent, *preferred, usedSlots)
+		slot := claimPoolSlotWithConfig(bp.city, cfgAgent, *preferred, usedSlots)
+		if slot == 0 {
+			return beads.Bead{}, 0, fmt.Errorf("pool session %s concrete slot already claimed", preferred.ID)
+		}
 		return *preferred, slot, nil
 	}
 	// Reuse an existing active/creating session bead. Skip drained, closed,
@@ -1959,13 +1994,15 @@ func selectOrCreatePoolSessionBead(
 			continue
 		}
 		if desiredName := strings.TrimSpace(bead.Metadata["session_name"]); desiredName != "" {
-			slot := claimPoolSlot(cfgAgent, bead, usedSlots)
+			slot := claimPoolSlotWithConfig(bp.city, cfgAgent, bead, usedSlots)
+			if slot == 0 {
+				continue
+			}
 			return bead, slot, nil
 		}
 	}
-	slot := claimPoolSlot(cfgAgent, beads.Bead{}, usedSlots)
-	instanceName := poolInstanceName(cfgAgent.Name, slot, cfgAgent)
-	qualifiedInstance := cfgAgent.QualifiedInstanceName(instanceName)
+	slot := claimPoolSlotWithConfig(bp.city, cfgAgent, beads.Bead{}, usedSlots)
+	_, qualifiedInstance := poolInstanceIdentity(cfgAgent, slot, bp.stderr)
 	bead, err := createPoolSessionBeadWithGuardedAlias(bp, template, qualifiedInstance, slot)
 	if err != nil {
 		delete(usedSlots, slot)
@@ -2067,8 +2104,7 @@ func selectOrCreateDependencyPoolSessionBead(
 	if cfgAgent == nil {
 		return beads.Bead{}, fmt.Errorf("dependency pool template %q has no configured agent", template)
 	}
-	instanceName := poolInstanceName(cfgAgent.Name, 1, cfgAgent)
-	qualifiedInstance := cfgAgent.QualifiedInstanceName(instanceName)
+	_, qualifiedInstance := poolInstanceIdentity(cfgAgent, 1, bp.stderr)
 	return createPoolSessionBeadWithGuardedAlias(bp, template, qualifiedInstance, 1)
 }
 
@@ -2096,19 +2132,56 @@ func prepareTemplateResolution(bp *agentBuildParams, cfgAgent *config.Agent, qua
 	if bp == nil || cfgAgent == nil {
 		return
 	}
-	if ih := config.ResolveInstallHooks(cfgAgent, bp.workspace); len(ih) > 0 {
-		workDir, err := workdirutil.ResolveWorkDirPathStrict(bp.cityPath, bp.cityName, qualifiedName, *cfgAgent, bp.rigs)
-		if err != nil {
-			return
-		}
-		workDir, err = resolveAgentDir(bp.cityPath, workDir)
-		if err != nil {
+	resolved, err := config.ResolveProvider(cfgAgent, bp.workspace, bp.providers, bp.lookPath)
+	if err != nil {
+		return
+	}
+	workDir, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
+	if err != nil {
+		if stderr != nil {
 			fmt.Fprintf(stderr, "agent %q: workdir: %v\n", qualifiedName, err) //nolint:errcheck
-			return
 		}
+		return
+	}
+	rigName := sessionSetupContextForAgent(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs).Rig
+	materializeProviderOverlaysBeforeFingerprint(bp, cfgAgent, resolved, qualifiedName, rigName, workDir, stderr)
+	if ih := config.ResolveInstallHooks(cfgAgent, bp.workspace); len(ih) > 0 {
 		resolver := func(name string) string { return config.BuiltinFamily(name, bp.providers) }
 		if hErr := hooks.InstallWithResolver(bp.fs, bp.cityPath, workDir, ih, resolver); hErr != nil {
 			fmt.Fprintf(stderr, "agent %q: hooks: %v\n", qualifiedName, hErr) //nolint:errcheck
+		}
+	}
+}
+
+func materializeProviderOverlaysBeforeFingerprint(
+	bp *agentBuildParams,
+	cfgAgent *config.Agent,
+	resolved *config.ResolvedProvider,
+	qualifiedName string,
+	rigName string,
+	workDir string,
+	stderr io.Writer,
+) {
+	if bp == nil || cfgAgent == nil || resolved == nil || workDir == "" {
+		return
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	installHooks := config.ResolveInstallHooks(cfgAgent, bp.workspace)
+	overlayProviders := runtime.OverlayProviderNamesFromParts(
+		resolvedProviderLaunchFamily(resolved),
+		strings.TrimSpace(resolved.Name),
+		installHooks,
+	)
+	for _, overlayDir := range effectiveOverlayDirs(bp.packOverlayDirs, bp.rigOverlayDirs, rigName) {
+		if err := runtime.StageProviderOverlayDir(overlayDir, workDir, overlayProviders, stderr); err != nil {
+			fmt.Fprintf(stderr, "agent %q: pack overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
+		}
+	}
+	if overlayDir := resolveOverlayDir(cfgAgent.OverlayDir, bp.cityPath); overlayDir != "" {
+		if err := runtime.StageProviderOverlayDir(overlayDir, workDir, overlayProviders, stderr); err != nil {
+			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}
 	}
 }
@@ -2205,4 +2278,37 @@ func poolInstanceName(base string, slot int, a *config.Agent) string {
 		return a.NamepoolNames[slot-1]
 	}
 	return fmt.Sprintf("%s-%d", base, slot)
+}
+
+// poolInstanceIdentity returns the (instanceName, qualifiedInstance) pair for
+// a pool slot on the given agent. For agents that do NOT support instance
+// expansion (max_active_sessions=1, no namepool), it returns the base
+// identity and emits a defensive warning when a non-zero slot would have
+// produced a phantom "{base}-N" name. The warning is the diagnostic
+// breadcrumb the bug report (ga-fiw) asked for — it lets operators see when
+// a non-expansion agent was about to be materialized with a numeric suffix.
+func poolInstanceIdentity(cfgAgent *config.Agent, slot int, stderr io.Writer) (string, string) {
+	if cfgAgent == nil {
+		return "", ""
+	}
+	if !cfgAgent.SupportsInstanceExpansion() {
+		if slot > 0 && stderr != nil {
+			fmt.Fprintf(stderr, "buildDesiredState: pool %q: agent does not support instance expansion (max_active_sessions=%s) but slot %d was claimed; using base identity to avoid phantom %q-%d session\n", //nolint:errcheck
+				cfgAgent.QualifiedName(), formatMaxSessions(cfgAgent), slot, cfgAgent.Name, slot)
+		}
+		return cfgAgent.Name, cfgAgent.QualifiedName()
+	}
+	instanceName := poolInstanceName(cfgAgent.Name, slot, cfgAgent)
+	return instanceName, cfgAgent.QualifiedInstanceName(instanceName)
+}
+
+func formatMaxSessions(a *config.Agent) string {
+	if a == nil {
+		return "<nil>"
+	}
+	m := a.EffectiveMaxActiveSessions()
+	if m == nil {
+		return "unlimited"
+	}
+	return strconv.Itoa(*m)
 }

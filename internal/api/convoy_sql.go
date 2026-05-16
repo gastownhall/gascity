@@ -14,8 +14,10 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltauth"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/sling"
 )
 
 type workflowSQLStoreCandidate struct {
@@ -33,7 +35,7 @@ func workflowSQLCandidatesForWorkflowID(
 		return workflowSQLStoreCandidates(state, requestedScopeKind, requestedScopeRef)
 	}
 
-	if prefix := beadPrefix(strings.TrimSpace(workflowID)); prefix != "" {
+	if prefix := workflowSQLWorkflowIDPrefix(state.Config(), workflowID); prefix != "" {
 		if candidate, ok := workflowSQLRouteCandidate(state, prefix); ok {
 			return []workflowSQLStoreCandidate{candidate}
 		}
@@ -216,7 +218,7 @@ func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScope
 		if err != nil {
 			continue
 		}
-		root, ok, err := workflowSQLFindRoot(user, password, host, port, database, workflowID)
+		root, ok, err := workflowSQLFindRoot(s.state.Config(), user, password, host, port, database, workflowID)
 		if err != nil || !ok {
 			continue
 		}
@@ -423,18 +425,19 @@ func workflowStorePath(state State, info workflowStoreInfo) (string, bool) {
 	return "", false
 }
 
-func workflowSQLFindRoot(user, password, host string, port int, database, workflowID string) (beads.Bead, bool, error) {
+func workflowSQLFindRoot(cfg *config.City, user, password, host string, port int, database, workflowID string) (beads.Bead, bool, error) {
+	hasWorkflowIDPrefix := workflowSQLWorkflowIDPrefix(cfg, workflowID) != ""
 	if root, ok, err := workflowSQLGetBead(user, password, host, port, database, workflowID); err != nil {
 		return beads.Bead{}, false, err
 	} else if ok {
 		if isWorkflowRoot(root) && matchesWorkflowID(root, workflowID) {
 			return root, true, nil
 		}
-		if beadPrefix(workflowID) != "" {
+		if hasWorkflowIDPrefix {
 			return beads.Bead{}, false, nil
 		}
 	}
-	if beadPrefix(workflowID) != "" {
+	if hasWorkflowIDPrefix {
 		return beads.Bead{}, false, nil
 	}
 
@@ -460,6 +463,10 @@ func workflowSQLFindRoot(user, password, host string, port int, database, workfl
 		return beads.Bead{}, ok, err
 	}
 	return bead, true, nil
+}
+
+func workflowSQLWorkflowIDPrefix(cfg *config.City, workflowID string) string {
+	return sling.BeadPrefixForCity(cfg, strings.TrimSpace(workflowID))
 }
 
 func workflowSQLGetBead(user, password, host string, port int, database, id string) (beads.Bead, bool, error) {

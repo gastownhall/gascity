@@ -44,6 +44,32 @@ func setupCity(t *testing.T, tomlContent string) string {
 	return dir
 }
 
+// clearInheritedBeadsEnv scrubs GC_BEADS_SCOPE_ROOT (and related beads/dolt
+// env) before a test sets an explicit GC_BEADS override. The doctor provider
+// resolution honors an explicit GC_BEADS only when GC_BEADS_SCOPE_ROOT is
+// unset or points back to cityPath; an inherited GC_BEADS_SCOPE_ROOT from a
+// gc agent's outer city disqualifies the override and the provider falls back
+// to the test's city.toml peek, defeating the assertion.
+func clearInheritedBeadsEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"GC_BEADS",
+		"GC_BEADS_SCOPE_ROOT",
+		"GC_BIN",
+		"GC_DOLT",
+		"GC_DOLT_HOST",
+		"GC_DOLT_PORT",
+		"GC_DOLT_USER",
+		"GC_DOLT_PASSWORD",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_USER",
+		"BEADS_DOLT_PASSWORD",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
 // --- CityStructureCheck ---
 
 func TestCityStructureCheck_OK(t *testing.T) {
@@ -1007,6 +1033,7 @@ func TestBDSplitStoreCheck_InvalidExternalCityConfigUsesNeutralGuidance(t *testi
 }
 
 func TestBDSplitStoreCheck_FileProviderUsesNeutralRecoveryGuidance(t *testing.T) {
+	clearInheritedBeadsEnv(t)
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 	fs := fsys.OSFS{}
@@ -1757,6 +1784,7 @@ provider = "exec:/tmp/gc-beads-bd"
 }
 
 func TestBeadsStoreCheck_GCBeadsExecOverrideExternalCityUnavailableFailsBeforePing(t *testing.T) {
+	clearInheritedBeadsEnv(t)
 	dir := setupCity(t, `[workspace]
 name = "test"
 [beads]
@@ -1795,6 +1823,7 @@ provider = "file"
 }
 
 func TestBeadsStoreCheck_GCBeadsFileOverrideSkipsBdPreflight(t *testing.T) {
+	clearInheritedBeadsEnv(t)
 	dir := setupCity(t, `[workspace]
 name = "test"
 `)

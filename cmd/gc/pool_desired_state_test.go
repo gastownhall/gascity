@@ -139,6 +139,80 @@ func TestComputePoolDesiredStates_ResumeBeatsNew(t *testing.T) {
 	}
 }
 
+func TestComputePoolDesiredStates_ResumeResolvesAssigneeByAlias(t *testing.T) {
+	// Regression: a polecat session bead has its human-readable alias in
+	// Metadata["alias"], and the work bead's assignee is typically the
+	// alias. The resume-tier lookup must resolve alias→session so the
+	// active session stays alive — otherwise the pool sees the work as
+	// unowned and spawns a second polecat for the same bead.
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(2), 0)},
+	}
+	work := []beads.Bead{
+		workBead("w1", "rig/claude", "nux", "in_progress", 5),
+	}
+	sessions := []beads.Bead{{
+		ID:     "sess-vi6hhp",
+		Status: "open",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "polecat-sess-vi6hhp",
+			"alias":                "nux",
+			"template":             "rig/claude",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}}
+
+	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	reqs := result[0].Requests
+	if len(reqs) != 1 {
+		t.Fatalf("len(requests) = %d, want 1 resume for alias-assigned work", len(reqs))
+	}
+	if reqs[0].Tier != "resume" {
+		t.Errorf("tier = %q, want resume", reqs[0].Tier)
+	}
+	if reqs[0].SessionBeadID != "sess-vi6hhp" {
+		t.Errorf("SessionBeadID = %q, want sess-vi6hhp", reqs[0].SessionBeadID)
+	}
+}
+
+func TestComputePoolDesiredStates_ResumeResolvesAssigneeByAliasHistory(t *testing.T) {
+	// Regression: alias rotation preserves prior aliases in alias_history.
+	// Work assigned under a prior alias must still resolve to its owning
+	// session.
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(2), 0)},
+	}
+	work := []beads.Bead{
+		workBead("w1", "rig/claude", "nux", "in_progress", 5),
+	}
+	sessions := []beads.Bead{{
+		ID:     "sess-vi6hhp",
+		Status: "open",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "polecat-sess-vi6hhp",
+			"alias":                "rictus",
+			"alias_history":        "nux",
+			"template":             "rig/claude",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}}
+
+	result := ComputePoolDesiredStates(cfg, work, sessions, nil)
+
+	reqs := result[0].Requests
+	if len(reqs) != 1 || reqs[0].SessionBeadID != "sess-vi6hhp" {
+		t.Fatalf("requests = %+v, want 1 resume for sess-vi6hhp", reqs)
+	}
+}
+
 func TestComputePoolDesiredStates_MaxCapsTotal(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(2), 0)},
@@ -454,6 +528,54 @@ func TestComputePoolDesiredStates_ScaleCheckMerge(t *testing.T) {
 		if r.Tier != "new" {
 			t.Errorf("request tier = %q, want new", r.Tier)
 		}
+	}
+}
+
+// TestComputePoolDesiredStates_NamedSessionBeadSkipsPoolResume verifies that
+// when work is assigned to a configured named session, the pool path does NOT
+// emit a resume request for the named session bead. Without this guard, the
+// named-session bead leaks into realizePoolDesiredSessions, which renames it
+// to a phantom "{name}-1" pool-instance form even when the agent has
+// max_active_sessions=1 and SupportsInstanceExpansion()=false.
+func TestComputePoolDesiredStates_NamedSessionBeadSkipsPoolResume(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("refinery", "rig", intPtr(1), 0)},
+		NamedSessions: []config.NamedSession{
+			{Template: "refinery", Scope: "rig", Mode: "on_demand"},
+		},
+	}
+	// Work routed to the canonical named-session identity, with a
+	// matching named-session bead present.
+	work := []beads.Bead{
+		workBead("w1", "rig/refinery", "rig/refinery", "in_progress", 5),
+	}
+	namedBead := beads.Bead{
+		ID:     "sess-refinery",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"session_name":               "rig--refinery",
+			"template":                   "rig/refinery",
+			"agent_name":                 "rig/refinery",
+			"state":                      "active",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "rig/refinery",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, []beads.Bead{namedBead}, nil)
+
+	resumeCount := 0
+	for _, ds := range result {
+		for _, req := range ds.Requests {
+			if req.Tier == "resume" {
+				resumeCount++
+			}
+		}
+	}
+	if resumeCount != 0 {
+		t.Errorf("resume count = %d, want 0 (named-session beads are materialized by the named-session loop, not pool resume)", resumeCount)
 	}
 }
 
@@ -802,6 +924,72 @@ func TestComputePoolDesiredStates_InFlightResumeBeadsDoNotConsumeNewDemand(t *te
 	}
 	if resume != 1 || explicitNew != 1 || anonymousNew != 2 {
 		t.Fatalf("resume=%d explicitNew=%d anonymousNew=%d, want 1/1/2", resume, explicitNew, anonymousNew)
+	}
+}
+
+func TestComputePoolDesiredStates_DoesNotResumeSessionAcrossExplicitRouteMismatch(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			poolAgent("codex-max", "", intPtr(10), 0),
+			poolAgent("codex-min", "", intPtr(10), 0),
+		},
+	}
+	session := beads.Bead{
+		ID:     "mc-codex-max",
+		Status: "open",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:codex-max"},
+		Metadata: map[string]string{
+			"template":     "codex-max",
+			"session_name": "workflows__codex-max-mc-codex-max",
+			"state":        "asleep",
+		},
+	}
+	work := []beads.Bead{
+		workBead("w-mismatched-route", "codex-min", "workflows__codex-max-mc-codex-max", "in_progress", 5),
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, []beads.Bead{session}, nil)
+
+	for _, state := range result {
+		for _, req := range state.Requests {
+			if req.SessionBeadID == session.ID {
+				t.Fatalf("mismatched routed work produced resume request under %q: %+v", state.Template, req)
+			}
+		}
+	}
+}
+
+func TestComputePoolDesiredStates_DoesNotResumeLegacySessionAcrossExplicitRouteMismatch(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			poolAgent("codex-max", "", intPtr(10), 0),
+			poolAgent("codex-min", "", intPtr(10), 0),
+		},
+	}
+	session := beads.Bead{
+		ID:     "mc-codex-max",
+		Status: "open",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"agent_name":   "codex-max-1",
+			"session_name": "workflows__codex-max-mc-codex-max",
+			"state":        "asleep",
+		},
+	}
+	work := []beads.Bead{
+		workBead("w-mismatched-route", "codex-min", "workflows__codex-max-mc-codex-max", "in_progress", 5),
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, []beads.Bead{session}, nil)
+
+	for _, state := range result {
+		for _, req := range state.Requests {
+			if req.SessionBeadID == session.ID {
+				t.Fatalf("legacy mismatched routed work produced resume request under %q: %+v", state.Template, req)
+			}
+		}
 	}
 }
 

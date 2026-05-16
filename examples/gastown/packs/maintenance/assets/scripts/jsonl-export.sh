@@ -158,6 +158,14 @@ set_consecutive_push_failures() {
     write_state_json "$(read_state_json | jq -c --argjson count "$count" '.consecutive_push_failures = $count')"
 }
 
+mark_push_failure_escalated() {
+    write_state_json "$(read_state_json | jq -c '.push_failure_escalated = true')"
+}
+
+clear_push_failure_escalation() {
+    write_state_json "$(read_state_json | jq -c 'del(.push_failure_escalated)')"
+}
+
 set_pending_archive_push() {
     write_state_json "$(read_state_json | jq -c '.pending_archive_push = true')"
 }
@@ -221,6 +229,8 @@ log_archive_mode_if_needed() {
     local state_json
     local last_logged_mode
     local last_logged_at
+    local stale_push_failures
+    local stale_push_escalation
     local now
     local now_ts
     local last_ts
@@ -231,6 +241,8 @@ log_archive_mode_if_needed() {
     state_json=$(read_state_json)
     last_logged_mode=$(printf '%s\n' "$state_json" | jq -r '.last_logged_mode // empty')
     last_logged_at=$(printf '%s\n' "$state_json" | jq -r '.last_logged_at // empty')
+    stale_push_failures=$(printf '%s\n' "$state_json" | jq -r '.consecutive_push_failures // 0')
+    stale_push_escalation=$(printf '%s\n' "$state_json" | jq -r '.push_failure_escalated // false')
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     now_ts=$(date -u +%s)
 
@@ -243,6 +255,11 @@ log_archive_mode_if_needed() {
         if [ "$last_ts" = "0" ] || [ "$((now_ts - last_ts))" -gt 604800 ]; then
             should_log=1
         fi
+    fi
+
+    if [ "$should_log" -eq 0 ] && [ "$current_mode" = "local-only" ] && { [ "$stale_push_failures" != "0" ] || [ "$stale_push_escalation" = "true" ]; }; then
+        write_state_json "$(printf '%s\n' "$state_json" | jq -c '.consecutive_push_failures = 0 | del(.push_failure_escalated)')"
+        return 0
     fi
 
     if [ "$should_log" -eq 0 ]; then
@@ -266,7 +283,7 @@ log_archive_mode_if_needed() {
     # shellcheck disable=SC2016  # $mode/$at are jq variables, not bash
     local jq_filter='.last_logged_mode = $mode | .last_logged_at = $at'
     if [ "$current_mode" = "local-only" ]; then
-        jq_filter="$jq_filter | .consecutive_push_failures = 0"
+        jq_filter="$jq_filter | .consecutive_push_failures = 0 | del(.push_failure_escalated)"
     fi
 
     write_state_json "$(
@@ -413,6 +430,7 @@ push_archive_main() {
         local stderr_context="$2"
         local body
         local stderr_display
+        local already_escalated
 
         echo "$message" >&2
         consecutive=$(read_state_json | jq -r '.consecutive_push_failures // 0' || echo "0")
@@ -420,7 +438,8 @@ push_archive_main() {
         set_consecutive_push_failures "$consecutive"
         set_pending_archive_push
 
-        if [ "$consecutive" -ge "$MAX_PUSH_FAILURES" ]; then
+        already_escalated=$(read_state_json | jq -r '.push_failure_escalated // false' || echo "false")
+        if [ "$consecutive" -ge "$MAX_PUSH_FAILURES" ] && [ "$already_escalated" != "true" ]; then
             stderr_display=$(truncate_stderr_context "$stderr_context")
             if [ -z "$stderr_display" ]; then
                 stderr_display="(no stderr captured)"
@@ -440,9 +459,11 @@ Remediation:
 - See docs/getting-started/troubleshooting.md#jsonl-archive-push-failures
 ESCALATION
 )
-            gc mail send mayor/ -s "ESCALATION: JSONL push failed [HIGH]" \
+            if gc mail send mayor/ -s "ESCALATION: JSONL push failed [HIGH]" \
                 -m "$body" \
-                2>/dev/null || true
+                2>/dev/null; then
+                mark_push_failure_escalated
+            fi
         fi
 
         return 1
@@ -474,6 +495,7 @@ ESCALATION
         fi
         if ! archive_has_local_only_commits_from_tracking; then
             set_consecutive_push_failures "0"
+            clear_push_failure_escalation
             clear_pending_archive_push
             return 0
         fi
@@ -487,6 +509,7 @@ ESCALATION
     fi
 
     set_consecutive_push_failures "0"
+    clear_push_failure_escalation
     clear_pending_archive_push
     return 0
 }

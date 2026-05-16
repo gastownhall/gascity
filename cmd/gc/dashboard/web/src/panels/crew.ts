@@ -43,8 +43,13 @@ export async function renderCrew(): Promise<void> {
   }
 
   const sessions = data.items;
+  // The Crew table is for persistent named workers — sessions whose backing
+  // agent is classified server-side as "crew". Other agent kinds (pool,
+  // role) belong on the Rigged/Pooled panels (or stay invisible until a
+  // dedicated panel exists), so filter them out here.
+  const crew = sessions.filter((session) => session.agent_kind === "crew");
   const pending = await Promise.all(
-    sessions.map(async (session) => {
+    crew.map(async (session) => {
       const res = await api.GET("/v0/city/{cityName}/session/{id}/pending", {
         params: { path: { cityName: city, id: session.id } },
       });
@@ -64,7 +69,6 @@ export async function renderCrew(): Promise<void> {
     }),
   );
 
-  const crew = sessions;
   crew.forEach((session, index) => {
     const state = classifyCrewState(session, pending[index] ?? false);
     const beadText = session.active_bead ? truncate(beadTitles.get(session.active_bead) ?? session.active_bead, 24) : "—";

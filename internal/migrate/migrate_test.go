@@ -615,6 +615,8 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		WorkQuery:              "bd ready",
 		SlingQuery:             "bd update {}",
 		IdleTimeout:            "15m",
+		MaxSessionAge:          "5h",
+		MaxSessionAgeJitter:    "15m",
 		SleepAfterIdle:         "30s",
 		InstallAgentHooks:      []string{"claude"},
 		HooksInstalled:         &trueVal,

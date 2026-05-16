@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -210,5 +211,190 @@ func TestSamePathUsesSharedPathNormalization(t *testing.T) {
 	want := runtime.GOOS == "darwin"
 	if got != want {
 		t.Fatalf("samePath(%q, %q) = %v, want %v", a, b, got, want)
+	}
+}
+
+// writeStaleGitPointer creates a stale worktree marker file at parent/.git
+// whose gitdir target does not exist on disk. Mirrors the bug shape from
+// gascity#1556.
+func writeStaleGitPointer(t *testing.T, parent, missingTarget string) {
+	t.Helper()
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitFile := filepath.Join(parent, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+missingTarget+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeValidGitPointer creates a worktree marker file at parent/.git whose
+// gitdir target is an existing directory.
+func writeValidGitPointer(t *testing.T, parent, target string) {
+	t.Helper()
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitFile := filepath.Join(parent, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+target+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateAncestorWorktreesNotStale_NoMarkersInAncestry(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "a", "b", "c", "polecat-1")
+	if err := ValidateAncestorWorktreesNotStale(target); err != nil {
+		t.Fatalf("ValidateAncestorWorktreesNotStale() = %v, want nil (ancestry has no .git markers)", err)
+	}
+}
+
+func TestValidateAncestorWorktreesNotStale_AncestorHasRealGitDir(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(repo, ".gc", "worktrees", "demo", "polecats", "polecat-1")
+	if err := ValidateAncestorWorktreesNotStale(target); err != nil {
+		t.Fatalf("ValidateAncestorWorktreesNotStale() = %v, want nil (ancestor has real .git directory)", err)
+	}
+}
+
+func TestValidateAncestorWorktreesNotStale_AncestorHasValidWorktreePointer(t *testing.T) {
+	root := t.TempDir()
+	wtParent := filepath.Join(root, "repo", ".gc", "worktrees", "demo", "polecats", "furiosa")
+	gitdirTarget := filepath.Join(root, "repo", ".git", "worktrees", "furiosa")
+	writeValidGitPointer(t, wtParent, gitdirTarget)
+	target := filepath.Join(wtParent, "child-spawn")
+	if err := ValidateAncestorWorktreesNotStale(target); err != nil {
+		t.Fatalf("ValidateAncestorWorktreesNotStale() = %v, want nil (ancestor has valid worktree pointer)", err)
+	}
+}
+
+func TestValidateAncestorWorktreesNotStale_AncestorHasStalePointer(t *testing.T) {
+	root := t.TempDir()
+	staleParent := filepath.Join(root, "repo", ".gc", "worktrees", "demo", "polecats", "furiosa")
+	missingTarget := filepath.Join(root, "repo", ".git", "worktrees", "furiosa-was-removed")
+	writeStaleGitPointer(t, staleParent, missingTarget)
+	target := filepath.Join(staleParent, "worktrees", "ta-2j4p")
+	err := ValidateAncestorWorktreesNotStale(target)
+	if err == nil {
+		t.Fatal("ValidateAncestorWorktreesNotStale() = nil, want error (ancestor has stale worktree pointer)")
+	}
+	for _, want := range []string{staleParent, missingTarget} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing reference %q", err.Error(), want)
+		}
+	}
+}
+
+func TestValidateAncestorWorktreesNotStale_PathItselfMissingButAncestryClean(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(repo, "does", "not", "exist", "yet")
+	if err := ValidateAncestorWorktreesNotStale(target); err != nil {
+		t.Fatalf("ValidateAncestorWorktreesNotStale() = %v, want nil (path missing but ancestry clean)", err)
+	}
+}
+
+func TestValidateAncestorWorktreesNotStale_StopsAtFirstValidMarker(t *testing.T) {
+	// Two levels of worktree markers in the chain. The closer one (a valid
+	// worktree pointer) should stop the walk; the further-up stale marker
+	// must NOT be reached and thus must NOT trigger rejection. This mirrors
+	// git's own resolution: once a valid worktree root is found, deeper
+	// ancestors are not consulted.
+	root := t.TempDir()
+	deepStaleParent := filepath.Join(root, "outer")
+	deepStaleTarget := filepath.Join(root, "outer", ".git", "worktrees", "gone")
+	writeStaleGitPointer(t, deepStaleParent, deepStaleTarget)
+
+	innerWtParent := filepath.Join(deepStaleParent, "inner", "polecats", "furiosa")
+	innerWtTarget := filepath.Join(root, "real-repo", ".git", "worktrees", "furiosa")
+	writeValidGitPointer(t, innerWtParent, innerWtTarget)
+
+	target := filepath.Join(innerWtParent, "child-spawn")
+	if err := ValidateAncestorWorktreesNotStale(target); err != nil {
+		t.Fatalf("ValidateAncestorWorktreesNotStale() = %v, want nil (closer valid marker should stop the walk)", err)
+	}
+}
+
+func TestValidateAncestorWorktreesNotStale_WalkTerminatesAtFilesystemRoot(t *testing.T) {
+	// Tests that the loop terminates on systems where the temp tree has no
+	// .git marker anywhere from path up to /. The validator must not loop
+	// or stat-thrash.
+	root := t.TempDir()
+	target := filepath.Join(root, "no", "git", "anywhere", "in", "ancestry")
+	if err := ValidateAncestorWorktreesNotStale(target); err != nil {
+		t.Fatalf("ValidateAncestorWorktreesNotStale() = %v, want nil (no markers up to FS root)", err)
+	}
+}
+
+// PR #2033 review: a gitdir: target written as a relative path must be
+// resolved against the directory containing the .git file (Git's gitfile
+// format), not against the process working directory.
+func TestValidateAncestorWorktreesNotStale_RelativeGitdirTarget(t *testing.T) {
+	root := t.TempDir()
+	wtParent := filepath.Join(root, "repo", ".gc", "worktrees", "demo", "polecats", "furiosa")
+	// Absolute target on disk lives alongside the pointer parent, so a
+	// relative pointer "../../../.git/worktrees/furiosa" resolves to it.
+	absTarget := filepath.Join(root, "repo", ".git", "worktrees", "furiosa")
+	if err := os.MkdirAll(absTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(wtParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	relTarget, err := filepath.Rel(wtParent, absTarget)
+	if err != nil {
+		t.Fatalf("filepath.Rel: %v", err)
+	}
+	gitFile := filepath.Join(wtParent, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+relTarget+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(wtParent, "child-spawn")
+	if err := ValidateAncestorWorktreesNotStale(target); err != nil {
+		t.Fatalf("ValidateAncestorWorktreesNotStale() = %v, want nil (relative gitdir should resolve against .git parent)", err)
+	}
+}
+
+// PR #2033 review: a gitdir target that exists on disk but is not a
+// directory (regular file, broken symlink, etc.) must be rejected with
+// the same shape as a missing target — the pointer is non-worktree-
+// capable and spawning into a descendant produces dangling content.
+func TestValidateAncestorWorktreesNotStale_GitdirTargetNotDirectory(t *testing.T) {
+	root := t.TempDir()
+	staleParent := filepath.Join(root, "repo", ".gc", "worktrees", "demo", "polecats", "furiosa")
+	if err := os.MkdirAll(staleParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Target exists but is a regular file rather than a worktree admin dir.
+	fileTarget := filepath.Join(root, "repo", ".git", "worktrees", "furiosa-file")
+	if err := os.MkdirAll(filepath.Dir(fileTarget), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fileTarget, []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitFile := filepath.Join(staleParent, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+fileTarget+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(staleParent, "child-spawn")
+	err := ValidateAncestorWorktreesNotStale(target)
+	if err == nil {
+		t.Fatal("ValidateAncestorWorktreesNotStale() = nil, want error (gitdir target is a file, not a directory)")
+	}
+	for _, want := range []string{staleParent, fileTarget, "not a directory"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing reference %q", err.Error(), want)
+		}
 	}
 }

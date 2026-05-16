@@ -214,7 +214,7 @@ func (p *Provider) Stop(name string) error {
 func (p *Provider) Interrupt(name string) error {
 	if p.tm.requiresHiddenAttachedInterrupt(name) && !p.tm.IsSessionAttached(name) {
 		if err := p.tm.ensureHiddenAttachedClient(name); err != nil {
-			return fmt.Errorf("preparing detached gemini interrupt: %w", err)
+			return fmt.Errorf("preparing detached interrupt: %w", err)
 		}
 	}
 	if used, err := p.tm.sendHiddenAttachedKeys(name, "C-c"); used {
@@ -765,7 +765,7 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 		return fmt.Errorf("verifying session: %w", err)
 	}
 	if !alive {
-		return fmt.Errorf("session %q died during startup", name)
+		return fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, name)
 	}
 
 	// Step 5.5: Run session setup commands and script.

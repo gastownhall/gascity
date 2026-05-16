@@ -543,6 +543,31 @@ func isMultiSessionAgent(a config.Agent) bool {
 	return maxSess == nil || *maxSess != 1
 }
 
+// classifyAgentKind labels an agent so dashboards can route its sessions to
+// the correct panel without referencing specific role names. The signal is
+// purely structural:
+//   - "crew" when the agent's identity Dir ends in a "crew" segment, the
+//     convention for persistent named workspaces under <rig>/crew/<name>.
+//   - "pool" when the agent can host more than one concurrent session.
+//   - "role" otherwise — a singleton agent (e.g. mayor, witness) that lives
+//     outside the crew dir. The classifier never inspects role names.
+func classifyAgentKind(a config.Agent) string {
+	if isCrewDir(a.Dir) {
+		return "crew"
+	}
+	if isMultiSessionAgent(a) {
+		return "pool"
+	}
+	return "role"
+}
+
+// isCrewDir reports whether dir is a "crew" segment (e.g. "crew" or
+// "<rig>/crew"). Crew agents organize themselves under this convention so
+// the dashboard can list them as named workers separate from role agents.
+func isCrewDir(dir string) bool {
+	return dir == "crew" || strings.HasSuffix(dir, "/crew")
+}
+
 func poolInstanceNameForAPI(base string, slot int, a config.Agent) string {
 	maxSess := a.EffectiveMaxActiveSessions()
 	isMultiInstance := maxSess != nil && (*maxSess > 1 || *maxSess < 0)

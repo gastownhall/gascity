@@ -35,6 +35,15 @@ func (c *CachingStore) Create(b Bead) (Bead, error) {
 
 // Update passes through to the backing store and refreshes the cache.
 func (c *CachingStore) Update(id string, opts UpdateOpts) error {
+	// Idempotence: if every non-nil field in opts already matches the
+	// cached bead AND the cache is primed, the backing call is a no-op.
+	// Skipping it avoids the bd subprocess invocation, the on_update
+	// hook, and the post-update Get refresh — same payoff as the
+	// SetMetadata short-circuit at metadataAlreadyMatchesCached.
+	// See gastownhall/gascity#1978 Phase 1.
+	if c.updateMatchesCached(id, opts) {
+		return nil
+	}
 	if err := c.backing.Update(id, opts); err != nil {
 		return err
 	}
@@ -66,6 +75,13 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 
 // Close marks a bead as closed in the backing store and cache.
 func (c *CachingStore) Close(id string) error {
+	// Idempotence: if the cached bead status is already "closed" AND the
+	// cache is primed, the backing call is a no-op. Skipping it avoids
+	// the bd subprocess invocation, the on_update hook, and the
+	// post-close Get refresh. See gastownhall/gascity#1978 Phase 1.
+	if c.closeAlreadyMatchesCached(id) {
+		return nil
+	}
 	if err := c.backing.Close(id); err != nil {
 		return err
 	}
@@ -273,6 +289,98 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	return nil
+}
+
+// updateMatchesCached returns true when every non-nil field in opts already
+// reflects the cached bead's state AND the cache is primed. Returns false on
+// cache miss, uninitialized cache, or any field mismatch — in which case the
+// caller falls through to the backing write. Companion to
+// metadataAlreadyMatchesCached but covers the full UpdateOpts surface
+// (Title, Status, Type, Priority, Description, ParentID, Assignee, Metadata,
+// Labels, RemoveLabels). See gastownhall/gascity#1978 Phase 1.
+func (c *CachingStore) updateMatchesCached(id string, opts UpdateOpts) bool {
+	if id == "" {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.state != cacheLive && c.state != cachePartial {
+		return false
+	}
+	b, ok := c.beads[id]
+	if !ok {
+		return false
+	}
+	if opts.Title != nil && b.Title != *opts.Title {
+		return false
+	}
+	if opts.Status != nil && b.Status != *opts.Status {
+		return false
+	}
+	if opts.Type != nil && b.Type != *opts.Type {
+		return false
+	}
+	if opts.Priority != nil {
+		if b.Priority == nil || *b.Priority != *opts.Priority {
+			return false
+		}
+	}
+	if opts.Description != nil && b.Description != *opts.Description {
+		return false
+	}
+	if opts.ParentID != nil && b.ParentID != *opts.ParentID {
+		return false
+	}
+	if opts.Assignee != nil && b.Assignee != *opts.Assignee {
+		return false
+	}
+	for k, v := range opts.Metadata {
+		if b.Metadata == nil {
+			if v != "" {
+				return false
+			}
+			continue
+		}
+		if b.Metadata[k] != v {
+			return false
+		}
+	}
+	if len(opts.Labels) > 0 || len(opts.RemoveLabels) > 0 {
+		existing := make(map[string]struct{}, len(b.Labels))
+		for _, l := range b.Labels {
+			existing[l] = struct{}{}
+		}
+		for _, l := range opts.Labels {
+			if _, present := existing[l]; !present {
+				return false
+			}
+		}
+		for _, l := range opts.RemoveLabels {
+			if _, present := existing[l]; present {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// closeAlreadyMatchesCached returns true when the cached bead status is
+// already "closed" AND the cache is primed. Returns false on cache miss or
+// uninitialized cache. See gastownhall/gascity#1978 Phase 1.
+func (c *CachingStore) closeAlreadyMatchesCached(id string) bool {
+	if id == "" {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.state != cacheLive && c.state != cachePartial {
+		return false
+	}
+	b, ok := c.beads[id]
+	if !ok {
+		return false
+	}
+	return b.Status == "closed"
 }
 
 // metadataAlreadyMatchesCached returns true when the cache holds a primed

@@ -179,6 +179,35 @@ func TestDiscoverPathKimiSessionKeyMissDoesNotUseNewestWorkdirTranscript(t *test
 	}
 }
 
+func TestDiscoverPathPiPrefersProviderSessionID(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "pi-project")
+
+	target := filepath.Join(base, "target.jsonl")
+	other := filepath.Join(base, "other.jsonl")
+	for _, item := range []struct {
+		path string
+		id   string
+	}{
+		{target, "target-session"},
+		{other, "other-session"},
+	} {
+		body := `{"type":"session","id":"` + item.id + `","cwd":"` + filepath.ToSlash(workDir) + `"}`
+		if err := os.WriteFile(item.path, []byte(body+"\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", item.path, err)
+		}
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(other, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	got := DiscoverPath([]string{base}, "pi/tmux-cli", workDir, "target-session")
+	if got != target {
+		t.Fatalf("DiscoverPath() = %q, want %q", got, target)
+	}
+}
+
 func TestDiscoverPathClaudeDoesNotScanCodexFallback(t *testing.T) {
 	base := t.TempDir()
 	workDir := filepath.Join(t.TempDir(), "claude-project")
@@ -217,6 +246,7 @@ func TestSupportsIDLookup(t *testing.T) {
 		{provider: "gemini/tmux-cli", want: false},
 		{provider: "kimi/tmux-cli", want: true},
 		{provider: "opencode/tmux-cli", want: false},
+		{provider: "pi/tmux-cli", want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.provider, func(t *testing.T) {

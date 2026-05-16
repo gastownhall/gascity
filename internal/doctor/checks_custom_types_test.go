@@ -17,6 +17,19 @@ func TestCustomTypesCheck_NoBeadsDir(t *testing.T) {
 }
 
 func TestCustomTypesCheck_MissingTypes(t *testing.T) {
+	// Scrub inherited beads env (BEADS_DIR / BEADS_ACTOR /
+	// GC_BEADS_SCOPE_ROOT) so the `bd config get` subprocess below
+	// resolves to the empty .beads/ in the temp dir instead of an
+	// outer gc city's beads database that a polecat/refinery worktree
+	// passes down via the environment. Without this, bd finds the
+	// outer city's store, reports all required types as present, and
+	// the check returns StatusOK — defeating the test's assertion.
+	// Same root cause class as ga-10qg / ga-766q; leak vector here is
+	// BEADS_DIR into a bd subprocess.
+	for _, key := range []string{"BEADS_DIR", "BEADS_ACTOR", "GC_BEADS_SCOPE_ROOT"} {
+		t.Setenv(key, "")
+	}
+
 	dir := t.TempDir()
 	beadsDir := filepath.Join(dir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o700); err != nil {

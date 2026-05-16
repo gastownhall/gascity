@@ -36,7 +36,10 @@ dolt.user: agent
 		t.Fatal(err)
 	}
 
-	env := bdRuntimeEnv(cityPath)
+	env, err := bdRuntimeEnvWithError(cityPath)
+	if err != nil {
+		t.Fatalf("bdRuntimeEnvWithError() error = %v", err)
+	}
 	if got := env["GC_DOLT_PASSWORD"]; got != "" {
 		t.Fatalf("GC_DOLT_PASSWORD = %q, want empty when only city.toml workspace env supplies auth", got)
 	}

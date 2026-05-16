@@ -38,8 +38,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  DOLT_VERSION: "1.86.6"
-  BD_VERSION: "v1.0.3"
+  DOLT_VERSION: "2.0.3"
+  BD_VERSION: "v1.0.4"
 
 jobs:
   runner-policy:

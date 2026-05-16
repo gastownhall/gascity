@@ -32,7 +32,7 @@ func runDoRigStatus(
 			store = opened
 		}
 	}
-	statusSnapshot := loadStatusSessionSnapshot(store)
+	statusSnapshot := loadStatusSessionSnapshot(store, stderr)
 	return doRigStatusWithStoreAndSnapshot(sp, dops, rig, agents, cityPath, "city", "", nil, store, statusSnapshot, stdout, stderr)
 }
 

@@ -27,6 +27,16 @@ func readFileString(t *testing.T, path string) string {
 	return string(data)
 }
 
+type partialListStore struct {
+	beads.Store
+	rows []beads.Bead
+	err  error
+}
+
+func (s *partialListStore) List(_ beads.ListQuery) ([]beads.Bead, error) {
+	return s.rows, s.err
+}
+
 // --- gc order list ---
 
 func TestOrderListEmpty(t *testing.T) {
@@ -765,12 +775,15 @@ name = "test-city"
 		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed)
+	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed, beads.WithBothTiers)
 	if err != nil {
 		t.Fatalf("store.ListByLabel(): %v", err)
 	}
 	if len(results) != 1 {
 		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if !results[0].Ephemeral {
+		t.Fatalf("tracking bead Ephemeral = false, want true")
 	}
 	for _, want := range []string{"order:release-exec", fmt.Sprintf("seq:%d", headSeq), "exec"} {
 		if !slicesContain(results[0].Labels, want) {
@@ -826,12 +839,15 @@ on = "bead.closed"
 	if err != nil {
 		t.Fatalf("openStoreAtForCity(): %v", err)
 	}
-	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed)
+	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed, beads.WithBothTiers)
 	if err != nil {
 		t.Fatalf("store.ListByLabel(): %v", err)
 	}
 	if len(results) != 1 {
 		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if !results[0].Ephemeral {
+		t.Fatalf("tracking bead Ephemeral = false, want true")
 	}
 	for _, want := range []string{"order:release-exec", fmt.Sprintf("seq:%d", headSeq), "exec"} {
 		if !slicesContain(results[0].Labels, want) {
@@ -1797,6 +1813,25 @@ func TestOrderHistoryWithStoresResolverFailsUnreadablePrimaryStore(t *testing.T)
 	}
 	if !strings.Contains(stderr.String(), "list failed") {
 		t.Fatalf("stderr missing primary list error:\n%s", stderr.String())
+	}
+}
+
+func TestBdCursorUsesRowsFromPartialTierError(t *testing.T) {
+	store := &partialListStore{
+		Store: beads.NewMemStore(),
+		rows: []beads.Bead{{
+			ID:     "cursor-1",
+			Labels: []string{"order:digest", "seq:42"},
+		}},
+		err: fmt.Errorf("wisps tier unavailable"),
+	}
+
+	got, err := bdCursor(store, "digest")
+	if err != nil {
+		t.Fatalf("bdCursor: %v", err)
+	}
+	if got != 42 {
+		t.Fatalf("bdCursor() = %d, want 42 from surviving rows", got)
 	}
 }
 

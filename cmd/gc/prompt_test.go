@@ -800,3 +800,249 @@ func TestEffectivePromptFragmentsDedupsAcrossLayers(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderPromptProviderContextVarsExposed(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/test.template.md"] = []byte(
+		"key={{ .ProviderKey }} display={{ .ProviderDisplayName }}")
+	ctx := PromptContext{ProviderKey: "claude", ProviderDisplayName: "Claude Code"}
+	got := renderPrompt(f, "/city", "", "prompts/test.template.md", ctx, "", io.Discard, nil, nil, nil)
+	want := "key=claude display=Claude Code"
+	if got != want {
+		t.Errorf("provider vars = %q, want %q", got, want)
+	}
+}
+
+func TestRenderPromptTemplateFirstPicksFirstRegistered(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/shared/frags.template.md"] = []byte(
+		`{{ define "note-claude" }}CLAUDE{{ end }}{{ define "note-default" }}DEFAULT{{ end }}`)
+	f.Files["/city/prompts/test.template.md"] = []byte(
+		`{{ templateFirst . "note-claude" "note-default" }}`)
+	got := renderPrompt(f, "/city", "", "prompts/test.template.md", PromptContext{}, "", io.Discard, nil, nil, nil)
+	if got != "CLAUDE" {
+		t.Errorf("templateFirst first-wins = %q, want %q", got, "CLAUDE")
+	}
+}
+
+func TestRenderPromptTemplateFirstFallsBackWhenFirstMissing(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/shared/frags.template.md"] = []byte(
+		`{{ define "note-default" }}DEFAULT{{ end }}`)
+	f.Files["/city/prompts/test.template.md"] = []byte(
+		`{{ templateFirst . "note-codex" "note-default" }}`)
+	got := renderPrompt(f, "/city", "", "prompts/test.template.md", PromptContext{}, "", io.Discard, nil, nil, nil)
+	if got != "DEFAULT" {
+		t.Errorf("templateFirst fallback = %q, want %q", got, "DEFAULT")
+	}
+}
+
+func TestRenderPromptTemplateFirstReturnsEmptyWhenNoneRegistered(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/test.template.md"] = []byte(
+		`prefix:{{ templateFirst . "note-codex" "note-claude" }}:suffix`)
+	got := renderPrompt(f, "/city", "", "prompts/test.template.md", PromptContext{}, "", io.Discard, nil, nil, nil)
+	want := "prefix::suffix"
+	if got != want {
+		t.Errorf("templateFirst all-missing = %q, want %q", got, want)
+	}
+}
+
+func TestRenderPromptTemplateFirstComposesWithProviderKey(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/shared/frags.template.md"] = []byte(
+		`{{ define "note-claude" }}slash commands{{ end }}` +
+			`{{ define "note-codex" }}subcommands{{ end }}` +
+			`{{ define "note-default" }}commands{{ end }}`)
+	f.Files["/city/prompts/test.template.md"] = []byte(
+		`{{ templateFirst . (printf "note-%s" .ProviderKey) "note-default" }}`)
+
+	cases := []struct {
+		key  string
+		want string
+	}{
+		{"claude", "slash commands"},
+		{"codex", "subcommands"},
+		{"gemini", "commands"}, // falls through to default
+		{"", "commands"},       // empty key skipped, falls through
+	}
+	for _, tc := range cases {
+		got := renderPrompt(f, "/city", "", "prompts/test.template.md",
+			PromptContext{ProviderKey: tc.key}, "", io.Discard, nil, nil, nil)
+		if got != tc.want {
+			t.Errorf("ProviderKey=%q: got %q, want %q", tc.key, got, tc.want)
+		}
+	}
+}
+
+func TestRenderPromptTemplateFirstSkipsEmptyName(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/shared/frags.template.md"] = []byte(
+		`{{ define "winner" }}WIN{{ end }}`)
+	f.Files["/city/prompts/test.template.md"] = []byte(
+		`{{ templateFirst . "" "winner" }}`)
+	got := renderPrompt(f, "/city", "", "prompts/test.template.md", PromptContext{}, "", io.Discard, nil, nil, nil)
+	if got != "WIN" {
+		t.Errorf("templateFirst skip-empty = %q, want %q", got, "WIN")
+	}
+}
+
+func TestProviderInfoForAgentResolvesAgentOverWorkspace(t *testing.T) {
+	ws := &config.Workspace{Provider: "codex"}
+	a := &config.Agent{Provider: "claude"}
+	gotKey, gotName := providerInfoForAgent(a, ws, nil)
+	if gotKey != "claude" {
+		t.Errorf("key = %q, want %q (agent.Provider should win over workspace.Provider)", gotKey, "claude")
+	}
+	if gotName != "Claude Code" {
+		t.Errorf("displayName = %q, want %q", gotName, "Claude Code")
+	}
+}
+
+func TestProviderInfoForAgentFallsBackToWorkspace(t *testing.T) {
+	ws := &config.Workspace{Provider: "codex"}
+	a := &config.Agent{}
+	gotKey, gotName := providerInfoForAgent(a, ws, nil)
+	if gotKey != "codex" {
+		t.Errorf("key = %q, want %q", gotKey, "codex")
+	}
+	if gotName != "Codex CLI" {
+		t.Errorf("displayName = %q, want %q", gotName, "Codex CLI")
+	}
+}
+
+func TestProviderInfoForAgentEmptyWhenNoneSet(t *testing.T) {
+	gotKey, gotName := providerInfoForAgent(&config.Agent{}, &config.Workspace{}, nil)
+	if gotKey != "" || gotName != "" {
+		t.Errorf("got (%q, %q), want both empty", gotKey, gotName)
+	}
+}
+
+func TestEmbeddedMayorPromptRendersProviderSpecificSlashNote(t *testing.T) {
+	// Round-trip the embedded mayor.md source through the renderer the same
+	// way `gc init` will (copy verbatim to agents/mayor/prompt.template.md,
+	// then render). Verifies the {{ templateFirst }} mechanism resolves the
+	// per-provider variant from the inline {{ define }} blocks at the top
+	// of the file.
+	source, err := defaultPrompts.ReadFile("prompts/mayor.md")
+	if err != nil {
+		t.Fatalf("read embedded mayor.md: %v", err)
+	}
+
+	cases := []struct {
+		key            string
+		wantContains   string
+		wantNotContain string
+	}{
+		{
+			key:            "claude",
+			wantContains:   "Claude Code slash commands",
+			wantNotContain: "provider's command",
+		},
+		{
+			key:            "codex",
+			wantContains:   "provider's command",
+			wantNotContain: "Claude Code",
+		},
+		{
+			key:            "", // no provider configured → fallback default
+			wantContains:   "provider's command",
+			wantNotContain: "Claude Code",
+		},
+	}
+
+	for _, tc := range cases {
+		f := fsys.NewFake()
+		f.Files["/city/agents/mayor/prompt.template.md"] = source
+		got := renderPrompt(f, "/city", "test-city",
+			"agents/mayor/prompt.template.md",
+			PromptContext{ProviderKey: tc.key},
+			"", io.Discard, nil, nil, nil)
+		if !strings.Contains(got, tc.wantContains) {
+			t.Errorf("ProviderKey=%q: rendered prompt missing %q\n--- got ---\n%s",
+				tc.key, tc.wantContains, got)
+		}
+		if tc.wantNotContain != "" && strings.Contains(got, tc.wantNotContain) {
+			t.Errorf("ProviderKey=%q: rendered prompt should not contain %q\n--- got ---\n%s",
+				tc.key, tc.wantNotContain, got)
+		}
+	}
+}
+
+func TestProviderDisplayNameFallsBackToKeyForUnknownProvider(t *testing.T) {
+	ws := &config.Workspace{Provider: "totally-unknown"}
+	a := &config.Agent{}
+	gotKey, gotName := providerInfoForAgent(a, ws, nil)
+	if gotKey != "totally-unknown" {
+		t.Errorf("key = %q, want %q", gotKey, "totally-unknown")
+	}
+	if gotName != "totally-unknown" {
+		t.Errorf("displayName = %q, want %q (unknown provider should fall back to key)", gotName, "totally-unknown")
+	}
+}
+
+// TestRenderPromptCityRootTemplateFragments verifies that template-fragments/
+// at the city root (the root pack itself) are loaded into the template set,
+// not just template-fragments/ inside imported pack dirs. Regression test for
+// rp-aew: a PackV2 root pack with no [imports.*] blocks (so cfg.PackDirs is
+// empty) must still be able to use its own template-fragments/.
+func TestRenderPromptCityRootTemplateFragments(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/template-fragments/recovery.template.md"] = []byte(
+		`{{ define "recovery" }}recover-from-city-root{{ end }}`)
+	f.Files["/city/agents/x/prompt.template.md"] = []byte(`{{ template "recovery" . }}`)
+	got := renderPrompt(f, "/city", "", "agents/x/prompt.template.md", PromptContext{},
+		"", io.Discard, nil, nil, nil)
+	if got != "recover-from-city-root" {
+		t.Errorf("renderPrompt(city-root template-fragments) = %q, want %q",
+			got, "recover-from-city-root")
+	}
+}
+
+// TestRenderPromptCityRootPromptsShared mirrors the test above for the
+// prompts/shared/ subdirectory at the city root.
+func TestRenderPromptCityRootPromptsShared(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/shared/greet.template.md"] = []byte(
+		`{{ define "greet" }}hello-from-city-root{{ end }}`)
+	f.Files["/city/agents/x/prompt.template.md"] = []byte(`{{ template "greet" . }}`)
+	got := renderPrompt(f, "/city", "", "agents/x/prompt.template.md", PromptContext{},
+		"", io.Discard, nil, nil, nil)
+	if got != "hello-from-city-root" {
+		t.Errorf("renderPrompt(city-root prompts/shared) = %q, want %q",
+			got, "hello-from-city-root")
+	}
+}
+
+// TestRenderPromptCityRootFragmentsPerAgentWins ensures the new city-root
+// fragment load does not displace per-agent fragments (which must still win
+// on name collision).
+func TestRenderPromptCityRootFragmentsPerAgentWins(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/template-fragments/footer.template.md"] = []byte(
+		`{{ define "footer" }}city-root{{ end }}`)
+	f.Files["/city/agents/x/template-fragments/footer.template.md"] = []byte(
+		`{{ define "footer" }}per-agent{{ end }}`)
+	f.Files["/city/agents/x/prompt.template.md"] = []byte(`{{ template "footer" . }}`)
+	got := renderPrompt(f, "/city", "", "agents/x/prompt.template.md", PromptContext{},
+		"", io.Discard, nil, nil, nil)
+	if got != "per-agent" {
+		t.Errorf("renderPrompt(per-agent overrides city-root) = %q, want %q",
+			got, "per-agent")
+	}
+}
+
+// TestRenderPromptCityRootFragmentsAbsentNoEffect is the regression-safety
+// check: when the city root has no template-fragments/ or prompts/shared/,
+// rendered output is byte-identical to pre-fix behavior (i.e. the new
+// directory probes silently no-op via the loadSharedTemplates ReadDir miss).
+func TestRenderPromptCityRootFragmentsAbsentNoEffect(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/agents/x/prompt.template.md"] = []byte("plain body {{ .AgentName }}")
+	got := renderPrompt(f, "/city", "", "agents/x/prompt.template.md",
+		PromptContext{AgentName: "x"}, "", io.Discard, nil, nil, nil)
+	want := "plain body x"
+	if got != want {
+		t.Errorf("renderPrompt(no city-root fragments) = %q, want %q", got, want)
+	}
+}

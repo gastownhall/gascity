@@ -50,12 +50,8 @@ func filterAssignedWorkBeadsForPoolDemand(
 		if template != "" {
 			sessionBeadTemplate[sb.ID] = template
 		}
-		assigneeToSessionBeadID[sb.ID] = sb.ID
-		if sessionName := strings.TrimSpace(sb.Metadata["session_name"]); sessionName != "" {
-			assigneeToSessionBeadID[sessionName] = sb.ID
-		}
-		if identity := strings.TrimSpace(sb.Metadata["configured_named_identity"]); identity != "" {
-			assigneeToSessionBeadID[identity] = sb.ID
+		for _, id := range sessionBeadAssigneeIdentities(sb) {
+			assigneeToSessionBeadID[id] = sb.ID
 		}
 	}
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
@@ -131,9 +127,9 @@ func filterAssignedWorkBeadsForSessionWake(
 			continue
 		}
 		storeRef := assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
-		add(sb.ID, storeRef)
-		add(sb.Metadata["session_name"], storeRef)
-		add(sb.Metadata["configured_named_identity"], storeRef)
+		for _, id := range sessionBeadAssigneeIdentities(sb) {
+			add(id, storeRef)
+		}
 		add(template, storeRef)
 	}
 

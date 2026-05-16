@@ -407,6 +407,64 @@ func TestApplyPatches_RigSuspend(t *testing.T) {
 	}
 }
 
+func TestApplyRigPatchFormulaVars(t *testing.T) {
+	t.Run("adds keys to a rig with no existing formula_vars", func(t *testing.T) {
+		cfg := &City{Rigs: []Rig{{Name: "mo", Path: "/mo"}}}
+		err := ApplyPatches(cfg, Patches{
+			Rigs: []RigPatch{{
+				Name:        "mo",
+				FormulaVars: map[string]string{"test_command": "make test-fast"},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("ApplyPatches: %v", err)
+		}
+		if got := cfg.Rigs[0].FormulaVars["test_command"]; got != "make test-fast" {
+			t.Errorf("FormulaVars[test_command] = %q, want %q", got, "make test-fast")
+		}
+	})
+
+	t.Run("patch keys win over existing rig keys", func(t *testing.T) {
+		cfg := &City{Rigs: []Rig{{
+			Name:        "mo",
+			Path:        "/mo",
+			FormulaVars: map[string]string{"test_command": "go test ./...", "lint_command": "golangci-lint"},
+		}}}
+		err := ApplyPatches(cfg, Patches{
+			Rigs: []RigPatch{{
+				Name:        "mo",
+				FormulaVars: map[string]string{"test_command": "make test-fast"},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("ApplyPatches: %v", err)
+		}
+		if got := cfg.Rigs[0].FormulaVars["test_command"]; got != "make test-fast" {
+			t.Errorf("FormulaVars[test_command] = %q, want %q (patch overrides)", got, "make test-fast")
+		}
+		if got := cfg.Rigs[0].FormulaVars["lint_command"]; got != "golangci-lint" {
+			t.Errorf("FormulaVars[lint_command] = %q, want %q (untouched)", got, "golangci-lint")
+		}
+	})
+
+	t.Run("empty patch leaves existing formula_vars unchanged", func(t *testing.T) {
+		cfg := &City{Rigs: []Rig{{
+			Name:        "mo",
+			Path:        "/mo",
+			FormulaVars: map[string]string{"test_command": "go test ./..."},
+		}}}
+		err := ApplyPatches(cfg, Patches{
+			Rigs: []RigPatch{{Name: "mo", Suspended: ptrBool(true)}},
+		})
+		if err != nil {
+			t.Fatalf("ApplyPatches: %v", err)
+		}
+		if got := cfg.Rigs[0].FormulaVars["test_command"]; got != "go test ./..." {
+			t.Errorf("FormulaVars[test_command] = %q, want %q (untouched)", got, "go test ./...")
+		}
+	})
+}
+
 func TestApplyPatches_RigNotFound(t *testing.T) {
 	cfg := &City{
 		Rigs: []Rig{{Name: "hw", Path: "/path"}},

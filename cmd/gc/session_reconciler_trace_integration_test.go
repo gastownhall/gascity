@@ -463,6 +463,266 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 	}
 }
 
+func TestSessionReconcilerTraceGH1654WorkRequestedStartCandidates(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 20, 0, 0, time.UTC)
+
+	tests := []struct {
+		name                string
+		template            string
+		wantStartCandidates int
+		setup               func(t *testing.T, cityDir string, store beads.Store, sp runtime.Provider) (*config.City, DesiredStateResult, *sessionBeadSnapshot)
+	}{
+		{
+			name:                "named session post-kill",
+			template:            "dispatcher",
+			wantStartCandidates: 1,
+			setup: func(t *testing.T, cityDir string, store beads.Store, sp runtime.Provider) (*config.City, DesiredStateResult, *sessionBeadSnapshot) {
+				t.Helper()
+				cfg := &config.City{
+					Workspace: config.Workspace{Name: "trace-town"},
+					Session:   config.SessionConfig{Provider: "fake"},
+					Agents: []config.Agent{{
+						Name:              "dispatcher",
+						StartCommand:      "true",
+						MaxActiveSessions: intPtr(1),
+					}},
+					NamedSessions: []config.NamedSession{{
+						Template: "dispatcher",
+						Mode:     "on_demand",
+					}},
+				}
+				if _, err := store.Create(beads.Bead{
+					Title:  "queued dispatcher work",
+					Type:   "task",
+					Status: "open",
+					Metadata: map[string]string{
+						"gc.routed_to": "dispatcher",
+					},
+				}); err != nil {
+					t.Fatalf("Create named work: %v", err)
+				}
+				sessionName := config.NamedSessionRuntimeName("trace-town", cfg.Workspace, "dispatcher")
+				if _, err := store.Create(beads.Bead{
+					Title:  sessionName,
+					Type:   sessionBeadType,
+					Labels: []string{sessionBeadLabel},
+					Metadata: map[string]string{
+						"session_name":               sessionName,
+						"alias":                      "dispatcher",
+						"template":                   "dispatcher",
+						"state":                      "asleep",
+						"generation":                 "1",
+						"continuation_epoch":         "1",
+						"instance_token":             "named-token",
+						namedSessionMetadataKey:      boolMetadata(true),
+						namedSessionIdentityMetadata: "dispatcher",
+						namedSessionModeMetadata:     "on_demand",
+					},
+				}); err != nil {
+					t.Fatalf("Create named session: %v", err)
+				}
+				dsResult := buildDesiredState("trace-town", cityDir, now, cfg, sp, store, io.Discard)
+				if !dsResult.NamedSessionDemand["dispatcher"] {
+					t.Fatal("NamedSessionDemand[dispatcher] = false, want true")
+				}
+				snapshot, err := loadSessionBeadSnapshot(store)
+				if err != nil {
+					t.Fatalf("load session snapshot: %v", err)
+				}
+				return cfg, dsResult, snapshot
+			},
+		},
+		{
+			name:                "pool respawn after drain",
+			template:            "repo/worker",
+			wantStartCandidates: 1,
+			setup: func(t *testing.T, cityDir string, store beads.Store, sp runtime.Provider) (*config.City, DesiredStateResult, *sessionBeadSnapshot) {
+				t.Helper()
+				cfg := &config.City{
+					Workspace: config.Workspace{Name: "trace-town"},
+					Session:   config.SessionConfig{Provider: "fake"},
+					Agents: []config.Agent{{
+						Name:              "worker",
+						Dir:               "repo",
+						StartCommand:      "true",
+						MinActiveSessions: intPtr(0),
+						MaxActiveSessions: intPtr(5),
+					}},
+				}
+				createRoutedReadyWork(t, store, "repo/worker", 1)
+				dsResult := buildDesiredState("trace-town", cityDir, now, cfg, sp, store, io.Discard)
+				if got := dsResult.ScaleCheckCounts["repo/worker"]; got != 1 {
+					t.Fatalf("ScaleCheckCounts[repo/worker] = %d, want 1", got)
+				}
+				snapshot, err := loadSessionBeadSnapshot(store)
+				if err != nil {
+					t.Fatalf("load session snapshot: %v", err)
+				}
+				return cfg, dsResult, snapshot
+			},
+		},
+		{
+			name:                "pool grows past min active sessions",
+			template:            "repo/worker",
+			wantStartCandidates: 3,
+			setup: func(t *testing.T, cityDir string, store beads.Store, sp runtime.Provider) (*config.City, DesiredStateResult, *sessionBeadSnapshot) {
+				t.Helper()
+				cfg := &config.City{
+					Workspace: config.Workspace{Name: "trace-town"},
+					Session:   config.SessionConfig{Provider: "fake"},
+					Agents: []config.Agent{{
+						Name:              "worker",
+						Dir:               "repo",
+						StartCommand:      "true",
+						MinActiveSessions: intPtr(3),
+						MaxActiveSessions: intPtr(100),
+					}},
+				}
+				createRoutedReadyWork(t, store, "repo/worker", 6)
+				for slot := 1; slot <= 3; slot++ {
+					session := createCanonicalPoolSession(t, store, &cfg.Agents[0], now, slot)
+					if err := store.SetMetadata(session.ID, "state", "active"); err != nil {
+						t.Fatalf("set active state: %v", err)
+					}
+					if err := store.SetMetadata(session.ID, "pending_create_claim", ""); err != nil {
+						t.Fatalf("clear pending create claim: %v", err)
+					}
+					if err := store.SetMetadata(session.ID, "pending_create_started_at", ""); err != nil {
+						t.Fatalf("clear pending create timestamp: %v", err)
+					}
+					if err := sp.Start(context.Background(), session.Metadata["session_name"], runtime.Config{}); err != nil {
+						t.Fatalf("seed active runtime session: %v", err)
+					}
+				}
+				dsResult := buildDesiredState("trace-town", cityDir, now, cfg, sp, store, io.Discard)
+				if got := dsResult.ScaleCheckCounts["repo/worker"]; got != 6 {
+					t.Fatalf("ScaleCheckCounts[repo/worker] = %d, want 6", got)
+				}
+				snapshot, err := loadSessionBeadSnapshot(store)
+				if err != nil {
+					t.Fatalf("load session snapshot: %v", err)
+				}
+				return cfg, dsResult, snapshot
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			writeCityTOML(t, cityDir, "trace-town", "worker")
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			cfg, dsResult, sessionBeads := tc.setup(t, cityDir, store, sp)
+
+			tracer := newSessionReconcilerTracer(cityDir, "trace-town", io.Discard)
+			if !tracer.Enabled() {
+				t.Fatal("tracer should be enabled")
+			}
+			if _, err := tracer.armStore.upsertArm(TraceArm{
+				ScopeType:      TraceArmScopeTemplate,
+				ScopeValue:     tc.template,
+				Source:         TraceArmSourceManual,
+				Level:          TraceModeDetail,
+				ArmedAt:        now,
+				ExpiresAt:      now.Add(15 * time.Minute),
+				LastExtendedAt: now,
+				UpdatedAt:      now,
+			}); err != nil {
+				t.Fatalf("upsert arm: %v", err)
+			}
+			cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "controller_tick", now, cfg)
+			if cycle == nil {
+				t.Fatal("BeginCycle returned nil")
+			}
+			cycle.syncArms(now, cfg)
+			cr := &CityRuntime{
+				cityPath:            cityDir,
+				cityName:            "trace-town",
+				cfg:                 cfg,
+				sp:                  sp,
+				trace:               tracer,
+				standaloneCityStore: store,
+				sessionDrains:       newDrainTracker(),
+				rec:                 events.NewFake(),
+				pokeCh:              make(chan struct{}, 1),
+				stdout:              io.Discard,
+				stderr:              io.Discard,
+			}
+			cr.beadReconcileTick(context.Background(), dsResult, sessionBeads, cycle)
+			if !cr.waitForAsyncStarts() {
+				t.Fatal("async starts did not finish")
+			}
+			if err := cycle.End(TraceCompletionCompleted, traceRecordPayload{"phase": "gh1654"}); err != nil {
+				t.Fatalf("cycle.End: %v", err)
+			}
+			if err := tracer.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+
+			records, err := ReadTraceRecords(traceCityRuntimeDir(cityDir), TraceFilter{TraceID: cycle.traceID})
+			if err != nil {
+				t.Fatalf("ReadTraceRecords: %v", err)
+			}
+			var startCandidates int
+			haveWorkRequestedSummary := false
+			for _, rec := range records {
+				if rec.RecordType == TraceRecordTemplateTickSummary && rec.Template == tc.template {
+					if rec.EvaluationStatus != TraceEvaluationEligible {
+						t.Fatalf("template summary evaluation_status = %q, want eligible", rec.EvaluationStatus)
+					}
+					if !traceFieldBool(rec.Fields["work_requested"]) {
+						t.Fatalf("template summary work_requested = %#v, want true", rec.Fields["work_requested"])
+					}
+					haveWorkRequestedSummary = true
+				}
+				if rec.RecordType == TraceRecordDecision &&
+					rec.SiteCode == TraceSiteReconcilerWakeDecision &&
+					rec.Template == tc.template &&
+					rec.OutcomeCode == TraceOutcomeStartCandidate {
+					startCandidates++
+				}
+			}
+			if !haveWorkRequestedSummary {
+				t.Fatalf("missing work-requested template summary for %s", tc.template)
+			}
+			if startCandidates != tc.wantStartCandidates {
+				t.Fatalf("start_candidate decisions = %d, want %d", startCandidates, tc.wantStartCandidates)
+			}
+		})
+	}
+}
+
+func createRoutedReadyWork(t *testing.T, store beads.Store, template string, count int) {
+	t.Helper()
+	for i := 0; i < count; i++ {
+		if _, err := store.Create(beads.Bead{
+			Title:  "queued work",
+			Type:   "task",
+			Status: "open",
+			Metadata: map[string]string{
+				"gc.routed_to": template,
+			},
+		}); err != nil {
+			t.Fatalf("Create routed work: %v", err)
+		}
+	}
+}
+
+func createCanonicalPoolSession(t *testing.T, store beads.Store, cfgAgent *config.Agent, now time.Time, slot int) beads.Bead {
+	t.Helper()
+	_, qualifiedInstance := poolInstanceIdentity(cfgAgent, slot, io.Discard)
+	session, err := createPoolSessionBead(store, cfgAgent.QualifiedName(), nil, now, poolSessionCreateIdentity{
+		AgentName: qualifiedInstance,
+		Alias:     qualifiedInstance,
+		Slot:      slot,
+	})
+	if err != nil {
+		t.Fatalf("create pool session: %v", err)
+	}
+	return session
+}
+
 func traceFieldInt(v any) int {
 	switch n := v.(type) {
 	case int:
@@ -492,4 +752,9 @@ func traceFieldInt(v any) int {
 	default:
 		return 0
 	}
+}
+
+func traceFieldBool(v any) bool {
+	b, ok := v.(bool)
+	return ok && b
 }

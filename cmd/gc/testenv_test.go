@@ -16,9 +16,12 @@ var gcEnvVars = []string{
 	"GC_AGENT",
 	"GC_SESSION_ID",
 	"GC_SESSION_NAME",
+	"GC_SESSION_ORIGIN",
 	"GC_SHARED_SKILL_CATALOG_SNAPSHOT",
+	"GC_TEMPLATE",
 	"GC_TMUX_SESSION",
 	"GC_CITY",
+	"GC_DIR",
 }
 
 // clearGCEnv clears GC_* identity and session-routing variables for the
@@ -38,6 +41,33 @@ func disableManagedDoltRecoveryForTest(t *testing.T) {
 	t.Setenv("GC_DOLT_PORT", "")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+}
+
+// inheritedCityRoutingEnvVars lists GC_* variables that an outer gc-managed
+// shell injects to pin commands at a specific city or scope. Unit tests that
+// build a fresh temp city must clear them so cityForStoreDir/findCity and the
+// scope-aware bead provider resolution actually resolve to the tempdir rather
+// than the parent shell's city.
+var inheritedCityRoutingEnvVars = []string{
+	"GC_CITY_PATH",
+	"GC_CITY_ROOT",
+	"GC_BEADS_SCOPE_ROOT",
+	"GC_DIR",
+	"GC_BIN",
+	"GC_RIG",
+	"GC_RIG_ROOT",
+	"GC_CONTINUATION_EPOCH",
+	"GC_RUNTIME_EPOCH",
+}
+
+// clearInheritedCityRoutingEnv unsets the city-routing env vars listed in
+// inheritedCityRoutingEnvVars for the duration of the test. It complements
+// clearGCEnv, which only clears identity/session vars.
+func clearInheritedCityRoutingEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range inheritedCityRoutingEnvVars {
+		t.Setenv(k, "")
+	}
 }
 
 var testProviderStubCommands = []string{

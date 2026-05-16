@@ -49,6 +49,10 @@ type AgentPatch struct {
 	Nudge *string `toml:"nudge,omitempty"`
 	// IdleTimeout overrides the idle timeout. Duration string (e.g., "30s", "5m", "1h").
 	IdleTimeout *string `toml:"idle_timeout,omitempty"`
+	// MaxSessionAge overrides the max session age. Duration string (e.g., "5h").
+	MaxSessionAge *string `toml:"max_session_age,omitempty"`
+	// MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., "15m").
+	MaxSessionAgeJitter *string `toml:"max_session_age_jitter,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
@@ -167,6 +171,10 @@ type RigPatch struct {
 	DefaultBranch *string `toml:"default_branch,omitempty"`
 	// Suspended overrides the rig's suspended state.
 	Suspended *bool `toml:"suspended,omitempty"`
+	// FormulaVars adds or overrides rig-scoped formula var defaults.
+	// Additive merge: patch keys win over existing rig keys, unspecified
+	// keys are preserved.
+	FormulaVars map[string]string `toml:"formula_vars,omitempty"`
 }
 
 // ProviderPatch modifies an existing provider identified by Name.
@@ -321,6 +329,12 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	if p.IdleTimeout != nil {
 		a.IdleTimeout = *p.IdleTimeout
 	}
+	if p.MaxSessionAge != nil {
+		a.MaxSessionAge = *p.MaxSessionAge
+	}
+	if p.MaxSessionAgeJitter != nil {
+		a.MaxSessionAgeJitter = *p.MaxSessionAgeJitter
+	}
 	if p.SleepAfterIdle != nil {
 		a.SleepAfterIdle = NormalizeSleepAfterIdle(*p.SleepAfterIdle)
 		a.SleepAfterIdleSource = "agent_patch"
@@ -474,6 +488,14 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			}
 			if patch.Suspended != nil {
 				r.Suspended = *patch.Suspended
+			}
+			if len(patch.FormulaVars) > 0 {
+				if r.FormulaVars == nil {
+					r.FormulaVars = make(map[string]string, len(patch.FormulaVars))
+				}
+				for k, v := range patch.FormulaVars {
+					r.FormulaVars[k] = v
+				}
 			}
 			return nil
 		}

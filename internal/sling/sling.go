@@ -51,6 +51,12 @@ type SlingOpts struct {
 	Nudge         bool
 	Force         bool
 	DryRun        bool
+	// Reassign clears any existing human assignee on the bead before
+	// routing so the target pool/agent can claim it. Without this, a
+	// bead claimed by a human (`bd update --claim`) stays invisible
+	// to the pool's claim filter even after sling sets gc.routed_to.
+	// See gastownhall/gascity#1007.
+	Reassign bool
 	// InlineText is set only by the CLI path for ad-hoc task text. API
 	// callers always provide explicit bead or formula references.
 	InlineText bool
@@ -398,20 +404,74 @@ func FormatBeadLabel(id, title string) string {
 	return id
 }
 
-// BeadPrefix extracts the rig prefix from a bead ID by taking the lowercase
-// letters before the first dash. "HW-7" → "hw", "FE-123" → "fe".
-// Returns "" if the ID has no dash (can't determine prefix).
+// BeadPrefix extracts the rig prefix from a bead ID using a config-free
+// last-hyphen heuristic. "HW-7" -> "hw", "pieces-annotator-x8o" ->
+// "pieces-annotator".
 //
-// This is a config-free heuristic. For inputs whose rig prefix may itself
-// contain hyphens ("agent-diagnostics-hnn" routed to rig "agent-diagnostics"),
-// callers must use BeadPrefixForCity, which resolves the longest matching
-// configured prefix.
+// If the final segment looks word-like rather than ID-like, it falls back to
+// the first dash so ordinary prose such as "code-review-please" still resolves
+// as "code". Callers with city config should use BeadPrefixForCity for
+// deterministic longest-prefix resolution.
 func BeadPrefix(beadID string) string {
-	i := strings.Index(beadID, "-")
-	if i <= 0 {
+	return beadPrefixHeuristic(beadID)
+}
+
+func beadPrefixHeuristic(beadID string) string {
+	beadID = strings.TrimSpace(beadID)
+	lastIdx := strings.LastIndex(beadID, "-")
+	if lastIdx <= 0 {
 		return ""
 	}
-	return strings.ToLower(beadID[:i])
+	suffix := beadID[lastIdx+1:]
+	if suffix == "" {
+		return strings.ToLower(strings.TrimRight(beadID[:lastIdx], "-"))
+	}
+	base := suffix
+	if dot := strings.IndexByte(suffix, '.'); dot > 0 {
+		base = suffix[:dot]
+	}
+	if isBeadNumeric(base) || isBeadHash(base) {
+		return strings.ToLower(strings.TrimRight(beadID[:lastIdx], "-"))
+	}
+	firstIdx := strings.Index(beadID, "-")
+	if firstIdx <= 0 {
+		return ""
+	}
+	return strings.ToLower(beadID[:firstIdx])
+}
+
+func isBeadNumeric(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isBeadHash is only the config-free BeadPrefix heuristic's suffix gate. It
+// intentionally rejects longer all-letter words so prose like
+// "code-review-please" falls back to the first dash instead of being treated
+// as a hyphenated rig prefix. Config-aware routing must use BeadPrefixForCity
+// and the configured-prefix matchers instead.
+func isBeadHash(s string) bool {
+	if len(s) < 3 || len(s) > 8 {
+		return false
+	}
+	hasDigit := len(s) == 3
+	for _, c := range s {
+		if c >= '0' && c <= '9' {
+			hasDigit = true
+			continue
+		}
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return false
+		}
+	}
+	return hasDigit
 }
 
 // BeadPrefixForCity returns the configured rig (or HQ) prefix that beadID
@@ -508,8 +568,10 @@ func configuredBeadPrefixes(cfg *config.City) []string {
 // validBeadSuffix reports whether suffix is a plausible bead-ID suffix:
 // a non-empty alphanumeric base of at most 8 characters, optionally
 // followed by ".child" hierarchical parts. The hierarchical portion is
-// not validated, matching BeadIDParts which truncates at the first dot
-// before validating the base.
+// not validated, matching BeadIDParts which truncates at the first dot before
+// validating the base. This is the configured-prefix suffix gate for
+// LooksLikeConfiguredBeadID; it does not try to distinguish hash-like IDs from
+// prose because the prefix has already matched city config.
 func validBeadSuffix(suffix string) bool {
 	base := suffix
 	if dot := strings.IndexByte(suffix, '.'); dot > 0 {
@@ -906,6 +968,8 @@ func rigStoredDefaultBranch(cfg *config.City, beadID string, a config.Agent) str
 }
 
 // BuildSlingFormulaVars builds the variable map for formula instantiation.
+// Precedence (highest wins): explicit --var > rig.formula_vars > routing-injected
+// defaults (issue/rig_name/base_branch/...) > formula-level [vars.*].default.
 func BuildSlingFormulaVars(formulaName, beadID string, userVars []string, a config.Agent, deps SlingDeps) map[string]string {
 	vars := make(map[string]string, len(userVars)+6)
 	for _, v := range userVars {
@@ -914,6 +978,7 @@ func BuildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 			vars[key] = value
 		}
 	}
+	mergeRigFormulaVars(vars, deps.Cfg, a)
 	addVar := func(key, value string) {
 		if value == "" {
 			return
@@ -946,6 +1011,32 @@ func BuildSlingFormulaVars(formulaName, beadID string, userVars []string, a conf
 	}
 
 	return vars
+}
+
+// mergeRigFormulaVars folds rig-scoped formula_vars defaults into vars.
+// Explicit --var entries already in vars are preserved. The lookup uses
+// rigNameForAgent so agents whose Dir is a filesystem path still resolve
+// to the correct rig.
+func mergeRigFormulaVars(vars map[string]string, cfg *config.City, a config.Agent) {
+	if cfg == nil {
+		return
+	}
+	rigName := rigNameForAgent(cfg, a)
+	if rigName == "" {
+		return
+	}
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name != rigName {
+			continue
+		}
+		for k, v := range cfg.Rigs[i].FormulaVars {
+			if _, explicit := vars[k]; explicit {
+				continue
+			}
+			vars[k] = v
+		}
+		return
+	}
 }
 
 // ResolveSlingEnv returns extra env vars for the sling command.

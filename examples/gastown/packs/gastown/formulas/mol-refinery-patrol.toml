@@ -29,7 +29,7 @@ closes the bead once the PR is verified.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-refinery-patrol"
-version = 3
+version = 4
 contract = "graph.v2"
 
 [vars]
@@ -74,8 +74,37 @@ description = "Seconds to wait for events before re-checking (exponential backof
 default = "30"
 
 [[steps]]
+id = "validate-identity"
+title = "Validate canonical agent identity"
+description = """
+**Fail fast if `$GC_AGENT` is not set.**
+
+The refinery uses `$GC_AGENT` (not `$GC_ALIAS`) as its canonical mailbox
+identity. The session harness
+(`internal/session/lifecycle.go:RuntimeEnvWithSessionContext`) guarantees
+`$GC_AGENT` is populated for every live session — it falls back to the
+session name when the alias is empty. `$GC_ALIAS` can legitimately be
+empty, which is how a refinery once self-polled for 13h42m with seven
+queued beads while looking healthy-idle (upstream #1833).
+
+Verify at startup:
+```bash
+if [ -z "${GC_AGENT:-}" ]; then
+    echo "GC_AGENT is empty — session harness did not inject the canonical identity."
+    echo "Refusing to self-poll with an empty filter; escalate before proceeding."
+    gc mail send mayor/ -s "ESCALATION: refinery started with empty GC_AGENT [HIGH]" \\
+        -m "Session has no canonical agent identity. Investigate session harness."
+    gc runtime drain-ack
+    exit 1
+fi
+```
+
+Close this step only when `$GC_AGENT` is confirmed non-empty."""
+
+[[steps]]
 id = "check-inbox"
 title = "Context check, then mail"
+needs = ["validate-identity"]
 description = """
 **1. Context check (FIRST — before any work):**
 ```bash
@@ -398,7 +427,9 @@ Run as a single chained command so the metadata write cannot be skipped
 when the close-reason already names the SHA. Both the `--set-metadata`
 write and the `gc bd close` are required — `merged_sha` and
 `merged_target` are the only forensic breadcrumbs tying a closed bead
-to its merge commit on `$TARGET`.
+to its merge commit on `$TARGET`. `--unset-metadata rejection_reason`
+clears any stale rejection field from an earlier rejected/reworked
+attempt before the successful close.
 
 ```bash
 MERGED_SHA=$(git rev-parse HEAD) && \
@@ -406,7 +437,8 @@ MERGED_SHORT=$(git rev-parse --short HEAD) && \
 gc bd update $WORK \
   --set-metadata merge_result=merged \
   --set-metadata merged_sha=$MERGED_SHA \
-  --set-metadata merged_target=$TARGET && \
+  --set-metadata merged_target=$TARGET \
+  --unset-metadata rejection_reason && \
 gc bd close $WORK --reason "Merged to $TARGET at $MERGED_SHORT"
 ```
 
@@ -535,14 +567,17 @@ Run as a single chained command so the metadata write cannot be skipped
 when the close-reason already names the PR. Both the `--set-metadata`
 write and the `gc bd close` are required — `pr_url` and `pr_number`
 are the only forensic breadcrumbs tying a closed bead to its pull
-request.
+request. `--unset-metadata rejection_reason` clears any stale rejection
+field from an earlier rejected/reworked attempt before the successful
+close.
 
 ```bash
 gc bd update $WORK \
   --set-metadata merge_result=pull_request \
   --set-metadata pr_url="$PR_URL" \
   --set-metadata pr_number="$PR_NUMBER" \
-  --set-metadata merged_target="$TARGET" && \
+  --set-metadata merged_target="$TARGET" \
+  --unset-metadata rejection_reason && \
 gc bd close $WORK --reason "Pull request ready: $PR_URL"
 ```
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -167,5 +168,48 @@ func cleanupManagedDoltTestCity(t *testing.T, cityPath string) {
 		if err := shutdownBeadsProvider(cityPath); err != nil {
 			t.Logf("shutdownBeadsProvider(%s): %v", cityPath, err)
 		}
+		stopManagedDoltProcessesUnderTestCity(t, cityPath)
 	})
+}
+
+func stopManagedDoltProcessesUnderTestCity(t *testing.T, cityPath string) {
+	t.Helper()
+	procs, err := discoverDoltProcesses()
+	if err != nil {
+		t.Fatalf("discoverDoltProcesses: %v", err)
+	}
+	for _, p := range procs {
+		configPath := extractConfigPath(p.Argv)
+		if !pathutil.PathWithin(cityPath, configPath) {
+			continue
+		}
+		stopManagedDoltTestPID(t, p.PID)
+	}
+}
+
+func stopManagedDoltTestPID(t *testing.T, pid int) {
+	t.Helper()
+	if pid <= 0 || !managedStopPIDAlive(pid) {
+		return
+	}
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
+		t.Fatalf("signal dolt test pid %d with SIGTERM: %v", pid, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for managedStopPIDAlive(pid) && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !managedStopPIDAlive(pid) {
+		return
+	}
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+		t.Fatalf("signal dolt test pid %d with SIGKILL: %v", pid, err)
+	}
+	deadline = time.Now().Add(time.Second)
+	for managedStopPIDAlive(pid) && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if managedStopPIDAlive(pid) {
+		t.Fatalf("dolt test pid %d still alive after SIGKILL", pid)
+	}
 }

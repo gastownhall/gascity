@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -389,5 +390,29 @@ func TestRunManagedDoltSQLTimesOut(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "timed out after") {
 		t.Fatalf("runManagedDoltSQL() error = %v, want timeout", err)
+	}
+}
+
+func TestRunManagedDoltSQLIncludesConfiguredPasswordFlag(t *testing.T) {
+	binDir := t.TempDir()
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	fakeDolt := filepath.Join(binDir, "dolt")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\n", argsFile)
+	if err := os.WriteFile(fakeDolt, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_DOLT_PASSWORD", "secret")
+
+	if _, err := runManagedDoltSQL("127.0.0.1", "3311", "root", "-q", "SELECT 1"); err != nil {
+		t.Fatalf("runManagedDoltSQL() error = %v", err)
+	}
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "--password\nsecret\n") {
+		t.Fatalf("dolt args missing configured password flag:\n%s", data)
 	}
 }

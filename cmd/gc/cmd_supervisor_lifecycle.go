@@ -381,8 +381,40 @@ API server.`,
 	}
 }
 
+// runSupervisorFunc is the run-loop entry point invoked by
+// doSupervisorRun. Indirection enables tests to substitute a no-op
+// loop so pre-loop setup (defaultSupervisorBeadsActor) is observable
+// without launching the real long-running supervisor.
+var runSupervisorFunc = runSupervisor
+
 func doSupervisorRun(stdout, stderr io.Writer) int {
-	return runSupervisor(stdout, stderr)
+	defaultSupervisorBeadsActor()
+	return runSupervisorFunc(stdout, stderr)
+}
+
+// defaultSupervisorBeadsActor sets BEADS_ACTOR=controller in this
+// process's env when the operator has not already set a value.
+//
+// bd hooks (.beads/hooks/on_create, on_update, on_close) are spawned
+// from the supervisor process and forward events via `gc event emit`
+// subprocesses that inherit this process's env. Without this default,
+// eventActor() walks the GC_ALIAS → GC_AGENT → GC_SESSION_ID →
+// BEADS_ACTOR chain (all unset in a fresh supervisor) and lands on the
+// "human" fallback, mis-attributing every dispatcher-issued
+// tracking-bead create/update/close.
+//
+// applyControllerBdEnv (cmd/gc/bd_env.go) covers BEADS_ACTOR for the
+// env map handed to spawned bd commands; this covers the
+// process-env path the hook subprocesses inherit. The two paths are
+// independent and both are required for full controller attribution.
+//
+// Order-exec subprocesses still override BEADS_ACTOR to "order:<name>"
+// via orderExecEnv (cmd/gc/order_store.go) before exec, so per-order
+// attribution is preserved.
+func defaultSupervisorBeadsActor() {
+	if strings.TrimSpace(os.Getenv("BEADS_ACTOR")) == "" {
+		_ = os.Setenv("BEADS_ACTOR", "controller")
+	}
 }
 
 func doSupervisorStart(stdout, stderr io.Writer) int {

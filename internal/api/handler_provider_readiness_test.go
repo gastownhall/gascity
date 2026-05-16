@@ -1073,10 +1073,15 @@ func TestHandleReadinessReturnsNotInstalledForGitHubCLIWithoutBinary(t *testing.
 
 	originalPathEnv := providerProbePathEnv
 	originalGOOS := providerProbeGOOS
+	originalExpandDirs := providerProbeExpandDirs
 	providerProbePathEnv = filepath.Join(homeDir, "bin")
+	providerProbeExpandDirs = func(_, _, basePath string) []string {
+		return []string{basePath}
+	}
 	defer func() {
 		providerProbePathEnv = originalPathEnv
 		providerProbeGOOS = originalGOOS
+		providerProbeExpandDirs = originalExpandDirs
 	}()
 	// "test" — not "linux" — so searchpath.Expand skips the unconditional
 	// /snap/bin and /home/linuxbrew/.linuxbrew/bin extras that would otherwise

@@ -13,11 +13,11 @@ then add a terminal step (submit, commit, etc).
 |----------|--------|-------------|
 | issue | caller | The work bead ID assigned to this polecat |
 | base_branch | caller | Base branch to rebase on (default: main) |
-| setup_command | rig config | Setup/install command. Empty = skip. |
-| typecheck_command | rig config | Type check command. Empty = skip. |
-| test_command | rig config | Test command. Empty = skip. |
-| lint_command | rig config | Lint command. Empty = skip. |
-| build_command | rig config | Build command. Empty = skip. |"""
+| setup_command | rig `formula_vars` | Setup/install command. Empty = skip. |
+| typecheck_command | rig `formula_vars` | Type check command. Empty = skip. |
+| test_command | rig `formula_vars` | Test command. Empty = skip. |
+| lint_command | rig `formula_vars` | Lint command. Empty = skip. |
+| build_command | rig `formula_vars` | Build command. Empty = skip. |"""
 formula = "mol-polecat-base"
 version = 1
 
@@ -31,23 +31,23 @@ description = "The base branch to rebase on and compare against (e.g., main, int
 default = "main"
 
 [vars.setup_command]
-description = "Setup/install command (e.g., pnpm install). Empty = skip."
+description = "Setup/install command (e.g., pnpm install). From rig `formula_vars` or empty to skip."
 default = ""
 
 [vars.typecheck_command]
-description = "Type check command (e.g., tsc --noEmit). Empty = skip."
+description = "Type check command (e.g., tsc --noEmit). From rig `formula_vars` or empty to skip."
 default = ""
 
 [vars.test_command]
-description = "Command to run tests (auto-detected from rig settings)"
+description = "Command to run tests. From rig `formula_vars` or empty to skip."
 default = ""
 
 [vars.lint_command]
-description = "Command to run linting. Empty = skip."
+description = "Command to run linting. From rig `formula_vars` or empty to skip."
 default = ""
 
 [vars.build_command]
-description = "Command to run build. Empty = skip."
+description = "Command to run build. From rig `formula_vars` or empty to skip."
 default = ""
 
 [[steps]]

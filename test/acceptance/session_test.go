@@ -104,10 +104,15 @@ func TestSessionDefaultNamedSession(t *testing.T) {
 		if strings.Contains(out, "No sessions found") {
 			t.Errorf("expected default named session on fresh city, got:\n%s", out)
 		}
-		for _, want := range []string{"mayor", "creating"} {
+		for _, want := range []string{"mayor"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("expected %q in default named session list, got:\n%s", want, out)
 			}
+		}
+		if !strings.Contains(out, string(session.StateCreating)) &&
+			!strings.Contains(out, string(session.StateActive)) &&
+			!strings.Contains(out, string(session.StateAwake)) {
+			t.Errorf("expected creating or running state in default named session list, got:\n%s", out)
 		}
 	})
 
@@ -126,8 +131,10 @@ func TestSessionDefaultNamedSession(t *testing.T) {
 		if got[0].Template != "mayor" {
 			t.Errorf("template = %q, want mayor\n%s", got[0].Template, out)
 		}
-		if got[0].State != session.StateCreating {
-			t.Errorf("state = %q, want creating\n%s", got[0].State, out)
+		switch got[0].State {
+		case session.StateCreating, session.StateActive, session.StateAwake:
+		default:
+			t.Errorf("state = %q, want creating or running\n%s", got[0].State, out)
 		}
 	})
 

@@ -106,6 +106,16 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		result.BeadWarnings = append(result.BeadWarnings, check.Warnings...)
 	}
 
+	// Reassign: clear any existing human assignee before routing so the
+	// target pool/agent can claim the bead. Without this, beads claimed
+	// by `bd update --claim` stay invisible to the pool's claim filter
+	// even after sling sets gc.routed_to. See gastownhall/gascity#1007.
+	if opts.Reassign && !opts.DryRun {
+		if err := clearHumanAssignee(opts.BeadOrFormula, deps); err != nil {
+			return result, fmt.Errorf("clearing assignee for %s: %w", opts.BeadOrFormula, err)
+		}
+	}
+
 	// Dry-run: return early with preview info.
 	if opts.DryRun {
 		result.DryRun = true
@@ -1079,4 +1089,25 @@ func selectedStoreContainer(opts SlingOpts, deps SlingDeps) (beads.Bead, bool) {
 		return beads.Bead{}, false
 	}
 	return b, b.Type == "epic" || beads.IsContainerType(b.Type)
+}
+
+// clearHumanAssignee unsets the bead's assignee if non-empty. No-op when
+// the bead is missing, the assignee is already empty, or the store is
+// unavailable. Errors only on a real store-Update failure with a
+// non-empty assignee. See SlingOpts.Reassign and #1007.
+func clearHumanAssignee(beadID string, deps SlingDeps) error {
+	if deps.Store == nil {
+		return nil
+	}
+	b, err := deps.Store.Get(beadID)
+	if err != nil {
+		// Bead may not exist locally yet (e.g. with --force routing
+		// against an absent bead). Nothing to clear.
+		return nil
+	}
+	if strings.TrimSpace(b.Assignee) == "" {
+		return nil
+	}
+	empty := ""
+	return deps.Store.Update(beadID, beads.UpdateOpts{Assignee: &empty})
 }

@@ -206,12 +206,20 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 		t.Fatalf("reading refinery formula: %v", err)
 	}
 	body := string(data)
+	normalizedBody := strings.Join(strings.Fields(body), " ")
+	unsetRationale := "`--unset-metadata rejection_reason` clears any stale rejection field"
+	if count := strings.Count(normalizedBody, unsetRationale); count != 2 {
+		t.Fatalf("refinery formula should explain rejection_reason cleanup in both close paths, found %d occurrences", count)
+	}
 
 	// Direct-merge path: metadata write must be chained into the close.
+	// --unset-metadata rejection_reason follows merged_target; the &&
+	// that gates gc bd close must appear after --unset-metadata.
 	assertContainsInOrder(t, body,
 		"--set-metadata merge_result=merged",
 		"--set-metadata merged_sha=$MERGED_SHA",
-		"--set-metadata merged_target=$TARGET &&",
+		"--set-metadata merged_target=$TARGET",
+		"--unset-metadata rejection_reason &&",
 		`gc bd close $WORK --reason "Merged to $TARGET at $MERGED_SHORT"`,
 	)
 
@@ -220,8 +228,43 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 		"--set-metadata merge_result=pull_request",
 		`--set-metadata pr_url="$PR_URL"`,
 		`--set-metadata pr_number="$PR_NUMBER"`,
-		`--set-metadata merged_target="$TARGET" &&`,
+		`--set-metadata merged_target="$TARGET"`,
+		"--unset-metadata rejection_reason &&",
 		`gc bd close $WORK --reason "Pull request ready: $PR_URL"`,
+	)
+}
+
+// TestRefineryPromptRejectionFlowEnforcesClearOnMerge guards against
+// the regression observed in L5c (2026-05-10): the refinery agent
+// merged a previously-rejected work bead and closed it, but never ran
+// `gc bd update --unset-metadata rejection_reason`. The closed bead
+// retained the stale `rejection_reason` field, so downstream tooling
+// could not distinguish "rejected and resolved" from "rejected and
+// abandoned" by reading metadata.
+//
+// The formula's `merge-push` step chains `--unset-metadata
+// rejection_reason` into the terminal `gc bd update`, but the refinery
+// prompt's "Rejection Flow" section described only the set side of the
+// lifecycle — the LLM agent saw no closing-symmetry instruction in the
+// prompt and dropped the unset whenever it bypassed the formula's chained
+// command.
+//
+// The fix adds a closing-symmetry note to the Rejection Flow section
+// naming the obligation: on merging a previously-rejected bead, clear
+// `rejection_reason` before `gc bd close`.
+func TestRefineryPromptRejectionFlowEnforcesClearOnMerge(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "refinery", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery prompt: %v", err)
+	}
+	body := strings.Join(strings.Fields(string(data)), " ")
+
+	assertContainsInOrder(t, body,
+		"## Rejection Flow",
+		"clear `rejection_reason` before `gc bd close`",
+		"--unset-metadata rejection_reason",
 	)
 }
 
@@ -270,6 +313,61 @@ func TestPolecatFormulaRecordsExistingPRMetadataOnSubmit(t *testing.T) {
 	}
 	if strings.Contains(body, "gh pr create") {
 		t.Fatalf("polecat submit flow must not create pull requests directly")
+	}
+}
+
+func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat formula: %v", err)
+	}
+	body := string(data)
+	refineryTarget := `REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery"`
+	nudge := `gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true`
+
+	assertContainsInOrder(t, body,
+		"**5. Reassign to refinery:**",
+		refineryTarget,
+		`gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"`,
+		"**6. Signal refinery to check for work immediately",
+		refineryTarget,
+		`gc session wake "$REFINERY_TARGET" || true`,
+		nudge,
+		"**7. Signal reconciler and exit.**",
+	)
+
+	for _, bad := range []string{
+		`gc session wake "$REFINERY_TARGET" 2>/dev/null`,
+		`gc session nudge "$REFINERY_TARGET" 2>/dev/null`,
+		`gc session nudge "$REFINERY_TARGET" || true`,
+	} {
+		if strings.Contains(body, bad) {
+			t.Fatalf("polecat formula must preserve refinery handoff diagnostics and pass a nudge message; found %q", bad)
+		}
+	}
+}
+
+func TestPolecatPromptDoneSequenceSignalsRefinery(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "polecat", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat prompt: %v", err)
+	}
+	body := string(data)
+
+	assertContainsInOrder(t, body,
+		"## FINAL REMINDER: RUN THE DONE SEQUENCE",
+		`REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"`,
+		`gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"`,
+		`gc session wake "$REFINERY_TARGET" || true`,
+		`gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true`,
+		`gc runtime drain-ack`,
+	)
+	if !strings.Contains(body, "Done sequence (push, set metadata, reassign, wake refinery, nudge refinery, `gc runtime drain-ack`, exit)") {
+		t.Fatalf("polecat quick reference must include the refinery wake+nudge handoff")
 	}
 }
 
@@ -1246,6 +1344,60 @@ func TestWitnessPatrolStateClassificationCoversSessionStates(t *testing.T) {
 	}
 }
 
+// TestWitnessPatrolAllStepsContinueNotExit guards against the regression
+// in upstream #1884: every intermediate step in mol-witness-patrol must
+// tell the agent to continue rather than exit the wisp. The burn
+// primitive only lives in `next-iteration`, so any step that reads as
+// terminal ("Exit criteria: no orphans found.") leaks wisps when an LLM
+// treats the early-exit as a terminal instruction.
+func TestWitnessPatrolAllStepsContinueNotExit(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-witness-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading witness patrol formula: %v", err)
+	}
+
+	var parsed struct {
+		Steps []struct {
+			ID          string `toml:"id"`
+			Description string `toml:"description"`
+		} `toml:"steps"`
+	}
+	if _, err := toml.Decode(string(data), &parsed); err != nil {
+		t.Fatalf("parsing witness patrol formula: %v", err)
+	}
+
+	byID := make(map[string]string, len(parsed.Steps))
+	for _, s := range parsed.Steps {
+		byID[s.ID] = s.Description
+	}
+
+	intermediate := []string{
+		"check-inbox",
+		"recover-orphaned-beads",
+		"check-refinery",
+		"check-polecat-health",
+	}
+	for _, id := range intermediate {
+		desc, ok := byID[id]
+		if !ok {
+			t.Errorf("witness patrol formula missing step %q", id)
+			continue
+		}
+		if !strings.Contains(desc, "do NOT exit") {
+			t.Errorf("step %q missing continuation reminder 'do NOT exit' so an LLM can treat the step as terminal and leak the wisp:\n%s", id, desc)
+		}
+		if !strings.Contains(desc, "next-iteration") {
+			t.Errorf("step %q missing reference to `next-iteration` as the sole burn site:\n%s", id, desc)
+		}
+	}
+
+	if _, ok := byID["next-iteration"]; !ok {
+		t.Fatal("witness patrol formula missing `next-iteration` step — continuation clauses point at a non-existent target")
+	}
+}
+
 func TestAllFormulasExist(t *testing.T) {
 	dir := exampleDir()
 	formulaDir := filepath.Join(dir, "packs", "gastown", "formulas")
@@ -1710,5 +1862,98 @@ func TestDoltHealthFormulasExist(t *testing.T) {
 
 	if count == 0 {
 		t.Error("no formula files found")
+	}
+}
+
+// TestDeaconPatrolDetectsQueueStarvation verifies the deacon formula
+// cross-checks assigned open beads against visible work signal, so a
+// stuck self-polling refinery is flagged even when its patrol wisp is
+// cycling fresh. See upstream #1833.
+func TestDeaconPatrolDetectsQueueStarvation(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-deacon-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading deacon formula: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		`id = "queue-starvation-check"`,
+		`needs = ["health-scan"]`,
+		"Cross-check assigned work against visible work signal",
+		"gc bd list --status=open --assignee=",
+		"bead.updated_at",
+		"30min",
+		`"gc.routed_to":"{{binding_prefix}}dog"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("deacon formula missing queue-starvation guidance %q", want)
+		}
+	}
+
+	// The new step must chain into the next one.
+	if !strings.Contains(body, `needs = ["queue-starvation-check"]`) {
+		t.Errorf("deacon formula step after queue-starvation-check must depend on it")
+	}
+
+	assertContainsInOrder(t, body,
+		`id = "health-scan"`,
+		`id = "queue-starvation-check"`,
+		`id = "utility-agent-health"`,
+	)
+}
+
+// TestRefineryPromptUsesCanonicalAgentIdentity verifies the refinery
+// prompt's wisp lookup and assignment commands use $GC_AGENT, which the
+// session harness guarantees (internal/session/lifecycle.go). $GC_ALIAS
+// can be empty or stale, which was the root cause of the stuck self-poll
+// reported in upstream #1833.
+func TestRefineryPromptUsesCanonicalAgentIdentity(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "refinery", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery prompt: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		`gc bd list --assignee="$GC_AGENT" --status=in_progress`,
+		`gc bd update "$WISP" --assignee="$GC_AGENT"`,
+		`| Find assigned work | ` + "`" + `gc bd list --assignee="$GC_AGENT" --status=open` + "`" + ` |`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("refinery prompt missing canonical $GC_AGENT usage %q", want)
+		}
+	}
+
+	// The refinery prompt must NOT rely on $GC_ALIAS for its own identity
+	// (it can be empty; the harness-guaranteed identity is $GC_AGENT).
+	if strings.Contains(body, `--assignee="$GC_ALIAS"`) {
+		t.Errorf("refinery prompt still uses $GC_ALIAS for its own identity; switch to $GC_AGENT")
+	}
+}
+
+// TestRefineryFormulaValidatesAgentIdentityAtStartup verifies the
+// refinery formula fails fast when $GC_AGENT is unset or empty, instead
+// of silently returning no results and looking healthy-idle.
+func TestRefineryFormulaValidatesAgentIdentityAtStartup(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery formula: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		`if [ -z "${GC_AGENT:-}" ]; then`,
+		`GC_AGENT is empty`,
+		`gc runtime drain-ack`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("refinery formula missing $GC_AGENT startup validation %q", want)
+		}
 	}
 }

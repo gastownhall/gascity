@@ -17,26 +17,21 @@ type execStoreTarget struct {
 	RigName   string
 }
 
-var execProjectedDoltEnvKeys = []string{
-	"GC_DOLT_HOST",
-	"GC_DOLT_PORT",
-	"GC_DOLT_USER",
-	"GC_DOLT_PASSWORD",
-	"BEADS_CREDENTIALS_FILE",
-	"BEADS_DOLT_SERVER_HOST",
-	"BEADS_DOLT_SERVER_PORT",
-	"BEADS_DOLT_SERVER_USER",
-	"BEADS_DOLT_PASSWORD",
+func execProjectedBackendEnvKeys() []string {
+	keys := make([]string, 0, len(projectedDoltEnvKeys)+len(projectedPostgresEnvKeys))
+	keys = append(keys, projectedDoltEnvKeys...)
+	keys = append(keys, projectedPostgresEnvKeys...)
+	return keys
 }
 
-func setExecProjectedDoltEnvEmpty(env map[string]string) {
-	for _, key := range execProjectedDoltEnvKeys {
+func setExecProjectedBackendEnvEmpty(env map[string]string) {
+	for _, key := range execProjectedBackendEnvKeys() {
 		env[key] = ""
 	}
 }
 
-func copyExecProjectedDoltEnv(dst, src map[string]string) {
-	for _, key := range execProjectedDoltEnvKeys {
+func copyExecProjectedBackendEnv(dst, src map[string]string) {
+	for _, key := range execProjectedBackendEnvKeys() {
 		if value, ok := src[key]; ok {
 			dst[key] = value
 		}
@@ -51,7 +46,7 @@ func gcExecStoreEnv(cityPath string, target execStoreTarget, provider string) ma
 	env["GC_BEADS_PREFIX"] = target.Prefix
 	env["GC_RIG"] = ""
 	env["GC_RIG_ROOT"] = ""
-	setExecProjectedDoltEnvEmpty(env)
+	setExecProjectedBackendEnvEmpty(env)
 	env["BEADS_DIR"] = ""
 	env["BEADS_DOLT_AUTO_START"] = ""
 	env["GC_BIN"] = ""
@@ -77,9 +72,17 @@ func gcExecLifecycleInitProcessEnv(cityPath string, target execStoreTarget, prov
 		if err != nil {
 			return nil, err
 		}
-		copyExecProjectedDoltEnv(env, bdRuntimeEnvForRig(cityPath, cfg, target.ScopeRoot))
+		projected, err := bdRuntimeEnvForRigWithError(cityPath, cfg, target.ScopeRoot)
+		if err != nil {
+			return nil, err
+		}
+		copyExecProjectedBackendEnv(env, projected)
 	} else {
-		copyExecProjectedDoltEnv(env, bdRuntimeEnv(cityPath))
+		projected, err := bdRuntimeEnvWithError(cityPath)
+		if err != nil {
+			return nil, err
+		}
+		copyExecProjectedBackendEnv(env, projected)
 	}
 	return mergeRuntimeEnv(os.Environ(), env), nil
 }

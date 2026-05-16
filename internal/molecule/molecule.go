@@ -236,7 +236,7 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 	// This runs before epoch fencing so that crash-retries with stale epochs
 	// still return the existing result instead of failing.
 	if opts.IdempotencyKey != "" {
-		if existing, err := findExistingAttach(store, rootBeadID, attachBeadID, opts.IdempotencyKey); err != nil {
+		if existing, err := findExistingAttach(store, recipe, rootBeadID, attachBeadID, opts.IdempotencyKey, opts.ExpectedEpoch); err != nil {
 			return nil, fmt.Errorf("idempotency check: %w", err)
 		} else if existing != nil {
 			return existing, nil
@@ -310,7 +310,7 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 
 // findExistingAttach checks if a sub-DAG root with the given idempotency key
 // already exists in the workflow. Returns nil if not found.
-func findExistingAttach(store beads.Store, rootBeadID, attachBeadID, key string) (*AttachResult, error) {
+func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, attachBeadID, key string, expectedEpoch int) (*AttachResult, error) {
 	all, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{
 			"gc.idempotency_key": key,
@@ -326,6 +326,9 @@ func findExistingAttach(store beads.Store, rootBeadID, attachBeadID, key string)
 		}
 		if b.Metadata["gc.root_bead_id"] != rootBeadID {
 			continue
+		}
+		if b.Metadata["molecule_failed"] == "true" {
+			return nil, fmt.Errorf("existing attach root %s for idempotency key %q is marked molecule_failed", b.ID, key)
 		}
 		// Found existing sub-DAG root. Ensure dep is wired.
 		deps, err := store.DepList(attachBeadID, "down")
@@ -344,13 +347,101 @@ func findExistingAttach(store beads.Store, rootBeadID, attachBeadID, key string)
 				return nil, err
 			}
 		}
+		if err := advanceAttachEpochIfNeeded(store, attachBeadID, expectedEpoch); err != nil {
+			return nil, err
+		}
+		idMapping, err := existingAttachIDMapping(store, recipe, rootBeadID, b)
+		if err != nil {
+			return nil, err
+		}
 		return &AttachResult{
 			RootID:         b.ID,
 			WorkflowRootID: rootBeadID,
+			IDMapping:      idMapping,
 			Duplicate:      true,
 		}, nil
 	}
 	return nil, nil
+}
+
+func advanceAttachEpochIfNeeded(store beads.Store, attachBeadID string, expectedEpoch int) error {
+	if expectedEpoch <= 0 {
+		return nil
+	}
+	attachBead, err := store.Get(attachBeadID)
+	if err != nil {
+		return err
+	}
+	currentEpoch, _ := strconv.Atoi(strings.TrimSpace(attachBead.Metadata["gc.control_epoch"]))
+	if currentEpoch != expectedEpoch {
+		return nil
+	}
+	nextEpoch := expectedEpoch + 1
+	return store.SetMetadata(attachBeadID, "gc.control_epoch", strconv.Itoa(nextEpoch))
+}
+
+func existingAttachIDMapping(store beads.Store, recipe *formula.Recipe, rootBeadID string, root beads.Bead) (map[string]string, error) {
+	idMapping := map[string]string{}
+	if recipe == nil {
+		return idMapping, nil
+	}
+	wantedRefs := map[string][]string{}
+	for i, step := range recipe.Steps {
+		if i == 0 || step.IsRoot {
+			idMapping[step.ID] = root.ID
+			continue
+		}
+		for _, ref := range attachStepRefs(step) {
+			wantedRefs[ref] = append(wantedRefs[ref], step.ID)
+		}
+	}
+	if len(wantedRefs) == 0 {
+		return idMapping, nil
+	}
+	all, err := store.List(beads.ListQuery{
+		Metadata: map[string]string{"gc.root_bead_id": rootBeadID},
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, bead := range all {
+		if bead.Metadata["molecule_failed"] == "true" {
+			continue
+		}
+		ref := strings.TrimSpace(bead.Metadata["gc.step_ref"])
+		if ref == "" {
+			ref = strings.TrimSpace(bead.Ref)
+		}
+		if ref == "" {
+			continue
+		}
+		for _, stepID := range wantedRefs[ref] {
+			if idMapping[stepID] == "" {
+				idMapping[stepID] = bead.ID
+			}
+		}
+	}
+	return idMapping, nil
+}
+
+func attachStepRefs(step formula.RecipeStep) []string {
+	refs := make([]string, 0, 2)
+	if ref := strings.TrimSpace(step.Metadata["gc.step_ref"]); ref != "" {
+		refs = append(refs, ref)
+	}
+	if id := strings.TrimSpace(step.ID); id != "" {
+		duplicate := false
+		for _, ref := range refs {
+			if ref == id {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			refs = append(refs, id)
+		}
+	}
+	return refs
 }
 
 // Instantiate creates beads from a pre-compiled Recipe. Use this when
