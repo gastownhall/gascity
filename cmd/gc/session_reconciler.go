@@ -1363,14 +1363,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					storedLive := session.Metadata["started_live_hash"]
 					currentLive := runtime.LiveFingerprint(agentCfg)
 					if storedLive != currentLive {
-						if storedLive == "" && len(agentCfg.SessionLive) == 0 {
+						switch {
+						case storedLive == "" && len(agentCfg.SessionLive) == 0:
 							// No stored hash and no live config — silently
 							// backfill the hash without running anything.
 							_ = store.SetMetadataBatch(session.ID, map[string]string{
 								"live_hash":         currentLive,
 								"started_live_hash": currentLive,
 							})
-						} else if runtime.IsLegacyOrMismatchedVersion(storedLive) {
+						case runtime.IsLegacyOrMismatchedVersion(storedLive):
 							// Stored live hash from a pre-versioning or
 							// version-mismatched binary — silently rebaseline
 							// all four fingerprint fields rather than running
@@ -1387,7 +1388,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 									"current_hash": currentLive,
 								}, nil, "")
 							}
-						} else {
+						default:
 							fmt.Fprintf(stdout, "Live config changed for '%s', re-applying...\n", tp.DisplayName()) //nolint:errcheck
 							if err := sp.RunLive(name, agentCfg); err != nil {
 								fmt.Fprintf(stderr, "session reconciler: RunLive %s: %v\n", name, err) //nolint:errcheck
