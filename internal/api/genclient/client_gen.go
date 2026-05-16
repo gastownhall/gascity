@@ -1876,24 +1876,28 @@ type ProviderOptionDTO struct {
 
 // ProviderPatch defines model for ProviderPatch.
 type ProviderPatch struct {
-	ACPArgs            *[]string         `json:"ACPArgs"`
-	ACPCommand         *string           `json:"ACPCommand"`
-	Args               *[]string         `json:"Args"`
-	ArgsAppend         *[]string         `json:"ArgsAppend"`
-	Base               *string           `json:"Base"`
-	Command            *string           `json:"Command"`
-	Env                map[string]string `json:"Env"`
-	EnvRemove          *[]string         `json:"EnvRemove"`
-	Name               string            `json:"Name"`
-	OptionsSchemaMerge *string           `json:"OptionsSchemaMerge"`
-	PromptFlag         *string           `json:"PromptFlag"`
-	PromptMode         *string           `json:"PromptMode"`
-	ReadyDelayMs       *int64            `json:"ReadyDelayMs"`
-	Replace            bool              `json:"Replace"`
+	ACPArgs              *[]string         `json:"ACPArgs"`
+	ACPCommand           *string           `json:"ACPCommand"`
+	AcceptStartupDialogs *bool             `json:"AcceptStartupDialogs"`
+	Args                 *[]string         `json:"Args"`
+	ArgsAppend           *[]string         `json:"ArgsAppend"`
+	Base                 *string           `json:"Base"`
+	Command              *string           `json:"Command"`
+	Env                  map[string]string `json:"Env"`
+	EnvRemove            *[]string         `json:"EnvRemove"`
+	Name                 string            `json:"Name"`
+	OptionsSchemaMerge   *string           `json:"OptionsSchemaMerge"`
+	PromptFlag           *string           `json:"PromptFlag"`
+	PromptMode           *string           `json:"PromptMode"`
+	ReadyDelayMs         *int64            `json:"ReadyDelayMs"`
+	Replace              bool              `json:"Replace"`
 }
 
 // ProviderPatchSetInputBody defines model for ProviderPatchSetInputBody.
 type ProviderPatchSetInputBody struct {
+	// AcceptStartupDialogs Override startup dialog acceptance behavior.
+	AcceptStartupDialogs *bool `json:"accept_startup_dialogs,omitempty"`
+
 	// AcpArgs Override ACP transport command arguments.
 	AcpArgs *[]string `json:"acp_args,omitempty"`
 

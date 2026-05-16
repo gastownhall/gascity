@@ -412,6 +412,10 @@ type Config struct {
 	// EmitsPermissionWarning is true if the agent shows a bypass-permissions dialog.
 	EmitsPermissionWarning bool
 
+	// AcceptStartupDialogs overrides automatic startup dialog handling.
+	// Nil keeps the runtime default derived from other startup hints.
+	AcceptStartupDialogs *bool
+
 	// Nudge is text typed into the session after the agent is ready.
 	// Used for CLI agents that don't accept command-line prompts.
 	Nudge string

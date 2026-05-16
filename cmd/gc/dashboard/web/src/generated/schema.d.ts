@@ -3339,6 +3339,7 @@ export interface components {
         ProviderPatch: {
             ACPArgs: string[] | null;
             ACPCommand: string | null;
+            AcceptStartupDialogs: boolean | null;
             Args: string[] | null;
             ArgsAppend: string[] | null;
             Base: string | null;
@@ -3356,6 +3357,8 @@ export interface components {
             Replace: boolean;
         };
         ProviderPatchSetInputBody: {
+            /** @description Override startup dialog acceptance behavior. */
+            accept_startup_dialogs?: boolean;
             /** @description Override ACP transport command arguments. */
             acp_args?: string[] | null;
             /** @description Override ACP transport command binary. */

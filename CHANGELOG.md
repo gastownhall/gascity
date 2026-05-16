@@ -54,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pack import cache validation now requires commit abbreviations in
   `packs.lock` to be at least seven characters long. Shorter abbreviations
   should be refreshed with `gc import install`.
+- City discovery now treats a `city.toml` at `$HOME` or an explicit
+  `GC_CEILING_DIRECTORIES` entry as a valid city. The ceiling directory is
+  searched but never crossed, so existing stray `$HOME/city.toml` files may now
+  be discovered from subdirectories where they were previously ignored.
 - ACP, subprocess, and Kubernetes session staging now apply pack and agent
   overlays through the provider-aware `per-provider/<provider>/` contract.
   Custom ACP overlays that previously expected a literal `per-provider/`

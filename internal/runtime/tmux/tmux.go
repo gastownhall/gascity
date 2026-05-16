@@ -36,7 +36,7 @@ import (
 
 const pollInterval = 100 * time.Millisecond
 
-var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "gemini", "opencode", "pi"}
+var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "gemini", "kimi", "opencode", "pi"}
 
 // Config holds configurable timeouts and intervals for the tmux provider.
 // All fields have sensible defaults matching the original hardcoded values.
@@ -1410,8 +1410,9 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		return err
 	}
 
-	// 2. Wait 500ms for paste to complete (tested, required)
-	time.Sleep(500 * time.Millisecond)
+	// 2. Wait for paste to complete (tested, required). Kimi's TUI can take
+	// longer to accept large pasted prompts in detached panes.
+	time.Sleep(t.nudgeSubmitDebounce(target))
 
 	// 3. Send Escape only for TUIs where it's an insert-mode escape, not a
 	// semantic input key. Claude, Codex, Gemini, and OpenCode all treat
@@ -1514,6 +1515,14 @@ func providerEnvSkipsEscape(provider string) bool {
 
 func (t *Tmux) targetLooksLikeNoEscapeProvider(target string) bool {
 	return t.targetLooksLikeAnyProvider(target, providersSkippingEscapeBeforeEnter...)
+}
+
+func (t *Tmux) nudgeSubmitDebounce(target string) time.Duration {
+	provider := t.providerEnv(target)
+	if provider == "kimi" || (provider == "" && t.targetLooksLikeProvider(target, "kimi")) {
+		return 1500 * time.Millisecond
+	}
+	return 500 * time.Millisecond
 }
 
 func (t *Tmux) targetLooksLikeProvider(target, provider string) bool {

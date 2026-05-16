@@ -205,6 +205,54 @@ func TestWorkerInferenceSmoke(t *testing.T) {
 	reporter.Require(t, workertest.Pass(profileID, workertest.RequirementInferenceTranscript, "live transcript was discovered and normalized after the completed task").WithEvidence(transcriptEvidence))
 }
 
+func TestWorkerInferenceTemplateStartupPrompt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("WorkerInference: skipping in short mode")
+	}
+
+	profileID := workertest.ProfileID(liveSetup.Profile)
+	reporter := workertest.NewSuiteReporter(t, "worker-inference-template-startup", map[string]string{
+		"lane":        "live",
+		"profile":     string(liveSetup.Profile),
+		"provider":    liveSetup.Provider,
+		"auth_source": liveSetup.AuthSource,
+	})
+
+	if liveSetup.SetupError != "" {
+		reporter.Record(workertest.EnvironmentError(profileID, workertest.RequirementInferenceTemplateStartup, liveSetup.SetupError).WithEvidence(map[string]string{
+			"profile":  string(liveSetup.Profile),
+			"provider": liveSetup.Provider,
+		}))
+		t.FailNow()
+	}
+
+	outputRel := fmt.Sprintf("worker-template-startup-%s.txt", liveSetup.Provider)
+	outputText := fmt.Sprintf("%s template startup ok", liveSetup.Provider)
+	prompt := fmt.Sprintf("Create a file named %s containing exactly %q and nothing else.", outputRel, outputText)
+	run, spawnEvidence, taskEvidence, phase, err := runFreshManualSessionTurn(
+		t,
+		liveSetup.Provider,
+		inferenceProbeTemplate,
+		fmt.Sprintf("probe-template-%s", liveSetup.Provider),
+		prompt,
+		outputRel,
+	)
+	if err != nil {
+		evidence := mergeEvidence(spawnEvidence, taskEvidence)
+		if phase != "" {
+			evidence["failed_phase"] = phase
+		}
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceTemplateStartup, err.Error(), evidence))
+		t.FailNow()
+	}
+	if strings.TrimSpace(run.OutputContents) != outputText {
+		reporter.Record(liveFailureResult(profileID, workertest.RequirementInferenceTemplateStartup, "manual template session output did not match the requested content", taskEvidence))
+		t.FailNow()
+	}
+
+	reporter.Require(t, workertest.Pass(profileID, workertest.RequirementInferenceTemplateStartup, "manual template session stayed alive after startup prompt delivery and completed a machine-checkable task").WithEvidence(mergeEvidence(spawnEvidence, taskEvidence)))
+}
+
 func TestWorkerInferenceWorkspaceTask(t *testing.T) {
 	if testing.Short() {
 		t.Skip("WorkerInference: skipping in short mode")
@@ -2723,7 +2771,7 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 			"init_out":   strings.TrimSpace(initOut),
 		}, nil, "spawn", fmt.Errorf("seeding live provider state: %w", err)
 	}
-	if err := installInferenceProbeAgent(c.Dir); err != nil {
+	if err := installInferenceProbeAgent(c.Dir, false); err != nil {
 		return inferenceSessionRun{}, map[string]string{
 			"city_dir":   c.Dir,
 			"provider":   provider,
@@ -2781,6 +2829,33 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
 	_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
 
+	startOut, startErr := runGCWithTimeout(liveBootstrapTimeout, liveEnv, c.Dir, "start", c.Dir)
+	startTimedOut := isRunTimeout(startErr)
+	t.Cleanup(func() {
+		_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
+		_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
+		_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
+	})
+
+	beadReady := pollForCondition(60*time.Second, 2*time.Second, func() bool {
+		_, err := bdCmd(liveEnv, c.Dir, "list", "--json", "--limit=1")
+		return err == nil
+	})
+	if !beadReady {
+		detail := beadStoreNotReadyDetail("bead store did not become ready before gc session new", startErr)
+		return inferenceSessionRun{}, map[string]string{
+			"city_dir":    c.Dir,
+			"provider":    provider,
+			"template":    templateName,
+			"alias":       alias,
+			"init_out":    strings.TrimSpace(initOut),
+			"start_out":   strings.TrimSpace(startOut),
+			"start_err":   strings.TrimSpace(errorString(startErr)),
+			"output_rel":  outputRel,
+			"failed_step": "bead_readiness",
+		}, nil, "spawn", errors.New(detail)
+	}
+
 	newOut, newErr := runGCWithTimeout(90*time.Second, liveEnv, c.Dir, "session", "new", templateName, "--alias", alias, "--no-attach")
 	sessionID := parseCreatedSessionID(newOut)
 	if newErr != nil {
@@ -2805,21 +2880,10 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 			"output_rel":  outputRel,
 		}, nil, "spawn", fmt.Errorf("gc session new output did not include a session id")
 	}
-
-	startOut, startErr := runGCWithTimeout(liveBootstrapTimeout, liveEnv, c.Dir, "start", c.Dir)
-	startTimedOut := isRunTimeout(startErr)
-	t.Cleanup(func() {
-		_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
-		_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, "", "supervisor", "stop")
-		_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
-	})
-
-	beadReady := pollForCondition(60*time.Second, 2*time.Second, func() bool {
-		_, err := bdCmd(liveEnv, c.Dir, "list", "--json", "--limit=1")
-		return err == nil
-	})
-	if !beadReady {
-		detail := beadStoreNotReadyDetail("bead store did not become ready after gc start", startErr)
+	_, _ = runGCWithTimeout(liveShutdownTimeout, liveEnv, c.Dir, "stop", c.Dir)
+	_, _ = waitForManagedDoltStopped(c.Dir, liveStopBarrierTimeout)
+	restartOut, restartErr := runGCWithTimeout(liveBootstrapTimeout, liveEnv, c.Dir, "start", c.Dir)
+	if restartErr != nil && !isRunTimeout(restartErr) {
 		return inferenceSessionRun{}, map[string]string{
 			"city_dir":    c.Dir,
 			"provider":    provider,
@@ -2829,9 +2893,26 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 			"init_out":    strings.TrimSpace(initOut),
 			"session_out": strings.TrimSpace(newOut),
 			"start_out":   strings.TrimSpace(startOut),
-			"start_err":   strings.TrimSpace(errorString(startErr)),
+			"restart_out": strings.TrimSpace(restartOut),
+			"restart_err": strings.TrimSpace(errorString(restartErr)),
 			"output_rel":  outputRel,
-		}, nil, "spawn", errors.New(detail)
+		}, nil, "spawn", fmt.Errorf("gc start after session new failed: %w", restartErr)
+	}
+	wakeOut, wakeErr := runGCWithTimeout(90*time.Second, liveEnv, c.Dir, "session", "wake", sessionID)
+	if wakeErr != nil {
+		return inferenceSessionRun{}, map[string]string{
+			"city_dir":    c.Dir,
+			"provider":    provider,
+			"template":    templateName,
+			"alias":       alias,
+			"session_id":  sessionID,
+			"init_out":    strings.TrimSpace(initOut),
+			"session_out": strings.TrimSpace(newOut),
+			"wake_out":    strings.TrimSpace(wakeOut),
+			"start_out":   strings.TrimSpace(startOut),
+			"restart_out": strings.TrimSpace(restartOut),
+			"output_rel":  outputRel,
+		}, nil, "spawn", fmt.Errorf("gc session wake failed: %w", wakeErr)
 	}
 
 	sessionInfo, statusOut, err := waitForSessionRunning(c.Dir, sessionID, "")
@@ -2844,7 +2925,9 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 			"session_id":  sessionID,
 			"init_out":    strings.TrimSpace(initOut),
 			"start_out":   strings.TrimSpace(startOut),
+			"restart_out": strings.TrimSpace(restartOut),
 			"session_out": strings.TrimSpace(newOut),
+			"wake_out":    strings.TrimSpace(wakeOut),
 			"status":      strings.TrimSpace(statusOut),
 			"output_rel":  outputRel,
 		}, nil, "spawn", err
@@ -3375,11 +3458,6 @@ When a later message asks you to recall prior turn context, use conversation mem
 		return err
 	}
 
-	maxActiveSessions := 1
-	if !includeNamedSession {
-		maxActiveSessions = 0
-	}
-
 	cityPath := filepath.Join(cityDir, "city.toml")
 	data, err := os.ReadFile(cityPath)
 	if err != nil {
@@ -3400,8 +3478,8 @@ When a later message asks you to recall prior turn context, use conversation mem
 [[agent]]
 name = %q
 %sprompt_template = %q
-max_active_sessions = %d
-`, inferenceProbeTemplate, sessionLine, inferenceProbePromptPath, maxActiveSessions))
+max_active_sessions = 1
+`, inferenceProbeTemplate, sessionLine, inferenceProbePromptPath))
 	}
 	if includeNamedSession && !strings.Contains(string(data), "\n[[named_session]]\ntemplate = \""+inferenceProbeTemplate+"\"") {
 		additions = append(additions, fmt.Sprintf(`
@@ -3437,7 +3515,7 @@ func inferenceProbeSessionLine(data []byte) (string, error) {
 		return "", err
 	}
 	switch strings.TrimSpace(cfg.Workspace.Provider) {
-	case "opencode", "pi":
+	case "kimi", "opencode", "pi":
 		return `session = "tmux"` + "\n", nil
 	}
 	return "", nil
@@ -3752,6 +3830,14 @@ func sessionStateSnapshot(cityDir, identity, expectedSessionName string, require
 		return liveSession, diag, nil
 	}
 	if !sessionStateCountsAsRunning(liveSession.State) {
+		if strings.EqualFold(strings.TrimSpace(liveSession.State), "asleep") {
+			if live, liveErr := tmuxSessionLive(cityDir, liveSession.SessionName); liveErr == nil && live {
+				// Wake/start transitions can briefly report the persisted session as
+				// asleep after tmux is already live; runtime liveness is authoritative
+				// for this acceptance helper's "running yet" check.
+				return liveSession, diag, nil
+			}
+		}
 		return liveSession, diag, fmt.Errorf("session %s not running yet", identity)
 	}
 	return liveSession, diag, nil

@@ -4721,6 +4721,12 @@
               "null"
             ]
           },
+          "AcceptStartupDialogs": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "Args": {
             "items": {
               "type": "string"
@@ -4810,6 +4816,7 @@
           "PromptMode",
           "PromptFlag",
           "ReadyDelayMs",
+          "AcceptStartupDialogs",
           "Env",
           "EnvRemove",
           "Replace"
@@ -4819,6 +4826,10 @@
       "ProviderPatchSetInputBody": {
         "additionalProperties": false,
         "properties": {
+          "accept_startup_dialogs": {
+            "description": "Override startup dialog acceptance behavior.",
+            "type": "boolean"
+          },
           "acp_args": {
             "description": "Override ACP transport command arguments.",
             "items": {

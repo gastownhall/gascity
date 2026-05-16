@@ -775,11 +775,7 @@ func buildPreparedStart(
 			forceFresh := session.Metadata["wake_mode"] == "fresh"
 			if msg, ok := overrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
 				if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
-					if agentCfg.Nudge != "" {
-						agentCfg.Nudge = agentCfg.Nudge + "\n\n---\n\nUser message:\n" + msg
-					} else {
-						agentCfg.Nudge = msg
-					}
+					agentCfg.Nudge = appendInitialMessageToStartupNudge(agentCfg.Nudge, msg)
 				} else {
 					existing := ""
 					if agentCfg.PromptSuffix != "" {
@@ -1021,6 +1017,14 @@ func runPreparedStartCandidate(
 		rateLimitScreen: rateLimitScreen,
 		phases:          phases,
 	}
+}
+
+func appendInitialMessageToStartupNudge(nudge, msg string) string {
+	userMessage := "User message:\n" + msg
+	if nudge != "" {
+		return nudge + startupPromptNudgeSeparator + userMessage
+	}
+	return userMessage
 }
 
 func startupRateLimitScreenDetected(

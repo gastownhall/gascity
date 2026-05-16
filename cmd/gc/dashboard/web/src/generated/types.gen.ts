@@ -1901,6 +1901,7 @@ export type ProviderOptionDto = {
 export type ProviderPatch = {
     ACPArgs: Array<string> | null;
     ACPCommand: string | null;
+    AcceptStartupDialogs: boolean | null;
     Args: Array<string> | null;
     ArgsAppend: Array<string> | null;
     Base: string | null;
@@ -1918,6 +1919,10 @@ export type ProviderPatch = {
 };
 
 export type ProviderPatchSetInputBody = {
+    /**
+     * Override startup dialog acceptance behavior.
+     */
+    accept_startup_dialogs?: boolean;
     /**
      * Override ACP transport command arguments.
      */

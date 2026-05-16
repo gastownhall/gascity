@@ -1,6 +1,8 @@
 package transcript
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -130,6 +132,53 @@ func TestDiscoverPathCodexIgnoresGCSessionID(t *testing.T) {
 	}
 }
 
+func TestDiscoverPathKimiPrefersSessionKey(t *testing.T) {
+	base := t.TempDir()
+	workDir := "/tmp/gascity/phase1/kimi"
+	workHash := md5Hex(workDir)
+	keyed := filepath.Join(base, "sessions", workHash, "session-key", "context.jsonl")
+	if err := os.MkdirAll(filepath.Dir(keyed), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyed, []byte(`{"role":"user","content":"keyed"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(base, "sessions", workHash, "newer-session", "context.jsonl")
+	if err := os.MkdirAll(filepath.Dir(other), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(other, []byte(`{"role":"user","content":"newer"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(keyed, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	got := DiscoverPath([]string{base}, "kimi/tmux-cli", workDir, "session-key")
+	if got != keyed {
+		t.Fatalf("DiscoverPath() = %q, want keyed Kimi transcript %q", got, keyed)
+	}
+}
+
+func TestDiscoverPathKimiSessionKeyMissDoesNotUseNewestWorkdirTranscript(t *testing.T) {
+	base := t.TempDir()
+	workDir := "/tmp/gascity/phase1/kimi"
+	workHash := md5Hex(workDir)
+	other := filepath.Join(base, "sessions", workHash, "newer-session", "context.jsonl")
+	if err := os.MkdirAll(filepath.Dir(other), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(other, []byte(`{"role":"user","content":"newer"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := DiscoverPath([]string{base}, "kimi/tmux-cli", workDir, "missing-session")
+	if got != "" {
+		t.Fatalf("DiscoverPath() = %q, want empty on missing Kimi session key", got)
+	}
+}
+
 func TestDiscoverPathPiPrefersProviderSessionID(t *testing.T) {
 	base := t.TempDir()
 	workDir := filepath.Join(t.TempDir(), "pi-project")
@@ -195,6 +244,7 @@ func TestSupportsIDLookup(t *testing.T) {
 		{provider: "claude/tmux-cli", want: true},
 		{provider: "codex/tmux-cli", want: false},
 		{provider: "gemini/tmux-cli", want: false},
+		{provider: "kimi/tmux-cli", want: true},
 		{provider: "opencode/tmux-cli", want: false},
 		{provider: "pi/tmux-cli", want: true},
 	}
@@ -205,4 +255,9 @@ func TestSupportsIDLookup(t *testing.T) {
 			}
 		})
 	}
+}
+
+func md5Hex(value string) string {
+	sum := md5.Sum([]byte(value))
+	return hex.EncodeToString(sum[:])
 }

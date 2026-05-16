@@ -26,6 +26,9 @@ func DiscoverPath(searchPaths []string, provider, workDir, gcSessionID string) s
 	if strings.TrimSpace(gcSessionID) != "" && SupportsIDLookup(provider) {
 		return ""
 	}
+	if sessionlog.ProviderFamily(provider) == "kimi" {
+		return sessionlog.FindKimiSessionFileIfUnambiguous(searchPaths, workDir)
+	}
 	return sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
 }
 
@@ -34,7 +37,10 @@ func DiscoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID stri
 	if strings.TrimSpace(gcSessionID) == "" || !SupportsIDLookup(provider) {
 		return ""
 	}
-	if sessionlog.ProviderFamily(provider) == "pi" {
+	switch sessionlog.ProviderFamily(provider) {
+	case "kimi":
+		return sessionlog.FindKimiSessionFileByID(searchPaths, workDir, gcSessionID)
+	case "pi":
 		return sessionlog.FindPiSessionFileByID(searchPaths, workDir, gcSessionID)
 	}
 	return sessionlog.FindSessionFileByID(searchPaths, workDir, gcSessionID)
@@ -47,7 +53,13 @@ func DiscoverFallbackPath(searchPaths []string, provider, workDir, gcSessionID s
 		return ""
 	}
 	if strings.TrimSpace(gcSessionID) != "" && SupportsIDLookup(provider) {
+		if sessionlog.ProviderFamily(provider) == "kimi" {
+			return ""
+		}
 		return sessionlog.FindProviderFallbackSessionFile(searchPaths, provider, workDir)
+	}
+	if sessionlog.ProviderFamily(provider) == "kimi" {
+		return sessionlog.FindKimiSessionFileIfUnambiguous(searchPaths, workDir)
 	}
 	return sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
 }

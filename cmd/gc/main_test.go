@@ -398,7 +398,7 @@ func TestFindCity(t *testing.T) {
 		}
 	})
 
-	t.Run("not_found_ignores_stray_home_city_toml", func(t *testing.T) {
+	t.Run("checks_home_ceiling_dir_last", func(t *testing.T) {
 		homeDir := t.TempDir()
 		t.Setenv("HOME", homeDir)
 		t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
@@ -411,12 +411,12 @@ func TestFindCity(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		_, err := findCity(dir)
-		if err == nil {
-			t.Fatal("findCity() should fail when only a stray $HOME/city.toml exists")
+		got, err := findCity(dir)
+		if err != nil {
+			t.Fatalf("findCity(%q) error: %v", dir, err)
 		}
-		if !strings.Contains(err.Error(), "not in a city directory") {
-			t.Errorf("error = %q, want 'not in a city directory'", err)
+		if got != homeDir {
+			t.Errorf("findCity(%q) = %q, want %q", dir, got, homeDir)
 		}
 	})
 
@@ -468,7 +468,94 @@ func TestFindCity(t *testing.T) {
 		}
 	})
 
-	t.Run("respects_gc_ceiling_directories", func(t *testing.T) {
+	t.Run("city_at_home_is_found", func(t *testing.T) {
+		// Repro for the bug where a city installed directly at $HOME
+		// (e.g. running as user "gc" with city at /home/gc) was reported
+		// as "not in a city directory" because the discovery ceiling
+		// fired before the starting dir was checked. The ceiling should
+		// only bound upward traversal, not the dir the user is in.
+		homeDir := t.TempDir()
+		t.Setenv("HOME", homeDir)
+		t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+		if err := os.WriteFile(filepath.Join(homeDir, "city.toml"), []byte("[workspace]\nname = \"home-city\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := findCity(homeDir)
+		if err != nil {
+			t.Fatalf("findCity(%q) error: %v", homeDir, err)
+		}
+		if got != homeDir {
+			t.Errorf("findCity(%q) = %q, want %q", homeDir, got, homeDir)
+		}
+	})
+
+	t.Run("start_at_home_ceiling_does_not_search_above", func(t *testing.T) {
+		root := t.TempDir()
+		homeDir := filepath.Join(root, "home")
+		if err := os.MkdirAll(homeDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("HOME", homeDir)
+		t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+		if err := os.WriteFile(filepath.Join(root, "city.toml"), []byte("[workspace]\nname = \"root\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := findCity(homeDir)
+		if err == nil {
+			t.Fatal("findCity() should fail when only an ancestor above $HOME has city.toml")
+		}
+		if !strings.Contains(err.Error(), "not in a city directory") {
+			t.Errorf("error = %q, want 'not in a city directory'", err)
+		}
+	})
+
+	t.Run("city_at_explicit_ceiling_dir_is_found", func(t *testing.T) {
+		// Same idea as city_at_home, but for an explicit
+		// GC_CEILING_DIRECTORIES entry.
+		root := t.TempDir()
+		ceiling := filepath.Join(root, "ceiling")
+		if err := os.MkdirAll(ceiling, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(ceiling, "city.toml"), []byte("[workspace]\nname = \"ceiling-city\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GC_CEILING_DIRECTORIES", ceiling)
+
+		got, err := findCity(ceiling)
+		if err != nil {
+			t.Fatalf("findCity(%q) error: %v", ceiling, err)
+		}
+		if got != ceiling {
+			t.Errorf("findCity(%q) = %q, want %q", ceiling, got, ceiling)
+		}
+	})
+
+	t.Run("start_at_explicit_ceiling_dir_does_not_search_above", func(t *testing.T) {
+		root := t.TempDir()
+		ceiling := filepath.Join(root, "ceiling")
+		if err := os.MkdirAll(ceiling, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "city.toml"), []byte("[workspace]\nname = \"root\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GC_CEILING_DIRECTORIES", ceiling)
+
+		_, err := findCity(ceiling)
+		if err == nil {
+			t.Fatal("findCity() should fail when only an ancestor above the ceiling has city.toml")
+		}
+		if !strings.Contains(err.Error(), "not in a city directory") {
+			t.Errorf("error = %q, want 'not in a city directory'", err)
+		}
+	})
+
+	t.Run("checks_explicit_ceiling_dir_last", func(t *testing.T) {
 		root := t.TempDir()
 		parent := filepath.Join(root, "parent")
 		if err := os.MkdirAll(parent, 0o755); err != nil {
@@ -483,9 +570,33 @@ func TestFindCity(t *testing.T) {
 		}
 		t.Setenv("GC_CEILING_DIRECTORIES", parent)
 
+		got, err := findCity(dir)
+		if err != nil {
+			t.Fatalf("findCity(%q) error: %v", dir, err)
+		}
+		if got != parent {
+			t.Errorf("findCity(%q) = %q, want %q", dir, got, parent)
+		}
+	})
+
+	t.Run("does_not_search_above_explicit_ceiling_dir", func(t *testing.T) {
+		root := t.TempDir()
+		ceiling := filepath.Join(root, "ceiling")
+		if err := os.MkdirAll(ceiling, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "city.toml"), []byte("[workspace]\nname = \"root\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Join(ceiling, "child", "deep")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GC_CEILING_DIRECTORIES", ceiling)
+
 		_, err := findCity(dir)
 		if err == nil {
-			t.Fatal("findCity() should fail when GC_CEILING_DIRECTORIES excludes the ancestor city root")
+			t.Fatal("findCity() should fail when only an ancestor above the ceiling has city.toml")
 		}
 		if !strings.Contains(err.Error(), "not in a city directory") {
 			t.Errorf("error = %q, want 'not in a city directory'", err)
@@ -2876,8 +2987,8 @@ func TestRunWizardTutorialAliasMapsToMinimal(t *testing.T) {
 }
 
 func TestRunWizardSelectCursorByNumber(t *testing.T) {
-	// Cursor is #5 in the order.
-	stdin := strings.NewReader("\n5\n")
+	// Cursor is #6 in the order.
+	stdin := strings.NewReader("\n6\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 

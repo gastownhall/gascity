@@ -1159,6 +1159,57 @@ func TestPrepareStartCandidate_NoneModeInitialMessageStaysInNudge(t *testing.T) 
 	}
 }
 
+func TestAppendInitialMessageToStartupNudgeAppendsAfterFullNudge(t *testing.T) {
+	nudge := "startup prompt" + startupPromptNudgeSeparator + "base nudge"
+	got := appendInitialMessageToStartupNudge(nudge, "hello from the user")
+	want := nudge + startupPromptNudgeSeparator + "User message:\nhello from the user"
+	if got != want {
+		t.Fatalf("appendInitialMessageToStartupNudge() = %q, want %q", got, want)
+	}
+}
+
+func TestAppendInitialMessageToStartupNudgeDoesNotSplitPromptSeparatorContent(t *testing.T) {
+	startupPrompt := "startup line" + startupPromptNudgeSeparator + "still startup"
+	nudge := startupPrompt + startupPromptNudgeSeparator + "base nudge"
+	got := appendInitialMessageToStartupNudge(nudge, "hello from the user")
+	want := nudge + startupPromptNudgeSeparator + "User message:\nhello from the user"
+	if got != want {
+		t.Fatalf("appendInitialMessageToStartupNudge() = %q, want %q", got, want)
+	}
+}
+
+func TestAppendInitialMessageToStartupNudgeBranches(t *testing.T) {
+	tests := []struct {
+		name  string
+		nudge string
+		want  string
+	}{
+		{
+			name:  "empty nudge",
+			nudge: "",
+			want:  "User message:\nhello",
+		},
+		{
+			name:  "plain nudge",
+			nudge: "base nudge",
+			want:  "base nudge" + startupPromptNudgeSeparator + "User message:\nhello",
+		},
+		{
+			name:  "startup plus nudge",
+			nudge: "startup prompt" + startupPromptNudgeSeparator + "base nudge",
+			want:  "startup prompt" + startupPromptNudgeSeparator + "base nudge" + startupPromptNudgeSeparator + "User message:\nhello",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := appendInitialMessageToStartupNudge(tt.nudge, "hello")
+			if got != tt.want {
+				t.Fatalf("appendInitialMessageToStartupNudge() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testing.T) {
 	maxWakes := 8
 	dropAfter := 3

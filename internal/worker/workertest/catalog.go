@@ -29,6 +29,7 @@ const ( //nolint:revive // exported requirement IDs are documented by the catalo
 	RequirementInputInitialMessageResume           RequirementCode = "WC-INPUT-002"
 	RequirementInputOverrideDefaults               RequirementCode = "WC-INPUT-003"
 	RequirementInferenceFreshSpawn                 RequirementCode = "WI-START-001"
+	RequirementInferenceTemplateStartup            RequirementCode = "WI-START-002"
 	RequirementInferenceFreshTask                  RequirementCode = "WI-TASK-001"
 	RequirementInferenceWorkspaceTask              RequirementCode = "WI-TOOL-001"
 	RequirementInferenceMultiTurnWorkflow          RequirementCode = "WI-MTURN-001"
@@ -93,6 +94,11 @@ func InferenceCatalog() []Requirement {
 			Code:        RequirementInferenceFreshSpawn,
 			Group:       "live_startup",
 			Description: "A fresh city sling spawns a live worker session for the canonical profile.",
+		},
+		{
+			Code:        RequirementInferenceTemplateStartup,
+			Group:       "live_startup",
+			Description: "A manual template session starts with the provider-native interactive runtime still alive after startup prompt delivery.",
 		},
 		{
 			Code:        RequirementInferenceFreshTask,

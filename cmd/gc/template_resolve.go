@@ -520,6 +520,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		ReadyDelayMs:           resolved.ReadyDelayMs,
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
+		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
 		Nudge:                  cfgAgent.Nudge,
 		PreStart:               expandedPreStart,
 		SessionSetup:           expandedSetup,
@@ -662,6 +663,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		ReadyDelayMs:           tp.Hints.ReadyDelayMs,
 		ProcessNames:           tp.Hints.ProcessNames,
 		EmitsPermissionWarning: tp.Hints.EmitsPermissionWarning,
+		AcceptStartupDialogs:   tp.Hints.AcceptStartupDialogs,
 		Nudge:                  nudge,
 		PreStart:               tp.Hints.PreStart,
 		SessionSetup:           tp.Hints.SessionSetup,
@@ -679,7 +681,9 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 
 func prependStartupPromptToNudge(prompt, nudge string) string {
 	if nudge != "" {
-		return prompt + "\n\n---\n\n" + nudge
+		return prompt + startupPromptNudgeSeparator + nudge
 	}
 	return prompt
 }
+
+const startupPromptNudgeSeparator = "\n\n---\n\n"

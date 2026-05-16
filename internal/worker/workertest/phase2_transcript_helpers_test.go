@@ -36,6 +36,12 @@ func writeMalformedHistoryTranscript(t *testing.T, profile Profile) string {
 			t.Fatalf("write malformed gemini transcript: %v", err)
 		}
 		return path
+	case ProfileKimiTmuxCLI:
+		return writeLinesFile(t, filepath.Join("sessions", "5decc6790b1207964f31266c8258989e", "kimi-malformed", "context.jsonl"), []string{
+			`{"role":"user","content":"hello"}`,
+			`{"role":"assistant","content":"done"}`,
+			`{"role":"assistant","content":`,
+		})
 	case ProfileOpenCodeTmuxCLI:
 		path := filepath.Join(t.TempDir(), "session.json")
 		if err := os.WriteFile(path, []byte(`{"info":{"id":"malformed-opencode","directory":"/tmp/gascity/phase2/opencode"},"messages":[`), 0o644); err != nil {
@@ -83,6 +89,11 @@ func writeInteractionHistoryTranscript(t *testing.T, profile Profile) string {
 			t.Fatalf("write gemini interaction transcript: %v", err)
 		}
 		return path
+	case ProfileKimiTmuxCLI:
+		return writeLinesFile(t, filepath.Join("sessions", "5decc6790b1207964f31266c8258989e", "kimi-interaction-phase2", "context.jsonl"), []string{
+			`{"role":"user","content":"run a tool"}`,
+			`{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]}`,
+		})
 	case ProfileOpenCodeTmuxCLI:
 		return writeOpenCodeExportTranscript(t, "opencode-interaction-phase2", "/tmp/gascity/phase2/opencode", []string{
 			`{"info":{"id":"msg_user_1","sessionID":"opencode-interaction-phase2","role":"user","time":{"created":1770000000000}},"parts":[{"id":"part_user_1","type":"text","text":"run a tool"}]}`,
@@ -134,6 +145,11 @@ func writeInteractionLifecycleTranscript(t *testing.T, profile Profile, finalSta
 			t.Fatalf("write gemini interaction lifecycle transcript: %v", err)
 		}
 		return path
+	case ProfileKimiTmuxCLI:
+		return writeLinesFile(t, filepath.Join("sessions", "5decc6790b1207964f31266c8258989e", "kimi-interaction-lifecycle-phase2", "context.jsonl"), []string{
+			`{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]}`,
+			fmt.Sprintf(`{"role":"user","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}]}`, finalStateText, finalAction),
+		})
 	case ProfileOpenCodeTmuxCLI:
 		return writeOpenCodeExportTranscript(t, "opencode-interaction-lifecycle-phase2", "/tmp/gascity/phase2/opencode", []string{
 			`{"info":{"id":"msg_assistant_1","sessionID":"opencode-interaction-lifecycle-phase2","role":"assistant","time":{"created":1770000000000}},"parts":[{"id":"part_interaction_1","type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]}`,
@@ -196,6 +212,18 @@ func writeToolTranscript(t *testing.T, profile Profile, openTail bool) string {
 			t.Fatalf("write gemini transcript: %v", err)
 		}
 		return path
+	case ProfileKimiTmuxCLI:
+		lines := []string{
+			`{"role":"user","content":"read the file"}`,
+			`{"role":"assistant","content":[],"tool_calls":[{"type":"function","id":"call-1","function":{"name":"Read","arguments":"{\"path\":\"README.md\"}"}}]}`,
+		}
+		if !openTail {
+			lines = append(lines,
+				`{"role":"tool","content":"file data","tool_call_id":"call-1"}`,
+				`{"role":"assistant","content":"done"}`,
+			)
+		}
+		return writeLinesFile(t, filepath.Join("sessions", "5decc6790b1207964f31266c8258989e", "kimi-tool-phase2", "context.jsonl"), lines)
 	case ProfileOpenCodeTmuxCLI:
 		state := `{"status":"running","input":{"path":"README.md"}}`
 		tail := ""

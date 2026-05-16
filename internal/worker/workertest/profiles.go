@@ -9,6 +9,7 @@ const ( //nolint:revive // exported profile IDs are documented by the enclosing 
 	ProfileClaudeTmuxCLI   ProfileID = "claude/tmux-cli"
 	ProfileCodexTmuxCLI    ProfileID = "codex/tmux-cli"
 	ProfileGeminiTmuxCLI   ProfileID = "gemini/tmux-cli"
+	ProfileKimiTmuxCLI     ProfileID = "kimi/tmux-cli"
 	ProfileOpenCodeTmuxCLI ProfileID = "opencode/tmux-cli"
 	ProfilePiTmuxCLI       ProfileID = "pi/tmux-cli"
 )
@@ -88,6 +89,22 @@ func Phase1Profiles() []Profile {
 				RecallPromptContains:   "Repeat the exact fixture summary from earlier before answering.",
 				RecallResponseContains: "The fixture models normalized transcript history.",
 				ResetResponseContains:  "I cannot repeat the earlier fixture summary because this chat is fresh.",
+			},
+		},
+		{
+			ID:       ProfileKimiTmuxCLI,
+			Provider: "kimi/tmux-cli",
+			WorkDir:  "/tmp/gascity/phase1/kimi",
+			Fixtures: ProfileFixtureSet{
+				FreshRoot:        "testdata/fixtures/kimi/fresh",
+				ContinuationRoot: "testdata/fixtures/kimi/continuation",
+				ResetRoot:        "testdata/fixtures/kimi/reset",
+			},
+			Continuation: ContinuationOracle{
+				AnchorText:             "Kimi phase 1 validates the native context JSONL transcript contract.",
+				RecallPromptContains:   "Repeat the exact Kimi phase-1 summary from earlier before answering.",
+				RecallResponseContains: "Kimi phase 1 validates the native context JSONL transcript contract.",
+				ResetResponseContains:  "I cannot repeat the earlier Kimi summary because this session started fresh.",
 			},
 		},
 		{

@@ -478,6 +478,7 @@ ProviderPatch modifies an existing provider identified by Name.
 | `prompt_mode` | string |  |  | PromptMode overrides prompt delivery mode. Enum: `arg`, `flag`, `none` |
 | `prompt_flag` | string |  |  | PromptFlag overrides the prompt flag. |
 | `ready_delay_ms` | integer |  |  | ReadyDelayMs overrides the ready delay in milliseconds. |
+| `accept_startup_dialogs` | boolean |  |  | AcceptStartupDialogs overrides startup dialog acceptance behavior. |
 | `env` | map[string]string |  |  | Env adds or overrides environment variables. |
 | `env_remove` | []string |  |  | EnvRemove lists env var keys to remove. |
 | `_replace` | boolean |  |  | Replace replaces the entire provider block instead of deep-merging. |
@@ -500,6 +501,7 @@ ProviderSpec defines a named provider's startup parameters.
 | `ready_prompt_prefix` | string |  |  | ReadyPromptPrefix is the string prefix that indicates the provider is ready for input. |
 | `process_names` | []string |  |  | ProcessNames lists process names to look for when checking if the provider is running. |
 | `emits_permission_warning` | boolean |  |  | EmitsPermissionWarning is tri-state: nil = inherit, &true = enable, &false = explicit disable. |
+| `accept_startup_dialogs` | boolean |  |  | AcceptStartupDialogs is tri-state: nil = default startup dialog handling, &true = force dialog acceptance, &false = suppress it for providers that handle permissions entirely through launch flags. |
 | `env` | map[string]string |  |  | Env sets additional environment variables for the provider process. |
 | `path_check` | string |  |  | PathCheck overrides the binary name used for PATH detection. When set, lookupProvider and detectProviderName use this instead of Command for exec.LookPath checks. Useful when Command is a shell wrapper (e.g. sh -c '...') but we need to verify the real binary is installed. |
 | `supports_acp` | boolean |  |  | SupportsACP indicates the binary speaks the Agent Client Protocol (JSON-RPC 2.0 over stdio). When an agent sets session = "acp", its resolved provider must have SupportsACP = true. |
@@ -512,7 +514,7 @@ ProviderSpec defines a named provider's startup parameters.
 | `permission_modes` | map[string]string |  |  | PermissionModes maps permission mode names to CLI flags. Example: &#123;"unrestricted": "--dangerously-skip-permissions", "plan": "--permission-mode plan"&#125; This is a config-only lookup table consumed by external clients (e.g., real-world app) to populate permission mode dropdowns. Launch-time flag substitution is planned for a follow-up PR — currently no runtime code reads this field. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults overrides the Default value in OptionsSchema entries without redefining the schema itself. Keys are option keys (e.g., "permission_mode"), values are choice values (e.g., "unrestricted"). city.toml users set this to customize provider behavior without touching Args or OptionsSchema. |
 | `options_schema` | []ProviderOption |  |  | OptionsSchema declares the configurable options this provider supports. Each option maps to CLI args via its Choices[].FlagArgs field. Serialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side. |
-| `print_args` | []string |  |  | PrintArgs are CLI arguments that enable one-shot non-interactive mode. The provider prints its response to stdout and exits. When empty, the provider does not support one-shot invocation. Examples: ["-p"] (claude, gemini), ["exec"] (codex) |
+| `print_args` | []string |  |  | PrintArgs are CLI arguments that enable one-shot non-interactive mode. The provider prints its response to stdout and exits. When empty, the provider does not support one-shot invocation. Examples: ["-p"] (claude, gemini), ["exec"] (codex), ["--quiet", "--prompt"] (kimi) |
 | `title_model` | string |  |  | TitleModel is the OptionsSchema model key used for title generation. Resolved via the "model" option in OptionsSchema to get FlagArgs. Defaults to the cheapest/fastest model for each provider. Examples: "haiku" (claude), "o4-mini" (codex), "gemini-2.5-flash" (gemini) |
 | `acp_command` | string |  |  | ACPCommand overrides Command when the session transport is ACP. When empty, Command is used for both tmux and ACP transports. |
 | `acp_args` | []string |  |  | ACPArgs overrides Args when the session transport is ACP. When nil, Args is used for both tmux and ACP transports. |

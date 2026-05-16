@@ -587,6 +587,15 @@ func isCodexManagedHookCommand(command string) bool {
 }
 
 func upgradeCodexHookCommand(command string) (string, bool) {
+	body := commandBodyAfterCanonicalPrefix(command)
+	if equalsLegacyCommandBody(body, `gc prime --hook`) ||
+		equalsLegacyCommandBody(body, `gc prime --hook --hook-format codex`) ||
+		equalsLegacyCommandBody(body, `GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`) ||
+		equalsLegacyCommandBody(body, `GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex`) ||
+		equalsLegacyCommandBody(body, sessionStartPreviousManagedFormBody) {
+		prefix := strings.TrimSuffix(command, body)
+		return prefix + sessionStartCurrentFormBody, true
+	}
 	if strings.Contains(command, `--hook-format codex`) {
 		return "", false
 	}
@@ -858,6 +867,8 @@ func isLegacyGCManagedCommand(event, command string) bool {
 			equalsLegacyCommandBody(body, `gc handoff --auto "context cycle"`)
 	case "SessionStart":
 		return equalsLegacyCommandBody(body, "gc prime --hook") ||
+			equalsLegacyCommandBody(body, "gc prime --hook --hook-format codex") ||
+			equalsLegacyCommandBody(body, sessionStartPreviousManagedFormBody) ||
 			equalsLegacyCommandBody(body, sessionStartCurrentFormBody)
 	}
 	return false
@@ -871,7 +882,9 @@ func isLegacyGCManagedCommand(event, command string) bool {
 // full env-var preamble. If gc ever extends the current-form command
 // with additional arguments, update this constant alongside the
 // emission site so legacy detection remains tight.
-const sessionStartCurrentFormBody = `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`
+const sessionStartCurrentFormBody = `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex`
+
+const sessionStartPreviousManagedFormBody = `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`
 
 // equalsLegacyCommandBody reports whether the command body is exactly the
 // legacy token. gc historically emitted these tokens as the complete
@@ -921,8 +934,11 @@ func upgradeClaudeHookCommand(event, command string) (string, bool) {
 		// Legacy: bare `gc prime --hook` without the
 		// GC_MANAGED_SESSION_HOOK / GC_HOOK_EVENT_NAME env vars the
 		// current managed form expects.
-		if equalsLegacyCommandBody(body, `gc prime --hook`) {
-			return strings.Replace(command, `gc prime --hook`, `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`, 1), true
+		if equalsLegacyCommandBody(body, `gc prime --hook`) ||
+			equalsLegacyCommandBody(body, `gc prime --hook --hook-format codex`) ||
+			equalsLegacyCommandBody(body, sessionStartPreviousManagedFormBody) {
+			prefix := strings.TrimSuffix(command, body)
+			return prefix + sessionStartCurrentFormBody, true
 		}
 	}
 	return "", false
