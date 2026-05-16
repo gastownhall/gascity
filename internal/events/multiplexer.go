@@ -289,6 +289,7 @@ func (m *Multiplexer) Watch(ctx context.Context, cursors map[string]uint64) (*Mu
 			log.Printf("events: mux watcher attach failed for city %q: %v", result.city, result.err)
 			continue
 		}
+		// Defensive: a Provider returning (nil, nil) would panic the goroutine below on Next().
 		if result.watcher == nil {
 			log.Printf("events: mux watcher attach failed for city %q: nil watcher", result.city)
 			continue
