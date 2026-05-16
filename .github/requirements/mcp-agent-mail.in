@@ -7,3 +7,7 @@ mcp-agent-mail @ https://github.com/Dicklesworthstone/mcp_agent_mail/archive/327
 # even if mcp-agent-mail's transitive constraint allows older. Drop this
 # line once mcp-agent-mail upstream pins GitPython>=3.1.50 itself.
 gitpython>=3.1.50
+
+# Authlib and FastMCP security floors live in
+# .github/requirements/mcp-agent-mail.overrides.txt because mcp-agent-mail
+# v0.3.2 still caps Authlib below the fixed release.

@@ -10,7 +10,7 @@ import (
 // SupportsIDLookup reports whether the provider family exposes a stable
 // transcript identifier that should be preferred over workdir-only discovery.
 func SupportsIDLookup(provider string) bool {
-	switch providerFamily(provider) {
+	switch sessionlog.ProviderFamily(provider) {
 	case "codex", "gemini", "opencode":
 		return false
 	default:
@@ -34,28 +34,20 @@ func DiscoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID stri
 	if strings.TrimSpace(gcSessionID) == "" || !SupportsIDLookup(provider) {
 		return ""
 	}
+	if sessionlog.ProviderFamily(provider) == "pi" {
+		return sessionlog.FindPiSessionFileByID(searchPaths, workDir, gcSessionID)
+	}
 	return sessionlog.FindSessionFileByID(searchPaths, workDir, gcSessionID)
 }
 
 // DiscoverFallbackPath resolves the narrow provider-specific fallback path to
 // use when a keyed transcript lookup misses.
 func DiscoverFallbackPath(searchPaths []string, provider, workDir, gcSessionID string) string {
+	if strings.TrimSpace(gcSessionID) != "" && sessionlog.ProviderFamily(provider) == "pi" {
+		return ""
+	}
 	if strings.TrimSpace(gcSessionID) != "" && SupportsIDLookup(provider) {
 		return sessionlog.FindProviderFallbackSessionFile(searchPaths, provider, workDir)
 	}
 	return sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
-}
-
-func providerFamily(provider string) string {
-	lower := strings.ToLower(strings.TrimSpace(provider))
-	switch {
-	case strings.Contains(lower, "codex"):
-		return "codex"
-	case strings.Contains(lower, "gemini"):
-		return "gemini"
-	case strings.Contains(lower, "opencode"):
-		return "opencode"
-	default:
-		return "claude"
-	}
 }

@@ -77,6 +77,8 @@ export type AgentPatch = {
     MCP: Array<string> | null;
     MCPAppend: Array<string> | null;
     MaxActiveSessions: number | null;
+    MaxSessionAge: string | null;
+    MaxSessionAgeJitter: string | null;
     MinActiveSessions: number | null;
     Name: string;
     Nudge: string | null;
@@ -249,6 +251,7 @@ export type Bead = {
     created_at: string;
     dependencies?: Array<Dep> | null;
     description?: string;
+    ephemeral?: boolean;
     from?: string;
     id: string;
     issue_type: string;
@@ -745,7 +748,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | RequestFailedPayload | SessionCreateSucceededPayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | SupervisorFsPressureSkippedTickPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventStreamEnvelope = {
     actor: string;
@@ -2176,6 +2179,9 @@ export type RigCreatedOutputBody = {
 
 export type RigPatch = {
     DefaultBranch: string | null;
+    FormulaVars: {
+        [key: string]: string;
+    };
     Name: string;
     Path: string | null;
     Prefix: string | null;
@@ -2234,6 +2240,12 @@ export type RigUpdateInputBody = {
      * Whether rig is suspended.
      */
     suspended?: boolean;
+};
+
+export type RotatedPayload = {
+    prior_archive: string;
+    prior_first_seq: number;
+    prior_last_seq: number;
 };
 
 export type ScopeGroup = {
@@ -2343,6 +2355,21 @@ export type SessionInfo = {
     name: string;
 };
 
+export type SessionLifecyclePayload = {
+    /**
+     * Short human-readable reason.
+     */
+    reason?: string;
+    /**
+     * Canonical session bead ID. Always present.
+     */
+    session_id: string;
+    /**
+     * Session template name when known at the emission site.
+     */
+    template?: string;
+};
+
 export type SessionMessageInputBody = {
     /**
      * Message text to send.
@@ -2426,6 +2453,7 @@ export type SessionRespondOutputBody = {
 export type SessionResponse = {
     active_bead?: string;
     activity?: string;
+    agent_kind?: string;
     alias?: string;
     attached: boolean;
     configured_named_session?: boolean;
@@ -2436,6 +2464,7 @@ export type SessionResponse = {
     id: string;
     kind?: string;
     last_active?: string;
+    last_nudge_delivered_at?: string;
     last_output?: string;
     metadata?: {
         [key: string]: string;
@@ -2762,6 +2791,33 @@ export type SupervisorEventListOutputBody = {
     total: number;
 };
 
+export type SupervisorFsPressureSkippedTickPayload = {
+    /**
+     * The Linux PSI some avg60 value observed for filesystem IO pressure.
+     */
+    avg60: number;
+    /**
+     * Number of consecutive pressure skips including this tick.
+     */
+    consecutive_skips: number;
+    /**
+     * Maximum consecutive skips before the supervisor forces one reconciliation tick.
+     */
+    max_consecutive_skips: number;
+    /**
+     * The pressure decision outcome: skipped for a shed tick or forced for the bounded liveness tick.
+     */
+    outcome: string;
+    /**
+     * The configured avg60 threshold that triggered the skip.
+     */
+    threshold: number;
+    /**
+     * The daemon tick trigger, such as patrol or poke.
+     */
+    trigger?: string;
+};
+
 export type SupervisorHealthOutputBody = {
     /**
      * Cities currently running.
@@ -2854,6 +2910,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeConvoyClosed) | ({
     type: 'convoy.created';
 } & TypedEventStreamEnvelopeConvoyCreated) | ({
+    type: 'events.rotated';
+} & TypedEventStreamEnvelopeEventsRotated) | ({
     type: 'extmsg.adapter_added';
 } & TypedEventStreamEnvelopeExtmsgAdapterAdded) | ({
     type: 'extmsg.adapter_removed';
@@ -2908,6 +2966,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionDraining) | ({
     type: 'session.idle_killed';
 } & TypedEventStreamEnvelopeSessionIdleKilled) | ({
+    type: 'session.max_age_killed';
+} & TypedEventStreamEnvelopeSessionMaxAgeKilled) | ({
     type: 'session.quarantined';
 } & TypedEventStreamEnvelopeSessionQuarantined) | ({
     type: 'session.stopped';
@@ -2920,6 +2980,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionUpdated) | ({
     type: 'session.woke';
 } & TypedEventStreamEnvelopeSessionWoke) | ({
+    type: 'supervisor.fs_pressure.skipped_tick';
+} & TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
     type: 'worker.operation';
 } & TypedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedEventStreamEnvelopeCustom';
@@ -3090,6 +3152,20 @@ export type TypedEventStreamEnvelopeCustom = {
     subject?: string;
     ts: string;
     type: string;
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope events.rotated
+ */
+export type TypedEventStreamEnvelopeEventsRotated = {
+    actor: string;
+    message?: string;
+    payload: RotatedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'events.rotated';
     workflow?: WorkflowEventProjection;
 };
 
@@ -3435,7 +3511,7 @@ export type TypedEventStreamEnvelopeRequestResultSessionSubmit = {
 export type TypedEventStreamEnvelopeSessionCrashed = {
     actor: string;
     message?: string;
-    payload: NoPayload;
+    payload: SessionLifecyclePayload;
     seq: number;
     subject?: string;
     ts: string;
@@ -3472,6 +3548,20 @@ export type TypedEventStreamEnvelopeSessionIdleKilled = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.max_age_killed
+ */
+export type TypedEventStreamEnvelopeSessionMaxAgeKilled = {
+    actor: string;
+    message?: string;
+    payload: NoPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.max_age_killed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.quarantined
  */
 export type TypedEventStreamEnvelopeSessionQuarantined = {
@@ -3491,7 +3581,7 @@ export type TypedEventStreamEnvelopeSessionQuarantined = {
 export type TypedEventStreamEnvelopeSessionStopped = {
     actor: string;
     message?: string;
-    payload: NoPayload;
+    payload: SessionLifecyclePayload;
     seq: number;
     subject?: string;
     ts: string;
@@ -3556,6 +3646,20 @@ export type TypedEventStreamEnvelopeSessionWoke = {
 };
 
 /**
+ * TypedEventStreamEnvelope supervisor.fs_pressure.skipped_tick
+ */
+export type TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
+    actor: string;
+    message?: string;
+    payload: SupervisorFsPressureSkippedTickPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.fs_pressure.skipped_tick';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope worker.operation
  */
 export type TypedEventStreamEnvelopeWorkerOperation = {
@@ -3597,6 +3701,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeConvoyClosed) | ({
     type: 'convoy.created';
 } & TypedTaggedEventStreamEnvelopeConvoyCreated) | ({
+    type: 'events.rotated';
+} & TypedTaggedEventStreamEnvelopeEventsRotated) | ({
     type: 'extmsg.adapter_added';
 } & TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded) | ({
     type: 'extmsg.adapter_removed';
@@ -3651,6 +3757,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionDraining) | ({
     type: 'session.idle_killed';
 } & TypedTaggedEventStreamEnvelopeSessionIdleKilled) | ({
+    type: 'session.max_age_killed';
+} & TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled) | ({
     type: 'session.quarantined';
 } & TypedTaggedEventStreamEnvelopeSessionQuarantined) | ({
     type: 'session.stopped';
@@ -3663,6 +3771,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionUpdated) | ({
     type: 'session.woke';
 } & TypedTaggedEventStreamEnvelopeSessionWoke) | ({
+    type: 'supervisor.fs_pressure.skipped_tick';
+} & TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
     type: 'worker.operation';
 } & TypedTaggedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedTaggedEventStreamEnvelopeCustom';
@@ -3845,6 +3955,21 @@ export type TypedTaggedEventStreamEnvelopeCustom = {
     subject?: string;
     ts: string;
     type: string;
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope events.rotated
+ */
+export type TypedTaggedEventStreamEnvelopeEventsRotated = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: RotatedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'events.rotated';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4215,7 +4340,7 @@ export type TypedTaggedEventStreamEnvelopeSessionCrashed = {
     actor: string;
     city: string;
     message?: string;
-    payload: NoPayload;
+    payload: SessionLifecyclePayload;
     seq: number;
     subject?: string;
     ts: string;
@@ -4254,6 +4379,21 @@ export type TypedTaggedEventStreamEnvelopeSessionIdleKilled = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope session.max_age_killed
+ */
+export type TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: NoPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.max_age_killed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope session.quarantined
  */
 export type TypedTaggedEventStreamEnvelopeSessionQuarantined = {
@@ -4275,7 +4415,7 @@ export type TypedTaggedEventStreamEnvelopeSessionStopped = {
     actor: string;
     city: string;
     message?: string;
-    payload: NoPayload;
+    payload: SessionLifecyclePayload;
     seq: number;
     subject?: string;
     ts: string;
@@ -4340,6 +4480,21 @@ export type TypedTaggedEventStreamEnvelopeSessionWoke = {
     subject?: string;
     ts: string;
     type: 'session.woke';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope supervisor.fs_pressure.skipped_tick
+ */
+export type TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SupervisorFsPressureSkippedTickPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.fs_pressure.skipped_tick';
     workflow?: WorkflowEventProjection;
 };
 

@@ -277,6 +277,18 @@
               "null"
             ]
           },
+          "MaxSessionAge": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "MaxSessionAgeJitter": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "MinActiveSessions": {
             "format": "int64",
             "type": [
@@ -469,6 +481,8 @@
           "StartCommand",
           "Nudge",
           "IdleTimeout",
+          "MaxSessionAge",
+          "MaxSessionAgeJitter",
           "SleepAfterIdle",
           "InstallAgentHooks",
           "Skills",
@@ -789,6 +803,9 @@
           },
           "description": {
             "type": "string"
+          },
+          "ephemeral": {
+            "type": "boolean"
           },
           "from": {
             "type": "string"
@@ -2020,13 +2037,22 @@
             "$ref": "#/components/schemas/RequestFailedPayload"
           },
           {
+            "$ref": "#/components/schemas/RotatedPayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionCreateSucceededPayload"
+          },
+          {
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
           {
             "$ref": "#/components/schemas/SessionMessageSucceededPayload"
           },
           {
             "$ref": "#/components/schemas/SessionSubmitSucceededPayload"
+          },
+          {
+            "$ref": "#/components/schemas/SupervisorFSPressureSkippedTickPayload"
           },
           {
             "$ref": "#/components/schemas/UnboundEventPayload"
@@ -5348,6 +5374,12 @@
               "null"
             ]
           },
+          "FormulaVars": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
           "Name": {
             "type": "string"
           },
@@ -5375,7 +5407,8 @@
           "Path",
           "Prefix",
           "DefaultBranch",
-          "Suspended"
+          "Suspended",
+          "FormulaVars"
         ],
         "type": "object"
       },
@@ -5468,6 +5501,30 @@
             "type": "boolean"
           }
         },
+        "type": "object"
+      },
+      "RotatedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "prior_archive": {
+            "type": "string"
+          },
+          "prior_first_seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "prior_last_seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "prior_archive",
+          "prior_first_seq",
+          "prior_last_seq"
+        ],
         "type": "object"
       },
       "ScopeGroup": {
@@ -5693,6 +5750,27 @@
         ],
         "type": "object"
       },
+      "SessionLifecyclePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "description": "Short human-readable reason.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Canonical session bead ID. Always present.",
+            "type": "string"
+          },
+          "template": {
+            "description": "Session template name when known at the emission site.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "type": "object"
+      },
       "SessionMessageInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -5833,6 +5911,9 @@
           "activity": {
             "type": "string"
           },
+          "agent_kind": {
+            "type": "string"
+          },
           "alias": {
             "type": "string"
           },
@@ -5863,6 +5944,9 @@
             "type": "string"
           },
           "last_active": {
+            "type": "string"
+          },
+          "last_nudge_delivered_at": {
             "type": "string"
           },
           "last_output": {
@@ -6538,6 +6622,47 @@
         ],
         "type": "object"
       },
+      "SupervisorFSPressureSkippedTickPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "avg60": {
+            "description": "The Linux PSI some avg60 value observed for filesystem IO pressure.",
+            "format": "double",
+            "type": "number"
+          },
+          "consecutive_skips": {
+            "description": "Number of consecutive pressure skips including this tick.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "max_consecutive_skips": {
+            "description": "Maximum consecutive skips before the supervisor forces one reconciliation tick.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "outcome": {
+            "description": "The pressure decision outcome: skipped for a shed tick or forced for the bounded liveness tick.",
+            "type": "string"
+          },
+          "threshold": {
+            "description": "The configured avg60 threshold that triggered the skip.",
+            "format": "double",
+            "type": "number"
+          },
+          "trigger": {
+            "description": "The daemon tick trigger, such as patrol or poke.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "avg60",
+          "threshold",
+          "consecutive_skips",
+          "max_consecutive_skips",
+          "outcome"
+        ],
+        "type": "object"
+      },
       "SupervisorHealthOutputBody": {
         "additionalProperties": false,
         "properties": {
@@ -6679,6 +6804,7 @@
             "controller.stopped": "#/components/schemas/TypedEventStreamEnvelopeControllerStopped",
             "convoy.closed": "#/components/schemas/TypedEventStreamEnvelopeConvoyClosed",
             "convoy.created": "#/components/schemas/TypedEventStreamEnvelopeConvoyCreated",
+            "events.rotated": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated",
             "extmsg.adapter_added": "#/components/schemas/TypedEventStreamEnvelopeExtmsgAdapterAdded",
             "extmsg.adapter_removed": "#/components/schemas/TypedEventStreamEnvelopeExtmsgAdapterRemoved",
             "extmsg.bound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgBound",
@@ -6706,12 +6832,14 @@
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
+            "session.max_age_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled",
             "session.quarantined": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined",
             "session.stopped": "#/components/schemas/TypedEventStreamEnvelopeSessionStopped",
             "session.suspended": "#/components/schemas/TypedEventStreamEnvelopeSessionSuspended",
             "session.undrained": "#/components/schemas/TypedEventStreamEnvelopeSessionUndrained",
             "session.updated": "#/components/schemas/TypedEventStreamEnvelopeSessionUpdated",
             "session.woke": "#/components/schemas/TypedEventStreamEnvelopeSessionWoke",
+            "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
             "worker.operation": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -6749,6 +6877,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeConvoyCreated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgAdapterAdded"
@@ -6832,6 +6963,9 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined"
           },
           {
@@ -6848,6 +6982,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionWoke"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
@@ -7352,6 +7489,7 @@
                 "session.undrained",
                 "session.quarantined",
                 "session.idle_killed",
+                "session.max_age_killed",
                 "session.suspended",
                 "session.updated",
                 "bead.created",
@@ -7383,13 +7521,15 @@
                 "order.failed",
                 "provider.swapped",
                 "worker.operation",
+                "supervisor.fs_pressure.skipped_tick",
                 "extmsg.bound",
                 "extmsg.unbound",
                 "extmsg.group_created",
                 "extmsg.adapter_added",
                 "extmsg.adapter_removed",
                 "extmsg.inbound",
-                "extmsg.outbound"
+                "extmsg.outbound",
+                "events.rotated"
               ]
             },
             "type": "string"
@@ -7406,6 +7546,48 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope custom",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeEventsRotated": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/RotatedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "events.rotated",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope events.rotated",
         "type": "object"
       },
       "TypedEventStreamEnvelopeExtmsgAdapterAdded": {
@@ -8426,7 +8608,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/NoPayload"
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
           "seq": {
             "format": "int64",
@@ -8542,6 +8724,48 @@
         "title": "TypedEventStreamEnvelope session.idle_killed",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionMaxAgeKilled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.max_age_killed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.max_age_killed",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionQuarantined": {
         "additionalProperties": false,
         "properties": {
@@ -8594,7 +8818,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/NoPayload"
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
           "seq": {
             "format": "int64",
@@ -8794,6 +9018,48 @@
         "title": "TypedEventStreamEnvelope session.woke",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SupervisorFSPressureSkippedTickPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "supervisor.fs_pressure.skipped_tick",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope supervisor.fs_pressure.skipped_tick",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeWorkerOperation": {
         "additionalProperties": false,
         "properties": {
@@ -8851,6 +9117,7 @@
             "controller.stopped": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerStopped",
             "convoy.closed": "#/components/schemas/TypedTaggedEventStreamEnvelopeConvoyClosed",
             "convoy.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeConvoyCreated",
+            "events.rotated": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated",
             "extmsg.adapter_added": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded",
             "extmsg.adapter_removed": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved",
             "extmsg.bound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgBound",
@@ -8878,12 +9145,14 @@
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
+            "session.max_age_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled",
             "session.quarantined": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined",
             "session.stopped": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStopped",
             "session.suspended": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionSuspended",
             "session.undrained": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUndrained",
             "session.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUpdated",
             "session.woke": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWoke",
+            "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
             "worker.operation": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -8921,6 +9190,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeConvoyCreated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded"
@@ -9004,6 +9276,9 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined"
           },
           {
@@ -9020,6 +9295,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWoke"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
@@ -9571,6 +9849,7 @@
                 "session.undrained",
                 "session.quarantined",
                 "session.idle_killed",
+                "session.max_age_killed",
                 "session.suspended",
                 "session.updated",
                 "bead.created",
@@ -9602,13 +9881,15 @@
                 "order.failed",
                 "provider.swapped",
                 "worker.operation",
+                "supervisor.fs_pressure.skipped_tick",
                 "extmsg.bound",
                 "extmsg.unbound",
                 "extmsg.group_created",
                 "extmsg.adapter_added",
                 "extmsg.adapter_removed",
                 "extmsg.inbound",
-                "extmsg.outbound"
+                "extmsg.outbound",
+                "events.rotated"
               ]
             },
             "type": "string"
@@ -9626,6 +9907,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope custom",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeEventsRotated": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/RotatedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "events.rotated",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope events.rotated",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded": {
@@ -10745,7 +11072,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/NoPayload"
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
           "seq": {
             "format": "int64",
@@ -10870,6 +11197,52 @@
         "title": "TypedTaggedEventStreamEnvelope session.idle_killed",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NoPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.max_age_killed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.max_age_killed",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeSessionQuarantined": {
         "additionalProperties": false,
         "properties": {
@@ -10929,7 +11302,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/NoPayload"
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
           },
           "seq": {
             "format": "int64",
@@ -11144,6 +11517,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.woke",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SupervisorFSPressureSkippedTickPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "supervisor.fs_pressure.skipped_tick",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope supervisor.fs_pressure.skipped_tick",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeWorkerOperation": {

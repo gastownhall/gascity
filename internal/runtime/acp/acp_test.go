@@ -273,8 +273,9 @@ func TestNudge_SendsPrompt(t *testing.T) {
 
 func TestNudge_MissingSession(t *testing.T) {
 	p := newTestProvider(t)
-	if err := p.Nudge("nonexistent", runtime.TextContent("hello")); err != nil {
-		t.Errorf("Nudge on missing session should not error: %v", err)
+	err := p.Nudge("nonexistent", runtime.TextContent("hello"))
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("Nudge missing session error = %v, want ErrSessionNotFound", err)
 	}
 }
 

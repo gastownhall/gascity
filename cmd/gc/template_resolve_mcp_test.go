@@ -122,13 +122,24 @@ args = ["notes-mcp"]
 	})
 
 	t.Run("unsupported provider hard errors when MCP exists", func(t *testing.T) {
-		agent := &config.Agent{Name: "worker", Scope: "city", Provider: "cursor"}
+		agent := &config.Agent{Name: "worker", Scope: "city", Provider: "copilot"}
 		_, err := resolveTemplate(buildParams("tmux"), agent, agent.QualifiedName(), nil)
 		if err == nil {
 			t.Fatal("expected unsupported provider error, got nil")
 		}
 		if !strings.Contains(err.Error(), "effective MCP requires a supported provider family") {
 			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("cursor provider accepts mcp", func(t *testing.T) {
+		agent := &config.Agent{Name: "worker", Scope: "city", Provider: "cursor"}
+		tp, err := resolveTemplate(buildParams("tmux"), agent, agent.QualifiedName(), nil)
+		if err != nil {
+			t.Fatalf("resolveTemplate: %v", err)
+		}
+		if tp.FPExtra["mcp:cursor"] == "" {
+			t.Fatalf("expected cursor mcp fingerprint entry, got %+v", tp.FPExtra)
 		}
 	})
 

@@ -113,7 +113,10 @@ func TestGCBeadsBDScript_UsesPortableSleepMS(t *testing.T) {
 	}
 }
 
-func TestGCBeadsBDScript_QuarantinesRetiredReplacementDatabases(t *testing.T) {
+// TestGCBeadsBDScript_DoesNotMutateDoltInternals pins gc-beads-bd.sh against
+// re-introducing any mv/rm of files under a .dolt/ directory. Comments are
+// permitted; only non-comment occurrences fail the test.
+func TestGCBeadsBDScript_DoesNotMutateDoltInternals(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller(0) failed")
@@ -125,20 +128,23 @@ func TestGCBeadsBDScript_QuarantinesRetiredReplacementDatabases(t *testing.T) {
 	}
 	script := string(data)
 
-	required := []string{
-		"retired_replacement_db_name()",
-		"?*.replaced-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z)",
-		`reason="retired replacement"`,
-		`quarantining unservable database`,
+	forbidden := []string{
+		"cleanup_stale_locks()",
+		"quarantine_phantom_dbs()",
 		`mv -f "$dir" "$quarantine_dir"`,
+		`rm -f "$lock_file"`,
 	}
-	for _, want := range required {
-		if !strings.Contains(script, want) {
-			t.Fatalf("gc-beads-bd.sh missing retired replacement fallback fragment %q", want)
+	for _, bad := range forbidden {
+		// Allow appearances inside comments (lines starting with `#`).
+		for _, line := range strings.Split(script, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if strings.Contains(line, bad) {
+				t.Fatalf("gc-beads-bd.sh contains forbidden Dolt-internal mutator %q: %s", bad, line)
+			}
 		}
-	}
-	if strings.Contains(script, "quarantining phantom database") {
-		t.Fatal("gc-beads-bd.sh still logs the broader fallback as phantom-only")
 	}
 }
 

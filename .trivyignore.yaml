@@ -1,4 +1,63 @@
 vulnerabilities:
+  # Go stdlib CVEs disclosed 2026-05-12 (Go 1.26.2). Fixed in Go 1.25.10
+  # and 1.26.3 upstream. Our own gc binary builds against Go 1.25.10 (see
+  # go.mod), but the upstream gh and dolt distributions still ship a
+  # 1.26.2 stdlib until cli/cli and dolthub/dolt cut new releases.
+  - id: CVE-2026-33811
+    paths:
+      - "usr/bin/gh"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/br"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-06-12
+    statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
+  - id: CVE-2026-33814
+    paths:
+      - "usr/bin/gh"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/br"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-06-12
+    statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
+  - id: CVE-2026-39820
+    paths:
+      - "usr/bin/gh"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/br"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-06-12
+    statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
+  - id: CVE-2026-39836
+    paths:
+      - "usr/bin/gh"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/br"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-06-12
+    statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
+  - id: CVE-2026-42499
+    paths:
+      - "usr/bin/gh"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/br"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-06-12
+    statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
+  - id: CVE-2026-44431
+    paths:
+      - "usr/local/lib/python3.12/site-packages/urllib3-2.6.3.dist-info/METADATA"
+    expired_at: 2026-06-12
+    statement: mcp-agent-mail v0.3.2 transitive pin keeps urllib3 on 2.6.3; remove after upstream accepts urllib3 2.7.0 or later.
+  - id: CVE-2026-44432
+    paths:
+      - "usr/local/lib/python3.12/site-packages/urllib3-2.6.3.dist-info/METADATA"
+    expired_at: 2026-06-12
+    statement: mcp-agent-mail v0.3.2 transitive pin keeps urllib3 on 2.6.3; remove after upstream accepts urllib3 2.7.0 or later.
   - id: CVE-2026-41602
     paths:
       - "usr/local/bin/dolt"

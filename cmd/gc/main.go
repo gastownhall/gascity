@@ -179,6 +179,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newConvoyCmd(stdout, stderr),
 		newWispCmd(stdout, stderr),
 		newPrimeCmd(stdout, stderr),
+		newPromptCmd(stdout, stderr),
 		newHandoffCmd(stdout, stderr),
 		newBeadsCmd(stdout, stderr),
 		newBuildImageCmd(stdout, stderr),
@@ -203,6 +204,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newDoltConfigCmd(stdout, stderr),
 		newDoltStateCmd(stdout, stderr),
 		newShellCmd(stdout, stderr),
+		newAnalyzeCmd(stdout, stderr),
 	)
 	// gen-doc needs the root command to walk the tree; add after construction.
 	root.AddCommand(newGenDocCmd(stdout, stderr, root))
@@ -211,6 +213,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	registerPackCommands(root, stdout, stderr)
 
 	installArgUsageErrors(root, stderr)
+	installFlagGroupUsageErrors(root, stderr)
 
 	return root
 }
@@ -228,6 +231,32 @@ func installArgUsageErrors(cmd *cobra.Command, stderr io.Writer) {
 	}
 	for _, child := range cmd.Commands() {
 		installArgUsageErrors(child, stderr)
+	}
+}
+
+// installFlagGroupUsageErrors wraps PreRunE on every command so mutually
+// exclusive / required-together / one-required flag violations surface as
+// readable usage errors. Without this, cobra's own ValidateFlagGroups error
+// returns through RunE and is swallowed by the root's SilenceErrors, causing
+// `gc <cmd> --a --b` (with --a/--b mutex) to exit 1 with no output.
+func installFlagGroupUsageErrors(cmd *cobra.Command, stderr io.Writer) {
+	prev := cmd.PreRunE
+	prevRun := cmd.PreRun
+	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		if err := cmd.ValidateFlagGroups(); err != nil {
+			printCommandUsageError(stderr, cmd, err)
+			return errExit
+		}
+		if prev != nil {
+			return prev(cmd, args)
+		}
+		if prevRun != nil {
+			prevRun(cmd, args)
+		}
+		return nil
+	}
+	for _, child := range cmd.Commands() {
+		installFlagGroupUsageErrors(child, stderr)
 	}
 }
 
@@ -870,9 +899,17 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 				if err != nil {
 					return nil, err
 				}
-				copyExecProjectedDoltEnv(env, bdRuntimeEnvForRig(runtimeCityPath, cfg, target.ScopeRoot))
+				projected, err := bdRuntimeEnvForRigWithError(runtimeCityPath, cfg, target.ScopeRoot)
+				if err != nil {
+					return nil, err
+				}
+				copyExecProjectedBackendEnv(env, projected)
 			} else {
-				copyExecProjectedDoltEnv(env, bdRuntimeEnv(runtimeCityPath))
+				projected, err := bdRuntimeEnvWithError(runtimeCityPath)
+				if err != nil {
+					return nil, err
+				}
+				copyExecProjectedBackendEnv(env, projected)
 			}
 		}
 		store := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))

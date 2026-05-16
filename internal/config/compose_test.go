@@ -36,8 +36,8 @@ name = "mayor"
 	if len(prov.Sources) != 1 {
 		t.Errorf("len(Sources) = %d, want 1", len(prov.Sources))
 	}
-	if len(prov.Warnings) != 0 {
-		t.Errorf("unexpected warnings: %v", prov.Warnings)
+	if other := warningsExcludingV1Surfaces(prov.Warnings); len(other) != 0 {
+		t.Errorf("unexpected non-v1-surface warnings: %v", other)
 	}
 	// Include should be cleared from the result.
 	if cfg.Include != nil {
@@ -1137,8 +1137,8 @@ ref = "main"
 	if cfg.Packs["ralph"].Source != "https://github.com/example/ralph" {
 		t.Errorf("ralph source = %q", cfg.Packs["ralph"].Source)
 	}
-	if len(prov.Warnings) != 0 {
-		t.Errorf("unexpected warnings: %v", prov.Warnings)
+	if other := warningsExcludingV1Surfaces(prov.Warnings); len(other) != 0 {
+		t.Errorf("unexpected non-v1-surface warnings: %v", other)
 	}
 }
 

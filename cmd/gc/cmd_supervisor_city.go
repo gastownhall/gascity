@@ -434,11 +434,21 @@ func statusDisplayText(status string) string {
 	}
 }
 
+type supervisorUnregisterOptions struct {
+	Force bool
+}
+
 func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer) (bool, int) {
-	return unregisterCityFromSupervisorWithForce(cityPath, stdout, stderr, "gc unregister", false)
+	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, "gc unregister", supervisorUnregisterOptions{})
 }
 
 func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Writer, commandName string, force bool) (bool, int) {
+	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, commandName, supervisorUnregisterOptions{
+		Force: force,
+	})
+}
+
+func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.Writer, commandName string, opts supervisorUnregisterOptions) (bool, int) {
 	cityPath = normalizePathForCompare(cityPath)
 	entry, registered, err := registeredCityEntry(cityPath)
 	if err != nil {
@@ -450,7 +460,7 @@ func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Wr
 	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-	if force && supervisorAliveHook() != 0 {
+	if opts.Force && supervisorAliveHook() != 0 {
 		tryStopControllerWithForce(cityPath, io.Discard, true)
 	}
 	if err := reg.Unregister(cityPath); err != nil {

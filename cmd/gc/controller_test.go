@@ -1898,13 +1898,12 @@ func TestControllerReloadCityNameChange(t *testing.T) {
 	// Change the city name.
 	writeCityTOML(t, dir, "different-city", "mayor")
 
-	// Wait for tick.
-	target := reconcileCount.Load() + 2
 	deadline := time.After(3 * time.Second)
-	for reconcileCount.Load() < target {
+	for !strings.Contains(stderr.String(), "workspace.name changed") {
 		select {
 		case <-deadline:
-			t.Fatal("timed out waiting for tick after name change")
+			t.Fatalf("timed out waiting for city name change rejection; reconciles=%d stdout=%q stderr=%q",
+				reconcileCount.Load(), stdout.String(), stderr.String())
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}

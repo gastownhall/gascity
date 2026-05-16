@@ -100,6 +100,15 @@ check.
 | bd | 1.0.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
 | flock | -- | `brew install flock` | `apt install util-linux` |
 
+### Optional for GitHub gates
+
+| Tool | macOS | Linux |
+|------|-------|-------|
+| gh | `brew install gh` | [cli.github.com](https://cli.github.com/) |
+
+Gas City can run without `gh`. Maintenance skips GitHub gate checks when the
+GitHub CLI is not installed.
+
 If you do not want to install dolt, bd, and flock, switch to the file-based
 store:
 
@@ -133,7 +142,10 @@ Upgrade via Homebrew (`brew upgrade dolt`) or download a newer release from
 
 ## `bd` Version Too Old
 
-Gas City requires `bd` 1.0.0 or newer. Check your version:
+Gas City requires `bd` 1.0.0 or newer. The bd-backed store relies on wisps
+support, including `bd create --ephemeral` and `bd query ephemeral=true`, so
+older binaries can fail order-tracking and wisp cleanup paths. Check your
+version:
 
 ```bash
 bd version
@@ -152,6 +164,32 @@ brew install flock
 
 Alternatively, switch to the file-based beads provider (see above) to skip
 the flock requirement entirely.
+
+## Cursor MCP Tools Still Prompt or Appear Unavailable
+
+The built-in `cursor` provider starts `cursor-agent` with `-f` and leaves
+Cursor's MCP approval prompt enabled by default. This avoids silently approving
+user or global MCP servers that Cursor can also see through `~/.cursor/mcp.json`.
+
+For unattended Cursor pool workers, opt in only after confirming that every
+workspace and user/global MCP server visible to Cursor is trusted. The
+`--approve-mcps` flag approves every visible server, including servers projected
+from Gas City's catalog into `.cursor/mcp.json` and servers from
+`~/.cursor/mcp.json`.
+
+```toml
+[providers.cursor.option_defaults]
+mcp_approval = "approve"
+```
+
+If you override Cursor `args` directly, the override replaces the built-in
+args. Include `-f` yourself and add `--approve-mcps` only for the same explicit
+trust decision. Agent-level `args` overrides behave the same way.
+
+Existing Cursor sessions keep the command fingerprint they were created with.
+The supervisor reconciler restarts sessions automatically after the fingerprint
+changes. Drain the pool first when you need a controlled handoff rather than
+waiting for the next automatic restart.
 
 ## `gc version` Prints Unexpected Output
 
@@ -216,7 +254,10 @@ git -C "$ARCHIVE" remote remove origin
 
 Re-detection is automatic on the next run — no state-file edits are
 required. The next log line will read `archive running in local-only
-mode`.
+mode`. If push mode had accumulated failures before the remote was
+removed, local-only detection clears that stale failure counter while
+retaining `pending_archive_push` so deferred commits are still pushed if
+`origin` returns.
 
 ### Reading a `JSONL push failed [HIGH]` escalation
 
@@ -238,6 +279,12 @@ Remediation:
 - Temporarily suppress: export GC_JSONL_MAX_PUSH_FAILURES=99
 - See docs/getting-started/troubleshooting.md#jsonl-archive-push-failures
 ```
+
+The exporter sends one HIGH escalation for a still-unresolved push
+failure. It continues recording `consecutive_push_failures` and
+`pending_archive_push` in state, but does not mail the same failure on
+every tick. A successful push or a switch back to local-only mode clears
+the escalation marker.
 
 Common root causes, in rough order of frequency:
 

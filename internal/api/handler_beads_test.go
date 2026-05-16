@@ -1910,3 +1910,23 @@ func TestPackListEmpty(t *testing.T) {
 		t.Errorf("packs count = %d, want 0", len(resp.Packs))
 	}
 }
+
+func TestBeadPrefixAPI(t *testing.T) {
+	tests := []struct {
+		id   string
+		want string
+	}{
+		{"ga-5b8i", "ga"},
+		{"pieces-annotator-x8o", "pieces-annotator"},
+		{"pieces-cli-5b8i", "pieces-cli"},
+		{"ga-123", "ga"},
+		{"", ""},
+		{"nohyphen", ""},
+	}
+	for _, tt := range tests {
+		got := beadPrefix(tt.id)
+		if got != tt.want {
+			t.Errorf("beadPrefix(%q) = %q, want %q", tt.id, got, tt.want)
+		}
+	}
+}

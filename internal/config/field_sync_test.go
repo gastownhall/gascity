@@ -54,6 +54,7 @@ func TestAgentFieldSync(t *testing.T) {
 		"BindingName":                  "runtime-only, set during V2 import expansion, not user-configurable",
 		"PackName":                     "runtime-only, set during V2 import expansion, not user-configurable",
 		"source":                       "runtime-only unexported provenance enum (ga-tpfc); stamped at discovery, not patched or overridden",
+		"layout":                       "runtime-only unexported pack-layout enum (ga-9ogb); stamped at discovery, not patched or overridden",
 	}
 
 	// Fields on AgentOverride/AgentPatch that don't map 1:1 to Agent fields.
@@ -180,6 +181,8 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		StartCommand:            strVal("claude --dangerously"),
 		Nudge:                   strVal("wake up"),
 		IdleTimeout:             strVal("15m"),
+		MaxSessionAge:           strVal("5h"),
+		MaxSessionAgeJitter:     strVal("15m"),
 		SleepAfterIdle:          strVal("30s"),
 		InstallAgentHooks:       []string{"claude"},
 		HooksInstalled:          &trueVal,
@@ -189,7 +192,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		SessionLive:             []string{"live-cmd"},
 		OverlayDir:              strVal("overlays/test"),
 		DefaultSlingFormula:     strVal("mol-work"),
-		InjectFragments:         []string{"frag1"},
+		InjectFragments:         Fragments("frag1"),
 		AppendFragments:         []string{"append1"},
 		DependsOn:               []string{"other-agent"},
 		ResumeCommand:           strVal("claude --resume {{.SessionKey}}"),
@@ -328,6 +331,8 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		StartCommand:            strVal("claude --dangerously"),
 		Nudge:                   strVal("wake up"),
 		IdleTimeout:             strVal("15m"),
+		MaxSessionAge:           strVal("5h"),
+		MaxSessionAgeJitter:     strVal("15m"),
 		SleepAfterIdle:          strVal("30s"),
 		InstallAgentHooks:       []string{"claude"},
 		HooksInstalled:          &trueVal,
@@ -337,7 +342,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		SessionLive:             []string{"live-cmd"},
 		OverlayDir:              strVal("overlays/test"),
 		DefaultSlingFormula:     strVal("mol-work"),
-		InjectFragments:         []string{"frag1"},
+		InjectFragments:         Fragments("frag1"),
 		AppendFragments:         []string{"append1"},
 		DependsOn:               []string{"other-agent"},
 		ResumeCommand:           strVal("claude --resume {{.SessionKey}}"),

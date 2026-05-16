@@ -23,6 +23,8 @@ import (
 )
 
 func TestControllerStateReadAccess(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
 	sp := runtime.NewFake()
 	ep := events.NewFake()
 	cfg := &config.City{
@@ -71,6 +73,8 @@ func TestControllerStateReadAccess(t *testing.T) {
 }
 
 func TestControllerStateConcurrentAccess(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
 	sp := runtime.NewFake()
 	ep := events.NewFake()
 	cfg := &config.City{
@@ -101,6 +105,8 @@ func TestControllerStateConcurrentAccess(t *testing.T) {
 }
 
 func TestControllerStateUpdate(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
 	sp := runtime.NewFake()
 	ep := events.NewFake()
 	cfg1 := &config.City{
@@ -336,6 +342,7 @@ func TestControllerStateRuntimeUpdateIgnoresEmptyRevisionDuringPendingMutation(t
 
 func TestControllerStateRuntimeUpdateAcceptsBuiltinAwareRevision(t *testing.T) {
 	configureTestDoltIdentityEnv(t)
+	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "")
 
 	cityDir := shortSocketTempDir(t, "gc-state-runtime-builtin-")
@@ -373,6 +380,7 @@ func TestControllerStateRuntimeUpdateAcceptsBuiltinAwareRevision(t *testing.T) {
 
 func TestControllerStateMutationRefreshKeepsBuiltinOrdersAndClearsPending(t *testing.T) {
 	configureTestDoltIdentityEnv(t)
+	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "")
 
 	cityDir := shortSocketTempDir(t, "gc-state-mutation-builtin-")
@@ -1450,6 +1458,8 @@ provider = "file"
 }
 
 func TestControllerStateNilEventProvider(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
 	sp := runtime.NewFake()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -1463,6 +1473,8 @@ func TestControllerStateNilEventProvider(t *testing.T) {
 }
 
 func TestControllerStateOrdersIncludeVisibleCityRoot(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
 	cityDir := t.TempDir()
 	autoDir := filepath.Join(cityDir, "orders", "digest")
 	if err := os.MkdirAll(autoDir, 0o755); err != nil {

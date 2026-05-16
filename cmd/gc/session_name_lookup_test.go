@@ -85,3 +85,25 @@ func TestResolvedTemplateForIdentity_DoesNotResolveOutOfBoundsQualifiedPoolIdent
 		t.Fatalf("resolvedTemplateForIdentity(frontend/worker-7) = %q, want unresolved out-of-bounds identity", got)
 	}
 }
+
+func TestExistingPoolSlotWithConfig_PrefersConcreteAgentIdentityOverStaleSlot(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(10)},
+			{Name: "worker", Dir: "backend", MaxActiveSessions: intPtr(10)},
+		},
+	}
+	cfgAgent := &cfg.Agents[0]
+	bead := beads.Bead{
+		Metadata: map[string]string{
+			"template":   "frontend/worker",
+			"agent_name": "frontend/worker-3",
+			"alias":      "backend/worker-4",
+			"pool_slot":  "4",
+		},
+	}
+
+	if got := existingPoolSlotWithConfig(cfg, cfgAgent, bead); got != 3 {
+		t.Fatalf("existingPoolSlotWithConfig = %d, want concrete agent slot 3 over stale slot/foreign alias", got)
+	}
+}

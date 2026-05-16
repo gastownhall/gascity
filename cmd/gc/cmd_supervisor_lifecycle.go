@@ -64,6 +64,17 @@ var (
 	supervisorSystemctlActive = func(service string) bool {
 		return exec.Command("systemctl", "--user", "is-active", "--quiet", service).Run() == nil
 	}
+	// supervisorSystemctlUserAvailable probes whether a per-user systemd
+	// instance is reachable. `systemctl --user show-environment` exits
+	// non-zero when there is no user manager (e.g. running as a service
+	// account without `loginctl enable-linger`, or inside a minimal
+	// container). The check goes through supervisorSystemctlRun so the
+	// existing test seam keeps working: tests that stub
+	// supervisorSystemctlRun automatically see the user manager as
+	// available.
+	supervisorSystemctlUserAvailable = func() bool {
+		return supervisorSystemctlRun("--user", "show-environment") == nil
+	}
 	supervisorRunningPreserveSignalReady                = runningSupervisorPreserveSignalReady
 	supervisorProcRoot                                  = "/proc"
 	supervisorProcReadDir                               = os.ReadDir
@@ -370,8 +381,40 @@ API server.`,
 	}
 }
 
+// runSupervisorFunc is the run-loop entry point invoked by
+// doSupervisorRun. Indirection enables tests to substitute a no-op
+// loop so pre-loop setup (defaultSupervisorBeadsActor) is observable
+// without launching the real long-running supervisor.
+var runSupervisorFunc = runSupervisor
+
 func doSupervisorRun(stdout, stderr io.Writer) int {
-	return runSupervisor(stdout, stderr)
+	defaultSupervisorBeadsActor()
+	return runSupervisorFunc(stdout, stderr)
+}
+
+// defaultSupervisorBeadsActor sets BEADS_ACTOR=controller in this
+// process's env when the operator has not already set a value.
+//
+// bd hooks (.beads/hooks/on_create, on_update, on_close) are spawned
+// from the supervisor process and forward events via `gc event emit`
+// subprocesses that inherit this process's env. Without this default,
+// eventActor() walks the GC_ALIAS → GC_AGENT → GC_SESSION_ID →
+// BEADS_ACTOR chain (all unset in a fresh supervisor) and lands on the
+// "human" fallback, mis-attributing every dispatcher-issued
+// tracking-bead create/update/close.
+//
+// applyControllerBdEnv (cmd/gc/bd_env.go) covers BEADS_ACTOR for the
+// env map handed to spawned bd commands; this covers the
+// process-env path the hook subprocesses inherit. The two paths are
+// independent and both are required for full controller attribution.
+//
+// Order-exec subprocesses still override BEADS_ACTOR to "order:<name>"
+// via orderExecEnv (cmd/gc/order_store.go) before exec, so per-order
+// attribution is preserved.
+func defaultSupervisorBeadsActor() {
+	if strings.TrimSpace(os.Getenv("BEADS_ACTOR")) == "" {
+		_ = os.Setenv("BEADS_ACTOR", "controller")
+	}
 }
 
 func doSupervisorStart(stdout, stderr io.Writer) int {
@@ -1459,6 +1502,24 @@ func stopSupervisorSystemdForWarmRefresh(service string) ([]string, error) {
 }
 
 func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Writer) int {
+	// Bail out before we touch the unit file when there is no per-user
+	// systemd manager to load it. Otherwise daemon-reload + enable both
+	// fail and the rollback path tries daemon-reload again, producing
+	// 2-3 cascading "systemctl --user" errors that obscure the real
+	// problem. Callers (notably ensureSupervisorRunning) already fall
+	// back to a detached supervisor when install returns non-zero, so a
+	// single clean error is the right shape here.
+	if !supervisorSystemctlUserAvailable() {
+		fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+			"gc supervisor install: per-user systemd instance is not available "+
+				"(systemctl --user could not reach the user manager). "+
+				"Either enable lingering for this account ('sudo loginctl enable-linger %s'), "+
+				"log in via a PAM session that starts user-systemd, or run the supervisor "+
+				"detached (e.g. 'gc supervisor start' without service install).\n",
+			currentUsernameForSystemdHint())
+		return 1
+	}
+
 	content, err := renderSupervisorTemplate(supervisorSystemdTemplate, data)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor install: rendering unit: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1571,6 +1632,21 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 	fmt.Fprintf(stdout, "Installed systemd service: %s\n", path) //nolint:errcheck // best-effort stdout
 	return 0
 }
+
+// currentUsernameForSystemdHint returns the current username for use in the
+// "loginctl enable-linger <user>" hint, falling back to "<your-user>" if
+// the lookup fails so the message stays actionable. The osuser.Current
+// lookup is reached via a package var so tests can exercise both
+// branches.
+func currentUsernameForSystemdHint() string {
+	if u, err := currentUserForSystemdHint(); err == nil && strings.TrimSpace(u.Username) != "" {
+		return u.Username
+	}
+	return "<your-user>"
+}
+
+// currentUserForSystemdHint is overridable in tests.
+var currentUserForSystemdHint = osuser.Current
 
 func uninstallSupervisorSystemd(_ *supervisorServiceData, stdout, stderr io.Writer) int {
 	path := supervisorSystemdServicePath()

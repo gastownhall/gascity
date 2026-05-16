@@ -292,8 +292,9 @@ func listActiveWorkflowProjectionBeads(store beads.Store) ([]beads.Bead, error) 
 
 func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef string) (orderRunFeedResult, error) {
 	stores := workflowStores(state)
-	orderByScopedName := make(map[string]orders.Order, len(state.Orders()))
-	for _, order := range state.Orders() {
+	allOrders := state.OrdersAll()
+	orderByScopedName := make(map[string]orders.Order, len(allOrders))
+	for _, order := range allOrders {
 		orderByScopedName[order.ScopedName()] = order
 	}
 
@@ -307,8 +308,9 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 			continue
 		}
 		results, err := info.store.List(beads.ListQuery{
-			Label: "order-tracking",
-			Sort:  beads.SortCreatedDesc,
+			Label:    "order-tracking",
+			Sort:     beads.SortCreatedDesc,
+			TierMode: beads.TierBoth,
 		})
 		if err != nil {
 			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {
@@ -374,13 +376,17 @@ func orderTrackingUpdatedAt(store beads.Store, tracking beads.Bead, scopedName s
 	}
 
 	runs, err := store.List(beads.ListQuery{
-		Label: "order-run:" + scopedName,
-		Limit: 1,
-		Sort:  beads.SortCreatedDesc,
+		Label:    "order-run:" + scopedName,
+		Limit:    1,
+		Sort:     beads.SortCreatedDesc,
+		TierMode: beads.TierBoth,
 	})
-	if err != nil {
+	if err != nil && len(runs) == 0 {
 		orderFeedLogf("api: order feed update lookup failed for %s bead %s: %v", scopedName, tracking.ID, err)
 		return updatedAt
+	}
+	if err != nil {
+		orderFeedLogf("api: order feed update lookup partially failed for %s bead %s: %v", scopedName, tracking.ID, err)
 	}
 	if len(runs) > 0 && runs[0].CreatedAt.After(updatedAt) {
 		updatedAt = runs[0].CreatedAt

@@ -175,6 +175,7 @@ func buildOrderDispatcher(cityPath string, cfg *config.City, rec events.Recorder
 			logDispatchError(stderr, "gc start: order overrides: %v", err)
 		}
 	}
+	allAA = orders.FilterEnabled(allAA)
 
 	// Filter out manual-trigger orders — they are never auto-dispatched.
 	var auto []orders.Order
@@ -279,7 +280,11 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 				return cursor
 			}
 		}
-		triggerOpts := orderTriggerOptionsForTarget(cityPath, m.cfg, target, a)
+		triggerOpts, err := orderTriggerOptionsForTarget(cityPath, m.cfg, target, a)
+		if err != nil {
+			logDispatchError(m.stderr, "gc: order dispatch: building trigger env for %s: %v", a.ScopedName(), err)
+			continue
+		}
 		result := orders.CheckTriggerWithOptions(a, now, lastRunFn, m.ep, cursorFn, triggerOpts)
 		if lastRunErr != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: reading last run for %s: %v", a.ScopedName(), lastRunErr)
@@ -320,8 +325,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// Create tracking bead synchronously BEFORE dispatch goroutine.
 		// This prevents the cooldown trigger from re-firing on the next tick.
 		trackingBead, err := store.Create(beads.Bead{
-			Title:  "order:" + scoped,
-			Labels: []string{"order-run:" + scoped, labelOrderTracking},
+			Title:     "order:" + scoped,
+			Labels:    []string{"order-run:" + scoped, labelOrderTracking},
+			Ephemeral: true,
 		})
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v", scoped, err)
@@ -554,16 +560,24 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 		}
 	}
 
-	env := orderExecEnv(cityPath, m.cfg, target, a)
-	output, err := m.execRun(ctx, a.Exec, target.ScopeRoot, env)
+	env, err := orderExecEnvWithError(cityPath, m.cfg, target, a)
+	var output []byte
 	var execErrMsg string
 	if err != nil {
 		redactionEnv := append(os.Environ(), env...)
 		execErrMsg = execenv.RedactText(err.Error(), redactionEnv)
 		labels = []string{"exec-failed"}
 		logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, execErrMsg)
-		if len(output) > 0 {
-			logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, execenv.RedactText(string(output), redactionEnv))
+	} else {
+		output, err = m.execRun(ctx, a.Exec, target.ScopeRoot, env)
+		if err != nil {
+			redactionEnv := append(os.Environ(), env...)
+			execErrMsg = execenv.RedactText(err.Error(), redactionEnv)
+			labels = []string{"exec-failed"}
+			logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, execErrMsg)
+			if len(output) > 0 {
+				logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, execenv.RedactText(string(output), redactionEnv))
+			}
 		}
 	}
 
@@ -778,20 +792,35 @@ func (m *memoryOrderDispatcher) rigSuspendedByName(rigName string) bool {
 	return false
 }
 
-// hasOpenWorkStrict reports whether any non-closed work or tracking bead
-// exists for this order. Open tracking beads represent in-flight dispatch and
-// must block condition/event orders that do not consult LastRun.
+// hasOpenWorkStrict reports whether an open tracking bead exists for this
+// order — i.e. a dispatchOne goroutine is still in flight. Tracking beads
+// carry both "order-run:<scoped>" and labelOrderTracking; dispatchOne closes
+// them via defer when dispatch returns.
+//
+// Wisp root beads also carry "order-run:<scoped>" (so gc order history and
+// the orders API feed can attribute the wisp to its order), but molecule
+// roots never auto-close when their step beads finish. A leftover open
+// root is not in-flight work and must not block re-dispatch — counting it
+// caused ga-jra/ga-lo8c, where formula+pool orders stalled indefinitely
+// after a city restart because the first auto-fire's wisp root permanently
+// tripped this check.
 func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName string) (bool, error) {
 	results, err := store.List(beads.ListQuery{
-		Label: "order-run:" + scopedName,
-		Sort:  beads.SortCreatedDesc,
+		Label:    "order-run:" + scopedName,
+		Sort:     beads.SortCreatedDesc,
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return false, fmt.Errorf("listing order work beads: %w", err)
 	}
 	for _, b := range results {
-		if b.Status != "closed" {
-			return true, nil
+		if b.Status == "closed" {
+			continue
+		}
+		for _, lbl := range b.Labels {
+			if lbl == labelOrderTracking {
+				return true, nil
+			}
 		}
 	}
 	return false, nil
@@ -818,7 +847,9 @@ func (m *memoryOrderDispatcher) hasOpenWorkInStoresStrict(stores []beads.Store, 
 // closed. This is non-fatal: dispatch proceeds even if the sweep fails.
 func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
 	// ListByLabel without IncludeClosed returns only open beads.
-	all, err := store.ListByLabel(labelOrderTracking, 0)
+	// New tracking beads live in the wisps tier, but legacy issues-tier
+	// tracking beads may still exist after upgrade; sweep both.
+	all, err := store.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
 	if err != nil {
 		return 0, fmt.Errorf("listing order-tracking beads: %w", err)
 	}
@@ -845,7 +876,7 @@ func sweepStaleOrderTracking(store beads.Store, now time.Time, staleAfter time.D
 	if staleAfter <= 0 {
 		return 0, fmt.Errorf("stale-after must be positive")
 	}
-	all, err := store.ListByLabel(labelOrderTracking, 0)
+	all, err := store.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
 	if err != nil {
 		return 0, fmt.Errorf("listing order-tracking beads: %w", err)
 	}

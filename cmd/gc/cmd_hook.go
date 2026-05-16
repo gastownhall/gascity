@@ -142,7 +142,11 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 	} else {
 		sessionForQuery = cliSessionName(cityPath, cityName, resolvedAgentName, cfg.Workspace.SessionTemplate)
 	}
-	overrides := hookQueryEnv(cityPath, cfg, &a)
+	overrides, err := hookQueryEnv(cityPath, cfg, &a)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook: building work query env: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	overrides["GC_AGENT"] = agentForQuery
 	overrides["GC_SESSION_NAME"] = sessionForQuery
 	if sessionTemplateContext {
@@ -162,33 +166,51 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 // It includes scope metadata (store root/scope/prefix) plus any rig-scoped
 // runtime overrides so hook queries observe the same routing contract as the
 // controller probes.
-func hookQueryEnv(cityPath string, cfg *config.City, a *config.Agent) map[string]string {
-	env := controllerWorkQueryEnv(cityPath, cfg, a)
+func hookQueryEnv(cityPath string, cfg *config.City, a *config.Agent) (map[string]string, error) {
+	env, err := controllerWorkQueryEnv(cityPath, cfg, a)
+	if err != nil {
+		return nil, err
+	}
 	if env == nil {
 		env = map[string]string{}
 	}
-	return env
+	return env, nil
 }
 
 // WorkQueryRunner runs a work query command and returns its stdout.
 // dir sets the command's working directory.
 type WorkQueryRunner func(command, dir string) (string, error)
 
+// hookWorkQueryTimeout caps the work-query subprocess. Default matches
+// the pre-bounded behavior (30s) so existing tests that legitimately
+// take >15s don't regress; the package-level var lets us lower it in
+// follow-up work after slow paths are identified and optimized.
+var hookWorkQueryTimeout = 30 * time.Second
+
 // shellWorkQueryWithEnv runs a work query command via sh -c and returns
 // stdout. If env is non-nil it is used as the subprocess environment
 // (including any rig-scoped BEADS_DIR / GC_RIG_ROOT overrides); otherwise
-// the child inherits the parent process environment. Times out after 30
-// seconds.
+// the child inherits the parent process environment. Times out after a
+// short bounded interval so startup hooks cannot strand sessions behind a
+// wedged data-plane command.
 func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.WaitDelay = 2 * time.Second
+	prepareProviderOpCommand(cmd)
 	if dir != "" {
 		cmd.Dir = dir
 	}
 	cmd.Env = workQueryEnvForDir(env, dir)
 	out, err := cmd.Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			return string(out), fmt.Errorf("running work query %q: timed out after %s with partial stdout %q", command, hookWorkQueryTimeout, msg)
+		}
+		return "", fmt.Errorf("running work query %q: timed out after %s", command, hookWorkQueryTimeout)
+	}
 	if err != nil {
 		return "", fmt.Errorf("running work query %q: %w", command, err)
 	}
@@ -221,6 +243,9 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 
 	output, err := runner(workQuery, dir)
 	if err != nil {
+		if normalized := normalizeWorkQueryOutput(strings.TrimSpace(output)); normalized != "" {
+			fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
+		}
 		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

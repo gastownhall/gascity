@@ -18,12 +18,12 @@ import (
 // Helpers
 // ---------------------------------------------------------------------------
 
-// setupCity creates a minimal city directory with city.toml and .gc/.
+// setupCity creates a minimal city directory with city.toml and the runtime scaffold.
 // Returns the absolute path to the city root.
 func setupCity(t *testing.T, name string) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+	if err := ensureCityScaffold(dir); err != nil {
 		t.Fatal(err)
 	}
 	toml := "[workspace]\nname = \"" + name + "\"\n\n[[agent]]\nname = \"mayor\"\n"

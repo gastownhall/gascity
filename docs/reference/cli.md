@@ -20,6 +20,7 @@ gc [flags]
 | Subcommand | Description |
 |------------|-------------|
 | [gc agent](#gc-agent) | Manage agent configuration |
+| [gc analyze](#gc-analyze) | Read-only analysis over events and beads |
 | [gc bd](#gc-bd) | Run bd in the correct rig directory |
 | [gc beads](#gc-beads) | Manage the beads provider |
 | [gc build-image](#gc-build-image) | Build a prebaked agent container image |
@@ -46,6 +47,7 @@ gc [flags]
 | [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
 | [gc pack](#gc-pack) | Manage remote pack sources |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
+| [gc prompt](#gc-prompt) | Author and inspect agent prompt templates |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
 | [gc reload](#gc-reload) | Reload the current city's config without restarting the city/controller |
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
@@ -138,6 +140,54 @@ replaced if they exit. Use "gc agent resume" to restore.
 ```
 gc agent suspend <name>
 ```
+
+## gc analyze
+
+Analyze produces correlated reports over the events log and
+bead state. All subcommands are read-only and safe to run alongside a
+live controller.
+
+```
+gc analyze
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc analyze reliability](#gc-analyze-reliability) | Correlate session-lifecycle events with model/version/rig |
+
+## gc analyze reliability
+
+Reliability reports per-(model, prompt_version, rig) counts of
+the tracked session-lifecycle events:
+
+  session.crashed
+  session.quarantined (reserved; current production paths do not emit it)
+  session.idle_killed
+  session.draining
+
+Worker.operation events from #1252 supply the (model, prompt_version,
+agent_name) tuple per session. Lifecycle events get attributed via the
+session id or producer aliases from worker.operation payloads. Sessions
+with worker.operation events but no lifecycle events count toward the
+per-group total — they're the denominator side of crash-rate
+calculations. Model and prompt_version are best-effort dimensions; the
+report warns when the source event stream is missing them.
+
+Read-only: this command never writes events or beads.
+
+```
+gc analyze reliability [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--city` | string |  | city directory (default: discover from cwd) |
+| `--events` | string |  | explicit events.jsonl path (overrides city discovery) |
+| `--json` | bool |  | emit JSON instead of a table |
+| `--model` | string |  | filter to a specific model |
+| `--rig` | string |  | filter to a specific rig |
+| `--since` | string | `7d` | start of the analysis window — duration (1h, 7d) or RFC3339 timestamp |
+| `--until` | string |  | end of the analysis window — duration (0s = now, 30m = 30 minutes ago) or RFC3339 timestamp |
 
 ## gc bd
 
@@ -1092,9 +1142,13 @@ Compile and display a formula recipe.
 By default, shows the recipe with &#123;&#123;variable&#125;&#125; placeholders intact.
 Use --var to substitute variables and preview the resolved output.
 
+When --rig is set (or cwd is inside a rig), rig-scoped formula_vars from
+city.toml are shown as "(rig default=...)" alongside each applicable var.
+
 Examples:
   gc formula show mol-feature
   gc formula show mol-feature --var title="Auth system" --var branch=main
+  gc formula show mol-polecat-work --rig mo
 
 ```
 gc formula show <formula-name> [flags]
@@ -1784,6 +1838,95 @@ gc prime [agent-name] [flags]
 | `--hook-format` | string |  | format hook output for a provider |
 | `--strict` | bool |  | fail on missing city, missing or unknown agent, or unreadable prompt_template instead of falling back to the default prompt |
 
+## gc prompt
+
+Subcommands for authoring agent prompt templates.
+
+Currently the only subcommand is 'synth', which invokes the configured
+provider in one-shot mode to generate a prompt template for a given role.
+
+```
+gc prompt
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc prompt synth](#gc-prompt-synth) | Generate an agent prompt template by invoking the LLM |
+
+## gc prompt synth
+
+Renders a meta-prompt with the given parameters, invokes the configured
+provider in one-shot mode, and emits the generated prompt template.
+
+The default behavior prints the generated prompt to stdout. Pass --write
+to save it directly to &lt;city&gt;/agents/&lt;role&gt;/prompt.template.md (use --force
+to overwrite an existing file).
+
+Context type is determined by --rig:
+
+  (no --rig)     City context. The agent is HQ-only and operates at
+                 the city level (e.g. mayor, deacon). The meta-prompt
+                 emphasizes coordination, dispatch, monitoring.
+  --rig &lt;name&gt;   Rig context. The agent is attached to the named rig
+                 (looked up in city.toml). The meta-prompt includes
+                 the rig path, default branch, and project-aware
+                 guidance (git operations, branch management, etc.).
+
+Auto-detection:
+  --provider     defaults to workspace.provider in city.toml
+
+Baseline:
+  The synth pulls in an existing prompt template as a refinement
+  baseline so the LLM iterates on a known-good shape rather than
+  designing from scratch. Resolution priority:
+    1. &lt;city&gt;/agents/&lt;role&gt;/prompt.template.md     (user customization)
+    2. &lt;city&gt;/.gc/system/packs/*/agents/&lt;role&gt;/    (pack default)
+    3. embedded prompts/&lt;role&gt;.md                  (built-in fallback)
+    4. embedded prompts/mayor.md                   (structural reference,
+                                                     used only when no
+                                                     role-specific source
+                                                     exists)
+
+Two execution modes:
+
+  --writer-agent ""        Direct mode (default). Spawns a one-shot
+                           subprocess of the configured provider; no
+                           Gas City agent is involved. Useful for
+                           bootstrap and offline-friendly invocations.
+
+  --writer-agent &lt;name&gt;    Slingued mode. Creates a bead and slings the
+                           synth as work to the named agent via the
+                           mol-prompt-synth formula; the agent's
+                           session reads the meta-prompt, generates the
+                           prompt, and writes it to the destination.
+
+                           Async by default — the CLI prints the bead
+                           ID + destination and returns immediately;
+                           use 'gc bd show &lt;id&gt;' to track progress.
+                           Pass --wait to block until the agent closes
+                           the bead (or --wait-timeout fires).
+
+The output is LLM-generated. Review it carefully before relying on it.
+When --write is used, a comment header records the inputs and generation
+date for traceability.
+
+```
+gc prompt synth [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--city` | string |  | city path (default: auto-resolve) |
+| `--force` | bool |  | with --write, overwrite the destination if it exists |
+| `--meta-prompt` | string |  | override the embedded meta-prompt with a file path |
+| `--provider` | string |  | target AI provider key (default: city.toml workspace.provider) |
+| `--rig` | string |  | rig name from city.toml (default: empty = city/HQ context, no rig) |
+| `--role` | string |  | agent role to design (required, e.g. mayor, polecat, witness) |
+| `--wait` | bool |  | in slingued mode, block until the agent closes the bead |
+| `--wait-timeout` | duration | `10m0s` | in slingued mode with --wait, abort after this duration |
+| `--write` | bool |  | write to &lt;city&gt;/agents/&lt;role&gt;/prompt.template.md instead of stdout (direct mode only; slingued mode always writes) |
+| `--writer-agent` | string |  | Gas City agent to delegate the synth to via mol-prompt-synth (default: empty = direct mode, no agent) |
+
 ## gc register
 
 Register a city directory with the machine-wide supervisor.
@@ -1811,8 +1954,19 @@ Force the current city controller to re-read effective config and
 process one reload tick without restarting the city/controller.
 
 Reload may fetch configured remote packs before recomputing effective
-config. Existing per-session restarts may still happen if normal config
-drift rules require them.
+config. By default, per-session restarts may still happen if normal
+config drift rules require them.
+
+With --soft, the controller accepts any detected per-session config
+drift instead of draining the drifted sessions: each open session's
+recorded config hash is updated to the hash the freshly reloaded
+config produces for it, the matching hash breakdown is refreshed, and
+any already queued config-drift drain for that session is canceled. The
+immediately-following reconcile tick sees no drift and no config-drift
+drains fire. Useful when editing a running city's .gc/settings.json
+without disrupting in-flight work. Sessions whose template no longer
+maps to a configured agent are NOT updated; normal orphan/suspended
+drain handles them on the next tick.
 
 ```
 gc reload [path] [flags]
@@ -1821,6 +1975,7 @@ gc reload [path] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--async` | bool |  | Return after the controller accepts the reload request |
+| `--soft` | bool |  | Accept config drift on open sessions instead of draining them |
 | `--timeout` | string | `5m` | How long to wait for reload completion |
 
 ## gc restart
@@ -2609,6 +2764,7 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 | `--nudge` | bool |  | nudge target after routing |
 | `--on` | string |  | attach wisp from formula to bead before routing |
 | `--owned` | bool |  | mark auto-convoy as owned (skip auto-close) |
+| `--reassign` | bool |  | clear any existing human assignee before routing (for human→pool handoff) |
 | `--scope-kind` | string |  | logical workflow scope kind for graph.v2 launches |
 | `--scope-ref` | string |  | logical workflow scope ref for graph.v2 launches |
 | `--stdin` | bool |  | read bead text from stdin (first line = title, rest = description) |

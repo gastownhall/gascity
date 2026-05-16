@@ -10,6 +10,8 @@ func profileFamily(profile Profile) string {
 		return "gemini"
 	case ProfileOpenCodeTmuxCLI:
 		return "opencode"
+	case ProfilePiTmuxCLI:
+		return "pi"
 	case ProfileClaudeTmuxCLI:
 		return "claude"
 	default:

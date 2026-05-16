@@ -62,6 +62,20 @@ func configureIsolatedRuntimeEnv(t *testing.T) {
 	}
 }
 
+func TestRunReportsMutuallyExclusiveFlagViolations(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sling", "target", "arg", "--formula", "--on", "bd-1"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("run returned 0; expected non-zero. stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "mutually") && !strings.Contains(stderr.String(), "none of the others") {
+		t.Fatalf("stderr did not describe the mutex violation; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "formula") || !strings.Contains(stderr.String(), "on") {
+		t.Fatalf("stderr did not name the conflicting flags; got %q", stderr.String())
+	}
+}
+
 func TestRunDoesNotLeakPersistentCityOrRigFlags(t *testing.T) {
 	prevCityFlag, prevRigFlag := cityFlag, rigFlag
 	t.Cleanup(func() {
@@ -142,6 +156,16 @@ func explicitAgents(agents []config.Agent) []config.Agent {
 	return out
 }
 
+func configureFSPressureForTests() {
+	fsPressurePath = "/test/pressure/io"
+	fsPressureReadFile = func(path string) ([]byte, error) {
+		if path != fsPressurePath {
+			return nil, fmt.Errorf("unexpected FS pressure path %q", path)
+		}
+		return []byte("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"), nil
+	}
+}
+
 func TestMain(m *testing.M) {
 	gcHome, err := os.MkdirTemp("", "gascity-gc-home-*")
 	if err != nil {
@@ -169,6 +193,7 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("PATH", pathValue); err != nil {
 		panic(err)
 	}
+	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
 	testscript.Main(m, map[string]func(){
 		"gc": func() {
@@ -3302,20 +3327,36 @@ scale_check = "echo 3"
 		t.Errorf("ResolvedWorkspaceName = %q, want %q (should be overridden)", cfg.ResolvedWorkspaceName, "bright-lights")
 	}
 	explicit := explicitAgents(cfg.Agents)
-	if len(explicit) != 2 {
-		t.Fatalf("len(explicitAgents) = %d, want 2", len(explicit))
+	if len(explicit) != 3 {
+		t.Fatalf("len(explicitAgents) = %d, want 3", len(explicit))
 	}
-	if explicit[1].Name != "worker" {
-		t.Errorf("explicitAgents[1].Name = %q, want %q", explicit[1].Name, "worker")
+	explicitByName := make(map[string]config.Agent, len(explicit))
+	for _, agent := range explicit {
+		explicitByName[agent.Name] = agent
 	}
-	if explicit[1].MaxActiveSessions == nil {
-		t.Fatal("explicitAgents[1].MaxActiveSessions is nil, want non-nil")
+	mayor, ok := explicitByName["mayor"]
+	if !ok {
+		t.Fatalf("explicitAgents missing mayor: %+v", explicit)
 	}
-	if *explicit[1].MaxActiveSessions != 5 {
-		t.Errorf("explicitAgents[1].MaxActiveSessions = %d, want 5", *explicit[1].MaxActiveSessions)
+	worker, ok := explicitByName["worker"]
+	if !ok {
+		t.Fatalf("explicitAgents missing worker: %+v", explicit)
 	}
-	if !strings.HasSuffix(explicit[0].PromptTemplate, filepath.Join("agents", "mayor", "prompt.template.md")) {
-		t.Errorf("explicitAgents[0].PromptTemplate = %q, want suffix %q", explicit[0].PromptTemplate, filepath.Join("agents", "mayor", "prompt.template.md"))
+	dog, ok := explicitByName["dog"]
+	if !ok {
+		t.Fatalf("explicitAgents missing builtin maintenance dog agent: %+v", explicit)
+	}
+	if worker.MaxActiveSessions == nil {
+		t.Fatal("worker.MaxActiveSessions is nil, want non-nil")
+	}
+	if *worker.MaxActiveSessions != 5 {
+		t.Errorf("worker.MaxActiveSessions = %d, want 5", *worker.MaxActiveSessions)
+	}
+	if !strings.HasSuffix(mayor.PromptTemplate, filepath.Join("agents", "mayor", "prompt.template.md")) {
+		t.Errorf("mayor.PromptTemplate = %q, want suffix %q", mayor.PromptTemplate, filepath.Join("agents", "mayor", "prompt.template.md"))
+	}
+	if !strings.HasSuffix(dog.PromptTemplate, filepath.Join(".gc", "system", "packs", "maintenance", "agents", "dog", "prompt.template.md")) {
+		t.Errorf("dog.PromptTemplate = %q, want maintenance dog prompt", dog.PromptTemplate)
 	}
 
 	packData, err := os.ReadFile(filepath.Join(cityPath, "pack.toml"))
@@ -4876,17 +4917,7 @@ func TestDoStopStopError(t *testing.T) {
 // --- doAgentAdd (with fsys.Fake) ---
 
 func TestDoAgentAddSuccess(t *testing.T) {
-	f := fsys.NewFake()
-	cfg := config.DefaultCity("bright-lights")
-	data, err := cfg.Marshal()
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.Files[filepath.Join("/city", "city.toml")] = data
-	f.Files[filepath.Join("/city", "pack.toml")] = []byte(`[pack]
-name = "bright-lights"
-schema = 2
-`)
+	f := v2CityWithPack(t)
 
 	var stdout, stderr bytes.Buffer
 	code := doAgentAdd(f, "/city", "worker", "", "", false, &stdout, &stderr)
@@ -4925,17 +4956,7 @@ schema = 2
 }
 
 func TestDoAgentAddDuplicate(t *testing.T) {
-	f := fsys.NewFake()
-	cfg := config.DefaultCity("bright-lights")
-	data, err := cfg.Marshal()
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.Files[filepath.Join("/city", "city.toml")] = data
-	f.Files[filepath.Join("/city", "pack.toml")] = []byte(`[pack]
-name = "bright-lights"
-schema = 2
-`)
+	f := v2CityWithPack(t)
 
 	var stdout, stderr bytes.Buffer
 	if code := doAgentAdd(f, "/city", "dupe", "", "", false, &stdout, &stderr); code != 0 {
@@ -5074,17 +5095,7 @@ func TestResolveAgentChoiceUnknown(t *testing.T) {
 }
 
 func TestDoAgentAddWithPromptTemplate(t *testing.T) {
-	f := fsys.NewFake()
-	cfg := config.DefaultCity("bright-lights")
-	data, err := cfg.Marshal()
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.Files[filepath.Join("/city", "city.toml")] = data
-	f.Files[filepath.Join("/city", "pack.toml")] = []byte(`[pack]
-name = "bright-lights"
-schema = 2
-`)
+	f := v2CityWithPack(t)
 	f.Files[filepath.Join("/city", "templates", "worker.md")] = []byte("prompt")
 
 	var stdout, stderr bytes.Buffer
@@ -5425,6 +5436,9 @@ prompt_template = "prompts/mayor.md"
 // rather than being reported as an error. Strict is for debugging typos
 // and template mistakes, not for rejecting valid minimal configs.
 func TestDoPrimeStrictAgentWithEmptyPromptTemplate(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	dir := t.TempDir()
 	gcDir := filepath.Join(dir, ".gc")
 	if err := os.MkdirAll(gcDir, 0o755); err != nil {
@@ -5437,6 +5451,7 @@ name = "test-city"
 
 [[agent]]
 name = "mayor"
+max_active_sessions = 1
 `
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
 		t.Fatal(err)
@@ -5464,6 +5479,9 @@ name = "mayor"
 // silently swallows by returning "", which strict mode needs to surface
 // with the underlying stat reason.
 func TestDoPrimeStrictMissingTemplateFile(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	dir := t.TempDir()
 	gcDir := filepath.Join(dir, ".gc")
 	if err := os.MkdirAll(gcDir, 0o755); err != nil {
@@ -5500,6 +5518,9 @@ prompt_template = "prompts/does-not-exist.md"
 }
 
 func TestDoPrimeStrictAbsoluteTemplatePath(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	dir := t.TempDir()
 	gcDir := filepath.Join(dir, ".gc")
 	if err := os.MkdirAll(gcDir, 0o755); err != nil {
@@ -5545,6 +5566,9 @@ prompt_template = %q
 // substantial content. The absence of this test would let the missing-
 // file strict check quietly regress into a broader empty-render check.
 func TestDoPrimeStrictTemplateRendersLegitimatelyEmpty(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	dir := t.TempDir()
 	gcDir := filepath.Join(dir, ".gc")
 	if err := os.MkdirAll(gcDir, 0o755); err != nil {
@@ -5597,6 +5621,9 @@ prompt_template = "prompts/mayor.md"
 // effects (persisting the session ID to .runtime/session_id) do NOT fire.
 // A failing strict invocation must not leave partial state behind.
 func TestDoPrimeStrictHookModeDoesNotPersistSessionOnFailure(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	dir := t.TempDir()
 	gcDir := filepath.Join(dir, ".gc")
 	if err := os.MkdirAll(gcDir, 0o755); err != nil {
@@ -5639,6 +5666,9 @@ name = "mayor"
 // effects. A missing prompt_template is a strict failure, so it must not
 // leave behind a session id for the failed hook invocation.
 func TestDoPrimeStrictHookModeMissingTemplateDoesNotPersistSessionOnFailure(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	dir := t.TempDir()
 	gcDir := filepath.Join(dir, ".gc")
 	if err := os.MkdirAll(gcDir, 0o755); err != nil {
@@ -5683,6 +5713,9 @@ prompt_template = "prompts/does-not-exist.md"
 // session-id persistence DOES fire — the deferral is not a regression of
 // hook behavior for the success path.
 func TestDoPrimeStrictHookModePersistsSessionOnSuccess(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	dir := t.TempDir()
 	gcDir := filepath.Join(dir, ".gc")
 	if err := os.MkdirAll(gcDir, 0o755); err != nil {
@@ -5797,6 +5830,9 @@ prompt_template = "prompts/mayor.md"
 // Without this guard, the strict deferral silently drops session-id
 // persistence on the suspended-agent success path.
 func TestDoPrimeStrictHookModeOnSuspendedAgentPersistsSessionID(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	dir := t.TempDir()
 	gcDir := filepath.Join(dir, ".gc")
 	if err := os.MkdirAll(gcDir, 0o755); err != nil {
@@ -6010,6 +6046,9 @@ func materializeBuiltinPrompts(cityPath string) error {
 }
 
 func TestDoPrimeHookPersistsSessionID(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -6444,17 +6483,7 @@ func TestCurrentRigContextUsesWorkingDirThroughSymlinkAlias(t *testing.T) {
 // --- doAgentAdd with --dir and --suspended ---
 
 func TestDoAgentAddWithDir(t *testing.T) {
-	f := fsys.NewFake()
-	cfg := config.DefaultCity("bright-lights")
-	data, err := cfg.Marshal()
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.Files[filepath.Join("/city", "city.toml")] = data
-	f.Files[filepath.Join("/city", "pack.toml")] = []byte(`[pack]
-name = "bright-lights"
-schema = 2
-`)
+	f := v2CityWithPack(t)
 
 	var stdout, stderr bytes.Buffer
 	code := doAgentAdd(f, "/city", "builder", "", "hello-world", false, &stdout, &stderr)
@@ -6490,17 +6519,7 @@ schema = 2
 }
 
 func TestDoAgentAddWithSuspended(t *testing.T) {
-	f := fsys.NewFake()
-	cfg := config.DefaultCity("bright-lights")
-	data, err := cfg.Marshal()
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.Files[filepath.Join("/city", "city.toml")] = data
-	f.Files[filepath.Join("/city", "pack.toml")] = []byte(`[pack]
-name = "bright-lights"
-schema = 2
-`)
+	f := v2CityWithPack(t)
 
 	var stdout, stderr bytes.Buffer
 	code := doAgentAdd(f, "/city", "builder", "", "hello-world", true, &stdout, &stderr)

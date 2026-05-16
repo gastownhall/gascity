@@ -45,19 +45,27 @@ func sanitizedBaseEnv(extra ...string) []string {
 // If stderrMsg is non-empty, the script writes it to stderr before exiting.
 func writeTestScript(t *testing.T, _ string, exitCode int, stderrMsg string) string {
 	t.Helper()
-	dir := t.TempDir()
-	script := filepath.Join(dir, "test-beads.sh")
-
 	content := "#!/bin/sh\n"
 	if stderrMsg != "" {
 		content += "echo '" + stderrMsg + "' >&2\n"
 	}
 	content += "exit " + itoa(exitCode) + "\n"
+	return writeNamedTestScript(t, "test-beads.sh", content)
+}
 
+func writeNamedTestScript(t *testing.T, name, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, name)
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return script
+}
+
+func writeManagedBdTestScript(t *testing.T, content string) string {
+	t.Helper()
+	return writeNamedTestScript(t, "gc-beads-bd.sh", content)
 }
 
 func itoa(n int) string {

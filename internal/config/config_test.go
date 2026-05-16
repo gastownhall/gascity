@@ -1452,7 +1452,7 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveWorkQuery()
 	// Tiered query: check that tier 3 (routed_to) and tier 1-2 (assignee resolution) are present.
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=mayor --unassigned --json --limit=1") {
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=mayor --unassigned --exclude-type=epic --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 	if !strings.Contains(got, `"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`) {
@@ -1472,7 +1472,7 @@ func TestEffectiveWorkQueryCustom(t *testing.T) {
 func TestEffectiveWorkQueryWithDir(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world"}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1") {
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --exclude-type=epic --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 }
@@ -1480,7 +1480,7 @@ func TestEffectiveWorkQueryWithDir(t *testing.T) {
 func TestEffectiveWorkQueryPoolDefault(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1") {
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --exclude-type=epic --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 	if strings.Contains(got, "--type=molecule") {
@@ -1533,7 +1533,7 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1") {
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --exclude-type=epic --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to with pool name: %q", got)
 	}
 	if strings.Contains(got, "--type=molecule") {
@@ -1544,7 +1544,7 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 func TestEffectiveWorkQueryPoolNoPoolName(t *testing.T) {
 	a := Agent{Name: "dog", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1") {
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --exclude-type=epic --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 }
@@ -1574,14 +1574,14 @@ func TestEffectiveWorkQueryControlDispatcherClaimsLegacyAssignedWork(t *testing.
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "list --status in_progress --assignee=gascity--control-dispatcher --json --limit=1"|\
-  "list --status in_progress --assignee=gascity/control-dispatcher --json --limit=1"|\
-  "list --status in_progress --assignee=gascity--workflow-control --json --limit=1"|\
-  "list --status in_progress --assignee=gascity/workflow-control --json --limit=1")
+  "list --status in_progress --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=1"|\
+  "list --status in_progress --assignee=gascity/control-dispatcher --exclude-type=epic --json --limit=1"|\
+  "list --status in_progress --assignee=gascity--workflow-control --exclude-type=epic --json --limit=1"|\
+  "list --status in_progress --assignee=gascity/workflow-control --exclude-type=epic --json --limit=1")
     printf '[]'
     ;;
-  "ready --assignee=gascity--workflow-control --json --limit=1"|\
-  "ready --assignee=gascity/workflow-control --json --limit=1")
+  "ready --assignee=gascity--workflow-control --exclude-type=epic --json --limit=1"|\
+  "ready --assignee=gascity/workflow-control --exclude-type=epic --json --limit=1")
     printf '[{"id":"ga-legacy-ready"}]'
     ;;
   *)
@@ -1599,10 +1599,10 @@ func TestEffectiveWorkQueryControlDispatcherClaimsLegacyUnassignedRoute(t *testi
 	out := runEffectiveWorkQuery(t, a, nil, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --json --limit=1")
+  "ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --json --limit=1")
     printf '[]'
     ;;
-  "ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --json --limit=1")
+  "ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --exclude-type=epic --json --limit=1")
     printf '[{"id":"ga-legacy-route"}]'
     ;;
   *)
@@ -1626,6 +1626,95 @@ func TestEffectiveSlingQueryPoolNameOverride(t *testing.T) {
 	want := "bd update {} --set-metadata gc.routed_to=hello-world/dog-1"
 	if got != want {
 		t.Errorf("EffectiveSlingQuery() = %q, want %q", got, want)
+	}
+}
+
+// TestEffectiveWorkQueryExcludesEpics verifies that the default work query
+// excludes parent epic beads from claimable work — regression coverage for
+// gc-udx where workers were claiming open parent epics whose only role is
+// "all children done." Workers should only see leaf work; parent epics must
+// flow through an explicit override path (a custom work_query in the
+// agent's TOML), not the default tier-1/2/3 query.
+func TestEffectiveWorkQueryExcludesEpics(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	got := a.EffectiveWorkQuery()
+	// All three tiers (in_progress assignee, ready assignee, ready routed)
+	// must structurally exclude the epic type.
+	wantSnippets := []string{
+		`bd list --status in_progress --assignee="$id" --exclude-type=epic --json`,
+		`bd ready --assignee="$id" --exclude-type=epic --json`,
+		`bd ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --json`,
+	}
+	for _, want := range wantSnippets {
+		if !strings.Contains(got, want) {
+			t.Errorf("EffectiveWorkQuery() missing exclude-type=epic on tier:\n  want substring: %s\n  got: %s", want, got)
+		}
+	}
+}
+
+// TestEffectiveWorkQueryExcludesEpicsControlDispatcher verifies the
+// control-dispatcher path (which has an extra legacy workflow-control
+// route) also excludes epics on every tier.
+func TestEffectiveWorkQueryExcludesEpicsControlDispatcher(t *testing.T) {
+	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
+	got := a.EffectiveWorkQuery()
+	wantSnippets := []string{
+		`bd list --status in_progress --assignee="$cand" --exclude-type=epic --json`,
+		`bd ready --assignee="$cand" --exclude-type=epic --json`,
+		`bd ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --json`,
+		`bd ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --exclude-type=epic --json`,
+	}
+	for _, want := range wantSnippets {
+		if !strings.Contains(got, want) {
+			t.Errorf("EffectiveWorkQuery() missing exclude-type=epic on control-dispatcher tier:\n  want substring: %s\n  got: %s", want, got)
+		}
+	}
+}
+
+// TestEffectiveWorkQueryCustomPreservesOverride verifies that an agent
+// that explicitly opts into epic-handling (e.g. an oversight role that
+// closes epics once their children complete) can do so via a custom
+// work_query — the explicit-override path required by gc-udx.
+func TestEffectiveWorkQueryCustomPreservesOverride(t *testing.T) {
+	custom := "bd ready --type=epic --assignee=closer --json --limit=1"
+	a := Agent{Name: "closer", WorkQuery: custom}
+	if got := a.EffectiveWorkQuery(); got != custom {
+		t.Errorf("EffectiveWorkQuery() = %q, want %q (custom override must pass through unmodified)", got, custom)
+	}
+}
+
+// TestEffectiveWorkQuerySkipsEpicLeafScenario simulates the gc-udx
+// reproduction state through the runEffectiveWorkQuery harness:
+//   - parent epic is open and routed_to the worker
+//   - one open leaf child is also routed_to the worker
+//
+// The default query must return the leaf, never the epic. The fake bd
+// stub here only returns results when --exclude-type=epic is present on
+// the tier-3 routed query — i.e. it asserts the flag is on the wire.
+func TestEffectiveWorkQuerySkipsEpicLeafScenario(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--exclude-type=epic"*"--metadata-field gc.routed_to=hello-world/worker"*|\
+  *"--metadata-field gc.routed_to=hello-world/worker"*"--exclude-type=epic"*)
+    printf '[{"id":"leaf-child","issue_type":"task"}]'
+    ;;
+  *"--metadata-field gc.routed_to=hello-world/worker"*)
+    printf '[{"id":"parent-epic","issue_type":"epic"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if !strings.Contains(out, "leaf-child") {
+		t.Fatalf("EffectiveWorkQuery() did not return the leaf child: %q", out)
+	}
+	if strings.Contains(out, "parent-epic") {
+		t.Fatalf("EffectiveWorkQuery() surfaced the parent epic to the worker: %q", out)
 	}
 }
 
@@ -2677,6 +2766,76 @@ func TestRigsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRigFormulaVarsRoundTrip verifies that rigs.<name>.formula_vars survives
+// TOML marshal/unmarshal so city.toml can declare rig-scoped formula defaults.
+func TestRigFormulaVarsRoundTrip(t *testing.T) {
+	c := City{
+		Workspace: Workspace{Name: "test"},
+		Agents:    []Agent{{Name: "mayor"}},
+		Rigs: []Rig{
+			{
+				Name: "mo",
+				Path: "/home/user/mo",
+				FormulaVars: map[string]string{
+					"test_command": "make test-fast",
+					"lint_command": "golangci-lint run",
+				},
+			},
+		},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse(Marshal output): %v", err)
+	}
+	if len(got.Rigs) != 1 {
+		t.Fatalf("len(Rigs) after round-trip = %d, want 1", len(got.Rigs))
+	}
+	if v := got.Rigs[0].FormulaVars["test_command"]; v != "make test-fast" {
+		t.Errorf("FormulaVars[test_command] = %q, want %q", v, "make test-fast")
+	}
+	if v := got.Rigs[0].FormulaVars["lint_command"]; v != "golangci-lint run" {
+		t.Errorf("FormulaVars[lint_command] = %q, want %q", v, "golangci-lint run")
+	}
+}
+
+// TestRigFormulaVarsParsing verifies the expected TOML surface — a
+// [rigs.formula_vars] table inside a [[rigs]] entry — decodes into the
+// FormulaVars map on the rig.
+func TestRigFormulaVarsParsing(t *testing.T) {
+	input := `
+[workspace]
+name = "my-city"
+
+[[agent]]
+name = "mayor"
+
+[[rigs]]
+name = "mo"
+path = "/home/user/mo"
+
+[rigs.formula_vars]
+test_command = "make test-fast"
+build_command = "make build"
+`
+	cfg, err := Parse([]byte(input))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Rigs) != 1 {
+		t.Fatalf("len(Rigs) = %d, want 1", len(cfg.Rigs))
+	}
+	if got := cfg.Rigs[0].FormulaVars["test_command"]; got != "make test-fast" {
+		t.Errorf("FormulaVars[test_command] = %q, want %q", got, "make test-fast")
+	}
+	if got := cfg.Rigs[0].FormulaVars["build_command"]; got != "make build" {
+		t.Errorf("FormulaVars[build_command] = %q, want %q", got, "make build")
+	}
+}
+
 // --- DeriveBeadsPrefix tests ---
 
 func TestDeriveBeadsPrefix(t *testing.T) {
@@ -3187,6 +3346,85 @@ func TestIdleTimeoutOmittedWhenEmpty(t *testing.T) {
 	}
 	if strings.Contains(string(data), "idle_timeout") {
 		t.Errorf("TOML output should omit idle_timeout when empty, got:\n%s", data)
+	}
+}
+
+// --- MaxSessionAge tests ---
+
+func TestMaxSessionAgeDurationEmpty(t *testing.T) {
+	a := Agent{Name: "witness"}
+	if got := a.MaxSessionAgeDuration(); got != 0 {
+		t.Errorf("MaxSessionAgeDuration() = %v, want 0", got)
+	}
+}
+
+func TestMaxSessionAgeDurationValid(t *testing.T) {
+	a := Agent{Name: "witness", MaxSessionAge: "5h"}
+	if got := a.MaxSessionAgeDuration(); got != 5*time.Hour {
+		t.Errorf("MaxSessionAgeDuration() = %v, want 5h", got)
+	}
+}
+
+func TestMaxSessionAgeDurationInvalid(t *testing.T) {
+	a := Agent{Name: "witness", MaxSessionAge: "bogus"}
+	if got := a.MaxSessionAgeDuration(); got != 0 {
+		t.Errorf("MaxSessionAgeDuration() = %v, want 0 for invalid", got)
+	}
+}
+
+func TestMaxSessionAgeJitterDurationIgnoredWhenAgeUnset(t *testing.T) {
+	a := Agent{Name: "witness", MaxSessionAgeJitter: "15m"}
+	if got := a.MaxSessionAgeJitterDuration(); got != 0 {
+		t.Errorf("MaxSessionAgeJitterDuration() = %v, want 0 when MaxSessionAge unset", got)
+	}
+}
+
+func TestMaxSessionAgeJitterDurationValid(t *testing.T) {
+	a := Agent{Name: "witness", MaxSessionAge: "5h", MaxSessionAgeJitter: "15m"}
+	if got := a.MaxSessionAgeJitterDuration(); got != 15*time.Minute {
+		t.Errorf("MaxSessionAgeJitterDuration() = %v, want 15m", got)
+	}
+}
+
+func TestMaxSessionAgeJitterDurationNegativeRejected(t *testing.T) {
+	a := Agent{Name: "witness", MaxSessionAge: "5h", MaxSessionAgeJitter: "-5m"}
+	if got := a.MaxSessionAgeJitterDuration(); got != 0 {
+		t.Errorf("MaxSessionAgeJitterDuration() = %v, want 0 for negative value", got)
+	}
+}
+
+func TestMaxSessionAgeRoundTrip(t *testing.T) {
+	c := City{
+		Workspace: Workspace{Name: "test"},
+		Agents:    []Agent{{Name: "witness", MaxSessionAge: "5h", MaxSessionAgeJitter: "15m"}},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got.Agents[0].MaxSessionAge != "5h" {
+		t.Errorf("MaxSessionAge after round-trip = %q, want %q", got.Agents[0].MaxSessionAge, "5h")
+	}
+	if got.Agents[0].MaxSessionAgeJitter != "15m" {
+		t.Errorf("MaxSessionAgeJitter after round-trip = %q, want %q", got.Agents[0].MaxSessionAgeJitter, "15m")
+	}
+}
+
+func TestMaxSessionAgeOmittedWhenEmpty(t *testing.T) {
+	c := City{
+		Workspace: Workspace{Name: "test"},
+		Agents:    []Agent{{Name: "witness"}},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "max_session_age") {
+		t.Errorf("TOML output should omit max_session_age when empty, got:\n%s", data)
 	}
 }
 
@@ -4945,8 +5183,11 @@ name = "mayor"
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
 
-	if len(prov.Warnings) != 0 {
-		t.Errorf("expected no warning, got:\n%s", strings.Join(prov.Warnings, "\n"))
+	// This test guards the attachment-list tombstone warning, not the
+	// v1-surface warnings. Filter v1-surface warnings (the [[agent]] in
+	// the fixture intentionally exercises the legacy surface).
+	if other := warningsExcludingV1Surfaces(prov.Warnings); len(other) != 0 {
+		t.Errorf("expected no non-v1-surface warning, got:\n%s", strings.Join(other, "\n"))
 	}
 }
 

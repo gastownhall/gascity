@@ -211,7 +211,7 @@ func (p *Provider) Stop(name string) error {
 func (p *Provider) Interrupt(name string) error {
 	if p.tm.requiresHiddenAttachedInterrupt(name) && !p.tm.IsSessionAttached(name) {
 		if err := p.tm.ensureHiddenAttachedClient(name); err != nil {
-			return fmt.Errorf("preparing detached gemini interrupt: %w", err)
+			return fmt.Errorf("preparing detached interrupt: %w", err)
 		}
 	}
 	if used, err := p.tm.sendHiddenAttachedKeys(name, "C-c"); used {

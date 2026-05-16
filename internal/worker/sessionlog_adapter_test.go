@@ -91,6 +91,24 @@ func TestSessionLogAdapterDiscoverTranscriptExplicitIDFailsClosed(t *testing.T) 
 	}
 }
 
+func TestSessionLogAdapterDiscoverTranscriptPiExplicitIDFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	workDir := filepath.Join(t.TempDir(), "pi-project")
+	base := t.TempDir()
+	path := filepath.Join(base, "other.jsonl")
+	writeLines(t, path,
+		fmt.Sprintf(`{"type":"session","id":"other-session","cwd":%q}`, workDir),
+		`{"type":"message","id":"u1","message":{"role":"user","content":"pending"}}`,
+	)
+
+	adapter := SessionLogAdapter{SearchPaths: []string{base}}
+	discovered := adapter.DiscoverTranscript("pi/tmux-cli", workDir, "missing-session")
+	if discovered != "" {
+		t.Fatalf("DiscoverTranscript() = %q, want empty string when explicit Pi session ID is missing", discovered)
+	}
+}
+
 func TestSessionLogAdapterLoadHistoryCodex(t *testing.T) {
 	t.Parallel()
 

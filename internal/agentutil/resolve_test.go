@@ -24,6 +24,30 @@ func TestResolveAgentLiteralQualified(t *testing.T) {
 	}
 }
 
+func TestResolveAgentLiteralBindingQualified(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "interface-lead", BindingName: "ar"},
+			{Name: "interface-lead", BindingName: "ar", Dir: "demo"},
+		},
+	}
+	a, ok := ResolveAgent(cfg, "ar.interface-lead", ResolveOpts{})
+	if !ok {
+		t.Fatal("expected to resolve ar.interface-lead")
+	}
+	if got := a.QualifiedName(); got != "ar.interface-lead" {
+		t.Errorf("got %q, want ar.interface-lead", got)
+	}
+
+	a, ok = ResolveAgent(cfg, "demo/ar.interface-lead", ResolveOpts{})
+	if !ok {
+		t.Fatal("expected to resolve demo/ar.interface-lead")
+	}
+	if got := a.QualifiedName(); got != "demo/ar.interface-lead" {
+		t.Errorf("got %q, want demo/ar.interface-lead", got)
+	}
+}
+
 func TestResolveAgentBareName(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
@@ -98,6 +122,21 @@ func TestResolveAgentPoolMemberAllowed(t *testing.T) {
 	}
 	if a.Name != "polecat-2" {
 		t.Errorf("got name %q, want polecat-2", a.Name)
+	}
+}
+
+func TestResolveAgentCityScopedBindingQualifiedPoolMemberAllowed(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "witness", BindingName: "gastown", MaxActiveSessions: intPtr(-1)},
+		},
+	}
+	a, ok := ResolveAgent(cfg, "gastown.witness-1", ResolveOpts{AllowPoolMembers: true})
+	if !ok {
+		t.Fatal("expected binding-qualified pool member to resolve")
+	}
+	if got := a.QualifiedName(); got != "gastown.witness-1" {
+		t.Errorf("got %q, want gastown.witness-1", got)
 	}
 }
 

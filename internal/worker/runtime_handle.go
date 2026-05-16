@@ -342,8 +342,15 @@ func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, err
 	if sessionID, err := h.provider.GetMeta(h.sessionName, "GC_SESSION_ID"); err == nil {
 		obs.RuntimeSessionID = strings.TrimSpace(sessionID)
 	}
-	if obs.Running {
+	if len(h.processNames) > 0 {
 		obs.Alive = h.provider.ProcessAlive(h.sessionName, h.processNames)
+		if obs.Alive && !obs.Running {
+			obs.Running = true
+		}
+	} else {
+		obs.Alive = obs.Running
+	}
+	if obs.Running {
 		obs.Attached = h.provider.IsAttached(h.sessionName)
 		if last, err := h.provider.GetLastActivity(h.sessionName); err == nil && !last.IsZero() {
 			lastCopy := last

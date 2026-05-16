@@ -24,6 +24,32 @@ var (
 	rawDurationIntervalRe = regexp.MustCompile(`(?i)\bINTERVAL\s+\{\{(?:max_age|purge_age|stale_issue_age)\}\}`)
 )
 
+func TestMaintenanceCheckBinariesTreatsGhAsOptional(t *testing.T) {
+	binDir := t.TempDir()
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	if err := os.Symlink(bashPath, filepath.Join(binDir, "bash")); err != nil {
+		t.Fatalf("Symlink(bash): %v", err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "jq"), "#!/bin/sh\nexit 0\n")
+
+	cmd := exec.Command(filepath.Join(exampleDir(), "packs", "maintenance", "doctor", "check-binaries", "run.sh"))
+	cmd.Env = mergeTestEnv(map[string]string{"PATH": binDir})
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("check-binaries failed without gh: %v\n%s", err, out)
+	}
+	text := string(out)
+	if !strings.Contains(text, "all required binaries available (jq)") {
+		t.Fatalf("output = %q, want required jq success", text)
+	}
+	if !strings.Contains(text, "optional gh not found") {
+		t.Fatalf("output = %q, want optional gh warning", text)
+	}
+}
+
 func TestMaintenanceDoltScriptsUseProjectedConnectionTarget(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -3464,9 +3490,9 @@ func initEmptyArchiveRemote(t *testing.T, archiveRepo string, prevCount int) str
 // Used by tests that specifically exercise the push-failure recovery paths:
 // push mode is active (so `should_attempt_push` returns true) but the remote
 // cannot be reached.
-func initSeedArchiveWithUnreachableRemote(t *testing.T, archiveRepo string, prevCount int) {
+func initSeedArchiveWithUnreachableRemote(t *testing.T, archiveRepo string) {
 	t.Helper()
-	initSeedArchive(t, archiveRepo, prevCount)
+	initSeedArchive(t, archiveRepo, 3)
 	unreachable := filepath.Join(t.TempDir(), "nonexistent-remote.git")
 	if out, err := exec.Command("git", "-C", archiveRepo, "remote", "add", "origin", unreachable).CombinedOutput(); err != nil {
 		t.Fatalf("git remote add origin: %v\n%s", err, out)
@@ -4591,7 +4617,7 @@ func TestJsonlExportPushFailureRecoversFromMalformedState(t *testing.T) {
 	archiveRepo := filepath.Join(cityDir, "archive")
 	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
 
-	initSeedArchiveWithUnreachableRemote(t, archiveRepo, 3)
+	initSeedArchiveWithUnreachableRemote(t, archiveRepo)
 	writeMultiRecordDoltStub(t, binDir, 5)
 	writeJsonlExportGCStub(t, binDir)
 
@@ -4625,7 +4651,7 @@ func TestJsonlExportPushFailureRecoversFromWrongShapeState(t *testing.T) {
 	archiveRepo := filepath.Join(cityDir, "archive")
 	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
 
-	initSeedArchiveWithUnreachableRemote(t, archiveRepo, 3)
+	initSeedArchiveWithUnreachableRemote(t, archiveRepo)
 	writeMultiRecordDoltStub(t, binDir, 5)
 	writeJsonlExportGCStub(t, binDir)
 
@@ -5043,6 +5069,107 @@ func TestJsonlExportLocalOnlyTransitionClearsStalePushFailureState(t *testing.T)
 	}
 }
 
+func TestJsonlExportLocalOnlyModeClearsStalePushFailureState(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	initSeedArchive(t, archiveRepo, 3)
+	writeMultiRecordDoltStub(t, binDir, 3)
+	writeJsonlExportGCStub(t, binDir)
+
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(state dir): %v", err)
+	}
+	priorState := `{"last_logged_mode":"local-only","last_logged_at":"2026-05-10T00:00:00Z","consecutive_push_failures":38,"pending_archive_push":true,"push_failure_escalated":true}` + "\n"
+	if err := os.WriteFile(stateFile, []byte(priorState), 0o644); err != nil {
+		t.Fatalf("WriteFile(state file): %v", err)
+	}
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	delete(env, "GC_JSONL_MAX_PUSH_FAILURES")
+
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "push: skipped (local-only)") {
+		t.Fatalf("expected local-only pending-push summary, got:\n%s", out)
+	}
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got, ok := state["consecutive_push_failures"].(float64); !ok || got != 0 {
+		t.Fatalf("consecutive_push_failures = %v, want 0\nstate: %s", state["consecutive_push_failures"], stateData)
+	}
+	if got, ok := state["pending_archive_push"].(bool); !ok || !got {
+		t.Fatalf("pending_archive_push must remain true to track deferred push\nstate: %s", stateData)
+	}
+	if _, ok := state["push_failure_escalated"]; ok {
+		t.Fatalf("push_failure_escalated must clear in local-only mode\nstate: %s", stateData)
+	}
+
+	mailContents, err := os.ReadFile(mailLog)
+	if err == nil && strings.Contains(string(mailContents), "ESCALATION: JSONL push failed [HIGH]") {
+		t.Fatalf("local-only cleanup must not escalate; mail log:\n%s", mailContents)
+	}
+}
+
+func TestJsonlExportLocalOnlyModeClearsStalePushEscalationMarker(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	initSeedArchive(t, archiveRepo, 3)
+	writeMultiRecordDoltStub(t, binDir, 3)
+	writeJsonlExportGCStub(t, binDir)
+
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(state dir): %v", err)
+	}
+	priorState := `{"last_logged_mode":"local-only","last_logged_at":"2026-05-10T00:00:00Z","consecutive_push_failures":0,"pending_archive_push":true,"push_failure_escalated":true}` + "\n"
+	if err := os.WriteFile(stateFile, []byte(priorState), 0o644); err != nil {
+		t.Fatalf("WriteFile(state file): %v", err)
+	}
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	delete(env, "GC_JSONL_MAX_PUSH_FAILURES")
+
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
+	}
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if _, ok := state["push_failure_escalated"]; ok {
+		t.Fatalf("push_failure_escalated must clear in local-only mode\nstate: %s", stateData)
+	}
+	if got, ok := state["pending_archive_push"].(bool); !ok || !got {
+		t.Fatalf("pending_archive_push must remain true to track deferred push\nstate: %s", stateData)
+	}
+}
+
 // TestJsonlExportModeTransitionFromPushToLocalOnlyRelogs covers the operator
 // who previously had origin configured, ran the archive (so state already
 // carries last_logged_mode=push), then removed origin. The next run must log
@@ -5113,7 +5240,7 @@ func TestJsonlExportPushFailureEscalationBodyIncludesStderrAndRemediation(t *tes
 	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
 	archiveRepo := filepath.Join(cityDir, "archive")
 
-	initSeedArchiveWithUnreachableRemote(t, archiveRepo, 3)
+	initSeedArchiveWithUnreachableRemote(t, archiveRepo)
 	writeMultiRecordDoltStub(t, binDir, 5)
 	writeJsonlExportGCStub(t, binDir)
 
@@ -5140,6 +5267,48 @@ func TestJsonlExportPushFailureEscalationBodyIncludesStderrAndRemediation(t *tes
 		if !strings.Contains(body, want) {
 			t.Fatalf("escalation body missing %q:\n%s", want, body)
 		}
+	}
+}
+
+func TestJsonlExportPushFailureEscalatesOncePerUnresolvedFailure(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	initSeedArchiveWithUnreachableRemote(t, archiveRepo)
+	writeMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["GC_JSONL_MAX_PUSH_FAILURES"] = "1"
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh")
+	runScript(t, script, env)
+	runScript(t, script, env)
+	runScript(t, script, env)
+
+	mailData, err := os.ReadFile(mailLog)
+	if err != nil {
+		t.Fatalf("ReadFile(mail log): %v", err)
+	}
+	if got := strings.Count(string(mailData), "ESCALATION: JSONL push failed [HIGH]"); got != 1 {
+		t.Fatalf("push failure must escalate once per unresolved failure, got %d mails:\n%s", got, mailData)
+	}
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got, ok := state["push_failure_escalated"].(bool); !ok || !got {
+		t.Fatalf("push_failure_escalated = %v, want true\nstate: %s", state["push_failure_escalated"], stateData)
 	}
 }
 

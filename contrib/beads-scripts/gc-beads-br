@@ -85,6 +85,7 @@ br_stream_objects() {
 br_object_to_gc() {
   local obj="$1"
   local parent_id="" key value rest key_hex value_hex
+  local ephemeral=false
   local -a kept_labels=()
   local -a needs=()
   local metadata='{}'
@@ -111,6 +112,9 @@ br_object_to_gc() {
         value=$(hex_decode "$value_hex")
         metadata=$(jq -cn --argjson m "$metadata" --arg k "$key" --arg v "$value" '$m + {($k): $v}')
         ;;
+      gc:ephemeral)
+        ephemeral=true
+        ;;
       *)
         kept_labels+=("$label")
         ;;
@@ -126,6 +130,7 @@ br_object_to_gc() {
     --argjson labels "$labels_json" \
     --argjson needs "$needs_json" \
     --argjson metadata "$metadata" \
+    --argjson ephemeral "$ephemeral" \
     '{
       id: .id,
       title: .title,
@@ -140,7 +145,8 @@ br_object_to_gc() {
       needs: $needs,
       description: (.description // ""),
       labels: $labels,
-      metadata: $metadata
+      metadata: $metadata,
+      ephemeral: $ephemeral
     }'
 }
 
@@ -200,6 +206,10 @@ case "$op" in
     while IFS=$'\t' read -r meta_key meta_value; do
       [ -n "$meta_key" ] && all_labels+=("$(meta_label "$meta_key" "$meta_value")")
     done < <(echo "$input" | jq -r '.metadata // {} | to_entries[] | [.key, (.value|tostring)] | @tsv')
+
+    if [ "$(echo "$input" | jq -r '.ephemeral // false')" = "true" ]; then
+      all_labels+=("gc:ephemeral")
+    fi
 
     # Build create command.
     cmd_args=(br create --json --type="$bead_type")

@@ -11,8 +11,11 @@ you left off from context (bead state, mail state, last action).
 Formula steps are NOT materialized as child beads. Read the step
 descriptions below and work through them in order.
 
-The loop mechanism: every exit path (happy or early) pours the next
-wisp before burning this one. The prompt only bootstraps the first wisp.
+The loop mechanism: EVERY step is one leg of the same wisp. Never exit
+the wisp from an intermediate step — either continue to the next step
+or jump directly to `next-iteration` to pour and burn. Exiting without
+burning leaks wisps (see #1884). The prompt only bootstraps the first
+wisp.
 
 ## Witness Role
 
@@ -55,7 +58,7 @@ the worktree. This makes the work schedulable again.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-witness-patrol"
-version = 8
+version = 9
 
 [vars]
 [vars.event_timeout]
@@ -117,7 +120,9 @@ Archive after reading.
 **Hygiene principle**: Archive messages after they're fully processed.
 Inbox should be near-empty after this step.
 
-Close this step and proceed."""
+Close this step and continue to `recover-orphaned-beads` — do NOT exit
+the wisp here. The `next-iteration` step is the only place that pours
+the next wisp and burns this one."""
 
 [[steps]]
 id = "recover-orphaned-beads"
@@ -353,7 +358,9 @@ gc bd update <bead> --set-metadata recovered=true
 ```
 
 **Exit criteria:** All orphaned beads recovered, worktrees cleaned.
-Or no orphans found."""
+Or no orphans found. Continue to `check-refinery` — do NOT exit the
+wisp here. The `next-iteration` step is the only place that pours the
+next wisp and burns this one."""
 
 [[steps]]
 id = "check-refinery"
@@ -395,7 +402,10 @@ Observation: <what you found>
 Recommendation: <what should happen>"
 ```
 
-Close this step after assessment."""
+**Exit criteria:** Queue health assessed; nudge sent or escalation
+filed if needed. Continue to `check-polecat-health` — do NOT exit the
+wisp here. The `next-iteration` step is the only place that pours the
+next wisp and burns this one."""
 
 [[steps]]
 id = "check-polecat-health"
@@ -450,7 +460,9 @@ system handles it. Only escalate if you see a pattern (many stuck
 polecats, systemic issue).
 
 **Exit criteria:** All active polecat work beads assessed. Warrants
-filed for stuck agents. Or no stuck polecats found."""
+filed for stuck agents. Or no stuck polecats found. Continue to
+`next-iteration` — do NOT exit the wisp here. The `next-iteration` step
+is the only place that pours the next wisp and burns this one."""
 
 [[steps]]
 id = "next-iteration"

@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -178,6 +179,80 @@ func TestProcessRetryEvalRetriesPassMissingRequiredOutputJSON(t *testing.T) {
 	}
 	if run2.ID == "" {
 		t.Fatal("missing retry run 2")
+	}
+}
+
+func TestProcessRetryEvalTransientAppendErrorStaysOpenForRetry(t *testing.T) {
+	t.Parallel()
+
+	base := beads.NewMemStore()
+	root := mustCreateWorkflowBead(t, base, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	logical := mustCreateWorkflowBead(t, base, beads.Bead{
+		Title: "review",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "demo.review",
+			"gc.max_attempts": "3",
+			"gc.on_exhausted": "hard_fail",
+		},
+	})
+	run1 := mustCreateWorkflowBead(t, base, beads.Bead{
+		Title:  "review attempt 1",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-run",
+			"gc.root_bead_id":    root.ID,
+			"gc.step_ref":        "demo.review.run.1",
+			"gc.logical_bead_id": logical.ID,
+			"gc.attempt":         "1",
+			"gc.max_attempts":    "3",
+			"gc.on_exhausted":    "hard_fail",
+			"gc.outcome":         "fail",
+			"gc.failure_class":   "transient",
+			"gc.failure_reason":  "rate_limited",
+		},
+	})
+	eval1 := mustCreateWorkflowBead(t, base, beads.Bead{
+		Title: "review eval 1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-eval",
+			"gc.root_bead_id":    root.ID,
+			"gc.step_ref":        "demo.review.eval.1",
+			"gc.logical_bead_id": logical.ID,
+			"gc.attempt":         "1",
+			"gc.max_attempts":    "3",
+			"gc.on_exhausted":    "hard_fail",
+		},
+	})
+	mustDepAdd(t, base, logical.ID, eval1.ID, "blocks")
+	mustDepAdd(t, base, eval1.ID, run1.ID, "blocks")
+
+	store := &failOnceCreateStore{
+		Store: base,
+		err:   errors.New("creating retry run bead: invalid connection: i/o timeout"),
+	}
+	_, err := ProcessControl(store, mustGetBead(t, store, eval1.ID), ProcessOptions{})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl(retry-eval append) error = %v, want %v", err, ErrControlPending)
+	}
+
+	after := mustGetBead(t, store, eval1.ID)
+	if after.Status != "open" {
+		t.Fatalf("eval status = %q, want open", after.Status)
+	}
+	if after.Metadata["gc.controller_error_class"] != "transient" || after.Metadata["gc.controller_retryable"] != "true" {
+		t.Fatalf("controller retry metadata = %v, want transient retryable", after.Metadata)
 	}
 }
 

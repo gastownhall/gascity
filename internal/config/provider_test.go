@@ -145,8 +145,35 @@ func TestBuiltinProvidersCursor(t *testing.T) {
 	if p.Command != "cursor-agent" {
 		t.Errorf("Command = %q, want %q", p.Command, "cursor-agent")
 	}
-	if len(p.Args) != 1 || p.Args[0] != "-f" {
+	if !reflect.DeepEqual(p.Args, []string{"-f"}) {
 		t.Errorf("Args = %v, want [-f]", p.Args)
+	}
+	rp := &ResolvedProvider{
+		Command:           p.Command,
+		Args:              p.Args,
+		OptionsSchema:     p.OptionsSchema,
+		EffectiveDefaults: ComputeEffectiveDefaults(p.OptionsSchema, p.OptionDefaults, nil),
+	}
+	if got := rp.CommandString(); got != "cursor-agent -f" {
+		t.Errorf("CommandString() = %q, want %q", got, "cursor-agent -f")
+	}
+	if got := rp.ResolveDefaultArgs(); len(got) != 0 {
+		t.Errorf("ResolveDefaultArgs() = %v, want no MCP approval args by default", got)
+	}
+	mcpApproval := findOption(p.OptionsSchema, "mcp_approval")
+	if mcpApproval == nil {
+		t.Fatal("OptionsSchema missing mcp_approval")
+	}
+	if mcpApproval.Default != "prompt" {
+		t.Errorf("mcp_approval default = %q, want prompt", mcpApproval.Default)
+	}
+	approve := findChoice(mcpApproval.Choices, "approve")
+	if approve == nil || !reflect.DeepEqual(approve.FlagArgs, []string{"--approve-mcps"}) {
+		t.Fatalf("mcp_approval approve choice = %+v, want --approve-mcps", approve)
+	}
+	rp.EffectiveDefaults = ComputeEffectiveDefaults(p.OptionsSchema, map[string]string{"mcp_approval": "approve"}, nil)
+	if got := rp.ResolveDefaultArgs(); !reflect.DeepEqual(got, []string{"--approve-mcps"}) {
+		t.Errorf("ResolveDefaultArgs(opt-in) = %v, want [--approve-mcps]", got)
 	}
 	if p.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "arg")
@@ -247,6 +274,64 @@ func TestBuiltinProvidersOpenCodePromptModeRegression(t *testing.T) {
 	}
 	if p.PromptMode != "flag" || p.PromptFlag != "--prompt" {
 		t.Fatalf("OpenCode prompt delivery = %q %q, want flag --prompt", p.PromptMode, p.PromptFlag)
+	}
+}
+
+// TestBuiltinProvidersResumeFlags asserts that every builtin provider known
+// to support session resume populates ResumeFlag and ResumeStyle. The flag
+// shapes are mirrored from gastown's reference table (mayor/rig/internal/
+// config/agents.go) which has been validated against each provider's CLI.
+// session_reconciler.resolveResumeCommand short-circuits when ResumeFlag is
+// empty, silently dropping the session-id and starting a fresh process —
+// regressing one of these to "" would re-introduce that bug for the
+// provider in question.
+func TestBuiltinProvidersResumeFlags(t *testing.T) {
+	tests := []struct {
+		provider    string
+		resumeFlag  string
+		resumeStyle string
+	}{
+		{"claude", "--resume", "flag"},
+		{"codex", "resume", "subcommand"},
+		{"gemini", "--resume", "flag"},
+		{"cursor", "--resume", "flag"},
+		{"copilot", "--resume", "flag"},
+		{"amp", "threads continue", "subcommand"},
+		{"opencode", "--session", "flag"},
+		{"auggie", "--resume", "flag"},
+	}
+	providers := BuiltinProviders()
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			p, ok := providers[tt.provider]
+			if !ok {
+				t.Fatalf("BuiltinProviders() missing %q", tt.provider)
+			}
+			if p.ResumeFlag != tt.resumeFlag {
+				t.Errorf("ResumeFlag = %q, want %q", p.ResumeFlag, tt.resumeFlag)
+			}
+			if p.ResumeStyle != tt.resumeStyle {
+				t.Errorf("ResumeStyle = %q, want %q", p.ResumeStyle, tt.resumeStyle)
+			}
+		})
+	}
+}
+
+// TestBuiltinProvidersSessionIDFlag pins which providers populate
+// SessionIDFlag. Claude is the only provider with a documented "start a new
+// session with this id" flag (--session-id). Codex exposes session ids only
+// through `codex resume <id>` (a resume path, not a fresh-start path), so it
+// stays empty — populating it would make resolveSessionCommand emit
+// `codex --session-id <key>` on first start, which codex rejects.
+func TestBuiltinProvidersSessionIDFlag(t *testing.T) {
+	providers := BuiltinProviders()
+	if got := providers["claude"].SessionIDFlag; got != "--session-id" {
+		t.Errorf("claude SessionIDFlag = %q, want --session-id", got)
+	}
+	for _, name := range []string{"codex", "gemini", "cursor", "copilot", "amp", "opencode", "auggie", "pi", "omp"} {
+		if got := providers[name].SessionIDFlag; got != "" {
+			t.Errorf("%s SessionIDFlag = %q, want empty (no documented start-with-id flag)", name, got)
+		}
 	}
 }
 

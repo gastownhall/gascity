@@ -7,6 +7,101 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+func TestSessionBeadAssigneeIdentities(t *testing.T) {
+	tests := []struct {
+		name string
+		bead beads.Bead
+		want []string
+	}{
+		{
+			name: "empty bead produces no identities",
+			bead: beads.Bead{},
+			want: []string{},
+		},
+		{
+			name: "id only",
+			bead: beads.Bead{ID: "mc-xyz"},
+			want: []string{"mc-xyz"},
+		},
+		{
+			name: "session_name only",
+			bead: beads.Bead{Metadata: map[string]string{"session_name": "worker-mc-live"}},
+			want: []string{"worker-mc-live"},
+		},
+		{
+			name: "configured_named_identity only",
+			bead: beads.Bead{Metadata: map[string]string{"configured_named_identity": "reviewer"}},
+			want: []string{"reviewer"},
+		},
+		{
+			name: "alias only",
+			bead: beads.Bead{Metadata: map[string]string{"alias": "nux"}},
+			want: []string{"nux"},
+		},
+		{
+			name: "alias_history single entry",
+			bead: beads.Bead{Metadata: map[string]string{"alias_history": "previous"}},
+			want: []string{"previous"},
+		},
+		{
+			name: "alias_history multiple entries",
+			bead: beads.Bead{Metadata: map[string]string{"alias_history": "first,second,third"}},
+			want: []string{"first", "second", "third"},
+		},
+		{
+			name: "all fields populated",
+			bead: beads.Bead{
+				ID: "mc-xyz",
+				Metadata: map[string]string{
+					"session_name":              "worker-mc-live",
+					"configured_named_identity": "reviewer",
+					"alias":                     "rictus",
+					"alias_history":             "nux",
+				},
+			},
+			want: []string{"mc-xyz", "worker-mc-live", "reviewer", "rictus", "nux"},
+		},
+		{
+			name: "whitespace-only values are trimmed and skipped",
+			bead: beads.Bead{
+				ID: "  ",
+				Metadata: map[string]string{
+					"session_name":              "   ",
+					"configured_named_identity": "\t",
+					"alias":                     " ",
+					"alias_history":             "  ,  , real ,  ",
+				},
+			},
+			want: []string{"real"},
+		},
+		{
+			name: "values with surrounding whitespace are trimmed",
+			bead: beads.Bead{
+				ID: "  mc-xyz  ",
+				Metadata: map[string]string{
+					"session_name":              "  worker-mc-live  ",
+					"configured_named_identity": "  reviewer  ",
+					"alias":                     "  nux  ",
+				},
+			},
+			want: []string{"mc-xyz", "worker-mc-live", "reviewer", "nux"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sessionBeadAssigneeIdentities(tt.bead)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d identities %v, want %d %v", len(got), got, len(tt.want), tt.want)
+			}
+			for i, id := range got {
+				if id != tt.want[i] {
+					t.Errorf("identity[%d] = %q, want %q (full got=%v, want=%v)", i, id, tt.want[i], got, tt.want)
+				}
+			}
+		})
+	}
+}
+
 func TestPoolSessionName(t *testing.T) {
 	tests := []struct {
 		template string
@@ -204,6 +299,73 @@ func (s sessionListMissStore) List(query beads.ListQuery) ([]beads.Bead, error) 
 	return s.Store.List(query)
 }
 
+func TestLiveSessionBeadExistsByIdentity_SkipsClosedSessionBead(t *testing.T) {
+	// Regression: directSessionBeadIDCandidates can resolve to a session
+	// bead that has since been closed. liveSessionBeadExistsByIdentity must
+	// skip closed beads via the early continue so the caller falls through
+	// to the live-list fallback instead of claiming the dead session is alive.
+	base := beads.NewMemStore()
+	closed, err := base.Create(beads.Bead{
+		Title:  "closed session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	if err := base.Close(closed.ID); err != nil {
+		t.Fatalf("Close session bead: %v", err)
+	}
+	closed, err = base.Get(closed.ID)
+	if err != nil {
+		t.Fatalf("Reload closed session: %v", err)
+	}
+	if closed.Status != "closed" {
+		t.Fatalf("closed status = %q, want closed", closed.Status)
+	}
+
+	store := sessionListMissStore{
+		Store:          base,
+		directSessions: map[string]beads.Bead{"worker-mc-dead": closed},
+	}
+
+	if liveSessionBeadExistsByIdentity(store, "worker-mc-dead") {
+		t.Error("liveSessionBeadExistsByIdentity = true, want false for closed session bead")
+	}
+}
+
+func TestLiveSessionBeadExistsByIdentity_SkipsNonSessionBead(t *testing.T) {
+	// Regression: directSessionBeadIDCandidates can resolve to a bead that
+	// is not a session (e.g. a work bead whose ID collides with the
+	// assignee string). liveSessionBeadExistsByIdentity must skip such
+	// beads instead of treating them as live session owners.
+	base := beads.NewMemStore()
+	notSession, err := base.Create(beads.Bead{
+		Title: "not a session",
+		Type:  "task",
+	})
+	if err != nil {
+		t.Fatalf("Create non-session bead: %v", err)
+	}
+	if notSession.Type == sessionBeadType {
+		t.Fatalf("test setup: bead type = %q, want non-session", notSession.Type)
+	}
+	for _, label := range notSession.Labels {
+		if label == sessionBeadLabel {
+			t.Fatalf("test setup: bead has session label %q", label)
+		}
+	}
+
+	store := sessionListMissStore{
+		Store:          base,
+		directSessions: map[string]beads.Bead{"worker-mc-task": notSession},
+	}
+
+	if liveSessionBeadExistsByIdentity(store, "worker-mc-task") {
+		t.Error("liveSessionBeadExistsByIdentity = true, want false for non-session bead")
+	}
+}
+
 func TestReleaseOrphanedPoolAssignments_SkipsLiveSessionMissingFromSnapshot(t *testing.T) {
 	store := beads.NewMemStore()
 	sessionBead, err := store.Create(beads.Bead{
@@ -321,6 +483,175 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveSessionWhenLiveSessionListMisse
 	}
 	if got.Assignee != sessionBead.Metadata["session_name"] {
 		t.Fatalf("assignee = %q, want %q", got.Assignee, sessionBead.Metadata["session_name"])
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_SkipsLiveSessionAssignedByAlias(t *testing.T) {
+	// Regression: polecat pool sessions carry their human-readable identity
+	// in Metadata["alias"] (e.g. "nux"), separate from session_name
+	// ("polecat-gc-vi6hhp"). Work claimed by a polecat is often assigned
+	// under the alias, so orphan-release must recognize alias-owned work as
+	// belonging to a live session.
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "polecat",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "polecat-gc-vi6hhp",
+			"alias":                "nux",
+			"template":             "worker",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "claimed pool work",
+		Assignee: "nux",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		[]beads.Bead{sessionBead},
+		[]beads.Bead{work},
+		[]beads.Store{store},
+		nil,
+		nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none — live polecat owns work via alias", released)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("status = %q, want in_progress", got.Status)
+	}
+	if got.Assignee != "nux" {
+		t.Fatalf("assignee = %q, want nux", got.Assignee)
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_SkipsLiveSessionAssignedByAliasHistory(t *testing.T) {
+	// Regression: a polecat may have been rebranded (alias rotated) while
+	// retaining ownership of work assigned under the prior alias. The
+	// previous alias is preserved in Metadata["alias_history"], so
+	// orphan-release must consult history before deciding the assignee is
+	// dead.
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "polecat",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "polecat-gc-vi6hhp",
+			"alias":                "rictus",
+			"alias_history":        "nux",
+			"template":             "worker",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "claimed pool work",
+		Assignee: "nux",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		[]beads.Bead{sessionBead},
+		[]beads.Bead{work},
+		[]beads.Store{store},
+		nil,
+		nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none — live polecat owns work via prior alias", released)
+	}
+}
+
+func TestReleaseOrphanedPoolAssignments_SkipsLiveSessionByAliasViaLiveList(t *testing.T) {
+	// Even without an upstream session snapshot, the fallback live-list
+	// path must recognize alias-owned work. This covers ticks where the
+	// session snapshot is missing or stale (e.g. partial reads).
+	store := beads.NewMemStore()
+	_, err := store.Create(beads.Bead{
+		Title:  "polecat",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "polecat-gc-vi6hhp",
+			"alias":                "nux",
+			"template":             "worker",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "claimed pool work",
+		Assignee: "nux",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	released := releaseOrphanedPoolAssignments(
+		store,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		"",
+		nil,
+		[]beads.Bead{work},
+		[]beads.Store{store},
+		nil,
+		nil,
+	)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none — live-list fallback must resolve alias", released)
 	}
 }
 
@@ -814,6 +1145,27 @@ func TestReleaseOrphanedPoolAssignments_ReleasesRigWorkAssignedToUnreachableOpen
 	}
 	if gotSession.Status != "open" || gotSession.Metadata["session_name"] != "worker-live" {
 		t.Fatalf("city session changed: status=%q metadata=%#v", gotSession.Status, gotSession.Metadata)
+	}
+}
+
+func TestStoreForPoolAssignment_UsesConfiguredHyphenatedIDPrefix(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	cfg := &config.City{
+		Rigs: []config.Rig{{
+			Name:   "pieces",
+			Prefix: "Pieces-Annotator",
+			Path:   t.TempDir(),
+		}},
+	}
+	work := beads.Bead{
+		ID:       "pieces-annotator-x8o",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	}
+
+	got := storeForPoolAssignment(cfg, cityStore, map[string]beads.Store{"pieces": rigStore}, work)
+	if got != rigStore {
+		t.Fatalf("storeForPoolAssignment() = %p, want rig store %p", got, rigStore)
 	}
 }
 

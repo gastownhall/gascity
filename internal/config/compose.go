@@ -18,7 +18,7 @@ import (
 // wins. Duplicate keys within either input are collapsed to their last
 // occurrence. The returned slice preserves surviving base order followed by
 // surviving override-only entries in their original order. Used to compose
-// pack→city pricing layers during config load.
+// pack->city pricing layers during config load.
 func mergePricingByKey(base, override []pricing.ModelPricing) []pricing.ModelPricing {
 	base = dedupePricingByKey(base)
 	override = dedupePricingByKey(override)
@@ -142,6 +142,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	var rootPackGlobals []ResolvedPackGlobal
 	var rootPackRequires []PackRequirement
 	packPath := filepath.Join(cityRoot, packFile)
+	legacyV1SurfaceWarningsEnabled := false
 	if packData, pErr := fs.ReadFile(packPath); pErr == nil {
 		packExists = true
 		pc, md, packWarnings, decErr := parsePackConfigWithMetadata(packData, packPath)
@@ -154,6 +155,14 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		prov.Warnings = append(prov.Warnings, packWarnings...)
 		if err := validatePackMeta(&pc.Pack); err != nil {
 			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
+		}
+		legacyV1SurfaceWarningsEnabled = pc.Pack.Schema >= 2
+		if legacyV1SurfaceWarningsEnabled {
+			// Detect v1 surfaces on the freshly-parsed city.toml, before
+			// pack.toml merging or fragment processing can inject
+			// pack-discovered agents or pack-default rig includes into the
+			// same fields.
+			prov.Warnings = append(prov.Warnings, DetectLegacyV1Surfaces(root, path)...)
 		}
 		// Preserve the city.toml agents so they can override pack-defined
 		// and convention-discovered agents.
@@ -171,10 +180,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		var packAgents []Agent
 		for _, a := range pc.Agents {
 			if !cityAgentNames[a.Name] {
-				// Stamp source on the city pack's own [[agent]] blocks
-				// so duplicate-name errors against city.toml inline
-				// agents render a non-empty descriptor (ga-tpfc.1).
+				// Stamp provenance on the city pack's own [[agent]]
+				// blocks; these are v1 inline pack agents, distinct
+				// from v2 convention-discovered agents.
 				a.source = sourcePack
+				a.layout = layoutV1Inline
 				packAgents = append(packAgents, a)
 			}
 		}
@@ -360,6 +370,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 			return nil, nil, fmt.Errorf("fragment %q: %w", inc, err)
 		}
 		prov.Warnings = append(prov.Warnings, fragWarnings...)
+		if legacyV1SurfaceWarningsEnabled {
+			prov.Warnings = append(prov.Warnings, DetectLegacyV1Surfaces(frag, fragPath)...)
+		}
 
 		// Fragments cannot include other fragments.
 		if len(frag.Include) > 0 {
@@ -518,6 +531,23 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	root.PackGlobals = append(root.PackGlobals, rootPackGlobals...)
 	applyPackGlobals(root)
 
+	// Refine source provenance for default-binding imports (ga-tpfc).
+	// Discovery stamps every pack-loaded agent as sourcePack; here we
+	// promote the subset that came in via pack.toml's
+	// [defaults.rig.imports] to sourceAutoImport so describeSource can
+	// distinguish them in duplicate-name errors.
+	if len(defaultBindings) > 0 {
+		for i := range root.Agents {
+			a := &root.Agents[i]
+			if a.source != sourcePack || a.BindingName == "" {
+				continue
+			}
+			if defaultBindings[a.BindingName] {
+				a.source = sourceAutoImport
+			}
+		}
+	}
+
 	// Validate city-scoped pack requirements.
 	if err := validateCityRequirements(cityReqs, root.Agents); err != nil {
 		return nil, nil, err
@@ -581,16 +611,6 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		return nil, nil, fmt.Errorf("%s: provider cache build failed: %w", path, err)
 	}
 
-	// v0.15.1: enrich every agent with its convention-discovered
-	// agent-local asset paths (agents/<name>/skills/, agents/<name>/mcp/).
-	// DiscoverPackAgents only does this for agents it creates — it skips
-	// names already present in pack.toml [[agent]] or city.toml
-	// [[agent]] entries, so those agents leave the discovery pass with
-	// empty SkillsDir/MCPDir even when agents/<name>/skills/ exists on
-	// disk. The materializer and collision validator both key off
-	// SkillsDir, so that gap silently loses agent-local skills for every
-	// explicitly-declared agent. Populate the fields here so the
-	// convention works uniformly.
 	populateAgentLocalAssetDirs(fs, root, cityRoot)
 
 	// Load namepool files for pool agents.
@@ -609,7 +629,37 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		prov.Warnings = append(prov.Warnings, warning)
 	}
 
-	promoteAutoImportAgentSources(root.Agents, defaultBindings, root.ImplicitImportBindings)
+	// v0.15.1: enrich every agent with its convention-discovered
+	// agent-local asset paths (agents/<name>/skills/, agents/<name>/mcp/).
+	// DiscoverPackAgents only does this for agents it creates — it skips
+	// names already present in pack.toml [[agent]] or city.toml
+	// [[agent]] entries, so those agents leave the discovery pass with
+	// empty SkillsDir/MCPDir even when agents/<name>/skills/ exists on
+	// disk. The materializer and collision validator both key off
+	// SkillsDir, so that gap silently loses agent-local skills for every
+	// explicitly-declared agent. Populate the fields here so the
+	// convention works uniformly.
+
+	// ga-tpfc.1: promote pack-stamped agents to sourceAutoImport when
+	// their binding came in via implicit-import expansion (the gastown
+	// system pack and similar). describeSource then renders
+	// "<auto-import: …>" for these in duplicate-name errors instead of
+	// the generic "<pack: …>" or empty-string forms. Agents loaded via
+	// loadPackWithCacheOptions arrive with source=sourcePack; we override
+	// based on the post-composition ImplicitImportBindings set so the
+	// override is computed exactly once over the data the loader already
+	// stamped.
+	if len(root.ImplicitImportBindings) > 0 {
+		for i := range root.Agents {
+			a := &root.Agents[i]
+			if a.BindingName == "" {
+				continue
+			}
+			if root.ImplicitImportBindings[a.BindingName] {
+				a.source = sourceAutoImport
+			}
+		}
+	}
 
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading
@@ -1208,31 +1258,14 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 	warnings := agentDefaultsCompatibilityWarnings(md, source)
 	normalizeLegacyOrderOverrideAliases(&cfg)
 	warnings = append(warnings, CheckUndecodedKeys(md, source)...)
-	// Stamp source=sourceInline on inline [[agent]] tables. Fragments may
-	// later set SourceDir, which remains the concrete duplicate-error source.
+	// Stamp source=sourceInline on inline [[agent]] tables. For fragments,
+	// adjustAgentPaths later sets SourceDir, which takes precedence in
+	// describeSource (FR-1). For the root city.toml, SourceDir is empty
+	// and the inline stamp drives the fallback descriptor (FR-3).
 	for i := range cfg.Agents {
 		cfg.Agents[i].source = sourceInline
 	}
 	return &cfg, md, warnings, nil
-}
-
-// promoteAutoImportAgentSources centralizes the two auto-import sources:
-// bindings from the city pack's [defaults.rig.imports] and bootstrap implicit
-// imports. Both paths produce normal pack-loaded agents first, then this pass
-// promotes the source stamp exactly once after composition has settled.
-func promoteAutoImportAgentSources(agents []Agent, defaultBindings, implicitBindings map[string]bool) {
-	if len(defaultBindings) == 0 && len(implicitBindings) == 0 {
-		return
-	}
-	for i := range agents {
-		a := &agents[i]
-		if a.source != sourcePack || a.BindingName == "" {
-			continue
-		}
-		if defaultBindings[a.BindingName] || implicitBindings[a.BindingName] {
-			a.source = sourceAutoImport
-		}
-	}
 }
 
 // LoadRootPackDefaultRigImports loads the canonical [defaults.rig.imports]

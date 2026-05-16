@@ -1297,6 +1297,13 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	// Collect this pack's own requirements.
 	allRequires = append(allRequires, tc.Pack.Requires...)
 
+	// Stamp layoutV1Inline on this pack's [[agent]] blocks BEFORE v2
+	// discovery appends to tc.Agents. Discovery stamps layoutV2Convention
+	// itself; the field is preserved through the merge below. (ga-9ogb)
+	for i := range tc.Agents {
+		tc.Agents[i].layout = layoutV1Inline
+	}
+
 	// V2 convention-based agent discovery: scan agents/ directory.
 	// Convention-discovered agents are appended AFTER TOML-declared agents
 	// so [[agent]] tables take precedence when both exist.
@@ -2361,6 +2368,12 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if ov.IdleTimeout != nil {
 		a.IdleTimeout = *ov.IdleTimeout
 	}
+	if ov.MaxSessionAge != nil {
+		a.MaxSessionAge = *ov.MaxSessionAge
+	}
+	if ov.MaxSessionAgeJitter != nil {
+		a.MaxSessionAgeJitter = *ov.MaxSessionAgeJitter
+	}
 	if ov.SleepAfterIdle != nil {
 		a.SleepAfterIdle = NormalizeSleepAfterIdle(*ov.SleepAfterIdle)
 		a.SleepAfterIdleSource = "rig_override"
@@ -2410,8 +2423,8 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if ov.WakeMode != nil {
 		a.WakeMode = *ov.WakeMode
 	}
-	if len(ov.InjectFragments) > 0 {
-		a.InjectFragments = append([]string(nil), ov.InjectFragments...)
+	if ov.InjectFragments != nil {
+		a.InjectFragments = append([]string(nil), (*ov.InjectFragments)...)
 	}
 	if len(ov.AppendFragments) > 0 {
 		a.AppendFragments = append([]string(nil), ov.AppendFragments...)

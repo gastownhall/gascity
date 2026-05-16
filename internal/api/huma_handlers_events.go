@@ -36,24 +36,9 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 		filter.Since = time.Now().Add(-d)
 	}
 
-	evts, err := ep.List(filter)
-	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
-	}
-
-	wires := make([]WireEvent, 0, len(evts))
-	for _, e := range evts {
-		w, ok := toWireEvent(e)
-		if !ok {
-			continue
-		}
-		wires = append(wires, w)
-	}
-
-	index := s.latestIndex()
-
-	// Pagination support. Apply the same ceiling used across other list
-	// endpoints so `limit=1_000_000` can't force a million-item serialization.
+	// Resolve the effective limit first so we can decide between the
+	// bounded tail path (fast) and the full-scan pagination path (slow
+	// but needed when the caller walks offsets with cursors).
 	limit := 100
 	if input.Limit > 0 {
 		limit = input.Limit
@@ -61,6 +46,55 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 	if limit > maxPaginationLimit {
 		limit = maxPaginationLimit
 	}
+
+	index := s.latestIndex()
+
+	// Fast path: no cursor → most clients just want the N newest events.
+	// Use ListTail when the provider supports it so we don't parse the
+	// entire events.jsonl (which is O(file size), ~4s on 100 MB) just to
+	// throw away all but the tail. Same pattern as the supervisor
+	// handler's optimizedTail branch.
+	if input.Cursor == "" {
+		if tp, ok := ep.(events.TailProvider); ok {
+			evts, err := tp.ListTail(filter, limit)
+			if err != nil {
+				return nil, huma.Error500InternalServerError(err.Error())
+			}
+			wires := toWireEvents(evts)
+			// Total is best-effort here: when the caller narrowed with
+			// Type/Actor/Since we cannot cheaply compute the full match
+			// count, so report the returned slice length. When the
+			// filter is empty, LatestSeq is authoritative since the log
+			// is append-only and gap-free.
+			total := len(wires)
+			if filterIsEmpty(filter) {
+				if seq, seqErr := ep.LatestSeq(); seqErr == nil {
+					total = int(seq)
+				}
+			}
+			return &ListOutput[WireEvent]{
+				Index: index,
+				Body:  ListBody[WireEvent]{Items: wires, Total: total},
+			}, nil
+		}
+	}
+
+	// Cursor pagination (or provider without TailProvider): we still
+	// need the full materialized list to honor offset-based cursors.
+	// Cap the scan at (offset+limit) matching events so this path is
+	// bounded by caller pagination depth rather than file size.
+	scanLimit := limit
+	if input.Cursor != "" {
+		scanLimit = decodeCursor(input.Cursor) + limit
+	}
+	filter.Limit = scanLimit
+
+	evts, err := ep.List(filter)
+	if err != nil {
+		return nil, huma.Error500InternalServerError(err.Error())
+	}
+	wires := toWireEvents(evts)
+
 	if input.Cursor != "" {
 		pp := pageParams{
 			Offset: decodeCursor(input.Cursor),
@@ -86,6 +120,23 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 		Index: index,
 		Body:  ListBody[WireEvent]{Items: wires, Total: total},
 	}, nil
+}
+
+func toWireEvents(evts []events.Event) []WireEvent {
+	wires := make([]WireEvent, 0, len(evts))
+	for _, e := range evts {
+		w, ok := toWireEvent(e)
+		if !ok {
+			continue
+		}
+		wires = append(wires, w)
+	}
+	return wires
+}
+
+func filterIsEmpty(f events.Filter) bool {
+	return f.Type == "" && f.Actor == "" && f.Subject == "" &&
+		f.Since.IsZero() && f.Until.IsZero() && f.AfterSeq == 0
 }
 
 func parseEventSince(value string) (time.Duration, bool, error) {

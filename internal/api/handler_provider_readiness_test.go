@@ -387,11 +387,17 @@ printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstPar
 	t.Setenv("HOME", homeDir)
 	originalPathEnv := providerProbePathEnv
 	originalCommandContext := providerProbeCommandContext
+	originalCache := providerProbeCache
+	originalCacheTTL := providerProbeCacheTTL
 	providerProbePathEnv = binDir
 	providerProbeCommandContext = exec.CommandContext
+	providerProbeCache = newCachedProviderProbeStore()
+	providerProbeCacheTTL = time.Hour
 	defer func() {
 		providerProbePathEnv = originalPathEnv
 		providerProbeCommandContext = originalCommandContext
+		providerProbeCache = originalCache
+		providerProbeCacheTTL = originalCacheTTL
 	}()
 
 	state := newFakeState(t)
@@ -1067,10 +1073,15 @@ func TestHandleReadinessReturnsNotInstalledForGitHubCLIWithoutBinary(t *testing.
 
 	originalPathEnv := providerProbePathEnv
 	originalGOOS := providerProbeGOOS
+	originalExpandDirs := providerProbeExpandDirs
 	providerProbePathEnv = filepath.Join(homeDir, "bin")
+	providerProbeExpandDirs = func(_, _, basePath string) []string {
+		return []string{basePath}
+	}
 	defer func() {
 		providerProbePathEnv = originalPathEnv
 		providerProbeGOOS = originalGOOS
+		providerProbeExpandDirs = originalExpandDirs
 	}()
 	// "test" — not "linux" — so searchpath.Expand skips the unconditional
 	// /snap/bin and /home/linuxbrew/.linuxbrew/bin extras that would otherwise

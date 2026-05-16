@@ -288,6 +288,20 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ProcessNames:      []string{"cursor-agent"},
 		SupportsHooks:     true,
 		InstructionsFile:  "AGENTS.md",
+		ResumeFlag:        "--resume",
+		ResumeStyle:       "flag",
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:     "mcp_approval",
+				Label:   "MCP Approval",
+				Type:    "select",
+				Default: "prompt",
+				Choices: []BuiltinOptionChoice{
+					{Value: "prompt", Label: "Prompt for MCP approval"},
+					{Value: "approve", Label: "Approve visible MCP servers", FlagArgs: []string{"--approve-mcps"}},
+				},
+			},
+		},
 	},
 	"copilot": {
 		DisplayName: "GitHub Copilot",
@@ -307,14 +321,26 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ProcessNames:      []string{"copilot"},
 		SupportsHooks:     true,
 		InstructionsFile:  "AGENTS.md",
+		ResumeFlag:        "--resume",
+		ResumeStyle:       "flag",
 	},
 	"amp": {
+		// Hook mechanism: Amp CLI's plugin system (session.start,
+		// tool.call) is documented at https://ampcode.com/manual.
+		// Gas Town has not yet wired hook installation for amp —
+		// tracked as gap 4 of gastownhall/gascity#672. Nudges still
+		// drain via the supervisor dispatcher / per-session poller
+		// without requiring provider hooks; the remaining work is
+		// event-driven coordination (session-start priming,
+		// pre-compaction handoff).
 		DisplayName:      "Sourcegraph AMP",
 		Command:          "amp",
 		Args:             []string{"--dangerously-allow-all", "--no-ide"},
 		PromptMode:       "arg",
 		ProcessNames:     []string{"amp"},
 		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "threads continue",
+		ResumeStyle:      "subcommand",
 	},
 	"opencode": {
 		DisplayName:      "OpenCode",
@@ -333,12 +359,24 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ACPArgs:          []string{"acp"},
 	},
 	"auggie": {
+		// Hook mechanism: Auggie CLI exposes SessionStart, SessionEnd,
+		// Stop, PreToolUse, PostToolUse hooks via ~/.augment/settings.json
+		// (https://docs.augmentcode.com/cli/overview). The config is
+		// USER-global rather than project-local, which complicates Gas
+		// Town's per-workdir installation model — wiring auggie hooks
+		// requires either merging into the user's existing config or
+		// designing a per-rig override mechanism. Tracked as gap 4 of
+		// gastownhall/gascity#672. Nudges still drain via the supervisor
+		// dispatcher / per-session poller without requiring provider
+		// hooks.
 		DisplayName:      "Auggie CLI",
 		Command:          "auggie",
 		Args:             []string{"--allow-indexing"},
 		PromptMode:       "arg",
 		ProcessNames:     []string{"auggie"},
 		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--resume",
+		ResumeStyle:      "flag",
 	},
 	"pi": {
 		DisplayName:      "Pi Coding Agent",
@@ -349,6 +387,19 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ProcessNames:     []string{"pi", "node", "bun"},
 		SupportsHooks:    true,
 		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--session",
+		ResumeStyle:      "flag",
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "ollama-cloud-gpt-oss-20b", Label: "Ollama Cloud GPT-OSS 20B", FlagArgs: []string{"--provider", "ollama-cloud", "--model", "gpt-oss:20b"}},
+				},
+			},
+		},
 	},
 	"omp": {
 		DisplayName:      "Oh My Pi (OMP)",
@@ -393,6 +444,8 @@ func CanonicalProfileIdentity(profile string) (ProfileIdentity, bool) {
 		return newProfileIdentity(profile, "gemini"), true
 	case "opencode/tmux-cli":
 		return newProfileIdentity(profile, "opencode"), true
+	case "pi/tmux-cli":
+		return newProfileIdentity(profile, "pi"), true
 	default:
 		return ProfileIdentity{}, false
 	}

@@ -46,8 +46,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 env:
-  DOLT_VERSION: "1.86.6"
-  BD_VERSION: "v1.0.3"
+  DOLT_VERSION: "2.0.3"
+  BD_VERSION: "v1.0.4"
 
 # Trigger gate re-used by every job below via `if:`.
 # We want each job to run when EITHER:
