@@ -95,6 +95,7 @@
         "pages": [
           "guides/index",
           "guides/migrating-to-pack-vnext",
+          "packv2/migration",
           "guides/shareable-packs"
         ]
       },

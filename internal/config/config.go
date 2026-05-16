@@ -2277,6 +2277,7 @@ type Agent struct {
 	// Fallback marks this agent as a fallback definition. During pack
 	// composition, a non-fallback agent with the same name wins silently.
 	// When two fallbacks collide, the first loaded (depth-first) wins.
+	// See docs/packv2/migration.mdx for migration guidance.
 	Fallback bool `toml:"fallback,omitempty"`
 	// DependsOn lists agent names that must be awake before this agent wakes.
 	// Used for dependency-ordered startup and shutdown. Validated for cycles
@@ -3398,8 +3399,9 @@ func WizardCity(name, provider, startCommand string) City {
 // GastownCity returns a City configured for the gastown orchestration pack.
 // Agents come from the pack (.gc/system/packs/gastown); no inline agents are
 // defined. The root city pack imports gastown and sets canonical
-// DefaultRigImports so newly added rigs inherit the same pack by default. If
-// startCommand is set, it takes precedence over provider.
+// DefaultRigImports so newly added rigs inherit the same pack by default. It
+// also sets global fragments and daemon config. If startCommand is set, it
+// takes precedence over provider.
 func GastownCity(name, provider, startCommand string) City {
 	ws := Workspace{
 		Name:            name,
