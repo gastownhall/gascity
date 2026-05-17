@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "command", "city_path", "agent", "session", "counts", "pending", "in_flight", "dead"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "command": { "const": "nudge status" },
+    "city_path": { "type": "string" },
+    "agent": { "type": "string" },
+    "session": { "type": "string" },
+    "session_id": { "type": "string" },
+    "counts": {
+      "type": "object",
+      "required": ["pending", "in_flight", "dead"],
+      "properties": {
+        "pending": { "type": "integer" },
+        "in_flight": { "type": "integer" },
+        "dead": { "type": "integer" }
+      },
+      "additionalProperties": true
+    },
+    "pending": { "type": "array", "items": { "$ref": "#/$defs/nudge" } },
+    "in_flight": { "type": "array", "items": { "$ref": "#/$defs/nudge" } },
+    "dead": { "type": "array", "items": { "$ref": "#/$defs/nudge" } }
+  },
+  "$defs": {
+    "nudge": {
+      "type": "object",
+      "required": ["id", "agent", "source", "message", "created_at", "deliver_after", "expires_at"],
+      "properties": {
+        "id": { "type": "string" },
+        "bead_id": { "type": "string" },
+        "agent": { "type": "string" },
+        "session_id": { "type": "string" },
+        "continuation_epoch": { "type": "string" },
+        "source": { "type": "string" },
+        "message": { "type": "string" },
+        "reference": {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string" },
+            "id": { "type": "string" }
+          },
+          "additionalProperties": true
+        },
+        "created_at": { "type": "string", "format": "date-time" },
+        "deliver_after": { "type": "string", "format": "date-time" },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "attempts": { "type": "integer" },
+        "last_attempt_at": { "type": "string", "format": "date-time" },
+        "last_error": { "type": "string" },
+        "claimed_at": { "type": "string", "format": "date-time" },
+        "lease_until": { "type": "string", "format": "date-time" },
+        "dead_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "command", "action", "session", "status"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "command": { "const": "runtime drain" },
+    "action": { "const": "drain" },
+    "session": { "type": "string" },
+    "target": { "type": "string" },
+    "status": { "const": "draining" }
+  },
+  "additionalProperties": true
+}

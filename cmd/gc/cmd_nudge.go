@@ -69,6 +69,25 @@ type nudgeTarget struct {
 	sessionName       string
 }
 
+type nudgeStatusJSON struct {
+	SchemaVersion string            `json:"schema_version"`
+	Command       string            `json:"command"`
+	CityPath      string            `json:"city_path"`
+	Agent         string            `json:"agent"`
+	Session       string            `json:"session"`
+	SessionID     string            `json:"session_id,omitempty"`
+	Counts        nudgeStatusCounts `json:"counts"`
+	Pending       []queuedNudge     `json:"pending"`
+	InFlight      []queuedNudge     `json:"in_flight"`
+	Dead          []queuedNudge     `json:"dead"`
+}
+
+type nudgeStatusCounts struct {
+	Pending  int `json:"pending"`
+	InFlight int `json:"in_flight"`
+	Dead     int `json:"dead"`
+}
+
 func (t nudgeTarget) agentKey() string {
 	if t.alias != "" {
 		return t.alias
@@ -172,7 +191,8 @@ was asleep or was not at a safe interactive boundary yet.`,
 }
 
 func newNudgeStatusCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "status [session]",
 		Short: "Show queued and dead-letter nudges for a session",
 		Long: `Show queued and dead-letter nudges for a session.
@@ -180,12 +200,14 @@ func newNudgeStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 Defaults to $GC_ALIAS or $GC_SESSION_ID when run inside a session.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdNudgeStatus(args, stdout, stderr) != 0 {
+			if cmdNudgeStatus(args, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON")
+	return cmd
 }
 
 func newNudgeDrainCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -232,7 +254,7 @@ func newNudgePollCmd(stdout, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
-func cmdNudgeStatus(args []string, stdout, stderr io.Writer) int {
+func cmdNudgeStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
 	targetID := os.Getenv("GC_ALIAS")
 	if targetID == "" {
 		targetID = os.Getenv("GC_SESSION_ID")
@@ -255,6 +277,29 @@ func cmdNudgeStatus(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "gc nudge status: %v\n", err) //nolint:errcheck
 		return 1
+	}
+
+	if jsonOutput {
+		if err := writeCLIJSONLine(stdout, nudgeStatusJSON{
+			SchemaVersion: "1",
+			Command:       "nudge status",
+			CityPath:      target.cityPath,
+			Agent:         target.agentKey(),
+			Session:       target.sessionName,
+			SessionID:     target.sessionID,
+			Counts: nudgeStatusCounts{
+				Pending:  len(pending),
+				InFlight: len(inFlight),
+				Dead:     len(dead),
+			},
+			Pending:  nonNilQueuedNudges(pending),
+			InFlight: nonNilQueuedNudges(inFlight),
+			Dead:     nonNilQueuedNudges(dead),
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc nudge status: writing JSON: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		return 0
 	}
 
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
@@ -285,6 +330,13 @@ func cmdNudgeStatus(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	return 0
+}
+
+func nonNilQueuedNudges(items []queuedNudge) []queuedNudge {
+	if items == nil {
+		return []queuedNudge{}
+	}
+	return items
 }
 
 func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
