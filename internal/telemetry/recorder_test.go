@@ -3,10 +3,13 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 
 	otellog "go.opentelemetry.io/otel/log"
+	otellogglobal "go.opentelemetry.io/otel/log/global"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 )
 
 // resetInstruments resets the sync.Once so initInstruments re-runs against
@@ -169,10 +172,155 @@ func TestRecordBDCall_TruncatesLongOutput(t *testing.T) {
 	RecordBDCall(ctx, []string{"cmd"}, 1.0, nil, bigStdout, bigStderr)
 }
 
+func TestSanitizeBDArgsRedactsSecretFlags(t *testing.T) {
+	in := []string{
+		"config", "set",
+		"--token", "sk-secret",
+		"--api-key=api-secret",
+		"--password", "pw-secret",
+		"--remote-password=remote-secret",
+		"--bearer", "bearer-secret",
+		"--not-token", "visible",
+	}
+	original := append([]string(nil), in...)
+
+	got := sanitizeBDArgs(in)
+	want := []string{
+		"config", "set",
+		"--token", "<redacted>",
+		"--api-key=<redacted>",
+		"--password", "<redacted>",
+		"--remote-password=<redacted>",
+		"--bearer", "<redacted>",
+		"--not-token", "visible",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sanitizeBDArgs() = %#v, want %#v", got, want)
+	}
+	if !reflect.DeepEqual(in, original) {
+		t.Fatalf("sanitizeBDArgs mutated input: got %#v, want %#v", in, original)
+	}
+}
+
+func TestRecordBDCallSanitizesArgs(t *testing.T) {
+	resetInstruments(t)
+	exp := installRecordingLogExporter(t)
+
+	RecordBDCall(context.Background(), []string{"config", "set", "--token", "sk-secret"}, 12.5, nil, nil, "")
+
+	rec := exp.recordByBody("bd.call")
+	if rec == nil {
+		t.Fatal("RecordBDCall did not emit bd.call")
+	}
+	attrs := recordAttrs(*rec)
+	if got := attrs["args"].AsString(); got != "config set --token <redacted>" {
+		t.Fatalf("bd.call args = %q, want token redacted", got)
+	}
+}
+
+func TestRecordBDSlowEmitsSanitizedWarnEvent(t *testing.T) {
+	resetInstruments(t)
+	exp := installRecordingLogExporter(t)
+
+	RecordBDSlow(context.Background(), []string{"config", "set", "--token", "sk-secret"}, "/tmp/city", "test-agent-1")
+
+	rec := exp.recordByBody("bd.slow")
+	if rec == nil {
+		t.Fatal("RecordBDSlow did not emit bd.slow")
+	}
+	if got := rec.Severity(); got != otellog.SeverityWarn {
+		t.Fatalf("bd.slow severity = %v, want WARN", got)
+	}
+	attrs := recordAttrs(*rec)
+	if got := logValueStringSlice(attrs["args"]); !reflect.DeepEqual(got, []string{"config", "set", "--token", "<redacted>"}) {
+		t.Fatalf("bd.slow args = %#v, want token redacted", got)
+	}
+	if got := attrs["dir"].AsString(); got != "/tmp/city" {
+		t.Fatalf("bd.slow dir = %q, want /tmp/city", got)
+	}
+	if got := attrs["agent_id"].AsString(); got != "test-agent-1" {
+		t.Fatalf("bd.slow agent_id = %q, want test-agent-1", got)
+	}
+	if got := attrs["elapsed_ms"].AsInt64(); got != BDSlowThreshold.Milliseconds() {
+		t.Fatalf("bd.slow elapsed_ms = %d, want %d", got, BDSlowThreshold.Milliseconds())
+	}
+	if got := attrs["threshold_ms"].AsInt64(); got != BDSlowThreshold.Milliseconds() {
+		t.Fatalf("bd.slow threshold_ms = %d, want %d", got, BDSlowThreshold.Milliseconds())
+	}
+	if got := attrs["timestamp"].AsString(); got == "" {
+		t.Fatal("bd.slow timestamp is empty")
+	}
+}
+
 func TestRecordBeadStoreHealth(t *testing.T) {
 	resetInstruments(t)
 	ctx := context.Background()
 
 	RecordBeadStoreHealth(ctx, "test-city", true)
 	RecordBeadStoreHealth(ctx, "test-city", false)
+}
+
+type recordingLogExporter struct {
+	mu      sync.Mutex
+	records []sdklog.Record
+}
+
+func installRecordingLogExporter(t *testing.T) *recordingLogExporter {
+	t.Helper()
+	exp := &recordingLogExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exp)))
+	prev := otellogglobal.GetLoggerProvider()
+	otellogglobal.SetLoggerProvider(provider)
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		otellogglobal.SetLoggerProvider(prev)
+	})
+	return exp
+}
+
+func (e *recordingLogExporter) Export(_ context.Context, records []sdklog.Record) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, rec := range records {
+		e.records = append(e.records, rec.Clone())
+	}
+	return nil
+}
+
+func (e *recordingLogExporter) Shutdown(context.Context) error {
+	return nil
+}
+
+func (e *recordingLogExporter) ForceFlush(context.Context) error {
+	return nil
+}
+
+func (e *recordingLogExporter) recordByBody(body string) *sdklog.Record {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for i := range e.records {
+		if e.records[i].Body().AsString() == body {
+			rec := e.records[i].Clone()
+			return &rec
+		}
+	}
+	return nil
+}
+
+func recordAttrs(rec sdklog.Record) map[string]otellog.Value {
+	attrs := make(map[string]otellog.Value)
+	rec.WalkAttributes(func(kv otellog.KeyValue) bool {
+		attrs[kv.Key] = kv.Value
+		return true
+	})
+	return attrs
+}
+
+func logValueStringSlice(value otellog.Value) []string {
+	values := value.AsSlice()
+	out := make([]string, 0, len(values))
+	for _, item := range values {
+		out = append(out, item.AsString())
+	}
+	return out
 }

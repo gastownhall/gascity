@@ -2266,6 +2266,25 @@ func TestBdStoreDepAdd(t *testing.T) {
 	}
 }
 
+func TestBdStoreDepAddRetriesTransientDoltConnectionError(t *testing.T) {
+	calls := 0
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return nil, fmt.Errorf("exit status 1: [mysql] read tcp 127.0.0.1:54108->127.0.0.1:4306: i/o timeout: failed to check for dependency cycle: invalid connection")
+		}
+		return nil, nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	err := s.DepAdd("bd-42", "bd-41", "blocks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+}
+
 func TestBdStoreDepAddError(t *testing.T) {
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
 		return nil, fmt.Errorf("exit status 1")

@@ -52,6 +52,9 @@ func ValidateDurations(cfg *City, source string) []string {
 	// Orders config durations.
 	check("[orders]", "max_timeout", cfg.Orders.MaxTimeout)
 
+	// Events config durations.
+	check("[events.rotation]", "archive_retain_age", cfg.Events.Rotation.ArchiveRetainAge)
+
 	// Chat sessions config durations.
 	check("[chat_sessions]", "idle_timeout", cfg.ChatSessions.IdleTimeout)
 
@@ -76,4 +79,21 @@ func ValidateDurations(cfg *City, source string) []string {
 	}
 
 	return warnings
+}
+
+// ValidateEventsRotation returns non-fatal warnings for risky but intentional
+// events rotation settings.
+func ValidateEventsRotation(cfg *City) []string {
+	if cfg == nil {
+		return nil
+	}
+	raw := cfg.Events.Rotation.ArchiveRetainAge
+	if raw == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 || d >= 168*time.Hour {
+		return nil
+	}
+	return []string{fmt.Sprintf("events.rotation: warning: archive_retain_age=%s may delete recent archives", raw)}
 }

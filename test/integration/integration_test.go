@@ -387,8 +387,12 @@ func gc(dir string, args ...string) (string, error) {
 // supervisor state, but without forcing GC_DOLT=skip. Use this for tests that
 // need the real bd+dolt-backed bead store.
 func gcDolt(dir string, args ...string) (string, error) {
+	return gcDoltWithTimeout(dir, gcDoltCommandTimeout(args), args...)
+}
+
+func gcDoltWithTimeout(dir string, timeout time.Duration, args ...string) (string, error) {
 	envDir := commandCityDirForArgs(dir, args)
-	return runCommand(dir, commandEnvForDir(envDir, true), integrationGCDoltCommandTimeout, gcBinary, args...)
+	return runCommand(dir, commandEnvForDir(envDir, true), timeout, gcBinary, args...)
 }
 
 // bd runs the bd binary with the given args. If dir is non-empty, it sets
@@ -507,7 +511,18 @@ func runGCWithEnv(env []string, dir string, args ...string) (string, error) {
 }
 
 func runGCDoltWithEnv(env []string, dir string, args ...string) (string, error) {
-	return runCommand(dir, env, integrationGCDoltCommandTimeout, gcBinary, args...)
+	return runCommand(dir, env, gcDoltCommandTimeout(args), gcBinary, args...)
+}
+
+func gcDoltCommandTimeout(args []string) time.Duration {
+	if len(args) > 0 && args[0] == "sling" {
+		for _, arg := range args[1:] {
+			if strings.HasPrefix(arg, "--on=") {
+				return 4 * time.Minute
+			}
+		}
+	}
+	return integrationGCDoltCommandTimeout
 }
 
 func gcCommandTimeout(args []string) time.Duration {

@@ -36,6 +36,8 @@ type wakeEvaluation struct {
 	ConfigSuppressed bool
 }
 
+const sleepReasonRuntimeMissing = "runtime-missing"
+
 // Deprecated: evaluateWakeReasons and wakeReasons are legacy functions
 // superseded by ComputeAwakeSet (compute_awake_set.go). The production
 // reconciler at session_reconciler.go:438 uses ComputeAwakeSet →
@@ -968,15 +970,20 @@ func healStatePatch(session beads.Bead, alive bool, clk clock.Clock) map[string]
 	}
 	if meta["state"] != target {
 		batch["state"] = target
+		if target == string(sessionpkg.StateAsleep) && view.ResetContinuation && strings.TrimSpace(meta["sleep_reason"]) == "" {
+			batch["sleep_reason"] = sleepReasonRuntimeMissing
+		}
 	}
 	if target == string(sessionpkg.StateAsleep) {
 		if strings.TrimSpace(meta["sleep_reason"]) == "" && strings.TrimSpace(meta["state"]) == "failed-create" {
 			batch["sleep_reason"] = "failed-create"
 		}
 		if view.ResetContinuation {
-			batch["session_key"] = ""
-			batch["started_config_hash"] = ""
-			batch["continuation_reset_pending"] = "true"
+			if !isNamedSessionBead(session) || namedSessionMode(session) != "always" {
+				batch["session_key"] = ""
+				batch["started_config_hash"] = ""
+				batch["continuation_reset_pending"] = "true"
+			}
 		}
 	}
 	return emptyNil(batch)

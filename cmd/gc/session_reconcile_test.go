@@ -1623,6 +1623,7 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 			}(),
 			want: map[string]string{
 				"state":                      "asleep",
+				"sleep_reason":               sleepReasonRuntimeMissing,
 				"session_key":                "",
 				"started_config_hash":        "",
 				"continuation_reset_pending": "true",
@@ -1682,6 +1683,34 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 	}
 }
 
+func TestHealStatePatch_NamedAlwaysAwakeFlapsToAsleepWithoutReasonOnAliveFalse(t *testing.T) {
+	now := time.Date(2026, 5, 12, 22, 16, 55, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	session := makeBead("mayor-adhoc-b76ba59d39", map[string]string{
+		"state":                      "awake",
+		"session_key":                "active-session-abc",
+		"started_config_hash":        "current-core-hash",
+		"started_live_hash":          "current-live-hash",
+		"sleep_reason":               "",
+		"template":                   "mayor",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "mayor",
+		namedSessionModeMetadata:     "always",
+	})
+
+	patch := healStatePatch(session, false, clk)
+	if patch["state"] != "asleep" {
+		t.Fatalf("baseline: expected state=asleep on heal-from-awake when !alive, got %q (patch=%#v)", patch["state"], patch)
+	}
+
+	sleepReasonSet := strings.TrimSpace(patch["sleep_reason"]) != ""
+	resumeWiped := patch["session_key"] == "" || patch["started_config_hash"] == ""
+	if !sleepReasonSet && resumeWiped {
+		t.Fatalf("named-always heal-to-asleep produced empty sleep_reason and wiped resume identity in one tick: patch=%#v", patch)
+	}
+}
+
 func TestHealStatePatchNilClockKeepsCreatingFresh(t *testing.T) {
 	session := makeBead("b1", map[string]string{
 		"state": "creating",
@@ -1728,6 +1757,7 @@ func TestHealState_ClearsStaleResumeMetadata(t *testing.T) {
 		wakeMode               string
 		sessionKey             string
 		startedConfigHash      string
+		namedAlways            bool
 		wantKeyCleared         bool
 		wantStartedHashCleared bool
 	}{
@@ -1859,6 +1889,16 @@ func TestHealState_ClearsStaleResumeMetadata(t *testing.T) {
 			wantKeyCleared:         false,
 			wantStartedHashCleared: true,
 		},
+		{
+			name:                   "named-always awake with no drain reason — resume metadata preserved",
+			prevState:              "awake",
+			sleepReason:            "",
+			sessionKey:             "abc-123",
+			startedConfigHash:      "hash-before",
+			namedAlways:            true,
+			wantKeyCleared:         false,
+			wantStartedHashCleared: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1872,6 +1912,11 @@ func TestHealState_ClearsStaleResumeMetadata(t *testing.T) {
 				"session_key":         tt.sessionKey,
 				"started_config_hash": tt.startedConfigHash,
 			})
+			if tt.namedAlways {
+				session.Metadata[namedSessionMetadataKey] = "true"
+				session.Metadata[namedSessionIdentityMetadata] = "mayor"
+				session.Metadata[namedSessionModeMetadata] = "always"
+			}
 			healState(&session, false, store, clk)
 			keyAfter := session.Metadata["session_key"]
 			startedHashAfter := session.Metadata["started_config_hash"]

@@ -93,6 +93,20 @@ type SessionSubmitSucceededPayload struct {
 // IsEventPayload marks SessionSubmitSucceededPayload as an events.Payload variant.
 func (SessionSubmitSucceededPayload) IsEventPayload() {}
 
+// ProjectIdentityStampedPayload carries one layer-write event for a scope
+// identity reconcile. Source is one of generated, migrated_from_metadata,
+// migrated_from_database, or cache_repair. Layer is one of L1, L2, or L3.
+type ProjectIdentityStampedPayload struct {
+	ScopeRoot string `json:"scope_root"`
+	Source    string `json:"source"`
+	Layer     string `json:"layer"`
+	OldID     string `json:"old_id,omitempty"`
+	NewID     string `json:"new_id"`
+}
+
+// IsEventPayload marks ProjectIdentityStampedPayload as an events.Payload variant.
+func (ProjectIdentityStampedPayload) IsEventPayload() {}
+
 // RequestFailedPayload is emitted on request.failed for any async
 // operation that fails. The operation enum identifies which operation.
 type RequestFailedPayload struct {
@@ -409,4 +423,5 @@ func init() {
 	events.RegisterPayload(events.OrderFailed, events.NoPayload{})
 	events.RegisterPayload(events.ProviderSwapped, events.NoPayload{})
 	events.RegisterPayload(events.WorkerOperation, WorkerOperationEventPayload{})
+	events.RegisterPayload(events.ProjectIdentityStamped, ProjectIdentityStampedPayload{})
 }

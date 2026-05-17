@@ -548,7 +548,7 @@ func shouldResetContinuation(base BaseState, meta map[string]string, sleepReason
 		return false
 	}
 	switch strings.TrimSpace(sleepReason) {
-	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained", "city-stop", "user-hold", "wait-hold", "rate_limit":
+	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained", "city-stop", "user-hold", "wait-hold", "rate_limit", "runtime-missing":
 		return false
 	}
 	return base == BaseStateActive || base == BaseStateCreating

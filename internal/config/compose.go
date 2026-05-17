@@ -599,6 +599,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 
 	// Validate all duration strings in the fully-merged config.
 	prov.Warnings = append(prov.Warnings, ValidateDurations(root, path)...)
+	prov.Warnings = append(prov.Warnings, ValidateEventsRotation(root)...)
 
 	// Validate cross-entity semantic constraints.
 	prov.Warnings = append(prov.Warnings, ValidateSemantics(root, path)...)

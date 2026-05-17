@@ -1238,6 +1238,53 @@ func TestCanonicalValidationPasswordUsesCredentialsFileOverride(t *testing.T) {
 	}
 }
 
+func TestReadCanonicalProjectIDReadsL1Authoritatively(t *testing.T) {
+	scopeRoot := t.TempDir()
+	writeRigEndpointMetadata(t, scopeRoot, "hq")
+	metadataPath := filepath.Join(scopeRoot, ".beads", "metadata.json")
+	writeMetadataProjectID(t, metadataPath, "legacy-l2")
+	if err := contract.WriteProjectIdentity(fsys.OSFS{}, scopeRoot, "canonical-l1"); err != nil {
+		t.Fatalf("WriteProjectIdentity: %v", err)
+	}
+
+	got, err := readCanonicalProjectID(metadataPath)
+	if err != nil {
+		t.Fatalf("readCanonicalProjectID: %v", err)
+	}
+	if got != "canonical-l1" {
+		t.Fatalf("readCanonicalProjectID() = %q, want canonical-l1", got)
+	}
+}
+
+func TestReadCanonicalProjectIDFallsBackToL2WhenL1Absent(t *testing.T) {
+	scopeRoot := t.TempDir()
+	writeRigEndpointMetadata(t, scopeRoot, "hq")
+	metadataPath := filepath.Join(scopeRoot, ".beads", "metadata.json")
+	writeMetadataProjectID(t, metadataPath, "legacy-l2")
+
+	got, err := readCanonicalProjectID(metadataPath)
+	if err != nil {
+		t.Fatalf("readCanonicalProjectID: %v", err)
+	}
+	if got != "legacy-l2" {
+		t.Fatalf("readCanonicalProjectID() = %q, want legacy-l2", got)
+	}
+}
+
+func TestReadCanonicalProjectIDReturnsEmptyWhenL1AndL2Missing(t *testing.T) {
+	scopeRoot := t.TempDir()
+	writeRigEndpointMetadata(t, scopeRoot, "hq")
+	metadataPath := filepath.Join(scopeRoot, ".beads", "metadata.json")
+
+	got, err := readCanonicalProjectID(metadataPath)
+	if err != nil {
+		t.Fatalf("readCanonicalProjectID: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("readCanonicalProjectID() = %q, want empty", got)
+	}
+}
+
 func TestVerifyExternalDoltEndpointRejectsEmptyExternalDoltDatabase(t *testing.T) {
 	skipSlowCmdGCTest(t, "requires a managed external dolt endpoint; run make test-cmd-gc-process for full coverage")
 	doltPath, err := exec.LookPath("dolt")
@@ -1346,8 +1393,9 @@ func TestVerifyExternalDoltEndpointRejectsProjectIdentityMismatch(t *testing.T) 
 		t.Skip("dolt not installed")
 	}
 	bdPath := waitTestRealBDPath(t)
+	gcBin := currentGCBinaryForTests(t)
 	oldResolve := resolveProviderLifecycleGCBinary
-	resolveProviderLifecycleGCBinary = func() string { return currentGCBinaryForTests(t) }
+	resolveProviderLifecycleGCBinary = func() string { return gcBin }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
 	cityDir := t.TempDir()
@@ -1417,14 +1465,8 @@ func TestVerifyExternalDoltEndpointRejectsProjectIdentityMismatch(t *testing.T) 
 	if _, err := db.ExecContext(ctx, "INSERT INTO metadata (`key`, value) VALUES ('_project_id', ?) ON DUPLICATE KEY UPDATE value = VALUES(value)", originalProjectID); err != nil {
 		t.Fatalf("seed database _project_id: %v", err)
 	}
-	meta["project_id"] = "different-project-id"
-	patched, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		t.Fatalf("MarshalIndent(metadata.json): %v", err)
-	}
-	patched = append(patched, '\n')
-	if err := os.WriteFile(metadataPath, patched, 0o644); err != nil {
-		t.Fatalf("WriteFile(metadata.json): %v", err)
+	if err := contract.WriteProjectIdentity(fsys.OSFS{}, cityDir, "different-project-id"); err != nil {
+		t.Fatalf("WriteProjectIdentity: %v", err)
 	}
 
 	state := contract.ConfigState{
@@ -1442,6 +1484,9 @@ func TestVerifyExternalDoltEndpointRejectsProjectIdentityMismatch(t *testing.T) 
 	if !strings.Contains(strings.ToLower(err.Error()), "project identity mismatch") {
 		t.Fatalf("verifyExternalDoltEndpoint() error = %v", err)
 	}
+	if !strings.Contains(err.Error(), "different-project-id") || !strings.Contains(err.Error(), originalProjectID) {
+		t.Fatalf("verifyExternalDoltEndpoint() error = %v, want both project ids", err)
+	}
 }
 
 func TestVerifyExternalDoltEndpointRejectsMissingLocalProjectID(t *testing.T) {
@@ -1451,8 +1496,9 @@ func TestVerifyExternalDoltEndpointRejectsMissingLocalProjectID(t *testing.T) {
 		t.Skip("dolt not installed")
 	}
 	bdPath := waitTestRealBDPath(t)
+	gcBin := currentGCBinaryForTests(t)
 	oldResolve := resolveProviderLifecycleGCBinary
-	resolveProviderLifecycleGCBinary = func() string { return currentGCBinaryForTests(t) }
+	resolveProviderLifecycleGCBinary = func() string { return gcBin }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
 	cityDir := t.TempDir()
@@ -1517,6 +1563,9 @@ func TestVerifyExternalDoltEndpointRejectsMissingLocalProjectID(t *testing.T) {
 	if err := os.WriteFile(metadataPath, patched, 0o644); err != nil {
 		t.Fatalf("WriteFile(metadata.json): %v", err)
 	}
+	if err := os.Remove(contract.ProjectIdentityPath(cityDir)); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("Remove(identity.toml): %v", err)
+	}
 
 	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%s)/hq", port))
 	if err != nil {
@@ -1541,7 +1590,7 @@ func TestVerifyExternalDoltEndpointRejectsMissingLocalProjectID(t *testing.T) {
 	if err == nil {
 		t.Fatal("verifyExternalDoltEndpoint() unexpectedly succeeded for missing local project_id")
 	}
-	if !strings.Contains(strings.ToLower(err.Error()), "missing project_id") {
+	if !strings.Contains(err.Error(), "neither .beads/identity.toml nor .beads/metadata.json carry a project_id") {
 		t.Fatalf("verifyExternalDoltEndpoint() error = %v", err)
 	}
 }
@@ -1629,6 +1678,24 @@ func writeRigEndpointMetadata(t *testing.T, dir, doltDatabase string) {
 		DoltMode:     "server",
 		DoltDatabase: doltDatabase,
 	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeMetadataProjectID(t *testing.T, metadataPath string, projectID string) {
+	t.Helper()
+	data := mustReadFile(t, metadataPath)
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatal(err)
+	}
+	meta["project_id"] = projectID
+	encoded, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded = append(encoded, '\n')
+	if err := os.WriteFile(metadataPath, encoded, 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

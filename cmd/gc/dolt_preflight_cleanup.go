@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,7 +82,7 @@ func staleManagedDoltSocketPaths() []string {
 }
 
 func fileOpenedByAnyProcess(path string) (bool, error) {
-	if open, checked := unixSocketAcceptsConnection(path); checked {
+	if open, checked := unixSocketOpenStateFromTable(path); checked {
 		return open, nil
 	}
 	procCtx, procCancel := context.WithTimeout(context.Background(), managedDoltProcTimeout)
@@ -127,22 +126,18 @@ func fileOpenedByAnyProcess(path string) (bool, error) {
 	return false, fmt.Errorf("lsof %s: %w: %s", path, err, strings.TrimSpace(string(out)))
 }
 
-func unixSocketAcceptsConnection(path string) (bool, bool) {
+func unixSocketOpenStateFromTable(path string) (bool, bool) {
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSocket == 0 {
 		return false, false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), managedDoltProcTimeout)
 	defer cancel()
-	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
-	if err == nil {
-		_ = conn.Close()
-		return true, true
+	inodes, checked := unixSocketInodesForPath(ctx, path)
+	if !checked || ctx.Err() != nil {
+		return false, false
 	}
-	if os.IsNotExist(err) || errors.Is(err, syscall.ECONNREFUSED) {
-		return false, true
-	}
-	return false, false
+	return len(inodes) > 0, true
 }
 
 func fileOpenedByAnyProcessFromProc(ctx context.Context, path string) (bool, bool) {

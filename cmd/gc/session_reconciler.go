@@ -1198,14 +1198,30 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					agentCfg := sessionCoreConfigForHash(tp, *session)
 					currentHash := runtime.CoreFingerprint(agentCfg)
 					if storedHash != currentHash {
-						fmt.Fprintf(stderr, "config-drift %s: stored=%s current=%s cmd=%q\n", name, storedHash[:12], currentHash[:12], agentCfg.Command) //nolint:errcheck
-						// Diagnostic: log per-field breakdown to identify the drifting field.
-						var storedBreakdown map[string]string
-						if raw := session.Metadata["core_hash_breakdown"]; raw != "" {
-							_ = json.Unmarshal([]byte(raw), &storedBreakdown)
+						// Stored hash has no version prefix or carries a
+						// different version than the current binary — silently
+						// rebaseline all four fingerprint fields rather than
+						// draining the session. The mismatch is a versioning
+						// artifact, not real config drift. See ga-s760 FRs 1-3.
+						if runtime.IsLegacyOrMismatchedVersion(storedHash) {
+							outcome := rebaselineLegacyHashOutcome(storedHash)
+							if err := silentRebaselineSessionHashes(session, store, agentCfg); err != nil {
+								fmt.Fprintf(stderr, "session reconciler: rebaselining legacy hash for %s: %v\n", name, err) //nolint:errcheck
+							} else {
+								fmt.Fprintf(stderr, "rebaselined legacy hash for %s (stored=%s current=%s)\n", name, truncateHashForLog(storedHash), truncateHashForLog(currentHash)) //nolint:errcheck
+							}
+							if trace != nil {
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(outcome), traceRecordPayload{
+									"stored_hash":  storedHash,
+									"current_hash": currentHash,
+								}, nil, "")
+							}
+							continue
 						}
-						driftedFields := runtime.CoreFingerprintDriftFields(storedBreakdown, agentCfg)
-						runtime.LogCoreFingerprintDrift(stderr, name, storedBreakdown, agentCfg)
+						fmt.Fprintf(stderr, "config-drift %s: stored=%s current=%s cmd=%q\n", name, truncateHashForLog(storedHash), truncateHashForLog(currentHash), agentCfg.Command) //nolint:errcheck
+						// Diagnostic: log per-field breakdown to identify the drifting field.
+						driftedFields := runtime.CoreFingerprintDriftFieldsFromJSON(session.Metadata["core_hash_breakdown"], agentCfg)
+						runtime.LogCoreFingerprintDrift(stderr, name, session.Metadata["core_hash_breakdown"], agentCfg)
 						restartedInPlace := false
 						// Attached sessions never get config-drift restarts.
 						// The human will restart when ready; drift applies
@@ -1343,14 +1359,32 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					storedLive := session.Metadata["started_live_hash"]
 					currentLive := runtime.LiveFingerprint(agentCfg)
 					if storedLive != currentLive {
-						if storedLive == "" && len(agentCfg.SessionLive) == 0 {
+						switch {
+						case storedLive == "" && len(agentCfg.SessionLive) == 0:
 							// No stored hash and no live config — silently
 							// backfill the hash without running anything.
 							_ = store.SetMetadataBatch(session.ID, map[string]string{
 								"live_hash":         currentLive,
 								"started_live_hash": currentLive,
 							})
-						} else {
+						case runtime.IsLegacyOrMismatchedVersion(storedLive):
+							// Stored live hash from a pre-versioning or
+							// version-mismatched binary — silently rebaseline
+							// all four fingerprint fields rather than running
+							// SessionLive again. ga-s760 FRs 1-3.
+							outcome := rebaselineLegacyHashOutcome(storedLive)
+							if err := silentRebaselineSessionHashes(session, store, agentCfg); err != nil {
+								fmt.Fprintf(stderr, "session reconciler: rebaselining legacy live hash for %s: %v\n", name, err) //nolint:errcheck
+							} else {
+								fmt.Fprintf(stderr, "rebaselined legacy live hash for %s (stored=%s current=%s)\n", name, truncateHashForLog(storedLive), truncateHashForLog(currentLive)) //nolint:errcheck
+							}
+							if trace != nil {
+								trace.recordDecision("reconciler.session.live_drift", tp.TemplateName, name, "live_drift", string(outcome), traceRecordPayload{
+									"stored_hash":  storedLive,
+									"current_hash": currentLive,
+								}, nil, "")
+							}
+						default:
 							fmt.Fprintf(stdout, "Live config changed for '%s', re-applying...\n", tp.DisplayName()) //nolint:errcheck
 							if err := sp.RunLive(name, agentCfg); err != nil {
 								fmt.Fprintf(stderr, "session reconciler: RunLive %s: %v\n", name, err) //nolint:errcheck
@@ -1391,11 +1425,25 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					agentCfg := sessionCoreConfigForHash(tp, *session)
 					currentHash := runtime.CoreFingerprint(agentCfg)
 					if storedHash != currentHash {
-						var storedBreakdown map[string]string
-						if raw := session.Metadata["core_hash_breakdown"]; raw != "" {
-							_ = json.Unmarshal([]byte(raw), &storedBreakdown)
+						// Stored hash carries no version prefix or a different
+						// version — silently rebaseline rather than treating
+						// the asleep named session as drifted. ga-s760 FRs 1-3.
+						if runtime.IsLegacyOrMismatchedVersion(storedHash) {
+							outcome := rebaselineLegacyHashOutcome(storedHash)
+							if err := silentRebaselineSessionHashes(session, store, agentCfg); err != nil {
+								fmt.Fprintf(stderr, "session reconciler: rebaselining legacy hash for %s: %v\n", name, err) //nolint:errcheck
+							} else {
+								fmt.Fprintf(stderr, "rebaselined legacy hash for %s (stored=%s current=%s)\n", name, truncateHashForLog(storedHash), truncateHashForLog(currentHash)) //nolint:errcheck
+							}
+							if trace != nil {
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(outcome), traceRecordPayload{
+									"stored_hash":  storedHash,
+									"current_hash": currentHash,
+								}, nil, "")
+							}
+							continue
 						}
-						driftedFields := runtime.CoreFingerprintDriftFields(storedBreakdown, agentCfg)
+						driftedFields := runtime.CoreFingerprintDriftFieldsFromJSON(session.Metadata["core_hash_breakdown"], agentCfg)
 						resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, false, "asleep", clk.Now().UTC(), stderr)
 						if trace != nil {
 							trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "repair_in_place", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
@@ -2440,6 +2488,68 @@ func resolveTaskWorkDir(store beads.Store, assignees ...string) string {
 		}
 	}
 	return ""
+}
+
+// truncateHashForLog returns a short representation of a fingerprint hash
+// for log output. Preserves any v<digits>: prefix so the version stays
+// visible alongside the hex tail.
+func truncateHashForLog(h string) string {
+	if i := strings.IndexByte(h, ':'); i >= 0 {
+		end := i + 1 + 10
+		if end > len(h) {
+			end = len(h)
+		}
+		return h[:end]
+	}
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
+}
+
+// rebaselineLegacyHashOutcome picks the trace outcome that matches a
+// stored hash about to be silently rebaselined.
+func rebaselineLegacyHashOutcome(stored string) TraceOutcomeCode {
+	if runtime.IsVersionMismatchedHash(stored) {
+		return TraceOutcomeRebaselinedVersionMismatch
+	}
+	return TraceOutcomeRebaselinedUnversioned
+}
+
+// silentRebaselineSessionHashes overwrites the four fingerprint metadata
+// fields (started_config_hash, started_live_hash, live_hash,
+// core_hash_breakdown) with values produced by the current binary. Used
+// when a stored hash carries no version prefix or a version prefix that
+// does not match runtime.FingerprintVersion. The reconciler invokes this
+// instead of draining the session — the hash mismatch is purely a
+// versioning artifact, not real config drift.
+func silentRebaselineSessionHashes(session *beads.Bead, store beads.Store, agentCfg runtime.Config) error {
+	if session == nil || store == nil {
+		return nil
+	}
+	coreHash := runtime.CoreFingerprint(agentCfg)
+	liveHash := runtime.LiveFingerprint(agentCfg)
+	breakdown := runtime.CoreFingerprintBreakdown(agentCfg)
+	breakdownJSON, err := json.Marshal(breakdown)
+	if err != nil {
+		return fmt.Errorf("marshaling core_hash_breakdown: %w", err)
+	}
+	patch := map[string]string{
+		"started_config_hash": coreHash,
+		"started_live_hash":   liveHash,
+		"live_hash":           liveHash,
+		"core_hash_breakdown": string(breakdownJSON),
+	}
+	if err := store.SetMetadataBatch(session.ID, patch); err != nil {
+		return fmt.Errorf("rebaselining hashes: %w", err)
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string, len(patch))
+	}
+	for k, v := range patch {
+		session.Metadata[k] = v
+	}
+	return nil
 }
 
 // resolveSessionCommand returns the command to use when starting a session.

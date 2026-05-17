@@ -33,6 +33,12 @@ var (
 	// pre-bounded behavior; lowered in follow-up work after slow read
 	// paths are identified.
 	bdReadCommandTimeout = 120 * time.Second
+	// bdGraphApplyCommandTimeout bounds atomic graph creation below callers'
+	// outer command budgets so transient Dolt stalls can retry or fall back.
+	bdGraphApplyCommandTimeout = 45 * time.Second
+	// bdSlowTelemetryThreshold is fixed in production via telemetry.BDSlowThreshold:
+	// high enough to avoid normal bd list calls, but below the wrapper timeout.
+	bdSlowTelemetryThreshold = telemetry.BDSlowThreshold
 )
 
 // ExecCommandRunner returns a CommandRunner that uses os/exec to run commands.
@@ -69,6 +75,15 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 		timeout := bdCommandTimeoutFor(name, args)
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
+		var slowTimer *time.Timer
+		if name == "bd" {
+			bdArgs := append([]string(nil), args...)
+			agentID := bdTelemetryAgentID(env)
+			slowTimer = time.AfterFunc(bdSlowTelemetryThreshold, func() {
+				telemetry.RecordBDSlow(ctx, bdArgs, dir, agentID)
+			})
+			defer slowTimer.Stop()
+		}
 		cmd := exec.CommandContext(ctx, name, args...)
 		cmd.WaitDelay = 2 * time.Second
 		prepareCommandForTimeout(cmd)
@@ -114,9 +129,26 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 	}
 }
 
+func bdTelemetryAgentID(env map[string]string) string {
+	for _, key := range []string{"GC_ALIAS", "GC_AGENT"} {
+		if env != nil {
+			if value := strings.TrimSpace(env[key]); value != "" {
+				return value
+			}
+		}
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func bdCommandTimeoutFor(name string, args []string) time.Duration {
 	if name != "bd" || len(args) == 0 {
 		return bdCommandTimeout
+	}
+	if len(args) >= 2 && args[0] == "create" && args[1] == "--graph" {
+		return bdGraphApplyCommandTimeout
 	}
 	switch args[0] {
 	case "count", "list", "ready", "show", "stats":
@@ -834,7 +866,7 @@ func (s *BdStore) runBDTransientWrite(args ...string) error {
 	var err error
 	for attempt := 1; attempt <= bdTransientWriteAttempts; attempt++ {
 		_, err = s.runner(s.dir, "bd", args...)
-		if err == nil || !isBdTransientWriteConflict(err) || attempt == bdTransientWriteAttempts {
+		if err == nil || !isBdTransientWriteError(err) || attempt == bdTransientWriteAttempts {
 			return err
 		}
 		time.Sleep(time.Duration(attempt) * 25 * time.Millisecond)
@@ -842,13 +874,20 @@ func (s *BdStore) runBDTransientWrite(args ...string) error {
 	return err
 }
 
-func isBdTransientWriteConflict(err error) bool {
+func isBdTransientWriteError(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "Error 1213 (40001): serialization failure") ||
-		strings.Contains(msg, "this transaction conflicts with a committed transaction")
+		strings.Contains(msg, "this transaction conflicts with a committed transaction") ||
+		strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "invalid connection") ||
+		strings.Contains(msg, "bad connection") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "timed out after") ||
+		strings.Contains(msg, "deadline exceeded")
 }
 
 // Ping verifies the bd binary is accessible by running a no-op command.
@@ -1303,7 +1342,7 @@ func (s *BdStore) DepAdd(issueID, dependsOnID, depType string) error {
 			return nil
 		}
 	}
-	_, err := s.runner(s.dir, "bd", "dep", "add", issueID, dependsOnID, "--type", depType)
+	err := s.runBDTransientWrite("dep", "add", issueID, dependsOnID, "--type", depType)
 	if err != nil {
 		return fmt.Errorf("adding dep %s→%s: %w", issueID, dependsOnID, err)
 	}

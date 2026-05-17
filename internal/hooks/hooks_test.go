@@ -1340,7 +1340,11 @@ func TestInstallClaudeSurfacesEmptyPreferredOverride(t *testing.T) {
 
 // TestInstallClaudeSurfacesMalformedOverride verifies that a syntactically
 // invalid .claude/settings.json surfaces a descriptive error rather than
-// silently falling back to a legacy source or the embedded base.
+// silently falling back to a legacy source or the embedded base. The error
+// message must (a) name the offending path and (b) clearly identify the
+// file as having invalid JSON — previously this path surfaced a cryptic
+// "merging Claude settings from %s: invalid character ..." that obscured
+// the root cause. See gastownhall/gascity#2109.
 func TestInstallClaudeSurfacesMalformedOverride(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/.claude/settings.json"] = []byte(`{not valid json`)
@@ -1351,6 +1355,12 @@ func TestInstallClaudeSurfacesMalformedOverride(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), ".claude/settings.json") {
 		t.Errorf("error must name the offending path: %v", err)
+	}
+	if !strings.Contains(err.Error(), "invalid JSON") {
+		t.Errorf("error must clearly identify the file as invalid JSON (not bury it in a generic merge error): %v", err)
+	}
+	if strings.Contains(err.Error(), "merging Claude settings") {
+		t.Errorf("error must not surface as a generic 'merging Claude settings' wrap — that hides the JSON-parse root cause from operators: %v", err)
 	}
 }
 

@@ -150,9 +150,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: basic
-            command: make test-integration-review-formulas-basic-cover
-            coverprofile: coverage.integration-review-formulas-basic.txt
+          - label: basic-1-of-2
+            command: >-
+              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-basic-1-of-2.txt
+              ./scripts/test-integration-shard review-formulas-basic-1-of-2
+            coverprofile: coverage.integration-review-formulas-basic-1-of-2.txt
+          - label: basic-2-of-2
+            command: >-
+              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-basic-2-of-2.txt
+              ./scripts/test-integration-shard review-formulas-basic-2-of-2
+            coverprofile: coverage.integration-review-formulas-basic-2-of-2.txt
           - label: retries-1-of-2
             command: >-
               GO_TEST_COVERPROFILE=coverage.integration-review-formulas-retries-1-of-2.txt

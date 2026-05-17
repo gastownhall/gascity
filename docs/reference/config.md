@@ -281,6 +281,7 @@ DaemonConfig holds controller daemon settings.
 | `probe_concurrency` | integer |  | `8` | ProbeConcurrency bounds the number of concurrent bd subprocess probes issued by the pool scale_check and work_query paths. bd serializes on a shared dolt sql-server, so unbounded parallelism causes contention. Nil (unset) defaults to 8. Set higher for workspaces with a fast dedicated dolt server, or lower to reduce contention on slow storage. |
 | `max_wakes_per_tick` | integer |  | `5` | MaxWakesPerTick caps how many sessions the reconciler may start in a single tick. Nil (unset) defaults to 5. Values &lt;= 0 are treated as the default — set a positive integer to override. |
 | `nudge_dispatcher` | string |  | `legacy` | NudgeDispatcher selects how queued nudges get delivered to running sessions. "legacy" (default) auto-spawns a per-session `gc nudge poll` process that polls the file-backed queue every 2s. "supervisor" runs the delivery loop inside the city runtime instead, with a unix-socket wake fast path triggered by enqueue, eliminating the per-session bd shellout storm. Enum: `legacy`, `supervisor` |
+| `auto_restart_on_drift` | boolean |  | `true` | AutoRestartOnDrift controls whether `gc start` automatically restarts the supervisor when it detects the running supervisor's binary or pack snapshot has drifted from on-disk state. Nil (unset) defaults to true — operators get the correct-by-default behavior. Set to false as a global kill switch (e.g., for production cities where a rebuild on the host should not auto-restart the supervisor). |
 
 ## DoctorConfig
 
@@ -309,6 +310,19 @@ EventsConfig holds events provider settings.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `provider` | string |  |  | Provider selects the events backend: "fake", "fail", "exec:&lt;script&gt;", or "" (default: file-backed JSONL). |
+| `rotation` | EventsRotationConfig |  |  | Rotation configures file-backed JSONL rotation. Defaults are applied by EventsRotationConfig helper methods when this table is absent. |
+
+## EventsRotationConfig
+
+EventsRotationConfig holds file-backed events rotation settings.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean |  | `true` | Enabled controls automatic size-triggered rotation. Defaults to true. |
+| `max_size_bytes` | integer |  | `268435456` | MaxSizeBytes is the active events.jsonl size threshold. Defaults to DefaultEventsRotationMaxSizeBytes. |
+| `check_interval_records` | integer |  | `1024` | CheckIntervalRecords is the number of records between size checks. Defaults to DefaultEventsRotationCheckIntervalRecords. |
+| `check_interval_seconds` | integer |  | `60` | CheckIntervalSeconds is the time backstop between size checks. Defaults to DefaultEventsRotationCheckIntervalSeconds. |
+| `archive_retain_age` | string |  |  | ArchiveRetainAge is an optional Go duration. Empty keeps all archives. |
 
 ## FormulasConfig
 

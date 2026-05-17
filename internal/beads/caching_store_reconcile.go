@@ -197,7 +197,19 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.state == cacheDegraded || c.lastFreshAt.IsZero() {
+	if c.syncFailures >= maxCacheSyncFailures && !c.stats.LastProblemAt.IsZero() {
+		dueAt := c.stats.LastProblemAt.Add(cacheReconcileFailureBackoff)
+		if !now.Before(dueAt) {
+			return 0
+		}
+		return dueAt.Sub(now)
+	}
+
+	if c.state == cacheDegraded {
+		return 0
+	}
+
+	if c.lastFreshAt.IsZero() {
 		return 0
 	}
 

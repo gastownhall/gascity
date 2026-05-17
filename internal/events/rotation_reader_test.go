@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // seedRecorderWithRotation creates a fresh recorder, writes recordsBefore
@@ -130,6 +131,33 @@ func TestReadFilteredAcrossArchivesAppliesLimit(t *testing.T) {
 	}
 	if got[0].Seq != 1 || got[1].Seq != 2 {
 		t.Errorf("got seqs = [%d,%d], want [1,2]", got[0].Seq, got[1].Seq)
+	}
+}
+
+func TestReadLatestSeqSpansArchiveOnlyLog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+
+	rotating := filepath.Join(dir, "events.jsonl.rotating-20260507T120000Z-seq-100-102")
+	const body = `{"seq":100,"type":"x"}
+{"seq":101,"type":"y"}
+{"seq":102,"type":"z"}
+`
+	if err := os.WriteFile(rotating, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(dir, formatArchiveBasename(time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC), 100, 102))
+	var stderr bytes.Buffer
+	if err := gzipAndArchive(rotating, dest, &stderr); err != nil {
+		t.Fatalf("gzipAndArchive: %v", err)
+	}
+
+	seq, err := ReadLatestSeq(path)
+	if err != nil {
+		t.Fatalf("ReadLatestSeq: %v", err)
+	}
+	if seq != 102 {
+		t.Fatalf("ReadLatestSeq archive-only = %d, want 102", seq)
 	}
 }
 

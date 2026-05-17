@@ -53,6 +53,8 @@ type Options struct {
 }
 
 const (
+	graphApplyTransientRetryDelay = 500 * time.Millisecond
+
 	// DeferredAssigneeMetadataKey stores an assignee withheld during speculative
 	// molecule creation. Activating the molecule restores the value as Assignee.
 	DeferredAssigneeMetadataKey = "gc.deferred_assignee"
@@ -452,8 +454,6 @@ func attachStepRefs(step formula.RecipeStep) []string {
 // already-created beads are marked with "molecule_failed" metadata
 // for cleanup.
 func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe, opts Options) (*Result, error) {
-	_ = ctx // reserved for future cancellation support
-
 	if recipe == nil {
 		return nil, fmt.Errorf("recipe is nil")
 	}
@@ -462,9 +462,32 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 	}
 	if !opts.DeferAssignees && IsGraphApplyEnabled() {
 		if applier, ok := store.(beads.GraphApplyStore); ok {
-			return instantiateViaGraphApply(ctx, applier, recipe, opts)
+			result, err := instantiateViaGraphApply(ctx, applier, recipe, opts)
+			if err == nil {
+				return result, nil
+			}
+			if !isTransientGraphApplyError(err) {
+				return nil, err
+			}
+			graphApplyTracef("graph-apply transient-error retry recipe=%s err=%v", recipe.Name, err)
+			timer := time.NewTimer(graphApplyTransientRetryDelay)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				return nil, fmt.Errorf("retrying graph apply for recipe %q: %w", recipe.Name, ctx.Err())
+			}
+			result, retryErr := instantiateViaGraphApply(ctx, applier, recipe, opts)
+			if retryErr == nil {
+				return result, nil
+			}
+			if !isTransientGraphApplyError(retryErr) {
+				return nil, retryErr
+			}
+			graphApplyTracef("graph-apply transient-error fallback recipe=%s first_err=%v retry_err=%v", recipe.Name, err, retryErr)
+		} else {
+			graphApplyTracef("graph-apply unavailable recipe=%s store=%T", recipe.Name, store)
 		}
-		graphApplyTracef("graph-apply unavailable recipe=%s store=%T", recipe.Name, store)
 	}
 
 	// Merge variable defaults from recipe with caller-provided vars.

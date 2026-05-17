@@ -577,40 +577,35 @@ func verifyExternalDoltEndpoint(state contract.ConfigState, databaseScopeRoot, a
 		return fmt.Errorf("beads store not usable on external endpoint: %w", err)
 	}
 	if localProjectID == "" {
-		return fmt.Errorf("external endpoint identity unverifiable: local metadata.json is missing project_id; rerun with --adopt-unverified or repair the canonical metadata first")
+		return fmt.Errorf("external endpoint identity unverifiable: neither %s nor .beads/metadata.json carry a project_id; rerun with --adopt-unverified or seed the canonical identity first", projectIdentityDisplayPath)
 	}
 	if !ok {
 		return fmt.Errorf("external endpoint identity unverifiable: database %q is missing metadata _project_id; rerun with --adopt-unverified", strings.TrimSpace(database))
 	}
 	if localProjectID != databaseProjectID {
-		return fmt.Errorf("PROJECT IDENTITY MISMATCH — refusing to connect: local metadata.json project_id %q does not match database _project_id %q", localProjectID, databaseProjectID)
+		return fmt.Errorf(
+			"PROJECT IDENTITY MISMATCH — refusing to connect:\n"+
+				"  canonical local project_id    = %q   (from "+projectIdentityDisplayPath+" or metadata.json)\n"+
+				"  database metadata._project_id  = %q\n"+
+				"\n"+
+				"Inspect both values and resolve manually before reconnecting.",
+			localProjectID, databaseProjectID,
+		)
 	}
 	return nil
 }
 
 func readCanonicalProjectID(metadataPath string) (string, error) {
-	data, err := os.ReadFile(metadataPath)
+	scopeRoot, err := scopeRootFromMetadataPath(metadataPath)
 	if err != nil {
 		return "", err
 	}
-	var meta map[string]any
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return "", nil
-	}
-	raw, ok := meta["project_id"]
-	if !ok || raw == nil {
-		return "", nil
-	}
-	switch value := raw.(type) {
-	case string:
-		return strings.TrimSpace(value), nil
-	default:
-		projectID := strings.TrimSpace(fmt.Sprint(value))
-		if projectID == "" || projectID == "<nil>" || strings.EqualFold(projectID, "null") {
-			return "", nil
-		}
+	if projectID, ok, err := contract.ReadProjectIdentity(fsys.OSFS{}, scopeRoot); err != nil {
+		return "", err
+	} else if ok {
 		return projectID, nil
 	}
+	return readManagedMetadataProjectID(metadataPath)
 }
 
 func readDatabaseProjectID(ctx context.Context, db *sql.DB) (string, bool, error) {

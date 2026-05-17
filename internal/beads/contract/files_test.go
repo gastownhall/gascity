@@ -617,6 +617,120 @@ func TestEnsureCanonicalMetadataPreservesUnknownKeysAndScrubsDeprecatedOnes(t *t
 	}
 }
 
+func TestEnsureCanonicalMetadataRegeneratesProjectIDFromL1(t *testing.T) {
+	fs := fsys.OSFS{}
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(beadsDir, "metadata.json")
+	input := `{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"hq","project_id":"stale-L2-id","custom":"keep"}`
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteProjectIdentity(fs, scope, "L1-pinned-id"); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "hq",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalMetadata() should report L1 project_id regeneration")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if got := trimmedString(meta["project_id"]); got != "L1-pinned-id" {
+		t.Fatalf("project_id = %q, want %q", got, "L1-pinned-id")
+	}
+	if got := trimmedString(meta["custom"]); got != "keep" {
+		t.Fatalf("custom = %q, want %q", got, "keep")
+	}
+}
+
+func TestEnsureCanonicalMetadataPreservesProjectIDWhenL1Absent(t *testing.T) {
+	fs := fsys.OSFS{}
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(beadsDir, "metadata.json")
+	input := `{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"hq","project_id":"legacy-L2-id"}`
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "hq",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+	}
+	if changed {
+		t.Fatal("EnsureCanonicalMetadata() changed legacy project_id without L1")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if got := trimmedString(meta["project_id"]); got != "legacy-L2-id" {
+		t.Fatalf("project_id = %q, want %q", got, "legacy-L2-id")
+	}
+}
+
+func TestEnsureCanonicalMetadataSurfacesL1ParseError(t *testing.T) {
+	fs := fsys.OSFS{}
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(beadsDir, "metadata.json")
+	input := `{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"hq","project_id":"legacy-L2-id"}`
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.WriteFile(ProjectIdentityPath(scope), []byte("not valid toml ===\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "hq",
+	})
+	if err == nil {
+		t.Fatal("EnsureCanonicalMetadata() error = nil, want corrupt L1 error")
+	}
+	if msg := strings.ToLower(err.Error()); !strings.Contains(msg, "identity.toml") && !strings.Contains(msg, "project identity") {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v, want identity context", err)
+	}
+}
+
 func TestEnsureCanonicalMetadataPreservesExistingDoltDatabaseWhenStateOmitsIt(t *testing.T) {
 	fs := fsys.OSFS{}
 	dir := t.TempDir()

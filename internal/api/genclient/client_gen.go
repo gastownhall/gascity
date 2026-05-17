@@ -1814,6 +1814,15 @@ type PoolOverride struct {
 	OnDeath      *string `json:"OnDeath"`
 }
 
+// ProjectIdentityStampedPayload defines model for ProjectIdentityStampedPayload.
+type ProjectIdentityStampedPayload struct {
+	Layer     string  `json:"layer"`
+	NewId     string  `json:"new_id"`
+	OldId     *string `json:"old_id,omitempty"`
+	ScopeRoot string  `json:"scope_root"`
+	Source    string  `json:"source"`
+}
+
 // ProviderCreateInputBody defines model for ProviderCreateInputBody.
 type ProviderCreateInputBody struct {
 	// AcpArgs ACP transport command arguments override.
@@ -3055,6 +3064,18 @@ type TypedEventStreamEnvelopeOrderFired struct {
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeProjectIdentityStamped defines model for TypedEventStreamEnvelopeProjectIdentityStamped.
+type TypedEventStreamEnvelopeProjectIdentityStamped struct {
+	Actor    string                        `json:"actor"`
+	Message  *string                       `json:"message,omitempty"`
+	Payload  ProjectIdentityStampedPayload `json:"payload"`
+	Seq      int64                         `json:"seq"`
+	Subject  *string                       `json:"subject,omitempty"`
+	Ts       time.Time                     `json:"ts"`
+	Type     string                        `json:"type"`
+	Workflow *WorkflowEventProjection      `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeProviderSwapped defines model for TypedEventStreamEnvelopeProviderSwapped.
 type TypedEventStreamEnvelopeProviderSwapped struct {
 	Actor    string                   `json:"actor"`
@@ -3676,6 +3697,19 @@ type TypedTaggedEventStreamEnvelopeOrderFired struct {
 	Ts       time.Time                `json:"ts"`
 	Type     string                   `json:"type"`
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeProjectIdentityStamped defines model for TypedTaggedEventStreamEnvelopeProjectIdentityStamped.
+type TypedTaggedEventStreamEnvelopeProjectIdentityStamped struct {
+	Actor    string                        `json:"actor"`
+	City     string                        `json:"city"`
+	Message  *string                       `json:"message,omitempty"`
+	Payload  ProjectIdentityStampedPayload `json:"payload"`
+	Seq      int64                         `json:"seq"`
+	Subject  *string                       `json:"subject,omitempty"`
+	Ts       time.Time                     `json:"ts"`
+	Type     string                        `json:"type"`
+	Workflow *WorkflowEventProjection      `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeProviderSwapped defines model for TypedTaggedEventStreamEnvelopeProviderSwapped.
@@ -5395,6 +5429,32 @@ func (t *EventPayload) MergeOutboundEventPayload(v OutboundEventPayload) error {
 	return err
 }
 
+// AsProjectIdentityStampedPayload returns the union data inside the EventPayload as a ProjectIdentityStampedPayload
+func (t EventPayload) AsProjectIdentityStampedPayload() (ProjectIdentityStampedPayload, error) {
+	var body ProjectIdentityStampedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromProjectIdentityStampedPayload overwrites any union data inside the EventPayload as the provided ProjectIdentityStampedPayload
+func (t *EventPayload) FromProjectIdentityStampedPayload(v ProjectIdentityStampedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeProjectIdentityStampedPayload performs a merge with any union data inside the EventPayload, using the provided ProjectIdentityStampedPayload
+func (t *EventPayload) MergeProjectIdentityStampedPayload(v ProjectIdentityStampedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsRequestFailedPayload returns the union data inside the EventPayload as a RequestFailedPayload
 func (t EventPayload) AsRequestFailedPayload() (RequestFailedPayload, error) {
 	var body RequestFailedPayload
@@ -6539,6 +6599,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeOrderFired(v Typ
 	return err
 }
 
+// AsTypedEventStreamEnvelopeProjectIdentityStamped returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeProjectIdentityStamped
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeProjectIdentityStamped() (TypedEventStreamEnvelopeProjectIdentityStamped, error) {
+	var body TypedEventStreamEnvelopeProjectIdentityStamped
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeProjectIdentityStamped overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeProjectIdentityStamped
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeProjectIdentityStamped(v TypedEventStreamEnvelopeProjectIdentityStamped) error {
+	v.Type = "project.identity.stamped"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeProjectIdentityStamped performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeProjectIdentityStamped
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeProjectIdentityStamped(v TypedEventStreamEnvelopeProjectIdentityStamped) error {
+	v.Type = "project.identity.stamped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeProviderSwapped returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeProviderSwapped
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeProviderSwapped() (TypedEventStreamEnvelopeProviderSwapped, error) {
 	var body TypedEventStreamEnvelopeProviderSwapped
@@ -7173,6 +7261,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeOrderFailed()
 	case "order.fired":
 		return t.AsTypedEventStreamEnvelopeOrderFired()
+	case "project.identity.stamped":
+		return t.AsTypedEventStreamEnvelopeProjectIdentityStamped()
 	case "provider.swapped":
 		return t.AsTypedEventStreamEnvelopeProviderSwapped()
 	case "request.failed":
@@ -8038,6 +8128,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeOrde
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeProjectIdentityStamped returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeProjectIdentityStamped
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeProjectIdentityStamped() (TypedTaggedEventStreamEnvelopeProjectIdentityStamped, error) {
+	var body TypedTaggedEventStreamEnvelopeProjectIdentityStamped
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeProjectIdentityStamped overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeProjectIdentityStamped
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeProjectIdentityStamped(v TypedTaggedEventStreamEnvelopeProjectIdentityStamped) error {
+	v.Type = "project.identity.stamped"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeProjectIdentityStamped performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeProjectIdentityStamped
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeProjectIdentityStamped(v TypedTaggedEventStreamEnvelopeProjectIdentityStamped) error {
+	v.Type = "project.identity.stamped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeProviderSwapped returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeProviderSwapped
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeProviderSwapped() (TypedTaggedEventStreamEnvelopeProviderSwapped, error) {
 	var body TypedTaggedEventStreamEnvelopeProviderSwapped
@@ -8672,6 +8790,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeOrderFailed()
 	case "order.fired":
 		return t.AsTypedTaggedEventStreamEnvelopeOrderFired()
+	case "project.identity.stamped":
+		return t.AsTypedTaggedEventStreamEnvelopeProjectIdentityStamped()
 	case "provider.swapped":
 		return t.AsTypedTaggedEventStreamEnvelopeProviderSwapped()
 	case "request.failed":

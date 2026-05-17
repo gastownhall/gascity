@@ -26,9 +26,13 @@ func TestParseDurationWithDays(t *testing.T) {
 		{"1d12h", 36 * time.Hour, false},
 		{"30m", 30 * time.Minute, false},
 		{"0s", 0, false},
+		{"0d", 0, false},
 		{"", 0, true},
 		{"abc", 0, true},
 		{"xd", 0, true},
+		{"d", 0, true},
+		{"99999999999999999999d", 0, true},
+		{"106752d", 0, true},
 	}
 	for _, tc := range cases {
 		got, err := parseDurationWithDays(tc.in)

@@ -1141,6 +1141,11 @@
           ],
           "description": "NudgeDispatcher selects how queued nudges get delivered to running\nsessions. \"legacy\" (default) auto-spawns a per-session `gc nudge poll`\nprocess that polls the file-backed queue every 2s. \"supervisor\" runs\nthe delivery loop inside the city runtime instead, with a unix-socket\nwake fast path triggered by enqueue, eliminating the per-session bd\nshellout storm.",
           "default": "legacy"
+        },
+        "auto_restart_on_drift": {
+          "type": "boolean",
+          "description": "AutoRestartOnDrift controls whether `gc start` automatically restarts\nthe supervisor when it detects the running supervisor's binary or\npack snapshot has drifted from on-disk state. Nil (unset) defaults\nto true — operators get the correct-by-default behavior. Set to\nfalse as a global kill switch (e.g., for production cities where a\nrebuild on the host should not auto-restart the supervisor).",
+          "default": true
         }
       },
       "additionalProperties": false,
@@ -1196,11 +1201,46 @@
         "provider": {
           "type": "string",
           "description": "Provider selects the events backend: \"fake\", \"fail\",\n\"exec:\u003cscript\u003e\", or \"\" (default: file-backed JSONL)."
+        },
+        "rotation": {
+          "$ref": "#/$defs/EventsRotationConfig",
+          "description": "Rotation configures file-backed JSONL rotation. Defaults are applied\nby EventsRotationConfig helper methods when this table is absent."
         }
       },
       "additionalProperties": false,
       "type": "object",
       "description": "EventsConfig holds events provider settings."
+    },
+    "EventsRotationConfig": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enabled controls automatic size-triggered rotation. Defaults to true.",
+          "default": true
+        },
+        "max_size_bytes": {
+          "type": "integer",
+          "description": "MaxSizeBytes is the active events.jsonl size threshold. Defaults to\nDefaultEventsRotationMaxSizeBytes.",
+          "default": 268435456
+        },
+        "check_interval_records": {
+          "type": "integer",
+          "description": "CheckIntervalRecords is the number of records between size checks.\nDefaults to DefaultEventsRotationCheckIntervalRecords.",
+          "default": 1024
+        },
+        "check_interval_seconds": {
+          "type": "integer",
+          "description": "CheckIntervalSeconds is the time backstop between size checks. Defaults\nto DefaultEventsRotationCheckIntervalSeconds.",
+          "default": 60
+        },
+        "archive_retain_age": {
+          "type": "string",
+          "description": "ArchiveRetainAge is an optional Go duration. Empty keeps all archives."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "EventsRotationConfig holds file-backed events rotation settings."
     },
     "FormulasConfig": {
       "properties": {

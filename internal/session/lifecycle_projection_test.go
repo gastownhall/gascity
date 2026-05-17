@@ -395,6 +395,23 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 			wantReconciledState: StateAsleep,
 		},
 		{
+			name: "dead active runtime with runtime-missing reason preserves resume identity",
+			input: LifecycleInput{
+				Status: "open",
+				Metadata: map[string]string{
+					"state":               "active",
+					"session_name":        "s-worker",
+					"session_key":         "provider-conversation",
+					"started_config_hash": "config",
+					"sleep_reason":        "runtime-missing",
+				},
+				Runtime: RuntimeFacts{Observed: true, Alive: false},
+				Now:     now,
+			},
+			wantRuntime:         RuntimeProjectionMissing,
+			wantReconciledState: StateAsleep,
+		},
+		{
 			name: "fresh creating state stays creating after restart",
 			input: LifecycleInput{
 				Status: "open",

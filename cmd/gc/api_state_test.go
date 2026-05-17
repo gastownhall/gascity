@@ -523,6 +523,58 @@ func TestControllerStateRuntimeUpdatePreservesCurrentStoresWithoutPendingMutatio
 	}
 }
 
+func TestControllerStateRuntimeUpdateRebuildsStoresWhenBackendMetadataChanges(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	writeBackendMetadata(t, cityDir, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`)
+
+	current := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+	}
+	oldStore := beads.NewMemStore()
+	cs := &controllerState{
+		cfg:                    current,
+		sp:                     runtime.NewFake(),
+		beadStores:             map[string]beads.Store{},
+		cityBeadStore:          oldStore,
+		cityName:               "city1",
+		cityPath:               cityDir,
+		storeMetadataSignature: storeMetadataSignature(cityDir, current),
+	}
+	oldSignature := cs.storeMetadataSignature
+
+	if !cs.runtimeUpdateCanReuseCurrentStores(current) {
+		t.Fatal("precondition: matching metadata should allow store reuse")
+	}
+
+	writeBackendMetadata(t, cityDir, `{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`)
+	nextProvider := runtime.NewFake()
+	cs.updateFromRuntime(current, nextProvider, "")
+
+	if got := cs.CityBeadStore(); got == oldStore {
+		t.Fatal("CityBeadStore() reused stale store after backend metadata changed")
+	}
+	if cs.SessionProvider() != nextProvider {
+		t.Fatal("SessionProvider() was not advanced after metadata-triggered update")
+	}
+	if cs.storeMetadataSignature == "" || cs.storeMetadataSignature == oldSignature {
+		t.Fatal("store metadata signature was not refreshed after backend metadata changed")
+	}
+}
+
+func writeBackendMetadata(t *testing.T, scopeRoot, data string) {
+	t.Helper()
+	dir := filepath.Join(scopeRoot, ".beads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(data+"\n"), 0o644); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
+	}
+}
+
 func TestControllerStateRuntimeUpdateIgnoresStaleRevisionWithoutPendingMutation(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 

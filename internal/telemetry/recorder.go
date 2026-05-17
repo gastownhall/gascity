@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"go.opentelemetry.io/otel"
@@ -22,6 +23,21 @@ const (
 	meterRecorderName = "github.com/gastownhall/gascity"
 	loggerName        = "gascity"
 )
+
+// BDSlowThreshold is the fixed wall-clock point where an in-flight bd
+// subprocess is reported as slow. It is intentionally well below the bd
+// wrapper timeout and not operator-tunable.
+const BDSlowThreshold = 30 * time.Second
+
+// BDSlowEvent describes the structured fields emitted with bd.slow telemetry.
+type BDSlowEvent struct {
+	Timestamp time.Time `json:"timestamp"`
+	Args      []string  `json:"args"`
+	Dir       string    `json:"dir"`
+	ElapsedMs int64     `json:"elapsed_ms"`
+	AgentID   string    `json:"agent_id,omitempty"`
+	Threshold int64     `json:"threshold_ms"`
+}
 
 // recorderInstruments holds all lazy-initialized OTel metric instruments.
 type recorderInstruments struct {
@@ -204,6 +220,40 @@ func truncateOutput(s string, limit int) string {
 		truncated = truncated[:len(truncated)-1]
 	}
 	return truncated + "…"
+}
+
+var bdSecretArgs = map[string]struct{}{
+	"--password":        {},
+	"--remote-password": {},
+	"--token":           {},
+	"--api-key":         {},
+	"--bearer":          {},
+}
+
+func sanitizeBDArgs(args []string) []string {
+	out := append([]string(nil), args...)
+	for i := 0; i < len(out); i++ {
+		arg := out[i]
+		if flag, _, ok := strings.Cut(arg, "="); ok {
+			if _, secret := bdSecretArgs[flag]; secret {
+				out[i] = flag + "=<redacted>"
+			}
+			continue
+		}
+		if _, secret := bdSecretArgs[arg]; secret && i+1 < len(out) {
+			i++
+			out[i] = "<redacted>"
+		}
+	}
+	return out
+}
+
+func logStringSlice(key string, values []string) otellog.KeyValue {
+	otelValues := make([]otellog.Value, 0, len(values))
+	for _, value := range values {
+		otelValues = append(otelValues, otellog.StringValue(value))
+	}
+	return otellog.Slice(key, otelValues...)
 }
 
 // RecordAgentStart records an agent session start (metrics + log event).
@@ -403,6 +453,7 @@ func RecordBDCall(ctx context.Context, args []string, durationMs float64, err er
 	if len(args) > 0 {
 		subcommand = args[0]
 	}
+	sanitizedArgs := sanitizeBDArgs(args)
 	status := statusStr(err)
 	attrs := metric.WithAttributes(
 		attribute.String("status", status),
@@ -412,7 +463,7 @@ func RecordBDCall(ctx context.Context, args []string, durationMs float64, err er
 	inst.bdDurationHist.Record(ctx, durationMs, attrs)
 	kvs := []otellog.KeyValue{
 		otellog.String("subcommand", subcommand),
-		otellog.String("args", strings.Join(args, " ")),
+		otellog.String("args", strings.Join(sanitizedArgs, " ")),
 		otellog.Float64("duration_ms", durationMs),
 		otellog.String("status", status),
 		errKV(err),
@@ -425,6 +476,30 @@ func RecordBDCall(ctx context.Context, args []string, durationMs float64, err er
 		)
 	}
 	emit(ctx, "bd.call", severity(err), kvs...)
+}
+
+// RecordBDSlow records a bd CLI invocation that is still running after the
+// fixed slow-call threshold.
+func RecordBDSlow(ctx context.Context, args []string, dir, agentID string) {
+	event := BDSlowEvent{
+		Timestamp: time.Now().UTC(),
+		Args:      sanitizeBDArgs(args),
+		Dir:       strings.TrimSpace(dir),
+		ElapsedMs: BDSlowThreshold.Milliseconds(),
+		AgentID:   strings.TrimSpace(agentID),
+		Threshold: BDSlowThreshold.Milliseconds(),
+	}
+	kvs := []otellog.KeyValue{
+		otellog.String("timestamp", event.Timestamp.Format(time.RFC3339Nano)),
+		logStringSlice("args", event.Args),
+		otellog.String("dir", event.Dir),
+		otellog.Int64("elapsed_ms", event.ElapsedMs),
+		otellog.Int64("threshold_ms", event.Threshold),
+	}
+	if event.AgentID != "" {
+		kvs = append(kvs, otellog.String("agent_id", event.AgentID))
+	}
+	emit(ctx, "bd.slow", otellog.SeverityWarn, kvs...)
 }
 
 // ── Phase 2 recording functions ──────────────────────────────────────────

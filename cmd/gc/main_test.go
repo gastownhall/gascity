@@ -167,7 +167,10 @@ func configureFSPressureForTests() {
 }
 
 func TestMain(m *testing.M) {
-	testTempRoot, err := os.MkdirTemp("", "gascity-cmd-gc-test-*")
+	if !isTestscriptCommandInvocation(os.Args[0]) {
+		clearProcessLiveEnvForTests()
+	}
+	testTempRoot, err := os.MkdirTemp("/tmp", "gctest-")
 	if err != nil {
 		panic(err)
 	}

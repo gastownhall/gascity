@@ -89,7 +89,7 @@ lower_dolt_database_name() {
 
 is_system_dolt_database_name() {
     case "$(lower_dolt_database_name "$1")" in
-        information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) return 0 ;;
+        information_schema|mysql|dolt|dolt_cluster|performance_schema|sys|__gc_probe) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -217,9 +217,7 @@ path_under_data_dir() {
     return 1
 }
 
-# do_query_probe runs a SELECT active_branch() query against the dolt server.
-# active_branch() is lightweight and won't block behind queued queries,
-# unlike SELECT 1 which goes through the full query executor (per Tim Sehn, Dolt CEO).
+# do_query_probe runs a read-only information_schema query against the dolt server.
 do_query_probe() {
     local host gc_bin
     host=$(connect_host)
@@ -228,7 +226,7 @@ do_query_probe() {
         "$gc_bin" dolt-state query-probe --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" >/dev/null 2>&1
         return $?
     fi
-    dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls         sql -q "SELECT active_branch()" >/dev/null 2>&1
+    dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls         sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA" >/dev/null 2>&1
 }
 
 # server_sql runs a SQL query against the running dolt server.
@@ -380,22 +378,14 @@ read_existing_dolt_database() {
     grep -o '"dolt_database"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta_file" 2>/dev/null |         sed 's/.*"dolt_database"[[:space:]]*:[[:space:]]*"//;s/"//' || true
 }
 
-metadata_has_project_id() {
-    local meta_file="$1"
-    [ -f "$meta_file" ] || return 1
-    grep -q '"project_id"[[:space:]]*:' "$meta_file" 2>/dev/null
+identity_toml_present() {
+    local dir="$1"
+    [ -f "$dir/.beads/identity.toml" ]
 }
 
-backfill_project_id_if_missing() {
+ensure_project_identity() {
     local dir="$1" meta_file gc_bin dolt_database host
     meta_file="$dir/.beads/metadata.json"
-    if metadata_has_project_id "$meta_file"; then
-        return 0
-    fi
-    run_bd_pinned "$dir" migrate --update-repo-id 2>/dev/null || true
-    if metadata_has_project_id "$meta_file"; then
-        return 0
-    fi
     gc_bin=$(resolve_gc_helper_bin)
     if [ -z "$gc_bin" ]; then
         return 0
@@ -405,7 +395,14 @@ backfill_project_id_if_missing() {
         return 0
     fi
     host=$(connect_host)
-    "$gc_bin" dolt-state ensure-project-id         --metadata "$meta_file"         --host "$host"         --port "$DOLT_PORT"         --user "$DOLT_USER"         --database "$dolt_database" >/dev/null || die "failed to ensure project identity for $dir"
+    "$gc_bin" dolt-state ensure-project-id \
+        --city "$GC_CITY_PATH" \
+        --metadata "$meta_file" \
+        --host "$host" \
+        --port "$DOLT_PORT" \
+        --user "$DOLT_USER" \
+        --database "$dolt_database" >/dev/null \
+        || die "failed to ensure project identity for $dir"
 }
 
 ensure_bd_runtime_issue_prefix() {
@@ -1013,6 +1010,8 @@ listener:
 
 data_dir: "$DATA_DIR"
 
+# auto_gc is disabled — dolt#10944 load-avg gating means upstream auto-GC effectively never fires.
+# Compaction-driven scheduled GC replaces it. See gastownhall/gascity#1918, #1200, #1977 for context.
 behavior:
   auto_gc_behavior:
     enable: false
@@ -2117,7 +2116,7 @@ op_init() {
                 ensure_types_custom_in_yaml "$dir" "$custom_types"
                 ensure_bd_runtime_custom_types "$dolt_database" "$custom_types"
                 ensure_bd_runtime_issue_prefix "$dolt_database" "$prefix"
-                backfill_project_id_if_missing "$dir"
+                ensure_project_identity "$dir"
                 exit 0
             fi
             echo "warning: database '$dolt_database' missing bd schema; re-initializing" >&2
@@ -2191,10 +2190,7 @@ op_init() {
     # compatibility state for raw bd operations, not a second GC authority.
     ensure_bd_runtime_issue_prefix "$dolt_database" "$prefix"
 
-    # Ensure database has repository fingerprint (upstream GH #25).
-    # Fresh bd init already writes project_id on current upstream; only pay the
-    # migration cost when metadata still lacks it.
-    backfill_project_id_if_missing "$dir"
+    ensure_project_identity "$dir"
 
     # Drop orphan database created by bd init (upstream gt-sv1h) only after
     # the pinned database schema is visible. Some bd builds appear to stage
@@ -2240,7 +2236,7 @@ op_health() {
 
     if load_health_check_from_gc; then
         if [ "$GC_HEALTH_QUERY_READY" != "true" ]; then
-            die "dolt query probe failed (SELECT active_branch())"
+            die "dolt query probe failed (information_schema.SCHEMATA)"
         fi
         if ! is_remote && [ "$GC_HEALTH_READ_ONLY" = "true" ]; then
             die "dolt server is in read-only mode"
@@ -2252,7 +2248,7 @@ op_health() {
     else
         # Query probe.
         if ! do_query_probe; then
-            die "dolt query probe failed (SELECT active_branch())"
+            die "dolt query probe failed (information_schema.SCHEMATA)"
         fi
 
         # Imposter detection disabled: TCP + query probe passed, server is

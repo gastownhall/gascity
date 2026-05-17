@@ -118,22 +118,14 @@ func (s *Server) extmsgNotifyMembers(
 
 	notifyResolved := func(sessionSelector, resolvedID string) {
 		handle := s.extmsgSessionHandleForResolvedID(resolvedID, sessionSelector)
-		// Normalize for the CLI hint — gc subcommands are lowercase. The
-		// human-facing prose uses titleCaseProvider for display.
-		providerCLI := strings.ToLower(conv.Provider)
-		providerDisplay := titleCaseProvider(providerCLI)
-		nudge := fmt.Sprintf("<system-reminder>\nNew message in shared conversation %s/%s:\n\n"+
-			"- %s (%s): %s\n\n"+
-			"To reply in %s, write your response to a file and run:\n"+
-			"  gc %s reply-current --conversation-id %s --body-file <path>\n"+
-			"Prefix your reply with your agent handle in bold (e.g., **%s:** your message).\n"+
-			"</system-reminder>",
-			conv.Provider, conv.ConversationID,
-			actorDisplayName, actorKind, text,
-			providerDisplay,
-			providerCLI, conv.ConversationID,
-			handle,
-		)
+		nudge := formatExtmsgNotifyReminder(extmsgNotifyReminder{
+			Provider:       conv.Provider,
+			ConversationID: conv.ConversationID,
+			ActorDisplay:   actorDisplayName,
+			ActorKind:      actorKind,
+			Text:           text,
+			Handle:         handle,
+		})
 		if err := s.sendBackgroundMessageToSession(ctx, store, resolvedID, nudge); err != nil {
 			log.Printf("extmsg: notify %s failed: %v", sessionSelector, err)
 		}
@@ -193,4 +185,45 @@ func titleCaseProvider(name string) string {
 		return string(first-'a'+'A') + name[1:]
 	}
 	return name
+}
+
+// extmsgNotifyReminder collects the inputs the inbound-message
+// <system-reminder> block is constructed from. Externally-supplied fields
+// (ActorDisplay, Text) are sanitized via extmsg.SanitizeForSystemReminder
+// inside formatExtmsgNotifyReminder before interpolation; callers should
+// not pre-sanitize.
+type extmsgNotifyReminder struct {
+	Provider       string
+	ConversationID string
+	ActorDisplay   string
+	ActorKind      string
+	Text           string
+	Handle         string
+}
+
+// formatExtmsgNotifyReminder builds the inbound-message reminder body.
+// Attacker-controllable fields (ActorDisplay, Text) are stripped of literal
+// <system-reminder> open/close sequences before being interpolated into
+// the reminder block. Without this guard, an external sender can inject
+// the sequence and break out of the legitimate reminder, injecting
+// attacker-controlled instructions into the receiving agent's prompt.
+// See gastownhall/gascity#2195.
+func formatExtmsgNotifyReminder(r extmsgNotifyReminder) string {
+	providerCLI := strings.ToLower(r.Provider)
+	providerDisplay := titleCaseProvider(providerCLI)
+	safeActor := extmsg.SanitizeForSystemReminder(r.ActorDisplay)
+	safeText := extmsg.SanitizeForSystemReminder(r.Text)
+	return fmt.Sprintf(
+		"<system-reminder>\nNew message in shared conversation %s/%s:\n\n"+
+			"- %s (%s): %s\n\n"+
+			"To reply in %s, write your response to a file and run:\n"+
+			"  gc %s reply-current --conversation-id %s --body-file <path>\n"+
+			"Prefix your reply with your agent handle in bold (e.g., **%s:** your message).\n"+
+			"</system-reminder>",
+		r.Provider, r.ConversationID,
+		safeActor, r.ActorKind, safeText,
+		providerDisplay,
+		providerCLI, r.ConversationID,
+		r.Handle,
+	)
 }

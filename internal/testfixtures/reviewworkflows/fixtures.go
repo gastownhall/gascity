@@ -168,6 +168,93 @@ max_attempts = 3
 on_exhausted = "hard_fail"
 `
 
+// ExpansionReviewPRLite is the personal-work happy-path review expansion.
+// Retry and Gemini soft-fail behavior are covered by ExpansionReviewPR in the
+// adopt-pr retry scenarios; this fixture keeps the personal-work graph small
+// enough for CI Dolt cycle checks.
+const ExpansionReviewPRLite = `description = """
+Test-local lightweight review expansion for the personal-work happy path.
+Exercises compose.expand and pooled reviewer fan-out without retry fan-out.
+"""
+formula = "expansion-review-pr-lite"
+version = 2
+contract = "graph.v2"
+type = "expansion"
+
+[[template]]
+id = "{target}.review-claude"
+title = "Code review: Claude"
+metadata = { "gc.run_target" = "polecat" }
+description = "Claude review lane."
+
+[[template]]
+id = "{target}.review-codex"
+title = "Code review: Codex"
+metadata = { "gc.run_target" = "polecat" }
+description = "Codex review lane."
+
+[[template]]
+id = "{target}.synthesize"
+title = "Synthesize review findings"
+needs = ["{target}.review-claude", "{target}.review-codex"]
+metadata = { "gc.run_target" = "worker" }
+description = "Merge available reviewer outputs."
+`
+
+// ExpansionDesignReviewLite is the personal-work happy-path design expansion.
+// The heavier retry/Gemini design expansion remains available through
+// ExpansionDesignReview; this version keeps the personal-work integration
+// fixture focused on expansion/control-flow behavior.
+const ExpansionDesignReviewLite = `description = """
+Test-local lightweight design review expansion for the personal-work happy path.
+Exercises a second compose.expand path and pooled fan-out without retry fan-out.
+"""
+formula = "expansion-design-review-lite"
+version = 2
+contract = "graph.v2"
+type = "expansion"
+
+[[template]]
+id = "{target}.persona-gen-claude"
+title = "Generate personas: Claude"
+metadata = { "gc.run_target" = "polecat" }
+description = "Claude persona generation lane."
+
+[[template]]
+id = "{target}.persona-gen-codex"
+title = "Generate personas: Codex"
+metadata = { "gc.run_target" = "polecat" }
+description = "Codex persona generation lane."
+
+[[template]]
+id = "{target}.persona-synthesis"
+title = "Synthesize personas"
+needs = ["{target}.persona-gen-claude", "{target}.persona-gen-codex"]
+metadata = { "gc.run_target" = "worker" }
+description = "Merge persona suggestions."
+
+[[template]]
+id = "{target}.persona-reviews-claude"
+title = "Persona reviews: Claude"
+needs = ["{target}.persona-synthesis"]
+metadata = { "gc.run_target" = "polecat" }
+description = "Claude persona review batch."
+
+[[template]]
+id = "{target}.persona-reviews-codex"
+title = "Persona reviews: Codex"
+needs = ["{target}.persona-synthesis"]
+metadata = { "gc.run_target" = "polecat" }
+description = "Codex persona review batch."
+
+[[template]]
+id = "{target}.review-synthesis"
+title = "Synthesize design review"
+needs = ["{target}.persona-reviews-claude", "{target}.persona-reviews-codex"]
+metadata = { "gc.run_target" = "worker" }
+description = "Merge design review findings."
+`
+
 // AdoptPR is the test-local adopt-pr workflow fixture.
 const AdoptPR = `description = """
 Test-local adopt-pr workflow used by integration tests.
@@ -282,8 +369,8 @@ on_exhausted = "hard_fail"
 const PersonalWork = `description = """
 Test-local personal-work workflow used by integration tests.
 Exercises two Check loops, two compose.expand sites, pooled fan-out,
-Gemini soft-fail retries, and body teardown without depending on private
-production formulas.
+and body teardown without depending on private production formulas. Retry
+and Gemini soft-fail behavior stay covered by the adopt-pr workflow fixture.
 """
 formula = "mol-personal-work-v2"
 version = 2
@@ -317,20 +404,12 @@ id = "load-context"
 title = "Load context"
 description = "Inspect the assigned work bead."
 
-[steps.retry]
-max_attempts = 3
-on_exhausted = "hard_fail"
-
 [[steps]]
 id = "workspace-setup"
 title = "Prepare worktree"
 needs = ["load-context"]
 description = "Prepare worktree metadata for the workflow."
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "setup", "gc.on_fail" = "abort_scope" }
-
-[steps.retry]
-max_attempts = 3
-on_exhausted = "hard_fail"
 
 [[steps]]
 id = "design-review-loop"
@@ -340,7 +419,7 @@ description = "Check loop for iterative design review."
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 
 [steps.check]
-max_attempts = 5
+max_attempts = 1
 
 [steps.check.check]
 mode = "exec"
@@ -358,20 +437,12 @@ title = "Apply design changes"
 needs = ["design-review-pipeline"]
 description = "Apply design review feedback and mark the Check verdict."
 
-[steps.children.retry]
-max_attempts = 3
-on_exhausted = "hard_fail"
-
 [[steps]]
 id = "implement"
 title = "Implement"
 needs = ["design-review-loop"]
 description = "Perform the main work."
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
-
-[steps.retry]
-max_attempts = 3
-on_exhausted = "hard_fail"
 
 [[steps]]
 id = "code-review-loop"
@@ -381,7 +452,7 @@ description = "Check loop for iterative code review."
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 
 [steps.check]
-max_attempts = 5
+max_attempts = 1
 
 [steps.check.check]
 mode = "exec"
@@ -399,20 +470,14 @@ title = "Apply code fixes"
 needs = ["review-pipeline"]
 description = "Apply code review feedback and mark the Check verdict."
 
-[steps.children.retry]
-max_attempts = 3
-on_exhausted = "hard_fail"
-
 [compose]
 [[compose.expand]]
 target = "design-review-pipeline"
-with = "expansion-design-review"
-vars = { skip_gemini = "{skip_gemini}" }
+with = "expansion-design-review-lite"
 
 [[compose.expand]]
 target = "review-pipeline"
-with = "expansion-review-pr"
-vars = { skip_gemini = "{skip_gemini}" }
+with = "expansion-review-pr-lite"
 
 [[steps]]
 id = "submit"
@@ -421,18 +486,10 @@ needs = ["code-review-loop"]
 description = "Finalize the work item."
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 
-[steps.retry]
-max_attempts = 3
-on_exhausted = "hard_fail"
-
 [[steps]]
 id = "cleanup-worktree"
 title = "Cleanup worktree"
 needs = ["body"]
 description = "Teardown after the body reaches terminal state."
 metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown" }
-
-[steps.retry]
-max_attempts = 3
-on_exhausted = "hard_fail"
 `
