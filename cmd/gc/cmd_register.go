@@ -16,6 +16,7 @@ import (
 
 func newRegisterCmd(stdout, stderr io.Writer) *cobra.Command {
 	var nameFlag string
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "register [path]",
 		Short: "Register a city with the machine-wide supervisor",
@@ -31,13 +32,14 @@ Registration is idempotent — registering the same city twice is a no-op.
 The supervisor is started if needed and immediately reconciles the city.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if doRegisterWithOptions(args, nameFlag, stdout, stderr) != 0 {
+			if doRegisterWithOptionsJSON(args, nameFlag, jsonOut, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&nameFlag, "name", "", "machine-local alias for this city registration")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
 	return cmd
 }
 
@@ -46,6 +48,10 @@ func doRegister(args []string, stdout, stderr io.Writer) int {
 }
 
 func doRegisterWithOptions(args []string, nameOverride string, stdout, stderr io.Writer) int {
+	return doRegisterWithOptionsJSON(args, nameOverride, false, stdout, stderr)
+}
+
+func doRegisterWithOptionsJSON(args []string, nameOverride string, jsonOut bool, stdout, stderr io.Writer) int {
 	var cityPath string
 	var err error
 	if len(args) > 0 {
@@ -68,7 +74,22 @@ func doRegisterWithOptions(args []string, nameOverride string, stdout, stderr io
 		fmt.Fprintf(stderr, "gc register: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	return registerCityWithSupervisorNamed(cityPath, registerName, stdout, stderr, "gc register", true)
+	registerStdout := stdout
+	if jsonOut {
+		registerStdout = io.Discard
+	}
+	code := registerCityWithSupervisorNamed(cityPath, registerName, registerStdout, stderr, "gc register", true)
+	if code != 0 || !jsonOut {
+		return code
+	}
+	_ = writeLifecycleActionJSON(stdout, lifecycleActionJSON{
+		Command:  "register",
+		Action:   "register",
+		Message:  "City registered.",
+		CityName: registerName,
+		CityPath: cityPath,
+	})
+	return 0
 }
 
 // resolveRegistrationName returns the machine-local alias to store in the
@@ -87,6 +108,7 @@ func resolveRegistrationName(cityPath, nameOverride string) (string, error) {
 }
 
 func newUnregisterCmd(stdout, stderr io.Writer) *cobra.Command {
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "unregister [path]",
 		Short: "Remove a city from the machine-wide supervisor",
@@ -96,16 +118,21 @@ If no path is given, unregisters the current city (discovered from cwd).
 If the supervisor is running, it immediately stops managing the city.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if doUnregister(args, stdout, stderr) != 0 {
+			if doUnregisterJSON(args, jsonOut, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
 	return cmd
 }
 
 func doUnregister(args []string, stdout, stderr io.Writer) int {
+	return doUnregisterJSON(args, false, stdout, stderr)
+}
+
+func doUnregisterJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int {
 	var cityPath string
 	var err error
 	if len(args) > 0 {
@@ -120,7 +147,26 @@ func doUnregister(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc unregister: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	_, code := unregisterCityFromSupervisor(cityPath, stdout, stderr)
+	entry, registered, _ := registeredCityEntry(cityPath)
+	unregisterStdout := stdout
+	if jsonOut {
+		unregisterStdout = io.Discard
+	}
+	_, code := unregisterCityFromSupervisor(cityPath, unregisterStdout, stderr)
+	if code != 0 || !jsonOut {
+		return code
+	}
+	cityName := ""
+	if registered {
+		cityName = entry.EffectiveName()
+	}
+	_ = writeLifecycleActionJSON(stdout, lifecycleActionJSON{
+		Command:  "unregister",
+		Action:   "unregister",
+		Message:  "City unregistered.",
+		CityName: cityName,
+		CityPath: cityPath,
+	})
 	return code
 }
 

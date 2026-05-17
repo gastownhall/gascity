@@ -63,6 +63,7 @@ to add cities.`,
 }
 
 func newSupervisorStartCmd(stdout, stderr io.Writer) *cobra.Command {
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "Start the machine-wide supervisor in the background",
@@ -71,18 +72,20 @@ func newSupervisorStartCmd(stdout, stderr io.Writer) *cobra.Command {
 This forks "gc supervisor run", verifies it became ready, and returns.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doSupervisorStart(stdout, stderr) != 0 {
+			if doSupervisorStartJSON(stdout, stderr, jsonOut) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
 	return cmd
 }
 
 func newSupervisorStopCmd(stdout, stderr io.Writer) *cobra.Command {
 	var wait bool
 	var waitTimeout time.Duration
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Stop the machine-wide supervisor",
@@ -96,7 +99,7 @@ tests that then expect to remove temp directories without racing
 against lingering supervisor / controller subprocesses).`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if stopSupervisorWithWait(stdout, stderr, wait, waitTimeout) != 0 {
+			if stopSupervisorWithWaitJSON(stdout, stderr, wait, waitTimeout, jsonOut) != 0 {
 				return errExit
 			}
 			return nil
@@ -104,6 +107,7 @@ against lingering supervisor / controller subprocesses).`,
 	}
 	cmd.Flags().BoolVar(&wait, "wait", false, "Wait for the supervisor to finish stopping all managed cities and release its socket before returning")
 	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Second, "Maximum time to wait when --wait is set")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
 	return cmd
 }
 
@@ -569,6 +573,10 @@ func stopSupervisor(stdout, stderr io.Writer) int {
 // the supervisor acknowledges the destructive socket stop, so launchd/systemd
 // will not restart it when the process exits.
 func stopSupervisorWithWait(stdout, stderr io.Writer, wait bool, waitTimeout time.Duration) int {
+	return stopSupervisorWithWaitJSON(stdout, stderr, wait, waitTimeout, false)
+}
+
+func stopSupervisorWithWaitJSON(stdout, stderr io.Writer, wait bool, waitTimeout time.Duration, jsonOut bool) int {
 	sockPath, _ := runningSupervisorSocket()
 	if sockPath == "" {
 		fmt.Fprintln(stderr, "gc supervisor stop: supervisor is not running") //nolint:errcheck
@@ -588,9 +596,14 @@ func stopSupervisorWithWait(stdout, stderr io.Writer, wait bool, waitTimeout tim
 		fmt.Fprintln(stderr, "gc supervisor stop: no acknowledgment from supervisor") //nolint:errcheck
 		return 1
 	}
-	fmt.Fprintln(stdout, "Supervisor stopping...") //nolint:errcheck
+	if !jsonOut {
+		fmt.Fprintln(stdout, "Supervisor stopping...") //nolint:errcheck
+	}
 	unloadSupervisorService()
 	if !wait {
+		if jsonOut {
+			return writeSupervisorStopSuccess(stdout, wait)
+		}
 		return 0
 	}
 	if waitTimeout <= 0 {
@@ -613,6 +626,9 @@ func stopSupervisorWithWait(stdout, stderr io.Writer, wait bool, waitTimeout tim
 			if err := waitForSupervisorExitUntil(sockPath, time.Now().Add(5*time.Second)); err != nil {
 				fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
 				return 1
+			}
+			if jsonOut {
+				return writeSupervisorStopSuccess(stdout, wait)
 			}
 			fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
 			return 0
@@ -641,7 +657,20 @@ func stopSupervisorWithWait(stdout, stderr io.Writer, wait bool, waitTimeout tim
 		fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	if jsonOut {
+		return writeSupervisorStopSuccess(stdout, wait)
+	}
 	fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
+	return 0
+}
+
+func writeSupervisorStopSuccess(stdout io.Writer, wait bool) int {
+	_ = writeLifecycleActionJSON(stdout, lifecycleActionJSON{
+		Command: "supervisor stop",
+		Action:  "stop",
+		Message: "Supervisor stopped.",
+		Wait:    lifecycleBoolPtr(wait),
+	})
 	return 0
 }
 
@@ -696,6 +725,7 @@ func supervisorStatusWithOptions(stdout, _ io.Writer, asJSON bool) int {
 }
 
 func newSupervisorReloadCmd(stdout, stderr io.Writer) *cobra.Command {
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "reload",
 		Short: "Trigger immediate reconciliation of all cities",
@@ -705,17 +735,22 @@ after killing a child process to force the supervisor to detect the
 change and restart it without waiting for the next patrol tick.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if reloadSupervisor(stdout, stderr) != 0 {
+			if reloadSupervisorJSON(stdout, stderr, jsonOut) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
 	return cmd
 }
 
 // reloadSupervisor sends a reload command to the running supervisor.
 func reloadSupervisor(stdout, stderr io.Writer) int {
+	return reloadSupervisorJSON(stdout, stderr, false)
+}
+
+func reloadSupervisorJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	sockPath, _ := runningSupervisorSocket()
 	if sockPath == "" {
 		fmt.Fprintln(stderr, "gc supervisor reload: supervisor is not running; start it with 'gc supervisor start'") //nolint:errcheck
@@ -734,6 +769,14 @@ func reloadSupervisor(stdout, stderr io.Writer) int {
 	resp := strings.TrimSpace(string(buf[:n]))
 	switch resp {
 	case "ok":
+		if jsonOut {
+			_ = writeLifecycleActionJSON(stdout, lifecycleActionJSON{
+				Command: "supervisor reload",
+				Action:  "reload",
+				Message: "Reconciliation triggered.",
+			})
+			return 0
+		}
 		fmt.Fprintln(stdout, "Reconciliation triggered.") //nolint:errcheck
 		return 0
 	case "busy":
