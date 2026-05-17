@@ -269,9 +269,9 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 			PackDrifted:  res.PackDrift,
 		})
 		if flags.KillSwitchActive {
-			fmt.Fprintln(stderr, "error: supervisor binary/pack drift; auto-restart disabled by [daemon].auto_restart_on_drift in city.toml. Restart manually with 'systemctl --user restart gascity-supervisor'.") //nolint:errcheck // best-effort stderr
+			fmt.Fprintln(stderr, "error: supervisor binary drift; auto-restart disabled by [daemon].auto_restart_on_drift in city.toml. Restart manually with 'systemctl --user restart gascity-supervisor'.") //nolint:errcheck // best-effort stderr
 		} else {
-			fmt.Fprintln(stderr, "error: supervisor binary/pack drift; rerun 'gc start' (or 'systemctl --user restart gascity-supervisor') to apply changes.") //nolint:errcheck // best-effort stderr
+			fmt.Fprintln(stderr, "error: supervisor binary drift; rerun 'gc start' (or 'systemctl --user restart gascity-supervisor') to apply changes.") //nolint:errcheck // best-effort stderr
 		}
 		return 1, false
 	case res.Restart:

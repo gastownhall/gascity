@@ -323,7 +323,7 @@ Use "gc supervisor run" for foreground operation.`,
 	cmd.Flags().BoolVarP(&dryRunMode, "dry-run", "n", false,
 		"preview what agents would start without starting them")
 	cmd.Flags().BoolVar(&noAutoRestartMode, "no-auto-restart", false,
-		"detect supervisor binary/pack drift but do not auto-restart; exits non-zero on drift")
+		"detect supervisor binary drift but do not auto-restart; exits non-zero on drift")
 	return cmd
 }
 

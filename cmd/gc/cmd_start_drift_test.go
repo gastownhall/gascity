@@ -257,12 +257,12 @@ func driftCheckEnv(t *testing.T, supervisorBuildID string) (cityPath string, res
 
 	// Use the current process PID so readSupervisorExePath
 	// (/proc/<pid>/exe) succeeds without requiring root.
-	supervisorAliveHook = func() int { return os.Getpid() }
+	supervisorAliveHook = os.Getpid
 	supervisorAPIBaseURLHook = func() (string, error) { return srv.URL, nil }
 	supervisorSystemctlActive = func(string) bool { return false }
 	restartHelpersHook = func() restartHelpers {
 		return restartHelpers{
-			Systemctl: func(args ...string) error { return nil },
+			Systemctl: func(...string) error { return nil },
 			Kill:      func(int) error { return nil },
 			WaitExit:  func(int) error { return nil },
 			Spawn:     func(string, ...string) error { return nil },
@@ -350,7 +350,7 @@ func TestRunStartDriftCheck_ErrorReturnsTerminal(t *testing.T) {
 	if cont {
 		t.Errorf("cont = true on --no-auto-restart error; should be terminal")
 	}
-	if !strings.Contains(stderr.String(), "supervisor binary/pack drift") {
+	if !strings.Contains(stderr.String(), "supervisor binary drift") {
 		t.Errorf("stderr missing drift error:\n%s", stderr.String())
 	}
 }

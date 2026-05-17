@@ -168,7 +168,7 @@ func TestStartDrift_NoAutoRestart_ExitsNonZero(t *testing.T) {
 		"Drift detected:",
 		"binary: local=" + driftHappyNewCommit,
 		"supervisor=" + driftHappyOldCommit,
-		"error: supervisor binary/pack drift",
+		"error: supervisor binary drift",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q\n%s", want, out)
@@ -239,7 +239,7 @@ func TestStartDrift_KillSwitchInConfig_PreventsRestart(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Drift detected:",
-		"error: supervisor binary/pack drift",
+		"error: supervisor binary drift",
 		"auto_restart_on_drift",
 	} {
 		if !strings.Contains(out, want) {

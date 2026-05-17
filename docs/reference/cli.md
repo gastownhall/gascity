@@ -2809,7 +2809,7 @@ gc start
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `-n`, `--dry-run` | bool |  | preview what agents would start without starting them |
-| `--no-auto-restart` | bool |  | detect supervisor binary/pack drift but do not auto-restart; exits non-zero on drift |
+| `--no-auto-restart` | bool |  | detect supervisor binary drift but do not auto-restart; exits non-zero on drift |
 
 ## gc status
 
