@@ -250,7 +250,12 @@ func TestDoDoctorRegistersJsonlArchiveCheck(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeCityToml(t, cityDir, "[workspace]\nname = \"demo\"\n")
+	writeCityToml(t, cityDir, `[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+`)
 	writePackToml(t, cityDir, `[pack]
 name = "demo"
 schema = 1
@@ -292,7 +297,12 @@ func TestDoDoctorJSONOutputIncludesArchiveCheck(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeCityToml(t, cityDir, "[workspace]\nname = \"demo\"\n")
+	writeCityToml(t, cityDir, `[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+`)
 	writePackToml(t, cityDir, `[pack]
 name = "demo"
 schema = 1

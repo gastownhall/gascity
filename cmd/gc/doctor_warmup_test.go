@@ -13,6 +13,7 @@ func TestCommandDoctorChecksWarmupEligibleDefaultsFalse(t *testing.T) {
 		&doltDriftCheck{},
 		&doltTopologyCheck{},
 		&importStateDoctorCheck{},
+		&jsonlArchiveDoctorCheck{},
 		&mcpConfigDoctorCheck{},
 		&mcpSharedTargetDoctorCheck{},
 		&sessionModelDoctorCheck{},
