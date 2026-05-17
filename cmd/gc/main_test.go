@@ -876,9 +876,14 @@ func TestResolveCityRigSiblingWithLegacyGCDir(t *testing.T) {
 		t.Fatalf("persist rig binding: %v", err)
 	}
 
-	old := cityFlag
+	// Save & restore BOTH cityFlag and rigFlag. resolveContext prioritizes
+	// --rig at step 3, so a leftover rigFlag from another parallel-safe
+	// test would short-circuit the GC_DIR-based path under exercise here
+	// and silently invalidate the assertion.
+	oldCity, oldRig := cityFlag, rigFlag
 	cityFlag = ""
-	t.Cleanup(func() { cityFlag = old })
+	rigFlag = ""
+	t.Cleanup(func() { cityFlag, rigFlag = oldCity, oldRig })
 	t.Setenv("GC_CITY", "")
 	t.Setenv("GC_CITY_PATH", "")
 	t.Setenv("GC_CITY_ROOT", "")

@@ -511,9 +511,18 @@ func resolveContext() (resolvedContext, error) {
 	// (e.g. rig at /Code/rigname and city at /Code/cityname), the walkup
 	// never reaches the real city and the stale ".gc/" inside the rig
 	// would otherwise win.
+	//
+	// Guard: only run the (potentially expensive) registry scan when GC_DIR
+	// actually shows the legacy-fallback misfire shape — a .gc/ directory
+	// without a sibling city.toml. When GC_DIR carries its own city.toml
+	// the walkup at step 8 finds the right city in O(1) and we don't pay
+	// for a full registry scan. When GC_DIR has neither, step 9 (cwd-based
+	// rig lookup) covers it.
 	if gcDir := strings.TrimSpace(os.Getenv("GC_DIR")); gcDir != "" {
-		if ctx, ok := lookupRigFromCwd(gcDir); ok {
-			return ctx, nil
+		if citylayout.HasRuntimeRoot(gcDir) && !citylayout.HasCityConfig(gcDir) {
+			if ctx, ok := lookupRigFromCwd(gcDir); ok {
+				return ctx, nil
+			}
 		}
 	}
 
