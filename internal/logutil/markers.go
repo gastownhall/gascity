@@ -56,6 +56,8 @@ func RenderFatalLine(message string, tty bool) string {
 func FatalCause(message string) string {
 	lower := strings.ToLower(message)
 	switch {
+	case strings.Contains(lower, "signal: killed") && (strings.Contains(lower, "bd init") || strings.Contains(lower, "beads init")):
+		return "op-init-timeout"
 	case strings.Contains(lower, "op_init") && (strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out")):
 		return "op-init-timeout"
 	case strings.Contains(lower, "pack v1/v2 layout collision"):

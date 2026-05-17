@@ -43,3 +43,15 @@ func TestFatalFormattingCompactsMultilineMessages(t *testing.T) {
 		t.Fatalf("FormatFatalLine() should be one line, got %q", got)
 	}
 }
+
+func TestFatalCauseRoutesBeadsInitKilledToOpInitTimeout(t *testing.T) {
+	got := FatalCause("exec beads init: signal: killed")
+	if got != "op-init-timeout" {
+		t.Fatalf("FatalCause() = %q, want %q", got, "op-init-timeout")
+	}
+	line := FormatFatalLine("exec beads init: signal: killed")
+	want := "gc-fatal: exec beads init: signal: killed see: " + WalkthroughURL["bd_op_init_timeout"]
+	if line != want {
+		t.Fatalf("FormatFatalLine() = %q, want %q", line, want)
+	}
+}
