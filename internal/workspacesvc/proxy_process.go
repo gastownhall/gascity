@@ -118,17 +118,17 @@ func (p *proxyProcessInstance) HandleHTTP(w http.ResponseWriter, r *http.Request
 	}
 
 	target := &url.URL{Scheme: "http", Host: "gc-service"}
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = transport
-	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
-		http.Error(w, fmt.Sprintf("service unavailable: %v", err), http.StatusBadGateway)
-	}
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		req.URL.Path = subpath
-		req.URL.RawPath = subpath
-		req.Host = ""
+	proxy := &httputil.ReverseProxy{
+		Transport: transport,
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			http.Error(w, fmt.Sprintf("service unavailable: %v", err), http.StatusBadGateway)
+		},
+		Rewrite: func(req *httputil.ProxyRequest) {
+			req.SetURL(target)
+			req.Out.URL.Path = subpath
+			req.Out.URL.RawPath = subpath
+			req.Out.Host = ""
+		},
 	}
 	proxy.ServeHTTP(w, r)
 	return true
