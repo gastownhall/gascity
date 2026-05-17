@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -177,20 +179,32 @@ func parseTimeFlag(raw string, now time.Time) (time.Time, error) {
 
 // parseDurationWithDays extends time.ParseDuration with a "d" suffix
 // for whole-day durations. Examples: "7d" → 168h, "1d12h" → 36h.
-// Returns an error if the input has no recognized form.
+// Returns an error if the input has no recognized form. Unlike session
+// pruning, reliability analysis accepts zero durations because "0s" and
+// "0d" mean "now" for analysis window endpoints.
 func parseDurationWithDays(raw string) (time.Duration, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return 0, fmt.Errorf("empty duration")
 	}
+	original := raw
 	// Find day component if present.
 	dayIdx := strings.IndexByte(raw, 'd')
 	var days int64
 	if dayIdx >= 0 {
 		// Parse leading integer for days.
-		n, err := atoi64(raw[:dayIdx])
+		if dayIdx == 0 {
+			return 0, fmt.Errorf("invalid day duration %q", original)
+		}
+		n, err := strconv.ParseInt(raw[:dayIdx], 10, 64)
 		if err != nil {
-			return 0, err
+			return 0, fmt.Errorf("invalid day duration %q: %w", original, err)
+		}
+		if n < 0 {
+			return 0, fmt.Errorf("invalid day duration %q", original)
+		}
+		if n > math.MaxInt64/int64(24*time.Hour) {
+			return 0, fmt.Errorf("duration %q overflows time.Duration", original)
 		}
 		days = n
 		raw = raw[dayIdx+1:]
@@ -203,20 +217,12 @@ func parseDurationWithDays(raw string) (time.Duration, error) {
 		}
 		rest = d
 	}
-	return time.Duration(days)*24*time.Hour + rest, nil
-}
-
-// atoi64 parses a positive int64 from s. Empty s = 0.
-func atoi64(s string) (int64, error) {
-	if s == "" {
-		return 0, nil
+	dayPart := time.Duration(days) * 24 * time.Hour
+	if rest > 0 && dayPart > time.Duration(math.MaxInt64)-rest {
+		return 0, fmt.Errorf("duration %q overflows time.Duration", original)
 	}
-	var n int64
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return 0, fmt.Errorf("invalid integer %q", s)
-		}
-		n = n*10 + int64(c-'0')
+	if rest < 0 && dayPart < time.Duration(math.MinInt64)-rest {
+		return 0, fmt.Errorf("duration %q overflows time.Duration", original)
 	}
-	return n, nil
+	return dayPart + rest, nil
 }

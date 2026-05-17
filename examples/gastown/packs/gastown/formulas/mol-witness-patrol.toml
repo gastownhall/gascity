@@ -61,6 +61,10 @@ formula = "mol-witness-patrol"
 version = 9
 
 [vars]
+[vars.binding_prefix]
+description = "Import binding prefix for gastown agent identities, including trailing dot when bound."
+default = ""
+
 [vars.event_timeout]
 description = "Seconds to wait for events before re-checking (exponential backoff)"
 default = "30"
@@ -150,7 +154,8 @@ gc bd list --status=open --json --limit=0
 Filter for beads with an assignee (skip unassigned beads). This pass does not
 solve the controller race where orphaned work may already have been released to
 open/unassigned before witness observes it; that requires a separate
-worktree-salvage scan keyed by `metadata.work_dir`.
+worktree-salvage scan keyed by `metadata.work_dir`. Bound Gastown polecat
+assignees use the shape `<rig>/{{binding_prefix}}<polecat-suffix>`.
 
 Get the full session roster for liveness checks:
 ```bash
@@ -371,7 +376,7 @@ Ensure the refinery is processing work and the queue is healthy.
 
 **Step 1: Check work beads assigned to refinery:**
 ```bash
-gc bd list --assignee=<rig>/refinery --status=open --json
+gc bd list --assignee=<rig>/{{binding_prefix}}refinery --status=open --json
 ```
 
 These are work beads with `metadata.branch` and `metadata.target` that
@@ -391,7 +396,7 @@ wisp is stale, the refinery may be stuck.
 
 **Step 3: Nudge if needed:**
 ```bash
-gc session nudge <rig>/refinery "Work beads waiting for merge. Please check queue."
+gc session nudge <rig>/{{binding_prefix}}refinery "Work beads waiting for merge. Please check queue."
 ```
 
 **Step 4: Escalate if needed:**

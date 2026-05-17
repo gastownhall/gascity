@@ -247,6 +247,9 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	if city.EmitsPermissionWarning != nil {
 		result.EmitsPermissionWarning = city.EmitsPermissionWarning
 	}
+	if city.AcceptStartupDialogs != nil {
+		result.AcceptStartupDialogs = cloneBoolPtr(city.AcceptStartupDialogs)
+	}
 	if city.PathCheck != "" {
 		result.PathCheck = city.PathCheck
 	}
@@ -544,6 +547,7 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		ReadyDelayMs:           spec.ReadyDelayMs,
 		ReadyPromptPrefix:      spec.ReadyPromptPrefix,
 		EmitsPermissionWarning: derefBool(spec.EmitsPermissionWarning),
+		AcceptStartupDialogs:   cloneBoolPtr(spec.AcceptStartupDialogs),
 		SupportsACP:            derefBool(spec.SupportsACP),
 		SupportsHooks:          derefBool(spec.SupportsHooks),
 		InstructionsFile:       spec.InstructionsFile,
@@ -751,6 +755,9 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 	if leaf.EmitsPermissionWarning == nil && providerBoolFieldSet(r, "emits_permission_warning") {
 		v := r.EmitsPermissionWarning
 		out.EmitsPermissionWarning = &v
+	}
+	if leaf.AcceptStartupDialogs == nil && providerBoolFieldSet(r, "accept_startup_dialogs") {
+		out.AcceptStartupDialogs = cloneBoolPtr(r.AcceptStartupDialogs)
 	}
 	if leaf.SupportsACP == nil && providerBoolFieldSet(r, "supports_acp") {
 		v := r.SupportsACP

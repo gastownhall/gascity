@@ -22,7 +22,8 @@ import (
 )
 
 const (
-	labelOrderTracking = "order-tracking"
+	labelOrderTracking    = "order-tracking"
+	labelTriggerEnvFailed = "trigger-env-failed"
 
 	orderTrackingSweepOrder                = "order-tracking-sweep"
 	defaultOrderTrackingSweepStaleAfter    = 10 * time.Minute
@@ -256,6 +257,16 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if legacyStore != nil {
 			storeKeysForGate = append(storeKeysForGate, orderStoreTargetKey(legacyOrderCityTarget(cityPath, m.cfg)))
 		}
+		scoped := a.ScopedName()
+		hasOpenWork, err := m.hasOpenWorkInStoresStrict(storesForGate, scoped)
+		if err != nil {
+			logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
+			continue
+		}
+		if hasOpenWork {
+			continue
+		}
+
 		baseLastRunFn := orders.LastRunAcrossStores(storesForGate...)
 		var lastRunErr error
 		var lastRunFromCache bool
@@ -282,7 +293,27 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 		triggerOpts, err := orderTriggerOptionsForTarget(cityPath, m.cfg, target, a)
 		if err != nil {
-			logDispatchError(m.stderr, "gc: order dispatch: building trigger env for %s: %v", a.ScopedName(), err)
+			redacted := redactOrderEnvError(err, os.Environ())
+			msg := fmt.Sprintf("building trigger env: %s", redacted)
+			logDispatchError(m.stderr, "gc: order dispatch: building trigger env for %s: %s", a.ScopedName(), redacted)
+			// Leave this open so the existing open-work gate suppresses repeat
+			// ticks until the normal stale tracking sweep gives the order another try.
+			trackingBead, createErr := store.Create(beads.Bead{
+				Title:     "order:" + scoped,
+				Labels:    []string{"order-run:" + scoped, labelOrderTracking, labelTriggerEnvFailed},
+				Ephemeral: true,
+			})
+			if createErr != nil {
+				logDispatchError(m.stderr, "gc: order dispatch: creating trigger env failure tracking bead for %s: %v", scoped, createErr)
+			} else {
+				m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
+			}
+			m.rec.Record(events.Event{
+				Type:    events.OrderFailed,
+				Actor:   "controller",
+				Subject: a.ScopedName(),
+				Message: msg,
+			})
 			continue
 		}
 		result := orders.CheckTriggerWithOptions(a, now, lastRunFn, m.ep, cursorFn, triggerOpts)
@@ -312,8 +343,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 
 		// Skip dispatch if previous work hasn't been processed yet.
-		scoped := a.ScopedName()
-		hasOpenWork, err := m.hasOpenWorkInStoresStrict(storesForGate, scoped)
+		hasOpenWork, err = m.hasOpenWorkInStoresStrict(storesForGate, scoped)
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: checking open work for %s: %v", scoped, err)
 			continue
@@ -565,9 +595,10 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 	var execErrMsg string
 	if err != nil {
 		redactionEnv := append(os.Environ(), env...)
-		execErrMsg = execenv.RedactText(err.Error(), redactionEnv)
-		labels = []string{"exec-failed"}
-		logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, execErrMsg)
+		redacted := redactOrderEnvError(err, redactionEnv)
+		execErrMsg = "exec env failed: " + redacted
+		labels = []string{"exec-env-failed"}
+		logDispatchError(m.stderr, "gc: order exec %s env failed: %s", scoped, redacted)
 	} else {
 		output, err = m.execRun(ctx, a.Exec, target.ScopeRoot, env)
 		if err != nil {
@@ -614,6 +645,13 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 		Actor:   "controller",
 		Subject: scoped,
 	})
+}
+
+func redactOrderEnvError(err error, env []string) string {
+	if err == nil {
+		return ""
+	}
+	return execenv.RedactText(err.Error(), env)
 }
 
 // dispatchWisp instantiates a wisp from the order's formula.
@@ -856,9 +894,15 @@ func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
 	if len(all) == 0 {
 		return 0, nil
 	}
-	ids := make([]string, len(all))
-	for i, b := range all {
-		ids[i] = b.ID
+	ids := make([]string, 0, len(all))
+	for _, b := range all {
+		if beadLabelsContain(b.Labels, labelTriggerEnvFailed) {
+			continue
+		}
+		ids = append(ids, b.ID)
+	}
+	if len(ids) == 0 {
+		return 0, nil
 	}
 	n, err := store.CloseAll(ids, map[string]string{
 		"close_reason": orphanedOrderTrackingCloseReason,
@@ -867,6 +911,15 @@ func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
 		return n, fmt.Errorf("closing orphaned order-tracking beads: %w", err)
 	}
 	return n, nil
+}
+
+func beadLabelsContain(labels []string, want string) bool {
+	for _, label := range labels {
+		if label == want {
+			return true
+		}
+	}
+	return false
 }
 
 // sweepStaleOrderTracking closes open order-tracking beads whose creation

@@ -748,7 +748,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | SupervisorFsPressureSkippedTickPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | SupervisorFsPressureSkippedTickPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventStreamEnvelope = {
     actor: string;
@@ -1822,6 +1822,14 @@ export type PoolOverride = {
     OnDeath: string | null;
 };
 
+export type ProjectIdentityStampedPayload = {
+    layer: string;
+    new_id: string;
+    old_id?: string;
+    scope_root: string;
+    source: string;
+};
+
 export type ProviderCreateInputBody = {
     /**
      * ACP transport command arguments override.
@@ -1901,6 +1909,7 @@ export type ProviderOptionDto = {
 export type ProviderPatch = {
     ACPArgs: Array<string> | null;
     ACPCommand: string | null;
+    AcceptStartupDialogs: boolean | null;
     Args: Array<string> | null;
     ArgsAppend: Array<string> | null;
     Base: string | null;
@@ -1918,6 +1927,10 @@ export type ProviderPatch = {
 };
 
 export type ProviderPatchSetInputBody = {
+    /**
+     * Override startup dialog acceptance behavior.
+     */
+    accept_startup_dialogs?: boolean;
     /**
      * Override ACP transport command arguments.
      */
@@ -2946,6 +2959,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedEventStreamEnvelopeOrderFired) | ({
+    type: 'project.identity.stamped';
+} & TypedEventStreamEnvelopeProjectIdentityStamped) | ({
     type: 'provider.swapped';
 } & TypedEventStreamEnvelopeProviderSwapped) | ({
     type: 'request.failed';
@@ -3408,6 +3423,20 @@ export type TypedEventStreamEnvelopeOrderFired = {
 };
 
 /**
+ * TypedEventStreamEnvelope project.identity.stamped
+ */
+export type TypedEventStreamEnvelopeProjectIdentityStamped = {
+    actor: string;
+    message?: string;
+    payload: ProjectIdentityStampedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'project.identity.stamped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope provider.swapped
  */
 export type TypedEventStreamEnvelopeProviderSwapped = {
@@ -3737,6 +3766,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedTaggedEventStreamEnvelopeOrderFired) | ({
+    type: 'project.identity.stamped';
+} & TypedTaggedEventStreamEnvelopeProjectIdentityStamped) | ({
     type: 'provider.swapped';
 } & TypedTaggedEventStreamEnvelopeProviderSwapped) | ({
     type: 'request.failed';
@@ -4225,6 +4256,21 @@ export type TypedTaggedEventStreamEnvelopeOrderFired = {
     subject?: string;
     ts: string;
     type: 'order.fired';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope project.identity.stamped
+ */
+export type TypedTaggedEventStreamEnvelopeProjectIdentityStamped = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: ProjectIdentityStampedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'project.identity.stamped';
     workflow?: WorkflowEventProjection;
 };
 

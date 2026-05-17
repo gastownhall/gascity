@@ -2698,7 +2698,10 @@ dolt.auto-start: false
 	}
 	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}
 
-	env := slingStoreEnv(cfg, cityDir, rigDir)
+	env, err := slingStoreEnvWithError(cfg, cityDir, rigDir)
+	if err != nil {
+		t.Fatalf("slingStoreEnvWithError() error = %v", err)
+	}
 	if got := env["GC_DOLT_PORT"]; got != wantPort {
 		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, wantPort)
 	}

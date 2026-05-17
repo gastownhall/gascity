@@ -65,6 +65,7 @@ const (
 	OrderFailed                     = "order.failed"
 	ProviderSwapped                 = "provider.swapped"
 	WorkerOperation                 = "worker.operation"
+	ProjectIdentityStamped          = "project.identity.stamped"
 	SupervisorFSPressureSkippedTick = "supervisor.fs_pressure.skipped_tick"
 
 	// External messaging events.
@@ -102,7 +103,7 @@ var KnownEventTypes = []string{
 	RequestResultSessionSubmit, RequestFailed,
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed,
-	ProviderSwapped, WorkerOperation, SupervisorFSPressureSkippedTick,
+	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,

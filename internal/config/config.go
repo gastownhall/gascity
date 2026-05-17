@@ -713,6 +713,181 @@ type BoundImport struct {
 	Import  Import
 }
 
+var (
+	legacyImportInvalidBindingChars = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
+	legacyImportRepeatedDash        = regexp.MustCompile(`-+`)
+)
+
+// AddLegacyImports converts legacy include tokens into canonical V2 imports.
+func AddLegacyImports(target map[string]Import, includes []string, packs map[string]PackSource) bool {
+	changed := false
+	for _, include := range includes {
+		source := legacyImportSourceFor(include, packs)
+		if _, exists := existingDefaultImportBindingForSource(target, source); exists {
+			continue
+		}
+		binding := uniqueLegacyImportBinding(target, legacyImportBindingName(include, source, packs))
+		target[binding] = Import{Source: source}
+		changed = true
+	}
+	return changed
+}
+
+// AddOrderedLegacyImports converts legacy include tokens while preserving the import order list.
+func AddOrderedLegacyImports(target map[string]Import, order []string, includes []string, packs map[string]PackSource) ([]string, bool) {
+	changed := false
+	for _, include := range includes {
+		source := legacyImportSourceFor(include, packs)
+		binding, exists := existingDefaultImportBindingForSource(target, source)
+		if !exists {
+			binding = uniqueLegacyImportBinding(target, legacyImportBindingName(include, source, packs))
+			target[binding] = Import{Source: source}
+			changed = true
+		}
+		if !stringSliceContains(order, binding) {
+			order = append(order, binding)
+			changed = true
+		}
+	}
+	return order, changed
+}
+
+// BoundImportsFromLegacySources converts legacy include tokens into sorted bound imports.
+func BoundImportsFromLegacySources(sources []string, packs map[string]PackSource) []BoundImport {
+	if len(sources) == 0 {
+		return nil
+	}
+	target := make(map[string]Import, len(sources))
+	AddLegacyImports(target, sources, packs)
+	return sortedBoundImports(target)
+}
+
+func legacyImportSourceFor(include string, packs map[string]PackSource) string {
+	include = strings.TrimSpace(include)
+	if spec, ok := packs[include]; ok {
+		source := spec.Source
+		if spec.Path != "" {
+			source += "//" + strings.TrimPrefix(spec.Path, "/")
+		}
+		if spec.Ref != "" {
+			source += "#" + spec.Ref
+		}
+		return source
+	}
+	if looksLikeLegacyLocalImportPath(include) && !strings.HasPrefix(include, "./") && !strings.HasPrefix(include, "../") && !filepath.IsAbs(include) {
+		return "./" + include
+	}
+	return include
+}
+
+func legacyImportBindingName(include, source string, packs map[string]PackSource) string {
+	include = strings.TrimSpace(include)
+	if _, ok := packs[include]; ok {
+		return sanitizeLegacyImportBindingName(include)
+	}
+	base := source
+	if idx := strings.Index(base, "#"); idx >= 0 {
+		base = base[:idx]
+	}
+	if idx := strings.LastIndex(base, "//"); idx >= 0 && idx > strings.Index(base, "://")+2 {
+		base = base[idx+2:]
+	}
+	base = strings.TrimSuffix(base, "/")
+	base = strings.TrimSuffix(base, ".git")
+	base = pathBase(base)
+	return sanitizeLegacyImportBindingName(base)
+}
+
+func existingDefaultImportBindingForSource(target map[string]Import, source string) (string, bool) {
+	for binding, imp := range target {
+		if imp.Source != source {
+			continue
+		}
+		if strings.TrimSpace(imp.Version) != "" || imp.Export {
+			continue
+		}
+		if imp.Transitive != nil && !*imp.Transitive {
+			continue
+		}
+		shadow := strings.TrimSpace(imp.Shadow)
+		if shadow == "" || shadow == "warn" {
+			return binding, true
+		}
+	}
+	return "", false
+}
+
+func uniqueLegacyImportBinding(target map[string]Import, base string) string {
+	if base == "" {
+		base = "import"
+	}
+	if _, exists := target[base]; !exists {
+		return base
+	}
+	for i := 2; ; i++ {
+		candidate := fmt.Sprintf("%s-%d", base, i)
+		if _, exists := target[candidate]; !exists {
+			return candidate
+		}
+	}
+}
+
+func sanitizeLegacyImportBindingName(value string) string {
+	value = legacyImportInvalidBindingChars.ReplaceAllString(value, "-")
+	value = legacyImportRepeatedDash.ReplaceAllString(value, "-")
+	value = strings.Trim(value, "-")
+	if value == "" {
+		return "import"
+	}
+	return value
+}
+
+func looksLikeLegacyLocalImportPath(value string) bool {
+	if strings.Contains(value, "://") || strings.HasPrefix(value, "git@") {
+		return false
+	}
+	if strings.HasPrefix(value, "github.com/") {
+		return false
+	}
+	return true
+}
+
+func pathBase(value string) string {
+	value = strings.TrimRight(value, "/")
+	if idx := strings.LastIndex(value, "/"); idx >= 0 {
+		return value[idx+1:]
+	}
+	return value
+}
+
+func sortedBoundImports(imports map[string]Import) []BoundImport {
+	if len(imports) == 0 {
+		return nil
+	}
+	bindings := make([]string, 0, len(imports))
+	for binding := range imports {
+		bindings = append(bindings, binding)
+	}
+	sort.Strings(bindings)
+	bound := make([]BoundImport, 0, len(bindings))
+	for _, binding := range bindings {
+		bound = append(bound, BoundImport{
+			Binding: binding,
+			Import:  imports[binding],
+		})
+	}
+	return bound
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 // PackRequirement declares an agent that must exist in the
 // expanded config for this pack's formulas/orders to function.
 type PackRequirement struct {
@@ -901,14 +1076,39 @@ type Workspace struct {
 	// Each name must match a {{ define "name" }} block from a pack's
 	// prompts/shared/ directory.
 	GlobalFragments []string `toml:"global_fragments,omitempty"`
-	// Includes lists pack directories or URLs to compose into this
-	// workspace. Replaces the older pack/packs fields. Each entry
-	// is a local path, a git source//sub#ref URL, or a GitHub tree URL.
+	// Includes is the legacy city.toml pack-composition list.
+	//
+	// Deprecated: use root pack.toml [imports.*] instead. Run gc doctor to
+	// inspect; gc doctor --fix handles the safe mechanical rewrites available
+	// in this release wave. Each entry is a local path, a git source//sub#ref
+	// URL, or a GitHub tree URL.
 	Includes []string `toml:"includes,omitempty"`
-	// DefaultRigIncludes lists pack directories applied to new rigs when
-	// "gc rig add" is called without --include. Allows cities to define
-	// a default pack for all rigs.
+	// DefaultRigIncludes is the legacy city.toml default-rig pack list.
+	//
+	// Deprecated: use root pack.toml [defaults.rig.imports.<binding>] instead.
+	// Run gc doctor to inspect; gc doctor --fix handles the safe mechanical
+	// rewrites available in this release wave.
 	DefaultRigIncludes []string `toml:"default_rig_includes,omitempty"`
+}
+
+// LegacyIncludes returns the compatibility-only city.toml include list.
+func (w *Workspace) LegacyIncludes() []string {
+	return w.Includes
+}
+
+// SetLegacyIncludes updates the compatibility-only city.toml include list.
+func (w *Workspace) SetLegacyIncludes(includes []string) {
+	w.Includes = includes
+}
+
+// LegacyDefaultRigIncludes returns the compatibility-only city.toml default-rig include list.
+func (w *Workspace) LegacyDefaultRigIncludes() []string {
+	return w.DefaultRigIncludes
+}
+
+// SetLegacyDefaultRigIncludes updates the compatibility-only city.toml default-rig include list.
+func (w *Workspace) SetLegacyDefaultRigIncludes(includes []string) {
+	w.DefaultRigIncludes = includes
 }
 
 // BeadsConfig holds bead store settings.
@@ -1126,6 +1326,86 @@ type EventsConfig struct {
 	// Provider selects the events backend: "fake", "fail",
 	// "exec:<script>", or "" (default: file-backed JSONL).
 	Provider string `toml:"provider,omitempty"`
+	// Rotation configures file-backed JSONL rotation. Defaults are applied
+	// by EventsRotationConfig helper methods when this table is absent.
+	Rotation EventsRotationConfig `toml:"rotation,omitempty"`
+}
+
+const (
+	// DefaultEventsRotationMaxSizeBytes is the default active events.jsonl
+	// size threshold before auto-rotation.
+	DefaultEventsRotationMaxSizeBytes int64 = 256 * 1024 * 1024
+	// DefaultEventsRotationCheckIntervalRecords is the default number of
+	// records between active file size checks.
+	DefaultEventsRotationCheckIntervalRecords = 1024
+	// DefaultEventsRotationCheckIntervalSeconds is the default time backstop
+	// between active file size checks.
+	DefaultEventsRotationCheckIntervalSeconds = 60
+	// DefaultEventsRotationCheckInterval is the default time backstop between
+	// active file size checks.
+	DefaultEventsRotationCheckInterval = time.Duration(DefaultEventsRotationCheckIntervalSeconds) * time.Second
+)
+
+// EventsRotationConfig holds file-backed events rotation settings.
+type EventsRotationConfig struct {
+	// Enabled controls automatic size-triggered rotation. Defaults to true.
+	Enabled *bool `toml:"enabled,omitempty" jsonschema:"default=true"`
+	// MaxSizeBytes is the active events.jsonl size threshold. Defaults to
+	// DefaultEventsRotationMaxSizeBytes.
+	MaxSizeBytes *int64 `toml:"max_size_bytes,omitempty" jsonschema:"default=268435456"`
+	// CheckIntervalRecords is the number of records between size checks.
+	// Defaults to DefaultEventsRotationCheckIntervalRecords.
+	CheckIntervalRecords *int `toml:"check_interval_records,omitempty" jsonschema:"default=1024"`
+	// CheckIntervalSeconds is the time backstop between size checks. Defaults
+	// to DefaultEventsRotationCheckIntervalSeconds.
+	CheckIntervalSeconds *int `toml:"check_interval_seconds,omitempty" jsonschema:"default=60"`
+	// ArchiveRetainAge is an optional Go duration. Empty keeps all archives.
+	ArchiveRetainAge string `toml:"archive_retain_age,omitempty"`
+}
+
+// EnabledOrDefault reports whether automatic rotation is enabled.
+func (c EventsRotationConfig) EnabledOrDefault() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+// MaxSizeBytesOrDefault returns the configured active log size threshold.
+func (c EventsRotationConfig) MaxSizeBytesOrDefault() int64 {
+	if c.MaxSizeBytes == nil {
+		return DefaultEventsRotationMaxSizeBytes
+	}
+	return *c.MaxSizeBytes
+}
+
+// CheckIntervalRecordsOrDefault returns the configured record-count gate.
+func (c EventsRotationConfig) CheckIntervalRecordsOrDefault() int {
+	if c.CheckIntervalRecords == nil {
+		return DefaultEventsRotationCheckIntervalRecords
+	}
+	return *c.CheckIntervalRecords
+}
+
+// CheckIntervalDurationOrDefault returns the configured time gate.
+func (c EventsRotationConfig) CheckIntervalDurationOrDefault() time.Duration {
+	if c.CheckIntervalSeconds == nil {
+		return DefaultEventsRotationCheckInterval
+	}
+	return time.Duration(*c.CheckIntervalSeconds) * time.Second
+}
+
+// ArchiveRetainAgeDuration parses ArchiveRetainAge. Empty or invalid values
+// return zero, which keeps all archives.
+func (c EventsRotationConfig) ArchiveRetainAgeDuration() time.Duration {
+	if strings.TrimSpace(c.ArchiveRetainAge) == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(c.ArchiveRetainAge)
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 // DoltConfig holds optional dolt server overrides.
@@ -1460,6 +1740,25 @@ type DaemonConfig struct {
 	// wake fast path triggered by enqueue, eliminating the per-session bd
 	// shellout storm.
 	NudgeDispatcher string `toml:"nudge_dispatcher,omitempty" jsonschema:"default=legacy,enum=legacy,enum=supervisor"`
+	// AutoRestartOnDrift controls whether `gc start` automatically restarts
+	// the supervisor when it detects the running supervisor's binary or
+	// pack snapshot has drifted from on-disk state. Nil (unset) defaults
+	// to true — operators get the correct-by-default behavior. Set to
+	// false as a global kill switch (e.g., for production cities where a
+	// rebuild on the host should not auto-restart the supervisor).
+	AutoRestartOnDrift *bool `toml:"auto_restart_on_drift,omitempty" jsonschema:"default=true"`
+}
+
+// AutoRestartOnDriftEnabled reports whether the supervisor should be
+// auto-restarted when `gc start` detects binary or pack drift. The
+// default is true: operators get correct-by-default behavior. The
+// per-invocation `--no-auto-restart` flag does NOT override the config
+// kill switch — production safety wins.
+func (d *DaemonConfig) AutoRestartOnDriftEnabled() bool {
+	if d.AutoRestartOnDrift == nil {
+		return true
+	}
+	return *d.AutoRestartOnDrift
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
@@ -2341,22 +2640,49 @@ func (a *Agent) SupportsMultipleSessions() bool {
 	return maxSessions == nil || *maxSessions != 1
 }
 
+// UsesCanonicalSingletonPoolIdentity reports whether singleton pool-shaped
+// surfaces should use the configured agent identity instead of synthesizing a
+// slot identity such as "{name}-1".
+func (a *Agent) UsesCanonicalSingletonPoolIdentity() bool {
+	if a == nil {
+		return false
+	}
+	if strings.TrimSpace(a.Namepool) != "" || len(a.NamepoolNames) > 0 {
+		return false
+	}
+	maxSessions := a.EffectiveMaxActiveSessions()
+	return maxSessions != nil && *maxSessions == 1
+}
+
+// SupportsExpandedSessionIdentities reports whether callers should expose or
+// discover concrete member identities instead of only the configured identity.
+func (a *Agent) SupportsExpandedSessionIdentities() bool {
+	if a == nil {
+		return false
+	}
+	if m := a.EffectiveMaxActiveSessions(); m != nil && *m == 0 {
+		return false
+	}
+	return a.SupportsInstanceExpansion() && !a.UsesCanonicalSingletonPoolIdentity()
+}
+
 // SupportsInstanceExpansion reports whether the template may have multiple
 // simultaneously addressable concrete instances and therefore needs instance
 // discovery / synthetic member naming.
 //
 // max_active_sessions=1 has two distinct flavors:
 //
-//   - Pool agents (MinActiveSessions or ScaleCheck set) addressed as
-//     "{name}-1" — they participate in pool semantics even at capacity 1.
+//   - Pool agents (MinActiveSessions or ScaleCheck set) keep pool controller
+//     semantics. Non-namepool singleton pools still use the canonical
+//     configured identity; see UsesCanonicalSingletonPoolIdentity.
 //   - Named-session agents (MaxActiveSessions=1 with a [[named_session]]
 //     entry, no Min/ScaleCheck) addressed as just "{name}" — they have a
 //     stable canonical identity and a phantom "-1" suffix breaks tools that
-//     resolve by qualified name (e.g. refinery).
+//     resolve by qualified name.
 //
-// We keep instance expansion on for the pool flavor so existing identities
-// stay stable, and turn it off for the named-session flavor so the bare name
-// resolves correctly.
+// We keep instance expansion on for the pool flavor so controller paths still
+// run pool reconciliation, and turn it off for the named-session flavor so the
+// bare name resolves correctly.
 func (a *Agent) SupportsInstanceExpansion() bool {
 	if a == nil {
 		return false
@@ -3066,9 +3392,10 @@ func WizardCity(name, provider, startCommand string) City {
 }
 
 // GastownCity returns a City configured for the gastown orchestration pack.
-// Agents come from the pack (packs/gastown); no inline agents are defined.
-// Sets workspace.includes, default_rig_includes, global_fragments, and daemon
-// config. If startCommand is set, it takes precedence over provider.
+// Agents come from the pack (.gc/system/packs/gastown); no inline agents are
+// defined. The root city pack imports gastown and sets canonical
+// DefaultRigImports so newly added rigs inherit the same pack by default. If
+// startCommand is set, it takes precedence over provider.
 func GastownCity(name, provider, startCommand string) City {
 	ws := Workspace{
 		Name:            name,

@@ -1889,6 +1889,75 @@ func TestCompileReviewWorkflowSkipGeminiFiltersExpansionLane(t *testing.T) {
 	}
 }
 
+func TestCompilePersonalWorkSkipGeminiFiltersExpansionLanes(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	writeReviewWorkflowFixtures(t, dir)
+
+	recipe, err := Compile(context.Background(), "mol-personal-work-v2", []string{dir}, map[string]string{
+		"issue":         "GC-1",
+		"base_branch":   "main",
+		"skip_gemini":   "true",
+		"setup_command": "true",
+		"test_command":  "true",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	for _, step := range recipe.Steps {
+		if strings.Contains(step.ID, "gemini") {
+			t.Fatalf("compiled recipe unexpectedly retained Gemini lane with skip_gemini=true: %s", step.ID)
+		}
+	}
+	for _, dep := range recipe.Deps {
+		if strings.Contains(dep.StepID, "gemini") || strings.Contains(dep.DependsOnID, "gemini") {
+			t.Fatalf("compiled recipe unexpectedly retained Gemini dependency with skip_gemini=true: %+v", dep)
+		}
+	}
+
+	for _, want := range []string{
+		"mol-personal-work-v2.design-review-loop.iteration.1.design-review-pipeline.persona-gen-claude",
+		"mol-personal-work-v2.design-review-loop.iteration.1.design-review-pipeline.persona-gen-codex",
+		"mol-personal-work-v2.design-review-loop.iteration.1.design-review-pipeline.persona-synthesis",
+		"mol-personal-work-v2.code-review-loop.iteration.1.review-pipeline.review-claude",
+		"mol-personal-work-v2.code-review-loop.iteration.1.review-pipeline.review-codex",
+		"mol-personal-work-v2.code-review-loop.iteration.1.review-pipeline.synthesize",
+	} {
+		if recipe.StepByID(want) == nil {
+			t.Fatalf("compiled recipe missing expected step %q", want)
+		}
+	}
+}
+
+func TestCompilePersonalWorkHappyPathDoesNotAddRetryWrappers(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	writeReviewWorkflowFixtures(t, dir)
+
+	recipe, err := Compile(context.Background(), "mol-personal-work-v2", []string{dir}, map[string]string{
+		"issue":         "GC-1",
+		"base_branch":   "main",
+		"skip_gemini":   "true",
+		"setup_command": "true",
+		"test_command":  "true",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	for _, step := range recipe.Steps {
+		if got := step.Metadata["gc.kind"]; got == "retry" {
+			t.Fatalf("personal-work happy path should not add retry control step %q", step.ID)
+		}
+		if strings.Contains(step.ID, ".attempt.") {
+			t.Fatalf("personal-work happy path should not add retry attempt step %q", step.ID)
+		}
+	}
+}
+
 func TestCompileReviewWorkflowAnnotatesNestedReviewerRetries(t *testing.T) {
 	enableV2ForTest(t)
 
@@ -1939,8 +2008,12 @@ func TestCompileReviewWorkflowAnnotatesNestedReviewerRetries(t *testing.T) {
 func writeReviewWorkflowFixtures(t *testing.T, dir string) {
 	t.Helper()
 	for name, content := range map[string]string{
-		"expansion-review-pr.toml": reviewworkflows.ExpansionReviewPR,
-		"mol-adopt-pr-v2.toml":     reviewworkflows.AdoptPR,
+		"expansion-design-review.toml":      reviewworkflows.ExpansionDesignReview,
+		"expansion-review-pr.toml":          reviewworkflows.ExpansionReviewPR,
+		"expansion-design-review-lite.toml": reviewworkflows.ExpansionDesignReviewLite,
+		"expansion-review-pr-lite.toml":     reviewworkflows.ExpansionReviewPRLite,
+		"mol-adopt-pr-v2.toml":              reviewworkflows.AdoptPR,
+		"mol-personal-work-v2.toml":         reviewworkflows.PersonalWork,
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
 			t.Fatalf("write %s: %v", name, err)

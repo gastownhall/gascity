@@ -488,6 +488,14 @@ func EnsureCanonicalMetadata(fs fsys.FS, path string, state MetadataState) (bool
 			changed = true
 		}
 	}
+
+	scopeRoot := filepath.Dir(filepath.Dir(filepath.Clean(path)))
+	if projectID, ok, err := ReadProjectIdentity(fs, scopeRoot); err != nil {
+		return false, err
+	} else if ok && projectID != "" && trimmedString(meta["project_id"]) != projectID {
+		meta["project_id"] = projectID
+		changed = true
+	}
 	if !changed {
 		return false, nil
 	}

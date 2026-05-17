@@ -418,3 +418,190 @@ func TestCachingStoreCloseFallsThroughOnCacheMiss(t *testing.T) {
 			backing.closeCalls)
 	}
 }
+
+// TestCachingStoreUpdateSkipsBackingPerFieldMatch is the per-field
+// short-circuit coverage requested in gastownhall/gascity#2199. The original
+// PR #2159 exercised Assignee + Labels-mismatch + cache-miss only; the
+// remaining 6 field branches in updateMatchesCached were asserted by
+// inspection. This table-driven test pins the short-circuit behavior for
+// each field independently so a future refactor of any single check
+// surfaces in CI.
+func TestCachingStoreUpdateSkipsBackingPerFieldMatch(t *testing.T) {
+	t.Parallel()
+
+	type fieldCase struct {
+		name string
+		seed Bead
+		opts UpdateOpts
+	}
+	strPtr := func(s string) *string { return &s }
+	intPtr := func(i int) *int { return &i }
+
+	cases := []fieldCase{
+		{
+			name: "Title",
+			seed: Bead{Title: "pinned"},
+			opts: UpdateOpts{Title: strPtr("pinned")},
+		},
+		{
+			name: "Status",
+			seed: Bead{Title: "x", Status: "open"},
+			opts: UpdateOpts{Status: strPtr("open")},
+		},
+		{
+			name: "Type",
+			seed: Bead{Title: "x", Type: "task"},
+			opts: UpdateOpts{Type: strPtr("task")},
+		},
+		{
+			name: "Priority",
+			seed: Bead{Title: "x", Priority: intPtr(2)},
+			opts: UpdateOpts{Priority: intPtr(2)},
+		},
+		{
+			name: "Description",
+			seed: Bead{Title: "x", Description: "body"},
+			opts: UpdateOpts{Description: strPtr("body")},
+		},
+		{
+			name: "ParentID",
+			seed: Bead{Title: "x", ParentID: "gc-parent"},
+			opts: UpdateOpts{ParentID: strPtr("gc-parent")},
+		},
+		{
+			name: "Metadata",
+			seed: Bead{Title: "x", Metadata: map[string]string{"k": "v"}},
+			opts: UpdateOpts{Metadata: map[string]string{"k": "v"}},
+		},
+		{
+			name: "Labels-present",
+			seed: Bead{Title: "x", Labels: []string{"a", "b"}},
+			opts: UpdateOpts{Labels: []string{"a"}},
+		},
+		{
+			name: "RemoveLabels-absent",
+			seed: Bead{Title: "x", Labels: []string{"a"}},
+			opts: UpdateOpts{RemoveLabels: []string{"z"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			backing := &countingBackingStore{Store: NewMemStore()}
+			bead, err := backing.Create(tc.seed)
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			cache := NewCachingStoreForTest(backing, nil)
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+			backing.updateCalls = 0
+
+			if err := cache.Update(bead.ID, tc.opts); err != nil {
+				t.Fatalf("Update: %v", err)
+			}
+			if backing.updateCalls != 0 {
+				t.Errorf("backing.Update called %d times; want 0 (%s value-match must short-circuit)",
+					backing.updateCalls, tc.name)
+			}
+		})
+	}
+}
+
+// TestCachingStoreUpdateFallsThroughPerFieldMismatch is the mismatch-side
+// companion to TestCachingStoreUpdateSkipsBackingPerFieldMatch. Each
+// subtest asserts that a real change in the named field forces the
+// backing call — guarding the matcher against accidentally returning true
+// when a single field actually differs.
+func TestCachingStoreUpdateFallsThroughPerFieldMismatch(t *testing.T) {
+	t.Parallel()
+
+	type fieldCase struct {
+		name string
+		seed Bead
+		opts UpdateOpts
+	}
+	strPtr := func(s string) *string { return &s }
+	intPtr := func(i int) *int { return &i }
+
+	cases := []fieldCase{
+		{
+			name: "Title",
+			seed: Bead{Title: "before"},
+			opts: UpdateOpts{Title: strPtr("after")},
+		},
+		{
+			name: "Status",
+			seed: Bead{Title: "x", Status: "open"},
+			opts: UpdateOpts{Status: strPtr("closed")},
+		},
+		{
+			name: "Type",
+			seed: Bead{Title: "x", Type: "task"},
+			opts: UpdateOpts{Type: strPtr("epic")},
+		},
+		{
+			name: "Priority",
+			seed: Bead{Title: "x", Priority: intPtr(2)},
+			opts: UpdateOpts{Priority: intPtr(3)},
+		},
+		{
+			name: "Priority-nil-cached",
+			seed: Bead{Title: "x"},
+			opts: UpdateOpts{Priority: intPtr(2)},
+		},
+		{
+			name: "Description",
+			seed: Bead{Title: "x", Description: "before"},
+			opts: UpdateOpts{Description: strPtr("after")},
+		},
+		{
+			name: "ParentID",
+			seed: Bead{Title: "x", ParentID: "gc-a"},
+			opts: UpdateOpts{ParentID: strPtr("gc-b")},
+		},
+		{
+			name: "Metadata-value",
+			seed: Bead{Title: "x", Metadata: map[string]string{"k": "old"}},
+			opts: UpdateOpts{Metadata: map[string]string{"k": "new"}},
+		},
+		{
+			name: "Metadata-missing-key",
+			seed: Bead{Title: "x"},
+			opts: UpdateOpts{Metadata: map[string]string{"k": "v"}},
+		},
+		{
+			name: "RemoveLabels-present",
+			seed: Bead{Title: "x", Labels: []string{"a", "b"}},
+			opts: UpdateOpts{RemoveLabels: []string{"a"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			backing := &countingBackingStore{Store: NewMemStore()}
+			bead, err := backing.Create(tc.seed)
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			cache := NewCachingStoreForTest(backing, nil)
+			if err := cache.Prime(context.Background()); err != nil {
+				t.Fatalf("Prime: %v", err)
+			}
+			backing.updateCalls = 0
+
+			if err := cache.Update(bead.ID, tc.opts); err != nil {
+				t.Fatalf("Update: %v", err)
+			}
+			if backing.updateCalls != 1 {
+				t.Errorf("backing.Update called %d times; want 1 (%s real change must propagate)",
+					backing.updateCalls, tc.name)
+			}
+		})
+	}
+}

@@ -9,12 +9,12 @@ func TestBuiltinProviders(t *testing.T) {
 	providers := BuiltinProviders()
 	order := BuiltinProviderOrder()
 
-	// Must have exactly 11 built-in providers.
-	if len(providers) != 11 {
-		t.Fatalf("len(BuiltinProviders()) = %d, want 11", len(providers))
+	// Must have exactly 12 built-in providers.
+	if len(providers) != 12 {
+		t.Fatalf("len(BuiltinProviders()) = %d, want 12", len(providers))
 	}
-	if len(order) != 11 {
-		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 11", len(order))
+	if len(order) != 12 {
+		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 12", len(order))
 	}
 
 	// Every entry in order must exist in providers.
@@ -137,6 +137,52 @@ func TestBuiltinProvidersGemini(t *testing.T) {
 	}
 	if len(p.ProcessNames) != 2 || p.ProcessNames[0] != "gemini" || p.ProcessNames[1] != "node" {
 		t.Errorf("ProcessNames = %v, want [gemini node]", p.ProcessNames)
+	}
+}
+
+func TestBuiltinProvidersKimi(t *testing.T) {
+	p := BuiltinProviders()["kimi"]
+	if p.Command != "kimi" {
+		t.Errorf("Command = %q, want %q", p.Command, "kimi")
+	}
+	if !reflect.DeepEqual(p.Args, []string{"--yolo", "--no-thinking"}) {
+		t.Errorf("Args = %v, want [--yolo --no-thinking]", p.Args)
+	}
+	if p.PromptMode != "none" {
+		t.Errorf("PromptMode = %q, want none", p.PromptMode)
+	}
+	if p.PromptFlag != "" {
+		t.Errorf("PromptFlag = %q, want empty", p.PromptFlag)
+	}
+	if p.ReadyDelayMs != 5000 {
+		t.Errorf("ReadyDelayMs = %d, want 5000", p.ReadyDelayMs)
+	}
+	if !reflect.DeepEqual(p.ProcessNames, []string{"kimi", "python"}) {
+		t.Errorf("ProcessNames = %v, want [kimi python]", p.ProcessNames)
+	}
+	if !derefBool(p.SupportsACP) {
+		t.Error("SupportsACP = false, want true")
+	}
+	if derefBool(p.SupportsHooks) {
+		t.Error("SupportsHooks = true, want false until Kimi hook installer exists")
+	}
+	if p.ResumeFlag != "--session" {
+		t.Errorf("ResumeFlag = %q, want --session", p.ResumeFlag)
+	}
+	if p.ResumeStyle != "flag" {
+		t.Errorf("ResumeStyle = %q, want flag", p.ResumeStyle)
+	}
+	if p.AcceptStartupDialogs == nil || *p.AcceptStartupDialogs {
+		t.Errorf("AcceptStartupDialogs = %v, want false", p.AcceptStartupDialogs)
+	}
+	if !reflect.DeepEqual(p.ACPArgs, []string{"--yolo", "--no-thinking", "acp"}) {
+		t.Errorf("ACPArgs = %v, want [--yolo --no-thinking acp]", p.ACPArgs)
+	}
+	if !reflect.DeepEqual(p.PrintArgs, []string{"--quiet", "--prompt"}) {
+		t.Errorf("PrintArgs = %v, want [--quiet --prompt]", p.PrintArgs)
+	}
+	if p.TitleModel != "kimi-k2.6" {
+		t.Errorf("TitleModel = %q, want kimi-k2.6", p.TitleModel)
 	}
 }
 
@@ -435,6 +481,15 @@ func TestACPCommandString(t *testing.T) {
 				ACPArgs:    []string{},
 			},
 			want: "opencode-acp",
+		},
+		{
+			name: "BuiltinKimiPreservesGlobalFlags",
+			rp: ResolvedProvider{
+				Command: "kimi",
+				Args:    []string{"--yolo", "--no-thinking"},
+				ACPArgs: []string{"--yolo", "--no-thinking", "acp"},
+			},
+			want: "kimi --yolo --no-thinking acp",
 		},
 	}
 

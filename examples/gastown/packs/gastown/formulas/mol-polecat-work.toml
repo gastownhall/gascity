@@ -39,6 +39,11 @@ formula = "mol-polecat-work"
 extends = ["mol-polecat-base"]
 version = 9
 
+[vars]
+[vars.binding_prefix]
+description = "Import binding prefix for gastown agent identities, including trailing dot when bound."
+default = ""
+
 [[steps]]
 id = "workspace-setup"
 title = "Set up worktree and feature branch"

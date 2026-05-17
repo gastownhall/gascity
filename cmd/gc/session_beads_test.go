@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
@@ -5635,6 +5636,106 @@ func countOpenMembershipsForSession(t *testing.T, fabric extmsg.Services, caller
 	return len(members)
 }
 
+func TestReassignStateAssignedToRetiredSessionBeadConvergesAfterWaitLookupLimit(t *testing.T) {
+	store := beads.NewMemStore()
+	oldSessionID := "retired-session"
+	newSessionID := "replacement-session"
+	for i := 0; i < waitLookupLimit+1; i++ {
+		if _, err := store.Create(beads.Bead{
+			Title:  fmt.Sprintf("wait-%d", i),
+			Type:   waitBeadType,
+			Labels: []string{waitBeadLabel, "session:" + oldSessionID},
+			Metadata: map[string]string{
+				"session_id": oldSessionID,
+				"state":      waitStatePending,
+			},
+		}); err != nil {
+			t.Fatalf("create wait %d: %v", i, err)
+		}
+	}
+
+	var stderr bytes.Buffer
+	now := time.Date(2026, 5, 15, 9, 30, 0, 0, time.UTC)
+	reassignStateAssignedToRetiredSessionBead(store, oldSessionID, newSessionID, now, &stderr)
+	if strings.Contains(stderr.String(), "reassigning waits") {
+		t.Fatalf("stderr = %q, want converged reassign without cap error", stderr.String())
+	}
+	oldRows, err := store.List(beads.ListQuery{Label: "session:" + oldSessionID})
+	if err != nil {
+		t.Fatalf("list old waits: %v", err)
+	}
+	if len(oldRows) != 0 {
+		t.Fatalf("old session wait count = %d, want 0", len(oldRows))
+	}
+	newRows, err := store.List(beads.ListQuery{Label: "session:" + newSessionID})
+	if err != nil {
+		t.Fatalf("list new waits: %v", err)
+	}
+	if len(newRows) != waitLookupLimit+1 {
+		t.Fatalf("new session wait count = %d, want %d", len(newRows), waitLookupLimit+1)
+	}
+	for _, wait := range newRows {
+		if wait.Metadata["session_id"] != newSessionID {
+			t.Fatalf("wait %s session_id = %q, want %q", wait.ID, wait.Metadata["session_id"], newSessionID)
+		}
+	}
+}
+
+func TestCancelStateAssignedToRetiredSessionBeadConvergesAfterWaitLookupLimit(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "retired",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "retired",
+			"state":        string(session.StateArchived),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create retired session bead: %v", err)
+	}
+	for i := 0; i < waitLookupLimit+1; i++ {
+		if _, err := store.Create(beads.Bead{
+			Title:  fmt.Sprintf("wait-%d", i),
+			Type:   waitBeadType,
+			Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+			Metadata: map[string]string{
+				"session_id": sessionBead.ID,
+				"state":      waitStatePending,
+			},
+		}); err != nil {
+			t.Fatalf("create wait %d: %v", i, err)
+		}
+	}
+
+	var stderr bytes.Buffer
+	now := time.Date(2026, 5, 15, 10, 0, 0, 0, time.UTC)
+	cancelStateAssignedToRetiredSessionBead(store, sessionBead.ID, now, &stderr)
+	if strings.Contains(stderr.String(), "canceling waits") {
+		t.Fatalf("stderr = %q, want converged cleanup without cap error", stderr.String())
+	}
+	waits, err := store.List(beads.ListQuery{Label: "session:" + sessionBead.ID, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("list waits: %v", err)
+	}
+	for _, wait := range waits {
+		if !session.IsWaitBead(wait) {
+			continue
+		}
+		if wait.Status != "closed" || wait.Metadata["state"] != waitStateCanceled {
+			t.Fatalf("wait %s status/state = %q/%q, want closed/canceled", wait.ID, wait.Status, wait.Metadata["state"])
+		}
+	}
+	updatedSession, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if got := updatedSession.Metadata["wait_lookup_capped_source"]; got != "retired-session-cleanup" {
+		t.Fatalf("wait_lookup_capped_source = %q, want retired-session-cleanup", got)
+	}
+}
+
 // TestCloseBeadCascadesExtmsgState verifies the cascade fires from the pool
 // close path. Named-session retirement already calls
 // cancelStateAssignedToRetiredSessionBead at
@@ -5987,6 +6088,65 @@ func TestPreserveConfiguredNamedSessionBead_StateGate(t *testing.T) {
 			if got != tc.want {
 				t.Fatalf("preserveConfiguredNamedSessionBead(state=%q sleep_reason=%q last_woke_at=%q) = %v, want %v",
 					tc.state, tc.sleepReason, tc.lastWokeAt, got, tc.want)
+			}
+		})
+	}
+}
+
+// validPoolSessionNamePattern mirrors the tmux session-name validator in
+// internal/runtime/tmux/tmux.go (^[a-zA-Z0-9_-]+$). Replicated here as a
+// regression-test guard so future drift in the validator surfaces locally.
+var validPoolSessionNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// TestPendingPoolSessionName_SanitizesDottedTemplate is the regression test
+// for gastownhall/gascity#2205. Templates like "gastown.dog" (imported from
+// packs) used to produce session names with a literal dot — e.g.
+// "gastown.dog-pending-<uuid>" — which the tmux session-name validator
+// (^[a-zA-Z0-9_-]+$) rejects. That landed sessions in "failed-create" state
+// and pinned dolt CPU at 70%+ as the reconciler iterated over the wedged
+// beads every tick.
+func TestPendingPoolSessionName_SanitizesDottedTemplate(t *testing.T) {
+	cases := []struct {
+		name     string
+		template string
+		token    string
+		want     string
+	}{
+		{
+			name:     "dotted template (the #2205 bug)",
+			template: "gastown.dog",
+			token:    "04bac82a08846ba44210744efd0e9e15",
+			want:     "gastown__dog-pending-04bac82a08846ba44210744efd0e9e15",
+		},
+		{
+			name:     "slashed template (rig-qualified)",
+			template: "saitoc/refinery",
+			token:    "abc123",
+			want:     "refinery-pending-abc123", // targetBasename strips the rig prefix
+		},
+		{
+			name:     "dotted template with rig prefix",
+			template: "saitoc/gastown.dog",
+			token:    "deadbeef",
+			want:     "gastown__dog-pending-deadbeef",
+		},
+		{
+			name:     "plain template (no separators)",
+			template: "mayor",
+			token:    "00000000",
+			want:     "mayor-pending-00000000",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pendingPoolSessionName(tc.template, tc.token)
+			if got != tc.want {
+				t.Errorf("pendingPoolSessionName(%q, %q) = %q, want %q",
+					tc.template, tc.token, got, tc.want)
+			}
+			if !validPoolSessionNamePattern.MatchString(got) {
+				t.Errorf("pendingPoolSessionName(%q, %q) = %q, fails tmux session-name validator ^[a-zA-Z0-9_-]+$ (this is the #2205 bug)",
+					tc.template, tc.token, got)
 			}
 		})
 	}

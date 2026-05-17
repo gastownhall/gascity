@@ -31,12 +31,6 @@ func (c *ImplicitImportCacheCheck) Name() string { return "implicit-import-cache
 // Run checks bootstrap-managed implicit import cache paths.
 func (c *ImplicitImportCacheCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
-	if len(bootstrap.BootstrapPacks) == 0 {
-		r.Status = StatusOK
-		r.Message = "no bootstrap implicit imports configured"
-		return r
-	}
-
 	imports, implicitPath, err := config.ReadImplicitImports()
 	if err != nil {
 		r.Status = StatusError
@@ -46,6 +40,20 @@ func (c *ImplicitImportCacheCheck) Run(_ *CheckContext) *CheckResult {
 	if implicitPath == "" {
 		r.Status = StatusOK
 		r.Message = "implicit import home unavailable"
+		return r
+	}
+
+	retired := inspectRetiredBootstrapImplicitImports(imports)
+	if len(bootstrap.BootstrapPacks) == 0 {
+		if len(retired) == 0 {
+			r.Status = StatusOK
+			r.Message = "no bootstrap implicit imports configured"
+			return r
+		}
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("%d retired bootstrap implicit %s", len(retired), pluralEntry(len(retired)))
+		r.Details = retired
+		r.FixHint = `run "gc doctor --fix" to prune retired bootstrap implicit imports`
 		return r
 	}
 
@@ -84,9 +92,6 @@ func (c *ImplicitImportCacheCheck) CanFix() bool { return true }
 // Fix re-materializes bootstrap-managed implicit imports and prunes stale
 // legacy-key cache directories when a canonical cache is present.
 func (c *ImplicitImportCacheCheck) Fix(_ *CheckContext) error {
-	if len(bootstrap.BootstrapPacks) == 0 {
-		return nil
-	}
 	importsBefore, implicitPath, err := config.ReadImplicitImports()
 	if err != nil {
 		return err
@@ -99,6 +104,9 @@ func (c *ImplicitImportCacheCheck) Fix(_ *CheckContext) error {
 	issuesBefore := inspectBootstrapImplicitImportCaches(gcHome, importsBefore)
 	if err := ensureBootstrapForDoctor(gcHome); err != nil {
 		return err
+	}
+	if len(bootstrap.BootstrapPacks) == 0 {
+		return nil
 	}
 
 	importsAfter, implicitPathAfter, err := config.ReadImplicitImports()
@@ -128,6 +136,25 @@ func (c *ImplicitImportCacheCheck) Fix(_ *CheckContext) error {
 	}
 
 	return nil
+}
+
+func inspectRetiredBootstrapImplicitImports(imports map[string]config.ImplicitImport) []string {
+	if len(imports) == 0 {
+		return nil
+	}
+	var details []string
+	for _, entry := range bootstrap.RetiredBootstrapPacks {
+		imp, ok := imports[entry.Name]
+		if !ok {
+			continue
+		}
+		if config.NormalizeRemoteSource(entry.Source) != config.NormalizeRemoteSource(imp.Source) {
+			continue
+		}
+		details = append(details, fmt.Sprintf("implicit import %q is retired", entry.Name))
+	}
+	sort.Strings(details)
+	return details
 }
 
 func inspectBootstrapImplicitImportCaches(gcHome string, imports map[string]config.ImplicitImport) []implicitImportCacheIssue {

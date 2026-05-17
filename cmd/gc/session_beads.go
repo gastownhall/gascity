@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -113,6 +114,13 @@ func pendingPoolSessionName(template, instanceToken string) string {
 	if base == "" {
 		base = "pool"
 	}
+	// SanitizeQualifiedNameForSession encodes "." → "__" and "/" → "--"
+	// so the result satisfies tmux's session-name validator
+	// (^[a-zA-Z0-9_-]+$ — no dots, no slashes). Pack-imported templates
+	// like "gastown.dog" otherwise produce names with a literal dot that
+	// fail validation and wedge the pool at the create-session step. See
+	// gastownhall/gascity#2205.
+	base = agent.SanitizeQualifiedNameForSession(base)
 	token := strings.TrimSpace(instanceToken)
 	if token == "" {
 		token = session.NewInstanceToken()
@@ -660,6 +668,9 @@ func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string
 	if stderr == nil {
 		stderr = io.Discard
 	}
+	if _, err := session.ListSessionWaitBeads(store, sessionID); beads.IsLookupLimitError(err) {
+		stampWaitLookupCapDiagnostic(store, sessionID, err, now, "retired-session-cleanup")
+	}
 	if err := session.CancelWaits(store, sessionID, now); err != nil {
 		fmt.Fprintf(stderr, "session beads: canceling waits for retired session %s: %v\n", sessionID, err) //nolint:errcheck
 	}
@@ -1153,6 +1164,12 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				queueMeta("pool_slot", "")
 			}
 		}
+		if managedAlias == "" && isManagedPool && !isPoolInstance && isPoolManagedSessionBead(b) {
+			conflictAlias := strings.TrimSpace(b.Metadata[poolAliasConflictMetadataKey])
+			if cfgAgent := findAgentByTemplate(cfg, tp.TemplateName); cfgAgent != nil && cfgAgent.UsesCanonicalSingletonPoolIdentity() && conflictAlias == cfgAgent.QualifiedName() {
+				managedAlias = conflictAlias
+			}
+		}
 		needsAliasSync := b.Metadata["alias"] != managedAlias
 		if b.Metadata["pool_slot"] == "" {
 			queuePoolSlotMeta := queueMeta
@@ -1295,6 +1312,9 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			}
 		}
 		clearAliasConflict := func() {
+			wasConflicted := b.Metadata[poolAliasConflictMetadataKey] != "" ||
+				b.Metadata[poolAliasConflictCountMetadataKey] != "" ||
+				b.Metadata[poolAliasConflictAtMetadataKey] != ""
 			if b.Metadata[poolAliasConflictMetadataKey] != "" {
 				queueMeta(poolAliasConflictMetadataKey, "")
 			}
@@ -1304,12 +1324,17 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if b.Metadata[poolAliasConflictAtMetadataKey] != "" {
 				queueMeta(poolAliasConflictAtMetadataKey, "")
 			}
+			if wasConflicted {
+				fmt.Fprintf(stderr, "session beads: clearing alias conflict for %s\n", agentName) //nolint:errcheck
+			}
 		}
 		recordAliasConflict := func() {
 			count := 0
 			if existing, err := strconv.Atoi(strings.TrimSpace(b.Metadata[poolAliasConflictCountMetadataKey])); err == nil && existing > 0 {
 				count = existing
 			}
+			// This is a retry counter across build-time normalization and
+			// sync-time alias recovery, not a one-increment-per-tick gauge.
 			queueMeta(poolAliasConflictMetadataKey, managedAlias)
 			queueMeta(poolAliasConflictCountMetadataKey, strconv.Itoa(count+1))
 			queueMeta(poolAliasConflictAtMetadataKey, now.Format(time.RFC3339))
@@ -1460,6 +1485,9 @@ func syncDesiredPoolSlots(
 		}
 		agentCfg := findAgentByTemplate(cfg, tp.TemplateName)
 		if agentCfg == nil || !agentCfg.SupportsInstanceExpansion() {
+			continue
+		}
+		if agentCfg.UsesCanonicalSingletonPoolIdentity() {
 			continue
 		}
 		desiredByTemplate[tp.TemplateName] = append(desiredByTemplate[tp.TemplateName], sn)

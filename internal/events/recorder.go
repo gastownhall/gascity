@@ -50,6 +50,7 @@ type FileRecorder struct {
 	maxSize               int64
 	rotationCheckRecords  int
 	rotationCheckInterval time.Duration
+	archiveRetainAge      time.Duration
 	recordCount           uint64
 	lastSizeCheck         time.Time
 }
@@ -80,6 +81,13 @@ func WithRotationCheckRecords(n int) FileRecorderOption {
 // once per interval. Defaults to 60s.
 func WithRotationCheckInterval(d time.Duration) FileRecorderOption {
 	return func(r *FileRecorder) { r.rotationCheckInterval = d }
+}
+
+// WithArchiveRetainAge sets the maximum age of canonical archive
+// files kept after a successful rotation. A non-positive value keeps
+// all archives forever.
+func WithArchiveRetainAge(d time.Duration) FileRecorderOption {
+	return func(r *FileRecorder) { r.archiveRetainAge = d }
 }
 
 // RotationResult is returned by ForceRotate (and B-3's API endpoint)
@@ -146,19 +154,6 @@ func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) 
 		return nil, err
 	}
 
-	// Crash recovery: if a prior process rotated events into archives
-	// but the active log is empty or absent, ReadLatestSeq returns 0
-	// and new records would collide with seqs already written to disk.
-	// Take the max of the active tail and every archive's LastSeq so
-	// the next Record continues monotonically across rotations.
-	if archives, archErr := archiveFilesIn(filepath.Dir(path)); archErr == nil {
-		for _, info := range archives {
-			if info.LastSeq > maxSeq {
-				maxSeq = info.LastSeq
-			}
-		}
-	}
-
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("opening event log: %w", err)
@@ -218,7 +213,7 @@ func (r *FileRecorder) Record(e Event) {
 // flock. Returns an error on marshal or write failure; the caller
 // decides whether to log to stderr or surface it.
 func (r *FileRecorder) writeRecordLocked(e *Event) error {
-	if latest, err := ReadLatestSeq(r.path); err == nil && latest > r.seq {
+	if latest, err := readLatestActiveSeq(r.path); err == nil && latest > r.seq {
 		r.seq = latest
 	} else if err != nil {
 		return fmt.Errorf("latest seq: %w", err)
@@ -370,6 +365,7 @@ func (r *FileRecorder) rotateLocked() (RotationResult, error) {
 	}
 
 	done := make(chan struct{})
+	retainAge := r.archiveRetainAge
 	r.rotations.Add(1)
 	go func() {
 		defer r.rotations.Done()
@@ -377,6 +373,10 @@ func (r *FileRecorder) rotateLocked() (RotationResult, error) {
 		if err := gzipAndArchive(rotatingPath, archivePath, r.stderr); err != nil {
 			// gzipAndArchive already wrote to stderr.
 			_ = err
+			return
+		}
+		if err := reapExpiredArchives(dir, retainAge, r.stderr); err != nil {
+			fmt.Fprintf(r.stderr, "events: rotation: archive retention: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 	}()
 

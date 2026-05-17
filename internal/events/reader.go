@@ -281,11 +281,28 @@ func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) 
 	return reversed, nil
 }
 
-// ReadLatestSeq returns the latest complete event Seq in the events file, or
-// 0 if the file is missing or empty. Event logs are append-only and sequence
-// numbers are monotonic, so this reads backward from the tail instead of
-// parsing historical events on every recorder open.
+// ReadLatestSeq returns the highest complete event Seq visible in the
+// active events file or any canonical sibling archive. Event logs are
+// append-only and sequence numbers are monotonic, so the active file
+// is read backward from the tail and archives contribute their
+// filename-encoded LastSeq without being gunzipped.
 func ReadLatestSeq(path string) (uint64, error) {
+	seq, err := readLatestActiveSeq(path)
+	if err != nil {
+		return 0, err
+	}
+	archives, err := archiveFilesIn(filepath.Dir(path))
+	if err == nil {
+		for _, info := range archives {
+			if info.LastSeq > seq {
+				seq = info.LastSeq
+			}
+		}
+	}
+	return seq, nil
+}
+
+func readLatestActiveSeq(path string) (uint64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {

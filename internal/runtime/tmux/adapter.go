@@ -146,6 +146,9 @@ func injectSessionRuntimeHintsEnv(env map[string]string, cfg runtime.Config) map
 	for k, v := range env {
 		cloned[k] = v
 	}
+	if provider := strings.TrimSpace(cfg.ProviderName); provider != "" && strings.TrimSpace(cloned["GC_PROVIDER"]) == "" {
+		cloned["GC_PROVIDER"] = provider
+	}
 	if prompt := strings.TrimSpace(cfg.ReadyPromptPrefix); prompt != "" {
 		cloned[sessionReadyPromptEnvKey] = cfg.ReadyPromptPrefix
 	} else {
@@ -627,6 +630,16 @@ func (o *tmuxStartOps) acceptStartupDialogs(ctx context.Context, name string) er
 	return o.tm.AcceptStartupDialogs(ctx, name)
 }
 
+func shouldAcceptStartupDialogs(cfg runtime.Config) bool {
+	if cfg.AcceptStartupDialogs != nil {
+		return *cfg.AcceptStartupDialogs
+	}
+	if len(cfg.ProcessNames) == 0 && !cfg.EmitsPermissionWarning {
+		return false
+	}
+	return true
+}
+
 func (o *tmuxStartOps) waitForReady(ctx context.Context, name string, rc *RuntimeConfig, timeout time.Duration) error {
 	return o.tm.WaitForRuntimeReady(ctx, name, rc, timeout)
 }
@@ -692,6 +705,7 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 
 	hasHints := cfg.ReadyPromptPrefix != "" || cfg.ReadyDelayMs > 0 ||
 		len(cfg.ProcessNames) > 0 || cfg.EmitsPermissionWarning ||
+		cfg.AcceptStartupDialogs != nil ||
 		cfg.Nudge != "" || len(cfg.PreStart) > 0 || len(cfg.SessionSetup) > 0 || cfg.SessionSetupScript != "" ||
 		len(cfg.SessionLive) > 0
 
@@ -715,7 +729,7 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 	// Step 3: Accept startup dialogs (workspace trust + bypass permissions).
 	// Always attempted when process names are set, since any Claude-like
 	// agent may show a trust dialog regardless of EmitsPermissionWarning.
-	if len(cfg.ProcessNames) > 0 || cfg.EmitsPermissionWarning {
+	if shouldAcceptStartupDialogs(cfg) {
 		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
 		if err := ctx.Err(); err != nil {
 			return err
@@ -738,7 +752,7 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 	// Some CLIs surface trust or permissions dialogs only after their initial
 	// ready screen. Re-run dialog acceptance after readiness so late dialogs do
 	// not strand the session in an unusable startup state.
-	if len(cfg.ProcessNames) > 0 || cfg.EmitsPermissionWarning {
+	if shouldAcceptStartupDialogs(cfg) {
 		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
 		if err := ctx.Err(); err != nil {
 			return err

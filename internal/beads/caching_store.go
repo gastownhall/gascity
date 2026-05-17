@@ -47,6 +47,7 @@ type CachingStore struct {
 	onChange     func(eventType, beadID string, payload json.RawMessage)
 	cancelFn     context.CancelFunc
 	problemf     func(string)
+	problemLog   map[string]cacheProblemLogState
 
 	// latencyWindow holds the most recent reconciliation bd-list
 	// durations for adaptive cadence decisions. Bounded at
@@ -69,6 +70,11 @@ const (
 	cacheLive
 	cacheDegraded
 )
+
+type cacheProblemLogState struct {
+	lastAt     time.Time
+	suppressed int64
+}
 
 // CacheStats exposes cache freshness, reconciliation, and problem state.
 type CacheStats struct {
@@ -112,6 +118,8 @@ const (
 	cacheReconcileIntervalSmall  = 30 * time.Second
 	cacheReconcileIntervalMedium = 60 * time.Second
 	cacheReconcileIntervalLarge  = 120 * time.Second
+	cacheProblemLogWindow        = time.Minute
+	cacheReconcileFailureBackoff = time.Minute
 )
 
 // StaggerOption configures the deterministic startup stagger applied
@@ -218,6 +226,7 @@ func newCachingStore(backing Store, idPrefix string, onChange func(eventType, be
 		beadSeq:     make(map[string]uint64),
 		localBeadAt: make(map[string]time.Time),
 		deletedSeq:  make(map[string]uint64),
+		problemLog:  make(map[string]cacheProblemLogState),
 		onChange:    onChange,
 		problemf: func(msg string) {
 			log.Printf("beads cache: %s", msg)
@@ -523,12 +532,34 @@ func (c *CachingStore) recordProblemLocked(op string, err error) {
 		return
 	}
 	msg := fmt.Sprintf("%s: %v", op, err)
+	now := time.Now()
 	c.stats.ProblemCount++
-	c.stats.LastProblemAt = time.Now()
+	c.stats.LastProblemAt = now
 	c.stats.LastProblem = msg
 	if c.problemf != nil {
-		c.problemf(msg)
+		if logMsg, ok := c.problemLogMessageLocked(msg, now); ok {
+			c.problemf(logMsg)
+		}
 	}
+}
+
+func (c *CachingStore) problemLogMessageLocked(msg string, now time.Time) (string, bool) {
+	if c.problemLog == nil {
+		c.problemLog = make(map[string]cacheProblemLogState)
+	}
+	state := c.problemLog[msg]
+	if !state.lastAt.IsZero() && now.Sub(state.lastAt) < cacheProblemLogWindow {
+		state.suppressed++
+		c.problemLog[msg] = state
+		return "", false
+	}
+
+	logMsg := msg
+	if state.suppressed > 0 {
+		logMsg = fmt.Sprintf("%s (suppressed %d duplicate logs)", msg, state.suppressed)
+	}
+	c.problemLog[msg] = cacheProblemLogState{lastAt: now}
+	return logMsg, true
 }
 
 func (c *CachingStore) updateStatsLocked() {

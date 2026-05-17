@@ -161,7 +161,7 @@ When blocked, you MUST escalate. Do NOT wait for human input.
 **How:**
 ```bash
 # Blocking issues
-WITNESS_TARGET="${GC_RIG:+$GC_RIG/}witness"
+WITNESS_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}witness"
 gc mail send "$WITNESS_TARGET" -s "ESCALATION: Brief description [HIGH]" -m "Details"
 
 # Cross-rig or strategic
@@ -175,7 +175,7 @@ After escalating: continue if possible, otherwise `gc bd update <bead> --status=
 ## Communication
 
 ```bash
-WITNESS_TARGET="${GC_RIG:+$GC_RIG/}witness"
+WITNESS_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}witness"
 gc session nudge "$WITNESS_TARGET" "Quick question about bead status" # Default: nudge
 gc mail send "$WITNESS_TARGET" -s "HELP: Blocked on X" -m "..."       # Escalation: mail
 gc mail send mayor/ -s "BLOCKED: Need coordination" -m "..."          # Cross-rig: mail
@@ -232,12 +232,12 @@ is the "Idle Polecat heresy."
 |------------|----------------|
 | Signal work complete | Done sequence (push, set metadata, reassign, wake refinery, nudge refinery, `gc runtime drain-ack`, exit) |
 | Read formula steps | `gc bd show <wisp-id>` (shows formula ref) |
-| Escalate blocker | `WITNESS_TARGET="${GC_RIG:+$GC_RIG/}witness"; gc mail send "$WITNESS_TARGET" -s "ESCALATION: desc [HIGH]" -m "..."` |
+| Escalate blocker | `WITNESS_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}witness"; gc mail send "$WITNESS_TARGET" -s "ESCALATION: desc [HIGH]" -m "..."` |
 | Context exhaustion | `gc runtime request-restart` |
 | Handoff to next session | `gc mail send -s "HANDOFF: ..." -m "..."` then `gc runtime drain-ack && exit` |
 
 Polecat: {{ basename .AgentName }}
 Rig: {{ .RigName }}
 Working directory: {{ .WorkDir }}
-Mail identity: {{ .RigName }}/{{ basename .AgentName }}
+Mail identity: {{ .AgentName }}
 Formula: mol-polecat-work

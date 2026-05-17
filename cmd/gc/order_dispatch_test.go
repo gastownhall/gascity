@@ -66,6 +66,13 @@ type latestSeqFailProvider struct {
 	events.Provider
 }
 
+type triggerEvaluationFailStore struct {
+	beads.Store
+
+	lastRunOrder string
+	cursorOrder  string
+}
+
 type countingListStore struct {
 	beads.Store
 
@@ -111,6 +118,16 @@ func (s eventCursorUpdateFailStore) Update(id string, opts beads.UpdateOpts) err
 
 func (p latestSeqFailProvider) LatestSeq() (uint64, error) {
 	return 0, fmt.Errorf("latest seq failed")
+}
+
+func (s triggerEvaluationFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == "order-run:"+s.lastRunOrder && query.IncludeClosed {
+		return nil, fmt.Errorf("last-run lookup should be skipped while trigger env failure is open")
+	}
+	if query.Label == "order:"+s.cursorOrder {
+		return nil, fmt.Errorf("event cursor lookup should be skipped while trigger env failure is open")
+	}
+	return s.Store.List(query)
 }
 
 func (s *countingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -1342,6 +1359,59 @@ func TestOrderDispatchExecFailure(t *testing.T) {
 	}
 }
 
+func TestOrderDispatchExecEnvFailureUsesEnvFailureLabel(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+	tracking, err := store.Create(beads.Bead{
+		Title:  "order:pg-env",
+		Labels: []string{"order-run:pg-env", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cityDir := t.TempDir()
+	writePGScopeFixture(t, cityDir, "")
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := orders.Order{Name: "pg-env", Trigger: "cooldown", Interval: "1m", Exec: "true"}
+	ad := buildOrderDispatcherFromListExec([]orders.Order{a}, store, nil, successfulExec, &rec)
+	mad := ad.(*memoryOrderDispatcher)
+	mad.stderr = &stderr
+
+	logs := captureCmdOrderLogs(t, func() {
+		mad.dispatchExec(context.Background(), store, execStoreTarget{ScopeRoot: cityDir, ScopeKind: "city", Prefix: "ct"}, a, cityDir, tracking.ID)
+	})
+
+	all := trackingBeads(t, store, "order-run:pg-env")
+	if len(all) != 1 {
+		t.Fatalf("tracking bead count = %d, want 1", len(all))
+	}
+	if !slicesContain(all[0].Labels, "exec-env-failed") {
+		t.Fatalf("tracking bead labels = %v, want exec-env-failed", all[0].Labels)
+	}
+	if slicesContain(all[0].Labels, "exec-failed") {
+		t.Fatalf("tracking bead labels = %v, want no exec-failed for env-build failure", all[0].Labels)
+	}
+	if !rec.hasType(events.OrderFailed) {
+		t.Fatal("missing order.failed event")
+	}
+	combined := logs + "\n" + stderr.String()
+	if !strings.Contains(combined, "order exec pg-env env failed") {
+		t.Fatalf("logs = %q, want env failure warning", combined)
+	}
+}
+
 func TestOrderDispatchExecFailureRedactsSecrets(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "ghs_order_secret")
 	store := beads.NewMemStore()
@@ -1503,6 +1573,165 @@ description = "Target: {{target_id}}, workspace: {{workspace}}"
 	}
 	if strings.Contains(failedMessage, "bead title contains unresolved variable(s)") {
 		t.Fatalf("order.failed message = %q, want consolidated required-var validation instead of title-only failure", failedMessage)
+	}
+}
+
+func TestOrderDispatchConditionTriggerEnvFailureRecordsOrderFailure(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	writePGScopeFixture(t, cityDir, "")
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+	a := orders.Order{Name: "pg-condition", Trigger: "condition", Check: "true", Exec: "true"}
+	ad := buildOrderDispatcherFromListExec([]orders.Order{a}, store, nil, successfulExec, &rec)
+	mad := ad.(*memoryOrderDispatcher)
+	mad.stderr = &stderr
+
+	now := time.Now()
+	mad.dispatch(context.Background(), cityDir, now)
+	mad.drain(context.Background())
+
+	if !rec.hasType(events.OrderFailed) {
+		t.Fatal("missing order.failed event for trigger env failure")
+	}
+	rec.mu.Lock()
+	eventsSnapshot := append([]events.Event(nil), rec.events...)
+	rec.mu.Unlock()
+	if len(eventsSnapshot) != 1 {
+		t.Fatalf("recorded events = %#v, want one order.failed event", eventsSnapshot)
+	}
+	if eventsSnapshot[0].Subject != "pg-condition" {
+		t.Fatalf("order.failed subject = %q, want pg-condition", eventsSnapshot[0].Subject)
+	}
+	if !strings.Contains(eventsSnapshot[0].Message, "building trigger env") {
+		t.Fatalf("order.failed message = %q, want trigger env context", eventsSnapshot[0].Message)
+	}
+	all := trackingBeads(t, store, "order-run:pg-condition")
+	if len(all) != 1 {
+		t.Fatalf("tracking beads = %#v, want one trigger env failure marker", all)
+	}
+	for _, want := range []string{labelOrderTracking, labelTriggerEnvFailed} {
+		if !slicesContain(all[0].Labels, want) {
+			t.Fatalf("tracking bead labels = %v, want %s", all[0].Labels, want)
+		}
+	}
+
+	mad.dispatch(context.Background(), cityDir, now.Add(10*time.Second))
+	mad.drain(context.Background())
+
+	rec.mu.Lock()
+	eventsSnapshot = append([]events.Event(nil), rec.events...)
+	rec.mu.Unlock()
+	failedEvents := 0
+	for _, event := range eventsSnapshot {
+		if event.Type == events.OrderFailed && event.Subject == "pg-condition" {
+			failedEvents++
+		}
+	}
+	if failedEvents != 1 {
+		t.Fatalf("order.failed count after second dispatch = %d, want 1", failedEvents)
+	}
+	all = trackingBeads(t, store, "order-run:pg-condition")
+	if len(all) != 1 {
+		t.Fatalf("tracking beads after second dispatch = %#v, want original failure marker only", all)
+	}
+}
+
+func TestOrderDispatchTriggerEnvFailureTrackingSuppressesNonConditionBeforeEvaluation(t *testing.T) {
+	tests := []struct {
+		name          string
+		order         orders.Order
+		ep            events.Provider
+		lastRunOrder  string
+		cursorOrder   string
+		dispatchAfter time.Duration
+	}{
+		{
+			name:          "cooldown",
+			order:         orders.Order{Name: "pg-cooldown", Trigger: "cooldown", Interval: "1s", Exec: "true"},
+			lastRunOrder:  "pg-cooldown",
+			dispatchAfter: 2 * time.Second,
+		},
+		{
+			name:        "event",
+			order:       orders.Order{Name: "pg-event", Trigger: "event", On: events.BeadClosed, Exec: "true"},
+			ep:          events.NewFake(),
+			cursorOrder: "pg-event",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			baseStore := beads.NewMemStore()
+			if _, err := baseStore.Create(beads.Bead{
+				Title:     "order:" + tt.order.Name,
+				Labels:    []string{"order-run:" + tt.order.Name, labelOrderTracking, labelTriggerEnvFailed},
+				Ephemeral: true,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if fake, ok := tt.ep.(*events.Fake); ok {
+				fake.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+			}
+
+			var rec memRecorder
+			rec.Record(events.Event{Type: events.OrderFailed, Subject: tt.order.Name, Message: "building trigger env: previous failure"})
+			var stderr bytes.Buffer
+			store := triggerEvaluationFailStore{
+				Store:        baseStore,
+				lastRunOrder: tt.lastRunOrder,
+				cursorOrder:  tt.cursorOrder,
+			}
+			ad := buildOrderDispatcherFromListExec([]orders.Order{tt.order}, store, tt.ep, successfulExec, &rec)
+			mad := ad.(*memoryOrderDispatcher)
+			mad.stderr = &stderr
+
+			mad.dispatch(context.Background(), t.TempDir(), time.Now().Add(tt.dispatchAfter))
+			mad.drain(context.Background())
+
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want open trigger-env failure to suppress trigger evaluation", stderr.String())
+			}
+			all := trackingBeads(t, baseStore, "order-run:"+tt.order.Name)
+			if len(all) != 1 {
+				t.Fatalf("tracking beads after second dispatch = %#v, want original failure marker only", all)
+			}
+			failedEvents := 0
+			rec.mu.Lock()
+			eventsSnapshot := append([]events.Event(nil), rec.events...)
+			rec.mu.Unlock()
+			for _, event := range eventsSnapshot {
+				if event.Type == events.OrderFailed && event.Subject == tt.order.Name {
+					failedEvents++
+				}
+			}
+			if failedEvents != 1 {
+				t.Fatalf("order.failed count after second dispatch = %d, want 1", failedEvents)
+			}
+		})
+	}
+}
+
+func TestRedactOrderEnvErrorUsesProcessEnv(t *testing.T) {
+	t.Setenv("GC_ORDER_SECRET", "super-secret-token")
+
+	got := redactOrderEnvError(fmt.Errorf("projection leaked super-secret-token"), os.Environ())
+	if strings.Contains(got, "super-secret-token") {
+		t.Fatalf("redacted error = %q, want secret removed", got)
+	}
+	if !strings.Contains(got, "projection leaked") {
+		t.Fatalf("redacted error = %q, want non-secret context preserved", got)
 	}
 }
 
@@ -2818,6 +3047,64 @@ func TestStartupSweepThenBuildDispatcher(t *testing.T) {
 	}
 }
 
+func TestStartupSweepPreservesTriggerEnvFailureMarker(t *testing.T) {
+	store := beads.NewMemStore()
+
+	marker, err := store.Create(beads.Bead{
+		Title:     "order:pg-cooldown",
+		Labels:    []string{"order-run:pg-cooldown", labelOrderTracking, labelTriggerEnvFailed},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	closed, err := sweepOrphanedOrderTrackingRetry(store, 3, time.Millisecond)
+	if err != nil {
+		t.Fatalf("sweepOrphanedOrderTrackingRetry: %v", err)
+	}
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+	gotMarker, err := store.Get(marker.ID)
+	if err != nil {
+		t.Fatalf("Get(marker): %v", err)
+	}
+	if gotMarker.Status != "open" {
+		t.Fatalf("trigger env failure marker status = %q, want open", gotMarker.Status)
+	}
+
+	order := orders.Order{Name: "pg-cooldown", Trigger: "cooldown", Interval: "1s", Exec: "true"}
+	rec := memRecorder{}
+	rec.Record(events.Event{Type: events.OrderFailed, Subject: order.Name, Message: "building trigger env: previous failure"})
+	var stderr bytes.Buffer
+	ad := buildOrderDispatcherFromListExec([]orders.Order{order}, triggerEvaluationFailStore{
+		Store:        store,
+		lastRunOrder: order.Name,
+	}, nil, successfulExec, &rec)
+	mad := ad.(*memoryOrderDispatcher)
+	mad.stderr = &stderr
+
+	mad.dispatch(context.Background(), t.TempDir(), time.Now().Add(2*time.Second))
+	mad.drain(context.Background())
+
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want preserved trigger-env marker to suppress trigger evaluation", stderr.String())
+	}
+	rec.mu.Lock()
+	eventsSnapshot := append([]events.Event(nil), rec.events...)
+	rec.mu.Unlock()
+	failedEvents := 0
+	for _, event := range eventsSnapshot {
+		if event.Type == events.OrderFailed && event.Subject == order.Name {
+			failedEvents++
+		}
+	}
+	if failedEvents != 1 {
+		t.Fatalf("order.failed count after restart-like sweep and dispatch = %d, want 1", failedEvents)
+	}
+}
+
 // TestSweepOrphanedOrderTracking_StampsCloseReason verifies that the
 // startup-time orphan sweep also stamps close_reason. The original
 // callsite passed nil metadata; under validation.on-close=error this
@@ -3742,7 +4029,7 @@ func TestOrderDispatchConditionUsesScopedEnv(t *testing.T) {
 	}
 }
 
-func TestOrderDispatchSkipsRigCooldownWhenLegacyLastRunReadFails(t *testing.T) {
+func TestOrderDispatchSkipsRigCooldownWhenLegacyOpenWorkReadFails(t *testing.T) {
 	rigStore := beads.NewMemStore()
 	legacyStore := labelFailListStore{
 		Store:     beads.NewMemStore(),
@@ -3785,8 +4072,8 @@ func TestOrderDispatchSkipsRigCooldownWhenLegacyLastRunReadFails(t *testing.T) {
 	if len(rigRuns) != 0 {
 		t.Fatalf("rig store has %d new run bead(s), want 0 when legacy last-run state cannot be read", len(rigRuns))
 	}
-	if !strings.Contains(stderr.String(), "last run") {
-		t.Fatalf("stderr missing last-run error:\n%s", stderr.String())
+	if !strings.Contains(stderr.String(), "checking open work") {
+		t.Fatalf("stderr missing open-work gate error:\n%s", stderr.String())
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -3637,6 +3638,9 @@ func TestWaitForSupervisorReadySucceedsWhenAlreadyReadyEvenWithZeroTimeout(t *te
 }
 
 func TestDoSupervisorStartAlreadyRunning(t *testing.T) {
+	if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && strings.TrimSpace(lu.HomeDir) != "" {
+		t.Setenv("HOME", lu.HomeDir) // prevent HOME-override guard from firing before the already-running check
+	}
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
@@ -3657,6 +3661,9 @@ func TestDoSupervisorStartAlreadyRunning(t *testing.T) {
 }
 
 func TestDoSupervisorStartDetectsSupervisorOnFallbackSocket(t *testing.T) {
+	if lu, err := user.LookupId(strconv.Itoa(os.Getuid())); err == nil && strings.TrimSpace(lu.HomeDir) != "" {
+		t.Setenv("HOME", lu.HomeDir) // prevent HOME-override guard from firing before the already-running check
+	}
 	gcHome := shortTempDir(t, "gc-home-")
 	runtimeDir := shortTempDir(t, "gc-run-")
 	t.Setenv("GC_HOME", gcHome)
@@ -4038,6 +4045,7 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
 	closer := &closerSpy{}
+	forceStop := &atomic.Bool{}
 	mc := &managedCity{
 		name:   "bright-lights",
 		cancel: func() {},
@@ -4051,10 +4059,11 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 					DriftDrainTimeout: "20ms",
 				},
 			},
-			sp:     runtime.NewFake(),
-			rec:    events.Discard,
-			stdout: io.Discard,
-			stderr: io.Discard,
+			sp:                runtime.NewFake(),
+			rec:               events.Discard,
+			stdout:            io.Discard,
+			stderr:            io.Discard,
+			forceStopShutdown: forceStop,
 		},
 	}
 
@@ -4075,6 +4084,60 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	}
 	if !closer.closed {
 		t.Fatal("expected closer to be closed after forced cleanup")
+	}
+	if !forceStop.Load() {
+		t.Fatal("expected forced cleanup to request force-stop shutdown")
+	}
+
+	ops := readOpLog(t, logFile)
+	assertSingleStopWithBenignNoise(t, ops)
+}
+
+func TestStopManagedCityAllowsForcedShutdownToUnwind(t *testing.T) {
+	cityPath := t.TempDir()
+	logFile := filepath.Join(t.TempDir(), "ops.log")
+	script := writeSpyScript(t, logFile)
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+
+	done := make(chan struct{})
+	time.AfterFunc(60*time.Millisecond, func() {
+		close(done)
+	})
+	closer := &closerSpy{}
+	forceStop := &atomic.Bool{}
+	mc := &managedCity{
+		name:   "bright-lights",
+		cancel: func() {},
+		done:   done,
+		closer: closer,
+		cr: &CityRuntime{
+			cfg: &config.City{
+				Daemon: config.DaemonConfig{
+					ShutdownTimeout: "20ms",
+				},
+			},
+			sp:                runtime.NewFake(),
+			rec:               events.Discard,
+			stdout:            io.Discard,
+			stderr:            io.Discard,
+			forceStopShutdown: forceStop,
+		},
+	}
+
+	var stderr bytes.Buffer
+	err := stopManagedCity(mc, cityPath, &stderr)
+	if err != nil {
+		t.Fatalf("stopManagedCity: %v; stderr=%q", err, stderr.String())
+	}
+	if !forceStop.Load() {
+		t.Fatal("expected forced cleanup to request force-stop shutdown")
+	}
+	if !closer.closed {
+		t.Fatal("expected closer to be closed after forced cleanup")
+	}
+	if strings.Contains(stderr.String(), "after forced shutdown") {
+		t.Fatalf("stderr = %q, want no forced-shutdown timeout", stderr.String())
 	}
 
 	ops := readOpLog(t, logFile)

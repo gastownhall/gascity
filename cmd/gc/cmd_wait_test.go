@@ -34,6 +34,38 @@ type waitGetSpyStore struct {
 	getIDs []string
 }
 
+type waitListQueryCaptureStore struct {
+	beads.Store
+	queries []beads.ListQuery
+}
+
+type waitGlobalListOmitStore struct {
+	beads.Store
+}
+
+type waitGlobalListLimitStore struct {
+	beads.Store
+}
+
+type waitGlobalListErrorStore struct {
+	beads.Store
+}
+
+type waitOneSessionListLimitStore struct {
+	beads.Store
+	sessionID string
+}
+
+type waitLookupLimitStore struct {
+	beads.Store
+}
+
+func setWaitTestFileBeads(t *testing.T) {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+}
+
 func (s waitNudgeMetadataFailStore) SetMetadata(id, key, value string) error {
 	if key == "nudge_id" {
 		return errors.New("set nudge id failed")
@@ -44,6 +76,61 @@ func (s waitNudgeMetadataFailStore) SetMetadata(id, key, value string) error {
 func (s *waitGetSpyStore) Get(id string) (beads.Bead, error) {
 	s.getIDs = append(s.getIDs, id)
 	return s.Store.Get(id)
+}
+
+func (s *waitListQueryCaptureStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.queries = append(s.queries, query)
+	return s.Store.List(query)
+}
+
+func (s waitGlobalListOmitStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == waitBeadLabel {
+		return nil, nil
+	}
+	return s.Store.List(query)
+}
+
+func (s waitGlobalListLimitStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == waitBeadLabel {
+		return waitLookupLimitStore(s).List(query)
+	}
+	return s.Store.List(query)
+}
+
+func (s waitGlobalListErrorStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == waitBeadLabel {
+		return nil, errors.New("global wait list failed")
+	}
+	return s.Store.List(query)
+}
+
+func (s waitOneSessionListLimitStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == waitBeadLabel {
+		return nil, nil
+	}
+	if query.Label == "session:"+s.sessionID {
+		return waitLookupLimitStore{Store: s.Store}.List(query)
+	}
+	return s.Store.List(query)
+}
+
+func (s waitLookupLimitStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	items := make([]beads.Bead, query.Limit)
+	for i := range items {
+		items[i] = beads.Bead{
+			ID:     fmt.Sprintf("wait-%d", i),
+			Type:   waitBeadType,
+			Status: "open",
+			Labels: []string{query.Label},
+		}
+	}
+	if len(items) > 0 {
+		items[0].Metadata = map[string]string{
+			"session_id": "session-1",
+			"state":      waitStateReady,
+		}
+	}
+	return items, nil
 }
 
 var (
@@ -101,6 +188,130 @@ func waitTestRealBDPath(t *testing.T) string {
 		t.Skip(waitTestRealBDErr.Error())
 	}
 	return waitTestRealBDCached
+}
+
+func TestLoadWaitBeadsByLabelUsesBoundedLookup(t *testing.T) {
+	mem := beads.NewMemStore()
+	if _, err := mem.Create(beads.Bead{
+		Title:  "wait",
+		Type:   sessionpkg.LegacyWaitBeadType,
+		Labels: []string{waitBeadLabel},
+	}); err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+	store := &waitListQueryCaptureStore{Store: mem}
+
+	waits, err := loadWaitBeadsByLabel(store)
+	if err != nil {
+		t.Fatalf("loadWaitBeadsByLabel: %v", err)
+	}
+	if len(waits) != 1 {
+		t.Fatalf("wait count = %d, want 1", len(waits))
+	}
+	if len(store.queries) != 1 {
+		t.Fatalf("List calls = %d, want 1", len(store.queries))
+	}
+	if got := store.queries[0].Limit; got != waitLookupLimit+1 {
+		t.Fatalf("List limit = %d, want %d", got, waitLookupLimit+1)
+	}
+	if got := store.queries[0].Sort; got != beads.SortCreatedDesc {
+		t.Fatalf("List sort = %q, want %q", got, beads.SortCreatedDesc)
+	}
+}
+
+func TestLoadWaitBeadsByLabelAllowsExactLookupLimit(t *testing.T) {
+	mem := beads.NewMemStore()
+	for i := 0; i < waitLookupLimit; i++ {
+		if _, err := mem.Create(beads.Bead{
+			Title:  fmt.Sprintf("wait-%d", i),
+			Type:   waitBeadType,
+			Labels: []string{waitBeadLabel},
+		}); err != nil {
+			t.Fatalf("create wait bead %d: %v", i, err)
+		}
+	}
+
+	waits, err := loadWaitBeadsByLabel(mem)
+	if err != nil {
+		t.Fatalf("loadWaitBeadsByLabel: %v", err)
+	}
+	if len(waits) != waitLookupLimit {
+		t.Fatalf("wait count = %d, want %d", len(waits), waitLookupLimit)
+	}
+}
+
+func TestLoadWaitBeadsByLabelReportsLookupLimit(t *testing.T) {
+	_, err := loadWaitBeadsByLabel(waitLookupLimitStore{Store: beads.NewMemStore()})
+	if err == nil || !strings.Contains(err.Error(), "wait lookup hit limit") {
+		t.Fatalf("loadWaitBeadsByLabel error = %v, want wait lookup limit", err)
+	}
+}
+
+func TestCmdWaitListSessionFilterUsesSessionScopedLookup(t *testing.T) {
+	cityDir := t.TempDir()
+	writePhase0InterfaceCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+`)
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_DIR", t.TempDir())
+	t.Setenv("GC_BEADS", "file")
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	targetWait, err := store.Create(beads.Bead{
+		Title:  "target wait",
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:target-session"},
+		Metadata: map[string]string{
+			"session_id": "target-session",
+			"state":      waitStatePending,
+			"kind":       "manual",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(target wait): %v", err)
+	}
+	for i := 0; i < waitLookupLimit; i++ {
+		if _, err := store.Create(beads.Bead{
+			Title:  fmt.Sprintf("other wait %d", i),
+			Type:   waitBeadType,
+			Labels: []string{waitBeadLabel, "session:other-session"},
+			Metadata: map[string]string{
+				"session_id": "other-session",
+				"state":      waitStatePending,
+				"kind":       "manual",
+			},
+		}); err != nil {
+			t.Fatalf("Create(other wait %d): %v", i, err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdWaitList("", "target-session", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdWaitList = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), targetWait.ID) {
+		t.Fatalf("wait list output missing target wait %s:\nstdout=%s\nstderr=%s", targetWait.ID, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "other-session") {
+		t.Fatalf("wait list output included non-target session:\n%s", stdout.String())
+	}
+}
+
+func TestReadyWaitSetForList_ReturnsSetAndCapError(t *testing.T) {
+	ready, err := readyWaitSetForList(waitGlobalListLimitStore{Store: beads.NewMemStore()})
+	if err == nil || !strings.Contains(err.Error(), "wait lookup hit limit") {
+		t.Fatalf("readyWaitSetForList error = %v, want wait lookup limit", err)
+	}
+	if !ready["session-1"] {
+		t.Fatalf("readyWaitSetForList ready = %#v, want session-1 despite cap warning", ready)
+	}
 }
 
 func writeWaitTestDoltIdentity(homeDir string) error {
@@ -231,7 +442,7 @@ func (s waitErrorStore) ListByLabel(label string, limit int, _ ...beads.QueryOpt
 }
 
 func (s waitErrorStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Label == waitBeadLabel {
+	if query.Label == waitBeadLabel || strings.HasPrefix(query.Label, "session:") {
 		return nil, errors.New("wait list failed")
 	}
 	return s.MemStore.List(query)
@@ -581,6 +792,258 @@ func TestPrepareWaitWakeState_CancelsStaleEpochWaitForClosedSession(t *testing.T
 	}
 }
 
+func TestPrepareWaitWakeState_ProcessesOpenSessionWaitsWithoutGlobalWaitList(t *testing.T) {
+	base := beads.NewMemStore()
+	store := waitGlobalListOmitStore{Store: base}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	dep, err := store.Create(beads.Bead{Title: "dep"})
+	if err != nil {
+		t.Fatalf("create dep bead: %v", err)
+	}
+	if err := store.Close(dep.ID); err != nil {
+		t.Fatalf("close dep bead: %v", err)
+	}
+	waitBead, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStatePending,
+			"dep_ids":          dep.ID,
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+
+	readyWaitSet, err := prepareWaitWakeState(store, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("prepareWaitWakeState: %v", err)
+	}
+	if !readyWaitSet[sessionBead.ID] {
+		t.Fatalf("readyWaitSet missing session %s", sessionBead.ID)
+	}
+	updated, err := store.Get(waitBead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(wait): %v", err)
+	}
+	if got := updated.Metadata["state"]; got != waitStateReady {
+		t.Fatalf("wait state = %q, want %q", got, waitStateReady)
+	}
+}
+
+func TestPrepareWaitWakeState_ContinuesWhenGlobalListCaps(t *testing.T) {
+	base := beads.NewMemStore()
+	store := waitGlobalListLimitStore{Store: base}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "1",
+			"state":              string(sessionpkg.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	dep, err := store.Create(beads.Bead{Title: "dep"})
+	if err != nil {
+		t.Fatalf("create dep bead: %v", err)
+	}
+	if err := store.Close(dep.ID); err != nil {
+		t.Fatalf("close dep bead: %v", err)
+	}
+	waitBead, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStatePending,
+			"dep_ids":          dep.ID,
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+
+	readyWaitSet, err := prepareWaitWakeState(store, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("prepareWaitWakeState: %v", err)
+	}
+	if !readyWaitSet[sessionBead.ID] {
+		t.Fatalf("readyWaitSet missing session %s", sessionBead.ID)
+	}
+	updated, err := store.Get(waitBead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(wait): %v", err)
+	}
+	if got := updated.Metadata["state"]; got != waitStateReady {
+		t.Fatalf("wait state = %q, want %q", got, waitStateReady)
+	}
+	updatedSession, err := base.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(session): %v", err)
+	}
+	if got := updatedSession.Metadata["wait_lookup_capped_label"]; got != waitBeadLabel {
+		t.Fatalf("wait_lookup_capped_label = %q, want %q", got, waitBeadLabel)
+	}
+	if got := updatedSession.Metadata["wait_lookup_capped_limit"]; got != fmt.Sprint(waitLookupLimit) {
+		t.Fatalf("wait_lookup_capped_limit = %q, want %d", got, waitLookupLimit)
+	}
+	if got := updatedSession.Metadata["wait_lookup_capped_source"]; got != "wake-state-global" {
+		t.Fatalf("wait_lookup_capped_source = %q, want wake-state-global", got)
+	}
+	if got := updatedSession.Metadata["wait_lookup_capped_at"]; got == "" {
+		t.Fatal("wait_lookup_capped_at empty, want structured global cap diagnostic timestamp")
+	}
+}
+
+func TestPrepareWaitWakeState_ContinuesWhenOneSessionLookupCaps(t *testing.T) {
+	base := beads.NewMemStore()
+	cappedSession, err := base.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "capped",
+			"agent_name":         "capped",
+			"continuation_epoch": "1",
+			"state":              string(sessionpkg.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create capped session bead: %v", err)
+	}
+	sessionBead, err := base.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "1",
+			"state":              string(sessionpkg.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	dep, err := base.Create(beads.Bead{Title: "dep"})
+	if err != nil {
+		t.Fatalf("create dep bead: %v", err)
+	}
+	if err := base.Close(dep.ID); err != nil {
+		t.Fatalf("close dep bead: %v", err)
+	}
+	waitBead, err := base.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStatePending,
+			"dep_ids":          dep.ID,
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+	store := waitOneSessionListLimitStore{Store: base, sessionID: cappedSession.ID}
+
+	readyWaitSet, err := prepareWaitWakeState(store, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("prepareWaitWakeState: %v", err)
+	}
+	if !readyWaitSet[sessionBead.ID] {
+		t.Fatalf("readyWaitSet missing session %s after capped session %s", sessionBead.ID, cappedSession.ID)
+	}
+	updated, err := base.Get(waitBead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(wait): %v", err)
+	}
+	if got := updated.Metadata["state"]; got != waitStateReady {
+		t.Fatalf("wait state = %q, want %q", got, waitStateReady)
+	}
+	updatedCapped, err := base.Get(cappedSession.ID)
+	if err != nil {
+		t.Fatalf("store.Get(capped session): %v", err)
+	}
+	if got := updatedCapped.Metadata["wait_lookup_capped_label"]; got != "session:"+cappedSession.ID {
+		t.Fatalf("wait_lookup_capped_label = %q, want session label", got)
+	}
+	if got := updatedCapped.Metadata["wait_lookup_capped_limit"]; got != "1000" {
+		t.Fatalf("wait_lookup_capped_limit = %q, want 1000", got)
+	}
+	if got := updatedCapped.Metadata["wait_lookup_capped_source"]; got != "wake-state-session" {
+		t.Fatalf("wait_lookup_capped_source = %q, want wake-state-session", got)
+	}
+	if got := updatedCapped.Metadata["wait_lookup_capped_at"]; got == "" {
+		t.Fatal("wait_lookup_capped_at empty, want structured cap diagnostic timestamp")
+	}
+}
+
+func TestPrepareWaitWakeState_PropagatesGlobalListError(t *testing.T) {
+	base := beads.NewMemStore()
+	store := waitGlobalListErrorStore{Store: base}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "1",
+			"state":              string(sessionpkg.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStatePending,
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+		},
+	}); err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+
+	_, err = prepareWaitWakeState(store, time.Now().UTC())
+	if err == nil || !strings.Contains(err.Error(), "global wait list failed") {
+		t.Fatalf("prepareWaitWakeState error = %v, want global wait list failed", err)
+	}
+}
+
 func TestDepsWaitReady_IgnoresEmptyDependencyEntries(t *testing.T) {
 	store := beads.NewMemStore()
 	dep, err := store.Create(beads.Bead{Title: "dep"})
@@ -814,7 +1277,7 @@ func TestRetryClosedWait_PreservesNonDepsMetadata(t *testing.T) {
 }
 
 func TestDispatchReadyWaitNudges_EnqueuesDeterministicNudge(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
+	setWaitTestFileBeads(t)
 	dir := t.TempDir()
 	store, err := openCityStoreAt(dir)
 	if err != nil {
@@ -888,7 +1351,7 @@ func TestDispatchReadyWaitNudges_EnqueuesDeterministicNudge(t *testing.T) {
 }
 
 func TestDispatchReadyWaitNudges_UsesOpenSessionSnapshotInsteadOfWorkerRunningCheck(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
+	setWaitTestFileBeads(t)
 	dir := t.TempDir()
 	base := beads.NewMemStore()
 	store := &waitGetSpyStore{Store: base}
@@ -941,8 +1404,116 @@ func TestDispatchReadyWaitNudges_UsesOpenSessionSnapshotInsteadOfWorkerRunningCh
 	}
 }
 
+func TestDispatchReadyWaitNudges_ProcessesOpenSessionWaitsWithoutGlobalWaitList(t *testing.T) {
+	setWaitTestFileBeads(t)
+	dir := t.TempDir()
+	base := beads.NewMemStore()
+	store := waitGlobalListOmitStore{Store: base}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "1",
+			"state":              string(sessionpkg.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	waitBead, err := store.Create(beads.Bead{
+		Type:        waitBeadType,
+		Labels:      []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Description: "Continue after review closes.",
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+	sp := runtime.NewFake()
+
+	if err := dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC()); err != nil {
+		t.Fatalf("dispatchReadyWaitNudges: %v", err)
+	}
+	pending, _, _, err := listQueuedNudges(dir, "worker", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != waitNudgeID(waitBead) {
+		t.Fatalf("pending nudges = %#v, want one wait nudge %q", pending, waitNudgeID(waitBead))
+	}
+}
+
+func TestDispatchReadyWaitNudges_ContinuesWhenOneSessionLookupCaps(t *testing.T) {
+	setWaitTestFileBeads(t)
+	dir := t.TempDir()
+	base := beads.NewMemStore()
+	cappedSession, err := base.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "capped",
+			"agent_name":         "capped",
+			"continuation_epoch": "1",
+			"state":              string(sessionpkg.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create capped session bead: %v", err)
+	}
+	sessionBead, err := base.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "1",
+			"state":              string(sessionpkg.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	waitBead, err := base.Create(beads.Bead{
+		Type:        waitBeadType,
+		Labels:      []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Description: "Continue after review closes.",
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+	store := waitOneSessionListLimitStore{Store: base, sessionID: cappedSession.ID}
+
+	if err := dispatchReadyWaitNudges(dir, store, runtime.NewFake(), time.Now().UTC()); err != nil {
+		t.Fatalf("dispatchReadyWaitNudges: %v", err)
+	}
+	updated, err := base.Get(waitBead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(wait): %v", err)
+	}
+	if updated.Metadata["nudge_id"] == "" {
+		t.Fatal("wait nudge_id empty, want dispatch for uncapped session")
+	}
+}
+
 func TestDispatchReadyWaitNudges_SkipsClosedSessionWithoutBackingGet(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
+	setWaitTestFileBeads(t)
 	dir := t.TempDir()
 	base := beads.NewMemStore()
 	store := &waitGetSpyStore{Store: base}
@@ -993,7 +1564,7 @@ func TestDispatchReadyWaitNudges_SkipsClosedSessionWithoutBackingGet(t *testing.
 }
 
 func TestDispatchReadyWaitNudges_StartsCodexPoller(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
+	setWaitTestFileBeads(t)
 	dir := t.TempDir()
 	store := beads.NewMemStore()
 	sessionBead, err := store.Create(beads.Bead{
@@ -1105,7 +1676,7 @@ func TestDispatchReadyWaitNudges_StartsPiPoller(t *testing.T) {
 }
 
 func TestDispatchReadyWaitNudges_PropagatesNudgeIDMetadataFailure(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
+	setWaitTestFileBeads(t)
 	dir := t.TempDir()
 	store := waitNudgeMetadataFailStore{MemStore: beads.NewMemStore()}
 	sessionBead, err := store.Create(beads.Bead{
@@ -1148,7 +1719,7 @@ func TestDispatchReadyWaitNudges_PropagatesNudgeIDMetadataFailure(t *testing.T) 
 }
 
 func TestDispatchReadyWaitNudges_PropagatesPollerFailure(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
+	setWaitTestFileBeads(t)
 	dir := t.TempDir()
 	store := beads.NewMemStore()
 	sessionBead, err := store.Create(beads.Bead{
@@ -1197,7 +1768,7 @@ func TestDispatchReadyWaitNudges_PropagatesPollerFailure(t *testing.T) {
 }
 
 func TestWithdrawQueuedWaitNudges_RemovesQueuedNudge(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
+	setWaitTestFileBeads(t)
 	dir := t.TempDir()
 	item := newQueuedNudgeWithOptions("worker", "Wait satisfied.", "wait", time.Now().Add(-time.Minute), queuedNudgeOptions{
 		ID:        "wait-gc-1-1-1",
@@ -1274,6 +1845,48 @@ func TestCancelWaitsForSession(t *testing.T) {
 	}
 }
 
+func TestCancelWaitsForSessionReturnsNilAfterCappedConvergence(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	waitIDs := make([]string, 0, sessionpkg.SessionWaitLookupLimit+1)
+	for i := 0; i < sessionpkg.SessionWaitLookupLimit+1; i++ {
+		waitBead, err := store.Create(beads.Bead{
+			Type:   waitBeadType,
+			Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+			Metadata: map[string]string{
+				"session_id": sessionBead.ID,
+				"state":      waitStatePending,
+			},
+		})
+		if err != nil {
+			t.Fatalf("create wait bead %d: %v", i, err)
+		}
+		waitIDs = append(waitIDs, waitBead.ID)
+	}
+
+	if err := cancelWaitsForSession(store, sessionBead.ID); err != nil {
+		t.Fatalf("cancelWaitsForSession: %v", err)
+	}
+	for _, id := range waitIDs {
+		updated, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("store.Get(%s): %v", id, err)
+		}
+		if got := updated.Metadata["state"]; got != waitStateCanceled {
+			t.Fatalf("wait %s state = %q, want %q", id, got, waitStateCanceled)
+		}
+		if updated.Status != "closed" {
+			t.Fatalf("wait %s status = %q, want closed", id, updated.Status)
+		}
+	}
+}
+
 func TestLoadSessionWaitBeads_IncludesLegacyWaitType(t *testing.T) {
 	store := beads.NewMemStore()
 	sessionID := "gc-session"
@@ -1297,6 +1910,45 @@ func TestLoadSessionWaitBeads_IncludesLegacyWaitType(t *testing.T) {
 	}
 	if waits[0].Type != sessionpkg.LegacyWaitBeadType {
 		t.Fatalf("wait type = %q, want legacy %q", waits[0].Type, sessionpkg.LegacyWaitBeadType)
+	}
+}
+
+func TestClearSessionWaitHoldIfIdle_UsesSessionWaitLookup(t *testing.T) {
+	base := beads.NewMemStore()
+	store := waitGlobalListOmitStore{Store: base}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"wait_hold":    "true",
+			"sleep_intent": "wait-hold",
+			"sleep_reason": "wait-hold",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id": sessionBead.ID,
+			"state":      waitStatePending,
+		},
+	}); err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+
+	if err := clearSessionWaitHoldIfIdle(store, sessionBead.ID); err != nil {
+		t.Fatalf("clearSessionWaitHoldIfIdle: %v", err)
+	}
+
+	updated, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(session): %v", err)
+	}
+	if updated.Metadata["wait_hold"] != "true" {
+		t.Fatalf("wait_hold = %q, want preserved", updated.Metadata["wait_hold"])
 	}
 }
 
@@ -1331,7 +1983,7 @@ func TestClearSessionWaitHoldIfIdle_PropagatesWaitLoadError(t *testing.T) {
 }
 
 func TestCmdSessionWait_DoesNotMaterializeTemplateTarget(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
+	setWaitTestFileBeads(t)
 	t.Setenv("GC_SESSION", "fake")
 
 	prevCityFlag := cityFlag

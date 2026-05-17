@@ -30,7 +30,9 @@ func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
 Checks city structure, config validity, binary dependencies (tmux, git,
 bd, dolt), controller status, agent sessions, zombie/orphan sessions,
 bead stores, Dolt server health, event log integrity, and per-rig
-health. Use --fix to attempt automatic repairs.`,
+health. Use --fix for the canonical remediation path, including any
+safe mechanical PackV1-to-PackV2 rewrites that are available on this
+branch.`,
 		Example: `  gc doctor
   gc doctor --fix
   gc doctor --verbose`,
@@ -42,7 +44,7 @@ health. Use --fix to attempt automatic repairs.`,
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&fix, "fix", false, "attempt to fix issues automatically")
+	cmd.Flags().BoolVar(&fix, "fix", false, "attempt automatic repairs and safe mechanical migrations")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show extra diagnostic details")
 	return cmd
 }

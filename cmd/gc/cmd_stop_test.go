@@ -661,6 +661,35 @@ func TestCmdStopInvalidConfigManagedRuntimeFailsWhenShutdownFails(t *testing.T) 
 	}
 }
 
+func TestStopCityManagedBeadsProviderUsesProviderStateWhenPublishedStateIsMissing(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := t.TempDir()
+	_ = writeReachableProviderManagedDoltState(t, cityDir)
+
+	var shutdowns int
+	overrideShutdownBeadsProviderForStop(t, func(path string) error {
+		shutdowns++
+		assertSameTestPath(t, path, cityDir)
+		return nil
+	})
+
+	stopped, err := stopCityManagedBeadsProvider(cityDir)
+	if err != nil {
+		t.Fatalf("stopCityManagedBeadsProvider() error = %v", err)
+	}
+	if !stopped {
+		t.Fatal("stopCityManagedBeadsProvider() stopped = false, want true")
+	}
+	if shutdowns != 1 {
+		t.Fatalf("shutdown calls = %d, want 1", shutdowns)
+	}
+	if _, err := os.Stat(managedDoltStatePath(cityDir)); !os.IsNotExist(err) {
+		t.Fatalf("stop detection should not publish runtime state, stat err = %v", err)
+	}
+}
+
 func setupInvalidConfigManagedRuntime(t *testing.T) string {
 	t.Helper()
 

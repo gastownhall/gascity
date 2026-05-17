@@ -128,6 +128,8 @@ func resolveProfile(raw string) workerpkg.Profile {
 		return workerpkg.ProfileCodexTmuxCLI
 	case string(workerpkg.ProfileGeminiTmuxCLI):
 		return workerpkg.ProfileGeminiTmuxCLI
+	case string(workerpkg.ProfileKimiTmuxCLI):
+		return workerpkg.ProfileKimiTmuxCLI
 	case string(workerpkg.ProfileOpenCodeTmuxCLI):
 		return workerpkg.ProfileOpenCodeTmuxCLI
 	case string(workerpkg.ProfilePiTmuxCLI):
@@ -145,6 +147,8 @@ func profileProvider(profile workerpkg.Profile) string {
 		return "codex"
 	case workerpkg.ProfileGeminiTmuxCLI:
 		return "gemini"
+	case workerpkg.ProfileKimiTmuxCLI:
+		return "kimi"
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return "opencode"
 	case workerpkg.ProfilePiTmuxCLI:
@@ -160,6 +164,8 @@ func profileSearchPaths(gcHome string, profile workerpkg.Profile) []string {
 		return []string{filepath.Join(gcHome, ".codex", "sessions")}
 	case workerpkg.ProfileGeminiTmuxCLI:
 		return []string{filepath.Join(gcHome, ".gemini", "tmp")}
+	case workerpkg.ProfileKimiTmuxCLI:
+		return []string{filepath.Join(gcHome, ".kimi", "sessions")}
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return []string{filepath.Join(gcHome, ".local", "share", "gascity", "opencode-transcripts")}
 	case workerpkg.ProfilePiTmuxCLI:
@@ -177,6 +183,8 @@ func stageProviderAuth(gcHome string, env *helpers.Env, profile workerpkg.Profil
 		return stageCodexAuth(gcHome, env)
 	case workerpkg.ProfileGeminiTmuxCLI:
 		return stageGeminiAuth(gcHome, env)
+	case workerpkg.ProfileKimiTmuxCLI:
+		return stageKimiAuth(gcHome, env)
 	case workerpkg.ProfileOpenCodeTmuxCLI:
 		return stageOpenCodeGeminiAuth(gcHome, env)
 	case workerpkg.ProfilePiTmuxCLI:
@@ -184,6 +192,99 @@ func stageProviderAuth(gcHome string, env *helpers.Env, profile workerpkg.Profil
 	default:
 		return "", fmt.Errorf("unsupported worker-inference profile %q", profile)
 	}
+}
+
+func stageKimiAuth(gcHome string, env *helpers.Env) (string, error) {
+	kimiDir := filepath.Join(gcHome, ".kimi")
+	if err := os.MkdirAll(kimiDir, 0o755); err != nil {
+		return "", err
+	}
+	env.With("KIMI_SHARE_DIR", kimiDir).
+		With("KIMI_CLI_NO_AUTO_UPDATE", "1")
+
+	config, configFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_KIMI_CONFIG_TOML",
+		"GC_WORKER_INFERENCE_KIMI_CONFIG_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("kimi auth unavailable: %w", err)
+	}
+	if strings.TrimSpace(config) != "" {
+		if err := os.WriteFile(filepath.Join(kimiDir, "config.toml"), []byte(config), 0o600); err != nil {
+			return "", err
+		}
+		return stagedSecretSource("kimi", configFromFile), nil
+	}
+
+	if apiKey := strings.TrimSpace(os.Getenv("OLLAMA_API_KEY")); apiKey != "" {
+		if err := writeKimiOllamaConfig(filepath.Join(kimiDir, "config.toml"), apiKey); err != nil {
+			return "", err
+		}
+		return "env:OLLAMA_API_KEY", nil
+	}
+	if apiKey := strings.TrimSpace(os.Getenv("KIMI_API_KEY")); apiKey != "" {
+		env.With("KIMI_API_KEY", apiKey)
+		if err := writeKimiNativeConfig(filepath.Join(kimiDir, "config.toml"), apiKey); err != nil {
+			return "", err
+		}
+		return "env:KIMI_API_KEY", nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("kimi auth unavailable: %w", err)
+	}
+	if err := copyFileIfExists(filepath.Join(home, ".kimi", "config.toml"), filepath.Join(kimiDir, "config.toml"), 0o600); err != nil {
+		return "", fmt.Errorf("kimi auth unavailable: %w", err)
+	}
+	if fileExists(filepath.Join(kimiDir, "config.toml")) {
+		return "host-home:kimi", nil
+	}
+	return "", fmt.Errorf("kimi auth unavailable: set OLLAMA_API_KEY, KIMI_API_KEY, or GC_WORKER_INFERENCE_KIMI_CONFIG_TOML")
+}
+
+func writeKimiOllamaConfig(path, apiKey string) error {
+	content := fmt.Sprintf(`default_model = "kimi-ollama"
+default_yolo = true
+telemetry = false
+
+[providers.ollama-cloud]
+type = "openai_legacy"
+base_url = "https://ollama.com/v1"
+api_key = %q
+
+[models.kimi-ollama]
+provider = "ollama-cloud"
+model = %q
+max_context_size = 262144
+`, apiKey, liveKimiOllamaModel())
+	return os.WriteFile(path, []byte(content), 0o600)
+}
+
+func writeKimiNativeConfig(path, apiKey string) error {
+	content := fmt.Sprintf(`default_model = "kimi-for-coding"
+default_yolo = true
+telemetry = false
+
+[providers.kimi-for-coding]
+type = "kimi"
+base_url = "https://api.kimi.com/coding/v1"
+api_key = %q
+
+[models.kimi-for-coding]
+provider = "kimi-for-coding"
+model = "kimi-for-coding"
+max_context_size = 262144
+`, apiKey)
+	return os.WriteFile(path, []byte(content), 0o600)
+}
+
+func liveKimiOllamaModel() string {
+	model := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_KIMI_MODEL"))
+	if model == "" {
+		return "kimi-k2.6"
+	}
+	return model
 }
 
 func stageClaudeAuth(gcHome string, env *helpers.Env) (string, error) {

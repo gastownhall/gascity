@@ -567,6 +567,22 @@ func TestCanonicalProfileIdentityOpenCode(t *testing.T) {
 	}
 }
 
+func TestCanonicalProfileIdentityKimi(t *testing.T) {
+	identity, ok := CanonicalProfileIdentity(ProfileKimiTmuxCLI)
+	if !ok {
+		t.Fatal("CanonicalProfileIdentity(ProfileKimiTmuxCLI) = false, want true")
+	}
+	if identity.ProviderFamily != "kimi" {
+		t.Fatalf("ProviderFamily = %q, want kimi", identity.ProviderFamily)
+	}
+	if identity.TransportClass != "tmux-cli" {
+		t.Fatalf("TransportClass = %q, want tmux-cli", identity.TransportClass)
+	}
+	if identity.CertificationFingerprint == "" {
+		t.Fatal("CertificationFingerprint is empty")
+	}
+}
+
 func TestSessionHandleMessageInterruptNowUsesWorkerBoundary(t *testing.T) {
 	handle, _, sp, mgr := newTestSessionHandle(t, SessionSpec{
 		Profile:  ProfileClaudeTmuxCLI,
@@ -1251,6 +1267,32 @@ func TestRuntimeHandleExpandedWorkerSurface(t *testing.T) {
 	}
 	if err := handle.Reset(context.Background()); !errors.Is(err, ErrOperationUnsupported) {
 		t.Fatalf("Reset err = %v, want %v", err, ErrOperationUnsupported)
+	}
+}
+
+func TestRuntimeHandleCloseDetailedStopsRuntimeAndReturnsZeroResult(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "stub",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	result, err := handle.CloseDetailed(context.Background())
+	if err != nil {
+		t.Fatalf("CloseDetailed: %v", err)
+	}
+	if len(result.WaitNudgeIDs) != 0 {
+		t.Fatalf("WaitNudgeIDs = %#v, want empty", result.WaitNudgeIDs)
+	}
+	if sp.IsRunning("legacy-worker") {
+		t.Fatal("legacy-worker should be stopped after CloseDetailed")
 	}
 }
 

@@ -186,6 +186,7 @@ func knownTOMLKeys() []string {
 		reflect.TypeOf(SessionConfig{}),
 		reflect.TypeOf(MailConfig{}),
 		reflect.TypeOf(EventsConfig{}),
+		reflect.TypeOf(EventsRotationConfig{}),
 		reflect.TypeOf(DoltConfig{}),
 		reflect.TypeOf(FormulasConfig{}),
 		reflect.TypeOf(DaemonConfig{}),

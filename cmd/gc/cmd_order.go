@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"path/filepath"
 	"sort"
 	"time"
@@ -640,20 +641,33 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, st
 		return 1
 	}
 
-	code := doOrderRunExec(a, cityPath, cfg, stdout, stderr)
+	result := doOrderRunExecResult(a, cityPath, cfg, stdout, stderr)
 	labels := []string{"exec"}
-	if code != 0 {
-		labels = []string{"exec-failed"}
+	if result.code != 0 {
+		failureLabel := result.failureLabel
+		if failureLabel == "" {
+			failureLabel = "exec-failed"
+		}
+		labels = []string{failureLabel}
 	}
 	if err := store.Update(tracking.ID, beads.UpdateOpts{Labels: labels}); err != nil {
 		fmt.Fprintf(stderr, "gc order run: labeling exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return code
+	return result.code
 }
 
 // doOrderRunExec runs an exec order directly via shell.
 func doOrderRunExec(a orders.Order, cityPath string, cfg *config.City, stdout, stderr io.Writer) int {
+	return doOrderRunExecResult(a, cityPath, cfg, stdout, stderr).code
+}
+
+type orderRunExecResult struct {
+	code         int
+	failureLabel string
+}
+
+func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, stdout, stderr io.Writer) orderRunExecResult {
 	var maxTimeout time.Duration
 	if cfg != nil {
 		maxTimeout = cfg.Orders.MaxTimeoutDuration()
@@ -664,13 +678,13 @@ func doOrderRunExec(a orders.Order, cityPath string, cfg *config.City, stdout, s
 
 	target, err := resolveOrderExecTarget(cityPath, cfg, a)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		fmt.Fprintf(stderr, "gc order run: %s\n", redactOrderEnvError(err, os.Environ())) //nolint:errcheck // best-effort stderr
+		return orderRunExecResult{code: 1, failureLabel: "exec-failed"}
 	}
 	env, err := orderExecEnvWithError(cityPath, cfg, target, a)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck
-		return 1
+		fmt.Fprintf(stderr, "gc order run: %s\n", redactOrderEnvError(err, os.Environ())) //nolint:errcheck // best-effort stderr
+		return orderRunExecResult{code: 1, failureLabel: "exec-env-failed"}
 	}
 
 	output, err := shellExecRunner(ctx, a.Exec, target.ScopeRoot, env)
@@ -679,13 +693,13 @@ func doOrderRunExec(a orders.Order, cityPath string, cfg *config.City, stdout, s
 		if len(output) > 0 {
 			fmt.Fprintf(stderr, "%s", output) //nolint:errcheck
 		}
-		return 1
+		return orderRunExecResult{code: 1, failureLabel: "exec-failed"}
 	}
 	if len(output) > 0 {
 		fmt.Fprintf(stdout, "%s", output) //nolint:errcheck
 	}
 	fmt.Fprintf(stdout, "Order %q executed (exec)\n", a.Name) //nolint:errcheck
-	return 0
+	return orderRunExecResult{code: 0}
 }
 
 // --- gc order check ---

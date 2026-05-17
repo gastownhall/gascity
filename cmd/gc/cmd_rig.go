@@ -73,8 +73,9 @@ func newRigAddCmd(stdout, stderr io.Writer) *cobra.Command {
 Initializes beads database, installs agent hooks if configured,
 generates cross-rig routes, and appends the rig to city.toml.
 If the target directory doesn't exist, it is created. Use --include
-to apply a pack directory that defines the rig's agent configuration;
-repeat the flag to compose multiple packs for one rig.
+to apply a pack source that defines the rig's agent configuration;
+repeat the flag to compose multiple packs for one rig. The flag is
+compatibility sugar: gc rig add writes canonical rig imports.
 
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
@@ -104,7 +105,7 @@ Skips beads init; the git repo check remains informational.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringArrayVar(&includes, "include", nil, "pack directory for rig agents (repeatable)")
+	cmd.Flags().StringArrayVar(&includes, "include", nil, "pack source for rig agents (repeatable; writes canonical rig imports)")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "rig name (default: directory basename)")
 	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix (default: derived from name)")
 	cmd.Flags().StringVar(&defaultBranchFlag, "default-branch", "", "mainline branch (default: auto-detect from origin/HEAD or current branch)")
@@ -226,6 +227,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		fmt.Fprintf(stderr, "gc rig add: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	explicitRigImports := boundImportsFromLegacySources(includes, cfg.Packs)
 	if cityUsesBdStoreContract(cityPath) && cityDoltConfigHasLifecycleFields(cfg.Dolt) {
 		registerCityDoltConfig(cityPath, cfg.Dolt)
 		defer clearCityDoltConfig(cityPath)
@@ -284,14 +286,8 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		reAddNeedsConfigWrite = true
 	}
 
-	rootDefaultRigImports, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig add: loading root pack defaults: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	defaultRigIncludes := append([]string{}, cfg.Workspace.DefaultRigIncludes...)
-
 	nextCfg := cfg
+	var defaultRigImports []config.BoundImport
 	needsValidation := !reAdd || reAddNeedsConfigWrite
 	if reAddNeedsConfigWrite {
 		next := *cfg
@@ -316,17 +312,17 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 			Suspended:     startSuspended,
 		}
 		switch {
-		case len(includes) > 0:
-			rig.Includes = slices.Clone(includes)
+		case len(explicitRigImports) > 0:
+			rig.Imports = boundImportsMap(explicitRigImports)
 		default:
-			if len(rootDefaultRigImports) > 0 {
-				rig.Imports = make(map[string]config.Import, len(rootDefaultRigImports))
-				for _, bound := range rootDefaultRigImports {
-					rig.Imports[bound.Binding] = bound.Import
-				}
+			rootDefaultRigImports, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc rig add: loading root pack defaults: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
 			}
-			if len(defaultRigIncludes) > 0 {
-				rig.Includes = slices.Clone(defaultRigIncludes)
+			defaultRigImports = composeDefaultRigImports(rootDefaultRigImports, cfg.Workspace.LegacyDefaultRigIncludes(), cfg.Packs)
+			if len(defaultRigImports) > 0 {
+				rig.Imports = boundImportsMap(defaultRigImports)
 			}
 		}
 		next := *cfg
@@ -410,8 +406,13 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		if startSuspended && startSuspended != existingRig.Suspended {
 			fmt.Fprintf(stderr, "gc rig add: warning: --start-suspended ignored (existing: suspended=%v); edit city.toml to change\n", existingRig.Suspended) //nolint:errcheck // best-effort stderr
 		}
-		if len(includes) > 0 && !slices.Equal(existingRig.Includes, includes) {
-			fmt.Fprintf(stderr, "gc rig add: warning: --include flags %v ignored (existing: %v); edit city.toml to change\n", includes, existingRig.Includes) //nolint:errcheck // best-effort stderr
+		if len(explicitRigImports) > 0 {
+			existingRigImports, err := effectiveRigBoundImports(existingRig, cfg.Packs)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc rig add: warning: --include flags %v ignored; existing rig imports could not be normalized (%v). Edit city.toml to change\n", includes, err) //nolint:errcheck // best-effort stderr
+			} else if !slices.Equal(existingRigImports, explicitRigImports) {
+				fmt.Fprintf(stderr, "gc rig add: warning: --include flags %v ignored (existing imports: %s); edit city.toml to change\n", includes, formatBoundImports(existingRigImports)) //nolint:errcheck // best-effort stderr
+			}
 		}
 		if prefixOverride != "" && strings.ToLower(prefixOverride) != existingRig.EffectivePrefix() {
 			fmt.Fprintf(stderr, "gc rig add: warning: --prefix=%s ignored (existing: %s); edit city.toml to change\n", prefixOverride, existingRig.EffectivePrefix()) //nolint:errcheck // best-effort stderr
@@ -433,14 +434,11 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	}
 	if !reAdd {
 		switch {
-		case len(includes) > 0:
-			w(fmt.Sprintf("  Include: %s", strings.Join(includes, ", ")))
+		case len(explicitRigImports) > 0:
+			w(fmt.Sprintf("  Import: %s", formatBoundImports(explicitRigImports)))
 		default:
-			if len(rootDefaultRigImports) > 0 {
-				w(fmt.Sprintf("  Import: %s (default)", formatBoundImports(rootDefaultRigImports)))
-			}
-			if len(defaultRigIncludes) > 0 {
-				w(fmt.Sprintf("  Include: %s (default)", strings.Join(defaultRigIncludes, ", ")))
+			if len(defaultRigImports) > 0 {
+				w(fmt.Sprintf("  Import: %s (default)", formatBoundImports(defaultRigImports)))
 			}
 		}
 	}
@@ -550,7 +548,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 
 func formatBoundImports(imports []config.BoundImport) string {
 	parts := make([]string, 0, len(imports))
-	for _, bound := range imports {
+	for _, bound := range sortedBoundImports(imports) {
 		part := bound.Binding
 		if source := strings.TrimSpace(bound.Import.Source); source != "" {
 			part += "=" + source
@@ -558,6 +556,119 @@ func formatBoundImports(imports []config.BoundImport) string {
 		parts = append(parts, part)
 	}
 	return strings.Join(parts, ", ")
+}
+
+func boundImportsFromLegacySources(sources []string, packs map[string]config.PackSource) []config.BoundImport {
+	return config.BoundImportsFromLegacySources(sources, packs)
+}
+
+func boundImportsFromImportMap(imports map[string]config.Import) []config.BoundImport {
+	if len(imports) == 0 {
+		return nil
+	}
+	bindings := make([]string, 0, len(imports))
+	for binding := range imports {
+		bindings = append(bindings, binding)
+	}
+	slices.Sort(bindings)
+	bound := make([]config.BoundImport, 0, len(bindings))
+	for _, binding := range bindings {
+		bound = append(bound, config.BoundImport{
+			Binding: binding,
+			Import:  imports[binding],
+		})
+	}
+	return bound
+}
+
+func effectiveRigBoundImports(rig *config.Rig, packs map[string]config.PackSource) ([]config.BoundImport, error) {
+	if rig == nil {
+		return nil, nil
+	}
+	legacy := boundImportsFromLegacySources(rig.Includes, packs)
+	return mergeBoundImports(boundImportsFromImportMap(rig.Imports), legacy)
+}
+
+func composeDefaultRigImports(root []config.BoundImport, legacyIncludes []string, packs map[string]config.PackSource) []config.BoundImport {
+	if len(root) == 0 {
+		return boundImportsFromLegacySources(legacyIncludes, packs)
+	}
+	target := make(map[string]config.Import, len(root)+len(legacyIncludes))
+	order := make([]string, 0, len(root)+len(legacyIncludes))
+	for _, bound := range root {
+		if _, exists := target[bound.Binding]; !exists {
+			order = append(order, bound.Binding)
+		}
+		target[bound.Binding] = bound.Import
+	}
+	order, _ = config.AddOrderedLegacyImports(target, order, legacyIncludes, packs)
+	out := make([]config.BoundImport, 0, len(order))
+	for _, binding := range order {
+		imp, ok := target[binding]
+		if !ok {
+			continue
+		}
+		out = append(out, config.BoundImport{Binding: binding, Import: imp})
+	}
+	return out
+}
+
+func sortedBoundImports(imports []config.BoundImport) []config.BoundImport {
+	if len(imports) == 0 {
+		return nil
+	}
+	sorted := append([]config.BoundImport(nil), imports...)
+	slices.SortFunc(sorted, func(a, b config.BoundImport) int {
+		if a.Binding != b.Binding {
+			return strings.Compare(a.Binding, b.Binding)
+		}
+		return strings.Compare(a.Import.Source, b.Import.Source)
+	})
+	return sorted
+}
+
+// mergeBoundImports is for already-bound import sets. Legacy default-rig
+// includes use composeDefaultRigImports so binding collisions can be
+// uniquified with the migration policy.
+func mergeBoundImports(primary, secondary []config.BoundImport) ([]config.BoundImport, error) {
+	if len(primary) == 0 && len(secondary) == 0 {
+		return nil, nil
+	}
+	merged := make([]config.BoundImport, 0, len(primary)+len(secondary))
+	seenByBinding := make(map[string]config.Import, len(primary)+len(secondary))
+	appendImport := func(bound config.BoundImport) error {
+		if prior, exists := seenByBinding[bound.Binding]; exists {
+			if prior.Source == bound.Import.Source {
+				return nil
+			}
+			return fmt.Errorf("binding %q maps to both %q and %q", bound.Binding, prior.Source, bound.Import.Source)
+		}
+		seenByBinding[bound.Binding] = bound.Import
+		merged = append(merged, bound)
+		return nil
+	}
+	for _, bound := range primary {
+		if err := appendImport(bound); err != nil {
+			return nil, err
+		}
+	}
+	for _, bound := range secondary {
+		if err := appendImport(bound); err != nil {
+			return nil, err
+		}
+	}
+	return sortedBoundImports(merged), nil
+}
+
+func boundImportsMap(imports []config.BoundImport) map[string]config.Import {
+	if len(imports) == 0 {
+		return nil
+	}
+	out := make(map[string]config.Import, len(imports))
+	for _, bound := range imports {
+		out[bound.Binding] = bound.Import
+	}
+	return out
 }
 
 func snapshotRigAddTopologyFiles(fs fsys.FS, cityPath string, cfg *config.City) ([]fileSnapshot, error) {

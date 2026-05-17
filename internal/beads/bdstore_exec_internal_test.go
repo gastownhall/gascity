@@ -49,6 +49,12 @@ func TestBDCommandTimeoutForReadCommands(t *testing.T) {
 	}
 }
 
+func TestBDCommandTimeoutForGraphApply(t *testing.T) {
+	if got := bdCommandTimeoutFor("bd", []string{"create", "--graph", "/tmp/plan.json", "--json"}); got != bdGraphApplyCommandTimeout {
+		t.Fatalf("bd create --graph timeout = %s, want %s", got, bdGraphApplyCommandTimeout)
+	}
+}
+
 // TestKillCommandTreeKillsProcessGroup verifies killCommandTree kills
 // the entire process group, not just the direct child. The script
 // backgrounds a `sleep 30`; without process-group cleanup, that sleep

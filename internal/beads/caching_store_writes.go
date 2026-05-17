@@ -298,6 +298,15 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 // metadataAlreadyMatchesCached but covers the full UpdateOpts surface
 // (Title, Status, Type, Priority, Description, ParentID, Assignee, Metadata,
 // Labels, RemoveLabels). See gastownhall/gascity#1978 Phase 1.
+//
+// The short-circuit path skips the deduplication that
+// applyUpdateOptsToBead performs on the non-short-circuit pass. Cached
+// bead labels come from bd/dolt's canonical state, which never produces
+// duplicates, so a Labels-equal match here is a Labels-equal match in
+// the store after applyUpdateOptsToBead would have run. If a future
+// path injects duplicate labels into the cache, this short-circuit
+// would skip the dedup-fixup — file an issue rather than relaxing the
+// invariant here.
 func (c *CachingStore) updateMatchesCached(id string, opts UpdateOpts) bool {
 	if id == "" {
 		return false
@@ -346,6 +355,11 @@ func (c *CachingStore) updateMatchesCached(id string, opts UpdateOpts) bool {
 		}
 	}
 	if len(opts.Labels) > 0 || len(opts.RemoveLabels) > 0 {
+		// Set-equality check: opts.Labels ⊆ existing AND
+		// (opts.RemoveLabels ∩ existing) = ∅ implies the final label set
+		// after applyUpdateOptsToBead equals the current set. We skip
+		// that function's dedup pass here — see the doc comment above
+		// for why that's safe under bd/dolt's canonical labels.
 		existing := make(map[string]struct{}, len(b.Labels))
 		for _, l := range b.Labels {
 			existing[l] = struct{}{}

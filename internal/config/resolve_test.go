@@ -349,6 +349,29 @@ func TestResolveProviderUserDefinedProvider(t *testing.T) {
 	}
 }
 
+func TestResolveProviderKimiStartupDialogPolicyInheritedByWrapper(t *testing.T) {
+	base := "builtin:kimi"
+	agent := &Agent{Name: "scout", Provider: "wrapped-kimi"}
+	cityProviders := map[string]ProviderSpec{
+		"wrapped-kimi": {
+			Base:      &base,
+			Command:   "sh",
+			Args:      []string{"-c", "exec kimi --yolo --no-thinking"},
+			PathCheck: "kimi",
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kimi"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.BuiltinAncestor != "kimi" {
+		t.Fatalf("BuiltinAncestor = %q, want kimi", rp.BuiltinAncestor)
+	}
+	if rp.AcceptStartupDialogs == nil || *rp.AcceptStartupDialogs {
+		t.Fatalf("AcceptStartupDialogs = %v, want false inherited from builtin kimi", rp.AcceptStartupDialogs)
+	}
+}
+
 func TestResolveProviderKiroAgentArgsOverride(t *testing.T) {
 	agent := &Agent{
 		Name:     "scout",
@@ -1936,6 +1959,7 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		ReadyPromptPrefix:      "$ ",
 		ProcessNames:           []string{"custom"},
 		EmitsPermissionWarning: boolPtr(true),
+		AcceptStartupDialogs:   boolPtr(true),
 		Env:                    map[string]string{"K": "V"},
 		PathCheck:              "custom-bin",
 		SupportsACP:            boolPtr(true),

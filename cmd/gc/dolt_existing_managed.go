@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -35,6 +36,13 @@ func assessExistingManagedDolt(cityPath, host, port, user string, timeout time.D
 		PortHolderPID:           info.PortHolderPID,
 		PortHolderOwned:         info.PortHolderOwned,
 		PortHolderDeletedInodes: info.PortHolderDeletedInodes,
+	}
+	owned, err := managedDoltLifecycleOwned(cityPath)
+	if err != nil {
+		return report, fmt.Errorf("determine managed dolt ownership: %w", err)
+	}
+	if !owned {
+		return report, nil
 	}
 	report.StatePort = managedDoltExistingStatePort(cityPath, layout, report.ManagedPID)
 	if report.ManagedPID <= 0 || !report.ManagedOwned || report.StatePort <= 0 || report.DeletedInodes || timeout <= 0 {

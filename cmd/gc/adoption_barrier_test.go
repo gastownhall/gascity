@@ -730,19 +730,15 @@ func TestAdoptionBarrier_SingletonWithNumericSuffix(t *testing.T) {
 	}
 }
 
-// TestAdoptionBarrier_OrphanDashNSessionLogsWarning verifies the ga-fiw
-// defensive log: when a running session ends in "-N" but no configured pool
-// agent claims it (because the matching base agent has max_active_sessions=1
-// and SupportsInstanceExpansion()=false), the barrier still adopts the
-// session but emits a stderr warning so the leak is traceable.
-func TestAdoptionBarrier_OrphanDashNSessionLogsWarning(t *testing.T) {
+func TestAdoptionBarrier_StaleDashNSingletonAdoptsCanonicalIdentity(t *testing.T) {
 	store := beads.NewMemStore()
 	// "refinery-1" looks like a pool instance but the base "refinery" agent
-	// has max_active_sessions=1, so resolvePoolBase rejects the suffix.
+	// has max_active_sessions=1, so it should be treated as stale singleton
+	// state rather than a live pool slot.
 	sp := &fakeAdoptionProvider{running: []string{"refinery-1"}}
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "refinery", MaxActiveSessions: intPtr(1)},
+			{Name: "refinery", MaxActiveSessions: intPtr(1), ScaleCheck: "printf 1"},
 		},
 	}
 	var stderr bytes.Buffer
@@ -751,14 +747,22 @@ func TestAdoptionBarrier_OrphanDashNSessionLogsWarning(t *testing.T) {
 	if result.Adopted != 1 {
 		t.Errorf("Adopted = %d, want 1", result.Adopted)
 	}
-	if !bytes.Contains(stderr.Bytes(), []byte("refinery-1 ends in -1")) {
-		t.Errorf("stderr missing orphan -N warning; got: %s", stderr.String())
+	if !bytes.Contains(stderr.Bytes(), []byte("adopting stale singleton suffix session refinery-1")) {
+		t.Errorf("stderr missing stale singleton adoption warning; got: %s", stderr.String())
 	}
-	// Verify no pool_slot metadata (we explicitly decline to stamp it).
 	beadList, _ := store.ListByLabel(sessionBeadLabel, 0)
 	for _, b := range beadList {
+		if b.Metadata["agent_name"] != "refinery" {
+			t.Errorf("stale singleton agent_name = %q, want canonical refinery", b.Metadata["agent_name"])
+		}
+		if !containsString(b.Labels, "agent:refinery") {
+			t.Errorf("stale singleton labels = %v, want canonical agent label", b.Labels)
+		}
+		if containsString(b.Labels, "agent:refinery-1") {
+			t.Errorf("stale singleton labels = %v, must not include phantom pool identity", b.Labels)
+		}
 		if b.Metadata["pool_slot"] != "" {
-			t.Errorf("orphan -N session should not have pool_slot metadata, got %q", b.Metadata["pool_slot"])
+			t.Errorf("stale singleton session should not have pool_slot metadata, got %q", b.Metadata["pool_slot"])
 		}
 	}
 }

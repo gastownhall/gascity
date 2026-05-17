@@ -717,6 +717,65 @@ func TestNewCityRuntimePreflightsManagedDoltPublicationBeforeStartupStoreWork(t 
 	}
 }
 
+func TestNewCityRuntimePreflightUsesResolvableProviderStateByDefault(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	healthCalls := 0
+	cityPath := t.TempDir()
+	writeReachableProviderManagedDoltState(t, cityPath)
+	sp := runtime.NewFake()
+	_ = newCityRuntime(CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		Cfg:      &config.City{},
+		SP:       sp,
+		ManagedDoltHealth: func(string) error {
+			healthCalls++
+			return nil
+		},
+		ManagedDoltOwned: func(string) (bool, error) {
+			return true, nil
+		},
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+
+	if healthCalls != 0 {
+		t.Fatalf("healthCalls = %d, want 0 when provider state is already resolvable", healthCalls)
+	}
+}
+
+func TestCityRuntimeTickPreflightUsesResolvableProviderStateByDefault(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	healthCalls := 0
+	cityPath := t.TempDir()
+	writeReachableProviderManagedDoltState(t, cityPath)
+	cr := &CityRuntime{
+		cityPath:  cityPath,
+		logPrefix: "gc test",
+		stderr:    io.Discard,
+		managedDoltHealth: func(string) error {
+			healthCalls++
+			return nil
+		},
+		managedDoltOwned: func(string) (bool, error) {
+			return true, nil
+		},
+	}
+
+	cr.ensureManagedDoltPublishedForTick()
+
+	if healthCalls != 0 {
+		t.Fatalf("healthCalls = %d, want 0 when provider state is already resolvable", healthCalls)
+	}
+}
+
 func TestCityRuntimeDemandSnapshotRetainsOnlyPoolScaleCheckPartials(t *testing.T) {
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{{
 		ID:     "session-worker",
@@ -3465,6 +3524,56 @@ func TestCityRuntimeReloadSameRevisionIsNoOp(t *testing.T) {
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q, want empty for same-revision reload", stdout.String())
+	}
+}
+
+func TestCityRuntimeReloadSameRevisionRefreshesStoresWhenMetadataChanges(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	writeBackendMetadata(t, cityPath, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`)
+
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+	sp := runtime.NewFake()
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	oldStore := cs.CityBeadStore()
+	if oldStore == nil {
+		t.Fatal("precondition: controller state city store is nil")
+	}
+
+	var stdout bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		ConfigRev: configRev,
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: io.Discard,
+	})
+	cr.setControllerState(cs)
+
+	writeBackendMetadata(t, cityPath, `{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`)
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeApplied)
+	}
+	if got := cs.CityBeadStore(); got == oldStore {
+		t.Fatal("same-revision reload reused stale city store after metadata backend changed")
+	}
+	if cr.configRev != configRev {
+		t.Fatalf("configRev = %q, want same revision %q", cr.configRev, configRev)
+	}
+	if lastProviderName != "fake" {
+		t.Fatalf("lastProviderName = %q, want fake", lastProviderName)
 	}
 }
 

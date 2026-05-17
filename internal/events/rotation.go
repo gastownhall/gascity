@@ -135,6 +135,34 @@ func reapOrphanedRotatingFiles(dir string, stderr io.Writer) error {
 	return nil
 }
 
+// reapExpiredArchives removes canonical archive files older than
+// retainAge. A non-positive retainAge is a no-op. Archive age is
+// based on the UTC timestamp embedded in the canonical filename, so
+// pruning does not need to open or gunzip archive contents.
+func reapExpiredArchives(dir string, retainAge time.Duration, stderr io.Writer) error {
+	if retainAge <= 0 {
+		return nil
+	}
+	archives, err := archiveFilesIn(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	cutoff := time.Now().UTC().Add(-retainAge)
+	for _, info := range archives {
+		if !info.Timestamp.Before(cutoff) {
+			continue
+		}
+		path := filepath.Join(dir, info.Basename)
+		if err := os.Remove(path); err != nil {
+			fmt.Fprintf(stderr, "events: rotation: removing expired archive %q: %v\n", info.Basename, err) //nolint:errcheck // best-effort stderr
+		}
+	}
+	return nil
+}
+
 // archiveRotatingFile is the per-file branch of the reaper. The
 // rotating filename embeds the timestamp and seq window so the
 // archive name can be derived without scanning content. For legacy

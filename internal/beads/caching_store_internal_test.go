@@ -901,6 +901,55 @@ func TestCachingStoreRunReconciliationRecordsProblemAndDegrades(t *testing.T) {
 	}
 }
 
+func TestCachingStoreRunReconciliationSuppressesDuplicateProblemLogs(t *testing.T) {
+	t.Parallel()
+
+	backing := &listFailingStore{Store: NewMemStore()}
+	if _, err := backing.Create(Bead{Title: "Task"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	var logs []string
+	cache.problemf = func(msg string) {
+		logs = append(logs, msg)
+	}
+
+	backing.failList = true
+	for i := 0; i < maxCacheSyncFailures; i++ {
+		cache.runReconciliation()
+	}
+
+	stats := cache.Stats()
+	if stats.ProblemCount != int64(maxCacheSyncFailures) {
+		t.Fatalf("ProblemCount = %d, want %d", stats.ProblemCount, maxCacheSyncFailures)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("logged %d problem lines, want 1: %#v", len(logs), logs)
+	}
+	if delay := cache.nextReconcileDelay(time.Now()); delay <= cacheReconcilePollInterval {
+		t.Fatalf("nextReconcileDelay = %v, want sustained-failure backoff above poll interval", delay)
+	}
+
+	cache.mu.Lock()
+	state := cache.problemLog[stats.LastProblem]
+	state.lastAt = time.Now().Add(-cacheProblemLogWindow)
+	cache.problemLog[stats.LastProblem] = state
+	cache.mu.Unlock()
+
+	cache.runReconciliation()
+	if len(logs) != 2 {
+		t.Fatalf("logged %d problem lines after window expiry, want 2: %#v", len(logs), logs)
+	}
+	if !strings.Contains(logs[1], "suppressed 4 duplicate logs") {
+		t.Fatalf("second problem log = %q, want suppressed duplicate count", logs[1])
+	}
+}
+
 func TestCachingStorePrimeActiveUsesPartialResultRows(t *testing.T) {
 	t.Parallel()
 

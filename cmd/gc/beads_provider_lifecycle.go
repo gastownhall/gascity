@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -147,17 +148,13 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	} else {
 		clearCityDoltConfig(cityPath)
 	}
-	// Skip local Dolt startup only when canonical or compatibility topology
-	// says the city endpoint is external. Managed-local cities may not have a
-	// published runtime port yet on first startup, so this guard must not depend
-	// on runtime-state resolution.
 	skipLocalDolt := false
 	if cityUsesBdStoreContract(cityPath) {
-		_, _, ok, invalid := resolveConfiguredCityDoltTarget(cityPath)
-		if invalid {
-			return fmt.Errorf("invalid canonical city endpoint state")
+		owned, err := managedDoltLifecycleOwned(cityPath)
+		if err != nil {
+			return err
 		}
-		skipLocalDolt = ok
+		skipLocalDolt = !owned
 	}
 	if !skipLocalDolt {
 		if err := ensureBeadsProvider(cityPath); err != nil {
@@ -211,6 +208,16 @@ func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
 			}
 			return true, nil
 		}
+		owned, err := managedDoltLifecycleOwned(cityPath)
+		if err != nil {
+			return false, err
+		}
+		if !owned {
+			if err := initDirIfReadyInitAndHookDir(cityPath, dir, prefix); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
 		if err := initDirIfReadyManagedDolt(cityPath, dir, prefix, provider); err != nil {
 			return false, err
 		}
@@ -259,7 +266,11 @@ func initDirIfReadyManagedDolt(cityPath, dir, prefix, provider string) error {
 }
 
 func shouldRetryInitDirIfReady(cityPath, provider string, err error) bool {
-	if !providerUsesBdStoreContract(provider) || isExternalDolt(cityPath) {
+	if !providerUsesBdStoreContract(provider) {
+		return false
+	}
+	owned, ownershipErr := managedDoltLifecycleOwned(cityPath)
+	if ownershipErr != nil || !owned {
 		return false
 	}
 	return isRetryableManagedDoltLifecycleError(err)
@@ -434,7 +445,7 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 	if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase); err != nil {
 		return err
 	}
-	if cityUsesBdStoreContract(cityPath) && currentManagedDoltPort(cityPath) != "" {
+	if cityUsesBdStoreContract(cityPath) && currentResolvableManagedDoltPort(cityPath) != "" {
 		if err := syncManagedDoltPortMirrors(cityPath); err != nil {
 			return fmt.Errorf("sync managed dolt port mirrors after init: %w", err)
 		}
@@ -521,14 +532,14 @@ func allowLegacyDoltMetadataRepair(fs fsys.FS, path string, err error) bool {
 // the database is found, or an actionable error otherwise.
 //
 // The function is a no-op (returns nil) when the city does not use the bd
-// store contract or when no managed Dolt port is published — the caller
+// store contract or when no managed Dolt port is resolvable — the caller
 // already gates on those conditions, but we double-check defensively so
 // the helper is safe to call from new sites without re-checking.
 var verifyManagedDoltDatabaseExistsAfterInit = func(cityPath, dir, dbName string) error {
 	if !cityUsesBdStoreContract(cityPath) {
 		return nil
 	}
-	port := currentManagedDoltPort(cityPath)
+	port := currentResolvableManagedDoltPort(cityPath)
 	if port == "" {
 		return nil
 	}
@@ -655,12 +666,18 @@ func ensureBeadsProvider(cityPath string) error {
 // For exec providers, fires "stop". For file providers, always available.
 func shutdownBeadsProvider(cityPath string) error {
 	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
-		return clearManagedDoltRuntimeStateIfOwned(cityPath)
+		return clearManagedDoltRuntimeStateUnlessPostgres(cityPath)
 	}
 	provider := beadsProvider(cityPath)
 	if strings.HasPrefix(provider, "exec:") {
-		if providerUsesBdStoreContract(provider) && isExternalDolt(cityPath) {
-			return clearManagedDoltRuntimeStateIfOwned(cityPath)
+		if providerUsesBdStoreContract(provider) {
+			owned, err := managedDoltLifecycleOwned(cityPath)
+			if err != nil {
+				return err
+			}
+			if !owned {
+				return clearManagedDoltRuntimeStateUnlessPostgres(cityPath)
+			}
 		}
 		script := strings.TrimPrefix(provider, "exec:")
 		providerEnv, err := providerLifecycleProcessEnvWithError(cityPath, provider)
@@ -705,7 +722,7 @@ func initBeadsForDir(cityPath, dir, prefix, doltDatabase string) error {
 		}
 		script := strings.TrimPrefix(provider, "exec:")
 		if execProviderUsesCanonicalBdScopeFiles(provider) && !execProviderNeedsScopedDoltInit(provider) {
-			baseEnv, err := providerLifecycleProcessEnvWithError(cityPath, provider)
+			baseEnv, err := providerLifecycleProcessEnvForScopeInitWithError(cityPath, dir, provider)
 			if err != nil {
 				return err
 			}
@@ -894,8 +911,14 @@ func healthBeadsProvider(cityPath string) error {
 			return err
 		}
 		if err := runProviderOpWithEnv(script, providerEnv, "health"); err != nil {
-			if providerUsesBdStoreContract(provider) && isExternalDolt(cityPath) {
-				return err
+			if providerUsesBdStoreContract(provider) {
+				owned, ownershipErr := managedDoltLifecycleOwned(cityPath)
+				if ownershipErr != nil {
+					return fmt.Errorf("determine managed dolt ownership: %w", ownershipErr)
+				}
+				if !owned {
+					return err
+				}
 			}
 			if recErr := runProviderOpWithEnv(script, providerEnv, "recover"); recErr != nil {
 				return fmt.Errorf("unhealthy (%w) and recovery failed: %w", err, recErr)
@@ -906,7 +929,14 @@ func healthBeadsProvider(cityPath string) error {
 			if waitErr := waitForAllBeadsScopesReadyAfterRecovery(cityPath, 10*time.Second); waitErr != nil {
 				return fmt.Errorf("recovered but store not ready: %w", waitErr)
 			}
-		} else if providerUsesBdStoreContract(provider) && !isExternalDolt(cityPath) && currentManagedDoltPort(cityPath) == "" {
+		} else if providerUsesBdStoreContract(provider) && currentManagedDoltPort(cityPath) == "" {
+			owned, ownershipErr := managedDoltLifecycleOwned(cityPath)
+			if ownershipErr != nil {
+				return fmt.Errorf("determine managed dolt ownership: %w", ownershipErr)
+			}
+			if !owned {
+				return nil
+			}
 			if pubErr := publishManagedDoltRuntimeStateIfOwned(cityPath); pubErr != nil {
 				return fmt.Errorf("healthy but failed to publish managed dolt runtime state: %w", pubErr)
 			}
@@ -1052,11 +1082,13 @@ type doltRuntimeState struct {
 }
 
 // currentDoltPort returns the controller-managed Dolt port for the city.
-// The only managed-local authority is .gc/runtime/packs/dolt/dolt-state.json.
+// Published runtime state is preferred; valid provider state is accepted while
+// publication catches up so the raw-bd compatibility mirror does not get
+// removed during a live managed-Dolt window.
 // .beads/dolt-server.port is a compatibility mirror for raw bd, not a GC
 // control-plane input.
 func currentDoltPort(cityPath string) string {
-	if port := currentManagedDoltPort(cityPath); port != "" {
+	if port := currentResolvableManagedDoltPort(cityPath); port != "" {
 		writeDoltPortFile(cityPath, port, "", io.Discard)
 		return port
 	}
@@ -1069,6 +1101,14 @@ func managedDoltStatePath(cityPath string) string {
 }
 
 func currentManagedDoltPort(cityPath string) string {
+	owned, err := managedDoltLifecycleOwned(cityPath)
+	if err != nil {
+		log.Printf("gc: managed dolt ownership probe failed for %s: %v", cityPath, err)
+		return ""
+	}
+	if !owned {
+		return ""
+	}
 	data, err := os.ReadFile(managedDoltStatePath(cityPath))
 	if err != nil {
 		return ""
@@ -1312,6 +1352,14 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 	}
 	resolveRigPaths(cityPath, rigs)
 	cityUsesBd := scopeUsesManagedBdStoreContract(cityPath, cityPath)
+	cityUsesPostgres := false
+	if cityUsesBd {
+		usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, cityPath)
+		if err != nil {
+			return fmt.Errorf("classifying city backend: %w", err)
+		}
+		cityUsesPostgres = usesPostgres
+	}
 	anyRigUsesBd := false
 	for _, rig := range rigs {
 		if rigUsesManagedBdStoreContract(cityPath, rig) {
@@ -1333,17 +1381,19 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 		return err
 	}
 	managedPort := ""
-	if cityState.EndpointOrigin == contract.EndpointOriginManagedCity {
+	if cityState.EndpointOrigin == contract.EndpointOriginManagedCity && !cityUsesPostgres {
 		managedPort = currentDoltPort(cityPath)
 	}
 	if cityUsesBd {
 		if err := normalizeScopeDoltConfig(cityPath, cityState); err != nil {
 			return err
 		}
-		if managedPort != "" {
-			writeDoltPortFile(cityPath, managedPort, "city", warn)
-		} else {
-			removeDoltPortFile(cityPath)
+		if !cityUsesPostgres {
+			if managedPort != "" {
+				writeDoltPortFile(cityPath, managedPort, "city", warn)
+			} else {
+				removeDoltPortFile(cityPath)
+			}
 		}
 	} else {
 		removeDoltPortFile(cityPath)
@@ -1650,8 +1700,67 @@ func providerLifecycleProcessEnvWithError(cityPath, provider string) ([]string, 
 	if err != nil {
 		return nil, err
 	}
-	if !providerUsesBdStoreContract(provider) {
+	return providerLifecycleProcessEnvFromBase(cityPath, provider, env), nil
+}
+
+func providerLifecycleProcessEnvForScopeInitWithError(cityPath, scopeRoot, provider string) ([]string, error) {
+	env, err := providerLifecycleProcessEnvWithError(cityPath, provider)
+	if err == nil {
+		if providerUsesBdStoreContract(provider) && scopeRuntimeEnvIndependentOfCityProjection(cityPath, scopeRoot) {
+			env = providerLifecycleIndependentScopeInitEnv(cityPath, scopeRoot, env)
+		}
 		return env, nil
+	}
+	if !providerUsesBdStoreContract(provider) || !cityPostgresProjectionErrorCanBeBypassed(cityPath, err) || !scopeRuntimeEnvIndependentOfCityProjection(cityPath, scopeRoot) {
+		return nil, err
+	}
+	cityPath = normalizePathForCompare(cityPath)
+	overrides := cityRuntimeEnvMapForCity(cityPath)
+	setExecProjectedBackendEnvEmpty(overrides)
+	overrides["BEADS_DOLT_AUTO_START"] = "0"
+	applyLegacyRigScopeInitDoltEnv(overrides, cityPath, scopeRoot)
+	baseEnv := mergeRuntimeEnv(os.Environ(), overrides)
+	return providerLifecycleProcessEnvFromBase(cityPath, provider, baseEnv), nil
+}
+
+func providerLifecycleIndependentScopeInitEnv(cityPath, scopeRoot string, env []string) []string {
+	cityPath = normalizePathForCompare(cityPath)
+	overrides := map[string]string{}
+	applyLegacyRigScopeInitDoltEnv(overrides, cityPath, scopeRoot)
+	ensureProjectedPostgresEnvExplicit(overrides)
+	return overlayEnvEntries(env, overrides)
+}
+
+func scopeRuntimeEnvIndependentOfCityProjection(cityPath, scopeRoot string) bool {
+	if strings.TrimSpace(cityPath) == "" || samePath(cityPath, scopeRoot) {
+		return false
+	}
+	var explicitRig *config.Rig
+	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil && cfg != nil {
+		explicitRig = rigConfigForScopeRoot(cityPath, scopeRoot, cfg.Rigs)
+	}
+	return rigRuntimeEnvIndependentOfCityProjection(cityPath, scopeRoot, explicitRig)
+}
+
+func applyLegacyRigScopeInitDoltEnv(env map[string]string, cityPath, scopeRoot string) {
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil || cfg == nil {
+		return
+	}
+	explicitRig := rigConfigForScopeRoot(cityPath, scopeRoot, cfg.Rigs)
+	if explicitRig == nil || (explicitRig.DoltHost == "" && explicitRig.DoltPort == "") {
+		return
+	}
+	clearProjectedPostgresEnv(env)
+	applyLegacyRigExternalTarget(env, *explicitRig)
+	clearProjectedDoltPasswordEnv(env)
+	applyResolvedDoltAuthEnv(env, scopeRoot, "")
+	mirrorBeadsDoltEnv(env)
+}
+
+func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string) []string {
+	if !providerUsesBdStoreContract(provider) {
+		return env
 	}
 	for _, key := range []string{
 		"GC_PACK_STATE_DIR",
@@ -1697,7 +1806,7 @@ func providerLifecycleProcessEnvWithError(cityPath, provider string) ([]string, 
 			env = append(env, loglevelPrefix+val)
 		}
 	}
-	return env, nil
+	return env
 }
 
 // acquireProviderSemaphore returns a per-city semaphore channel and waits

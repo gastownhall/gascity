@@ -33,6 +33,36 @@ func TestOrderTrackingStatusTreatsWispFailedAsFailed(t *testing.T) {
 	}
 }
 
+func TestOrderTrackingExecEnvFailedClassifiesAsFailedExec(t *testing.T) {
+	bead := beads.Bead{
+		Status: "closed",
+		Labels: []string{"order-tracking", "order-run:nightly", "exec-env-failed"},
+	}
+	if got := orderTrackingStatus(bead); got != "failed" {
+		t.Fatalf("orderTrackingStatus = %q, want failed", got)
+	}
+	if got := orderTrackingTarget(orders.Order{}, false, bead); got != "exec" {
+		t.Fatalf("orderTrackingTarget = %q, want exec", got)
+	}
+	if got := orderTrackingType(orders.Order{}, false, bead); got != "exec" {
+		t.Fatalf("orderTrackingType = %q, want exec", got)
+	}
+}
+
+func TestOrderTrackingTriggerEnvFailedClassifiesOpenAndClosedAsFailed(t *testing.T) {
+	for _, status := range []string{"open", "closed"} {
+		t.Run(status, func(t *testing.T) {
+			bead := beads.Bead{
+				Status: status,
+				Labels: []string{"order-tracking", "order-run:nightly", "trigger-env-failed"},
+			}
+			if got := orderTrackingStatus(bead); got != "failed" {
+				t.Fatalf("orderTrackingStatus(%s) = %q, want failed", status, got)
+			}
+		})
+	}
+}
+
 func TestParseMonitorTimestampAcceptsRFC3339AndNano(t *testing.T) {
 	base := "2026-03-26T14:06:31+01:00"
 	if got := parseMonitorTimestamp(base); got.IsZero() {

@@ -205,7 +205,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	}
 	managedDoltPort := p.ManagedDoltPort
 	if managedDoltPort == nil {
-		managedDoltPort = currentManagedDoltPort
+		managedDoltPort = currentResolvableManagedDoltPort
 	}
 
 	logPrefix := p.LogPrefix
@@ -1089,6 +1089,21 @@ func (cr *CityRuntime) reloadConfigTraced(
 		appendWarning(warning)
 	}
 	if cr.configRev != "" && result.Revision == cr.configRev {
+		if cr.cs != nil && cr.cs.storeMetadataChanged(result.Cfg) {
+			cr.cs.update(result.Cfg, cr.sp)
+			message := fmt.Sprintf("Config reloaded: bead store metadata changed (rev %s)", shortRev(result.Revision))
+			fmt.Fprintln(cr.stdout, message) //nolint:errcheck // best-effort stdout
+			if trace != nil {
+				trace.RecordConfigReload(cr.configRev, result.Revision, TraceOutcomeApplied, source, nil, nil, false, warnings, nil)
+			}
+			telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeApplied), len(warnings), nil)
+			return reloadControlReply{
+				Outcome:  reloadOutcomeApplied,
+				Message:  message,
+				Revision: result.Revision,
+				Warnings: warnings,
+			}
+		}
 		if trace != nil {
 			trace.RecordConfigReload(cr.configRev, result.Revision, TraceOutcomeNoChange, source, nil, nil, false, warnings, nil)
 		}
@@ -2010,7 +2025,7 @@ func (cr *CityRuntime) ensureManagedDoltPublishedForTick() {
 	}
 	portFn := cr.managedDoltPort
 	if portFn == nil {
-		portFn = currentManagedDoltPort
+		portFn = currentResolvableManagedDoltPort
 	}
 	ensureManagedDoltPublishedForRuntime(cr.cityPath, cr.stderr, cr.logPrefix, healthFn, ownedFn, portFn)
 }

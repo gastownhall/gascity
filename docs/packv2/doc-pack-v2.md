@@ -428,7 +428,7 @@ A declared-but-unbound rig is a valid state. `gc start` warns about unbound rigs
 - **New concepts:** Import model with aliasing, versioning, transitive-by-default imports, flattened re-export, single root lock file (`packs.lock`). Lock file consumption (loader is a reader; `gc import` owns bootstrap, repair, and cache materialization). Shadow warnings. Lifecycle verb separation (define / install / register / start).
 - **Config split:** Current city.toml splits into pack.toml (definition) + city.toml (deployment) + `.gc/` (site binding).
 - **Convention:** Filesystem layout replaces most TOML path declarations.
-- **Migration:** Hard cutover. `gc doctor` detects V1 patterns and `gc doctor --fix` handles the safe mechanical conversion. `gc import migrate` is no longer the primary public path. After one release of deprecation warnings, the V2 loader will refuse V1 shapes.
+- **Migration:** Hard cutover. `gc doctor` detects V1 patterns and `gc doctor --fix` handles the safe mechanical conversion. `gc import migrate` is deprecated shim territory, not a co-equal migration path, and no longer performs in-place rewrites. After the last-call wave, the V2 loader will refuse V1 shapes.
 
 ## Resolved questions
 

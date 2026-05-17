@@ -655,18 +655,29 @@ func initNeedsLocalDoltIdentity(cityPath string) bool {
 	if ok {
 		cityCfg = cfg
 	}
-	if cityUsesBdStoreContract(cityPath) && !initScopeUsesExternalDolt(cityPath, cityPath, cityCfg) {
+	if cityUsesBdStoreContract(cityPath) && initScopeNeedsLocalDoltIdentity(cityPath, cityPath, cityCfg) {
 		return true
 	}
 	if !ok {
 		return false
 	}
 	for _, rig := range cfg.Rigs {
-		if rigUsesManagedBdStoreContract(cityPath, rig) && !initScopeUsesExternalDolt(cityPath, rig.Path, cfg) {
+		if rigUsesManagedBdStoreContract(cityPath, rig) && initScopeNeedsLocalDoltIdentity(cityPath, rig.Path, cfg) {
 			return true
 		}
 	}
 	return false
+}
+
+func initScopeNeedsLocalDoltIdentity(cityPath, scopeRoot string, cfg *config.City) bool {
+	_, usesPostgres, err := postgresMetadataForScope(cityPath, scopeRoot)
+	if err != nil {
+		return true
+	}
+	if usesPostgres {
+		return false
+	}
+	return !initScopeUsesExternalDolt(cityPath, scopeRoot, cfg)
 }
 
 func initScopeUsesExternalDolt(cityPath, scopeRoot string, cfg *config.City) bool {

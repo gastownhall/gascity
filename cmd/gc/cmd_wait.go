@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -266,19 +267,25 @@ func cmdWaitList(stateFilter, sessionFilter string, stdout, stderr io.Writer) in
 	if store == nil {
 		return code
 	}
-	items, err := loadWaitBeads(store)
+	var items []beads.Bead
+	var err error
+	if sessionFilter != "" {
+		items, err = loadSessionWaitBeads(store, sessionFilter)
+	} else {
+		items, err = loadWaitBeads(store)
+	}
 	if err != nil {
-		fmt.Fprintf(stderr, "gc wait list: %v\n", err) //nolint:errcheck
-		return 1
+		if !isWaitLookupLimitError(err) {
+			fmt.Fprintf(stderr, "gc wait list: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		fmt.Fprintf(stderr, "gc wait list: %v; showing capped results\n", err) //nolint:errcheck
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].CreatedAt.Before(items[j].CreatedAt) })
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "WAIT\tSESSION\tSTATE\tKIND\tNOTE") //nolint:errcheck
 	for _, item := range items {
 		if stateFilter != "" && item.Metadata["state"] != stateFilter {
-			continue
-		}
-		if sessionFilter != "" && item.Metadata["session_id"] != sessionFilter {
 			continue
 		}
 		note := item.Description
@@ -399,24 +406,59 @@ func loadWaitBeads(store beads.Store) ([]beads.Bead, error) {
 	if store == nil {
 		return nil, nil
 	}
-	return loadWaitBeadsByLabel(store, waitBeadLabel)
+	return loadWaitBeadsByLabel(store)
 }
 
 func loadSessionWaitBeads(store beads.Store, sessionID string) ([]beads.Bead, error) {
-	if store == nil || sessionID == "" {
-		return nil, nil
+	return sessionpkg.ListSessionWaitBeads(store, sessionID)
+}
+
+const waitLookupLimit = sessionpkg.SessionWaitLookupLimit
+
+func isWaitLookupLimitError(err error) bool {
+	return beads.IsLookupLimitError(err)
+}
+
+func stampWaitLookupCapDiagnostic(store beads.Store, sessionID string, err error, now time.Time, source string) {
+	if store == nil || strings.TrimSpace(sessionID) == "" {
+		return
 	}
-	return loadWaitBeadsByLabel(store, "session:"+sessionID)
+	var limitErr beads.LookupLimitError
+	if !errors.As(err, &limitErr) {
+		return
+	}
+	label := limitErr.Label
+	if label == "" {
+		label = "session:" + sessionID
+	}
+	if source == "" {
+		source = "wait-lookup"
+	}
+	batch := map[string]string{}
+	sessionpkg.StampWaitLookupCapMetadata(batch, label, limitErr.Limit, now, source)
+	if err := store.SetMetadataBatch(sessionID, batch); err != nil {
+		log.Printf("gc wait: recording lookup cap diagnostic for session %s failed: %v", sessionID, err)
+	}
 }
 
-func waitNudgeIDsForSession(store beads.Store, sessionID string) ([]string, error) {
-	return sessionpkg.WaitNudgeIDs(store, sessionID)
+func stampGlobalWaitLookupCapDiagnostics(store beads.Store, sessionBeads *sessionBeadSnapshot, err error, now time.Time) {
+	for _, sessionBead := range sessionBeads.Open() {
+		stampWaitLookupCapDiagnostic(store, sessionBead.ID, err, now, "wake-state-global")
+	}
 }
 
-func loadWaitBeadsByLabel(store beads.Store, label string) ([]beads.Bead, error) {
-	all, err := store.List(beads.ListQuery{Label: label})
+func loadWaitBeadsByLabel(store beads.Store) ([]beads.Bead, error) {
+	all, err := store.List(beads.ListQuery{
+		Label: waitBeadLabel,
+		Limit: waitLookupLimit + 1,
+		Sort:  beads.SortCreatedDesc,
+	})
 	if err != nil {
 		return nil, err
+	}
+	capped := len(all) > waitLookupLimit
+	if capped {
+		all = all[:waitLookupLimit]
 	}
 	result := make([]beads.Bead, 0, len(all))
 	for _, item := range all {
@@ -428,7 +470,67 @@ func loadWaitBeadsByLabel(store beads.Store, label string) ([]beads.Bead, error)
 		}
 		result = append(result, item)
 	}
+	if capped {
+		return result, beads.LookupLimitError{Kind: "wait", Label: waitBeadLabel, Limit: waitLookupLimit}
+	}
 	return result, nil
+}
+
+func loadWaitBeadsForWakeState(store beads.Store, sessionBeads *sessionBeadSnapshot) ([]beads.Bead, error) {
+	// Open sessions get per-session coverage; waits tied only to closed
+	// sessions can fall outside the newest global capped window under
+	// saturation, with cap diagnostics as the operator signal.
+	waits, seen, err := loadWaitBeadsForOpenSessionsWithSeen(store, sessionBeads)
+	if err != nil {
+		return nil, err
+	}
+	globalWaits, err := loadWaitBeads(store)
+	if err != nil {
+		if !isWaitLookupLimitError(err) {
+			return nil, err
+		}
+		stampGlobalWaitLookupCapDiagnostics(store, sessionBeads, err, time.Now().UTC())
+		log.Printf("gc wait: global wake-state wait lookup failed; continuing with open-session waits: %v", err)
+	}
+	for _, wait := range globalWaits {
+		if seen[wait.ID] {
+			continue
+		}
+		seen[wait.ID] = true
+		waits = append(waits, wait)
+	}
+	return waits, nil
+}
+
+func loadWaitBeadsForOpenSessions(store beads.Store, sessionBeads *sessionBeadSnapshot) ([]beads.Bead, error) {
+	waits, _, err := loadWaitBeadsForOpenSessionsWithSeen(store, sessionBeads)
+	return waits, err
+}
+
+func loadWaitBeadsForOpenSessionsWithSeen(store beads.Store, sessionBeads *sessionBeadSnapshot) ([]beads.Bead, map[string]bool, error) {
+	seen := map[string]bool{}
+	if store == nil || sessionBeads == nil {
+		return nil, seen, nil
+	}
+	waits := []beads.Bead(nil)
+	for _, sessionBead := range sessionBeads.Open() {
+		sessionWaits, err := loadSessionWaitBeads(store, sessionBead.ID)
+		if err != nil {
+			if !isWaitLookupLimitError(err) {
+				return nil, seen, err
+			}
+			stampWaitLookupCapDiagnostic(store, sessionBead.ID, err, time.Now().UTC(), "wake-state-session")
+			log.Printf("gc wait: session %s wait lookup capped; continuing with filtered partial waits: %v", sessionBead.ID, err)
+		}
+		for _, wait := range sessionWaits {
+			if seen[wait.ID] {
+				continue
+			}
+			seen[wait.ID] = true
+			waits = append(waits, wait)
+		}
+	}
+	return waits, seen, nil
 }
 
 func depsWaitReady(store beads.Store, wait beads.Bead) bool {
@@ -565,16 +667,16 @@ func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Ti
 }
 
 func prepareWaitWakeStateForCityWithSnapshot(cityPath string, store beads.Store, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
-	waits, err := loadWaitBeads(store)
-	if err != nil {
-		return nil, err
-	}
 	if sessionBeads == nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(store)
 		if err != nil {
 			return nil, err
 		}
+	}
+	waits, err := loadWaitBeadsForWakeState(store, sessionBeads)
+	if err != nil {
+		return nil, err
 	}
 	readyWaitSet := make(map[string]bool)
 	for _, wait := range waits {
@@ -700,16 +802,16 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, _ runtime.Provi
 }
 
 func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, store beads.Store, now time.Time, sessionBeads *sessionBeadSnapshot) error {
-	waits, err := loadWaitBeads(store)
-	if err != nil {
-		return err
-	}
 	if sessionBeads == nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(store)
 		if err != nil {
 			return err
 		}
+	}
+	waits, err := loadWaitBeadsForOpenSessions(store, sessionBeads)
+	if err != nil {
+		return err
 	}
 	for _, wait := range waits {
 		if wait.Metadata["state"] != waitStateReady {
@@ -730,7 +832,15 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, stor
 		if nudgeID == "" {
 			continue
 		}
-		if _, ok, err := findQueuedNudgeBead(store, nudgeID); err == nil && ok {
+		_, ok, err := findQueuedNudgeBead(store, nudgeID)
+		if err != nil {
+			if beads.IsLookupLimitError(err) {
+				stampWaitLookupCapDiagnostic(store, sessionID, err, now, "ready-wait-nudge")
+				continue
+			}
+			return err
+		}
+		if ok {
 			continue
 		}
 		message := strings.TrimSpace(wait.Description)
@@ -790,7 +900,14 @@ func finalizeReadyWaitFromNudge(store beads.Store, wait beads.Bead, now time.Tim
 		return false, nil
 	}
 	nudge, ok, err := findAnyQueuedNudgeBead(store, nudgeID)
-	if err != nil || !ok {
+	if err != nil {
+		if beads.IsLookupLimitError(err) {
+			stampWaitLookupCapDiagnostic(store, wait.Metadata["session_id"], err, now, "ready-wait-finalize-nudge")
+			return false, nil
+		}
+		return false, err
+	}
+	if !ok {
 		return false, err
 	}
 	switch nudge.Metadata["state"] {
@@ -818,31 +935,18 @@ func cancelWaitsForSession(store beads.Store, sessionID string) error {
 	if store == nil || sessionID == "" {
 		return nil
 	}
-	waits, err := loadSessionWaitBeads(store, sessionID)
+	nudgeIDs, _, err := sessionpkg.CancelWaitsAndCollectNudgeIDs(store, sessionID, time.Now().UTC())
 	if err != nil {
-		return err
-	}
-	nudgeIDs := make([]string, 0, len(waits))
-	for _, wait := range waits {
-		if wait.Metadata["session_id"] != sessionID {
-			continue
+		if !isWaitLookupLimitError(err) {
+			return err
 		}
-		if isWaitTerminal(wait.Metadata["state"]) {
-			continue
-		}
-		if nudgeID := wait.Metadata["nudge_id"]; nudgeID != "" {
-			nudgeIDs = append(nudgeIDs, nudgeID)
-		}
-	}
-	if err := sessionpkg.CancelWaits(store, sessionID, time.Now().UTC()); err != nil {
-		return err
 	}
 	if cityPath, err := resolveCity(); err == nil {
 		if err := withdrawQueuedWaitNudges(cityPath, nudgeIDs); err != nil {
 			return err
 		}
 	}
-	return nil
+	return err
 }
 
 func clearSessionWaitHold(store beads.Store, sessionID string) error {
@@ -873,17 +977,19 @@ func clearSessionWaitHoldIfIdle(store beads.Store, sessionID string) error {
 }
 
 func hasNonTerminalWaits(store beads.Store, sessionID string) (bool, error) {
-	waits, err := loadWaitBeads(store)
-	if err != nil {
+	waits, err := loadSessionWaitBeads(store, sessionID)
+	if err != nil && !isWaitLookupLimitError(err) {
 		return false, err
 	}
+	capped := err != nil
 	for _, wait := range waits {
-		if wait.Metadata["session_id"] != sessionID {
-			continue
-		}
 		if !isWaitTerminal(wait.Metadata["state"]) {
 			return true, nil
 		}
+	}
+	if capped {
+		log.Printf("gc wait: session %s wait-hold lookup capped; preserving wait hold: %v", sessionID, err)
+		return true, nil
 	}
 	return false, nil
 }

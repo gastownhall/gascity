@@ -153,6 +153,15 @@ func (h *RuntimeHandle) Close(ctx context.Context) (err error) {
 	return err
 }
 
+// CloseDetailed asks the provider to close the live runtime session and
+// returns no bead cleanup artifacts for runtime-only handles.
+func (h *RuntimeHandle) CloseDetailed(ctx context.Context) (sessionpkg.CloseResult, error) {
+	if err := h.Close(ctx); err != nil {
+		return sessionpkg.CloseResult{}, err
+	}
+	return sessionpkg.CloseResult{}, nil
+}
+
 // Rename reports unsupported because runtime-only handles have no persisted name update.
 func (h *RuntimeHandle) Rename(ctx context.Context, _ string) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationRename)

@@ -23,7 +23,7 @@ func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Check for available work",
 		Long: `Checks for available work using the agent's work_query config.
 
-Without --inject: prints raw output, exits 0 if work exists, 1 if empty.
+Without --inject: prints normalized ready-only output, exits 0 if work exists, 1 if empty.
 With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
 
 		The agent is determined from $GC_AGENT or a positional argument.`,
@@ -55,7 +55,7 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 		return 0
 	}
 	// Accepted for compatibility with installed hook commands; non-inject
-	// gc hook output is intentionally raw regardless of provider format.
+	// gc hook output ignores provider-specific formatting.
 	_ = hookFormat
 
 	agentName := os.Getenv("GC_ALIAS")
@@ -234,8 +234,9 @@ func workQueryEnvForDir(env []string, dir string) []string {
 }
 
 // doHook is the pure logic for gc hook. Runs the work query and outputs
-// results based on mode. Without inject: prints raw output, returns 0 if
-// work, 1 if empty. With inject: skips the work query and returns 0.
+// results based on mode. Without inject: prints normalized ready-only output,
+// returns 0 if work exists, 1 if empty. With inject: skips the work query and
+// returns 0.
 func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, stderr io.Writer) int {
 	if inject {
 		return 0
@@ -252,9 +253,10 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 
 	trimmed := strings.TrimSpace(output)
 	normalized := normalizeWorkQueryOutput(trimmed)
+	normalized = filterUnreadyHookCandidates(normalized, time.Now())
 	hasWork := workQueryHasReadyWork(normalized)
 
-	// Non-inject mode: print raw output. Return 0 only when work exists.
+	// Non-inject mode: print normalized, ready-only output. Return 0 only when work exists.
 	if !hasWork {
 		if normalized != "" {
 			fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
@@ -286,6 +288,84 @@ func workQueryHasReadyWork(output string) bool {
 		}
 	}
 	return true
+}
+
+// filterUnreadyHookCandidates strips beads from work_query output that fail
+// bd ready semantics: future defer_until, or any open blocking dep in the
+// row's blocked_by array. The work_query is expected to gate these, but
+// defensive filtering here prevents a single broken query from cascading
+// into agent action on a bead it cannot progress.
+// Pure function over JSON; takes time.Time so tests stay deterministic.
+func filterUnreadyHookCandidates(output string, now time.Time) string {
+	if output == "" {
+		return output
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(output), &decoded); err != nil {
+		return output
+	}
+	arr, ok := decoded.([]any)
+	if !ok {
+		return output
+	}
+	filtered := make([]any, 0, len(arr))
+	for _, item := range arr {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			filtered = append(filtered, item)
+			continue
+		}
+		if isFutureDeferredHookCandidate(obj, now) {
+			continue
+		}
+		if isDepBlockedHookCandidate(obj) {
+			continue
+		}
+		filtered = append(filtered, obj)
+	}
+	reencoded, err := json.Marshal(filtered)
+	if err != nil {
+		return output
+	}
+	return string(reencoded)
+}
+
+func isFutureDeferredHookCandidate(item map[string]any, now time.Time) bool {
+	raw, ok := item["defer_until"].(string)
+	if !ok {
+		return false
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	deferAt, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return false
+	}
+	return deferAt.After(now)
+}
+
+func isDepBlockedHookCandidate(item map[string]any) bool {
+	blockedBy, ok := item["blocked_by"].([]any)
+	if !ok || len(blockedBy) == 0 {
+		return false
+	}
+	for _, b := range blockedBy {
+		dep, ok := b.(map[string]any)
+		if !ok {
+			continue
+		}
+		status, ok := dep["status"].(string)
+		if !ok {
+			continue
+		}
+		status = strings.TrimSpace(status)
+		if status != "" && !strings.EqualFold(status, "closed") {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeWorkQueryOutput(output string) string {

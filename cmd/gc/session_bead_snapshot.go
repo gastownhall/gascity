@@ -91,7 +91,11 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 		isCanonicalNamed := strings.TrimSpace(b.Metadata["configured_named_identity"]) != ""
 		if agentName := sessionBeadAgentName(b); agentName != "" {
 			if isPoolManagedSessionBead(b) && agentName == b.Metadata["template"] {
-				agentName = stampedPoolQualifiedIdentity(b)
+				if stamped := stampedPoolQualifiedIdentity(b); stamped != "" {
+					agentName = stamped
+				} else if !isCanonicalPoolManagedSessionBeadForTemplate(b, agentName) {
+					agentName = ""
+				}
 			}
 			if agentName == "" {
 				continue

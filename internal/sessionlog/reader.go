@@ -155,6 +155,8 @@ func ReadProviderFile(provider, path string, tailCompactions int) (*Session, err
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "kimi":
+		return ReadKimiFile(path, tailCompactions)
 	case "opencode":
 		return ReadOpenCodeFile(path, tailCompactions)
 	case "pi":
@@ -206,6 +208,8 @@ func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, 
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "kimi":
+		return ReadKimiFile(path, tailCompactions)
 	case "opencode":
 		return ReadOpenCodeFile(path, tailCompactions)
 	case "pi":
@@ -281,6 +285,8 @@ func ReadProviderFileOlder(provider, path string, tailCompactions int, beforeMes
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "kimi":
+		return ReadKimiFilePage(path, tailCompactions, beforeMessageID, "")
 	case "opencode":
 		return ReadOpenCodeFile(path, tailCompactions)
 	case "pi":
@@ -299,6 +305,8 @@ func ReadProviderFileRawOlder(provider, path string, tailCompactions int, before
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "kimi":
+		return ReadKimiFilePage(path, tailCompactions, beforeMessageID, "")
 	case "opencode":
 		return ReadOpenCodeFile(path, tailCompactions)
 	case "pi":
@@ -373,6 +381,8 @@ func ReadProviderFileNewer(provider, path string, tailCompactions int, afterMess
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "kimi":
+		return ReadKimiFilePage(path, tailCompactions, "", afterMessageID)
 	case "opencode":
 		return ReadOpenCodeFile(path, tailCompactions)
 	case "pi":
@@ -391,6 +401,8 @@ func ReadProviderFileRawNewer(provider, path string, tailCompactions int, afterM
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "kimi":
+		return ReadKimiFilePage(path, tailCompactions, "", afterMessageID)
 	case "opencode":
 		return ReadOpenCodeFile(path, tailCompactions)
 	case "pi":
@@ -548,6 +560,8 @@ func FindSessionFileForProvider(searchPaths []string, provider, workDir string) 
 		return FindCodexSessionFile(searchPaths, workDir)
 	case "gemini":
 		return FindGeminiSessionFile(searchPaths, workDir)
+	case "kimi":
+		return FindKimiSessionFile(searchPaths, workDir)
 	case "opencode":
 		return FindOpenCodeSessionFile(searchPaths, workDir)
 	case "pi":
@@ -569,6 +583,8 @@ func FindProviderFallbackSessionFile(searchPaths []string, provider, workDir str
 		return FindCodexSessionFile(searchPaths, workDir)
 	case "gemini":
 		return FindGeminiSessionFile(searchPaths, workDir)
+	case "kimi":
+		return FindKimiSessionFile(searchPaths, workDir)
 	case "opencode":
 		return FindOpenCodeSessionFile(searchPaths, workDir)
 	case "pi":
@@ -901,6 +917,16 @@ func DefaultGeminiSearchPaths() []string {
 	return []string{filepath.Join(home, ".gemini", "tmp")}
 }
 
+// DefaultKimiSearchPaths returns the default search paths for Kimi Code
+// session files (~/.kimi/sessions).
+func DefaultKimiSearchPaths() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	return []string{filepath.Join(home, ".kimi", "sessions")}
+}
+
 // MergeSearchPaths merges default paths with user-configured extra paths,
 // expanding ~ and deduplicating.
 func MergeSearchPaths(extraPaths []string) []string {
@@ -951,6 +977,8 @@ func ProviderFamily(provider string) string {
 		return "codex"
 	case strings.Contains(p, "gemini"):
 		return "gemini"
+	case strings.Contains(p, "kimi"):
+		return "kimi"
 	case strings.Contains(p, "opencode"):
 		return "opencode"
 	case p == "pi" || strings.HasPrefix(p, "pi/") || strings.HasSuffix(p, "/pi") || strings.HasSuffix(p, "-pi") || strings.Contains(p, "-pi/"):

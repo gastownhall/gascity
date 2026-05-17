@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,7 +82,7 @@ func staleManagedDoltSocketPaths() []string {
 }
 
 func fileOpenedByAnyProcess(path string) (bool, error) {
-	if open, checked := unixSocketAcceptsConnection(path); checked {
+	if open, checked := unixSocketOpenStateFromTable(path); checked {
 		return open, nil
 	}
 	procCtx, procCancel := context.WithTimeout(context.Background(), managedDoltProcTimeout)
@@ -127,36 +126,39 @@ func fileOpenedByAnyProcess(path string) (bool, error) {
 	return false, fmt.Errorf("lsof %s: %w: %s", path, err, strings.TrimSpace(string(out)))
 }
 
-func unixSocketAcceptsConnection(path string) (bool, bool) {
+func unixSocketOpenStateFromTable(path string) (bool, bool) {
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSocket == 0 {
 		return false, false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), managedDoltProcTimeout)
 	defer cancel()
-	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
-	if err == nil {
-		_ = conn.Close()
-		return true, true
+	inodes, checked := unixSocketInodesForPath(ctx, path)
+	if !checked || ctx.Err() != nil {
+		return false, false
 	}
-	if os.IsNotExist(err) || errors.Is(err, syscall.ECONNREFUSED) {
-		return false, true
-	}
-	return false, false
+	return len(inodes) > 0, true
 }
 
 func fileOpenedByAnyProcessFromProc(ctx context.Context, path string) (bool, bool) {
 	if ctx != nil && ctx.Err() != nil {
 		return false, false
 	}
+	info, statErr := os.Lstat(path)
+	isSocketPath := statErr == nil && info.Mode()&os.ModeSocket != 0
+	if isSocketPath {
+		socketInodes, checked := unixSocketInodesForPath(ctx, path)
+		if ctx != nil && ctx.Err() != nil {
+			return false, false
+		}
+		if checked {
+			return len(socketInodes) > 0, true
+		}
+	}
 	entries, err := os.ReadDir(managedDoltProcDir)
 	if err != nil {
 		return false, false
 	}
-	if ctx != nil && ctx.Err() != nil {
-		return false, false
-	}
-	socketInodes, _ := unixSocketInodesForPath(ctx, path)
 	if ctx != nil && ctx.Err() != nil {
 		return false, false
 	}
@@ -186,12 +188,6 @@ func fileOpenedByAnyProcessFromProc(ctx context.Context, path string) (bool, boo
 			target = strings.TrimSuffix(target, " (deleted)")
 			if samePath(target, path) {
 				return true, true
-			}
-			if len(socketInodes) > 0 && strings.HasPrefix(target, "socket:[") && strings.HasSuffix(target, "]") {
-				inode := strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")
-				if _, ok := socketInodes[inode]; ok {
-					return true, true
-				}
 			}
 		}
 	}

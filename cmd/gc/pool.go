@@ -421,8 +421,9 @@ func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, s
 	}
 }
 
-// discoverPoolInstances returns qualified instance names for a multi-instance pool.
-// For bounded pools (max > 1), generates static names {name}-1..{name}-{max}.
+// discoverPoolInstances returns qualified runtime identities for a pool-shaped
+// agent. Canonical singleton pools use the configured qualified name. Bounded
+// multi-instance pools generate static names {name}-1..{name}-{max}.
 // For unlimited pools (max < 0), discovers running instances via session provider
 // prefix matching.
 func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *config.Agent,
@@ -430,6 +431,9 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 ) []string {
 	isUnlimited := sp0.Max < 0
 	if !isUnlimited {
+		if a.UsesCanonicalSingletonPoolIdentity() {
+			return discoverCanonicalSingletonPoolInstances(a, cityName, st, sp)
+		}
 		// Bounded pool: static enumeration.
 		var names []string
 		for i := 1; i <= sp0.Max; i++ {
@@ -479,6 +483,42 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 		}
 	}
 	return names
+}
+
+func discoverCanonicalSingletonPoolInstances(a *config.Agent, cityName, st string, sp runtime.Provider) []string {
+	if a == nil {
+		return nil
+	}
+	canonical := a.QualifiedName()
+	names := []string{canonical}
+	if sp == nil {
+		return names
+	}
+	prefix := agent.SessionNameFor(cityName, canonical+"-", st)
+	running, err := sp.ListRunning("")
+	if err != nil {
+		return names
+	}
+	templatePrefix := agent.SessionNameFor(cityName, "", st)
+	stale := make([]string, 0, len(running))
+	seen := map[string]bool{canonical: true}
+	for _, sn := range running {
+		if !strings.HasPrefix(sn, prefix) {
+			continue
+		}
+		qnSanitized := sn
+		if templatePrefix != "" && strings.HasPrefix(qnSanitized, templatePrefix) {
+			qnSanitized = qnSanitized[len(templatePrefix):]
+		}
+		qn := agent.UnsanitizeQualifiedNameFromSession(qnSanitized)
+		if seen[qn] || nonExpandingPoolIdentitySlot(a, qn) <= 0 {
+			continue
+		}
+		seen[qn] = true
+		stale = append(stale, qn)
+	}
+	sort.Strings(stale)
+	return append(names, stale...)
 }
 
 func resolvePoolSessionRefs(

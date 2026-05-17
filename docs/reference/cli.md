@@ -946,7 +946,9 @@ Run diagnostic health checks on the city workspace.
 Checks city structure, config validity, binary dependencies (tmux, git,
 bd, dolt), controller status, agent sessions, zombie/orphan sessions,
 bead stores, Dolt server health, event log integrity, and per-rig
-health. Use --fix to attempt automatic repairs.
+health. Use --fix for the canonical remediation path, including any
+safe mechanical PackV1-to-PackV2 rewrites that are available on this
+branch.
 
 ```
 gc doctor [flags]
@@ -962,7 +964,7 @@ gc doctor
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--fix` | bool |  | attempt to fix issues automatically |
+| `--fix` | bool |  | attempt automatic repairs and safe mechanical migrations |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |
 
 ## gc dolt-cleanup
@@ -1249,7 +1251,7 @@ gc help [command]
 
 Checks for available work using the agent's work_query config.
 
-Without --inject: prints raw output, exits 0 if work exists, 1 if empty.
+Without --inject: prints normalized ready-only output, exits 0 if work exists, 1 if empty.
 With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
 
 		The agent is determined from $GC_AGENT or a positional argument.
@@ -1276,7 +1278,6 @@ gc import
 | [gc import check](#gc-import-check) | Validate installed pack import state |
 | [gc import install](#gc-import-install) | Install imports from pack.toml and packs.lock |
 | [gc import list](#gc-import-list) | List imported packs |
-| [gc import migrate](#gc-import-migrate) | Migrate a V1 city layout to the V2 pack shape |
 | [gc import remove](#gc-import-remove) | Remove a pack import |
 | [gc import upgrade](#gc-import-upgrade) | Upgrade imported packs within their constraints |
 | [gc import why](#gc-import-why) | Explain why an import is present |
@@ -1321,22 +1322,6 @@ gc import list [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--tree` | bool |  | Show the import dependency tree |
-
-## gc import migrate
-
-Rewrite a legacy city into the V2 migration shape.
-
-Moves workspace.includes into pack imports, converts [[agent]] tables
-into agents/&lt;name&gt;/ directories, and stages prompt/overlay/namepool
-assets into their V2 locations.
-
-```
-gc import migrate [flags]
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--dry-run` | bool |  | print what would change without writing |
 
 ## gc import remove
 
@@ -2032,8 +2017,9 @@ Register an external project directory as a rig.
 Initializes beads database, installs agent hooks if configured,
 generates cross-rig routes, and appends the rig to city.toml.
 If the target directory doesn't exist, it is created. Use --include
-to apply a pack directory that defines the rig's agent configuration;
-repeat the flag to compose multiple packs for one rig.
+to apply a pack source that defines the rig's agent configuration;
+repeat the flag to compose multiple packs for one rig. The flag is
+compatibility sugar: gc rig add writes canonical rig imports.
 
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
@@ -2069,7 +2055,7 @@ gc rig add /path/to/project
 |------|------|---------|-------------|
 | `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
 | `--default-branch` | string |  | mainline branch (default: auto-detect from origin/HEAD or current branch) |
-| `--include` | stringArray |  | pack directory for rig agents (repeatable) |
+| `--include` | stringArray |  | pack source for rig agents (repeatable; writes canonical rig imports) |
 | `--name` | string |  | rig name (default: directory basename) |
 | `--prefix` | string |  | bead ID prefix (default: derived from name) |
 | `--start-suspended` | bool |  | add rig in suspended state (dormant-by-default) |

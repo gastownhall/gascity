@@ -14,6 +14,7 @@ NPM_PACKAGE_BY_PROVIDER = {
     "pi": ("@earendil-works/pi-coding-agent", "PI_CODING_AGENT_VERSION", "0.74.0"),
 }
 CLAUDE_CODE_VERSION = "2.1.123"
+KIMI_CLI_VERSION = "1.42.0"
 PI_OLLAMA_CLOUD_VERSION = "0.4.1"
 
 
@@ -31,7 +32,7 @@ def main() -> int:
     if args.command != "install":
         raise SystemExit(f"unsupported command: {args.command}")
     provider = args.profile.split("/", 1)[0].strip().lower()
-    if provider not in {"claude", *NPM_PACKAGE_BY_PROVIDER}:
+    if provider not in {"claude", "kimi", *NPM_PACKAGE_BY_PROVIDER}:
         raise SystemExit(f"unsupported worker-inference profile: {args.profile!r}")
     already_present = shutil.which(provider) is not None
     if already_present and not args.force and provider != "pi":
@@ -43,6 +44,9 @@ def main() -> int:
         repo_root = Path(__file__).resolve().parents[1]
         installer = repo_root / ".github" / "scripts" / "install-claude-native.sh"
         subprocess.run([str(installer), version], check=True)
+    elif provider == "kimi":
+        version = os.environ.get("KIMI_CLI_VERSION", KIMI_CLI_VERSION)
+        subprocess.run(["uv", "tool", "install", "--python", "3.13", f"kimi-cli=={version}"], check=True)
     else:
         package, env_var, default_version = NPM_PACKAGE_BY_PROVIDER[provider]
         version = os.environ.get(env_var, default_version)

@@ -1,6 +1,8 @@
 package worker
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -88,6 +90,49 @@ func TestSessionLogAdapterDiscoverTranscriptExplicitIDFailsClosed(t *testing.T) 
 	discovered := adapter.DiscoverTranscript("claude/tmux-cli", workDir, "missing-session")
 	if discovered != "" {
 		t.Fatalf("DiscoverTranscript() = %q, want empty string when explicit session ID is missing", discovered)
+	}
+}
+
+func TestSessionLogAdapterDiscoverTranscriptKimiKeyedMissFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	workDir := "/tmp/kimi-project"
+	base := t.TempDir()
+	workHash := kimiTestWorkDirHash(workDir)
+	otherPath := filepath.Join(base, "sessions", workHash, "different-session", "context.jsonl")
+	if err := os.MkdirAll(filepath.Dir(otherPath), 0o755); err != nil {
+		t.Fatalf("mkdir kimi transcript dir: %v", err)
+	}
+	writeLines(t, otherPath, `{"role":"user","content":"not this session"}`)
+
+	adapter := SessionLogAdapter{SearchPaths: []string{base}}
+	discovered := adapter.DiscoverTranscript("kimi/tmux-cli", workDir, "missing-session")
+	if discovered != "" {
+		t.Fatalf("DiscoverTranscript() = %q, want empty string when explicit Kimi session ID is missing", discovered)
+	}
+}
+
+func TestSessionLogAdapterDiscoverTranscriptKimiEmptyKeyFailsClosedWhenAmbiguous(t *testing.T) {
+	t.Parallel()
+
+	workDir := "/tmp/kimi-project"
+	base := t.TempDir()
+	workHash := kimiTestWorkDirHash(workDir)
+	firstPath := filepath.Join(base, "sessions", workHash, "first-session", "context.jsonl")
+	secondPath := filepath.Join(base, "sessions", workHash, "second-session", "context.jsonl")
+	if err := os.MkdirAll(filepath.Dir(firstPath), 0o755); err != nil {
+		t.Fatalf("mkdir first kimi transcript dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(secondPath), 0o755); err != nil {
+		t.Fatalf("mkdir second kimi transcript dir: %v", err)
+	}
+	writeLines(t, firstPath, `{"role":"user","content":"first"}`)
+	writeLines(t, secondPath, `{"role":"user","content":"second"}`)
+
+	adapter := SessionLogAdapter{SearchPaths: []string{base}}
+	discovered := adapter.DiscoverTranscript("kimi/tmux-cli", workDir, "")
+	if discovered != "" {
+		t.Fatalf("DiscoverTranscript() = %q, want empty string when Kimi workdir has multiple sessions and no key", discovered)
 	}
 }
 
@@ -509,4 +554,9 @@ func writeLines(t *testing.T, path string, lines ...string) {
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
+}
+
+func kimiTestWorkDirHash(workDir string) string {
+	sum := md5.Sum([]byte(workDir))
+	return hex.EncodeToString(sum[:])
 }

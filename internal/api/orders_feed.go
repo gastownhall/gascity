@@ -499,7 +499,7 @@ func orderTrackingTarget(orderDef orders.Order, found bool, bead beads.Bead) str
 			return orderDef.Formula
 		}
 	}
-	if containsString(bead.Labels, "exec") || containsString(bead.Labels, "exec-failed") {
+	if orderLabelsContainExec(bead.Labels) {
 		return "exec"
 	}
 	return "formula"
@@ -519,22 +519,38 @@ func orderTrackingType(orderDef orders.Order, found bool, bead beads.Bead) strin
 		}
 		return "formula"
 	}
-	if containsString(bead.Labels, "exec") || containsString(bead.Labels, "exec-failed") {
+	if orderLabelsContainExec(bead.Labels) {
 		return "exec"
 	}
 	return "formula"
 }
 
 func orderTrackingStatus(bead beads.Bead) string {
-	if strings.TrimSpace(bead.Status) != "closed" {
-		return "active"
-	}
-	if containsString(bead.Labels, "exec-failed") ||
+	if orderLabelsContainExecFailure(bead.Labels) ||
+		orderLabelsContainTriggerEnvFailure(bead.Labels) ||
 		containsString(bead.Labels, "wisp-canceled") ||
 		containsString(bead.Labels, "wisp-failed") {
 		return "failed"
 	}
+	if strings.TrimSpace(bead.Status) != "closed" {
+		return "active"
+	}
 	return "completed"
+}
+
+func orderLabelsContainExec(labels []string) bool {
+	return containsString(labels, "exec") ||
+		containsString(labels, "exec-failed") ||
+		containsString(labels, "exec-env-failed")
+}
+
+func orderLabelsContainExecFailure(labels []string) bool {
+	return containsString(labels, "exec-failed") ||
+		containsString(labels, "exec-env-failed")
+}
+
+func orderLabelsContainTriggerEnvFailure(labels []string) bool {
+	return containsString(labels, "trigger-env-failed")
 }
 
 // normalizeFeedLimit clamps a caller-supplied feed limit to a sensible

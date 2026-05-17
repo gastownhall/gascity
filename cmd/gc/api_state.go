@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,26 +35,27 @@ import (
 // Protected by an RWMutex for hot-reload: readers take RLock,
 // the controller loop takes Lock when updating cfg/sp/stores.
 type controllerState struct {
-	mu            sync.RWMutex
-	cfg           *config.City
-	sp            runtime.Provider
-	cacheCtx      context.Context
-	beadStores    map[string]beads.Store
-	cityBeadStore beads.Store   // city-level store for session beads
-	cityMailProv  mail.Provider // city-level mail provider (all mail is city-scoped)
-	eventProv     events.Provider
-	editor        *configedit.Editor
-	cityName      string
-	cityPath      string
-	version       string
-	startedAt     time.Time
-	ct            crashTracker  // nil if crash tracking disabled
-	pokeCh        chan struct{} // nil when poke is not available; triggers immediate reconciler tick
-	configDirty   *atomic.Bool  // optional dirty flag shared with the reconciler reload path
-	services      workspacesvc.Registry
-	extmsgSvc     *extmsg.Services
-	adapterReg    *extmsg.AdapterRegistry
-	updateMu      sync.Mutex // serializes rebuild+swap so stale reloads cannot overtake newer mutations
+	mu                     sync.RWMutex
+	cfg                    *config.City
+	sp                     runtime.Provider
+	cacheCtx               context.Context
+	beadStores             map[string]beads.Store
+	cityBeadStore          beads.Store   // city-level store for session beads
+	cityMailProv           mail.Provider // city-level mail provider (all mail is city-scoped)
+	eventProv              events.Provider
+	editor                 *configedit.Editor
+	cityName               string
+	cityPath               string
+	version                string
+	startedAt              time.Time
+	storeMetadataSignature string
+	ct                     crashTracker  // nil if crash tracking disabled
+	pokeCh                 chan struct{} // nil when poke is not available; triggers immediate reconciler tick
+	configDirty            *atomic.Bool  // optional dirty flag shared with the reconciler reload path
+	services               workspacesvc.Registry
+	extmsgSvc              *extmsg.Services
+	adapterReg             *extmsg.AdapterRegistry
+	updateMu               sync.Mutex // serializes rebuild+swap so stale reloads cannot overtake newer mutations
 
 	// True after an API config mutation refreshes controller state ahead of the
 	// runtime reload loop. Runtime reloads from older revisions are ignored
@@ -106,6 +108,7 @@ func newControllerState(
 		svc := extmsg.NewServices(cs.cityBeadStore)
 		cs.extmsgSvc = &svc
 	}
+	cs.storeMetadataSignature = storeMetadataSignature(cityPath, cfg)
 	return cs
 }
 
@@ -342,6 +345,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 
 	// Build new stores outside the lock (may do file I/O / subprocess spawns).
 	stores := cs.buildStores(cfg)
+	storeSignature := storeMetadataSignature(cs.cityPath, cfg)
 	// Reopen city-level store for session beads and mail.
 	cityStore, err := openCityStoreAt(cs.cityPath)
 	if err != nil {
@@ -364,6 +368,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	if cityStore != nil {
 		cs.cityBeadStore = cityStore
 		cs.cityMailProv = cityMailProv
+		cs.storeMetadataSignature = storeSignature
 	}
 	if extSvc != nil {
 		cs.extmsgSvc = extSvc
@@ -414,6 +419,7 @@ func (cs *controllerState) runtimeUpdateCanReuseCurrentStores(next *config.City)
 	cs.mu.RLock()
 	current := cs.cfg
 	cityStore := cs.cityBeadStore
+	storeSignature := cs.storeMetadataSignature
 	stores := make(map[string]beads.Store, len(cs.beadStores))
 	for name, store := range cs.beadStores {
 		stores[name] = store
@@ -421,6 +427,9 @@ func (cs *controllerState) runtimeUpdateCanReuseCurrentStores(next *config.City)
 	cs.mu.RUnlock()
 
 	if cityStore == nil || !sameStoreTopology(cs.cityPath, current, next) {
+		return false
+	}
+	if storeSignature != "" && storeSignature != storeMetadataSignature(cs.cityPath, next) {
 		return false
 	}
 	for _, rig := range next.Rigs {
@@ -432,6 +441,51 @@ func (cs *controllerState) runtimeUpdateCanReuseCurrentStores(next *config.City)
 		}
 	}
 	return true
+}
+
+func (cs *controllerState) storeMetadataChanged(next *config.City) bool {
+	cs.mu.RLock()
+	cityPath := cs.cityPath
+	storeSignature := cs.storeMetadataSignature
+	cs.mu.RUnlock()
+
+	return storeSignature != "" && storeSignature != storeMetadataSignature(cityPath, next)
+}
+
+func storeMetadataSignature(cityPath string, cfg *config.City) string {
+	if strings.TrimSpace(cityPath) == "" {
+		return ""
+	}
+	var b strings.Builder
+	appendScopeMetadataSignature := func(label, scopeRoot string) {
+		if strings.TrimSpace(scopeRoot) == "" {
+			scopeRoot = cityPath
+		}
+		scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
+		fmt.Fprintf(&b, "%s:%s:", label, filepath.Clean(scopeRoot))
+		data, err := os.ReadFile(scopeMetadataJSONPath(scopeRoot))
+		switch {
+		case err == nil:
+			sum := sha256.Sum256(data)
+			fmt.Fprintf(&b, "sha256=%x\n", sum)
+		case os.IsNotExist(err):
+			b.WriteString("missing\n")
+		default:
+			fmt.Fprintf(&b, "error=%T:%v\n", err, err)
+		}
+	}
+
+	appendScopeMetadataSignature("city", cityPath)
+	if cfg == nil {
+		return b.String()
+	}
+	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		appendScopeMetadataSignature("rig:"+rig.Name, rig.Path)
+	}
+	return b.String()
 }
 
 func (cs *controllerState) runtimeUpdateDropsPendingRigs(next *config.City) bool {
