@@ -3,14 +3,20 @@
 package beads
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	otellog "go.opentelemetry.io/otel/log"
+	otellogglobal "go.opentelemetry.io/otel/log/global"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 )
 
 // TestExecCommandRunnerTimesOut verifies the runner returns a "timed
@@ -52,6 +58,63 @@ func TestBDCommandTimeoutForReadCommands(t *testing.T) {
 func TestBDCommandTimeoutForGraphApply(t *testing.T) {
 	if got := bdCommandTimeoutFor("bd", []string{"create", "--graph", "/tmp/plan.json", "--json"}); got != bdGraphApplyCommandTimeout {
 		t.Fatalf("bd create --graph timeout = %s, want %s", got, bdGraphApplyCommandTimeout)
+	}
+}
+
+func TestExecCommandRunnerEmitsBDSlowForLongBDCommand(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh unavailable")
+	}
+
+	oldThreshold := bdSlowTelemetryThreshold
+	bdSlowTelemetryThreshold = 20 * time.Millisecond
+	t.Cleanup(func() { bdSlowTelemetryThreshold = oldThreshold })
+
+	exp := installBeadsRecordingLogExporter(t)
+	binDir := t.TempDir()
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+sleep 0.08
+printf '[]\n'
+`)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_ALIAS", "test-agent-1")
+
+	if _, err := ExecCommandRunner()(t.TempDir(), "bd", "list", "--token", "sk-secret"); err != nil {
+		t.Fatalf("ExecCommandRunner bd: %v", err)
+	}
+
+	rec := exp.waitForBody(t, "bd.slow", time.Second)
+	attrs := beadsRecordAttrs(*rec)
+	if got := beadsLogValueStringSlice(attrs["args"]); strings.Join(got, " ") != "list --token <redacted>" {
+		t.Fatalf("bd.slow args = %#v, want token redacted", got)
+	}
+	if got := attrs["agent_id"].AsString(); got != "test-agent-1" {
+		t.Fatalf("bd.slow agent_id = %q, want test-agent-1", got)
+	}
+}
+
+func TestExecCommandRunnerStopsBDSlowTimerForFastBDCommand(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh unavailable")
+	}
+
+	oldThreshold := bdSlowTelemetryThreshold
+	bdSlowTelemetryThreshold = 30 * time.Millisecond
+	t.Cleanup(func() { bdSlowTelemetryThreshold = oldThreshold })
+
+	exp := installBeadsRecordingLogExporter(t)
+	binDir := t.TempDir()
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '[]\n'
+`)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if _, err := ExecCommandRunner()(t.TempDir(), "bd", "list"); err != nil {
+		t.Fatalf("ExecCommandRunner bd: %v", err)
+	}
+	time.Sleep(2 * bdSlowTelemetryThreshold)
+	if got := exp.countByBody("bd.slow"); got != 0 {
+		t.Fatalf("bd.slow records = %d, want 0 for fast bd command", got)
 	}
 }
 
@@ -131,4 +194,101 @@ func waitForNonEmptyFile(t *testing.T, path string, timeout time.Duration) strin
 	}
 	t.Fatalf("child pid was not written within %s", timeout)
 	return ""
+}
+
+func writeExecutable(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatalf("write executable %s: %v", path, err)
+	}
+}
+
+type beadsRecordingLogExporter struct {
+	mu      sync.Mutex
+	records []sdklog.Record
+}
+
+func installBeadsRecordingLogExporter(t *testing.T) *beadsRecordingLogExporter {
+	t.Helper()
+	exp := &beadsRecordingLogExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exp)))
+	prev := otellogglobal.GetLoggerProvider()
+	otellogglobal.SetLoggerProvider(provider)
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		otellogglobal.SetLoggerProvider(prev)
+	})
+	return exp
+}
+
+func (e *beadsRecordingLogExporter) Export(_ context.Context, records []sdklog.Record) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, rec := range records {
+		e.records = append(e.records, rec.Clone())
+	}
+	return nil
+}
+
+func (e *beadsRecordingLogExporter) Shutdown(context.Context) error {
+	return nil
+}
+
+func (e *beadsRecordingLogExporter) ForceFlush(context.Context) error {
+	return nil
+}
+
+func (e *beadsRecordingLogExporter) waitForBody(t *testing.T, body string, timeout time.Duration) *sdklog.Record {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if rec := e.recordByBody(body); rec != nil {
+			return rec
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("log body %q did not arrive within %s", body, timeout)
+	return nil
+}
+
+func (e *beadsRecordingLogExporter) recordByBody(body string) *sdklog.Record {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for i := range e.records {
+		if e.records[i].Body().AsString() == body {
+			rec := e.records[i].Clone()
+			return &rec
+		}
+	}
+	return nil
+}
+
+func (e *beadsRecordingLogExporter) countByBody(body string) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var count int
+	for i := range e.records {
+		if e.records[i].Body().AsString() == body {
+			count++
+		}
+	}
+	return count
+}
+
+func beadsRecordAttrs(rec sdklog.Record) map[string]otellog.Value {
+	attrs := make(map[string]otellog.Value)
+	rec.WalkAttributes(func(kv otellog.KeyValue) bool {
+		attrs[kv.Key] = kv.Value
+		return true
+	})
+	return attrs
+}
+
+func beadsLogValueStringSlice(value otellog.Value) []string {
+	values := value.AsSlice()
+	out := make([]string, 0, len(values))
+	for _, item := range values {
+		out = append(out, item.AsString())
+	}
+	return out
 }

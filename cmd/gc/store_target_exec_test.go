@@ -15,6 +15,8 @@ import (
 
 func writeExecStoreCityConfig(t *testing.T, cityDir, cityName, cityPrefix string, rigs []config.Rig) {
 	t.Helper()
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, cityDir)
 
 	content := fmt.Sprintf("[workspace]\nname = %q\n", cityName)
 	if cityPrefix != "" {
@@ -162,6 +164,7 @@ func TestGcExecLifecycleInitProcessEnvDoesNotLeakAmbientBEADS_DIRForGcBeadsK8s(t
 		Prefix: "fe",
 	}})
 
+	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("BEADS_DIR", "/tmp/ambient-beads")
 	target := execStoreTarget{
 		ScopeRoot: rigDir,

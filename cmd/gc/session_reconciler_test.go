@@ -2524,6 +2524,159 @@ func TestReconcileSessionBeads_NoDriftWhenHashMatches(t *testing.T) {
 	}
 }
 
+// TestReconcilerSilentRebaselineOnLegacyHash enforces ga-s760.1 FR-1, FR-3:
+// when a session's stored core hash carries no version prefix (a session
+// started by a binary released before fingerprint versioning), the
+// reconciler must silently overwrite all four hash/breakdown metadata
+// fields with current versioned values. No drain, no SessionDraining
+// event.
+func TestReconcilerSilentRebaselineOnLegacyHash(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	rec := events.NewFake()
+	env.rec = rec
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	// Legacy bare-hex values as written by the pre-versioning binary.
+	legacyCore := strings.Repeat("a", 64)
+	legacyLive := strings.Repeat("b", 64)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": legacyCore,
+		"started_live_hash":   legacyLive,
+		"live_hash":           legacyLive,
+		"core_hash_breakdown": `{"Command":"legacy","Env":"legacy"}`,
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("expected no drain on legacy hash silent rebaseline, got %+v; stderr=%s", ds, env.stderr.String())
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionDraining {
+			t.Errorf("unexpected SessionDraining event recorded for silent rebaseline: %+v", e)
+		}
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	expectedCore := runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"})
+	expectedLive := runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"})
+	if got.Metadata["started_config_hash"] != expectedCore {
+		t.Errorf("started_config_hash = %q, want rebaseline to %q", got.Metadata["started_config_hash"], expectedCore)
+	}
+	if got.Metadata["started_live_hash"] != expectedLive {
+		t.Errorf("started_live_hash = %q, want rebaseline to %q", got.Metadata["started_live_hash"], expectedLive)
+	}
+	if got.Metadata["live_hash"] != expectedLive {
+		t.Errorf("live_hash = %q, want rebaseline to %q", got.Metadata["live_hash"], expectedLive)
+	}
+	if got.Metadata["core_hash_breakdown"] == `{"Command":"legacy","Env":"legacy"}` {
+		t.Errorf("core_hash_breakdown was not rebaselined, still: %q", got.Metadata["core_hash_breakdown"])
+	}
+	if got.Metadata["core_hash_breakdown"] == "" {
+		t.Errorf("core_hash_breakdown was cleared but should be rebaselined to current breakdown")
+	}
+}
+
+// TestReconcilerSilentRebaselineOnVersionMismatch enforces ga-s760.1 FR-2,
+// FR-3: when a session's stored core hash carries a version prefix from a
+// different binary (e.g., v0:), the reconciler must silently rebaseline
+// all four hash/breakdown fields. No drain, no SessionDraining event.
+func TestReconcilerSilentRebaselineOnVersionMismatch(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	rec := events.NewFake()
+	env.rec = rec
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	// Version-mismatched stored hashes (v0: prefix is from an older binary).
+	mismatchCore := "v0:" + strings.Repeat("a", 64)
+	mismatchLive := "v0:" + strings.Repeat("b", 64)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": mismatchCore,
+		"started_live_hash":   mismatchLive,
+		"live_hash":           mismatchLive,
+		"core_hash_breakdown": `{"version":"v0","fields":{"Command":"old"}}`,
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("expected no drain on version-mismatch silent rebaseline, got %+v; stderr=%s", ds, env.stderr.String())
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionDraining {
+			t.Errorf("unexpected SessionDraining event recorded for silent rebaseline: %+v", e)
+		}
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	expectedCore := runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"})
+	expectedLive := runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"})
+	if got.Metadata["started_config_hash"] != expectedCore {
+		t.Errorf("started_config_hash = %q, want rebaseline to %q", got.Metadata["started_config_hash"], expectedCore)
+	}
+	if got.Metadata["started_live_hash"] != expectedLive {
+		t.Errorf("started_live_hash = %q, want rebaseline to %q", got.Metadata["started_live_hash"], expectedLive)
+	}
+	if got.Metadata["live_hash"] != expectedLive {
+		t.Errorf("live_hash = %q, want rebaseline to %q", got.Metadata["live_hash"], expectedLive)
+	}
+	if got.Metadata["core_hash_breakdown"] == `{"version":"v0","fields":{"Command":"old"}}` {
+		t.Errorf("core_hash_breakdown was not rebaselined, still: %q", got.Metadata["core_hash_breakdown"])
+	}
+	if got.Metadata["core_hash_breakdown"] == "" {
+		t.Errorf("core_hash_breakdown was cleared but should be rebaselined to current breakdown")
+	}
+}
+
+// TestReconcilerStillDrainsOnSameVersionRealDrift enforces ga-s760.1 FR-4:
+// the silent rebaseline path must NOT swallow real drift. When stored and
+// current hashes share the current version prefix but differ in the hex
+// tail, the reconciler still drains the session. This is the regression
+// guard against the rebaseline branch over-applying.
+func TestReconcilerStillDrainsOnSameVersionRealDrift(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	// Desired state has a different command than the bead.
+	env.addRunningWorkerDesiredWithNewConfig()
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	// Stored hash carries the current version prefix but a fabricated hex
+	// that differs from whatever the desired-state config currently hashes
+	// to. The shared prefix means the version gate sees same-version, so
+	// the drift handling proceeds to compare the hex tails and drain.
+	storedCore := runtime.FingerprintVersion + ":" + strings.Repeat("c", 64)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": storedCore,
+	})
+
+	currentHash := runtime.CoreFingerprint(runtime.Config{Command: "new-cmd"})
+	if storedCore == currentHash {
+		t.Fatalf("test setup: stored hash %q should differ from current %q", storedCore, currentHash)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatalf("expected drain to be initiated for same-version real drift (session.ID=%q, stderr=%s)", session.ID, env.stderr.String())
+	}
+	if ds.reason != "config-drift" {
+		t.Errorf("drain reason = %q, want %q", ds.reason, "config-drift")
+	}
+}
+
 // Regression test for #127: a freshly created session can be drained for
 // config-drift shortly after wake because the reconciler's drift check runs
 // before started_config_hash is written. The fix skips drift detection until

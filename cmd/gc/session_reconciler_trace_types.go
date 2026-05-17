@@ -166,6 +166,15 @@ const (
 	TraceOutcomeStartCandidate          TraceOutcomeCode = "start_candidate"
 	TraceOutcomeRetry                   TraceOutcomeCode = "retry"
 	TraceOutcomeCancel                  TraceOutcomeCode = "cancel"
+	// TraceOutcomeRebaselinedUnversioned marks a silent rebaseline of a
+	// stored fingerprint hash that carried no version prefix (legacy
+	// pre-versioning binary or otherwise malformed). No drain, no event.
+	TraceOutcomeRebaselinedUnversioned TraceOutcomeCode = "rebaselined_unversioned"
+	// TraceOutcomeRebaselinedVersionMismatch marks a silent rebaseline of
+	// a stored fingerprint hash whose v<digits>: prefix did not match the
+	// current FingerprintVersion (older or future binary). No drain, no
+	// event.
+	TraceOutcomeRebaselinedVersionMismatch TraceOutcomeCode = "rebaselined_version_mismatch"
 )
 
 type TraceCompletionStatus string

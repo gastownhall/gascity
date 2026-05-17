@@ -941,8 +941,184 @@ func TestCmdEventsValidatesLocalFlagsBeforeAPIDiscovery(t *testing.T) {
 	}
 }
 
+func TestDoEventsRotateGoldenPathPrintsJSONL(t *testing.T) {
+	server := newEventsTestServer(t, testEventRoutes{
+		cityRotate: func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				t.Fatalf("method = %s, want POST", r.Method)
+			}
+			if got := r.Header.Get("X-GC-Request"); got == "" {
+				t.Fatal("missing X-GC-Request header")
+			}
+			if got := r.URL.Query().Get("wait"); got != "" {
+				t.Fatalf("wait query = %q, want absent", got)
+			}
+			writeJSONResponse(t, w, eventRotateTestResponse("pending"))
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsRotate(eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsRotate = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	want := `{"rotated":true,"archive":{"path":"/tmp/events.jsonl.archive-20260505T035000Z-seq-1234-5678.gz","first_seq":1234,"last_seq":5678,"compression_status":"pending"},"anchor_event":{"seq":5679,"type":"events.rotated","ts":"2026-05-05T03:50:00.123456Z"}}` + "\n"
+	if stdout.String() != want {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestDoEventsRotateEmptyActiveLogNoOp(t *testing.T) {
+	server := newEventsTestServer(t, testEventRoutes{
+		cityRotate: func(w http.ResponseWriter, _ *http.Request) {
+			writeJSONResponse(t, w, eventRotateNoopTestResponse())
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsRotate(eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsRotate = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	want := `{"rotated":false,"reason":"active log is empty"}` + "\n"
+	if stdout.String() != want {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
+func TestDoEventsRotateWaitRequestsServerSideWait(t *testing.T) {
+	server := newEventsTestServer(t, testEventRoutes{
+		cityRotate: func(w http.ResponseWriter, r *http.Request) {
+			if got := r.URL.Query().Get("wait"); got != "true" {
+				t.Fatalf("wait query = %q, want true", got)
+			}
+			writeJSONResponse(t, w, eventRotateTestResponse("complete"))
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsRotate(eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsRotate --wait = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"compression_status":"complete"`) {
+		t.Fatalf("stdout = %q, want complete compression status", stdout.String())
+	}
+}
+
+func TestDoEventsRotateUnsupportedProviderErrorIsPinned(t *testing.T) {
+	server := newEventsTestServer(t, testEventRoutes{
+		cityRotate: func(w http.ResponseWriter, _ *http.Request) {
+			writeProblemResponseStatus(t, w, http.StatusMethodNotAllowed, map[string]any{
+				"title":  "Method Not Allowed",
+				"status": http.StatusMethodNotAllowed,
+				"detail": "rotation is only supported for the file-backed events provider; current provider is 'exec:my-script'",
+			})
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsRotate(eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doEventsRotate = %d, want 1", code)
+	}
+	want := "gc events: rotate is only supported for the file-backed events provider; current provider is 'exec:my-script'\n"
+	if stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+}
+
+func TestDoEventsRotateRequiresRunningSupervisor(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := doEventsRotate(eventsAPIScope{localOnly: true, cityName: "mc-city"}, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doEventsRotate localOnly = %d, want 1", code)
+	}
+	want := "gc events: rotate requires a running supervisor; start it with 'gc supervisor start'\n"
+	if stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+func TestDoEventsRotateCityNotFoundErrorIsPinned(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/city/missing-city/events/rotate" {
+			t.Fatalf("path = %s, want missing-city rotate path", r.URL.Path)
+		}
+		writeProblemResponseStatus(t, w, http.StatusNotFound, map[string]any{
+			"title":  "Not Found",
+			"status": http.StatusNotFound,
+			"detail": gcapi.CityNotFoundOrNotRunningDetail("missing-city"),
+		})
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsRotate(eventsAPIScope{apiURL: server.URL, cityName: "missing-city"}, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doEventsRotate missing city = %d, want 1", code)
+	}
+	want := "gc events: city 'missing-city' not found; run 'gc supervisor cities' to list registered cities\n"
+	if stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+func TestDoEventsRotateWaitTimeoutIsPinned(t *testing.T) {
+	server := newEventsTestServer(t, testEventRoutes{
+		cityRotate: func(w http.ResponseWriter, _ *http.Request) {
+			writeJSONResponse(t, w, eventRotateTestResponse("pending"))
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsRotate(eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doEventsRotate wait pending = %d, want 1", code)
+	}
+	want := "gc events: rotation succeeded but compression did not complete within 30s; archive_path=/tmp/events.jsonl.archive-20260505T035000Z-seq-1234-5678.gz; check disk space and retry\n"
+	if stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+func TestEventsRotateHelpIncludesFlagsAndExample(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := newRootCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"events", "rotate", "--help"})
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("events rotate --help: %v; stderr=%s", err, stderr.String())
+	}
+	help := stdout.String()
+	for _, want := range []string{
+		"gc events rotate",
+		"--api",
+		"--city",
+		"--wait",
+		"gc events rotate --wait",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("help missing %q:\n%s", want, help)
+		}
+	}
+}
+
 type testEventRoutes struct {
 	cityEvents       func(http.ResponseWriter, *http.Request)
+	cityRotate       func(http.ResponseWriter, *http.Request)
 	cityStream       func(http.ResponseWriter, *http.Request)
 	supervisorEvents func(http.ResponseWriter, *http.Request)
 	supervisorStream func(http.ResponseWriter, *http.Request)
@@ -957,6 +1133,11 @@ func newEventsTestServer(t *testing.T, routes testEventRoutes) *httptest.Server 
 				t.Fatalf("unexpected city events request: %s", r.URL.String())
 			}
 			routes.cityEvents(w, r)
+		case "/v0/city/mc-city/events/rotate":
+			if routes.cityRotate == nil {
+				t.Fatalf("unexpected city rotate request: %s", r.URL.String())
+			}
+			routes.cityRotate(w, r)
 		case "/v0/city/mc-city/events/stream":
 			if routes.cityStream == nil {
 				t.Fatalf("unexpected city stream request: %s", r.URL.String())
@@ -976,6 +1157,30 @@ func newEventsTestServer(t *testing.T, routes testEventRoutes) *httptest.Server 
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 	}))
+}
+
+func eventRotateTestResponse(status string) cliEventsRotateResponse {
+	return cliEventsRotateResponse{
+		Rotated: true,
+		Archive: &cliEventsRotateArchive{
+			Path:              "/tmp/events.jsonl.archive-20260505T035000Z-seq-1234-5678.gz",
+			FirstSeq:          1234,
+			LastSeq:           5678,
+			CompressionStatus: status,
+		},
+		AnchorEvent: &cliEventsRotateAnchor{
+			Seq:  5679,
+			Type: events.EventsRotated,
+			Ts:   time.Date(2026, 5, 5, 3, 50, 0, 123456000, time.UTC),
+		},
+	}
+}
+
+func eventRotateNoopTestResponse() cliEventsRotateResponse {
+	return cliEventsRotateResponse{
+		Rotated: false,
+		Reason:  "active log is empty",
+	}
 }
 
 func writeJSONResponse(t *testing.T, w http.ResponseWriter, body any) {
@@ -1022,8 +1227,13 @@ func supervisorEventsListResponse(t *testing.T, items []cliWireTaggedEvent) genc
 
 func writeProblemResponse(t *testing.T, w http.ResponseWriter, body any) {
 	t.Helper()
+	writeProblemResponseStatus(t, w, http.StatusNotFound, body)
+}
+
+func writeProblemResponseStatus(t *testing.T, w http.ResponseWriter, status int, body any) {
+	t.Helper()
 	w.Header().Set("Content-Type", "application/problem+json")
-	w.WriteHeader(http.StatusNotFound)
+	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		t.Fatalf("encode problem response: %v", err)
 	}

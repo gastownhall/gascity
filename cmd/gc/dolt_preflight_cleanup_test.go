@@ -172,7 +172,7 @@ func TestUnixSocketInodesForPathHonorsCancelledContext(t *testing.T) {
 }
 
 func TestFileOpenedByAnyProcessFromProcDetectsBoundSocketFromUnixTable(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "dolt.sock")
+	socketPath := shortUnixSocketPath(t)
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("net.Listen(unix): %v", err)
@@ -194,7 +194,7 @@ func TestFileOpenedByAnyProcessFromProcDetectsBoundSocketFromUnixTable(t *testin
 }
 
 func TestFileOpenedByAnyProcessFromProcTreatsUnlistedSocketAsClosed(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "dolt.sock")
+	socketPath := shortUnixSocketPath(t)
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("net.Listen(unix): %v", err)
@@ -216,7 +216,7 @@ func TestFileOpenedByAnyProcessFromProcTreatsUnlistedSocketAsClosed(t *testing.T
 }
 
 func TestFileOpenedByAnyProcessFromProcFallsBackWhenUnixTableUnreadable(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "dolt.sock")
+	socketPath := shortUnixSocketPath(t)
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("net.Listen(unix): %v", err)
@@ -271,4 +271,9 @@ func withManagedDoltProcPaths(t *testing.T, procDir, unixSocketTable string) {
 		managedDoltProcDir = oldProcDir
 		managedDoltUnixSocketTable = oldUnixSocketTable
 	})
+}
+
+func shortUnixSocketPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(shortSocketTempDir(t, "gc-sock-"), "d.sock")
 }

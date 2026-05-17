@@ -30,7 +30,13 @@ print_failure_details() {
 
   echo "observable go test: failure details from $log" >&2
 
-  mapfile -t failed_tests < <(jq -r 'select(.Action == "fail" and .Test != null) | .Test' "$log" | sort -u)
+  # Portable across bash 3.2 (macOS default) and bash 4+. mapfile/readarray
+  # are bash 4+ only — using them on macOS runners exits 127 (command not
+  # found) and fails the entire Mac/make test job.
+  failed_tests=()
+  while IFS= read -r failed_test_name; do
+    failed_tests+=("$failed_test_name")
+  done < <(jq -r 'select(.Action == "fail" and .Test != null) | .Test' "$log" | sort -u)
   if [ "${#failed_tests[@]}" -gt 0 ]; then
     for test_name in "${failed_tests[@]}"; do
       echo "observable go test: failed test: $test_name" >&2

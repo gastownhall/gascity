@@ -43,6 +43,73 @@ func TestCachingStoreRunReconciliationDetectsLabelContentChanges(t *testing.T) {
 	}
 }
 
+func TestCachingStoreRunReconciliationSkipLabelsSuppressesLabelOnlyUpdates(t *testing.T) {
+	t.Parallel()
+
+	backing := &skipLabelsRecordingStore{Store: NewMemStore()}
+	bead, err := backing.Create(Bead{Title: "Task", Labels: []string{"foo"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var events []string
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
+		events = append(events, eventType+":"+beadID)
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if got := backing.lastListQuery(t); !got.SkipLabels {
+		t.Fatalf("Prime List query SkipLabels = false, want true")
+	}
+
+	backing.dropLabels = true
+	cache.runReconciliation()
+	if got := backing.lastListQuery(t); !got.SkipLabels {
+		t.Fatalf("reconcile List query SkipLabels = false, want true")
+	}
+	if len(events) != 0 {
+		t.Fatalf("events after label-only reconcile = %v, want none", events)
+	}
+
+	status := "in_progress"
+	if err := backing.Update(bead.ID, UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update backing status: %v", err)
+	}
+	cache.runReconciliation()
+	if len(events) != 1 || events[0] != "bead.updated:"+bead.ID {
+		t.Fatalf("events after status reconcile = %v, want [bead.updated:%s]", events, bead.ID)
+	}
+}
+
+type skipLabelsRecordingStore struct {
+	Store
+	dropLabels  bool
+	listQueries []ListQuery
+}
+
+func (s *skipLabelsRecordingStore) List(query ListQuery) ([]Bead, error) {
+	s.listQueries = append(s.listQueries, query)
+	rows, err := s.Store.List(query)
+	if err != nil || !query.SkipLabels || !s.dropLabels {
+		return rows, err
+	}
+	out := make([]Bead, len(rows))
+	for i, row := range rows {
+		out[i] = cloneBead(row)
+		out[i].Labels = nil
+	}
+	return out, nil
+}
+
+func (s *skipLabelsRecordingStore) lastListQuery(t *testing.T) ListQuery {
+	t.Helper()
+	if len(s.listQueries) == 0 {
+		t.Fatal("no List query recorded")
+	}
+	return s.listQueries[len(s.listQueries)-1]
+}
+
 func TestCachingStoreListInProgressUsesCacheByDefault(t *testing.T) {
 	t.Parallel()
 
@@ -898,6 +965,55 @@ func TestCachingStoreRunReconciliationRecordsProblemAndDegrades(t *testing.T) {
 	}
 	if !strings.Contains(stats.LastProblem, "reconcile cache") {
 		t.Fatalf("LastProblem = %q, want reconcile context", stats.LastProblem)
+	}
+}
+
+func TestCachingStoreRunReconciliationSuppressesDuplicateProblemLogs(t *testing.T) {
+	t.Parallel()
+
+	backing := &listFailingStore{Store: NewMemStore()}
+	if _, err := backing.Create(Bead{Title: "Task"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	var logs []string
+	cache.problemf = func(msg string) {
+		logs = append(logs, msg)
+	}
+
+	backing.failList = true
+	for i := 0; i < maxCacheSyncFailures; i++ {
+		cache.runReconciliation()
+	}
+
+	stats := cache.Stats()
+	if stats.ProblemCount != int64(maxCacheSyncFailures) {
+		t.Fatalf("ProblemCount = %d, want %d", stats.ProblemCount, maxCacheSyncFailures)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("logged %d problem lines, want 1: %#v", len(logs), logs)
+	}
+	if delay := cache.nextReconcileDelay(time.Now()); delay <= cacheReconcilePollInterval {
+		t.Fatalf("nextReconcileDelay = %v, want sustained-failure backoff above poll interval", delay)
+	}
+
+	cache.mu.Lock()
+	state := cache.problemLog[stats.LastProblem]
+	state.lastAt = time.Now().Add(-cacheProblemLogWindow)
+	cache.problemLog[stats.LastProblem] = state
+	cache.mu.Unlock()
+
+	cache.runReconciliation()
+	if len(logs) != 2 {
+		t.Fatalf("logged %d problem lines after window expiry, want 2: %#v", len(logs), logs)
+	}
+	if !strings.Contains(logs[1], "suppressed 4 duplicate logs") {
+		t.Fatalf("second problem log = %q, want suppressed duplicate count", logs[1])
 	}
 }
 

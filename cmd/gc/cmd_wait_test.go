@@ -507,6 +507,71 @@ func TestPrepareWaitWakeState_MarksDepsReady(t *testing.T) {
 	}
 }
 
+func TestPrepareWaitWakeState_CancelsWaitForClosedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "1",
+			"provider":           "codex",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if err := store.Close(sessionBead.ID); err != nil {
+		t.Fatalf("close session bead: %v", err)
+	}
+	dep, err := store.Create(beads.Bead{Title: "dep"})
+	if err != nil {
+		t.Fatalf("create dep bead: %v", err)
+	}
+	if err := store.Close(dep.ID); err != nil {
+		t.Fatalf("close dep bead: %v", err)
+	}
+	waitBead, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"dep_ids":          dep.ID,
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+
+	readyWaitSet, err := prepareWaitWakeState(store, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("prepareWaitWakeState: %v", err)
+	}
+	if readyWaitSet[sessionBead.ID] {
+		t.Fatalf("readyWaitSet unexpectedly contains closed session %s", sessionBead.ID)
+	}
+	updated, err := store.Get(waitBead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(wait): %v", err)
+	}
+	if updated.Status != "closed" {
+		t.Fatalf("wait status = %q, want closed", updated.Status)
+	}
+	if got := updated.Metadata["state"]; got != waitStateCanceled {
+		t.Fatalf("wait state = %q, want %q", got, waitStateCanceled)
+	}
+	if got := updated.Metadata["last_error"]; got != "session-closed" {
+		t.Fatalf("wait last_error = %q, want session-closed", got)
+	}
+}
+
 func TestPrepareWaitWakeState_FailsMissingDependencyWait(t *testing.T) {
 	store := beads.NewMemStore()
 	sessionBead, err := store.Create(beads.Bead{

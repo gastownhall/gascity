@@ -107,6 +107,18 @@ func isLegacyArchiveBasename(name string) bool {
 	return legacyArchiveRE.MatchString(name)
 }
 
+func parseLegacyArchiveBasename(name string) (time.Time, error) {
+	if !isLegacyArchiveBasename(name) {
+		return time.Time{}, fmt.Errorf("not a legacy events archive: %q", name)
+	}
+	day := strings.TrimSuffix(strings.TrimPrefix(name, archivePrefix), ".gz")
+	ts, err := time.Parse("20060102", day)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("archive %q: parsing legacy date: %w", name, err)
+	}
+	return ts.UTC(), nil
+}
+
 // archiveOverlapsFilter reports whether the archive's seq range can
 // possibly contain events that satisfy filter. The skip-fast read path
 // uses this to avoid gunzipping archives whose entire window has

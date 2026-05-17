@@ -1931,6 +1931,33 @@ func TestCompilePersonalWorkSkipGeminiFiltersExpansionLanes(t *testing.T) {
 	}
 }
 
+func TestCompilePersonalWorkHappyPathDoesNotAddRetryWrappers(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	writeReviewWorkflowFixtures(t, dir)
+
+	recipe, err := Compile(context.Background(), "mol-personal-work-v2", []string{dir}, map[string]string{
+		"issue":         "GC-1",
+		"base_branch":   "main",
+		"skip_gemini":   "true",
+		"setup_command": "true",
+		"test_command":  "true",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	for _, step := range recipe.Steps {
+		if got := step.Metadata["gc.kind"]; got == "retry" {
+			t.Fatalf("personal-work happy path should not add retry control step %q", step.ID)
+		}
+		if strings.Contains(step.ID, ".attempt.") {
+			t.Fatalf("personal-work happy path should not add retry attempt step %q", step.ID)
+		}
+	}
+}
+
 func TestCompileReviewWorkflowAnnotatesNestedReviewerRetries(t *testing.T) {
 	enableV2ForTest(t)
 

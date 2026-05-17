@@ -454,6 +454,7 @@ func TestCityRuntimeEnsureManagedDoltPublishedForTickLogsOwnershipError(t *testi
 }
 
 func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	orderEvents := &orderedRuntimeEvents{}
@@ -462,8 +463,10 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T)
 		events: orderEvents,
 	}
 	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
 	cr := &CityRuntime{
-		cityPath: t.TempDir(),
+		cityPath: cityPath,
 		cityName: "test-city",
 		cfg:      &config.City{},
 		sp:       sp,
@@ -504,9 +507,11 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T)
 }
 
 func TestCityRuntimeTickPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	cityPath := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityPath)
 	orderEvents := &orderedRuntimeEvents{}
 	store := &managedDoltPreflightOrderStore{
 		Store:  beads.NewMemStore(),
@@ -634,6 +639,7 @@ func TestCityRuntimeRunStartupPreflightsManagedDoltBeforeSessionSnapshot(t *test
 }
 
 func TestCityRuntimeControlDispatcherPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	orderEvents := &orderedRuntimeEvents{}
@@ -642,8 +648,10 @@ func TestCityRuntimeControlDispatcherPreflightsManagedDoltBeforeSessionSnapshot(
 		events: orderEvents,
 	}
 	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
 	cr := &CityRuntime{
-		cityPath: "test-city",
+		cityPath: cityPath,
 		cityName: "test-city",
 		cfg: &config.City{Agents: []config.Agent{
 			{Name: config.ControlDispatcherAgentName},
@@ -680,10 +688,12 @@ func TestCityRuntimeControlDispatcherPreflightsManagedDoltBeforeSessionSnapshot(
 }
 
 func TestNewCityRuntimePreflightsManagedDoltPublicationBeforeStartupStoreWork(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	healthCalls := 0
 	cityPath := t.TempDir()
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
 	sp := runtime.NewFake()
 	_ = newCityRuntime(CityRuntimeParams{
 		CityPath: cityPath,
@@ -3524,6 +3534,56 @@ func TestCityRuntimeReloadSameRevisionIsNoOp(t *testing.T) {
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q, want empty for same-revision reload", stdout.String())
+	}
+}
+
+func TestCityRuntimeReloadSameRevisionRefreshesStoresWhenMetadataChanges(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	writeBackendMetadata(t, cityPath, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`)
+
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+	sp := runtime.NewFake()
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	oldStore := cs.CityBeadStore()
+	if oldStore == nil {
+		t.Fatal("precondition: controller state city store is nil")
+	}
+
+	var stdout bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		ConfigRev: configRev,
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: io.Discard,
+	})
+	cr.setControllerState(cs)
+
+	writeBackendMetadata(t, cityPath, `{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`)
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeApplied)
+	}
+	if got := cs.CityBeadStore(); got == oldStore {
+		t.Fatal("same-revision reload reused stale city store after metadata backend changed")
+	}
+	if cr.configRev != configRev {
+		t.Fatalf("configRev = %q, want same revision %q", cr.configRev, configRev)
+	}
+	if lastProviderName != "fake" {
+		t.Fatalf("lastProviderName = %q, want fake", lastProviderName)
 	}
 }
 

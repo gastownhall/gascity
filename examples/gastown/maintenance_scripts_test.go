@@ -1178,6 +1178,276 @@ exit 0
 	}
 }
 
+func TestReaperPrunesClosedSessionBeadsWithBdPrune(t *testing.T) {
+	cityDir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(cityDir); err == nil {
+		cityDir = resolved
+	}
+	writeCityBeadsMetadata(t, cityDir, "beads")
+	canonicalCityDir, err := filepath.EvalSymlinks(cityDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(city dir): %v", err)
+	}
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"BD_CALL_LOG":      bdLog,
+		"BD_PRUNE_COUNT":   "7",
+		"DOLT_ARGS_LOG":    doltLog,
+		"DOLT_DBS":         "beads",
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	bdLogText := string(bdData)
+	wantArgs := "args=prune --pattern gm-* --older-than 720h --force --json"
+	if !strings.Contains(bdLogText, wantArgs) {
+		t.Fatalf("reaper did not call bd prune with the gm session-bead retention args %q:\n%s", wantArgs, bdLogText)
+	}
+	if got := strings.Count(bdLogText, "args=prune "); got != 1 {
+		t.Fatalf("reaper called bd prune %d times, want once:\n%s", got, bdLogText)
+	}
+	if !strings.Contains(bdLogText, "pwd="+canonicalCityDir) {
+		t.Fatalf("reaper did not run bd prune from the city dir:\n%s", bdLogText)
+	}
+	if !strings.Contains(bdLogText, "beads="+filepath.Join(canonicalCityDir, ".beads")) {
+		t.Fatalf("reaper did not scope bd prune to the city beads dir:\n%s", bdLogText)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "sessions-pruned:7") {
+		t.Fatalf("reaper summary did not report pruned sessions:\n%s", gcData)
+	}
+}
+
+func TestReaperSessionPruneDryRunOmitsForce(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "beads")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"BD_CALL_LOG":                 bdLog,
+		"BD_PRUNE_COUNT":              "3",
+		"DOLT_ARGS_LOG":               doltLog,
+		"DOLT_DBS":                    "beads",
+		"GC_CALL_LOG":                 gcLog,
+		"GC_CITY":                     cityDir,
+		"GC_CITY_PATH":                cityDir,
+		"GC_DOLT_HOST":                "127.0.0.1",
+		"GC_DOLT_PORT":                "3307",
+		"GC_DOLT_USER":                "root",
+		"GC_DOLT_PASSWORD":            "",
+		"GC_REAPER_DRY_RUN":           "1",
+		"GC_REAPER_SESSION_PURGE_AGE": "24h",
+		"PATH":                        binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	bdLogText := string(bdData)
+	wantArgs := "args=prune --pattern gm-* --older-than 24h --json"
+	if !strings.Contains(bdLogText, wantArgs) {
+		t.Fatalf("reaper dry-run did not call bd prune with preview args %q:\n%s", wantArgs, bdLogText)
+	}
+	if strings.Contains(bdLogText, "--force") {
+		t.Fatalf("reaper dry-run passed --force to bd prune:\n%s", bdLogText)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "sessions-pruned:3") || !strings.Contains(gcLogText, "(dry run)") {
+		t.Fatalf("reaper dry-run summary did not report session prune preview count:\n%s", gcLogText)
+	}
+}
+
+func TestReaperSessionPruneAnomalyEscalates(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "beads")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"BD_CALL_LOG":      bdLog,
+		"BD_PRUNE_COUNT":   "1500",
+		"DOLT_ARGS_LOG":    doltLog,
+		"DOLT_DBS":         "beads",
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
+		t.Fatalf("reaper did not send escalation mail for session-prune anomaly:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "gm: 1500 closed session beads pruned in one run (threshold: 1000)") {
+		t.Fatalf("reaper escalation did not include session-prune anomaly:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "sessions-pruned:1500") {
+		t.Fatalf("reaper summary did not include anomalous session-prune count:\n%s", gcLogText)
+	}
+}
+
+func TestReaperSessionPruneMissingBdDegradesToZero(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "beads")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"DOLT_DBS":         "beads",
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + "/usr/bin:/bin",
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if strings.Contains(gcLogText, "ESCALATION") {
+		t.Fatalf("reaper escalated missing bd binary instead of degrading:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "sessions-pruned:0") {
+		t.Fatalf("reaper summary did not report zero pruned sessions without bd:\n%s", gcLogText)
+	}
+}
+
+func TestReaperSessionPruneRunsWhenNoDoltDatabases(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "beads")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\n'
+    ;;
+esac
+exit 0
+`)
+	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"BD_CALL_LOG":       bdLog,
+		"BD_PRUNE_COUNT":    "0",
+		"DOLT_ARGS_LOG":     doltLog,
+		"GC_CALL_LOG":       gcLog,
+		"GC_CITY":           cityDir,
+		"GC_CITY_PATH":      cityDir,
+		"GC_DOLT_HOST":      "127.0.0.1",
+		"GC_DOLT_PORT":      "3307",
+		"GC_DOLT_USER":      "root",
+		"GC_DOLT_PASSWORD":  "",
+		"GC_REAPER_DRY_RUN": "1",
+		"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if !strings.Contains(string(bdData), "args=prune --pattern gm-* --older-than 720h --json") {
+		t.Fatalf("reaper did not run session prune when Dolt had no databases:\n%s", bdData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "sessions-pruned:0") {
+		t.Fatalf("reaper summary did not report zero session prune count without Dolt databases:\n%s", gcData)
+	}
+}
+
 func TestReaperClosesStaleWispChainsToFixpoint(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -3161,6 +3431,19 @@ case "$*" in
 *"SELECT id"*)
   printf 'id\n'
   ;;
+esac
+exit 0
+`)
+}
+
+func writeMaintenanceBdStub(t *testing.T, path string) {
+	t.Helper()
+	writeExecutable(t, path, `#!/bin/sh
+printf 'pwd=%s beads=%s args=%s\n' "$PWD" "${BEADS_DIR:-}" "$*" >> "$BD_CALL_LOG"
+case "$1" in
+  prune)
+    printf '{"pruned_count":%s}\n' "${BD_PRUNE_COUNT:-0}"
+    ;;
 esac
 exit 0
 `)

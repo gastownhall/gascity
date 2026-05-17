@@ -218,14 +218,10 @@ func WakeSession(store beads.Store, sessionBead beads.Bead, now time.Time) ([]st
 	}
 	state := State(strings.TrimSpace(sessionBead.Metadata["state"]))
 	batch := ClearWakeBlockersPatch(state, sessionBead.Metadata["sleep_reason"])
-	if state == StateSuspended || state == StateDrained {
-		for k, v := range RequestWakePatch(string(WakeCauseExplicit), now) {
-			batch[k] = v
-		}
+	for k, v := range RequestExplicitWakePatch(string(WakeCauseExplicit), now) {
+		batch[k] = v
 	}
 	if view.BaseState == BaseStateArchived && view.ContinuityEligible {
-		// RequestWakePatch clears wake blockers before claiming the start.
-		batch = RequestWakePatch(string(WakeCauseExplicit), now)
 		batch["archived_at"] = ""
 		batch["continuity_eligible"] = "true"
 	}

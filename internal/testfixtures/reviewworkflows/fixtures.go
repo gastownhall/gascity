@@ -404,20 +404,12 @@ id = "load-context"
 title = "Load context"
 description = "Inspect the assigned work bead."
 
-[steps.retry]
-max_attempts = 1
-on_exhausted = "hard_fail"
-
 [[steps]]
 id = "workspace-setup"
 title = "Prepare worktree"
 needs = ["load-context"]
 description = "Prepare worktree metadata for the workflow."
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "setup", "gc.on_fail" = "abort_scope" }
-
-[steps.retry]
-max_attempts = 1
-on_exhausted = "hard_fail"
 
 [[steps]]
 id = "design-review-loop"
@@ -445,20 +437,12 @@ title = "Apply design changes"
 needs = ["design-review-pipeline"]
 description = "Apply design review feedback and mark the Check verdict."
 
-[steps.children.retry]
-max_attempts = 1
-on_exhausted = "hard_fail"
-
 [[steps]]
 id = "implement"
 title = "Implement"
 needs = ["design-review-loop"]
 description = "Perform the main work."
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
-
-[steps.retry]
-max_attempts = 1
-on_exhausted = "hard_fail"
 
 [[steps]]
 id = "code-review-loop"
@@ -486,10 +470,6 @@ title = "Apply code fixes"
 needs = ["review-pipeline"]
 description = "Apply code review feedback and mark the Check verdict."
 
-[steps.children.retry]
-max_attempts = 1
-on_exhausted = "hard_fail"
-
 [compose]
 [[compose.expand]]
 target = "design-review-pipeline"
@@ -506,18 +486,10 @@ needs = ["code-review-loop"]
 description = "Finalize the work item."
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
 
-[steps.retry]
-max_attempts = 1
-on_exhausted = "hard_fail"
-
 [[steps]]
 id = "cleanup-worktree"
 title = "Cleanup worktree"
 needs = ["body"]
 description = "Teardown after the body reaches terminal state."
 metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown" }
-
-[steps.retry]
-max_attempts = 1
-on_exhausted = "hard_fail"
 `

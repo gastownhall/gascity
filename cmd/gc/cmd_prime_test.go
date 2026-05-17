@@ -505,7 +505,12 @@ func TestDoPrimeWithHookFormat_FormatsDefaultFallback(t *testing.T) {
 }
 
 func TestDoPrimeWithHook_DeliveredStartupPromptCodexJSONHookFormat(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedBeadsEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityDir)
 	promptDir := filepath.Join(cityDir, "prompts")
 	if err := os.MkdirAll(promptDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(promptDir): %v", err)
@@ -603,12 +608,15 @@ func TestDoPrimeWithHook_CodexJSONFormatInfersAgentFromWorkDir(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			clearGCEnv(t)
+			clearInheritedBeadsEnv(t)
 			clearInheritedCityRoutingEnv(t)
+			disableManagedDoltRecoveryForTest(t)
 			t.Setenv("GC_TEMPLATE", "")
 			t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
 			withPrimeHookStdin(t)
 
 			cityDir := t.TempDir()
+			cleanupManagedDoltTestCity(t, cityDir)
 			agentWorkDirParts := append([]string{cityDir, ".gc", "agents"}, strings.Split(tt.identity, "/")...)
 			agentWorkDir := filepath.Join(agentWorkDirParts...)
 			if err := os.MkdirAll(agentWorkDir, 0o755); err != nil {

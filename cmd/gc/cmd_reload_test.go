@@ -600,11 +600,12 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 	}
 
 	dir := shortSocketTempDir(t, "gc-reload-invalid-")
-	cleanupManagedDoltTestCity(t, dir)
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
+	disableManagedDoltRecoveryForTest(t)
+	cleanupManagedDoltTestCity(t, dir)
 	cfg, prov, err := loadCityConfigWithBuiltinPacks(dir)
 	if err != nil {
 		t.Fatal(err)

@@ -101,6 +101,7 @@
       {
         "group": "Troubleshooting",
         "pages": [
+          "troubleshooting/gc-start-walkthrough",
           "troubleshooting/dolt-bloat-recovery"
         ]
       },

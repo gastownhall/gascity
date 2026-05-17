@@ -114,6 +114,20 @@ func TestProjectLifecycleDesiredStateAndBlockers(t *testing.T) {
 			wantCauses:  []WakeCause{WakeCausePendingCreate},
 		},
 		{
+			name: "explicit wake request is a durable wake cause",
+			input: LifecycleInput{
+				Status: "open",
+				Metadata: map[string]string{
+					"state":        "asleep",
+					"session_name": "s-worker",
+					"wake_request": "explicit",
+				},
+				Now: now,
+			},
+			wantDesired: DesiredStateRunning,
+			wantCauses:  []WakeCause{WakeCauseExplicit},
+		},
+		{
 			name: "future hold blocks an otherwise runnable create claim",
 			input: LifecycleInput{
 				Status: "open",
@@ -387,6 +401,23 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 					"session_key":         "provider-conversation",
 					"started_config_hash": "config",
 					"sleep_reason":        "rate_limit",
+				},
+				Runtime: RuntimeFacts{Observed: true, Alive: false},
+				Now:     now,
+			},
+			wantRuntime:         RuntimeProjectionMissing,
+			wantReconciledState: StateAsleep,
+		},
+		{
+			name: "dead active runtime with runtime-missing reason preserves resume identity",
+			input: LifecycleInput{
+				Status: "open",
+				Metadata: map[string]string{
+					"state":               "active",
+					"session_name":        "s-worker",
+					"session_key":         "provider-conversation",
+					"started_config_hash": "config",
+					"sleep_reason":        "runtime-missing",
 				},
 				Runtime: RuntimeFacts{Observed: true, Alive: false},
 				Now:     now,
