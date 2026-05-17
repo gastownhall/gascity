@@ -268,7 +268,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 }
 
 func cmdWaitList(stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc wait list")
+	store, cityPath, code := openCityStoreWithPath(stderr, "gc wait list")
 	if store == nil {
 		return code
 	}
@@ -295,8 +295,7 @@ func cmdWaitList(stateFilter, sessionFilter string, jsonOutput bool, stdout, std
 		filtered = append(filtered, item)
 	}
 	if jsonOutput {
-		cityPath, _ := resolveCity()
-		return writeWaitListJSON(stdout, cityPath, filtered)
+		return writeWaitListJSON(stdout, stderr, cityPath, filtered)
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "WAIT\tSESSION\tSTATE\tKIND\tNOTE") //nolint:errcheck
@@ -312,7 +311,7 @@ func cmdWaitList(stateFilter, sessionFilter string, jsonOutput bool, stdout, std
 }
 
 func cmdWaitInspect(waitID string, jsonOutput bool, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc wait inspect")
+	store, cityPath, code := openCityStoreWithPath(stderr, "gc wait inspect")
 	if store == nil {
 		return code
 	}
@@ -326,8 +325,7 @@ func cmdWaitInspect(waitID string, jsonOutput bool, stdout, stderr io.Writer) in
 		return 1
 	}
 	if jsonOutput {
-		cityPath, _ := resolveCity()
-		return writeWaitInspectJSON(stdout, cityPath, b)
+		return writeWaitInspectJSON(stdout, stderr, cityPath, b)
 	}
 	fmt.Fprintf(stdout, "Wait:       %s\n", b.ID)                                               //nolint:errcheck
 	fmt.Fprintf(stdout, "Session:    %s\n", b.Metadata["session_id"])                           //nolint:errcheck
@@ -342,32 +340,48 @@ func cmdWaitInspect(waitID string, jsonOutput bool, stdout, stderr io.Writer) in
 }
 
 type waitJSON struct {
-	ID          string            `json:"id"`
-	SessionID   string            `json:"session_id"`
-	SessionName string            `json:"session_name,omitempty"`
-	State       string            `json:"state"`
-	Kind        string            `json:"kind"`
-	DepIDs      []string          `json:"dep_ids,omitempty"`
-	DepMode     string            `json:"dep_mode,omitempty"`
-	Note        string            `json:"note,omitempty"`
-	Status      string            `json:"status"`
-	CreatedAt   string            `json:"created_at,omitempty"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
+	ID              string   `json:"id"`
+	SessionID       string   `json:"session_id"`
+	SessionName     string   `json:"session_name,omitempty"`
+	State           string   `json:"state"`
+	Kind            string   `json:"kind"`
+	DepIDs          []string `json:"dep_ids,omitempty"`
+	DepMode         string   `json:"dep_mode,omitempty"`
+	RegisteredEpoch string   `json:"registered_epoch,omitempty"`
+	DeliveryAttempt string   `json:"delivery_attempt,omitempty"`
+	NudgeID         string   `json:"nudge_id,omitempty"`
+	Note            string   `json:"note,omitempty"`
+	Status          string   `json:"status"`
+	CreatedAt       string   `json:"created_at,omitempty"`
+}
+
+type waitListJSONEnvelope struct {
+	SchemaVersion string     `json:"schema_version"`
+	CityPath      string     `json:"city_path"`
+	Waits         []waitJSON `json:"waits"`
+}
+
+type waitInspectJSONEnvelope struct {
+	SchemaVersion string   `json:"schema_version"`
+	CityPath      string   `json:"city_path"`
+	Wait          waitJSON `json:"wait"`
 }
 
 func waitJSONFromBead(b beads.Bead) waitJSON {
 	return waitJSON{
-		ID:          b.ID,
-		SessionID:   b.Metadata["session_id"],
-		SessionName: b.Metadata["session_name"],
-		State:       b.Metadata["state"],
-		Kind:        b.Metadata["kind"],
-		DepIDs:      splitWaitIDs(b.Metadata["dep_ids"]),
-		DepMode:     b.Metadata["dep_mode"],
-		Note:        b.Description,
-		Status:      b.Status,
-		CreatedAt:   formatOptionalTime(b.CreatedAt),
-		Metadata:    cloneStringMap(b.Metadata),
+		ID:              b.ID,
+		SessionID:       b.Metadata["session_id"],
+		SessionName:     b.Metadata["session_name"],
+		State:           b.Metadata["state"],
+		Kind:            b.Metadata["kind"],
+		DepIDs:          splitWaitIDs(b.Metadata["dep_ids"]),
+		DepMode:         b.Metadata["dep_mode"],
+		RegisteredEpoch: b.Metadata["registered_epoch"],
+		DeliveryAttempt: b.Metadata["delivery_attempt"],
+		NudgeID:         b.Metadata["nudge_id"],
+		Note:            b.Description,
+		Status:          b.Status,
+		CreatedAt:       formatOptionalTime(b.CreatedAt),
 	}
 }
 
@@ -385,29 +399,31 @@ func splitWaitIDs(value string) []string {
 	return out
 }
 
-func writeWaitListJSON(stdout io.Writer, cityPath string, waits []beads.Bead) int {
+func writeWaitListJSON(stdout, stderr io.Writer, cityPath string, waits []beads.Bead) int {
 	rows := make([]waitJSON, 0, len(waits))
 	for _, wait := range waits {
 		rows = append(rows, waitJSONFromBead(wait))
 	}
-	payload := map[string]any{
-		"schema_version": "1",
-		"city_path":      cityPath,
-		"waits":          rows,
+	payload := waitListJSONEnvelope{
+		SchemaVersion: "1",
+		CityPath:      cityPath,
+		Waits:         rows,
 	}
 	if err := writeCLIJSONLine(stdout, payload); err != nil {
+		fmt.Fprintf(stderr, "gc wait list: encode JSON: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	return 0
 }
 
-func writeWaitInspectJSON(stdout io.Writer, cityPath string, wait beads.Bead) int {
-	payload := map[string]any{
-		"schema_version": "1",
-		"city_path":      cityPath,
-		"wait":           waitJSONFromBead(wait),
+func writeWaitInspectJSON(stdout, stderr io.Writer, cityPath string, wait beads.Bead) int {
+	payload := waitInspectJSONEnvelope{
+		SchemaVersion: "1",
+		CityPath:      cityPath,
+		Wait:          waitJSONFromBead(wait),
 	}
 	if err := writeCLIJSONLine(stdout, payload); err != nil {
+		fmt.Fprintf(stderr, "gc wait inspect: encode JSON: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	return 0

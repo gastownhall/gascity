@@ -23,15 +23,14 @@
           "items": { "type": "string" }
         },
         "dep_mode": { "type": "string" },
+        "registered_epoch": { "type": "string" },
+        "delivery_attempt": { "type": "string" },
+        "nudge_id": { "type": "string" },
         "note": { "type": "string" },
         "status": { "type": "string" },
         "created_at": {
           "type": "string",
           "format": "date-time"
-        },
-        "metadata": {
-          "type": "object",
-          "additionalProperties": { "type": "string" }
         }
       },
       "additionalProperties": true
