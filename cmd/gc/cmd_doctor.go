@@ -266,6 +266,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 				FixScript: entry.FixScript,
 				PackDir:   entry.PackDir,
 				PackName:  entry.PackName,
+				Warmup:    entry.Warmup,
 			})
 		}
 	}
