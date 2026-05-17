@@ -97,6 +97,43 @@ func TestJSONSchemaManifestForLifecycleActionCommands(t *testing.T) {
 	}
 }
 
+func TestJSONSchemaManifestForActionSummaryCommands(t *testing.T) {
+	for _, args := range [][]string{
+		{"convoy", "create", "--json-schema"},
+		{"convoy", "land", "--json-schema"},
+		{"mail", "send", "--json-schema"},
+		{"mail", "delete", "--json-schema"},
+	} {
+		t.Run(strings.Join(args[:len(args)-1], " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(args, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run(%v) = %d, stderr=%q stdout=%q", args, code, stderr.String(), stdout.String())
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want empty", stderr.String())
+			}
+			var manifest struct {
+				SchemaVersion string                     `json:"schema_version"`
+				JSONSupported bool                       `json:"json_supported"`
+				Schemas       map[string]json.RawMessage `json:"schemas"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
+				t.Fatalf("manifest is not JSON: %v\n%s", err, stdout.String())
+			}
+			if manifest.SchemaVersion != "1" || !manifest.JSONSupported {
+				t.Fatalf("manifest metadata = %+v", manifest)
+			}
+			if !json.Valid(manifest.Schemas["result"]) {
+				t.Fatalf("result schema missing or invalid: %s", manifest.Schemas["result"])
+			}
+			if !json.Valid(manifest.Schemas["failure"]) {
+				t.Fatalf("failure schema missing or invalid: %s", manifest.Schemas["failure"])
+			}
+		})
+	}
+}
+
 func TestJSONSchemaManifestForUnsupportedCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"dashboard", "--json-schema"}, &stdout, &stderr)

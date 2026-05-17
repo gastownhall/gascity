@@ -71,6 +71,31 @@ func TestConvoyCreateWithIssues(t *testing.T) {
 	}
 }
 
+func TestConvoyCreateJSON(t *testing.T) {
+	store := beads.NewMemStore()
+	issue, _ := store.Create(beads.Bead{Title: "fix auth"})
+
+	var stdout, stderr bytes.Buffer
+	code := doConvoyCreateWithOptionsJSON(store, nil, "", events.Discard,
+		[]string{"security fixes", issue.ID}, convoyCreateOptions{}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyCreateWithOptionsJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var got struct {
+		SchemaVersion string   `json:"schema_version"`
+		OK            bool     `json:"ok"`
+		Command       string   `json:"command"`
+		ConvoyID      string   `json:"convoy_id"`
+		IssueIDs      []string `json:"issue_ids"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || !got.OK || got.Command != "convoy.create" || got.ConvoyID == "" || len(got.IssueIDs) != 1 {
+		t.Fatalf("payload = %+v", got)
+	}
+}
+
 func TestConvoyCreateMissingName(t *testing.T) {
 	store := beads.NewMemStore()
 
@@ -108,7 +133,7 @@ func TestConvoyCreateMultiRig(t *testing.T) {
 
 	// Test 1: single-store mode (cfg=nil) — all beads in same store.
 	var stdout, stderr bytes.Buffer
-	code := doConvoyCreateWithOptions(cityStore, nil, "", events.Discard,
+	code := doConvoyCreateWithOptions(cityStore, events.Discard,
 		[]string{"cross-rig batch", child1.ID, child2.ID}, convoyCreateOptions{}, &stdout, &stderr)
 	// Should fail because children are in rigStore, not cityStore.
 	if code != 1 {
@@ -120,7 +145,7 @@ func TestConvoyCreateMultiRig(t *testing.T) {
 	stderr.Reset()
 	child3, _ := cityStore.Create(beads.Bead{Title: "city task"})
 	child4, _ := cityStore.Create(beads.Bead{Title: "city task 2"})
-	code = doConvoyCreateWithOptions(cityStore, nil, "", events.Discard,
+	code = doConvoyCreateWithOptions(cityStore, events.Discard,
 		[]string{"same-store batch", child3.ID, child4.ID}, convoyCreateOptions{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("same-store convoy failed: %s", stderr.String())
@@ -178,7 +203,7 @@ func TestConvoyCreateRigChildrenShareStore(t *testing.T) {
 	c3, _ := store.Create(beads.Bead{Title: "Haskell hello"})
 
 	var stdout, stderr bytes.Buffer
-	code := doConvoyCreateWithOptions(store, nil, "", events.Discard,
+	code := doConvoyCreateWithOptions(store, events.Discard,
 		[]string{"Hello World Variants", c1.ID, c2.ID, c3.ID}, convoyCreateOptions{}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("convoy create failed: %s", stderr.String())
@@ -1506,7 +1531,7 @@ func TestConvoyCreateWithFields(t *testing.T) {
 	fields := ConvoyFields{Owner: "mayor", Merge: "mr"}
 
 	var stdout, stderr bytes.Buffer
-	code := doConvoyCreateWithOptions(store, nil, "", events.Discard, []string{"deploy"}, convoyCreateOptions{Fields: fields}, &stdout, &stderr)
+	code := doConvoyCreateWithOptions(store, events.Discard, []string{"deploy"}, convoyCreateOptions{Fields: fields}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doConvoyCreateWithOptions = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1532,7 +1557,7 @@ func TestConvoyCreateWithOptionsOwnedAndTarget(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doConvoyCreateWithOptions(store, nil, "", events.Discard, []string{"deploy"}, opts, &stdout, &stderr)
+	code := doConvoyCreateWithOptions(store, events.Discard, []string{"deploy"}, opts, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doConvoyCreateWithOptions = %d, want 0; stderr: %s", code, stderr.String())
 	}
