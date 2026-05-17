@@ -1889,6 +1889,47 @@ func TestCompileReviewWorkflowSkipGeminiFiltersExpansionLane(t *testing.T) {
 	}
 }
 
+func TestCompilePersonalWorkSkipGeminiKeepsBothReviewLoops(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	writePersonalWorkReviewWorkflowFixtures(t, dir)
+
+	recipe, err := Compile(context.Background(), "mol-personal-work-v2", []string{dir}, map[string]string{
+		"issue":       "GC-1",
+		"skip_gemini": "true",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	for _, step := range recipe.Steps {
+		if strings.Contains(step.ID, "gemini") {
+			t.Fatalf("compiled recipe unexpectedly retained Gemini lane with skip_gemini=true: %s", step.ID)
+		}
+	}
+	for _, dep := range recipe.Deps {
+		if strings.Contains(dep.StepID, "gemini") || strings.Contains(dep.DependsOnID, "gemini") {
+			t.Fatalf("compiled recipe unexpectedly retained Gemini dependency with skip_gemini=true: %+v", dep)
+		}
+	}
+
+	for _, want := range []string{
+		"mol-personal-work-v2.design-review-loop.iteration.1.design-review-pipeline.persona-gen-claude",
+		"mol-personal-work-v2.design-review-loop.iteration.1.design-review-pipeline.persona-gen-codex",
+		"mol-personal-work-v2.design-review-loop.iteration.1.design-review-pipeline.review-synthesis",
+		"mol-personal-work-v2.design-review-loop.iteration.1.apply-design-changes",
+		"mol-personal-work-v2.code-review-loop.iteration.1.review-pipeline.review-claude",
+		"mol-personal-work-v2.code-review-loop.iteration.1.review-pipeline.review-codex",
+		"mol-personal-work-v2.code-review-loop.iteration.1.review-pipeline.synthesize",
+		"mol-personal-work-v2.code-review-loop.iteration.1.apply-code-fixes",
+	} {
+		if recipe.StepByID(want) == nil {
+			t.Fatalf("compiled recipe missing expected step %q", want)
+		}
+	}
+}
+
 func TestCompileReviewWorkflowAnnotatesNestedReviewerRetries(t *testing.T) {
 	enableV2ForTest(t)
 
@@ -1941,6 +1982,19 @@ func writeReviewWorkflowFixtures(t *testing.T, dir string) {
 	for name, content := range map[string]string{
 		"expansion-review-pr.toml": reviewworkflows.ExpansionReviewPR,
 		"mol-adopt-pr-v2.toml":     reviewworkflows.AdoptPR,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+}
+
+func writePersonalWorkReviewWorkflowFixtures(t *testing.T, dir string) {
+	t.Helper()
+	for name, content := range map[string]string{
+		"expansion-review-pr.toml":     reviewworkflows.ExpansionReviewPR,
+		"expansion-design-review.toml": reviewworkflows.ExpansionDesignReview,
+		"mol-personal-work-v2.toml":    reviewworkflows.PersonalWork,
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
 			t.Fatalf("write %s: %v", name, err)

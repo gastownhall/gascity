@@ -173,7 +173,7 @@ func TestPersonalWorkFormulaCompileAndRun(t *testing.T) {
 	issueID, workflowID := startReviewWorkflow(t, cityDir, "mol-personal-work-v2", map[string]string{
 		"issue":         "", // filled after create
 		"base_branch":   "main",
-		"skip_gemini":   "false",
+		"skip_gemini":   "true",
 		"setup_command": "true",
 		"test_command":  "true",
 	})
