@@ -2493,6 +2493,7 @@ gc session logs mayor
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `-f`, `--follow` | bool |  | Follow new messages as they arrive |
+| `--json` | bool |  | emit JSONL result for the bounded snapshot |
 | `--tail` | int | `10` | Number of most recent transcript entries to show (0 = all; compact dividers count as entries) |
 
 ## gc session new
@@ -2554,6 +2555,7 @@ gc session peek <session-id-or-alias> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--json` | bool |  | emit JSONL result |
 | `--lines` | int | `50` | number of lines to capture |
 
 ## gc session pin

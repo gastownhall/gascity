@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gc-jsonl": true,
+  "type": "object",
+  "required": ["schema_version", "session_id", "target", "lines", "line_count", "output"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "session_id": { "type": "string" },
+    "target": { "type": "string" },
+    "lines": { "type": "integer" },
+    "line_count": { "type": "integer", "minimum": 0 },
+    "output": { "type": "string" }
+  },
+  "additionalProperties": true
+}
