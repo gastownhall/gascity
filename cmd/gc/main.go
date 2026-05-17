@@ -38,6 +38,17 @@ type commandExitError struct {
 	code int
 }
 
+type switchableWriter struct {
+	target io.Writer
+}
+
+func (w *switchableWriter) Write(p []byte) (int, error) {
+	if w == nil || w.target == nil {
+		return 0, io.ErrClosedPipe
+	}
+	return w.target.Write(p)
+}
+
 func (e *commandExitError) Error() string {
 	if e == nil {
 		return "exit"
@@ -108,16 +119,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 		telemetry.SetProcessOTELAttrs()
 	}
 
-	jsonExecution := shouldBufferJSONExecution(args)
-	execStdout := stdout
+	execStdout := &switchableWriter{target: stdout}
 	var jsonStdout bytes.Buffer
-	if jsonExecution {
-		execStdout = &jsonStdout
-	}
-
 	root := newRootCmd(execStdout, stderr)
 	if args == nil {
 		args = []string{}
+	}
+	jsonExecution := shouldBufferJSONExecution(root, args)
+	if jsonExecution {
+		execStdout.target = &jsonStdout
 	}
 	root.SetArgs(args)
 	root.SetOut(execStdout)
@@ -125,13 +135,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if handled, code := handleJSONSchemaRequest(root, args, stdout); handled {
 		return code
 	}
-	if handled, code := handleJSONContractRequest(root, args, stdout); handled {
+	if handled, code := handleJSONContractRequest(root, args, stdout, stderr); handled {
 		return code
 	}
 	if err := root.Execute(); err != nil {
 		code := commandExitCode(err)
 		if jsonExecution {
-			_ = writeJSONFailure(stdout, "command_failed", "command failed; see stderr for diagnostics", code)
+			if len(bytes.TrimSpace(jsonStdout.Bytes())) > 0 {
+				if _, copyErr := io.Copy(stdout, &jsonStdout); copyErr != nil {
+					return 1
+				}
+			} else {
+				_ = writeJSONFailure(stdout, "command_failed", commandFailureMessage(err), code)
+			}
 		}
 		return code
 	}
@@ -141,6 +157,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	return 0
+}
+
+func commandFailureMessage(err error) string {
+	if err == nil {
+		return "command failed"
+	}
+	msg := strings.TrimSpace(err.Error())
+	if msg == "" || errors.Is(err, errExit) {
+		return "command failed; see stderr for diagnostics"
+	}
+	return msg
 }
 
 // newRootCmd creates the root cobra command with all subcommands.

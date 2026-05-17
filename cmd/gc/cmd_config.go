@@ -143,7 +143,13 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 
 	if validate {
 		if asJSON {
-			return writeConfigShowJSON(stdout, cityPath, cfg, compositionWarnings, validationWarnings, validationErrors, nil)
+			if code := writeConfigShowJSON(stdout, cityPath, cfg, compositionWarnings, validationWarnings, validationErrors, nil); code != 0 {
+				return code
+			}
+			if len(validationErrors) > 0 {
+				return 1
+			}
+			return 0
 		}
 		for _, w := range validationWarnings {
 			fmt.Fprintf(stderr, "gc config show: warning: %s\n", w) //nolint:errcheck // best-effort stderr
@@ -200,11 +206,11 @@ func writeConfigShowJSON(stdout io.Writer, cityPath string, cfg *config.City, wa
 		"schema_version": "1",
 		"city_path":      cityPath,
 		"config":         configForDisplay(cfg),
-		"warnings":       warnings,
+		"warnings":       nonNilStrings(warnings),
 		"validation": map[string]any{
 			"ok":       len(validationErrors) == 0,
-			"warnings": validationWarnings,
-			"errors":   validationErrors,
+			"warnings": nonNilStrings(validationWarnings),
+			"errors":   nonNilStrings(validationErrors),
 		},
 	}
 	if provenance != nil {
@@ -214,6 +220,13 @@ func writeConfigShowJSON(stdout io.Writer, cityPath string, cfg *config.City, wa
 		return 1
 	}
 	return 0
+}
+
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
 }
 
 func configForDisplay(cfg *config.City) *config.City {

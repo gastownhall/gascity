@@ -81,14 +81,14 @@ func handleJSONSchemaRequest(root *cobra.Command, args []string, stdout io.Write
 	return true, 0
 }
 
-func handleJSONContractRequest(root *cobra.Command, args []string, stdout io.Writer) (bool, int) {
-	request, ok := parseJSONRequest(args)
+func handleJSONContractRequest(root *cobra.Command, args []string, stdout, stderr io.Writer) (bool, int) {
+	request, ok := resolveJSONRequest(root, args)
 	if !ok {
 		return false, 0
 	}
 
-	cmd, _, err := root.Find(request.commandArgs)
-	if err != nil || cmd == nil {
+	cmd := request.cmd
+	if request.findErr != nil || cmd == nil {
 		return true, writeJSONSchemaUnavailable(stdout, "json_command_not_found",
 			fmt.Sprintf("command %q was not found", strings.Join(request.commandArgs, " ")))
 	}
@@ -98,22 +98,37 @@ func handleJSONContractRequest(root *cobra.Command, args []string, stdout io.Wri
 	}
 
 	commandPath := commandPathWords(cmd)
-	if len(commandPath) > 0 && commandPath[0] == "bd" {
+	if isBDCommandPath(commandPath) {
 		return false, 0
 	}
 	if _, err := readCommandSchema(cmd, commandPath, jsonSchemaResultRole); err != nil {
+		if allowMissingLocalJSONSchemaPassthrough(cmd, err) {
+			fmt.Fprintf(stderr, "gc: warning: command %q does not declare JSON support; allowing --json pass-through during schema rollout (set GC_JSON_CONTRACT_STRICT=1 to enforce)\n", strings.Join(commandPath, " ")) //nolint:errcheck
+			return false, 0
+		}
 		return true, writeJSONSchemaUnavailable(stdout, "json_unsupported",
 			fmt.Sprintf("command %q does not declare JSON support", strings.Join(commandPath, " ")))
 	}
 	return false, 0
 }
 
-func shouldBufferJSONExecution(args []string) bool {
-	request, ok := parseJSONRequest(args)
+func shouldBufferJSONExecution(root *cobra.Command, args []string) bool {
+	request, ok := resolveJSONRequest(root, args)
 	if !ok {
 		return false
 	}
-	return len(request.commandArgs) == 0 || request.commandArgs[0] != "bd"
+	if request.findErr != nil || request.cmd == nil {
+		return true
+	}
+	commandPath := commandPathWords(request.cmd)
+	if isBDCommandPath(commandPath) {
+		return false
+	}
+	schema, err := readCommandSchema(request.cmd, commandPath, jsonSchemaResultRole)
+	if err != nil {
+		return !allowMissingLocalJSONSchemaPassthrough(request.cmd, err)
+	}
+	return !schemaDeclaresJSONL(schema)
 }
 
 type jsonSchemaRequest struct {
@@ -122,15 +137,37 @@ type jsonSchemaRequest struct {
 }
 
 type jsonRequest struct {
+	cmd         *cobra.Command
 	commandArgs []string
+	findErr     error
 }
 
-func parseJSONRequest(args []string) (jsonRequest, bool) {
-	var request jsonRequest
+func resolveJSONRequest(root *cobra.Command, args []string) (jsonRequest, bool) {
+	filteredArgs, jsonRequested := filterJSONFlag(args)
+	if !jsonRequested {
+		return jsonRequest{}, false
+	}
+	cmd, _, err := root.Find(filteredArgs)
+	request := jsonRequest{
+		cmd:         cmd,
+		commandArgs: fallbackCommandArgs(filteredArgs),
+		findErr:     err,
+	}
+	if cmd != nil {
+		if commandPath := commandPathWords(cmd); len(commandPath) > 0 {
+			request.commandArgs = commandPath
+		}
+	}
+	return request, true
+}
+
+func filterJSONFlag(args []string) ([]string, bool) {
+	filtered := make([]string, 0, len(args))
 	jsonRequested := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
+			filtered = append(filtered, args[i:]...)
 			break
 		}
 		switch {
@@ -139,22 +176,33 @@ func parseJSONRequest(args []string) (jsonRequest, bool) {
 		case strings.HasPrefix(arg, "--json="):
 			value := strings.TrimPrefix(arg, "--json=")
 			jsonRequested = value == "" || value == "true" || value == "1"
-		case arg == "--city" || arg == "--rig":
-			i++
-		case strings.HasPrefix(arg, "--city=") || strings.HasPrefix(arg, "--rig="):
-			continue
-		case strings.HasPrefix(arg, "-"):
-			if !strings.Contains(arg, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				i++
-			}
 		default:
-			request.commandArgs = append(request.commandArgs, arg)
+			filtered = append(filtered, arg)
 		}
 	}
-	if !jsonRequested {
-		return jsonRequest{}, false
+	return filtered, jsonRequested
+}
+
+func fallbackCommandArgs(args []string) []string {
+	var words []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if strings.HasPrefix(arg, "--city=") || strings.HasPrefix(arg, "--rig=") {
+			continue
+		}
+		if arg == "--city" || arg == "--rig" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		words = append(words, arg)
 	}
-	return request, true
+	return words
 }
 
 func parseJSONSchemaRequest(args []string) (jsonSchemaRequest, bool) {
@@ -202,6 +250,38 @@ func commandPathWords(cmd *cobra.Command) []string {
 	}
 	slices.Reverse(reversed)
 	return reversed
+}
+
+func isBDCommandPath(commandPath []string) bool {
+	return len(commandPath) > 0 && commandPath[0] == "bd"
+}
+
+func schemaDeclaresJSONL(schema json.RawMessage) bool {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(schema, &object); err != nil {
+		return false
+	}
+	_, ok := object["x-gc-jsonl"]
+	return ok
+}
+
+func allowMissingLocalJSONSchemaPassthrough(cmd *cobra.Command, err error) bool {
+	if cmd == nil || !os.IsNotExist(err) {
+		return false
+	}
+	if strings.TrimSpace(cmd.Annotations[jsonSchemaDirAnnotation]) == "" {
+		return false
+	}
+	return !strictPackJSONSchemaContract()
+}
+
+func strictPackJSONSchemaContract() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GC_JSON_CONTRACT_STRICT"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func writeJSONSchemaManifest(stdout io.Writer, cmd *cobra.Command, commandPath []string) error {

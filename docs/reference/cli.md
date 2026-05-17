@@ -7,6 +7,7 @@
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--city` | string |  | path to the city directory (default: walk up from cwd) |
+| `--json-schema` | string |  | emit JSON Schema for this command; optional value: result or failure |
 | `--rig` | string |  | rig name or path (default: discover from cwd) |
 
 ## gc
@@ -556,12 +557,14 @@ gc config show [flags]
 gc config show
   gc config show --validate
   gc config show --provenance
+  gc config show --json
   gc config show -f overlay.toml
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `-f`, `--file` | stringArray |  | additional config files to layer (can be repeated) |
+| `--json` | bool |  | emit JSON |
 | `--provenance` | bool |  | show where each config element originated |
 | `--validate` | bool |  | validate config and exit (0 = valid, 1 = errors) |
 
@@ -2935,8 +2938,12 @@ gc supervisor start
 Check if the supervisor is running
 
 ```
-gc supervisor status
+gc supervisor status [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSON |
 
 ## gc supervisor stop
 

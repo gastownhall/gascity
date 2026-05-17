@@ -184,10 +184,89 @@ func TestJSONContractAllowsBdPassthrough(t *testing.T) {
 	root := &cobra.Command{Use: "gc"}
 	root.AddCommand(&cobra.Command{Use: "bd [bd-args...]"})
 
-	var stdout bytes.Buffer
-	handled, code := handleJSONContractRequest(root, []string{"bd", "list", "--json"}, &stdout)
+	var stdout, stderr bytes.Buffer
+	handled, code := handleJSONContractRequest(root, []string{"bd", "list", "--json"}, &stdout, &stderr)
 	if handled || code != 0 {
 		t.Fatalf("handled=%v code=%d stdout=%q", handled, code, stdout.String())
+	}
+}
+
+func TestJSONContractResolvesCommandWithInterspersedBooleanFlags(t *testing.T) {
+	schemaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(schemaDir, "result.schema.json"), []byte(`{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object"
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	root := &cobra.Command{Use: "gc"}
+	parent := &cobra.Command{Use: "tools"}
+	parent.PersistentFlags().Bool("verbose", false, "verbose output")
+	leaf := &cobra.Command{
+		Use:         "run",
+		Annotations: map[string]string{jsonSchemaDirAnnotation: schemaDir},
+	}
+	parent.AddCommand(leaf)
+	root.AddCommand(parent)
+
+	var stdout, stderr bytes.Buffer
+	handled, code := handleJSONContractRequest(root, []string{"tools", "--verbose", "run", "--json"}, &stdout, &stderr)
+	if handled || code != 0 {
+		t.Fatalf("handled=%v code=%d stdout=%q stderr=%q", handled, code, stdout.String(), stderr.String())
+	}
+}
+
+func TestJSONContractMissingPackSchemaWarnsBeforeStrictRollout(t *testing.T) {
+	t.Setenv("GC_JSON_CONTRACT_STRICT", "0")
+
+	root := &cobra.Command{Use: "gc"}
+	root.AddCommand(&cobra.Command{
+		Use:         "packcmd",
+		Annotations: map[string]string{jsonSchemaDirAnnotation: filepath.Join(t.TempDir(), "schemas")},
+	})
+
+	var stdout, stderr bytes.Buffer
+	handled, code := handleJSONContractRequest(root, []string{"packcmd", "--json"}, &stdout, &stderr)
+	if handled || code != 0 {
+		t.Fatalf("handled=%v code=%d stdout=%q stderr=%q", handled, code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "does not declare JSON support") {
+		t.Fatalf("stderr = %q, want missing-schema warning", stderr.String())
+	}
+}
+
+func TestJSONContractMissingPackSchemaCanBeStrict(t *testing.T) {
+	t.Setenv("GC_JSON_CONTRACT_STRICT", "1")
+
+	root := &cobra.Command{Use: "gc"}
+	root.AddCommand(&cobra.Command{
+		Use:         "packcmd",
+		Annotations: map[string]string{jsonSchemaDirAnnotation: filepath.Join(t.TempDir(), "schemas")},
+	})
+
+	var stdout, stderr bytes.Buffer
+	handled, code := handleJSONContractRequest(root, []string{"packcmd", "--json"}, &stdout, &stderr)
+	if !handled || code == 0 {
+		t.Fatalf("handled=%v code=%d stdout=%q stderr=%q", handled, code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"code":"json_unsupported"`) {
+		t.Fatalf("stdout = %q, want json_unsupported", stdout.String())
+	}
+}
+
+func TestJSONExecutionDoesNotBufferJSONLCommands(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	root := newRootCmd(&stdout, &stderr)
+
+	for _, args := range [][]string{
+		{"events", "--json"},
+		{"events", "--follow", "--json"},
+		{"events", "--watch", "--json"},
+	} {
+		if shouldBufferJSONExecution(root, args) {
+			t.Fatalf("shouldBufferJSONExecution(%v) = true, want false for JSONL command", args)
+		}
 	}
 }
 
