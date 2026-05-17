@@ -750,6 +750,59 @@ export type EventEmitRequest = {
 
 export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | SupervisorFsPressureSkippedTickPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
+export type EventRotateAnchor = {
+    /**
+     * Anchor event sequence.
+     */
+    seq: number;
+    /**
+     * Anchor event timestamp.
+     */
+    ts: string;
+    /**
+     * Anchor event type.
+     */
+    type: string;
+};
+
+export type EventRotateArchive = {
+    /**
+     * Archive compression status.
+     */
+    compression_status: 'pending' | 'complete';
+    /**
+     * First event sequence included in the archive.
+     */
+    first_seq: number;
+    /**
+     * Last event sequence included in the archive.
+     */
+    last_seq: number;
+    /**
+     * Absolute path to the archive.
+     */
+    path: string;
+};
+
+export type EventRotateResponse = {
+    /**
+     * Anchor event metadata when rotated is true.
+     */
+    anchor_event?: EventRotateAnchor;
+    /**
+     * Archive metadata when rotated is true.
+     */
+    archive?: EventRotateArchive;
+    /**
+     * No-op reason when rotated is false.
+     */
+    reason?: string;
+    /**
+     * Whether an archive was produced.
+     */
+    rotated: boolean;
+};
+
 export type EventStreamEnvelope = {
     actor: string;
     message?: string;
@@ -6499,6 +6552,47 @@ export type EmitEventResponses = {
 };
 
 export type EmitEventResponse = EmitEventResponses[keyof EmitEventResponses];
+
+export type RotateEventsData = {
+    body?: never;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: {
+        /**
+         * Wait for archive compression to complete before returning.
+         */
+        wait?: boolean;
+    };
+    url: '/v0/city/{cityName}/events/rotate';
+};
+
+export type RotateEventsErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type RotateEventsError = RotateEventsErrors[keyof RotateEventsErrors];
+
+export type RotateEventsResponses = {
+    /**
+     * OK
+     */
+    200: EventRotateResponse;
+};
+
+export type RotateEventsResponse = RotateEventsResponses[keyof RotateEventsResponses];
 
 export type StreamEventsData = {
     body?: never;

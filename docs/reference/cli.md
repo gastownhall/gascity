@@ -1088,6 +1088,33 @@ gc events
 | `--type` | string |  | Filter by event type (e.g. bead.created) |
 | `--watch` | bool |  | Block until matching events arrive (exits after first match or buffered replay) |
 
+| Subcommand | Description |
+|------------|-------------|
+| [gc events rotate](#gc-events-rotate) | Force rotate the city event log |
+
+## gc events rotate
+
+Force rotate the city event log through the running supervisor.
+
+Output is one JSON line. Empty active logs are successful no-ops.
+
+```
+gc events rotate [flags]
+```
+
+**Example:**
+
+```
+gc events rotate
+  gc events rotate --wait
+  gc --city /path/to/city events rotate --api http://127.0.0.1:8080
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--api` | string |  | GC API server URL override (auto-discovered by default) |
+| `--wait` | bool |  | Wait for archive compression to complete before returning |
+
 ## gc formula
 
 Manage and inspect formulas

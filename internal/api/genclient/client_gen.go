@@ -81,6 +81,24 @@ func (e ConversationKind) Valid() bool {
 	}
 }
 
+// Defines values for EventRotateArchiveCompressionStatus.
+const (
+	Complete EventRotateArchiveCompressionStatus = "complete"
+	Pending  EventRotateArchiveCompressionStatus = "pending"
+)
+
+// Valid indicates whether the value is a known member of the EventRotateArchiveCompressionStatus enum.
+func (e EventRotateArchiveCompressionStatus) Valid() bool {
+	switch e {
+	case Complete:
+		return true
+	case Pending:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RequestFailedPayloadOperation.
 const (
 	CityCreate     RequestFailedPayloadOperation = "city.create"
@@ -882,6 +900,48 @@ type EventEmitRequest struct {
 // EventPayload defines model for EventPayload.
 type EventPayload struct {
 	union json.RawMessage
+}
+
+// EventRotateAnchor defines model for EventRotateAnchor.
+type EventRotateAnchor struct {
+	// Seq Anchor event sequence.
+	Seq int64 `json:"seq"`
+
+	// Ts Anchor event timestamp.
+	Ts time.Time `json:"ts"`
+
+	// Type Anchor event type.
+	Type string `json:"type"`
+}
+
+// EventRotateArchive defines model for EventRotateArchive.
+type EventRotateArchive struct {
+	// CompressionStatus Archive compression status.
+	CompressionStatus EventRotateArchiveCompressionStatus `json:"compression_status"`
+
+	// FirstSeq First event sequence included in the archive.
+	FirstSeq int64 `json:"first_seq"`
+
+	// LastSeq Last event sequence included in the archive.
+	LastSeq int64 `json:"last_seq"`
+
+	// Path Absolute path to the archive.
+	Path string `json:"path"`
+}
+
+// EventRotateArchiveCompressionStatus Archive compression status.
+type EventRotateArchiveCompressionStatus string
+
+// EventRotateResponse defines model for EventRotateResponse.
+type EventRotateResponse struct {
+	AnchorEvent *EventRotateAnchor  `json:"anchor_event,omitempty"`
+	Archive     *EventRotateArchive `json:"archive,omitempty"`
+
+	// Reason No-op reason when rotated is false.
+	Reason *string `json:"reason,omitempty"`
+
+	// Rotated Whether an archive was produced.
+	Rotated bool `json:"rotated"`
 }
 
 // EventStreamEnvelope defines model for EventStreamEnvelope.
@@ -4368,6 +4428,15 @@ type GetV0CityByCityNameEventsParams struct {
 
 // EmitEventParams defines parameters for EmitEvent.
 type EmitEventParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// RotateEventsParams defines parameters for RotateEvents.
+type RotateEventsParams struct {
+	// Wait Wait for archive compression to complete before returning.
+	Wait *bool `form:"wait,omitempty" json:"wait,omitempty"`
+
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
 }
@@ -9076,6 +9145,9 @@ type ClientInterface interface {
 
 	EmitEvent(ctx context.Context, cityName string, params *EmitEventParams, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// RotateEvents request
+	RotateEvents(ctx context.Context, cityName string, params *RotateEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// StreamEvents request
 	StreamEvents(ctx context.Context, cityName string, params *StreamEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -10102,6 +10174,18 @@ func (c *Client) EmitEventWithBody(ctx context.Context, cityName string, params 
 
 func (c *Client) EmitEvent(ctx context.Context, cityName string, params *EmitEventParams, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewEmitEventRequest(c.Server, cityName, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RotateEvents(ctx context.Context, cityName string, params *RotateEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRotateEventsRequest(c.Server, cityName, params)
 	if err != nil {
 		return nil, err
 	}
@@ -14347,6 +14431,75 @@ func NewEmitEventRequestWithBody(server string, cityName string, params *EmitEve
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
+// NewRotateEventsRequest generates requests for RotateEvents
+func NewRotateEventsRequest(server string, cityName string, params *RotateEventsParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/events/rotate", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Wait != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "wait", *params.Wait, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -20905,6 +21058,9 @@ type ClientWithResponsesInterface interface {
 
 	EmitEventWithResponse(ctx context.Context, cityName string, params *EmitEventParams, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*EmitEventResponse, error)
 
+	// RotateEventsWithResponse request
+	RotateEventsWithResponse(ctx context.Context, cityName string, params *RotateEventsParams, reqEditors ...RequestEditorFn) (*RotateEventsResponse, error)
+
 	// StreamEventsWithResponse request
 	StreamEventsWithResponse(ctx context.Context, cityName string, params *StreamEventsParams, reqEditors ...RequestEditorFn) (*StreamEventsResponse, error)
 
@@ -22261,6 +22417,29 @@ func (r EmitEventResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r EmitEventResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RotateEventsResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON200                       *EventRotateResponse
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r RotateEventsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RotateEventsResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -25041,6 +25220,15 @@ func (c *ClientWithResponses) EmitEventWithResponse(ctx context.Context, cityNam
 	return ParseEmitEventResponse(rsp)
 }
 
+// RotateEventsWithResponse request returning *RotateEventsResponse
+func (c *ClientWithResponses) RotateEventsWithResponse(ctx context.Context, cityName string, params *RotateEventsParams, reqEditors ...RequestEditorFn) (*RotateEventsResponse, error) {
+	rsp, err := c.RotateEvents(ctx, cityName, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRotateEventsResponse(rsp)
+}
+
 // StreamEventsWithResponse request returning *StreamEventsResponse
 func (c *ClientWithResponses) StreamEventsWithResponse(ctx context.Context, cityName string, params *StreamEventsParams, reqEditors ...RequestEditorFn) (*StreamEventsResponse, error) {
 	rsp, err := c.StreamEvents(ctx, cityName, params, reqEditors...)
@@ -27573,6 +27761,39 @@ func ParseEmitEventResponse(rsp *http.Response) (*EmitEventResponse, error) {
 			return nil, err
 		}
 		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRotateEventsResponse parses an HTTP response from a RotateEventsWithResponse call
+func ParseRotateEventsResponse(rsp *http.Response) (*RotateEventsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RotateEventsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest EventRotateResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest ErrorModel

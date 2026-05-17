@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -104,6 +105,120 @@ func TestEventListRejectsInvalidSince(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "invalid since duration") {
 		t.Fatalf("body = %q, want invalid since duration", rec.Body.String())
+	}
+}
+
+func TestEventRotateFileRecorderGoldenPath(t *testing.T) {
+	state := newFakeState(t)
+	var stderr strings.Builder
+	rec, err := events.NewFileRecorder(filepath.Join(t.TempDir(), "events.jsonl"), &stderr)
+	if err != nil {
+		t.Fatalf("NewFileRecorder: %v", err)
+	}
+	t.Cleanup(func() { _ = rec.Close() })
+	state.eventProv = rec
+	rec.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+	rec.Record(events.Event{Type: events.BeadCreated, Actor: "worker"})
+	h := newTestCityHandler(t, state)
+
+	req := newPostRequest(cityURL(state, "/events/rotate"), nil)
+	httpRec := httptest.NewRecorder()
+	h.ServeHTTP(httpRec, req)
+
+	if httpRec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", httpRec.Code, http.StatusOK, httpRec.Body.String())
+	}
+	var resp EventRotateResponse
+	if err := json.NewDecoder(httpRec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.Rotated {
+		t.Fatalf("rotated = false, want true; resp=%+v", resp)
+	}
+	if resp.Archive == nil {
+		t.Fatalf("archive = nil, want metadata; resp=%+v", resp)
+	}
+	if resp.Archive.FirstSeq != 1 || resp.Archive.LastSeq != 2 {
+		t.Fatalf("archive seq = %d-%d, want 1-2", resp.Archive.FirstSeq, resp.Archive.LastSeq)
+	}
+	if resp.Archive.CompressionStatus != "pending" {
+		t.Fatalf("compression_status = %q, want pending", resp.Archive.CompressionStatus)
+	}
+	if resp.AnchorEvent == nil || resp.AnchorEvent.Seq != 3 || resp.AnchorEvent.Type != events.EventsRotated {
+		t.Fatalf("anchor_event = %+v, want seq=3 type=%s", resp.AnchorEvent, events.EventsRotated)
+	}
+}
+
+func TestEventRotateEmptyActiveLogIsNoOp(t *testing.T) {
+	state := newFakeState(t)
+	var stderr strings.Builder
+	rec, err := events.NewFileRecorder(filepath.Join(t.TempDir(), "events.jsonl"), &stderr)
+	if err != nil {
+		t.Fatalf("NewFileRecorder: %v", err)
+	}
+	t.Cleanup(func() { _ = rec.Close() })
+	state.eventProv = rec
+	h := newTestCityHandler(t, state)
+
+	req := newPostRequest(cityURL(state, "/events/rotate"), nil)
+	httpRec := httptest.NewRecorder()
+	h.ServeHTTP(httpRec, req)
+
+	if httpRec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", httpRec.Code, http.StatusOK, httpRec.Body.String())
+	}
+	var resp EventRotateResponse
+	if err := json.NewDecoder(httpRec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Rotated || resp.Reason != "active log is empty" {
+		t.Fatalf("response = %+v, want rotated=false reason", resp)
+	}
+}
+
+func TestEventRotateUnsupportedProviderReturnsMethodNotAllowed(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Events.Provider = "exec:my-script"
+	h := newTestCityHandler(t, state)
+
+	req := newPostRequest(cityURL(state, "/events/rotate"), nil)
+	httpRec := httptest.NewRecorder()
+	h.ServeHTTP(httpRec, req)
+
+	if httpRec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d; body: %s", httpRec.Code, http.StatusMethodNotAllowed, httpRec.Body.String())
+	}
+	want := "rotation is only supported for the file-backed events provider; current provider is 'exec:my-script'"
+	if !strings.Contains(httpRec.Body.String(), want) {
+		t.Fatalf("body = %q, want %q", httpRec.Body.String(), want)
+	}
+}
+
+func TestEventRotateWaitReturnsCompleteCompressionStatus(t *testing.T) {
+	state := newFakeState(t)
+	var stderr strings.Builder
+	rec, err := events.NewFileRecorder(filepath.Join(t.TempDir(), "events.jsonl"), &stderr)
+	if err != nil {
+		t.Fatalf("NewFileRecorder: %v", err)
+	}
+	t.Cleanup(func() { _ = rec.Close() })
+	state.eventProv = rec
+	rec.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+	h := newTestCityHandler(t, state)
+
+	req := newPostRequest(cityURL(state, "/events/rotate?wait=true"), nil)
+	httpRec := httptest.NewRecorder()
+	h.ServeHTTP(httpRec, req)
+
+	if httpRec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", httpRec.Code, http.StatusOK, httpRec.Body.String())
+	}
+	var resp EventRotateResponse
+	if err := json.NewDecoder(httpRec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Archive == nil || resp.Archive.CompressionStatus != "complete" {
+		t.Fatalf("archive = %+v, want compression_status=complete", resp.Archive)
 	}
 }
 

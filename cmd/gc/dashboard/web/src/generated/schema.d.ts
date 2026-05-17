@@ -569,6 +569,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v0/city/{cityName}/events/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Force rotate the city event log */
+        post: operations["rotate-events"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v0/city/{cityName}/events/stream": {
         parameters: {
             query?: never;
@@ -2512,6 +2529,52 @@ export interface components {
             type: string;
         };
         EventPayload: components["schemas"]["AdapterEventPayload"] | components["schemas"]["BeadEventPayload"] | components["schemas"]["BoundEventPayload"] | components["schemas"]["CityCreateSucceededPayload"] | components["schemas"]["CityLifecyclePayload"] | components["schemas"]["CityUnregisterSucceededPayload"] | components["schemas"]["GroupCreatedEventPayload"] | components["schemas"]["InboundEventPayload"] | components["schemas"]["MailEventPayload"] | components["schemas"]["NoPayload"] | components["schemas"]["OutboundEventPayload"] | components["schemas"]["ProjectIdentityStampedPayload"] | components["schemas"]["RequestFailedPayload"] | components["schemas"]["RotatedPayload"] | components["schemas"]["SessionCreateSucceededPayload"] | components["schemas"]["SessionLifecyclePayload"] | components["schemas"]["SessionMessageSucceededPayload"] | components["schemas"]["SessionSubmitSucceededPayload"] | components["schemas"]["SupervisorFSPressureSkippedTickPayload"] | components["schemas"]["UnboundEventPayload"] | components["schemas"]["WorkerOperationEventPayload"];
+        EventRotateAnchor: {
+            /**
+             * Format: int64
+             * @description Anchor event sequence.
+             */
+            seq: number;
+            /**
+             * Format: date-time
+             * @description Anchor event timestamp.
+             */
+            ts: string;
+            /**
+             * @description Anchor event type.
+             * @example events.rotated
+             */
+            type: string;
+        };
+        EventRotateArchive: {
+            /**
+             * @description Archive compression status.
+             * @enum {string}
+             */
+            compression_status: "pending" | "complete";
+            /**
+             * Format: int64
+             * @description First event sequence included in the archive.
+             */
+            first_seq: number;
+            /**
+             * Format: int64
+             * @description Last event sequence included in the archive.
+             */
+            last_seq: number;
+            /** @description Absolute path to the archive. */
+            path: string;
+        };
+        EventRotateResponse: {
+            /** @description Anchor event metadata when rotated is true. */
+            anchor_event?: components["schemas"]["EventRotateAnchor"];
+            /** @description Archive metadata when rotated is true. */
+            archive?: components["schemas"]["EventRotateArchive"];
+            /** @description No-op reason when rotated is false. */
+            reason?: string;
+            /** @description Whether an archive was produced. */
+            rotated: boolean;
+        };
         EventStreamEnvelope: {
             actor: string;
             message?: string;
@@ -7830,6 +7893,46 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["EventEmitOutputBody"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "rotate-events": {
+        parameters: {
+            query?: {
+                /** @description Wait for archive compression to complete before returning. */
+                wait?: boolean;
+            };
+            header: {
+                /** @description Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks. */
+                "X-GC-Request": string;
+            };
+            path: {
+                /** @description City name. */
+                cityName: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventRotateResponse"];
                 };
             };
             /** @description Error */

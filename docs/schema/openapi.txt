@@ -2065,6 +2065,96 @@
           }
         ]
       },
+      "EventRotateAnchor": {
+        "additionalProperties": false,
+        "properties": {
+          "seq": {
+            "description": "Anchor event sequence.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "ts": {
+            "description": "Anchor event timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "description": "Anchor event type.",
+            "examples": [
+              "events.rotated"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts"
+        ],
+        "type": "object"
+      },
+      "EventRotateArchive": {
+        "additionalProperties": false,
+        "properties": {
+          "compression_status": {
+            "description": "Archive compression status.",
+            "enum": [
+              "pending",
+              "complete"
+            ],
+            "type": "string"
+          },
+          "first_seq": {
+            "description": "First event sequence included in the archive.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "last_seq": {
+            "description": "Last event sequence included in the archive.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Absolute path to the archive.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "first_seq",
+          "last_seq",
+          "compression_status"
+        ],
+        "type": "object"
+      },
+      "EventRotateResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "anchor_event": {
+            "$ref": "#/components/schemas/EventRotateAnchor",
+            "description": "Anchor event metadata when rotated is true."
+          },
+          "archive": {
+            "$ref": "#/components/schemas/EventRotateArchive",
+            "description": "Archive metadata when rotated is true."
+          },
+          "reason": {
+            "description": "No-op reason when rotated is false.",
+            "type": "string"
+          },
+          "rotated": {
+            "description": "Whether an archive was produced.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "rotated"
+        ],
+        "type": "object"
+      },
       "EventStreamEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -15792,6 +15882,79 @@
           }
         },
         "summary": "Emit an event"
+      }
+    },
+    "/v0/city/{cityName}/events/rotate": {
+      "post": {
+        "operationId": "rotate-events",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for archive compression to complete before returning.",
+            "explode": false,
+            "in": "query",
+            "name": "wait",
+            "schema": {
+              "description": "Wait for archive compression to complete before returning.",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventRotateResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Force rotate the city event log"
       }
     },
     "/v0/city/{cityName}/events/stream": {
