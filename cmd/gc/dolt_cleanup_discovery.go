@@ -533,15 +533,6 @@ func parseListeningPortLsofLine(line string) (int, int, bool) {
 	return pid, port, true
 }
 
-// listenInodesByPort reads /proc/net/tcp{,6} and returns a port → []inode map
-// for sockets in LISTEN state (TCP state 0A). Each inode is a unique kernel
-// socket identifier that appears as the target of a /proc/<pid>/fd/<n>
-// symlink ("socket:[<inode>]"); cross-referencing those gives port→pid.
-func listenInodesByPort() map[int][]string {
-	out, _ := listenInodesByPortChecked()
-	return out
-}
-
 func listenInodesByPortChecked() (map[int][]string, bool) {
 	out := map[int][]string{}
 	checked := false

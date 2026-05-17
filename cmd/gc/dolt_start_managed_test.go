@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -222,6 +223,86 @@ func TestManagedDoltTestWatchdogCanBeDisabledByEnv(t *testing.T) {
 	}
 }
 
+func TestManagedDoltTestWatchdogExecutableUsesOSExecutable(t *testing.T) {
+	oldExecutable := managedDoltTestExecutable
+	t.Cleanup(func() { managedDoltTestExecutable = oldExecutable })
+	want := filepath.Join(t.TempDir(), "gc-test-binary")
+	managedDoltTestExecutable = func() (string, error) {
+		return want, nil
+	}
+
+	got, err := managedDoltTestWatchdogExecutable()
+	if err != nil {
+		t.Fatalf("managedDoltTestWatchdogExecutable: %v", err)
+	}
+	if got != want {
+		t.Fatalf("managedDoltTestWatchdogExecutable() = %q, want %q", got, want)
+	}
+}
+
+type blockingWatchdogPIDReader struct {
+	started chan struct{}
+	unblock chan struct{}
+	done    chan struct{}
+}
+
+func newBlockingWatchdogPIDReader() *blockingWatchdogPIDReader {
+	return &blockingWatchdogPIDReader{
+		started: make(chan struct{}, 1),
+		unblock: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+}
+
+func (r *blockingWatchdogPIDReader) Read(_ []byte) (int, error) {
+	defer close(r.done)
+	select {
+	case r.started <- struct{}{}:
+	default:
+	}
+	<-r.unblock
+	return 0, io.EOF
+}
+
+func (r *blockingWatchdogPIDReader) Close() {
+	close(r.unblock)
+}
+
+func TestReadManagedDoltTestWatchdogPIDTimeoutUnblocksReaderAfterClose(t *testing.T) {
+	oldTimeout := managedDoltTestWatchdogPIDTimeout
+	managedDoltTestWatchdogPIDTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { managedDoltTestWatchdogPIDTimeout = oldTimeout })
+
+	reader := newBlockingWatchdogPIDReader()
+	done := make(chan error, 1)
+	go func() {
+		_, err := readManagedDoltTestWatchdogPID(reader, 12345)
+		done <- err
+	}()
+
+	select {
+	case <-reader.started:
+	case <-time.After(time.Second):
+		t.Fatal("reader did not start")
+	}
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("readManagedDoltTestWatchdogPID error = %v, want timeout", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("readManagedDoltTestWatchdogPID did not time out")
+	}
+
+	reader.Close()
+	select {
+	case <-reader.done:
+	case <-time.After(time.Second):
+		t.Fatal("watchdog PID reader goroutine stayed blocked after close")
+	}
+}
+
 func TestManagedDoltTestModeEnabledHonorsEnv(t *testing.T) {
 	withManagedDoltTestMode(t, false)
 	t.Setenv("GC_MANAGED_DOLT_TEST_MODE", "1")
@@ -267,6 +348,92 @@ func TestManagedDoltTestDisarmOnReadyForEnvOnlyHelperWithoutParent(t *testing.T)
 
 	if !managedDoltTestDisarmOnReady() {
 		t.Fatal("managedDoltTestDisarmOnReady() = false, want true without external parent")
+	}
+}
+
+func TestDisarmManagedDoltStartedProcessUnregistersReadyProcess(t *testing.T) {
+	withManagedDoltTestMode(t, true)
+	clearManagedDoltTestProcessRegistry(t)
+	t.Cleanup(func() {
+		clearManagedDoltTestProcessRegistry(t)
+	})
+
+	pid := os.Getpid()
+	disarmFile := filepath.Join(t.TempDir(), "disarm-ready")
+	started := managedDoltStartedProcess{
+		PID:         pid,
+		WatchdogPID: pid,
+		DisarmFile:  disarmFile,
+		DisarmReady: true,
+	}
+	registerManagedDoltTestProcess(started)
+
+	disarmManagedDoltStartedProcess(started)
+
+	data, err := os.ReadFile(disarmFile)
+	if err != nil {
+		t.Fatalf("read disarm file: %v", err)
+	}
+	if string(data) != "ready\n" {
+		t.Fatalf("disarm file = %q, want ready marker", string(data))
+	}
+	var remaining int
+	managedDoltTestProcessRegistry.Range(func(_, _ any) bool {
+		remaining++
+		return true
+	})
+	if remaining != 0 {
+		t.Fatalf("registry still has %d entries after disarm", remaining)
+	}
+}
+
+func TestTerminateManagedDoltStartedProcessUnregistersFailedStartup(t *testing.T) {
+	withManagedDoltTestMode(t, true)
+	clearManagedDoltTestProcessRegistry(t)
+	t.Cleanup(func() {
+		clearManagedDoltTestProcessRegistry(t)
+	})
+
+	startChild := func(name string) *exec.Cmd {
+		t.Helper()
+		cmd := exec.Command("sleep", "60")
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start %s child: %v", name, err)
+		}
+		t.Cleanup(func() {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			_ = cmd.Wait()
+		})
+		return cmd
+	}
+
+	dolt := startChild("dolt")
+	watchdog := startChild("watchdog")
+	disarmFile := filepath.Join(t.TempDir(), "disarm")
+	if err := os.WriteFile(disarmFile, []byte("ready\n"), 0o644); err != nil {
+		t.Fatalf("write disarm file: %v", err)
+	}
+	started := managedDoltStartedProcess{
+		PID:         dolt.Process.Pid,
+		WatchdogPID: watchdog.Process.Pid,
+		DisarmFile:  disarmFile,
+	}
+	registerManagedDoltTestProcess(started)
+
+	terminateManagedDoltStartedProcess(started)
+
+	var remaining int
+	managedDoltTestProcessRegistry.Range(func(_, _ any) bool {
+		remaining++
+		return true
+	})
+	if remaining != 0 {
+		t.Fatalf("registry still has %d entries after startup-failure terminate", remaining)
+	}
+	if _, err := os.Stat(disarmFile); !os.IsNotExist(err) {
+		t.Fatalf("disarm file still exists after terminate: %v", err)
 	}
 }
 

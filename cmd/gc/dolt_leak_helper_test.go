@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -366,7 +367,7 @@ func TestRequireNoLeakedDoltAfterWithFilterReportsKillErrors(t *testing.T) {
 	inner := &recordingTB{}
 	requireNoLeakedDoltAfterWithFilterAndKiller(inner, enumerate, func(configPath string) bool {
 		return samePath(configPath, ownedRoot) || strings.HasPrefix(configPath, ownedRoot+string(filepath.Separator))
-	}, func(pid int, sig syscall.Signal) error {
+	}, func(_ int, sig syscall.Signal) error {
 		if sig == syscall.SIGTERM {
 			return errors.New("synthetic kill failure")
 		}
@@ -386,13 +387,40 @@ func TestRequireNoLeakedDoltAfterWithFilterReportsKillErrors(t *testing.T) {
 func TestIsStaleCmdGCTestConfigPathSkipsActiveRoot(t *testing.T) {
 	activeRoot := filepath.Join("/tmp", "gctest-active")
 	activeConfig := filepath.Join(activeRoot, "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
-	if isStaleCmdGCTestConfigPath(activeConfig, activeRoot) {
+	if isStaleCmdGCTestConfigPath(activeConfig, []string{activeRoot}, "/tmp") {
 		t.Fatalf("active config path %q classified as stale", activeConfig)
 	}
 
-	staleConfig := filepath.Join("/tmp", "gctest-stale", "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
-	if !isStaleCmdGCTestConfigPath(staleConfig, activeRoot) {
+	staleRoot := filepath.Join("/tmp", fmt.Sprintf("%s%d-stale", testCmdGCTempRootPrefix, nonLivePID(t)))
+	staleConfig := filepath.Join(staleRoot, "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	if !isStaleCmdGCTestConfigPath(staleConfig, []string{activeRoot}, "/tmp") {
 		t.Fatalf("stale config path %q not classified as stale", staleConfig)
+	}
+}
+
+func TestIsStaleCmdGCTestConfigPathSkipsActiveSiblingRoot(t *testing.T) {
+	activeRoot := filepath.Join("/tmp", "gctest-sibling")
+	activeConfig := filepath.Join(activeRoot, "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+
+	if isStaleCmdGCTestConfigPath(activeConfig, []string{activeRoot}, "/tmp") {
+		t.Fatalf("active sibling config path %q classified as stale", activeConfig)
+	}
+}
+
+func TestIsStaleCmdGCTestConfigPathSkipsLivePeerOwnerPIDRoot(t *testing.T) {
+	peerRoot := filepath.Join("/tmp", fmt.Sprintf("%s%d-peer", testCmdGCTempRootPrefix, os.Getpid()))
+	peerConfig := filepath.Join(peerRoot, "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+
+	if isStaleCmdGCTestConfigPath(peerConfig, nil, "/tmp") {
+		t.Fatalf("live peer config path %q classified as stale", peerConfig)
+	}
+}
+
+func TestIsStaleCmdGCTestConfigPathSkipsLegacyUnownedRoot(t *testing.T) {
+	legacyConfig := filepath.Join("/tmp", "gctest-legacy", "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+
+	if isStaleCmdGCTestConfigPath(legacyConfig, nil, "/tmp") {
+		t.Fatalf("legacy unowned config path %q classified as stale", legacyConfig)
 	}
 }
 

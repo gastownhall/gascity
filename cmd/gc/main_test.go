@@ -176,7 +176,7 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv(managedDoltTestParentPIDEnv, fmt.Sprintf("%d", os.Getpid())); err != nil {
 		panic(err)
 	}
-	testTempRoot, err := os.MkdirTemp("/tmp", "gctest-")
+	testTempRoot, err := os.MkdirTemp("/tmp", pidPrefixedTempPattern(testCmdGCTempRootPrefix))
 	if err != nil {
 		panic(err)
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -107,6 +108,9 @@ func (g *doltLeakGuardedTestingM) Run() int {
 
 	code := g.m.Run()
 
+	g.cleanupTemporaryPaths()
+	reapManagedDoltTestProcesses()
+
 	guardFailed := initialErr != nil
 	if initialErr == nil {
 		final, finalErr := snapshotDoltProcessesForConfigRoot(discoverDoltProcesses, g.tempRoot)
@@ -121,8 +125,6 @@ func (g *doltLeakGuardedTestingM) Run() int {
 		}
 	}
 
-	g.cleanupTemporaryPaths()
-	reapManagedDoltTestProcesses()
 	if guardFailed && code == 0 {
 		return 1
 	}
@@ -189,9 +191,11 @@ func (g *doltLeakGuardedTestingM) sweepStaleCmdGCTestDoltProcesses(label string)
 		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: %s stale scan failed: %v\n", label, err) //nolint:errcheck
 		return true
 	}
+	activeRoots := cmdGCTestActiveRoots(g.tempRoot)
+	tempParent := filepath.Dir(filepath.Clean(g.tempRoot))
 	var leaked []DoltProcInfo
 	for _, proc := range procs {
-		if !isStaleCmdGCTestConfigPath(extractConfigPath(proc.Argv), g.tempRoot) {
+		if !isStaleCmdGCTestConfigPath(extractConfigPath(proc.Argv), activeRoots, tempParent) {
 			continue
 		}
 		leaked = append(leaked, proc)
@@ -208,14 +212,51 @@ func (g *doltLeakGuardedTestingM) sweepStaleCmdGCTestDoltProcesses(label string)
 	return true
 }
 
-func isStaleCmdGCTestConfigPath(configPath, activeRoot string) bool {
-	if configPath == "" || activeRoot == "" {
+func cmdGCTestActiveRoots(currentRoot string) []string {
+	roots := discoverActiveTestRoots("", os.TempDir())
+	if currentRoot != "" {
+		roots = append(roots, currentRoot)
+	}
+	cleaned := make([]string, 0, len(roots))
+	seen := make(map[string]struct{}, len(roots))
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		clean := filepath.Clean(root)
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		cleaned = append(cleaned, clean)
+	}
+	return cleaned
+}
+
+func isStaleCmdGCTestConfigPath(configPath string, activeRoots []string, tempParent string) bool {
+	return isStaleCmdGCTestConfigPathWithPIDCheck(configPath, activeRoots, tempParent, pidAlive)
+}
+
+func isStaleCmdGCTestConfigPathWithPIDCheck(configPath string, activeRoots []string, tempParent string, pidAliveFn func(int) bool) bool {
+	if configPath == "" || tempParent == "" {
 		return false
 	}
-	if pathutil.PathWithin(activeRoot, configPath) {
+	if configUnderActiveTestRoot(configPath, activeRoots) {
 		return false
 	}
-	return hasTestChildPrefix(filepath.Clean(configPath), filepath.Dir(filepath.Clean(activeRoot)), []string{"gctest-"})
+	ownerPID, ok := cmdGCTestConfigOwnerPID(configPath, tempParent)
+	if !ok {
+		return false
+	}
+	return !pidAliveFn(ownerPID)
+}
+
+func cmdGCTestConfigOwnerPID(configPath string, tempParent string) (int, bool) {
+	root, ok := activeTestRootUnder(filepath.Clean(configPath), filepath.Clean(tempParent), []string{testCmdGCTempRootPrefix})
+	if !ok {
+		return 0, false
+	}
+	return pidFromPrefixedDirName(filepath.Base(root), testCmdGCTempRootPrefix)
 }
 
 func snapshotDoltProcessesForConfigRoot(enumerate func() ([]DoltProcInfo, error), root string) (map[int]DoltProcInfo, error) {
@@ -269,13 +310,13 @@ func reapDoltLeakProcessesWithKiller(leaked []DoltProcInfo, killFn func(int, sys
 func reapDoltLeakPIDsWithKiller(pids []int, killFn func(int, syscall.Signal) error) []error {
 	var errs []error
 	for _, pid := range pids {
-		if err := killFn(pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
+		if err := killFn(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 			errs = append(errs, fmt.Errorf("SIGTERM pid %d: %w", pid, err))
 		}
 	}
 	time.Sleep(250 * time.Millisecond)
 	for _, pid := range pids {
-		if err := killFn(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+		if err := killFn(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 			errs = append(errs, fmt.Errorf("SIGKILL pid %d: %w", pid, err))
 		}
 	}

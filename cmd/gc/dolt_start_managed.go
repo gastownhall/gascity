@@ -40,12 +40,15 @@ const (
 )
 
 var (
-	managedDoltTestMode             = isTestBinary
-	managedDoltTestProcessRegistry  sync.Map
-	managedDoltTestTerminateProcess = terminateManagedDoltTestPID
+	managedDoltTestMode               = isTestBinary
+	managedDoltTestExecutable         = os.Executable
+	managedDoltTestWatchdogPIDTimeout = 5 * time.Second
+	managedDoltTestProcessRegistry    sync.Map
+	managedDoltTestTerminateProcess   = terminateManagedDoltTestPID
 )
 
 func init() {
+	// Test watchdog re-exec runs before normal command dispatch.
 	if len(os.Args) < 2 || os.Args[1] != managedDoltTestWatchdogArg {
 		return
 	}
@@ -202,7 +205,12 @@ func startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath
 	if err != nil {
 		return managedDoltStartedProcess{}, err
 	}
-	cmd := exec.Command(os.Args[0], managedDoltTestWatchdogArg, managedDoltTestParentPIDString(), configFile, logFilePath, disarmFile)
+	watchdogExecutable, err := managedDoltTestWatchdogExecutable()
+	if err != nil {
+		_ = os.Remove(disarmFile)
+		return managedDoltStartedProcess{}, err
+	}
+	cmd := exec.Command(watchdogExecutable, managedDoltTestWatchdogArg, managedDoltTestParentPIDString(), configFile, logFilePath, disarmFile)
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
 	cmd.Env = doltServerEnv(os.Environ())
@@ -232,6 +240,28 @@ func startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath
 	}
 	registerManagedDoltTestProcess(started)
 	return started, nil
+}
+
+func managedDoltTestWatchdogExecutable() (string, error) {
+	executable, executableErr := managedDoltTestExecutable()
+	if executableErr == nil && strings.TrimSpace(executable) != "" {
+		return executable, nil
+	}
+	fallback := strings.TrimSpace(os.Args[0])
+	if fallback == "" {
+		if executableErr != nil {
+			return "", fmt.Errorf("resolve dolt test watchdog executable: os.Executable: %w", executableErr)
+		}
+		return "", fmt.Errorf("resolve dolt test watchdog executable: os.Executable returned empty path")
+	}
+	if filepath.IsAbs(fallback) {
+		return fallback, nil
+	}
+	abs, err := filepath.Abs(fallback)
+	if err != nil {
+		return "", fmt.Errorf("resolve dolt test watchdog executable from argv %q: %w", fallback, err)
+	}
+	return abs, nil
 }
 
 func managedDoltTestWatchdogDisarmFile(logFilePath string) (string, error) {
@@ -272,7 +302,7 @@ func readManagedDoltTestWatchdogPID(r io.Reader, watchdogPID int) (int, error) {
 			return 0, fmt.Errorf("read dolt test watchdog pid: invalid pid %q", strings.TrimSpace(res.line))
 		}
 		return pid, nil
-	case <-time.After(5 * time.Second):
+	case <-time.After(managedDoltTestWatchdogPIDTimeout):
 		return 0, fmt.Errorf("dolt test watchdog pid timed out (watchdog pid %d)", watchdogPID)
 	}
 }
@@ -324,6 +354,7 @@ func managedDoltTestDisarmOnReady() bool {
 }
 
 func terminateManagedDoltStartedProcess(started managedDoltStartedProcess) {
+	unregisterManagedDoltStartedProcess(started)
 	_ = terminateManagedDoltPID(started.CityPath, started.PID)
 	if started.WatchdogPID > 0 {
 		_ = terminateManagedDoltPID(started.CityPath, started.WatchdogPID)
@@ -331,6 +362,11 @@ func terminateManagedDoltStartedProcess(started managedDoltStartedProcess) {
 	if started.DisarmFile != "" {
 		_ = os.Remove(started.DisarmFile)
 	}
+}
+
+func unregisterManagedDoltStartedProcess(started managedDoltStartedProcess) {
+	unregisterManagedDoltTestProcess(started.PID)
+	unregisterManagedDoltTestProcess(started.WatchdogPID)
 }
 
 func terminateManagedDoltTestPID(pid int) error {
@@ -341,7 +377,10 @@ func disarmManagedDoltStartedProcess(started managedDoltStartedProcess) {
 	if started.DisarmFile == "" || !started.DisarmReady {
 		return
 	}
-	_ = os.WriteFile(started.DisarmFile, []byte("ready\n"), 0o644)
+	if err := os.WriteFile(started.DisarmFile, []byte("ready\n"), 0o644); err != nil {
+		return
+	}
+	unregisterManagedDoltTestProcess(started.PID)
 }
 
 func registerManagedDoltTestProcess(started managedDoltStartedProcess) {
@@ -349,6 +388,13 @@ func registerManagedDoltTestProcess(started managedDoltStartedProcess) {
 		return
 	}
 	managedDoltTestProcessRegistry.Store(started.PID, started)
+}
+
+func unregisterManagedDoltTestProcess(pid int) {
+	if pid <= 0 {
+		return
+	}
+	managedDoltTestProcessRegistry.Delete(pid)
 }
 
 func reapManagedDoltTestProcesses() {
