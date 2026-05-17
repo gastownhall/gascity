@@ -1376,20 +1376,67 @@ flatten_database() {
 
   ensure_repair_marker_paths_writable "$db" "$remote" || return 1
 
+  # Race window: between the `head` capture above and the flatten transaction
+  # below, a busy database (notably hq, where many writers commit constantly)
+  # may move HEAD. The post-flatten value-hash check then fails and the DB is
+  # quarantined. Retry preflight up to 3 times with jittered 1-5s sleep,
+  # refreshing HEAD between attempts; require HEAD to stay stable across a
+  # preflight gather before flattening.
   preflight_tmp=$(mktemp)
-  if ! preflight_counts "$db" "$preflight_tmp"; then
+  preflight_max_attempts=3
+  preflight_attempt=1
+  preflight_succeeded=false
+  current_head=""
+  while [ "$preflight_attempt" -le "$preflight_max_attempts" ]; do
+    if [ "$preflight_attempt" -gt 1 ]; then
+      if ! head=$(head_commit "$db"); then
+        rm -f "$preflight_tmp"
+        return 1
+      fi
+      if [ -z "$head" ]; then
+        printf 'compact: db=%s HEAD commit probe returned empty value during retry — fail\n' "$db" >&2
+        rm -f "$preflight_tmp"
+        return 1
+      fi
+      compacted_from_head="$head"
+    fi
+
+    : > "$preflight_tmp"
+    if ! preflight_counts "$db" "$preflight_tmp"; then
+      rm -f "$preflight_tmp"
+      return 1
+    fi
+    if ! preflight_hash=$(db_value_hash "$db"); then
+      rm -f "$preflight_tmp"
+      return 1
+    fi
+    if [ -z "$preflight_hash" ]; then
+      printf 'compact: db=%s pre-flatten value hash probe returned empty value — fail\n' "$db" >&2
+      rm -f "$preflight_tmp"
+      return 1
+    fi
+
+    current_head=$(head_commit "$db" || true)
+    if [ "$current_head" = "$head" ]; then
+      preflight_succeeded=true
+      break
+    fi
+
+    if [ "$preflight_attempt" -lt "$preflight_max_attempts" ]; then
+      printf 'compact: db=%s HEAD moved during preflight attempt=%s/%s want_HEAD=%s got_HEAD=%s — retrying\n' \
+        "$db" "$preflight_attempt" "$preflight_max_attempts" "$head" "${current_head:-<empty>}" >&2
+      sleep "$(awk 'BEGIN{srand(); printf "%.2f", 1 + rand() * 4}')"
+    fi
+    preflight_attempt=$((preflight_attempt + 1))
+  done
+
+  if [ "$preflight_succeeded" != "true" ]; then
+    printf 'compact: db=%s HEAD kept moving across %s preflight attempts last_want_HEAD=%s last_got_HEAD=%s — aborting before flatten\n' \
+      "$db" "$preflight_max_attempts" "$head" "${current_head:-<empty>}" >&2
     rm -f "$preflight_tmp"
     return 1
   fi
-  if ! preflight_hash=$(db_value_hash "$db"); then
-    rm -f "$preflight_tmp"
-    return 1
-  fi
-  if [ -z "$preflight_hash" ]; then
-    printf 'compact: db=%s pre-flatten value hash probe returned empty value — fail\n' "$db" >&2
-    rm -f "$preflight_tmp"
-    return 1
-  fi
+
   table_count=$(wc -l < "$preflight_tmp")
   printf 'compact: db=%s commits=%s root=%s tables=%s — flattening...\n' \
     "$db" "$count" "$root" "$table_count"
