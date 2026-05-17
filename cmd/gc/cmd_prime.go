@@ -98,14 +98,7 @@ to empty output from valid conditional logic, or on suspended states
 			if doPrimeWithHookFormat(args, &buf, stderr, hookMode, hookFormat, strictMode) != 0 {
 				return errExit
 			}
-			agentName := ""
-			if len(args) > 0 {
-				agentName = args[0]
-			} else if v := strings.TrimSpace(os.Getenv("GC_ALIAS")); v != "" {
-				agentName = v
-			} else {
-				agentName = strings.TrimSpace(os.Getenv("GC_AGENT"))
-			}
+			agentName, _ := primeInvocationAgentName(args)
 			_ = writeCLIJSONLine(stdout, primeJSONResult{
 				SchemaVersion: "1",
 				Agent:         agentName,
@@ -161,7 +154,7 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMo
 	return doPrimeWithHookFormat(args, stdout, stderr, hookMode, "", strictMode)
 }
 
-func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode bool) int {
+func primeInvocationAgentName(args []string) (string, bool) {
 	agentName := os.Getenv("GC_ALIAS")
 	if agentName == "" {
 		agentName = os.Getenv("GC_AGENT")
@@ -179,6 +172,11 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	if len(args) > 0 {
 		agentName = args[0]
 	}
+	return strings.TrimSpace(agentName), sessionTemplateContext
+}
+
+func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode bool) int {
+	agentName, sessionTemplateContext := primeInvocationAgentName(args)
 	hookContext := primeHookContext{}
 	suppressHookPrompt := false
 	if hookMode {

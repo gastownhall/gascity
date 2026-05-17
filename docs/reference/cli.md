@@ -338,6 +338,7 @@ gc build-image [city-path] [flags]
 |------|------|---------|-------------|
 | `--base-image` | string | `gc-agent:latest` | base Docker image |
 | `--context-only` | bool |  | write build context without running docker build |
+| `--json` | bool |  | emit JSON summary |
 | `--push` | bool |  | push image after building |
 | `--rig-path` | stringSlice |  | rig name:path pairs (repeatable) |
 | `--tag` | string |  | image tag (required unless --context-only) |
@@ -1040,7 +1041,9 @@ gc event
 Record a custom event to the city event log.
 
 Best-effort: always exits 0 so bead hooks never fail. Supports
-attaching arbitrary JSON payloads.
+attaching arbitrary JSON payloads. JSON summaries report whether submission to
+the configured provider was attempted; the event bus does not acknowledge
+durable persistence.
 
 ```
 gc event emit <type> [flags]
@@ -1049,6 +1052,7 @@ gc event emit <type> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--actor` | string |  | Actor name (default: $GC_ALIAS, else $GC_AGENT, else $GC_SESSION_ID, else "human") |
+| `--json` | bool |  | emit JSON summary |
 | `--message` | string |  | Event message |
 | `--payload` | string |  | JSON payload to attach to the event |
 | `--subject` | string |  | Event subject (e.g. bead ID) |
@@ -1268,6 +1272,7 @@ gc handoff [subject] [message] [flags]
 |------|------|---------|-------------|
 | `--auto` | bool |  | Send handoff mail without requesting restart (for PreCompact hooks) |
 | `--hook-format` | string |  | format hook output for a provider |
+| `--json` | bool |  | emit JSON summary |
 | `--target` | string |  | Remote session alias or ID to handoff (kills only controller-restartable sessions) |
 
 ## gc help
@@ -1415,6 +1420,7 @@ gc init
 | `--bootstrap-profile` | string |  | bootstrap profile to apply for hosted/container defaults |
 | `--file` | string |  | path to a TOML file to use as city.toml |
 | `--from` | string |  | path to an example city directory to copy |
+| `--json` | bool |  | emit JSON summary |
 | `--name` | string |  | workspace name (default: target directory basename) |
 | `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
 | `--provider` | string |  | built-in workspace provider to use for the default mayor config |
@@ -1853,6 +1859,7 @@ gc prime [agent-name] [flags]
 |------|------|---------|-------------|
 | `--hook` | bool |  | compatibility mode for runtime hook invocations |
 | `--hook-format` | string |  | format hook output for a provider |
+| `--json` | bool |  | emit JSON summary |
 | `--strict` | bool |  | fail on missing city, missing or unknown agent, or unreadable prompt_template instead of falling back to the default prompt |
 
 ## gc prompt
@@ -2744,6 +2751,7 @@ gc skill list [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--agent` | string |  | show the effective skill view for this agent |
+| `--json` | bool |  | emit JSON summary |
 | `--session` | string |  | show the effective skill view for this session |
 
 ## gc sling
@@ -3128,6 +3136,7 @@ gc version [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--json` | bool |  | emit JSON summary |
 | `-l`, `--long` | bool |  | Include git commit and build date metadata |
 
 ## gc wait

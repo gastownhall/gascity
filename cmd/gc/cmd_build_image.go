@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -11,6 +10,12 @@ import (
 
 	"github.com/gastownhall/gascity/internal/buildimage"
 	"github.com/spf13/cobra"
+)
+
+var (
+	buildImageAssembleContext = buildimage.AssembleContext
+	buildImageBuild           = buildimage.Build
+	buildImagePush            = buildimage.Push
 )
 
 func newBuildImageCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -49,38 +54,21 @@ volume mounts at runtime.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			out := stdout
-			var bufferedOut bytes.Buffer
 			if jsonOut {
 				out = stderr
-				if contextOnly {
-					out = &bufferedOut
-				}
 			}
-			code := doBuildImage(args, tag, baseImage, rigPaths, push, contextOnly, out, stderr)
+			result, code := doBuildImageWithResult(args, tag, baseImage, rigPaths, push, contextOnly, out, stderr)
 			if code != 0 {
 				return errExit
 			}
-			contextDir := ""
 			if jsonOut {
-				if bufferedOut.Len() > 0 {
-					fmt.Fprint(stderr, bufferedOut.String()) //nolint:errcheck // best-effort stderr
-					contextDir = parseBuildImageContextDir(bufferedOut.String())
-				}
-				cityPath := ""
-				if len(args) > 0 {
-					if abs, err := filepath.Abs(args[0]); err == nil {
-						cityPath = abs
-					} else {
-						cityPath = args[0]
-					}
-				}
 				_ = writeCLIJSONLine(stdout, buildImageJSONResult{
 					SchemaVersion: "1",
-					CityPath:      cityPath,
+					CityPath:      result.CityPath,
 					Tag:           tag,
 					BaseImage:     baseImage,
 					ContextOnly:   contextOnly,
-					ContextDir:    contextDir,
+					ContextDir:    result.ContextDir,
 					Push:          push,
 					RigPathCount:  len(rigPaths),
 				})
@@ -110,19 +98,21 @@ type buildImageJSONResult struct {
 	RigPathCount  int    `json:"rig_path_count"`
 }
 
-func parseBuildImageContextDir(output string) string {
-	for _, line := range strings.Split(output, "\n") {
-		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "Build context written to: "); ok {
-			return rest
-		}
-	}
-	return ""
+type buildImageRunResult struct {
+	CityPath   string
+	ContextDir string
 }
 
-func doBuildImage(args []string, tag, baseImage string, rigPaths []string, push, contextOnly bool, stdout, stderr io.Writer) int {
+func doBuildImage(args []string, tag, baseImage string, rigPaths []string, push, contextOnly bool, stdout, stderr io.Writer) int { //nolint:unparam // preserved for existing tests; command path needs doBuildImageWithResult.
+	_, code := doBuildImageWithResult(args, tag, baseImage, rigPaths, push, contextOnly, stdout, stderr)
+	return code
+}
+
+func doBuildImageWithResult(args []string, tag, baseImage string, rigPaths []string, push, contextOnly bool, stdout, stderr io.Writer) (buildImageRunResult, int) {
+	result := buildImageRunResult{}
 	if !contextOnly && tag == "" {
 		fmt.Fprintln(stderr, "gc build-image: --tag is required (or use --context-only)") //nolint:errcheck // best-effort stderr
-		return 1
+		return result, 1
 	}
 
 	// Resolve city path.
@@ -134,8 +124,12 @@ func doBuildImage(args []string, tag, baseImage string, rigPaths []string, push,
 		cityPath, err = resolveCommandCity(nil)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc build-image: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+			return result, 1
 		}
+	}
+	result.CityPath = cityPath
+	if abs, err := filepath.Abs(cityPath); err == nil {
+		result.CityPath = abs
 	}
 
 	// Parse rig-path flags (name:path format).
@@ -144,7 +138,7 @@ func doBuildImage(args []string, tag, baseImage string, rigPaths []string, push,
 		name, path, ok := strings.Cut(rp, ":")
 		if !ok || name == "" || path == "" {
 			fmt.Fprintf(stderr, "gc build-image: invalid --rig-path %q (expected name:path)\n", rp) //nolint:errcheck // best-effort stderr
-			return 1
+			return result, 1
 		}
 		rigs[name] = path
 	}
@@ -153,7 +147,7 @@ func doBuildImage(args []string, tag, baseImage string, rigPaths []string, push,
 	outputDir, err := os.MkdirTemp("", "gc-build-image-*")
 	if err != nil {
 		fmt.Fprintf(stderr, "gc build-image: creating temp dir: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return result, 1
 	}
 	if !contextOnly {
 		defer func() { _ = os.RemoveAll(outputDir) }()
@@ -167,34 +161,35 @@ func doBuildImage(args []string, tag, baseImage string, rigPaths []string, push,
 		Tag:       tag,
 		RigPaths:  rigs,
 	}
-	if err := buildimage.AssembleContext(opts); err != nil {
+	if err := buildImageAssembleContext(opts); err != nil {
 		fmt.Fprintf(stderr, "gc build-image: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return result, 1
 	}
 
 	if contextOnly {
+		result.ContextDir = outputDir
 		fmt.Fprintf(stdout, "Build context written to: %s\n", outputDir) //nolint:errcheck // best-effort stdout
-		return 0
+		return result, 0
 	}
 
 	// Build image.
 	fmt.Fprintf(stdout, "Building image %s...\n", tag) //nolint:errcheck // best-effort stdout
 	ctx := context.Background()
-	if err := buildimage.Build(ctx, outputDir, tag, stdout, stderr); err != nil {
+	if err := buildImageBuild(ctx, outputDir, tag, stdout, stderr); err != nil {
 		fmt.Fprintf(stderr, "gc build-image: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return result, 1
 	}
 	fmt.Fprintf(stdout, "Image built: %s\n", tag) //nolint:errcheck // best-effort stdout
 
 	// Push if requested.
 	if push {
 		fmt.Fprintf(stdout, "Pushing %s...\n", tag) //nolint:errcheck // best-effort stdout
-		if err := buildimage.Push(ctx, tag, stdout, stderr); err != nil {
+		if err := buildImagePush(ctx, tag, stdout, stderr); err != nil {
 			fmt.Fprintf(stderr, "gc build-image: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+			return result, 1
 		}
 		fmt.Fprintf(stdout, "Pushed: %s\n", tag) //nolint:errcheck // best-effort stdout
 	}
 
-	return 0
+	return result, 0
 }

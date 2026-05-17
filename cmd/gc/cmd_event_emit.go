@@ -33,8 +33,8 @@ type eventEmitJSONResult struct {
 	Actor         string `json:"actor"`
 	Subject       string `json:"subject,omitempty"`
 	Message       string `json:"message,omitempty"`
-	Payload       bool   `json:"payload"`
-	Recorded      bool   `json:"recorded"`
+	HasPayload    bool   `json:"has_payload"`
+	Submitted     bool   `json:"submitted"`
 }
 
 func newEventEmitCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -47,24 +47,26 @@ func newEventEmitCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Record a custom event to the city event log.
 
 Best-effort: always exits 0 so bead hooks never fail. Supports
-attaching arbitrary JSON payloads.`,
+attaching arbitrary JSON payloads. JSON summaries report whether submission to
+the configured provider was attempted; the event bus does not acknowledge
+durable persistence.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			effectiveActor := actor
 			if effectiveActor == "" {
 				effectiveActor = eventActor()
 			}
-			recorded := false
+			submitted := false
 			if jsonOut {
-				recorded = cmdEventEmitRecorded(args[0], subject, message, effectiveActor, payload, stderr)
+				submitted = cmdEventEmitSubmitted(args[0], subject, message, effectiveActor, payload, stderr)
 				_ = writeCLIJSONLine(stdout, eventEmitJSONResult{
 					SchemaVersion: "1",
 					EventType:     args[0],
 					Actor:         effectiveActor,
 					Subject:       subject,
 					Message:       message,
-					Payload:       payload != "",
-					Recorded:      recorded,
+					HasPayload:    payload != "",
+					Submitted:     submitted,
 				})
 				return nil
 			}
@@ -85,11 +87,11 @@ attaching arbitrary JSON payloads.`,
 // cmdEventEmit records a single event to the city event log. Best-effort:
 // errors go to stderr but exit code is always 0 so bd hooks never fail.
 func cmdEventEmit(eventType, subject, message, actor, payload string, stderr io.Writer) int {
-	cmdEventEmitRecorded(eventType, subject, message, actor, payload, stderr)
+	cmdEventEmitSubmitted(eventType, subject, message, actor, payload, stderr)
 	return 0
 }
 
-func cmdEventEmitRecorded(eventType, subject, message, actor, payload string, stderr io.Writer) bool {
+func cmdEventEmitSubmitted(eventType, subject, message, actor, payload string, stderr io.Writer) bool {
 	ep, code := openCityEventEmitProvider(stderr, "gc event emit")
 	if ep == nil {
 		// Best-effort: if we can't open the provider, still exit 0.
