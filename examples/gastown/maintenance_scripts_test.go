@@ -2,6 +2,7 @@ package gastown_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -308,7 +309,7 @@ exit 1
 	}
 }
 
-func TestMaintenanceDoltScriptsFallbackToManagedRuntimePorts(t *testing.T) {
+func TestMaintenanceDoltScriptsUseManagedRuntimePorts(t *testing.T) {
 	scripts := []struct {
 		name   string
 		script string
@@ -336,19 +337,6 @@ func TestMaintenanceDoltScriptsFallbackToManagedRuntimePorts(t *testing.T) {
 		setup func(t *testing.T, cityDir string) string
 	}{
 		{
-			name: "compatibility port mirror ignored without managed runtime state",
-			setup: func(t *testing.T, cityDir string) string {
-				t.Helper()
-				if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(cityDir, ".beads", "dolt-server.port"), []byte("45781\n"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				return "3307"
-			},
-		},
-		{
 			name: "managed runtime state",
 			setup: func(t *testing.T, cityDir string) string {
 				t.Helper()
@@ -372,26 +360,6 @@ func TestMaintenanceDoltScriptsFallbackToManagedRuntimePorts(t *testing.T) {
 				port := listener.Addr().(*net.TCPAddr).Port
 				writeManagedRuntimeState(t, cityDir, port)
 				return strconv.Itoa(port)
-			},
-		},
-		{
-			name: "corrupt managed state ignores compatibility port mirror",
-			setup: func(t *testing.T, cityDir string) string {
-				t.Helper()
-				stateDir := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt")
-				if err := os.MkdirAll(stateDir, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(stateDir, "dolt-state.json"), []byte(`not-json`), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(cityDir, ".beads", "dolt-server.port"), []byte("45785\n"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				return "3307"
 			},
 		},
 	}
@@ -479,6 +447,7 @@ func TestMaintenanceDoltScriptsFallbackToManagedRuntimePortsWithInconclusiveLsof
 		lsofBody    string
 		ncBody      func(port string) string
 		wantManaged bool
+		wantExit78  bool
 	}{
 		{
 			name:     "inconclusive lsof accepts reachable port",
@@ -503,7 +472,7 @@ exit 1
 exit 0
 `
 			},
-			wantManaged: false,
+			wantExit78: true,
 		},
 		{
 			name:     "inconclusive lsof with unreachable port still rejects port",
@@ -513,7 +482,7 @@ exit 0
 exit 1
 `
 			},
-			wantManaged: false,
+			wantExit78: true,
 		},
 	}
 
@@ -526,10 +495,7 @@ exit 1
 
 				listener := listenManagedDoltPort(t)
 				managedPort := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-				wantPort := "3307"
-				if tc.wantManaged {
-					wantPort = managedPort
-				}
+				wantPort := managedPort
 				writeManagedRuntimeState(t, cityDir, listener.Addr().(*net.TCPAddr).Port)
 
 				writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
@@ -558,7 +524,13 @@ exit 0
 					env[key] = value
 				}
 
-				runScript(t, filepath.Join(exampleDir(), tt.script), env)
+				script := filepath.Join(exampleDir(), tt.script)
+				if tc.wantExit78 {
+					out, err := runScriptResult(t, script, env)
+					assertMaintenanceScriptExit78(t, err, out)
+					return
+				}
+				runScript(t, script, env)
 
 				logData, err := os.ReadFile(doltLog)
 				if err != nil {
@@ -576,6 +548,24 @@ exit 0
 				}
 			})
 		}
+	}
+}
+
+func assertMaintenanceScriptExit78(t *testing.T, err error, out []byte) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("maintenance script exited 0, want exit 78\n%s", out)
+	}
+	exitErr := &exec.ExitError{}
+	ok := errors.As(err, &exitErr)
+	if !ok {
+		t.Fatalf("maintenance script returned non-exit error: %v\n%s", err, out)
+	}
+	if exitErr.ExitCode() != 78 {
+		t.Fatalf("maintenance script exit code = %d, want 78\n%s", exitErr.ExitCode(), out)
+	}
+	if !strings.Contains(string(out), "gc dolt: cannot resolve runtime port") {
+		t.Fatalf("maintenance script output missing port-resolution error:\n%s", out)
 	}
 }
 
