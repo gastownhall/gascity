@@ -121,7 +121,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		dependencyConflict := cacheEventDependencyConflict(currentDeps, depsKnown, patch, fields)
 		if fieldConflict || dependencyConflict {
 			if eventType == "bead.closed" {
-				if !verifiedConflict || beadChanged(current, verifiedClosedBase) {
+				if !verifiedConflict || beadChanged(current, verifiedClosedBase, false) {
 					return
 				}
 			} else {
@@ -132,7 +132,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 					return
 				}
 				if recentLocalMutation(c.localBeadAt[patch.ID], time.Now()) &&
-					(!verifiedRecentLocal || beadChanged(current, verifiedRecentLocalBase)) {
+					(!verifiedRecentLocal || beadChanged(current, verifiedRecentLocalBase, false)) {
 					return
 				}
 			}
@@ -154,7 +154,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		mutated = true
 	case "bead.updated":
 		existing, cached := c.beads[b.ID]
-		if !cached || beadChanged(existing, b) {
+		if !cached || beadChanged(existing, b, false) {
 			c.noteMutationLocked(b.ID)
 			c.beads[b.ID] = cloneBead(b)
 			delete(c.dirty, b.ID)
@@ -378,7 +378,7 @@ func recentLocalMutation(mutatedAt time.Time, now time.Time) bool {
 	return !mutatedAt.IsZero() && now.Sub(mutatedAt) <= 5*time.Second
 }
 
-func (c *CachingStore) recentLocalBeadConflictLocked(id string, fresh Bead, now time.Time) (Bead, bool) {
+func (c *CachingStore) recentLocalBeadConflictLocked(id string, fresh Bead, now time.Time, skipLabels bool) (Bead, bool) {
 	current, ok := c.beads[id]
 	if !ok {
 		return Bead{}, false
@@ -386,7 +386,7 @@ func (c *CachingStore) recentLocalBeadConflictLocked(id string, fresh Bead, now 
 	if !recentLocalMutation(c.localBeadAt[id], now) {
 		return Bead{}, false
 	}
-	if !beadChanged(current, fresh) {
+	if !beadChanged(current, fresh, skipLabels) {
 		return Bead{}, false
 	}
 	return cloneBead(current), true
@@ -479,7 +479,7 @@ func (c *CachingStore) notifyChanges(notifications []cacheNotification) {
 	}
 }
 
-func beadChanged(old, fresh Bead) bool {
+func beadChanged(old, fresh Bead, skipLabels bool) bool {
 	if old.ID != fresh.ID ||
 		old.Title != fresh.Title ||
 		old.Status != fresh.Status ||
@@ -496,7 +496,7 @@ func beadChanged(old, fresh Bead) bool {
 	if !maps.Equal(old.Metadata, fresh.Metadata) {
 		return true
 	}
-	if !slices.Equal(old.Labels, fresh.Labels) {
+	if !skipLabels && !slices.Equal(old.Labels, fresh.Labels) {
 		return true
 	}
 	if !slices.Equal(old.Needs, fresh.Needs) {

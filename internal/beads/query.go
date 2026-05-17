@@ -71,6 +71,10 @@ type ListQuery struct {
 	Limit         int
 	IncludeClosed bool
 	AllowScan     bool
+	// SkipLabels tells backing stores and cache reconciliation that the
+	// caller does not need labels for change detection. Stores that cannot
+	// omit labels may ignore it.
+	SkipLabels bool
 	// Live bypasses CachingStore and reads from the backing store. Other Store
 	// implementations ignore it. Use it only for lifecycle gates that must
 	// observe external mutations immediately.

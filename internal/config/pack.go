@@ -2088,6 +2088,7 @@ func legacyPackDoctors(fs fsys.FS, entries []PackDoctorEntry, packDir, packName 
 			SourceDir:   packDir,
 			PackDir:     packDir,
 			PackName:    packName,
+			Warmup:      entry.Warmup,
 		})
 	}
 	return out, nil

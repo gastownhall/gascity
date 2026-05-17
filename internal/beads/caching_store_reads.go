@@ -169,7 +169,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 			}
 			continue
 		}
-		if current, keep := c.recentLocalBeadConflictLocked(item.ID, item, now); keep {
+		if current, keep := c.recentLocalBeadConflictLocked(item.ID, item, now, false); keep {
 			if query.Matches(current) {
 				refreshed = append(refreshed, current)
 			}
@@ -197,7 +197,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
 			continue
 		}
-		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now); keep {
+		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
 			continue
 		}
 		c.beads[id] = bead

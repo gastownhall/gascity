@@ -960,11 +960,13 @@ gc doctor [flags]
 gc doctor
   gc doctor --fix
   gc doctor --verbose
+  gc doctor --json
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--fix` | bool |  | attempt automatic repairs and safe mechanical migrations |
+| `--json` | bool |  | emit structured JSON instead of human-readable output |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |
 
 ## gc dolt-cleanup
@@ -1087,6 +1089,33 @@ gc events
 | `--timeout` | string | `30s` | Max wait duration for --watch (e.g. 30s, 5m) |
 | `--type` | string |  | Filter by event type (e.g. bead.created) |
 | `--watch` | bool |  | Block until matching events arrive (exits after first match or buffered replay) |
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc events rotate](#gc-events-rotate) | Force rotate the city event log |
+
+## gc events rotate
+
+Force rotate the city event log through the running supervisor.
+
+Output is one JSON line. Empty active logs are successful no-ops.
+
+```
+gc events rotate [flags]
+```
+
+**Example:**
+
+```
+gc events rotate
+  gc events rotate --wait
+  gc --city /path/to/city events rotate --api http://127.0.0.1:8080
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--api` | string |  | GC API server URL override (auto-discovered by default) |
+| `--wait` | bool |  | Wait for archive compression to complete before returning |
 
 ## gc formula
 
@@ -2782,6 +2811,7 @@ gc start
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `-n`, `--dry-run` | bool |  | preview what agents would start without starting them |
+| `--no-auto-restart` | bool |  | detect supervisor binary drift but do not auto-restart; exits non-zero on drift |
 
 ## gc status
 

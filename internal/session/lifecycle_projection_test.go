@@ -114,6 +114,20 @@ func TestProjectLifecycleDesiredStateAndBlockers(t *testing.T) {
 			wantCauses:  []WakeCause{WakeCausePendingCreate},
 		},
 		{
+			name: "explicit wake request is a durable wake cause",
+			input: LifecycleInput{
+				Status: "open",
+				Metadata: map[string]string{
+					"state":        "asleep",
+					"session_name": "s-worker",
+					"wake_request": "explicit",
+				},
+				Now: now,
+			},
+			wantDesired: DesiredStateRunning,
+			wantCauses:  []WakeCause{WakeCauseExplicit},
+		},
+		{
 			name: "future hold blocks an otherwise runnable create claim",
 			input: LifecycleInput{
 				Status: "open",

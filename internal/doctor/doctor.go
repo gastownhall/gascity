@@ -15,6 +15,10 @@ type Report struct {
 	Failed int
 	// Fixed is the number of checks remediated by --fix.
 	Fixed int
+	// Results holds the per-check results in the order they ran. Populated
+	// by Run so callers that need structured output (e.g. `gc doctor --json`)
+	// can project every result without re-running checks.
+	Results []*CheckResult
 }
 
 // Doctor runs registered health checks and reports results.
@@ -29,8 +33,25 @@ func (d *Doctor) Register(c Check) {
 
 // Run executes all registered checks, streaming results to w as each
 // completes. When fix is true, fixable checks that fail are remediated
-// and re-run. Returns a summary report.
+// and re-run. Returns a summary report whose Results field holds every
+// check result in execution order.
 func (d *Doctor) Run(ctx *CheckContext, w io.Writer, fix bool) *Report {
+	return d.run(ctx, w, fix, true)
+}
+
+// RunCollect executes all registered checks without streaming per-check
+// output. The returned Report's Results field holds every check result in
+// execution order so callers can render structured output (e.g. JSON).
+// Fix semantics match Run.
+func (d *Doctor) RunCollect(ctx *CheckContext, fix bool) *Report {
+	return d.run(ctx, io.Discard, fix, false)
+}
+
+func (d *Doctor) run(ctx *CheckContext, w io.Writer, fix, stream bool) *Report {
+	// Normalize ctx so individual checks always get a non-nil context with
+	// an Output writer set. Done here so both Run and RunCollect benefit
+	// — RunCollect routes Output to io.Discard so a check that writes to
+	// ctx.Output incidentally won't disturb the JSON-collect path.
 	if ctx == nil {
 		ctx = &CheckContext{}
 	}
@@ -60,7 +81,10 @@ func (d *Doctor) Run(ctx *CheckContext, w io.Writer, fix bool) *Report {
 			}
 		}
 
-		printResult(w, result, ctx.Verbose)
+		if stream {
+			printResult(w, result, ctx.Verbose)
+		}
+		r.Results = append(r.Results, result)
 
 		switch {
 		case result.Fixed:

@@ -480,6 +480,12 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 					continue
 				}
 				workflowTracef("serve process-error bead=%s kind=%s err=%v", beadID, kind, err)
+				if dispatch.IsTransientControllerError(err) {
+					pendingCount++
+					result.pendingAny = true
+					workflowTracef("serve transient-error-pending bead=%s kind=%s err=%v", beadID, kind, err)
+					continue
+				}
 				if isLegacyOversizedControlEventError(err) {
 					legacyOversizedCount++
 					continue

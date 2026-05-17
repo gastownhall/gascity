@@ -61,6 +61,26 @@ type cliWireTaggedEvent struct {
 	Type    string          `json:"type"`
 }
 
+type cliEventsRotateResponse struct {
+	Rotated     bool                    `json:"rotated"`
+	Reason      string                  `json:"reason,omitempty"`
+	Archive     *cliEventsRotateArchive `json:"archive,omitempty"`
+	AnchorEvent *cliEventsRotateAnchor  `json:"anchor_event,omitempty"`
+}
+
+type cliEventsRotateArchive struct {
+	Path              string `json:"path"`
+	FirstSeq          uint64 `json:"first_seq"`
+	LastSeq           uint64 `json:"last_seq"`
+	CompressionStatus string `json:"compression_status"`
+}
+
+type cliEventsRotateAnchor struct {
+	Seq  uint64    `json:"seq"`
+	Type string    `json:"type"`
+	Ts   time.Time `json:"ts"`
+}
+
 type cliEventEnvelope = cliWireEvent
 
 type cliTaggedEventEnvelope = cliWireTaggedEvent
@@ -180,6 +200,32 @@ DTO or SSE envelope.`,
 	cmd.Flags().StringArrayVar(&payloadMatch, "payload-match", nil, "Filter by payload field (key=value or key.subkey=value, repeatable)")
 	cmd.Flags().BoolVar(&jsonFlagDeprecated, "json", false, "Deprecated: output is always JSONL. Accepted for back-compat.")
 	_ = cmd.Flags().MarkDeprecated("json", "output is always JSONL; the flag is now a no-op and will be removed in a future release")
+	cmd.AddCommand(newEventsRotateCmd(stdout, stderr))
+	return cmd
+}
+
+func newEventsRotateCmd(stdout, stderr io.Writer) *cobra.Command {
+	var apiURL string
+	var wait bool
+	cmd := &cobra.Command{
+		Use:   "rotate",
+		Short: "Force rotate the city event log",
+		Long: `Force rotate the city event log through the running supervisor.
+
+Output is one JSON line. Empty active logs are successful no-ops.`,
+		Example: `  gc events rotate
+  gc events rotate --wait
+  gc --city /path/to/city events rotate --api http://127.0.0.1:8080`,
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if cmdEventsRotate(apiURL, wait, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&apiURL, "api", "", "GC API server URL override (auto-discovered by default)")
+	cmd.Flags().BoolVar(&wait, "wait", false, "Wait for archive compression to complete before returning")
 	return cmd
 }
 
@@ -245,6 +291,15 @@ func cmdEventsWatch(apiURLOverride, typeFilter string, payloadMatchArgs []string
 		return 1
 	}
 	return doEventsWatch(scope, typeFilter, pm, afterSeq, afterCursor, timeout, stdout, stderr)
+}
+
+func cmdEventsRotate(apiURLOverride string, wait bool, stdout, stderr io.Writer) int {
+	scope, err := resolveEventsScope(apiURLOverride)
+	if err != nil {
+		fmt.Fprintln(stderr, "gc events: rotate requires a running supervisor; start it with 'gc supervisor start'") //nolint:errcheck
+		return 1
+	}
+	return doEventsRotate(scope, wait, stdout, stderr)
 }
 
 func openEventsScope(apiURLOverride string, stderr io.Writer) (eventsAPIScope, int) {
@@ -778,6 +833,103 @@ func doEventsWatch(scope eventsAPIScope, typeFilter string, payloadMatch map[str
 	}
 
 	return streamCityEvents(ctx, client, scope.cityName, resumeSeq, typeFilter, payloadMatch, true, stdout, stderr)
+}
+
+func doEventsRotate(scope eventsAPIScope, wait bool, stdout, stderr io.Writer) int {
+	if scope.localOnly || strings.TrimSpace(scope.apiURL) == "" {
+		printEventsRotateSupervisorRequired(stderr)
+		return 1
+	}
+	if scope.isSupervisor() {
+		fmt.Fprintln(stderr, "gc events: rotate requires a city in scope; run from a city directory or pass --city") //nolint:errcheck
+		return 1
+	}
+
+	client, err := scope.client()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+		return 1
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resp, err := rotateCityEvents(ctx, client, scope.cityName, wait)
+	if err != nil {
+		printEventsRotateError(scope, err, stderr)
+		return 1
+	}
+	if wait && resp.Rotated && resp.Archive != nil && resp.Archive.CompressionStatus != "complete" {
+		_, _ = fmt.Fprintf(
+			stderr,
+			"gc events: rotation succeeded but compression did not complete within 30s; archive_path=%s; check disk space and retry\n",
+			resp.Archive.Path,
+		)
+		return 1
+	}
+	return printJSONLines(resp, stdout, stderr)
+}
+
+func rotateCityEvents(ctx context.Context, client *genclient.ClientWithResponses, cityName string, wait bool) (cliEventsRotateResponse, error) {
+	params := &genclient.RotateEventsParams{XGCRequest: "true"}
+	if wait {
+		params.Wait = &wait
+	}
+	resp, err := client.RotateEventsWithResponse(ctx, cityName, params)
+	if err != nil {
+		return cliEventsRotateResponse{}, &eventsAPITransportError{err: err}
+	}
+	if err := eventsListError(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return cliEventsRotateResponse{}, err
+	}
+	if resp.JSON200 == nil {
+		return cliEventsRotateResponse{}, fmt.Errorf("empty rotate response")
+	}
+	return cliRotateResponseFromGen(*resp.JSON200)
+}
+
+func cliRotateResponseFromGen(item genclient.EventRotateResponse) (cliEventsRotateResponse, error) {
+	data, err := json.Marshal(item)
+	if err != nil {
+		return cliEventsRotateResponse{}, err
+	}
+	var out cliEventsRotateResponse
+	if err := json.Unmarshal(data, &out); err != nil {
+		return cliEventsRotateResponse{}, err
+	}
+	return out, nil
+}
+
+func printEventsRotateError(scope eventsAPIScope, err error, stderr io.Writer) {
+	if isEventsRotateSupervisorRequired(err) {
+		printEventsRotateSupervisorRequired(stderr)
+		return
+	}
+
+	var apiErr *eventsAPIError
+	if errors.As(err, &apiErr) {
+		msg := strings.TrimSpace(apiErr.Error())
+		if apiErr.statusCode == http.StatusNotFound && gcapi.IsCityNotFoundOrNotRunningDetail(apiErr.detail) {
+			fmt.Fprintf(stderr, "gc events: city '%s' not found; run 'gc supervisor cities' to list registered cities\n", scope.cityName) //nolint:errcheck
+			return
+		}
+		if apiErr.statusCode == http.StatusMethodNotAllowed && strings.HasPrefix(msg, "rotation is only supported") {
+			msg = "rotate" + strings.TrimPrefix(msg, "rotation")
+		}
+		fmt.Fprintf(stderr, "gc events: %s\n", msg) //nolint:errcheck
+		return
+	}
+
+	fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+}
+
+func isEventsRotateSupervisorRequired(err error) bool {
+	var transport *eventsAPITransportError
+	return errors.As(err, &transport)
+}
+
+func printEventsRotateSupervisorRequired(stderr io.Writer) {
+	fmt.Fprintln(stderr, "gc events: rotate requires a running supervisor; start it with 'gc supervisor start'") //nolint:errcheck
 }
 
 func probeCityEventsReachable(ctx context.Context, client *genclient.ClientWithResponses, cityName string) error {

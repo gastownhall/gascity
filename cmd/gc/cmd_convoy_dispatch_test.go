@@ -3292,6 +3292,66 @@ func TestRunWorkflowServeTreatsTransientControllerSpawnPendingAsNonFatal(t *test
 	}
 }
 
+func TestRunWorkflowServeTreatsTransientControlErrorAsPending(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	cityFlag = ""
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	var attempted []string
+	var processed []string
+	calls := 0
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		calls++
+		if calls == 1 {
+			return []hookBead{
+				{ID: "gc-transient", Metadata: map[string]string{"gc.kind": "ralph"}},
+				{ID: "gc-ready", Metadata: map[string]string{"gc.kind": "scope-check"}},
+			}, nil
+		}
+		return nil, nil
+	}
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+		attempted = append(attempted, beadID)
+		if beadID == "gc-transient" {
+			return fmt.Errorf("gc-transient: spawning iteration 2: adding dep: failed to check for dependency cycle: invalid connection: i/o timeout")
+		}
+		processed = append(processed, beadID)
+		return nil
+	}
+
+	if err := runWorkflowServe("", false, io.Discard, io.Discard); err != nil {
+		t.Fatalf("runWorkflowServe: %v", err)
+	}
+
+	if !slices.Equal(attempted, []string{"gc-transient", "gc-ready"}) {
+		t.Fatalf("attempted beads = %#v, want transient bead skipped before ready bead is processed", attempted)
+	}
+	if !slices.Equal(processed, []string{"gc-ready"}) {
+		t.Fatalf("processed beads = %#v, want only later ready bead to be processed", processed)
+	}
+}
+
 func TestRunControlDispatcherQuarantinesMalformedControlGraph(t *testing.T) {
 	clearGCEnv(t)
 
@@ -3613,7 +3673,7 @@ func TestRunWorkflowServeFollowUsesSweepFallback(t *testing.T) {
 	}
 	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
 		processed = append(processed, beadID)
-		return os.ErrDeadlineExceeded
+		return errors.New("synthetic dispatch failure")
 	}
 
 	wfcAgent := config.Agent{Name: "control-dispatcher", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}
@@ -3625,8 +3685,8 @@ func TestRunWorkflowServeFollowUsesSweepFallback(t *testing.T) {
 		nil,
 		io.Discard,
 	)
-	if err == nil || !strings.Contains(err.Error(), os.ErrDeadlineExceeded.Error()) {
-		t.Fatalf("runWorkflowServeFollow error = %v, want wrapped %v", err, os.ErrDeadlineExceeded)
+	if err == nil || !strings.Contains(err.Error(), "synthetic dispatch failure") {
+		t.Fatalf("runWorkflowServeFollow error = %v, want wrapped synthetic dispatch failure", err)
 	}
 	if !slices.Equal(processed, []string{"gc-ready"}) {
 		t.Fatalf("processed beads = %#v, want sweep fallback to process gc-ready", processed)

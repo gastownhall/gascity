@@ -641,6 +641,76 @@ func TestProcessScopeCheckReturnsMalformedWhenScopeBodyMissing(t *testing.T) {
 	}
 }
 
+func TestProcessScopeCheckRetriesTransientMissingScopeBody(t *testing.T) {
+	t.Parallel()
+
+	mem := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	body := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	step := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title:  "preflight",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "pass",
+		},
+	})
+	control := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title: "Finalize scope for preflight",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+	mustDepAdd(t, mem, control.ID, step.ID, "blocks")
+
+	store := &transientMissingScopeBodyStore{
+		MemStore:  mem,
+		bodyID:    body.ID,
+		rootID:    workflow.ID,
+		hideReads: 3,
+	}
+	result, err := ProcessControl(store, control, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl: %v", err)
+	}
+	if result.Action != "scope-pass" {
+		t.Fatalf("action = %q, want scope-pass", result.Action)
+	}
+	if store.hiddenReads != 3 {
+		t.Fatalf("hiddenReads = %d, want 3", store.hiddenReads)
+	}
+	bodyAfter := mustGetBead(t, mem, body.ID)
+	if bodyAfter.Status != "closed" {
+		t.Fatalf("body status = %q, want closed", bodyAfter.Status)
+	}
+	if got := bodyAfter.Metadata["gc.outcome"]; got != "pass" {
+		t.Fatalf("body outcome = %q, want pass", got)
+	}
+}
+
 func TestProcessFanoutReturnsMalformedWhenScopeBodyMissing(t *testing.T) {
 	t.Parallel()
 
@@ -939,6 +1009,14 @@ type scopeBodyVanishAfterFirstResolveStore struct {
 	resolved bool
 }
 
+type transientMissingScopeBodyStore struct {
+	*beads.MemStore
+	bodyID      string
+	rootID      string
+	hideReads   int
+	hiddenReads int
+}
+
 type workflowFinalizeCloseFailStore struct {
 	beads.Store
 	finalizerID string
@@ -971,8 +1049,24 @@ func (s *scopeBodyVanishAfterFirstResolveStore) List(query beads.ListQuery) ([]b
 	return filterBeadID(result, s.bodyID), nil
 }
 
+func (s *transientMissingScopeBodyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	result, err := s.MemStore.List(query)
+	if err != nil {
+		return nil, err
+	}
+	if !canResolveScopeBodyQuery(query, s.rootID) || !containsBeadID(result, s.bodyID) || s.hiddenReads >= s.hideReads {
+		return result, nil
+	}
+	s.hiddenReads++
+	return filterBeadID(result, s.bodyID), nil
+}
+
 func (s *scopeBodyVanishAfterFirstResolveStore) canResolveScopeBody(query beads.ListQuery) bool {
-	if query.Metadata["gc.root_bead_id"] != s.rootID {
+	return canResolveScopeBodyQuery(query, s.rootID)
+}
+
+func canResolveScopeBodyQuery(query beads.ListQuery, rootID string) bool {
+	if query.Metadata["gc.root_bead_id"] != rootID {
 		return false
 	}
 	if query.Metadata["gc.kind"] == "scope" && query.Metadata["gc.scope_role"] == "body" {

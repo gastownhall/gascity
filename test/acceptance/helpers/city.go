@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -129,6 +130,65 @@ func (c *City) WriteConfig(toml string) {
 	}
 }
 
+// WriteV1AgentBlock appends a legacy [[agent]] block to the city root pack.toml.
+func (c *City) WriteV1AgentBlock(name string, fields ...string) {
+	c.t.Helper()
+	var b strings.Builder
+	b.WriteString("\n[[agent]]\n")
+	fmt.Fprintf(&b, "name = %q\n", name)
+	if !hasTOMLFieldKey(fields, "scope") {
+		b.WriteString("scope = \"city\"\n")
+	}
+	writeTOMLFields(&b, fields)
+
+	packPath := filepath.Join(c.Dir, "pack.toml")
+	f, err := os.OpenFile(packPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		c.t.Fatalf("opening pack.toml: %v", err)
+	}
+	defer f.Close() //nolint:errcheck // test helper failure is already captured on write
+	if _, err := f.WriteString(b.String()); err != nil {
+		c.t.Fatalf("appending v1 agent block to pack.toml: %v", err)
+	}
+}
+
+// WriteV2AgentDir writes a convention-discovered agent under the city root pack.
+func (c *City) WriteV2AgentDir(name string, fields ...string) {
+	c.t.Helper()
+	agentDir := filepath.Join(c.Dir, "agents", name)
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		c.t.Fatalf("creating agents/%s: %v", name, err)
+	}
+
+	var b strings.Builder
+	if !hasTOMLFieldKey(fields, "scope") {
+		b.WriteString("scope = \"city\"\n")
+	}
+	writeTOMLFields(&b, fields)
+	if err := os.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte(b.String()), 0o644); err != nil {
+		c.t.Fatalf("writing agents/%s/agent.toml: %v", name, err)
+	}
+
+	prompt := fmt.Sprintf("# %s\n\nYou are the %s test agent.\n", name, name)
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.template.md"), []byte(prompt), 0o644); err != nil {
+		c.t.Fatalf("writing agents/%s/prompt.template.md: %v", name, err)
+	}
+}
+
+// StartExpectingFatal runs gc start and returns its captured failure output.
+func (c *City) StartExpectingFatal(t *testing.T) string {
+	t.Helper()
+	out, err := c.GC("start", c.Dir)
+	if err == nil {
+		t.Fatalf("gc start succeeded; want fatal failure\n%s", out)
+	}
+	last := lastVisuallyDistinctLine(out)
+	if !fatalLinePrefixRE.MatchString(last) {
+		t.Fatalf("last visually distinct line = %q, want fatal prefix; full output:\n%s", last, out)
+	}
+	return out
+}
+
 // Stop runs gc stop.
 func (c *City) Stop() {
 	if !c.started {
@@ -235,6 +295,43 @@ func parseKeyValues(s string) map[string]string {
 		}
 	}
 	return m
+}
+
+var (
+	ansiEscapeRE      = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
+	fatalLinePrefixRE = regexp.MustCompile(`^(FATAL:|gc-fatal:)`)
+)
+
+func hasTOMLFieldKey(fields []string, key string) bool {
+	for _, field := range fields {
+		k, _, ok := strings.Cut(strings.TrimSpace(field), "=")
+		if ok && strings.TrimSpace(k) == key {
+			return true
+		}
+	}
+	return false
+}
+
+func writeTOMLFields(b *strings.Builder, fields []string) {
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		b.WriteString(field)
+		b.WriteByte('\n')
+	}
+}
+
+func lastVisuallyDistinctLine(out string) string {
+	var last string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(ansiEscapeRE.ReplaceAllString(line, ""))
+		if line != "" {
+			last = line
+		}
+	}
+	return last
 }
 
 func uniqueName() string {

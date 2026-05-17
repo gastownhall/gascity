@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -14,6 +15,11 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/telemetry"
+)
+
+const (
+	sourceWorkflowLaunchVisibilityAttempts   = 5
+	sourceWorkflowLaunchVisibilityRetryDelay = 100 * time.Millisecond
 )
 
 func depsTracef(deps SlingDeps, format string, args ...any) {
@@ -696,7 +702,7 @@ func withSourceWorkflowLaunchLock(ctx context.Context, deps SlingDeps, sourceBea
 			}
 			return err
 		}
-		roots, err = listSourceWorkflowRoots(deps, sourceBeadID)
+		roots, err = waitForSourceWorkflowLaunchVisible(ctx, deps, sourceBeadID, result.WorkflowID, launch.storeRef)
 		if err != nil {
 			// A transient store error while re-listing is recoverable:
 			// the finalize already succeeded, the lock is still held, and
@@ -706,9 +712,7 @@ func withSourceWorkflowLaunchLock(ctx context.Context, deps SlingDeps, sourceBea
 				fmt.Sprintf("verify live workflows for %s: %v", sourceBeadID, err))
 			return nil
 		}
-		if !slices.ContainsFunc(roots, func(root sourceWorkflowRoot) bool {
-			return sameWorkflowRoot(root, result.WorkflowID, launch.storeRef)
-		}) {
+		if roots == nil {
 			// Under the held lock, a successful finalize that is not
 			// visible via ListLiveRoots is an invariant violation: either
 			// the new root was never persisted or it no longer matches
@@ -729,6 +733,58 @@ func withSourceWorkflowLaunchLock(ctx context.Context, deps SlingDeps, sourceBea
 		return nil
 	})
 	return result, err
+}
+
+func waitForSourceWorkflowLaunchVisible(ctx context.Context, deps SlingDeps, sourceBeadID, workflowID, storeRef string) ([]sourceWorkflowRoot, error) {
+	var roots []sourceWorkflowRoot
+	for attempt := 1; attempt <= sourceWorkflowLaunchVisibilityAttempts; attempt++ {
+		var err error
+		roots, err = listSourceWorkflowRoots(deps, sourceBeadID)
+		if err != nil {
+			return nil, err
+		}
+		if slices.ContainsFunc(roots, func(root sourceWorkflowRoot) bool {
+			return sameWorkflowRoot(root, workflowID, storeRef)
+		}) {
+			return roots, nil
+		}
+		if ok, err := launchedWorkflowRootMatchesSource(deps, sourceBeadID, workflowID, storeRef); err != nil {
+			return nil, err
+		} else if ok {
+			return []sourceWorkflowRoot{{
+				root:     beads.Bead{ID: workflowID},
+				store:    deps.Store,
+				storeRef: strings.TrimSpace(storeRef),
+			}}, nil
+		}
+		if attempt == sourceWorkflowLaunchVisibilityAttempts {
+			return nil, nil
+		}
+		timer := time.NewTimer(sourceWorkflowLaunchVisibilityRetryDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, nil
+}
+
+func launchedWorkflowRootMatchesSource(deps SlingDeps, sourceBeadID, workflowID, storeRef string) (bool, error) {
+	root, err := deps.Store.Get(workflowID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !sourceworkflow.IsWorkflowRoot(root) {
+		return false, nil
+	}
+	return sourceworkflow.WorkflowMatchesSource(root, sourceBeadID, storeRef, storeRef), nil
 }
 
 // attachBatchFormula launches one batch-child formula. The caller passes the

@@ -43,6 +43,73 @@ func TestCachingStoreRunReconciliationDetectsLabelContentChanges(t *testing.T) {
 	}
 }
 
+func TestCachingStoreRunReconciliationSkipLabelsSuppressesLabelOnlyUpdates(t *testing.T) {
+	t.Parallel()
+
+	backing := &skipLabelsRecordingStore{Store: NewMemStore()}
+	bead, err := backing.Create(Bead{Title: "Task", Labels: []string{"foo"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var events []string
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
+		events = append(events, eventType+":"+beadID)
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if got := backing.lastListQuery(t); !got.SkipLabels {
+		t.Fatalf("Prime List query SkipLabels = false, want true")
+	}
+
+	backing.dropLabels = true
+	cache.runReconciliation()
+	if got := backing.lastListQuery(t); !got.SkipLabels {
+		t.Fatalf("reconcile List query SkipLabels = false, want true")
+	}
+	if len(events) != 0 {
+		t.Fatalf("events after label-only reconcile = %v, want none", events)
+	}
+
+	status := "in_progress"
+	if err := backing.Update(bead.ID, UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update backing status: %v", err)
+	}
+	cache.runReconciliation()
+	if len(events) != 1 || events[0] != "bead.updated:"+bead.ID {
+		t.Fatalf("events after status reconcile = %v, want [bead.updated:%s]", events, bead.ID)
+	}
+}
+
+type skipLabelsRecordingStore struct {
+	Store
+	dropLabels  bool
+	listQueries []ListQuery
+}
+
+func (s *skipLabelsRecordingStore) List(query ListQuery) ([]Bead, error) {
+	s.listQueries = append(s.listQueries, query)
+	rows, err := s.Store.List(query)
+	if err != nil || !query.SkipLabels || !s.dropLabels {
+		return rows, err
+	}
+	out := make([]Bead, len(rows))
+	for i, row := range rows {
+		out[i] = cloneBead(row)
+		out[i].Labels = nil
+	}
+	return out, nil
+}
+
+func (s *skipLabelsRecordingStore) lastListQuery(t *testing.T) ListQuery {
+	t.Helper()
+	if len(s.listQueries) == 0 {
+		t.Fatal("no List query recorded")
+	}
+	return s.listQueries[len(s.listQueries)-1]
+}
+
 func TestCachingStoreListInProgressUsesCacheByDefault(t *testing.T) {
 	t.Parallel()
 

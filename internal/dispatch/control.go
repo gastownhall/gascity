@@ -300,7 +300,7 @@ func markControllerSpawnError(store beads.Store, beadID string, err error) bool 
 	metadata := map[string]string{
 		"gc.controller_error": err.Error(),
 	}
-	if isTransientControllerError(err) && !isPartialAttemptAttachError(err) {
+	if IsTransientControllerError(err) && !isPartialAttemptAttachError(err) {
 		metadata["gc.controller_error_class"] = "transient"
 		metadata["gc.controller_retryable"] = "true"
 		_ = store.SetMetadataBatch(beadID, metadata)
@@ -329,11 +329,11 @@ func isPartialAttemptAttachError(err error) bool {
 	return errors.As(err, &partial)
 }
 
-// isTransientControllerError is the dispatch/store transient classifier for
+// IsTransientControllerError is the dispatch/store transient classifier for
 // control spawn and spawn-state update boundaries. Prefer typed checks when
 // callers expose them; the string fallback covers wrapped Dolt/MySQL/tmux
 // messages that arrive through the bead store CLI boundary.
-func isTransientControllerError(err error) bool {
+func IsTransientControllerError(err error) bool {
 	if err == nil {
 		return false
 	}

@@ -55,6 +55,19 @@ func pendingCreateStartedAt(now time.Time) string {
 	return now.UTC().Format(time.RFC3339)
 }
 
+// RequestExplicitWakePatch records durable wake intent without claiming a
+// concrete start. The reconciler consumes the request when it prepares the
+// runtime start.
+func RequestExplicitWakePatch(reason string, now time.Time) MetadataPatch {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return MetadataPatch{
+		"wake_request":      reason,
+		"wake_requested_at": now.UTC().Format(time.RFC3339),
+	}
+}
+
 // RequestWakePatch records a controller-owned one-shot create claim.
 func RequestWakePatch(reason string, now time.Time) MetadataPatch {
 	return MetadataPatch{
@@ -97,6 +110,8 @@ func PreWakePatch(input PreWakePatchInput) MetadataPatch {
 		"sleep_reason":               input.SleepReason,
 		"sleep_intent":               "",
 		"generation":                 fmt.Sprintf("%d", input.Generation),
+		"wake_request":               "",
+		"wake_requested_at":          "",
 	}
 	if input.FreshWake {
 		patch["session_key"] = ""

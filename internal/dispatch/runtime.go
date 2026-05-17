@@ -63,6 +63,8 @@ var (
 const (
 	maxSourceChainHops               = 32
 	maxWorkflowFinalizeErrorMetadata = 512
+	scopeBodyResolveAttempts         = 5
+	scopeBodyResolveRetryDelay       = 100 * time.Millisecond
 )
 
 const workflowFinalizeErrorMetadataKey = "gc.last_finalize_error"
@@ -1071,6 +1073,21 @@ func resolveBlockingSubjectID(store beads.Store, beadID string) (string, error) 
 }
 
 func resolveScopeBody(store beads.Store, rootID, scopeRef string) (beads.Bead, error) {
+	var lastErr error
+	for attempt := 1; attempt <= scopeBodyResolveAttempts; attempt++ {
+		bead, err := resolveScopeBodyOnce(store, rootID, scopeRef)
+		if err == nil || !errors.Is(err, errScopeBodyMissing) {
+			return bead, err
+		}
+		lastErr = err
+		if attempt < scopeBodyResolveAttempts {
+			time.Sleep(scopeBodyResolveRetryDelay)
+		}
+	}
+	return beads.Bead{}, lastErr
+}
+
+func resolveScopeBodyOnce(store beads.Store, rootID, scopeRef string) (beads.Bead, error) {
 	if bead, ok, err := resolveScopeBodyByRole(store, rootID, scopeRef, false); err != nil {
 		return beads.Bead{}, err
 	} else if ok {

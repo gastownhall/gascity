@@ -215,8 +215,9 @@ func TestHealthScriptDoesNotInvokeDoltLog(t *testing.T) {
 
 func TestRuntimeScriptPortPrecedence(t *testing.T) {
 	tests := []struct {
-		name  string
-		setup func(t *testing.T, cityPath string) string
+		name       string
+		setup      func(t *testing.T, cityPath string) string
+		wantExit78 bool
 	}{
 		{
 			name: "managed state beats compatibility port mirror",
@@ -239,7 +240,7 @@ func TestRuntimeScriptPortPrecedence(t *testing.T) {
 			},
 		},
 		{
-			name: "corrupt managed state ignores compatibility port mirror",
+			name: "corrupt managed state exits 78",
 			setup: func(t *testing.T, cityPath string) string {
 				t.Helper()
 				stateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
@@ -255,8 +256,9 @@ func TestRuntimeScriptPortPrecedence(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(cityPath, ".beads", "dolt-server.port"), []byte("45785\n"), 0o644); err != nil {
 					t.Fatal(err)
 				}
-				return "3307"
+				return ""
 			},
+			wantExit78: true,
 		},
 	}
 
@@ -273,6 +275,10 @@ func TestRuntimeScriptPortPrecedence(t *testing.T) {
 				"GC_PACK_DIR="+root,
 			)
 			out, err := cmd.CombinedOutput()
+			if tt.wantExit78 {
+				assertRuntimePortExit78(t, err, out, filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json"), cityPath)
+				return
+			}
 			if err != nil {
 				t.Fatalf("runtime.sh failed: %v\n%s", err, out)
 			}
@@ -289,6 +295,7 @@ func TestRuntimeScriptPortPrecedenceToleratesInconclusiveLsof(t *testing.T) {
 		lsofBody    string
 		ncBody      func(port string) string
 		wantManaged bool
+		wantExit78  bool
 	}{
 		{
 			name:     "inconclusive lsof accepts reachable port",
@@ -313,7 +320,7 @@ exit 1
 exit 0
 `
 			},
-			wantManaged: false,
+			wantExit78: true,
 		},
 		{
 			name:     "inconclusive lsof with unreachable port still rejects port",
@@ -323,7 +330,7 @@ exit 0
 exit 1
 `
 			},
-			wantManaged: false,
+			wantExit78: true,
 		},
 	}
 
@@ -357,6 +364,10 @@ exit 1
 				"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
 			)
 			out, err := cmd.CombinedOutput()
+			if tt.wantExit78 {
+				assertRuntimePortExit78(t, err, out, filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json"), cityPath)
+				return
+			}
 			if err != nil {
 				t.Fatalf("runtime.sh failed: %v\n%s", err, out)
 			}
@@ -364,6 +375,24 @@ exit 1
 				t.Fatalf("GC_DOLT_PORT = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+func assertRuntimePortExit78(t *testing.T, err error, out []byte, stateFile, cityPath string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("runtime.sh exited 0, want exit 78\n%s", out)
+	}
+	exitErr := &exec.ExitError{}
+	ok := errors.As(err, &exitErr)
+	if !ok {
+		t.Fatalf("runtime.sh returned non-exit error: %v\n%s", err, out)
+	}
+	if exitErr.ExitCode() != 78 {
+		t.Fatalf("runtime.sh exit code = %d, want 78\n%s", exitErr.ExitCode(), out)
+	}
+	if got, want := string(out), expectedPortResolveError(stateFile, cityPath, "present but not running"); got != want {
+		t.Fatalf("runtime.sh output = %q, want %q", got, want)
 	}
 }
 

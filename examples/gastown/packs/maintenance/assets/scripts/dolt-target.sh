@@ -142,23 +142,28 @@ managed_runtime_port() (
     printf '%s\n' "$port"
 )
 
-if [ -z "${GC_DOLT_PORT:-}" ]; then
-    if [ -n "${GC_DOLT_STATE_FILE:-}" ]; then
-        DOLT_STATE_FILE="$GC_DOLT_STATE_FILE"
+if [ -n "${GC_DOLT_STATE_FILE:-}" ]; then
+    DOLT_STATE_FILE="$GC_DOLT_STATE_FILE"
+else
+    DOLT_PACK_DIR="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}/packs/dolt"
+    if [ -f "$DOLT_PACK_DIR/dolt-state.json" ]; then
+        DOLT_STATE_FILE="$DOLT_PACK_DIR/dolt-state.json"
+    elif [ -f "$DOLT_PACK_DIR/dolt-provider-state.json" ]; then
+        DOLT_STATE_FILE="$DOLT_PACK_DIR/dolt-provider-state.json"
     else
-        DOLT_PACK_DIR="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}/packs/dolt"
-        if [ -f "$DOLT_PACK_DIR/dolt-state.json" ]; then
-            DOLT_STATE_FILE="$DOLT_PACK_DIR/dolt-state.json"
-        elif [ -f "$DOLT_PACK_DIR/dolt-provider-state.json" ]; then
-            DOLT_STATE_FILE="$DOLT_PACK_DIR/dolt-provider-state.json"
-        else
-            DOLT_STATE_FILE="$DOLT_PACK_DIR/dolt-state.json"
-        fi
+        DOLT_STATE_FILE="$DOLT_PACK_DIR/dolt-state.json"
     fi
-    GC_DOLT_PORT="$(managed_runtime_port "$DOLT_STATE_FILE" "$GC_CITY_PATH/.beads/dolt")"
 fi
 
-: "${GC_DOLT_PORT:=3307}"
+DOLT_PORT_RESOLVE_SCRIPT="${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}/dolt/assets/scripts/port_resolve.sh"
+if [ ! -f "$DOLT_PORT_RESOLVE_SCRIPT" ] && [ -n "${SCRIPT_DIR:-}" ]; then
+    DOLT_SOURCE_SCRIPT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../../../../../dolt/assets/scripts" 2>/dev/null && pwd || true)
+    if [ -n "$DOLT_SOURCE_SCRIPT_DIR" ]; then
+        DOLT_PORT_RESOLVE_SCRIPT="$DOLT_SOURCE_SCRIPT_DIR/port_resolve.sh"
+    fi
+fi
+. "${DOLT_PORT_RESOLVE_SCRIPT:?port_resolve.sh not resolved}"
+GC_DOLT_PORT="$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$GC_CITY_PATH/.beads/dolt" "$GC_CITY_PATH")" || exit $?
 
 case "$GC_DOLT_PORT" in
     ''|*[!0-9]*)

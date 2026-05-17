@@ -184,6 +184,120 @@ func TestReapOrphanedRotatingFilesEmptyRotatingFile(t *testing.T) {
 	}
 }
 
+func TestNewFileRecorderMigratesLegacyArchiveOnOpen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	legacyBase := "events.jsonl.archive-20260416.gz"
+	legacyPath := filepath.Join(dir, legacyBase)
+	const body = `{"seq":10,"type":"bead.created","actor":"human","subject":"first"}
+{"seq":11,"type":"bead.updated","actor":"human","subject":"middle"}
+{"seq":12,"type":"bead.closed","actor":"human","subject":"last"}
+`
+	writeGzipFile(t, legacyPath, body)
+
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Record(Event{Type: BeadClosed, Actor: "human", Subject: "post-migration"})
+	if err := rec.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.Len() > 0 {
+		t.Errorf("unexpected stderr during legacy migration: %q", stderr.String())
+	}
+
+	canonicalBase := "events.jsonl.archive-20260416T000000Z-seq-10-12.gz"
+	canonicalPath := filepath.Join(dir, canonicalBase)
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Errorf("legacy archive should be renamed away: %v", err)
+	}
+	if _, err := os.Stat(canonicalPath); err != nil {
+		t.Fatalf("canonical archive missing after migration: %v", err)
+	}
+	got, err := readGzipFile(canonicalPath)
+	if err != nil {
+		t.Fatalf("read migrated archive: %v", err)
+	}
+	if got != body {
+		t.Errorf("migrated archive content mismatch:\n got=%q\nwant=%q", got, body)
+	}
+
+	all, err := ReadAll(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 4 {
+		t.Fatalf("ReadAll after legacy migration returned %d events, want 4", len(all))
+	}
+	if all[0].Seq != 10 || all[2].Seq != 12 || all[3].Seq != 13 {
+		t.Errorf("seqs after migration = [%d,%d,%d], want [10,12,13]",
+			all[0].Seq, all[2].Seq, all[3].Seq)
+	}
+
+	var secondStderr bytes.Buffer
+	rec2, err := NewFileRecorder(path, &secondStderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rec2.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if secondStderr.Len() > 0 {
+		t.Errorf("legacy migration should be idempotent on second open, stderr = %q", secondStderr.String())
+	}
+}
+
+func TestNewFileRecorderLeavesUnparseableLegacyArchive(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	legacyBase := "events.jsonl.archive-20260416.gz"
+	legacyPath := filepath.Join(dir, legacyBase)
+	if err := os.WriteFile(legacyPath, []byte("not gzip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rec.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Fatalf("unparseable legacy archive should be left in place: %v", err)
+	}
+	canonicalBase := "events.jsonl.archive-20260416T000000Z-seq-1-1.gz"
+	if _, err := os.Stat(filepath.Join(dir, canonicalBase)); !os.IsNotExist(err) {
+		t.Errorf("unparseable legacy archive should not produce canonical archive: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "legacy archive") || !strings.Contains(stderr.String(), legacyBase) {
+		t.Errorf("stderr should mention legacy archive %q, got %q", legacyBase, stderr.String())
+	}
+}
+
+func writeGzipFile(t *testing.T, path, body string) {
+	t.Helper()
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gzip.NewWriter(f)
+	if _, err := gw.Write([]byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func readGzipFile(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {

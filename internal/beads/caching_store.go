@@ -326,7 +326,7 @@ func (c *CachingStore) PrimeActive() error {
 				continue
 			}
 		}
-		if _, keep := c.recentLocalBeadConflictLocked(b.ID, b, now); keep {
+		if _, keep := c.recentLocalBeadConflictLocked(b.ID, b, now, false); keep {
 			continue
 		}
 		c.beads[b.ID] = cloneBead(b)
@@ -362,7 +362,7 @@ func (c *CachingStore) Prime(_ context.Context) error {
 	var err error
 	var partialErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		all, err = c.backing.List(ListQuery{AllowScan: true}) // active beads only (default)
+		all, err = c.backing.List(ListQuery{AllowScan: true, SkipLabels: true}) // active beads only (default)
 		if err == nil {
 			break
 		}
@@ -405,7 +405,7 @@ func (c *CachingStore) Prime(_ context.Context) error {
 				if recentLocalMutation(c.localBeadAt[id], now) {
 					c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
 				}
-				if _, keep := c.recentLocalBeadConflictLocked(id, fresh, now); keep {
+				if _, keep := c.recentLocalBeadConflictLocked(id, fresh, now, true); keep {
 					nextBeads[id] = cloneBead(current)
 					if deps, ok := c.deps[id]; ok {
 						nextDeps[id] = cloneDeps(deps)

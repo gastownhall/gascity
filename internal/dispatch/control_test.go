@@ -1253,8 +1253,8 @@ func TestIsTransientControllerError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isTransientControllerError(tt.err); got != tt.want {
-				t.Fatalf("isTransientControllerError(%v) = %v, want %v", tt.err, got, tt.want)
+			if got := IsTransientControllerError(tt.err); got != tt.want {
+				t.Fatalf("IsTransientControllerError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}

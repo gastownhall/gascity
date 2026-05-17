@@ -2,6 +2,7 @@ package gastown_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -308,7 +309,7 @@ exit 1
 	}
 }
 
-func TestMaintenanceDoltScriptsFallbackToManagedRuntimePorts(t *testing.T) {
+func TestMaintenanceDoltScriptsUseManagedRuntimePorts(t *testing.T) {
 	scripts := []struct {
 		name   string
 		script string
@@ -336,19 +337,6 @@ func TestMaintenanceDoltScriptsFallbackToManagedRuntimePorts(t *testing.T) {
 		setup func(t *testing.T, cityDir string) string
 	}{
 		{
-			name: "compatibility port mirror ignored without managed runtime state",
-			setup: func(t *testing.T, cityDir string) string {
-				t.Helper()
-				if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(cityDir, ".beads", "dolt-server.port"), []byte("45781\n"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				return "3307"
-			},
-		},
-		{
 			name: "managed runtime state",
 			setup: func(t *testing.T, cityDir string) string {
 				t.Helper()
@@ -372,26 +360,6 @@ func TestMaintenanceDoltScriptsFallbackToManagedRuntimePorts(t *testing.T) {
 				port := listener.Addr().(*net.TCPAddr).Port
 				writeManagedRuntimeState(t, cityDir, port)
 				return strconv.Itoa(port)
-			},
-		},
-		{
-			name: "corrupt managed state ignores compatibility port mirror",
-			setup: func(t *testing.T, cityDir string) string {
-				t.Helper()
-				stateDir := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt")
-				if err := os.MkdirAll(stateDir, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(stateDir, "dolt-state.json"), []byte(`not-json`), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(cityDir, ".beads", "dolt-server.port"), []byte("45785\n"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				return "3307"
 			},
 		},
 	}
@@ -479,6 +447,7 @@ func TestMaintenanceDoltScriptsFallbackToManagedRuntimePortsWithInconclusiveLsof
 		lsofBody    string
 		ncBody      func(port string) string
 		wantManaged bool
+		wantExit78  bool
 	}{
 		{
 			name:     "inconclusive lsof accepts reachable port",
@@ -503,7 +472,7 @@ exit 1
 exit 0
 `
 			},
-			wantManaged: false,
+			wantExit78: true,
 		},
 		{
 			name:     "inconclusive lsof with unreachable port still rejects port",
@@ -513,7 +482,7 @@ exit 0
 exit 1
 `
 			},
-			wantManaged: false,
+			wantExit78: true,
 		},
 	}
 
@@ -526,10 +495,7 @@ exit 1
 
 				listener := listenManagedDoltPort(t)
 				managedPort := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-				wantPort := "3307"
-				if tc.wantManaged {
-					wantPort = managedPort
-				}
+				wantPort := managedPort
 				writeManagedRuntimeState(t, cityDir, listener.Addr().(*net.TCPAddr).Port)
 
 				writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
@@ -558,7 +524,13 @@ exit 0
 					env[key] = value
 				}
 
-				runScript(t, filepath.Join(exampleDir(), tt.script), env)
+				script := filepath.Join(exampleDir(), tt.script)
+				if tc.wantExit78 {
+					out, err := runScriptResult(t, script, env)
+					assertMaintenanceScriptExit78(t, err, out)
+					return
+				}
+				runScript(t, script, env)
 
 				logData, err := os.ReadFile(doltLog)
 				if err != nil {
@@ -576,6 +548,24 @@ exit 0
 				}
 			})
 		}
+	}
+}
+
+func assertMaintenanceScriptExit78(t *testing.T, err error, out []byte) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("maintenance script exited 0, want exit 78\n%s", out)
+	}
+	exitErr := &exec.ExitError{}
+	ok := errors.As(err, &exitErr)
+	if !ok {
+		t.Fatalf("maintenance script returned non-exit error: %v\n%s", err, out)
+	}
+	if exitErr.ExitCode() != 78 {
+		t.Fatalf("maintenance script exit code = %d, want 78\n%s", exitErr.ExitCode(), out)
+	}
+	if !strings.Contains(string(out), "gc dolt: cannot resolve runtime port") {
+		t.Fatalf("maintenance script output missing port-resolution error:\n%s", out)
 	}
 }
 
@@ -1175,6 +1165,276 @@ exit 0
 	}
 	if strings.Contains(string(gcData), "mail:") {
 		t.Errorf("reaper DOG_DONE still reports removed mail cleanup:\n%s", gcData)
+	}
+}
+
+func TestReaperPrunesClosedSessionBeadsWithBdPrune(t *testing.T) {
+	cityDir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(cityDir); err == nil {
+		cityDir = resolved
+	}
+	writeCityBeadsMetadata(t, cityDir, "beads")
+	canonicalCityDir, err := filepath.EvalSymlinks(cityDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(city dir): %v", err)
+	}
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"BD_CALL_LOG":      bdLog,
+		"BD_PRUNE_COUNT":   "7",
+		"DOLT_ARGS_LOG":    doltLog,
+		"DOLT_DBS":         "beads",
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	bdLogText := string(bdData)
+	wantArgs := "args=prune --pattern gm-* --older-than 720h --force --json"
+	if !strings.Contains(bdLogText, wantArgs) {
+		t.Fatalf("reaper did not call bd prune with the gm session-bead retention args %q:\n%s", wantArgs, bdLogText)
+	}
+	if got := strings.Count(bdLogText, "args=prune "); got != 1 {
+		t.Fatalf("reaper called bd prune %d times, want once:\n%s", got, bdLogText)
+	}
+	if !strings.Contains(bdLogText, "pwd="+canonicalCityDir) {
+		t.Fatalf("reaper did not run bd prune from the city dir:\n%s", bdLogText)
+	}
+	if !strings.Contains(bdLogText, "beads="+filepath.Join(canonicalCityDir, ".beads")) {
+		t.Fatalf("reaper did not scope bd prune to the city beads dir:\n%s", bdLogText)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "sessions-pruned:7") {
+		t.Fatalf("reaper summary did not report pruned sessions:\n%s", gcData)
+	}
+}
+
+func TestReaperSessionPruneDryRunOmitsForce(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "beads")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"BD_CALL_LOG":                 bdLog,
+		"BD_PRUNE_COUNT":              "3",
+		"DOLT_ARGS_LOG":               doltLog,
+		"DOLT_DBS":                    "beads",
+		"GC_CALL_LOG":                 gcLog,
+		"GC_CITY":                     cityDir,
+		"GC_CITY_PATH":                cityDir,
+		"GC_DOLT_HOST":                "127.0.0.1",
+		"GC_DOLT_PORT":                "3307",
+		"GC_DOLT_USER":                "root",
+		"GC_DOLT_PASSWORD":            "",
+		"GC_REAPER_DRY_RUN":           "1",
+		"GC_REAPER_SESSION_PURGE_AGE": "24h",
+		"PATH":                        binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	bdLogText := string(bdData)
+	wantArgs := "args=prune --pattern gm-* --older-than 24h --json"
+	if !strings.Contains(bdLogText, wantArgs) {
+		t.Fatalf("reaper dry-run did not call bd prune with preview args %q:\n%s", wantArgs, bdLogText)
+	}
+	if strings.Contains(bdLogText, "--force") {
+		t.Fatalf("reaper dry-run passed --force to bd prune:\n%s", bdLogText)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "sessions-pruned:3") || !strings.Contains(gcLogText, "(dry run)") {
+		t.Fatalf("reaper dry-run summary did not report session prune preview count:\n%s", gcLogText)
+	}
+}
+
+func TestReaperSessionPruneAnomalyEscalates(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "beads")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"BD_CALL_LOG":      bdLog,
+		"BD_PRUNE_COUNT":   "1500",
+		"DOLT_ARGS_LOG":    doltLog,
+		"DOLT_DBS":         "beads",
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
+		t.Fatalf("reaper did not send escalation mail for session-prune anomaly:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "gm: 1500 closed session beads pruned in one run (threshold: 1000)") {
+		t.Fatalf("reaper escalation did not include session-prune anomaly:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "sessions-pruned:1500") {
+		t.Fatalf("reaper summary did not include anomalous session-prune count:\n%s", gcLogText)
+	}
+}
+
+func TestReaperSessionPruneMissingBdDegradesToZero(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "beads")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"DOLT_DBS":         "beads",
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + "/usr/bin:/bin",
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if strings.Contains(gcLogText, "ESCALATION") {
+		t.Fatalf("reaper escalated missing bd binary instead of degrading:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "sessions-pruned:0") {
+		t.Fatalf("reaper summary did not report zero pruned sessions without bd:\n%s", gcLogText)
+	}
+}
+
+func TestReaperSessionPruneRunsWhenNoDoltDatabases(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "beads")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\n'
+    ;;
+esac
+exit 0
+`)
+	writeMaintenanceBdStub(t, filepath.Join(binDir, "bd"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"BD_CALL_LOG":       bdLog,
+		"BD_PRUNE_COUNT":    "0",
+		"DOLT_ARGS_LOG":     doltLog,
+		"GC_CALL_LOG":       gcLog,
+		"GC_CITY":           cityDir,
+		"GC_CITY_PATH":      cityDir,
+		"GC_DOLT_HOST":      "127.0.0.1",
+		"GC_DOLT_PORT":      "3307",
+		"GC_DOLT_USER":      "root",
+		"GC_DOLT_PASSWORD":  "",
+		"GC_REAPER_DRY_RUN": "1",
+		"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if !strings.Contains(string(bdData), "args=prune --pattern gm-* --older-than 720h --json") {
+		t.Fatalf("reaper did not run session prune when Dolt had no databases:\n%s", bdData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "sessions-pruned:0") {
+		t.Fatalf("reaper summary did not report zero session prune count without Dolt databases:\n%s", gcData)
 	}
 }
 
@@ -3166,6 +3426,19 @@ exit 0
 `)
 }
 
+func writeMaintenanceBdStub(t *testing.T, path string) {
+	t.Helper()
+	writeExecutable(t, path, `#!/bin/sh
+printf 'pwd=%s beads=%s args=%s\n' "$PWD" "${BEADS_DIR:-}" "$*" >> "$BD_CALL_LOG"
+case "$1" in
+  prune)
+    printf '{"pruned_count":%s}\n' "${BD_PRUNE_COUNT:-0}"
+    ;;
+esac
+exit 0
+`)
+}
+
 func mergeTestEnv(overrides map[string]string) []string {
 	env := os.Environ()
 	for key := range overrides {
@@ -3489,7 +3762,8 @@ func initEmptyArchiveRemote(t *testing.T, archiveRepo string, prevCount int) str
 // that points at a nonexistent path, so any `git fetch`/`git push` fails.
 // Used by tests that specifically exercise the push-failure recovery paths:
 // push mode is active (so `should_attempt_push` returns true) but the remote
-// cannot be reached.
+// cannot be reached. Seed count is fixed because push-failure tests care only
+// about whether a commit exists, not about its row count.
 func initSeedArchiveWithUnreachableRemote(t *testing.T, archiveRepo string) {
 	t.Helper()
 	initSeedArchive(t, archiveRepo, 3)
@@ -4673,6 +4947,120 @@ func TestJsonlExportPushFailureRecoversFromWrongShapeState(t *testing.T) {
 	}
 	if got := state["consecutive_push_failures"]; got != float64(1) {
 		t.Fatalf("consecutive_push_failures = %v, want 1\nstate: %s", got, stateData)
+	}
+}
+
+func TestJsonlExportPushSuccessWritesLastPushAt(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	initSeedArchiveWithRemote(t, archiveRepo)
+	writeMultiRecordDoltStub(t, binDir, 100)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	ts, ok := state["last_push_at"].(string)
+	if !ok || ts == "" {
+		t.Fatalf("last_push_at missing from state:\n%s", stateData)
+	}
+	if _, err := time.Parse(time.RFC3339, ts); err != nil {
+		t.Fatalf("last_push_at = %q is not RFC3339: %v", ts, err)
+	}
+	if _, has := state["last_push_stderr"]; has {
+		t.Fatalf("last_push_stderr should not be present after a successful push:\n%s", stateData)
+	}
+}
+
+func TestJsonlExportPushFailureWritesLastPushStderr(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	// Must have an origin remote — auto-detect mode skips push (and therefore
+	// the failure path) when origin is unset. An unreachable remote triggers
+	// the real push failure in push_archive_main.
+	initSeedArchiveWithUnreachableRemote(t, archiveRepo)
+	writeMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got := state["consecutive_push_failures"]; got != float64(1) {
+		t.Fatalf("consecutive_push_failures = %v, want 1\nstate: %s", got, stateData)
+	}
+	stderrVal, ok := state["last_push_stderr"].(string)
+	if !ok || stderrVal == "" {
+		t.Fatalf("last_push_stderr missing from state after push failure:\n%s", stateData)
+	}
+}
+
+func TestJsonlExportPushSuccessAfterFailureClearsLastPushStderr(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	initSeedArchiveWithRemote(t, archiveRepo)
+	writeMultiRecordDoltStub(t, binDir, 100)
+	writeJsonlExportGCStub(t, binDir)
+
+	if err := os.WriteFile(stateFile, []byte(`{"consecutive_push_failures":2,"last_push_stderr":"old boom","pending_archive_push":true}`+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(seed state): %v", err)
+	}
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if _, has := state["last_push_stderr"]; has {
+		t.Fatalf("last_push_stderr should be cleared after a successful push:\n%s", stateData)
+	}
+	if got := state["consecutive_push_failures"]; got != float64(0) {
+		t.Fatalf("consecutive_push_failures = %v, want 0\nstate: %s", got, stateData)
+	}
+	if _, ok := state["last_push_at"].(string); !ok {
+		t.Fatalf("last_push_at should be set after a successful push:\n%s", stateData)
 	}
 }
 
