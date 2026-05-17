@@ -2,6 +2,10 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -215,6 +219,139 @@ func TestPrintSupervisorIdentity_EmptyBuildID(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "buildID=(unknown)") {
 		t.Errorf("expected buildID=(unknown) for empty buildID; got %q", out)
+	}
+}
+
+// driftCheckEnv stands up the shared seams runStartDriftCheck needs:
+// an httptest server serving /health with the chosen build_id, a
+// GC_HOME pointed at a temp dir, and stubbed supervisorAliveHook /
+// supervisorAPIBaseURLHook / supervisorSystemctlActive /
+// restartHelpersHook. Production globals are saved on entry and
+// restored via t.Cleanup. The returned commit string is the local
+// build identity the test should compare against the supervisor's
+// reported build_id.
+func driftCheckEnv(t *testing.T, supervisorBuildID string) (cityPath string, restoreCommit func(string)) {
+	t.Helper()
+
+	// Isolated GC_HOME so recordDriftRestartAttempt writes into a temp
+	// dir instead of the user's real ~/.gc.
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_DOLT", "skip")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"status":"ok","version":"v0","build_id":%q,"uptime_sec":1,"cities_total":0,"cities_running":0}`, supervisorBuildID)
+	}))
+	t.Cleanup(srv.Close)
+
+	oldAlive := supervisorAliveHook
+	oldBaseURL := supervisorAPIBaseURLHook
+	oldActive := supervisorSystemctlActive
+	oldHelpers := restartHelpersHook
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorAPIBaseURLHook = oldBaseURL
+		supervisorSystemctlActive = oldActive
+		restartHelpersHook = oldHelpers
+	})
+
+	// Use the current process PID so readSupervisorExePath
+	// (/proc/<pid>/exe) succeeds without requiring root.
+	supervisorAliveHook = func() int { return os.Getpid() }
+	supervisorAPIBaseURLHook = func() (string, error) { return srv.URL, nil }
+	supervisorSystemctlActive = func(string) bool { return false }
+	restartHelpersHook = func() restartHelpers {
+		return restartHelpers{
+			Systemctl: func(args ...string) error { return nil },
+			Kill:      func(int) error { return nil },
+			WaitExit:  func(int) error { return nil },
+			Spawn:     func(string, ...string) error { return nil },
+		}
+	}
+
+	oldCommit := commit
+	restoreCommit = func(local string) { commit = local }
+	t.Cleanup(func() { commit = oldCommit })
+
+	cityPath = t.TempDir()
+	return cityPath, restoreCommit
+}
+
+// TestRunStartDriftCheck_RestartReturnsContinue pins the load-bearing
+// post-restart contract: when drift triggers a successful auto-restart,
+// runStartDriftCheck must return (0, true) so the caller continues into
+// normal supervisor registration / start. Returning (0, false) here
+// (which was the previous behavior on the success arm) left the
+// requested city un-registered after the supervisor came back up.
+func TestRunStartDriftCheck_RestartReturnsContinue(t *testing.T) {
+	cityPath, setCommit := driftCheckEnv(t, "old-build-id")
+	setCommit("new-build-id") // local commit differs → drift detected → Restart disposition
+
+	// Make sure dry-run / no-auto-restart flags are off so the
+	// decideDriftAction switch lands on Restart.
+	oldDry, oldNoAR := dryRunMode, noAutoRestartMode
+	dryRunMode, noAutoRestartMode = false, false
+	t.Cleanup(func() { dryRunMode, noAutoRestartMode = oldDry, oldNoAR })
+
+	var stdout, stderr bytes.Buffer
+	exitCode, cont := runStartDriftCheck(cityPath, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Errorf("exitCode = %d, want 0; stderr=%q", exitCode, stderr.String())
+	}
+	if !cont {
+		t.Fatalf("cont = false on successful Restart; caller would skip city registration.\nstdout:\n%s\nstderr:\n%s",
+			stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Drift detected:") {
+		t.Errorf("stdout missing drift report:\n%s", stdout.String())
+	}
+}
+
+// TestRunStartDriftCheck_DryRunReturnsTerminal pins the dry-run arm:
+// drift is reported, the operator is told what would happen, and the
+// caller exits (cont == false) so no further side effects fire.
+func TestRunStartDriftCheck_DryRunReturnsTerminal(t *testing.T) {
+	cityPath, setCommit := driftCheckEnv(t, "old-build-id")
+	setCommit("new-build-id")
+
+	oldDry, oldNoAR := dryRunMode, noAutoRestartMode
+	dryRunMode, noAutoRestartMode = true, false
+	t.Cleanup(func() { dryRunMode, noAutoRestartMode = oldDry, oldNoAR })
+
+	var stdout, stderr bytes.Buffer
+	exitCode, cont := runStartDriftCheck(cityPath, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Errorf("exitCode = %d, want 0 on --dry-run", exitCode)
+	}
+	if cont {
+		t.Errorf("cont = true on --dry-run; should be terminal")
+	}
+	if !strings.Contains(stdout.String(), "(would auto-restart; --dry-run)") {
+		t.Errorf("stdout missing dry-run suffix:\n%s", stdout.String())
+	}
+}
+
+// TestRunStartDriftCheck_ErrorReturnsTerminal pins the --no-auto-restart
+// arm: drift is detected, an error is printed, and the caller exits
+// non-zero with cont == false.
+func TestRunStartDriftCheck_ErrorReturnsTerminal(t *testing.T) {
+	cityPath, setCommit := driftCheckEnv(t, "old-build-id")
+	setCommit("new-build-id")
+
+	oldDry, oldNoAR := dryRunMode, noAutoRestartMode
+	dryRunMode, noAutoRestartMode = false, true
+	t.Cleanup(func() { dryRunMode, noAutoRestartMode = oldDry, oldNoAR })
+
+	var stdout, stderr bytes.Buffer
+	exitCode, cont := runStartDriftCheck(cityPath, &stdout, &stderr)
+	if exitCode != 1 {
+		t.Errorf("exitCode = %d, want 1 on --no-auto-restart drift", exitCode)
+	}
+	if cont {
+		t.Errorf("cont = true on --no-auto-restart error; should be terminal")
+	}
+	if !strings.Contains(stderr.String(), "supervisor binary/pack drift") {
+		t.Errorf("stderr missing drift error:\n%s", stderr.String())
 	}
 }
 

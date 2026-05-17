@@ -350,6 +350,14 @@ func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr 
 		return 1
 	}
 
+	// Flag validation runs before any drift side effects so a malformed
+	// invocation (e.g. `gc start --file=foo`) fails fast without
+	// triggering a supervisor restart.
+	if len(extraConfigFiles) > 0 || noStrictMode {
+		fmt.Fprintln(stderr, "gc start: --file and --no-strict only apply to the legacy standalone controller; use --foreground or remove those flags") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	// Drift detection runs against any already-running supervisor before
 	// we hand work to it. When no supervisor is running the check is a
 	// no-op (registration spawns a fresh one).
@@ -362,11 +370,6 @@ func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr 
 	// report even in preview mode.
 	if dryRunMode {
 		return doStartStandalone(args, controllerMode, stdout, stderr)
-	}
-
-	if len(extraConfigFiles) > 0 || noStrictMode {
-		fmt.Fprintln(stderr, "gc start: --file and --no-strict only apply to the legacy standalone controller; use --foreground or remove those flags") //nolint:errcheck // best-effort stderr
-		return 1
 	}
 
 	if err := ensureCityScaffold(cityPath); err != nil {

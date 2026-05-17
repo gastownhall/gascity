@@ -177,6 +177,10 @@ func printDriftReport(w io.Writer, r driftReport) {
 // architect's brief.
 var driftReadyTimeout = 5 * time.Second
 
+// restartHelpersHook lets tests substitute a fake set of helpers for
+// the production kill+spawn (or systemctl) side effects.
+var restartHelpersHook = defaultRestartHelpers
+
 // driftRestartLoopMax / driftRestartLoopWindow define the loop-guard
 // budget: at most 3 supervisor auto-restarts may occur within any
 // 60-second window. Persistence is via driftRestartHistoryPath so the
@@ -208,7 +212,7 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 	}
 
 	exePath, exeErr := readSupervisorExePath(pid)
-	baseURL, urlErr := supervisorAPIBaseURL()
+	baseURL, urlErr := supervisorAPIBaseURLHook()
 	if urlErr != nil {
 		// Without a base URL we can't query /health. Don't block
 		// startup — just continue silently. (The operator's `gc start`
@@ -310,7 +314,7 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 		}
 		fmt.Fprintf(stdout, "Restarting supervisor (%s)...", mode) //nolint:errcheck // best-effort stdout
 		t0 := time.Now()
-		if err := restartSupervisor(spec, defaultRestartHelpers()); err != nil {
+		if err := restartSupervisor(spec, restartHelpersHook()); err != nil {
 			fmt.Fprintln(stdout)                                               //nolint:errcheck // best-effort stdout
 			fmt.Fprintf(stderr, "error: supervisor restart failed: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1, false
@@ -340,7 +344,11 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 				}, time.Now())
 			}
 		}
-		return 0, false
+		// Successful auto-restart is non-terminal: the caller continues
+		// into normal supervisor registration / start so the requested
+		// city actually comes up. Returning false here would leave the
+		// restarted supervisor running but the city un-registered.
+		return 0, true
 	}
 	// Unreachable; decideDriftAction always sets exactly one disposition.
 	return 0, true

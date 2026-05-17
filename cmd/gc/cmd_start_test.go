@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1355,5 +1357,62 @@ func TestResolveTemplateFPExtra_NotEmptyForPoolAgent(t *testing.T) {
 				t.Errorf("tp.FPExtra missing pool.min for pool agent (FPExtra=%v)", tp.FPExtra)
 			}
 		})
+	}
+}
+
+// TestDoStart_FlagValidationRunsBeforeDriftCheck pins the ordering:
+// the --file / --no-strict legacy-flag rejection must run before any
+// supervisor drift side effects. Otherwise a malformed invocation
+// (e.g. `gc start --file=foo <city>`) triggers a real supervisor
+// restart and then fails with the flag error, an avoidable footgun.
+func TestDoStart_FlagValidationRunsBeforeDriftCheck(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_DOLT", "skip")
+
+	// Bootstrap a minimal city directory so requireBootstrappedCity
+	// returns successfully and execution reaches the flag check.
+	cityDir := filepath.Join(t.TempDir(), "test-city")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("mkdir city .gc: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	// Set extraConfigFiles to a non-empty value so the legacy-flag
+	// rejection arm is selected.
+	oldExtra := extraConfigFiles
+	extraConfigFiles = []string{"some-extra.toml"}
+	t.Cleanup(func() { extraConfigFiles = oldExtra })
+
+	// Stub supervisorAliveHook to a non-zero PID so that, if drift
+	// detection runs, it would take the drift-check path. We track
+	// call count to confirm drift detection was NOT invoked.
+	oldAlive := supervisorAliveHook
+	aliveCalls := 0
+	supervisorAliveHook = func() int {
+		aliveCalls++
+		return 4242
+	}
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+
+	var stdout, stderr bytes.Buffer
+	code := doStartWithNameOverride([]string{cityDir}, false, &stdout, &stderr, "")
+
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "--file and --no-strict only apply") {
+		t.Errorf("stderr missing flag-rejection message:\n%s", stderr.String())
+	}
+	if aliveCalls != 0 {
+		t.Errorf("supervisorAliveHook called %d times; drift check ran before flag validation", aliveCalls)
+	}
+	if strings.Contains(stdout.String(), "Drift detected:") || strings.Contains(stderr.String(), "Drift detected:") {
+		t.Errorf("drift report printed despite flag rejection.\nstdout:\n%s\nstderr:\n%s",
+			stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Restarting supervisor") {
+		t.Errorf("supervisor restart attempted despite flag rejection:\n%s", stdout.String())
 	}
 }

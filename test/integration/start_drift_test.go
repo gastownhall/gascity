@@ -258,9 +258,8 @@ func TestStartDrift_KillSwitchInConfig_PreventsRestart(t *testing.T) {
 // when `/proc/<pid>/exe` cannot be read because the supervisor runs as
 // a different uid. The acceptance brief calls for a descriptive error
 // that routes the operator to fix the uid mismatch or pass
-// --no-auto-restart; phase 2 currently surfaces `exe=(unreadable)` as
-// a fallback. This test pins the design intent — it will fail until
-// the builder implements the stronger error message.
+// --no-auto-restart; the implementation now surfaces that error rather
+// than the silent `exe=(unreadable)` fallback.
 //
 // Skipped when the test process is root (root can read any
 // /proc/<pid>/exe so the scenario is unreproducible) or when no
@@ -271,10 +270,9 @@ func TestStartDrift_PermissionDenied_DescriptiveError(t *testing.T) {
 
 	out, exitCode, _ := runDriftCommand(t, tc.newBinary, tc.env, tc.cityDir,
 		"start", tc.cityDir)
-	// The current code falls back to exe=(unreadable) and proceeds; the
-	// acceptance brief asks for a descriptive error + non-zero exit.
-	// Pin the design intent here. If the implementation still has the
-	// fallback, this test fails — that is the TDD signal.
+	// The acceptance brief asks for a descriptive error + non-zero exit
+	// when /proc/<pid>/exe is unreadable; the implementation must not
+	// silently fall back to exe=(unreadable) and proceed.
 	if exitCode == 0 {
 		t.Errorf("gc start under permission-denied returned exit 0; design requires non-zero so the operator notices")
 	}
@@ -327,10 +325,8 @@ func TestStartDrift_RestartTimeout_ExitsNonZero(t *testing.T) {
 // TestStartDrift_RestartLoopGuard_RefusesFourthInWindow pins the
 // architect's 3-in-60s threshold. Four drift-and-restart cycles in a
 // row must result in the fourth being refused with the loop-detected
-// error. Today's phase 2 implementation keeps the guard inside one
-// process, so this cross-invocation pin will fail until the builder
-// adds persistent tracking — that is the TDD signal flagged in the
-// design brief.
+// error. Persistent tracking of restart attempts (driftRestartHistoryFile)
+// keeps the guard honest across `gc start` invocations.
 func TestStartDrift_RestartLoopGuard_RefusesFourthInWindow(t *testing.T) {
 	tc := setupDriftDirectScenario(t)
 
