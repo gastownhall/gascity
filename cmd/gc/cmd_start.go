@@ -602,8 +602,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	recorder := events.Discard
 	var eventProv events.Provider // nil when events disabled or FileRecorder fails
-	if fr, err := events.NewFileRecorder(
-		filepath.Join(cityPath, ".gc", "events.jsonl"), stderr); err == nil {
+	if fr, err := newFileEventsRecorder(
+		filepath.Join(cityPath, ".gc", "events.jsonl"), cfg.Events, stderr); err == nil {
 		recorder = fr
 		eventProv = fr
 	}

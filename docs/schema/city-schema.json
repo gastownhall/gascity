@@ -1196,11 +1196,46 @@
         "provider": {
           "type": "string",
           "description": "Provider selects the events backend: \"fake\", \"fail\",\n\"exec:\u003cscript\u003e\", or \"\" (default: file-backed JSONL)."
+        },
+        "rotation": {
+          "$ref": "#/$defs/EventsRotationConfig",
+          "description": "Rotation configures file-backed JSONL rotation. Defaults are applied\nby EventsRotationConfig helper methods when this table is absent."
         }
       },
       "additionalProperties": false,
       "type": "object",
       "description": "EventsConfig holds events provider settings."
+    },
+    "EventsRotationConfig": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enabled controls automatic size-triggered rotation. Defaults to true.",
+          "default": true
+        },
+        "max_size_bytes": {
+          "type": "integer",
+          "description": "MaxSizeBytes is the active events.jsonl size threshold. Defaults to\nDefaultEventsRotationMaxSizeBytes.",
+          "default": 268435456
+        },
+        "check_interval_records": {
+          "type": "integer",
+          "description": "CheckIntervalRecords is the number of records between size checks.\nDefaults to DefaultEventsRotationCheckIntervalRecords.",
+          "default": 1024
+        },
+        "check_interval_seconds": {
+          "type": "integer",
+          "description": "CheckIntervalSeconds is the time backstop between size checks. Defaults\nto DefaultEventsRotationCheckIntervalSeconds.",
+          "default": 60
+        },
+        "archive_retain_age": {
+          "type": "string",
+          "description": "ArchiveRetainAge is an optional Go duration. Empty keeps all archives."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "EventsRotationConfig holds file-backed events rotation settings."
     },
     "FormulasConfig": {
       "properties": {

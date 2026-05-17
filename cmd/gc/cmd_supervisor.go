@@ -1438,7 +1438,7 @@ func reconcileCities(
 		rec := events.Discard
 		var eventProv events.Provider
 		evPath := filepath.Join(path, ".gc", "events.jsonl")
-		fr, frErr := events.NewFileRecorder(evPath, stderr)
+		fr, frErr := newFileEventsRecorder(evPath, cfg.Events, stderr)
 		if frErr == nil {
 			rec = fr
 			eventProv = fr

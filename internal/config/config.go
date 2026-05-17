@@ -1326,6 +1326,86 @@ type EventsConfig struct {
 	// Provider selects the events backend: "fake", "fail",
 	// "exec:<script>", or "" (default: file-backed JSONL).
 	Provider string `toml:"provider,omitempty"`
+	// Rotation configures file-backed JSONL rotation. Defaults are applied
+	// by EventsRotationConfig helper methods when this table is absent.
+	Rotation EventsRotationConfig `toml:"rotation,omitempty"`
+}
+
+const (
+	// DefaultEventsRotationMaxSizeBytes is the default active events.jsonl
+	// size threshold before auto-rotation.
+	DefaultEventsRotationMaxSizeBytes int64 = 256 * 1024 * 1024
+	// DefaultEventsRotationCheckIntervalRecords is the default number of
+	// records between active file size checks.
+	DefaultEventsRotationCheckIntervalRecords = 1024
+	// DefaultEventsRotationCheckIntervalSeconds is the default time backstop
+	// between active file size checks.
+	DefaultEventsRotationCheckIntervalSeconds = 60
+	// DefaultEventsRotationCheckInterval is the default time backstop between
+	// active file size checks.
+	DefaultEventsRotationCheckInterval = time.Duration(DefaultEventsRotationCheckIntervalSeconds) * time.Second
+)
+
+// EventsRotationConfig holds file-backed events rotation settings.
+type EventsRotationConfig struct {
+	// Enabled controls automatic size-triggered rotation. Defaults to true.
+	Enabled *bool `toml:"enabled,omitempty" jsonschema:"default=true"`
+	// MaxSizeBytes is the active events.jsonl size threshold. Defaults to
+	// DefaultEventsRotationMaxSizeBytes.
+	MaxSizeBytes *int64 `toml:"max_size_bytes,omitempty" jsonschema:"default=268435456"`
+	// CheckIntervalRecords is the number of records between size checks.
+	// Defaults to DefaultEventsRotationCheckIntervalRecords.
+	CheckIntervalRecords *int `toml:"check_interval_records,omitempty" jsonschema:"default=1024"`
+	// CheckIntervalSeconds is the time backstop between size checks. Defaults
+	// to DefaultEventsRotationCheckIntervalSeconds.
+	CheckIntervalSeconds *int `toml:"check_interval_seconds,omitempty" jsonschema:"default=60"`
+	// ArchiveRetainAge is an optional Go duration. Empty keeps all archives.
+	ArchiveRetainAge string `toml:"archive_retain_age,omitempty"`
+}
+
+// EnabledOrDefault reports whether automatic rotation is enabled.
+func (c EventsRotationConfig) EnabledOrDefault() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+// MaxSizeBytesOrDefault returns the configured active log size threshold.
+func (c EventsRotationConfig) MaxSizeBytesOrDefault() int64 {
+	if c.MaxSizeBytes == nil {
+		return DefaultEventsRotationMaxSizeBytes
+	}
+	return *c.MaxSizeBytes
+}
+
+// CheckIntervalRecordsOrDefault returns the configured record-count gate.
+func (c EventsRotationConfig) CheckIntervalRecordsOrDefault() int {
+	if c.CheckIntervalRecords == nil {
+		return DefaultEventsRotationCheckIntervalRecords
+	}
+	return *c.CheckIntervalRecords
+}
+
+// CheckIntervalDurationOrDefault returns the configured time gate.
+func (c EventsRotationConfig) CheckIntervalDurationOrDefault() time.Duration {
+	if c.CheckIntervalSeconds == nil {
+		return DefaultEventsRotationCheckInterval
+	}
+	return time.Duration(*c.CheckIntervalSeconds) * time.Second
+}
+
+// ArchiveRetainAgeDuration parses ArchiveRetainAge. Empty or invalid values
+// return zero, which keeps all archives.
+func (c EventsRotationConfig) ArchiveRetainAgeDuration() time.Duration {
+	if strings.TrimSpace(c.ArchiveRetainAge) == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(c.ArchiveRetainAge)
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 // DoltConfig holds optional dolt server overrides.

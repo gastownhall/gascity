@@ -7,7 +7,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -703,15 +705,24 @@ func openCityMailProvider(stderr io.Writer, cmdName string) (mail.Provider, int)
 // eventsProviderName returns the events provider name.
 // Priority: GC_EVENTS env var → city.toml [events].provider → "" (default: file JSONL).
 func eventsProviderName() string {
-	if v := os.Getenv("GC_EVENTS"); v != "" {
-		return v
-	}
+	return eventsProviderConfig().Provider
+}
+
+func eventsProviderConfig() config.EventsConfig {
+	return eventsProviderConfigWithWarnings(io.Discard)
+}
+
+func eventsProviderConfigWithWarnings(w io.Writer) config.EventsConfig {
+	cfg := config.EventsConfig{}
 	if cp, err := resolveCity(); err == nil {
-		if cfg, err := loadCityConfig(cp, io.Discard); err == nil && cfg.Events.Provider != "" {
-			return cfg.Events.Provider
+		if cityCfg, err := loadCityConfig(cp, w); err == nil {
+			cfg = cityCfg.Events
 		}
 	}
-	return ""
+	if v := os.Getenv("GC_EVENTS"); v != "" {
+		cfg.Provider = v
+	}
+	return cfg
 }
 
 // fastEventsProviderName returns the events provider name for hook-driven
@@ -738,6 +749,10 @@ func fastEventsProviderName() string {
 //   - "exec:<script>" → user-supplied script (absolute path or PATH lookup)
 //   - default → file-backed JSONL provider
 func newEventsProviderForName(v, eventsPath string, stderr io.Writer) (events.Provider, error) {
+	return newEventsProviderForNameWithConfig(v, eventsPath, stderr, config.EventsConfig{})
+}
+
+func newEventsProviderForNameWithConfig(v, eventsPath string, stderr io.Writer, eventsCfg config.EventsConfig) (events.Provider, error) {
 	if strings.HasPrefix(v, "exec:") {
 		return eventsexec.NewProvider(strings.TrimPrefix(v, "exec:"), stderr), nil
 	}
@@ -747,14 +762,98 @@ func newEventsProviderForName(v, eventsPath string, stderr io.Writer) (events.Pr
 	case "fail":
 		return events.NewFailFake(), nil
 	default:
-		return events.NewFileRecorder(eventsPath, stderr)
+		return newFileEventsRecorder(eventsPath, eventsCfg, stderr)
 	}
+}
+
+type eventsRotationSettings struct {
+	enabled              bool
+	maxSizeBytes         int64
+	checkIntervalRecords int
+	checkInterval        time.Duration
+	archiveRetainAge     time.Duration
+}
+
+func eventsRotationSettingsFromConfig(eventsCfg config.EventsConfig, stderr io.Writer) eventsRotationSettings {
+	rot := eventsCfg.Rotation
+	settings := eventsRotationSettings{
+		enabled:              rot.EnabledOrDefault(),
+		maxSizeBytes:         rot.MaxSizeBytesOrDefault(),
+		checkIntervalRecords: rot.CheckIntervalRecordsOrDefault(),
+		checkInterval:        rot.CheckIntervalDurationOrDefault(),
+		archiveRetainAge:     rot.ArchiveRetainAgeDuration(),
+	}
+	if raw, ok := os.LookupEnv("GC_EVENTS_ROTATION_ENABLED"); ok {
+		if parsed, parseOK := parseEventsRotationEnabled(raw); parseOK {
+			settings.enabled = parsed
+		} else {
+			warnEventsRotation(stderr, "events.rotation: warning: ignoring invalid GC_EVENTS_ROTATION_ENABLED=%q\n", raw)
+		}
+	}
+	if raw, ok := os.LookupEnv("GC_EVENTS_ROTATION_MAX_SIZE_BYTES"); ok {
+		if n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
+			settings.maxSizeBytes = n
+		} else {
+			warnEventsRotation(stderr, "events.rotation: warning: ignoring invalid GC_EVENTS_ROTATION_MAX_SIZE_BYTES=%q\n", raw)
+		}
+	}
+	if raw, ok := os.LookupEnv("GC_EVENTS_ROTATION_RETAIN_AGE"); ok {
+		if strings.TrimSpace(raw) == "" {
+			settings.archiveRetainAge = 0
+		} else if d, err := time.ParseDuration(raw); err == nil {
+			settings.archiveRetainAge = d
+			if d > 0 && d < 168*time.Hour {
+				warnEventsRotation(stderr, "events.rotation: warning: archive_retain_age=%s may delete recent archives\n", raw)
+			}
+		} else {
+			warnEventsRotation(stderr, "events.rotation: warning: ignoring invalid GC_EVENTS_ROTATION_RETAIN_AGE=%q\n", raw)
+		}
+	}
+	return settings
+}
+
+func parseEventsRotationEnabled(raw string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "t", "true", "y", "yes", "on", "enabled":
+		return true, true
+	case "0", "f", "false", "n", "no", "off", "disabled":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func warnEventsRotation(stderr io.Writer, format string, args ...any) {
+	if stderr == nil {
+		return
+	}
+	fmt.Fprintf(stderr, format, args...) //nolint:errcheck // best-effort operator warning
+}
+
+func eventsFileRecorderOptions(eventsCfg config.EventsConfig, stderr io.Writer) []events.FileRecorderOption {
+	settings := eventsRotationSettingsFromConfig(eventsCfg, stderr)
+	maxSize := settings.maxSizeBytes
+	if !settings.enabled {
+		maxSize = 0
+	}
+	return []events.FileRecorderOption{
+		events.WithMaxSize(maxSize),
+		events.WithRotationCheckRecords(settings.checkIntervalRecords),
+		events.WithRotationCheckInterval(settings.checkInterval),
+		events.WithArchiveRetainAge(settings.archiveRetainAge),
+	}
+}
+
+func newFileEventsRecorder(eventsPath string, eventsCfg config.EventsConfig, stderr io.Writer) (*events.FileRecorder, error) {
+	return events.NewFileRecorder(eventsPath, stderr, eventsFileRecorderOptions(eventsCfg, stderr)...)
 }
 
 // openCityEventsProvider resolves the city and returns an events.Provider.
 // Returns (nil, exitCode) on failure.
 func openCityEventsProvider(stderr io.Writer, cmdName string) (events.Provider, int) {
-	return openCityEventsProviderWithName(eventsProviderName, stderr, cmdName)
+	return openCityEventsProviderWithConfig(func() config.EventsConfig {
+		return eventsProviderConfigWithWarnings(stderr)
+	}, stderr, cmdName)
 }
 
 func openCityEventEmitProvider(stderr io.Writer, cmdName string) (events.Provider, int) {
@@ -762,10 +861,17 @@ func openCityEventEmitProvider(stderr io.Writer, cmdName string) (events.Provide
 }
 
 func openCityEventsProviderWithName(providerName func() string, stderr io.Writer, cmdName string) (events.Provider, int) {
+	return openCityEventsProviderWithConfig(func() config.EventsConfig {
+		return config.EventsConfig{Provider: providerName()}
+	}, stderr, cmdName)
+}
+
+func openCityEventsProviderWithConfig(providerConfig func() config.EventsConfig, stderr io.Writer, cmdName string) (events.Provider, int) {
 	// For exec: and test doubles, no city needed.
-	v := providerName()
+	eventsCfg := providerConfig()
+	v := eventsCfg.Provider
 	if strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail" {
-		p, err := newEventsProviderForName(v, "", stderr)
+		p, err := newEventsProviderForNameWithConfig(v, "", stderr, eventsCfg)
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 			return nil, 1
@@ -779,7 +885,7 @@ func openCityEventsProviderWithName(providerName func() string, stderr io.Writer
 		return nil, 1
 	}
 	eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
-	p, err := newEventsProviderForName(v, eventsPath, stderr)
+	p, err := newEventsProviderForNameWithConfig(v, eventsPath, stderr, eventsCfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1

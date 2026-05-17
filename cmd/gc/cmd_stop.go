@@ -241,8 +241,8 @@ func cmdStopBody(cityPath string, cfg *config.City, force bool, stdout, stderr i
 		}
 	}
 	recorder := events.Discard
-	if fr, err := events.NewFileRecorder(
-		filepath.Join(cityPath, ".gc", "events.jsonl"), stderr); err == nil {
+	if fr, err := newFileEventsRecorder(
+		filepath.Join(cityPath, ".gc", "events.jsonl"), cfg.Events, stderr); err == nil {
 		recorder = fr
 	}
 
