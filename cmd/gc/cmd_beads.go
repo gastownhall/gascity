@@ -32,7 +32,7 @@ Subcommands for topology operations, health checking, and diagnostics.`,
 }
 
 func newBeadsHealthCmd(stdout, stderr io.Writer) *cobra.Command {
-	var quiet bool
+	var quiet, jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "health",
 		Short: "Check beads provider health",
@@ -44,10 +44,11 @@ and recovery internally. For the file provider, always succeeds (no-op).
 
 Also used by the beads-health system order for periodic monitoring.`,
 		Example: `  gc beads health
-  gc beads health --quiet`,
+  gc beads health --quiet
+  gc beads health --json`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doBeadsHealth(quiet, stdout, stderr) != 0 {
+			if doBeadsHealth(quiet, jsonOut, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -55,12 +56,21 @@ Also used by the beads-health system order for periodic monitoring.`,
 	}
 	cmd.Flags().BoolVar(&quiet, "quiet", false,
 		"silent on success, stderr on failure")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON result")
 	return cmd
+}
+
+type beadsHealthJSONResult struct {
+	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
+	CityPath      string `json:"city_path"`
+	Provider      string `json:"provider"`
+	Status        string `json:"status"`
 }
 
 // doBeadsHealth runs the beads provider health check.
 // Returns 0 if healthy, 1 if unhealthy/recovery-failed.
-func doBeadsHealth(quiet bool, stdout, stderr io.Writer) int {
+func doBeadsHealth(quiet, jsonOut bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc beads health: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -70,6 +80,19 @@ func doBeadsHealth(quiet bool, stdout, stderr io.Writer) int {
 	if err := healthBeadsProvider(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc beads health: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if jsonOut {
+		if err := writeCLIJSONLine(stdout, beadsHealthJSONResult{
+			SchemaVersion: "1",
+			OK:            true,
+			CityPath:      cityPath,
+			Provider:      rawBeadsProvider(cityPath),
+			Status:        "healthy",
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc beads health: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
 	}
 	if !quiet {
 		fmt.Fprintln(stdout, "Beads provider: healthy") //nolint:errcheck // best-effort stdout
