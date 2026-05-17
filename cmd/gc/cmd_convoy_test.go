@@ -1989,10 +1989,14 @@ func convoyProblemHandler(status int, detail string) convoyMatrixHandler {
 // output.
 func writeConvoyTestCity(t *testing.T) string {
 	t.Helper()
+	clearInheritedBeadsEnv(t)
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY_PATH", cityPath)
 	cityToml := `[workspace]
 name = "test-city"
 

@@ -3256,10 +3256,14 @@ func mailProblemHandler(status int, detail string) mailMatrixHandler {
 // the fallback helpers don't walk up to the builder's own city directory.
 func writeMailTestCity(t *testing.T) string {
 	t.Helper()
+	clearInheritedBeadsEnv(t)
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY_PATH", cityPath)
 	cityToml := `[workspace]
 name = "test-city"
 
@@ -3270,8 +3274,6 @@ name = "mayor"
 		t.Fatal(err)
 	}
 	t.Setenv("GC_MAIL", "fake")
-	t.Setenv("GC_CITY_PATH", cityPath)
-	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	return cityPath
 }
 
