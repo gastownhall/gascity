@@ -1306,7 +1306,8 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 
 // newSessionSuspendCmd creates the "gc session suspend <id-or-alias>" command.
 func newSessionSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "suspend <session-id-or-alias>",
 		Short: "Suspend a session (save state, free resources)",
 		Long: `Suspend an active session by stopping its runtime process.
@@ -1315,13 +1316,15 @@ The session bead persists and can be resumed later.
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionSuspend(args, stdout, stderr) != 0 {
+			if cmdSessionSuspend(args, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
 		},
 		ValidArgsFunction: completeSessionIDs,
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
+	return cmd
 }
 
 // cmdSessionSuspend is the CLI entry point for "gc session suspend".
@@ -1329,7 +1332,8 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 // Phase 2: sets held_until metadata on the session bead and pokes the
 // controller. The reconciler handles the actual process stop. Falls back
 // to direct suspend via the session manager if the controller isn't running.
-func cmdSessionSuspend(args []string, stdout, stderr io.Writer) int {
+func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
+	asJSON := sessionJSONRequested(jsonOutput)
 	store, code := openCityStore(stderr, "gc session suspend")
 	if store == nil {
 		return code
@@ -1364,6 +1368,15 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer) int {
 			}
 			// Poke again to trigger immediate reconciler tick.
 			_ = pokeController(cityPath)
+			if asJSON {
+				writeSessionActionJSON(stdout, sessionActionResult{
+					Action:    "suspend",
+					SessionID: sessionID,
+					Mode:      "managed",
+					State:     "suspended",
+				})
+				return 0
+			}
 			fmt.Fprintf(stdout, "Session %s suspended. Resume with: gc session wake %s\n", sessionID, sessionID) //nolint:errcheck // best-effort stdout
 			return 0
 		}
@@ -1382,13 +1395,23 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	if asJSON {
+		writeSessionActionJSON(stdout, sessionActionResult{
+			Action:    "suspend",
+			SessionID: sessionID,
+			Mode:      "direct",
+			State:     "suspended",
+		})
+		return 0
+	}
 	fmt.Fprintf(stdout, "Session %s suspended. Resume with: gc session attach %s\n", sessionID, sessionID) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
 // newSessionCloseCmd creates the "gc session close <id-or-alias>" command.
 func newSessionCloseCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "close <session-id-or-alias>",
 		Short: "Close a session permanently",
 		Long: `End a conversation. Stops the runtime if active and closes the bead.
@@ -1396,17 +1419,20 @@ func newSessionCloseCmd(stdout, stderr io.Writer) *cobra.Command {
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionClose(args, stdout, stderr) != 0 {
+			if cmdSessionClose(args, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
 		},
 		ValidArgsFunction: completeSessionIDs,
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
+	return cmd
 }
 
 // cmdSessionClose is the CLI entry point for "gc session close".
-func cmdSessionClose(args []string, stdout, stderr io.Writer) int {
+func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
+	asJSON := sessionJSONRequested(jsonOutput)
 	store, code := openCityStore(stderr, "gc session close")
 	if store == nil {
 		return code
@@ -1440,28 +1466,41 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	if asJSON {
+		writeSessionActionJSON(stdout, sessionActionResult{
+			Action:              "close",
+			SessionID:           sessionID,
+			State:               "closed",
+			WaitNudgesWithdrawn: len(closeResult.WaitNudgeIDs),
+		})
+		return 0
+	}
 	fmt.Fprintf(stdout, "Session %s closed.\n", sessionID) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
 // newSessionRenameCmd creates the "gc session rename <id-or-alias> <title>" command.
 func newSessionRenameCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "rename <session-id-or-alias> <title>",
 		Short: "Rename a session",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionRename(args, stdout, stderr) != 0 {
+			if cmdSessionRename(args, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
 		},
 		ValidArgsFunction: completeSessionIDs,
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
+	return cmd
 }
 
 // cmdSessionRename is the CLI entry point for "gc session rename".
-func cmdSessionRename(args []string, stdout, stderr io.Writer) int {
+func cmdSessionRename(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
+	asJSON := sessionJSONRequested(jsonOutput)
 	title := args[1]
 
 	store, code := openCityStore(stderr, "gc session rename")
@@ -1491,6 +1530,14 @@ func cmdSessionRename(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	if asJSON {
+		writeSessionActionJSON(stdout, sessionActionResult{
+			Action:    "rename",
+			SessionID: sessionID,
+			Title:     title,
+		})
+		return 0
+	}
 	fmt.Fprintf(stdout, "Session %s renamed to %q.\n", sessionID, title) //nolint:errcheck // best-effort stdout
 	return 0
 }
@@ -1498,6 +1545,7 @@ func cmdSessionRename(args []string, stdout, stderr io.Writer) int {
 // newSessionPruneCmd creates the "gc session prune" command.
 func newSessionPruneCmd(stdout, stderr io.Writer) *cobra.Command {
 	var beforeStr string
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "prune",
 		Short: "Close old suspended sessions",
@@ -1507,18 +1555,20 @@ sessions are affected — active sessions are never pruned.`,
   gc session prune --before 24h`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdSessionPrune(beforeStr, stdout, stderr) != 0 {
+			if cmdSessionPrune(beforeStr, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&beforeStr, "before", "7d", "prune sessions older than this duration (e.g., 7d, 24h)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
 	return cmd
 }
 
 // cmdSessionPrune is the CLI entry point for "gc session prune".
-func cmdSessionPrune(beforeStr string, stdout, stderr io.Writer) int {
+func cmdSessionPrune(beforeStr string, stdout, stderr io.Writer, jsonOutput ...bool) int {
+	asJSON := sessionJSONRequested(jsonOutput)
 	dur, err := parsePruneDuration(beforeStr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session prune: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1549,6 +1599,15 @@ func cmdSessionPrune(beforeStr string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	if asJSON {
+		writeSessionActionJSON(stdout, sessionActionResult{
+			Action: "prune",
+			Count:  &result.Count,
+			Before: beforeStr,
+			Cutoff: cutoff.UTC().Format(time.RFC3339),
+		})
+		return 0
+	}
 	if result.Count == 0 {
 		fmt.Fprintln(stdout, "No sessions to prune.") //nolint:errcheck // best-effort stdout
 	} else {
@@ -1681,7 +1740,8 @@ func outputLineCount(output string) int {
 
 // newSessionKillCmd creates the "gc session kill <id-or-alias>" command.
 func newSessionKillCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "kill <session-id-or-alias>",
 		Short: "Force-kill session runtime (reconciler restarts)",
 		Long: `Force-kill the runtime process for a session without changing its bead state.
@@ -1693,17 +1753,20 @@ useful for unsticking a session without losing its conversation history.
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionKill(args, stdout, stderr) != 0 {
+			if cmdSessionKill(args, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
 		},
 		ValidArgsFunction: completeSessionIDs,
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
+	return cmd
 }
 
 // cmdSessionKill is the CLI entry point for "gc session kill".
-func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
+func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
+	asJSON := sessionJSONRequested(jsonOutput)
 	store, code := openCityStore(stderr, "gc session kill")
 	if store == nil {
 		return code
@@ -1744,6 +1807,13 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
 		Payload: api.SessionLifecyclePayloadJSON(sessionID, "", "killed"),
 	})
 
+	if asJSON {
+		writeSessionActionJSON(stdout, sessionActionResult{
+			Action:    "kill",
+			SessionID: sessionID,
+		})
+		return 0
+	}
 	fmt.Fprintf(stdout, "Session %s killed.\n", sessionID) //nolint:errcheck // best-effort stdout
 	return 0
 }

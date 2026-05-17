@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gc-jsonl": {},
+  "type": "object",
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "action": { "const": "kill" },
+    "session_id": { "type": "string", "minLength": 1 }
+  },
+  "required": ["schema_version", "ok", "action", "session_id"],
+  "additionalProperties": false
+}
