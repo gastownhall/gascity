@@ -125,8 +125,9 @@ func doUnregister(args []string, stdout, stderr io.Writer) int {
 }
 
 func newCitiesCmd(stdout, stderr io.Writer) *cobra.Command {
+	var jsonOutput bool
 	runList := func(_ *cobra.Command, _ []string) error {
-		if doCities(stdout, stderr) != 0 {
+		if doCities(jsonOutput, stdout, stderr) != 0 {
 			return errExit
 		}
 		return nil
@@ -138,22 +139,56 @@ func newCitiesCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE:  runList,
 	}
-	cmd.AddCommand(&cobra.Command{
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output one JSONL result record")
+	listCmd := &cobra.Command{
 		Use:     "list",
 		Short:   "List registered cities",
 		Aliases: []string{"ls"},
 		Args:    cobra.NoArgs,
 		RunE:    runList,
-	})
+	}
+	listCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output one JSONL result record")
+	cmd.AddCommand(listCmd)
 	return cmd
 }
 
-func doCities(stdout, stderr io.Writer) int {
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+type citiesListJSON struct {
+	SchemaVersion string             `json:"schema_version"`
+	RegistryPath  string             `json:"registry_path"`
+	Cities        []cityRegistryJSON `json:"cities"`
+}
+
+type cityRegistryJSON struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+func doCities(jsonOutput bool, stdout, stderr io.Writer) int {
+	registryPath := supervisor.RegistryPath()
+	reg := supervisor.NewRegistry(registryPath)
 	entries, err := reg.List()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc cities: %v\n", err) //nolint:errcheck
 		return 1
+	}
+
+	if jsonOutput {
+		cities := make([]cityRegistryJSON, 0, len(entries))
+		for _, e := range entries {
+			cities = append(cities, cityRegistryJSON{
+				Name: e.EffectiveName(),
+				Path: e.Path,
+			})
+		}
+		if err := writeCLIJSONLine(stdout, citiesListJSON{
+			SchemaVersion: "1",
+			RegistryPath:  registryPath,
+			Cities:        cities,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc cities: writing JSON: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		return 0
 	}
 
 	if len(entries) == 0 {
