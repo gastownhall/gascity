@@ -375,6 +375,36 @@ func TestJSONContractAllowsBdPassthrough(t *testing.T) {
 	}
 }
 
+func TestJSONSchemaManifestForBdPassthrough(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"bd", "--json-schema"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(bd --json-schema) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+
+	var manifest struct {
+		Command       []string                   `json:"command"`
+		Transport     string                     `json:"transport"`
+		JSONSupported bool                       `json:"json_supported"`
+		Schemas       map[string]json.RawMessage `json:"schemas"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
+		t.Fatalf("manifest is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got := strings.Join(manifest.Command, " "); got != "bd" {
+		t.Fatalf("command = %q, want bd", got)
+	}
+	if !manifest.JSONSupported || manifest.Transport != "jsonl" {
+		t.Fatalf("manifest metadata = %+v", manifest)
+	}
+	if !json.Valid(manifest.Schemas["result"]) || !json.Valid(manifest.Schemas["failure"]) {
+		t.Fatalf("manifest schemas = %+v", manifest.Schemas)
+	}
+}
+
 func TestJSONContractResolvesCommandWithInterspersedBooleanFlags(t *testing.T) {
 	schemaDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(schemaDir, "result.schema.json"), []byte(`{
