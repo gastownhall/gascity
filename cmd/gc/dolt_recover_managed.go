@@ -122,7 +122,10 @@ func recoverManagedDoltProcess(cityPath, host, port, user, logLevel string, time
 	}
 	time.Sleep(time.Second)
 
-	startReport, err := startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel, -1, timeout, false)
+	// We already hold the managed-dolt lifecycle lock (acquired above);
+	// call the lock-free helper rather than startManagedDoltProcessWithOptions,
+	// which would re-open the lock file and self-contend until timeout.
+	startReport, err := startManagedDoltProcessLocked(cityPath, host, port, user, logLevel, -1, timeout, false)
 	report.Restarted = true
 	report.Ready = startReport.Ready
 	if startReport.PID > 0 {

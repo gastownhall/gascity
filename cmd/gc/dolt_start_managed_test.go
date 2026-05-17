@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -340,5 +341,74 @@ func TestStartManagedDolt_GatesPreflightBehindLifecycleLock(t *testing.T) {
 	}
 	if calls := atomic.LoadInt32(&preflightCalls); calls != 0 {
 		t.Fatalf("preflight called %d times while external lock was held; lifecycle lock did not gate preflight", calls)
+	}
+}
+
+// TestStartManagedDoltLocked_DoesNotAcquireLifecycleLock pins the
+// PR #2296 deadlock fix: startManagedDoltProcessLocked must NOT touch the
+// lifecycle lock, because recoverManagedDoltProcess calls it while already
+// holding the lock. If Locked re-acquired the lock, the second open+tryLock
+// would block (flock is per-open-file-description), recovery restarts would
+// time out instead of spawning, and the #2130 fix would regress into a
+// worse failure mode than the original race.
+//
+// Mechanism: hold the lifecycle lock externally (simulating recover's
+// in-flight lock hold), patch preflight to abort with a sentinel error,
+// then call startManagedDoltProcessLocked. The companion test
+// TestStartManagedDolt_GatesPreflightBehindLifecycleLock asserts that
+// startManagedDoltProcessWithOptions DOES block on the same setup; the
+// contrast pins the locked/unlocked split.
+func TestStartManagedDoltLocked_DoesNotAcquireLifecycleLock(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads", "dolt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	externalLock, _, err := openManagedDoltLifecycleLock(cityPath)
+	if err != nil {
+		t.Fatalf("openManagedDoltLifecycleLock: %v", err)
+	}
+	defer func() {
+		releaseManagedDoltLifecycleLock(externalLock)
+	}()
+	gotExternal, err := tryManagedDoltLifecycleLock(externalLock)
+	if err != nil {
+		t.Fatalf("tryManagedDoltLifecycleLock(external): %v", err)
+	}
+	if !gotExternal {
+		t.Fatal("expected external lock acquisition to succeed on first try")
+	}
+
+	// Preflight is the first observable side effect inside the spawn loop.
+	// If Locked respects the no-acquire contract, this fires immediately
+	// despite the external lock hold; if it regresses to acquire-the-lock,
+	// Locked deadlocks against the external hold and returns a timeout
+	// error before preflight ever runs.
+	var preflightCalls int32
+	preflightSentinel := fmt.Errorf("preflight reached — locked did not block on external lifecycle lock")
+	oldPreflight := managedDoltPreflightCleanupFn
+	managedDoltPreflightCleanupFn = func(string) error {
+		atomic.AddInt32(&preflightCalls, 1)
+		return preflightSentinel
+	}
+	t.Cleanup(func() {
+		managedDoltPreflightCleanupFn = oldPreflight
+	})
+
+	// Short timeout — if Locked accidentally acquires the lock, this
+	// surfaces as a "timed out waiting" error within 500ms rather than
+	// the preflight sentinel.
+	_, startErr := startManagedDoltProcessLocked(
+		cityPath, "127.0.0.1", "13306", "root", "warning", -1, 500*time.Millisecond, false,
+	)
+
+	if calls := atomic.LoadInt32(&preflightCalls); calls != 1 {
+		t.Fatalf("preflight called %d times; expected exactly 1 (Locked must not block on the lifecycle lock). startErr=%v", calls, startErr)
+	}
+	if startErr == nil || startErr.Error() != preflightSentinel.Error() {
+		t.Fatalf("expected preflight sentinel error, got: %v", startErr)
 	}
 }

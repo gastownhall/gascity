@@ -23,13 +23,20 @@ func startManagedDoltProcess(cityPath, host, port, user, logLevel string, timeou
 	return startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel, -1, timeout, true)
 }
 
+// startManagedDoltProcessWithOptions acquires the managed-dolt lifecycle
+// lock (or observes a concurrent starter's healthy result) and then
+// delegates to startManagedDoltProcessLocked for the spawn work. Callers
+// that ALREADY hold the lifecycle lock (e.g. recoverManagedDoltProcess
+// across its restart phase) must call startManagedDoltProcessLocked
+// directly — calling this function while holding the lock self-contends
+// because flock is per-open-file-description, not per-process, and the
+// second open + tryLock blocks until timeout.
 func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel string, archiveLevel int, timeout time.Duration, publish bool) (managedDoltStartReport, error) {
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
 		return managedDoltStartReport{}, err
 	}
-	portNum, err := strconv.Atoi(strings.TrimSpace(port))
-	if err != nil || portNum <= 0 {
+	if _, err := strconv.Atoi(strings.TrimSpace(port)); err != nil {
 		return managedDoltStartReport{}, fmt.Errorf("invalid port %q", port)
 	}
 	if strings.TrimSpace(host) == "" {
@@ -38,13 +45,9 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	if strings.TrimSpace(user) == "" {
 		user = "root"
 	}
-	if strings.TrimSpace(logLevel) == "" {
-		logLevel = "warning"
-	}
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	archiveLevel = resolveDoltArchiveLevel(archiveLevel)
 
 	report := managedDoltStartReport{}
 
@@ -85,6 +88,41 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	}
 	defer releaseManagedDoltLifecycleLock(lockFile)
 	lockFile = nil
+
+	return startManagedDoltProcessLocked(cityPath, host, port, user, logLevel, archiveLevel, timeout, publish)
+}
+
+// startManagedDoltProcessLocked spawns the dolt sql-server and waits for
+// it to become query-ready. It does NOT acquire the lifecycle lock; the
+// caller must already hold it. recoverManagedDoltProcess uses this entry
+// point during its restart phase (it already holds the lock from its
+// own lifecycle-lock acquire and would deadlock against the outer
+// startManagedDoltProcessWithOptions's re-acquire attempt — see
+// https://github.com/gastownhall/gascity/pull/2296#discussion).
+func startManagedDoltProcessLocked(cityPath, host, port, user, logLevel string, archiveLevel int, timeout time.Duration, publish bool) (managedDoltStartReport, error) {
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		return managedDoltStartReport{}, err
+	}
+	portNum, err := strconv.Atoi(strings.TrimSpace(port))
+	if err != nil || portNum <= 0 {
+		return managedDoltStartReport{}, fmt.Errorf("invalid port %q", port)
+	}
+	if strings.TrimSpace(host) == "" {
+		host = "0.0.0.0"
+	}
+	if strings.TrimSpace(user) == "" {
+		user = "root"
+	}
+	if strings.TrimSpace(logLevel) == "" {
+		logLevel = "warning"
+	}
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	archiveLevel = resolveDoltArchiveLevel(archiveLevel)
+
+	report := managedDoltStartReport{}
 
 	currentPort := portNum
 	for attempt := 1; attempt <= 5; attempt++ {
