@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,6 +101,28 @@ func TestNativeDoltStoreGetPropagatesUpstreamError(t *testing.T) {
 	}
 }
 
+func TestNativeDoltStoreGetRejectsInvalidMetadata(t *testing.T) {
+	storage := &nativeDoltStorageSpy{
+		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
+			return &beadslib.Issue{
+				ID:        "gc-corrupt",
+				Title:     "corrupt metadata",
+				Status:    beadslib.StatusOpen,
+				IssueType: beadslib.TypeTask,
+				Priority:  2,
+				Metadata:  json.RawMessage(`{"gc.step_ref":`),
+			}, nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	if _, err := store.Get("gc-corrupt"); err == nil {
+		t.Fatal("Get error = nil, want invalid metadata error")
+	} else if !strings.Contains(err.Error(), `parsing metadata for bead "gc-corrupt"`) {
+		t.Fatalf("Get error = %v, want bead metadata context", err)
+	}
+}
+
 func TestNativeDoltStoreListDelegatesAndConvertsIssues(t *testing.T) {
 	createdAt := time.Date(2026, 5, 17, 11, 0, 0, 0, time.UTC)
 	var capturedFilter beadslib.IssueFilter
@@ -140,10 +163,41 @@ func TestNativeDoltStoreListDelegatesAndConvertsIssues(t *testing.T) {
 	}
 }
 
+func TestNativeDoltStoreSetMetadataBatchRejectsInvalidExistingMetadata(t *testing.T) {
+	updateCalled := false
+	storage := &nativeDoltStorageSpy{
+		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
+			return &beadslib.Issue{
+				ID:        "gc-corrupt",
+				Title:     "corrupt metadata",
+				Status:    beadslib.StatusOpen,
+				IssueType: beadslib.TypeTask,
+				Priority:  2,
+				Metadata:  json.RawMessage(`{"existing":`),
+			}, nil
+		},
+		updateIssue: func(context.Context, string, map[string]interface{}, string) error {
+			updateCalled = true
+			return nil
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	if err := store.SetMetadataBatch("gc-corrupt", map[string]string{"gc.step_ref": "build"}); err == nil {
+		t.Fatal("SetMetadataBatch error = nil, want invalid metadata error")
+	} else if !strings.Contains(err.Error(), `parsing metadata for bead "gc-corrupt"`) {
+		t.Fatalf("SetMetadataBatch error = %v, want bead metadata context", err)
+	}
+	if updateCalled {
+		t.Fatal("UpdateIssue was called after invalid metadata")
+	}
+}
+
 type nativeDoltStorageSpy struct {
 	beadslib.Storage
 	createIssue  func(context.Context, *beadslib.Issue, string) error
 	getIssue     func(context.Context, string) (*beadslib.Issue, error)
+	updateIssue  func(context.Context, string, map[string]interface{}, string) error
 	searchIssues func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error)
 }
 
@@ -153,6 +207,10 @@ func (s *nativeDoltStorageSpy) CreateIssue(ctx context.Context, issue *beadslib.
 
 func (s *nativeDoltStorageSpy) GetIssue(ctx context.Context, id string) (*beadslib.Issue, error) {
 	return s.getIssue(ctx, id)
+}
+
+func (s *nativeDoltStorageSpy) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
+	return s.updateIssue(ctx, id, updates, actor)
 }
 
 func (s *nativeDoltStorageSpy) SearchIssues(ctx context.Context, query string, filter beadslib.IssueFilter) ([]*beadslib.Issue, error) {

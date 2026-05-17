@@ -42,7 +42,7 @@ func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
 	if err := s.storage.CreateIssue(context.Background(), issue, s.actor); err != nil {
 		return Bead{}, err
 	}
-	return beadFromNativeIssue(issue), nil
+	return beadFromNativeIssue(issue)
 }
 
 // Get retrieves a bead by ID from the upstream beads storage layer.
@@ -51,7 +51,7 @@ func (s *NativeDoltStore) Get(id string) (Bead, error) {
 	if err != nil {
 		return Bead{}, err
 	}
-	return beadFromNativeIssue(issue), nil
+	return beadFromNativeIssue(issue)
 }
 
 // Update modifies an existing bead through the upstream beads storage layer.
@@ -136,7 +136,11 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 	}
 	beads := make([]Bead, 0, len(issues))
 	for _, issue := range issues {
-		beads = append(beads, beadFromNativeIssue(issue))
+		bead, err := beadFromNativeIssue(issue)
+		if err != nil {
+			return nil, err
+		}
+		beads = append(beads, bead)
 	}
 	return ApplyListQuery(beads, query), nil
 }
@@ -169,7 +173,11 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 	}
 	beads := make([]Bead, 0, len(issues))
 	for _, issue := range issues {
-		beads = append(beads, beadFromNativeIssue(issue))
+		bead, err := beadFromNativeIssue(issue)
+		if err != nil {
+			return nil, err
+		}
+		beads = append(beads, bead)
 	}
 	return beads, nil
 }
@@ -223,7 +231,10 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 	if err != nil {
 		return err
 	}
-	metadata := metadataMapFromNative(issue.Metadata)
+	metadata, err := metadataMapFromNative(issue.Metadata)
+	if err != nil {
+		return fmt.Errorf("parsing metadata for bead %q: %w", id, err)
+	}
 	if metadata == nil {
 		metadata = make(map[string]string, len(kvs))
 	}
@@ -320,7 +331,10 @@ func (s *NativeDoltStore) nativeUpdates(ctx context.Context, id string, opts Upd
 		if err != nil {
 			return nil, err
 		}
-		metadata := metadataMapFromNative(issue.Metadata)
+		metadata, err := metadataMapFromNative(issue.Metadata)
+		if err != nil {
+			return nil, fmt.Errorf("parsing metadata for bead %q: %w", id, err)
+		}
 		if metadata == nil {
 			metadata = make(map[string]string, len(opts.Metadata))
 		}
@@ -420,9 +434,13 @@ func nativeIssueFromBead(b Bead) (*beadslib.Issue, error) {
 	return issue, nil
 }
 
-func beadFromNativeIssue(issue *beadslib.Issue) Bead {
+func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 	if issue == nil {
-		return Bead{}
+		return Bead{}, nil
+	}
+	metadata, err := metadataMapFromNative(issue.Metadata)
+	if err != nil {
+		return Bead{}, fmt.Errorf("parsing metadata for bead %q: %w", issue.ID, err)
 	}
 	priority := issue.Priority
 	b := Bead{
@@ -436,7 +454,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) Bead {
 		From:        issue.Sender,
 		Description: issue.Description,
 		Labels:      append([]string(nil), issue.Labels...),
-		Metadata:    metadataMapFromNative(issue.Metadata),
+		Metadata:    metadata,
 		Ephemeral:   issue.Ephemeral,
 	}
 	for _, dep := range issue.Dependencies {
@@ -453,7 +471,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) Bead {
 			b.ParentID = dep.DependsOnID
 		}
 	}
-	return b
+	return b, nil
 }
 
 func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
@@ -513,13 +531,13 @@ func metadataRawFromMap(metadata map[string]string) (json.RawMessage, error) {
 	return raw, nil
 }
 
-func metadataMapFromNative(raw json.RawMessage) map[string]string {
+func metadataMapFromNative(raw json.RawMessage) (map[string]string, error) {
 	if len(raw) == 0 {
-		return nil
+		return nil, nil
 	}
 	var values map[string]interface{}
 	if err := json.Unmarshal(raw, &values); err != nil {
-		return nil
+		return nil, fmt.Errorf("unmarshaling metadata: %w", err)
 	}
 	metadata := make(map[string]string, len(values))
 	for k, v := range values {
@@ -529,5 +547,5 @@ func metadataMapFromNative(raw json.RawMessage) map[string]string {
 		}
 		metadata[k] = fmt.Sprint(v)
 	}
-	return metadata
+	return metadata, nil
 }
