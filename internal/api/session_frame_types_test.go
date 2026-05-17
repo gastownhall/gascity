@@ -7,6 +7,8 @@ import (
 )
 
 func TestSessionRawMessageFrameEscapesLiteralNewlinesInRawJSONStrings(t *testing.T) {
+	// The raw frame intentionally contains literal newline bytes inside the
+	// JSON string value — this is the malformed producer output we're repairing.
 	rawFrame := json.RawMessage("{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"line one\n\nline two\"}]}")
 
 	encoded, err := json.Marshal(SessionStreamRawMessageEvent{
