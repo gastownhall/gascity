@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -278,7 +279,7 @@ func TestConvoyListAcrossStores(t *testing.T) {
 	_, _ = rigStore.Create(beads.Bead{Title: "rig task", ParentID: "gc-1"})
 
 	var stdout, stderr bytes.Buffer
-	code := doConvoyListAcrossStores([]convoyStoreView{{store: cityStore}, {store: rigStore}}, &stdout, &stderr)
+	code := doConvoyListAcrossStores([]convoyStoreView{{store: cityStore}, {store: rigStore}}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doConvoyListAcrossStores = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -287,6 +288,76 @@ func TestConvoyListAcrossStores(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestConvoyListJSON(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{
+		Title:    "batch 1",
+		Type:     "convoy",
+		Labels:   []string{"owned"},
+		Metadata: map[string]string{"target": "integration/gc-1"},
+	})
+	_, _ = store.Create(beads.Bead{Title: "fix auth", ParentID: "gc-1"})
+	_, _ = store.Create(beads.Bead{Title: "fix logs", ParentID: "gc-1", Assignee: "worker"})
+	_ = store.Close("gc-3")
+
+	var stdout, stderr bytes.Buffer
+	code := doConvoyListAcrossStores([]convoyStoreView{{store: store}}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyListAcrossStores --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stdout lines = %d, want one JSONL record: %q", len(lines), stdout.String())
+	}
+	var result convoyListResultJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" {
+		t.Fatalf("schema_version = %q, want 1", result.SchemaVersion)
+	}
+	if result.Summary.Total != 1 || len(result.Convoys) != 1 {
+		t.Fatalf("result summary/items = %+v/%+v, want one convoy", result.Summary, result.Convoys)
+	}
+	got := result.Convoys[0]
+	if got.ID != "gc-1" || got.Title != "batch 1" || !got.Owned {
+		t.Fatalf("convoy summary = %+v, want gc-1 batch 1 owned", got)
+	}
+	if got.Progress.Closed != 1 || got.Progress.Total != 2 {
+		t.Fatalf("progress = %+v, want 1/2", got.Progress)
+	}
+	if got.Fields.Target != "integration/gc-1" {
+		t.Fatalf("target = %q, want integration/gc-1", got.Fields.Target)
+	}
+}
+
+func TestConvoyListJSONEmpty(t *testing.T) {
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doConvoyListAcrossStores([]convoyStoreView{{store: store}}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyListAcrossStores --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "No open convoys") {
+		t.Fatalf("json stdout contains human message: %q", stdout.String())
+	}
+	var result convoyListResultJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" || result.Summary.Total != 0 || len(result.Convoys) != 0 {
+		t.Fatalf("result = %+v, want empty v1 list", result)
 	}
 }
 
@@ -325,6 +396,106 @@ func TestConvoyStatus(t *testing.T) {
 			t.Errorf("stdout missing %q:\n%s", want, out)
 		}
 	}
+}
+
+func TestConvoyStatusJSON(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{
+		Title:    "deploy",
+		Type:     "convoy",
+		Labels:   []string{"owned"},
+		Metadata: map[string]string{"target": "integration/gc-1", "convoy.owner": "mayor"},
+	})
+	_, _ = store.Create(beads.Bead{Title: "task A", ParentID: "gc-1"})
+	_, _ = store.Create(beads.Bead{Title: "task B", ParentID: "gc-1", Assignee: "worker"})
+	_ = store.Close("gc-2")
+
+	var stdout, stderr bytes.Buffer
+	code := doConvoyStatusWithJSON(store, []string{"gc-1"}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyStatus --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stdout lines = %d, want one JSONL record: %q", len(lines), stdout.String())
+	}
+	var result convoyStatusResultJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" {
+		t.Fatalf("schema_version = %q, want 1", result.SchemaVersion)
+	}
+	if result.Convoy.ID != "gc-1" || result.Convoy.Title != "deploy" || !result.Convoy.Owned {
+		t.Fatalf("convoy = %+v, want owned gc-1 deploy", result.Convoy)
+	}
+	if result.Convoy.Fields.Target != "integration/gc-1" || result.Convoy.Fields.Owner != "mayor" {
+		t.Fatalf("fields = %+v, want target and owner", result.Convoy.Fields)
+	}
+	if result.Progress.Closed != 1 || result.Progress.Total != 2 {
+		t.Fatalf("progress = %+v, want 1/2", result.Progress)
+	}
+	if len(result.Children) != 2 || result.Children[1].Assignee != "worker" {
+		t.Fatalf("children = %+v, want two children with second assigned", result.Children)
+	}
+}
+
+func TestConvoyListAndStatusJSONCommands(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	_, _ = store.Create(beads.Bead{Title: "release train", Type: "convoy"})
+	_, _ = store.Create(beads.Bead{Title: "ship docs", ParentID: "gc-1"})
+
+	t.Run("list", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"convoy", "list", "--json"}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("run convoy list --json = %d; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("stderr = %q, want empty", stderr.String())
+		}
+		var result convoyListResultJSON
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+		}
+		if result.SchemaVersion != "1" || len(result.Convoys) != 1 {
+			t.Fatalf("result = %+v, want one v1 convoy", result)
+		}
+	})
+
+	t.Run("status", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"convoy", "status", "gc-1", "--json"}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("run convoy status --json = %d; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("stderr = %q, want empty", stderr.String())
+		}
+		var result convoyStatusResultJSON
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+		}
+		if result.SchemaVersion != "1" || result.Convoy.ID != "gc-1" || len(result.Children) != 1 {
+			t.Fatalf("result = %+v, want gc-1 with one child", result)
+		}
+	})
 }
 
 func TestConvoyTarget(t *testing.T) {
