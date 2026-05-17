@@ -558,18 +558,49 @@ func (e *Editor) ResumeCity() error {
 // CreateAgent adds a new city-local convention agent. Returns an error if an
 // agent with the same qualified name already exists.
 func (e *Editor) CreateAgent(a config.Agent) error {
-	return e.EditExpanded(func(_, expanded *config.City) error {
+	return e.EditExpanded(func(raw, expanded *config.City) error {
 		qn := a.QualifiedName()
 		for _, existing := range expanded.Agents {
 			if existing.QualifiedName() == qn {
 				return fmt.Errorf("%w: agent %q", ErrAlreadyExists, qn)
 			}
 		}
-		if err := WriteLocalDiscoveredAgentConfig(e.fs, filepath.Dir(e.tomlPath), a); err != nil {
+
+		cityRoot := filepath.Dir(e.tomlPath)
+		schema2Pack, err := hasSchema2RootPack(e.fs, cityRoot)
+		if err != nil {
+			return err
+		}
+		if !schema2Pack {
+			raw.Agents = append(raw.Agents, a)
+			return nil
+		}
+
+		if err := WriteLocalDiscoveredAgentConfig(e.fs, cityRoot, a); err != nil {
 			return err
 		}
 		return ErrUnmodified
 	})
+}
+
+func hasSchema2RootPack(fs fsys.FS, cityRoot string) (bool, error) {
+	data, err := fs.ReadFile(filepath.Join(cityRoot, "pack.toml"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading pack.toml: %w", err)
+	}
+
+	var header struct {
+		Pack struct {
+			Schema int `toml:"schema"`
+		} `toml:"pack"`
+	}
+	if _, err := toml.Decode(string(data), &header); err != nil {
+		return false, fmt.Errorf("parsing pack.toml: %w", err)
+	}
+	return header.Pack.Schema >= 2, nil
 }
 
 // WriteLocalDiscoveredAgentConfig writes the durable config for a city-local

@@ -56,6 +56,10 @@ func setupGasTownCity(t *testing.T, guard *tmuxtest.Guard, agents []gasTownAgent
 	if err := os.WriteFile(filepath.Join(sourceDir, "city.toml"), []byte(renderGasTownToml(cityName, agents)), 0o644); err != nil {
 		t.Fatalf("writing init config: %v", err)
 	}
+	pack := fmt.Sprintf("[pack]\nname = %s\nschema = 2\n", quote(cityName))
+	if err := os.WriteFile(filepath.Join(sourceDir, "pack.toml"), []byte(pack), 0o644); err != nil {
+		t.Fatalf("writing init pack: %v", err)
+	}
 	writeGasTownAgentFiles(t, sourceDir, agents)
 
 	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--from", sourceDir, cityDir)

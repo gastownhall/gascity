@@ -841,6 +841,22 @@ func TestCreateAgent(t *testing.T) {
 	}
 }
 
+func TestCreateAgentLegacyNoPackAppendsInline(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, "[workspace]\n")
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	err := ed.CreateAgent(config.Agent{Name: "coder", Provider: "claude"})
+	if err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+
+	cfg := readTOML(t, path)
+	if len(cfg.Agents) != 1 || cfg.Agents[0].Name != "coder" || cfg.Agents[0].Provider != "claude" {
+		t.Fatalf("agents = %+v, want inline legacy coder", cfg.Agents)
+	}
+}
+
 func TestCreateAgent_Duplicate(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTOML(t, dir, minimalCity())
