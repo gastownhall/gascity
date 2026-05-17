@@ -1819,6 +1819,39 @@ func TestOrderHistory(t *testing.T) {
 	}
 }
 
+func TestOrderHistoryJSON(t *testing.T) {
+	store := beads.NewBdStore(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
+		if strings.Contains(strings.Join(args, " "), "--label=order-run:digest") {
+			return []byte(`[{"id":"WP-42","title":"digest wisp","status":"closed","issue_type":"task","created_at":"2026-02-27T10:00:00Z","labels":["order-run:digest"]}]`), nil
+		}
+		return []byte(`[]`), nil
+	})
+	aa := []orders.Order{{Name: "digest", Formula: "mol-digest"}}
+	resolver := func(orders.Order) ([]beads.Store, error) {
+		return []beads.Store{store}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderHistoryWithStoresResolverJSON("digest", "", aa, resolver, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderHistoryWithStoresResolverJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stdout lines = %d, want 1: %q", len(lines), stdout.String())
+	}
+	var payload orderHistoryJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.SchemaVersion != "1" || !payload.OK || payload.Summary.Total != 1 {
+		t.Fatalf("payload = %+v, want ok schema v1 with one entry", payload)
+	}
+	if len(payload.Entries) != 1 || payload.Entries[0].Order != "digest" || payload.Entries[0].BeadID != "WP-42" {
+		t.Fatalf("entries = %+v, want digest WP-42", payload.Entries)
+	}
+}
+
 func TestOrderHistoryNamed(t *testing.T) {
 	store := beads.NewBdStore(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
 		joined := strings.Join(args, " ")

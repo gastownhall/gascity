@@ -210,6 +210,44 @@ func TestJSONSchemaRoleSpecificResultForMailAndTraceShard(t *testing.T) {
 	}
 }
 
+func TestJSONSchemaResultForGraphConvergeOrderFormulaActions(t *testing.T) {
+	commands := [][]string{
+		{"graph"},
+		{"converge", "create"},
+		{"converge", "approve"},
+		{"converge", "iterate"},
+		{"converge", "stop"},
+		{"converge", "test-gate"},
+		{"converge", "retry"},
+		{"formula", "cook"},
+		{"order", "history"},
+	}
+	for _, command := range commands {
+		t.Run(strings.Join(command, "_"), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			args := append(append([]string{}, command...), "--json-schema=result")
+			code := run(args, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run(%s --json-schema=result) = %d, stderr=%q stdout=%q", strings.Join(command, " "), code, stderr.String(), stdout.String())
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want empty", stderr.String())
+			}
+			var schema map[string]any
+			if err := json.Unmarshal(stdout.Bytes(), &schema); err != nil {
+				t.Fatalf("schema is not JSON: %v\n%s", err, stdout.String())
+			}
+			props, ok := schema["properties"].(map[string]any)
+			if !ok {
+				t.Fatalf("schema missing properties: %+v", schema)
+			}
+			if _, ok := props["schema_version"]; !ok {
+				t.Fatalf("schema missing schema_version property: %+v", schema)
+			}
+		})
+	}
+}
+
 func TestJSONSchemaRoleSpecificFailureUsesSharedDefault(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"events", "--json-schema", "failure"}, &stdout, &stderr)

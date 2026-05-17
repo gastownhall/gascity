@@ -470,6 +470,7 @@ func newFormulaCookCmd(stdout, stderr io.Writer) *cobra.Command {
 	var vars []string
 	var metadata []string
 	var attach string
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "cook <formula-name>",
 		Short: "Instantiate a formula into the current bead store",
@@ -518,6 +519,20 @@ bead into a sub-workflow at runtime.`,
 					return err
 				}
 
+				if jsonOutput {
+					_ = writeCLIJSONLine(stdout, formulaCookJSONResult{
+						SchemaVersion:  "1",
+						OK:             true,
+						Formula:        args[0],
+						Mode:           "attach",
+						AttachBeadID:   attach,
+						RootID:         result.RootID,
+						WorkflowRootID: result.WorkflowRootID,
+						Created:        result.Created,
+					})
+					_ = pokeControlDispatch(cityPath)
+					return nil
+				}
 				_, _ = fmt.Fprintf(stdout, "Attached: %s -> %s (root: %s)\n", attach, result.RootID, result.WorkflowRootID)
 				_, _ = fmt.Fprintf(stdout, "Root: %s\n", result.RootID)
 				_, _ = fmt.Fprintf(stdout, "Created: %d\n", result.Created)
@@ -545,6 +560,18 @@ bead into a sub-workflow at runtime.`,
 				}
 			}
 
+			if jsonOutput {
+				_ = writeCLIJSONLine(stdout, formulaCookJSONResult{
+					SchemaVersion: "1",
+					OK:            true,
+					Formula:       args[0],
+					Mode:          "cook",
+					RootID:        result.RootID,
+					Created:       result.Created,
+					IDMapping:     result.IDMapping,
+				})
+				return nil
+			}
 			_, _ = fmt.Fprintf(stdout, "Root: %s\n", result.RootID)
 			_, _ = fmt.Fprintf(stdout, "Created: %d\n", result.Created)
 			keys := make([]string, 0, len(result.IDMapping))
@@ -562,7 +589,20 @@ bead into a sub-workflow at runtime.`,
 	cmd.Flags().StringArrayVar(&vars, "var", nil, "variable substitution for formula (key=value, repeatable)")
 	cmd.Flags().StringArrayVar(&metadata, "meta", nil, "set root bead metadata after cook (key=value, repeatable)")
 	cmd.Flags().StringVar(&attach, "attach", "", "attach sub-DAG to existing bead (bead gains blocking dep on sub-DAG root)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output JSONL summary")
 	return cmd
+}
+
+type formulaCookJSONResult struct {
+	SchemaVersion  string            `json:"schema_version"`
+	OK             bool              `json:"ok"`
+	Formula        string            `json:"formula"`
+	Mode           string            `json:"mode"`
+	AttachBeadID   string            `json:"attach_bead_id,omitempty"`
+	RootID         string            `json:"root_id"`
+	WorkflowRootID string            `json:"workflow_root_id,omitempty"`
+	Created        int               `json:"created"`
+	IDMapping      map[string]string `json:"id_mapping,omitempty"`
 }
 
 func parseFormulaVars(varFlags []string) map[string]string {
