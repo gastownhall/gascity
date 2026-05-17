@@ -2406,6 +2406,42 @@ func TestCityForStoreDirHonoursGCCity(t *testing.T) {
 	}
 }
 
+func TestCityForStoreDirPrefersDiscoveredCityOverGCCity(t *testing.T) {
+	// Regression: when an explicit dir resolves via findCity to a city
+	// AND GC_CITY env points to a different city, the dir-discovered
+	// city wins. Otherwise an explicit --city flag whose value differs
+	// from an inherited GC_CITY env gets silently swapped at the bd
+	// runtime env layer, producing
+	// "managed_city endpoint origin is invalid for rig scope" because
+	// downstream resolution pairs the dir's config with the env city's
+	// scope.
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+	envCity := filepath.Join(homeDir, "envcity")
+	if err := os.MkdirAll(filepath.Join(envCity, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(envCity, "city.toml"), []byte("[workspace]\nname = \"env\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", envCity)
+
+	dirCity := filepath.Join(homeDir, "dircity")
+	if err := os.MkdirAll(filepath.Join(dirCity, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirCity, "city.toml"), []byte("[workspace]\nname = \"dir\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := cityForStoreDir(dirCity)
+	if canonicalTestPath(got) != canonicalTestPath(dirCity) {
+		t.Errorf("cityForStoreDir(%q) = %q, want %q (dir-discovered city must win over GC_CITY=%q)", dirCity, got, dirCity, envCity)
+	}
+}
+
 func TestCityForStoreDirFallsBackToFindCity(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
