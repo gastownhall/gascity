@@ -79,6 +79,37 @@ func TestDoEventsSupervisorDefaultUsesTaggedJSONLItems(t *testing.T) {
 	}
 }
 
+func TestEventsJSONFlagIsSilentNoOp(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	items := []cliWireTaggedEvent{
+		{Actor: "human", City: "alpha", Seq: 3, Subject: "gc-1", Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
+	}
+	server := newEventsTestServer(t, testEventRoutes{
+		supervisorEvents: func(w http.ResponseWriter, _ *http.Request) {
+			writeJSONResponse(t, w, supervisorEventsListResponse(t, items))
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	cmd := newEventsCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"--api", server.URL, "--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc events --json execute: %v; stderr=%s", err, stderr.String())
+	}
+	if stderr.Len() > 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var got cliWireTaggedEvent
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
+	}
+	if got.City != "alpha" || got.Type != "bead.created" || got.Seq != 3 {
+		t.Fatalf("unexpected tagged event: %+v", got)
+	}
+}
+
 func TestDoEventsSeqCityUsesIndexHeader(t *testing.T) {
 	server := newEventsTestServer(t, testEventRoutes{
 		cityEvents: func(w http.ResponseWriter, _ *http.Request) {

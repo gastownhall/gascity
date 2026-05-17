@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -1217,6 +1218,28 @@ func TestMailInboxShowsMessages(t *testing.T) {
 	}
 }
 
+func TestMailInboxJSON(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("human", "mayor", "Hello", "json body") //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	code := doMailInboxTargetWithJSON(mp, resolvedMailTarget{display: "mayor", recipients: []string{"mayor"}}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailInboxTargetWithJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() > 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var got mailMessagesJSONResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || got.Recipient != "mayor" || len(got.Messages) != 1 || got.Messages[0].Body != "json body" {
+		t.Fatalf("unexpected JSON result: %+v", got)
+	}
+}
+
 func TestMailInboxFiltersCorrectly(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
@@ -1350,6 +1373,28 @@ func TestMailReadAlreadyRead(t *testing.T) {
 	}
 }
 
+func TestMailReadJSON(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("human", "mayor", "Hello", "read json") //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	code := doMailReadWithJSON(mp, events.Discard, []string{"gc-1"}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailReadWithJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() > 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var got mailMessageJSONResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || got.Message.ID != "gc-1" || got.Message.Body != "read json" || !got.Message.Read {
+		t.Fatalf("unexpected JSON result: %+v", got)
+	}
+}
+
 // --- gc mail peek ---
 
 func TestMailPeekSuccess(t *testing.T) {
@@ -1383,6 +1428,28 @@ func TestMailPeekMissingID(t *testing.T) {
 	code := doMailPeek(mp, nil, &bytes.Buffer{}, &stderr)
 	if code != 1 {
 		t.Errorf("doMailPeek = %d, want 1", code)
+	}
+}
+
+func TestMailPeekJSON(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("human", "mayor", "Hello", "peek json") //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	code := doMailPeekWithJSON(mp, []string{"gc-1"}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailPeekWithJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() > 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var got mailMessageJSONResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || got.Message.ID != "gc-1" || got.Message.Body != "peek json" || got.Message.Read {
+		t.Fatalf("unexpected JSON result: %+v", got)
 	}
 }
 
@@ -1925,6 +1992,29 @@ func TestMailThreadEmpty(t *testing.T) {
 	}
 }
 
+func TestMailThreadJSON(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	sent, _ := mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
+	mp.Reply(sent.ID, "bob", "RE: Hello", "second")      //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	code := doMailThreadWithJSON(mp, []string{sent.ThreadID}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailThreadWithJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() > 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var got mailMessagesJSONResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || got.ThreadID != sent.ThreadID || len(got.Messages) != 2 {
+		t.Fatalf("unexpected JSON result: %+v", got)
+	}
+}
+
 // --- gc mail count ---
 
 func TestMailCountSuccess(t *testing.T) {
@@ -1941,6 +2031,30 @@ func TestMailCountSuccess(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "2 total, 1 unread for bob") {
 		t.Errorf("stdout = %q, want count output", stdout.String())
+	}
+}
+
+func TestMailCountJSON(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("alice", "bob", "", "msg1") //nolint:errcheck
+	m2, _ := mp.Send("alice", "bob", "", "msg2")
+	mp.MarkRead(m2.ID) //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	code := doMailCountTargetWithJSON(mp, resolvedMailTarget{display: "bob", recipients: []string{"bob"}}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailCountTargetWithJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() > 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var got mailCountJSONResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || got.Recipient != "bob" || got.Total != 2 || got.Unread != 1 {
+		t.Fatalf("unexpected JSON result: %+v", got)
 	}
 }
 

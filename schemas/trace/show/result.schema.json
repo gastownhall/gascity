@@ -1,16 +1,29 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "type": "array",
-  "items": {
-    "type": "object",
-    "properties": {
-      "schema_version": { "type": "integer" },
-      "trace_id": { "type": "string" },
-      "tick_id": { "type": "string" },
-      "type": { "type": "string" },
-      "reason": { "type": "string" },
-      "created_at": { "type": "string", "format": "date-time" }
-    },
-    "additionalProperties": true
-  }
+  "type": "object",
+  "required": ["schema_version", "city_path", "count", "records"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "city_path": { "type": "string" },
+    "count": { "type": "integer", "minimum": 0 },
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "trace_schema_version": { "type": "integer" },
+          "seq": { "type": "integer", "minimum": 0 },
+          "trace_id": { "type": "string" },
+          "tick_id": { "type": "string" },
+          "record_id": { "type": "string" },
+          "record_type": { "type": "string" },
+          "reason_code": { "type": "string" },
+          "outcome_code": { "type": "string" },
+          "ts": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": false
 }
