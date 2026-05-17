@@ -107,6 +107,10 @@ func isLegacyArchiveBasename(name string) bool {
 	return legacyArchiveRE.MatchString(name)
 }
 
+// parseLegacyArchiveBasename validates a pre-rotation archive basename
+// and returns the legacy day it encoded. Migration callers use the day
+// only as validation input; canonical migrated archives are stamped with
+// migration time so retention policy does not immediately prune them.
 func parseLegacyArchiveBasename(name string) (time.Time, error) {
 	if !isLegacyArchiveBasename(name) {
 		return time.Time{}, fmt.Errorf("not a legacy events archive: %q", name)
