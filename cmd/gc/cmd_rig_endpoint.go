@@ -69,7 +69,7 @@ This command owns the rig's canonical .beads/config.yaml topology state.`,
 					Action:   "set-endpoint",
 					Name:     args[0],
 					Rig:      args[0],
-					DryRun:   opts.DryRun,
+					DryRun:   managementBoolPtr(opts.DryRun),
 					Endpoint: rigEndpointJSONFromOptions(opts),
 				})
 			}

@@ -600,11 +600,17 @@ replaced if they exit. Use "gc agent resume" to restore.`,
 				if cmdAgentSuspend(args, io.Discard, stderr) != 0 {
 					return errExit
 				}
+				cityPath, err := resolveCity()
+				if err != nil {
+					fmt.Fprintf(stderr, "gc agent suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+					return errExit
+				}
+				name, qualifiedName := agentJSONIdentity(cityPath, args[0])
 				return writeManagementActionJSON(stdout, managementActionResult{
 					Command:       commandName("agent", "suspend"),
 					Action:        "suspend",
-					Name:          args[0],
-					QualifiedName: args[0],
+					Name:          name,
+					QualifiedName: qualifiedName,
 					Suspended:     managementBoolPtr(true),
 				})
 			}
@@ -668,11 +674,17 @@ names (resolved via rig context) and qualified names (e.g. "myrig/worker").`,
 				if cmdAgentResume(args, io.Discard, stderr) != 0 {
 					return errExit
 				}
+				cityPath, err := resolveCity()
+				if err != nil {
+					fmt.Fprintf(stderr, "gc agent resume: %v\n", err) //nolint:errcheck // best-effort stderr
+					return errExit
+				}
+				name, qualifiedName := agentJSONIdentity(cityPath, args[0])
 				return writeManagementActionJSON(stdout, managementActionResult{
 					Command:       commandName("agent", "resume"),
 					Action:        "resume",
-					Name:          args[0],
-					QualifiedName: args[0],
+					Name:          name,
+					QualifiedName: qualifiedName,
 					Suspended:     managementBoolPtr(false),
 				})
 			}

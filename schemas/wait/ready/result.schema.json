@@ -8,6 +8,9 @@
     "command": { "const": "wait ready" },
     "action": { "const": "ready" },
     "name": { "type": "string" },
+    "retried": { "type": "boolean" },
+    "retried_from_wait": { "type": "string" },
+    "ready_wait_id": { "type": "string" },
     "state": { "const": "ready" }
   },
   "additionalProperties": true
