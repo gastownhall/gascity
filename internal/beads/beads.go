@@ -54,6 +54,22 @@ type UpdateOpts struct {
 	Metadata     map[string]string
 }
 
+// Tx is the write surface available inside a Store.Tx callback.
+// Keep this interface limited to methods needed by current transactional
+// write pairs; do not add Store methods speculatively.
+type Tx interface {
+	Update(id string, opts UpdateOpts) error
+	SetMetadataBatch(id string, kvs map[string]string) error
+	Close(id string) error
+}
+
+func runSequentialTx(tx Tx, fn func(Tx) error) error {
+	if fn == nil {
+		return errors.New("beads tx: nil callback")
+	}
+	return fn(tx)
+}
+
 func cloneIntPtr(v *int) *int {
 	if v == nil {
 		return nil
@@ -226,6 +242,12 @@ type Store interface {
 	// batch contents to be idempotent and tolerate partial writes.
 	// Returns ErrNotFound if the bead does not exist.
 	SetMetadataBatch(id string, kvs map[string]string) error
+
+	// Tx executes fn inside a single logical transaction identified by
+	// commitMsg. Stores without native transaction support execute fn
+	// sequentially against themselves, preserving their existing write
+	// semantics. fn must not retain the Tx after it returns.
+	Tx(commitMsg string, fn func(tx Tx) error) error
 
 	// Delete permanently removes a bead from the store. The bead should be
 	// closed first. Returns ErrNotFound if the bead does not exist.

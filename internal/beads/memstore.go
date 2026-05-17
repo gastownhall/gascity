@@ -390,6 +390,11 @@ func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	return fmt.Errorf("setting metadata batch on %q: %w", id, ErrNotFound)
 }
 
+// Tx executes fn sequentially against the MemStore.
+func (m *MemStore) Tx(_ string, fn func(Tx) error) error {
+	return runSequentialTx(m, fn)
+}
+
 // Delete removes a bead from the in-memory store.
 func (m *MemStore) Delete(id string) error {
 	m.mu.Lock()

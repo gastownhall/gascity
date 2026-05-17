@@ -251,6 +251,15 @@ func (s *prefixedAliasStore) SetMetadataBatch(id string, kvs map[string]string) 
 	return s.base.SetMetadataBatch(s.aliasToBase(id), kvs)
 }
 
+func (s *prefixedAliasStore) Tx(commitMsg string, fn func(beads.Tx) error) error {
+	if fn == nil {
+		return s.base.Tx(commitMsg, nil)
+	}
+	return s.base.Tx(commitMsg, func(beads.Tx) error {
+		return fn(s)
+	})
+}
+
 func (s *prefixedAliasStore) Ping() error {
 	return s.base.Ping()
 }

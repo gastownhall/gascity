@@ -653,6 +653,70 @@ func RunStoreTests(t *testing.T, newStore func() beads.Store) {
 			t.Errorf("ListByLabel on empty store returned %d beads, want 0", len(got))
 		}
 	})
+
+	t.Run("TxRunsCallbackAndAppliesWriteSurface", func(t *testing.T) {
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "before"})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		updatedDescription := "after"
+		called := false
+		err = s.Tx("conformance tx", func(tx beads.Tx) error {
+			called = true
+			if err := tx.Update(b.ID, beads.UpdateOpts{Description: &updatedDescription}); err != nil {
+				return err
+			}
+			if err := tx.SetMetadataBatch(b.ID, map[string]string{"tx": "applied"}); err != nil {
+				return err
+			}
+			return tx.Close(b.ID)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !called {
+			t.Fatal("Tx callback was not called")
+		}
+
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Description != updatedDescription {
+			t.Errorf("Description after Tx = %q, want %q", got.Description, updatedDescription)
+		}
+		if got.Metadata["tx"] != "applied" {
+			t.Errorf("Metadata[tx] after Tx = %q, want applied", got.Metadata["tx"])
+		}
+		if got.Status != "closed" {
+			t.Errorf("Status after Tx = %q, want closed", got.Status)
+		}
+	})
+
+	t.Run("TxPropagatesCallbackError", func(t *testing.T) {
+		s := newStore()
+		wantErr := errors.New("stop tx")
+		called := false
+		err := s.Tx("conformance tx error", func(_ beads.Tx) error {
+			called = true
+			return wantErr
+		})
+		if !called {
+			t.Fatal("Tx callback was not called")
+		}
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("Tx error = %v, want %v", err, wantErr)
+		}
+	})
+
+	t.Run("TxRejectsNilCallback", func(t *testing.T) {
+		s := newStore()
+		if err := s.Tx("conformance nil tx", nil); err == nil {
+			t.Fatal("Tx(nil) returned nil, want error")
+		}
+	})
 }
 
 // RunMetadataTests runs conformance tests for metadata absent-vs-empty
