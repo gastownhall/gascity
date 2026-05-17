@@ -498,6 +498,10 @@ func TestHumaBinary_CityUnregisterAsync(t *testing.T) {
 
 	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
 	env := integrationEnvFor(gcHome, runtimeDir, true)
+	// This test covers the supervisor's async unregister contract, not
+	// provider startup. Keep the city runtime deterministic so unregister
+	// does not race provider resume/startup-key handling.
+	env = append(env, "GC_SESSION=fake")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

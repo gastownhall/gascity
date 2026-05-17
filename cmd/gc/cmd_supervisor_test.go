@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -4038,6 +4039,7 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
 	closer := &closerSpy{}
+	forceStop := &atomic.Bool{}
 	mc := &managedCity{
 		name:   "bright-lights",
 		cancel: func() {},
@@ -4051,10 +4053,11 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 					DriftDrainTimeout: "20ms",
 				},
 			},
-			sp:     runtime.NewFake(),
-			rec:    events.Discard,
-			stdout: io.Discard,
-			stderr: io.Discard,
+			sp:                runtime.NewFake(),
+			rec:               events.Discard,
+			stdout:            io.Discard,
+			stderr:            io.Discard,
+			forceStopShutdown: forceStop,
 		},
 	}
 
@@ -4075,6 +4078,9 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	}
 	if !closer.closed {
 		t.Fatal("expected closer to be closed after forced cleanup")
+	}
+	if !forceStop.Load() {
+		t.Fatal("expected forced cleanup to request force-stop shutdown")
 	}
 
 	ops := readOpLog(t, logFile)

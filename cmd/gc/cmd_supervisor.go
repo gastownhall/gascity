@@ -701,6 +701,9 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 		}
 	}
 	if mc.cr != nil {
+		if mc.cr.forceStopShutdown != nil {
+			mc.cr.forceStopShutdown.Store(true)
+		}
 		func() {
 			defer func() { recover() }() //nolint:errcheck
 			mc.cr.shutdown()

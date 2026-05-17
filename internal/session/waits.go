@@ -257,6 +257,10 @@ func cancelWaitsAndCollectNudgeIDs(store beads.Store, sessionID string, now time
 	ids := []string(nil)
 	seen := map[string]bool{}
 	capped := false
+	canceledMetadata := map[string]string{
+		"state":       waitStateCanceled,
+		"canceled_at": now.UTC().Format(time.RFC3339),
+	}
 	for {
 		waits, err := ListSessionWaitBeads(store, sessionID)
 		if err != nil && !beads.IsLookupLimitError(err) {
@@ -264,24 +268,30 @@ func cancelWaitsAndCollectNudgeIDs(store beads.Store, sessionID string, now time
 		}
 		lookupCapped := beads.IsLookupLimitError(err)
 		capped = capped || lookupCapped
-		canceled := 0
+		cancelIDs := make([]string, 0, len(waits))
+		terminalIDs := make([]string, 0, len(waits))
 		for _, wait := range waits {
 			if nudgeID := wait.Metadata["nudge_id"]; nudgeID != "" && !seen[nudgeID] {
 				seen[nudgeID] = true
 				ids = append(ids, nudgeID)
 			}
 			if IsWaitTerminalState(wait.Metadata["state"]) {
-				if err := store.Close(wait.ID); err != nil {
-					return ids, capped, err
-				}
-				canceled++
+				terminalIDs = append(terminalIDs, wait.ID)
 				continue
 			}
-			if err := cancelWait(store, wait, now); err != nil {
+			cancelIDs = append(cancelIDs, wait.ID)
+		}
+		if len(cancelIDs) > 0 {
+			if _, err := store.CloseAll(cancelIDs, canceledMetadata); err != nil {
 				return ids, capped, err
 			}
-			canceled++
 		}
+		if len(terminalIDs) > 0 {
+			if _, err := store.CloseAll(terminalIDs, nil); err != nil {
+				return ids, capped, err
+			}
+		}
+		canceled := len(cancelIDs) + len(terminalIDs)
 		if !lookupCapped {
 			return ids, capped, nil
 		}
@@ -295,19 +305,6 @@ func cancelWaitsAndCollectNudgeIDs(store beads.Store, sessionID string, now time
 func CancelWaits(store beads.Store, sessionID string, now time.Time) error {
 	_, _, err := CancelWaitsAndCollectNudgeIDs(store, sessionID, now)
 	return err
-}
-
-func cancelWait(store beads.Store, wait beads.Bead, now time.Time) error {
-	if err := store.SetMetadataBatch(wait.ID, map[string]string{
-		"state":       waitStateCanceled,
-		"canceled_at": now.UTC().Format(time.RFC3339),
-	}); err != nil {
-		return err
-	}
-	if err := store.Close(wait.ID); err != nil {
-		return err
-	}
-	return nil
 }
 
 func beadHasLabel(b beads.Bead, want string) bool {

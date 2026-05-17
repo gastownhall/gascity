@@ -59,6 +59,15 @@ func (s cancelWaitMetadataFailStore) SetMetadataBatch(id string, kvs map[string]
 	return s.MemStore.SetMetadataBatch(id, kvs)
 }
 
+func (s cancelWaitMetadataFailStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	for _, id := range ids {
+		if id == s.failID {
+			return 0, errors.New("cancel wait metadata failed")
+		}
+	}
+	return s.MemStore.CloseAll(ids, metadata)
+}
+
 func sessionWaitItems(query beads.ListQuery, count int) []beads.Bead {
 	items := make([]beads.Bead, count)
 	for i := range items {
