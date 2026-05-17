@@ -2155,6 +2155,109 @@ schema = 1
 	}
 }
 
+func TestImportAddCommandIgnoresInheritedLiveEnv(t *testing.T) {
+	external := t.TempDir()
+	writeCityToml(t, external, "[workspace]\nname = \"external\"\n")
+	writePackToml(t, external, `[pack]
+name = "external"
+schema = 1
+`)
+	externalPackPath := filepath.Join(external, "pack.toml")
+	externalPackBefore, err := os.ReadFile(externalPackPath)
+	if err != nil {
+		t.Fatalf("ReadFile(external pack.toml): %v", err)
+	}
+	externalBeadsPath := filepath.Join(external, ".beads", "issues.jsonl")
+	if err := os.MkdirAll(filepath.Dir(externalBeadsPath), 0o700); err != nil {
+		t.Fatalf("MkdirAll(external .beads): %v", err)
+	}
+	externalBeadsBefore := []byte(`{"id":"live-1","title":"do not touch"}` + "\n")
+	if err := os.WriteFile(externalBeadsPath, externalBeadsBefore, 0o600); err != nil {
+		t.Fatalf("WriteFile(external beads): %v", err)
+	}
+
+	t.Setenv("GC_CITY_PATH", external)
+	t.Setenv("GC_CITY_ROOT", external)
+	t.Setenv("BEADS_DB_PATH", externalBeadsPath)
+	t.Setenv("DOLT_ROOT_PATH", filepath.Join(external, "dolt-home"))
+	clearGCEnv(t)
+
+	dir := t.TempDir()
+	writePackToml(t, dir, `[pack]
+name = "demo-pack"
+schema = 1
+`)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Chdir(%q): %v", dir, err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	})
+
+	prevCityFlag := cityFlag
+	prevRigFlag := rigFlag
+	prevResolve := resolveImportVersion
+	prevConstraint := defaultImportConstraint
+	prevSync := syncImports
+	cityFlag = ""
+	rigFlag = ""
+	resolveImportVersion = func(_, _ string) (packman.ResolvedVersion, error) {
+		return packman.ResolvedVersion{Version: "1.4.2", Commit: "abc123"}, nil
+	}
+	defaultImportConstraint = func(_ string) (string, error) { return "^1.4", nil }
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				"https://github.com/example/tools.git": {Version: "1.4.2", Commit: "abc123"},
+			},
+		}, nil
+	}
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		rigFlag = prevRigFlag
+		resolveImportVersion = prevResolve
+		defaultImportConstraint = prevConstraint
+		syncImports = prevSync
+	})
+
+	var stdout, stderr bytes.Buffer
+	cmd := newImportCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"add", "https://github.com/example/tools.git"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v\nstderr=%s", err, stderr.String())
+	}
+
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(dir, "pack.toml"))
+	if err != nil {
+		t.Fatalf("Load(pack.toml): %v", err)
+	}
+	if _, ok := cfg.Imports["tools"]; !ok {
+		t.Fatalf("imports = %#v, want tools in standalone pack", cfg.Imports)
+	}
+	externalPackAfter, err := os.ReadFile(externalPackPath)
+	if err != nil {
+		t.Fatalf("ReadFile(external pack.toml after import): %v", err)
+	}
+	if !bytes.Equal(externalPackAfter, externalPackBefore) {
+		t.Fatalf("external pack.toml was modified:\n%s", string(externalPackAfter))
+	}
+	externalBeadsAfter, err := os.ReadFile(externalBeadsPath)
+	if err != nil {
+		t.Fatalf("ReadFile(external beads after import): %v", err)
+	}
+	if !bytes.Equal(externalBeadsAfter, externalBeadsBefore) {
+		t.Fatalf("external beads store was modified:\n%s", string(externalBeadsAfter))
+	}
+}
+
 func TestImportAddCommandAcceptsCityFlagForStandalonePackDir(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
