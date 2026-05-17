@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestRecordAutoRotatesOnSizeThreshold drives the size-gated rotation
@@ -115,6 +116,38 @@ func TestRecordAutoRotateDisabledByZeroMaxSize(t *testing.T) {
 		if strings.HasPrefix(e.Name(), "events.jsonl.rotating-") {
 			t.Errorf("unexpected rotating file %q with MaxSize=0", e.Name())
 		}
+	}
+}
+
+func TestArchiveRetainAgePrunesOldArchivesAfterRotation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	oldArchive := filepath.Join(dir, formatArchiveBasename(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC), 1, 1))
+	if err := os.WriteFile(oldArchive, []byte("stale archive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr, WithArchiveRetainAge(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	rec.Record(Event{Type: BeadCreated, Actor: "human"})
+	res, err := rec.ForceRotate()
+	if err != nil {
+		t.Fatalf("ForceRotate: %v", err)
+	}
+	if res.Done != nil {
+		<-res.Done
+	}
+
+	if _, err := os.Stat(oldArchive); !os.IsNotExist(err) {
+		t.Fatalf("old archive should be pruned by retain age, stat err = %v", err)
+	}
+	if _, err := os.Stat(res.ArchivePath); err != nil {
+		t.Fatalf("fresh archive should remain after retention pruning: %v", err)
 	}
 }
 
