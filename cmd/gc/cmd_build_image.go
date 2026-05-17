@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/buildimage"
@@ -18,6 +20,7 @@ func newBuildImageCmd(stdout, stderr io.Writer) *cobra.Command {
 		rigPaths    []string
 		push        bool
 		contextOnly bool
+		jsonOut     bool
 	)
 
 	cmd := &cobra.Command{
@@ -45,9 +48,42 @@ volume mounts at runtime.`,
   gc build-image ~/bright-lights --tag registry.io/my-city:latest --push`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			code := doBuildImage(args, tag, baseImage, rigPaths, push, contextOnly, stdout, stderr)
+			out := stdout
+			var bufferedOut bytes.Buffer
+			if jsonOut {
+				out = stderr
+				if contextOnly {
+					out = &bufferedOut
+				}
+			}
+			code := doBuildImage(args, tag, baseImage, rigPaths, push, contextOnly, out, stderr)
 			if code != 0 {
 				return errExit
+			}
+			contextDir := ""
+			if jsonOut {
+				if bufferedOut.Len() > 0 {
+					fmt.Fprint(stderr, bufferedOut.String()) //nolint:errcheck // best-effort stderr
+					contextDir = parseBuildImageContextDir(bufferedOut.String())
+				}
+				cityPath := ""
+				if len(args) > 0 {
+					if abs, err := filepath.Abs(args[0]); err == nil {
+						cityPath = abs
+					} else {
+						cityPath = args[0]
+					}
+				}
+				_ = writeCLIJSONLine(stdout, buildImageJSONResult{
+					SchemaVersion: "1",
+					CityPath:      cityPath,
+					Tag:           tag,
+					BaseImage:     baseImage,
+					ContextOnly:   contextOnly,
+					ContextDir:    contextDir,
+					Push:          push,
+					RigPathCount:  len(rigPaths),
+				})
 			}
 			return nil
 		},
@@ -58,8 +94,29 @@ volume mounts at runtime.`,
 	cmd.Flags().StringSliceVar(&rigPaths, "rig-path", nil, "rig name:path pairs (repeatable)")
 	cmd.Flags().BoolVar(&push, "push", false, "push image after building")
 	cmd.Flags().BoolVar(&contextOnly, "context-only", false, "write build context without running docker build")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 
 	return cmd
+}
+
+type buildImageJSONResult struct {
+	SchemaVersion string `json:"schema_version"`
+	CityPath      string `json:"city_path,omitempty"`
+	Tag           string `json:"tag,omitempty"`
+	BaseImage     string `json:"base_image"`
+	ContextOnly   bool   `json:"context_only"`
+	ContextDir    string `json:"context_dir,omitempty"`
+	Push          bool   `json:"push"`
+	RigPathCount  int    `json:"rig_path_count"`
+}
+
+func parseBuildImageContextDir(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "Build context written to: "); ok {
+			return rest
+		}
+	}
+	return ""
 }
 
 func doBuildImage(args []string, tag, baseImage string, rigPaths []string, push, contextOnly bool, stdout, stderr io.Writer) int {

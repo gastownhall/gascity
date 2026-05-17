@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "base_image", "context_only", "push", "rig_path_count"],
+  "properties": {
+    "schema_version": { "type": "string" },
+    "city_path": { "type": "string" },
+    "tag": { "type": "string" },
+    "base_image": { "type": "string" },
+    "context_only": { "type": "boolean" },
+    "context_dir": { "type": "string" },
+    "push": { "type": "boolean" },
+    "rig_path_count": { "type": "integer" }
+  },
+  "additionalProperties": true
+}

@@ -87,9 +87,9 @@ func TestJSONSchemaManifestForSessionDetailCommands(t *testing.T) {
 
 func TestJSONSchemaManifestForUnsupportedCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"version", "--json-schema"}, &stdout, &stderr)
+	code := run([]string{"dashboard", "--json-schema"}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("run(version --json-schema) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+		t.Fatalf("run(dashboard --json-schema) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
@@ -103,8 +103,8 @@ func TestJSONSchemaManifestForUnsupportedCommand(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
 		t.Fatalf("manifest is not JSON: %v\n%s", err, stdout.String())
 	}
-	if got := strings.Join(manifest.Command, " "); got != "version" {
-		t.Fatalf("command = %q, want version", got)
+	if got := strings.Join(manifest.Command, " "); got != "dashboard" {
+		t.Fatalf("command = %q, want dashboard", got)
 	}
 	if manifest.JSONSupported {
 		t.Fatalf("json_supported = true, want false")
@@ -163,9 +163,9 @@ func TestJSONSchemaRoleSpecificFailureUsesSharedDefault(t *testing.T) {
 
 func TestJSONSchemaUnavailableRoleFailureIsStructured(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"version", "--json-schema=result"}, &stdout, &stderr)
+	code := run([]string{"dashboard", "--json-schema=result"}, &stdout, &stderr)
 	if code == 0 {
-		t.Fatalf("run(version --json-schema=result) = 0, want nonzero")
+		t.Fatalf("run(dashboard --json-schema=result) = 0, want nonzero")
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
@@ -190,9 +190,9 @@ func TestJSONSchemaUnavailableRoleFailureIsStructured(t *testing.T) {
 
 func TestJSONUnsupportedCommandFailureIsStructured(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"version", "--json"}, &stdout, &stderr)
+	code := run([]string{"dashboard", "--json"}, &stdout, &stderr)
 	if code == 0 {
-		t.Fatalf("run(version --json) = 0, want nonzero")
+		t.Fatalf("run(dashboard --json) = 0, want nonzero")
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())

@@ -61,6 +61,7 @@ func newPrimeCmd(stdout, stderr io.Writer) *cobra.Command {
 	var hookMode bool
 	var hookFormat string
 	var strictMode bool
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "prime [agent-name]",
 		Short: "Output the behavioral prompt for an agent",
@@ -92,6 +93,29 @@ to empty output from valid conditional logic, or on suspended states
 		Args: cobra.MaximumNArgs(1),
 	}
 	cmd.RunE = func(_ *cobra.Command, args []string) error {
+		if jsonOut {
+			var buf strings.Builder
+			if doPrimeWithHookFormat(args, &buf, stderr, hookMode, hookFormat, strictMode) != 0 {
+				return errExit
+			}
+			agentName := ""
+			if len(args) > 0 {
+				agentName = args[0]
+			} else if v := strings.TrimSpace(os.Getenv("GC_ALIAS")); v != "" {
+				agentName = v
+			} else {
+				agentName = strings.TrimSpace(os.Getenv("GC_AGENT"))
+			}
+			_ = writeCLIJSONLine(stdout, primeJSONResult{
+				SchemaVersion: "1",
+				Agent:         agentName,
+				Hook:          hookMode,
+				HookFormat:    hookFormat,
+				Content:       buf.String(),
+				Bytes:         buf.Len(),
+			})
+			return nil
+		}
 		if doPrimeWithHookFormat(args, stdout, stderr, hookMode, hookFormat, strictMode) != 0 {
 			return errExit
 		}
@@ -100,7 +124,17 @@ to empty output from valid conditional logic, or on suspended states
 	cmd.Flags().BoolVar(&hookMode, "hook", false, "compatibility mode for runtime hook invocations")
 	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
 	cmd.Flags().BoolVar(&strictMode, "strict", false, "fail on missing city, missing or unknown agent, or unreadable prompt_template instead of falling back to the default prompt")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	return cmd
+}
+
+type primeJSONResult struct {
+	SchemaVersion string `json:"schema_version"`
+	Agent         string `json:"agent,omitempty"`
+	Hook          bool   `json:"hook"`
+	HookFormat    string `json:"hook_format,omitempty"`
+	Content       string `json:"content"`
+	Bytes         int    `json:"bytes"`
 }
 
 // doPrime exists as the public non-strict entry point so callers don't
