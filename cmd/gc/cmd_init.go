@@ -95,6 +95,8 @@ func isTerminal(f *os.File) bool {
 	return fi.Mode()&os.ModeCharDevice != 0
 }
 
+var isTerminalFunc = isTerminal
+
 // readLine reads a single line from br and returns it trimmed.
 // Returns empty string on EOF or error.
 func readLine(br *bufio.Reader) string {
@@ -280,7 +282,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 			if providerFlag != "" || bootstrapProfileFlag != "" {
 				mode = "provider"
 			}
-			code := cmdInitWithOptions(args, providerFlag, bootstrapProfileFlag, nameFlag, out, stderr, skipProviderReadiness, preserveExisting)
+			code := cmdInitWithOptionsInternal(args, providerFlag, bootstrapProfileFlag, nameFlag, out, stderr, skipProviderReadiness, preserveExisting, jsonOut)
 			return writeInitJSONOrExit(code, jsonOut, args, nameFlag, providerFlag, bootstrapProfileFlag, mode, stdout)
 		},
 	}
@@ -346,6 +348,10 @@ func cmdInit(args []string, providerFlag, bootstrapProfileFlag string, stdout, s
 }
 
 func cmdInitWithOptions(args []string, providerFlag, bootstrapProfileFlag, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool) int {
+	return cmdInitWithOptionsInternal(args, providerFlag, bootstrapProfileFlag, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, false)
+}
+
+func cmdInitWithOptionsInternal(args []string, providerFlag, bootstrapProfileFlag, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, forceDefaultWizard bool) int {
 	var cityPath string
 	if len(args) > 0 {
 		var err error
@@ -374,7 +380,9 @@ func cmdInitWithOptions(args []string, providerFlag, bootstrapProfileFlag, nameO
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-	case isTerminal(os.Stdin):
+	case forceDefaultWizard:
+		wiz = defaultWizardConfig()
+	case isTerminalFunc(os.Stdin):
 		wiz = runWizard(os.Stdin, stdout)
 		maybePrintWizardProviderGuidance(wiz, stdout)
 	default:
