@@ -103,6 +103,7 @@ Use --rig to disambiguate same-name orders in different rigs.`,
 
 func newOrderRunCmd(stdout, stderr io.Writer) *cobra.Command {
 	var rig string
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "run <name>",
 		Short: "Execute an order manually",
@@ -114,7 +115,7 @@ them outside their normal schedule.
 Use --rig to disambiguate same-name orders in different rigs.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdOrderRun(args[0], rig, stdout, stderr) != 0 {
+			if cmdOrderRun(args[0], rig, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -122,12 +123,14 @@ Use --rig to disambiguate same-name orders in different rigs.`,
 		ValidArgsFunction: completeOrderNames,
 	}
 	cmd.Flags().StringVar(&rig, "rig", "", "rig name to disambiguate same-name orders")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
 	_ = cmd.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	return cmd
 }
 
 func newOrderCheckCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "check",
 		Short: "Check which orders are due to run",
 		Long: `Evaluate trigger conditions for all orders and show which are due.
@@ -136,12 +139,14 @@ Prints a table with each order's trigger, due status, and reason. Returns
 exit code 0 if any order is due, 1 if none are due.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdOrderCheck(stdout, stderr) != 0 {
+			if cmdOrderCheck(jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
+	return cmd
 }
 
 func newOrderHistoryCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -604,7 +609,7 @@ func doOrderShow(aa []orders.Order, name, rig string, stdout, stderr io.Writer) 
 
 // --- gc order run ---
 
-func cmdOrderRun(name, rig string, stdout, stderr io.Writer) int {
+func cmdOrderRun(name, rig string, jsonOutput bool, stdout, stderr io.Writer) int {
 	cityPath, cfg, aa, code := loadOrdersWithCity(stderr, "gc order run")
 	if code != 0 {
 		return code
@@ -615,6 +620,10 @@ func cmdOrderRun(name, rig string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if a.IsExec() {
+		if jsonOutput {
+			fmt.Fprintln(stderr, "gc order run: --json is not supported for exec orders because the exec body may write arbitrary stdout") //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		if a.Trigger == "event" {
 			store, storeCode := openOrderStoreForOrder(cityPath, cfg, a, stderr, "gc order run")
 			if store == nil {
@@ -639,13 +648,29 @@ func cmdOrderRun(name, rig string, stdout, stderr io.Writer) int {
 		return epCode
 	}
 	defer ep.Close() //nolint:errcheck // best-effort
-	return doOrderRun(aa, name, rig, cityPath, store, ep, stdout, stderr)
+	return doOrderRunWithJSON(aa, name, rig, cityPath, store, ep, jsonOutput, stdout, stderr)
 }
 
 // doOrderRun executes an order manually: instantiates a wisp from the
 // order's formula (or runs exec script directly) and routes it to the
 // configured target.
 func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store, ep events.Provider, stdout, stderr io.Writer) int {
+	return doOrderRunWithJSON(aa, name, rig, cityPath, store, ep, false, stdout, stderr)
+}
+
+type orderRunJSON struct {
+	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
+	Order         string `json:"order"`
+	Rig           string `json:"rig,omitempty"`
+	ScopedName    string `json:"scoped_name"`
+	Action        string `json:"action"`
+	WispID        string `json:"wisp_id"`
+	RoutedTo      string `json:"routed_to,omitempty"`
+	EventCursor   uint64 `json:"event_cursor,omitempty"`
+}
+
+func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store beads.Store, ep events.Provider, jsonOutput bool, stdout, stderr io.Writer) int {
 	a, ok := findOrder(aa, name, rig)
 	if !ok {
 		fmt.Fprintf(stderr, "gc order run: order %q not found\n", name) //nolint:errcheck // best-effort stderr
@@ -654,6 +679,10 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 
 	// Exec orders: run the script directly.
 	if a.IsExec() {
+		if jsonOutput {
+			fmt.Fprintln(stderr, "gc order run: --json is not supported for exec orders because the exec body may write arbitrary stdout") //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		cfg, cfgErr := loadCityConfig(cityPath, stderr)
 		if cfgErr != nil {
 			fmt.Fprintf(stderr, "gc order run: %v\n", cfgErr) //nolint:errcheck // best-effort stderr
@@ -744,6 +773,20 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 		return 1
 	}
 
+	if jsonOutput {
+		_ = writeCLIJSONLine(stdout, orderRunJSON{
+			SchemaVersion: "1",
+			OK:            true,
+			Order:         a.Name,
+			Rig:           a.Rig,
+			ScopedName:    scoped,
+			Action:        "formula",
+			WispID:        rootID,
+			RoutedTo:      pool,
+			EventCursor:   headSeq,
+		}) //nolint:errcheck // best-effort stdout
+		return 0
+	}
 	fmt.Fprintf(stdout, "Order %q executed: wisp %s", name, rootID) //nolint:errcheck
 	if a.Pool != "" {
 		fmt.Fprintf(stdout, " → gc.routed_to=%s", pool) //nolint:errcheck
@@ -844,7 +887,7 @@ func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, std
 
 // --- gc order check ---
 
-func cmdOrderCheck(stdout, stderr io.Writer) int {
+func cmdOrderCheck(jsonOutput bool, stdout, stderr io.Writer) int {
 	cityPath, cfg, aa, code := loadOrdersWithCity(stderr, "gc order check")
 	if code != 0 {
 		return code
@@ -855,7 +898,7 @@ func cmdOrderCheck(stdout, stderr io.Writer) int {
 		return epCode
 	}
 	defer ep.Close() //nolint:errcheck // best-effort
-	return doOrderCheckWithStoresResolverScoped(cityPath, cfg, aa, time.Now(), ep, cachedOrderStoresResolver(cityPath, cfg), stdout, stderr)
+	return doOrderCheckWithStoresResolverScopedJSON(cityPath, cfg, aa, time.Now(), ep, cachedOrderStoresResolver(cityPath, cfg), jsonOutput, stdout, stderr)
 }
 
 // orderLastRunFn returns a LastRunFunc that queries BdStore for the most
@@ -867,8 +910,70 @@ func orderLastRunFn(store beads.Store) orders.LastRunFunc {
 // doOrderCheck evaluates triggers for all orders and prints a table.
 // Returns 0 if any are due, 1 if none are due.
 func doOrderCheck(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc, stdout io.Writer) int {
+	return doOrderCheckJSON(aa, now, lastRunFn, false, stdout)
+}
+
+type orderCheckJSON struct {
+	SchemaVersion string              `json:"schema_version"`
+	OK            bool                `json:"ok"`
+	AnyDue        bool                `json:"any_due"`
+	OrdersTotal   int                 `json:"orders_total"`
+	DueTotal      int                 `json:"due_total"`
+	Orders        []orderCheckJSONRow `json:"orders"`
+}
+
+type orderCheckJSONRow struct {
+	Name       string `json:"name"`
+	Rig        string `json:"rig,omitempty"`
+	ScopedName string `json:"scoped_name"`
+	Trigger    string `json:"trigger"`
+	Due        bool   `json:"due"`
+	Reason     string `json:"reason"`
+}
+
+func doOrderCheckJSON(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc, jsonOutput bool, stdout io.Writer) int {
 	if len(aa) == 0 {
+		if jsonOutput {
+			_ = writeCLIJSONLine(stdout, orderCheckJSON{
+				SchemaVersion: "1",
+				OK:            true,
+				AnyDue:        false,
+				OrdersTotal:   0,
+				DueTotal:      0,
+				Orders:        []orderCheckJSONRow{},
+			}) //nolint:errcheck // best-effort stdout
+			return 1
+		}
 		fmt.Fprintln(stdout, "No orders found.") //nolint:errcheck // best-effort stdout
+		return 1
+	}
+
+	if jsonOutput {
+		result := orderCheckJSON{
+			SchemaVersion: "1",
+			OK:            true,
+			OrdersTotal:   len(aa),
+			Orders:        make([]orderCheckJSONRow, 0, len(aa)),
+		}
+		for _, a := range aa {
+			check := orders.CheckTrigger(a, now, lastRunFn, nil, nil)
+			if check.Due {
+				result.AnyDue = true
+				result.DueTotal++
+			}
+			result.Orders = append(result.Orders, orderCheckJSONRow{
+				Name:       a.Name,
+				Rig:        a.Rig,
+				ScopedName: a.ScopedName(),
+				Trigger:    a.Trigger,
+				Due:        check.Due,
+				Reason:     check.Reason,
+			})
+		}
+		_ = writeCLIJSONLine(stdout, result) //nolint:errcheck // best-effort stdout
+		if result.AnyDue {
+			return 0
+		}
 		return 1
 	}
 
@@ -908,8 +1013,86 @@ func doOrderCheckWithStoresResolver(aa []orders.Order, now time.Time, ep events.
 }
 
 func doOrderCheckWithStoresResolverScoped(cityPath string, cfg *config.City, aa []orders.Order, now time.Time, ep events.Provider, resolveStores orderStoresResolver, stdout, stderr io.Writer) int {
+	return doOrderCheckWithStoresResolverScopedJSON(cityPath, cfg, aa, now, ep, resolveStores, false, stdout, stderr)
+}
+
+func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City, aa []orders.Order, now time.Time, ep events.Provider, resolveStores orderStoresResolver, jsonOutput bool, stdout, stderr io.Writer) int {
 	if len(aa) == 0 {
+		if jsonOutput {
+			_ = writeCLIJSONLine(stdout, orderCheckJSON{
+				SchemaVersion: "1",
+				OK:            true,
+				AnyDue:        false,
+				OrdersTotal:   0,
+				DueTotal:      0,
+				Orders:        []orderCheckJSONRow{},
+			}) //nolint:errcheck // best-effort stdout
+			return 1
+		}
 		fmt.Fprintln(stdout, "No orders found.") //nolint:errcheck // best-effort stdout
+		return 1
+	}
+
+	if jsonOutput {
+		result := orderCheckJSON{
+			SchemaVersion: "1",
+			OK:            true,
+			OrdersTotal:   len(aa),
+			Orders:        make([]orderCheckJSONRow, 0, len(aa)),
+		}
+		for _, a := range aa {
+			stores, err := resolveStores(a)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			baseLastRunFn := orders.LastRunAcrossStores(stores...)
+			var lastRunErr error
+			lastRunFn := func(orderName string) (time.Time, error) {
+				last, err := baseLastRunFn(orderName)
+				if err != nil {
+					lastRunErr = err
+				}
+				return last, err
+			}
+			cursorFn := orders.CursorAcrossStores(stores...)
+			if a.Trigger == "event" {
+				cursor, err := bdCursorAcrossStores(a.ScopedName(), stores...)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
+					return 1
+				}
+				cursorFn = func(string) uint64 {
+					return cursor
+				}
+			}
+			triggerOpts, err := orderTriggerOptions(cityPath, cfg, a)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			check := orders.CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, triggerOpts)
+			if lastRunErr != nil {
+				fmt.Fprintf(stderr, "gc order check: reading last run for %s: %v\n", a.ScopedName(), lastRunErr) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			if check.Due {
+				result.AnyDue = true
+				result.DueTotal++
+			}
+			result.Orders = append(result.Orders, orderCheckJSONRow{
+				Name:       a.Name,
+				Rig:        a.Rig,
+				ScopedName: a.ScopedName(),
+				Trigger:    a.Trigger,
+				Due:        check.Due,
+				Reason:     check.Reason,
+			})
+		}
+		_ = writeCLIJSONLine(stdout, result) //nolint:errcheck // best-effort stdout
+		if result.AnyDue {
+			return 0
+		}
 		return 1
 	}
 

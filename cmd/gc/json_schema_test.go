@@ -247,6 +247,36 @@ func TestJSONSchemaRoleSpecificResultForMailAndTraceShard(t *testing.T) {
 	}
 }
 
+func TestJSONSchemaManifestForSessionOrderShardCommands(t *testing.T) {
+	commands := [][]string{
+		{"session", "new"},
+		{"session", "submit"},
+		{"session", "nudge"},
+		{"order", "check"},
+		{"order", "run"},
+	}
+	for _, command := range commands {
+		t.Run(strings.Join(command, " "), func(t *testing.T) {
+			args := append(append([]string{}, command...), "--json-schema=result")
+			var stdout, stderr bytes.Buffer
+			code := run(args, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run(%v) = %d, stderr=%q stdout=%q", args, code, stderr.String(), stdout.String())
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want empty", stderr.String())
+			}
+			var schema map[string]any
+			if err := json.Unmarshal(stdout.Bytes(), &schema); err != nil {
+				t.Fatalf("result schema is not JSON: %v\n%s", err, stdout.String())
+			}
+			if schema["$schema"] == "" {
+				t.Fatalf("schema missing $schema: %+v", schema)
+			}
+		})
+	}
+}
+
 func TestJSONSchemaResultForGraphConvergeOrderFormulaActions(t *testing.T) {
 	commands := [][]string{
 		{"graph"},

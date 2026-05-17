@@ -586,6 +586,26 @@ func TestOrderCheckNoneDue(t *testing.T) {
 	}
 }
 
+func TestOrderCheckJSONNoneDuePreservesSemanticExit(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "deploy", Trigger: "manual", Formula: "mol-deploy"},
+	}
+	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+	neverRan := func(_ string) (time.Time, error) { return time.Time{}, nil }
+
+	var stdout bytes.Buffer
+	code := doOrderCheckJSON(aa, now, neverRan, true, &stdout)
+	if code != 1 {
+		t.Fatalf("doOrderCheckJSON = %d, want 1 (none due)", code)
+	}
+	got := stdout.String()
+	for _, want := range []string{`"schema_version":"1"`, `"ok":true`, `"any_due":false`, `"orders_total":1`, `"due_total":0`, `"name":"deploy"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stdout = %q, missing %s", got, want)
+		}
+	}
+}
+
 func TestOrderCheckEmpty(t *testing.T) {
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
 	neverRan := func(_ string) (time.Time, error) { return time.Time{}, nil }
@@ -843,6 +863,44 @@ func TestOrderRun(t *testing.T) {
 	}
 }
 
+func TestOrderRunJSONFormulaSummary(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
+	}
+
+	store := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunWithJSON(aa, "digest", "", "/city", store, nil, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRunWithJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	got := stdout.String()
+	for _, want := range []string{`"schema_version":"1"`, `"ok":true`, `"order":"digest"`, `"scoped_name":"digest"`, `"action":"formula"`, `"wisp_id":`, `"routed_to":"dog"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stdout = %q, missing %s", got, want)
+		}
+	}
+}
+
+func TestOrderRunJSONRejectsExecWithoutRunning(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "release-exec", Trigger: "manual", Exec: "printf unsafe"},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunWithJSON(aa, "release-exec", "", "/city", beads.NewMemStore(), nil, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderRunWithJSON exec = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty stdout on unsupported exec JSON", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--json is not supported for exec orders") {
+		t.Fatalf("stderr = %q, want unsupported exec message", stderr.String())
+	}
+}
+
 func TestOrderRunEventExecAdvancesCursor(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
@@ -926,7 +984,7 @@ on = "bead.closed"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderRun("release-exec", "", &stdout, &stderr)
+	code := cmdOrderRun("release-exec", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}

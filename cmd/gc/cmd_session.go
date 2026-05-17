@@ -74,6 +74,7 @@ continuity.`,
 
 func newSessionSubmitCmd(stdout, stderr io.Writer) *cobra.Command {
 	var intent string
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "submit <id-or-alias> <message...>",
 		Short: "Submit a message with semantic delivery intent",
@@ -91,7 +92,7 @@ according to the selected semantic intent.`,
 				fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			if cmdSessionSubmit(args, parsedIntent, stdout, stderr) != 0 {
+			if cmdSessionSubmit(args, parsedIntent, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -99,6 +100,7 @@ according to the selected semantic intent.`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().StringVar(&intent, "intent", string(session.SubmitIntentDefault), "submit intent: default, follow_up, or interrupt_now")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
 	return cmd
 }
 
@@ -108,6 +110,7 @@ func newSessionNewCmd(stdout, stderr io.Writer) *cobra.Command {
 	var alias string
 	var titleHint string
 	var noAttach bool
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "new <template>",
 		Short: "Create a new chat session from an agent template",
@@ -125,7 +128,7 @@ and refined by the title model in the background.`,
   gc session new helper --no-attach`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionNew(args, alias, title, titleHint, noAttach, stdout, stderr) != 0 {
+			if cmdSessionNew(args, alias, title, titleHint, noAttach, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -135,6 +138,7 @@ and refined by the title model in the background.`,
 	cmd.Flags().StringVar(&title, "title", "", "human-readable session title")
 	cmd.Flags().StringVar(&titleHint, "title-hint", "", "text to auto-generate a session title from")
 	cmd.Flags().BoolVar(&noAttach, "no-attach", false, "create session without attaching")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
 	return cmd
 }
 
@@ -143,8 +147,12 @@ and refined by the title model in the background.`,
 // Phase 2: creates a session bead and pokes the controller. The reconciler
 // handles process lifecycle (start). If the controller is not running,
 // falls back to direct process start via the session manager.
-func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool, stdout, stderr io.Writer) int {
+func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, jsonOutput bool, stdout, stderr io.Writer) int {
 	templateName := args[0]
+	if jsonOutput && !noAttach {
+		fmt.Fprintln(stderr, "gc session new: --json requires --no-attach because attaching is interactive") //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	cityPath, err := resolveCity()
 	if err != nil {
@@ -313,10 +321,25 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 			// Poke again after bead creation to trigger immediate reconciler tick.
 			_ = pokeController(cityPath)
 
-			fmt.Fprintf(stdout, "Session %s created from template %q (reconciler will start it).\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
+			if jsonOutput {
+				writeSessionNewJSON(stdout, sessionNewJSON{
+					SchemaVersion: "1",
+					OK:            true,
+					SessionID:     info.ID,
+					SessionName:   info.SessionName,
+					Alias:         info.Alias,
+					Template:      canonicalTemplate,
+					Transport:     sessionTransport,
+					WorkDir:       info.WorkDir,
+					DeferredStart: true,
+					Attached:      false,
+				})
+			} else {
+				fmt.Fprintf(stdout, "Session %s created from template %q (reconciler will start it).\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
+			}
 
 			if !shouldAttachNewSession(noAttach, sessionTransport) {
-				if sessionTransport == config.SessionTransportACP && !noAttach {
+				if sessionTransport == config.SessionTransportACP && !noAttach && !jsonOutput {
 					fmt.Fprintln(stdout, "Session uses ACP transport; not attaching.") //nolint:errcheck // best-effort stdout
 				}
 				return 0
@@ -407,10 +430,25 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	titleDone := maybeAutoTitle(store, info.ID, title, titleHint, titleProvider, info.WorkDir, stderr)
 	defer func() { <-titleDone }() // ensure title goroutine completes on all exit paths
 
-	fmt.Fprintf(stdout, "Session %s created from template %q.\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
+	if jsonOutput {
+		writeSessionNewJSON(stdout, sessionNewJSON{
+			SchemaVersion: "1",
+			OK:            true,
+			SessionID:     info.ID,
+			SessionName:   info.SessionName,
+			Alias:         info.Alias,
+			Template:      canonicalTemplate,
+			Transport:     sessionTransport,
+			WorkDir:       info.WorkDir,
+			DeferredStart: false,
+			Attached:      false,
+		})
+	} else {
+		fmt.Fprintf(stdout, "Session %s created from template %q.\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
+	}
 
 	if !shouldAttachNewSession(noAttach, sessionTransport) {
-		if sessionTransport == config.SessionTransportACP && !noAttach {
+		if sessionTransport == config.SessionTransportACP && !noAttach && !jsonOutput {
 			fmt.Fprintln(stdout, "Session uses ACP transport; not attaching.") //nolint:errcheck // best-effort stdout
 		}
 		return 0
@@ -842,6 +880,23 @@ func summarizeSessionList(rows []sessionListJSONRow) sessionListSummary {
 		}
 	}
 	return summary
+}
+
+type sessionNewJSON struct {
+	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
+	SessionID     string `json:"session_id"`
+	SessionName   string `json:"session_name"`
+	Alias         string `json:"alias,omitempty"`
+	Template      string `json:"template"`
+	Transport     string `json:"transport"`
+	WorkDir       string `json:"work_dir"`
+	DeferredStart bool   `json:"deferred_start"`
+	Attached      bool   `json:"attached"`
+}
+
+func writeSessionNewJSON(stdout io.Writer, result sessionNewJSON) {
+	_ = writeCLIJSONLine(stdout, result) //nolint:errcheck // best-effort stdout
 }
 
 func sessionListJSONRows(sessions []session.Info) []sessionListJSONRow {
@@ -1821,6 +1876,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 // newSessionNudgeCmd creates the "gc session nudge <id-or-alias> <message>" command.
 func newSessionNudgeCmd(stdout, stderr io.Writer) *cobra.Command {
 	var delivery string
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "nudge <id-or-alias> <message...>",
 		Short: "Send a text message to a running session",
@@ -1838,7 +1894,7 @@ joined automatically.`,
 				fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			if cmdSessionNudge(args, mode, stdout, stderr) != 0 {
+			if cmdSessionNudge(args, mode, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -1846,6 +1902,7 @@ joined automatically.`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().StringVar(&delivery, "delivery", string(nudgeDeliveryWaitIdle), "delivery mode: immediate, wait-idle, or queue")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
 	return cmd
 }
 
@@ -1862,7 +1919,16 @@ func parseSessionSubmitIntent(raw string) (session.SubmitIntent, error) {
 	}
 }
 
-func cmdSessionSubmit(args []string, intent session.SubmitIntent, stdout, stderr io.Writer) int {
+type sessionSubmitJSON struct {
+	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
+	Target        string `json:"target"`
+	Intent        string `json:"intent"`
+	Queued        bool   `json:"queued"`
+	Outcome       string `json:"outcome"`
+}
+
+func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput bool, stdout, stderr io.Writer) int {
 	target := args[0]
 	message := strings.Join(args[1:], " ")
 
@@ -1875,7 +1941,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, stdout, stderr
 	if c := apiClient(cityPath); c != nil {
 		resp, err := c.SubmitSession(target, message, intent)
 		if err == nil {
-			emitSessionSubmitResult(stdout, target, intent, resp.Queued)
+			emitSessionSubmitResult(stdout, target, intent, resp.Queued, jsonOutput)
 			return 0
 		}
 		if !api.ShouldFallback(err) {
@@ -1914,11 +1980,28 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, stdout, stderr
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	emitSessionSubmitResult(stdout, target, intent, outcome.Queued)
+	emitSessionSubmitResult(stdout, target, intent, outcome.Queued, jsonOutput)
 	return 0
 }
 
-func emitSessionSubmitResult(stdout io.Writer, target string, intent session.SubmitIntent, queued bool) {
+func emitSessionSubmitResult(stdout io.Writer, target string, intent session.SubmitIntent, queued, jsonOutput bool) {
+	if jsonOutput {
+		outcome := "submitted"
+		if queued {
+			outcome = "queued"
+		} else if intent == session.SubmitIntentInterruptNow {
+			outcome = "interrupted"
+		}
+		_ = writeCLIJSONLine(stdout, sessionSubmitJSON{
+			SchemaVersion: "1",
+			OK:            true,
+			Target:        target,
+			Intent:        string(intent),
+			Queued:        queued,
+			Outcome:       outcome,
+		}) //nolint:errcheck // best-effort stdout
+		return
+	}
 	switch {
 	case queued:
 		fmt.Fprintf(stdout, "Queued follow-up for %s\n", target) //nolint:errcheck // best-effort stdout
@@ -1931,8 +2014,19 @@ func emitSessionSubmitResult(stdout io.Writer, target string, intent session.Sub
 	}
 }
 
+type sessionNudgeJSON struct {
+	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
+	Target        string `json:"target"`
+	SessionID     string `json:"session_id,omitempty"`
+	SessionName   string `json:"session_name,omitempty"`
+	Delivery      string `json:"delivery"`
+	Queued        bool   `json:"queued"`
+	Outcome       string `json:"outcome"`
+}
+
 // cmdSessionNudge is the CLI entry point for "gc session nudge".
-func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, stdout, stderr io.Writer) int {
+func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
 	target := args[0]
 	message := strings.Join(args[1:], " ")
 
@@ -1941,7 +2035,7 @@ func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, stdout, stderr i
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return deliverSessionNudge(targetInfo, message, delivery, stdout, stderr)
+	return deliverSessionNudge(targetInfo, message, delivery, jsonOutput, stdout, stderr)
 }
 
 // resolveWorkDir determines the working directory for a session based on the
