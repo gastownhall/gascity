@@ -168,6 +168,37 @@ func TestJSONSchemaRoleSpecificResultForRigAgentRoutingCommands(t *testing.T) {
 	}
 }
 
+func TestJSONSchemaRoleSpecificResultForMailAndTraceShard(t *testing.T) {
+	for _, args := range [][]string{
+		{"mail", "inbox", "--json-schema=result"},
+		{"mail", "read", "--json-schema=result"},
+		{"mail", "peek", "--json-schema=result"},
+		{"mail", "thread", "--json-schema=result"},
+		{"mail", "count", "--json-schema=result"},
+		{"trace", "status", "--json-schema=result"},
+		{"trace", "show", "--json-schema=result"},
+	} {
+		t.Run(strings.Join(args[:len(args)-1], " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(args, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run(%v) = %d, stderr=%q stdout=%q", args, code, stderr.String(), stdout.String())
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want empty", stderr.String())
+			}
+
+			var schema map[string]any
+			if err := json.Unmarshal(stdout.Bytes(), &schema); err != nil {
+				t.Fatalf("result schema is not JSON: %v\n%s", err, stdout.String())
+			}
+			if schema["$schema"] == "" {
+				t.Fatalf("schema missing $schema: %+v", schema)
+			}
+		})
+	}
+}
+
 func TestJSONSchemaRoleSpecificFailureUsesSharedDefault(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"events", "--json-schema", "failure"}, &stdout, &stderr)
