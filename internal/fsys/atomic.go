@@ -86,6 +86,9 @@ func parseAtomicTempPID(suffix string) (int, bool) {
 	if err != nil || pid <= 0 {
 		return 0, false
 	}
+	if _, err := strconv.ParseInt(suffix[dot+1:], 36, 64); err != nil {
+		return 0, false
+	}
 	return pid, true
 }
 

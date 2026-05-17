@@ -307,12 +307,14 @@ func TestWriteFileAtomic_PreservesUnparseablePeers(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "config.yaml")
 
+	deadPID := unusedPID(t)
 	noise := []string{
 		target + ".tmp.notapid.suffix",
 		target + ".tmp.",
 		target + ".tmp",
 		target + ".bak",
 		filepath.Join(dir, "config.yaml.swp"),
+		fmt.Sprintf("%s.tmp.%d.not-base36!", target, deadPID),
 	}
 	for _, name := range noise {
 		if err := os.WriteFile(name, nil, 0o644); err != nil {
