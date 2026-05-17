@@ -75,11 +75,12 @@ func newSessionWaitCmd(stdout, stderr io.Writer) *cobra.Command {
 func newWaitListCmd(stdout, stderr io.Writer) *cobra.Command {
 	var stateFilter string
 	var sessionFilter string
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List durable waits",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdWaitList(stateFilter, sessionFilter, stdout, stderr) != 0 {
+			if cmdWaitList(stateFilter, sessionFilter, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -87,21 +88,25 @@ func newWaitListCmd(stdout, stderr io.Writer) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&stateFilter, "state", "", "filter by wait state")
 	cmd.Flags().StringVar(&sessionFilter, "session", "", "filter by session ID")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON")
 	return cmd
 }
 
 func newWaitInspectCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "inspect <wait-id>",
 		Short: "Show details for a wait",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdWaitInspect(args[0], stdout, stderr) != 0 {
+			if cmdWaitInspect(args[0], jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON")
+	return cmd
 }
 
 func newWaitCancelCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -262,7 +267,7 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 	return 0
 }
 
-func cmdWaitList(stateFilter, sessionFilter string, stdout, stderr io.Writer) int {
+func cmdWaitList(stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
 	store, code := openCityStore(stderr, "gc wait list")
 	if store == nil {
 		return code
@@ -282,12 +287,20 @@ func cmdWaitList(stateFilter, sessionFilter string, stdout, stderr io.Writer) in
 		fmt.Fprintf(stderr, "gc wait list: %v; showing capped results\n", err) //nolint:errcheck
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].CreatedAt.Before(items[j].CreatedAt) })
-	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "WAIT\tSESSION\tSTATE\tKIND\tNOTE") //nolint:errcheck
+	filtered := make([]beads.Bead, 0, len(items))
 	for _, item := range items {
 		if stateFilter != "" && item.Metadata["state"] != stateFilter {
 			continue
 		}
+		filtered = append(filtered, item)
+	}
+	if jsonOutput {
+		cityPath, _ := resolveCity()
+		return writeWaitListJSON(stdout, cityPath, filtered)
+	}
+	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "WAIT\tSESSION\tSTATE\tKIND\tNOTE") //nolint:errcheck
+	for _, item := range filtered {
 		note := item.Description
 		if note == "" {
 			note = "-"
@@ -298,7 +311,7 @@ func cmdWaitList(stateFilter, sessionFilter string, stdout, stderr io.Writer) in
 	return 0
 }
 
-func cmdWaitInspect(waitID string, stdout, stderr io.Writer) int {
+func cmdWaitInspect(waitID string, jsonOutput bool, stdout, stderr io.Writer) int {
 	store, code := openCityStore(stderr, "gc wait inspect")
 	if store == nil {
 		return code
@@ -312,6 +325,10 @@ func cmdWaitInspect(waitID string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc wait inspect: %s is not a wait\n", waitID) //nolint:errcheck
 		return 1
 	}
+	if jsonOutput {
+		cityPath, _ := resolveCity()
+		return writeWaitInspectJSON(stdout, cityPath, b)
+	}
 	fmt.Fprintf(stdout, "Wait:       %s\n", b.ID)                                               //nolint:errcheck
 	fmt.Fprintf(stdout, "Session:    %s\n", b.Metadata["session_id"])                           //nolint:errcheck
 	fmt.Fprintf(stdout, "State:      %s\n", b.Metadata["state"])                                //nolint:errcheck
@@ -321,6 +338,78 @@ func cmdWaitInspect(waitID string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Attempt:    %s\n", b.Metadata["delivery_attempt"])                     //nolint:errcheck
 	fmt.Fprintf(stdout, "Nudge:      %s\n", b.Metadata["nudge_id"])                             //nolint:errcheck
 	fmt.Fprintf(stdout, "Note:       %s\n", b.Description)                                      //nolint:errcheck
+	return 0
+}
+
+type waitJSON struct {
+	ID          string            `json:"id"`
+	SessionID   string            `json:"session_id"`
+	SessionName string            `json:"session_name,omitempty"`
+	State       string            `json:"state"`
+	Kind        string            `json:"kind"`
+	DepIDs      []string          `json:"dep_ids,omitempty"`
+	DepMode     string            `json:"dep_mode,omitempty"`
+	Note        string            `json:"note,omitempty"`
+	Status      string            `json:"status"`
+	CreatedAt   string            `json:"created_at,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
+}
+
+func waitJSONFromBead(b beads.Bead) waitJSON {
+	return waitJSON{
+		ID:          b.ID,
+		SessionID:   b.Metadata["session_id"],
+		SessionName: b.Metadata["session_name"],
+		State:       b.Metadata["state"],
+		Kind:        b.Metadata["kind"],
+		DepIDs:      splitWaitIDs(b.Metadata["dep_ids"]),
+		DepMode:     b.Metadata["dep_mode"],
+		Note:        b.Description,
+		Status:      b.Status,
+		CreatedAt:   formatOptionalTime(b.CreatedAt),
+		Metadata:    cloneStringMap(b.Metadata),
+	}
+}
+
+func splitWaitIDs(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+func writeWaitListJSON(stdout io.Writer, cityPath string, waits []beads.Bead) int {
+	rows := make([]waitJSON, 0, len(waits))
+	for _, wait := range waits {
+		rows = append(rows, waitJSONFromBead(wait))
+	}
+	payload := map[string]any{
+		"schema_version": "1",
+		"city_path":      cityPath,
+		"waits":          rows,
+	}
+	if err := writeCLIJSONLine(stdout, payload); err != nil {
+		return 1
+	}
+	return 0
+}
+
+func writeWaitInspectJSON(stdout io.Writer, cityPath string, wait beads.Bead) int {
+	payload := map[string]any{
+		"schema_version": "1",
+		"city_path":      cityPath,
+		"wait":           waitJSONFromBead(wait),
+	}
+	if err := writeCLIJSONLine(stdout, payload); err != nil {
+		return 1
+	}
 	return 0
 }
 

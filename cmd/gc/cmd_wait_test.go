@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -64,6 +65,115 @@ func setWaitTestFileBeads(t *testing.T) {
 	t.Helper()
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+}
+
+func TestWaitListJSON(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeCityToml(t, cityDir, "[workspace]\nname = \"wait-json\"\n")
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	wait := createTestWaitBead(t, store)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWaitList("", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWaitList(--json) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+
+	var payload struct {
+		SchemaVersion string `json:"schema_version"`
+		CityPath      string `json:"city_path"`
+		Waits         []struct {
+			ID        string   `json:"id"`
+			SessionID string   `json:"session_id"`
+			State     string   `json:"state"`
+			DepIDs    []string `json:"dep_ids"`
+		} `json:"waits"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.SchemaVersion != "1" || payload.CityPath != cityDir || len(payload.Waits) != 1 {
+		t.Fatalf("payload = %+v", payload)
+	}
+	if got := payload.Waits[0]; got.ID != wait.ID || got.SessionID != "session-1" || got.State != waitStatePending || len(got.DepIDs) != 2 {
+		t.Fatalf("wait row = %+v, source=%+v", got, wait)
+	}
+}
+
+func TestWaitInspectJSON(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeCityToml(t, cityDir, "[workspace]\nname = \"wait-json\"\n")
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	wait := createTestWaitBead(t, store)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWaitInspect(wait.ID, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWaitInspect(--json) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+
+	var payload struct {
+		SchemaVersion string `json:"schema_version"`
+		Wait          struct {
+			ID       string            `json:"id"`
+			Kind     string            `json:"kind"`
+			Note     string            `json:"note"`
+			Metadata map[string]string `json:"metadata"`
+		} `json:"wait"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.SchemaVersion != "1" || payload.Wait.ID != wait.ID || payload.Wait.Kind != "deps" || payload.Wait.Note != "wait for deps" {
+		t.Fatalf("payload = %+v", payload)
+	}
+	if payload.Wait.Metadata["dep_mode"] != "all" {
+		t.Fatalf("metadata = %+v", payload.Wait.Metadata)
+	}
+}
+
+func createTestWaitBead(t *testing.T, store beads.Store) beads.Bead {
+	t.Helper()
+	wait, err := store.Create(beads.Bead{
+		Title:       "wait:demo",
+		Type:        waitBeadType,
+		Status:      "open",
+		Description: "wait for deps",
+		Labels:      []string{waitBeadLabel, "session:session-1"},
+		Metadata: map[string]string{
+			"session_id":       "session-1",
+			"session_name":     "demo",
+			"kind":             "deps",
+			"state":            waitStatePending,
+			"dep_ids":          "bead-1,bead-2",
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(wait): %v", err)
+	}
+	return wait
 }
 
 func (s waitNudgeMetadataFailStore) SetMetadata(id, key, value string) error {
@@ -292,7 +402,7 @@ provider = "file"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdWaitList("", "target-session", &stdout, &stderr)
+	code := cmdWaitList("", "target-session", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdWaitList = %d, want 0; stderr=%s", code, stderr.String())
 	}

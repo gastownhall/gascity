@@ -3158,8 +3158,12 @@ gc wait cancel <wait-id>
 Show details for a wait
 
 ```
-gc wait inspect <wait-id>
+gc wait inspect <wait-id> [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSON |
 
 ## gc wait list
 
@@ -3171,6 +3175,7 @@ gc wait list [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--json` | bool |  | emit JSON |
 | `--session` | string |  | filter by session ID |
 | `--state` | string |  | filter by wait state |
 
