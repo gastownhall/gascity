@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,6 +41,49 @@ func TestSkillListCityCatalog(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("skill list output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestSkillListJSON(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+	writeCatalogFile(t, cityDir, "skills/code-review/SKILL.md", "city skill")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"skill", "list", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc skill list --json exited %d: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+
+	var payload struct {
+		SchemaVersion string `json:"schema_version"`
+		CityPath      string `json:"city_path"`
+		Skills        []struct {
+			Name   string `json:"name"`
+			Source string `json:"source"`
+			Path   string `json:"path"`
+		} `json:"skills"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.SchemaVersion != "1" || payload.CityPath != cityDir || len(payload.Skills) == 0 {
+		t.Fatalf("payload = %+v", payload)
+	}
+	found := false
+	for _, got := range payload.Skills {
+		if got.Name == "code-review" && got.Source == "city" && got.Path == "skills/code-review/SKILL.md" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("city skill missing from %+v", payload.Skills)
 	}
 }
 
