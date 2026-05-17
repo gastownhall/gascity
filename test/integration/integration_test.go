@@ -21,6 +21,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -69,6 +70,8 @@ const (
 	integrationRealBDBinaryEnv = "GC_INTEGRATION_REAL_BD"
 	integrationDoltBinaryEnv   = "GC_INTEGRATION_DOLT_BINARY"
 	integrationDoltIdentityEnv = "GC_INTEGRATION_DOLT_IDENTITY_MODE"
+	managedDoltTestModeEnv     = "GC_MANAGED_DOLT_TEST_MODE"
+	managedDoltTestParentEnv   = "GC_MANAGED_DOLT_TEST_PARENT_PID"
 	doltIdentityModeIsolated   = "isolated"
 	doltIdentityModeGlobal     = "global"
 	doltIdentityModeSkip       = "skip"
@@ -90,6 +93,8 @@ func TestMain(m *testing.M) {
 		// their descendant pollers from prior interrupted runs.
 		sweepSubprocessTestProcesses()
 	}
+	stopSignalSweeper := installIntegrationSignalSweeper(subprocess)
+	defer stopSignalSweeper()
 
 	// Build gc binary to a temp directory.
 	tmpDir, err := os.MkdirTemp("", "gc-integration-*")
@@ -198,6 +203,41 @@ func TestMain(m *testing.M) {
 	}
 
 	os.Exit(code)
+}
+
+func installIntegrationSignalSweeper(subprocess bool) func() {
+	signals := make(chan os.Signal, 2)
+	done := make(chan struct{})
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		select {
+		case sig := <-signals:
+			sweepIntegrationProcesses(subprocess)
+			signal.Stop(signals)
+			if s, ok := sig.(syscall.Signal); ok {
+				signal.Reset(s)
+				_ = syscall.Kill(os.Getpid(), s)
+			}
+		case <-done:
+		}
+	}()
+	return func() {
+		signal.Stop(signals)
+		close(done)
+	}
+}
+
+func sweepIntegrationProcesses(subprocess bool) {
+	if gcBinary != "" {
+		stopCmd := exec.Command(gcBinary, "supervisor", "stop", "--wait")
+		stopCmd.Env = integrationEnv()
+		_ = stopCmd.Run()
+	}
+	if !subprocess {
+		tmuxtest.KillAllTestSessions(&mainTB{})
+		return
+	}
+	sweepSubprocessTestProcesses()
 }
 
 func binaryOverride(envName string) (string, bool, error) {
@@ -759,6 +799,8 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env = filterEnv(env, "GC_DOLT_PORT")
 	env = filterEnv(env, "GC_DOLT_USER")
 	env = filterEnv(env, "GC_DOLT_PASSWORD")
+	env = filterEnv(env, managedDoltTestModeEnv)
+	env = filterEnv(env, managedDoltTestParentEnv)
 	env = filterEnv(env, "BEADS_DOLT_SERVER_HOST")
 	env = filterEnv(env, "BEADS_DOLT_SERVER_PORT")
 	env = filterEnv(env, "BEADS_DOLT_SERVER_USER")
@@ -782,6 +824,8 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	}
 	env = append(env, "GC_HOME="+gcHome)
 	env = append(env, "XDG_RUNTIME_DIR="+runtimeDir)
+	env = append(env, managedDoltTestModeEnv+"=1")
+	env = append(env, managedDoltTestParentEnv+"="+strconv.Itoa(os.Getpid()))
 	env = append(env, integrationRealBDBinaryEnv+"="+realBDBinary)
 	env = append(env, "DOLT_ROOT_PATH="+gcHome)
 	env = append(env, "PATH="+prependPath(integrationToolBinDir, os.Getenv("PATH")))

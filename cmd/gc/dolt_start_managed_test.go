@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -173,6 +174,130 @@ func TestManagedDoltStartFields(t *testing.T) {
 		if fields[i] != w {
 			t.Errorf("fields[%d] = %q, want %q", i, fields[i], w)
 		}
+	}
+}
+
+func withManagedDoltTestMode(t *testing.T, enabled bool) {
+	t.Helper()
+	old := managedDoltTestMode
+	managedDoltTestMode = func() bool { return enabled }
+	t.Cleanup(func() { managedDoltTestMode = old })
+}
+
+func clearManagedDoltTestProcessRegistry(t *testing.T) {
+	t.Helper()
+	managedDoltTestProcessRegistry.Range(func(key, _ any) bool {
+		managedDoltTestProcessRegistry.Delete(key)
+		return true
+	})
+}
+
+func TestManagedDoltSQLServerSysProcAttrProductionDetaches(t *testing.T) {
+	withManagedDoltTestMode(t, false)
+	t.Setenv(managedDoltTestModeEnv, "")
+
+	attr := managedDoltSQLServerSysProcAttr()
+
+	if attr == nil || !attr.Setpgid {
+		t.Fatalf("production managed Dolt must keep detached process-group behavior, got %#v", attr)
+	}
+}
+
+func TestManagedDoltSQLServerSysProcAttrTestModeDoesNotDetach(t *testing.T) {
+	withManagedDoltTestMode(t, true)
+
+	attr := managedDoltSQLServerSysProcAttr()
+
+	if attr != nil {
+		t.Fatalf("test-mode managed Dolt must stay in the test process group, got %#v", attr)
+	}
+}
+
+func TestManagedDoltTestWatchdogCanBeDisabledByEnv(t *testing.T) {
+	withManagedDoltTestMode(t, true)
+	t.Setenv("GC_MANAGED_DOLT_TEST_WATCHDOG", "0")
+
+	if managedDoltTestWatchdogEnabled() {
+		t.Fatalf("managedDoltTestWatchdogEnabled() = true, want false when GC_MANAGED_DOLT_TEST_WATCHDOG=0")
+	}
+}
+
+func TestManagedDoltTestModeEnabledHonorsEnv(t *testing.T) {
+	withManagedDoltTestMode(t, false)
+	t.Setenv("GC_MANAGED_DOLT_TEST_MODE", "1")
+
+	if !managedDoltTestModeEnabled() {
+		t.Fatalf("managedDoltTestModeEnabled() = false, want true when GC_MANAGED_DOLT_TEST_MODE=1")
+	}
+	if !managedDoltTestModeFromEnvOnly() {
+		t.Fatalf("managedDoltTestModeFromEnvOnly() = false, want true for built helper test mode")
+	}
+}
+
+func TestManagedDoltTestModeFromEnvOnlyFalseForTestBinary(t *testing.T) {
+	withManagedDoltTestMode(t, true)
+	t.Setenv("GC_MANAGED_DOLT_TEST_MODE", "1")
+
+	if managedDoltTestModeFromEnvOnly() {
+		t.Fatalf("managedDoltTestModeFromEnvOnly() = true, want false for the test binary itself")
+	}
+}
+
+func TestManagedDoltTestParentPIDHonorsEnv(t *testing.T) {
+	t.Setenv(managedDoltTestParentPIDEnv, "12345")
+
+	if got := managedDoltTestParentPID(); got != 12345 {
+		t.Fatalf("managedDoltTestParentPID() = %d, want 12345", got)
+	}
+}
+
+func TestManagedDoltTestDisarmOnReadyStaysArmedForExternalParent(t *testing.T) {
+	withManagedDoltTestMode(t, false)
+	t.Setenv(managedDoltTestModeEnv, "1")
+	t.Setenv(managedDoltTestParentPIDEnv, strconv.Itoa(os.Getpid()+1))
+
+	if managedDoltTestDisarmOnReady() {
+		t.Fatal("managedDoltTestDisarmOnReady() = true, want false with external parent")
+	}
+}
+
+func TestManagedDoltTestDisarmOnReadyForEnvOnlyHelperWithoutParent(t *testing.T) {
+	withManagedDoltTestMode(t, false)
+	t.Setenv(managedDoltTestModeEnv, "1")
+
+	if !managedDoltTestDisarmOnReady() {
+		t.Fatal("managedDoltTestDisarmOnReady() = false, want true without external parent")
+	}
+}
+
+func TestReapManagedDoltTestProcessesTerminatesRegisteredChildren(t *testing.T) {
+	withManagedDoltTestMode(t, true)
+	clearManagedDoltTestProcessRegistry(t)
+	t.Cleanup(func() {
+		clearManagedDoltTestProcessRegistry(t)
+	})
+	oldTerminate := managedDoltTestTerminateProcess
+	var terminated []int
+	managedDoltTestTerminateProcess = func(pid int) error {
+		terminated = append(terminated, pid)
+		return nil
+	}
+	t.Cleanup(func() { managedDoltTestTerminateProcess = oldTerminate })
+
+	pid := os.Getpid()
+	registerManagedDoltTestProcess(managedDoltStartedProcess{PID: pid, WatchdogPID: pid})
+	reapManagedDoltTestProcesses()
+
+	if len(terminated) != 2 || terminated[0] != pid || terminated[1] != pid {
+		t.Fatalf("terminated = %v, want child and watchdog pid %d", terminated, pid)
+	}
+	var remaining int
+	managedDoltTestProcessRegistry.Range(func(_, _ any) bool {
+		remaining++
+		return true
+	})
+	if remaining != 0 {
+		t.Fatalf("registry still has %d entries after reap", remaining)
 	}
 }
 

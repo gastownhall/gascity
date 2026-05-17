@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -45,18 +46,14 @@ func loadRigDoltPorts(rigs []resolverRig, fs fsys.FS) map[int]string {
 // kernel thread or hung process can't make the reaper hang.
 const procEnumerationTimeout = 2 * time.Second
 
-// discoverDoltProcesses walks /proc to find live `dolt sql-server` processes
-// and reports their argv and listening ports. Returns nil + nil on hosts
-// without /proc (the reaper degrades to "no candidates found", which is
-// indistinguishable from a healthy host with no orphans).
-//
-// The function is intentionally Linux-specific. macOS/BSD hosts would need
-// `ps -ax -o pid,command` and `lsof -i -P -nFn` — left as future work since
-// the architect's spec scopes this to Linux test infrastructure.
+// discoverDoltProcesses finds live `dolt sql-server` processes and reports
+// their argv and listening ports. Linux uses /proc for argv, ports, RSS, and
+// start ticks. Hosts without /proc (including Darwin/macOS) fall back to ps for
+// process enumeration and lsof for best-effort listening ports.
 func discoverDoltProcesses() ([]DoltProcInfo, error) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return nil, nil
+		return discoverDoltProcessesFromPS()
 	}
 
 	pidPorts := portsByPID()
@@ -85,10 +82,27 @@ func discoverDoltProcesses() ([]DoltProcInfo, error) {
 	return out, nil
 }
 
+func discoverDoltProcessesFromPS() ([]DoltProcInfo, error) {
+	lines, err := psLStartCommandLines()
+	if err != nil {
+		return nil, err
+	}
+	pidPorts := portsByPID()
+	var out []DoltProcInfo
+	for _, line := range lines {
+		proc, ok := parseDoltPSLine(line, pidPorts)
+		if !ok {
+			continue
+		}
+		out = append(out, proc)
+	}
+	return out, nil
+}
+
 func discoverActiveTestRoots(homeDir, tempDir string) []string {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return nil
+		return discoverActiveTestRootsFromPS(homeDir, tempDir)
 	}
 	seen := map[string]struct{}{}
 	var roots []string
@@ -106,6 +120,33 @@ func discoverActiveTestRoots(homeDir, tempDir string) []string {
 		}
 		argv := splitCmdline(data)
 		if looksLikeDoltSQLServer(argv) {
+			continue
+		}
+		for _, arg := range argv {
+			root, ok := activeTestRootFromPath(arg, homeDir, tempDir)
+			if !ok {
+				continue
+			}
+			if _, exists := seen[root]; exists {
+				continue
+			}
+			seen[root] = struct{}{}
+			roots = append(roots, root)
+		}
+	}
+	return roots
+}
+
+func discoverActiveTestRootsFromPS(homeDir, tempDir string) []string {
+	lines, err := psLStartCommandLines()
+	if err != nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var roots []string
+	for _, line := range lines {
+		argv, ok := argvFromPSLine(line)
+		if !ok || looksLikeDoltSQLServer(argv) {
 			continue
 		}
 		for _, arg := range argv {
@@ -218,6 +259,152 @@ func readDoltSQLServerArgv(pid int) ([]string, bool) {
 	return argv, true
 }
 
+func psLStartCommandLines() ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), procEnumerationTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ps", "-ax", "-o", "pid=,rss=,lstart=,command=")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	lines := make([]string, 0, 64)
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines, nil
+}
+
+func parseDoltPSLine(line string, pidPorts map[int][]int) (DoltProcInfo, bool) {
+	fields, command := consumeLeadingFields(line, 7)
+	if len(fields) != 7 || command == "" {
+		return DoltProcInfo{}, false
+	}
+	pid, err := strconv.Atoi(fields[0])
+	if err != nil || pid <= 0 {
+		return DoltProcInfo{}, false
+	}
+	rssKB, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil || rssKB < 0 {
+		rssKB = 0
+	}
+	argv := parseDoltPSCommandLine(command)
+	if !looksLikeDoltSQLServer(argv) {
+		return DoltProcInfo{}, false
+	}
+	return DoltProcInfo{
+		PID:           pid,
+		Argv:          argv,
+		Ports:         pidPorts[pid],
+		RSSBytes:      rssKB * 1024,
+		StartIdentity: strings.Join(fields[2:7], " "),
+	}, true
+}
+
+func argvFromPSLine(line string) ([]string, bool) {
+	_, command := consumeLeadingFields(line, 7)
+	if command == "" {
+		return nil, false
+	}
+	return parseDoltPSCommandLine(command), true
+}
+
+func consumeLeadingFields(s string, n int) ([]string, string) {
+	rest := strings.TrimSpace(s)
+	fields := make([]string, 0, n)
+	for len(fields) < n {
+		if rest == "" {
+			return fields, ""
+		}
+		i := strings.IndexFunc(rest, func(r rune) bool { return r == ' ' || r == '\t' })
+		if i < 0 {
+			fields = append(fields, rest)
+			return fields, ""
+		}
+		fields = append(fields, rest[:i])
+		rest = strings.TrimLeft(rest[i:], " \t")
+	}
+	return fields, rest
+}
+
+func parseDoltPSCommandLine(command string) []string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return nil
+	}
+	if len(fields) < 2 || filepath.Base(fields[0]) != "dolt" || fields[1] != "sql-server" {
+		return fields
+	}
+	argv := []string{fields[0], fields[1]}
+	if cfg, ok := configPathFromPSCommandLine(command); ok {
+		argv = append(argv, "--config", cfg)
+	}
+	return argv
+}
+
+func configPathFromPSCommandLine(command string) (string, bool) {
+	spans := commandFieldSpans(command)
+	for i, span := range spans {
+		field := command[span.start:span.end]
+		if strings.HasPrefix(field, "--config=") {
+			value := strings.TrimSpace(strings.TrimPrefix(field, "--config="))
+			if value == "" {
+				return "", false
+			}
+			return trimPSConfigValue(value), true
+		}
+		if field == "--config" {
+			if i+1 >= len(spans) {
+				return "", false
+			}
+			value := strings.TrimSpace(command[spans[i+1].start:])
+			if value == "" {
+				return "", false
+			}
+			return trimPSConfigValue(value), true
+		}
+	}
+	return "", false
+}
+
+type commandFieldSpan struct {
+	start int
+	end   int
+}
+
+func commandFieldSpans(s string) []commandFieldSpan {
+	var spans []commandFieldSpan
+	inField := false
+	start := 0
+	for i, r := range s {
+		if r == ' ' || r == '\t' {
+			if inField {
+				spans = append(spans, commandFieldSpan{start: start, end: i})
+				inField = false
+			}
+			continue
+		}
+		if !inField {
+			start = i
+			inField = true
+		}
+	}
+	if inField {
+		spans = append(spans, commandFieldSpan{start: start, end: len(s)})
+	}
+	return spans
+}
+
+func trimPSConfigValue(value string) string {
+	for _, sep := range []string{" --", "\t--"} {
+		if i := strings.Index(value, sep); i >= 0 {
+			value = value[:i]
+		}
+	}
+	return strings.TrimSpace(value)
+}
+
 // splitCmdline parses a /proc/<pid>/cmdline blob (NUL-separated argv with
 // trailing NUL) into a string slice. Empty trailing element is dropped.
 func splitCmdline(data []byte) []string {
@@ -247,9 +434,12 @@ func looksLikeDoltSQLServer(argv []string) bool {
 // only protection).
 func portsByPID() map[int][]int {
 	out := map[int][]int{}
-	listenInodes := listenInodesByPort()
+	listenInodes, checkedProcNet := listenInodesByPortChecked()
 	if len(listenInodes) == 0 {
-		return out
+		if checkedProcNet {
+			return out
+		}
+		return portsByPIDFromLsof()
 	}
 	inodeToPort := map[string]int{}
 	for port, inodes := range listenInodes {
@@ -292,17 +482,75 @@ func portsByPID() map[int][]int {
 	return out
 }
 
+func portsByPIDFromLsof() map[int][]int {
+	out := map[int][]int{}
+	if _, err := exec.LookPath("lsof"); err != nil {
+		return out
+	}
+	data, err := lsofOutput("-nP", "-iTCP", "-sTCP:LISTEN")
+	if err != nil {
+		return out
+	}
+	return parseListeningPortsByPIDFromLsof(string(data))
+}
+
+func parseListeningPortsByPIDFromLsof(output string) map[int][]int {
+	out := map[int][]int{}
+	for _, line := range strings.Split(output, "\n") {
+		pid, port, ok := parseListeningPortLsofLine(line)
+		if !ok {
+			continue
+		}
+		out[pid] = appendUniqueInt(out[pid], port)
+	}
+	return out
+}
+
+func parseListeningPortLsofLine(line string) (int, int, bool) {
+	if !strings.Contains(line, "(LISTEN)") {
+		return 0, 0, false
+	}
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return 0, 0, false
+	}
+	pid, err := strconv.Atoi(fields[1])
+	if err != nil || pid <= 0 {
+		return 0, 0, false
+	}
+	listenIdx := strings.Index(line, "(LISTEN)")
+	beforeListen := strings.TrimSpace(line[:listenIdx])
+	colon := strings.LastIndex(beforeListen, ":")
+	if colon < 0 || colon+1 >= len(beforeListen) {
+		return 0, 0, false
+	}
+	portText := beforeListen[colon+1:]
+	portText = strings.TrimRightFunc(portText, func(r rune) bool { return r < '0' || r > '9' })
+	port, err := strconv.Atoi(portText)
+	if err != nil || !validDoltPort(port) {
+		return 0, 0, false
+	}
+	return pid, port, true
+}
+
 // listenInodesByPort reads /proc/net/tcp{,6} and returns a port → []inode map
 // for sockets in LISTEN state (TCP state 0A). Each inode is a unique kernel
 // socket identifier that appears as the target of a /proc/<pid>/fd/<n>
 // symlink ("socket:[<inode>]"); cross-referencing those gives port→pid.
 func listenInodesByPort() map[int][]string {
+	out, _ := listenInodesByPortChecked()
+	return out
+}
+
+func listenInodesByPortChecked() (map[int][]string, bool) {
 	out := map[int][]string{}
+	checked := false
 	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
+		checked = true
 		for _, line := range strings.Split(string(data), "\n") {
 			fields := strings.Fields(line)
 			if len(fields) < 10 || fields[3] != "0A" {
@@ -319,7 +567,7 @@ func listenInodesByPort() map[int][]string {
 			out[int(port)] = appendUniqueString(out[int(port)], fields[9])
 		}
 	}
-	return out
+	return out, checked
 }
 
 func appendUniqueInt(s []int, v int) []int {
