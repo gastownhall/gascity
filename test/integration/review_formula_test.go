@@ -284,7 +284,7 @@ func TestRetryManagedPooledWorkerRecoversClaimedAttemptAfterCrash(t *testing.T) 
 	cityDir := setupReviewFormulaCity(t, "success", map[string]string{
 		"GC_GRAPH_TRANSIENT_ONCE_SUFFIXES":        "review.attempt.1",
 		"GC_GRAPH_EXIT_AFTER_CLAIM_ONCE_SUFFIXES": "review.attempt.2",
-	}, reviewFormulaCityOption{explicitPolecatScaleCheck: true})
+	})
 	writeLocalFormula(t, cityDir, "mol-retry-recovery-smoke", `description = """
 Minimal pooled retry workflow used to verify crash-before-result recovery.
 """
@@ -343,11 +343,7 @@ on_exhausted = "hard_fail"
 
 // --- helpers ---
 
-type reviewFormulaCityOption struct {
-	explicitPolecatScaleCheck bool
-}
-
-func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]string, opts ...reviewFormulaCityOption) string {
+func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]string) string {
 	t.Helper()
 	env := newIsolatedCommandEnv(t, true)
 
@@ -360,18 +356,12 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 	cityDir := filepath.Join(t.TempDir(), cityName)
 
 	startCommand := workflowAgentStartCommand(mode, extraEnv)
-	polecatScaleCheck := ""
-	for _, opt := range opts {
-		if opt.explicitPolecatScaleCheck {
-			check := `ready_json=$(bd ready --metadata-field gc.routed_to=polecat --unassigned --exclude-type=epic --json --limit=0) && printf '%s\n' "$ready_json" | jq 'length'`
-			polecatScaleCheck = fmt.Sprintf("scale_check = %q\n", check)
-		}
-	}
+	polecatScaleCheck := `ready_json=$(bd ready --metadata-field gc.routed_to=polecat --unassigned --exclude-type=epic --json --limit=0) && printf '%s\n' "$ready_json" | jq 'length'`
 	cityToml := fmt.Sprintf(
 		"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n"+
 			"[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n"+
 			"[[named_session]]\ntemplate = \"worker\"\nmode = \"always\"\n\n"+
-			"[[agent]]\nname = \"polecat\"\nstart_command = %q\nmin_active_sessions = 0\nmax_active_sessions = 3\n%s",
+			"[[agent]]\nname = \"polecat\"\nstart_command = %q\nmin_active_sessions = 0\nmax_active_sessions = 3\nscale_check = %q\n",
 		cityName, startCommand, startCommand, polecatScaleCheck,
 	)
 	configPath := filepath.Join(t.TempDir(), "review-formula.toml")
