@@ -486,24 +486,29 @@ wait_for_bd_runtime_schema() {
     return 1
 }
 
-# ensure_types_custom_in_yaml writes types.custom to .beads/config.yaml when
-# the key is absent. bd reads this YAML key as a fallback when the database
-# config table is unset (see beads internal/config: GetCustomTypesFromYAML),
-# so writing here registers the types without paying bd's per-command
-# auto-migrate cost (~50s on populated databases). Idempotent: re-running
-# never appends duplicates.
+# ensure_types_custom_in_yaml writes types.custom to .beads/config.yaml.
+# bd reads this YAML key as a fallback when the database config table is
+# unset (see beads internal/config: GetCustomTypesFromYAML), so writing
+# here registers the types without paying bd's per-command auto-migrate
+# cost (~50s on populated databases).
+#
+# Idempotent against the desired value: re-running with the SAME $types
+# is a no-op. If the YAML already has a STALE types.custom line (different
+# value from the one being installed), strip it and append the new value —
+# leaving a stale line in place would mask the types we actually need to
+# register, which is the failure mode #2154 surfaces on the gascity side.
 ensure_types_custom_in_yaml() {
     local dir="$1"
     local types="$2"
     local config_yaml="$dir/.beads/config.yaml"
     [ -f "$config_yaml" ] || return 0
     [ -n "$types" ] || return 0
-    if grep -q "^types\.custom:" "$config_yaml" 2>/dev/null; then
+    if grep -qxF "types.custom: $types" "$config_yaml" 2>/dev/null; then
         return 0
     fi
     local tmp
     tmp=$(mktemp "$config_yaml.tmp.XXXXXX") || return 0
-    cat "$config_yaml" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    sed '/^types\.custom:/d' "$config_yaml" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
     printf 'types.custom: %s\n' "$types" >> "$tmp"
     mv -f "$tmp" "$config_yaml" || rm -f "$tmp"
 }
