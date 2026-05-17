@@ -2768,6 +2768,56 @@ func TestMaterializeNamedSessionStampsProviderFamilyMetadata(t *testing.T) {
 	}
 }
 
+func TestMaterializeNamedSessionSeedsCityRuntimeEnv(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Providers["test-agent"] = config.ProviderSpec{
+		DisplayName: "Test Agent",
+		Command:     "/bin/echo",
+		Env: map[string]string{
+			"GC_CITY":        "/wrong/city",
+			"GC_CITY_PATH":   "/wrong/city",
+			"PROVIDER_TOKEN": "ok",
+		},
+	}
+	srv := New(fs)
+
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	if err != nil {
+		t.Fatalf("findNamedSessionSpecForTarget: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected named session spec")
+	}
+	id, err := srv.materializeNamedSession(fs.cityBeadStore, spec)
+	if err != nil {
+		t.Fatalf("materializeNamedSession: %v", err)
+	}
+	bead, err := fs.cityBeadStore.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	cfg := fs.sp.LastStartConfig(bead.Metadata["session_name"])
+	if cfg == nil {
+		t.Fatalf("Start call not recorded: %#v", fs.sp.Calls)
+	}
+	if got := cfg.Env["GC_CITY"]; got != fs.cityPath {
+		t.Errorf("Env[GC_CITY] = %q, want %q", got, fs.cityPath)
+	}
+	if got := cfg.Env["GC_CITY_PATH"]; got != fs.cityPath {
+		t.Errorf("Env[GC_CITY_PATH] = %q, want %q", got, fs.cityPath)
+	}
+	wantRuntimeDir := filepath.Join(fs.cityPath, ".gc", "runtime")
+	if got := cfg.Env["GC_CITY_RUNTIME_DIR"]; got != wantRuntimeDir {
+		t.Errorf("Env[GC_CITY_RUNTIME_DIR] = %q, want %q", got, wantRuntimeDir)
+	}
+	if got := cfg.Env["PROVIDER_TOKEN"]; got != "ok" {
+		t.Errorf("Env[PROVIDER_TOKEN] = %q, want ok", got)
+	}
+	if got, present := cfg.Env["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]; present {
+		t.Errorf("Env[GC_CONTROL_DISPATCHER_TRACE_DEFAULT] = %q present, want absent", got)
+	}
+}
+
 func TestMaterializeNamedSessionRejectsACPTemplateWithoutACPRouting(t *testing.T) {
 	supportsACP := true
 	fs := newSessionFakeState(t)

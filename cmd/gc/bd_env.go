@@ -1062,6 +1062,14 @@ func cityRuntimeEnvMapForCity(cityPath string) map[string]string {
 	return citylayout.CityRuntimeEnvMapForRuntimeDir(cityPath, citylayout.TrustedAmbientCityRuntimeDir(cityPath))
 }
 
+// cityIdentityAnchorsForCity returns only the three identity anchors
+// (GC_CITY, GC_CITY_PATH, GC_CITY_RUNTIME_DIR) for cityPath. The shared
+// projection lives in internal/citylayout so CLI and API session resolvers
+// keep the identity-only contract in sync.
+func cityIdentityAnchorsForCity(cityPath string) map[string]string {
+	return citylayout.CityIdentityEnvMap(cityPath)
+}
+
 func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 	cityPath = normalizePathForCompare(cityPath)
 	overrides := cityRuntimeEnvMapForCity(cityPath)

@@ -144,6 +144,22 @@ func CityRuntimeEnvMapForRuntimeDir(cityRoot, runtimeDir string) map[string]stri
 	}
 }
 
+// CityIdentityEnvMap returns the city identity anchors without dispatcher
+// trace defaults. Empty city roots return nil so callers do not inject empty
+// GC_CITY values or relative runtime paths on unanchored code paths.
+func CityIdentityEnvMap(cityRoot string) map[string]string {
+	cityRoot = strings.TrimSpace(cityRoot)
+	if cityRoot == "" {
+		return nil
+	}
+	full := CityRuntimeEnvMapForRuntimeDir(cityRoot, TrustedAmbientCityRuntimeDir(cityRoot))
+	return map[string]string{
+		"GC_CITY":             full["GC_CITY"],
+		"GC_CITY_PATH":        full["GC_CITY_PATH"],
+		"GC_CITY_RUNTIME_DIR": full["GC_CITY_RUNTIME_DIR"],
+	}
+}
+
 // PackRuntimeEnv returns city runtime env vars plus the canonical pack state dir.
 func PackRuntimeEnv(cityRoot, packName string) []string {
 	env := CityRuntimeEnv(cityRoot)
