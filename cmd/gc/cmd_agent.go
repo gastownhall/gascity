@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -429,7 +430,7 @@ have moved to "gc session" and "gc runtime".`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc agent: missing subcommand (add, suspend, resume)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "gc agent: missing subcommand (add, list, suspend, resume)") //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc agent: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
@@ -438,10 +439,130 @@ have moved to "gc session" and "gc runtime".`,
 	}
 	cmd.AddCommand(
 		newAgentAddCmd(stdout, stderr),
+		newAgentListCmd(stdout, stderr),
 		newAgentResumeCmd(stdout, stderr),
 		newAgentSuspendCmd(stdout, stderr),
 	)
 	return cmd
+}
+
+func newAgentListCmd(stdout, stderr io.Writer) *cobra.Command {
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List configured agents",
+		Long: `List configured agents from the resolved city configuration.
+
+Use --json to inspect agent routing fields, including effective work_query
+and sling_query values.`,
+		Args: cobra.ArbitraryArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if cmdAgentList(jsonOutput, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
+	return cmd
+}
+
+// AgentListJSON is the JSON output format for "gc agent list --json".
+type AgentListJSON struct {
+	SchemaVersion string          `json:"schema_version"`
+	CityPath      string          `json:"city_path"`
+	CityName      string          `json:"city_name"`
+	Agents        []AgentListItem `json:"agents"`
+}
+
+// AgentListItem is one configured agent in "gc agent list --json".
+type AgentListItem struct {
+	Name                 string    `json:"name"`
+	QualifiedName        string    `json:"qualified_name"`
+	Dir                  string    `json:"dir,omitempty"`
+	Scope                string    `json:"scope,omitempty"`
+	WorkDir              string    `json:"work_dir,omitempty"`
+	Provider             string    `json:"provider,omitempty"`
+	Session              string    `json:"session,omitempty"`
+	Suspended            bool      `json:"suspended"`
+	Pool                 *PoolJSON `json:"pool,omitempty"`
+	WorkQuery            string    `json:"work_query"`
+	SlingQuery           string    `json:"sling_query"`
+	ConfiguredWorkQuery  string    `json:"configured_work_query,omitempty"`
+	ConfiguredSlingQuery string    `json:"configured_sling_query,omitempty"`
+}
+
+func cmdAgentList(jsonOutput bool, stdout, stderr io.Writer) int {
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc agent list: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return doAgentList(fsys.OSFS{}, cityPath, jsonOutput, stdout, stderr)
+}
+
+func doAgentList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.Writer) int {
+	cfg, err := loadCityConfigFS(fs, filepath.Join(cityPath, "city.toml"), stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc agent list: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	items := agentListItems(cfg)
+	if jsonOutput {
+		if err := writeCLIJSONLine(stdout, AgentListJSON{
+			SchemaVersion: "1",
+			CityPath:      cityPath,
+			CityName:      cfg.EffectiveCityName(),
+			Agents:        items,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc agent list: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	}
+
+	fmt.Fprintf(stdout, "Agents in %s:\n", cityPath) //nolint:errcheck // best-effort stdout
+	for _, item := range items {
+		status := "active"
+		if item.Suspended {
+			status = "suspended"
+		}
+		fmt.Fprintf(stdout, "  %-24s %s\n", item.QualifiedName, status) //nolint:errcheck // best-effort stdout
+	}
+	return 0
+}
+
+func agentListItems(cfg *config.City) []AgentListItem {
+	if cfg == nil {
+		return nil
+	}
+	items := make([]AgentListItem, 0, len(cfg.Agents))
+	for i := range cfg.Agents {
+		a := cfg.Agents[i]
+		item := AgentListItem{
+			Name:                 a.Name,
+			QualifiedName:        a.QualifiedName(),
+			Dir:                  a.Dir,
+			Scope:                a.Scope,
+			WorkDir:              a.WorkDir,
+			Provider:             a.Provider,
+			Session:              a.Session,
+			Suspended:            a.Suspended,
+			WorkQuery:            a.EffectiveWorkQuery(),
+			SlingQuery:           a.EffectiveSlingQuery(),
+			ConfiguredWorkQuery:  a.WorkQuery,
+			ConfiguredSlingQuery: a.SlingQuery,
+		}
+		sp := scaleParamsFor(&a)
+		if sp.Min != 0 || sp.Max != 1 || strings.TrimSpace(sp.Check) != "" || a.SupportsInstanceExpansion() {
+			item.Pool = &PoolJSON{Min: sp.Min, Max: sp.Max}
+		}
+		items = append(items, item)
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].QualifiedName < items[j].QualifiedName
+	})
+	return items
 }
 
 func newAgentAddCmd(stdout, stderr io.Writer) *cobra.Command {

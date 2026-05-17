@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -133,6 +134,37 @@ func TestJSONSchemaRoleSpecificResult(t *testing.T) {
 	}
 	if _, ok := schema["x-gc-jsonl"].(map[string]any); !ok {
 		t.Fatalf("schema missing x-gc-jsonl object: %+v", schema)
+	}
+}
+
+func TestJSONSchemaRoleSpecificResultForRigAgentRoutingCommands(t *testing.T) {
+	for _, args := range [][]string{
+		{"agent", "list", "--json-schema=result"},
+		{"rig", "status", "--json-schema=result"},
+	} {
+		t.Run(strings.Join(args[:len(args)-1], "_"), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(args, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run(%v) = %d, stderr=%q stdout=%q", args, code, stderr.String(), stdout.String())
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want empty", stderr.String())
+			}
+			var schema struct {
+				Required   []string       `json:"required"`
+				Properties map[string]any `json:"properties"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &schema); err != nil {
+				t.Fatalf("result schema is not JSON: %v\n%s", err, stdout.String())
+			}
+			if !slices.Contains(schema.Required, "schema_version") {
+				t.Fatalf("required = %v, want schema_version", schema.Required)
+			}
+			if schema.Properties["schema_version"] == nil {
+				t.Fatalf("schema missing schema_version property: %+v", schema.Properties)
+			}
+		})
 	}
 }
 

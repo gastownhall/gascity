@@ -6,7 +6,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
 )
 
@@ -16,22 +18,25 @@ import (
 
 // newRigStatusCmd creates the "gc rig status <name>" subcommand.
 func newRigStatusCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "status [name]",
 		Short: "Show rig status and agent running state",
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdRigStatus(args, stdout, stderr) != 0 {
+			if cmdRigStatus(args, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 		ValidArgsFunction: completeRigNames,
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
+	return cmd
 }
 
 // cmdRigStatus is the CLI entry point for showing rig status.
-func cmdRigStatus(args []string, stdout, stderr io.Writer) int {
+func cmdRigStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
 	ctx, err := resolveContext()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig status: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -85,7 +90,38 @@ func cmdRigStatus(args []string, stdout, stderr io.Writer) int {
 	statusSnapshot := loadStatusSessionSnapshot(store, stderr)
 	sp := newStatusSessionProviderForCityWithSnapshot(cfg, cityPath, statusSnapshot)
 	dops := newDrainOps(sp)
-	return doRigStatusWithStoreAndSnapshot(sp, dops, rig, rigAgents, cityPath, cityName, cfg.Workspace.SessionTemplate, cfg, store, statusSnapshot, stdout, stderr)
+	return doRigStatusWithStoreAndSnapshot(sp, dops, rig, rigAgents, cityPath, cityName, cfg.Workspace.SessionTemplate, cfg, store, statusSnapshot, jsonOutput, stdout, stderr)
+}
+
+// RigStatusJSON is the JSON output format for "gc rig status --json".
+type RigStatusJSON struct {
+	SchemaVersion string           `json:"schema_version"`
+	CityPath      string           `json:"city_path"`
+	CityName      string           `json:"city_name"`
+	Rig           RigStatusRig     `json:"rig"`
+	Agents        []RigStatusAgent `json:"agents"`
+}
+
+// RigStatusRig describes the selected rig in "gc rig status --json".
+type RigStatusRig struct {
+	Name          string `json:"name"`
+	Path          string `json:"path"`
+	Prefix        string `json:"prefix"`
+	DefaultBranch string `json:"default_branch,omitempty"`
+	Suspended     bool   `json:"suspended"`
+	Beads         string `json:"beads"`
+}
+
+// RigStatusAgent describes an agent or concrete pool instance for a rig.
+type RigStatusAgent struct {
+	Name               string `json:"name"`
+	QualifiedName      string `json:"qualified_name"`
+	RuntimeSessionName string `json:"runtime_session_name"`
+	SessionID          string `json:"session_id,omitempty"`
+	Running            bool   `json:"running"`
+	Suspended          bool   `json:"suspended"`
+	Draining           bool   `json:"draining"`
+	Status             string `json:"status"`
 }
 
 func doRigStatusWithStoreAndSnapshot(
@@ -97,9 +133,13 @@ func doRigStatusWithStoreAndSnapshot(
 	cfg *config.City,
 	store beads.Store,
 	statusSnapshot *sessionBeadSnapshot,
+	jsonOutput bool,
 	stdout, stderr io.Writer,
 ) int {
 	registerStatusProviderACPRoutes(sp, statusSnapshot, cityName, cfg)
+	if jsonOutput {
+		return renderRigStatusJSON(sp, dops, rig, agents, cityPath, cityName, sessionTemplate, cfg, store, statusSnapshot, stdout, stderr)
+	}
 
 	suspStr := "no"
 	if rig.Suspended {
@@ -128,6 +168,79 @@ func doRigStatusWithStoreAndSnapshot(
 		}
 	}
 	return 0
+}
+
+func renderRigStatusJSON(
+	sp runtime.Provider,
+	dops drainOps,
+	rig config.Rig,
+	agents []config.Agent,
+	cityPath, cityName, sessionTemplate string,
+	cfg *config.City,
+	store beads.Store,
+	statusSnapshot *sessionBeadSnapshot,
+	stdout, stderr io.Writer,
+) int {
+	result := RigStatusJSON{
+		SchemaVersion: "1",
+		CityPath:      cityPath,
+		CityName:      cityName,
+		Rig: RigStatusRig{
+			Name:          rig.Name,
+			Path:          rig.Path,
+			Prefix:        rig.EffectivePrefix(),
+			DefaultBranch: rig.EffectiveDefaultBranch(),
+			Suspended:     rig.Suspended,
+			Beads:         rigBeadsStatus(fsys.OSFS{}, rig.Path),
+		},
+	}
+	for _, a := range agents {
+		sp0 := scaleParamsFor(&a)
+		if !a.SupportsInstanceExpansion() {
+			target := statusObservationTargetForIdentity(statusSnapshot, cityName, a.QualifiedName(), sessionTemplate)
+			obs := observeSessionTargetWithWarning("gc rig status", cityPath, store, sp, cfg, target, stderr)
+			result.Agents = append(result.Agents, rigStatusAgentJSON(a.Name, a.QualifiedName(), target, obs, dops, a.Suspended))
+			continue
+		}
+		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp) {
+			target := statusObservationTargetForIdentity(statusSnapshot, cityName, qualifiedInstance, sessionTemplate)
+			obs := observeSessionTargetWithWarning("gc rig status", cityPath, store, sp, cfg, target, stderr)
+			result.Agents = append(result.Agents, rigStatusAgentJSON(a.Name, qualifiedInstance, target, obs, dops, a.Suspended))
+		}
+	}
+	if err := writeCLIJSONLine(stdout, result); err != nil {
+		fmt.Fprintf(stderr, "gc rig status: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return 0
+}
+
+func rigStatusAgentJSON(name, qualifiedName string, target statusObservationTarget, obs worker.LiveObservation, dops drainOps, agentSuspended bool) RigStatusAgent {
+	suspended := agentSuspended || obs.Suspended || target.suspended
+	draining := false
+	if obs.Running {
+		draining, _ = dops.isDraining(target.runtimeSessionName)
+	}
+	status := "stopped"
+	if obs.Running {
+		status = "running"
+		if draining {
+			status = "draining"
+		}
+	}
+	if suspended && !obs.Running {
+		status = "suspended"
+	}
+	return RigStatusAgent{
+		Name:               name,
+		QualifiedName:      qualifiedName,
+		RuntimeSessionName: target.runtimeSessionName,
+		SessionID:          target.sessionID,
+		Running:            obs.Running,
+		Suspended:          suspended,
+		Draining:           draining,
+		Status:             status,
+	}
 }
 
 // agentStatusLine returns a human-readable status string for an agent session.
