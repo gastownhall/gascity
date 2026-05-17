@@ -3619,6 +3619,9 @@ func writeMultiRecordDoltStub(t *testing.T, binDir string, currentCount int) {
 func writeIssuesPayloadDoltStub(t *testing.T, binDir, issuesPayload string) {
 	t.Helper()
 	body := "#!/bin/sh\n" +
+		"if [ -n \"${DOLT_ARGS_LOG:-}\" ]; then\n" +
+		"  printf '%s\\n' \"$*\" >> \"$DOLT_ARGS_LOG\"\n" +
+		"fi\n" +
 		"case \"$*\" in\n" +
 		"  *\"SHOW TABLES FROM\"*\"LIKE 'wisps'\"*)\n" +
 		"    printf 'Tables_in_db\\nwisps\\n'\n" +
@@ -4026,22 +4029,57 @@ func TestJsonlExportScrubTrueFiltersRowsWithoutDroppingWholePayload(t *testing.T
 	stateDir := t.TempDir()
 	gcLog := filepath.Join(t.TempDir(), "gc.log")
 	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	doltLog := filepath.Join(t.TempDir(), "dolt.log")
 	archiveRepo := filepath.Join(cityDir, "archive")
 
 	initSeedArchive(t, archiveRepo, 12)
-	rows := make([]string, 0, 13)
-	rows = append(rows, `{"id":"bd-100","title":"real-leading-prefix"}`)
-	for i := 1; i < 12; i++ {
-		rows = append(rows, fmt.Sprintf(`{"id":"prod-%d","title":"real-%d"}`, i, i))
+	rows := []string{
+		`{"id":"bd-100","title":"real-leading-prefix","issue_type":"task"}`,
+		`{"id":"prod-gc-near","title":"agc:kept","issue_type":"task"}`,
+		`{"id":"prod-order-near","title":"preorder:kept","issue_type":"task"}`,
+		`{"id":"prod-sling-task","title":"sling-ga-user-task","issue_type":"task"}`,
+		`{"id":"prod-manual-convoy","title":"manual-convoy","issue_type":"convoy"}`,
 	}
-	rows = append(rows, `{"id":"prod-test","title":"Test Issue 99"}`)
+	for i := 1; i <= 7; i++ {
+		rows = append(rows, fmt.Sprintf(`{"id":"prod-%d","title":"real-%d","issue_type":"task"}`, i, i))
+	}
+	rows = append(rows,
+		`{"id":"prod-test","title":"Test Issue 99","issue_type":"task"}`,
+		`{"id":"sys-gc","title":"gc:status","issue_type":"task"}`,
+		`{"id":"sys-order","title":"order:beads-health","issue_type":"task"}`,
+		`{"id":"sys-auto-convoy","title":"sling-ga-auto","issue_type":"convoy"}`,
+		`{"id":"sys-message","title":"message-row","issue_type":"message"}`,
+		`{"id":"sys-event","title":"event-row","issue_type":"event"}`,
+		`{"id":"sys-wisp","title":"wisp-row","issue_type":"wisp"}`,
+		`{"id":"sys-agent","title":"agent-row","issue_type":"agent"}`,
+	)
+	if len(rows) != 20 {
+		t.Fatalf("test fixture row count drifted: got %d, want 20", len(rows))
+	}
 	writeIssueRowsDoltStub(t, binDir, rows)
 	writeJsonlExportGCStub(t, binDir)
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 	env["GC_JSONL_SCRUB"] = "true"
+	env["DOLT_ARGS_LOG"] = doltLog
 
 	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	doltData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	doltSQL := string(doltData)
+	for _, want := range []string{
+		"issue_type NOT IN ('message', 'event', 'wisp', 'agent')",
+		"title NOT LIKE 'gc:%'",
+		"title NOT LIKE 'order:%'",
+		"NOT (issue_type = 'convoy' AND title LIKE 'sling-%')",
+	} {
+		if !strings.Contains(doltSQL, want) {
+			t.Fatalf("expected scrub SQL to contain %q, got:\n%s", want, doltSQL)
+		}
+	}
 
 	mailData, err := os.ReadFile(mailLog)
 	if err != nil && !os.IsNotExist(err) {
@@ -4061,8 +4099,24 @@ func TestJsonlExportScrubTrueFiltersRowsWithoutDroppingWholePayload(t *testing.T
 	if !strings.Contains(string(exported), `"id":"bd-100"`) {
 		t.Fatalf("expected scrubbed export to preserve the legitimate bd-100 row, got:\n%s", exported)
 	}
-	if strings.Contains(string(exported), "Test Issue 99") {
-		t.Fatalf("expected scrubbed export to remove the test row, got:\n%s", exported)
+	for _, want := range []string{"prod-gc-near", "prod-order-near", "prod-sling-task", "prod-manual-convoy"} {
+		if !strings.Contains(string(exported), want) {
+			t.Fatalf("expected scrubbed export to preserve near-miss row %q, got:\n%s", want, exported)
+		}
+	}
+	for _, unwanted := range []string{
+		"Test Issue 99",
+		"sys-gc",
+		"sys-order",
+		"sys-auto-convoy",
+		"sys-message",
+		"sys-event",
+		"sys-wisp",
+		"sys-agent",
+	} {
+		if strings.Contains(string(exported), unwanted) {
+			t.Fatalf("expected scrubbed export to remove %q, got:\n%s", unwanted, exported)
+		}
 	}
 
 	legacyExported, err := os.ReadFile(filepath.Join(archiveRepo, "beads.jsonl"))
@@ -4075,8 +4129,24 @@ func TestJsonlExportScrubTrueFiltersRowsWithoutDroppingWholePayload(t *testing.T
 	if !strings.Contains(string(legacyExported), `"id":"bd-100"`) {
 		t.Fatalf("expected legacy flat export to preserve the legitimate bd-100 row, got:\n%s", legacyExported)
 	}
-	if strings.Contains(string(legacyExported), "Test Issue 99") {
-		t.Fatalf("expected legacy flat export to remove the test row, got:\n%s", legacyExported)
+	for _, want := range []string{"prod-gc-near", "prod-order-near", "prod-sling-task", "prod-manual-convoy"} {
+		if !strings.Contains(string(legacyExported), want) {
+			t.Fatalf("expected legacy flat export to preserve near-miss row %q, got:\n%s", want, legacyExported)
+		}
+	}
+	for _, unwanted := range []string{
+		"Test Issue 99",
+		"sys-gc",
+		"sys-order",
+		"sys-auto-convoy",
+		"sys-message",
+		"sys-event",
+		"sys-wisp",
+		"sys-agent",
+	} {
+		if strings.Contains(string(legacyExported), unwanted) {
+			t.Fatalf("expected legacy flat export to remove %q, got:\n%s", unwanted, legacyExported)
+		}
 	}
 
 	gcData, err := os.ReadFile(gcLog)
