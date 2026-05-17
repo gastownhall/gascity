@@ -45,7 +45,7 @@ func TestLoadDriftRestartHistory_EdgeCases(t *testing.T) {
 	}{
 		{
 			name:    "missing file returns empty",
-			prepare: func(t *testing.T, path string) {},
+			prepare: func(_ *testing.T, _ string) {},
 			want:    0,
 		},
 		{

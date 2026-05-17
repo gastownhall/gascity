@@ -197,9 +197,8 @@ const (
 //   - the operator's flags (--no-auto-restart, --dry-run)
 //
 // Returns (exitCode, continue) where continue=false means the caller
-// should `return exitCode` immediately. continue=true means drift
-// handling completed successfully (no drift, restart succeeded, or
-// dry-run reported the result) and the caller should proceed.
+// should `return exitCode` immediately. continue=true means no terminal
+// drift action happened and the caller should proceed with normal start.
 func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 	pid := supervisorAliveHook()
 	if pid == 0 {
@@ -341,7 +340,7 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 				}, time.Now())
 			}
 		}
-		return 0, true
+		return 0, false
 	}
 	// Unreachable; decideDriftAction always sets exactly one disposition.
 	return 0, true
