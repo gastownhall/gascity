@@ -42,7 +42,6 @@ gc [flags]
 | [gc import](#gc-import) | Manage pack imports |
 | [gc init](#gc-init) | Initialize a new city |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
-| [gc maintenance](#gc-maintenance) | Dolt store maintenance (gc + snapshot) |
 | [gc mcp](#gc-mcp) | Inspect projected MCP config |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
 | [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
@@ -222,9 +221,7 @@ gc bd --rig my-project list
 
 Manage the beads provider (backing store for issue tracking).
 
-Subcommands for topology operations, health checking, diagnostics, and
-read-only list/show routed through the supervisor API with transparent
-fallback to direct bd reads.
+Subcommands for topology operations, health checking, and diagnostics.
 
 ```
 gc beads
@@ -234,8 +231,6 @@ gc beads
 |------------|-------------|
 | [gc beads city](#gc-beads-city) | Manage canonical city endpoint topology |
 | [gc beads health](#gc-beads-health) | Check beads provider health |
-| [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
-| [gc beads show](#gc-beads-show) | Show a single bead (API-routed with bd fallback) |
 
 ## gc beads city
 
@@ -305,49 +300,6 @@ gc beads health
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--quiet` | bool |  | silent on success, stderr on failure |
-
-## gc beads list
-
-List beads across all rigs, routed through the supervisor API when
-the controller is alive and falling back to a direct multi-store read
-otherwise.
-
-Supports --label, --status, --all, and --format flags. --json is an
-alias for --format=json. API-path JSON output includes _cache_age_s;
-fallback-path JSON omits it.
-
-```
-gc beads list
-```
-
-**Example:**
-
-```
-gc beads list
-  gc beads list --label ready-to-build
-  gc beads list --status open --json
-  gc beads list --format=toon
-```
-
-## gc beads show
-
-Show one bead by ID, routed through the supervisor API when the
-controller is alive and falling back to a direct multi-store lookup
-otherwise.
-
-Supports --format and --json. API-path JSON output includes
-_cache_age_s; fallback-path JSON omits it.
-
-```
-gc beads show <bead-id>
-```
-
-**Example:**
-
-```
-gc beads show ga-abc
-  gc beads show ga-abc --json
-```
 
 ## gc build-image
 
@@ -1630,47 +1582,6 @@ Show all messages sharing a thread ID or message ID, ordered by time.
 ```
 gc mail thread <id>
 ```
-
-## gc maintenance
-
-Manage periodic Dolt store maintenance (see docs/adr/0002-dolt-store-maintenance-runbook.md).
-
-The weekly loop runs inside the supervisor process when [maintenance.dolt] enabled=true
-in city.toml. 'status' shows loop state and recent runs; 'dolt-gc' triggers a manual run.
-
-```
-gc maintenance
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| [gc maintenance dolt-gc](#gc-maintenance-dolt-gc) | Trigger a Dolt store maintenance run |
-| [gc maintenance status](#gc-maintenance-status) | Show Dolt store maintenance status |
-
-## gc maintenance dolt-gc
-
-Trigger a Dolt store maintenance run
-
-```
-gc maintenance dolt-gc [flags]
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--json` | bool |  | emit machine-readable JSON |
-| `--wait` | bool |  | block until the run completes (exit 1 on failure) |
-
-## gc maintenance status
-
-Show Dolt store maintenance status
-
-```
-gc maintenance status [flags]
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--json` | bool |  | emit machine-readable JSON |
 
 ## gc mcp
 

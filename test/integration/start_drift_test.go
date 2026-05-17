@@ -414,7 +414,7 @@ type driftScenario struct {
 func setupDriftDirectScenario(t *testing.T) *driftScenario {
 	t.Helper()
 
-	gcHome, runtimeDir, env := newIsolatedEnvRoot(t, false)
+	gcHome, runtimeDir, env := newDriftIsolatedEnvRoot(t)
 	port := readSupervisorPortFromConfig(t, gcHome)
 
 	binaryDir := filepath.Join(filepath.Dir(gcHome), "bin")
@@ -458,7 +458,7 @@ func setupDriftDirectScenario(t *testing.T) *driftScenario {
 func setupDriftSystemdScenario(t *testing.T) *driftScenario {
 	t.Helper()
 
-	gcHome, runtimeDir, env := newIsolatedEnvRoot(t, false)
+	gcHome, runtimeDir, env := newDriftIsolatedEnvRoot(t)
 	// The gc subprocess needs the real XDG_RUNTIME_DIR to reach user
 	// systemd via `systemctl --user`. Isolation is unnecessary here:
 	// supervisor.RuntimeDir() short-circuits to gcHome under
@@ -553,7 +553,7 @@ func setupDriftDirectScenarioAsUID(t *testing.T, uid uint32) *driftScenario {
 // needs.
 func setupDriftDirectScenarioWithoutLaunch(t *testing.T) *driftScenario {
 	t.Helper()
-	gcHome, _, env := newIsolatedEnvRoot(t, false)
+	gcHome, _, env := newDriftIsolatedEnvRoot(t)
 	port := readSupervisorPortFromConfig(t, gcHome)
 
 	binaryDir := filepath.Join(filepath.Dir(gcHome), "bin")
@@ -575,6 +575,14 @@ func setupDriftDirectScenarioWithoutLaunch(t *testing.T) *driftScenario {
 		binaryPath:     binaryPath,
 		newBinary:      binaryPath,
 	}
+}
+
+func newDriftIsolatedEnvRoot(t *testing.T) (string, string, []string) {
+	t.Helper()
+	gcHome, runtimeDir, env := newIsolatedEnvRoot(t, false)
+	env = replaceEnv(env, "GC_BEADS", "file")
+	env = replaceEnv(env, "GC_SESSION", "fake")
+	return gcHome, runtimeDir, env
 }
 
 // buildGCBinaryWithCommit compiles the gc binary at outPath with
@@ -1040,6 +1048,8 @@ StandardError=append:%s/supervisor.log
 Environment=GC_HOME=%s
 Environment=XDG_RUNTIME_DIR=%s
 Environment=GC_DOLT=skip
+Environment=GC_BEADS=file
+Environment=GC_SESSION=fake
 
 [Install]
 WantedBy=default.target
