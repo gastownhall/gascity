@@ -13,6 +13,13 @@ Design note for a simpler pack import/export model that replaces the current
 `transitive = ...` and `export = ...` behavior with explicit imports plus
 explicit exports.
 
+This is a proposed replacement for the current PackV2 contract, not a change to
+the active user-facing syntax. The current contract remains documented in
+`docs/packv2/doc-pack-v2.md`, `docs/packv2/skew-analysis.md`,
+`docs/reference/config.md`, and `docs/guides/shareable-packs.md`. PR #2119 is
+the antecedent implementation model this note is trying to make easier to
+explain, migrate, and eventually supersede.
+
 ## Summary
 
 We believe the current PackV2 import surface is trying to express a useful
@@ -214,6 +221,34 @@ If:
 then `A` sees that nested structure because the chain is explicitly public all
 the way up, not because transitive leakage happened by default.
 
+## Migration And Deprecation
+
+The implementation should preserve the current `transitive` / `export` syntax
+for a deprecation window while also accepting `[[exports]]`. The old syntax and
+the new syntax should not be mixed for the same imported binding; if an import
+uses `export` or `transitive`, that binding is in legacy mode, and if an import
+is named by `[[exports]]`, that binding is in explicit-export mode.
+
+The migration mapping is:
+
+| Current import form | Current behavior | Explicit-export form |
+|---|---|---|
+| no `transitive`, no `export` | default transitive import; subordinate public surfaces remain reachable through the import chain | import the pack and export only the public namespaces the parent intentionally wants to expose |
+| `transitive = false` | imported pack is usable locally, but subordinate surfaces do not leak upstream | plain `[imports.name]` with no `[[exports]]` entry, unless the parent wants to expose selected public namespaces |
+| `export = true` | imported surface is flattened into the parent public surface | `[[exports]]` with `from = "name"` and `as = "."` |
+| `transitive = false`, `export = true` | reachable legacy combination that behaves like a shallow facade and must not be lost during migration | `[[exports]]` with `from = "name"` and `as = "."`; no transitive leakage beyond the imported pack's public API |
+
+The deprecation path should be:
+
+1. accept both surfaces, but warn when a pack uses legacy `transitive` or
+   `export`
+2. teach `gc pack` or `gc doctor --fix` to rewrite straightforward legacy
+   imports into explicit `[[exports]]`
+3. keep the old syntax until the PackV2 deprecation wave, `gc pack`, and pack
+   registry migration have all shipped
+4. remove the old syntax only after the repository fixtures and user-facing
+   reference docs have been updated to the explicit-export contract
+
 ## Local Definitions
 
 Current recommendation:
@@ -244,6 +279,18 @@ If two imported packs both export `worker` into the same resulting public
 namespace, that should fail loudly unless and until we design an explicit
 override mechanism.
 
+Multiple imports may intentionally feed the same public namespace only when the
+exported leaf names are disjoint. For example, `from = "c", as = "tools"` and
+`from = "d", as = "tools"` are valid only if the public leaf names under
+`tools.*` do not overlap. The slot is the resolved public leaf name, not merely
+the namespace prefix.
+
+Validation should happen when the pack graph is loaded, in the same
+configuration validation path that resolves imports and exposes pack surfaces.
+An unknown `from` binding, duplicate resolved public leaf, or invalid facade
+target should be a typed configuration error that names the importing pack, the
+`[[exports]]` entry, and the conflicting public name.
+
 This preserves one of the most important properties:
 
 - public API aggregation is intentional
@@ -264,6 +311,26 @@ Most importantly, it aligns with the mental model people tend to expect:
 
 - internal wiring stays internal
 - public API is what the pack author chooses to expose
+
+The import graph must still preserve provenance for tooling. Even when a pack
+facade-exports another pack with `as = "."` or converges several imports into
+one public namespace, `gc why` and related inspection commands should still be
+able to report the origin chain from the surfaced public name back to the
+source pack and definition.
+
+## Implementation Considerations
+
+The config model needs a first-class `Export` table-array alongside
+`[imports.*]`, with at least `from` and `as` fields. The loader should resolve
+`from` against local import bindings, then project only that imported pack's
+public API into the requested public namespace or facade surface.
+
+The generated schema, TOML reference docs, and PackV2 guide should be updated
+in the same implementation wave so users see one coherent contract. Validation
+should reject unknown `from` bindings, malformed `as` values, duplicate public
+leaf names, and legacy/new syntax conflicts with context-rich messages such as
+`export from "tools": unknown import binding` or
+`export as "tools": duplicate public name "tools.worker"`.
 
 ## Open Questions
 
