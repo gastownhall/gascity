@@ -2382,6 +2382,29 @@ func TestDaemonMaxRestartsZero(t *testing.T) {
 	}
 }
 
+func TestDaemonAutoRestartOnDriftDefault(t *testing.T) {
+	d := DaemonConfig{}
+	if !d.AutoRestartOnDriftEnabled() {
+		t.Errorf("AutoRestartOnDriftEnabled() = false, want true (default)")
+	}
+}
+
+func TestDaemonAutoRestartOnDriftExplicitTrue(t *testing.T) {
+	v := true
+	d := DaemonConfig{AutoRestartOnDrift: &v}
+	if !d.AutoRestartOnDriftEnabled() {
+		t.Errorf("AutoRestartOnDriftEnabled() = false, want true")
+	}
+}
+
+func TestDaemonAutoRestartOnDriftExplicitFalse(t *testing.T) {
+	v := false
+	d := DaemonConfig{AutoRestartOnDrift: &v}
+	if d.AutoRestartOnDriftEnabled() {
+		t.Errorf("AutoRestartOnDriftEnabled() = true, want false (kill switch)")
+	}
+}
+
 func TestDaemonRestartWindowDefault(t *testing.T) {
 	d := DaemonConfig{}
 	got := d.RestartWindowDuration()

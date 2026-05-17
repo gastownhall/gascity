@@ -1141,6 +1141,11 @@
           ],
           "description": "NudgeDispatcher selects how queued nudges get delivered to running\nsessions. \"legacy\" (default) auto-spawns a per-session `gc nudge poll`\nprocess that polls the file-backed queue every 2s. \"supervisor\" runs\nthe delivery loop inside the city runtime instead, with a unix-socket\nwake fast path triggered by enqueue, eliminating the per-session bd\nshellout storm.",
           "default": "legacy"
+        },
+        "auto_restart_on_drift": {
+          "type": "boolean",
+          "description": "AutoRestartOnDrift controls whether `gc start` automatically restarts\nthe supervisor when it detects the running supervisor's binary or\npack snapshot has drifted from on-disk state. Nil (unset) defaults\nto true — operators get the correct-by-default behavior. Set to\nfalse as a global kill switch (e.g., for production cities where a\nrebuild on the host should not auto-restart the supervisor).",
+          "default": true
         }
       },
       "additionalProperties": false,

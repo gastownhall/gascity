@@ -1660,6 +1660,25 @@ type DaemonConfig struct {
 	// wake fast path triggered by enqueue, eliminating the per-session bd
 	// shellout storm.
 	NudgeDispatcher string `toml:"nudge_dispatcher,omitempty" jsonschema:"default=legacy,enum=legacy,enum=supervisor"`
+	// AutoRestartOnDrift controls whether `gc start` automatically restarts
+	// the supervisor when it detects the running supervisor's binary or
+	// pack snapshot has drifted from on-disk state. Nil (unset) defaults
+	// to true — operators get the correct-by-default behavior. Set to
+	// false as a global kill switch (e.g., for production cities where a
+	// rebuild on the host should not auto-restart the supervisor).
+	AutoRestartOnDrift *bool `toml:"auto_restart_on_drift,omitempty" jsonschema:"default=true"`
+}
+
+// AutoRestartOnDriftEnabled reports whether the supervisor should be
+// auto-restarted when `gc start` detects binary or pack drift. The
+// default is true: operators get correct-by-default behavior. The
+// per-invocation `--no-auto-restart` flag does NOT override the config
+// kill switch — production safety wins.
+func (d *DaemonConfig) AutoRestartOnDriftEnabled() bool {
+	if d.AutoRestartOnDrift == nil {
+		return true
+	}
+	return *d.AutoRestartOnDrift
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
