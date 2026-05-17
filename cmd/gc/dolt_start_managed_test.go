@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	bdpack "github.com/gastownhall/gascity/examples/bd"
 )
@@ -273,5 +275,70 @@ func TestResolveDoltArchiveLevel(t *testing.T) {
 				t.Errorf("resolveDoltArchiveLevel(%d) = %d, want %d", tt.explicit, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestStartManagedDolt_GatesPreflightBehindLifecycleLock pins the #2130 fix:
+// when the managed-dolt lifecycle lock is held by another caller,
+// startManagedDoltProcessWithOptions must NOT run preflight cleanup or proceed
+// to spawn `dolt sql-server`. It should block on waitForManagedDoltLifecycleOrReady
+// until either the lock is freed (and we acquire it) or the wait times out.
+//
+// Verifies the lock-acquire wrapping fixes the concurrent-starters race where
+// two `gc dolt start` invocations both proceeded to preflight + spawn and
+// ended up with two competing dolt sql-server processes (one on the configured
+// port, one on the address_in_use fallback port).
+func TestStartManagedDolt_GatesPreflightBehindLifecycleLock(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads", "dolt"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	// Acquire the lifecycle lock externally to simulate another in-flight starter.
+	externalLock, _, err := openManagedDoltLifecycleLock(cityPath)
+	if err != nil {
+		t.Fatalf("openManagedDoltLifecycleLock: %v", err)
+	}
+	defer func() {
+		releaseManagedDoltLifecycleLock(externalLock)
+	}()
+	gotExternal, err := tryManagedDoltLifecycleLock(externalLock)
+	if err != nil {
+		t.Fatalf("tryManagedDoltLifecycleLock(external): %v", err)
+	}
+	if !gotExternal {
+		t.Fatal("expected external lock acquisition to succeed on first try")
+	}
+
+	// If start ever reaches preflight, the fix is broken — fail loudly.
+	var preflightCalls int32
+	oldPreflight := managedDoltPreflightCleanupFn
+	managedDoltPreflightCleanupFn = func(string) error {
+		atomic.AddInt32(&preflightCalls, 1)
+		return nil
+	}
+	t.Cleanup(func() {
+		managedDoltPreflightCleanupFn = oldPreflight
+	})
+
+	// Short timeout so the waitForManagedDoltLifecycleOrReady loop exits quickly.
+	report, startErr := startManagedDoltProcessWithOptions(
+		cityPath, "127.0.0.1", "13306", "root", "warning", -1, 500*time.Millisecond, false,
+	)
+
+	if startErr == nil {
+		t.Fatalf("expected timeout error from lifecycle-lock contention, got nil; report=%+v", report)
+	}
+	if !strings.Contains(startErr.Error(), "timed out waiting") {
+		t.Fatalf("expected wait-timeout error, got: %v", startErr)
+	}
+	if report.Ready {
+		t.Errorf("expected report.Ready=false on lock-contention timeout, got true")
+	}
+	if calls := atomic.LoadInt32(&preflightCalls); calls != 0 {
+		t.Fatalf("preflight called %d times while external lock was held; lifecycle lock did not gate preflight", calls)
 	}
 }

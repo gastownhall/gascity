@@ -47,6 +47,45 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	archiveLevel = resolveDoltArchiveLevel(archiveLevel)
 
 	report := managedDoltStartReport{}
+
+	lockFile, _, err := openManagedDoltLifecycleLock(cityPath)
+	if err != nil {
+		return report, err
+	}
+	defer func() {
+		if lockFile != nil {
+			_ = lockFile.Close()
+		}
+	}()
+	locked, err := tryManagedDoltLifecycleLock(lockFile)
+	if err != nil {
+		return report, err
+	}
+	if !locked {
+		recoverReport := managedDoltRecoverReport{}
+		observed, acquired, waitErr := waitForManagedDoltLifecycleOrReady(cityPath, host, port, user, timeout, lockFile, layout, &recoverReport)
+		if waitErr != nil {
+			return report, waitErr
+		}
+		if observed {
+			report.Ready = true
+			report.PID = recoverReport.PID
+			report.Port = recoverReport.Port
+			if publish {
+				if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
+					return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
+				}
+			}
+			return report, nil
+		}
+		locked = acquired
+	}
+	if !locked {
+		return report, fmt.Errorf("managed dolt lifecycle lock not acquired")
+	}
+	defer releaseManagedDoltLifecycleLock(lockFile)
+	lockFile = nil
+
 	currentPort := portNum
 	for attempt := 1; attempt <= 5; attempt++ {
 		report.Attempts = attempt
