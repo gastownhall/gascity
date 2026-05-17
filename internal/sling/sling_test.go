@@ -142,6 +142,35 @@ type testNotifier struct{}
 func (testNotifier) PokeController(_ string)      {}
 func (testNotifier) PokeControlDispatch(_ string) {}
 
+type closeLaunchedWorkflowNotifier struct {
+	store    beads.Store
+	sourceID string
+	storeRef string
+	once     sync.Once
+	closed   int
+	err      error
+}
+
+func (n *closeLaunchedWorkflowNotifier) PokeController(_ string) {
+	n.once.Do(func() {
+		roots, err := sourceworkflow.ListLiveRoots(n.store, n.sourceID, n.storeRef, n.storeRef)
+		if err != nil {
+			n.err = err
+			return
+		}
+		closedStatus := "closed"
+		for _, root := range roots {
+			if err := n.store.Update(root.ID, beads.UpdateOpts{Status: &closedStatus}); err != nil {
+				n.err = err
+				return
+			}
+			n.closed++
+		}
+	})
+}
+
+func (*closeLaunchedWorkflowNotifier) PokeControlDispatch(_ string) {}
+
 func testDeps(cfg *config.City, sp runtime.Provider, runner SlingRunner) SlingDeps {
 	if cfg != nil && len(cfg.FormulaLayers.City) == 0 {
 		cfg.FormulaLayers.City = []string{sharedTestFormulaDir}
@@ -1751,6 +1780,81 @@ title = "Do work"
 	}
 	if !sourceworkflow.WorkflowMatchesSource(root, source.ID, deps.StoreRef, deps.StoreRef) {
 		t.Fatalf("root metadata = %#v, want workflow to match source %s", root.Metadata, source.ID)
+	}
+	updatedSource, err := deps.Store.Get(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updatedSource.Metadata["workflow_id"]; got != result.WorkflowID {
+		t.Fatalf("source workflow_id = %q, want %q", got, result.WorkflowID)
+	}
+}
+
+func TestSlingAttachGraphFormulaAcceptsRootClosedBeforeVisibilityCheck(t *testing.T) {
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Daemon:    config.DaemonConfig{FormulaV2: true},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{formulaDir},
+		},
+	}
+	formulatest.EnableV2ForTest(t)
+	config.InjectImplicitAgents(cfg)
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	notifier := &closeLaunchedWorkflowNotifier{
+		store:    deps.Store,
+		sourceID: source.ID,
+		storeRef: deps.StoreRef,
+	}
+	deps.Notify = notifier
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.AttachFormula(context.Background(), "graph-work", source.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+	if notifier.err != nil {
+		t.Fatalf("notifier close: %v", notifier.err)
+	}
+	if notifier.closed != 1 {
+		t.Fatalf("notifier closed = %d, want 1", notifier.closed)
+	}
+	root, err := deps.Store.Get(result.WorkflowID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if root.Status != "closed" {
+		t.Fatalf("root status = %q, want closed", root.Status)
+	}
+	if !sourceworkflow.WorkflowMatchesSource(root, source.ID, deps.StoreRef, deps.StoreRef) {
+		t.Fatalf("root metadata = %#v, want workflow to match source %s", root.Metadata, source.ID)
+	}
+	liveRoots, err := sourceworkflow.ListLiveRoots(deps.Store, source.ID, deps.StoreRef, deps.StoreRef)
+	if err != nil {
+		t.Fatalf("ListLiveRoots: %v", err)
+	}
+	if len(liveRoots) != 0 {
+		t.Fatalf("live roots = %#v, want none after notifier closes root", liveRoots)
 	}
 	updatedSource, err := deps.Store.Get(source.ID)
 	if err != nil {
