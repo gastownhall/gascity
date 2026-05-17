@@ -32,7 +32,7 @@ print_failure_details() {
 
   # Portable across bash 3.2 (macOS default) and bash 4+. mapfile/readarray
   # are bash 4+ only — using them on macOS runners exits 127 (command not
-  # found) and red-runs the entire Mac/make test job.
+  # found) and fails the entire Mac/make test job.
   failed_tests=()
   while IFS= read -r failed_test_name; do
     failed_tests+=("$failed_test_name")
