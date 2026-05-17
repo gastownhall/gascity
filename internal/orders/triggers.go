@@ -136,7 +136,15 @@ func cronFieldMatches(field string, value int) bool {
 		return true
 	}
 	for _, part := range strings.Split(field, ",") {
-		n, err := strconv.Atoi(strings.TrimSpace(part))
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "*/") {
+			step, err := strconv.Atoi(strings.TrimPrefix(part, "*/"))
+			if err == nil && step > 0 && value%step == 0 {
+				return true
+			}
+			continue
+		}
+		n, err := strconv.Atoi(part)
 		if err == nil && n == value {
 			return true
 		}

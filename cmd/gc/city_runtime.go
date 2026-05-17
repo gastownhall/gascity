@@ -20,6 +20,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -35,6 +37,8 @@ import (
 // beads are still compensated by the next startup sweep if shutdown also
 // cannot wait long enough.
 const reloadOrderDrainTimeout = 1 * time.Second
+
+var orderRescanInterval = time.Minute
 
 // CityRuntime holds all running state for a single city's reconciliation
 // loop. It encapsulates the per-city lifecycle that was previously spread
@@ -65,6 +69,10 @@ type CityRuntime struct {
 	wg                      wispGC
 	od                      orderDispatcher
 	retiredOrderDispatchers []orderDispatcher
+	orderSet                []orders.Order
+	orderSetSignature       string
+	orderRescanEnabled      bool
+	orderRescanLast         time.Time
 	trace                   *sessionReconcilerTraceManager
 
 	orderSweepWatchdogLast time.Time
@@ -228,7 +236,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		fmt.Fprintf(p.Stderr, "gc start: closed %d orphaned order-tracking beads\n", n) //nolint:errcheck // best-effort stderr
 	}
 
-	od := buildOrderDispatcher(p.CityPath, p.Cfg, p.Rec, p.Stderr)
+	od, orderSnapshot := buildOrderDispatcherWithSnapshot(p.CityPath, p.Cfg, p.Rec, p.Stderr, "gc start: order scan")
 
 	suspendedNames := computeSuspendedNames(p.Cfg, p.CityName, p.CityPath)
 
@@ -251,6 +259,10 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		mat:                     mat,
 		wg:                      wg,
 		od:                      od,
+		orderSet:                orderSnapshot.Orders,
+		orderSetSignature:       orderSnapshot.Signature,
+		orderRescanEnabled:      true,
+		orderRescanLast:         time.Now(),
 		trace:                   newSessionReconcilerTraceManager(p.CityPath, p.CityName, p.Stderr),
 		rec:                     p.Rec,
 		poolSessions:            p.PoolSessions,
@@ -931,10 +943,98 @@ func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
 		return
 	}
 	now := time.Now()
+	cr.rescanOrderDispatcherIfDue(ctx, cityRoot, now)
 	cr.runOrderTrackingSweepWatchdog(now)
 	if cr.od != nil {
 		cr.od.dispatch(ctx, cityRoot, now)
 	}
+}
+
+func (cr *CityRuntime) rescanOrderDispatcherIfDue(ctx context.Context, cityRoot string, now time.Time) {
+	if !cr.orderRescanEnabled || cr.tomlPath == "" || strings.TrimSpace(cityRoot) == "" {
+		return
+	}
+	if !cr.orderRescanLast.IsZero() && now.Sub(cr.orderRescanLast) < orderRescanInterval {
+		return
+	}
+	if _, _, err := cr.rescanOrderDispatcher(ctx, cityRoot, cr.cfg, "gc patrol: order scan", now); err != nil {
+		cr.orderRescanLast = now
+		logDispatchError(cr.stderr, "%s: order rescan: %v", cr.logPrefix, err)
+	}
+}
+
+func (cr *CityRuntime) rescanOrderDispatcher(ctx context.Context, cityRoot string, cfg *config.City, cmdName string, now time.Time) (bool, string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	snapshot, err := scanOrderSetSnapshotFS(fsys.OSFS{}, cityRoot, cfg, cr.stderr, cmdName)
+	if err != nil {
+		return false, "", err
+	}
+	cr.orderRescanLast = now
+	if snapshot.Signature == cr.orderSetSignature {
+		return false, "unchanged", nil
+	}
+
+	summary := orderSetChangeSummary(cr.orderSet, snapshot.Orders)
+	if cr.od != nil {
+		drainCtx, drainCancel := context.WithTimeout(ctx, reloadOrderDrainTimeout)
+		cr.drainOutgoingOrderDispatcher(drainCtx, cr.od)
+		drainCancel()
+	}
+	cr.od = buildOrderDispatcherFromOrderSet(cityRoot, cfg, snapshot.Orders, cr.rec, cr.stderr)
+	cr.orderSet = snapshot.Orders
+	cr.orderSetSignature = snapshot.Signature
+	if summary != "unchanged" {
+		fmt.Fprintf(cr.stderr, "%s: orders reloaded: %s\n", cr.logPrefix, summary) //nolint:errcheck // best-effort stderr
+	}
+	return true, summary, nil
+}
+
+func orderSetChangeSummary(oldOrders, newOrders []orders.Order) string {
+	oldByName := make(map[string]orders.Order, len(oldOrders))
+	for _, a := range oldOrders {
+		oldByName[a.ScopedName()] = a
+	}
+	newByName := make(map[string]orders.Order, len(newOrders))
+	for _, a := range newOrders {
+		newByName[a.ScopedName()] = a
+	}
+
+	var added, removed, changed []string
+	for name, next := range newByName {
+		prev, ok := oldByName[name]
+		if !ok {
+			added = append(added, name)
+			continue
+		}
+		if orderSetSignature([]orders.Order{prev}) != orderSetSignature([]orders.Order{next}) {
+			changed = append(changed, name)
+		}
+	}
+	for name := range oldByName {
+		if _, ok := newByName[name]; !ok {
+			removed = append(removed, name)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	sort.Strings(changed)
+
+	var parts []string
+	if len(added) > 0 {
+		parts = append(parts, "added "+strings.Join(added, ", "))
+	}
+	if len(removed) > 0 {
+		parts = append(parts, "removed "+strings.Join(removed, ", "))
+	}
+	if len(changed) > 0 {
+		parts = append(parts, "changed "+strings.Join(changed, ", "))
+	}
+	if len(parts) == 0 {
+		return "unchanged"
+	}
+	return strings.Join(parts, "; ")
 }
 
 func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
@@ -1089,9 +1189,41 @@ func (cr *CityRuntime) reloadConfigTraced(
 		appendWarning(warning)
 	}
 	if cr.configRev != "" && result.Revision == cr.configRev {
+		ordersChanged, orderSummary, orderErr := cr.rescanOrderDispatcher(ctx, cityRoot, result.Cfg, "gc reload: order scan", time.Now())
+		if orderErr != nil {
+			err := fmt.Errorf("order reload: %w", orderErr)
+			fmt.Fprintf(cr.stderr, "%s: %v (keeping old orders)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+			telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
+			if trace != nil {
+				trace.RecordConfigReload(cr.configRev, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+			}
+			return reloadControlReply{
+				Outcome:  reloadOutcomeFailed,
+				Error:    err.Error(),
+				Revision: result.Revision,
+				Warnings: warnings,
+			}
+		}
 		if cr.cs != nil && cr.cs.storeMetadataChanged(result.Cfg) {
 			cr.cs.update(result.Cfg, cr.sp)
 			message := fmt.Sprintf("Config reloaded: bead store metadata changed (rev %s)", shortRev(result.Revision))
+			if ordersChanged {
+				message = fmt.Sprintf("Config reloaded: bead store metadata changed; orders reloaded: %s (rev %s)", orderSummary, shortRev(result.Revision))
+			}
+			fmt.Fprintln(cr.stdout, message) //nolint:errcheck // best-effort stdout
+			if trace != nil {
+				trace.RecordConfigReload(cr.configRev, result.Revision, TraceOutcomeApplied, source, nil, nil, false, warnings, nil)
+			}
+			telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeApplied), len(warnings), nil)
+			return reloadControlReply{
+				Outcome:  reloadOutcomeApplied,
+				Message:  message,
+				Revision: result.Revision,
+				Warnings: warnings,
+			}
+		}
+		if ordersChanged {
+			message := fmt.Sprintf("Orders reloaded: %s (config rev %s)", orderSummary, shortRev(result.Revision))
 			fmt.Fprintln(cr.stdout, message) //nolint:errcheck // best-effort stdout
 			if trace != nil {
 				trace.RecordConfigReload(cr.configRev, result.Revision, TraceOutcomeApplied, source, nil, nil, false, warnings, nil)
@@ -1280,7 +1412,15 @@ func (cr *CityRuntime) reloadConfigTraced(
 		cr.drainOutgoingOrderDispatcher(drainCtx, cr.od)
 		drainCancel()
 	}
-	cr.od = buildOrderDispatcher(cityRoot, nextCfg, cr.rec, cr.stderr)
+	nextOD, orderSnapshot := buildOrderDispatcherWithSnapshot(cityRoot, nextCfg, cr.rec, cr.stderr, "gc reload: order scan")
+	orderSummary := orderSetChangeSummary(cr.orderSet, orderSnapshot.Orders)
+	cr.od = nextOD
+	cr.orderSet = orderSnapshot.Orders
+	cr.orderSetSignature = orderSnapshot.Signature
+	cr.orderRescanLast = time.Now()
+	if orderSummary != "unchanged" {
+		fmt.Fprintf(cr.stderr, "%s: orders reloaded: %s\n", cr.logPrefix, orderSummary) //nolint:errcheck // best-effort stderr
+	}
 
 	cr.serviceStateMu.Lock()
 	cr.cfg = nextCfg
