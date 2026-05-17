@@ -135,11 +135,12 @@ type RotationResult struct {
 // FileRecorderOption values configure rotation behavior; defaults
 // are documented on each option.
 //
-// On open, the constructor performs a one-shot orphan sweep on the
-// log directory: any events.jsonl.rotating-* file left from a crashed
-// rotation is gzipped into its canonical archive name, and any
-// *.gz.tmp file is removed. Sweep failures are logged to stderr and
-// do not block the recorder from opening.
+// On open, the constructor performs a one-shot sweep on the log
+// directory: legacy events.jsonl.archive-YYYYMMDD.gz files are
+// renamed to the seq-stamped convention, events.jsonl.rotating-* files
+// left from a crashed rotation are gzipped into canonical archive
+// names, and *.gz.tmp files are removed. Sweep failures are logged to
+// stderr and do not block the recorder from opening.
 func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) (*FileRecorder, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("creating event log directory: %w", err)

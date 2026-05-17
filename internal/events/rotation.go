@@ -86,11 +86,13 @@ func gzipAndArchive(source, dest string, stderr io.Writer) error {
 	return nil
 }
 
-// reapOrphanedRotatingFiles cleans up artifacts left behind by a
-// crashed rotation: each events.jsonl.rotating-<ts> is gzipped into
-// its canonical archive name (the seq window is read from the
-// rotating file's first and last lines), and each *.gz.tmp is removed
-// outright (an incomplete gzip cannot be salvaged).
+// reapOrphanedRotatingFiles cleans up rotation-era artifacts on
+// startup: each legacy events.jsonl.archive-YYYYMMDD.gz file is
+// renamed into the canonical seq-stamped convention, each
+// events.jsonl.rotating-<ts> file is gzipped into its canonical
+// archive name (the seq window is read from the rotating file's first
+// and last lines when the filename lacks seqs), and each *.gz.tmp is
+// removed outright (an incomplete gzip cannot be salvaged).
 //
 // The sweep is idempotent: re-running it on a clean directory is a
 // no-op. Failures on individual files are logged to stderr and the
@@ -108,6 +110,7 @@ func reapOrphanedRotatingFiles(dir string, stderr io.Writer) error {
 		return fmt.Errorf("listing %q: %w", dir, err)
 	}
 
+	var legacyArchives []string
 	var rotatings []string
 	for _, e := range entries {
 		if e.IsDir() {
@@ -115,6 +118,8 @@ func reapOrphanedRotatingFiles(dir string, stderr io.Writer) error {
 		}
 		name := e.Name()
 		switch {
+		case isLegacyArchiveBasename(name):
+			legacyArchives = append(legacyArchives, name)
 		case hasRotatingPrefix(name):
 			rotatings = append(rotatings, name)
 		case hasGzipTmpSuffix(name):
@@ -122,6 +127,13 @@ func reapOrphanedRotatingFiles(dir string, stderr io.Writer) error {
 			if err := os.Remove(path); err != nil {
 				fmt.Fprintf(stderr, "events: rotation: removing stale %q: %v\n", name, err) //nolint:errcheck // best-effort stderr
 			}
+		}
+	}
+
+	sort.Strings(legacyArchives)
+	for _, base := range legacyArchives {
+		if err := migrateLegacyArchive(filepath.Join(dir, base), dir, base); err != nil {
+			fmt.Fprintf(stderr, "events: rotation: legacy archive %q: %v\n", filepath.Join(dir, base), err) //nolint:errcheck // best-effort stderr
 		}
 	}
 
@@ -202,6 +214,27 @@ func archiveRotatingFile(src, dir, base string, stderr io.Writer) error {
 	return gzipAndArchive(src, dest, stderr)
 }
 
+func migrateLegacyArchive(src, dir, base string) error {
+	ts, err := parseLegacyArchiveBasename(base)
+	if err != nil {
+		return err
+	}
+	first, last, err := readGzipSeqWindow(src)
+	if err != nil {
+		return fmt.Errorf("reading seq window: %w", err)
+	}
+	dest := filepath.Join(dir, formatArchiveBasename(ts, first, last))
+	if _, err := os.Stat(dest); err == nil {
+		return fmt.Errorf("target archive %q already exists; leaving legacy archive in place", dest)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat target archive %q: %w", dest, err)
+	}
+	if err := os.Rename(src, dest); err != nil {
+		return fmt.Errorf("renaming to canonical archive: %w", err)
+	}
+	return nil
+}
+
 // parseRotatingBasename extracts (timestamp, firstSeq, lastSeq) from a
 // new-format rotating filename: events.jsonl.rotating-<ts>-seq-<a>-<b>.
 // Returns ok=false for legacy filenames that lack the seq segment;
@@ -274,6 +307,46 @@ func readSeqWindow(path string) (uint64, uint64, error) {
 	if last < first {
 		// Single-event file collapses both ends.
 		last = first
+	}
+	return first, last, nil
+}
+
+func readGzipSeqWindow(path string) (uint64, uint64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer f.Close() //nolint:errcheck // read-only file
+
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		return 0, 0, fmt.Errorf("gunzip: %w", err)
+	}
+	defer gr.Close() //nolint:errcheck // read-only stream
+
+	scanner := bufio.NewScanner(gr)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var first, last uint64
+	for scanner.Scan() {
+		var header struct {
+			Seq uint64 `json:"seq"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &header); err != nil {
+			continue
+		}
+		if header.Seq == 0 {
+			continue
+		}
+		if first == 0 {
+			first = header.Seq
+		}
+		last = header.Seq
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, 0, fmt.Errorf("scanning: %w", err)
+	}
+	if first == 0 {
+		return 0, 0, fmt.Errorf("no parseable events in %q", path)
 	}
 	return first, last, nil
 }
