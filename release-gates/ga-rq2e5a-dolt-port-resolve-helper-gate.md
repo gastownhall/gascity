@@ -17,8 +17,8 @@ Verdict: PASS
 | 2 | Acceptance criteria met | PASS | The helper `examples/dolt/assets/scripts/port_resolve.sh` exists with `resolve_dolt_port_or_die`; `runtime.sh` and maintenance `dolt-target.sh` route through it; current source-closure script `GC_DOLT_PORT.*3307` fallbacks were removed; packlint and helper tests cover the pinned behavior; `gc dolt sync --db` reserved-name validation still runs before runtime port resolution. |
 | 3 | Tests pass | PASS | Focused acceptance tests, shell syntax checks, `go vet ./...`, `go build ./...`, and `make test-fast-parallel` passed on the PR branch. |
 | 4 | No high-severity review findings open | PASS | Review notes contain five informational findings and no HIGH findings. |
-| 5 | Final branch is clean | PASS | `git status --porcelain=v1` was empty before writing this checklist; the checklist is committed as the only deployer delta before push and status is rechecked after the gate commit. |
-| 6 | Branch diverges cleanly from main | PASS | `git merge-base --is-ancestor origin/main HEAD` returned 0 before the gate commit; PR #2282 reports `mergeStateStatus: CLEAN`. |
+| 5 | Final branch is clean | PASS | `git status --porcelain=v1` was empty before the gate commits and rechecked clean after push. |
+| 6 | Branch diverges cleanly from main | PASS | `git merge-base --is-ancestor origin/main HEAD` returned 0 after the gate commit; `git merge-tree` conflict scan found no conflict markers; PR #2282 reports `mergeable: MERGEABLE`. GitHub `mergeStateStatus: BLOCKED` is from queued/in-progress CI and branch protection, not a merge conflict. |
 
 ## Acceptance Evidence
 
