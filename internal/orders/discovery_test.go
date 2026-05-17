@@ -85,7 +85,7 @@ schedule = "*/5 * * * *"
 	}
 }
 
-func TestDiscoverRootRejectsLegacyFlatOrderFilename(t *testing.T) {
+func TestDiscoverRootAcceptsLegacyFlatOrderFilename(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/pack/orders/health-check.order.toml"] = []byte(`
 [order]
@@ -94,15 +94,21 @@ trigger = "cron"
 schedule = "*/5 * * * *"
 `)
 
-	_, err := discoverRoot(fs, ScanRoot{
+	orders, err := discoverRoot(fs, ScanRoot{
 		Dir:          "/pack/orders",
 		FormulaLayer: "/pack/formulas",
 	})
-	if err == nil {
-		t.Fatal("discoverRoot succeeded, want hard error for legacy flat order filename")
+	if err != nil {
+		t.Fatalf("discoverRoot: %v", err)
 	}
-	if !strings.Contains(err.Error(), "rename to orders/health-check.toml") {
-		t.Fatalf("error = %v, want rename guidance", err)
+	if len(orders) != 1 {
+		t.Fatalf("got %d orders, want 1", len(orders))
+	}
+	if orders[0].Name != "health-check" {
+		t.Fatalf("Name = %q, want health-check", orders[0].Name)
+	}
+	if orders[0].Source != "/pack/orders/health-check.order.toml" {
+		t.Fatalf("Source = %q, want legacy flat source", orders[0].Source)
 	}
 }
 

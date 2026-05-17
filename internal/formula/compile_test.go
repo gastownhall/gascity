@@ -2126,7 +2126,7 @@ path = "check.sh"
 	})
 }
 
-func TestCompileRejectsLegacyFormulaFilename(t *testing.T) {
+func TestCompileAcceptsLegacyFormulaFilename(t *testing.T) {
 	dir := t.TempDir()
 	formulaContent := `
 formula = "legacy-name"
@@ -2140,12 +2140,12 @@ title = "Do work"
 		t.Fatal(err)
 	}
 
-	_, err := Compile(context.Background(), "legacy-name", []string{dir}, nil)
-	if err == nil {
-		t.Fatal("Compile succeeded, want hard error for legacy formula filename")
+	got, err := Compile(context.Background(), "legacy-name", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
 	}
-	if !strings.Contains(err.Error(), "unsupported PackV1 formula path") || !strings.Contains(err.Error(), "rename to legacy-name.toml") {
-		t.Fatalf("error = %v, want legacy formula rename guidance", err)
+	if got.Name != "legacy-name" {
+		t.Fatalf("Name = %q, want legacy-name", got.Name)
 	}
 }
 

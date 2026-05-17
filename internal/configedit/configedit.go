@@ -555,19 +555,60 @@ func (e *Editor) ResumeCity() error {
 	})
 }
 
-// CreateAgent adds a new agent to the config. Returns an error if an
+// CreateAgent adds a new city-local convention agent. Returns an error if an
 // agent with the same qualified name already exists.
 func (e *Editor) CreateAgent(a config.Agent) error {
-	return e.Edit(func(cfg *config.City) error {
+	return e.EditExpanded(func(_, expanded *config.City) error {
 		qn := a.QualifiedName()
-		for _, existing := range cfg.Agents {
+		for _, existing := range expanded.Agents {
 			if existing.QualifiedName() == qn {
 				return fmt.Errorf("%w: agent %q", ErrAlreadyExists, qn)
 			}
 		}
-		cfg.Agents = append(cfg.Agents, a)
-		return nil
+		if err := WriteLocalDiscoveredAgentConfig(e.fs, filepath.Dir(e.tomlPath), a); err != nil {
+			return err
+		}
+		return ErrUnmodified
 	})
+}
+
+// WriteLocalDiscoveredAgentConfig writes the durable config for a city-local
+// convention agent under agents/<name>/agent.toml.
+func WriteLocalDiscoveredAgentConfig(fs fsys.FS, cityRoot string, agent config.Agent) error {
+	if agent.Name == "" {
+		return fmt.Errorf("%w: agent name is required", ErrValidation)
+	}
+
+	agentDir := filepath.Join(cityRoot, "agents", agent.Name)
+	if err := fs.MkdirAll(agentDir, 0o755); err != nil {
+		return fmt.Errorf("creating agents/%s: %w", agent.Name, err)
+	}
+
+	values := make(map[string]any)
+	if agent.Description != "" {
+		values["description"] = agent.Description
+	}
+	if agent.Dir != "" {
+		values["dir"] = agent.Dir
+	}
+	if agent.Scope != "" {
+		values["scope"] = agent.Scope
+	}
+	if agent.Provider != "" {
+		values["provider"] = agent.Provider
+	}
+	if agent.Suspended {
+		values["suspended"] = true
+	}
+
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(values); err != nil {
+		return fmt.Errorf("encoding agents/%s/agent.toml: %w", agent.Name, err)
+	}
+	if err := fsys.WriteFileAtomic(fs, filepath.Join(agentDir, "agent.toml"), buf.Bytes(), 0o644); err != nil {
+		return fmt.Errorf("writing agents/%s/agent.toml: %w", agent.Name, err)
+	}
+	return nil
 }
 
 // AgentUpdate holds optional fields for a partial agent update.

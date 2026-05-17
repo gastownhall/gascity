@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -304,19 +303,4 @@ func configureTestDoltIdentityEnv(t *testing.T) {
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(homeDir, ".gitconfig"))
 	t.Setenv("DOLT_ROOT_PATH", homeDir)
-}
-
-func configureRealBdAndDoltPath(t *testing.T) {
-	t.Helper()
-
-	bdPath := waitTestRealBDPath(t)
-	doltPath, err := exec.LookPath("dolt")
-	if err != nil {
-		t.Skip("dolt not installed")
-	}
-	t.Setenv("PATH", strings.Join([]string{
-		filepath.Dir(bdPath),
-		filepath.Dir(doltPath),
-		os.Getenv("PATH"),
-	}, string(os.PathListSeparator)))
 }

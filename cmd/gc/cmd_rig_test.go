@@ -56,7 +56,7 @@ func writeSchema2RigCity(t *testing.T, cityPath, workspaceName, cityToml, siteTo
 	}
 }
 
-func writeSchema2RigCityFS(t *testing.T, f *fsys.Fake, cityPath, workspaceName, cityToml, siteToml string) {
+func writeSchema2RigCityFS(t *testing.T, f *fsys.Fake, cityPath, workspaceName, cityToml string) {
 	t.Helper()
 	f.Dirs[cityPath] = true
 	f.Dirs[filepath.Join(cityPath, ".gc")] = true
@@ -65,10 +65,7 @@ func writeSchema2RigCityFS(t *testing.T, f *fsys.Fake, cityPath, workspaceName, 
 		cityToml = "[workspace]\n"
 	}
 	f.Files[filepath.Join(cityPath, "city.toml")] = []byte(cityToml)
-	if siteToml == "" {
-		siteToml = fmt.Sprintf("workspace_name = %q\n", workspaceName)
-	}
-	f.Files[config.SiteBindingPath(cityPath)] = []byte(siteToml)
+	f.Files[config.SiteBindingPath(cityPath)] = []byte(fmt.Sprintf("workspace_name = %q\n", workspaceName))
 }
 
 func TestDoRigAdd_Basic(t *testing.T) {
@@ -704,7 +701,7 @@ func TestDoRigAdd_ConfigUnchangedOnInfraFailure(t *testing.T) {
 
 	// Use a fake FS that fails on beads init for the rig.
 	f := fsys.NewFake()
-	writeSchema2RigCityFS(t, f, cityPath, "test", originalToml, "")
+	writeSchema2RigCityFS(t, f, cityPath, "test", originalToml)
 	f.Dirs["/fake-rig"] = true
 	f.Errors[filepath.Join("/fake-rig", ".beads")] = os.ErrPermission
 
@@ -728,7 +725,7 @@ func TestDoRigAdd_RootPackDefaultRigImportsErrorDoesNotMutateRig(t *testing.T) {
 	f := fsys.NewFake()
 	cityPath := "/city"
 	rigPath := "/rigs/my-project"
-	writeSchema2RigCityFS(t, f, cityPath, "test", "[workspace]\n", "")
+	writeSchema2RigCityFS(t, f, cityPath, "test", "[workspace]\n")
 	originalToml := string(f.Files[filepath.Join(cityPath, "city.toml")])
 	f.Errors[filepath.Join(cityPath, "pack.toml")] = errors.New("read denied")
 
@@ -825,7 +822,7 @@ func TestDoRigAdd_CreateMissingRigDirectoryError(t *testing.T) {
 	base := fsys.NewFake()
 	cityPath := "/city"
 	rigPath := "/rigs/my-project"
-	writeSchema2RigCityFS(t, base, cityPath, "test", "[workspace]\n", "")
+	writeSchema2RigCityFS(t, base, cityPath, "test", "[workspace]\n")
 	originalToml := string(base.Files[filepath.Join(cityPath, "city.toml")])
 	mkdirErr := errors.New("mkdir denied")
 
@@ -1040,7 +1037,7 @@ func TestDoRigSuspend(t *testing.T) {
 
 func TestDoRigSuspendNotFound(t *testing.T) {
 	f := fsys.NewFake()
-	writeSchema2RigCityFS(t, f, "/city", "test-city", "[workspace]\n", "")
+	writeSchema2RigCityFS(t, f, "/city", "test-city", "[workspace]\n")
 
 	var stdout, stderr bytes.Buffer
 	code := doRigSuspend(f, "/city", "nonexistent", &stdout, &stderr)
@@ -1092,7 +1089,7 @@ func TestDoRigResume(t *testing.T) {
 
 func TestDoRigResumeNotFound(t *testing.T) {
 	f := fsys.NewFake()
-	writeSchema2RigCityFS(t, f, "/city", "test-city", "[workspace]\n", "")
+	writeSchema2RigCityFS(t, f, "/city", "test-city", "[workspace]\n")
 
 	var stdout, stderr bytes.Buffer
 	code := doRigResume(f, "/city", "nonexistent", &stdout, &stderr)
@@ -2126,7 +2123,7 @@ func TestDoRigAdd_ExistingBeadsStatErrorFailsClosed(t *testing.T) {
 	rigPath := "/alpha-beta"
 	beadsPath := filepath.Join(rigPath, ".beads")
 
-	writeSchema2RigCityFS(t, f, cityPath, "my-city", "[workspace]\n", "")
+	writeSchema2RigCityFS(t, f, cityPath, "my-city", "[workspace]\n")
 	f.Dirs[rigPath] = true
 	f.Errors[beadsPath] = os.ErrPermission
 

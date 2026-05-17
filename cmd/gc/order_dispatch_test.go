@@ -5177,21 +5177,29 @@ func TestBuildOrderDispatcherOverrideDisablesDropsFromDispatcher(t *testing.T) {
 	sysDir := t.TempDir()
 	topoDir := t.TempDir()
 
-	sysAutoDir := sysDir + "/orders/beads-health"
-	if err := mkdirAll(sysAutoDir); err != nil {
+	sysFormulaDir := sysDir + "/formulas"
+	sysOrdersDir := sysDir + "/orders"
+	if err := mkdirAll(sysFormulaDir); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, sysAutoDir+"/order.toml", `[order]
+	if err := mkdirAll(sysOrdersDir); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, sysOrdersDir+"/beads-health.toml", `[order]
 exec = "scripts/beads-health.sh"
 trigger = "cooldown"
 interval = "30s"
 `)
 
-	topoAutoDir := topoDir + "/orders/wasteland-poll"
-	if err := mkdirAll(topoAutoDir); err != nil {
+	topoFormulaDir := topoDir + "/formulas"
+	topoOrdersDir := topoDir + "/orders"
+	if err := mkdirAll(topoFormulaDir); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, topoAutoDir+"/order.toml", `[order]
+	if err := mkdirAll(topoOrdersDir); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, topoOrdersDir+"/wasteland-poll.toml", `[order]
 exec = "scripts/wasteland-poll.sh"
 trigger = "cooldown"
 interval = "2m"
@@ -5200,7 +5208,7 @@ interval = "2m"
 	disabled := false
 	cfg := &config.City{
 		FormulaLayers: config.FormulaLayers{
-			City: []string{sysDir, topoDir},
+			City: []string{sysFormulaDir, topoFormulaDir},
 		},
 		Orders: config.OrdersConfig{
 			Overrides: []config.OrderOverride{

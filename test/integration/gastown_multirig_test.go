@@ -68,18 +68,27 @@ func waitForActiveSessionTargets(t *testing.T, cityDir string, targets []string,
 // directories under an isolated integration GC_HOME. Returns the city
 // directory and a slice of rig directory paths.
 //
-// The city starts with the default minimal scaffold. Callers overwrite
-// city.toml afterward and use gc restart/start against the isolated
-// supervisor-managed city registered for this path.
+// The city starts from a file-backed schema-2 source so config-only multi-rig
+// tests do not depend on the developer machine's bd/dolt toolchain before the
+// test overwrites city.toml with its scenario-specific fixture.
 func setupMultiRigCity(t *testing.T, rigCount int) (cityDir string, rigDirs []string) {
 	t.Helper()
 	env := newIsolatedCommandEnv(t, false)
 	cityName := uniqueCityName()
 	cityDir = filepath.Join(t.TempDir(), cityName)
+	sourceDir := filepath.Join(t.TempDir(), cityName+"-source")
+	require.NoError(t, os.MkdirAll(sourceDir, 0o755))
+
+	var source strings.Builder
+	fmt.Fprintf(&source, "[workspace]\nname = %s\n", quote(cityName))
+	fmt.Fprintf(&source, "\n[beads]\nprovider = \"file\"\n")
+	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "city.toml"), []byte(source.String()), 0o644))
+	pack := fmt.Sprintf("[pack]\nname = %s\nschema = 2\n", quote(cityName))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "pack.toml"), []byte(pack), 0o644))
 
 	// Create the city scaffold inside an isolated supervisor env so
 	// multi-rig tests do not contend with the suite-global supervisor.
-	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", cityDir)
+	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--from", sourceDir, cityDir)
 	require.NoError(t, err, "gc init: %s", out)
 	registerCityCommandEnv(cityDir, env)
 
@@ -109,8 +118,9 @@ func setupMultiRigCity(t *testing.T, rigCount int) (cityDir string, rigDirs []st
 	return cityDir, rigDirs
 }
 
-// writeMultiRigToml writes a city.toml that references the given rig directories.
-// Each rig gets a [[rigs]] entry and a rig-scoped worker agent.
+// writeMultiRigToml writes a schema-2 city plus site bindings for the given
+// rig directories. Each rig gets a [[rigs]] entry and each agent is declared
+// under agents/<name>/agent.toml.
 func writeMultiRigToml(t *testing.T, cityDir, cityName string, rigDirs []string, agents []gasTownAgent) {
 	t.Helper()
 
@@ -119,32 +129,9 @@ func writeMultiRigToml(t *testing.T, cityDir, cityName string, rigDirs []string,
 	fmt.Fprintf(&b, "\n[beads]\nprovider = \"file\"\n")
 	fmt.Fprintf(&b, "\n[daemon]\npatrol_interval = \"100ms\"\n")
 
-	for i, rd := range rigDirs {
+	for i := range rigDirs {
 		rigName := fmt.Sprintf("rig-%d", i)
-		fmt.Fprintf(&b, "\n[[rigs]]\nname = %s\npath = %s\n",
-			quote(rigName), quote(rd))
-	}
-
-	for _, a := range agents {
-		fmt.Fprintf(&b, "\n[[agent]]\nname = %s\n", quote(a.Name))
-		fmt.Fprintf(&b, "start_command = %s\n", quote(a.StartCommand))
-		if a.Dir != "" {
-			fmt.Fprintf(&b, "dir = %s\n", quote(a.Dir))
-		}
-		if a.Suspended {
-			fmt.Fprintf(&b, "suspended = true\n")
-		}
-		if len(a.Env) > 0 {
-			b.WriteString("\n[agent.env]\n")
-			for k, v := range a.Env {
-				fmt.Fprintf(&b, "%s = %s\n", k, quote(v))
-			}
-		}
-		if a.Pool != nil {
-			fmt.Fprintf(&b, "min_active_sessions = %d\n", a.Pool.Min)
-			fmt.Fprintf(&b, "max_active_sessions = %d\n", a.Pool.Max)
-			fmt.Fprintf(&b, "scale_check = %s\n", quote(a.Pool.Check))
-		}
+		fmt.Fprintf(&b, "\n[[rigs]]\nname = %s\n", quote(rigName))
 	}
 
 	for _, a := range agents {
@@ -159,6 +146,16 @@ func writeMultiRigToml(t *testing.T, cityDir, cityName string, rigDirs []string,
 
 	tomlPath := filepath.Join(cityDir, "city.toml")
 	require.NoError(t, os.WriteFile(tomlPath, []byte(b.String()), 0o644))
+	writeGasTownAgentFiles(t, cityDir, agents)
+
+	var site strings.Builder
+	fmt.Fprintf(&site, "workspace_name = %s\n", quote(cityName))
+	for i, rd := range rigDirs {
+		rigName := fmt.Sprintf("rig-%d", i)
+		fmt.Fprintf(&site, "\n[[rig]]\nname = %s\npath = %s\n", quote(rigName), quote(rd))
+	}
+	require.NoError(t, os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cityDir, ".gc", "site.toml"), []byte(site.String()), 0o644))
 }
 
 func installFakeBDForCity(t *testing.T, cityDir string) {

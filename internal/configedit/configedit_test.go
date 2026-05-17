@@ -815,7 +815,10 @@ suspended = true
 
 func TestCreateAgent(t *testing.T) {
 	dir := t.TempDir()
-	path := writeTOML(t, dir, minimalCity())
+	path := writeTOML(t, dir, "[workspace]\n")
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	ed := configedit.NewEditor(fsys.OSFS{}, path)
 
 	err := ed.CreateAgent(config.Agent{Name: "coder", Provider: "claude"})
@@ -823,10 +826,13 @@ func TestCreateAgent(t *testing.T) {
 		t.Fatalf("CreateAgent: %v", err)
 	}
 
-	cfg := readTOML(t, path)
+	if _, err := os.Stat(filepath.Join(dir, "agents", "coder", "agent.toml")); err != nil {
+		t.Fatalf("agent.toml stat: %v", err)
+	}
+	cfg := readExpandedTOML(t, path)
 	found := false
 	for _, a := range cfg.Agents {
-		if a.Name == "coder" {
+		if a.Name == "coder" && a.Provider == "claude" {
 			found = true
 		}
 	}
