@@ -4087,6 +4087,57 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	assertSingleStopWithBenignNoise(t, ops)
 }
 
+func TestStopManagedCityAllowsForcedShutdownToUnwind(t *testing.T) {
+	cityPath := t.TempDir()
+	logFile := filepath.Join(t.TempDir(), "ops.log")
+	script := writeSpyScript(t, logFile)
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+
+	done := make(chan struct{})
+	time.AfterFunc(60*time.Millisecond, func() {
+		close(done)
+	})
+	closer := &closerSpy{}
+	forceStop := &atomic.Bool{}
+	mc := &managedCity{
+		name:   "bright-lights",
+		cancel: func() {},
+		done:   done,
+		closer: closer,
+		cr: &CityRuntime{
+			cfg: &config.City{
+				Daemon: config.DaemonConfig{
+					ShutdownTimeout: "20ms",
+				},
+			},
+			sp:                runtime.NewFake(),
+			rec:               events.Discard,
+			stdout:            io.Discard,
+			stderr:            io.Discard,
+			forceStopShutdown: forceStop,
+		},
+	}
+
+	var stderr bytes.Buffer
+	err := stopManagedCity(mc, cityPath, &stderr)
+	if err != nil {
+		t.Fatalf("stopManagedCity: %v; stderr=%q", err, stderr.String())
+	}
+	if !forceStop.Load() {
+		t.Fatal("expected forced cleanup to request force-stop shutdown")
+	}
+	if !closer.closed {
+		t.Fatal("expected closer to be closed after forced cleanup")
+	}
+	if strings.Contains(stderr.String(), "after forced shutdown") {
+		t.Fatalf("stderr = %q, want no forced-shutdown timeout", stderr.String())
+	}
+
+	ops := readOpLog(t, logFile)
+	assertSingleStopWithBenignNoise(t, ops)
+}
+
 func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 	cityPath := t.TempDir()
 	logFile := filepath.Join(t.TempDir(), "ops.log")

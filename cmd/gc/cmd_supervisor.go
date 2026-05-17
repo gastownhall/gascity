@@ -672,6 +672,14 @@ func managedCityStopTimeout(mc *managedCity) time.Duration {
 	return mc.cr.cfg.Daemon.ShutdownTimeoutDuration()
 }
 
+func managedCityForcedStopTimeout(mc *managedCity) time.Duration {
+	timeout := managedCityStopTimeout(mc)
+	if timeout <= 0 {
+		return timeout
+	}
+	return timeout * 5
+}
+
 // stopManagedCity cancels a city's context, waits up to its configured
 // grace period for it to exit, forces shutdown if it doesn't, and then
 // closes the bead provider and file recorder. It returns a non-nil error
@@ -709,15 +717,16 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 			mc.cr.shutdown()
 		}()
 	}
-	if timeout > 0 {
+	forceTimeout := managedCityForcedStopTimeout(mc)
+	if forceTimeout > 0 {
 		select {
 		case <-mc.done:
 			// Forced shutdown completed before the second timeout — the
 			// city is out. Clear the pending error so we report success.
 			stopErr = nil
-		case <-time.After(timeout):
-			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, timeout) //nolint:errcheck
-			stopErr = fmt.Errorf("city %q did not exit within %s after forced shutdown", mc.name, timeout)
+		case <-time.After(forceTimeout):
+			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, forceTimeout) //nolint:errcheck
+			stopErr = fmt.Errorf("city %q did not exit within %s after forced shutdown", mc.name, forceTimeout)
 		}
 	}
 	if err := shutdownBeadsProvider(cityPath); err != nil {
