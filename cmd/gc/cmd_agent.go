@@ -447,6 +447,7 @@ have moved to "gc session" and "gc runtime".`,
 func newAgentAddCmd(stdout, stderr io.Writer) *cobra.Command {
 	var name, promptTemplate, dir string
 	var suspended bool
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "add --name <name>",
 		Short: "Add an agent scaffold",
@@ -465,6 +466,19 @@ agent in a suspended state.`,
   gc agent add --name worker --prompt-template ./worker.md --suspended`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if jsonOutput {
+				if cmdAgentAdd(name, promptTemplate, dir, suspended, io.Discard, stderr) != 0 {
+					return errExit
+				}
+				resultName, qualifiedName := agentJSONName(name, dir)
+				return writeManagementActionJSON(stdout, managementActionResult{
+					Command:       commandName("agent", "add"),
+					Action:        "add",
+					Name:          resultName,
+					QualifiedName: qualifiedName,
+					Suspended:     managementBoolPtr(suspended),
+				})
+			}
 			if cmdAgentAdd(name, promptTemplate, dir, suspended, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -475,6 +489,7 @@ agent in a suspended state.`,
 	cmd.Flags().StringVar(&promptTemplate, "prompt-template", "", "Path to prompt template file (relative to city root)")
 	cmd.Flags().StringVar(&dir, "dir", "", "Working directory for the agent (relative to city root)")
 	cmd.Flags().BoolVar(&suspended, "suspended", false, "Register the agent in suspended state")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
 	return cmd
 }
 
@@ -570,7 +585,8 @@ func doAgentAdd(fs fsys.FS, cityPath, name, promptTemplate, dir string, suspende
 }
 
 func newAgentSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "suspend <name>",
 		Short: "Suspend an agent (reconciler will skip it)",
 		Long: `Suspend an agent by setting suspended=true in its durable config.
@@ -580,12 +596,26 @@ started or restarted. Existing sessions continue running but won't be
 replaced if they exit. Use "gc agent resume" to restore.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				if cmdAgentSuspend(args, io.Discard, stderr) != 0 {
+					return errExit
+				}
+				return writeManagementActionJSON(stdout, managementActionResult{
+					Command:       commandName("agent", "suspend"),
+					Action:        "suspend",
+					Name:          args[0],
+					QualifiedName: args[0],
+					Suspended:     managementBoolPtr(true),
+				})
+			}
 			if cmdAgentSuspend(args, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
+	return cmd
 }
 
 // cmdAgentSuspend is the CLI entry point for suspending an agent.
@@ -624,7 +654,8 @@ func doAgentSuspend(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 }
 
 func newAgentResumeCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "resume <name>",
 		Short: "Resume a suspended agent",
 		Long: `Resume a suspended agent by clearing suspended in its durable config.
@@ -633,12 +664,26 @@ The reconciler will start the agent on its next tick. Supports bare
 names (resolved via rig context) and qualified names (e.g. "myrig/worker").`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				if cmdAgentResume(args, io.Discard, stderr) != 0 {
+					return errExit
+				}
+				return writeManagementActionJSON(stdout, managementActionResult{
+					Command:       commandName("agent", "resume"),
+					Action:        "resume",
+					Name:          args[0],
+					QualifiedName: args[0],
+					Suspended:     managementBoolPtr(false),
+				})
+			}
 			if cmdAgentResume(args, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
+	return cmd
 }
 
 // cmdAgentResume is the CLI entry point for resuming a suspended agent.

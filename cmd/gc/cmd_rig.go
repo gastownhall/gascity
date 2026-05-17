@@ -65,6 +65,7 @@ func newRigAddCmd(stdout, stderr io.Writer) *cobra.Command {
 	var prefixFlag string
 	var defaultBranchFlag string
 	var adoptFlag bool
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "add <path>",
 		Short: "Register a project as a rig",
@@ -99,6 +100,26 @@ Skips beads init; the git repo check remains informational.`,
   gc rig add /path/to/existing --adopt`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				cityPath, err := resolveCity()
+				if err != nil {
+					fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
+					return errExit
+				}
+				if len(args) < 1 {
+					fmt.Fprintln(stderr, "gc rig add: missing path") //nolint:errcheck // best-effort stderr
+					return errExit
+				}
+				rigPath, err := resolveRigAddPath(cityPath, args[0])
+				if err != nil {
+					fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
+					return errExit
+				}
+				if doRigAdd(fsys.OSFS{}, cityPath, rigPath, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, io.Discard, stderr) != 0 {
+					return errExit
+				}
+				return writeManagementActionJSON(stdout, rigAddJSONSummary(cityPath, rigPath, nameFlag, prefixFlag))
+			}
 			if cmdRigAdd(args, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -111,6 +132,7 @@ Skips beads init; the git repo check remains informational.`,
 	cmd.Flags().StringVar(&defaultBranchFlag, "default-branch", "", "mainline branch (default: auto-detect from origin/HEAD or current branch)")
 	cmd.Flags().BoolVar(&startSuspended, "start-suspended", false, "add rig in suspended state (dormant-by-default)")
 	cmd.Flags().BoolVar(&adoptFlag, "adopt", false, "adopt existing .beads/ directory (skip init)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
 	return cmd
 }
 
@@ -972,7 +994,8 @@ func rigBeadsStatus(fs fsys.FS, dir string) string {
 }
 
 func newRigSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "suspend [name]",
 		Short: "Suspend a rig (reconciler will skip its agents)",
 		Long: `Suspend a rig by setting suspended=true in city.toml.
@@ -982,6 +1005,24 @@ the reconciler skips them and gc hook returns empty. The rig's beads
 database remains accessible. Use "gc rig resume" to restore.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				rigName := ""
+				if len(args) > 0 {
+					rigName = args[0]
+				} else if ctx, err := resolveContext(); err == nil {
+					rigName = ctx.RigName
+				}
+				if cmdRigSuspend(args, io.Discard, stderr) != 0 {
+					return errExit
+				}
+				return writeManagementActionJSON(stdout, managementActionResult{
+					Command:   commandName("rig", "suspend"),
+					Action:    "suspend",
+					Name:      rigName,
+					Rig:       rigName,
+					Suspended: managementBoolPtr(true),
+				})
+			}
 			if cmdRigSuspend(args, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -989,6 +1030,8 @@ database remains accessible. Use "gc rig resume" to restore.`,
 		},
 		ValidArgsFunction: completeRigNames,
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
+	return cmd
 }
 
 // cmdRigSuspend is the CLI entry point for suspending a rig.
@@ -1055,7 +1098,8 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 }
 
 func newRigResumeCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "resume [name]",
 		Short: "Resume a suspended rig",
 		Long: `Resume a suspended rig by clearing suspended in city.toml.
@@ -1063,6 +1107,24 @@ func newRigResumeCmd(stdout, stderr io.Writer) *cobra.Command {
 The reconciler will start the rig's agents on its next tick.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				rigName := ""
+				if len(args) > 0 {
+					rigName = args[0]
+				} else if ctx, err := resolveContext(); err == nil {
+					rigName = ctx.RigName
+				}
+				if cmdRigResume(args, io.Discard, stderr) != 0 {
+					return errExit
+				}
+				return writeManagementActionJSON(stdout, managementActionResult{
+					Command:   commandName("rig", "resume"),
+					Action:    "resume",
+					Name:      rigName,
+					Rig:       rigName,
+					Suspended: managementBoolPtr(false),
+				})
+			}
 			if cmdRigResume(args, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -1070,6 +1132,8 @@ The reconciler will start the rig's agents on its next tick.`,
 		},
 		ValidArgsFunction: completeRigNames,
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
+	return cmd
 }
 
 // cmdRigResume is the CLI entry point for resuming a suspended rig.
@@ -1136,7 +1200,8 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 }
 
 func newRigRemoveCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "remove <name>",
 		Short: "Remove a rig from the city",
 		Long: `Remove a rig from the current city's configuration.
@@ -1146,6 +1211,17 @@ binding from .gc/site.toml.`,
 		Example: `  gc rig remove myrig`,
 		Args:    cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				if cmdRigRemove(args[0], io.Discard, stderr) != 0 {
+					return errExit
+				}
+				return writeManagementActionJSON(stdout, managementActionResult{
+					Command: commandName("rig", "remove"),
+					Action:  "remove",
+					Name:    args[0],
+					Rig:     args[0],
+				})
+			}
 			if cmdRigRemove(args[0], stdout, stderr) != 0 {
 				return errExit
 			}
@@ -1153,6 +1229,8 @@ binding from .gc/site.toml.`,
 		},
 		ValidArgsFunction: completeRigNames,
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
+	return cmd
 }
 
 // cmdRigRemove removes a rig from the current city and its local site binding.

@@ -97,7 +97,8 @@ func cmdServiceDoctor(name string, stdout, stderr io.Writer) int {
 }
 
 func newServiceRestartCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "restart <name>",
 		Short: "Restart a workspace service",
 		Long: `Stop and restart a workspace service by name.
@@ -106,12 +107,24 @@ The controller closes the current service process and starts a fresh one.
 Useful after updating pack scripts without a full city restart.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				if cmdServiceRestart(args[0], io.Discard, stderr) != 0 {
+					return errExit
+				}
+				return writeManagementActionJSON(stdout, managementActionResult{
+					Command: commandName("service", "restart"),
+					Action:  "restart",
+					Name:    args[0],
+				})
+			}
 			if cmdServiceRestart(args[0], stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
+	return cmd
 }
 
 func cmdServiceRestart(name string, stdout, stderr io.Writer) int {

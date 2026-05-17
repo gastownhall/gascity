@@ -110,31 +110,59 @@ func newWaitInspectCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 func newWaitCancelCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "cancel <wait-id>",
 		Short: "Cancel a wait",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				if cmdWaitSetState(args[0], waitStateCanceled, io.Discard, stderr) != 0 {
+					return errExit
+				}
+				return writeManagementActionJSON(stdout, managementActionResult{
+					Command: commandName("wait", "cancel"),
+					Action:  "cancel",
+					Name:    args[0],
+					State:   waitStateCanceled,
+				})
+			}
 			if cmdWaitSetState(args[0], waitStateCanceled, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
+	return cmd
 }
 
 func newWaitReadyCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "ready <wait-id>",
 		Short: "Manually mark a wait ready",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				if cmdWaitSetState(args[0], waitStateReady, io.Discard, stderr) != 0 {
+					return errExit
+				}
+				return writeManagementActionJSON(stdout, managementActionResult{
+					Command: commandName("wait", "ready"),
+					Action:  "ready",
+					Name:    args[0],
+					State:   waitStateReady,
+				})
+			}
 			if cmdWaitSetState(args[0], waitStateReady, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
+	return cmd
 }
 
 func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep bool, stdout, stderr io.Writer) int {
