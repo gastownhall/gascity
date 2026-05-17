@@ -248,6 +248,14 @@ func normalizeRemoteSource(source string) remoteSource {
 }
 
 func defaultRunGit(dir string, args ...string) (string, error) {
+	env := hermeticGitEnv()
+	if len(args) > 0 && needsCredentials(args[0]) {
+		env = credentialAwareGitEnv()
+	}
+	return runGitWithEnv(dir, env, args...)
+}
+
+func runGitWithEnv(dir string, env []string, args ...string) (string, error) {
 	cmdArgs := append([]string{
 		"-c", "core.fsmonitor=false",
 		"-c", "core.hooksPath=/dev/null",
@@ -257,18 +265,52 @@ func defaultRunGit(dir string, args ...string) (string, error) {
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	for _, e := range os.Environ() {
-		if k, _, ok := strings.Cut(e, "="); ok && fetchGitEnvBlacklist[k] {
-			continue
-		}
-		cmd.Env = append(cmd.Env, e)
-	}
-	cmd.Env = append(cmd.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// needsCredentials reports whether a git subcommand may need credential
+// helpers from the user's global gitconfig. Network operations on remotes
+// (clone, fetch, ls-remote, push) require user-configured credentials to
+// access private repositories; local repo operations do not.
+func needsCredentials(subcommand string) bool {
+	switch subcommand {
+	case "clone", "fetch", "ls-remote", "push":
+		return true
+	}
+	return false
+}
+
+// sanitizedGitEnv returns os.Environ() with dangerous GIT_* overrides removed.
+// This is the shared base for both hermetic and credential-aware invocations.
+func sanitizedGitEnv() []string {
+	env := make([]string, 0, len(os.Environ()))
+	for _, e := range os.Environ() {
+		if k, _, ok := strings.Cut(e, "="); ok && fetchGitEnvBlacklist[k] {
+			continue
+		}
+		env = append(env, e)
+	}
+	return env
+}
+
+// hermeticGitEnv returns an environment that silences global and system
+// gitconfig. Use this for operations within a cache repo where determinism
+// matters and credentials are unnecessary.
+func hermeticGitEnv() []string {
+	return append(sanitizedGitEnv(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+}
+
+// credentialAwareGitEnv returns an environment that allows the user's
+// ~/.gitconfig (including credential helpers installed by `gh auth setup-git`
+// or similar) to apply. Use this only for network operations that need to
+// authenticate to private remotes — clone, fetch, ls-remote, push.
+func credentialAwareGitEnv() []string {
+	return sanitizedGitEnv()
 }
 
 var fetchGitEnvBlacklist = map[string]bool{

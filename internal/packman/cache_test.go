@@ -386,3 +386,59 @@ func TestEnsureRepoInCacheReclonesCacheFileWithoutGit(t *testing.T) {
 		t.Fatalf("EnsureRepoInCache path = %q, want %q", got, path)
 	}
 }
+
+func TestNeedsCredentialsCoversNetworkSubcommands(t *testing.T) {
+	for _, sub := range []string{"clone", "fetch", "ls-remote", "push"} {
+		if !needsCredentials(sub) {
+			t.Errorf("needsCredentials(%q) = false, want true", sub)
+		}
+	}
+	for _, sub := range []string{"checkout", "reset", "clean", "status", "rev-parse", "merge", "rebase"} {
+		if needsCredentials(sub) {
+			t.Errorf("needsCredentials(%q) = true, want false", sub)
+		}
+	}
+}
+
+func TestHermeticGitEnvSilencesGlobalConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	env := hermeticGitEnv()
+	if !containsEnv(env, "GIT_CONFIG_NOSYSTEM=1") {
+		t.Errorf("hermeticGitEnv() missing GIT_CONFIG_NOSYSTEM=1; env=%v", env)
+	}
+	if !containsEnv(env, "GIT_CONFIG_GLOBAL=/dev/null") {
+		t.Errorf("hermeticGitEnv() missing GIT_CONFIG_GLOBAL=/dev/null; env=%v", env)
+	}
+}
+
+func TestCredentialAwareGitEnvAllowsGlobalConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	env := credentialAwareGitEnv()
+	for _, banned := range []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"} {
+		if containsEnv(env, banned) {
+			t.Errorf("credentialAwareGitEnv() set %q; credential helpers would not apply", banned)
+		}
+	}
+}
+
+func TestSanitizedGitEnvDropsDangerousOverrides(t *testing.T) {
+	t.Setenv("GIT_DIR", "/tmp/should-not-leak")
+	t.Setenv("GIT_CONFIG_GLOBAL", "/tmp/poisoned-config")
+	env := sanitizedGitEnv()
+	for _, banned := range []string{"GIT_DIR=", "GIT_CONFIG_GLOBAL="} {
+		for _, e := range env {
+			if strings.HasPrefix(e, banned) {
+				t.Errorf("sanitizedGitEnv() inherited %q from caller environment", e)
+			}
+		}
+	}
+}
+
+func containsEnv(env []string, want string) bool {
+	for _, e := range env {
+		if e == want {
+			return true
+		}
+	}
+	return false
+}

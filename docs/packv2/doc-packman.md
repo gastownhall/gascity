@@ -104,6 +104,30 @@ Common source forms:
 - `ssh://...`
 - `git@...`
 - bare `github.com/org/repo`
+- GitHub `/tree/<ref>/<subpath>` or `/blob/<ref>/<subpath>/pack.toml` URL
+
+### Subpath-of-repo sources
+
+A single repository may publish multiple packs at distinct paths.
+Address a subdirectory with a **double-slash** separator between the
+repo URL and the subpath:
+
+```toml
+[imports.pack-author]
+source = "github.com/enthought/gascity_packs//pack-author"
+
+[imports.llm-wiki]
+source = "github.com/enthought/gascity_packs//llm-wiki"
+version = "^1.0"
+```
+
+Both imports clone `enthought/gascity_packs` once into the shared cache
+and resolve their respective subdirectories from that clone. A GitHub
+`tree`/`blob` URL is parsed equivalently and may be pasted directly.
+
+The single-slash form `github.com/org/repo/subpath` is **not**
+supported and will fail to clone — without the `//` separator the
+loader treats the entire string as the repo URL.
 
 Resolution rules:
 
@@ -117,6 +141,31 @@ Resolution rules:
 Remote imports that need reproducible restore semantics must resolve to
 entries in `packs.lock`. Local-path imports remain valid authoring
 surfaces, but they are not a substitute for committed remote lock state.
+
+### Authenticating to private remotes
+
+`gc import install` shells out to `git` for `clone`, `fetch`, and
+`ls-remote`. Those network operations read credential configuration
+from the user's `~/.gitconfig`, so any credential helper installed by
+the operator applies. Common setups:
+
+- **GitHub CLI (HTTPS):** run `gh auth login` then
+  `gh auth setup-git`. This writes a credential helper to
+  `~/.gitconfig` that supplies a fresh token on every git network call.
+- **SSH:** declare imports with an `ssh://git@github.com/...` or
+  `git@github.com:...` source. SSH agents and `~/.ssh/config` are
+  used as-is.
+- **Personal access token in URL:** not recommended — tokens land in
+  `packs.lock` and process listings.
+
+Operations inside a cached repository (`checkout`, `reset`, `status`,
+`clean`) intentionally run with `GIT_CONFIG_NOSYSTEM=1` and
+`GIT_CONFIG_GLOBAL=/dev/null` so global config cannot alter cache
+state. Only the network-facing subcommands consult the user's
+`~/.gitconfig`. If `gc import install` fails to clone a private
+repository with an authentication error, verify that
+`git clone <source>` works from the same shell — `gc` uses the same
+credential path.
 
 ## Lock file contract
 
