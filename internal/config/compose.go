@@ -168,11 +168,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 			// before pack merging or fragment processing can inject
 			// pack-discovered agents or pack-default rig includes into the same
 			// fields.
-			if err := LegacyV1SurfaceError(root, path); err != nil {
+			if err := LegacyV1SurfaceError(root, path, data); err != nil {
 				return nil, nil, err
 			}
 			prov.Warnings = append(prov.Warnings, legacyWorkspaceIdentitySurfaceWarnings(root, path)...)
-			if err := LegacySiteBindingSurfaceError(root, path); err != nil {
+			if err := LegacySiteBindingSurfaceError(root, path, data); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -391,7 +391,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 		prov.Warnings = append(prov.Warnings, fragWarnings...)
 		if legacyV1SurfaceWarningsEnabled {
-			if err := LegacyInlineAgentSurfaceError(frag, fragPath); err != nil {
+			if err := LegacyInlineAgentSurfaceError(frag, fragPath, fragData); err != nil {
 				return nil, nil, err
 			}
 			prov.Warnings = append(prov.Warnings, DetectLegacyV1Surfaces(frag, fragPath)...)

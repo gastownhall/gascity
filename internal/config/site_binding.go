@@ -112,11 +112,12 @@ func legacyRigPathSurfaceWarnings(cfg *City, source string) []string {
 // LegacySiteBindingSurfaceErrors returns hard-error diagnostics for pre-1.0
 // workspace identity and rig-path declarations that should now live in
 // .gc/site.toml instead of city config.
-func LegacySiteBindingSurfaceErrors(cfg *City, source string) []string {
+func LegacySiteBindingSurfaceErrors(cfg *City, source string, data ...[]byte) []string {
 	if cfg == nil {
 		return nil
 	}
 
+	locator := optionalConfigDiagnosticLocator(data)
 	var errors []string
 	for _, rig := range cfg.Rigs {
 		if strings.TrimSpace(rig.Path) == "" {
@@ -128,7 +129,7 @@ func LegacySiteBindingSurfaceErrors(cfg *City, source string) []string {
 		}
 		errors = append(errors, fmt.Sprintf(
 			"%s: unsupported pre-1.0 rig.path for rig %q; move it to .gc/site.toml (run `gc doctor --fix` if this is the root city.toml; otherwise add the binding manually and remove rig.path from the fragment)",
-			source,
+			sourceWithDiagnosticLine(source, locator.lineForRigPath(rigName)),
 			rigName,
 		))
 	}
@@ -138,13 +139,9 @@ func LegacySiteBindingSurfaceErrors(cfg *City, source string) []string {
 
 // LegacySiteBindingSurfaceError aggregates unsupported pre-1.0 site-binding
 // surfaces into one load-time error for schema=2 enforcement paths.
-func LegacySiteBindingSurfaceError(cfg *City, source string) error {
-	violations := LegacySiteBindingSurfaceErrors(cfg, source)
-	if len(violations) == 0 {
-		return nil
-	}
-	return fmt.Errorf("pre-1.0 site-binding fields are no longer supported:\n  - %s",
-		strings.Join(violations, "\n  - "))
+func LegacySiteBindingSurfaceError(cfg *City, source string, data ...[]byte) error {
+	violations := LegacySiteBindingSurfaceErrors(cfg, source, data...)
+	return configSurfaceError("pre-1.0 site-binding fields are no longer supported", violations)
 }
 
 // SiteBindingPath returns the machine-local site binding file for a city.

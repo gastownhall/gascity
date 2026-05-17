@@ -82,6 +82,7 @@ func defaultSearchPaths() []string {
 
 // ParseFile parses a formula from a file path.
 // Supported extensions are .toml, .formula.toml, and .formula.json.
+// For .formula.toml, the ".formula" infix is stripped from the symbolic name.
 func (p *Parser) ParseFile(path string) (*Formula, error) {
 	// Check cache first
 	absPath, err := filepath.Abs(path)

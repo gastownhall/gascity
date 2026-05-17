@@ -166,6 +166,10 @@ workspace_prefix = "sc"
 }
 
 func TestLegacySiteBindingSurfaceErrorAggregatesViolations(t *testing.T) {
+	data := []byte(`[[rigs]]
+name = "frontend"
+path = "/legacy/frontend"
+`)
 	cfg := &City{
 		Workspace: Workspace{Name: "legacy-city", Prefix: "lc"},
 		Rigs: []Rig{{
@@ -174,17 +178,21 @@ func TestLegacySiteBindingSurfaceErrorAggregatesViolations(t *testing.T) {
 		}},
 	}
 
-	err := LegacySiteBindingSurfaceError(cfg, "city.toml")
+	err := LegacySiteBindingSurfaceError(cfg, "city.toml", data)
 	if err == nil {
 		t.Fatal("LegacySiteBindingSurfaceError returned nil, want aggregated error")
 	}
 	for _, want := range []string{
 		"pre-1.0 site-binding fields are no longer supported",
-		`city.toml: unsupported pre-1.0 rig.path for rig "frontend"`,
+		`city.toml:3: unsupported pre-1.0 rig.path for rig "frontend"`,
+		packV1MigrationDocsURL,
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %v, want substring %q", err, want)
 		}
+	}
+	if got := strings.Count(err.Error(), packV1MigrationDocsURL); got != 1 {
+		t.Fatalf("error = %v, want one docs pointer, got %d", err, got)
 	}
 
 	warnings := legacyWorkspaceIdentitySurfaceWarnings(cfg, "city.toml")
@@ -213,8 +221,13 @@ schema = 2
 	if err == nil {
 		t.Fatal("LoadWithIncludes succeeded, want hard error for legacy rig.path")
 	}
-	if !strings.Contains(err.Error(), `unsupported pre-1.0 rig.path for rig "frontend"`) {
-		t.Fatalf("error = %v, want legacy rig.path guidance", err)
+	for _, want := range []string{
+		`/city/city.toml:4: unsupported pre-1.0 rig.path for rig "frontend"`,
+		packV1MigrationDocsURL,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want substring %q", err, want)
+		}
 	}
 }
 

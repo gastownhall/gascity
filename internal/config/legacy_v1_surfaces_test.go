@@ -218,8 +218,9 @@ name = "fragment-worker"
 	}
 	for _, want := range []string{
 		"PackV1 inline agent tables are no longer supported",
-		"/city/fragments/legacy.toml: unsupported PackV1 [[agent]] tables",
+		"/city/fragments/legacy.toml:2: unsupported PackV1 [[agent]] tables",
 		"move each agent to agents/<name>/agent.toml",
+		packV1MigrationDocsURL,
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %v, want substring %q", err, want)
@@ -293,10 +294,11 @@ schema = 2
 		t.Fatal("LoadWithIncludes succeeded, want hard error for schema-2 city legacy surfaces")
 	}
 	for _, want := range []string{
-		"unsupported PackV1 [[agent]] tables",
-		"unsupported PackV1 [packs] entries",
-		"unsupported PackV1 workspace.includes",
-		"unsupported PackV1 workspace.default_rig_includes",
+		"/city/city.toml:7: unsupported PackV1 [[agent]] tables",
+		"/city/city.toml:10: unsupported PackV1 [packs] entries",
+		"/city/city.toml:4: unsupported PackV1 workspace.includes",
+		"/city/city.toml:5: unsupported PackV1 workspace.default_rig_includes",
+		packV1MigrationDocsURL,
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %v, want substring %q", err, want)
@@ -360,6 +362,16 @@ func TestDetectLegacyV1Surfaces_PointsAtDoctorWithoutPromisingInPlaceUpgrade(t *
 }
 
 func TestLegacyV1SurfaceErrorAggregatesViolations(t *testing.T) {
+	data := []byte(`[workspace]
+includes = ["./inc"]
+default_rig_includes = ["./drig"]
+
+[[agent]]
+name = "a"
+
+[packs.p]
+source = "./pack"
+`)
 	cfg := &City{
 		Agents: []Agent{{Name: "a"}},
 		Packs:  map[string]PackSource{"p": {}},
@@ -369,19 +381,22 @@ func TestLegacyV1SurfaceErrorAggregatesViolations(t *testing.T) {
 		},
 	}
 
-	err := LegacyV1SurfaceError(cfg, "city.toml")
+	err := LegacyV1SurfaceError(cfg, "city.toml", data)
 	if err == nil {
 		t.Fatal("LegacyV1SurfaceError returned nil, want aggregated error")
 	}
 	for _, want := range []string{
 		"PackV1 config surfaces are no longer supported",
-		"city.toml: unsupported PackV1 [[agent]] tables",
-		"city.toml: unsupported PackV1 [packs] entries",
-		"city.toml: unsupported PackV1 workspace.includes",
-		"city.toml: unsupported PackV1 workspace.default_rig_includes",
+		"city.toml:5: unsupported PackV1 [[agent]] tables",
+		"city.toml:8: unsupported PackV1 [packs] entries",
+		"city.toml:2: unsupported PackV1 workspace.includes",
+		"city.toml:3: unsupported PackV1 workspace.default_rig_includes",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %v, want substring %q", err, want)
 		}
+	}
+	if got := strings.Count(err.Error(), packV1MigrationDocsURL); got != 1 {
+		t.Fatalf("error = %v, want one docs pointer, got %d", err, got)
 	}
 }

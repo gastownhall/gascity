@@ -255,10 +255,19 @@ formulas/
 - stop treating formula location as configurable path wiring
 - move nested orders out of formula space
 
+Formula files may use either `formulas/<name>.toml` or
+`formulas/<name>.formula.toml`. In both cases, Gas City strips the optional
+`.formula` infix when computing the symbolic formula name, so
+`formulas/build-review.formula.toml` is named `build-review`. If both
+spellings exist for the same name in one directory, the plain `.toml` file wins.
+
 ## Orders
 
-Orders belong in top-level `orders/` and use flat files
-`orders/<name>.toml`.
+Orders belong in top-level `orders/` and use flat files. They may use either
+`orders/<name>.toml` or `orders/<name>.order.toml`. In both cases, Gas City
+strips the optional `.order` infix when computing the symbolic order name, so
+`orders/nightly-sync.order.toml` is named `nightly-sync`. If both spellings
+exist for the same name in one directory, the plain `.toml` file wins.
 
 If your city still uses nested PackV1 order layouts such as
 `formulas/orders/.../order.toml`, migrate them now. Those shapes only
