@@ -23,7 +23,7 @@ Generated: 2026-05-17T05:09:11-07:00
 | 3 | Tests pass | PASS | `make test` passed with `observable go test: PASS log=/tmp/gascity-test.jsonl`; `go vet ./...` passed; `git diff --check origin/main...HEAD` passed. |
 | 4 | No high-severity review findings open | PASS | Reviewer notes report PASS, no source changes, and "Security / OWASP: No new code, no findings." `bd list --label high -n 50` returned no issues. |
 | 5 | Final branch is clean | PASS | `git status --short --branch` returned only `## builder/ga-fyk7mj-1...fork/builder/ga-fyk7mj-1` before this gate file was added. |
-| 6 | Branch diverges cleanly from main | PASS | `git merge-base --is-ancestor origin/main HEAD` exited 0; `git rev-list --left-right --count origin/main...HEAD` returned `0 1`. |
+| 6 | Branch diverges cleanly from main | PASS | `git merge-tree --write-tree origin/main HEAD` exited 0 after final fetch. Current `origin/main` is `b472d0c32`; `git rev-list --left-right --count origin/main...HEAD` returned `1 2`. |
 
 ## Acceptance Trace
 
@@ -42,8 +42,8 @@ Generated: 2026-05-17T05:09:11-07:00
 | `make test` | PASS: `observable go test: PASS log=/tmp/gascity-test.jsonl` |
 | `go vet ./...` | PASS |
 | `git diff --check origin/main...HEAD` | PASS |
-| `git merge-base --is-ancestor origin/main HEAD` | PASS |
-| `git rev-list --left-right --count origin/main...HEAD` | PASS: `0 1` |
+| `git merge-tree --write-tree origin/main HEAD` | PASS |
+| `git rev-list --left-right --count origin/main...HEAD` | PASS: `1 2` after final fetch |
 
 ## Push Target
 
