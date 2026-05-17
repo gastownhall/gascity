@@ -1,12 +1,12 @@
 # Release gate — adaptive reconciler cadence + telemetry (ga-70nf, AD-03 part 3)
 
-**Verdict:** PASS (with maintainer-side fixup)
+**Verdict:** PASS (with maintainer-side and builder-side fixups)
 
 - Bead: `ga-70nf` (AD-03 part 3, deferred from ga-zor1n2 stagger gate)
 - Branch: `quad341:builder/ga-70nf-1`
-- HEAD: `27965cfe` after maintainer fixup (was `5df84922` at original gate review)
+- HEAD: branch tip after maintainer P95 fixup and builder cadence-diagnostics fixup
 - PR: [gastownhall/gascity#1820](https://github.com/gastownhall/gascity/pull/1820)
-- Diff (post-fixup): 2 files, +579 / -1 production + +N / 0 maintainer fixup; 14 unit tests + 1 end-to-end
+- Diff (post-fixup): cadence implementation, cadence unit coverage, and this release-gate note
 
 ## Criteria
 
@@ -25,6 +25,14 @@
 
 - `go build ./internal/beads/...` — clean
 - `go test ./internal/beads/ -run 'TestLatency|TestCadence|TestRecompute' -count=1` — PASS
+- `go test ./internal/beads/... -count=1` — PASS
+- `go test -race ./internal/beads/ -count=1` — PASS
+- `go vet ./...` — PASS
+
+## Builder follow-up fixup
+
+- `updateStatsLocked` now populates `CurrentReconcileInterval`, `LatencyP95Ms`, and `CadenceDriver` on every stats refresh, not only after reconcile cadence recomputation.
+- Demotion transition logs now report the transition cause (`driver=latency`) instead of the post-demotion steady-state driver (`default`).
 
 ## Open items deferred to follow-up
 
