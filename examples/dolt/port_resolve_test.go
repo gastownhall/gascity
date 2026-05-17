@@ -45,6 +45,50 @@ func TestPortResolveOrDieDiscoverySuccess(t *testing.T) {
 	assertPortResolveResult(t, result, 0, "47823\n", "")
 }
 
+func TestPortResolveOrDieProviderDiscoverySuccess(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "dolt-state.json")
+	providerStateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
+	dataDir := filepath.Join(t.TempDir(), "d")
+	cityPath := t.TempDir()
+	if err := os.WriteFile(stateFile, []byte(`{"running":false}`), 0o644); err != nil {
+		t.Fatalf("write state fixture: %v", err)
+	}
+	if err := os.WriteFile(providerStateFile, []byte(fmt.Sprintf(
+		`{"running":true,"pid":%d,"port":47824,"data_dir":%q}`,
+		os.Getpid(),
+		dataDir,
+	)), 0o644); err != nil {
+		t.Fatalf("write provider state fixture: %v", err)
+	}
+
+	result := runPortResolveOrDie(t, portResolveCase{
+		stateFile:           stateFile,
+		providerStateFile:   providerStateFile,
+		dataDir:             dataDir,
+		cityPath:            cityPath,
+		providerManagedPort: "47824",
+	})
+
+	assertPortResolveResult(t, result, 0, "47824\n", "")
+}
+
+func TestPortResolveOrDieExplicitStateSkipsProviderFallback(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "dolt-state.json")
+	providerStateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
+	cityPath := t.TempDir()
+
+	result := runPortResolveOrDie(t, portResolveCase{
+		stateFile:           stateFile,
+		providerStateFile:   providerStateFile,
+		dataDir:             filepath.Join(t.TempDir(), "data"),
+		cityPath:            cityPath,
+		providerManagedPort: "47824",
+		env:                 []string{"GC_DOLT_STATE_FILE=" + stateFile},
+	})
+
+	assertPortResolveResult(t, result, 78, "", expectedPortResolveError(stateFile, cityPath, "missing"))
+}
+
 func TestPortResolveOrDieMissingState(t *testing.T) {
 	stateFile := filepath.Join(t.TempDir(), "dolt-state.json")
 	cityPath := t.TempDir()
@@ -105,11 +149,13 @@ func TestDoltTargetShUsesPortResolve(t *testing.T) {
 }
 
 type portResolveCase struct {
-	stateFile   string
-	dataDir     string
-	cityPath    string
-	managedPort string
-	env         []string
+	stateFile           string
+	providerStateFile   string
+	dataDir             string
+	cityPath            string
+	managedPort         string
+	providerManagedPort string
+	env                 []string
 }
 
 type portResolveResult struct {
@@ -123,23 +169,33 @@ func runPortResolveOrDie(t *testing.T, tc portResolveCase) portResolveResult {
 	root := repoRoot(t)
 	driver := fmt.Sprintf(`
 managed_runtime_port() {
-    if [ -n "${TEST_MANAGED_PORT:-}" ]; then
+    if [ "$1" = "$STATE_FILE" ] && [ -n "${TEST_MANAGED_PORT:-}" ]; then
         printf '%%s\n' "$TEST_MANAGED_PORT"
+        return 0
+    fi
+    if [ -n "${PROVIDER_STATE_FILE:-}" ] && [ "$1" = "$PROVIDER_STATE_FILE" ] && [ -n "${TEST_PROVIDER_MANAGED_PORT:-}" ]; then
+        printf '%%s\n' "$TEST_PROVIDER_MANAGED_PORT"
         return 0
     fi
     return 0
 }
 . %s
-resolve_dolt_port_or_die "$STATE_FILE" "$DATA_DIR" "$CITY_PATH"
+if [ -n "${PROVIDER_STATE_FILE:-}" ]; then
+    resolve_dolt_port_or_die "$STATE_FILE" "$PROVIDER_STATE_FILE" "$DATA_DIR" "$CITY_PATH"
+else
+    resolve_dolt_port_or_die "$STATE_FILE" "$DATA_DIR" "$CITY_PATH"
+fi
 `, shellQuote(filepath.Join(root, "assets", "scripts", "port_resolve.sh")))
 
 	cmd := exec.Command("sh", "-c", driver)
-	cmd.Env = filteredEnv("GC_DOLT_PORT", "STATE_FILE", "DATA_DIR", "CITY_PATH", "TEST_MANAGED_PORT")
+	cmd.Env = filteredEnv("GC_DOLT_PORT", "GC_DOLT_STATE_FILE", "STATE_FILE", "PROVIDER_STATE_FILE", "DATA_DIR", "CITY_PATH", "TEST_MANAGED_PORT", "TEST_PROVIDER_MANAGED_PORT")
 	cmd.Env = append(cmd.Env,
 		"STATE_FILE="+tc.stateFile,
+		"PROVIDER_STATE_FILE="+tc.providerStateFile,
 		"DATA_DIR="+tc.dataDir,
 		"CITY_PATH="+tc.cityPath,
 		"TEST_MANAGED_PORT="+tc.managedPort,
+		"TEST_PROVIDER_MANAGED_PORT="+tc.providerManagedPort,
 	)
 	cmd.Env = append(cmd.Env, tc.env...)
 
@@ -181,6 +237,17 @@ func expectedPortResolveError(stateFile, cityPath, stateStatus string) string {
   state_file: %s (%s)
   city_path:  %s
   consulted:  GC_DOLT_PORT (unset), GC_DOLT_STATE_FILE
+  remediation: run `+"`"+`gc start`+"`"+` to bring up the city, or set
+               GC_DOLT_PORT explicitly to an already-running
+               server.
+`, stateFile, stateStatus, cityPath)
+}
+
+func expectedPortResolveErrorWithProvider(stateFile, cityPath, stateStatus string) string {
+	return fmt.Sprintf(`gc dolt: cannot resolve runtime port
+  state_file: %s (%s)
+  city_path:  %s
+  consulted:  GC_DOLT_PORT (unset), GC_DOLT_STATE_FILE, dolt-provider-state.json
   remediation: run `+"`"+`gc start`+"`"+` to bring up the city, or set
                GC_DOLT_PORT explicitly to an already-running
                server.
