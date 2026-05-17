@@ -3,12 +3,15 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/spf13/cobra"
 )
 
@@ -177,6 +180,73 @@ func TestJSONUnsupportedCommandFailureIsStructured(t *testing.T) {
 	}
 	if payload.OK || payload.Error.ExitCode != code || payload.Error.Code != "json_unsupported" {
 		t.Fatalf("payload = %+v, code=%d", payload, code)
+	}
+}
+
+func TestJSONCommandOutputMatchesDeclaredResultSchema(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	items := []cliWireTaggedEvent{
+		{
+			Actor:   "gc",
+			City:    "schema-city",
+			Message: "created",
+			Seq:     12,
+			Subject: "bead-1",
+			Ts:      time.Unix(1700000000, 0).UTC(),
+			Type:    "bead.created",
+		},
+	}
+	server := newEventsTestServer(t, testEventRoutes{
+		supervisorEvents: func(w http.ResponseWriter, _ *http.Request) {
+			writeJSONResponse(t, w, supervisorEventsListResponse(t, items))
+		},
+	})
+	defer server.Close()
+
+	var schemaStdout, schemaStderr bytes.Buffer
+	code := run([]string{"events", "--json-schema=result"}, &schemaStdout, &schemaStderr)
+	if code != 0 {
+		t.Fatalf("run(events --json-schema=result) = %d, stderr=%q stdout=%q", code, schemaStderr.String(), schemaStdout.String())
+	}
+	if schemaStderr.Len() != 0 {
+		t.Fatalf("schema stderr = %q, want empty", schemaStderr.String())
+	}
+
+	var schemaDoc any
+	if err := json.Unmarshal(schemaStdout.Bytes(), &schemaDoc); err != nil {
+		t.Fatalf("result schema is not JSON: %v\n%s", err, schemaStdout.String())
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource("gc://schemas/events/result.schema.json", schemaDoc); err != nil {
+		t.Fatalf("add result schema resource: %v", err)
+	}
+	schema, err := compiler.Compile("gc://schemas/events/result.schema.json")
+	if err != nil {
+		t.Fatalf("compile result schema: %v\n%s", err, schemaStdout.String())
+	}
+
+	var stdout, stderr bytes.Buffer
+	code = run([]string{"events", "--api", server.URL}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(events --api) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stdout records = %d, want 1: %q", len(lines), stdout.String())
+	}
+	for _, line := range lines {
+		var record any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("output record is not JSON: %v\n%s", err, line)
+		}
+		if err := schema.Validate(record); err != nil {
+			t.Fatalf("output record does not match declared schema: %v\nschema=%s\nrecord=%s", err, schemaStdout.String(), line)
+		}
 	}
 }
 
