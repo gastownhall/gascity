@@ -75,7 +75,7 @@ func TestCmdReloadJSONApplied(t *testing.T) {
 		reloadUnavailableMessageHook = oldUnavailable
 	})
 
-	sendReloadControlRequestHook = func(cityPath string, req reloadControlRequest) (reloadControlReply, error) {
+	sendReloadControlRequestHook = func(_ string, _ reloadControlRequest) (reloadControlReply, error) {
 		return reloadControlReply{
 			Outcome:  reloadOutcomeApplied,
 			Message:  "Config reloaded",

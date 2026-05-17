@@ -34,11 +34,6 @@ immediate reconcile.`,
 	return cmd
 }
 
-// cmdRestart stops the city, then re-starts it under the supervisor.
-func cmdRestart(args []string, stdout, stderr io.Writer) int {
-	return cmdRestartJSON(args, stdout, stderr, false)
-}
-
 func cmdRestartJSON(args []string, stdout, stderr io.Writer, jsonOut bool) int {
 	nameOverride, err := restartRegistrationName(args)
 	if err != nil {
