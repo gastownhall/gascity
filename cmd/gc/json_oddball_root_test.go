@@ -62,8 +62,9 @@ func TestOddballRootJSONPrimeUsesSessionTemplateIdentity(t *testing.T) {
 
 func TestOddballRootJSONEventEmitBestEffort(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
+	cityPath := writeOddballMinimalCity(t, "city")
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"event", "emit", "custom.test", "--subject", "thing", "--message", "hello", "--json"}, &stdout, &stderr)
+	code := run([]string{"--city", cityPath, "event", "emit", "custom.test", "--subject", "thing", "--message", "hello", "--json"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run event emit --json = %d; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
 	}
