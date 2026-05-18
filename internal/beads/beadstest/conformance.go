@@ -12,9 +12,30 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
+// Options controls optional behavior of the Store conformance suite.
+// Each opt-out should reference an external bead/escalation explaining
+// why a conforming implementation cannot pass the affected subtest.
+type Options struct {
+	// SkipTxApplyConformance skips the TxRunsCallbackAndAppliesWriteSurface
+	// subtest. Use only when the backing implementation has a known defect
+	// outside the Store contract (e.g., an external CLI bug). The other Tx
+	// subtests still run.
+	SkipTxApplyConformance bool
+	// SkipTxApplyReason is reported via t.Skipf when SkipTxApplyConformance
+	// is true. Should name the escalation bead or upstream issue.
+	SkipTxApplyReason string
+}
+
 // RunStoreTests runs the full conformance suite against a Store implementation.
 // The newStore function must return a fresh, empty store for each call.
 func RunStoreTests(t *testing.T, newStore func() beads.Store) {
+	RunStoreTestsWithOptions(t, newStore, Options{})
+}
+
+// RunStoreTestsWithOptions runs the conformance suite with optional opt-outs
+// for subtests that exercise behavior known to be broken in an underlying
+// dependency rather than in the Store implementation itself.
+func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Options) {
 	t.Helper()
 
 	t.Run("CreateAssignsUniqueNonEmptyID", func(t *testing.T) {
@@ -655,6 +676,9 @@ func RunStoreTests(t *testing.T, newStore func() beads.Store) {
 	})
 
 	t.Run("TxRunsCallbackAndAppliesWriteSurface", func(t *testing.T) {
+		if opts.SkipTxApplyConformance {
+			t.Skipf("skipping: %s", opts.SkipTxApplyReason)
+		}
 		s := newStore()
 		b, err := s.Create(beads.Bead{Title: "before"})
 		if err != nil {
