@@ -434,6 +434,56 @@ func TestPolecatPromptDoneSequenceSignalsRefinery(t *testing.T) {
 	}
 }
 
+// TestPolecatPromptOpensWithImperativeFirstAction guards against the
+// regression observed 2026-05-18 (ga-2ph): freshly-spawned or reload-
+// survivor polecat sessions sometimes sat idle at the Claude Code prompt
+// instead of auto-claiming routed pool work. A manual nudge with
+// "Run bd ready..." was enough to wake them, so the failure was that the
+// existing prompt buried its startup imperative far enough down the page
+// that the LLM's first turn produced "Session started. Ready..." text
+// instead of a `gc hook` tool call.
+//
+// The fix puts an unconditional "START IMMEDIATELY" section at the top of
+// the polecat prompt so the first substantive content the LLM sees is the
+// imperative to run `gc hook` as its very first tool call. This test
+// pins the section in place — it must precede the "FINAL REMINDER" done
+// sequence and must name both the hook call and the escalation path for
+// the empty-hook case (which is always a bug, never a wait state).
+func TestPolecatPromptOpensWithImperativeFirstAction(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "polecat", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat prompt: %v", err)
+	}
+	body := string(data)
+
+	assertContainsInOrder(t, body,
+		"## START IMMEDIATELY",
+		"`gc hook`",
+		`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`,
+		`gc bd update <id> --claim`,
+		`ESCALATION: polecat spawned with empty hook`,
+		"## FINAL REMINDER: RUN THE DONE SEQUENCE",
+	)
+
+	// The imperative must be the first H2 in the file so it precedes every
+	// other section (Idle Polecat Heresy, Never Close Beads, etc.). If a
+	// future edit inserts another H2 above it, the LLM's first scan will
+	// hit that section first and the fix is silently undone.
+	firstH2 := strings.Index(body, "\n## ")
+	if firstH2 == -1 {
+		t.Fatalf("polecat prompt has no H2 sections")
+	}
+	firstH2Line := body[firstH2+1:]
+	if nl := strings.IndexByte(firstH2Line, '\n'); nl != -1 {
+		firstH2Line = firstH2Line[:nl]
+	}
+	if !strings.HasPrefix(firstH2Line, "## START IMMEDIATELY") {
+		t.Fatalf("first H2 in polecat prompt must be START IMMEDIATELY, got %q", firstH2Line)
+	}
+}
+
 func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 	dir := exampleDir()
 	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
