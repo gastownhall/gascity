@@ -32,6 +32,10 @@ func (c *RigPackCoverageCheck) CanFix() bool { return false }
 // Fix is a no-op.
 func (c *RigPackCoverageCheck) Fix(_ *CheckContext) error { return nil }
 
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
+func (c *RigPackCoverageCheck) WarmupEligible() bool { return false }
+
 type partialPackForCoverage struct {
 	Pack struct {
 		Name string `toml:"name"`
