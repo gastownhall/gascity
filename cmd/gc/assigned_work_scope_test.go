@@ -112,6 +112,75 @@ func TestFilterAssignedWorkBeadsForPoolDemandDropsDirectAssigneeFromUnreachableS
 	}
 }
 
+func TestFilterAssignedWorkBeadsForPoolDemandHonorsRunTargetForWispStep(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "grader"}},
+	}
+	// Wisp step shape from the convergence reconciler:
+	// Status=open, unassigned, gc.run_target set, gc.routed_to absent.
+	work := []beads.Bead{{
+		ID:     "wisp-step-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.run_target": "grader",
+		},
+	}}
+
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, work, []string{""})
+
+	if len(got) != 1 || got[0].ID != "wisp-step-1" {
+		t.Fatalf("filtered work = %#v, want wisp-step-1 retained via gc.run_target fallback", got)
+	}
+}
+
+func TestFilterAssignedWorkBeadsForPoolDemandRoutedToWinsOverRunTarget(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "grader"},
+			{Name: "reviewer"},
+		},
+	}
+	// Explicit gc.routed_to must be honored when both keys are present.
+	work := []beads.Bead{{
+		ID:     "explicit-route",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			"gc.routed_to":  "reviewer",
+			"gc.run_target": "grader",
+		},
+	}}
+
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, work, []string{""})
+
+	if len(got) != 1 {
+		t.Fatalf("filtered work len = %d, want 1: %#v", len(got), got)
+	}
+}
+
+func TestFilterAssignedWorkBeadsForPoolDemandResolvesRunTargetToNamedSession(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "editor"}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "scope-locked-editor",
+			Template: "editor",
+			Mode:     "on_demand",
+		}},
+	}
+	work := []beads.Bead{{
+		ID:     "wisp-step-named",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.run_target": "scope-locked-editor",
+		},
+	}}
+
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, work, []string{""})
+
+	if len(got) != 1 || got[0].ID != "wisp-step-named" {
+		t.Fatalf("filtered work = %#v, want wisp-step-named retained via named-session run_target", got)
+	}
+}
+
 func TestSessionHasOpenAssignedWorkUsesOnlyReachableStore(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "riga")

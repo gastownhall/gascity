@@ -703,6 +703,102 @@ func TestCollectAssignedWorkBeads_ExcludesRoutedToMetadataWithoutAssignee(t *tes
 	}
 }
 
+// Wisp step beads emitted by the convergence reconciler are Status=open,
+// unassigned, and carry gc.run_target (no gc.routed_to). The dispatcher must
+// surface them so the target agent or named session can be spawned and the
+// work routed.
+func TestCollectAssignedWorkBeads_IncludesOpenAgentRoutedRunTargetWispStep(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "grader"}},
+	}
+	wisp, err := store.Create(beads.Bead{
+		Title:    "grade-output",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.run_target": "grader"},
+	})
+	if err != nil {
+		t.Fatalf("create wisp step bead: %v", err)
+	}
+	// Unknown run_target — must NOT be surfaced.
+	if _, err := store.Create(beads.Bead{
+		Title:    "unknown-target",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.run_target": "ghost-agent"},
+	}); err != nil {
+		t.Fatalf("create unknown-target bead: %v", err)
+	}
+
+	got, _ := collectAssignedWorkBeads(cfg, store)
+	if len(got) != 1 {
+		t.Fatalf("collectAssignedWorkBeads returned %d beads, want 1 (the agent-routed wisp step): %#v", len(got), got)
+	}
+	if got[0].ID != wisp.ID {
+		t.Fatalf("collectAssignedWorkBeads returned %q, want %q", got[0].ID, wisp.ID)
+	}
+}
+
+// Named-session identities (e.g. scope-locked-editor) must also be recognized
+// as routing targets via gc.run_target so on_demand sessions can be woken.
+func TestCollectAssignedWorkBeads_IncludesOpenRunTargetForNamedSession(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "editor"}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "scope-locked-editor",
+			Template: "editor",
+			Mode:     "on_demand",
+		}},
+	}
+	wisp, err := store.Create(beads.Bead{
+		Title:    "patch-file",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.run_target": "scope-locked-editor"},
+	})
+	if err != nil {
+		t.Fatalf("create wisp step bead: %v", err)
+	}
+
+	got, _ := collectAssignedWorkBeads(cfg, store)
+	if len(got) != 1 || got[0].ID != wisp.ID {
+		t.Fatalf("collectAssignedWorkBeads = %#v, want named-session wisp %s", got, wisp.ID)
+	}
+}
+
+// Confirm gc.routed_to remains the dominant routing key: when both are set,
+// the existing dispatcher paths (Ready handoff or in_progress) handle it, and
+// the new open-scan must not double-emit the bead.
+func TestCollectAssignedWorkBeads_RunTargetDoesNotDoubleEmitRoutedBead(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "grader"}},
+	}
+	routed, err := store.Create(beads.Bead{
+		Title:    "explicit-route",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: "grader",
+		Metadata: map[string]string{
+			"gc.routed_to":  "grader",
+			"gc.run_target": "grader",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create routed bead: %v", err)
+	}
+
+	got, _ := collectAssignedWorkBeads(cfg, store)
+	if len(got) != 1 || got[0].ID != routed.ID {
+		t.Fatalf("collectAssignedWorkBeads = %#v, want single emission of %s", got, routed.ID)
+	}
+}
+
 func TestCollectAssignedWorkBeads_ExcludesSessionBeads(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()
