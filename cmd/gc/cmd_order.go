@@ -260,10 +260,6 @@ func scanAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName 
 	return scanAllOrdersWithOptions(cityPath, cfg, stderr, cmdName, orders.ScanOptions{})
 }
 
-func scanAllOrdersFS(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, error) {
-	return scanAllOrdersFSWithOptions(fs, cityPath, cfg, stderr, cmdName, orders.ScanOptions{})
-}
-
 func scanAllOrdersWithOptions(cityPath string, cfg *config.City, stderr io.Writer, cmdName string, opts orders.ScanOptions) ([]orders.Order, error) {
 	return scanAllOrdersFSWithOptions(fsys.OSFS{}, cityPath, cfg, stderr, cmdName, opts)
 }
