@@ -1788,6 +1788,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	advanceSessionDrainsWithSessionsTraced(dt, sp, store, sessionLookup, ordered, wakeEvals, cfg, poolDesired, nil, readyWaitSet, clk, trace)
 	clearMissingIdleProbes(dt, beadByID)
 
+	// Phase 3: Re-nudge alive ephemeral pool sessions that look idle
+	// while routed pool work waits. Catches the reload-survivor case:
+	// a polecat whose spawn-time nudge fired against an older prompt
+	// is sitting at "Session started. Ready..." instead of running
+	// gc hook. detectIdleReloadSurvivors is idempotent across ticks
+	// via the idleRenudgeLastAtKey cooldown.
+	if ctx == nil || ctx.Err() == nil {
+		idleTargets := detectIdleReloadSurvivors(ordered, cfg, assignedWorkBeads, workSet, clk)
+		renudgeIdleSessions(ctx, idleTargets, sp, store, clk, stderr)
+	}
+
 	return plannedWakes
 }
 
