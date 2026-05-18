@@ -2,11 +2,13 @@ package examples_test
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/BurntSushi/toml"
+	"gopkg.in/yaml.v3"
 )
 
 func TestShippedExamplesDoNotHardcodeShortRoutedToPools(t *testing.T) {
@@ -45,110 +47,147 @@ func TestShippedExamplesDoNotHardcodeShortRoutedToPools(t *testing.T) {
 	}
 }
 
-func TestExamplePoolScriptsUseCanonicalGCTemplateRoutes(t *testing.T) {
+// TestMigratedExampleAgentsLaunchScriptedTestAgent verifies the lifecycle and
+// hyperscale example agents launch the YAML-driven scripted test-agent
+// (gascity-tools-fsm-test-agent) against a migrated agent-script vendored in
+// the example's own pack. The examples are `gc init --from`-copyable, so each
+// script lives under the pack's assets/scripts/ and start_command references
+// it via a {{.ConfigDir}}-relative path — an absolute gascity_tools path would
+// not survive the copy.
+//
+// Replaces the bash-era TestExamplePoolScriptsUseCanonicalGCTemplateRoutes:
+// canonical pool routing moved out of per-example shell scripts and into the
+// test-agent's hook probe, so the example only has to wire the agent up.
+func TestMigratedExampleAgentsLaunchScriptedTestAgent(t *testing.T) {
 	root := examplesRoot(t)
 
 	tests := []struct {
-		name     string
-		rel      string
-		template string
-		want     string
+		name      string
+		agentTOML string // relative to the examples root
+		script    string // expected agent-script filename
 	}{
 		{
-			name:     "hyperscale worker",
-			rel:      "hyperscale/packs/hyperscale/assets/scripts/mock-worker.sh",
-			template: "demo/hyperscale.worker",
-			want:     "demo/hyperscale.worker",
+			name:      "lifecycle polecat",
+			agentTOML: "lifecycle/packs/lifecycle/agents/polecat/agent.toml",
+			script:    "lifecycle-polecat-claim-handoff.yaml",
 		},
 		{
-			name:     "lifecycle polecat",
-			rel:      "lifecycle/packs/lifecycle/assets/scripts/mock-polecat.sh",
-			template: "demo/lifecycle.polecat",
-			want:     "demo/lifecycle.polecat",
+			name:      "lifecycle refinery",
+			agentTOML: "lifecycle/packs/lifecycle/agents/refinery/agent.toml",
+			script:    "lifecycle-refinery-merge.yaml",
+		},
+		{
+			name:      "hyperscale worker",
+			agentTOML: "hyperscale/packs/hyperscale/agents/worker/agent.toml",
+			script:    "hyperscale-worker.yaml",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			path := filepath.Join(root, tt.rel)
-			assignment := shellLineContaining(t, path, "POOL_LABEL=")
-			got := runShell(t, []string{"GC_TEMPLATE=" + tt.template}, assignment+`
-printf '%s' "$POOL_LABEL"
-`)
-			if got != tt.want {
-				t.Fatalf("POOL_LABEL = %q, want %q", got, tt.want)
+			agentPath := filepath.Join(root, tt.agentTOML)
+			got := agentStartCommand(t, agentPath)
+			want := "gascity-tools-fsm-test-agent --script {{.ConfigDir}}/assets/scripts/" + tt.script
+			if got != want {
+				t.Errorf("start_command = %q, want %q", got, want)
 			}
 
-			cmd := shellCommand(t, nil, assignment)
-			if err := cmd.Run(); err == nil {
-				t.Fatalf("POOL_LABEL assignment succeeded without GC_TEMPLATE")
-			}
-		})
-	}
-}
-
-func TestLifecyclePolecatDerivesRefineryTargetFromCanonicalTemplate(t *testing.T) {
-	root := examplesRoot(t)
-	path := filepath.Join(root, "lifecycle/packs/lifecycle/assets/scripts/mock-polecat.sh")
-	function := shellFunction(t, path, "derive_refinery_target")
-
-	tests := []struct {
-		name     string
-		template string
-		want     string
-	}{
-		{
-			name:     "v1 template",
-			template: "demo/polecat",
-			want:     "demo/refinery",
-		},
-		{
-			name:     "binding qualified template",
-			template: "demo/lifecycle.polecat",
-			want:     "demo/lifecycle.refinery",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := runShell(t, []string{"GC_TEMPLATE=" + tt.template}, function+`
-derive_refinery_target
-`)
-			if got != tt.want {
-				t.Fatalf("derive_refinery_target() = %q, want %q", got, tt.want)
+			// {{.ConfigDir}} resolves to the pack directory — two levels up
+			// from the agent directory. The script must be vendored there for
+			// the example to be self-contained after `gc init --from`.
+			packDir := filepath.Join(filepath.Dir(agentPath), "..", "..")
+			scriptPath := filepath.Join(packDir, "assets", "scripts", tt.script)
+			if _, err := os.Stat(scriptPath); err != nil {
+				t.Errorf("agent-script not vendored in the example pack: %v", err)
 			}
 		})
 	}
 
-	cmd := shellCommand(t, []string{"GC_TEMPLATE=demo/lifecycle.worker"}, function+`
-derive_refinery_target
-`)
-	if err := cmd.Run(); err == nil {
-		t.Fatalf("derive_refinery_target succeeded for a non-polecat template")
+	// The migration removes the bash mocks outright — a surviving mock-*.sh
+	// would be dead weight no agent.toml references.
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		name := entry.Name()
+		if !entry.IsDir() && strings.HasPrefix(name, "mock-") && strings.HasSuffix(name, ".sh") {
+			t.Errorf("bash mock survived the migration: %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
-func TestLifecycleRefineryConsumesPolecatHandoffAlias(t *testing.T) {
+// TestLifecyclePolecatHandsOffToLifecycleRefinery verifies the migrated
+// lifecycle polecat script hands a claimed bead to the lifecycle refinery.
+// The routing fact the bash mock expressed in a derive_refinery_target shell
+// function now lives in the script's has_work turn: a bd_update that reassigns
+// the bead and a mail_send that notifies the same address. {rig} is resolved
+// from $GC_RIG by the test-agent at run time.
+//
+// Replaces the bash-era TestLifecyclePolecatDerivesRefineryTargetFromCanonicalTemplate.
+func TestLifecyclePolecatHandsOffToLifecycleRefinery(t *testing.T) {
 	root := examplesRoot(t)
-	polecatPath := filepath.Join(root, "lifecycle/packs/lifecycle/assets/scripts/mock-polecat.sh")
-	refineryPath := filepath.Join(root, "lifecycle/packs/lifecycle/assets/scripts/mock-refinery.sh")
+	polecat := loadAgentScript(t, filepath.Join(root,
+		"lifecycle/packs/lifecycle/assets/scripts/lifecycle-polecat-claim-handoff.yaml"))
 
-	polecatTarget := runShell(t, []string{"GC_TEMPLATE=demo/lifecycle.polecat"}, shellFunction(t, polecatPath, "derive_refinery_target")+`
-derive_refinery_target
-`)
-	refineryAssignment := shellLineContaining(t, refineryPath, "MERGE_ASSIGNEE=")
-	refineryAssignee := runShell(t, []string{
-		"GC_ALIAS=" + polecatTarget,
-		"GC_AGENT=demo--lifecycle__refinery",
-	}, refineryAssignment+`
-printf '%s' "$MERGE_ASSIGNEE"
-`)
+	const refineryAddr = "{rig}/lifecycle.refinery"
 
-	if refineryAssignee != polecatTarget {
-		t.Fatalf("refinery consumes assignee %q, want polecat handoff target %q", refineryAssignee, polecatTarget)
+	work := hookTurn(t, polecat, "has_work")
+
+	update := dictAction(t, work, "bd_update")
+	if got := stringField(t, update, "assignee"); got != refineryAddr {
+		t.Errorf("polecat hands off to assignee %q, want %q", got, refineryAddr)
 	}
-	if refineryAssignee == "demo--lifecycle__refinery" {
-		t.Fatalf("refinery still consumes sanitized GC_AGENT instead of canonical GC_ALIAS")
+	metadata, ok := update["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("polecat bd_update has no metadata mapping")
+	}
+	if got, _ := metadata["branch"].(string); got != "polecat/{bead.id}" {
+		t.Errorf("polecat records metadata.branch = %q, want %q", got, "polecat/{bead.id}")
+	}
+
+	mail := dictAction(t, work, "mail_send")
+	if got := stringField(t, mail, "to"); got != refineryAddr {
+		t.Errorf("polecat mails %q, want the refinery %q", got, refineryAddr)
+	}
+}
+
+// TestLifecycleRefineryConsumesPolecatHandoff verifies the two halves of the
+// lifecycle pipeline agree on the handoff contract: the polecat reassigns the
+// bead to a {rig}/lifecycle.refinery address and records the feature branch
+// under metadata.branch; the refinery script merges exactly that
+// metadata.branch. Drift in either the address or the metadata key strands
+// the bead between the two agents.
+//
+// Replaces the bash-era TestLifecycleRefineryConsumesPolecatHandoffAlias.
+func TestLifecycleRefineryConsumesPolecatHandoff(t *testing.T) {
+	scriptDir := filepath.Join(examplesRoot(t), "lifecycle/packs/lifecycle/assets/scripts")
+	polecat := loadAgentScript(t, filepath.Join(scriptDir, "lifecycle-polecat-claim-handoff.yaml"))
+	refinery := loadAgentScript(t, filepath.Join(scriptDir, "lifecycle-refinery-merge.yaml"))
+
+	// The polecat's handoff: reassign to the lifecycle refinery role, with the
+	// feature branch recorded under metadata.branch.
+	update := dictAction(t, hookTurn(t, polecat, "has_work"), "bd_update")
+	handoff := stringField(t, update, "assignee")
+	if !strings.HasSuffix(handoff, "/lifecycle.refinery") {
+		t.Errorf("polecat handoff target %q does not address the lifecycle refinery", handoff)
+	}
+	if metadata, ok := update["metadata"].(map[string]any); !ok || metadata["branch"] == nil {
+		t.Fatal("polecat bd_update does not record metadata.branch for the refinery")
+	}
+
+	// The refinery's merge turn must consume {bead.metadata.branch} — the same
+	// key the polecat writes above.
+	refineryWork := hookTurn(t, refinery, "has_work")
+	out, err := yaml.Marshal(refineryWork)
+	if err != nil {
+		t.Fatalf("re-marshaling refinery turn: %v", err)
+	}
+	if !strings.Contains(string(out), "{bead.metadata.branch}") {
+		t.Error("refinery merge turn never references {bead.metadata.branch} — handoff contract broken")
 	}
 }
 
@@ -158,70 +197,94 @@ func examplesRoot(t *testing.T) string {
 	return filepath.Dir(filename)
 }
 
-func shellLineContaining(t *testing.T, path, needle string) string {
+// agentStartCommand decodes the start_command field from an example agent.toml.
+func agentStartCommand(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading %s: %v", path, err)
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.Contains(line, needle) {
-			return line
-		}
+	var cfg struct {
+		StartCommand string `toml:"start_command"`
 	}
-	t.Fatalf("%s missing shell line containing %q", path, needle)
-	return ""
+	if _, err := toml.Decode(string(data), &cfg); err != nil {
+		t.Fatalf("parsing %s: %v", path, err)
+	}
+	return cfg.StartCommand
 }
 
-func shellFunction(t *testing.T, path, name string) string {
+// agentScript is the subset of the gascity-tools-fsm-test-agent YAML schema
+// these tests assert against. The full schema lives in
+// gascity_tools/fsm/test_agent/README.md.
+type agentScript struct {
+	Turns []scriptTurn `yaml:"turns"`
+}
+
+// scriptTurn is one entry in a script's turn list: a `when:` predicate and the
+// ordered `do:` actions that run when it matches. Each do entry is a
+// single-key mapping of action name to argument.
+type scriptTurn struct {
+	When map[string]any   `yaml:"when"`
+	Do   []map[string]any `yaml:"do"`
+}
+
+// loadAgentScript reads and parses a test-agent YAML script.
+func loadAgentScript(t *testing.T, path string) agentScript {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("reading %s: %v", path, err)
+		t.Fatalf("reading agent script %s: %v", path, err)
 	}
-	lines := strings.Split(string(data), "\n")
-	for i, line := range lines {
-		if line == name+"() {" {
-			for j := i + 1; j < len(lines); j++ {
-				if lines[j] == "}" {
-					return strings.Join(lines[i:j+1], "\n")
-				}
-			}
-			t.Fatalf("%s shell function %q has no closing brace", path, name)
+	var script agentScript
+	if err := yaml.Unmarshal(data, &script); err != nil {
+		t.Fatalf("parsing agent script %s: %v", path, err)
+	}
+	return script
+}
+
+// hookTurn returns the turn whose `when:` matches the given hook state
+// (has_work | empty), failing the test if no such turn exists.
+func hookTurn(t *testing.T, script agentScript, hook string) scriptTurn {
+	t.Helper()
+	for _, turn := range script.Turns {
+		if turn.When["hook"] == hook {
+			return turn
 		}
 	}
-	t.Fatalf("%s missing shell function %q", path, name)
-	return ""
+	t.Fatalf("agent script has no turn for hook %q", hook)
+	return scriptTurn{}
 }
 
-func runShell(t *testing.T, env []string, body string) string {
+// dictAction returns the argument of the named action (e.g. bd_update,
+// mail_send) as a string-keyed mapping, failing if the action is absent from
+// the turn or its argument is not a mapping.
+func dictAction(t *testing.T, turn scriptTurn, action string) map[string]any {
 	t.Helper()
-	cmd := shellCommand(t, env, body)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("shell command failed: %v\n%s", err, out)
-	}
-	return strings.TrimSpace(string(out))
-}
-
-func shellCommand(t *testing.T, env []string, body string) *exec.Cmd {
-	t.Helper()
-	cmd := exec.Command("bash", "-e", "-u", "-o", "pipefail", "-c", body)
-	cmd.Env = append(scrubEnv(os.Environ(), "GC_TEMPLATE", "GC_ALIAS", "GC_AGENT"), env...)
-	return cmd
-}
-
-func scrubEnv(env []string, names ...string) []string {
-	blocked := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		blocked[name] = struct{}{}
-	}
-	kept := env[:0]
-	for _, entry := range env {
-		name, _, _ := strings.Cut(entry, "=")
-		if _, ok := blocked[name]; !ok {
-			kept = append(kept, entry)
+	for _, entry := range turn.Do {
+		arg, ok := entry[action]
+		if !ok {
+			continue
 		}
+		m, ok := arg.(map[string]any)
+		if !ok {
+			t.Fatalf("action %q is %T, want a mapping", action, arg)
+		}
+		return m
 	}
-	return kept
+	t.Fatalf("turn has no %q action", action)
+	return nil
+}
+
+// stringField returns m[key] as a string, failing if it is absent or not a string.
+func stringField(t *testing.T, m map[string]any, key string) string {
+	t.Helper()
+	v, ok := m[key]
+	if !ok {
+		t.Fatalf("mapping has no %q field", key)
+	}
+	s, ok := v.(string)
+	if !ok {
+		t.Fatalf("field %q is %T, want string", key, v)
+	}
+	return s
 }
