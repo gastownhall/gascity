@@ -5105,8 +5105,15 @@ func parseSessionListJSON(out string) ([]sessionJSON, error) {
 	if trimmed == "" || trimmed == "null" {
 		return nil, nil
 	}
-	if idx := strings.Index(trimmed, "["); idx >= 0 {
-		trimmed = trimmed[idx:]
+	var envelope struct {
+		Sessions []sessionJSON `json:"sessions"`
+	}
+	if strings.HasPrefix(trimmed, "{") {
+		dec := json.NewDecoder(strings.NewReader(trimmed))
+		if err := dec.Decode(&envelope); err != nil {
+			return nil, fmt.Errorf("unmarshal session list json envelope: %w", err)
+		}
+		return envelope.Sessions, nil
 	}
 	var sessions []sessionJSON
 	dec := json.NewDecoder(strings.NewReader(trimmed))
@@ -5147,14 +5154,14 @@ type beadJSON struct {
 }
 
 type sessionJSON struct {
-	Template    string `json:"Template"`
-	Provider    string `json:"Provider"`
-	ID          string `json:"ID"`
-	Alias       string `json:"Alias"`
-	State       string `json:"State"`
-	SessionName string `json:"SessionName"`
-	SessionKey  string `json:"SessionKey"`
-	LastActive  string `json:"LastActive"`
+	Template    string `json:"template"`
+	Provider    string `json:"provider"`
+	ID          string `json:"id"`
+	Alias       string `json:"alias"`
+	State       string `json:"state"`
+	SessionName string `json:"session_name"`
+	SessionKey  string `json:"session_key"`
+	LastActive  string `json:"last_active"`
 }
 
 func metaString(meta map[string]any, key string) string {

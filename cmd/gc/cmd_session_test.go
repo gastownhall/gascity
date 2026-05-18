@@ -1120,7 +1120,7 @@ func TestSessionNewAliasOwner_UsesConfiguredNamedIdentity(t *testing.T) {
 	}
 }
 
-func TestCmdSessionListJSONNoSessionsReturnsEmptyArray(t *testing.T) {
+func TestCmdSessionListJSONNoSessionsReturnsEmptyEnvelope(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 
@@ -1138,15 +1138,18 @@ func TestCmdSessionListJSONNoSessionsReturnsEmptyArray(t *testing.T) {
 	if strings.Contains(stdout.String(), "No sessions found") {
 		t.Fatalf("stdout = %q, want JSON only", stdout.String())
 	}
-	var got []session.Info
+	var got sessionListJSON
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
-		t.Fatalf("stdout is not a JSON session array: %v; stdout=%q", err, stdout.String())
+		t.Fatalf("stdout is not a JSON session list object: %v; stdout=%q", err, stdout.String())
 	}
-	if got == nil {
+	if got.SchemaVersion != "1" {
+		t.Fatalf("schema_version = %q, want 1; stdout=%q", got.SchemaVersion, stdout.String())
+	}
+	if got.Sessions == nil {
 		t.Fatalf("sessions JSON = nil, want empty array; stdout=%q", stdout.String())
 	}
-	if len(got) != 0 {
-		t.Fatalf("sessions = %d, want 0; stdout=%q", len(got), stdout.String())
+	if len(got.Sessions) != 0 || got.Summary.Total != 0 {
+		t.Fatalf("sessions = %d summary=%+v, want empty; stdout=%q", len(got.Sessions), got.Summary, stdout.String())
 	}
 }
 
@@ -1282,31 +1285,31 @@ func TestCmdSessionListJSONOmitZeroLastNudgeDeliveredAt(t *testing.T) {
 		t.Fatalf("stdout uses Go field name for last nudge timestamp:\n%s", stdout.String())
 	}
 
-	var rows []map[string]any
-	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
-		t.Fatalf("stdout is not a JSON session array: %v; stdout=%q", err, stdout.String())
+	var got sessionListJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not a JSON session list object: %v; stdout=%q", err, stdout.String())
 	}
-	quiet := sessionListJSONRowBySessionName(rows, "quiet-session")
+	quiet := sessionListJSONRowBySessionName(got.Sessions, "quiet-session")
 	if quiet == nil {
 		t.Fatalf("missing quiet-session row in JSON output:\n%s", stdout.String())
 	}
-	if _, ok := quiet["last_nudge_delivered_at"]; ok {
+	if quiet.LastNudgeDeliveredAt != nil {
 		t.Fatalf("quiet-session last_nudge_delivered_at present, want omitted: %#v", quiet)
 	}
 
-	nudged := sessionListJSONRowBySessionName(rows, "nudged-session")
+	nudged := sessionListJSONRowBySessionName(got.Sessions, "nudged-session")
 	if nudged == nil {
 		t.Fatalf("missing nudged-session row in JSON output:\n%s", stdout.String())
 	}
-	if got, want := nudged["last_nudge_delivered_at"], nudgeStamp.Format(time.RFC3339); got != want {
+	if got, want := nudged.LastNudgeDeliveredAt.Format(time.RFC3339), nudgeStamp.Format(time.RFC3339); got != want {
 		t.Fatalf("nudged-session last_nudge_delivered_at = %#v, want %q; row=%#v", got, want, nudged)
 	}
 }
 
-func sessionListJSONRowBySessionName(rows []map[string]any, name string) map[string]any {
+func sessionListJSONRowBySessionName(rows []sessionListJSONRow, name string) *sessionListJSONRow {
 	for _, row := range rows {
-		if row["SessionName"] == name {
-			return row
+		if row.SessionName == name {
+			return &row
 		}
 	}
 	return nil

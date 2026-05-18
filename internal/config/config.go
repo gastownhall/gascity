@@ -914,6 +914,10 @@ type PackDoctorEntry struct {
 	// Fix is an optional path to a remediation script, relative to the pack
 	// directory. When set, the check opts into `gc doctor --fix`.
 	Fix string `toml:"fix,omitempty"`
+	// Warmup, when true, includes this check in the `gc start` warm-up
+	// scan. Default false. The check still runs on demand via `gc doctor`
+	// regardless of this flag.
+	Warmup bool `toml:"warmup,omitempty"`
 }
 
 // PackCommandEntry declares a CLI subcommand provided by a pack.

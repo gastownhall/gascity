@@ -524,6 +524,16 @@ func normalizeCodexHookCommands(existing []byte) ([]byte, bool, error) {
 	return data, changed, nil
 }
 
+// CodexHooksMissingManagedPreCompact reports whether data is a Gas City
+// managed Codex hooks document that can be upgraded with a PreCompact hook.
+func CodexHooksMissingManagedPreCompact(data []byte) bool {
+	var root any
+	if err := json.Unmarshal(data, &root); err != nil {
+		return false
+	}
+	return codexHookDocCanAddPreCompact(root)
+}
+
 func codexHookValueHasManagedCommand(v any) bool {
 	switch node := v.(type) {
 	case map[string]any:

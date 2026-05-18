@@ -131,7 +131,7 @@ version = "^1.0"
 	}
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, true, &stdout, &stderr)
+	_ = doDoctor(false, true, false, &stdout, &stderr)
 	out := stdout.String() + stderr.String()
 	if !strings.Contains(out, "packv2-import-state") || !strings.Contains(out, `run "gc import install"`) {
 		t.Fatalf("doctor output missing import state check:\n%s", out)
@@ -171,7 +171,7 @@ version = "^1.0"
 	}
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, true, &stdout, &stderr)
+	_ = doDoctor(false, true, false, &stdout, &stderr)
 	out := stdout.String() + stderr.String()
 	if !strings.Contains(out, "packv2-import-state") || !strings.Contains(out, "missing-lockfile") {
 		t.Fatalf("doctor output missing import-state failure for broken install state:\n%s", out)
@@ -204,7 +204,7 @@ func TestDoDoctorSkipsImportStateCheckWhenCityConfigInvalid(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, true, &stdout, &stderr)
+	_ = doDoctor(false, true, false, &stdout, &stderr)
 	out := stdout.String() + stderr.String()
 	if strings.Contains(out, "packv2-import-state") {
 		t.Fatalf("doctor output included import state check for invalid config:\n%s", out)

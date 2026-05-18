@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc status --json result",
+  "description": "One JSONL record describing city identity, controller state, health, agents, rigs, and summary counts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "city_name",
+    "workspace",
+    "city_path",
+    "controller",
+    "running",
+    "suspended",
+    "health",
+    "agents",
+    "rigs",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "description": "Schema version for this command output." },
+    "city_name": { "type": "string", "description": "Configured or inferred city name." },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "path"],
+      "properties": {
+        "name": { "type": "string", "description": "Workspace display name." },
+        "path": { "type": "string", "description": "Absolute workspace path." }
+      }
+    },
+    "city_path": { "type": "string", "description": "Absolute city root path." },
+    "controller": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["running"],
+      "properties": {
+        "running": { "type": "boolean", "description": "Whether the city controller appears to be running." },
+        "pid": { "type": "integer", "description": "Controller process ID when known." },
+        "mode": { "type": "string", "description": "Controller operating mode when known." },
+        "status": { "type": "string", "description": "Controller status text when known." }
+      }
+    },
+    "running": { "type": "boolean", "description": "Whether the city is considered running." },
+    "suspended": { "type": "boolean", "description": "Whether the city is suspended." },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["usable", "degraded"],
+      "properties": {
+        "usable": { "type": "boolean", "description": "Whether agents and software can use the city." },
+        "degraded": { "type": "boolean", "description": "Whether any degraded signal was observed." },
+        "signals": {
+          "type": "array",
+          "description": "Human-readable degraded or health signals.",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "agents": {
+      "type": "array",
+      "description": "Configured agents visible to the city.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "qualified_name", "scope", "running", "suspended"],
+        "properties": {
+          "name": { "type": "string" },
+          "qualified_name": { "type": "string" },
+          "scope": { "type": "string" },
+          "running": { "type": "boolean" },
+          "suspended": { "type": "boolean" },
+          "pool": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["min", "max"],
+            "properties": {
+              "min": { "type": "integer" },
+              "max": { "type": "integer" }
+            }
+          }
+        }
+      }
+    },
+    "rigs": {
+      "type": "array",
+      "description": "Registered rigs visible to the city.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "path", "suspended"],
+        "properties": {
+          "name": { "type": "string" },
+          "path": { "type": "string" },
+          "prefix": { "type": "string" },
+          "suspended": { "type": "boolean" },
+          "default_sling_target": { "type": "string" }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total_agents", "running_agents"],
+      "properties": {
+        "total_agents": { "type": "integer" },
+        "running_agents": { "type": "integer" },
+        "active_sessions": { "type": "integer" },
+        "suspended_sessions": { "type": "integer" }
+      }
+    }
+  }
+}

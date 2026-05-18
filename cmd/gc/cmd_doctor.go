@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
@@ -21,7 +22,7 @@ var (
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
-	var fix, verbose bool
+	var fix, verbose, jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check workspace health",
@@ -35,10 +36,11 @@ safe mechanical PackV1-to-PackV2 rewrites that are available on this
 branch.`,
 		Example: `  gc doctor
   gc doctor --fix
-  gc doctor --verbose`,
+  gc doctor --verbose
+  gc doctor --json`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doDoctor(fix, verbose, stdout, stderr) != 0 {
+			if doDoctor(fix, verbose, jsonOut, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -46,6 +48,7 @@ branch.`,
 	}
 	cmd.Flags().BoolVar(&fix, "fix", false, "attempt automatic repairs and safe mechanical migrations")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show extra diagnostic details")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit structured JSON instead of human-readable output")
 	return cmd
 }
 
@@ -118,9 +121,13 @@ func (c *doltTopologyCheck) CanFix() bool { return false }
 
 func (c *doltTopologyCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
-func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
+func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
+		if jsonOut {
+			_ = writeDoctorJSONError(stdout, err)
+			return 1
+		}
 		fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -152,12 +159,14 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		d.Register(doctor.NewDurationRangeCheck(cfg))
 		d.Register(doctor.NewProviderParityCheck(cfg))
 		d.Register(doctor.NewSkillCollisionCheck(cfg, cityPath))
+		d.Register(doctor.NewOrderFiringCurrentCheck(cfg, cityPath))
 		d.Register(newCodexHooksDriftCheck(codexHookWorkDirs(cityPath, cfg)))
 		d.Register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		d.Register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
 	}
 	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
 		d.Register(newImportStateDoctorCheck(cityPath))
+		d.Register(newJsonlArchiveDoctorCheck(cityPath))
 	}
 
 	// System formulas/orders now ship via the core bootstrap pack; pack
@@ -266,17 +275,94 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 				FixScript: entry.FixScript,
 				PackDir:   entry.PackDir,
 				PackName:  entry.PackName,
+				Warmup:    entry.Warmup,
 			})
 		}
 	}
 
-	report := d.Run(ctx, stdout, fix)
-	doctor.PrintSummary(stdout, report)
+	var report *doctor.Report
+	if jsonOut {
+		report = d.RunCollect(ctx, fix)
+		if err := writeDoctorJSON(stdout, report); err != nil {
+			fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	} else {
+		report = d.Run(ctx, stdout, fix)
+		doctor.PrintSummary(stdout, report)
+	}
 
 	if report.Failed > 0 {
 		return 1
 	}
 	return 0
+}
+
+// doctorJSONResult mirrors doctor.CheckResult for JSON output. Keeping the
+// shape separate from the internal type keeps the wire format stable if the
+// internal struct grows new fields that shouldn't leak out.
+type doctorJSONResult struct {
+	Name         string   `json:"name"`
+	Status       string   `json:"status"`
+	Message      string   `json:"message"`
+	FixHint      string   `json:"fix_hint,omitempty"`
+	Details      []string `json:"details,omitempty"`
+	FixAttempted bool     `json:"fix_attempted,omitempty"`
+	FixError     string   `json:"fix_error,omitempty"`
+	Fixed        bool     `json:"fixed,omitempty"`
+}
+
+type doctorJSONReport struct {
+	Passed  int                `json:"passed"`
+	Warned  int                `json:"warned"`
+	Failed  int                `json:"failed"`
+	Fixed   int                `json:"fixed"`
+	Results []doctorJSONResult `json:"results"`
+	Error   string             `json:"error,omitempty"`
+}
+
+func doctorStatusString(s doctor.CheckStatus) string {
+	switch s {
+	case doctor.StatusOK:
+		return "ok"
+	case doctor.StatusWarning:
+		return "warning"
+	case doctor.StatusError:
+		return "error"
+	}
+	return "unknown"
+}
+
+func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
+	out := doctorJSONReport{
+		Passed:  report.Passed,
+		Warned:  report.Warned,
+		Failed:  report.Failed,
+		Fixed:   report.Fixed,
+		Results: make([]doctorJSONResult, 0, len(report.Results)),
+	}
+	for _, r := range report.Results {
+		out.Results = append(out.Results, doctorJSONResult{
+			Name:         r.Name,
+			Status:       doctorStatusString(r.Status),
+			Message:      r.Message,
+			FixHint:      r.FixHint,
+			Details:      r.Details,
+			FixAttempted: r.FixAttempted,
+			FixError:     r.FixError,
+			Fixed:        r.Fixed,
+		})
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
+}
+
+func writeDoctorJSONError(w io.Writer, err error) error {
+	out := doctorJSONReport{Error: err.Error(), Results: []doctorJSONResult{}}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
 }
 
 // collectPackDirs returns all unique pack directories from the city

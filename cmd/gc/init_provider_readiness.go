@@ -344,7 +344,7 @@ func providerStatusFixHint(probeName, status string) string {
 	case "claude":
 		switch status {
 		case api.ProbeStatusNeedsAuth:
-			return "run `claude auth login`"
+			return "run `claude auth login`, or run `claude setup-token` and export `CLAUDE_CODE_OAUTH_TOKEN` for headless environments"
 		case api.ProbeStatusNotInstalled:
 			return "install Claude Code"
 		case api.ProbeStatusInvalidConfiguration:

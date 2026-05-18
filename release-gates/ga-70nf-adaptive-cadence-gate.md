@@ -1,36 +1,44 @@
-# Release gate — adaptive reconciler cadence + telemetry (ga-70nf, AD-03 part 3)
+# Release Gate: Adaptive Reconciler Cadence + Telemetry
 
-**Verdict:** PASS (with maintainer-side fixup)
+Verdict: PASS
 
-- Bead: `ga-70nf` (AD-03 part 3, deferred from ga-zor1n2 stagger gate)
+- Deploy bead: `ga-6ndh55` (conflict-fix review for `ga-70nf`)
+- Source bead: `ga-70nf` (Adaptive cadence + telemetry in gascity reconciler, AD-03 part 3)
+- Original review bead: `ga-4vq2er`
 - Branch: `quad341:builder/ga-70nf-1`
-- HEAD: `27965cfe` after maintainer fixup (was `5df84922` at original gate review)
-- PR: [gastownhall/gascity#1820](https://github.com/gastownhall/gascity/pull/1820)
-- Diff (post-fixup): 2 files, +579 / -1 production + +N / 0 maintainer fixup; 14 unit tests + 1 end-to-end
+- Candidate HEAD before gate commit: `63fd74b2b6867de60bcfbe271c8ec74175da59b2`
+- Release criteria source: `docs/PROJECT_MANIFEST.md` is not present in this checkout, so this checklist uses the deployer release criteria from the active role prompt.
 
-## Criteria
+## Release Criteria
 
 | # | Criterion | Verdict | Evidence |
 |---|-----------|---------|----------|
-| 1 | Latency-driven promotion to MEDIUM cadence | PASS | `recomputeCadenceLocked` flips `latencyDriverActive` when nearest-rank P95 exceeds `cacheLatencyHighWaterMark`; verified by `TestAdaptiveCadencePromotesOnHighLatency`. |
-| 2 | Hysteresis demotion via window-drain | PASS | Window must fully drain to demote (N=`cacheLatencyWindowSize` consecutive low samples); verified by `TestAdaptiveCadenceDemotesAfterHysteresisWindow`. The spike-reset property — one slow scan during the drain re-arms the driver — is verified by `TestAdaptiveCadenceSpikeResetsHysteresisCounter`. |
-| 3 | Composes with bead-count cadence | PASS | `effectiveCadence` returns the slower of the two drivers; verified by `TestAdaptiveCadenceCompositionBeadCountAlone` and `TestAdaptiveCadenceCompositionBoth`. |
-| 4 | LARGE preserved via bead count only | PASS | `beadCountCadence(>=5000)` returns LARGE regardless of latency state; verified by `TestAdaptiveCadencePreservesLargeInterval`. |
-| 5 | Single transition log per ↕ change | PASS | `recomputeCadenceLocked` only logs on transition edges; verified by `TestAdaptiveCadenceLogsOnceOnPromote` and `TestAdaptiveCadenceLogsOnceOnDemote`. |
-| 6 | End-to-end: real reconciler feeds the latency window | PASS | `TestRunReconciliationFeedsLatencyWindow` exercises the full path. |
-| 7 | Race-free | PASS | `go test -race ./internal/beads/` — clean. |
-| 8 | Nearest-rank P95 generalizes beyond N=10 | PASS (after fixup) | Reviewer flagged that the original `sorted[len-1]` was P100 not P95; correct only by coincidence at N=10. Maintainer fixup replaces with `int(math.Ceil(0.95*N))-1`, which equals `len-1` for N=10 (preserves current behavior bit-for-bit) but stays P95 if `cacheLatencyWindowSize` is raised. |
+| 1 | Review PASS present | PASS | `ga-6ndh55` notes contain `REVIEW VERDICT: PASS` from `gascity/reviewer` for branch `builder/ga-70nf-1 @ 63fd74b2b`. The original implementation review bead `ga-4vq2er` also contains `REVIEW VERDICT: PASS`. |
+| 2 | Acceptance criteria met | PASS | The original review verified all 8 source-bead acceptance criteria. Deployer rechecked the implementation surfaces and reran the focused tests listed below on the rebased branch. |
+| 3 | Tests pass | PASS | `go test ./internal/beads/... -count=1`, `go test -race ./internal/beads/ -count=1`, `go vet ./...`, and `make test-fast-parallel` all passed on `deploy/ga-6ndh55-release`. |
+| 4 | No high-severity review findings open | PASS | Review notes for `ga-6ndh55` list one LOW style finding only (`cadenceTransitionDriver` doc comment). Unresolved HIGH findings: 0. |
+| 5 | Final branch is clean | PASS | After committing this gate file, `git status --short --branch` showed no uncommitted changes. |
+| 6 | Branch diverges cleanly from main | PASS | After committing this gate file, `git merge-tree --write-tree HEAD origin/main` exited 0. |
 
-## Validation (post-fixup)
+## Acceptance Criteria Evidence
 
-- `go build ./internal/beads/...` — clean
-- `go test ./internal/beads/ -run 'TestLatency|TestCadence|TestRecompute' -count=1` — PASS
+| # | Source-bead acceptance criterion | Evidence |
+|---|----------------------------------|----------|
+| 1 | Synthetic high `bd list` latency promotes reconciler to 60s cadence within 10 reconciliations. | `TestAdaptiveCadencePromotesOnHighLatency`; implementation flips the latency driver when nearest-rank P95 exceeds `cacheLatencyHighWaterMark`. |
+| 2 | Removing the delay demotes back to 30s within 10 reconciliations. | `TestAdaptiveCadenceDemotesAfterHysteresisWindow`; `TestAdaptiveCadenceSpikeResetsHysteresisCounter` verifies a slow scan during the drain re-arms the driver. |
+| 3 | `CacheStats.LatencyP95Ms` is populated after 10 samples and 0 before. | `TestLatencyP95FullWindowReturnsValue`; `updateStatsLocked` calls `updateCadenceStatsLocked` so diagnostics refresh on every stats update. |
+| 4 | `CacheStats.CadenceDriver` reflects the current cadence input. | Cadence-driver coverage in `internal/beads/caching_store_cadence_internal_test.go`; `cadenceTransitionDriver` preserves the transition cause for log lines. |
+| 5 | Promotion and demotion log lines fire exactly once per transition with the specified format. | `TestAdaptiveCadenceLogsOnceOnPromote` and `TestAdaptiveCadenceLogsOnceOnDemote`; demotion now reports `driver=latency` for the transition. |
+| 6 | Bead-count promotion to MEDIUM is preserved. | `TestAdaptiveCadenceCompositionBeadCountAlone` and `TestAdaptiveCadenceCompositionBoth`; effective cadence is the slower of bead-count and latency drivers. |
+| 7 | `cacheReconcileIntervalLarge` is not touched. | `TestAdaptiveCadencePreservesLargeInterval`; LARGE remains bead-count driven for >=5000 beads. |
+| 8 | Existing tests pass. | Focused package tests, race test, vet, and fast sharded baseline passed on the release branch. |
 
-## Open items deferred to follow-up
+## Verification Commands
 
-- **`sort.Slice` allocation per `recomputeCadenceLocked` call** is unnecessary at N=10; could be replaced with a streaming max or pre-sorted insert. Not a correctness issue; bounded allocation cost. File as `ga-70nf-followup` if follow-up is desired.
-
-## Notes
-
-- Maintainer fixup commit: nearest-rank P95 generalization. Behavior at the current window size is unchanged; the fix is forward-looking.
-- This gate file lands as part of the maintainer fixup commit so the PR includes the gate doc per the convention established by `ga-zor1n2`.
+| Command | Result |
+|---------|--------|
+| `git merge-tree --write-tree HEAD origin/main` | PASS |
+| `go test ./internal/beads/... -count=1` | PASS |
+| `go test -race ./internal/beads/ -count=1` | PASS |
+| `go vet ./...` | PASS |
+| `make test-fast-parallel` | PASS (`All fast jobs passed`) |

@@ -66,6 +66,15 @@ func TestCheckTriggerCronMatched(t *testing.T) {
 	}
 }
 
+func TestCheckTriggerCronEveryMinuteStepMatched(t *testing.T) {
+	a := Order{Name: "cleanup", Trigger: "cron", Schedule: "*/1 * * * *"}
+	now := time.Date(2026, 2, 27, 12, 34, 0, 0, time.UTC)
+	result := CheckTrigger(a, now, neverRan, nil, nil)
+	if !result.Due {
+		t.Errorf("Due = false, want true for */1 schedule; reason=%q", result.Reason)
+	}
+}
+
 func TestCheckTriggerCronNotMatched(t *testing.T) {
 	a := Order{Name: "cleanup", Trigger: "cron", Schedule: "0 3 * * *"}
 	// 12:00 UTC — should not match.

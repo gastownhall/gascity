@@ -156,6 +156,26 @@ func TestAdaptiveCadenceLowLatencyKeepsSmall(t *testing.T) {
 	}
 }
 
+func TestUpdateStatsPopulatesCadenceDiagnostics(t *testing.T) {
+	cs := newPrimedCacheForCadenceTest(t)
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	cs.updateStatsLocked()
+
+	if cs.stats.CurrentReconcileInterval != cacheReconcileIntervalSmall {
+		t.Errorf("stats.CurrentReconcileInterval = %v, want %v",
+			cs.stats.CurrentReconcileInterval, cacheReconcileIntervalSmall)
+	}
+	if cs.stats.LatencyP95Ms != 0 {
+		t.Errorf("stats.LatencyP95Ms = %v before full window, want 0",
+			cs.stats.LatencyP95Ms)
+	}
+	if cs.stats.CadenceDriver != "default" {
+		t.Errorf("stats.CadenceDriver = %q, want default", cs.stats.CadenceDriver)
+	}
+}
+
 func TestAdaptiveCadenceDemotesAfterHysteresisWindow(t *testing.T) {
 	cs := newPrimedCacheForCadenceTest(t)
 	cs.mu.Lock()
@@ -361,8 +381,8 @@ func TestAdaptiveCadenceLogsOnceOnDemote(t *testing.T) {
 	if nl := strings.IndexByte(demoteLine, '\n'); nl >= 0 {
 		demoteLine = demoteLine[:nl]
 	}
-	if !strings.Contains(demoteLine, "driver=default") {
-		t.Errorf("demote log missing driver=default; line=%q", demoteLine)
+	if !strings.Contains(demoteLine, "driver=latency") {
+		t.Errorf("demote log missing driver=latency; line=%q output=%q", demoteLine, out)
 	}
 }
 

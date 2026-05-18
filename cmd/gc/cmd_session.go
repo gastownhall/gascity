@@ -648,8 +648,15 @@ func newSessionListCmd(stdout, stderr io.Writer) *cobra.Command {
 
 // cmdSessionList is the CLI entry point for "gc session list".
 func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc session list")
+	storeStderr := stderr
+	if jsonOutput {
+		storeStderr = io.Discard
+	}
+	store, code := openCityStore(storeStderr, "gc session list")
 	if store == nil {
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "store_open_failed", "gc session list: opening bead store failed", code)
+		}
 		return code
 	}
 
@@ -678,6 +685,9 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 		Sort:  beads.SortCreatedDesc,
 	})
 	if err != nil {
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "session_list_failed", fmt.Sprintf("gc session list: listing sessions: %v", err), 1)
+		}
 		fmt.Fprintf(stderr, "gc session list: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -686,6 +696,9 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	sp := newSessionProviderFromContext(providerCtx, sessionBeads)
 	catalog, err := workerSessionCatalogWithConfig("", store, sp, providerCtx.cfg)
 	if err != nil {
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "session_catalog_failed", fmt.Sprintf("gc session list: %v", err), 1)
+		}
 		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -693,10 +706,7 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	sessions := listResult.Sessions
 
 	if jsonOutput {
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(sessionListJSONRows(sessions)) //nolint:errcheck // best-effort stdout
-		return 0
+		return writeSessionListJSON(sessions, stateFilter, templateFilter, stdout, stderr)
 	}
 
 	// Build bead index from the beads already fetched by ListFull (no duplicate query).
@@ -760,26 +770,79 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 }
 
 type sessionListJSONRow struct {
-	ID                   string
-	Template             string
-	State                session.State
-	Closed               bool
-	Title                string
-	Alias                string
-	AgentName            string
-	Provider             string
-	Transport            string
-	Command              string
-	WorkDir              string
-	SessionName          string
-	SessionKey           string
-	ResumeFlag           string
-	ResumeStyle          string
-	ResumeCommand        string
-	CreatedAt            time.Time
-	LastActive           time.Time
-	LastNudgeDeliveredAt *time.Time `json:"last_nudge_delivered_at,omitempty"`
-	Attached             bool
+	ID                   string        `json:"id"`
+	Name                 string        `json:"name,omitempty"`
+	Template             string        `json:"template"`
+	Provider             string        `json:"provider,omitempty"`
+	State                session.State `json:"state"`
+	Title                string        `json:"title,omitempty"`
+	Rig                  string        `json:"rig,omitempty"`
+	Alias                string        `json:"alias,omitempty"`
+	AgentName            string        `json:"agent_name,omitempty"`
+	Transport            string        `json:"transport,omitempty"`
+	Command              string        `json:"command,omitempty"`
+	WorkDir              string        `json:"work_dir,omitempty"`
+	SessionName          string        `json:"session_name,omitempty"`
+	SessionKey           string        `json:"session_key,omitempty"`
+	ResumeFlag           string        `json:"resume_flag,omitempty"`
+	ResumeStyle          string        `json:"resume_style,omitempty"`
+	ResumeCommand        string        `json:"resume_command,omitempty"`
+	CreatedAt            time.Time     `json:"created_at"`
+	LastActive           time.Time     `json:"last_active"`
+	LastNudgeDeliveredAt *time.Time    `json:"last_nudge_delivered_at,omitempty"`
+	Attached             bool          `json:"attached"`
+	Closed               bool          `json:"closed"`
+}
+
+type sessionListJSON struct {
+	SchemaVersion string               `json:"schema_version"`
+	Filters       sessionListFilters   `json:"filters"`
+	Sessions      []sessionListJSONRow `json:"sessions"`
+	Summary       sessionListSummary   `json:"summary"`
+}
+
+type sessionListFilters struct {
+	State    string `json:"state,omitempty"`
+	Template string `json:"template,omitempty"`
+}
+
+type sessionListSummary struct {
+	Total     int `json:"total"`
+	Active    int `json:"active"`
+	Suspended int `json:"suspended"`
+	Closed    int `json:"closed"`
+}
+
+func writeSessionListJSON(sessions []session.Info, stateFilter, templateFilter string, stdout, stderr io.Writer) int {
+	rows := sessionListJSONRows(sessions)
+	result := sessionListJSON{
+		SchemaVersion: "1",
+		Filters:       sessionListFilters{State: stateFilter, Template: templateFilter},
+		Sessions:      rows,
+		Summary:       summarizeSessionList(rows),
+	}
+	enc := json.NewEncoder(stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(result); err != nil {
+		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return 0
+}
+
+func summarizeSessionList(rows []sessionListJSONRow) sessionListSummary {
+	summary := sessionListSummary{Total: len(rows)}
+	for _, row := range rows {
+		switch {
+		case row.Closed:
+			summary.Closed++
+		case row.State == session.StateActive:
+			summary.Active++
+		case row.State == session.StateSuspended:
+			summary.Suspended++
+		}
+	}
+	return summary
 }
 
 func sessionListJSONRows(sessions []session.Info) []sessionListJSONRow {
@@ -787,10 +850,12 @@ func sessionListJSONRows(sessions []session.Info) []sessionListJSONRow {
 	for i, s := range sessions {
 		rows[i] = sessionListJSONRow{
 			ID:            s.ID,
+			Name:          sessionListJSONName(s),
 			Template:      s.Template,
 			State:         s.State,
 			Closed:        s.Closed,
 			Title:         s.Title,
+			Rig:           sessionListJSONRig(s),
 			Alias:         s.Alias,
 			AgentName:     s.AgentName,
 			Provider:      s.Provider,
@@ -812,6 +877,28 @@ func sessionListJSONRows(sessions []session.Info) []sessionListJSONRow {
 		}
 	}
 	return rows
+}
+
+func sessionListJSONName(s session.Info) string {
+	if s.Alias != "" {
+		return s.Alias
+	}
+	if s.SessionName != "" {
+		return s.SessionName
+	}
+	return s.ID
+}
+
+func sessionListJSONRig(s session.Info) string {
+	template := strings.TrimSpace(s.Template)
+	if before, _, ok := strings.Cut(template, "/"); ok {
+		return before
+	}
+	name := strings.TrimSpace(s.SessionName)
+	if before, _, ok := strings.Cut(name, "--"); ok {
+		return before
+	}
+	return ""
 }
 
 func sessionListTarget(s session.Info) string {

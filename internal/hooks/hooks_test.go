@@ -434,6 +434,27 @@ func TestInstallCodexIsByteStableAcrossRepeatedInstalls(t *testing.T) {
 	}
 }
 
+func TestCodexHooksMissingManagedPreCompact(t *testing.T) {
+	staleManaged := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"gc prime --hook --hook-format codex"}]}]}}`)
+	if !CodexHooksMissingManagedPreCompact(staleManaged) {
+		t.Fatal("managed Codex hooks without PreCompact were not reported stale")
+	}
+
+	currentManaged := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"gc prime --hook --hook-format codex"}]}],"PreCompact":[{"hooks":[{"type":"command","command":"gc handoff --auto --hook-format codex"}]}]}}`)
+	if CodexHooksMissingManagedPreCompact(currentManaged) {
+		t.Fatal("managed Codex hooks with PreCompact were reported stale")
+	}
+
+	customOnly := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"printf custom"}]}]}}`)
+	if CodexHooksMissingManagedPreCompact(customOnly) {
+		t.Fatal("custom-only Codex hooks were reported stale")
+	}
+
+	if CodexHooksMissingManagedPreCompact([]byte(`{not-json`)) {
+		t.Fatal("malformed Codex hooks were reported stale")
+	}
+}
+
 func TestInstallCodexPreservesCustomOnlyHooksByteForByte(t *testing.T) {
 	fs := fsys.NewFake()
 	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"printf custom-codex-hook","type":"command"}]}]}}`)

@@ -570,6 +570,7 @@ func (c *CachingStore) updateStatsLocked() {
 	}
 	c.stats.TotalDeps = totalDeps
 	c.stats.SyncFailures = c.syncFailures
+	c.updateCadenceStatsLocked()
 }
 
 func beadIDs(beadMap map[string]Bead) []string {

@@ -67,6 +67,7 @@ config and "explain" to see where each value originated.`,
 func newConfigShowCmd(stdout, stderr io.Writer) *cobra.Command {
 	var validate bool
 	var showProvenance bool
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "show",
 		Short: "Dump the resolved city configuration as TOML",
@@ -79,10 +80,11 @@ config element. Use -f to layer additional config files.`,
 		Example: `  gc config show
   gc config show --validate
   gc config show --provenance
+  gc config show --json
   gc config show -f overlay.toml`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doConfigShow(validate, showProvenance, stdout, stderr) != 0 {
+			if doConfigShow(validate, showProvenance, asJSON, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -90,6 +92,7 @@ config element. Use -f to layer additional config files.`,
 	}
 	cmd.Flags().BoolVar(&validate, "validate", false, "validate config and exit (0 = valid, 1 = errors)")
 	cmd.Flags().BoolVar(&showProvenance, "provenance", false, "show where each config element originated")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON")
 	cmd.Flags().StringArrayVarP(&extraConfigFiles, "file", "f", nil,
 		"additional config files to layer (can be repeated)")
 	return cmd
@@ -97,7 +100,7 @@ config element. Use -f to layer additional config files.`,
 
 // doConfigShow loads city.toml (with includes) and dumps the resolved
 // config, validates it, or shows provenance.
-func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
+func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc config show: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -115,9 +118,11 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Composition warnings.
-	for _, w := range prov.Warnings {
-		fmt.Fprintf(stderr, "gc config show: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+	compositionWarnings := append([]string(nil), prov.Warnings...)
+	if !asJSON {
+		for _, w := range compositionWarnings {
+			fmt.Fprintf(stderr, "gc config show: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+		}
 	}
 
 	// Run validation.
@@ -137,6 +142,15 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 	validationWarnings := singletonSessionMigrationWarnings(cfg)
 
 	if validate {
+		if asJSON {
+			if code := writeConfigShowJSON(stdout, cityPath, cfg, compositionWarnings, validationWarnings, validationErrors, nil); code != 0 {
+				return code
+			}
+			if len(validationErrors) > 0 {
+				return 1
+			}
+			return 0
+		}
 		for _, w := range validationWarnings {
 			fmt.Fprintf(stderr, "gc config show: warning: %s\n", w) //nolint:errcheck // best-effort stderr
 		}
@@ -148,6 +162,14 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintln(stdout, "Config valid.") //nolint:errcheck // best-effort stdout
 		return 0
+	}
+
+	if asJSON {
+		var provenance any
+		if showProvenance {
+			provenance = prov
+		}
+		return writeConfigShowJSON(stdout, cityPath, cfg, compositionWarnings, validationWarnings, validationErrors, provenance)
 	}
 
 	// Print validation warnings even in show mode.
@@ -177,6 +199,34 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprint(stdout, string(data)) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func writeConfigShowJSON(stdout io.Writer, cityPath string, cfg *config.City, warnings, validationWarnings, validationErrors []string, provenance any) int {
+	payload := map[string]any{
+		"schema_version": "1",
+		"city_path":      cityPath,
+		"config":         configForDisplay(cfg),
+		"warnings":       nonNilStrings(warnings),
+		"validation": map[string]any{
+			"ok":       len(validationErrors) == 0,
+			"warnings": nonNilStrings(validationWarnings),
+			"errors":   nonNilStrings(validationErrors),
+		},
+	}
+	if provenance != nil {
+		payload["provenance"] = provenance
+	}
+	if err := writeCLIJSONLine(stdout, payload); err != nil {
+		return 1
+	}
+	return 0
+}
+
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
 }
 
 func configForDisplay(cfg *config.City) *config.City {

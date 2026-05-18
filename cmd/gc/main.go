@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -35,6 +36,17 @@ var errExit = errors.New("exit")
 
 type commandExitError struct {
 	code int
+}
+
+type switchableWriter struct {
+	target io.Writer
+}
+
+func (w *switchableWriter) Write(p []byte) (int, error) {
+	if w == nil || w.target == nil {
+		return 0, io.ErrClosedPipe
+	}
+	return w.target.Write(p)
 }
 
 func (e *commandExitError) Error() string {
@@ -107,17 +119,55 @@ func run(args []string, stdout, stderr io.Writer) int {
 		telemetry.SetProcessOTELAttrs()
 	}
 
-	root := newRootCmd(stdout, stderr)
+	execStdout := &switchableWriter{target: stdout}
+	var jsonStdout bytes.Buffer
+	root := newRootCmd(execStdout, stderr)
 	if args == nil {
 		args = []string{}
 	}
+	jsonExecution := shouldBufferJSONExecution(root, args)
+	if jsonExecution {
+		execStdout.target = &jsonStdout
+	}
 	root.SetArgs(args)
-	root.SetOut(stdout)
+	root.SetOut(execStdout)
 	root.SetErr(stderr)
+	if handled, code := handleJSONSchemaRequest(root, args, stdout); handled {
+		return code
+	}
+	if handled, code := handleJSONContractRequest(root, args, stdout, stderr); handled {
+		return code
+	}
 	if err := root.Execute(); err != nil {
-		return commandExitCode(err)
+		code := commandExitCode(err)
+		if jsonExecution {
+			if len(bytes.TrimSpace(jsonStdout.Bytes())) > 0 {
+				if _, copyErr := io.Copy(stdout, &jsonStdout); copyErr != nil {
+					return 1
+				}
+			} else {
+				_ = writeJSONFailure(stdout, "command_failed", commandFailureMessage(err), code)
+			}
+		}
+		return code
+	}
+	if jsonExecution {
+		if _, err := io.Copy(stdout, &jsonStdout); err != nil {
+			return 1
+		}
 	}
 	return 0
+}
+
+func commandFailureMessage(err error) string {
+	if err == nil {
+		return "command failed"
+	}
+	msg := strings.TrimSpace(err.Error())
+	if msg == "" || errors.Is(err, errExit) {
+		return "command failed; see stderr for diagnostics"
+	}
+	return msg
 }
 
 // newRootCmd creates the root cobra command with all subcommands.
@@ -150,6 +200,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		"path to the city directory (default: walk up from cwd)")
 	root.PersistentFlags().StringVar(&rigFlag, "rig", "",
 		"rig name or path (default: discover from cwd)")
+	configureJSONSchemaFlag(root)
 	_ = root.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	root.AddCommand(
 		newStartCmd(stdout, stderr),

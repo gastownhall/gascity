@@ -494,6 +494,35 @@ func TestCityStatusJSONReportsCatalogListError(t *testing.T) {
 	}
 }
 
+func TestCmdCityStatusJSONConfigErrorIsStructured(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cmdCityStatus([]string{filepath.Join(t.TempDir(), "missing-city")}, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+
+	var payload cliJSONErrorOutput
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON error: %v\n%s", err, stdout.String())
+	}
+	if payload.OK {
+		t.Fatalf("ok = true, want false; payload=%+v", payload)
+	}
+	if payload.Error.Code != "city_resolve_failed" || payload.Error.ExitCode != code {
+		t.Fatalf("error = %+v, want city_resolve_failed with exit code %d", payload.Error, code)
+	}
+	if strings.Contains(stderr.String(), "gc status: loading") {
+		t.Fatalf("stderr contains human diagnostic: %q", stderr.String())
+	}
+	var diagnostic cliJSONDiagnostic
+	if err := json.Unmarshal(bytes.TrimSpace(stderr.Bytes()), &diagnostic); err != nil {
+		t.Fatalf("stderr is not JSON diagnostic: %v\n%s", err, stderr.String())
+	}
+	if diagnostic.ExitCode != code {
+		t.Fatalf("stderr exit_code = %d, want %d", diagnostic.ExitCode, code)
+	}
+}
+
 func TestCityStatusReportsCatalogListError(t *testing.T) {
 	sp := runtime.NewFake()
 	dops := newFakeDrainOps()

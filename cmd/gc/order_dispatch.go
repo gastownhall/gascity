@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -128,6 +132,11 @@ func lockedStderr(w io.Writer) io.Writer {
 
 type orderStoreFunc func(execStoreTarget) (beads.Store, error)
 
+type orderSetSnapshot struct {
+	Orders    []orders.Order
+	Signature string
+}
+
 // memoryOrderDispatcher is the production implementation.
 //
 // inflightN + inflightDone together track dispatchOne goroutines so
@@ -166,15 +175,58 @@ type memoryOrderDispatcher struct {
 // Scans both city-level and per-rig orders. Rig orders get their Rig
 // field stamped so they use independent scoped labels.
 func buildOrderDispatcher(cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer) orderDispatcher {
-	allAA, err := scanAllOrders(cityPath, cfg, stderr, "gc start: order scan")
+	od, _ := buildOrderDispatcherWithSnapshot(cityPath, cfg, rec, stderr, "gc start: order scan")
+	return od
+}
+
+func buildOrderDispatcherWithSnapshot(cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer, cmdName string) (orderDispatcher, orderSetSnapshot) {
+	snapshot, err := scanOrderSetSnapshotFS(fsys.OSFS{}, cityPath, cfg, stderr, cmdName)
 	if err != nil {
-		logDispatchError(stderr, "gc start: order scan: %v", err)
-		return nil
+		logDispatchError(stderr, "%s: %v", cmdName, err)
+		return nil, orderSetSnapshot{}
+	}
+	return buildOrderDispatcherFromOrderSet(cityPath, cfg, snapshot.Orders, rec, stderr), snapshot
+}
+
+func scanOrderSetSnapshotFS(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string) (orderSetSnapshot, error) {
+	if cfg == nil {
+		cfg = &config.City{}
+	}
+	allAA, err := scanAllOrdersFS(fs, cityPath, cfg, stderr, cmdName)
+	if err != nil {
+		return orderSetSnapshot{}, err
 	}
 	if len(cfg.Orders.Overrides) > 0 {
 		if err := orders.ApplyOverrides(allAA, convertOverrides(cfg.Orders.Overrides)); err != nil {
-			logDispatchError(stderr, "gc start: order overrides: %v", err)
+			logDispatchError(stderr, "%s: order overrides: %v", cmdName, err)
 		}
+	}
+	return orderSetSnapshot{
+		Orders:    append([]orders.Order(nil), allAA...),
+		Signature: orderSetSignature(allAA),
+	}, nil
+}
+
+func orderSetSignature(aa []orders.Order) string {
+	normalized := append([]orders.Order(nil), aa...)
+	sort.Slice(normalized, func(i, j int) bool {
+		left, right := normalized[i].ScopedName(), normalized[j].ScopedName()
+		if left != right {
+			return left < right
+		}
+		return normalized[i].Source < normalized[j].Source
+	})
+	data, err := json.Marshal(normalized)
+	if err != nil {
+		data = []byte(fmt.Sprintf("%#v", normalized))
+	}
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA []orders.Order, rec events.Recorder, stderr io.Writer) orderDispatcher {
+	if cfg == nil {
+		cfg = &config.City{}
 	}
 	allAA = orders.FilterEnabled(allAA)
 

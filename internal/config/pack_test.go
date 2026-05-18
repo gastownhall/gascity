@@ -3450,6 +3450,82 @@ script = "doctor/check2.sh"
 	}
 }
 
+func TestPackDoctorWarmupFlagParses(t *testing.T) {
+	cases := []struct {
+		name       string
+		toml       string
+		wantWarmup bool
+	}{
+		{
+			name: "explicit_true",
+			toml: `
+[pack]
+name = "warmup-pack"
+schema = 1
+
+[[doctor]]
+name = "check-x"
+script = "doctor/check-x.sh"
+warmup = true
+`,
+			wantWarmup: true,
+		},
+		{
+			name: "explicit_false",
+			toml: `
+[pack]
+name = "warmup-pack"
+schema = 1
+
+[[doctor]]
+name = "check-x"
+script = "doctor/check-x.sh"
+warmup = false
+`,
+			wantWarmup: false,
+		},
+		{
+			name: "default_omitted",
+			toml: `
+[pack]
+name = "warmup-pack"
+schema = 1
+
+[[doctor]]
+name = "check-x"
+script = "doctor/check-x.sh"
+`,
+			wantWarmup: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, "pack.toml", tc.toml)
+
+			entries := LoadPackDoctorEntries(fsys.OSFS{}, []string{dir})
+			if len(entries) != 1 {
+				t.Fatalf("got %d entries, want 1", len(entries))
+			}
+			if entries[0].Entry.Warmup != tc.wantWarmup {
+				t.Fatalf("Entry.Warmup = %v, want %v", entries[0].Entry.Warmup, tc.wantWarmup)
+			}
+
+			doctors, err := legacyPackDoctors(fsys.OSFS{}, []PackDoctorEntry{entries[0].Entry}, dir, entries[0].PackName)
+			if err != nil {
+				t.Fatalf("legacyPackDoctors: %v", err)
+			}
+			if len(doctors) != 1 {
+				t.Fatalf("got %d synthesized doctors, want 1", len(doctors))
+			}
+			if doctors[0].Warmup != tc.wantWarmup {
+				t.Errorf("DiscoveredDoctor.Warmup = %v, want %v", doctors[0].Warmup, tc.wantWarmup)
+			}
+		})
+	}
+}
+
 func TestLegacyPackDoctorsRejectsEscapingFixPaths(t *testing.T) {
 	dir := t.TempDir()
 	tests := []struct {

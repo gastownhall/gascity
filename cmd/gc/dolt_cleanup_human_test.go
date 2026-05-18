@@ -222,7 +222,10 @@ func (e *erroringCleanupClient) DropDatabase(_ context.Context, _ string) error 
 	return errBoom("drop-boom")
 }
 func (e *erroringCleanupClient) PurgeDroppedDatabases(_ context.Context, _ string) error { return nil }
-func (e *erroringCleanupClient) Close() error                                            { return nil }
+func (e *erroringCleanupClient) ProbeLiveSessions(_ context.Context) (map[string]int, error) {
+	return map[string]int{}, nil
+}
+func (e *erroringCleanupClient) Close() error { return nil }
 
 type errBoom string
 
