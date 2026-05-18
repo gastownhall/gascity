@@ -1711,6 +1711,16 @@ type DaemonConfig struct {
 	// agents during shutdown. Duration string (e.g., "5s", "30s"). Set to "0s"
 	// for immediate kill. Defaults to "5s".
 	ShutdownTimeout string `toml:"shutdown_timeout,omitempty" jsonschema:"default=5s"`
+	// DoltStopTimeout is the SIGTERM→SIGKILL grace period for the managed dolt
+	// subprocess during stop, unregister, restart, and startup/recovery
+	// cleanup. Independent of ShutdownTimeout (which gates agent drain) so a
+	// slow session drain cannot steal dolt's flush window. Duration string
+	// (e.g., "30s", "1m"). A too-short value risks SIGKILL during a journal
+	// index update or manifest rotation, which corrupts dolt's chunk journal
+	// (see gastownhall/gascity#2090). Defaults to "30s", which absorbs the
+	// longest observed flush window on commodity SSDs without unduly delaying
+	// unregister.
+	DoltStopTimeout string `toml:"dolt_stop_timeout,omitempty" jsonschema:"default=30s"`
 	// WispGCInterval is how often wisp GC runs. Duration string (e.g., "5m", "1h").
 	// Wisp GC is disabled unless both WispGCInterval and WispTTL are set.
 	WispGCInterval string `toml:"wisp_gc_interval,omitempty"`
@@ -1857,6 +1867,28 @@ func (d *DaemonConfig) ShutdownTimeoutDuration() time.Duration {
 	dur, err := time.ParseDuration(d.ShutdownTimeout)
 	if err != nil {
 		return 5 * time.Second
+	}
+	return dur
+}
+
+// DefaultDoltStopTimeout is the SIGTERM→SIGKILL grace for the managed dolt
+// subprocess when no value is configured. 30s is long enough to ride out the
+// longest observed journal-index update on commodity SSDs (#2090) while still
+// guaranteeing forward progress on unregister/restart.
+const DefaultDoltStopTimeout = 30 * time.Second
+
+// DoltStopTimeoutDuration returns the managed-dolt stop grace as a
+// time.Duration. Defaults to DefaultDoltStopTimeout (30s) when empty or
+// unparseable. Zero is allowed and means immediate SIGKILL — callers that
+// must guarantee a flush window should treat zero as a misconfiguration
+// upstream rather than silently overriding it here.
+func (d *DaemonConfig) DoltStopTimeoutDuration() time.Duration {
+	if d.DoltStopTimeout == "" {
+		return DefaultDoltStopTimeout
+	}
+	dur, err := time.ParseDuration(d.DoltStopTimeout)
+	if err != nil {
+		return DefaultDoltStopTimeout
 	}
 	return dur
 }

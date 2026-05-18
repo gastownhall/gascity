@@ -756,7 +756,7 @@ func TestRecoverManagedDoltProcessWithPasswordReusesHealthyRealServer(t *testing
 	defer cleanup()
 	t.Cleanup(func() {
 		if state, err := readDoltRuntimeStateFile(layout.StateFile); err == nil && state.PID > 0 {
-			_ = terminateManagedDoltPID(state.PID)
+			_ = terminateManagedDoltPID("", state.PID)
 		}
 	})
 

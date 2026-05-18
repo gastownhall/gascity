@@ -2591,6 +2591,64 @@ name = "mayor"
 	}
 }
 
+// --- DoltStopTimeout tests ---
+
+func TestDaemonDoltStopTimeoutDefault(t *testing.T) {
+	d := DaemonConfig{}
+	got := d.DoltStopTimeoutDuration()
+	if got != DefaultDoltStopTimeout {
+		t.Errorf("DoltStopTimeoutDuration() = %v, want %v", got, DefaultDoltStopTimeout)
+	}
+}
+
+func TestDaemonDoltStopTimeoutCustom(t *testing.T) {
+	d := DaemonConfig{DoltStopTimeout: "45s"}
+	got := d.DoltStopTimeoutDuration()
+	if got != 45*time.Second {
+		t.Errorf("DoltStopTimeoutDuration() = %v, want 45s", got)
+	}
+}
+
+func TestDaemonDoltStopTimeoutZero(t *testing.T) {
+	d := DaemonConfig{DoltStopTimeout: "0s"}
+	got := d.DoltStopTimeoutDuration()
+	if got != 0 {
+		t.Errorf("DoltStopTimeoutDuration() = %v, want 0", got)
+	}
+}
+
+func TestDaemonDoltStopTimeoutInvalid(t *testing.T) {
+	d := DaemonConfig{DoltStopTimeout: "not-a-duration"}
+	got := d.DoltStopTimeoutDuration()
+	if got != DefaultDoltStopTimeout {
+		t.Errorf("DoltStopTimeoutDuration() = %v, want %v (default for invalid)", got, DefaultDoltStopTimeout)
+	}
+}
+
+func TestParseDoltStopTimeout(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+dolt_stop_timeout = "1m"
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.DoltStopTimeout != "1m" {
+		t.Errorf("Daemon.DoltStopTimeout = %q, want %q", cfg.Daemon.DoltStopTimeout, "1m")
+	}
+	got := cfg.Daemon.DoltStopTimeoutDuration()
+	if got != time.Minute {
+		t.Errorf("DoltStopTimeoutDuration() = %v, want 1m", got)
+	}
+}
+
 // --- DriftDrainTimeout tests ---
 
 func TestDaemonDriftDrainTimeoutDefault(t *testing.T) {

@@ -2649,7 +2649,7 @@ esac
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Cleanup(func() {
 		if state, err := readDoltRuntimeStateFile(layout.StateFile); err == nil && state.PID > 0 {
-			_ = terminateManagedDoltPID(state.PID)
+			_ = terminateManagedDoltPID("", state.PID)
 		}
 	})
 
@@ -2789,7 +2789,7 @@ esac
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Cleanup(func() {
 		if state, err := readDoltRuntimeStateFile(layout.StateFile); err == nil && state.PID > 0 {
-			_ = terminateManagedDoltPID(state.PID)
+			_ = terminateManagedDoltPID("", state.PID)
 		}
 	})
 
@@ -3215,7 +3215,7 @@ esac
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Cleanup(func() {
 		if state, err := readDoltRuntimeStateFile(layout.StateFile); err == nil && state.PID > 0 {
-			_ = terminateManagedDoltPID(state.PID)
+			_ = terminateManagedDoltPID("", state.PID)
 		}
 	})
 
