@@ -196,6 +196,8 @@ mechanical.
 ## Agents
 
 Agents move out of inline TOML inventories and into agent directories.
+For the focused `[[agent]]` block split, see
+[Pack v1 → v2 migration](/packv2/migration).
 
 ### Old shape
 

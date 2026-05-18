@@ -1,93 +1,258 @@
-# Pack V2 Migration Guide
+---
+title: "Pack v1 → v2 migration"
+description: "Split a v1 [[agent]] block into a v2 agent directory in under 10 minutes."
+icon: "arrow-up-right-from-square"
+sidebarTitle: "v1 → v2 migration"
+worked_example_pinned_to: "gastown layout v0.15.0"
+---
 
-This guide covers the migration path for packs that still declare agents with
-v1 `[[agent]]` blocks while also using v2 convention-discovered agent
-directories.
+This guide covers one focused PackV2 migration: moving each v1 `[[agent]]`
+block out of `pack.toml` and into a v2 `agents/<name>/` directory with
+`agent.toml` plus `prompt.template.md`.
 
-The duplicate-agent diagnostic links here when Gas City finds both of these
-definitions for the same agent name after pack composition:
+For the broader city and pack migration path, see
+[PackV2: The New Package System for Gas City](/guides/migrating-to-pack-vnext).
 
-```toml
-[[agent]]
-name = "worker"
+## Why V2
+
+In v1, an agent definition lived in a flat `[[agent]]` list while its prompt,
+overlay, fragments, skills, and support files lived somewhere else. That made
+agent review and per-agent changes harder than they needed to be: the identity
+was in TOML, but the behavior was spread across pack-relative paths.
+
+V2 makes the agent directory the unit of ownership. `agents/<name>/agent.toml`
+holds config that differs from defaults. `agents/<name>/prompt.template.md`
+holds templated prompt content, while `prompt.md` stays plain Markdown. Agent
+local assets live beside those files, so a maintainer can version, copy, or
+override one agent without scanning the whole pack.
+
+## What Changes
+
+| In v1 `pack.toml` | In v2 |
+| --- | --- |
+| `[[agent]] name = "worker"` | `agents/worker/` |
+| `prompt_template = "prompts/worker.md"` | `agents/worker/prompt.template.md` for templated prompts |
+| Scalar fields such as `scope`, `provider`, `wake_mode` | `agents/worker/agent.toml` |
+| `append_fragments = ["footer"]` | `append_fragments` in `agent.toml`, with files in `template-fragments/` |
+| `overlay_dir = "overlays/worker"` | `agents/worker/overlay/` or pack-wide `overlay/` |
+| agent-local skills or MCP files | `agents/worker/skills/` and `agents/worker/mcp/` |
+| shared prompt fragments | pack-wide `template-fragments/` |
+
+## Migrate One Agent
+
+Set the agent name once, then migrate one `[[agent]]` block at a time.
+
+```bash
+PACK_DIR=${PACK_DIR:-.}
+AGENT=${AGENT:-worker}
+cd "$PACK_DIR"
+grep -n '^\[\[agent\]\]' pack.toml
 ```
 
 ```text
-agents/worker/agent.toml
+42:[[agent]]
 ```
 
-Gas City cannot infer which definition should win. The pack author must choose
-one layout for each agent name.
+Create the v2 directory and move the prompt into it. Use
+`prompt.template.md` when the old prompt used Go template data or fragments;
+use `prompt.md` only for plain Markdown.
 
-## Recommended Migration
+```bash
+mkdir -p "agents/${AGENT}"
+PROMPT_SOURCE=${PROMPT_SOURCE:-prompts/${AGENT}.template.md}
+cp -f "$PROMPT_SOURCE" "agents/${AGENT}/prompt.template.md"
+```
 
-Use the v2 agent directory layout for new and migrated packs.
-
-1. Create `agents/NAME/`.
-2. Move the v1 `[[agent]]` fields for that agent into
-   `agents/NAME/agent.toml`.
-3. Move the agent prompt into `agents/NAME/prompt.md` when the prompt is part
-   of the pack.
-4. Move agent-specific assets into the same directory:
-   `overlay/`, `skills/`, `mcp/`, and `template-fragments/`.
-5. Delete the old `[[agent]]` block from `pack.toml` or `city.toml`.
-6. Run the config-loading tests or `gc doctor` flow that exposed the collision.
-
-For the full v2 agent directory contract, see
-[`doc-agent-v2.md`](doc-agent-v2.md). For the pack and city model, see
-[`doc-pack-v2.md`](doc-pack-v2.md).
-
-## Field Mapping
-
-Most scalar fields move directly from the v1 `[[agent]]` block into
-`agent.toml`:
+Move scalar fields from the old `[[agent]]` block into `agent.toml`. Do not
+copy `name`; the directory name is now the identity.
 
 ```toml
-# pack.toml before
-[[agent]]
-name = "worker"
-scope = "city"
+# agents/worker/agent.toml
+scope = "rig"
 provider = "codex"
-prompt_template = "prompts/worker.md"
+wake_mode = "fresh"
+append_fragments = ["operational-awareness"]
 ```
 
-```toml
-# agents/worker/agent.toml after
-scope = "city"
-provider = "codex"
-prompt_template = "prompt.md"
+Move agent-local assets next to the agent. Leave shared assets at the pack
+root.
+
+```bash
+mkdir -p "agents/${AGENT}/overlay" "agents/${AGENT}/template-fragments"
 ```
 
-If the prompt is shared across multiple agents, keep using a pack-relative
-`prompt_template` path. If the prompt belongs only to this agent, prefer
-`agents/worker/prompt.md` and reference it as `prompt.md`.
+Delete the migrated `[[agent]]` block from `pack.toml`, then validate.
 
-## Collision Resolution
-
-When the diagnostic reports a v1/v2 layout collision, inspect both source
-lines:
+```bash
+gc doctor
+```
 
 ```text
-v1 source: ...
-v2 source: ...
+No PackV1 agent layout collision warnings should be reported.
 ```
 
-Then use one of these resolutions:
+<Note>
+Run `gc doctor` after each migrated agent. A one-agent loop keeps collisions
+local and makes the final diff easier to review.
+</Note>
 
-- Keep the v2 directory and remove the v1 `[[agent]]` block.
-- Keep the v1 block temporarily and remove the v2 directory.
-- Rename one agent if the two definitions are intentionally different roles.
+<Warning>
+Use `gc doctor --fix` only after reviewing or backing up the current pack. The
+fix path is for safe mechanical rewrites, not for resolving semantic choices
+such as which duplicate agent definition should win.
+</Warning>
 
-Do not keep both definitions with the same name in the same composed city. That
-keeps load order significant and prevents the operator from knowing which
-agent definition is active.
+## Auto-Imported System Packs
 
-## Imports And Patches
+`internal/config/config.go` is the source of truth for generated Gastown city
+imports. Today `GastownCity()` seeds only the `gastown` system pack, and both
+entries point at `.gc/system/packs/gastown`.
 
-Imported packs should define agents in their own pack directories. A city that
-needs to adjust an imported agent should use patches or overrides rather than
-redeclaring the same agent name in another layout.
+| Generated surface | Binding | Source |
+| --- | --- | --- |
+| `[imports.gastown]` | `gastown` | `.gc/system/packs/gastown` |
+| `[defaults.rig.imports.gastown]` | `gastown` | `.gc/system/packs/gastown` |
 
-During a staged migration, migrate one agent name at a time and run validation
-after each step. The desired steady state is that every composed agent name has
-one canonical definition path.
+The first import composes city-scoped agents from the system pack. The default
+rig import is applied when a new rig is added without explicit imports, so rig
+agents come from the same canonical system pack path.
+
+When `GastownCity()` changes this imports map, update this table in the same
+change.
+
+## `fallback = true`
+
+`fallback = true` is a pack composition escape hatch for duplicate agent names.
+The implementation is `resolveFallbackAgents` in `internal/config/pack.go`:
+
+```go
+func resolveFallbackAgents(agents []Agent) []Agent
+```
+
+Resolution is based on the agent's qualified name and source directory.
+Duplicates from the same source directory are not handled here; they are
+reported by the normal duplicate-agent validation path.
+
+1. If at least one fallback and one non-fallback agent with the same qualified
+   name come from different source directories, every fallback copy is removed.
+2. If all colliding copies are fallbacks, the first loaded copy wins. Load order
+   is depth-first include/import order.
+3. If no copy is a fallback, the collision remains and validation reports an
+   error.
+4. A city-level inline agent has an empty source directory, which still counts
+   as distinct from a system pack source. That lets a city-defined non-fallback
+   agent shadow a system fallback.
+
+```toml
+# imported pack
+[[agent]]
+name = "dog"
+fallback = true
+```
+
+```toml
+# city pack
+[[agent]]
+name = "dog"
+```
+
+In that composition, the city pack's `dog` remains active and the imported
+fallback `dog` is discarded before duplicate-agent validation runs.
+
+## Worked Example: Gastown `witness`
+
+Gastown's `witness` agent is already in the v2 shape. A v1 equivalent would
+have put the identity and scalar fields in `pack.toml`:
+
+```toml
+# v1 pack.toml
+[[agent]]
+name = "witness"
+scope = "rig"
+prompt_template = "prompts/witness.template.md"
+wake_mode = "fresh"
+work_dir = ".gc/agents/{{.Rig}}/witness"
+nudge = "Run 'gc prime' to check worker status and begin patrol cycle."
+idle_timeout = "1h"
+max_session_age = "5h"
+max_session_age_jitter = "15m"
+max_active_sessions = 1
+```
+
+The v2 pack removes that block and stores the agent under its own directory:
+
+```text
+examples/gastown/packs/gastown/agents/witness/
+├── agent.toml
+└── prompt.template.md
+```
+
+```toml
+# agents/witness/agent.toml
+scope = "rig"
+wake_mode = "fresh"
+work_dir = ".gc/agents/{{.Rig}}/witness"
+nudge = "Run 'gc prime' to check worker status and begin patrol cycle."
+idle_timeout = "1h"
+max_session_age = "5h"
+max_session_age_jitter = "15m"
+max_active_sessions = 1
+```
+
+The prompt body moves into `agents/witness/prompt.template.md`. The `name`
+field disappears because `witness` is now derived from the directory path.
+
+## Verification
+
+Run `gc doctor` and expect no PackV1 layout collision for the migrated agent.
+Then inspect or start the city and confirm the prompt path resolves
+from `agents/<name>/`.
+
+```bash
+gc doctor
+gc config show
+```
+
+## Troubleshooting
+
+### Agent Not Found
+
+Check that `agents/<name>/agent.toml` or a prompt file exists. An empty
+directory is not an agent definition.
+
+```bash
+find agents -maxdepth 2 -type f | sort
+```
+
+### Fallback Agent Still Appears
+
+Check whether the local agent is also marked `fallback = true`. A non-fallback
+agent shadows fallbacks; two fallback definitions keep the first loaded copy.
+
+### `pack.toml` Decode Error
+
+Run `gc doctor` for the exact file and line, then inspect the block you edited.
+Most failures come from leaving a partial `[[agent]]` table behind.
+
+### Auto-Imported Pack Missing
+
+Confirm the generated import source still matches
+`.gc/system/packs/gastown`. If `GastownCity()` changed, update the table above
+and the generated config together.
+
+### Fragments Do Not Render
+
+Only `.template.md` files run through Go templates. If a prompt needs
+`{{ template "fragment" . }}`, the prompt file must be named
+`prompt.template.md`.
+
+<Note>
+See also: If you're hitting an error other than `duplicate name`, see the
+[`gc start` walkthrough](/troubleshooting/gc-start-walkthrough).
+</Note>
+
+## Out Of Scope
+
+This page does not cover migrating formulas, orders, commands, doctor checks,
+or city deployment settings. Use the broader
+[PackV2 migration guide](/guides/migrating-to-pack-vnext) for those surfaces.

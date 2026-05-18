@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -64,6 +65,288 @@ func setWaitTestFileBeads(t *testing.T) {
 	t.Helper()
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+}
+
+func TestWaitListJSON(t *testing.T) {
+	cityDir, store := setupWaitJSONTestCity(t)
+	wait := createTestWaitBead(t, store)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWaitList("", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWaitList(--json) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+
+	var payload struct {
+		SchemaVersion string `json:"schema_version"`
+		CityPath      string `json:"city_path"`
+		Waits         []struct {
+			ID              string            `json:"id"`
+			SessionID       string            `json:"session_id"`
+			State           string            `json:"state"`
+			DepIDs          []string          `json:"dep_ids"`
+			RegisteredEpoch string            `json:"registered_epoch"`
+			Metadata        map[string]string `json:"metadata"`
+		} `json:"waits"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.SchemaVersion != "1" || payload.CityPath != cityDir || len(payload.Waits) != 1 {
+		t.Fatalf("payload = %+v", payload)
+	}
+	if got := payload.Waits[0]; got.ID != wait.ID || got.SessionID != "session-1" || got.State != waitStatePending || len(got.DepIDs) != 2 {
+		t.Fatalf("wait row = %+v, source=%+v", got, wait)
+	}
+	if got := payload.Waits[0].RegisteredEpoch; got != "1" {
+		t.Fatalf("registered_epoch = %q, want 1", got)
+	}
+	if payload.Waits[0].Metadata != nil {
+		t.Fatalf("metadata = %+v, want omitted", payload.Waits[0].Metadata)
+	}
+}
+
+func TestWaitInspectJSON(t *testing.T) {
+	_, store := setupWaitJSONTestCity(t)
+	wait := createTestWaitBead(t, store)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWaitInspect(wait.ID, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWaitInspect(--json) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+
+	var payload struct {
+		SchemaVersion string `json:"schema_version"`
+		Wait          struct {
+			ID              string            `json:"id"`
+			Kind            string            `json:"kind"`
+			Note            string            `json:"note"`
+			DepMode         string            `json:"dep_mode"`
+			RegisteredEpoch string            `json:"registered_epoch"`
+			Metadata        map[string]string `json:"metadata"`
+		} `json:"wait"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.SchemaVersion != "1" || payload.Wait.ID != wait.ID || payload.Wait.Kind != "deps" || payload.Wait.Note != "wait for deps" {
+		t.Fatalf("payload = %+v", payload)
+	}
+	if payload.Wait.DepMode != "all" || payload.Wait.RegisteredEpoch != "1" {
+		t.Fatalf("wait = %+v", payload.Wait)
+	}
+	if payload.Wait.Metadata != nil {
+		t.Fatalf("metadata = %+v, want omitted", payload.Wait.Metadata)
+	}
+}
+
+func TestWaitListJSONFiltersState(t *testing.T) {
+	_, store := setupWaitJSONTestCity(t)
+	pending := createTestWaitBead(t, store)
+	ready := createTestWaitBeadForSession(t, store, "session-2", waitStateReady)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWaitList(waitStatePending, "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWaitList(--json --state pending) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+
+	payload := decodeWaitListJSON(t, stdout.Bytes())
+	if len(payload.Waits) != 1 || payload.Waits[0].ID != pending.ID {
+		t.Fatalf("waits = %+v, want only %s; filtered ready=%s", payload.Waits, pending.ID, ready.ID)
+	}
+}
+
+func TestWaitListJSONFiltersSessionWithSessionScopedLookup(t *testing.T) {
+	_, store := setupWaitJSONTestCity(t)
+	targetWait := createTestWaitBeadForSession(t, store, "target-session", waitStatePending)
+	for i := 0; i < waitLookupLimit; i++ {
+		createTestWaitBeadForSession(t, store, "other-session", waitStatePending)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWaitList("", "target-session", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWaitList(--json --session target-session) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+
+	payload := decodeWaitListJSON(t, stdout.Bytes())
+	if len(payload.Waits) != 1 || payload.Waits[0].ID != targetWait.ID || payload.Waits[0].SessionID != "target-session" {
+		t.Fatalf("waits = %+v, want only target %s", payload.Waits, targetWait.ID)
+	}
+}
+
+func TestWaitListJSONEmptyListUsesArray(t *testing.T) {
+	_, _ = setupWaitJSONTestCity(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdWaitList("", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdWaitList(--json empty) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+
+	payload := decodeWaitListJSON(t, stdout.Bytes())
+	if payload.Waits == nil {
+		t.Fatalf("waits decoded as nil; stdout=%s", stdout.String())
+	}
+	if len(payload.Waits) != 0 {
+		t.Fatalf("waits = %+v, want empty", payload.Waits)
+	}
+}
+
+func TestWaitInspectJSONFailuresUseCommandFailureEnvelope(t *testing.T) {
+	cases := []struct {
+		name       string
+		waitID     func(t *testing.T, store beads.Store) string
+		stderrWant string
+	}{
+		{
+			name:       "missing",
+			waitID:     func(_ *testing.T, _ beads.Store) string { return "missing-wait" },
+			stderrWant: "gc wait inspect:",
+		},
+		{
+			name: "non_wait",
+			waitID: func(t *testing.T, store beads.Store) string {
+				t.Helper()
+				b, err := store.Create(beads.Bead{Title: "not a wait", Type: "task"})
+				if err != nil {
+					t.Fatalf("Create(non-wait): %v", err)
+				}
+				return b.ID
+			},
+			stderrWant: "is not a wait",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			_, store := setupWaitJSONTestCity(t)
+			waitID := tt.waitID(t, store)
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"wait", "inspect", waitID, "--json"}, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("run(wait inspect %s --json) = 0, want failure; stdout=%q stderr=%q", waitID, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tt.stderrWant) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tt.stderrWant)
+			}
+			var failure jsonSchemaErrorPayload
+			if err := json.Unmarshal(stdout.Bytes(), &failure); err != nil {
+				t.Fatalf("stdout is not JSON failure: %v\n%s", err, stdout.String())
+			}
+			if failure.OK || failure.Error.Code != "command_failed" || failure.Error.ExitCode != code {
+				t.Fatalf("failure = %+v, exit code %d", failure, code)
+			}
+		})
+	}
+}
+
+func TestWaitJSONEncoderErrorsWriteDiagnostics(t *testing.T) {
+	var stderr bytes.Buffer
+	if code := writeWaitListJSON(failingWriter{}, &stderr, "/city", nil); code != 1 {
+		t.Fatalf("writeWaitListJSON = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "gc wait list: encode JSON: write failed") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+
+	stderr.Reset()
+	if code := writeWaitInspectJSON(failingWriter{}, &stderr, "/city", beads.Bead{}); code != 1 {
+		t.Fatalf("writeWaitInspectJSON = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "gc wait inspect: encode JSON: write failed") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestWaitJSONSchemasDoNotExposeRawMetadata(t *testing.T) {
+	for _, path := range []string{
+		filepath.Join("..", "..", "schemas", "wait", "list", "result.schema.json"),
+		filepath.Join("..", "..", "schemas", "wait", "inspect", "result.schema.json"),
+	} {
+		t.Run(path, func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("ReadFile(%s): %v", path, err)
+			}
+			if bytes.Contains(data, []byte(`"metadata"`)) {
+				t.Fatalf("%s exposes raw metadata:\n%s", path, string(data))
+			}
+		})
+	}
+}
+
+type waitListJSONTestPayload struct {
+	Waits []struct {
+		ID        string `json:"id"`
+		SessionID string `json:"session_id"`
+		State     string `json:"state"`
+	} `json:"waits"`
+}
+
+func setupWaitJSONTestCity(t *testing.T) (string, beads.Store) {
+	t.Helper()
+	clearGCEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeCityToml(t, cityDir, "[workspace]\nname = \"wait-json\"\n")
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	return cityDir, store
+}
+
+func decodeWaitListJSON(t *testing.T, data []byte) waitListJSONTestPayload {
+	t.Helper()
+	var payload waitListJSONTestPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, string(data))
+	}
+	return payload
+}
+
+func createTestWaitBead(t *testing.T, store beads.Store) beads.Bead {
+	t.Helper()
+	return createTestWaitBeadForSession(t, store, "session-1", waitStatePending)
+}
+
+func createTestWaitBeadForSession(t *testing.T, store beads.Store, sessionID, state string) beads.Bead {
+	t.Helper()
+	wait, err := store.Create(beads.Bead{
+		Title:       "wait:demo",
+		Type:        waitBeadType,
+		Status:      "open",
+		Description: "wait for deps",
+		Labels:      []string{waitBeadLabel, "session:" + sessionID},
+		Metadata: map[string]string{
+			"session_id":       sessionID,
+			"session_name":     "demo",
+			"kind":             "deps",
+			"state":            state,
+			"dep_ids":          "bead-1,bead-2",
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+			"nudge_id":         "nudge-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(wait): %v", err)
+	}
+	return wait
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write failed")
 }
 
 func (s waitNudgeMetadataFailStore) SetMetadata(id, key, value string) error {
@@ -292,7 +575,7 @@ provider = "file"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdWaitList("", "target-session", &stdout, &stderr)
+	code := cmdWaitList("", "target-session", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdWaitList = %d, want 0; stderr=%s", code, stderr.String())
 	}

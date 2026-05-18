@@ -239,3 +239,134 @@ func TestRestartLoopGuard(t *testing.T) {
 		t.Errorf("restart after window: expected allowed")
 	}
 }
+
+// fakeRestartHelpers captures invocations made by RestartSupervisor.
+type fakeRestartHelpers struct {
+	systemctlArgs []string
+	systemctlErr  error
+	killedPID     int
+	killErr       error
+	spawnExe      string
+	spawnArgv     []string
+	spawnErr      error
+}
+
+func (f *fakeRestartHelpers) Systemctl(args ...string) error {
+	f.systemctlArgs = append([]string(nil), args...)
+	return f.systemctlErr
+}
+
+func (f *fakeRestartHelpers) Kill(pid int) error {
+	f.killedPID = pid
+	return f.killErr
+}
+
+func (f *fakeRestartHelpers) Spawn(exe string, argv ...string) error {
+	f.spawnExe = exe
+	f.spawnArgv = append([]string(nil), argv...)
+	return f.spawnErr
+}
+
+func TestRestartSupervisor_SystemdManaged(t *testing.T) {
+	h := &fakeRestartHelpers{}
+	spec := restartSpec{
+		SystemdManaged: true,
+		PID:            12345,
+		ExePath:        "/home/op/.local/bin/gc",
+		Argv:           []string{"supervisor", "run"},
+		ServiceName:    "gascity-supervisor.service",
+	}
+	if err := restartSupervisor(spec, restartHelpersFromFake(h)); err != nil {
+		t.Fatalf("restartSupervisor: %v", err)
+	}
+	wantArgs := []string{"--user", "restart", "gascity-supervisor.service"}
+	if len(h.systemctlArgs) != len(wantArgs) {
+		t.Fatalf("systemctl args = %v, want %v", h.systemctlArgs, wantArgs)
+	}
+	for i := range wantArgs {
+		if h.systemctlArgs[i] != wantArgs[i] {
+			t.Errorf("systemctl arg %d = %q, want %q", i, h.systemctlArgs[i], wantArgs[i])
+		}
+	}
+	if h.killedPID != 0 {
+		t.Errorf("Kill called for systemd-managed restart (pid=%d); should delegate to systemd only", h.killedPID)
+	}
+	if h.spawnExe != "" {
+		t.Errorf("Spawn called for systemd-managed restart; should delegate to systemd only")
+	}
+}
+
+func TestRestartSupervisor_DirectLaunch(t *testing.T) {
+	h := &fakeRestartHelpers{}
+	spec := restartSpec{
+		SystemdManaged: false,
+		PID:            12345,
+		ExePath:        "/home/op/.local/bin/gc",
+		Argv:           []string{"supervisor", "run"},
+	}
+	if err := restartSupervisor(spec, restartHelpersFromFake(h)); err != nil {
+		t.Fatalf("restartSupervisor: %v", err)
+	}
+	if len(h.systemctlArgs) != 0 {
+		t.Errorf("systemctl invoked for direct restart: %v", h.systemctlArgs)
+	}
+	if h.killedPID != 12345 {
+		t.Errorf("Kill called with pid %d, want 12345", h.killedPID)
+	}
+	if h.spawnExe != "/home/op/.local/bin/gc" {
+		t.Errorf("Spawn exe = %q, want /home/op/.local/bin/gc", h.spawnExe)
+	}
+	wantArgv := []string{"supervisor", "run"}
+	if len(h.spawnArgv) != len(wantArgv) {
+		t.Fatalf("spawn argv = %v, want %v", h.spawnArgv, wantArgv)
+	}
+	for i := range wantArgv {
+		if h.spawnArgv[i] != wantArgv[i] {
+			t.Errorf("spawn argv[%d] = %q, want %q", i, h.spawnArgv[i], wantArgv[i])
+		}
+	}
+}
+
+// TestRestartSupervisor_SystemdFailureSurfaces ensures a systemctl
+// failure is propagated rather than swallowed; without this the operator
+// would see "Restarting... ready" while the supervisor stayed dead.
+func TestRestartSupervisor_SystemdFailureSurfaces(t *testing.T) {
+	h := &fakeRestartHelpers{systemctlErr: errors.New("unit not loaded")}
+	spec := restartSpec{
+		SystemdManaged: true,
+		PID:            1,
+		ServiceName:    "gascity-supervisor.service",
+	}
+	err := restartSupervisor(spec, restartHelpersFromFake(h))
+	if err == nil {
+		t.Fatal("expected systemctl error to surface")
+	}
+}
+
+// TestRestartSupervisor_DirectKillFailureSurfaces guards against
+// silently spawning a second supervisor when the first one wouldn't die.
+func TestRestartSupervisor_DirectKillFailureSurfaces(t *testing.T) {
+	h := &fakeRestartHelpers{killErr: errors.New("permission denied")}
+	spec := restartSpec{
+		SystemdManaged: false,
+		PID:            12345,
+		ExePath:        "/home/op/.local/bin/gc",
+	}
+	err := restartSupervisor(spec, restartHelpersFromFake(h))
+	if err == nil {
+		t.Fatal("expected kill error to surface; otherwise we'd race a duplicate supervisor")
+	}
+	if h.spawnExe != "" {
+		t.Errorf("Spawn called after Kill failed; should abort instead")
+	}
+}
+
+// restartHelpersFromFake adapts the test fake to the production
+// restartHelpers contract.
+func restartHelpersFromFake(f *fakeRestartHelpers) restartHelpers {
+	return restartHelpers{
+		Systemctl: f.Systemctl,
+		Kill:      f.Kill,
+		Spawn:     f.Spawn,
+	}
+}

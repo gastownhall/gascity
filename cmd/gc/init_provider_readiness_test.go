@@ -117,6 +117,15 @@ func TestProviderStatusFixHintIncludesClaudeOAuthToken(t *testing.T) {
 	}
 }
 
+func TestProviderStatusFixHintIncludesClaudeSetupTokenForNeedsAuth(t *testing.T) {
+	got := providerStatusFixHint("claude", api.ProbeStatusNeedsAuth)
+	for _, want := range []string{"`claude auth login`", "`claude setup-token`", "`CLAUDE_CODE_OAUTH_TOKEN`"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("providerStatusFixHint = %q, want %s", got, want)
+		}
+	}
+}
+
 func TestFinalizeInitBlocksProviderReadinessBeforeSupervisorRegistration(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
@@ -172,6 +181,9 @@ func TestFinalizeInitBlocksProviderReadinessBeforeSupervisorRegistration(t *test
 	}
 	if !strings.Contains(stderr.String(), "run `claude auth login`") {
 		t.Fatalf("stderr = %q, want Claude fix hint", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "`claude setup-token`") {
+		t.Fatalf("stderr = %q, want Claude setup-token hint", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "Override: gc init --skip-provider-readiness") {
 		t.Fatalf("stderr = %q, want init override hint", stderr.String())

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net"
@@ -19,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
@@ -564,6 +566,116 @@ func TestSendReloadControlRequestNoChange(t *testing.T) {
 	if other := warningsWithoutV1Surfaces(reply.Warnings); len(other) != 0 {
 		t.Fatalf("reply.Warnings = %v, want none (besides v1-surface deprecations)", other)
 	}
+}
+
+func TestReloadConfigTracedRescansOrdersWhenConfigRevisionUnchanged(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	t.Setenv("GC_BEADS", "")
+
+	dir := shortSocketTempDir(t, "gc-reload-orders-dynamic-")
+	disableManagedDoltRecoveryForTest(t)
+	cleanupManagedDoltTestCity(t, dir)
+	tomlPath := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test\"\nschema = 1\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+
+	result, err := tryReloadConfig(tomlPath, "test", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := result.Cfg
+	applyFeatureFlags(cfg)
+	var stdout, stderr bytes.Buffer
+	initialOrders, err := scanOrderSetSnapshotFS(fsys.OSFS{}, dir, cfg, &stderr, "test")
+	if err != nil {
+		t.Fatalf("initial order scan: %v", err)
+	}
+	cr := &CityRuntime{
+		cityPath:           dir,
+		cityName:           "test",
+		configName:         "test",
+		tomlPath:           tomlPath,
+		configRev:          result.Revision,
+		cfg:                cfg,
+		sp:                 runtime.NewFake(),
+		dops:               newDrainOps(runtime.NewFake()),
+		od:                 buildOrderDispatcherFromOrderSet(dir, cfg, initialOrders.Orders, events.Discard, &stderr),
+		orderSet:           initialOrders.Orders,
+		orderSetSignature:  initialOrders.Signature,
+		orderRescanEnabled: true,
+		rec:                events.Discard,
+		stdout:             &stdout,
+		stderr:             &stderr,
+		logPrefix:          "gc test",
+	}
+	lastProviderName := cfg.Session.Provider
+
+	ordersDir := filepath.Join(dir, "orders")
+	if err := os.MkdirAll(ordersDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orderPath := filepath.Join(ordersDir, "dynamic-tick.toml")
+	if err := os.WriteFile(orderPath, []byte(`
+[order]
+exec = "true"
+trigger = "cron"
+schedule = "*/1 * * * *"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, dir, nil, reloadSourceManual)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("add reply.Outcome = %q, want %q; message=%q stderr=%q",
+			reply.Outcome, reloadOutcomeApplied, reply.Message, stderr.String())
+	}
+	if strings.Contains(reply.Message, "No config changes detected") {
+		t.Fatalf("add reply.Message = %q, should not report no change", reply.Message)
+	}
+	if !memoryDispatcherHasOrder(cr.od, "dynamic-tick") {
+		t.Fatalf("dispatcher orders after add missing dynamic-tick")
+	}
+
+	if err := os.Remove(orderPath); err != nil {
+		t.Fatal(err)
+	}
+	reply = cr.reloadConfigTraced(context.Background(), &lastProviderName, dir, nil, reloadSourceManual)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("remove reply.Outcome = %q, want %q; message=%q stderr=%q",
+			reply.Outcome, reloadOutcomeApplied, reply.Message, stderr.String())
+	}
+	if memoryDispatcherHasOrder(cr.od, "dynamic-tick") {
+		t.Fatalf("dispatcher orders after removal still contain dynamic-tick")
+	}
+	if !strings.Contains(stderr.String(), "orders reloaded: removed dynamic-tick") {
+		t.Fatalf("stderr = %q, want removal log", stderr.String())
+	}
+
+	reply = cr.reloadConfigTraced(context.Background(), &lastProviderName, dir, nil, reloadSourceManual)
+	if reply.Outcome != reloadOutcomeNoChange {
+		t.Fatalf("quiet reply.Outcome = %q, want %q; message=%q stderr=%q",
+			reply.Outcome, reloadOutcomeNoChange, reply.Message, stderr.String())
+	}
+	if reply.Message != "No config changes detected." {
+		t.Fatalf("quiet reply.Message = %q", reply.Message)
+	}
+}
+
+func memoryDispatcherHasOrder(od orderDispatcher, name string) bool {
+	m, ok := od.(*memoryOrderDispatcher)
+	if !ok {
+		return false
+	}
+	for _, a := range m.aa {
+		if a.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // warningsWithoutV1Surfaces filters out warnings produced by

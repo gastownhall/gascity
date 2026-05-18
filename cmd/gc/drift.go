@@ -19,6 +19,10 @@ type SupervisorStatus struct {
 	// predates buildID exposure.
 	BuildID string
 
+	// UptimeSec is the supervisor's reported uptime in seconds. Used to
+	// derive the `started=` token on the operator-facing identity line.
+	UptimeSec int
+
 	// PackRoots reports the supervisor's view of pack roots and when each
 	// was last parsed. The drift detector compares ParsedAt to on-disk
 	// mtime to determine whether the operator edited a pack since the
@@ -133,6 +137,107 @@ func PollReady(client SupervisorClient, timeout time.Duration) error {
 			return fmt.Errorf("supervisor not ready within %s: %w", timeout, lastErr)
 		}
 	}
+}
+
+// restartSpec describes a single supervisor restart attempt. Built by
+// the drift-detection caller from the live state (PID from
+// /proc/<pid>/exe + supervisorAlive, ExePath/Argv from os.Executable
+// and os.Args, ServiceName from supervisorSystemdServiceName, and
+// SystemdManaged from supervisorSystemctlActive).
+type restartSpec struct {
+	// SystemdManaged is true when the supervisor was started via
+	// `systemctl --user start`. In that mode the kernel's service
+	// manager owns the lifecycle; we delegate the restart to it.
+	SystemdManaged bool
+
+	// PID is the running supervisor's process id. Used by the direct
+	// branch to send SIGTERM before respawning. Ignored when
+	// SystemdManaged is true.
+	PID int
+
+	// ExePath is the resolved /proc/<pid>/exe target — the actual
+	// binary on disk, not a symlink. Used by the direct branch as
+	// the spawned executable. Ignored when SystemdManaged is true.
+	ExePath string
+
+	// Argv is the argument vector to pass to the new supervisor
+	// (e.g. {"supervisor", "run"}). Ignored when SystemdManaged is
+	// true.
+	Argv []string
+
+	// ServiceName is the systemd unit name (e.g.
+	// "gascity-supervisor.service"). Used by the systemd branch.
+	// Ignored when SystemdManaged is false.
+	ServiceName string
+}
+
+// restartHelpers abstracts the side-effecting operations
+// restartSupervisor performs so unit tests can exercise both branches
+// without spawning real processes.
+type restartHelpers struct {
+	// Systemctl invokes systemctl with the given args. Production
+	// uses supervisorSystemctlRun (which targets `systemctl ...`).
+	Systemctl func(args ...string) error
+
+	// Kill sends SIGTERM to pid. Production uses syscall.Kill.
+	Kill func(pid int) error
+
+	// WaitExit blocks until pid has exited (or the helper escalates
+	// and gives up). Production polls syscall.Kill(pid, 0) until it
+	// returns ESRCH, then SIGKILLs as a fallback. Tests set this to
+	// nil or a no-op when they don't model process lifetimes.
+	WaitExit func(pid int) error
+
+	// Spawn launches a detached process executing exe with argv.
+	// Production starts a backgrounded child via os/exec with
+	// backgroundSysProcAttr.
+	Spawn func(exe string, argv ...string) error
+}
+
+// restartSupervisor restarts the gascity-supervisor process. Behavior
+// depends on whether systemd manages the supervisor's lifecycle:
+//
+//   - SystemdManaged: a single `systemctl --user restart <unit>` call
+//     hands the restart to the service manager. The kill+respawn is
+//     systemd's responsibility; attempting to kill the PID ourselves
+//     would race with systemd's own respawn.
+//
+//   - Direct: we kill the process by PID and spawn a new instance from
+//     ExePath. Kill failures abort the restart so we never run two
+//     supervisors against the same socket.
+//
+// The helpers allow unit tests to substitute fakes; production wires
+// real systemctl/syscall.Kill/exec invocations.
+func restartSupervisor(spec restartSpec, h restartHelpers) error {
+	if spec.SystemdManaged {
+		if h.Systemctl == nil {
+			return fmt.Errorf("restartSupervisor: nil Systemctl helper")
+		}
+		if err := h.Systemctl("--user", "restart", spec.ServiceName); err != nil {
+			return fmt.Errorf("systemctl --user restart %s: %w", spec.ServiceName, err)
+		}
+		return nil
+	}
+	if h.Kill == nil || h.Spawn == nil {
+		return fmt.Errorf("restartSupervisor: nil Kill/Spawn helper")
+	}
+	if err := h.Kill(spec.PID); err != nil {
+		return fmt.Errorf("killing supervisor pid %d: %w", spec.PID, err)
+	}
+	// Wait for the old supervisor to actually exit before spawning the
+	// replacement. Without this gap, the old process still owns the
+	// /health port and the new one fails to bind — PollReady then sees
+	// the OLD supervisor still serving and returns "ready" without the
+	// build_id ever flipping.
+	if h.WaitExit != nil {
+		if err := h.WaitExit(spec.PID); err != nil {
+			return fmt.Errorf("waiting for supervisor pid %d to exit: %w", spec.PID, err)
+		}
+	}
+	if err := h.Spawn(spec.ExePath, spec.Argv...); err != nil {
+		return fmt.Errorf("spawning supervisor %s: %w", spec.ExePath, err)
+	}
+	return nil
 }
 
 // restartLoopGuard caps how many supervisor restarts may happen within

@@ -404,6 +404,30 @@ func TestBuildSlingCommand(t *testing.T) {
 	}
 }
 
+func TestSlingJSONFromResult(t *testing.T) {
+	result := sling.SlingResult{
+		Target:      "repo-a/polecat",
+		Method:      "formula",
+		BeadID:      "repo-a-1",
+		FormulaName: "pack-review",
+		WorkflowID:  "wf-1",
+		ConvoyID:    "convoy-1",
+		Routed:      1,
+		NudgeAgent:  &config.Agent{Name: "polecat", Dir: "repo-a"},
+	}
+
+	got := slingJSONFromResult(result)
+	if got.SchemaVersion != "1" || !got.Success {
+		t.Fatalf("schema/success = %q/%v, want v1 success", got.SchemaVersion, got.Success)
+	}
+	if got.Target != "repo-a/polecat" || got.BeadID != "repo-a-1" || got.Formula != "pack-review" {
+		t.Fatalf("payload = %+v, want target/bead/formula refs", got)
+	}
+	if !got.Routed || !got.Queued || got.WorkflowID != "wf-1" || got.ConvoyID != "convoy-1" {
+		t.Fatalf("payload = %+v, want routed queued workflow convoy refs", got)
+	}
+}
+
 func TestDoSlingBeadToFixedAgent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -7246,6 +7270,33 @@ func TestOneArgSlingFormulaRequiresTarget(t *testing.T) {
 	err := cmd.Execute()
 	if err == nil {
 		t.Fatal("expected error for --formula with 1 arg")
+	}
+}
+
+func TestSlingJSONArgumentErrorIsStructured(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := newSlingCmd(&stdout, &stderr)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--json"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for --formula with 1 arg")
+	}
+
+	var payload cliJSONErrorOutput
+	if unmarshalErr := json.Unmarshal(stdout.Bytes(), &payload); unmarshalErr != nil {
+		t.Fatalf("stdout is not JSON error: %v\n%s", unmarshalErr, stdout.String())
+	}
+	if payload.OK || payload.Error.Code != "invalid_arguments" || payload.Error.ExitCode != 1 {
+		t.Fatalf("payload = %+v, want invalid_arguments exit 1", payload)
+	}
+	var diagnostic cliJSONDiagnostic
+	if unmarshalErr := json.Unmarshal(bytes.TrimSpace(stderr.Bytes()), &diagnostic); unmarshalErr != nil {
+		t.Fatalf("stderr is not JSON diagnostic: %v\n%s", unmarshalErr, stderr.String())
+	}
+	if diagnostic.Code != payload.Error.Code || diagnostic.ExitCode != payload.Error.ExitCode {
+		t.Fatalf("diagnostic = %+v, payload error = %+v", diagnostic, payload.Error)
 	}
 }
 

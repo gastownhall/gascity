@@ -6797,6 +6797,10 @@
       "SupervisorHealthOutputBody": {
         "additionalProperties": false,
         "properties": {
+          "build_id": {
+            "description": "Build identity (typically a short git commit hash, with \"-dirty\" suffix when built from an unclean tree). Empty when unavailable.",
+            "type": "string"
+          },
           "cities_running": {
             "description": "Cities currently running.",
             "format": "int64",

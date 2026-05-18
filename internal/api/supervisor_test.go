@@ -68,8 +68,13 @@ func (f *fakeCityResolver) SupervisorEventRecorder() events.Recorder {
 
 func newTestSupervisorMux(t *testing.T, cities map[string]*fakeState) *SupervisorMux {
 	t.Helper()
+	return newTestSupervisorMuxWithBuildID(t, cities, "")
+}
+
+func newTestSupervisorMuxWithBuildID(t *testing.T, cities map[string]*fakeState, buildID string) *SupervisorMux {
+	t.Helper()
 	resolver := &fakeCityResolver{cities: cities}
-	return NewSupervisorMux(resolver, nil, false, "test", time.Now())
+	return NewSupervisorMux(resolver, nil, false, "test", buildID, time.Now())
 }
 
 func TestSupervisorCitiesList(t *testing.T) {
@@ -249,7 +254,7 @@ func TestSupervisorCityScopedRoute404sUntilCityRunning(t *testing.T) {
 			Status:  "starting_agents",
 		}},
 	}
-	sm := NewSupervisorMux(resolver, nil, false, "test", time.Now())
+	sm := NewSupervisorMux(resolver, nil, false, "test", "", time.Now())
 
 	req := httptest.NewRequest("GET", "/v0/city/bright-lights/agents", nil)
 	rec := httptest.NewRecorder()
@@ -395,6 +400,53 @@ func TestSupervisorHealth(t *testing.T) {
 	}
 	if resp["cities_running"] != float64(1) {
 		t.Errorf("cities_running = %v, want 1", resp["cities_running"])
+	}
+}
+
+// TestSupervisorHealthIncludesBuildID asserts /health surfaces the
+// supervisor's build identity. Drift detection in `gc start` reads this
+// field to compare against the local gc binary's build hash; an empty
+// or missing field disables binary-drift detection.
+func TestSupervisorHealthIncludesBuildID(t *testing.T) {
+	const wantBuildID = "abc123ef"
+	s := newFakeState(t)
+	sm := newTestSupervisorMuxWithBuildID(t, map[string]*fakeState{"test-city": s}, wantBuildID)
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got, _ := resp["build_id"].(string); got != wantBuildID {
+		t.Fatalf("build_id = %q, want %q\nbody: %s", got, wantBuildID, rec.Body.String())
+	}
+}
+
+// TestSupervisorHealthEmptyBuildID confirms that when the supervisor
+// has no buildID (e.g., `go run`-style launches that lack VCS info),
+// the field is omitted rather than surfacing a misleading empty
+// string. This matches `omitempty` JSON semantics — an empty buildID
+// is the same as "no buildID known."
+func TestSupervisorHealthEmptyBuildID(t *testing.T) {
+	s := newFakeState(t)
+	sm := newTestSupervisorMuxWithBuildID(t, map[string]*fakeState{"test-city": s}, "")
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, present := resp["build_id"]; present {
+		t.Fatalf("build_id key present in response despite empty buildID; got: %v", resp["build_id"])
 	}
 }
 

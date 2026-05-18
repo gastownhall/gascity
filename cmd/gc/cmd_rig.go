@@ -791,6 +791,9 @@ func cmdRigList(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
 	_ = args // no arguments used yet
 	cityPath, err := resolveCity()
 	if err != nil {
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "city_resolve_failed", fmt.Sprintf("gc rig list: %v", err), 1)
+		}
 		fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -799,9 +802,11 @@ func cmdRigList(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
 
 // RigListJSON is the JSON output format for "gc rig list --json".
 type RigListJSON struct {
-	CityPath string        `json:"city_path"`
-	CityName string        `json:"city_name"`
-	Rigs     []RigListItem `json:"rigs"`
+	SchemaVersion string         `json:"schema_version"`
+	CityPath      string         `json:"city_path"`
+	CityName      string         `json:"city_name"`
+	Rigs          []RigListItem  `json:"rigs"`
+	Summary       RigListSummary `json:"summary"`
 }
 
 // RigListItem is one rig entry in the JSON output.
@@ -810,12 +815,20 @@ type RigListItem struct {
 	// Path is the absolute filesystem path to the rig directory, resolved from
 	// city.toml by resolveRigPaths. Always absolute in output, regardless of
 	// the relative form stored in city.toml.
-	Path          string `json:"path"`
-	Prefix        string `json:"prefix"`
-	DefaultBranch string `json:"default_branch,omitempty"`
-	HQ            bool   `json:"hq"`
-	Suspended     bool   `json:"suspended"`
-	Beads         string `json:"beads"`
+	Path               string `json:"path"`
+	Prefix             string `json:"prefix"`
+	DefaultBranch      string `json:"default_branch,omitempty"`
+	HQ                 bool   `json:"hq"`
+	Suspended          bool   `json:"suspended"`
+	Running            bool   `json:"running"`
+	DefaultSlingTarget string `json:"default_sling_target,omitempty"`
+	Beads              string `json:"beads"`
+}
+
+type RigListSummary struct {
+	Total     int `json:"total"`
+	Suspended int `json:"suspended"`
+	Running   int `json:"running"`
 }
 
 // doRigList is the pure logic for "gc rig list". It reads rigs from city.toml
@@ -827,8 +840,15 @@ type RigListItem struct {
 // how the rig path is declared in city.toml. The cityPath parameter must be
 // absolute.
 func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.Writer) int {
-	cfg, err := loadCityConfigFS(fs, filepath.Join(cityPath, "city.toml"), stderr)
+	configStderr := stderr
+	if jsonOutput {
+		configStderr = io.Discard
+	}
+	cfg, err := loadCityConfigFS(fs, filepath.Join(cityPath, "city.toml"), configStderr)
 	if err != nil {
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "config_load_failed", fmt.Sprintf("gc rig list: %v", err), 1)
+		}
 		fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -839,25 +859,40 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 
 	if jsonOutput {
 		result := RigListJSON{
-			CityPath: cityPath,
-			CityName: cityName,
+			SchemaVersion: "1",
+			CityPath:      cityPath,
+			CityName:      cityName,
 		}
+		hqRunning := controllerAlive(cityPath) != 0
 		result.Rigs = append(result.Rigs, RigListItem{
-			Name:   cityName,
-			Path:   cityPath,
-			Prefix: hqPrefix,
-			HQ:     true,
-			Beads:  rigBeadsStatus(fs, cityPath),
+			Name:    cityName,
+			Path:    cityPath,
+			Prefix:  hqPrefix,
+			HQ:      true,
+			Running: hqRunning,
+			Beads:   rigBeadsStatus(fs, cityPath),
 		})
 		for i := range cfg.Rigs {
+			running := rigHasRunningAgent(cfg, cfg.Rigs[i].Name)
 			result.Rigs = append(result.Rigs, RigListItem{
-				Name:          cfg.Rigs[i].Name,
-				Path:          cfg.Rigs[i].Path,
-				Prefix:        cfg.Rigs[i].EffectivePrefix(),
-				DefaultBranch: cfg.Rigs[i].EffectiveDefaultBranch(),
-				Suspended:     cfg.Rigs[i].Suspended,
-				Beads:         rigBeadsStatus(fs, cfg.Rigs[i].Path),
+				Name:               cfg.Rigs[i].Name,
+				Path:               cfg.Rigs[i].Path,
+				Prefix:             cfg.Rigs[i].EffectivePrefix(),
+				DefaultBranch:      cfg.Rigs[i].EffectiveDefaultBranch(),
+				Suspended:          cfg.Rigs[i].Suspended,
+				Running:            running,
+				DefaultSlingTarget: cfg.Rigs[i].DefaultSlingTarget,
+				Beads:              rigBeadsStatus(fs, cfg.Rigs[i].Path),
 			})
+		}
+		result.Summary.Total = len(result.Rigs)
+		for _, rig := range result.Rigs {
+			if rig.Suspended {
+				result.Summary.Suspended++
+			}
+			if rig.Running {
+				result.Summary.Running++
+			}
 		}
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
@@ -898,6 +933,33 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 		w(fmt.Sprintf("    Beads:  %s", beads))
 	}
 	return 0
+}
+
+func rigHasRunningAgent(cfg *config.City, rigName string) bool {
+	if cfg == nil || rigName == "" {
+		return false
+	}
+	cityName := cfg.EffectiveCityName()
+	sp := newSessionProvider()
+	for i := range cfg.Agents {
+		a := cfg.Agents[i]
+		if a.Dir != rigName {
+			continue
+		}
+		sp0 := scaleParamsFor(&a)
+		if isMultiSessionCfgAgent(&a) {
+			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, cfg.Workspace.SessionTemplate, sp) {
+				if sp.IsRunning(sessionName(nil, cityName, qualifiedInstance, cfg.Workspace.SessionTemplate)) {
+					return true
+				}
+			}
+			continue
+		}
+		if sp.IsRunning(sessionName(nil, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)) {
+			return true
+		}
+	}
+	return false
 }
 
 // rigBeadsStatus returns a human-readable beads status for a directory.

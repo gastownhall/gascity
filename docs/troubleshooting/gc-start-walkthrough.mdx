@@ -19,13 +19,13 @@ recovery, see [Dolt bloat recovery](/troubleshooting/dolt-bloat-recovery).
 
 ![Failed gc start showing the FATAL prefix, warning de-duplication, and walkthrough URL — left panel is the TTY render with bold-red FATAL, right panel is the non-TTY render with plain ASCII FATAL prefix.](/images/troubleshooting/gc-start-fatal.png)
 
-The `FATAL:` prefix is the stable marker — bold red on a TTY, plain ASCII
-when piped or redirected. The URL on the next line is grep-able and links
-to the matching section below.
+The `FATAL:` prefix is the stable marker — bold red on a TTY, plain
+`gc-fatal:` ASCII when piped or redirected. The same line ends with
+` see: <URL>` pointing to the matching section below.
 
 ```bash
 # Find the FATAL line in a saved log:
-grep '^FATAL:' gc-start.log
+grep -E '^(FATAL|gc-fatal):' gc-start.log
 ```
 
 ## Quick lookup

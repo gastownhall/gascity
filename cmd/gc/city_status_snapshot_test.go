@@ -73,10 +73,19 @@ func TestCityStatusSnapshotNilConfigUsesCityPathName(t *testing.T) {
 	}
 }
 
-func TestCityStatusJSONPreservesNilAgentsWhenEmpty(t *testing.T) {
+func TestCityStatusJSONUsesEmptyCollectionsWhenEmpty(t *testing.T) {
 	status := cityStatusJSONFromSnapshot(cityStatusSnapshot{CityName: "city"}, StatusSummaryJSON{})
-	if status.Agents != nil {
-		t.Fatalf("Agents = %#v, want nil slice", status.Agents)
+	if status.Agents == nil {
+		t.Fatal("Agents = nil, want empty slice")
+	}
+	if len(status.Agents) != 0 {
+		t.Fatalf("len(Agents) = %d, want 0", len(status.Agents))
+	}
+	if status.Rigs == nil {
+		t.Fatal("Rigs = nil, want empty slice")
+	}
+	if len(status.Rigs) != 0 {
+		t.Fatalf("len(Rigs) = %d, want 0", len(status.Rigs))
 	}
 }
 

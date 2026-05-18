@@ -296,6 +296,16 @@ func TestMergeSettingsJSON_InvalidOverlay(t *testing.T) {
 	}
 }
 
+func TestMergeSettingsJSON_NullOverlayIsNotObject(t *testing.T) {
+	_, err := MergeSettingsJSON([]byte(`{}`), []byte(`null`))
+	if err == nil {
+		t.Fatal("expected error for null overlay JSON")
+	}
+	if !IsOverlayObjectShapeError(err) {
+		t.Fatalf("expected overlay object-shape error, got %v", err)
+	}
+}
+
 func TestMergeSettingsJSON_WitnessScenario(t *testing.T) {
 	// Full witness scenario: base has 4 default hooks, overlay adds PreToolUse only.
 	base := `{

@@ -128,6 +128,20 @@ func (c *CachingStore) latencyP95Locked() (time.Duration, bool) {
 	return sorted[idx], true
 }
 
+// updateCadenceStatsLocked refreshes the diagnostic cadence fields
+// without mutating hysteresis state or emitting transition logs. Caller
+// must hold c.mu.
+func (c *CachingStore) updateCadenceStatsLocked() {
+	p95, samplesEnough := c.latencyP95Locked()
+	var p95ms float64
+	if samplesEnough {
+		p95ms = float64(p95.Milliseconds())
+	}
+	c.stats.CurrentReconcileInterval = effectiveCadence(len(c.beads), c.latencyDriverActive)
+	c.stats.LatencyP95Ms = p95ms
+	c.stats.CadenceDriver = cadenceDriver(len(c.beads), c.latencyDriverActive)
+}
+
 // recomputeCadenceLocked updates the latency-driver hysteresis state
 // based on the current P95, recomposes the effective cadence, refreshes
 // the diagnostic CacheStats fields, and emits a single transition log
@@ -140,7 +154,12 @@ func (c *CachingStore) latencyP95Locked() (time.Duration, bool) {
 // One spike anywhere in that drain pushes P95 back up and re-arms the
 // driver, preventing thrash.
 func (c *CachingStore) recomputeCadenceLocked() {
-	prev := effectiveCadence(len(c.beads), c.latencyDriverActive)
+	prev := c.stats.CurrentReconcileInterval
+	hadPrev := prev != 0
+	prevDriver := c.stats.CadenceDriver
+	if prevDriver == "" {
+		prevDriver = cadenceDriver(len(c.beads), c.latencyDriverActive)
+	}
 
 	p95, samplesEnough := c.latencyP95Locked()
 	if samplesEnough {
@@ -153,28 +172,20 @@ func (c *CachingStore) recomputeCadenceLocked() {
 		}
 	}
 
-	next := effectiveCadence(len(c.beads), c.latencyDriverActive)
-	driver := cadenceDriver(len(c.beads), c.latencyDriverActive)
+	c.updateCadenceStatsLocked()
+	next := c.stats.CurrentReconcileInterval
+	driver := cadenceTransitionDriver(prevDriver, c.stats.CadenceDriver)
 
-	var p95ms float64
-	if samplesEnough {
-		p95ms = float64(p95.Milliseconds())
-	}
-
-	if prev != next {
+	if hadPrev && prev != next {
 		switch {
 		case prev == cacheReconcileIntervalSmall && next == cacheReconcileIntervalMedium:
 			log.Printf("beads cache: cadence promoted small→medium driver=%s p95=%.0fms window=%d",
-				driver, p95ms, cacheLatencyWindowSize)
+				driver, c.stats.LatencyP95Ms, cacheLatencyWindowSize)
 		case prev == cacheReconcileIntervalMedium && next == cacheReconcileIntervalSmall:
 			log.Printf("beads cache: cadence demoted medium→small driver=%s p95=%.0fms window=%d",
-				driver, p95ms, cacheLatencyWindowSize)
+				driver, c.stats.LatencyP95Ms, cacheLatencyWindowSize)
 		}
 	}
-
-	c.stats.CurrentReconcileInterval = next
-	c.stats.LatencyP95Ms = p95ms
-	c.stats.CadenceDriver = driver
 }
 
 // cadenceDriver classifies which input(s) are driving the current
@@ -188,6 +199,19 @@ func cadenceDriver(beadCount int, latencyDriverActive bool) string {
 		return "bead-count"
 	case latencyDriverActive:
 		return "latency"
+	default:
+		return "default"
+	}
+}
+
+func cadenceTransitionDriver(prevDriver, nextDriver string) string {
+	switch {
+	case prevDriver == "both" || nextDriver == "both":
+		return "both"
+	case nextDriver != "" && nextDriver != "default":
+		return nextDriver
+	case prevDriver != "" && prevDriver != "default":
+		return prevDriver
 	default:
 		return "default"
 	}
@@ -232,7 +256,7 @@ func (c *CachingStore) runReconciliation() {
 	c.mu.RUnlock()
 
 	bdStart := time.Now()
-	fresh, err := c.backing.List(ListQuery{AllowScan: true})
+	fresh, err := c.backing.List(ListQuery{AllowScan: true, SkipLabels: true})
 	bdLatency := time.Since(bdStart)
 	if err != nil {
 		c.mu.Lock()
@@ -277,7 +301,7 @@ func (c *CachingStore) runReconciliation() {
 				}
 				continue
 			}
-			if _, keep := c.recentLocalBeadConflictLocked(id, freshBead, now); keep {
+			if _, keep := c.recentLocalBeadConflictLocked(id, freshBead, now, true); keep {
 				if _, ok := c.deps[id]; !ok {
 					nextDepsComplete = false
 				}
@@ -293,7 +317,7 @@ func (c *CachingStore) runReconciliation() {
 					eventType: "bead.created",
 					bead:      cloneBead(freshBead),
 				})
-			case beadChanged(old, freshBead):
+			case beadChanged(old, freshBead, true):
 				updates++
 				notifications = append(notifications, cacheNotification{
 					eventType: "bead.updated",
@@ -379,7 +403,7 @@ func (c *CachingStore) runReconciliation() {
 		if recentLocalMutation(c.localBeadAt[id], now) {
 			c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
 		}
-		if current, keep := c.recentLocalBeadConflictLocked(id, freshBead, now); keep {
+		if current, keep := c.recentLocalBeadConflictLocked(id, freshBead, now, true); keep {
 			beadForCache = current
 			preservedRecentLocal = true
 		}
@@ -395,7 +419,7 @@ func (c *CachingStore) runReconciliation() {
 				eventType: "bead.created",
 				bead:      cloneBead(beadForCache),
 			})
-		case !preservedRecentLocal && beadChanged(old, freshBead):
+		case !preservedRecentLocal && beadChanged(old, freshBead, true):
 			updates++
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.updated",

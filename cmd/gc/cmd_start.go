@@ -170,6 +170,15 @@ var noStrictMode bool
 // dryRunMode previews what agents would start without actually starting them.
 var dryRunMode bool
 
+// noAutoRestartMode opts out of `gc start`'s supervisor auto-restart on
+// drift. When set, drift is detected and reported but the operator must
+// restart the supervisor manually. Honors the design's exit-1 contract
+// so CI scripts can pin "supervisor is on the build I just produced."
+var noAutoRestartMode bool
+
+// startVerboseMode disables gc start warning deduplication.
+var startVerboseMode bool
+
 // buildIdleTracker creates an idleTracker from the config, populating
 // timeouts for agents that have idle_timeout set. Returns nil if no
 // agents use idle timeout (disabled).
@@ -316,20 +325,63 @@ Use "gc supervisor run" for foreground operation.`,
 	cmd.Flags().MarkHidden("no-strict") //nolint:errcheck // flag always exists
 	cmd.Flags().BoolVarP(&dryRunMode, "dry-run", "n", false,
 		"preview what agents would start without starting them")
+	cmd.Flags().BoolVar(&noAutoRestartMode, "no-auto-restart", false,
+		"detect supervisor binary drift but do not auto-restart; exits non-zero on drift")
+	cmd.Flags().BoolVar(&startVerboseMode, "verbose", false,
+		"disable warning deduplication and print every supervisor warning")
 	return cmd
 }
 
 func doStart(args []string, controllerMode bool, stdout, stderr io.Writer) int {
-	return doStartWithNameOverride(args, controllerMode, stdout, stderr, "")
+	return doStartWithNameOverrideAndSummary(args, controllerMode, stdout, stderr, "")
 }
 
 func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr io.Writer, nameOverride string) int {
-	if controllerMode || dryRunMode {
-		return doStartStandalone(args, controllerMode, stdout, stderr)
+	return doStartWithNameOverrideRaw(args, controllerMode, stdout, stderr, nameOverride)
+}
+
+func doStartWithNameOverrideAndSummary(args []string, controllerMode bool, stdout, stderr io.Writer, nameOverride string) int {
+	if controllerMode {
+		code := doStartWithNameOverrideRaw(args, controllerMode, stdout, stderr, nameOverride)
+		writeStartSummary(stderr, startSummary{
+			PID:      currentSupervisorPID(),
+			Binary:   startSummaryBinaryPath(),
+			Build:    shortBuildHash(),
+			Drift:    "unknown",
+			Warnings: 0,
+			Fatal:    "",
+		})
+		return code
 	}
-	if len(extraConfigFiles) > 0 || noStrictMode {
-		fmt.Fprintln(stderr, "gc start: --file and --no-strict only apply to the legacy standalone controller; use --foreground or remove those flags") //nolint:errcheck // best-effort stderr
-		return 1
+	proxy := newStartOutputProxy(stderr, startOutputProxyOptions{
+		Verbose: startVerboseMode,
+		TTY:     startOutputIsTerminal(stderr),
+	})
+	code := doStartWithNameOverrideRaw(args, controllerMode, stdout, proxy, nameOverride)
+	fatal := ""
+	if code != 0 {
+		fatal = proxy.deriveFatalFromRecords()
+		proxy.SetFatal(fatal)
+	}
+	if err := proxy.Flush(); err != nil && stderr != nil {
+		fmt.Fprintf(stderr, "gc start: flushing output: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+	writeStartSummary(stderr, startSummary{
+		PID:      currentSupervisorPID(),
+		Binary:   startSummaryBinaryPath(),
+		Build:    shortBuildHash(),
+		Drift:    "unknown",
+		Warnings: proxy.WarningCount(),
+		Fatal:    fatalSummaryCause(fatal),
+	})
+	return code
+}
+
+func doStartWithNameOverrideRaw(args []string, controllerMode bool, stdout, stderr io.Writer, nameOverride string) int {
+	// --foreground / --controller bypass the supervisor entirely (legacy
+	// standalone reconciler). No drift to check.
+	if controllerMode {
+		return doStartStandalone(args, controllerMode, stdout, stderr)
 	}
 
 	dir, err := resolveStartDir(args)
@@ -343,6 +395,29 @@ func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr 
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+
+	// Flag validation runs before any drift side effects so a malformed
+	// invocation (e.g. `gc start --file=foo`) fails fast without
+	// triggering a supervisor restart.
+	if len(extraConfigFiles) > 0 || noStrictMode {
+		fmt.Fprintln(stderr, "gc start: --file and --no-strict only apply to the legacy standalone controller; use --foreground or remove those flags") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// Drift detection runs against any already-running supervisor before
+	// we hand work to it. When no supervisor is running the check is a
+	// no-op (registration spawns a fresh one).
+	if exitCode, cont := runStartDriftCheck(cityPath, stdout, stderr); !cont {
+		return exitCode
+	}
+
+	// --dry-run routes to the standalone preview path *after* the drift
+	// check, so operators get a Supervisor: identity line and any drift
+	// report even in preview mode.
+	if dryRunMode {
+		return doStartStandalone(args, controllerMode, stdout, stderr)
+	}
+
 	if err := ensureCityScaffold(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc start: runtime scaffold: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

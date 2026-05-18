@@ -22,6 +22,14 @@ type CleanupDoltClient interface {
 	// against the given rig database. The dolt server's purge routine is
 	// per-database — caller iterates over each rig DB it wants reclaimed.
 	PurgeDroppedDatabases(ctx context.Context, rigDB string) error
+	// ProbeLiveSessions returns the set of databases with at least one
+	// active session at probe time, keyed on database name with the
+	// thread count as the value. The probe issues
+	// cleanupLiveSessionProbeQuery against the same Dolt server the
+	// drop stage targets. Errors (timeout, auth, network, malformed
+	// result) propagate verbatim — the runner converts them into a
+	// FAIL-CLOSED force-blocker (architect FR-05).
+	ProbeLiveSessions(ctx context.Context) (map[string]int, error)
 	Close() error
 }
 
@@ -32,6 +40,23 @@ const cleanupDropTimeout = 30 * time.Second
 
 // cleanupListTimeout caps SHOW DATABASES.
 const cleanupListTimeout = 30 * time.Second
+
+// cleanupLiveSessionProbeQuery is the verbatim SQL the probe issues.
+// It scans the live processlist on the same Dolt server cleanup is
+// targeting and aggregates one row per database with at least one
+// active session. The schema is stable across all Dolt versions
+// gascity targets (information_schema.processlist is MySQL-compat).
+const cleanupLiveSessionProbeQuery = "SELECT db, COUNT(*) FROM information_schema.processlist WHERE db IS NOT NULL AND db != '' GROUP BY db"
+
+// cleanupLiveSessionProbeTimeout caps SHOW PROCESSLIST. NFR-01 of
+// ga-nw4z6: the query is expected to complete in well under 1 second
+// on a healthy Dolt server; 2 s is the FAIL-CLOSED threshold.
+//
+// Declared as var (not const) so TestProbeLiveSessions_TimesOut can
+// shrink it to keep CI wall time under 250 ms while still exercising
+// the timeout wiring. Production never mutates it; the assertion in
+// TestProbeLiveSessions_FailClosed pins the live value at 2*time.Second.
+var cleanupLiveSessionProbeTimeout = 2 * time.Second
 
 // runDropStage discovers all databases on the resolved Dolt server,
 // classifies them with planDoltDrops against the protection list, and (when
@@ -69,6 +94,30 @@ func runDropStage(report *CleanupReport, opts cleanupOptions) bool {
 	}
 
 	plan := planDoltDrops(all, stalePrefixes, protected)
+
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), cleanupLiveSessionProbeTimeout)
+	liveSessions, probeErr := opts.DoltClient.ProbeLiveSessions(probeCtx)
+	probeCancel()
+
+	if probeErr != nil {
+		recordCleanupForceBlocker(report, cleanupErrorKindLiveSessionProbeFailed, "", probeErr)
+		if opts.Force {
+			recordCleanupErrorKind(report, "drop", cleanupErrorKindLiveSessionProbeFailed, "", probeErr)
+			report.Dropped.Skipped = append([]DoltDropSkip{}, plan.Skipped...)
+			for _, skipped := range plan.Skipped {
+				if skipped.Reason == DropSkipReasonInvalidIdentifier {
+					recordCleanupError(report, "drop", skipped.Name, fmt.Errorf("invalid database identifier %q", skipped.Name))
+				}
+			}
+			return false
+		}
+		// Dry-run continues; report renders the planned ToDrop as if the
+		// probe had returned empty — operator sees what WOULD have been
+		// dropped, plus the visible ForceBlocker.
+	} else {
+		plan = applyLiveSessionsToPlan(plan, liveSessions)
+	}
+
 	report.Dropped.Skipped = append([]DoltDropSkip{}, plan.Skipped...)
 	for _, skipped := range plan.Skipped {
 		if skipped.Reason == DropSkipReasonInvalidIdentifier {
@@ -184,6 +233,30 @@ func (c *sqlCleanupDoltClient) PurgeDroppedDatabases(ctx context.Context, rigDB 
 		return err
 	}
 	return nil
+}
+
+func (c *sqlCleanupDoltClient) ProbeLiveSessions(ctx context.Context) (map[string]int, error) {
+	rows, err := c.db.QueryContext(ctx, cleanupLiveSessionProbeQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	out := map[string]int{}
+	for rows.Next() {
+		var (
+			name    string
+			threads int
+		)
+		if err := rows.Scan(&name, &threads); err != nil {
+			return nil, err
+		}
+		out[name] = threads
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *sqlCleanupDoltClient) Close() error {

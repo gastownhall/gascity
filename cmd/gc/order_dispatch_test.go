@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -17,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pgauth"
 )
@@ -77,6 +79,88 @@ type countingListStore struct {
 	beads.Store
 
 	includeClosedLists int
+}
+
+func TestScanOrderSetSnapshotFSTracksAddChangeRemove(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Dirs["/city/orders"] = true
+	cfg := &config.City{}
+
+	fs.Files["/city/orders/tick.toml"] = []byte(`
+[order]
+exec = "true"
+trigger = "cron"
+schedule = "* * * * *"
+`)
+	first, err := scanOrderSetSnapshotFS(fs, "/city", cfg, io.Discard, "test")
+	if err != nil {
+		t.Fatalf("scanOrderSetSnapshotFS(first): %v", err)
+	}
+	if first.Signature == "" {
+		t.Fatal("first signature is empty")
+	}
+	if got := orderSnapshotByName(first.Orders, "tick").Schedule; got != "* * * * *" {
+		t.Fatalf("tick schedule = %q, want every minute", got)
+	}
+
+	fs.Files["/city/orders/tick.toml"] = []byte(`
+[order]
+exec = "true"
+trigger = "cron"
+schedule = "0 * * * *"
+`)
+	changed, err := scanOrderSetSnapshotFS(fs, "/city", cfg, io.Discard, "test")
+	if err != nil {
+		t.Fatalf("scanOrderSetSnapshotFS(changed): %v", err)
+	}
+	if changed.Signature == first.Signature {
+		t.Fatal("signature did not change after order content changed")
+	}
+	if got := orderSnapshotByName(changed.Orders, "tick").Schedule; got != "0 * * * *" {
+		t.Fatalf("tick schedule after change = %q, want hourly", got)
+	}
+
+	fs.Files["/city/orders/new-order.toml"] = []byte(`
+[order]
+exec = "true"
+trigger = "cooldown"
+interval = "1m"
+`)
+	added, err := scanOrderSetSnapshotFS(fs, "/city", cfg, io.Discard, "test")
+	if err != nil {
+		t.Fatalf("scanOrderSetSnapshotFS(added): %v", err)
+	}
+	if added.Signature == changed.Signature {
+		t.Fatal("signature did not change after order add")
+	}
+	if got := orderSnapshotByName(added.Orders, "new-order").Interval; got != "1m" {
+		t.Fatalf("new-order interval = %q, want 1m", got)
+	}
+
+	delete(fs.Files, "/city/orders/tick.toml")
+	removed, err := scanOrderSetSnapshotFS(fs, "/city", cfg, io.Discard, "test")
+	if err != nil {
+		t.Fatalf("scanOrderSetSnapshotFS(removed): %v", err)
+	}
+	if removed.Signature == added.Signature {
+		t.Fatal("signature did not change after order removal")
+	}
+	if orderSnapshotHasName(removed.Orders, "tick") {
+		t.Fatalf("removed snapshot still contains tick: %#v", removed.Orders)
+	}
+}
+
+func orderSnapshotByName(aa []orders.Order, name string) orders.Order {
+	for _, a := range aa {
+		if a.Name == name {
+			return a
+		}
+	}
+	return orders.Order{}
+}
+
+func orderSnapshotHasName(aa []orders.Order, name string) bool {
+	return orderSnapshotByName(aa, name).Name != ""
 }
 
 type createdAtOverrideStore struct {

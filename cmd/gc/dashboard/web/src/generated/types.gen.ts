@@ -2886,6 +2886,10 @@ export type SupervisorFsPressureSkippedTickPayload = {
 
 export type SupervisorHealthOutputBody = {
     /**
+     * Build identity (typically a short git commit hash, with "-dirty" suffix when built from an unclean tree). Empty when unavailable.
+     */
+    build_id?: string;
+    /**
      * Cities currently running.
      */
     cities_running: number;

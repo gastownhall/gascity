@@ -434,6 +434,27 @@ func TestInstallCodexIsByteStableAcrossRepeatedInstalls(t *testing.T) {
 	}
 }
 
+func TestCodexHooksMissingManagedPreCompact(t *testing.T) {
+	staleManaged := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"gc prime --hook --hook-format codex"}]}]}}`)
+	if !CodexHooksMissingManagedPreCompact(staleManaged) {
+		t.Fatal("managed Codex hooks without PreCompact were not reported stale")
+	}
+
+	currentManaged := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"gc prime --hook --hook-format codex"}]}],"PreCompact":[{"hooks":[{"type":"command","command":"gc handoff --auto --hook-format codex"}]}]}}`)
+	if CodexHooksMissingManagedPreCompact(currentManaged) {
+		t.Fatal("managed Codex hooks with PreCompact were reported stale")
+	}
+
+	customOnly := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"printf custom"}]}]}}`)
+	if CodexHooksMissingManagedPreCompact(customOnly) {
+		t.Fatal("custom-only Codex hooks were reported stale")
+	}
+
+	if CodexHooksMissingManagedPreCompact([]byte(`{not-json`)) {
+		t.Fatal("malformed Codex hooks were reported stale")
+	}
+}
+
 func TestInstallCodexPreservesCustomOnlyHooksByteForByte(t *testing.T) {
 	fs := fsys.NewFake()
 	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"printf custom-codex-hook","type":"command"}]}]}}`)
@@ -1361,6 +1382,46 @@ func TestInstallClaudeSurfacesMalformedOverride(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "merging Claude settings") {
 		t.Errorf("error must not surface as a generic 'merging Claude settings' wrap — that hides the JSON-parse root cause from operators: %v", err)
+	}
+}
+
+// TestInstallClaudeSurfacesNonObjectOverride verifies that a valid JSON
+// value with the wrong top-level shape is reported as an invalid Claude
+// settings override, not as a generic merge failure.
+func TestInstallClaudeSurfacesNonObjectOverride(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "array", data: []byte(`["not", "an", "object"]`)},
+		{name: "string", data: []byte(`"not an object"`)},
+		{name: "number", data: []byte(`42`)},
+		{name: "bool", data: []byte(`true`)},
+		{name: "null", data: []byte(`null`)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := fsys.NewFake()
+			fs.Files["/city/.claude/settings.json"] = tt.data
+
+			err := Install(fs, "/city", "/work", []string{"claude"})
+			if err == nil {
+				t.Fatal("Install must surface non-object .claude/settings.json as an error")
+			}
+			if !strings.Contains(err.Error(), ".claude/settings.json") {
+				t.Errorf("error must name the offending path: %v", err)
+			}
+			if !strings.Contains(err.Error(), "invalid JSON") {
+				t.Errorf("error must clearly identify the file as invalid JSON (not bury it in a generic merge error): %v", err)
+			}
+			if !strings.Contains(err.Error(), "expected a JSON object") {
+				t.Errorf("error must explain the expected top-level shape: %v", err)
+			}
+			if strings.Contains(err.Error(), "merging Claude settings") {
+				t.Errorf("error must not surface as a generic 'merging Claude settings' wrap: %v", err)
+			}
+		})
 	}
 }
 

@@ -26,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -106,17 +107,19 @@ against lingering supervisor / controller subprocesses).`,
 }
 
 func newSupervisorStatusCmd(stdout, stderr io.Writer) *cobra.Command {
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Check if the supervisor is running",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if supervisorStatus(stdout, stderr) != 0 {
+			if supervisorStatusWithOptions(stdout, stderr, asJSON) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON")
 	return cmd
 }
 
@@ -576,9 +579,21 @@ func waitForSupervisorExitUntil(sockPath string, deadline time.Time) error {
 	}
 }
 
-// supervisorStatus checks and reports whether the supervisor is running.
-func supervisorStatus(stdout, _ io.Writer) int {
-	pid := supervisorAlive()
+func supervisorStatusWithOptions(stdout, _ io.Writer, asJSON bool) int {
+	sockPath, pid := runningSupervisorSocket()
+	if asJSON {
+		payload := map[string]any{
+			"schema_version": "1",
+			"running":        pid > 0,
+			"pid":            pid,
+			"socket_path":    sockPath,
+			"checked_paths":  supervisorSocketPathCandidates(),
+		}
+		if err := writeCLIJSONLine(stdout, payload); err != nil {
+			return 1
+		}
+		return 0
+	}
 	if pid > 0 {
 		fmt.Fprintf(stdout, "Supervisor is running (PID %d)\n", pid) //nolint:errcheck
 		return 0
@@ -857,7 +872,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	apiMux := api.NewSupervisorMux(registry, cityInitSvc, readOnly, version, startedAt)
+	apiMux := api.NewSupervisorMux(registry, cityInitSvc, readOnly, version, commit, startedAt)
 	if len(supCfg.Supervisor.AllowedOrigins) > 0 {
 		apiMux.WithAllowedOrigins(supCfg.Supervisor.AllowedOrigins)
 	}
@@ -1286,6 +1301,7 @@ func reconcileCities(
 
 		// recordInitFailure logs the error and records backoff state.
 		recordInitFailure := func(cityName, msg string) {
+			fmt.Fprintln(stderr, logutil.FormatFatalLine(msg))                              //nolint:errcheck // best-effort stderr
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': %s (skipping)\n", cityName, msg) //nolint:errcheck
 			var configMod time.Time
 			if info, stErr := os.Stat(tomlPath); stErr == nil {

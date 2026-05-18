@@ -4109,6 +4109,8 @@ export interface components {
             trigger?: string;
         };
         SupervisorHealthOutputBody: {
+            /** @description Build identity (typically a short git commit hash, with "-dirty" suffix when built from an unclean tree). Empty when unavailable. */
+            build_id?: string;
             /**
              * Format: int64
              * @description Cities currently running.
