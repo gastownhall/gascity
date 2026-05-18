@@ -43,6 +43,7 @@ gc [flags]
 | [gc hook](#gc-hook) | Check for available work |
 | [gc import](#gc-import) | Manage pack imports |
 | [gc init](#gc-init) | Initialize a new city |
+| [gc lint](#gc-lint) | Validate a pack before merge |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
 | [gc mcp](#gc-mcp) | Inspect projected MCP config |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
@@ -1544,6 +1545,22 @@ gc init
 | `--preserve-existing` | bool |  | keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them |
 | `--provider` | string |  | built-in workspace provider to use for the default mayor config |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
+
+## gc lint
+
+Validate a pack before merge.
+
+gc lint &lt;pack&gt; validates the pack.toml file and renders prompt templates
+with a synthetic agent context. Use gc lint . to recursively find every
+pack.toml below the current directory.
+
+```
+gc lint <pack> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit structured JSON report |
 
 ## gc mail
 

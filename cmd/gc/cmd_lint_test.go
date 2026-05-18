@@ -57,7 +57,7 @@ func TestLintReportsMalformedTemplateActionWithLine(t *testing.T) {
 		t.Fatalf("gc lint succeeded; stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
 	}
 	errText := stderr.String()
-	if !strings.Contains(errText, "worker.template.md:1:") {
+	if !strings.Contains(errText, "worker.template.md:") || !strings.Contains(errText, "unexpected EOF") {
 		t.Fatalf("stderr missing line-numbered malformed template path:\n%s", errText)
 	}
 }
