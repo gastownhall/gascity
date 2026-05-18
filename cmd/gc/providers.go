@@ -337,9 +337,10 @@ func observedACPSessionNames(snapshot *sessionBeadSnapshot, cfg *config.City) []
 	if snapshot == nil {
 		return nil
 	}
-	names := make([]string, 0, len(snapshot.open))
-	seen := make(map[string]bool, len(snapshot.open))
-	for _, bead := range snapshot.Open() {
+	open := snapshot.Open()
+	names := make([]string, 0, len(open))
+	seen := make(map[string]bool, len(open))
+	for _, bead := range open {
 		if !beadUsesACPTransport(bead, cfg) {
 			continue
 		}

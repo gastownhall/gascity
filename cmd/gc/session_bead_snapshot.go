@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -22,6 +23,12 @@ import (
 // See gastownhall/gascity#2148 for the named-session lookup-error visibility
 // regression this field exists to surface.
 type sessionBeadSnapshot struct {
+	// mu guards open + the four lookup maps. add() (called from inside
+	// createPoolSessionBead) can fire from multiple goroutines when
+	// realizePoolDesiredSessions parallelizes pool session bead creates
+	// across distinct aliases — see gastownhall/gascity#2319. All read
+	// methods take RLock; add() takes Lock.
+	mu                        sync.RWMutex
 	open                      []beads.Bead
 	beadIDByAgentName         map[string]string
 	beadIDByTemplateHint      map[string]string
@@ -39,6 +46,8 @@ func (s *sessionBeadSnapshot) LoadError() error {
 	if s == nil {
 		return nil
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.loadErr
 }
 
@@ -48,6 +57,9 @@ func (s *sessionBeadSnapshot) LoadError() error {
 // see the underlying failure via LoadError.
 func newSessionBeadSnapshotWithError(beadsIn []beads.Bead, err error) *sessionBeadSnapshot {
 	s := newSessionBeadSnapshot(beadsIn)
+	// loadErr is set during construction, before s is published to any other
+	// goroutine, so no s.mu lock is needed here even though LoadError() reads
+	// it under RLock.
 	s.loadErr = err
 	return s
 }
@@ -134,33 +146,35 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 	}
 }
 
-func (s *sessionBeadSnapshot) replaceOpen(open []beads.Bead) {
-	if s == nil {
-		return
-	}
+// replaceOpenLocked replaces the snapshot's open set and rebuilt lookup maps
+// from `open`. Callers must hold s.mu.
+func (s *sessionBeadSnapshot) replaceOpenLocked(open []beads.Bead) {
 	rebuilt := newSessionBeadSnapshot(open)
-	if rebuilt == nil {
-		s.open = nil
-		s.sessionNameByAgentName = nil
-		s.sessionNameByTemplateHint = nil
-		return
-	}
-	*s = *rebuilt
+	s.open = rebuilt.open
+	s.beadIDByAgentName = rebuilt.beadIDByAgentName
+	s.beadIDByTemplateHint = rebuilt.beadIDByTemplateHint
+	s.sessionNameByAgentName = rebuilt.sessionNameByAgentName
+	s.sessionNameByTemplateHint = rebuilt.sessionNameByTemplateHint
 }
 
 func (s *sessionBeadSnapshot) add(bead beads.Bead) {
 	if s == nil {
 		return
 	}
-	open := s.Open()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	open := make([]beads.Bead, 0, len(s.open)+1)
+	open = append(open, s.open...)
 	open = append(open, bead)
-	s.replaceOpen(open)
+	s.replaceOpenLocked(open)
 }
 
 func (s *sessionBeadSnapshot) Open() []beads.Bead {
 	if s == nil {
 		return nil
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	result := make([]beads.Bead, len(s.open))
 	copy(result, s.open)
 	return result
@@ -170,6 +184,8 @@ func (s *sessionBeadSnapshot) FindSessionNameByTemplate(template string) string 
 	if s == nil {
 		return ""
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if sn := s.sessionNameByAgentName[template]; sn != "" {
 		return sn
 	}
@@ -180,11 +196,13 @@ func (s *sessionBeadSnapshot) FindSessionBeadByTemplate(template string) (beads.
 	if s == nil {
 		return beads.Bead{}, false
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if id := s.beadIDByAgentName[template]; id != "" {
-		return s.FindByID(id)
+		return s.findByIDLocked(id)
 	}
 	if id := s.beadIDByTemplateHint[template]; id != "" {
-		return s.FindByID(id)
+		return s.findByIDLocked(id)
 	}
 	return beads.Bead{}, false
 }
@@ -193,6 +211,13 @@ func (s *sessionBeadSnapshot) FindByID(id string) (beads.Bead, bool) {
 	if s == nil || strings.TrimSpace(id) == "" {
 		return beads.Bead{}, false
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.findByIDLocked(id)
+}
+
+// findByIDLocked is the inner lookup; callers must hold at least s.mu.RLock.
+func (s *sessionBeadSnapshot) findByIDLocked(id string) (beads.Bead, bool) {
 	for _, bead := range s.open {
 		if bead.ID == id {
 			return bead, true
@@ -213,6 +238,8 @@ func (s *sessionBeadSnapshot) FindSessionBeadByNamedIdentity(identity string) (b
 	if s == nil || strings.TrimSpace(identity) == "" {
 		return beads.Bead{}, false
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for _, bead := range s.open {
 		if strings.TrimSpace(bead.Metadata["configured_named_identity"]) != identity {
 			continue

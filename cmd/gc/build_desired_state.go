@@ -1540,6 +1540,30 @@ func desiredHasCanonicalNonExpandingPoolSession(desired map[string]TemplateParam
 	return false
 }
 
+// poolRealizeParallelism caps the number of concurrent pool session bead
+// creates inside realizePoolDesiredSessions. Each create acquires a per-alias
+// session lock + commits to dolt; with N>cap pending creates the work pool
+// drains in O(ceil(N/cap) × commit-latency) wall time instead of the prior
+// O(N × commit-latency). The cap is intentionally modest: dolt commit
+// contention and per-city alias-lock churn put a ceiling on useful
+// parallelism even when many distinct aliases are pending. See
+// gastownhall/gascity#2319.
+const poolRealizeParallelism = 8
+
+// poolRealizeWorkItem holds the per-request state threaded across the
+// three-phase realizePoolDesiredSessions pipeline. Phase A (serial) populates
+// either sessionBead+slot (reuse path) or plan+slot (create path); Phase B
+// (parallel-bounded) materializes plans into sessionBead/createErr; Phase C
+// (serial) resolves the template and installs side effects.
+type poolRealizeWorkItem struct {
+	request     SessionRequest
+	skip        bool
+	plan        *poolSessionCreatePlan
+	sessionBead beads.Bead
+	slot        int
+	createErr   error
+}
+
 func realizePoolDesiredSessions(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,
@@ -1554,30 +1578,122 @@ func realizePoolDesiredSessions(
 	}
 	used := make(map[string]bool)
 	usedSlots := make(map[int]bool)
+
+	// Phase A (serial, fast): select an existing session bead to reuse OR
+	// reserve an (alias, slot) for a fresh create. Mutates used/usedSlots
+	// under serial control so dedup and slot allocation remain deterministic.
+	items := make([]poolRealizeWorkItem, 0, len(poolState.Requests))
 	for _, request := range poolState.Requests {
-		var prefer *beads.Bead
-		if request.SessionBeadID != "" {
-			if bead, ok := findOpenSessionBeadByID(bp.sessionBeads, request.SessionBeadID); ok {
-				// Defense in depth: ComputePoolDesiredStates filters out
-				// named-session beads from pool resume requests. If one
-				// slipped through, materializing it here would create a
-				// phantom "{name}-N" sibling to the canonical named session.
-				if isNamedSessionBead(bead) {
-					fmt.Fprintf(stderr, "buildDesiredState: pool %q: refusing to materialize named-session bead %s as pool instance (would create phantom %q-N sibling)\n", qualifiedName, bead.ID, cfgAgent.Name) //nolint:errcheck
-					continue
+		// planItem runs the per-request selection and returns the work item;
+		// any early-out (skip path) sets item.skip and returns. The single
+		// append below keeps slice growth in one place.
+		planItem := func() poolRealizeWorkItem {
+			item := poolRealizeWorkItem{request: request}
+			var prefer *beads.Bead
+			if request.SessionBeadID != "" {
+				if bead, ok := findOpenSessionBeadByID(bp.sessionBeads, request.SessionBeadID); ok {
+					// Defense in depth: ComputePoolDesiredStates filters out
+					// named-session beads from pool resume requests. If one
+					// slipped through, materializing it here would create a
+					// phantom "{name}-N" sibling to the canonical named session.
+					if isNamedSessionBead(bead) {
+						fmt.Fprintf(stderr, "buildDesiredState: pool %q: refusing to materialize named-session bead %s as pool instance (would create phantom %q-N sibling)\n", qualifiedName, bead.ID, cfgAgent.Name) //nolint:errcheck
+						item.skip = true
+						return item
+					}
+					prefer = &bead
 				}
-				prefer = &bead
 			}
+			sessionBead, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, used, usedSlots)
+			if err != nil {
+				fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
+				item.skip = true
+				return item
+			}
+			if plan != nil {
+				item.plan = plan
+				item.slot = plan.poolSlot
+				return item
+			}
+			if used[sessionBead.ID] {
+				item.skip = true
+				return item
+			}
+			used[sessionBead.ID] = true
+			item.sessionBead = sessionBead
+			item.slot = slot
+			return item
 		}
-		sessionBead, slot, err := selectOrCreatePoolSessionBead(bp, cfgAgent, qualifiedName, prefer, used, usedSlots)
-		if err != nil {
-			fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
+		items = append(items, planItem())
+	}
+
+	// Phase B (parallel, bounded): materialize planned creates. Per-alias
+	// session locks serialize same-alias calls; distinct aliases proceed in
+	// parallel up to poolRealizeParallelism workers. The store write and
+	// alias-conflict bookkeeping happen here.
+	pending := make([]int, 0, len(items))
+	for idx := range items {
+		if items[idx].plan != nil {
+			pending = append(pending, idx)
+		}
+	}
+	if len(pending) > 0 {
+		workerCount := poolRealizeParallelism
+		if workerCount > len(pending) {
+			workerCount = len(pending)
+		}
+		jobs := make(chan int)
+		var wg sync.WaitGroup
+		for w := 0; w < workerCount; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for idx := range jobs {
+					plan := *items[idx].plan
+					bead, err := executePlannedPoolSessionBeadCreate(bp, cfgAgent, qualifiedName, plan)
+					if err != nil {
+						items[idx].createErr = err
+						continue
+					}
+					items[idx].sessionBead = bead
+				}
+			}()
+		}
+		for _, idx := range pending {
+			jobs <- idx
+		}
+		close(jobs)
+		wg.Wait()
+	}
+
+	// Phase C (serial, fast): finalize results in original request order.
+	// Failed creates release their reserved slot here, at end-of-cycle —
+	// unlike the original serial loop, which freed a failed slot before the
+	// next request was planned, letting a same-tick later request reclaim it.
+	// With Phase A planning all requests up front, that intra-tick reuse no
+	// longer happens: a failed create leaves a slot gap for this cycle and the
+	// slot is reclaimed on the next build tick. The pool's active-session
+	// count converges identically; only the transient slot numbering differs.
+	// Template resolution + installAgentSideEffects (hooks.InstallWithResolver
+	// + autoSP.RouteACP) remain serial pending an audit of their thread-safety.
+	for i := range items {
+		item := &items[i]
+		if item.skip {
 			continue
 		}
-		if used[sessionBead.ID] {
-			continue
+		if item.plan != nil {
+			if item.createErr != nil {
+				fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, item.createErr) //nolint:errcheck
+				delete(usedSlots, item.plan.slot)
+				continue
+			}
+			if used[item.sessionBead.ID] {
+				continue
+			}
+			used[item.sessionBead.ID] = true
 		}
-		used[sessionBead.ID] = true
+		sessionBead := item.sessionBead
+		slot := item.slot
 		manualSession := isManualSessionBeadForAgent(sessionBead, cfgAgent)
 		var (
 			resolveAgent      *config.Agent
@@ -2147,6 +2263,17 @@ func findOpenSessionBeadByID(sessionBeads *sessionBeadSnapshot, id string) (bead
 	return beads.Bead{}, false
 }
 
+// poolSessionCreatePlan describes a fresh pool session bead that has been
+// selected for creation by the planning phase. Materializing the plan via
+// executePlannedPoolSessionBeadCreate performs the slow per-alias-locked
+// dolt write and is safe to call concurrently across distinct
+// qualifiedInstance values.
+type poolSessionCreatePlan struct {
+	qualifiedInstance string
+	slot              int
+	poolSlot          int
+}
+
 func selectOrCreatePoolSessionBead(
 	bp *agentBuildParams,
 	cfgAgent *config.Agent,
@@ -2155,28 +2282,64 @@ func selectOrCreatePoolSessionBead(
 	used map[string]bool,
 	usedSlots map[int]bool,
 ) (beads.Bead, int, error) {
+	bead, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, template, preferred, used, usedSlots)
+	if err != nil {
+		return beads.Bead{}, 0, err
+	}
+	if plan == nil {
+		return bead, slot, nil
+	}
+	bead, err = executePlannedPoolSessionBeadCreate(bp, cfgAgent, template, *plan)
+	if err != nil {
+		delete(usedSlots, plan.slot)
+		return bead, 0, err
+	}
+	return bead, plan.poolSlot, nil
+}
+
+// selectOrPlanPoolSessionBead performs the in-memory selection phase of pool
+// session provisioning. It returns one of:
+//   - reuse: (bead, slot, nil, nil) where bead is an existing session bead to
+//     reuse for this request.
+//   - plan:  (zero bead, 0, *plan, nil) where plan describes a fresh bead to
+//     be materialized by executePlannedPoolSessionBeadCreate.
+//   - error: (zero bead, 0, nil, err) when selection fails (e.g., concrete
+//     slot already claimed).
+//
+// Callers MUST serialize calls that share the same used / usedSlots maps; the
+// function mutates both. The plan path defers the slow per-alias-locked dolt
+// write to a subsequent (possibly parallel) step so realizePoolDesiredSessions
+// can drive distinct aliases concurrently.
+func selectOrPlanPoolSessionBead(
+	bp *agentBuildParams,
+	cfgAgent *config.Agent,
+	template string,
+	preferred *beads.Bead,
+	used map[string]bool,
+	usedSlots map[int]bool,
+) (beads.Bead, int, *poolSessionCreatePlan, error) {
 	if cfgAgent == nil {
 		cfgAgent = findAgentByTemplate(&config.City{Agents: bp.agents}, template)
 	}
 	if cfgAgent == nil {
-		return beads.Bead{}, 0, fmt.Errorf("pool template %q has no configured agent", template)
+		return beads.Bead{}, 0, nil, fmt.Errorf("pool template %q has no configured agent", template)
 	}
 	// Resume tier: reuse the session that has in-progress work assigned.
 	if preferred != nil && preferred.ID != "" && !used[preferred.ID] && !isFailedCreateSessionBead(*preferred) {
 		slot := claimDesiredPoolSlot(bp.city, cfgAgent, *preferred, usedSlots)
 		if slot == 0 && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
-			return beads.Bead{}, 0, fmt.Errorf("pool session %s concrete slot already claimed", preferred.ID)
+			return beads.Bead{}, 0, nil, fmt.Errorf("pool session %s concrete slot already claimed", preferred.ID)
 		}
 		if isManualSessionBeadForAgent(*preferred, cfgAgent) {
-			return *preferred, slot, nil
+			return *preferred, slot, nil, nil
 		}
 		bead, err := normalizeNonExpandingPoolSessionBeadForSelection(bp, cfgAgent, *preferred)
-		return bead, slot, err
+		return bead, slot, nil, err
 	}
 	if canonical, ok := findReusableCanonicalNonExpandingPoolSessionBead(bp, cfgAgent, template, used); ok {
 		slot := claimDesiredPoolSlot(bp.city, cfgAgent, canonical, usedSlots)
 		bead, err := normalizeNonExpandingPoolSessionBeadForSelection(bp, cfgAgent, canonical)
-		return bead, slot, err
+		return bead, slot, nil, err
 	}
 	// Reuse an existing active/creating session bead. Skip drained, closed,
 	// and asleep — asleep ephemerals are not restarted; a fresh session is
@@ -2188,17 +2351,31 @@ func selectOrCreatePoolSessionBead(
 				continue
 			}
 			bead, err := normalizeNonExpandingPoolSessionBeadForSelection(bp, cfgAgent, bead)
-			return bead, slot, err
+			return bead, slot, nil, err
 		}
 	}
 	slot := claimDesiredPoolSlot(bp.city, cfgAgent, beads.Bead{}, usedSlots)
 	_, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(cfgAgent, slot)
-	bead, err := createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, template, qualifiedInstance, slot)
-	if err != nil {
-		delete(usedSlots, slot)
-		return bead, 0, err
+	plan := &poolSessionCreatePlan{
+		qualifiedInstance: qualifiedInstance,
+		slot:              slot,
+		poolSlot:          poolSlot,
 	}
-	return bead, poolSlot, nil
+	return beads.Bead{}, 0, plan, nil
+}
+
+// executePlannedPoolSessionBeadCreate materializes a pool session bead from a
+// plan produced by selectOrPlanPoolSessionBead. The underlying call is
+// createPoolSessionBeadWithGuardedAlias, whose per-alias session lock makes
+// concurrent invocations safe across distinct qualifiedInstance values. Calls
+// with the same qualifiedInstance are still serialized by the alias lock.
+func executePlannedPoolSessionBeadCreate(
+	bp *agentBuildParams,
+	cfgAgent *config.Agent,
+	template string,
+	plan poolSessionCreatePlan,
+) (beads.Bead, error) {
+	return createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, template, plan.qualifiedInstance, plan.slot)
 }
 
 func claimDesiredPoolSlot(cfg *config.City, cfgAgent *config.Agent, sessionBead beads.Bead, used map[int]bool) int {
