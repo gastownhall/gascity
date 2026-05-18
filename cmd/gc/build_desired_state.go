@@ -640,6 +640,20 @@ func collectAssignedWorkBeadsWithStores(
 					appendInProgressWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, inProgress, seen, source.store, source.ref)
 				}
 			}
+			// Open, unassigned, agent-routed wisp step beads (gc.run_target set
+			// but no gc.routed_to and no assignee). These are the convergence
+			// reconciler shape: dispatcher must see them so it can spawn the
+			// target agent/session. Without this pass, the dispatcher would
+			// only see Status=in_progress beads and miss freshly created
+			// wisp steps until something else routed them first.
+			if open, err := listForControllerDemand(source.store, beads.ListQuery{Status: "open"}); err == nil {
+				appendOpenAgentRoutedWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, open, seen, source.store, source.ref)
+			} else {
+				errs = append(errs, fmt.Errorf("List(open): %w", err))
+				if beads.IsPartialResult(err) && len(open) > 0 {
+					appendOpenAgentRoutedWorkUnique(cfg, &result, &resultStores, &resultStoreRefs, open, seen, source.store, source.ref)
+				}
+			}
 			results[idx] = storeAssignedWorkResult{beads: result, stores: resultStores, storeRefs: resultStoreRefs, errs: errs}
 		}()
 	}
@@ -1157,6 +1171,41 @@ func appendInProgressWorkUnique(cfg *config.City, dst *[]beads.Bead, stores *[]b
 	for _, b := range beadList {
 		if strings.TrimSpace(b.Assignee) == "" && !isRecoverableUnassignedInProgressPoolWork(cfg, b) {
 			continue
+		}
+		appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef)
+	}
+}
+
+// appendOpenAgentRoutedWorkUnique includes Status=open, unassigned beads that
+// carry an agent/named-session routing key via gc.run_target. These are the
+// wisp step beads emitted by the convergence reconciler: they have no
+// gc.routed_to and no assignee, so the in-progress scan would skip them. The
+// dispatcher needs to see them so it can spawn the target agent or wake the
+// named session and route the work.
+func appendOpenAgentRoutedWorkUnique(cfg *config.City, dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+	for _, b := range beadList {
+		if b.Status != "open" {
+			continue
+		}
+		if strings.TrimSpace(b.Assignee) != "" {
+			continue
+		}
+		if strings.TrimSpace(b.Metadata["gc.routed_to"]) != "" {
+			// Already explicitly routed; the dispatcher's normal handoff
+			// probes (Ready queries) cover this case.
+			continue
+		}
+		target := strings.TrimSpace(b.Metadata["gc.run_target"])
+		if target == "" {
+			continue
+		}
+		// Only emit if the target resolves to a known agent template or
+		// named-session identity. Unknown targets are left for other
+		// reconcilers to surface as misconfigurations.
+		if findAgentByTemplate(cfg, target) == nil {
+			if _, ok := findNamedSessionSpec(cfg, "", target); !ok {
+				continue
+			}
 		}
 		appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef)
 	}
