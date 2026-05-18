@@ -267,11 +267,16 @@ func isRecoverableUnassignedInProgressPoolWork(cfg *config.City, wb beads.Bead) 
 	if wb.Status != "in_progress" || strings.TrimSpace(wb.Assignee) != "" {
 		return false
 	}
-	template := strings.TrimSpace(wb.Metadata["gc.routed_to"])
+	template := effectiveRoutingTarget(wb)
 	if template == "" {
 		return false
 	}
 	agentCfg := findAgentByTemplate(cfg, template)
+	if agentCfg == nil {
+		if spec, ok := findNamedSessionSpec(cfg, "", template); ok {
+			agentCfg = spec.Agent
+		}
+	}
 	return agentCfg != nil && agentCfg.SupportsGenericEphemeralSessions()
 }
 

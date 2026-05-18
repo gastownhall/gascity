@@ -877,7 +877,7 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 			if strings.TrimSpace(b.Assignee) != "" {
 				continue
 			}
-			template := strings.TrimSpace(b.Metadata["gc.routed_to"])
+			template := effectiveRoutingTarget(b)
 			if _, ok := group.templates[template]; ok {
 				counts[template]++
 			}
@@ -956,7 +956,7 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, cfg *config.Ci
 			if strings.TrimSpace(b.Assignee) != "" {
 				continue
 			}
-			routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"])
+			routedTo := effectiveRoutingTarget(b)
 			if routedTo == "" {
 				continue
 			}

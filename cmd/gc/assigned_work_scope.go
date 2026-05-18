@@ -7,6 +7,18 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+// effectiveRoutingTarget returns the agent/named-session identifier the bead
+// should route to. gc.routed_to wins when set (explicit dispatcher routing);
+// otherwise gc.run_target is consulted (the convergence-reconciler wisp step
+// shape — unassigned, Status="open"). Whitespace is trimmed at the boundary
+// so downstream callers never need to think about it.
+func effectiveRoutingTarget(b beads.Bead) string {
+	if routed := strings.TrimSpace(b.Metadata["gc.routed_to"]); routed != "" {
+		return routed
+	}
+	return strings.TrimSpace(b.Metadata["gc.run_target"])
+}
+
 func assignedWorkStoreRefForAgent(cityPath string, cfg *config.City, agentCfg *config.Agent) string {
 	if cfg == nil || agentCfg == nil {
 		return ""
@@ -56,7 +68,7 @@ func filterAssignedWorkBeadsForPoolDemand(
 	}
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
 	for i, wb := range assignedWorkBeads {
-		template := strings.TrimSpace(wb.Metadata["gc.routed_to"])
+		template := effectiveRoutingTarget(wb)
 		if template == "" {
 			if sessionBeadID := assigneeToSessionBeadID[strings.TrimSpace(wb.Assignee)]; sessionBeadID != "" {
 				template = sessionBeadTemplate[sessionBeadID]
@@ -69,6 +81,14 @@ func filterAssignedWorkBeadsForPoolDemand(
 			continue
 		}
 		agentCfg := findAgentByTemplate(cfg, template)
+		if agentCfg == nil {
+			// Identity may name a named-session (e.g. pack.scope-locked-editor)
+			// rather than a bare agent template. Resolve through the named-session
+			// spec to recover the backing agent for reachability checks.
+			if spec, ok := findNamedSessionSpec(cfg, "", template); ok {
+				agentCfg = spec.Agent
+			}
+		}
 		if agentCfg == nil {
 			continue
 		}
