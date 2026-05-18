@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"sort"
 	"strings"
@@ -11,42 +12,46 @@ import (
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
-func controllerQueryRuntimeEnv(cityPath string, cfg *config.City, agentCfg *config.Agent) map[string]string {
+func controllerQueryRuntimeEnv(cityPath string, cfg *config.City, agentCfg *config.Agent) (map[string]string, error) {
 	if strings.TrimSpace(cityPath) == "" || cfg == nil || agentCfg == nil {
-		return nil
+		return nil, nil
 	}
 	var source map[string]string
+	var err error
 	if rigName := configuredRigName(cityPath, agentCfg, cfg.Rigs); rigName != "" {
 		if rigRoot := rigRootForName(rigName, cfg.Rigs); rigRoot != "" {
 			if !scopeUsesManagedBdStoreContract(cityPath, rigRoot) {
-				return nil
+				return nil, nil
 			}
-			source = bdRuntimeEnvForRig(cityPath, cfg, rigRoot)
+			source, err = bdRuntimeEnvForRigWithError(cityPath, cfg, rigRoot)
 		} else {
 			if !scopeUsesManagedBdStoreContract(cityPath, cityPath) {
-				return nil
+				return nil, nil
 			}
-			source = bdRuntimeEnv(cityPath)
+			source, err = bdRuntimeEnvWithError(cityPath)
 		}
 	} else {
 		if !scopeUsesManagedBdStoreContract(cityPath, cityPath) {
-			return nil
+			return nil, nil
 		}
-		source = bdRuntimeEnv(cityPath)
+		source, err = bdRuntimeEnvWithError(cityPath)
+	}
+	if err != nil {
+		return nil, err
 	}
 	if len(source) == 0 {
-		return nil
+		return nil, nil
 	}
 	env := make(map[string]string, len(source))
 	for key, value := range source {
 		env[key] = value
 	}
-	return env
+	return env, nil
 }
 
-func controllerWorkQueryEnv(cityPath string, cfg *config.City, agentCfg *config.Agent) map[string]string {
+func controllerWorkQueryEnv(cityPath string, cfg *config.City, agentCfg *config.Agent) (map[string]string, error) {
 	if strings.TrimSpace(cityPath) == "" || cfg == nil || agentCfg == nil {
-		return nil
+		return nil, nil
 	}
 	env := cityRuntimeEnvMapForCity(cityPath)
 	env["GC_STORE_ROOT"] = cityPath
@@ -66,10 +71,14 @@ func controllerWorkQueryEnv(cityPath string, cfg *config.City, agentCfg *config.
 			}
 		}
 	}
-	for key, value := range controllerQueryRuntimeEnv(cityPath, cfg, agentCfg) {
+	queryEnv, err := controllerQueryRuntimeEnv(cityPath, cfg, agentCfg)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range queryEnv {
 		env[key] = value
 	}
-	return env
+	return env, nil
 }
 
 func controllerQueryPrefixEnv(source map[string]string) map[string]string {
@@ -94,8 +103,12 @@ func controllerQueryPrefixEnv(source map[string]string) map[string]string {
 	return env
 }
 
-func controllerQueryEnv(cityPath string, cfg *config.City, agentCfg *config.Agent) map[string]string {
-	return controllerQueryPrefixEnv(controllerQueryRuntimeEnv(cityPath, cfg, agentCfg))
+func controllerQueryEnv(cityPath string, cfg *config.City, agentCfg *config.Agent) (map[string]string, error) {
+	runtimeEnv, err := controllerQueryRuntimeEnv(cityPath, cfg, agentCfg)
+	if err != nil {
+		return nil, err
+	}
+	return controllerQueryPrefixEnv(runtimeEnv), nil
 }
 
 func prefixedWorkQueryForProbe(
@@ -107,7 +120,14 @@ func prefixedWorkQueryForProbe(
 	agentCfg *config.Agent,
 	stderr io.Writer,
 ) string {
-	return prefixedWorkQueryForProbeWithEnv(controllerQueryEnv(cityPath, cfg, agentCfg), cfg, cityPath, cityName, store, sessionBeads, agentCfg, stderr)
+	queryEnv, err := controllerQueryEnv(cityPath, cfg, agentCfg)
+	if err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "work_query probe env: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+		return ""
+	}
+	return prefixedWorkQueryForProbeWithEnv(queryEnv, cfg, cityPath, cityName, store, sessionBeads, agentCfg, stderr)
 }
 
 func prefixedWorkQueryForProbeWithEnv(

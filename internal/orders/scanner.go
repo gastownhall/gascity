@@ -1,9 +1,11 @@
 package orders
 
 import (
+	"io"
 	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/logutil"
 )
 
 // orderDir is the subdirectory name within formula layers that contains orders.
@@ -24,6 +26,14 @@ type ScanOptions struct {
 	// SuppressDeprecatedPathWarnings skips migration warnings for legacy order
 	// file layouts while preserving all other diagnostics.
 	SuppressDeprecatedPathWarnings bool
+	// DeprecatedPathWarningDedup suppresses repeated deprecated-path warnings
+	// within the caller's process. Nil leaves warnings unfiltered.
+	DeprecatedPathWarningDedup *logutil.Dedup
+	// DeprecatedPathWarningWriter receives deprecated-path warnings when set.
+	// Nil preserves the historical package logger output.
+	DeprecatedPathWarningWriter io.Writer
+	// VerboseDeprecatedPathWarnings bypasses DeprecatedPathWarningDedup.
+	VerboseDeprecatedPathWarnings bool
 }
 
 // Scan discovers orders across formula layers. It prefers top-level

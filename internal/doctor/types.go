@@ -29,6 +29,12 @@ type Check interface {
 	// Fix attempts to automatically remediate the issue found by Run.
 	// Only called when CanFix returns true and Run returned a non-OK status.
 	Fix(ctx *CheckContext) error
+	// WarmupEligible reports whether this check should be included in
+	// `gc start`'s warm-up scan (in addition to running on demand via
+	// `gc doctor`). Default for all in-tree checks is false; opt in by
+	// returning true. Pack-declared checks opt in via `warmup = true`
+	// on the pack.toml [[doctor]] entry or doctor.toml manifest.
+	WarmupEligible() bool
 }
 
 // CheckContext carries shared state for all checks during a doctor run.

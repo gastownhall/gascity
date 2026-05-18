@@ -56,6 +56,61 @@ run = "../../shared/check.sh"
 	}
 }
 
+func TestDoctorManifestWarmupFieldParses(t *testing.T) {
+	cases := []struct {
+		name       string
+		manifest   string
+		wantWarmup bool
+	}{
+		{
+			name: "explicit_true",
+			manifest: `
+description = "Check that X exists"
+run = "check-x.sh"
+warmup = true
+`,
+			wantWarmup: true,
+		},
+		{
+			name: "explicit_false",
+			manifest: `
+description = "Check that X exists"
+run = "check-x.sh"
+warmup = false
+`,
+			wantWarmup: false,
+		},
+		{
+			name: "default_omitted",
+			manifest: `
+description = "Check that X exists"
+run = "check-x.sh"
+`,
+			wantWarmup: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			packDir := filepath.Join(dir, "mypk")
+			writeTestFile(t, packDir, "doctor/check-x/doctor.toml", tc.manifest)
+			writeTestFile(t, packDir, "doctor/check-x/check-x.sh", "#!/bin/sh\nexit 0\n")
+
+			got, err := DiscoverPackDoctors(fsys.OSFS{}, packDir, "mypk")
+			if err != nil {
+				t.Fatalf("DiscoverPackDoctors: %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("got %d checks, want 1", len(got))
+			}
+			if got[0].Warmup != tc.wantWarmup {
+				t.Errorf("Warmup = %v, want %v", got[0].Warmup, tc.wantWarmup)
+			}
+		})
+	}
+}
+
 func TestDiscoverPackDoctors_RejectsEscapingOrAbsoluteRunPaths(t *testing.T) {
 	dir := t.TempDir()
 	packDir := filepath.Join(dir, "mypk")

@@ -150,21 +150,25 @@ existing in-flight-work guards in place.
 2. The controller runs the normal config reload (remote pack fetch,
    parse, validation, apply). If that fails, `--soft` is a no-op —
    reload returns `failed` exactly as it would without `--soft`.
-3. Once the new config is live, the controller rebuilds desired state
-   and walks every open session bead. For each session whose
+3. Once the new config is live, the controller uses the desired-state
+   result already built for the same reconcile tick and walks every
+   open session bead. For each session whose
    `session_name` has a desired-state entry and whose recorded
    `started_config_hash` differs from the value the new config would
    produce, the controller writes the new hash into
-   `started_config_hash`. Sessions that have not yet stamped a
-   `started_config_hash` (still in the startup window) are skipped —
-   they will record the right value once they finish starting.
-   Sessions whose `session_name` has no desired-state entry are
-   skipped — the orphan/suspended drain handles them on the next tick.
+   `started_config_hash`, writes the matching `core_hash_breakdown`,
+   and cancels any already queued `config-drift` drain for that bead.
+   Sessions that have not yet stamped a `started_config_hash` (still
+   in the startup window) are skipped — they will record the right value
+   once they finish starting. Sessions whose `session_name` has no
+   desired-state entry are skipped — the orphan/suspended drain handles
+   them on the next tick.
 4. The immediately-following reconcile tick sees no drift on the
    updated sessions and does not fire `config-drift` drains for them.
 5. The CLI prints `soft reload: accepted config drift on N session(s)`
-   on stdout when one or more sessions were updated, alongside the
-   normal `Config reloaded: ...` line.
+   on stdout alongside the normal `Config reloaded: ...` line. If the
+   controller cannot update some session metadata, the CLI also prints a
+   warning because those sessions may still drain.
 
 Soft reload is **not** a substitute for restarting sessions when a
 config change requires a process restart to take effect (e.g.

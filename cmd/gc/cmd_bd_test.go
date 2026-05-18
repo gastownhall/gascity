@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pgauth"
 )
 
 func TestExtractRigFlag(t *testing.T) {
@@ -318,12 +320,16 @@ dolt.auto-start: false
 		t.Fatal(err)
 	}
 	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}
-	env := listToMap(bdCommandEnv(cityDir, cfg, execStoreTarget{
+	envList, err := bdCommandEnv(cityDir, cfg, execStoreTarget{
 		ScopeRoot: rigDir,
 		ScopeKind: "rig",
 		Prefix:    "repo",
 		RigName:   "repo",
-	}))
+	})
+	if err != nil {
+		t.Fatalf("bdCommandEnv: %v", err)
+	}
+	env := listToMap(envList)
 	if got := env["GC_DOLT_PORT"]; got != wantPort {
 		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, wantPort)
 	}
@@ -347,6 +353,46 @@ dolt.auto-start: false
 	}
 	if _, present := env["BEADS_ACTOR"]; present {
 		t.Fatalf("BEADS_ACTOR = %q, want absent for direct gc bd env without explicit actor", env["BEADS_ACTOR"])
+	}
+}
+
+func TestBdCommandEnvSurfacesPostgresProjectionError(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(cityDir, "rigs", "pg")
+	writePGScopeFixture(t, rigDir, "")
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "pg", Path: "rigs/pg", Prefix: "pg"}}}
+
+	_, err := bdCommandEnv(cityDir, cfg, execStoreTarget{
+		ScopeRoot: rigDir,
+		ScopeKind: "rig",
+		Prefix:    "pg",
+		RigName:   "pg",
+	})
+	if err == nil {
+		t.Fatal("bdCommandEnv err = nil, want postgres projection error")
+	}
+	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
+		t.Errorf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
 	}
 }
 

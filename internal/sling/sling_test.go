@@ -51,6 +51,25 @@ type closeAllFailMemStore struct {
 	failSetMetadataCall int
 }
 
+type staleSourceWorkflowListStore struct {
+	beads.Store
+	sourceID      string
+	hiddenReads   int
+	hideReadLimit int
+}
+
+func (s *staleSourceWorkflowListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	items, err := s.Store.List(query)
+	if err != nil {
+		return nil, err
+	}
+	if query.Metadata["gc.source_bead_id"] == s.sourceID && len(items) > 0 && s.hiddenReads < s.hideReadLimit {
+		s.hiddenReads++
+		return nil, nil
+	}
+	return items, nil
+}
+
 func (s *closeAllFailMemStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	if s.failCloseAllCalls > 0 {
 		s.failCloseAllCalls--
@@ -122,6 +141,35 @@ type testNotifier struct{}
 
 func (testNotifier) PokeController(_ string)      {}
 func (testNotifier) PokeControlDispatch(_ string) {}
+
+type closeLaunchedWorkflowNotifier struct {
+	store    beads.Store
+	sourceID string
+	storeRef string
+	once     sync.Once
+	closed   int
+	err      error
+}
+
+func (n *closeLaunchedWorkflowNotifier) PokeController(_ string) {
+	n.once.Do(func() {
+		roots, err := sourceworkflow.ListLiveRoots(n.store, n.sourceID, n.storeRef, n.storeRef)
+		if err != nil {
+			n.err = err
+			return
+		}
+		closedStatus := "closed"
+		for _, root := range roots {
+			if err := n.store.Update(root.ID, beads.UpdateOpts{Status: &closedStatus}); err != nil {
+				n.err = err
+				return
+			}
+			n.closed++
+		}
+	})
+}
+
+func (*closeLaunchedWorkflowNotifier) PokeControlDispatch(_ string) {}
 
 func testDeps(cfg *config.City, sp runtime.Provider, runner SlingRunner) SlingDeps {
 	if cfg != nil && len(cfg.FormulaLayers.City) == 0 {
@@ -300,6 +348,16 @@ func TestBeadPrefixSling(t *testing.T) {
 		{"", ""},
 		{"nohyphen", ""},
 		{"-1", ""},
+		{"pieces-annotator-x8o", "pieces-annotator"},
+		{"pieces-annotator-a3f", "pieces-annotator"},
+		{"pieces-cli-5b8i", "pieces-cli"},
+		{" pieces-annotator-x8o ", "pieces-annotator"},
+		{"my-cool-app-123", "my-cool-app"},
+		{"beads-vscode-1", "beads-vscode"},
+		{"vc-baseline-test", "vc"},
+		{"pieces-annotator-baseline", "pieces"},
+		// All-letter suffixes are ambiguous without city config.
+		{"pieces-annotator-gnpgief", "pieces"},
 	}
 	for _, tt := range tests {
 		got := BeadPrefix(tt.id)
@@ -314,6 +372,7 @@ func TestBeadPrefixForCityLongestMatch(t *testing.T) {
 		Rigs: []config.Rig{
 			{Name: "agent", Path: "/agent", Prefix: "agent"},
 			{Name: "agent-diagnostics", Path: "/ad", Prefix: "agent-diagnostics"},
+			{Name: "pieces-annotator", Path: "/pa", Prefix: "pieces-annotator"},
 			{Name: "fe", Path: "/fe", Prefix: "fe"},
 		},
 	}
@@ -323,6 +382,7 @@ func TestBeadPrefixForCityLongestMatch(t *testing.T) {
 	}{
 		{"agent-diagnostics-hnn", "agent-diagnostics"},
 		{"agent-diagnostics-spawn-storm", "agent-diagnostics"},
+		{"pieces-annotator-gnpgief", "pieces-annotator"},
 		{"agent-x1", "agent"},
 		{"fe-42", "fe"},
 		{"unknown-7", "unknown"}, // falls back to BeadPrefix.
@@ -340,7 +400,7 @@ func TestBeadPrefixForCityFallsBackToBeadPrefix(t *testing.T) {
 	cfg := &config.City{
 		Rigs: []config.Rig{{Name: "fe", Path: "/fe", Prefix: "fe"}},
 	}
-	// Unknown prefix → fall back to BeadPrefix's first-dash split.
+	// Unknown prefix -> fall back to BeadPrefix's config-free heuristic.
 	if got := BeadPrefixForCity(cfg, "unknown-7"); got != "unknown" {
 		t.Errorf("BeadPrefixForCity(unknown-7) = %q, want unknown", got)
 	}
@@ -501,7 +561,7 @@ func TestRigDirForBeadHonorsUnderscoredPrefix(t *testing.T) {
 // RigDirForBead returns "" in two distinct ways: the prefix doesn't
 // parse at all (BeadPrefixForCity returns "") and the prefix parses
 // but doesn't match any configured rig (BeadPrefix falls back to
-// first-dash split for unknown prefixes). Cover both so a regression
+// the config-free heuristic for unknown prefixes). Cover both so a regression
 // that conflates the branches is caught.
 func TestRigDirForBeadEmptyPrefixAndUnknownRig(t *testing.T) {
 	cfg := &config.City{
@@ -1392,6 +1452,78 @@ func TestSlingRouteBeadWithTypedRouter(t *testing.T) {
 	}
 }
 
+func TestSlingAttachFormulaRoutesSourceBeadWithTypedRouter(t *testing.T) {
+	router := &fakeBeadRouter{}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Router = router
+	b, _ := deps.Store.Create(beads.Bead{Title: "work", Type: "task"})
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := s.AttachFormula(context.Background(), "code-review", b.ID, a, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+
+	if result.WispRootID == "" {
+		t.Fatal("WispRootID is empty")
+	}
+	if len(router.routed) != 1 {
+		t.Fatalf("got %d route calls, want 1", len(router.routed))
+	}
+	if router.routed[0].BeadID != b.ID {
+		t.Fatalf("routed BeadID = %q, want source bead %q", router.routed[0].BeadID, b.ID)
+	}
+	got, err := deps.Store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", b.ID, err)
+	}
+	if got.Metadata["molecule_id"] != result.WispRootID {
+		t.Fatalf("molecule_id metadata = %q, want %q", got.Metadata["molecule_id"], result.WispRootID)
+	}
+}
+
+func TestSlingRouteBeadDefaultFormulaRoutesSourceBeadWithTypedRouter(t *testing.T) {
+	router := &fakeBeadRouter{}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Router = router
+	deps.Store = seededStore("BL-42")
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := config.Agent{Name: "mayor", DefaultSlingFormula: stringPtr("code-review"), MaxActiveSessions: intPtr(1)}
+	result, err := s.RouteBead(context.Background(), "BL-42", a, RouteOpts{})
+	if err != nil {
+		t.Fatalf("RouteBead: %v", err)
+	}
+
+	if result.WispRootID == "" {
+		t.Fatal("WispRootID is empty")
+	}
+	if len(router.routed) != 1 {
+		t.Fatalf("got %d route calls, want 1", len(router.routed))
+	}
+	if router.routed[0].BeadID != "BL-42" {
+		t.Fatalf("routed BeadID = %q, want source bead BL-42", router.routed[0].BeadID)
+	}
+	got, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("Get(BL-42): %v", err)
+	}
+	if got.Metadata["molecule_id"] != result.WispRootID {
+		t.Fatalf("molecule_id metadata = %q, want %q", got.Metadata["molecule_id"], result.WispRootID)
+	}
+}
+
 // --- Missing coverage tests ---
 
 func TestSlingAttachFormula(t *testing.T) {
@@ -1531,6 +1663,205 @@ title = "Do work"
 	}
 	if conflictErr.SourceBeadID != source.ID {
 		t.Fatalf("SourceBeadID = %q, want %q", conflictErr.SourceBeadID, source.ID)
+	}
+}
+
+func TestSlingAttachGraphFormulaRetriesLaunchVisibilityAfterStaleList(t *testing.T) {
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Daemon:    config.DaemonConfig{FormulaV2: true},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{formulaDir},
+		},
+	}
+	formulatest.EnableV2ForTest(t)
+	config.InjectImplicitAgents(cfg)
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleStore := &staleSourceWorkflowListStore{
+		Store:         deps.Store,
+		sourceID:      source.ID,
+		hideReadLimit: 1,
+	}
+	deps.Store = staleStore
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.AttachFormula(context.Background(), "graph-work", source.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+	if staleStore.hiddenReads != 1 {
+		t.Fatalf("hiddenReads = %d, want 1", staleStore.hiddenReads)
+	}
+	roots, err := sourceworkflow.ListLiveRoots(deps.Store, source.ID, deps.StoreRef, deps.StoreRef)
+	if err != nil {
+		t.Fatalf("ListLiveRoots: %v", err)
+	}
+	if len(roots) != 1 || roots[0].ID != result.WorkflowID {
+		t.Fatalf("live roots = %#v, want [%s]", roots, result.WorkflowID)
+	}
+	updatedSource, err := deps.Store.Get(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updatedSource.Metadata["workflow_id"]; got != result.WorkflowID {
+		t.Fatalf("source workflow_id = %q, want %q", got, result.WorkflowID)
+	}
+}
+
+func TestSlingAttachGraphFormulaAcceptsDirectRootWhenLaunchListStaysStale(t *testing.T) {
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Daemon:    config.DaemonConfig{FormulaV2: true},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{formulaDir},
+		},
+	}
+	formulatest.EnableV2ForTest(t)
+	config.InjectImplicitAgents(cfg)
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleStore := &staleSourceWorkflowListStore{
+		Store:         deps.Store,
+		sourceID:      source.ID,
+		hideReadLimit: 99,
+	}
+	deps.Store = staleStore
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.AttachFormula(context.Background(), "graph-work", source.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+	if staleStore.hiddenReads == 0 {
+		t.Fatal("hiddenReads = 0, want stale list path exercised")
+	}
+	root, err := deps.Store.Get(result.WorkflowID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if !sourceworkflow.WorkflowMatchesSource(root, source.ID, deps.StoreRef, deps.StoreRef) {
+		t.Fatalf("root metadata = %#v, want workflow to match source %s", root.Metadata, source.ID)
+	}
+	updatedSource, err := deps.Store.Get(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updatedSource.Metadata["workflow_id"]; got != result.WorkflowID {
+		t.Fatalf("source workflow_id = %q, want %q", got, result.WorkflowID)
+	}
+}
+
+func TestSlingAttachGraphFormulaAcceptsRootClosedBeforeVisibilityCheck(t *testing.T) {
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Daemon:    config.DaemonConfig{FormulaV2: true},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{formulaDir},
+		},
+	}
+	formulatest.EnableV2ForTest(t)
+	config.InjectImplicitAgents(cfg)
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	notifier := &closeLaunchedWorkflowNotifier{
+		store:    deps.Store,
+		sourceID: source.ID,
+		storeRef: deps.StoreRef,
+	}
+	deps.Notify = notifier
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.AttachFormula(context.Background(), "graph-work", source.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("AttachFormula: %v", err)
+	}
+	if notifier.err != nil {
+		t.Fatalf("notifier close: %v", notifier.err)
+	}
+	if notifier.closed != 1 {
+		t.Fatalf("notifier closed = %d, want 1", notifier.closed)
+	}
+	root, err := deps.Store.Get(result.WorkflowID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if root.Status != "closed" {
+		t.Fatalf("root status = %q, want closed", root.Status)
+	}
+	if !sourceworkflow.WorkflowMatchesSource(root, source.ID, deps.StoreRef, deps.StoreRef) {
+		t.Fatalf("root metadata = %#v, want workflow to match source %s", root.Metadata, source.ID)
+	}
+	liveRoots, err := sourceworkflow.ListLiveRoots(deps.Store, source.ID, deps.StoreRef, deps.StoreRef)
+	if err != nil {
+		t.Fatalf("ListLiveRoots: %v", err)
+	}
+	if len(liveRoots) != 0 {
+		t.Fatalf("live roots = %#v, want none after notifier closes root", liveRoots)
+	}
+	updatedSource, err := deps.Store.Get(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updatedSource.Metadata["workflow_id"]; got != result.WorkflowID {
+		t.Fatalf("source workflow_id = %q, want %q", got, result.WorkflowID)
 	}
 }
 

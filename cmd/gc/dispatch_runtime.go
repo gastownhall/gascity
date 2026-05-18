@@ -314,7 +314,10 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 		return fmt.Errorf("agent %q not found in config", agentName)
 	}
 	workDir := agentCommandDir(cityPath, &agentCfg, cfg.Rigs)
-	workEnv := controllerWorkQueryEnv(cityPath, cfg, &agentCfg)
+	workEnv, err := controllerWorkQueryEnv(cityPath, cfg, &agentCfg)
+	if err != nil {
+		return fmt.Errorf("building work query env: %w", err)
+	}
 	cityName := loadedCityName(cfg, cityPath)
 	// Expand {{.Rig}}/{{.AgentBase}} once so the long-poll drain reuses the
 	// rig-scoped command instead of passing the literal template to the shell
@@ -477,6 +480,12 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 					continue
 				}
 				workflowTracef("serve process-error bead=%s kind=%s err=%v", beadID, kind, err)
+				if dispatch.IsTransientControllerError(err) {
+					pendingCount++
+					result.pendingAny = true
+					workflowTracef("serve transient-error-pending bead=%s kind=%s err=%v", beadID, kind, err)
+					continue
+				}
 				if isLegacyOversizedControlEventError(err) {
 					legacyOversizedCount++
 					continue

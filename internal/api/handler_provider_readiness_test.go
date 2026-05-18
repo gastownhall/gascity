@@ -295,6 +295,8 @@ printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstPar
 	originalCommandContext := providerProbeCommandContext
 	originalCache := providerProbeCache
 	originalCacheTTL := providerProbeCacheTTL
+	// This test mutates package probe globals; keep it serial and restore
+	// every override before returning.
 	providerProbePathEnv = binDir
 	providerProbeCommandContext = exec.CommandContext
 	providerProbeCache = newCachedProviderProbeStore()

@@ -56,6 +56,7 @@ type AwakeSessionBead struct {
 	SleepReason            string
 	ManualSession          bool
 	PendingCreate          bool      // controller claimed this bead for initial start
+	ExplicitWake           bool      // explicit durable wake request is pending
 	DependencyOnly         bool      // only wakeable via dependency gate
 	NamedIdentity          string    // non-empty for named session beads
 	ConfiguredNamedSession bool      // configured_named_session metadata is true
@@ -112,6 +113,14 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			continue
 		}
 		desired[bead.SessionName] = "pending-create"
+	}
+	for _, bead := range input.SessionBeads {
+		if !bead.ExplicitWake || bead.State == "closed" || bead.DependencyOnly {
+			continue
+		}
+		if agent, ok := agentsByName[bead.Template]; ok && !agent.Suspended {
+			desired[bead.SessionName] = "explicit-wake"
+		}
 	}
 
 	// Named sessions
@@ -261,7 +270,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		// input stays asleep until either its durable wait becomes ready
 		// or it still needs its initial launch.
 		if reason, inDesired := desired[name]; inDesired {
-			if !bead.WaitHold || bead.PendingCreate {
+			if !bead.WaitHold || bead.PendingCreate || bead.ExplicitWake {
 				decision.ShouldWake = true
 				decision.Reason = reason
 			}

@@ -42,6 +42,10 @@ type ConflictError struct {
 // Used by WorkflowMatchesSource to scope cross-store singleton checks.
 const SourceStoreRefMetadataKey = "gc.source_store_ref"
 
+// WorkflowSubtreeClosedReason is stamped on workflow subtree force-closes so
+// strict stores that require a human-readable close reason accept the cleanup.
+const WorkflowSubtreeClosedReason = "source workflow cleanup: subtree force-closed by CloseWorkflowSubtree"
+
 // WorkflowSkippedCloseReason is the canonical close_reason stamped on
 // workflow-subtree beads when they are force-closed via the
 // gc.outcome=skipped cleanup path (gc convoy delete --skip, force-replace
@@ -448,7 +452,7 @@ func CloseWorkflowSubtree(store beads.Store, rootID string) (int, error) {
 	}
 	return store.CloseAll(ordered, map[string]string{
 		"gc.outcome":   "skipped",
-		"close_reason": WorkflowSkippedCloseReason,
+		"close_reason": WorkflowSubtreeClosedReason,
 	})
 }
 

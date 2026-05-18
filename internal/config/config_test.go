@@ -1832,6 +1832,85 @@ func TestEffectiveScalingExplicit(t *testing.T) {
 	}
 }
 
+func TestAgentUsesCanonicalSingletonPoolIdentity(t *testing.T) {
+	tests := []struct {
+		name string
+		a    Agent
+		want bool
+	}{
+		{
+			name: "max one pool flavor uses canonical identity",
+			a:    Agent{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(1)},
+			want: true,
+		},
+		{
+			name: "namepool max one keeps instance identity",
+			a:    Agent{Name: "worker", MaxActiveSessions: ptrInt(1), NamepoolNames: []string{"alpha"}},
+		},
+		{
+			name: "multi session pool keeps instance identity",
+			a:    Agent{Name: "worker", MaxActiveSessions: ptrInt(2)},
+		},
+		{
+			name: "unbounded pool keeps instance identity",
+			a:    Agent{Name: "worker"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.a.UsesCanonicalSingletonPoolIdentity(); got != tt.want {
+				t.Fatalf("UsesCanonicalSingletonPoolIdentity() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAgentSupportsExpandedSessionIdentities(t *testing.T) {
+	tests := []struct {
+		name string
+		a    *Agent
+		want bool
+	}{
+		{
+			name: "nil",
+		},
+		{
+			name: "disabled max zero",
+			a:    &Agent{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(0)},
+		},
+		{
+			name: "canonical singleton pool",
+			a:    &Agent{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(1)},
+		},
+		{
+			name: "fixed singleton",
+			a:    &Agent{Name: "worker", MaxActiveSessions: ptrInt(1)},
+		},
+		{
+			name: "bounded pool",
+			a:    &Agent{Name: "worker", MaxActiveSessions: ptrInt(2)},
+			want: true,
+		},
+		{
+			name: "unbounded pool",
+			a:    &Agent{Name: "worker"},
+			want: true,
+		},
+		{
+			name: "namepool max one",
+			a:    &Agent{Name: "worker", MaxActiveSessions: ptrInt(1), NamepoolNames: []string{"alpha", "beta"}},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.a.SupportsExpandedSessionIdentities(); got != tt.want {
+				t.Fatalf("SupportsExpandedSessionIdentities() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestEffectiveScaleCheckDefaults(t *testing.T) {
 	// Check empty → default uses qualified name.
 	a := Agent{
@@ -2300,6 +2379,29 @@ func TestDaemonMaxRestartsZero(t *testing.T) {
 	got := d.MaxRestartsOrDefault()
 	if got != 0 {
 		t.Errorf("MaxRestartsOrDefault() = %d, want 0 (unlimited)", got)
+	}
+}
+
+func TestDaemonAutoRestartOnDriftDefault(t *testing.T) {
+	d := DaemonConfig{}
+	if !d.AutoRestartOnDriftEnabled() {
+		t.Errorf("AutoRestartOnDriftEnabled() = false, want true (default)")
+	}
+}
+
+func TestDaemonAutoRestartOnDriftExplicitTrue(t *testing.T) {
+	v := true
+	d := DaemonConfig{AutoRestartOnDrift: &v}
+	if !d.AutoRestartOnDriftEnabled() {
+		t.Errorf("AutoRestartOnDriftEnabled() = false, want true")
+	}
+}
+
+func TestDaemonAutoRestartOnDriftExplicitFalse(t *testing.T) {
+	v := false
+	d := DaemonConfig{AutoRestartOnDrift: &v}
+	if d.AutoRestartOnDriftEnabled() {
+		t.Errorf("AutoRestartOnDriftEnabled() = true, want false (kill switch)")
 	}
 }
 

@@ -17,13 +17,28 @@ import (
 
 // StatusJSON is the JSON output format for "gc status --json".
 type StatusJSON struct {
-	CityName   string            `json:"city_name"`
-	CityPath   string            `json:"city_path"`
-	Controller ControllerJSON    `json:"controller"`
-	Suspended  bool              `json:"suspended"`
-	Agents     []StatusAgentJSON `json:"agents"`
-	Rigs       []StatusRigJSON   `json:"rigs"`
-	Summary    StatusSummaryJSON `json:"summary"`
+	SchemaVersion string            `json:"schema_version"`
+	CityName      string            `json:"city_name"`
+	Workspace     WorkspaceJSON     `json:"workspace"`
+	CityPath      string            `json:"city_path"`
+	Controller    ControllerJSON    `json:"controller"`
+	Running       bool              `json:"running"`
+	Suspended     bool              `json:"suspended"`
+	Health        HealthJSON        `json:"health"`
+	Agents        []StatusAgentJSON `json:"agents"`
+	Rigs          []StatusRigJSON   `json:"rigs"`
+	Summary       StatusSummaryJSON `json:"summary"`
+}
+
+type WorkspaceJSON struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+type HealthJSON struct {
+	Usable   bool     `json:"usable"`
+	Degraded bool     `json:"degraded"`
+	Signals  []string `json:"signals,omitempty"`
 }
 
 // ControllerJSON represents controller state in JSON output.
@@ -52,9 +67,11 @@ type PoolJSON struct {
 
 // StatusRigJSON represents a rig in the JSON status output.
 type StatusRigJSON struct {
-	Name      string `json:"name"`
-	Path      string `json:"path"`
-	Suspended bool   `json:"suspended"`
+	Name               string `json:"name"`
+	Path               string `json:"path"`
+	Prefix             string `json:"prefix,omitempty"`
+	Suspended          bool   `json:"suspended"`
+	DefaultSlingTarget string `json:"default_sling_target,omitempty"`
 }
 
 // StatusSummaryJSON is the agent count summary in JSON output.
@@ -100,18 +117,35 @@ all agents with running status, rigs, and a summary count.`,
 func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCommandCity(args)
 	if err != nil {
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "city_resolve_failed", fmt.Sprintf("gc status: %v", err), 1)
+		}
 		fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	cfg, err := loadCityConfig(cityPath, stderr)
+	configStderr := stderr
+	if jsonOutput {
+		configStderr = io.Discard
+	}
+	cfg, err := loadCityConfig(cityPath, configStderr)
 	if err != nil {
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "config_load_failed", fmt.Sprintf("gc status: %v", err), 1)
+		}
 		fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	store, code := openCityStatusStore(cityPath, stderr)
+	storeStderr := stderr
+	if jsonOutput {
+		storeStderr = io.Discard
+	}
+	store, code := openCityStatusStore(cityPath, storeStderr)
 	if code != 0 {
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "store_open_failed", "gc status: opening bead store failed", code)
+		}
 		return code
 	}
 	statusSnapshot := loadStatusSessionSnapshot(store, stderr)
@@ -185,7 +219,7 @@ func loadStatusSessionSnapshot(store beads.Store, stderr io.Writer) *sessionBead
 			if stderr != nil {
 				fmt.Fprintf(stderr, "gc status: loading session snapshot: %v\n", result.err) //nolint:errcheck // best-effort stderr
 			}
-			return newSessionBeadSnapshot(nil)
+			return newSessionBeadSnapshotWithError(nil, fmt.Errorf("loading session snapshot: %w", result.err))
 		}
 		if result.snapshot == nil {
 			return newSessionBeadSnapshot(nil)
@@ -195,7 +229,7 @@ func loadStatusSessionSnapshot(store beads.Store, stderr io.Writer) *sessionBead
 		if stderr != nil {
 			fmt.Fprintf(stderr, "gc status: loading session snapshot timed out after %s; continuing with runtime-only status\n", statusSessionSnapshotTimeout) //nolint:errcheck // best-effort stderr
 		}
-		return newSessionBeadSnapshot(nil)
+		return newSessionBeadSnapshotWithError(nil, fmt.Errorf("loading session snapshot timed out after %s", statusSessionSnapshotTimeout))
 	}
 }
 
@@ -271,6 +305,11 @@ func doCityStatusWithStoreAndSnapshot(
 	snapshot := collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, statusSnapshot, stderr)
 	renderCityStatusText(snapshot, dops, stdout)
 
+	// Track session-snapshot degradation so we can render the textual report
+	// AND signal the failure via exit code. Restores the pre-#2005 contract
+	// that monitoring callers rely on (see #2147).
+	snapshotDegraded := statusSnapshot.LoadError() != nil
+
 	if store != nil {
 		sessions, err := collectCitySessionCounts(cityPath, store, sp, cfg, statusSnapshot)
 		if err != nil {
@@ -283,6 +322,9 @@ func doCityStatusWithStoreAndSnapshot(
 		}
 	}
 
+	if snapshotDegraded {
+		return 1
+	}
 	return 0
 }
 
@@ -310,6 +352,10 @@ func doCityStatusJSONWithStoreAndSnapshot(
 	stdout, stderr io.Writer,
 ) int {
 	snapshot := collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, statusSnapshot, stderr)
+	// Track session-snapshot degradation so we can emit the JSON payload AND
+	// signal the failure via exit code. Restores the pre-#2005 contract that
+	// monitoring callers rely on (see #2147).
+	snapshotDegraded := statusSnapshot.LoadError() != nil
 	if store != nil {
 		sessions, err := collectCitySessionCounts(cityPath, store, sp, cfg, statusSnapshot)
 		if err != nil {
@@ -327,6 +373,9 @@ func doCityStatusJSONWithStoreAndSnapshot(
 		return 1
 	}
 	fmt.Fprintln(stdout, string(data)) //nolint:errcheck // best-effort stdout
+	if snapshotDegraded {
+		return 1
+	}
 	return 0
 }
 

@@ -11,10 +11,11 @@ import (
 	"errors"
 	"fmt"
 	iofs "io/fs"
-	"log"
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
@@ -29,6 +30,10 @@ var configFS embed.FS
 // supported lists provider names that have hook support wired into
 // Gas Town's installer.
 var supported = []string{"claude", "codex", "gemini", "kiro", "opencode", "copilot", "cursor", "pi", "omp"}
+
+const managedPiHookVersion = 4
+
+var piHookVersionPattern = regexp.MustCompile(`\bGC_PI_HOOK_VERSION\s*=\s*([0-9]+)\b`)
 
 // unwiredHookProviders lists provider names whose own CLIs do expose a
 // hook mechanism (per upstream documentation) but for which Gas Town
@@ -198,6 +203,13 @@ func piHookNeedsUpgrade(existing []byte) bool {
 	if !strings.Contains(content, "Gas City hooks for Pi Coding Agent") {
 		return false
 	}
+	if piHookVersion(content) < managedPiHookVersion ||
+		!strings.Contains(content, "gc prime --hook") ||
+		!strings.Contains(content, "gc hook --inject") ||
+		!strings.Contains(content, "gc handoff --auto") ||
+		!strings.Contains(content, "mirrorTempCounter") {
+		return true
+	}
 	for _, marker := range []string{
 		"module.exports = {",
 		`"session.created"`,
@@ -210,6 +222,18 @@ func piHookNeedsUpgrade(existing []byte) bool {
 		}
 	}
 	return false
+}
+
+func piHookVersion(content string) int {
+	match := piHookVersionPattern.FindStringSubmatch(content)
+	if len(match) != 2 {
+		return 0
+	}
+	version, err := strconv.Atoi(match[1])
+	if err != nil {
+		return 0
+	}
+	return version
 }
 
 // installClaude writes the runtime settings file (.gc/settings.json) in the
@@ -267,10 +291,12 @@ func readEmbedded(embedPath ...string) ([]byte, error) {
 }
 
 func writeEmbeddedManaged(fs fsys.FS, dst string, data []byte, needsUpgrade func([]byte) bool) error {
+	var backup []byte
 	if existing, err := fs.ReadFile(dst); err == nil {
 		if needsUpgrade == nil || !needsUpgrade(existing) {
 			return nil
 		}
+		backup = append([]byte(nil), existing...)
 	} else if _, statErr := fs.Stat(dst); statErr == nil {
 		// File exists but isn't readable. Preserve it rather than clobbering it.
 		return nil
@@ -280,11 +306,36 @@ func writeEmbeddedManaged(fs fsys.FS, dst string, data []byte, needsUpgrade func
 	if err := fs.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", dir, err)
 	}
+	if backup != nil {
+		backupPath, err := nextManagedBackupPath(fs, dst)
+		if err != nil {
+			return err
+		}
+		if err := fs.WriteFile(backupPath, backup, 0o644); err != nil {
+			return fmt.Errorf("backing up %s to %s: %w", dst, backupPath, err)
+		}
+	}
 
 	if err := fs.WriteFile(dst, data, 0o644); err != nil {
 		return fmt.Errorf("writing %s: %w", dst, err)
 	}
 	return nil
+}
+
+func nextManagedBackupPath(fs fsys.FS, dst string) (string, error) {
+	base := dst + ".bak"
+	for i := 0; ; i++ {
+		candidate := base
+		if i > 0 {
+			candidate = fmt.Sprintf("%s.%d", base, i)
+		}
+		if _, err := fs.Stat(candidate); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return candidate, nil
+			}
+			return "", fmt.Errorf("checking backup %s: %w", candidate, err)
+		}
+	}
 }
 
 type claudeSettingsSourceKind int
@@ -317,24 +368,38 @@ func desiredClaudeSettings(fs fsys.FS, cityDir string) ([]byte, claudeSettingsSo
 	}
 
 	// Apply targeted in-place upgrades to legacy forms of managed gascity
-	// hook commands and matchers in the user's override before merging with
-	// the embedded base. Custom hook events and custom commands are
-	// preserved verbatim. The previous "use base instead" path discarded
-	// user customizations along with stale managed-hook bytes; this path
-	// patches the managed bytes while keeping customizations intact.
+	// hook commands and matchers in the user's override before merging
+	// with the embedded base. Custom hook events and custom commands are
+	// preserved semantically: command strings and hook entries are not
+	// modified, though MarshalCanonicalJSON may re-order keys or arrays
+	// when an upgrade rewrite is applied. The previous "use base instead"
+	// path discarded user customizations along with stale managed-hook
+	// bytes; this path patches the managed bytes while keeping
+	// customizations intact.
 	upgradedOverride, _, upgradeErr := upgradeClaudeFile(overrideData)
 	if upgradeErr != nil {
-		// Upgrade failure (e.g., malformed JSON) — fall back to original
-		// override; better to keep the user file as-is than fail install.
-		// Log so unexpected upgrade failures are discoverable rather than
-		// silent: a malformed user file is benign here, but a
-		// MarshalCanonicalJSON failure would indicate a gascity bug.
-		log.Printf("hooks: claude settings upgrade failed, using original override: %v", upgradeErr)
-		upgradedOverride = overrideData
+		// Distinguish a malformed user file from a gascity-side
+		// MarshalCanonicalJSON failure. JSON parse errors point at the
+		// user's override; the canonical recovery is to skip the merge
+		// and surface a clear, actionable error that names the file —
+		// previously this path silently re-assigned the malformed bytes
+		// and crashed downstream with a cryptic "merging ... : invalid
+		// character" error from MergeSettingsJSON. Marshal failures
+		// shouldn't happen on user data (we already parsed it
+		// successfully above) so they indicate a gascity bug worth
+		// surfacing too. See gastownhall/gascity#2109.
+		var syntaxErr *json.SyntaxError
+		if errors.As(upgradeErr, &syntaxErr) {
+			return nil, claudeSettingsSourceNone, fmt.Errorf("invalid JSON in Claude settings override at %s; fix or remove the file to proceed with install: %w", overridePath, upgradeErr)
+		}
+		return nil, claudeSettingsSourceNone, fmt.Errorf("upgrading Claude settings from %s: %w", overridePath, upgradeErr)
 	}
 
 	merged, err := overlay.MergeSettingsJSON(base, upgradedOverride)
 	if err != nil {
+		if overlay.IsOverlayObjectShapeError(err) {
+			return nil, claudeSettingsSourceNone, fmt.Errorf("invalid JSON in Claude settings override at %s; expected a JSON object; fix or remove the file to proceed with install: %w", overridePath, err)
+		}
 		return nil, claudeSettingsSourceNone, fmt.Errorf("merging Claude settings from %s: %w", overridePath, err)
 	}
 	return merged, sourceKind, nil
@@ -461,6 +526,16 @@ func normalizeCodexHookCommands(existing []byte) ([]byte, bool, error) {
 	return data, changed, nil
 }
 
+// CodexHooksMissingManagedPreCompact reports whether data is a Gas City
+// managed Codex hooks document that can be upgraded with a PreCompact hook.
+func CodexHooksMissingManagedPreCompact(data []byte) bool {
+	var root any
+	if err := json.Unmarshal(data, &root); err != nil {
+		return false
+	}
+	return codexHookDocCanAddPreCompact(root)
+}
+
 func codexHookValueHasManagedCommand(v any) bool {
 	switch node := v.(type) {
 	case map[string]any:
@@ -535,6 +610,15 @@ func isCodexManagedHookCommand(command string) bool {
 }
 
 func upgradeCodexHookCommand(command string) (string, bool) {
+	body := commandBodyAfterCanonicalPrefix(command)
+	if equalsLegacyCommandBody(body, `gc prime --hook`) ||
+		equalsLegacyCommandBody(body, `gc prime --hook --hook-format codex`) ||
+		equalsLegacyCommandBody(body, `GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`) ||
+		equalsLegacyCommandBody(body, `GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex`) ||
+		equalsLegacyCommandBody(body, sessionStartPreviousManagedFormBody) {
+		prefix := strings.TrimSuffix(command, body)
+		return prefix + sessionStartCurrentFormBody, true
+	}
 	if strings.Contains(command, `--hook-format codex`) {
 		return "", false
 	}
@@ -681,7 +765,10 @@ func claudeFileNeedsUpgrade(existing []byte) bool {
 // known legacy forms of managed gascity hook commands and matchers to their
 // current shape. Walks the hook events so upgrades can be event-aware
 // (e.g. SessionStart matcher upgrade, PreCompact command upgrade); custom
-// hook events and custom commands are preserved verbatim.
+// hook events and custom commands are preserved semantically — their
+// command strings and entry contents are untouched, though
+// MarshalCanonicalJSON may reorder keys or arrays when an upgrade
+// rewrite is applied.
 //
 // Returns the (possibly re-marshaled) JSON bytes and whether any patch
 // was applied.
@@ -806,6 +893,8 @@ func isLegacyGCManagedCommand(event, command string) bool {
 			equalsLegacyCommandBody(body, `gc handoff --auto "context cycle"`)
 	case "SessionStart":
 		return equalsLegacyCommandBody(body, "gc prime --hook") ||
+			equalsLegacyCommandBody(body, "gc prime --hook --hook-format codex") ||
+			equalsLegacyCommandBody(body, sessionStartPreviousManagedFormBody) ||
 			equalsLegacyCommandBody(body, sessionStartCurrentFormBody)
 	}
 	return false
@@ -819,7 +908,9 @@ func isLegacyGCManagedCommand(event, command string) bool {
 // full env-var preamble. If gc ever extends the current-form command
 // with additional arguments, update this constant alongside the
 // emission site so legacy detection remains tight.
-const sessionStartCurrentFormBody = `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`
+const sessionStartCurrentFormBody = `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex`
+
+const sessionStartPreviousManagedFormBody = `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`
 
 // equalsLegacyCommandBody reports whether the command body is exactly the
 // legacy token. gc historically emitted these tokens as the complete
@@ -869,8 +960,11 @@ func upgradeClaudeHookCommand(event, command string) (string, bool) {
 		// Legacy: bare `gc prime --hook` without the
 		// GC_MANAGED_SESSION_HOOK / GC_HOOK_EVENT_NAME env vars the
 		// current managed form expects.
-		if equalsLegacyCommandBody(body, `gc prime --hook`) {
-			return strings.Replace(command, `gc prime --hook`, `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`, 1), true
+		if equalsLegacyCommandBody(body, `gc prime --hook`) ||
+			equalsLegacyCommandBody(body, `gc prime --hook --hook-format codex`) ||
+			equalsLegacyCommandBody(body, sessionStartPreviousManagedFormBody) {
+			prefix := strings.TrimSuffix(command, body)
+			return prefix + sessionStartCurrentFormBody, true
 		}
 	}
 	return "", false

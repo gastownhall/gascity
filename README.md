@@ -58,6 +58,7 @@ Gas City requires the following tools on your system. `gc init` and
 | dolt | Beads provider `bd` | 1.86.2 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
 | bd | Beads provider `bd` | 1.0.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
 | flock | Beads provider `bd` | — | `brew install flock` | `apt install util-linux` |
+| gh | Optional GitHub gates | — | `brew install gh` | [cli.github.com](https://cli.github.com/) |
 | claude / codex / gemini | Per provider | — | See provider docs | See provider docs |
 
 The `bd` (beads) provider is the default. To use a file-based store instead

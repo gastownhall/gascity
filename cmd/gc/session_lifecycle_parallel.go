@@ -156,7 +156,7 @@ type preparedStart struct {
 	candidate     startCandidate
 	cfg           runtime.Config
 	coreHash      string
-	coreBreakdown map[string]string
+	coreBreakdown runtime.BreakdownV1
 	liveHash      string
 }
 
@@ -775,11 +775,7 @@ func buildPreparedStart(
 			forceFresh := session.Metadata["wake_mode"] == "fresh"
 			if msg, ok := overrides["initial_message"]; ok && msg != "" && (firstStart || forceFresh) {
 				if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
-					if agentCfg.Nudge != "" {
-						agentCfg.Nudge = agentCfg.Nudge + "\n\n---\n\nUser message:\n" + msg
-					} else {
-						agentCfg.Nudge = msg
-					}
+					agentCfg.Nudge = appendInitialMessageToStartupNudge(agentCfg.Nudge, msg)
 				} else {
 					existing := ""
 					if agentCfg.PromptSuffix != "" {
@@ -920,7 +916,7 @@ func runPreparedStartCandidate(
 	defer cancel()
 	var phases startPhaseTimings
 	startCallBegin := time.Now()
-	_, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg)
+	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg)
 	startCtxErr := startCtx.Err()
 	// Split start_call into provider.Start and the ErrStateSync recovery
 	// branch (gc-9ha). The recovery branch hits the worker observation
@@ -929,9 +925,9 @@ func runPreparedStartCandidate(
 	// zero on the happy path.
 	if err != nil && errors.Is(err, sessionpkg.ErrStateSync) {
 		recoveryBegin := time.Now()
-		running, runningErr := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
+		obs, runningErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
 		phases.StateSyncRecovery = time.Since(recoveryBegin)
-		if runningErr == nil && running {
+		if runningErr == nil && runtimeObservationLive(obs) {
 			err = nil
 		}
 	}
@@ -941,14 +937,13 @@ func runPreparedStartCandidate(
 	// likely references a conversation that no longer exists
 	// (e.g., "No conversation found"). Report as a failure so
 	// recordWakeFailure clears the key for the next attempt.
-	if err == nil && item.candidate.session != nil && item.candidate.session.Metadata["session_key"] != "" {
+	if startedFresh && err == nil && item.candidate.session != nil && item.candidate.session.Metadata["session_key"] != "" {
 		postStartBegin := time.Now()
 		time.Sleep(staleKeyDetectDelay)
 		running := false
 		alive := false
 		if store == nil || strings.TrimSpace(item.candidate.session.ID) == "" {
-			running = sp != nil && sp.IsRunning(item.candidate.name())
-			alive = running && (sp == nil || sp.ProcessAlive(item.candidate.name(), item.cfg.ProcessNames))
+			running, alive = observeRuntimeProviderLiveness(sp, item.candidate.name(), item.cfg.ProcessNames)
 		} else {
 			var obs worker.LiveObservation
 			obs, err = workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
@@ -992,16 +987,19 @@ func runPreparedStartCandidate(
 	case err == nil:
 		outcome = "success"
 	case errors.Is(err, runtime.ErrSessionExists):
-		running, runningErr := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
+		obs, runningErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
 		switch {
-		case runningErr != nil || !running:
+		case runningErr != nil || !runtimeObservationLive(obs):
 			outcome = "provider_error"
 		case rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp):
 			outcome = "session_exists_converged"
 			err = nil
 			rollbackPending = false
+		case rollbackPending:
+			outcome = "session_exists"
 		default:
 			outcome = "session_exists"
+			err = nil
 		}
 	default:
 		outcome = "provider_error"
@@ -1019,6 +1017,14 @@ func runPreparedStartCandidate(
 		rateLimitScreen: rateLimitScreen,
 		phases:          phases,
 	}
+}
+
+func appendInitialMessageToStartupNudge(nudge, msg string) string {
+	userMessage := "User message:\n" + msg
+	if nudge != "" {
+		return nudge + startupPromptNudgeSeparator + userMessage
+	}
+	return userMessage
 }
 
 func startupRateLimitScreenDetected(
@@ -1176,7 +1182,7 @@ func commitAsyncStartResultWithContext(
 		return false
 	}
 	if sp != nil && refreshed.err == nil && refreshed.outcome != "session_initializing" {
-		clearReconcilerDrainAckMetadata(sp, refreshed.prepared.candidate.name())
+		_ = clearReconcilerDrainAckMetadata(sp, refreshed.prepared.candidate.name())
 	}
 	return commitStartResultTraced(refreshed, store, clk, rec, wave, stdout, stderr, trace)
 }
@@ -1333,14 +1339,27 @@ func startPreparedStartCandidate(
 	sp runtime.Provider,
 	cfg *config.City,
 ) (bool, error) {
+	name := item.candidate.name()
+	if sp != nil {
+		running, alive := observeRuntimeProviderLiveness(sp, name, item.cfg.ProcessNames)
+		if running {
+			if shouldRollbackPendingCreate(item.candidate.session) && !runningSessionMatchesPendingCreate(item.candidate.session, name, sp) {
+				return false, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+			}
+			if alive {
+				return false, nil
+			}
+			return false, fmt.Errorf("session %q died during startup", name)
+		}
+	}
 	if store == nil || item.candidate.session == nil || strings.TrimSpace(item.candidate.session.ID) == "" {
 		handle, err := runtimeWorkerHandleWithConfig(
 			cityPath,
 			store,
 			sp,
 			cfg,
-			item.candidate.name(),
-			item.candidate.name(),
+			name,
+			name,
 			"",
 			nil,
 		)
@@ -1354,6 +1373,28 @@ func startPreparedStartCandidate(
 		return true, err
 	}
 	return true, handle.StartResolved(ctx, item.cfg.Command, item.cfg)
+}
+
+func runtimeObservationLive(obs worker.LiveObservation) bool {
+	return obs.Running && obs.Alive
+}
+
+func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNames []string) (running bool, alive bool) {
+	if sp == nil || strings.TrimSpace(name) == "" {
+		return false, false
+	}
+	return runtimeProviderLivenessFromRunning(sp, name, processNames, sp.IsRunning(name))
+}
+
+func runtimeProviderLivenessFromRunning(sp runtime.Provider, name string, processNames []string, running bool) (bool, bool) {
+	if len(processNames) == 0 {
+		return running, running
+	}
+	alive := sp.ProcessAlive(name, processNames)
+	if alive && !running {
+		running = true
+	}
+	return running, alive
 }
 
 func commitStartResult(
@@ -1658,6 +1699,32 @@ func rollbackPendingCreate(session *beads.Bead, store beads.Store, now time.Time
 	closeBead(store, session.ID, string(sessionpkg.StateFailedCreate), now, stderr)
 }
 
+func rollbackPendingCreateClearingClaim(session *beads.Bead, store beads.Store, now time.Time, stderr io.Writer) {
+	if session == nil || store == nil {
+		return
+	}
+	clearPendingStartInFlightLease(session, store, stderr)
+	if strings.TrimSpace(session.Metadata["session_name_explicit"]) == "true" {
+		if setMeta(store, session.ID, "session_name", "", stderr) == nil {
+			if session.Metadata == nil {
+				session.Metadata = make(map[string]string)
+			}
+			session.Metadata["session_name"] = ""
+		}
+	}
+	if !closeFailedCreateBead(store, session.ID, now, stderr) {
+		return
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string)
+	}
+	for key, value := range sessionpkg.ClosePatch(now.UTC(), string(sessionpkg.StateFailedCreate)) {
+		session.Metadata[key] = value
+	}
+	session.Metadata["pending_create_claim"] = ""
+	session.Metadata["pending_create_started_at"] = ""
+}
+
 func executePlannedStarts(
 	ctx context.Context,
 	candidates []startCandidate,
@@ -1893,7 +1960,7 @@ func executePlannedStartsTraced(
 					continue
 				}
 				if result.err == nil && result.outcome != "session_initializing" {
-					clearReconcilerDrainAckMetadata(sp, result.prepared.candidate.name())
+					_ = clearReconcilerDrainAckMetadata(sp, result.prepared.candidate.name())
 				}
 				if commitStartResultTraced(result, store, clk, rec, wave, stdout, stderr, trace) {
 					wakeCount++

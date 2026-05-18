@@ -106,6 +106,43 @@ func TestGcBeadsBdConfigSetLintCases(t *testing.T) {
 	}
 }
 
+func TestNoBashCleanupProjectIDGuard(t *testing.T) {
+	root := repoRootForLint(t)
+	scriptPath := filepath.Join(root, "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read script: %v", err)
+	}
+	script := string(data)
+
+	for _, forbidden := range []string{"metadata_has_project_id", "backfill_project_id_if_missing"} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("gc-beads-bd.sh must not contain %q", forbidden)
+		}
+	}
+	for _, fn := range []string{"ensure_project_identity", "identity_toml_present"} {
+		if got := countShellFunctionDefinitions(script, fn); got != 1 {
+			t.Fatalf("%s definitions = %d, want 1", fn, got)
+		}
+	}
+
+	ensureFn := extractShellFunction(t, script, "ensure_project_identity")
+	if strings.Contains(ensureFn, "identity_toml_present") {
+		t.Fatalf("ensure_project_identity must not guard on identity_toml_present:\n%s", ensureFn)
+	}
+	if got := strings.Count(ensureFn, "dolt-state ensure-project-id"); got != 1 {
+		t.Fatalf("ensure_project_identity dolt-state ensure-project-id count = %d, want 1:\n%s", got, ensureFn)
+	}
+	if !strings.Contains(ensureFn, `--city "$GC_CITY_PATH"`) {
+		t.Fatalf("ensure_project_identity missing --city \"$GC_CITY_PATH\":\n%s", ensureFn)
+	}
+}
+
+func countShellFunctionDefinitions(script, name string) int {
+	pattern := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(name) + `\(\) \{`)
+	return len(pattern.FindAllStringIndex(script, -1))
+}
+
 func bdConfigSetOffenders(path string, r io.Reader) ([]string, error) {
 	var offenders []string
 	scanner := bufio.NewScanner(r)

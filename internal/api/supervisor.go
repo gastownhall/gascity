@@ -108,6 +108,7 @@ type SupervisorMux struct {
 	initializer    cityInitializer
 	readOnly       bool
 	version        string
+	buildID        string
 	startedAt      time.Time
 	allowedOrigins []string
 	server         *http.Server
@@ -132,14 +133,18 @@ type SupervisorMux struct {
 // resolved by the given CityResolver. The initializer is invoked by the
 // POST /v0/city handler to scaffold new cities in-process; passing nil
 // is allowed for tests that don't exercise city creation (the handler
-// returns 501 Not Implemented in that case).
-func NewSupervisorMux(resolver CityResolver, initializer cityInitializer, readOnly bool, version string, startedAt time.Time) *SupervisorMux {
+// returns 501 Not Implemented in that case). buildID identifies the gc
+// binary the supervisor was built from (typically the short git commit hash
+// with a "-dirty" suffix when built from an unclean tree); empty disables
+// binary-drift comparison on the client side.
+func NewSupervisorMux(resolver CityResolver, initializer cityInitializer, readOnly bool, version, buildID string, startedAt time.Time) *SupervisorMux {
 	humaMux := http.NewServeMux()
 	sm := &SupervisorMux{
 		resolver:    resolver,
 		initializer: initializer,
 		readOnly:    readOnly,
 		version:     version,
+		buildID:     buildID,
 		startedAt:   startedAt,
 		humaMux:     humaMux,
 		humaAPI:     newSupervisorHumaAPI(humaMux, readOnly),

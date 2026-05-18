@@ -464,6 +464,119 @@ func seedQueuedWaitNudge(t *testing.T, fs *fakeState, wait beads.Bead, agentName
 	return nudgeID
 }
 
+const sessionCloseWaitOverflowCount = 1001
+
+func createSessionCloseWaitOverflow(t *testing.T, store beads.Store, sessionID string) {
+	t.Helper()
+	for i := 0; i < sessionCloseWaitOverflowCount; i++ {
+		if _, err := store.Create(beads.Bead{
+			Type:   session.WaitBeadType,
+			Labels: []string{session.WaitBeadLabel, "session:" + sessionID},
+			Metadata: map[string]string{
+				"session_id": sessionID,
+				"state":      "pending",
+				"nudge_id":   fmt.Sprintf("wait-nudge-%d", i),
+			},
+		}); err != nil {
+			t.Fatalf("create overflow wait %d: %v", i, err)
+		}
+	}
+}
+
+func createSessionCloseWaitOverflowWithQueuedNudges(t *testing.T, fs *fakeState, sessionID string) (string, string) {
+	t.Helper()
+	pending := make([]map[string]any, 0, sessionCloseWaitOverflowCount)
+	for i := 0; i < sessionCloseWaitOverflowCount; i++ {
+		nudgeID := fmt.Sprintf("wait-nudge-%d", i)
+		if _, err := fs.cityBeadStore.Create(beads.Bead{
+			Type:   session.WaitBeadType,
+			Labels: []string{session.WaitBeadLabel, "session:" + sessionID},
+			Metadata: map[string]string{
+				"session_id": sessionID,
+				"state":      "pending",
+				"nudge_id":   nudgeID,
+			},
+		}); err != nil {
+			t.Fatalf("create overflow wait %d: %v", i, err)
+		}
+		if _, err := fs.cityBeadStore.Create(beads.Bead{
+			Type:   "nudge",
+			Title:  "nudge:" + nudgeID,
+			Labels: []string{"nudge:" + nudgeID},
+			Metadata: map[string]string{
+				"nudge_id": nudgeID,
+				"state":    "queued",
+			},
+		}); err != nil {
+			t.Fatalf("create overflow nudge %d: %v", i, err)
+		}
+		pending = append(pending, map[string]any{
+			"id":    nudgeID,
+			"agent": "default",
+		})
+	}
+	statePath := citylayout.RuntimePath(fs.cityPath, "nudges", "state.json")
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		t.Fatalf("create nudge queue dir: %v", err)
+	}
+	data, err := json.MarshalIndent(map[string]any{"pending": pending}, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal nudge queue: %v", err)
+	}
+	if err := os.WriteFile(statePath, append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("seed nudge queue: %v", err)
+	}
+	return "wait-nudge-0", fmt.Sprintf("wait-nudge-%d", sessionCloseWaitOverflowCount-1)
+}
+
+func assertSessionCloseWaitsCanceled(t *testing.T, store beads.Store, sessionID string) {
+	t.Helper()
+	sessionBead, err := store.Get(sessionID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if sessionBead.Status != "closed" {
+		t.Fatalf("session status = %q, want closed", sessionBead.Status)
+	}
+	waits, err := store.List(beads.ListQuery{Label: "session:" + sessionID, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("list waits: %v", err)
+	}
+	for _, wait := range waits {
+		if !session.IsWaitBead(wait) {
+			continue
+		}
+		if wait.Status != "closed" || wait.Metadata["state"] != "canceled" {
+			t.Fatalf("wait %s status/state = %q/%q, want closed/canceled", wait.ID, wait.Status, wait.Metadata["state"])
+		}
+	}
+}
+
+func assertQueuedWaitNudgesWithdrawn(t *testing.T, fs *fakeState, nudgeIDs ...string) {
+	t.Helper()
+	state := loadQueuedWaitNudgeState(t, fs.cityPath)
+	for _, want := range nudgeIDs {
+		for _, item := range append(state.Pending, state.InFlight...) {
+			if got, _ := item["id"].(string); got == want {
+				t.Fatalf("nudge %q still queued after close", want)
+			}
+		}
+		items, err := fs.cityBeadStore.ListByLabel("nudge:"+want, 0, beads.IncludeClosed)
+		if err != nil {
+			t.Fatalf("ListByLabel(%s): %v", want, err)
+		}
+		if len(items) != 1 {
+			t.Fatalf("nudge %q bead count = %d, want 1", want, len(items))
+		}
+		if items[0].Status != "closed" {
+			t.Fatalf("nudge %q status = %q, want closed", want, items[0].Status)
+		}
+		if items[0].Metadata["terminal_reason"] != "wait-canceled" {
+			t.Fatalf("nudge %q terminal_reason = %q, want wait-canceled", want, items[0].Metadata["terminal_reason"])
+		}
+	}
+}
+
 func loadQueuedWaitNudgeState(t *testing.T, cityPath string) struct {
 	Pending  []map[string]any `json:"pending,omitempty"`
 	InFlight []map[string]any `json:"in_flight,omitempty"`
@@ -1103,6 +1216,78 @@ func TestHandleSessionClose(t *testing.T) {
 	if items[0].Metadata["terminal_reason"] != "wait-canceled" {
 		t.Fatalf("nudge terminal_reason = %q, want wait-canceled", items[0].Metadata["terminal_reason"])
 	}
+}
+
+func TestHumaSessionCloseContinuesAfterWaitLookupLimit(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Capped Huma Close")
+	createSessionCloseWaitOverflow(t, fs.cityBeadStore, info.ID)
+
+	w := httptest.NewRecorder()
+	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/close", nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	assertSessionCloseWaitsCanceled(t, fs.cityBeadStore, info.ID)
+}
+
+func TestHumaSessionCloseWithdrawsOverflowQueuedWaitNudges(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Overflow Queued Close")
+	firstNudgeID, laterPageNudgeID := createSessionCloseWaitOverflowWithQueuedNudges(t, fs, info.ID)
+
+	w := httptest.NewRecorder()
+	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/close", nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	assertSessionCloseWaitsCanceled(t, fs.cityBeadStore, info.ID)
+	assertQueuedWaitNudgesWithdrawn(t, fs, firstNudgeID, laterPageNudgeID)
+}
+
+func TestLegacySessionCloseContinuesAfterWaitLookupLimit(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Capped Legacy Close")
+	createSessionCloseWaitOverflow(t, fs.cityBeadStore, info.ID)
+
+	w := httptest.NewRecorder()
+	r := newPostRequest("/v0/session/"+info.ID+"/close", nil)
+	srv.legacySessionHandler().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	assertSessionCloseWaitsCanceled(t, fs.cityBeadStore, info.ID)
+}
+
+func TestLegacySessionCloseWithdrawsOverflowQueuedWaitNudges(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Overflow Queued Legacy Close")
+	firstNudgeID, laterPageNudgeID := createSessionCloseWaitOverflowWithQueuedNudges(t, fs, info.ID)
+
+	w := httptest.NewRecorder()
+	r := newPostRequest("/v0/session/"+info.ID+"/close", nil)
+	srv.legacySessionHandler().ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	assertSessionCloseWaitsCanceled(t, fs.cityBeadStore, info.ID)
+	assertQueuedWaitNudgesWithdrawn(t, fs, firstNudgeID, laterPageNudgeID)
 }
 
 func TestHandleSessionCloseDeleteIgnoresMissingBeadAfterClose(t *testing.T) {

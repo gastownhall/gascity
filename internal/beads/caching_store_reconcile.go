@@ -4,8 +4,29 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"math"
+	"sort"
 	"time"
 )
+
+// cacheLatencyWindowSize is the size of the rolling window of bd-list
+// durations the reconciler uses for adaptive cadence decisions. Doubles
+// as the hysteresis count for demotion.
+//
+// Rationale (designer §3 hysteresis): the window is asymmetric — a single
+// slow scan can promote (P95 over the high-water mark immediately when
+// the window fills), but demotion requires N consecutive calm cycles.
+// At MEDIUM cadence (60 s) ten cycles is roughly ten minutes of sustained
+// low-latency before we trust the easing.
+const cacheLatencyWindowSize = 10
+
+// cacheLatencyHighWaterMark is the P95 threshold above which the
+// reconciler asks for MEDIUM cadence. Set to cacheReconcileIntervalSmall/4
+// (= 7.5 s) per architect §3.2 — a single bd list call taking more than
+// a quarter of the small cadence is evidence of sustained backend
+// pressure.
+const cacheLatencyHighWaterMark = cacheReconcileIntervalSmall / 4
 
 func (c *CachingStore) reconcileLoop(ctx context.Context, stagger time.Duration) {
 	if stagger > 0 {
@@ -40,7 +61,29 @@ func (c *CachingStore) reconcileLoop(ctx context.Context, stagger time.Duration)
 }
 
 func (c *CachingStore) adaptiveIntervalLocked() time.Duration {
-	total := len(c.beads)
+	return effectiveCadence(len(c.beads), c.latencyDriverActive)
+}
+
+// effectiveCadence composes the bead-count cadence and the latency
+// cadence. The result is the slower of the two — either input pushing
+// to MEDIUM keeps the cadence at MEDIUM. LARGE is only reachable via
+// bead count (>=5000) per architect scope.
+func effectiveCadence(beadCount int, latencyDriverActive bool) time.Duration {
+	bead := beadCountCadence(beadCount)
+	latency := cacheReconcileIntervalSmall
+	if latencyDriverActive {
+		latency = cacheReconcileIntervalMedium
+	}
+	if latency > bead {
+		return latency
+	}
+	return bead
+}
+
+// beadCountCadence returns the cadence demanded by the bead-count input
+// alone. Preserved from the original adaptiveIntervalLocked so the
+// classification stays in one place.
+func beadCountCadence(total int) time.Duration {
 	switch {
 	case total >= 5000:
 		return cacheReconcileIntervalLarge
@@ -51,11 +94,146 @@ func (c *CachingStore) adaptiveIntervalLocked() time.Duration {
 	}
 }
 
+// recordReconcileLatencyLocked appends a bd-list duration sample to the
+// rolling latency window, dropping the oldest sample once the window is
+// full. Caller must hold c.mu (write lock).
+func (c *CachingStore) recordReconcileLatencyLocked(d time.Duration) {
+	if len(c.latencyWindow) < cacheLatencyWindowSize {
+		c.latencyWindow = append(c.latencyWindow, d)
+		return
+	}
+	c.latencyWindow = append(c.latencyWindow[1:], d)
+}
+
+// latencyP95Locked returns the nearest-rank P95 of the latency window
+// and reports whether the window contains enough samples to be
+// meaningful (full to cacheLatencyWindowSize). Caller must hold c.mu.
+//
+// Nearest-rank P95 index = ceil(0.95 * N) - 1. For N=10 this equals
+// len(sorted)-1 (the max), which is why the prior implementation
+// happened to be correct at the current window size — but the formula
+// generalizes so the function stays P95 if cacheLatencyWindowSize is
+// raised later.
+func (c *CachingStore) latencyP95Locked() (time.Duration, bool) {
+	if len(c.latencyWindow) < cacheLatencyWindowSize {
+		return 0, false
+	}
+	sorted := make([]time.Duration, len(c.latencyWindow))
+	copy(sorted, c.latencyWindow)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	idx := int(math.Ceil(0.95*float64(len(sorted)))) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	return sorted[idx], true
+}
+
+// updateCadenceStatsLocked refreshes the diagnostic cadence fields
+// without mutating hysteresis state or emitting transition logs. Caller
+// must hold c.mu.
+func (c *CachingStore) updateCadenceStatsLocked() {
+	p95, samplesEnough := c.latencyP95Locked()
+	var p95ms float64
+	if samplesEnough {
+		p95ms = float64(p95.Milliseconds())
+	}
+	c.stats.CurrentReconcileInterval = effectiveCadence(len(c.beads), c.latencyDriverActive)
+	c.stats.LatencyP95Ms = p95ms
+	c.stats.CadenceDriver = cadenceDriver(len(c.beads), c.latencyDriverActive)
+}
+
+// recomputeCadenceLocked updates the latency-driver hysteresis state
+// based on the current P95, recomposes the effective cadence, refreshes
+// the diagnostic CacheStats fields, and emits a single transition log
+// line on small↔medium changes. Caller must hold c.mu.
+//
+// Hysteresis is provided by the rolling window itself: a single slow
+// scan can promote (P95 jumps the moment the window fills), but
+// demotion requires the window to drain — N=cacheLatencyWindowSize
+// low-latency cycles before P95 drops below the high-water mark again.
+// One spike anywhere in that drain pushes P95 back up and re-arms the
+// driver, preventing thrash.
+func (c *CachingStore) recomputeCadenceLocked() {
+	prev := c.stats.CurrentReconcileInterval
+	hadPrev := prev != 0
+	prevDriver := c.stats.CadenceDriver
+	if prevDriver == "" {
+		prevDriver = cadenceDriver(len(c.beads), c.latencyDriverActive)
+	}
+
+	p95, samplesEnough := c.latencyP95Locked()
+	if samplesEnough {
+		if c.latencyDriverActive {
+			if p95 <= cacheLatencyHighWaterMark {
+				c.latencyDriverActive = false
+			}
+		} else if p95 > cacheLatencyHighWaterMark {
+			c.latencyDriverActive = true
+		}
+	}
+
+	c.updateCadenceStatsLocked()
+	next := c.stats.CurrentReconcileInterval
+	driver := cadenceTransitionDriver(prevDriver, c.stats.CadenceDriver)
+
+	if hadPrev && prev != next {
+		switch {
+		case prev == cacheReconcileIntervalSmall && next == cacheReconcileIntervalMedium:
+			log.Printf("beads cache: cadence promoted small→medium driver=%s p95=%.0fms window=%d",
+				driver, c.stats.LatencyP95Ms, cacheLatencyWindowSize)
+		case prev == cacheReconcileIntervalMedium && next == cacheReconcileIntervalSmall:
+			log.Printf("beads cache: cadence demoted medium→small driver=%s p95=%.0fms window=%d",
+				driver, c.stats.LatencyP95Ms, cacheLatencyWindowSize)
+		}
+	}
+}
+
+// cadenceDriver classifies which input(s) are driving the current
+// cadence. "default" means cadence is at SMALL with no pressure.
+func cadenceDriver(beadCount int, latencyDriverActive bool) string {
+	beadDrives := beadCountCadence(beadCount) > cacheReconcileIntervalSmall
+	switch {
+	case beadDrives && latencyDriverActive:
+		return "both"
+	case beadDrives:
+		return "bead-count"
+	case latencyDriverActive:
+		return "latency"
+	default:
+		return "default"
+	}
+}
+
+func cadenceTransitionDriver(prevDriver, nextDriver string) string {
+	switch {
+	case prevDriver == "both" || nextDriver == "both":
+		return "both"
+	case nextDriver != "" && nextDriver != "default":
+		return nextDriver
+	case prevDriver != "" && prevDriver != "default":
+		return prevDriver
+	default:
+		return "default"
+	}
+}
+
 func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.state == cacheDegraded || c.lastFreshAt.IsZero() {
+	if c.syncFailures >= maxCacheSyncFailures && !c.stats.LastProblemAt.IsZero() {
+		dueAt := c.stats.LastProblemAt.Add(cacheReconcileFailureBackoff)
+		if !now.Before(dueAt) {
+			return 0
+		}
+		return dueAt.Sub(now)
+	}
+
+	if c.state == cacheDegraded {
+		return 0
+	}
+
+	if c.lastFreshAt.IsZero() {
 		return 0
 	}
 
@@ -77,7 +255,9 @@ func (c *CachingStore) runReconciliation() {
 	startSeq := c.mutationSeq
 	c.mu.RUnlock()
 
-	fresh, err := c.backing.List(ListQuery{AllowScan: true})
+	bdStart := time.Now()
+	fresh, err := c.backing.List(ListQuery{AllowScan: true, SkipLabels: true})
+	bdLatency := time.Since(bdStart)
 	if err != nil {
 		c.mu.Lock()
 		c.syncFailures++
@@ -85,6 +265,8 @@ func (c *CachingStore) runReconciliation() {
 			c.state = cacheDegraded
 		}
 		c.recordProblemLocked("reconcile cache", err)
+		c.recordReconcileLatencyLocked(bdLatency)
+		c.recomputeCadenceLocked()
 		c.updateStatsLocked()
 		c.mu.Unlock()
 		return
@@ -119,7 +301,7 @@ func (c *CachingStore) runReconciliation() {
 				}
 				continue
 			}
-			if _, keep := c.recentLocalBeadConflictLocked(id, freshBead, now); keep {
+			if _, keep := c.recentLocalBeadConflictLocked(id, freshBead, now, true); keep {
 				if _, ok := c.deps[id]; !ok {
 					nextDepsComplete = false
 				}
@@ -135,7 +317,7 @@ func (c *CachingStore) runReconciliation() {
 					eventType: "bead.created",
 					bead:      cloneBead(freshBead),
 				})
-			case beadChanged(old, freshBead):
+			case beadChanged(old, freshBead, true):
 				updates++
 				notifications = append(notifications, cacheNotification{
 					eventType: "bead.updated",
@@ -199,6 +381,8 @@ func (c *CachingStore) runReconciliation() {
 		c.stats.Removes += removes
 		c.stats.Updates += updates
 		c.markFreshLocked(now)
+		c.recordReconcileLatencyLocked(bdLatency)
+		c.recomputeCadenceLocked()
 		c.updateStatsLocked()
 		c.mu.Unlock()
 		c.notifyChanges(notifications)
@@ -219,7 +403,7 @@ func (c *CachingStore) runReconciliation() {
 		if recentLocalMutation(c.localBeadAt[id], now) {
 			c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
 		}
-		if current, keep := c.recentLocalBeadConflictLocked(id, freshBead, now); keep {
+		if current, keep := c.recentLocalBeadConflictLocked(id, freshBead, now, true); keep {
 			beadForCache = current
 			preservedRecentLocal = true
 		}
@@ -235,7 +419,7 @@ func (c *CachingStore) runReconciliation() {
 				eventType: "bead.created",
 				bead:      cloneBead(beadForCache),
 			})
-		case !preservedRecentLocal && beadChanged(old, freshBead):
+		case !preservedRecentLocal && beadChanged(old, freshBead, true):
 			updates++
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.updated",
@@ -293,6 +477,8 @@ func (c *CachingStore) runReconciliation() {
 	c.stats.Removes += removes
 	c.stats.Updates += updates
 	c.markFreshLocked(now)
+	c.recordReconcileLatencyLocked(bdLatency)
+	c.recomputeCadenceLocked()
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	c.notifyChanges(notifications)

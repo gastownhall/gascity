@@ -166,6 +166,57 @@ clear_push_failure_escalation() {
     write_state_json "$(read_state_json | jq -c 'del(.push_failure_escalated)')"
 }
 
+# Truncate push stderr before persisting it to state so the state file stays
+# small regardless of how verbose git/network errors get. The head of the
+# output is almost always the actionable message.
+truncate_push_stderr_for_state() {
+    local raw="$1"
+    local max_bytes=512
+
+    if [ -z "$raw" ]; then
+        printf '%s' ""
+        return
+    fi
+    printf '%s' "$raw" | LC_ALL=C awk -v max="$max_bytes" '
+        BEGIN { total = 0 }
+        {
+            line = $0
+            if (NR > 1) {
+                line = "\n" line
+            }
+            len = length(line)
+            if (total + len > max) {
+                remaining = max - total
+                if (remaining > 0) {
+                    printf "%s", substr(line, 1, remaining)
+                }
+                printf "..."
+                exit
+            }
+            printf "%s", line
+            total += len
+        }
+    '
+}
+
+# Record a successful push in state so `gc doctor` can surface a timestamp for
+# the archive health check. Clears any stale stderr from previous failures and
+# any prior escalation marker so the next failure-cycle escalates fresh.
+record_archive_push_success() {
+    local now
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    write_state_json "$(
+        read_state_json \
+            | jq -c \
+                --arg now "$now" \
+                '.consecutive_push_failures = 0
+                 | del(.pending_archive_push)
+                 | del(.push_failure_escalated)
+                 | .last_push_at = $now
+                 | del(.last_push_stderr)'
+    )"
+}
+
 set_pending_archive_push() {
     write_state_json "$(read_state_json | jq -c '.pending_archive_push = true')"
 }
@@ -431,12 +482,23 @@ push_archive_main() {
         local body
         local stderr_display
         local already_escalated
+        local state_stderr=""
 
         echo "$message" >&2
+        if [ -n "$stderr_context" ]; then
+            state_stderr=$(truncate_push_stderr_for_state "$stderr_context")
+        fi
         consecutive=$(read_state_json | jq -r '.consecutive_push_failures // 0' || echo "0")
         consecutive=$((consecutive + 1))
-        set_consecutive_push_failures "$consecutive"
-        set_pending_archive_push
+        write_state_json "$(
+            read_state_json \
+                | jq -c \
+                    --argjson count "$consecutive" \
+                    --arg stderr "$state_stderr" \
+                    '.consecutive_push_failures = $count
+                     | .pending_archive_push = true
+                     | if $stderr == "" then del(.last_push_stderr) else .last_push_stderr = $stderr end'
+        )"
 
         already_escalated=$(read_state_json | jq -r '.push_failure_escalated // false' || echo "false")
         if [ "$consecutive" -ge "$MAX_PUSH_FAILURES" ] && [ "$already_escalated" != "true" ]; then
@@ -494,9 +556,7 @@ ESCALATION
             fi
         fi
         if ! archive_has_local_only_commits_from_tracking; then
-            set_consecutive_push_failures "0"
-            clear_push_failure_escalation
-            clear_pending_archive_push
+            record_archive_push_success
             return 0
         fi
     fi
@@ -508,9 +568,7 @@ ESCALATION
         return 1
     fi
 
-    set_consecutive_push_failures "0"
-    clear_push_failure_escalation
-    clear_pending_archive_push
+    record_archive_push_success
     return 0
 }
 

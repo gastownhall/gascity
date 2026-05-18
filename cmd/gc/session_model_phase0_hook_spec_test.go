@@ -14,7 +14,11 @@ import (
 // - session-context execution / gc hook
 
 func TestPhase0Hook_UsesGCTemplateForConfigLookupInSessionContext(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedBeadsEnv(t)
+	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
+	requireNoLeakedDoltAfterForPaths(t, cityDir)
 	workDir := t.TempDir()
 
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
@@ -32,11 +36,6 @@ work_query = "printf 'pwd=%s|agent=%s|template=%s|session=%s|origin=%s' \"$PWD\"
 		t.Fatal(err)
 	}
 
-	// GC_DOLT=skip prevents cmdHook's env build from spawning a managed dolt
-	// server via the gc-beads-bd recovery path (default bd backend + empty
-	// .beads triggers applyResolvedCityDoltEnv(allowRecovery=true) which
-	// would otherwise leak a dolt sql-server process for every test run).
-	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_ALIAS", "mayor")
 	t.Setenv("GC_AGENT", "mayor")
@@ -77,7 +76,11 @@ work_query = "printf 'pwd=%s|agent=%s|template=%s|session=%s|origin=%s' \"$PWD\"
 }
 
 func TestPhase0Hook_AliaslessOrdinarySessionUsesGCTemplateForConfigLookup(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedBeadsEnv(t)
+	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
+	requireNoLeakedDoltAfterForPaths(t, cityDir)
 	workDir := t.TempDir()
 
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
@@ -95,10 +98,6 @@ work_query = "printf 'agent=%s|template=%s|session=%s|origin=%s' \"$GC_AGENT\" \
 		t.Fatal(err)
 	}
 
-	// See TestPhase0Hook_UsesGCTemplateForConfigLookupInSessionContext for
-	// why GC_DOLT=skip is required (prevents dolt-server leak via managed
-	// bd recovery path).
-	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_ALIAS", "")
 	t.Setenv("GC_AGENT", "s-gc-ordinary")
@@ -134,7 +133,11 @@ work_query = "printf 'agent=%s|template=%s|session=%s|origin=%s' \"$GC_AGENT\" \
 }
 
 func TestPhase0Hook_NamedSessionContextPreservesExactOwnerEnv(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedBeadsEnv(t)
+	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
+	requireNoLeakedDoltAfterForPaths(t, cityDir)
 	workDir := t.TempDir()
 	fakeBin := t.TempDir()
 
@@ -160,11 +163,6 @@ start_command = "true"
 
 	origPath := os.Getenv("PATH")
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+origPath)
-	// See TestPhase0Hook_UsesGCTemplateForConfigLookupInSessionContext for
-	// why GC_DOLT=skip is required (prevents dolt-server leak via managed
-	// bd recovery path; fake bd on PATH alone is insufficient because the
-	// leak path is gc-beads-bd.sh, not bd).
-	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_CITY", cityDir)
 	t.Setenv("GC_SESSION_ID", "mc-session-123")
 	t.Setenv("GC_SESSION_NAME", "test-city--mayor")

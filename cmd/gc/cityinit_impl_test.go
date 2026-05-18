@@ -260,6 +260,7 @@ func TestCityInitServiceInitScaffoldsAndFinalizes(t *testing.T) {
 	configureTestDoltIdentityEnv(t)
 	configureRealBdAndDoltPath(t)
 	cityPath := filepath.Join(t.TempDir(), "init-city")
+	cleanupManagedDoltTestCity(t, cityPath)
 
 	result, err := mustNewCityInitService(t).Init(context.Background(), cityinit.InitRequest{
 		Dir:                   cityPath,

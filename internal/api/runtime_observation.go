@@ -23,10 +23,17 @@ func observeProviderSession(sp runtime.Provider, sessionName string, processName
 	if sessionID, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
 		obs.RuntimeSessionID = strings.TrimSpace(sessionID)
 	}
+	if len(processNames) > 0 {
+		obs.Alive = sp.ProcessAlive(sessionName, processNames)
+		if obs.Alive && !obs.Running {
+			obs.Running = true
+		}
+	} else {
+		obs.Alive = obs.Running
+	}
 	if !obs.Running {
 		return obs
 	}
-	obs.Alive = sp.ProcessAlive(sessionName, processNames)
 	obs.Attached = sp.IsAttached(sessionName)
 	if lastActive, err := sp.GetLastActivity(sessionName); err == nil && !lastActive.IsZero() {
 		last := lastActive

@@ -140,15 +140,21 @@ func (h *SessionHandle) Kill(ctx context.Context) (err error) {
 
 // Close permanently ends the worker session.
 func (h *SessionHandle) Close(ctx context.Context) (err error) {
+	_, err = h.CloseDetailed(ctx)
+	return err
+}
+
+// CloseDetailed permanently ends the worker session and reports cleanup artifacts.
+func (h *SessionHandle) CloseDetailed(ctx context.Context) (result sessionpkg.CloseResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationClose)
 	defer func() { event.finish(err) }()
 
 	id := h.currentSessionID()
 	if id == "" {
-		return nil
+		return result, nil
 	}
-	err = h.manager.Close(id)
-	return err
+	result, err = h.manager.CloseDetailed(id)
+	return result, err
 }
 
 // Rename updates the user-facing session title.

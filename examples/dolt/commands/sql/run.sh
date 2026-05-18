@@ -36,9 +36,13 @@ if is_running; then
     host="127.0.0.1"
   fi
   args="--host $host --port $GC_DOLT_PORT --user $GC_DOLT_USER --no-tls"
-  if [ -n "$GC_DOLT_PASSWORD" ]; then
-    export DOLT_CLI_PASSWORD="$GC_DOLT_PASSWORD"
-  fi
+  # Always export DOLT_CLI_PASSWORD so dolt's credential parser skips
+  # the TTY password prompt. When GC_DOLT_PASSWORD is empty (the
+  # managed-local default — root has no password), an unset env var
+  # causes `dolt sql -q "..."` to fail with "inappropriate ioctl for
+  # device" under non-interactive callers (CI, scripts, automation).
+  # Exporting empty satisfies dolt without changing auth outcomes.
+  export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
   exec dolt $args sql "$@"
 else
   # Embedded mode — find first database directory.

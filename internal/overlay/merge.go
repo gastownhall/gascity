@@ -4,6 +4,7 @@ package overlay
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 )
@@ -18,6 +19,17 @@ var mergeablePaths = map[string]bool{
 	filepath.Join(".github", "hooks", "gascity.json"): true,
 }
 
+var (
+	errBaseNotObject    = errors.New("base JSON is not an object")
+	errOverlayNotObject = errors.New("overlay JSON is not an object")
+)
+
+// IsOverlayObjectShapeError reports whether err indicates an overlay document
+// was syntactically valid JSON but not a top-level object.
+func IsOverlayObjectShapeError(err error) bool {
+	return errors.Is(err, errOverlayNotObject)
+}
+
 // IsMergeablePath reports whether relPath is a known settings/hooks file
 // that should be JSON-merged rather than overwritten.
 func IsMergeablePath(relPath string) bool {
@@ -25,6 +37,7 @@ func IsMergeablePath(relPath string) bool {
 }
 
 // MergeSettingsJSON performs a deep merge of base and overlay JSON documents.
+// Both documents must be top-level JSON objects.
 //
 // Merge semantics:
 //   - Non-hook top-level keys: last writer (overlay) wins.
@@ -39,12 +52,13 @@ func IsMergeablePath(relPath string) bool {
 //
 // Returns pretty-printed JSON.
 func MergeSettingsJSON(base, overlay []byte) ([]byte, error) {
-	var baseDoc, overDoc map[string]any
-	if err := json.Unmarshal(base, &baseDoc); err != nil {
-		return nil, fmt.Errorf("merge: parsing base: %w", err)
+	baseDoc, err := parseSettingsObject("base", base, errBaseNotObject)
+	if err != nil {
+		return nil, err
 	}
-	if err := json.Unmarshal(overlay, &overDoc); err != nil {
-		return nil, fmt.Errorf("merge: parsing overlay: %w", err)
+	overDoc, err := parseSettingsObject("overlay", overlay, errOverlayNotObject)
+	if err != nil {
+		return nil, err
 	}
 
 	// Start with a copy of base, then apply overlay on top.
@@ -69,6 +83,18 @@ func MergeSettingsJSON(base, overlay []byte) ([]byte, error) {
 		return nil, fmt.Errorf("merge: marshaling result: %w", err)
 	}
 	return out, nil
+}
+
+func parseSettingsObject(label string, data []byte, shapeErr error) (map[string]any, error) {
+	var doc any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("merge: parsing %s: %w", label, err)
+	}
+	obj, ok := doc.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("merge: parsing %s: expected JSON object: %w", label, shapeErr)
+	}
+	return obj, nil
 }
 
 // CanonicalJSON parses and re-emits a JSON document with stable formatting.

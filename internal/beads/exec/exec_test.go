@@ -134,6 +134,78 @@ esac
 	}
 }
 
+func TestCreate_ephemeralRoundTripsThroughConformanceScript(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	scriptPath, err := filepath.Abs(filepath.Join("testdata", "conformance.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewStore(scriptPath)
+	s.SetEnv(storeTargetEnv(t.TempDir()))
+
+	ephemeral, err := s.Create(beads.Bead{
+		Title:     "tracking",
+		Labels:    []string{"order-run:digest"},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(ephemeral): %v", err)
+	}
+	if !ephemeral.Ephemeral {
+		t.Fatalf("created.Ephemeral = false, want true")
+	}
+	got, err := s.Get(ephemeral.ID)
+	if err != nil {
+		t.Fatalf("Get(ephemeral): %v", err)
+	}
+	if !got.Ephemeral {
+		t.Fatalf("Get(%s).Ephemeral = false, want true", ephemeral.ID)
+	}
+
+	regular, err := s.Create(beads.Bead{
+		Title:  "regular work",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatalf("Create(regular): %v", err)
+	}
+
+	ready, err := s.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != regular.ID {
+		t.Fatalf("Ready() = %+v, want only non-ephemeral bead %s", ready, regular.ID)
+	}
+
+	issuesOnly, err := s.ListByLabel("order-run:digest", 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(issues): %v", err)
+	}
+	if len(issuesOnly) != 1 || issuesOnly[0].ID != regular.ID {
+		t.Fatalf("issues tier = %+v, want only regular bead %s", issuesOnly, regular.ID)
+	}
+
+	wispsOnly, err := s.ListByLabel("order-run:digest", 0, beads.WithEphemeral)
+	if err != nil {
+		t.Fatalf("ListByLabel(wisps): %v", err)
+	}
+	if len(wispsOnly) != 1 || wispsOnly[0].ID != ephemeral.ID {
+		t.Fatalf("wisps tier = %+v, want only ephemeral bead %s", wispsOnly, ephemeral.ID)
+	}
+
+	both, err := s.ListByLabel("order-run:digest", 0, beads.WithBothTiers)
+	if err != nil {
+		t.Fatalf("ListByLabel(both): %v", err)
+	}
+	if len(both) != 2 {
+		t.Fatalf("both tiers = %+v, want both regular and ephemeral beads", both)
+	}
+}
+
 func TestCreate_metadataReachesScript(t *testing.T) {
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "stdin.json")

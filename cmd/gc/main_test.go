@@ -62,6 +62,20 @@ func configureIsolatedRuntimeEnv(t *testing.T) {
 	}
 }
 
+func TestRunReportsMutuallyExclusiveFlagViolations(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sling", "target", "arg", "--formula", "--on", "bd-1"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("run returned 0; expected non-zero. stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "mutually") && !strings.Contains(stderr.String(), "none of the others") {
+		t.Fatalf("stderr did not describe the mutex violation; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "formula") || !strings.Contains(stderr.String(), "on") {
+		t.Fatalf("stderr did not name the conflicting flags; got %q", stderr.String())
+	}
+}
+
 func TestRunDoesNotLeakPersistentCityOrRigFlags(t *testing.T) {
 	prevCityFlag, prevRigFlag := cityFlag, rigFlag
 	t.Cleanup(func() {
@@ -142,7 +156,27 @@ func explicitAgents(agents []config.Agent) []config.Agent {
 	return out
 }
 
+func configureFSPressureForTests() {
+	fsPressurePath = "/test/pressure/io"
+	fsPressureReadFile = func(path string) ([]byte, error) {
+		if path != fsPressurePath {
+			return nil, fmt.Errorf("unexpected FS pressure path %q", path)
+		}
+		return []byte("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"), nil
+	}
+}
+
 func TestMain(m *testing.M) {
+	if !isTestscriptCommandInvocation(os.Args[0]) {
+		clearProcessLiveEnvForTests()
+	}
+	testTempRoot, err := os.MkdirTemp("/tmp", "gctest-")
+	if err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
+		panic(err)
+	}
 	gcHome, err := os.MkdirTemp("", "gascity-gc-home-*")
 	if err != nil {
 		panic(err)
@@ -161,7 +195,6 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	defer func() { _ = os.RemoveAll(providerStubDir) }()
 	pathValue := providerStubDir
 	if existingPath := os.Getenv("PATH"); existingPath != "" {
 		pathValue += string(os.PathListSeparator) + existingPath
@@ -169,8 +202,9 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("PATH", pathValue); err != nil {
 		panic(err)
 	}
+	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
-	testscript.Main(m, map[string]func(){
+	testscript.Main(newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir), map[string]func(){
 		"gc": func() {
 			configureTestscriptEnvDefaults()
 			os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -373,7 +407,7 @@ func TestFindCity(t *testing.T) {
 		}
 	})
 
-	t.Run("not_found_ignores_stray_home_city_toml", func(t *testing.T) {
+	t.Run("checks_home_ceiling_dir_last", func(t *testing.T) {
 		homeDir := t.TempDir()
 		t.Setenv("HOME", homeDir)
 		t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
@@ -386,12 +420,12 @@ func TestFindCity(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		_, err := findCity(dir)
-		if err == nil {
-			t.Fatal("findCity() should fail when only a stray $HOME/city.toml exists")
+		got, err := findCity(dir)
+		if err != nil {
+			t.Fatalf("findCity(%q) error: %v", dir, err)
 		}
-		if !strings.Contains(err.Error(), "not in a city directory") {
-			t.Errorf("error = %q, want 'not in a city directory'", err)
+		if got != homeDir {
+			t.Errorf("findCity(%q) = %q, want %q", dir, got, homeDir)
 		}
 	})
 
@@ -443,7 +477,94 @@ func TestFindCity(t *testing.T) {
 		}
 	})
 
-	t.Run("respects_gc_ceiling_directories", func(t *testing.T) {
+	t.Run("city_at_home_is_found", func(t *testing.T) {
+		// Repro for the bug where a city installed directly at $HOME
+		// (e.g. running as user "gc" with city at /home/gc) was reported
+		// as "not in a city directory" because the discovery ceiling
+		// fired before the starting dir was checked. The ceiling should
+		// only bound upward traversal, not the dir the user is in.
+		homeDir := t.TempDir()
+		t.Setenv("HOME", homeDir)
+		t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+		if err := os.WriteFile(filepath.Join(homeDir, "city.toml"), []byte("[workspace]\nname = \"home-city\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := findCity(homeDir)
+		if err != nil {
+			t.Fatalf("findCity(%q) error: %v", homeDir, err)
+		}
+		if got != homeDir {
+			t.Errorf("findCity(%q) = %q, want %q", homeDir, got, homeDir)
+		}
+	})
+
+	t.Run("start_at_home_ceiling_does_not_search_above", func(t *testing.T) {
+		root := t.TempDir()
+		homeDir := filepath.Join(root, "home")
+		if err := os.MkdirAll(homeDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("HOME", homeDir)
+		t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+		if err := os.WriteFile(filepath.Join(root, "city.toml"), []byte("[workspace]\nname = \"root\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := findCity(homeDir)
+		if err == nil {
+			t.Fatal("findCity() should fail when only an ancestor above $HOME has city.toml")
+		}
+		if !strings.Contains(err.Error(), "not in a city directory") {
+			t.Errorf("error = %q, want 'not in a city directory'", err)
+		}
+	})
+
+	t.Run("city_at_explicit_ceiling_dir_is_found", func(t *testing.T) {
+		// Same idea as city_at_home, but for an explicit
+		// GC_CEILING_DIRECTORIES entry.
+		root := t.TempDir()
+		ceiling := filepath.Join(root, "ceiling")
+		if err := os.MkdirAll(ceiling, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(ceiling, "city.toml"), []byte("[workspace]\nname = \"ceiling-city\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GC_CEILING_DIRECTORIES", ceiling)
+
+		got, err := findCity(ceiling)
+		if err != nil {
+			t.Fatalf("findCity(%q) error: %v", ceiling, err)
+		}
+		if got != ceiling {
+			t.Errorf("findCity(%q) = %q, want %q", ceiling, got, ceiling)
+		}
+	})
+
+	t.Run("start_at_explicit_ceiling_dir_does_not_search_above", func(t *testing.T) {
+		root := t.TempDir()
+		ceiling := filepath.Join(root, "ceiling")
+		if err := os.MkdirAll(ceiling, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "city.toml"), []byte("[workspace]\nname = \"root\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GC_CEILING_DIRECTORIES", ceiling)
+
+		_, err := findCity(ceiling)
+		if err == nil {
+			t.Fatal("findCity() should fail when only an ancestor above the ceiling has city.toml")
+		}
+		if !strings.Contains(err.Error(), "not in a city directory") {
+			t.Errorf("error = %q, want 'not in a city directory'", err)
+		}
+	})
+
+	t.Run("checks_explicit_ceiling_dir_last", func(t *testing.T) {
 		root := t.TempDir()
 		parent := filepath.Join(root, "parent")
 		if err := os.MkdirAll(parent, 0o755); err != nil {
@@ -458,9 +579,33 @@ func TestFindCity(t *testing.T) {
 		}
 		t.Setenv("GC_CEILING_DIRECTORIES", parent)
 
+		got, err := findCity(dir)
+		if err != nil {
+			t.Fatalf("findCity(%q) error: %v", dir, err)
+		}
+		if got != parent {
+			t.Errorf("findCity(%q) = %q, want %q", dir, got, parent)
+		}
+	})
+
+	t.Run("does_not_search_above_explicit_ceiling_dir", func(t *testing.T) {
+		root := t.TempDir()
+		ceiling := filepath.Join(root, "ceiling")
+		if err := os.MkdirAll(ceiling, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "city.toml"), []byte("[workspace]\nname = \"root\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Join(ceiling, "child", "deep")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GC_CEILING_DIRECTORIES", ceiling)
+
 		_, err := findCity(dir)
 		if err == nil {
-			t.Fatal("findCity() should fail when GC_CEILING_DIRECTORIES excludes the ancestor city root")
+			t.Fatal("findCity() should fail when only an ancestor above the ceiling has city.toml")
 		}
 		if !strings.Contains(err.Error(), "not in a city directory") {
 			t.Errorf("error = %q, want 'not in a city directory'", err)
@@ -1054,6 +1199,28 @@ func TestFindSessionNameByTemplate_SkipsPoolSlotBeads(t *testing.T) {
 	}
 }
 
+func TestLookupSessionNameOrLegacy_CanonicalSingletonPoolManagedBead(t *testing.T) {
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery",
+			"session_name":         "s-canonical-refinery",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := lookupSessionNameOrLegacy(store, "city", "cashmaster/refinery", "")
+	if got != "s-canonical-refinery" {
+		t.Fatalf("lookupSessionNameOrLegacy(canonical singleton pool bead) = %q, want s-canonical-refinery", got)
+	}
+}
+
 func TestFindSessionNameByTemplate_SkipsEmptySessionName(t *testing.T) {
 	store := beads.NewMemStore()
 	_, err := store.Create(beads.Bead{
@@ -1393,6 +1560,40 @@ func TestLookupPoolSessionNames_RejectsSharedPrefixSiblingTemplates(t *testing.T
 	}
 	if _, ok := got["frontend/worker-supervisor-1"]; ok {
 		t.Fatalf("lookupPoolSessionNames(frontend/worker) wrongly matched sibling template: %#v", got)
+	}
+}
+
+func TestLookupPoolSessionNames_AcceptsCanonicalSingletonPoolManagedBead(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "refinery", Dir: "cashmaster", MaxActiveSessions: intPtr(1), ScaleCheck: "printf 1"},
+		},
+	}
+	cfgAgent := &cfg.Agents[0]
+	if _, err := store.Create(beads.Bead{
+		Title:  "cashmaster/refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery",
+			"session_name":         "s-canonical-refinery",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := lookupPoolSessionNames(store, cfg, cfgAgent)
+	if err != nil {
+		t.Fatalf("lookupPoolSessionNames: %v", err)
+	}
+	if got["cashmaster/refinery"] != "s-canonical-refinery" {
+		t.Fatalf("lookupPoolSessionNames(canonical singleton) = %#v, want canonical session", got)
+	}
+	if _, ok := got["cashmaster/refinery-1"]; ok {
+		t.Fatalf("lookupPoolSessionNames(canonical singleton) registered phantom slot: %#v", got)
 	}
 }
 
@@ -2016,6 +2217,46 @@ func TestSelectRunningPoolSessionRefs_ReturnsAllLiveCandidatesForLogicalInstance
 	}
 }
 
+func TestSelectRunningPoolSessionRefs_CanonicalSingletonIncludesStaleBeadBackedSuffix(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1)},
+		},
+	}
+	agentCfg := cfg.Agents[0]
+	if _, err := store.Create(beads.Bead{
+		Title:  "stale singleton pool instance",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:frontend/worker-1", "template:frontend/worker"},
+		Metadata: map[string]string{
+			"template":             "frontend/worker",
+			"agent_name":           "frontend/worker-1",
+			"session_name":         "s-stale-worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "active",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "s-stale-worker", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+
+	refs, err := selectRunningPoolSessionRefs(store, sp, cfg, resolvePoolSessionRefs(store, cfg, agentCfg.Name, agentCfg.Dir, scaleParamsFor(&agentCfg), &agentCfg, "test-city", "", sp, io.Discard))
+	if err != nil {
+		t.Fatalf("selectRunningPoolSessionRefs: %v", err)
+	}
+	for _, ref := range refs {
+		if ref.qualifiedInstance == "frontend/worker-1" && ref.sessionName == "s-stale-worker" {
+			return
+		}
+	}
+	t.Fatalf("selectRunningPoolSessionRefs() = %#v, want stale bead-backed singleton suffix ref", refs)
+}
+
 func TestSelectRunningPoolSessionRefs_ReportsConcreteSessionOnProbeFailure(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
@@ -2349,10 +2590,14 @@ func TestDoInitSuccess(t *testing.T) {
 	if !strings.Contains(packToml, "schema = 2") {
 		t.Errorf("pack.toml missing schema 2:\n%s", packToml)
 	}
+	if strings.Contains(packToml, "[[agent]]") {
+		t.Errorf("fresh init should not emit inline [[agent]] entries into pack.toml:\n%s", packToml)
+	}
 
 	// Verify the composed config loads correctly from pack.toml + city.toml.
-	// agents + named_session live in pack.toml (pack-first); workspace name
-	// lives in .gc/site.toml as the machine-local binding.
+	// The mayor comes from the scaffolded agents/<name>/ tree, while the
+	// named session still lives in pack.toml. workspace name lives in
+	// .gc/site.toml as the machine-local binding.
 	cfg, err := loadCityConfigFS(f, filepath.Join("/bright-lights", "city.toml"))
 	if err != nil {
 		t.Fatalf("loading written config: %v", err)
@@ -2393,16 +2638,12 @@ func TestDoInitWritesExpectedTOML(t *testing.T) {
 		t.Errorf("city.toml content:\ngot:\n%s\nwant:\n%s", got, want)
 	}
 
-	// pack.toml owns the portable definition: [pack] + [[agent]] mayor +
-	// [[named_session]] mayor (pack-first scaffold from tutorial 01).
+	// pack.toml keeps the portable pack metadata and named session; the
+	// fresh mayor scaffold now comes from agents/<name>/ discovery.
 	packGot := string(f.Files[filepath.Join("/bright-lights", "pack.toml")])
 	packWant := `[pack]
 name = "bright-lights"
 schema = 2
-
-[[agent]]
-name = "mayor"
-prompt_template = "agents/mayor/prompt.template.md"
 
 [[named_session]]
 template = "mayor"
@@ -2851,8 +3092,8 @@ func TestRunWizardTutorialAliasMapsToMinimal(t *testing.T) {
 }
 
 func TestRunWizardSelectCursorByNumber(t *testing.T) {
-	// Cursor is #5 in the order.
-	stdin := strings.NewReader("\n5\n")
+	// Cursor is #6 in the order.
+	stdin := strings.NewReader("\n6\n")
 	var stdout bytes.Buffer
 	wiz := runWizard(stdin, &stdout)
 
@@ -2934,8 +3175,8 @@ func TestDoInitWithWizardConfig(t *testing.T) {
 	}
 
 	// Verify written raw city.toml keeps the provider (runtime-local) and
-	// the composed config (city.toml + pack.toml) surfaces the mayor agent
-	// from the pack-first scaffold.
+	// the composed config (city.toml + pack.toml) still surfaces the mayor
+	// agent from the scaffolded agents/<name>/ tree.
 	data := f.Files[filepath.Join("/bright-lights", "city.toml")]
 	raw, err := config.Parse(data)
 	if err != nil {
@@ -2979,7 +3220,8 @@ func TestDoInitWithCustomCommand(t *testing.T) {
 	}
 
 	// Verify raw city.toml carries start_command and no provider; the
-	// composed config then surfaces the mayor agent from pack.toml.
+	// composed config then surfaces the mayor agent from convention
+	// discovery.
 	data := f.Files[filepath.Join("/bright-lights", "city.toml")]
 	raw, err := config.Parse(data)
 	if err != nil {
@@ -3029,11 +3271,11 @@ func TestDoInitWithGastownTemplate(t *testing.T) {
 	if cfg.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", cfg.Workspace.Provider, "claude")
 	}
-	if len(cfg.Workspace.Includes) != 0 {
-		t.Errorf("Workspace.Includes = %v, want empty", cfg.Workspace.Includes)
+	if len(cfg.Workspace.LegacyIncludes()) != 0 {
+		t.Errorf("Workspace.Includes = %v, want empty", cfg.Workspace.LegacyIncludes())
 	}
-	if len(cfg.Workspace.DefaultRigIncludes) != 0 {
-		t.Errorf("Workspace.DefaultRigIncludes = %v, want empty", cfg.Workspace.DefaultRigIncludes)
+	if len(cfg.Workspace.LegacyDefaultRigIncludes()) != 0 {
+		t.Errorf("Workspace.DefaultRigIncludes = %v, want empty", cfg.Workspace.LegacyDefaultRigIncludes())
 	}
 	// No inline agents.
 	if len(cfg.Agents) != 0 {
@@ -3063,7 +3305,8 @@ func TestDoInitWithCustomTemplate(t *testing.T) {
 	}
 
 	// Custom template → DefaultCity (one mayor, no provider). The mayor
-	// agent lives in pack.toml after the pack-first scaffold split.
+	// now comes from the scaffolded agents/<name>/ tree rather than an
+	// inline pack.toml [[agent]].
 	data := f.Files[filepath.Join("/my-city", "city.toml")]
 	raw, err := config.Parse(data)
 	if err != nil {

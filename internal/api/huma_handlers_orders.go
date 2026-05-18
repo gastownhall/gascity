@@ -42,7 +42,7 @@ func (s *Server) humaHandleOrderGet(_ context.Context, input *OrderGetInput) (*s
 	Body orderResponse
 }, error,
 ) {
-	a, err := resolveOrder(s.state.Orders(), input.Name)
+	a, err := resolveOrder(s.state.OrdersAll(), input.Name)
 	if err != nil {
 		if errors.Is(err, errOrderAmbiguous) {
 			return nil, huma.Error409Conflict(err.Error())
@@ -194,7 +194,7 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 		beforeTime = t
 	}
 
-	aa := s.state.Orders()
+	aa := s.state.OrdersAll()
 	var auto *orders.Order
 	var orderDef orders.Order
 	for i, a := range aa {
@@ -422,6 +422,7 @@ func orderHistoryBeadsAcrossStoreInfosCachedFirst(infos []workflowStoreInfo, sco
 			Limit:         limit,
 			IncludeClosed: true,
 			Sort:          beads.SortCreatedDesc,
+			TierMode:      beads.TierBoth,
 		}
 		var (
 			rows []beads.Bead
@@ -437,11 +438,13 @@ func orderHistoryBeadsAcrossStoreInfosCachedFirst(infos []workflowStoreInfo, sco
 			rows, err = info.store.List(query)
 		}
 		if err != nil {
-			if i == 0 {
+			if i == 0 && len(rows) == 0 {
 				return nil, err
 			}
 			log.Printf("api: order history list failed for %s: %v", info.ref, err)
-			continue
+			if len(rows) == 0 {
+				continue
+			}
 		}
 		for _, row := range rows {
 			if !beforeTime.IsZero() && !row.CreatedAt.Before(beforeTime) {
@@ -483,13 +486,16 @@ func orderHistoryBeadsAcrossStoreInfos(infos []workflowStoreInfo, scopedName str
 			Limit:         limit,
 			IncludeClosed: true,
 			Sort:          beads.SortCreatedDesc,
+			TierMode:      beads.TierBoth,
 		})
 		if err != nil {
-			if i == 0 {
+			if i == 0 && len(rows) == 0 {
 				return nil, err
 			}
 			log.Printf("api: order history list failed for %s: %v", info.ref, err)
-			continue
+			if len(rows) == 0 {
+				continue
+			}
 		}
 		for _, row := range rows {
 			if !beforeTime.IsZero() && !row.CreatedAt.Before(beforeTime) {
@@ -648,7 +654,7 @@ func (s *Server) setOrderEnabledHuma(name string, enabled bool) (*OKResponse, er
 		return nil, errMutationsNotSupported
 	}
 
-	a, err := resolveOrder(s.state.Orders(), name)
+	a, err := resolveOrder(s.state.OrdersAll(), name)
 	if err != nil {
 		if errors.Is(err, errOrderAmbiguous) {
 			return nil, huma.Error409Conflict(err.Error())

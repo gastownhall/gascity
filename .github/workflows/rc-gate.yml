@@ -7,8 +7,8 @@ permissions:
   contents: read
 
 env:
-  DOLT_VERSION: "1.86.6"
-  BD_VERSION: "v1.0.3"
+  DOLT_VERSION: "2.0.3"
+  BD_VERSION: "v1.0.4"
 
 jobs:
   # Reuse the shared CI graph so RC inherits new parity checks automatically.

@@ -62,6 +62,42 @@ const DropSkipReasonRigProtected = "rig-protected"
 // destructive DROP DATABASE targets.
 const DropSkipReasonInvalidIdentifier = "invalid-identifier"
 
+// DropSkipReasonLiveSession marks a stale-matched DB held back because
+// information_schema.processlist reported at least one live session
+// against it at probe time. Third oracle in the three-signal safety
+// contract (architect §"Three-layer protection contract").
+const DropSkipReasonLiveSession = "live-session"
+
+// applyLiveSessionsToPlan removes any name in liveSessions from the
+// caller's ToDrop slice and appends a Skipped entry with reason
+// DropSkipReasonLiveSession for each removed name. Order of remaining
+// ToDrop names and order of new Skipped entries follows the input
+// ToDrop order, so human-readable rendering stays predictable.
+//
+// liveSessions is map[dbName]threadCount. Only the keys are consulted
+// here; thread counts are preserved by the runner for audit/logging
+// in a future slice.
+func applyLiveSessionsToPlan(plan DoltDropPlan, liveSessions map[string]int) DoltDropPlan {
+	if len(liveSessions) == 0 {
+		return plan
+	}
+	out := DoltDropPlan{
+		Protected: plan.Protected,
+		Skipped:   append([]DoltDropSkip{}, plan.Skipped...),
+	}
+	for _, name := range plan.ToDrop {
+		if _, live := liveSessions[name]; live {
+			out.Skipped = append(out.Skipped, DoltDropSkip{
+				Name:   name,
+				Reason: DropSkipReasonLiveSession,
+			})
+			continue
+		}
+		out.ToDrop = append(out.ToDrop, name)
+	}
+	return out
+}
+
 // planDoltDrops classifies the names returned by SHOW DATABASES against the
 // stale-prefix list and the rig-protection list. The protection check wins
 // over the stale-prefix match: a registered rig DB is never a drop target,
