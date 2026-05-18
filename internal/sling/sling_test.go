@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -219,8 +221,17 @@ var (
 	sharedTestCityDir    string
 )
 
+const (
+	slingTestFormulaDirPrefix = "gc-sling-test-formulas-pid"
+	slingTestCityDirPrefix    = "gc-sling-test-city-pid"
+)
+
 func init() {
-	dir, err := os.MkdirTemp("", "gc-sling-test-formulas-*")
+	tmpRoot := os.TempDir()
+	sweepOrphanSlingPIDPrefixedDirs(tmpRoot, slingTestFormulaDirPrefix)
+	sweepOrphanSlingPIDPrefixedDirs(tmpRoot, slingTestCityDirPrefix)
+
+	dir, err := os.MkdirTemp("", slingPIDPrefixedTempPattern(slingTestFormulaDirPrefix))
 	if err != nil {
 		panic(err)
 	}
@@ -236,11 +247,65 @@ func init() {
 	}
 	sharedTestFormulaDir = dir
 
-	cityDir, err := os.MkdirTemp("", "gc-sling-test-city-*")
+	cityDir, err := os.MkdirTemp("", slingPIDPrefixedTempPattern(slingTestCityDirPrefix))
 	if err != nil {
 		panic(err)
 	}
 	sharedTestCityDir = cityDir
+}
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	_ = os.RemoveAll(sharedTestFormulaDir)
+	_ = os.RemoveAll(sharedTestCityDir)
+	os.Exit(code)
+}
+
+func slingPIDPrefixedTempPattern(prefix string) string {
+	return prefix + strconv.Itoa(os.Getpid()) + "-*"
+}
+
+func slingPIDFromPrefixedDirName(name, prefix string) (int, bool) {
+	if !strings.HasPrefix(name, prefix) {
+		return 0, false
+	}
+	suffix := strings.TrimPrefix(name, prefix)
+	end := 0
+	for end < len(suffix) && suffix[end] >= '0' && suffix[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0, false
+	}
+	if end < len(suffix) && suffix[end] != '-' {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(suffix[:end])
+	if err != nil {
+		return 0, false
+	}
+	return pid, true
+}
+
+func sweepOrphanSlingPIDPrefixedDirs(root, prefix string) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	self := os.Getpid()
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		pid, ok := slingPIDFromPrefixedDirName(e.Name(), prefix)
+		if !ok || pid <= 0 || pid == self {
+			continue
+		}
+		if pidutil.Alive(pid) {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(root, e.Name()))
+	}
 }
 
 // --- Pure helper tests ---

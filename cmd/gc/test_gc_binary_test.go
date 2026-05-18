@@ -18,7 +18,8 @@ var (
 func currentGCBinaryForTests(t *testing.T) string {
 	t.Helper()
 	testGCBinaryOnce.Do(func() {
-		buildDir, err := os.MkdirTemp("", "gc-test-binary-")
+		sweepOrphanPIDPrefixedDirs(os.TempDir(), testGCBinaryDirPrefix)
+		buildDir, err := os.MkdirTemp("", pidPrefixedTempPattern(testGCBinaryDirPrefix))
 		if err != nil {
 			testGCBinaryErr = fmt.Errorf("mktemp gc binary dir: %w", err)
 			return

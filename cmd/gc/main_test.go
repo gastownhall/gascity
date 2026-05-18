@@ -177,11 +177,16 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
 		panic(err)
 	}
-	gcHome, err := os.MkdirTemp("", "gascity-gc-home-*")
+	tmpRoot := os.TempDir()
+	sweepOrphanPIDPrefixedDirs(tmpRoot, testGCHomeDirPrefix)
+	sweepOrphanPIDPrefixedDirs(tmpRoot, testRuntimeDirPrefix)
+	sweepOrphanPIDPrefixedDirs(tmpRoot, testProviderStubDirPrefix)
+
+	gcHome, err := os.MkdirTemp("", pidPrefixedTempPattern(testGCHomeDirPrefix))
 	if err != nil {
 		panic(err)
 	}
-	runtimeDir, err := os.MkdirTemp("", "gascity-runtime-*")
+	runtimeDir, err := os.MkdirTemp("", pidPrefixedTempPattern(testRuntimeDirPrefix))
 	if err != nil {
 		panic(err)
 	}
@@ -204,7 +209,7 @@ func TestMain(m *testing.M) {
 	}
 	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
-	testscript.Main(newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir), map[string]func(){
+	testscript.Main(newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFormulaDir, sharedTestCityDir), map[string]func(){
 		"gc": func() {
 			configureTestscriptEnvDefaults()
 			os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
