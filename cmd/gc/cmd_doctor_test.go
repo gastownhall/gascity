@@ -455,6 +455,40 @@ dolt_port = "3308"
 	}
 }
 
+func TestDoDoctorRegistersStaleLocalPackDirCheck(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, "packs", "actual"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[packs.actual]
+source = "https://github.com/gastownhall/gc-actual-packs"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_DOLT", "skip")
+	cleanupManagedDoltTestCity(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, true, false, &stdout, &stderr)
+	out := stdout.String() + stderr.String()
+	if !strings.Contains(out, "stale-local-pack-dirs") {
+		t.Fatalf("doctor output missing stale-local-pack-dirs check:\n%s", out)
+	}
+	if !strings.Contains(out, "delete `packs/actual/` (it's stale); edits go via PR on gc-actual-packs") {
+		t.Fatalf("doctor output missing stale pack action:\n%s", out)
+	}
+}
+
 func TestDoDoctorReportsLegacyBDSplitStore(t *testing.T) {
 	cityDir := t.TempDir()
 	writeMinimalCityToml(t, cityDir)
