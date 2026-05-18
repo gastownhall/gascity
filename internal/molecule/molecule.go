@@ -956,7 +956,7 @@ func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverrid
 
 	// Merge step metadata + notes into bead metadata.
 	if len(step.Metadata) > 0 || step.Notes != "" {
-		b.Metadata = make(map[string]string, len(step.Metadata)+1)
+		b.Metadata = make(map[string]string, len(step.Metadata))
 		for k, v := range step.Metadata {
 			b.Metadata[k] = formula.Substitute(v, vars)
 		}

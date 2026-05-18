@@ -677,6 +677,27 @@ func TestInstantiateSequentialPathPreservesStepMetadata(t *testing.T) {
 	}
 }
 
+func TestStepToBeadSubstitutesMetadataAndNotes(t *testing.T) {
+	bead := stepToBead(formula.RecipeStep{
+		Title: "Work",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.routed_to": "{{agent}}",
+		},
+		Notes: "retry {{attempt}}",
+	}, map[string]string{
+		"agent":   "worker",
+		"attempt": "1",
+	}, nil)
+
+	if got := bead.Metadata["gc.routed_to"]; got != "worker" {
+		t.Fatalf("gc.routed_to = %q, want worker", got)
+	}
+	if got := bead.Metadata["notes"]; got != "retry 1" {
+		t.Fatalf("notes = %q, want retry 1", got)
+	}
+}
+
 func TestInstantiateUsesGraphApplyStoreForRetryLogicalRefs(t *testing.T) {
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
 	prev := IsGraphApplyEnabled()
