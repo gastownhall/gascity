@@ -71,10 +71,13 @@ auto-export behavior, invoke bd directly.`,
   gc bd list --rig my-project -s open`,
 		DisableFlagParsing: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			if doBd(args, stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			// Plumb doBd's numeric exit code through exitForCode so the
+			// process exit code matches the documented contract above
+			// (bdSilentFallbackExitCode = 4) and bd's own exit codes are
+			// preserved. Returning errExit on any non-zero would collapse
+			// every code to 1 and defeat the operator/CI signal the loud-
+			// fail was meant to provide.
+			return exitForCode(doBd(args, stdout, stderr))
 		},
 	}
 	return cmd

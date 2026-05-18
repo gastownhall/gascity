@@ -1895,6 +1895,44 @@ exit 0
 	}
 }
 
+// TestGcBdProcessExitCodeMatchesSilentFallbackContract pins the process-
+// level exit code contract that the bdSilentFallbackExitCode = 4 doc
+// comment promises operators and CI. PR #2327 review found the previous
+// RunE used `return errExit` on any non-zero, which collapsed every code
+// to 1 in commandExitCode — defeating the operator/CI signal the loud-
+// fail was meant to provide. Plumbing doBd's numeric code through
+// exitForCode ensures the process exit code matches what doBd computed.
+func TestGcBdProcessExitCodeMatchesSilentFallbackContract(t *testing.T) {
+	silentFallbackTestSetup(t, silentFallbackFakeBdScript)
+
+	var stdout, stderr bytes.Buffer
+	got := run([]string{"bd", "update", "demo-abc", "--set-metadata", "k=v"}, &stdout, &stderr)
+	if got != bdSilentFallbackExitCode {
+		t.Fatalf("run(bd update) = %d, want %d (silent-fallback exit code); stderr=%q",
+			got, bdSilentFallbackExitCode, stderr.String())
+	}
+}
+
+// TestGcBdProcessExitCodePreservesBdNonZero is the inverse case: when bd
+// returns a non-zero code that isn't the silent-fallback case (e.g., bd
+// itself rejected the command), gc bd must preserve bd's exit code rather
+// than collapsing it to 1. exitForCode encodes ≥2 codes via
+// commandExitError so commandExitCode reads them back faithfully.
+func TestGcBdProcessExitCodePreservesBdNonZero(t *testing.T) {
+	const bdRejectsScript = `#!/bin/sh
+echo "bd: simulated usage error" >&2
+exit 3
+`
+	silentFallbackTestSetup(t, bdRejectsScript)
+
+	var stdout, stderr bytes.Buffer
+	got := run([]string{"bd", "list"}, &stdout, &stderr)
+	if got != 3 {
+		t.Fatalf("run(bd list) = %d, want 3 (preserved bd exit code); stderr=%q",
+			got, stderr.String())
+	}
+}
+
 // TestBdOutputIndicatesSilentFallback covers the marker-detection helper
 // directly with table-driven cases so the source-of-truth for what counts
 // as "silent fallback" is unit-pinned.
