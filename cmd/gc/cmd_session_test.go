@@ -1306,6 +1306,63 @@ func TestCmdSessionListJSONOmitZeroLastNudgeDeliveredAt(t *testing.T) {
 	}
 }
 
+func TestCmdSessionPeekJSONSuccessIsJSONOnly(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+
+	fakeProvider := runtime.NewFake()
+	fakeProvider.SetPeekOutput("runtime-session", "hello\nworld\n")
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return fakeProvider, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
+	}
+	b, err := store.Create(beads.Bead{
+		Title:  "json peek session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "runtime-session",
+			"template":     "worker",
+			"state":        "awake",
+			"work_dir":     cityDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionPeek([]string{b.ID}, 2, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionPeek(--json) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stdout lines = %d, want 1 JSONL record: %q", len(lines), stdout.String())
+	}
+	var got sessionPeekJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not parseable JSON: %v\n%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || got.SessionID != b.ID || got.Output != "hello\nworld\n" || got.LineCount != 2 {
+		t.Fatalf("peek JSON = %+v", got)
+	}
+}
+
 func sessionListJSONRowBySessionName(rows []sessionListJSONRow, name string) *sessionListJSONRow {
 	for _, row := range rows {
 		if row.SessionName == name {

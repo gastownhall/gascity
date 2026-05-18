@@ -1565,12 +1565,13 @@ func parsePruneDuration(s string) (time.Duration, error) {
 // newSessionPeekCmd creates the "gc session peek <id-or-alias>" command.
 func newSessionPeekCmd(stdout, stderr io.Writer) *cobra.Command {
 	var lines int
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "peek <session-id-or-alias>",
 		Short: "View session output without attaching",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionPeek(args, lines, stdout, stderr) != 0 {
+			if cmdSessionPeek(args, lines, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -1578,11 +1579,21 @@ func newSessionPeekCmd(stdout, stderr io.Writer) *cobra.Command {
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().IntVar(&lines, "lines", 50, "number of lines to capture")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL result")
 	return cmd
 }
 
+type sessionPeekJSONResult struct {
+	SchemaVersion string `json:"schema_version"`
+	SessionID     string `json:"session_id"`
+	Target        string `json:"target"`
+	Lines         int    `json:"lines"`
+	LineCount     int    `json:"line_count"`
+	Output        string `json:"output"`
+}
+
 // cmdSessionPeek is the CLI entry point for "gc session peek".
-func cmdSessionPeek(args []string, lines int, stdout, stderr io.Writer) int {
+func cmdSessionPeek(args []string, lines int, jsonOutput bool, stdout, stderr io.Writer) int {
 	store, code := openCityStore(stderr, "gc session peek")
 	if store == nil {
 		return code
@@ -1612,11 +1623,37 @@ func cmdSessionPeek(args []string, lines int, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	if jsonOutput {
+		if err := writeCLIJSONLine(stdout, sessionPeekJSONResult{
+			SchemaVersion: "1",
+			SessionID:     sessionID,
+			Target:        args[0],
+			Lines:         lines,
+			LineCount:     outputLineCount(output),
+			Output:        output,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	}
+
 	fmt.Fprint(stdout, output) //nolint:errcheck // best-effort stdout
 	if !strings.HasSuffix(output, "\n") {
 		fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
 	}
 	return 0
+}
+
+func outputLineCount(output string) int {
+	if output == "" {
+		return 0
+	}
+	count := strings.Count(output, "\n")
+	if !strings.HasSuffix(output, "\n") {
+		count++
+	}
+	return count
 }
 
 // newSessionKillCmd creates the "gc session kill <id-or-alias>" command.
