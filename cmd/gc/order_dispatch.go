@@ -26,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/processgroup"
 )
@@ -294,14 +295,20 @@ func scanOrderSetSnapshotFSWithOptions(fs fsys.FS, cityPath string, cfg *config.
 	if cfg == nil {
 		cfg = &config.City{}
 	}
-	allAA, err := scanAllOrdersFSWithOptions(fs, cityPath, cfg, stderr, cmdName, opts)
+	allAA, err := orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{
+		FS:               fs,
+		OrderScanOptions: opts,
+		OnRigScanError: func(rigName string, err error) error {
+			fmt.Fprintf(stderr, "%s: rig %s: %v\n", cmdName, rigName, err) //nolint:errcheck // best-effort stderr
+			return nil
+		},
+		OnOverrideError: func(err error) error {
+			logDispatchError(stderr, "%s: order overrides: %v", cmdName, err)
+			return nil
+		},
+	})
 	if err != nil {
 		return orderSetSnapshot{}, err
-	}
-	if len(cfg.Orders.Overrides) > 0 {
-		if err := orders.ApplyOverrides(allAA, convertOverrides(cfg.Orders.Overrides)); err != nil {
-			logDispatchError(stderr, "%s: order overrides: %v", cmdName, err)
-		}
 	}
 	return orderSetSnapshot{
 		Orders:    append([]orders.Order(nil), allAA...),
@@ -1176,10 +1183,7 @@ func effectiveTimeout(a orders.Order, maxTimeout time.Duration) time.Duration {
 // rigLocalLayer], we strip the city prefix to avoid double-scanning city
 // orders.
 func rigExclusiveLayers(rigLayers, cityLayers []string) []string {
-	if len(rigLayers) <= len(cityLayers) {
-		return nil
-	}
-	return rigLayers[len(cityLayers):]
+	return orderdiscovery.RigExclusiveLayers(rigLayers, cityLayers)
 }
 
 // qualifyPool resolves a raw pool name from an order TOML to the qualified
@@ -1292,24 +1296,4 @@ func appendUniquePoolTarget(values []string, want string) []string {
 		}
 	}
 	return append(values, want)
-}
-
-// convertOverrides converts config.OrderOverride to orders.Override.
-func convertOverrides(cfgOvs []config.OrderOverride) []orders.Override {
-	out := make([]orders.Override, len(cfgOvs))
-	for i, c := range cfgOvs {
-		out[i] = orders.Override{
-			Name:     c.Name,
-			Rig:      c.Rig,
-			Enabled:  c.Enabled,
-			Trigger:  c.Trigger,
-			Interval: c.Interval,
-			Schedule: c.Schedule,
-			Check:    c.Check,
-			On:       c.On,
-			Pool:     c.Pool,
-			Timeout:  c.Timeout,
-		}
-	}
-	return out
 }

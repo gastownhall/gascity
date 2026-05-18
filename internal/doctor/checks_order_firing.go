@@ -3,7 +3,6 @@ package doctor
 import (
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -11,7 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -138,109 +137,11 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 }
 
 func scanOrderFiringCurrentOrders(cityPath string, cfg *config.City) ([]orders.Order, error) {
-	cityLayers := orderFiringCityFormulaLayers(cityPath, cfg)
-	cityOrders, err := orders.ScanRoots(fsys.OSFS{}, orderFiringCityOrderRoots(cityPath, cfg), cfg.Orders.Skip)
+	allOrders, err := orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{})
 	if err != nil {
 		return nil, err
 	}
-
-	var rigOrders []orders.Order
-	rigNames := make([]string, 0, len(cfg.FormulaLayers.Rigs))
-	for rigName := range cfg.FormulaLayers.Rigs {
-		rigNames = append(rigNames, rigName)
-	}
-	sort.Strings(rigNames)
-	for _, rigName := range rigNames {
-		exclusive := orderFiringRigExclusiveLayers(cfg.FormulaLayers.Rigs[rigName], cityLayers)
-		if len(exclusive) == 0 {
-			continue
-		}
-		aa, err := orders.ScanRoots(fsys.OSFS{}, orderFiringRigOrderRoots(exclusive), cfg.Orders.Skip)
-		if err != nil {
-			return nil, fmt.Errorf("rig %s: %w", rigName, err)
-		}
-		for i := range aa {
-			aa[i].Rig = rigName
-		}
-		rigOrders = append(rigOrders, aa...)
-	}
-
-	allOrders := make([]orders.Order, 0, len(cityOrders)+len(rigOrders))
-	allOrders = append(allOrders, cityOrders...)
-	allOrders = append(allOrders, rigOrders...)
-	if len(cfg.Orders.Overrides) > 0 {
-		if err := orders.ApplyOverrides(allOrders, orderFiringOverrides(cfg.Orders.Overrides)); err != nil {
-			return nil, err
-		}
-	}
 	return orders.FilterEnabled(allOrders), nil
-}
-
-func orderFiringCityFormulaLayers(cityPath string, cfg *config.City) []string {
-	if len(cfg.FormulaLayers.City) > 0 {
-		return cfg.FormulaLayers.City
-	}
-	return []string{citylayout.ResolveFormulasDir(cityPath, cfg.FormulasDir())}
-}
-
-func orderFiringCityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
-	formulaLayers := orderFiringCityFormulaLayers(cityPath, cfg)
-	localFormulas := citylayout.ResolveFormulasDir(cityPath, cfg.FormulasDir())
-	roots := make([]orders.ScanRoot, 0, len(formulaLayers))
-	seen := make(map[string]bool, len(formulaLayers))
-	for _, layer := range formulaLayers {
-		root := orders.ScanRoot{
-			Dir:          filepath.Join(filepath.Dir(layer), "orders"),
-			FormulaLayer: layer,
-		}
-		if layer == localFormulas {
-			root.Dir = citylayout.OrdersPath(cityPath)
-		}
-		key := filepath.Clean(root.Dir) + "\n" + filepath.Clean(root.FormulaLayer)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		roots = append(roots, root)
-	}
-	return roots
-}
-
-func orderFiringRigOrderRoots(formulaLayers []string) []orders.ScanRoot {
-	roots := make([]orders.ScanRoot, 0, len(formulaLayers))
-	for _, layer := range formulaLayers {
-		roots = append(roots, orders.ScanRoot{
-			Dir:          filepath.Join(filepath.Dir(layer), "orders"),
-			FormulaLayer: layer,
-		})
-	}
-	return roots
-}
-
-func orderFiringRigExclusiveLayers(rigLayers, cityLayers []string) []string {
-	if len(rigLayers) <= len(cityLayers) {
-		return nil
-	}
-	return rigLayers[len(cityLayers):]
-}
-
-func orderFiringOverrides(cfgOverrides []config.OrderOverride) []orders.Override {
-	out := make([]orders.Override, len(cfgOverrides))
-	for i, override := range cfgOverrides {
-		out[i] = orders.Override{
-			Name:     override.Name,
-			Rig:      override.Rig,
-			Enabled:  override.Enabled,
-			Trigger:  override.Trigger,
-			Interval: override.Interval,
-			Schedule: override.Schedule,
-			Check:    override.Check,
-			On:       override.On,
-			Pool:     override.Pool,
-			Timeout:  override.Timeout,
-		}
-	}
-	return out
 }
 
 func expectedIntervalForOrder(order orders.Order, cronCache map[string]time.Duration) (time.Duration, error) {
