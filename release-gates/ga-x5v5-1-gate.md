@@ -1,11 +1,11 @@
 # Release Gate: ga-x5v5.1 - gc start troubleshooting walkthrough docs
 
-**Deploy bead:** ga-lr3sol  
-**Originating bead:** ga-x5v5.1 (closed)  
-**Parent design:** ga-x5v5  
-**Umbrella PRD:** ga-r8hs  
-**Branch:** `builder/ga-x5v5-1` (fork: `quad341/gascity`)  
-**Commit:** `2d3601312583`  
+**Deploy bead:** ga-lr3sol
+**Originating bead:** ga-x5v5.1 (closed)
+**Parent design:** ga-x5v5
+**Umbrella PRD:** ga-r8hs
+**Branch:** `builder/ga-x5v5-1` (fork: `quad341/gascity`)
+**Commit:** `2d3601312583`
 **Verdict:** PASS
 
 Note: `docs/PROJECT_MANIFEST.md` is not present on this branch, so this gate uses the deployer role's release criteria plus the repository guidance in `TESTING.md`.
