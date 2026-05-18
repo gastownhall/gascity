@@ -663,6 +663,19 @@ func bdTransportErrorMatches(cityPath, scopeRoot string, env map[string]string, 
 	return false
 }
 
+// bdSilentFallbackMarkerImport and bdSilentFallbackMarkerEmptyDB are the
+// substring pair bd emits when it loses the managed Dolt server and silently
+// falls back to opening the on-disk store with a JSONL auto-import. They are
+// load-bearing in three places — the two transport-error classifiers below
+// and bdOutputIndicatesSilentFallback — so they live here as the single
+// source of truth. If bd's banner wording ever changes, this is the only
+// edit site. (The root cause is fixed upstream in beads post-#3691; these
+// markers remain the symptom detector for deployments still on stable bd.)
+const (
+	bdSilentFallbackMarkerImport  = "auto-importing"
+	bdSilentFallbackMarkerEmptyDB = "into empty database"
+)
+
 func bdTransportRetryableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
 	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, []string{
 		"server unreachable",
@@ -678,8 +691,8 @@ func bdTransportRetryableError(cityPath, scopeRoot string, env map[string]string
 		// rather than a network error. Treat the auto-import marker as a
 		// transport failure so the managed-retry path republishes the correct
 		// port and retries against the live server. See gastownhall/gascity#1930.
-		"auto-importing",
-		"into empty database",
+		bdSilentFallbackMarkerImport,
+		bdSilentFallbackMarkerEmptyDB,
 	})
 }
 
@@ -691,9 +704,25 @@ func bdTransportRecoverableError(cityPath, scopeRoot string, env map[string]stri
 		// When bd auto-imports into an empty on-disk store it has lost the
 		// managed Dolt server; republishing the port via the recovery path
 		// is what unsticks the next attempt. See gastownhall/gascity#1930.
-		"auto-importing",
-		"into empty database",
+		bdSilentFallbackMarkerImport,
+		bdSilentFallbackMarkerEmptyDB,
 	})
+}
+
+// bdOutputIndicatesSilentFallback reports whether the given bd output
+// (typically captured stderr) contains the marker pair that bd emits
+// when it loses the managed Dolt server and silently falls back to
+// opening the on-disk store with a JSONL auto-import. Operators of
+// `gc bd ...` rely on this to convert the silent fallback into a loud,
+// non-zero-exit error — in managed mode (BD_EXPORT_AUTO=false) the
+// fallback drops writes. See gastownhall/gascity#2080 (bd update path)
+// and gastownhall/gascity#2079 (bd close path) — both subcommands flow
+// through the shared doBd handoff, so a single detection site covers
+// the bd-write-persistence quad.
+func bdOutputIndicatesSilentFallback(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, bdSilentFallbackMarkerImport) &&
+		strings.Contains(lower, bdSilentFallbackMarkerEmptyDB)
 }
 
 func bdCommandRunnerWithManagedRetry(cityPath string, envFn func(dir string) map[string]string) beads.CommandRunner {

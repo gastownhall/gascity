@@ -13,6 +13,42 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// bdSilentFallbackExitCode is the exit code gc bd emits when it detects
+// that bd silently fell back to on-disk auto-import mode (managed Dolt
+// unreachable). Distinct from bd's own exits so operators and CI can
+// tell the loud-fail apart from a real bd error. Covers both the
+// bd update path (gastownhall/gascity#2080) and the bd close path
+// (gastownhall/gascity#2079) because both subcommands flow through doBd.
+const bdSilentFallbackExitCode = 4
+
+// bdStderrScanLimit caps how much of bd's stderr gc retains to scan for the
+// silent-fallback marker. bd emits the marker pair while opening the store —
+// before it runs the subcommand — so the marker, when present, always lands
+// within the first chunk of stderr. Capping the retained prefix keeps memory
+// bounded for bd subcommands that stream large stderr output.
+const bdStderrScanLimit = 64 << 10 // 64 KiB
+
+// headLimitedWriter retains only the first limit bytes written to it and
+// discards the rest, so scanning bd's stderr for the silent-fallback marker
+// never holds an unbounded copy of the stream. It always reports a full
+// write so it is safe as an io.MultiWriter sink.
+type headLimitedWriter struct {
+	buf   []byte
+	limit int
+}
+
+func (w *headLimitedWriter) Write(p []byte) (int, error) {
+	if room := w.limit - len(w.buf); room > 0 {
+		if len(p) < room {
+			room = len(p)
+		}
+		w.buf = append(w.buf, p[:room]...)
+	}
+	return len(p), nil
+}
+
+func (w *headLimitedWriter) String() string { return string(w.buf) }
+
 func newBdCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bd [bd-args...]",
@@ -35,10 +71,13 @@ auto-export behavior, invoke bd directly.`,
   gc bd list --rig my-project -s open`,
 		DisableFlagParsing: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			if doBd(args, stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			// Plumb doBd's numeric exit code through exitForCode so the
+			// process exit code matches the documented contract above
+			// (bdSilentFallbackExitCode = 4) and bd's own exit codes are
+			// preserved. Returning errExit on any non-zero would collapse
+			// every code to 1 and defeat the operator/CI signal the loud-
+			// fail was meant to provide.
+			return exitForCode(doBd(args, stdout, stderr))
 		},
 	}
 	return cmd
@@ -139,7 +178,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	cmd.Dir = target.ScopeRoot
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
-	cmd.Stderr = stderr
+	// Tee stderr through a bounded head buffer alongside the operator's
+	// pipe so we can scan it post-exec for bd's silent-fallback-to-on-disk
+	// marker. Only stderr is teed: bd writes its auto-import banner there,
+	// not to stdout. See gastownhall/gascity#2080 (update path) and #2079
+	// (close path) — both go through this handoff.
+	stderrScan := &headLimitedWriter{limit: bdStderrScanLimit}
+	cmd.Stderr = io.MultiWriter(stderr, stderrScan)
 	env, err := bdCommandEnv(cityPath, cfg, target)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -147,14 +192,34 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	}
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
 
-	if err := cmd.Run(); err != nil {
+	runErr := cmd.Run()
+
+	if runErr != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if errors.As(runErr, &exitErr) {
 			return exitErr.ExitCode()
 		}
-		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc bd: %v\n", runErr) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+
+	// bd exited 0 — but if its stderr shows the silent fallback to on-disk
+	// auto-import, the managed Dolt server was unreachable and any write in
+	// this command was dropped (managed Gas City sets BD_EXPORT_AUTO=false;
+	// see applyExportSuppressionEnv in cmd/gc/bd_env.go). Surface that as a
+	// hard error instead of a misleading exit 0. One check here covers the
+	// whole bd-write-persistence quad (gastownhall/gascity#2079 / #2080 /
+	// #2149 / #2150) because every bd subcommand routes through this
+	// handoff. A non-zero bd exit is intentionally left to the block above:
+	// the existing transport-retry classifier already handles the
+	// timeout+marker case, and overriding a real bd exit code here would
+	// mask it. (Root cause fixed upstream in beads post-#3691; this surfaces
+	// the symptom for deployments still on stable bd builds.)
+	if bdOutputIndicatesSilentFallback(stderrScan.String()) {
+		fmt.Fprintln(stderr, "gc bd: managed Dolt unreachable; bd fell back to on-disk auto-import mode. If this command wrote data, that write was NOT persisted. Restart the managed Dolt server (or check connectivity) and retry. (See gastownhall/gascity#2080.)") //nolint:errcheck // best-effort stderr
+		return bdSilentFallbackExitCode
+	}
+
 	return 0
 }
 
