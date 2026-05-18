@@ -132,8 +132,8 @@ func reapOrphanedRotatingFiles(dir string, stderr io.Writer) error {
 
 	sort.Strings(legacyArchives)
 	for _, base := range legacyArchives {
-		if err := migrateLegacyArchive(filepath.Join(dir, base), dir, base); err != nil {
-			fmt.Fprintf(stderr, "events: rotation: legacy archive %q: %v\n", filepath.Join(dir, base), err) //nolint:errcheck // best-effort stderr
+		if err := migrateLegacyArchive(filepath.Join(dir, base), dir, base, time.Now().UTC()); err != nil {
+			fmt.Fprintf(stderr, "events: rotation: legacy archive %q: %v\n", base, err) //nolint:errcheck // best-effort stderr
 		}
 	}
 
@@ -214,16 +214,20 @@ func archiveRotatingFile(src, dir, base string, stderr io.Writer) error {
 	return gzipAndArchive(src, dest, stderr)
 }
 
-func migrateLegacyArchive(src, dir, base string) error {
-	ts, err := parseLegacyArchiveBasename(base)
-	if err != nil {
+// migrateLegacyArchive renames a pre-rotation gzip archive into the
+// canonical seq-stamped archive convention. The canonical timestamp is
+// the migration time, not the legacy filename day, so retain-age pruning
+// gives operators a full retention window after the upgrade observes
+// previously invisible archives.
+func migrateLegacyArchive(src, dir, base string, migrationTime time.Time) error {
+	if _, err := parseLegacyArchiveBasename(base); err != nil {
 		return err
 	}
 	first, last, err := readGzipSeqWindow(src)
 	if err != nil {
 		return fmt.Errorf("reading seq window: %w", err)
 	}
-	dest := filepath.Join(dir, formatArchiveBasename(ts, first, last))
+	dest := filepath.Join(dir, formatArchiveBasename(migrationTime, first, last))
 	if _, err := os.Stat(dest); err == nil {
 		return fmt.Errorf("target archive %q already exists; leaving legacy archive in place", dest)
 	} else if !os.IsNotExist(err) {
@@ -311,6 +315,10 @@ func readSeqWindow(path string) (uint64, uint64, error) {
 	return first, last, nil
 }
 
+// readGzipSeqWindow returns the first and last Seq values stored in a
+// gzip-compressed JSONL events archive. Unlike readSeqWindow, it scans
+// the full stream forward because gzip streams do not support the
+// active-log tail seek used for plain JSONL files.
 func readGzipSeqWindow(path string) (uint64, uint64, error) {
 	f, err := os.Open(path)
 	if err != nil {

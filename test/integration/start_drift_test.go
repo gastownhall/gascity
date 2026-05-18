@@ -573,6 +573,7 @@ func newDriftIsolatedEnvRoot(t *testing.T) (string, string, []string) {
 func buildGCBinaryWithCommit(t *testing.T, outPath, commitID string) {
 	t.Helper()
 	cmd := exec.Command("go", "build",
+		"-buildvcs=false",
 		"-ldflags", "-X main.commit="+commitID,
 		"-o", outPath,
 		"./cmd/gc",

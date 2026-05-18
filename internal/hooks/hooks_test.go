@@ -1385,6 +1385,46 @@ func TestInstallClaudeSurfacesMalformedOverride(t *testing.T) {
 	}
 }
 
+// TestInstallClaudeSurfacesNonObjectOverride verifies that a valid JSON
+// value with the wrong top-level shape is reported as an invalid Claude
+// settings override, not as a generic merge failure.
+func TestInstallClaudeSurfacesNonObjectOverride(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "array", data: []byte(`["not", "an", "object"]`)},
+		{name: "string", data: []byte(`"not an object"`)},
+		{name: "number", data: []byte(`42`)},
+		{name: "bool", data: []byte(`true`)},
+		{name: "null", data: []byte(`null`)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := fsys.NewFake()
+			fs.Files["/city/.claude/settings.json"] = tt.data
+
+			err := Install(fs, "/city", "/work", []string{"claude"})
+			if err == nil {
+				t.Fatal("Install must surface non-object .claude/settings.json as an error")
+			}
+			if !strings.Contains(err.Error(), ".claude/settings.json") {
+				t.Errorf("error must name the offending path: %v", err)
+			}
+			if !strings.Contains(err.Error(), "invalid JSON") {
+				t.Errorf("error must clearly identify the file as invalid JSON (not bury it in a generic merge error): %v", err)
+			}
+			if !strings.Contains(err.Error(), "expected a JSON object") {
+				t.Errorf("error must explain the expected top-level shape: %v", err)
+			}
+			if strings.Contains(err.Error(), "merging Claude settings") {
+				t.Errorf("error must not surface as a generic 'merging Claude settings' wrap: %v", err)
+			}
+		})
+	}
+}
+
 // TestInstallOverlayManagedProviders verifies that overlay-managed providers
 // are materialized from the embedded core pack overlay into the workdir.
 func TestInstallOverlayManagedProviders(t *testing.T) {

@@ -1170,6 +1170,9 @@ func rewriteRalphAttemptRef(ref string, oldAttempt, nextAttempt int) string {
 	if rewritten, ok := rewriteAttemptSegment(ref, "check", oldAttempt, nextAttempt); ok {
 		return rewritten
 	}
+	if rewritten, ok := rewriteAttemptSegment(ref, "iteration", oldAttempt, nextAttempt); ok {
+		return rewritten
+	}
 	return ref
 }
 

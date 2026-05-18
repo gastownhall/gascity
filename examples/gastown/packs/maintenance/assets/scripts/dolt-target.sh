@@ -146,13 +146,8 @@ if [ -n "${GC_DOLT_STATE_FILE:-}" ]; then
     DOLT_STATE_FILE="$GC_DOLT_STATE_FILE"
 else
     DOLT_PACK_DIR="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}/packs/dolt"
-    if [ -f "$DOLT_PACK_DIR/dolt-state.json" ]; then
-        DOLT_STATE_FILE="$DOLT_PACK_DIR/dolt-state.json"
-    elif [ -f "$DOLT_PACK_DIR/dolt-provider-state.json" ]; then
-        DOLT_STATE_FILE="$DOLT_PACK_DIR/dolt-provider-state.json"
-    else
-        DOLT_STATE_FILE="$DOLT_PACK_DIR/dolt-state.json"
-    fi
+    DOLT_STATE_FILE="$DOLT_PACK_DIR/dolt-state.json"
+    DOLT_PROVIDER_STATE_FILE="$DOLT_PACK_DIR/dolt-provider-state.json"
 fi
 
 DOLT_PORT_RESOLVE_SCRIPT="${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}/dolt/assets/scripts/port_resolve.sh"
@@ -163,7 +158,11 @@ if [ ! -f "$DOLT_PORT_RESOLVE_SCRIPT" ] && [ -n "${SCRIPT_DIR:-}" ]; then
     fi
 fi
 . "${DOLT_PORT_RESOLVE_SCRIPT:?port_resolve.sh not resolved}"
-GC_DOLT_PORT="$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$GC_CITY_PATH/.beads/dolt" "$GC_CITY_PATH")" || exit $?
+if [ -n "${DOLT_PROVIDER_STATE_FILE:-}" ]; then
+    GC_DOLT_PORT="$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$DOLT_PROVIDER_STATE_FILE" "$GC_CITY_PATH/.beads/dolt" "$GC_CITY_PATH")" || exit $?
+else
+    GC_DOLT_PORT="$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$GC_CITY_PATH/.beads/dolt" "$GC_CITY_PATH")" || exit $?
+fi
 
 case "$GC_DOLT_PORT" in
     ''|*[!0-9]*)

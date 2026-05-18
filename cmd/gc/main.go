@@ -851,18 +851,25 @@ func eventActor() string {
 // Store using the configured provider. On error it writes to stderr and returns
 // nil plus an exit code.
 func openCityStore(stderr io.Writer, cmdName string) (beads.Store, int) {
+	store, _, code := openCityStoreWithPath(stderr, cmdName)
+	return store, code
+}
+
+// openCityStoreWithPath locates the city root and opens its Store, returning
+// the resolved city path used for the store.
+func openCityStoreWithPath(stderr io.Writer, cmdName string) (beads.Store, string, int) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-		return nil, 1
+		return nil, "", 1
 	}
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
-		return nil, 1
+		return nil, "", 1
 	}
-	return store, 0
+	return store, cityPath, 0
 }
 
 // openCityStoreAt opens a bead store at the given city path.

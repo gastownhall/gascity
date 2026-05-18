@@ -389,8 +389,7 @@ func desiredClaudeSettings(fs fsys.FS, cityDir string) ([]byte, claudeSettingsSo
 		// successfully above) so they indicate a gascity bug worth
 		// surfacing too. See gastownhall/gascity#2109.
 		var syntaxErr *json.SyntaxError
-		var typeErr *json.UnmarshalTypeError
-		if errors.As(upgradeErr, &syntaxErr) || errors.As(upgradeErr, &typeErr) {
+		if errors.As(upgradeErr, &syntaxErr) {
 			return nil, claudeSettingsSourceNone, fmt.Errorf("invalid JSON in Claude settings override at %s; fix or remove the file to proceed with install: %w", overridePath, upgradeErr)
 		}
 		return nil, claudeSettingsSourceNone, fmt.Errorf("upgrading Claude settings from %s: %w", overridePath, upgradeErr)
@@ -398,6 +397,9 @@ func desiredClaudeSettings(fs fsys.FS, cityDir string) ([]byte, claudeSettingsSo
 
 	merged, err := overlay.MergeSettingsJSON(base, upgradedOverride)
 	if err != nil {
+		if overlay.IsOverlayObjectShapeError(err) {
+			return nil, claudeSettingsSourceNone, fmt.Errorf("invalid JSON in Claude settings override at %s; expected a JSON object; fix or remove the file to proceed with install: %w", overridePath, err)
+		}
 		return nil, claudeSettingsSourceNone, fmt.Errorf("merging Claude settings from %s: %w", overridePath, err)
 	}
 	return merged, sourceKind, nil

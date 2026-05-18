@@ -240,7 +240,28 @@ func TestRuntimeScriptPortPrecedence(t *testing.T) {
 			},
 		},
 		{
-			name: "corrupt managed state exits 78",
+			name: "invalid managed state falls back to provider state",
+			setup: func(t *testing.T, cityPath string) string {
+				t.Helper()
+				listener, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatalf("Listen: %v", err)
+				}
+				t.Cleanup(func() { _ = listener.Close() })
+				port := listener.Addr().(*net.TCPAddr).Port
+				stateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
+				if err := os.MkdirAll(stateDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(stateDir, "dolt-state.json"), []byte(`not-json`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				writeManagedRuntimeStateFileForScript(t, cityPath, "dolt-provider-state.json", port, os.Getpid())
+				return strconv.Itoa(port)
+			},
+		},
+		{
+			name: "corrupt managed state exits 78 despite compatibility port mirror",
 			setup: func(t *testing.T, cityPath string) string {
 				t.Helper()
 				stateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
@@ -391,7 +412,7 @@ func assertRuntimePortExit78(t *testing.T, err error, out []byte, stateFile, cit
 	if exitErr.ExitCode() != 78 {
 		t.Fatalf("runtime.sh exit code = %d, want 78\n%s", exitErr.ExitCode(), out)
 	}
-	if got, want := string(out), expectedPortResolveError(stateFile, cityPath, "present but not running"); got != want {
+	if got, want := string(out), expectedPortResolveErrorWithProvider(stateFile, cityPath, "present but not running"); got != want {
 		t.Fatalf("runtime.sh output = %q, want %q", got, want)
 	}
 }
@@ -691,6 +712,11 @@ func writeManagedRuntimeStateForScript(t *testing.T, cityPath string, port int) 
 
 func writeManagedRuntimeStateForScriptWithPID(t *testing.T, cityPath string, port int, pid int) {
 	t.Helper()
+	writeManagedRuntimeStateFileForScript(t, cityPath, "dolt-state.json", port, pid)
+}
+
+func writeManagedRuntimeStateFileForScript(t *testing.T, cityPath string, filename string, port int, pid int) {
+	t.Helper()
 	stateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -705,7 +731,7 @@ func writeManagedRuntimeStateForScriptWithPID(t *testing.T, cityPath string, por
 		port,
 		dataDir,
 	))
-	if err := os.WriteFile(filepath.Join(stateDir, "dolt-state.json"), payload, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(stateDir, filename), payload, 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
