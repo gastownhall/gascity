@@ -497,6 +497,62 @@ func TestTraceCycleResultRollupIncludesFlushedRecords(t *testing.T) {
 	}
 }
 
+func TestRecordControllerOperationIsAlwaysOnBaseline(t *testing.T) {
+	cityDir := t.TempDir()
+	tracer := newSessionReconcilerTracer(cityDir, "trace-town", io.Discard)
+	if !tracer.Enabled() {
+		t.Fatal("tracer should be enabled")
+	}
+	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "", time.Now().UTC(), &config.City{})
+	if cycle == nil {
+		t.Fatal("BeginCycle returned nil")
+	}
+	cycle.RecordControllerOperation(
+		TraceSiteDesiredStateBuild,
+		TraceReasonRetained,
+		TraceOutcomeApplied,
+		"load_demand_snapshot",
+		42*time.Millisecond,
+		map[string]any{"phase": "demand"},
+	)
+	if err := cycle.End(TraceCompletionCompleted, map[string]any{}); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	if err := tracer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityDir), TraceFilter{})
+	if err != nil {
+		t.Fatalf("ReadTraceRecords: %v", err)
+	}
+	var op *SessionReconcilerTraceRecord
+	for i := range records {
+		if records[i].RecordType == TraceRecordOperation && records[i].SiteCode == TraceSiteDesiredStateBuild {
+			op = &records[i]
+			break
+		}
+	}
+	if op == nil {
+		t.Fatal("controller operation missing")
+	}
+	if op.TraceMode != TraceModeBaseline {
+		t.Fatalf("trace_mode = %q, want baseline", op.TraceMode)
+	}
+	if op.TraceSource != TraceSourceAlwaysOn {
+		t.Fatalf("trace_source = %q, want always_on", op.TraceSource)
+	}
+	if op.OperationID == "" {
+		t.Fatal("operation_id should be populated")
+	}
+	if op.DurationMS != 42 {
+		t.Fatalf("duration_ms = %d, want 42", op.DurationMS)
+	}
+	if op.Fields["phase"] != "demand" {
+		t.Fatalf("phase field = %#v, want demand", op.Fields["phase"])
+	}
+}
+
 func TestTraceFlushAfterEndOnlyPersistsPostEndRecords(t *testing.T) {
 	cityDir := t.TempDir()
 	tracer := newSessionReconcilerTracer(cityDir, "trace-town", io.Discard)

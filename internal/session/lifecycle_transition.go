@@ -247,6 +247,21 @@ func BeginDrainPatch(now time.Time, reason string) MetadataPatch {
 	}
 }
 
+// DrainAckStopPendingReason marks a drain-acked runtime whose provider stop is
+// running asynchronously and waiting for controller finalization.
+const DrainAckStopPendingReason = "drain-ack-stop-pending"
+
+// DrainAckStopPendingPatch records that a drain-acked session has moved into
+// durable stop-pending state. The provider stop itself is asynchronous; the
+// controller finalizes the bead with the normal drain completion patches after
+// observing the runtime stopped.
+func DrainAckStopPendingPatch(now time.Time) MetadataPatch {
+	patch := BeginDrainPatch(now, DrainAckStopPendingReason)
+	patch["pending_create_claim"] = ""
+	patch["pending_create_started_at"] = ""
+	return patch
+}
+
 // SleepPatch records a non-terminal sleep/drain result.
 func SleepPatch(now time.Time, reason string) MetadataPatch {
 	return MetadataPatch{

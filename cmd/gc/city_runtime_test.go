@@ -71,6 +71,95 @@ func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 	}
 }
 
+func TestSweepUndesiredPoolSessionBeads_RunningProbeAvoidsFullObservation(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-running",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "active",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker-bd-running", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.SetAttached("worker-bd-running", true)
+	sp.SetActivity("worker-bd-running", time.Now())
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		nil,
+		sessionBeads,
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		sp,
+		false,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+	if got := sp.CountCalls("IsAttached", "worker-bd-running"); got != 0 {
+		t.Fatalf("IsAttached calls = %d, want 0; sweep only needs running state", got)
+	}
+	if got := sp.CountCalls("GetLastActivity", "worker-bd-running"); got != 0 {
+		t.Fatalf("GetLastActivity calls = %d, want 0; sweep only needs running state", got)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_SkipsProtectedCreateBeforeRuntimeProbe(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":              "worker-bd-fresh-create",
+			"template":                  "worker",
+			"agent_name":                "worker",
+			"pool_slot":                 "1",
+			poolManagedMetadataKey:      boolMetadata(true),
+			"state":                     "creating",
+			"pending_create_started_at": pendingCreateStartedAtNow(time.Now().UTC()),
+			"continuation_epoch":        "1",
+			"generation":                "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+	sp := runtime.NewFake()
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		nil,
+		sessionBeads,
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		sp,
+		false,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+	if got := sp.CountCalls("IsRunning", "worker-bd-fresh-create"); got != 0 {
+		t.Fatalf("IsRunning calls = %d, want 0; fresh pending create is protected by metadata", got)
+	}
+}
+
 // stubManagedDoltStoreOpeners replaces the two package-level store openers
 // used during newCityRuntime + newControllerState startup with in-memory
 // stubs. This prevents tests from spawning real managed dolt servers (~12s

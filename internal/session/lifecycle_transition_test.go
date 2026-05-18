@@ -498,6 +498,22 @@ func TestCommitStartedPatchCanPersistHashesWithoutRestampingState(t *testing.T) 
 	}
 }
 
+func TestDrainAckStopPendingPatchOwnsDurableStopPendingMetadata(t *testing.T) {
+	now := time.Date(2026, 5, 18, 4, 15, 0, 0, time.UTC)
+	patch := DrainAckStopPendingPatch(now)
+
+	want := MetadataPatch{
+		"state":                     string(StateDraining),
+		"state_reason":              DrainAckStopPendingReason,
+		"drain_at":                  now.Format(time.RFC3339),
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+	}
+	if !reflect.DeepEqual(patch, want) {
+		t.Fatalf("patch = %#v, want %#v", patch, want)
+	}
+}
+
 func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
 	tests := []struct {
 		name        string

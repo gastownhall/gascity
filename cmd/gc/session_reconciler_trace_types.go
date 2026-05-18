@@ -62,8 +62,13 @@ const (
 	TraceSiteCycleStart              TraceSiteCode = "cycle.start"
 	TraceSiteCycleFinish             TraceSiteCode = "cycle.finish"
 	TraceSiteConfigReload            TraceSiteCode = "config.reload"
+	TraceSiteControllerTickPhase     TraceSiteCode = "controller.tick.phase"
 	TraceSiteDesiredStateBuild       TraceSiteCode = "desired_state.build"
+	TraceSiteDemandSnapshot          TraceSiteCode = "demand_snapshot.load"
+	TraceSiteOrderDispatch           TraceSiteCode = "orders.dispatch"
 	TraceSitePoolDemandCompute       TraceSiteCode = "pool_desired.compute"
+	TraceSiteSessionSnapshot         TraceSiteCode = "session_snapshot.load"
+	TraceSiteSessionSync             TraceSiteCode = "session_sync.update_index"
 	TraceSitePoolAgentCap            TraceSiteCode = "reconciler.pool.agent_cap"
 	TraceSitePoolRigCap              TraceSiteCode = "reconciler.pool.rig_cap"
 	TraceSitePoolWorkspaceCap        TraceSiteCode = "reconciler.pool.workspace_cap"
@@ -539,8 +544,13 @@ func normalizeTraceSiteCode(raw string) (TraceSiteCode, string) {
 		TraceSiteCycleStart,
 		TraceSiteCycleFinish,
 		TraceSiteConfigReload,
+		TraceSiteControllerTickPhase,
 		TraceSiteDesiredStateBuild,
+		TraceSiteDemandSnapshot,
+		TraceSiteOrderDispatch,
 		TraceSitePoolDemandCompute,
+		TraceSiteSessionSnapshot,
+		TraceSiteSessionSync,
 		TraceSitePoolAgentCap,
 		TraceSitePoolRigCap,
 		TraceSitePoolWorkspaceCap,
