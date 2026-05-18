@@ -1769,3 +1769,195 @@ set -eu
 		t.Fatalf("stderr = %q, want canonical drift detail", stderr.String())
 	}
 }
+
+// silentFallbackFakeBdScript builds a fake `bd` shell script that emits the
+// silent-fallback marker pair on stderr ("auto-importing ... into empty
+// database") and exits 0 — the exact shape bd produces when it loses the
+// managed Dolt server and falls back to opening the on-disk store. doBd
+// should treat this as a hard failure regardless of bd's exit code.
+const silentFallbackFakeBdScript = `#!/bin/sh
+echo "auto-importing 220929 bytes from .beads/issues.jsonl into empty database... auto-imported 123 issues" >&2
+echo "$@"
+exit 0
+`
+
+// silentFallbackTestSetup writes a fake bd binary that emits the silent-
+// fallback marker, prepends it to PATH, and configures a minimal city as a
+// bd-backed scope (via GC_CITY_PATH) so doBd will dispatch through it.
+func silentFallbackTestSetup(t *testing.T, fakeBdScript string) {
+	t.Helper()
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	t.Cleanup(func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	})
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	port := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
+
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "issue_prefix: demo\n" +
+		"gc.endpoint_origin: city_canonical\n" +
+		"gc.endpoint_status: verified\n" +
+		"dolt.auto-start: false\n" +
+		"dolt.host: 127.0.0.1\n" +
+		"dolt.port: " + port + "\n"
+	// writeReachableManagedDoltState already creates .beads, but don't rely
+	// on that side-effect — make the directory explicit before writing.
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_DOLT_PORT", port)
+}
+
+// TestGcBdSurfacesSilentFallbackAsLoudError_UpdatePath pins the #2080 fix:
+// when bd's update path silently falls back to the on-disk store, gc bd must
+// convert that into a non-zero exit with an operator-facing message instead
+// of letting the silent write loss reach the operator as success.
+func TestGcBdSurfacesSilentFallbackAsLoudError_UpdatePath(t *testing.T) {
+	silentFallbackTestSetup(t, silentFallbackFakeBdScript)
+
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"update", "demo-abc", "--set-metadata", "k=v"}, &stdout, &stderr)
+	if got != bdSilentFallbackExitCode {
+		t.Fatalf("doBd(update) = %d, want %d (silent-fallback exit code); stderr=%q",
+			got, bdSilentFallbackExitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "managed Dolt unreachable") {
+		t.Fatalf("stderr missing loud-fail message; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "auto-importing") {
+		t.Fatalf("original bd stderr not passed through; stderr=%q", stderr.String())
+	}
+}
+
+// TestGcBdSurfacesSilentFallbackAsLoudError_ClosePath pins the #2079 half of
+// the bd-write-persistence quad: bd close goes through the same doBd
+// handoff, so the silent-fallback detection must fire identically. Pre-fix,
+// gc bd close would have exited 0 even when the close never persisted to
+// JSONL (the behavior #2079 documents).
+func TestGcBdSurfacesSilentFallbackAsLoudError_ClosePath(t *testing.T) {
+	silentFallbackTestSetup(t, silentFallbackFakeBdScript)
+
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"close", "demo-abc", "-r", "duplicate"}, &stdout, &stderr)
+	if got != bdSilentFallbackExitCode {
+		t.Fatalf("doBd(close) = %d, want %d (silent-fallback exit code); stderr=%q",
+			got, bdSilentFallbackExitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "managed Dolt unreachable") {
+		t.Fatalf("stderr missing loud-fail message; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "auto-importing") {
+		t.Fatalf("original bd stderr not passed through; stderr=%q", stderr.String())
+	}
+}
+
+// TestGcBdHappyPathExitsZeroWithoutFallbackMarker is the inverse: a clean
+// bd run that produces no auto-import marker must NOT be converted into the
+// loud-fail. This guards against false positives where bd's stderr happens
+// to contain unrelated content.
+func TestGcBdHappyPathExitsZeroWithoutFallbackMarker(t *testing.T) {
+	// Fake bd that exits 0 with normal output and an unrelated stderr line.
+	const happyPathFakeBdScript = `#!/bin/sh
+echo "some normal bd output"
+echo "some unrelated stderr line" >&2
+exit 0
+`
+	silentFallbackTestSetup(t, happyPathFakeBdScript)
+
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"list"}, &stdout, &stderr)
+	if got != 0 {
+		t.Fatalf("doBd(list) = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "managed Dolt unreachable") {
+		t.Fatalf("loud-fail message fired on a happy-path run; stderr=%q", stderr.String())
+	}
+}
+
+// TestBdOutputIndicatesSilentFallback covers the marker-detection helper
+// directly with table-driven cases so the source-of-truth for what counts
+// as "silent fallback" is unit-pinned.
+func TestBdOutputIndicatesSilentFallback(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"empty", "", false},
+		{"single marker only auto-importing", "auto-importing 100 bytes from foo", false},
+		{"single marker only into-empty-database", "into empty database", false},
+		{"both markers same line", "auto-importing 100 bytes into empty database", true},
+		{"both markers reversed order", "into empty database <- auto-importing 100 bytes", true},
+		{"both markers across newlines", "auto-importing 100 bytes\n  into empty database\n  done", true},
+		{"case insensitive uppercase", "AUTO-IMPORTING INTO EMPTY DATABASE", true},
+		{"case insensitive mixed", "Auto-Importing 200 bytes Into Empty Database", true},
+		{"unrelated transport error", "dial tcp 127.0.0.1:3306: connect: connection refused", false},
+		{"unrelated server-unreachable error", "server unreachable", false},
+		{"both markers buried in long output", "starting bd\n... \nauto-importing 220929 bytes from .beads/issues.jsonl into empty database... \n... \nauto-imported 123 issues\n", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := bdOutputIndicatesSilentFallback(tt.input); got != tt.want {
+				t.Errorf("bdOutputIndicatesSilentFallback(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHeadLimitedWriter pins the bounded-prefix behavior used to scan bd's
+// stderr: writes past the limit are reported as fully consumed (so it is
+// safe behind io.MultiWriter) but only the first limit bytes are retained.
+func TestHeadLimitedWriter(t *testing.T) {
+	t.Run("retains only the first limit bytes of an oversized write", func(t *testing.T) {
+		w := &headLimitedWriter{limit: 5}
+		n, err := w.Write([]byte("abcdefgh"))
+		if err != nil || n != 8 {
+			t.Fatalf("Write = (%d, %v), want (8, nil)", n, err)
+		}
+		if got := w.String(); got != "abcde" {
+			t.Fatalf("String() = %q, want %q", got, "abcde")
+		}
+	})
+	t.Run("accumulates across writes and stops at the limit", func(t *testing.T) {
+		w := &headLimitedWriter{limit: 5}
+		for _, chunk := range []string{"ab", "cdef", "ghi"} {
+			if n, err := w.Write([]byte(chunk)); err != nil || n != len(chunk) {
+				t.Fatalf("Write(%q) = (%d, %v), want (%d, nil)", chunk, n, err, len(chunk))
+			}
+		}
+		if got := w.String(); got != "abcde" {
+			t.Fatalf("String() = %q, want %q", got, "abcde")
+		}
+	})
+	t.Run("zero limit retains nothing but still consumes the write", func(t *testing.T) {
+		w := &headLimitedWriter{limit: 0}
+		n, err := w.Write([]byte("xyz"))
+		if err != nil || n != 3 {
+			t.Fatalf("Write = (%d, %v), want (3, nil)", n, err)
+		}
+		if got := w.String(); got != "" {
+			t.Fatalf("String() = %q, want empty", got)
+		}
+	})
+}
