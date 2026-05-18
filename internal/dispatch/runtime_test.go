@@ -6618,7 +6618,16 @@ func TestRunRalphCheckTimeoutMetadataPrecedence(t *testing.T) {
 
 func TestRunRalphCheckUsesStorePathForRelativeCheckAndSubjectEnv(t *testing.T) {
 	cityPath := t.TempDir()
-	storePath := t.TempDir()
+	// storePath models a rig store living as a subtree of the city, matching
+	// the production rig layout. The disjoint-tempdir construction this test
+	// previously used was unrealistic and obscured the gastownhall/gascity#2320
+	// envelope/base distinction: relative gc.check_path now resolves under
+	// storePath (the join base) but containment is validated against cityPath
+	// (the security envelope).
+	storePath := filepath.Join(cityPath, "rig-store")
+	if err := os.MkdirAll(storePath, 0o755); err != nil {
+		t.Fatalf("mkdir rig-store: %v", err)
+	}
 	workDir := filepath.Join(storePath, "frontend")
 	checkDir := filepath.Join(workDir, "checks")
 	if err := os.MkdirAll(checkDir, 0o755); err != nil {
@@ -6668,6 +6677,99 @@ func TestRunRalphCheckUsesStorePathForRelativeCheckAndSubjectEnv(t *testing.T) {
 		if !strings.Contains(result.Stdout, want) {
 			t.Fatalf("stdout = %q, want to contain %q", result.Stdout, want)
 		}
+	}
+}
+
+// TestRunRalphCheckRigScopedRelativeCheckPathResolvesAgainstStore pins the
+// gastownhall/gascity#2320 fix: a ralph check bead with a relative
+// gc.check_path and a storePath that is a SUBTREE of cityPath. The
+// gc.check_path here (`../scripts/check.sh`) deliberately escapes the store
+// (the join base) upward into the city tree (the security envelope) — the
+// exact shape that fails pre-fix. Before the envelope/base split,
+// ResolveConditionPath conflated the two roles, so this relative path was
+// validated against storePath and the traversal check rejected it even
+// though the script is comfortably inside the city envelope.
+func TestRunRalphCheckRigScopedRelativeCheckPathResolvesAgainstStore(t *testing.T) {
+	cityPath := t.TempDir()
+	storePath := filepath.Join(cityPath, "rig-frontend")
+	if err := os.MkdirAll(storePath, 0o755); err != nil {
+		t.Fatalf("mkdir store: %v", err)
+	}
+	// Script lives under the city tree, NOT under the store. A relative
+	// gc.check_path must climb out of the store to reach it.
+	scriptDir := filepath.Join(cityPath, "scripts")
+	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	scriptPath := filepath.Join(scriptDir, "check.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	check := beads.Bead{
+		ID:   "check-rig",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":    "../scripts/check.sh",
+			"gc.check_timeout": "30s",
+		},
+	}
+	subject := beads.Bead{ID: "run-rig", Type: "task"}
+
+	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+		CityPath:  cityPath,
+		StorePath: storePath,
+	})
+	if err != nil {
+		t.Fatalf("runRalphCheck: %v", err)
+	}
+	if result.Outcome != "pass" {
+		t.Fatalf("Outcome = %q, want pass (stderr=%q)", result.Outcome, result.Stderr)
+	}
+}
+
+// TestRunRalphCheckRejectsPathTraversalAboveCityPath pins the security
+// contract: when envelope (cityPath) and base (scriptBase) diverge, a
+// relative gc.check_path that traverses above the city must still be
+// rejected even though it might otherwise resolve via the join base.
+func TestRunRalphCheckRejectsPathTraversalAboveCityPath(t *testing.T) {
+	parent := t.TempDir()
+	cityPath := filepath.Join(parent, "city")
+	storePath := filepath.Join(cityPath, "rig-frontend")
+	if err := os.MkdirAll(storePath, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Outside script lives above cityPath — must be rejected by the envelope.
+	outsideDir := filepath.Join(parent, "outside")
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	outsideScript := filepath.Join(outsideDir, "check.sh")
+	if err := os.WriteFile(outsideScript, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	check := beads.Bead{
+		ID:   "check-evil",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":    "../../outside/check.sh",
+			"gc.check_timeout": "30s",
+		},
+	}
+	subject := beads.Bead{ID: "run-evil", Type: "task"}
+
+	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+		CityPath:  cityPath,
+		StorePath: storePath,
+	})
+	if err == nil {
+		t.Fatalf("expected traversal rejection, got outcome=%q stdout=%q", result.Outcome, result.Stdout)
+	}
+	if !strings.Contains(err.Error(), "traversal") {
+		t.Errorf("expected traversal error, got: %v", err)
 	}
 }
 

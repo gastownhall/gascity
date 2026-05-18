@@ -175,7 +175,11 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	if resolvedWorkDir != "" {
 		scriptBase = resolvedWorkDir
 	}
-	scriptPath, err := convergence.ResolveConditionPath(scriptBase, checkPath)
+	// Pass cityPath and scriptBase as distinct envelope/base roles: in
+	// gastownhall/gascity#2320 storePath (a rig subtree) was passed as both,
+	// causing relative gc.check_path values to be looked up under the rig
+	// tree even when the script lives in the city tree.
+	scriptPath, err := convergence.ResolveConditionPath(cityPath, scriptBase, checkPath)
 	if err != nil {
 		return convergence.GateResult{}, fmt.Errorf("%s: resolving check path: %w", bead.ID, err)
 	}
