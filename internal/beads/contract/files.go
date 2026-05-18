@@ -414,20 +414,21 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 	host := strings.TrimSpace(state.DoltHost)
 	port := strings.TrimSpace(state.DoltPort)
 	user := strings.TrimSpace(state.DoltUser)
+	// Preserve existing dolt.host/port/user when state doesn't carry a value.
+	// soc-g4k1 (mirror of mt-olympus mo-48xus3): a managed-city register
+	// pass with state.Dolt* == "" must NOT strip the keys — an operator who
+	// didn't pass --host/--port should not have their existing config
+	// silently zeroed out. Empty state means "I don't know", not
+	// "intentionally clear". Callers that genuinely want to clear can
+	// delete the key directly before calling this function.
 	if host != "" {
 		changed = setString(root, "dolt.host", host) || changed
-	} else {
-		changed = deleteKeys(root, "dolt.host") || changed
 	}
 	if port != "" {
 		changed = setPort(root, "dolt.port", port) || changed
-	} else {
-		changed = deleteKeys(root, "dolt.port") || changed
 	}
 	if user != "" {
 		changed = setString(root, "dolt.user", user) || changed
-	} else {
-		changed = deleteKeys(root, "dolt.user") || changed
 	}
 
 	changed = deleteKeys(root, deprecatedConfigKeys...) || changed

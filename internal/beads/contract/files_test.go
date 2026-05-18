@@ -175,6 +175,117 @@ func TestEnsureCanonicalConfigPreservesUnknownKeysAndScrubsDeprecatedOnes(t *tes
 	}
 }
 
+// soc-g4k1 (mirror of mt-olympus mo-48xus3): a managed-city register pass
+// that does not specify state.DoltHost/DoltPort/DoltUser must PRESERVE
+// any existing dolt.host/port/user keys in config.yaml — not strip them.
+// Stripping on empty-state caused mt-olympus's bd to silently lose its
+// 57331 port and default to 3306 (wrong DB).
+func TestEnsureCanonicalConfigPreservesDoltKeysWhenStateEmpty(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"issue_prefix: mo",
+		"issue-prefix: mo",
+		"dolt.auto-start: false",
+		"dolt.host: 127.0.0.1",
+		"dolt.port: 57331",
+		"dolt.user: root",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// State carries the endpoint markers but does NOT name a host/port/user
+	// (the canonical "I'm registering a managed city but the operator
+	// didn't pass --host/--port" shape).
+	if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "mo",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	}); err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	// Dolt.* keys MUST survive because state didn't claim them.
+	for _, needle := range []string{
+		"dolt.host: 127.0.0.1",
+		"dolt.port: 57331",
+		"dolt.user: root",
+	} {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("EnsureCanonicalConfig must preserve existing %q when state is empty; got:\n%s", needle, text)
+		}
+	}
+	// And the gc.endpoint_* markers still land on top.
+	for _, needle := range []string{
+		"gc.endpoint_origin: managed_city",
+		"gc.endpoint_status: verified",
+	} {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("EnsureCanonicalConfig must add %q; got:\n%s", needle, text)
+		}
+	}
+}
+
+// soc-g4k1: when state DOES carry a value, it MUST overwrite the
+// existing config.yaml value — the preserve-on-empty fix doesn't change
+// the explicit-value path.
+func TestEnsureCanonicalConfigOverwritesDoltKeysWhenStateSet(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"issue_prefix: mo",
+		"dolt.host: 10.0.0.1",
+		"dolt.port: 9999",
+		"dolt.user: olduser",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "mo",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+		DoltHost:       "127.0.0.1",
+		DoltPort:       "57331",
+		DoltUser:       "root",
+	}); err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	// New values must be present.
+	for _, needle := range []string{
+		"dolt.host: 127.0.0.1",
+		"dolt.port: 57331",
+		"dolt.user: root",
+	} {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("EnsureCanonicalConfig must set %q from state; got:\n%s", needle, text)
+		}
+	}
+	// Old values must be gone.
+	for _, forbidden := range []string{"10.0.0.1", "9999", "olduser"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("EnsureCanonicalConfig should overwrite stale %q; got:\n%s", forbidden, text)
+		}
+	}
+}
+
 func TestEnsureCanonicalConfigCollapsesDuplicateManagedKeys(t *testing.T) {
 	fs := fsys.OSFS{}
 	dir := t.TempDir()
