@@ -62,6 +62,19 @@ type Call struct {
 	Action    string         // only set for Respond calls
 }
 
+// CountCalls returns the number of recorded calls matching method and name.
+func (f *Fake) CountCalls(method, name string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	count := 0
+	for _, call := range f.Calls {
+		if call.Method == method && call.Name == name {
+			count++
+		}
+	}
+	return count
+}
+
 // NewFake returns a ready-to-use [Fake].
 func NewFake() *Fake {
 	return &Fake{

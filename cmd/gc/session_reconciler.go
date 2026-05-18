@@ -25,7 +25,6 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
-	"github.com/gastownhall/gascity/internal/worker"
 )
 
 const maxIdleSleepProbesPerTick = 3
@@ -957,12 +956,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 		// Liveness includes zombie detection: tmux session exists AND
 		// the expected child process is alive (when ProcessNames configured).
-		obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, session.ID, tp.Hints.ProcessNames)
-		if err != nil {
-			obs = worker.LiveObservation{}
-		}
-		running := obs.Running
-		alive := obs.Alive
+		// The desired-session fast path only needs running/alive; attachment
+		// and activity are probed by the narrower branches that use them.
+		running, alive := observeRuntimeProviderLiveness(sp, name, tp.Hints.ProcessNames)
 		peek := cachedSessionPeek(cityPath, store, sp, cfg, session.ID, tp.Hints.ProcessNames)
 
 		// Zombie capture: session exists but process dead — grab scrollback for forensics.

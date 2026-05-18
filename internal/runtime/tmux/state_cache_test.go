@@ -17,6 +17,7 @@ type mockFetcher struct {
 	mu       sync.Mutex
 	calls    int
 	sessions map[string]bool
+	state    runtimeStateSnapshot
 	err      error
 	delay    time.Duration
 }
@@ -39,6 +40,31 @@ func (m *mockFetcher) FetchRunning(ctx context.Context) (map[string]bool, error)
 	return sessions, err
 }
 
+func (m *mockFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, error) {
+	m.mu.Lock()
+	m.calls++
+	state := m.state
+	sessions := m.sessions
+	err := m.err
+	delay := m.delay
+	m.mu.Unlock()
+
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return runtimeStateSnapshot{}, ctx.Err()
+		}
+	}
+	if state.Sessions == nil && sessions != nil {
+		state.Sessions = make(map[string]sessionRuntimeState, len(sessions))
+		for name, running := range sessions {
+			state.Sessions[name] = sessionRuntimeState{Running: running}
+		}
+	}
+	return state, err
+}
+
 func (m *mockFetcher) getCalls() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -49,6 +75,7 @@ func (m *mockFetcher) setResult(sessions map[string]bool, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sessions = sessions
+	m.state = runtimeStateSnapshot{}
 	m.err = err
 }
 
@@ -131,6 +158,70 @@ func TestStateCache_ConcurrentCallersCoalesceIntoOneFetch(t *testing.T) {
 	// singleflight should have coalesced all callers into exactly 1 fetch.
 	if got := f.getCalls(); got != 1 {
 		t.Errorf("expected 1 fetch call (singleflight), got %d", got)
+	}
+}
+
+func TestStateCache_ProcessAliveUsesFreshSnapshot(t *testing.T) {
+	f := &mockFetcher{
+		state: runtimeStateSnapshot{
+			Sessions: map[string]sessionRuntimeState{
+				"agent-1": {
+					Running: true,
+					Panes: []paneRuntimeState{{
+						Command: "claude",
+						PID:     "101",
+					}},
+				},
+			},
+			Processes: newProcessSnapshot([]processRuntimeState{{
+				PID:     "101",
+				PPID:    "1",
+				Command: "claude",
+				Args:    "claude --dangerously-skip-permissions",
+			}}),
+		},
+	}
+	cache := NewStateCache(f, 2*time.Second)
+
+	if !cache.ProcessAlive("agent-1", []string{"claude"}) {
+		t.Fatal("ProcessAlive(agent-1, claude) = false, want true")
+	}
+	if !cache.IsRunning("agent-1") {
+		t.Fatal("IsRunning(agent-1) = false, want true from same snapshot")
+	}
+	if cache.ProcessAlive("agent-1", []string{"codex"}) {
+		t.Fatal("ProcessAlive(agent-1, codex) = true, want false")
+	}
+	if got := f.getCalls(); got != 1 {
+		t.Fatalf("fetch calls = %d, want 1 across ProcessAlive and IsRunning", got)
+	}
+}
+
+func TestStateCache_ProcessAliveMatchesShellDescendantFromSnapshot(t *testing.T) {
+	f := &mockFetcher{
+		state: runtimeStateSnapshot{
+			Sessions: map[string]sessionRuntimeState{
+				"agent-1": {
+					Running: true,
+					Panes: []paneRuntimeState{{
+						Command: "bash",
+						PID:     "101",
+					}},
+				},
+			},
+			Processes: newProcessSnapshot([]processRuntimeState{
+				{PID: "101", PPID: "1", Command: "bash", Args: "bash -lc codex"},
+				{PID: "102", PPID: "101", Command: "node", Args: "node /usr/local/bin/codex"},
+			}),
+		},
+	}
+	cache := NewStateCache(f, 2*time.Second)
+
+	if !cache.ProcessAlive("agent-1", []string{"codex"}) {
+		t.Fatal("ProcessAlive(agent-1, codex) = false, want true from cached descendant snapshot")
+	}
+	if got := f.getCalls(); got != 1 {
+		t.Fatalf("fetch calls = %d, want 1", got)
 	}
 }
 

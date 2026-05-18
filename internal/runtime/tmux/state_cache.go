@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,23 +23,49 @@ const defaultCacheTTL = 2 * time.Second
 // sessions and logs a degraded warning.
 const defaultStaleTTL = 30 * time.Second
 
-// fetchTimeout is the hard timeout for a single FetchRunning call.
+// fetchTimeout is the hard timeout for a single runtime-state fetch.
 const fetchTimeout = 3 * time.Second
 
 // StateFetcher abstracts tmux subprocess calls for testability.
 type StateFetcher interface {
-	// FetchRunning returns the set of session names with live (non-dead) panes.
+	// FetchState returns a runtime-state snapshot for live sessions.
 	// Sessions with remain-on-exit corpses (pane_dead=1) are excluded.
-	FetchRunning(ctx context.Context) (map[string]bool, error)
+	FetchState(ctx context.Context) (runtimeStateSnapshot, error)
 }
 
-// StateCache caches the set of running tmux sessions to avoid
-// spawning N subprocess calls per status check. Concurrent callers
-// are coalesced via singleflight so at most one tmux list-sessions
-// subprocess runs at a time.
+type paneRuntimeState struct {
+	Command string
+	PID     string
+}
+
+type sessionRuntimeState struct {
+	Running bool
+	Panes   []paneRuntimeState
+}
+
+type processRuntimeState struct {
+	PID     string
+	PPID    string
+	Command string
+	Args    string
+}
+
+type processSnapshot struct {
+	byPID    map[string]processRuntimeState
+	children map[string][]string
+}
+
+type runtimeStateSnapshot struct {
+	Sessions  map[string]sessionRuntimeState
+	Processes processSnapshot
+}
+
+// StateCache caches tmux runtime state to avoid spawning N subprocess calls per
+// status check or reconciler pass. Concurrent callers are coalesced via
+// singleflight so at most one tmux/process snapshot refresh runs at a time.
 type StateCache struct {
 	mu        sync.RWMutex
-	sessions  map[string]bool
+	state     runtimeStateSnapshot
 	fetchedAt time.Time
 	lastError error
 	dirty     bool // set by Invalidate(); cleared on successful refresh
@@ -61,15 +89,31 @@ func NewStateCache(fetcher StateFetcher, ttl time.Duration) *StateCache {
 // If the cache is stale, a refresh is triggered (coalesced via singleflight).
 // On refresh failure, the last-known-good cache is preserved up to staleTTL.
 func (c *StateCache) IsRunning(name string) bool {
+	state := c.currentState()
+	session, ok := state.Sessions[name]
+	return ok && session.Running
+}
+
+// ProcessAlive reports whether the named session has a process matching one of
+// processNames according to the cached runtime snapshot. An empty processNames
+// slice preserves Provider.ProcessAlive's "no check possible" behavior.
+func (c *StateCache) ProcessAlive(name string, processNames []string) bool {
+	if len(processNames) == 0 {
+		return true
+	}
+	return c.currentState().processAlive(name, processNames)
+}
+
+func (c *StateCache) currentState() runtimeStateSnapshot {
 	c.mu.RLock()
-	sessions := c.sessions
+	state := c.state
 	fetchedAt := c.fetchedAt
 	dirty := c.dirty
 	c.mu.RUnlock()
 
 	// Cache hit: fresh data, not invalidated.
-	if sessions != nil && !fetchedAt.IsZero() && !dirty && time.Since(fetchedAt) < c.ttl {
-		return sessions[name]
+	if state.Sessions != nil && !fetchedAt.IsZero() && !dirty && time.Since(fetchedAt) < c.ttl {
+		return state
 	}
 
 	// Stale, empty, or dirty — trigger refresh.
@@ -82,17 +126,17 @@ func (c *StateCache) IsRunning(name string) bool {
 
 	// Read the (potentially updated) cache.
 	c.mu.RLock()
-	sessions = c.sessions
+	state = c.state
 	fetchedAt = c.fetchedAt
 	c.mu.RUnlock()
 
 	// If the cache is older than staleTTL, report all sessions as not running.
 	// Note: fetchedAt is preserved on failure (never zeroed), so this only
 	// triggers after staleTTL of real wall-clock time since last success.
-	if sessions == nil || fetchedAt.IsZero() || time.Since(fetchedAt) > c.staleTTL {
-		return false
+	if state.Sessions == nil || fetchedAt.IsZero() || time.Since(fetchedAt) > c.staleTTL {
+		return runtimeStateSnapshot{}
 	}
-	return sessions[name]
+	return state
 }
 
 // Invalidate marks the cache as dirty, forcing the next IsRunning call
@@ -109,7 +153,7 @@ func (c *StateCache) Invalidate() {
 // the next refresh cycle (which may race with singleflight coalescing).
 func (c *StateCache) EvictSession(name string) {
 	c.mu.Lock()
-	delete(c.sessions, name)
+	delete(c.state.Sessions, name)
 	c.dirty = true
 	c.mu.Unlock()
 }
@@ -122,7 +166,7 @@ func (c *StateCache) refresh() {
 		defer cancel()
 
 		start := time.Now()
-		sessions, err := c.fetcher.FetchRunning(ctx)
+		state, err := c.fetcher.FetchState(ctx)
 		elapsed := time.Since(start)
 
 		if err != nil {
@@ -137,11 +181,11 @@ func (c *StateCache) refresh() {
 		// Successful refresh is noisy on the session loop; opt-in via env var
 		// keeps it available for diagnostics without polluting normal CLI use.
 		if os.Getenv("GC_LOG_TMUX_CACHE") == "true" {
-			log.Printf("tmux state cache: refreshed %d sessions in %v", len(sessions), elapsed)
+			log.Printf("tmux state cache: refreshed %d sessions in %v", len(state.Sessions), elapsed)
 		}
 
 		c.mu.Lock()
-		c.sessions = sessions
+		c.state = state
 		c.fetchedAt = time.Now()
 		c.lastError = nil
 		c.dirty = false
@@ -155,45 +199,215 @@ type tmuxFetcher struct {
 	tm *Tmux
 }
 
-// FetchRunning runs `tmux list-panes -a -F '#{session_name}\t#{pane_dead}'`
-// and returns a map of session names that have at least one live pane.
+// FetchState runs one tmux pane snapshot and one process-table snapshot.
 // Sessions where remain-on-exit has kept a dead pane (pane_dead=1) are
 // excluded — they represent exited processes, not running ones.
-func (f *tmuxFetcher) FetchRunning(ctx context.Context) (map[string]bool, error) {
-	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}")
+func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, error) {
+	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}")
 	if err != nil {
 		if isNoServerError(err) {
-			return map[string]bool{}, nil // No server = no sessions
+			return runtimeStateSnapshot{Sessions: map[string]sessionRuntimeState{}}, nil // No server = no sessions
 		}
-		return nil, err
+		return runtimeStateSnapshot{}, err
+	}
+	state := runtimeStateSnapshot{
+		Sessions: make(map[string]sessionRuntimeState),
 	}
 	if out == "" {
-		return map[string]bool{}, nil
+		return state, nil
 	}
 
-	// Track which sessions have dead panes vs live panes.
-	// A session is "running" if it has at least one live pane.
-	dead := make(map[string]bool)
-	alive := make(map[string]bool)
 	for _, line := range strings.Split(out, "\n") {
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) != 2 || parts[0] == "" {
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) < 2 || parts[0] == "" {
 			continue
 		}
 		name := parts[0]
 		if parts[1] == "1" {
-			dead[name] = true
-		} else {
-			alive[name] = true
+			continue
+		}
+		var pane paneRuntimeState
+		if len(parts) > 2 {
+			pane.Command = strings.TrimSpace(parts[2])
+		}
+		if len(parts) > 3 {
+			pane.PID = strings.TrimSpace(parts[3])
+		}
+		session := state.Sessions[name]
+		session.Running = true
+		if pane.Command != "" || pane.PID != "" {
+			session.Panes = append(session.Panes, pane)
+		}
+		state.Sessions[name] = session
+	}
+	state.Processes = fetchProcessSnapshot(ctx)
+	return state, nil
+}
+
+func (s runtimeStateSnapshot) processAlive(sessionName string, processNames []string) bool {
+	session, ok := s.Sessions[sessionName]
+	if !ok || !session.Running {
+		return false
+	}
+	names := processNameSet(processNames)
+	if len(names) == 0 {
+		return false
+	}
+	for _, pane := range session.Panes {
+		if pane.processAlive(names, s.Processes) {
+			return true
 		}
 	}
+	return false
+}
 
-	// alive wins over dead — if any pane is alive, session is running.
-	sessions := make(map[string]bool, len(alive))
-	for name := range alive {
-		sessions[name] = true
+func (p paneRuntimeState) processAlive(names map[string]struct{}, processes processSnapshot) bool {
+	if _, ok := names[p.Command]; ok && p.Command != "" {
+		return true
 	}
-	return sessions, nil
+	if p.PID == "" {
+		return false
+	}
+	if isSupportedShell(p.Command) {
+		return processes.hasDescendantWithNames(p.PID, names, 0)
+	}
+	if processes.processMatchesNames(p.PID, names) {
+		return true
+	}
+	return processes.hasDescendantWithNames(p.PID, names, 0)
+}
+
+func processNameSet(names []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if name = strings.TrimSpace(name); name != "" {
+			set[name] = struct{}{}
+		}
+	}
+	return set
+}
+
+func isSupportedShell(command string) bool {
+	for _, shell := range supportedShells {
+		if command == shell {
+			return true
+		}
+	}
+	return false
+}
+
+func newProcessSnapshot(processes []processRuntimeState) processSnapshot {
+	snapshot := processSnapshot{
+		byPID:    make(map[string]processRuntimeState, len(processes)),
+		children: make(map[string][]string),
+	}
+	for _, process := range processes {
+		process.PID = strings.TrimSpace(process.PID)
+		process.PPID = strings.TrimSpace(process.PPID)
+		process.Command = strings.TrimSpace(process.Command)
+		process.Args = strings.TrimSpace(process.Args)
+		if process.PID == "" {
+			continue
+		}
+		snapshot.byPID[process.PID] = process
+		if process.PPID != "" {
+			snapshot.children[process.PPID] = append(snapshot.children[process.PPID], process.PID)
+		}
+	}
+	return snapshot
+}
+
+func fetchProcessSnapshot(ctx context.Context) processSnapshot {
+	out, err := exec.CommandContext(ctx, "ps", "-eo", "pid=,ppid=,comm=,args=").Output()
+	if err != nil {
+		return processSnapshot{}
+	}
+	return parseProcessSnapshot(string(out))
+}
+
+func parseProcessSnapshot(out string) processSnapshot {
+	processes := make([]processRuntimeState, 0)
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		process := processRuntimeState{
+			PID:     fields[0],
+			PPID:    fields[1],
+			Command: fields[2],
+		}
+		if len(fields) > 3 {
+			process.Args = strings.Join(fields[3:], " ")
+		}
+		processes = append(processes, process)
+	}
+	return newProcessSnapshot(processes)
+}
+
+func (s processSnapshot) processMatchesNames(pid string, names map[string]struct{}) bool {
+	if len(names) == 0 {
+		return false
+	}
+	process, ok := s.byPID[pid]
+	if !ok {
+		return false
+	}
+	if _, ok := names[filepath.Base(process.Command)]; ok {
+		return true
+	}
+	args := strings.Fields(process.Args)
+	if len(args) == 0 {
+		return false
+	}
+	argv0 := filepath.Base(args[0])
+	if _, ok := names[argv0]; ok {
+		return true
+	}
+	knownInterpreters := map[string]struct{}{
+		"node": {}, "bun": {}, "npx": {}, "deno": {},
+	}
+	runnerSubcommands := map[string]struct{}{
+		"run": {}, "exec": {}, "x": {},
+	}
+	if _, isInterpreter := knownInterpreters[argv0]; !isInterpreter {
+		return false
+	}
+	for _, token := range args[1:] {
+		token = strings.TrimSpace(token)
+		if token == "" || strings.HasPrefix(token, "-") {
+			continue
+		}
+		if _, isRunner := runnerSubcommands[token]; isRunner {
+			continue
+		}
+		base := filepath.Base(token)
+		if _, ok := names[base]; ok {
+			return true
+		}
+		baseNoExt := strings.TrimSuffix(base, filepath.Ext(base))
+		if _, ok := names[baseNoExt]; ok {
+			return true
+		}
+		break
+	}
+	return false
+}
+
+func (s processSnapshot) hasDescendantWithNames(pid string, names map[string]struct{}, depth int) bool {
+	const maxDepth = 10
+	if len(names) == 0 || depth > maxDepth {
+		return false
+	}
+	for _, childPID := range s.children[pid] {
+		if s.processMatchesNames(childPID, names) {
+			return true
+		}
+		if s.hasDescendantWithNames(childPID, names, depth+1) {
+			return true
+		}
+	}
+	return false
 }
 
 // isNoServerError checks if the error is a "no server running" error.

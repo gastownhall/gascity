@@ -290,7 +290,7 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	if len(processNames) == 0 {
 		return true
 	}
-	return p.tm.IsRuntimeRunning(name, processNames)
+	return p.cache.ProcessAlive(name, processNames)
 }
 
 // ObserveLiveness reports both pane presence and agent-process presence for a
