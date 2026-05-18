@@ -1719,7 +1719,13 @@ type DaemonConfig struct {
 	// index update or manifest rotation, which corrupts dolt's chunk journal
 	// (see gastownhall/gascity#2090). Defaults to "30s", which absorbs the
 	// longest observed flush window on commodity SSDs without unduly delaying
-	// unregister.
+	// unregister. Set to "0s" for immediate SIGKILL with no grace. Negative
+	// values are rejected at config load. Note: when a city is stopped via the
+	// controller (`gc stop` while a controller is running), the standalone
+	// controller-stop wait budget is `shutdown_timeout` + 15s (20s at the
+	// default `shutdown_timeout` of "5s"); a `dolt_stop_timeout` larger than
+	// that budget can be cut short on that path even though the direct
+	// stop/unregister path always honors the full grace.
 	DoltStopTimeout string `toml:"dolt_stop_timeout,omitempty" jsonschema:"default=30s"`
 	// WispGCInterval is how often wisp GC runs. Duration string (e.g., "5m", "1h").
 	// Wisp GC is disabled unless both WispGCInterval and WispTTL are set.

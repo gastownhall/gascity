@@ -77,6 +77,35 @@ func TestResolveManagedDoltStopTimeoutMissingCityFallsBackToDefault(t *testing.T
 	}
 }
 
+func TestResolveManagedDoltStopTimeoutEmptyCityPathReturnsDefault(t *testing.T) {
+	// An empty cityPath must NOT trigger loadCityConfig("", …), which would
+	// resolve "city.toml" relative to cwd and materialize builtin packs
+	// there. Plant a stray ./city.toml with a non-default dolt_stop_timeout;
+	// resolveManagedDoltStopTimeout("") must ignore it and return the default.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`
+[workspace]
+name = "stray"
+
+[daemon]
+dolt_stop_timeout = "1m"
+
+[[agent]]
+name = "mayor"
+`), 0o644); err != nil {
+		t.Fatalf("write stray city.toml: %v", err)
+	}
+	t.Chdir(dir)
+
+	got := resolveManagedDoltStopTimeout("")
+	if got != config.DefaultDoltStopTimeout {
+		t.Errorf("resolveManagedDoltStopTimeout(\"\") = %v, want %v (default — must not read stray ./city.toml)", got, config.DefaultDoltStopTimeout)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".gc")); err == nil {
+		t.Error("resolveManagedDoltStopTimeout(\"\") materialized .gc/ under cwd; empty cityPath must not load config")
+	}
+}
+
 func TestResolveManagedDoltStopTimeoutInvalidValueFallsBackToDefault(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`

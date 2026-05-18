@@ -28,7 +28,16 @@ func stopManagedDoltProcess(cityPath, port string) (managedDoltStopReport, error
 // when available, falling back to config.DefaultDoltStopTimeout if the config
 // cannot be loaded. Independent of `[daemon].shutdown_timeout` so a slow agent
 // drain cannot steal dolt's flush window (see gastownhall/gascity#2090).
+//
+// An empty cityPath returns the default without attempting a config load:
+// loadCityConfig("", …) would resolve "city.toml" relative to the current
+// working directory, materializing builtin packs under cwd and reading an
+// unrelated ./city.toml. Recovery/startup-cleanup callers may pass an empty
+// cityPath, so this guard keeps that path from loading a stray config.
 func resolveManagedDoltStopTimeout(cityPath string) time.Duration {
+	if strings.TrimSpace(cityPath) == "" {
+		return config.DefaultDoltStopTimeout
+	}
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil || cfg == nil {
 		return config.DefaultDoltStopTimeout

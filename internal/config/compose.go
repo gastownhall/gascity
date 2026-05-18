@@ -601,6 +601,13 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	prov.Warnings = append(prov.Warnings, ValidateDurations(root, path)...)
 	prov.Warnings = append(prov.Warnings, ValidateEventsRotation(root)...)
 
+	// Reject negative durations that parse cleanly but are silently
+	// destructive at runtime (e.g. a negative dolt_stop_timeout collapses
+	// the managed-dolt SIGTERM→SIGKILL grace to an immediate kill).
+	if err := ValidateNonNegativeDurations(root, path); err != nil {
+		return nil, nil, err
+	}
+
 	// Validate cross-entity semantic constraints.
 	prov.Warnings = append(prov.Warnings, ValidateSemantics(root, path)...)
 	prov.Warnings = append(prov.Warnings, DetectLegacyProviderInheritance(root, path)...)

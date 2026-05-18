@@ -211,6 +211,11 @@ func resolveDoltArchiveLevel(explicit int) int {
 // a too-short hardcoded grace cannot SIGKILL dolt mid-flush on these paths
 // either (gastownhall/gascity#2090). cityPath may be empty — the grace then
 // falls back to config.DefaultDoltStopTimeout.
+//
+// The liveness-poll interval is clamped to the grace via
+// managedDoltStopPollInterval, matching the stop/unregister path: without the
+// clamp a sub-100ms configured grace would still sleep a fixed ~100ms before
+// the first re-check, sending SIGKILL well past the intended deadline.
 func terminateManagedDoltPID(cityPath string, pid int) error {
 	if pid <= 0 {
 		return nil
@@ -220,12 +225,14 @@ func terminateManagedDoltPID(cityPath string, pid int) error {
 		return err
 	}
 	_ = process.Signal(syscall.SIGTERM)
-	deadline := time.Now().Add(resolveManagedDoltStopTimeout(cityPath))
+	gracePeriod := resolveManagedDoltStopTimeout(cityPath)
+	deadline := time.Now().Add(gracePeriod)
+	pollInterval := managedDoltStopPollInterval(gracePeriod)
 	for time.Now().Before(deadline) {
 		if !pidAlive(pid) {
 			return nil
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(pollInterval)
 	}
 	_ = process.Signal(syscall.SIGKILL)
 	time.Sleep(250 * time.Millisecond)
