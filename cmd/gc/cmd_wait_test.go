@@ -2852,7 +2852,7 @@ func TestRouteWaitList_SixRowMatrix(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			code := routeWaitList(cityPath, c, tc.nilReason, "", "", &stdout, &stderr)
+			code := routeWaitList(cityPath, c, tc.nilReason, "", "", false, &stdout, &stderr)
 
 			if code != tc.wantExit {
 				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
@@ -2952,7 +2952,7 @@ func TestRouteWaitInspect_SixRowMatrix(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			code := routeWaitInspect(cityPath, c, tc.nilReason, "ga-missing", &stdout, &stderr)
+			code := routeWaitInspect(cityPath, c, tc.nilReason, "ga-missing", false, &stdout, &stderr)
 
 			if code != tc.wantExit {
 				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
@@ -2998,7 +2998,7 @@ func TestRouteWaitList_PassesWaitBeadLabelConstant(t *testing.T) {
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	if code := routeWaitList(cityPath, c, "", "", "", &stdout, &stderr); code != 0 {
+	if code := routeWaitList(cityPath, c, "", "", "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
 	if gotQuery != sessionpkg.WaitBeadLabel {
@@ -3020,7 +3020,7 @@ func TestRouteWaitList_StaleBannerOver30s(t *testing.T) {
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	var stdout, stderr bytes.Buffer
-	if code := routeWaitList(cityPath, c, "", "", "", &stdout, &stderr); code != 0 {
+	if code := routeWaitList(cityPath, c, "", "", "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "cache age: 45s") {
@@ -3066,8 +3066,8 @@ func TestRenderWaitListFromAPI_FiltersNonWaitBeads(t *testing.T) {
 		AgeSeconds: 1,
 	}
 
-	var stdout bytes.Buffer
-	if code := renderWaitListFromAPI(cr, "", &stdout); code != 0 {
+	var stdout, stderr bytes.Buffer
+	if code := renderWaitListFromAPI("test-city-path", cr, "", "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d", code)
 	}
 	out := stdout.String()
@@ -3100,7 +3100,7 @@ func TestRenderWaitInspectFromAPI_RejectsNonWait(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := renderWaitInspectFromAPI(cr, "ga-task", &stdout, &stderr)
+	code := renderWaitInspectFromAPI("test-city-path", cr, "ga-task", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
 	}

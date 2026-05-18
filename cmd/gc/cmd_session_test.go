@@ -2633,6 +2633,7 @@ func TestRouteSessionList_APIJSONIncludesCacheAge(t *testing.T) {
 	if code := routeSessionList(cityPath, "", "", nil, "controller-down", true, &stdout, &stderr); code != 0 {
 		t.Fatalf("fallback exit = %d, stderr=%q", code, stderr.String())
 	}
+	out = nil
 	if err := json.Unmarshal(stdout.Bytes(), &out); err == nil {
 		if _, ok := out["_cache_age_s"]; ok {
 			t.Errorf("_cache_age_s must be absent on fallback:\n%s", stdout.String())
