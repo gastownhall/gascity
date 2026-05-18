@@ -81,8 +81,11 @@ func (p *startOutputProxy) Flush() error {
 		return nil
 	}
 	for _, record := range p.records {
+		if !record.warning {
+			continue
+		}
 		line := record.line
-		if record.warning && record.duplicate > 0 {
+		if record.duplicate > 0 {
 			line = fmt.Sprintf("%s (suppressed %d more)", line, record.duplicate)
 		}
 		if _, err := fmt.Fprintln(p.dst, line); err != nil {
@@ -134,7 +137,11 @@ func (p *startOutputProxy) addLineLocked(line string) {
 		p.records = append(p.records, startOutputRecord{line: line, warning: true})
 		return
 	}
-	p.records = append(p.records, startOutputRecord{line: line})
+	// Stream non-warning, non-fatal lines directly so operators see
+	// progress live instead of waiting until Flush().
+	if p.dst != nil {
+		fmt.Fprintln(p.dst, line) //nolint:errcheck // best-effort streaming
+	}
 }
 
 func (p *startOutputProxy) setFatalLocked(message string) {

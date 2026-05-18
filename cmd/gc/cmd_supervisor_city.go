@@ -129,8 +129,25 @@ func cityUsesManagedReconciler(cityPath string) bool {
 	return supervisorAlive() != 0
 }
 
+// justRestartedSupervisorPID records the PID of a supervisor we just
+// auto-restarted in this invocation. Set by runStartDriftCheck after a
+// successful restart so that ensureNoStandaloneController can recognize
+// the new supervisor on the controller socket and not misclassify it as
+// a competing standalone during the brief window before the registry
+// reflects it managing the city. Zero when no restart has happened in
+// this process.
+var justRestartedSupervisorPID int
+
 func ensureNoStandaloneController(cityPath string) (int, error) {
 	if pid := controllerAlive(cityPath); pid != 0 {
+		// If we just auto-restarted the supervisor in this invocation,
+		// the new supervisor process is briefly visible on the controller
+		// socket before the registry catches up. Treat that as our own
+		// supervisor, not a competing standalone controller. Match by
+		// PID is deterministic — no polling or sleeping required.
+		if justRestartedSupervisorPID != 0 && pid == justRestartedSupervisorPID {
+			return 0, nil
+		}
 		return pid, errControllerAlreadyRunning
 	}
 	gcDir := filepath.Join(cityPath, ".gc")

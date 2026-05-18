@@ -376,6 +376,38 @@ func TestStartDrift_RestartLoopGuard_RefusesFourthInWindow(t *testing.T) {
 	}
 }
 
+// TestStartDrift_RestartDoesNotTriggerStandaloneControllerConflict is a
+// regression test for the race in which the just-spawned supervisor is
+// briefly visible on the controller socket before the registry reflects
+// it managing the city. Before the fix, registerCityWithSupervisorNamed's
+// ensureNoStandaloneController call would see the new supervisor's PID
+// on the controller socket and misclassify it as a competing standalone
+// controller — failing `gc start` immediately after a successful binary
+// drift restart. The fix records the just-restarted PID so the check
+// short-circuits when the socket-holder matches our own new supervisor.
+//
+// The full-flow path (proxy → drift → restart → register) must:
+//   - exit 0;
+//   - never print "standalone controller already running";
+//   - converge /health to the new build_id.
+func TestStartDrift_RestartDoesNotTriggerStandaloneControllerConflict(t *testing.T) {
+	tc := setupDriftDirectScenario(t)
+
+	out, exitCode, _ := runDriftCommand(t, tc.newBinary, tc.env, tc.cityDir, "start", tc.cityDir)
+	if exitCode != 0 {
+		t.Fatalf("gc start exit = %d, want 0\noutput:\n%s", exitCode, out)
+	}
+	if strings.Contains(out, "standalone controller already running") {
+		t.Fatalf("gc start surfaced a false-positive standalone-controller conflict\noutput:\n%s", out)
+	}
+	if !strings.Contains(out, "Restarting supervisor") {
+		t.Fatalf("expected restart path to run; output:\n%s", out)
+	}
+	if got := pollHealthBuildID(t, tc.supervisorPort, driftHappyNewCommit, driftReadyTimeout); got != driftHappyNewCommit {
+		t.Fatalf("post-restart /health build_id = %q, want %q", got, driftHappyNewCommit)
+	}
+}
+
 // driftScenario captures the state of a single integration scenario.
 type driftScenario struct {
 	gcHome         string

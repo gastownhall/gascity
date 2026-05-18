@@ -331,6 +331,12 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 		// is of the post-restart state, not the drift report.
 		newPID := supervisorAliveHook()
 		if newPID != 0 {
+			// Record the just-restarted PID so the downstream
+			// registerCityWithSupervisorNamed → ensureNoStandaloneController
+			// check doesn't misclassify our own new supervisor as a
+			// competing standalone during the brief window before the
+			// registry catches up.
+			justRestartedSupervisorPID = newPID
 			newExe, _ := readSupervisorExePath(newPID)
 			ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel2()
