@@ -421,6 +421,161 @@ func TestReconcileSessionBeads_DrainAckWithAssignedOpenWorkSleepsInsteadOfDraini
 	}
 }
 
+// TestReconcileSessionBeads_DrainAckMidPhaseEmitsAssignedWorkEvent pins
+// gastownhall/gascity#2293's Shape A contract: when a session drain-acks
+// while still holding the assignee on an in-progress work bead (the cap-hit
+// shape — worker exited mid-task without nulling assignee), the reconciler
+// MUST emit events.SessionDrainAckedWithAssignedWork carrying the session
+// and bead IDs so pack-side subscribers can apply recovery policy. The SDK
+// reconciler stops at the event; it does not commit, push, or clear assignee.
+func TestReconcileSessionBeads_DrainAckMidPhaseEmitsAssignedWorkEvent(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	fake := events.NewFake()
+	env.rec = fake
+
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	stranded, err := env.store.Create(beads.Bead{
+		Title:    "implement phase work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(stranded bead): %v", err)
+	}
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	var matched *events.Event
+	for i := range fake.Events {
+		if fake.Events[i].Type == events.SessionDrainAckedWithAssignedWork {
+			matched = &fake.Events[i]
+			break
+		}
+	}
+	if matched == nil {
+		t.Fatalf("expected %s event, got %d events of other types", events.SessionDrainAckedWithAssignedWork, len(fake.Events))
+	}
+	if !strings.Contains(string(matched.Payload), session.ID) {
+		t.Errorf("event payload does not reference session ID %q: %s", session.ID, matched.Payload)
+	}
+	if !strings.Contains(string(matched.Payload), stranded.ID) {
+		t.Errorf("event payload does not reference stranded bead ID %q: %s", stranded.ID, matched.Payload)
+	}
+
+	// Verify the SDK did NOT mutate the bead's assignee — recovery policy
+	// must live in pack-side subscribers, not the reconciler.
+	got, err := env.store.Get(stranded.ID)
+	if err != nil {
+		t.Fatalf("Get(stranded): %v", err)
+	}
+	if got.Assignee != session.ID {
+		t.Errorf("stranded bead assignee = %q, want %q (SDK must not clear assignee — pack-side recovery)", got.Assignee, session.ID)
+	}
+	if got.Status == "closed" {
+		t.Errorf("stranded bead status = %q, SDK must not close the bead", got.Status)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckCleanHandoffSuppressesAssignedWorkEvent
+// pins the other half of the Shape A contract: the phase-end handoff path
+// (worker writes --assignee "" before drain-ack) MUST NOT emit the event.
+// Without this discriminator, every clean handoff would be misclassified as
+// a cap-hit, breaking the SDLC multi-phase pattern.
+func TestReconcileSessionBeads_DrainAckCleanHandoffSuppressesAssignedWorkEvent(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	fake := events.NewFake()
+	env.rec = fake
+
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	// Phase-end handoff shape: bead exists but assignee is already nulled
+	// before drain-ack. Status open / re-routed for the next phase.
+	if _, err := env.store.Create(beads.Bead{
+		Title:  "next phase work",
+		Type:   "task",
+		Status: "open",
+		// Assignee intentionally empty — worker handed off before draining.
+		Metadata: map[string]string{"gc.routed_to": "tester"},
+	}); err != nil {
+		t.Fatalf("Create(handed-off bead): %v", err)
+	}
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	_ = reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	for _, ev := range fake.Events {
+		if ev.Type == events.SessionDrainAckedWithAssignedWork {
+			t.Fatalf("unexpected %s event on clean handoff path: %+v", events.SessionDrainAckedWithAssignedWork, ev)
+		}
+	}
+}
+
 func TestReconcileSessionBeads_UndesiredDrainAckStopsAndCloses(t *testing.T) {
 	env := newReconcilerTestEnv()
 	session := env.createSessionBead("worker", "worker")
