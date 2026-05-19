@@ -69,6 +69,69 @@ func TestAddRegistryWithCacheDoesNotConfigureWhenCacheWriteFails(t *testing.T) {
 	}
 }
 
+func TestSeedDefaultConfigIfAbsentWritesMainRegistry(t *testing.T) {
+	home := t.TempDir()
+	seeded, err := SeedDefaultConfigIfAbsent(home)
+	if err != nil {
+		t.Fatalf("SeedDefaultConfigIfAbsent: %v", err)
+	}
+	if !seeded {
+		t.Fatal("SeedDefaultConfigIfAbsent seeded=false, want true")
+	}
+	cfg, err := LoadConfig(home)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Schema != ConfigSchema {
+		t.Fatalf("schema = %d, want %d", cfg.Schema, ConfigSchema)
+	}
+	if len(cfg.Registries) != 1 {
+		t.Fatalf("registries = %+v, want one default registry", cfg.Registries)
+	}
+	if got := cfg.Registries[0]; got.Name != DefaultRegistryName || got.Source != DefaultRegistrySource {
+		t.Fatalf("default registry = %+v, want %s %s", got, DefaultRegistryName, DefaultRegistrySource)
+	}
+}
+
+func TestSeedDefaultConfigIfAbsentPreservesExistingFile(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(ConfigPath(home)), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	before := []byte("schema = 1\n\n[[registry]]\nname = \"custom\"\nsource = \"https://example.com/custom/registry.toml\"\n")
+	if err := os.WriteFile(ConfigPath(home), before, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	seeded, err := SeedDefaultConfigIfAbsent(home)
+	if err != nil {
+		t.Fatalf("SeedDefaultConfigIfAbsent: %v", err)
+	}
+	if seeded {
+		t.Fatal("SeedDefaultConfigIfAbsent seeded=true, want false")
+	}
+	after, err := os.ReadFile(ConfigPath(home))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("existing registries.toml changed:\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
+func TestDefaultRegistrySourceIsReleaseURL(t *testing.T) {
+	const want = "https://raw.githubusercontent.com/gastownhall/gascity-packs/main/registry.toml"
+	if DefaultRegistrySource != want {
+		t.Fatalf("DefaultRegistrySource = %q, want %q", DefaultRegistrySource, want)
+	}
+	source, err := NormalizeSource(DefaultRegistrySource)
+	if err != nil {
+		t.Fatalf("DefaultRegistrySource does not normalize: %v", err)
+	}
+	if !source.Remote {
+		t.Fatalf("DefaultRegistrySource normalized as local source: %+v", source)
+	}
+}
+
 func TestValidateRegistryName(t *testing.T) {
 	valid64 := "a" + strings.Repeat("b", 63)
 	for _, name := range []string{"main", "acme-1", "r0", valid64} {

@@ -15,6 +15,8 @@ type importStateDoctorCheck struct {
 	cityPath string
 }
 
+const importStateSyncFixHint = `run "gc pack sync"`
+
 func newImportStateDoctorCheck(cityPath string) *importStateDoctorCheck {
 	return &importStateDoctorCheck{cityPath: cityPath}
 }
@@ -41,7 +43,7 @@ func (c *importStateDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 	if err != nil {
 		r.Status = doctor.StatusError
 		r.Message = fmt.Sprintf("checking import state: %v", err)
-		r.FixHint = `run "gc import install"`
+		r.FixHint = importStateSyncFixHint
 		return r
 	}
 	if !report.HasIssues() {
@@ -52,7 +54,7 @@ func (c *importStateDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 
 	r.Status = doctor.StatusError
 	r.Message = fmt.Sprintf("%d import state issue(s)", len(report.Issues))
-	r.FixHint = `run "gc import install"`
+	r.FixHint = importStateSyncFixHint
 	for _, issue := range report.Issues {
 		r.Details = append(r.Details, formatImportStateDoctorDetail(issue))
 	}

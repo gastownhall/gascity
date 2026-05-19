@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packregistry"
 )
 
 func disableBootstrapForTests(t *testing.T) {
@@ -345,6 +346,96 @@ func TestFinalizeInitDoesNotWriteImplicitImportState(t *testing.T) {
 	implicitPath := filepath.Join(os.Getenv("GC_HOME"), "implicit-import.toml")
 	if _, err := os.Stat(implicitPath); !os.IsNotExist(err) {
 		t.Fatalf("implicit-import.toml should not be created during finalizeInit, stat err = %v", err)
+	}
+}
+
+func TestFinalizeInitSeedsDefaultPackRegistry(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &initStdout, &initStderr, false)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	stubInitDependencyChecks(t)
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {
+		return true, 0
+	}
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	var stdout, stderr bytes.Buffer
+	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{
+		commandName:           "gc init",
+		skipProviderReadiness: true,
+	})
+	if code != 0 {
+		t.Fatalf("finalizeInit = %d, want 0: %s", code, stderr.String())
+	}
+	cfg, err := packregistry.LoadConfig(gcHome)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Registries) != 1 {
+		t.Fatalf("registries = %+v, want default registry", cfg.Registries)
+	}
+	if got := cfg.Registries[0]; got.Name != packregistry.DefaultRegistryName || got.Source != packregistry.DefaultRegistrySource {
+		t.Fatalf("default registry = %+v", got)
+	}
+	if _, err := os.Stat(filepath.Join(gcHome, "registry-cache", packregistry.DefaultRegistryName, "registry.toml")); !os.IsNotExist(err) {
+		t.Fatalf("finalizeInit should not refresh registry cache during init, stat err = %v", err)
+	}
+}
+
+func TestFinalizeInitPreservesExistingPackRegistryConfig(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	if err := os.MkdirAll(filepath.Dir(packregistry.ConfigPath(gcHome)), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	before := []byte("schema = 1\n\n[[registry]]\nname = \"custom\"\nsource = \"https://example.com/custom/registry.toml\"\n")
+	if err := os.WriteFile(packregistry.ConfigPath(gcHome), before, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &initStdout, &initStderr, false)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	stubInitDependencyChecks(t)
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {
+		return true, 0
+	}
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	var stdout, stderr bytes.Buffer
+	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{
+		commandName:           "gc init",
+		skipProviderReadiness: true,
+	})
+	if code != 0 {
+		t.Fatalf("finalizeInit = %d, want 0: %s", code, stderr.String())
+	}
+	after, err := os.ReadFile(packregistry.ConfigPath(gcHome))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("existing registries.toml changed:\nbefore=%s\nafter=%s", before, after)
 	}
 }
 

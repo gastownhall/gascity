@@ -18,6 +18,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltversion"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/gchome"
+	"github.com/gastownhall/gascity/internal/packregistry"
 )
 
 var (
@@ -79,6 +81,10 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 		}
 	} else if !opts.showProgress && stdout != nil {
 		fmt.Fprintln(stdout, "Skipping provider readiness checks.") //nolint:errcheck // best-effort stdout
+	}
+	if _, err := packregistry.SeedDefaultConfigIfAbsent(gchome.Default()); err != nil {
+		fmt.Fprintf(stderr, "%s: seeding pack registry config: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	// Load config to resolve explicit HQ prefix (workspace.prefix field).

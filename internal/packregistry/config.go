@@ -18,6 +18,12 @@ import (
 // ConfigSchema is the supported registries.toml schema version.
 const ConfigSchema = 1
 
+// DefaultRegistryName is the first-party registry configured by gc init.
+const DefaultRegistryName = "main"
+
+// DefaultRegistrySource is the first-party pack registry catalog.
+const DefaultRegistrySource = "https://raw.githubusercontent.com/gastownhall/gascity-packs/main/registry.toml"
+
 var registryNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 // Config is the parsed registry configuration stored under the Gas City home.
@@ -126,6 +132,34 @@ func AddRegistryWithCache(home string, reg Registry, catalogData []byte) error {
 		}
 		return SaveConfig(home, cfg)
 	})
+}
+
+// SeedDefaultConfigIfAbsent writes the first-party registry configuration when
+// the user has no registry configuration file yet.
+func SeedDefaultConfigIfAbsent(home string) (bool, error) {
+	path := ConfigPath(home)
+	if _, err := os.Stat(path); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Errorf("checking registries.toml: %w", err)
+	}
+	seeded := false
+	err := WithConfigLock(home, func() error {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("checking registries.toml: %w", err)
+		}
+		if err := SaveConfig(home, Config{Registries: []Registry{{
+			Name:   DefaultRegistryName,
+			Source: DefaultRegistrySource,
+		}}}); err != nil {
+			return err
+		}
+		seeded = true
+		return nil
+	})
+	return seeded, err
 }
 
 // RemoveRegistry removes a registry from the registry configuration.

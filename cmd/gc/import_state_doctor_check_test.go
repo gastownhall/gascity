@@ -43,7 +43,7 @@ version = "^1.0"
 	}
 }
 
-func TestImportStateDoctorCheckReportsInstallHint(t *testing.T) {
+func TestImportStateDoctorCheckReportsSyncHint(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
 	writeCityToml(t, cityDir, "[workspace]\nname = \"demo\"\n")
@@ -69,7 +69,7 @@ version = "^1.0"
 				Commit:     "abc123",
 				Path:       filepath.Join(cityDir, ".gc", "cache", "repos", "abc"),
 				Message:    "locked import is missing from the local repo cache",
-				RepairHint: `run "gc import install"`,
+				RepairHint: `run "gc pack sync"`,
 			}},
 		}, nil
 	}
@@ -79,8 +79,8 @@ version = "^1.0"
 	if result.Status != doctor.StatusError {
 		t.Fatalf("status = %v, want Error; result=%#v", result.Status, result)
 	}
-	if check.CanFix() || result.FixHint != `run "gc import install"` {
-		t.Fatalf("result = %#v, want non-fixable install hint", result)
+	if check.CanFix() || result.FixHint != `run "gc pack sync"` {
+		t.Fatalf("result = %#v, want non-fixable sync hint", result)
 	}
 	if len(result.Details) != 1 || !strings.Contains(result.Details[0], "missing-cache") {
 		t.Fatalf("details = %#v", result.Details)
@@ -154,7 +154,7 @@ version = "^1.0"
 			Issues: []packman.CheckIssue{{
 				Severity:   packman.CheckSeverityError,
 				Code:       "missing-lockfile",
-				RepairHint: `run "gc import install"`,
+				RepairHint: `run "gc pack sync"`,
 			}},
 		}, nil
 	}
@@ -168,12 +168,15 @@ version = "^1.0"
 	var stdout, stderr bytes.Buffer
 	_ = doDoctor(false, true, false, false, &stdout, &stderr)
 	out := stdout.String() + stderr.String()
-	if !strings.Contains(out, "packv2-import-state") || !strings.Contains(out, `run "gc import install"`) {
+	if !strings.Contains(out, "packv2-import-state") || !strings.Contains(out, `run "gc pack sync"`) {
 		t.Fatalf("doctor output missing import state check:\n%s", out)
+	}
+	if strings.Contains(out, `run "gc import install"`) {
+		t.Fatalf("doctor output used stale import install hint:\n%s", out)
 	}
 }
 
-func TestDoDoctorRunsImportStateCheckWhenImportInstallStateBroken(t *testing.T) {
+func TestDoDoctorRunsImportStateCheckWhenPackSyncStateBroken(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
@@ -209,10 +212,13 @@ version = "^1.0"
 	_ = doDoctor(false, true, false, false, &stdout, &stderr)
 	out := stdout.String() + stderr.String()
 	if !strings.Contains(out, "packv2-import-state") || !strings.Contains(out, "missing-lockfile") {
-		t.Fatalf("doctor output missing import-state failure for broken install state:\n%s", out)
+		t.Fatalf("doctor output missing import-state failure for broken sync state:\n%s", out)
 	}
-	if !strings.Contains(out, `run "gc import install"`) {
-		t.Fatalf("doctor output missing install hint:\n%s", out)
+	if !strings.Contains(out, `run "gc pack sync"`) {
+		t.Fatalf("doctor output missing sync hint:\n%s", out)
+	}
+	if strings.Contains(out, `run "gc import install"`) {
+		t.Fatalf("doctor output used stale import install hint:\n%s", out)
 	}
 }
 
