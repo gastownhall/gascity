@@ -4632,14 +4632,26 @@ type GetV0CityByCityNameMailParams struct {
 	// Limit Maximum number of results to return. 0 = server default.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
 
-	// Agent Filter by agent name.
+	// Agent Filter by recipient (mailbox).
 	Agent *string `form:"agent,omitempty" json:"agent,omitempty"`
 
-	// Status Filter by status (unread, all).
+	// Status Read-state filter: 'unread' (default) or 'all'. This is independent of the bead status; pass include_closed=true to surface legacy archived (status=closed) beads.
 	Status *string `form:"status,omitempty" json:"status,omitempty"`
 
 	// Rig Filter by rig name.
 	Rig *string `form:"rig,omitempty" json:"rig,omitempty"`
+
+	// From Filter by sender (metadata.from / Bead.From). Empty = no sender constraint.
+	From *string `form:"from,omitempty" json:"from,omitempty"`
+
+	// Label Filter by exact label match (e.g. 'archived:viewer/me'). Empty = no label constraint.
+	Label *string `form:"label,omitempty" json:"label,omitempty"`
+
+	// ArchivedFor Convenience filter for the per-viewer archive model: equivalent to label='archived:<viewer>' with read messages included. Conflicts with 'label'.
+	ArchivedFor *string `form:"archived_for,omitempty" json:"archived_for,omitempty"`
+
+	// IncludeClosed Include status=closed message beads (legacy archived). Default false matches Inbox/All semantics.
+	IncludeClosed *bool `form:"include_closed,omitempty" json:"include_closed,omitempty"`
 }
 
 // SendMailParams defines parameters for SendMail.
@@ -16200,6 +16212,70 @@ func NewGetV0CityByCityNameMailRequest(server string, cityName string, params *G
 		if params.Rig != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "rig", *params.Rig, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.From != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "from", *params.From, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Label != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "label", *params.Label, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ArchivedFor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "archived_for", *params.ArchivedFor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeClosed != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "include_closed", *params.IncludeClosed, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

@@ -313,14 +313,6 @@ func (s *Server) configuredMailRecipientAddress(store beads.Store, identifier st
 	return spec.Identity, true, nil
 }
 
-func mailInboxForRecipients(mp mail.Provider, recipients []string) ([]mail.Message, error) {
-	return mailMessagesForRecipients(mp.Inbox, recipients)
-}
-
-func mailAllForRecipients(mp mail.Provider, recipients []string) ([]mail.Message, error) {
-	return mailMessagesForRecipients(mp.All, recipients)
-}
-
 func mailMessagesForRecipients(fetch func(string) ([]mail.Message, error), recipients []string) ([]mail.Message, error) {
 	recipients = uniqueMailRecipients(recipients)
 	var all []mail.Message
@@ -341,6 +333,112 @@ func mailMessagesForRecipients(fetch func(string) ([]mail.Message, error), recip
 		}
 	}
 	return all, nil
+}
+
+// filterMessagesForRecipients serves the extended /mail filter API. When the
+// provider implements [mail.Filterer], the query is dispatched server-side
+// per recipient route, then deduplicated across routes. Providers without
+// Filter support fall back to All-by-recipient and post-filter every field
+// in [mail.FilterOptions] except IncludeClosed (which is unreachable through
+// the legacy All path — those providers will silently miss legacy archived
+// beads, which matches the pre-ga-rdz behavior).
+//
+// recipients may be empty or contain a single empty string when the caller
+// passed no `agent=` constraint; in that case the filter scans every
+// mailbox the provider serves.
+func filterMessagesForRecipients(mp mail.Provider, recipients []string, opts mail.FilterOptions) ([]mail.Message, error) {
+	recipients = uniqueMailRecipients(recipients)
+	if filterer, ok := mp.(mail.Filterer); ok {
+		return filterViaProvider(filterer, recipients, opts)
+	}
+	return filterViaFallback(mp, recipients, opts)
+}
+
+func filterViaProvider(filterer mail.Filterer, recipients []string, opts mail.FilterOptions) ([]mail.Message, error) {
+	seen := make(map[string]bool)
+	var all []mail.Message
+	for _, recipient := range recipients {
+		routeOpts := opts
+		routeOpts.Recipient = recipient
+		msgs, err := filterer.Filter(routeOpts)
+		if err != nil {
+			return nil, err
+		}
+		for _, msg := range msgs {
+			if msg.ID != "" {
+				if seen[msg.ID] {
+					continue
+				}
+				seen[msg.ID] = true
+			}
+			all = append(all, msg)
+		}
+	}
+	return all, nil
+}
+
+func filterViaFallback(mp mail.Provider, recipients []string, opts mail.FilterOptions) ([]mail.Message, error) {
+	fetch := mp.Inbox
+	if opts.IncludeRead {
+		fetch = mp.All
+	}
+	msgs, err := mailMessagesForRecipients(fetch, recipients)
+	if err != nil {
+		return nil, err
+	}
+	return applyMailPostFilter(msgs, opts), nil
+}
+
+// applyMailPostFilter enforces the FilterOptions fields the Inbox/All
+// providers cannot honor natively: sender, label, and (when IncludeRead is
+// false but a label-narrowed query still returned read-but-archived rows)
+// the read filter. IncludeClosed is intentionally not enforced here — the
+// All path already excludes closed beads at the provider level, so a
+// fallback consumer never sees them.
+func applyMailPostFilter(msgs []mail.Message, opts mail.FilterOptions) []mail.Message {
+	sender := strings.TrimSpace(opts.Sender)
+	label := strings.TrimSpace(opts.Label)
+	if sender == "" && label == "" {
+		return msgs
+	}
+	filtered := msgs[:0]
+	for _, m := range msgs {
+		if sender != "" && strings.TrimSpace(m.From) != sender {
+			continue
+		}
+		if label != "" && !messageHasLabel(m, label) {
+			continue
+		}
+		filtered = append(filtered, m)
+	}
+	return filtered
+}
+
+// messageHasLabel reports whether the mail.Message carries the named label.
+// Labels are reflected on the Message indirectly: ThreadID maps to a
+// thread:<id> label, ReplyTo to reply-to:<id>, the Read flag to "read", and
+// CC entries to cc:<addr> labels. The archived-for-viewer label is currently
+// not reflected on [mail.Message] — providers without server-side filtering
+// cannot detect it in this fallback path and will return an empty list for
+// archived-by-label queries, which is the documented degraded behavior.
+func messageHasLabel(m mail.Message, label string) bool {
+	switch {
+	case label == "read":
+		return m.Read
+	case strings.HasPrefix(label, "thread:"):
+		return label == "thread:"+m.ThreadID
+	case strings.HasPrefix(label, "reply-to:"):
+		return label == "reply-to:"+m.ReplyTo
+	case strings.HasPrefix(label, "cc:"):
+		want := strings.TrimPrefix(label, "cc:")
+		for _, cc := range m.CC {
+			if cc == want {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 func mailCountForRecipients(mp mail.Provider, recipients []string) (int, int, error) {

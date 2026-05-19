@@ -1856,6 +1856,171 @@ func TestProviderCached_BroadSessionListCachedAcrossInboxCalls(t *testing.T) {
 	}
 }
 
+// --- Filter (ga-rdz) ---
+
+// TestFilterBySenderUsesMetadataIndex confirms that ?from= is honored by
+// the beadmail provider via the metadata-indexed query path, not a broad
+// type=message scan. This is the regression mode for gu-2jr (where a prior
+// from-filter shipped broken because it post-filtered nothing).
+func TestFilterBySenderUsesMetadataIndex(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	if _, err := p.Send("alice", "bob", "From alice 1", "a"); err != nil {
+		t.Fatalf("Send alice→bob: %v", err)
+	}
+	if _, err := p.Send("alice", "carol", "From alice 2", "b"); err != nil {
+		t.Fatalf("Send alice→carol: %v", err)
+	}
+	if _, err := p.Send("dave", "bob", "From dave", "c"); err != nil {
+		t.Fatalf("Send dave→bob: %v", err)
+	}
+
+	msgs, err := p.Filter(mail.FilterOptions{Sender: "alice", IncludeRead: true})
+	if err != nil {
+		t.Fatalf("Filter: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("Filter sender=alice returned %d messages, want 2", len(msgs))
+	}
+	for _, m := range msgs {
+		if m.From != "alice" {
+			t.Errorf("Filter sender=alice returned From=%q, want alice", m.From)
+		}
+	}
+}
+
+// TestFilterByLabelMatchesArchivedForViewer confirms the archived-by-label
+// shape returns rows even when they carry the "read" label, replacing the
+// pre-ga-rdz bd-subprocess scan in gas-ui.
+func TestFilterByLabelMatchesArchivedForViewer(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	if _, err := store.Create(beads.Bead{
+		Title: "Archived", Type: "message", Assignee: "bob", From: "alice",
+		Labels: []string{"archived:bob", "read"},
+	}); err != nil {
+		t.Fatalf("seed archived: %v", err)
+	}
+	if _, err := p.Send("alice", "bob", "Unrelated", "still open"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	msgs, err := p.Filter(mail.FilterOptions{
+		Recipient:   "bob",
+		Label:       "archived:bob",
+		IncludeRead: true,
+	})
+	if err != nil {
+		t.Fatalf("Filter: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("Filter label=archived:bob returned %d, want 1", len(msgs))
+	}
+	if msgs[0].Subject != "Archived" {
+		t.Errorf("Filter returned %q, want Archived", msgs[0].Subject)
+	}
+}
+
+// TestFilterIncludeClosedSurfacesArchivedBeads covers the legacy archive
+// model where Archive() closes the bead. Without IncludeClosed, the bead is
+// hidden; with it, the bead is returned.
+func TestFilterIncludeClosedSurfacesArchivedBeads(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	msg, err := p.Send("alice", "bob", "To archive", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := p.Archive(msg.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+
+	open, err := p.Filter(mail.FilterOptions{Recipient: "bob", IncludeRead: true})
+	if err != nil {
+		t.Fatalf("Filter open: %v", err)
+	}
+	if len(open) != 0 {
+		t.Fatalf("Filter without IncludeClosed returned %d, want 0", len(open))
+	}
+
+	all, err := p.Filter(mail.FilterOptions{Recipient: "bob", IncludeRead: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("Filter closed: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("Filter with IncludeClosed returned %d, want 1", len(all))
+	}
+	if all[0].ID != msg.ID {
+		t.Errorf("Filter with IncludeClosed returned id=%q, want %q", all[0].ID, msg.ID)
+	}
+}
+
+// TestFilterConjunctiveAcrossSenderAndRecipient confirms FilterOptions
+// fields stack: sender + recipient narrows to the intersection.
+func TestFilterConjunctiveAcrossSenderAndRecipient(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	if _, err := p.Send("alice", "bob", "match", "x"); err != nil {
+		t.Fatalf("Send alice→bob: %v", err)
+	}
+	if _, err := p.Send("alice", "carol", "miss-recipient", "x"); err != nil {
+		t.Fatalf("Send alice→carol: %v", err)
+	}
+	if _, err := p.Send("dave", "bob", "miss-sender", "x"); err != nil {
+		t.Fatalf("Send dave→bob: %v", err)
+	}
+
+	msgs, err := p.Filter(mail.FilterOptions{Recipient: "bob", Sender: "alice", IncludeRead: true})
+	if err != nil {
+		t.Fatalf("Filter: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("Filter Recipient=bob Sender=alice returned %d, want 1", len(msgs))
+	}
+	if msgs[0].Subject != "match" {
+		t.Errorf("Filter returned subject=%q, want match", msgs[0].Subject)
+	}
+}
+
+// TestFilterUnreadOnlyHidesReadEvenWhenLabelMatches verifies that
+// IncludeRead=false (the default) still hides "read" messages, even when
+// the label-narrowed candidate set would otherwise include them.
+func TestFilterUnreadOnlyHidesReadEvenWhenLabelMatches(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	if _, err := store.Create(beads.Bead{
+		Title: "Read", Type: "message", Assignee: "bob", From: "alice",
+		Labels: []string{"priority:high", "read"},
+	}); err != nil {
+		t.Fatalf("seed read: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title: "Unread", Type: "message", Assignee: "bob", From: "alice",
+		Labels: []string{"priority:high"},
+	}); err != nil {
+		t.Fatalf("seed unread: %v", err)
+	}
+
+	msgs, err := p.Filter(mail.FilterOptions{Recipient: "bob", Label: "priority:high"})
+	if err != nil {
+		t.Fatalf("Filter: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("Filter unread-only returned %d, want 1", len(msgs))
+	}
+	if msgs[0].Subject != "Unread" {
+		t.Errorf("Filter unread-only returned %q, want Unread", msgs[0].Subject)
+	}
+}
+
 // --- Compile-time interface check ---
 
-var _ mail.Provider = (*Provider)(nil)
+var (
+	_ mail.Provider = (*Provider)(nil)
+	_ mail.Filterer = (*Provider)(nil)
+)

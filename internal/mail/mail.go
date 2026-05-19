@@ -113,3 +113,40 @@ type Provider interface {
 	// Count returns (total, unread) message counts for a recipient.
 	Count(recipient string) (total int, unread int, err error)
 }
+
+// FilterOptions describes a fine-grained mail query that composes the
+// recipient-routing semantics of Inbox/All with explicit sender, label, and
+// status filters. Zero-value fields are unset (no constraint).
+//
+// The fields stack conjunctively: a message must match every non-empty
+// constraint to be returned. Note that Recipient still goes through the
+// provider's alias/session-history resolution, so the same routes that
+// surface a message in Inbox(recipient) surface it here.
+type FilterOptions struct {
+	// Recipient narrows by the message Assignee, including alias history.
+	// Empty means "no recipient constraint" — the result spans every
+	// mailbox the caller has access to.
+	Recipient string
+	// Sender narrows by the message From / metadata.from. Empty means
+	// "no sender constraint".
+	Sender string
+	// Label narrows by exact label match (e.g. "archived:viewer/me",
+	// "thread:foo"). Empty means "no label constraint".
+	Label string
+	// IncludeRead controls whether messages with the "read" label are
+	// returned. Default false matches Inbox semantics (unread only).
+	IncludeRead bool
+	// IncludeClosed controls whether status="closed" messages are
+	// returned alongside status="open". Default false matches the
+	// legacy Inbox/All semantics (open only). Set to true to surface
+	// legacy-archived (status=closed) beads.
+	IncludeClosed bool
+}
+
+// Filterer is the optional capability for providers that support
+// server-side filtering by sender, label, and status. Providers without
+// this capability can still serve filter requests through the generic
+// post-filter fallback in the API handler.
+type Filterer interface {
+	Filter(opts FilterOptions) ([]Message, error)
+}

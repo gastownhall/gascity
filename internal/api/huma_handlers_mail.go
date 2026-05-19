@@ -13,6 +13,16 @@ import (
 )
 
 // humaHandleMailList is the Huma-typed handler for GET /v0/mail.
+//
+// Filter precedence and combinations: agent/status define the base "Inbox"
+// vs "All" shape (read-state filter). Adding `from`, `label`, or
+// `archived_for` narrows further. `include_closed=true` extends the result
+// to status=closed beads alongside open ones, primarily for the legacy
+// archive model that closed message beads (rather than the current
+// `archived:<viewer>` label model). See [filterOptionsForRequest] for the
+// exact mapping; see [filterMessagesForRecipients] for how providers serve
+// the query (server-side when they implement [mail.Filterer], otherwise a
+// post-filter fallback over Inbox/All).
 func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (*MailListOutput, error) {
 	bp := input.toBlockingParams()
 	if bp.isBlocking() {
@@ -31,162 +41,100 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 		pp.IsPaging = true
 	}
 
-	agents := s.resolveMailQueryRecipientsWithContext(ctx, input.Agent)
 	status := input.Status
-	rig := input.Rig
-	index := s.latestIndex()
-
 	switch status {
-	case "", "unread":
-		if rig != "" {
-			mp := s.state.MailProvider(rig)
-			if mp == nil {
-				return &MailListOutput{
-					Index: index,
-					Body:  MailListBody{Items: []mail.Message{}, Total: 0},
-				}, nil
-			}
-			msgs, err := mailInboxForRecipients(mp, agents)
-			if err != nil {
-				return nil, huma.Error500InternalServerError(err.Error())
-			}
-			if msgs == nil {
-				msgs = []mail.Message{}
-			}
-			msgs = tagRig(msgs, rig)
-			if !pp.IsPaging {
-				total := len(msgs)
-				if pp.Limit < len(msgs) {
-					msgs = msgs[:pp.Limit]
-				}
-				return &MailListOutput{
-					Index: index,
-					Body:  MailListBody{Items: msgs, Total: total},
-				}, nil
-			}
-			page, total, nextCursor := paginate(msgs, pp)
-			if page == nil {
-				page = []mail.Message{}
-			}
-			return &MailListOutput{
-				Index: index,
-				Body:  MailListBody{Items: page, Total: total, NextCursor: nextCursor},
-			}, nil
-		}
-
-		providers := s.state.MailProviders()
-		var allMsgs []mail.Message
-		var partialErrs []string
-		for _, name := range sortedProviderNames(providers) {
-			msgs, err := mailInboxForRecipients(providers[name], agents)
-			if err != nil {
-				partialErrs = append(partialErrs, "mail provider "+name+": "+err.Error())
-				continue
-			}
-			allMsgs = append(allMsgs, tagRig(msgs, name)...)
-		}
-		if len(partialErrs) == len(providers) && len(providers) > 0 {
-			return nil, huma.Error503ServiceUnavailable("all mail providers failed: " + strings.Join(partialErrs, "; "))
-		}
-		if allMsgs == nil {
-			allMsgs = []mail.Message{}
-		}
-		partial := len(partialErrs) > 0
-		if !pp.IsPaging {
-			total := len(allMsgs)
-			if pp.Limit < len(allMsgs) {
-				allMsgs = allMsgs[:pp.Limit]
-			}
-			return &MailListOutput{
-				Index: index,
-				Body:  MailListBody{Items: allMsgs, Total: total, Partial: partial, PartialErrors: partialErrs},
-			}, nil
-		}
-		page, total, nextCursor := paginate(allMsgs, pp)
-		if page == nil {
-			page = []mail.Message{}
-		}
-		return &MailListOutput{
-			Index: index,
-			Body:  MailListBody{Items: page, Total: total, NextCursor: nextCursor, Partial: partial, PartialErrors: partialErrs},
-		}, nil
-
-	case "all":
-		if rig != "" {
-			mp := s.state.MailProvider(rig)
-			if mp == nil {
-				return &MailListOutput{
-					Index: index,
-					Body:  MailListBody{Items: []mail.Message{}, Total: 0},
-				}, nil
-			}
-			msgs, err := mailAllForRecipients(mp, agents)
-			if err != nil {
-				return nil, huma.Error500InternalServerError(err.Error())
-			}
-			if msgs == nil {
-				msgs = []mail.Message{}
-			}
-			msgs = tagRig(msgs, rig)
-			if !pp.IsPaging {
-				total := len(msgs)
-				if pp.Limit < len(msgs) {
-					msgs = msgs[:pp.Limit]
-				}
-				return &MailListOutput{
-					Index: index,
-					Body:  MailListBody{Items: msgs, Total: total},
-				}, nil
-			}
-			page, total, nextCursor := paginate(msgs, pp)
-			if page == nil {
-				page = []mail.Message{}
-			}
-			return &MailListOutput{
-				Index: index,
-				Body:  MailListBody{Items: page, Total: total, NextCursor: nextCursor},
-			}, nil
-		}
-
-		providers := s.state.MailProviders()
-		var allMsgs []mail.Message
-		var partialErrs []string
-		for _, name := range sortedProviderNames(providers) {
-			msgs, err := mailAllForRecipients(providers[name], agents)
-			if err != nil {
-				partialErrs = append(partialErrs, "mail provider "+name+": "+err.Error())
-				continue
-			}
-			allMsgs = append(allMsgs, tagRig(msgs, name)...)
-		}
-		if len(partialErrs) == len(providers) && len(providers) > 0 {
-			return nil, huma.Error503ServiceUnavailable("all mail providers failed: " + strings.Join(partialErrs, "; "))
-		}
-		if allMsgs == nil {
-			allMsgs = []mail.Message{}
-		}
-		partial := len(partialErrs) > 0
-		if !pp.IsPaging {
-			total := len(allMsgs)
-			if pp.Limit < len(allMsgs) {
-				allMsgs = allMsgs[:pp.Limit]
-			}
-			return &MailListOutput{
-				Index: index,
-				Body:  MailListBody{Items: allMsgs, Total: total, Partial: partial, PartialErrors: partialErrs},
-			}, nil
-		}
-		page, total, nextCursor := paginate(allMsgs, pp)
-		if page == nil {
-			page = []mail.Message{}
-		}
-		return &MailListOutput{
-			Index: index,
-			Body:  MailListBody{Items: page, Total: total, NextCursor: nextCursor, Partial: partial, PartialErrors: partialErrs},
-		}, nil
-
+	case "", "unread", "all":
 	default:
 		return nil, huma.Error400BadRequest("unsupported status filter: " + status + "; supported: unread, all")
+	}
+
+	if input.Label != "" && input.ArchivedFor != "" {
+		return nil, huma.Error400BadRequest("label and archived_for are mutually exclusive")
+	}
+
+	agents := s.resolveMailQueryRecipientsWithContext(ctx, input.Agent)
+	rig := input.Rig
+	index := s.latestIndex()
+	opts := filterOptionsForRequest(input)
+
+	if rig != "" {
+		mp := s.state.MailProvider(rig)
+		if mp == nil {
+			return &MailListOutput{
+				Index: index,
+				Body:  MailListBody{Items: []mail.Message{}, Total: 0},
+			}, nil
+		}
+		msgs, err := filterMessagesForRecipients(mp, agents, opts)
+		if err != nil {
+			return nil, huma.Error500InternalServerError(err.Error())
+		}
+		if msgs == nil {
+			msgs = []mail.Message{}
+		}
+		msgs = tagRig(msgs, rig)
+		return paginatedMailListOutput(msgs, pp, index, false, nil), nil
+	}
+
+	providers := s.state.MailProviders()
+	var allMsgs []mail.Message
+	var partialErrs []string
+	for _, name := range sortedProviderNames(providers) {
+		msgs, err := filterMessagesForRecipients(providers[name], agents, opts)
+		if err != nil {
+			partialErrs = append(partialErrs, "mail provider "+name+": "+err.Error())
+			continue
+		}
+		allMsgs = append(allMsgs, tagRig(msgs, name)...)
+	}
+	if len(partialErrs) == len(providers) && len(providers) > 0 {
+		return nil, huma.Error503ServiceUnavailable("all mail providers failed: " + strings.Join(partialErrs, "; "))
+	}
+	if allMsgs == nil {
+		allMsgs = []mail.Message{}
+	}
+	partial := len(partialErrs) > 0
+	return paginatedMailListOutput(allMsgs, pp, index, partial, partialErrs), nil
+}
+
+// filterOptionsForRequest maps the wire-level filter knobs onto a single
+// [mail.FilterOptions]. archived_for is sugar for label=archived:<viewer> with
+// IncludeRead=true — archived mail in the per-viewer model is typically read
+// and the user wouldn't sensibly want to hide it. status=all flips IncludeRead
+// regardless of archived_for so the explicit knob still works.
+func filterOptionsForRequest(input *MailListInput) mail.FilterOptions {
+	label := strings.TrimSpace(input.Label)
+	includeRead := input.Status == "all"
+	if archivedFor := strings.TrimSpace(input.ArchivedFor); archivedFor != "" {
+		label = "archived:" + archivedFor
+		includeRead = true
+	}
+	return mail.FilterOptions{
+		Sender:        strings.TrimSpace(input.From),
+		Label:         label,
+		IncludeRead:   includeRead,
+		IncludeClosed: input.IncludeClosed,
+	}
+}
+
+func paginatedMailListOutput(msgs []mail.Message, pp pageParams, index uint64, partial bool, partialErrs []string) *MailListOutput {
+	if !pp.IsPaging {
+		total := len(msgs)
+		if pp.Limit > 0 && pp.Limit < len(msgs) {
+			msgs = msgs[:pp.Limit]
+		}
+		return &MailListOutput{
+			Index: index,
+			Body:  MailListBody{Items: msgs, Total: total, Partial: partial, PartialErrors: partialErrs},
+		}
+	}
+	page, total, nextCursor := paginate(msgs, pp)
+	if page == nil {
+		page = []mail.Message{}
+	}
+	return &MailListOutput{
+		Index: index,
+		Body:  MailListBody{Items: page, Total: total, NextCursor: nextCursor, Partial: partial, PartialErrors: partialErrs},
 	}
 }
 

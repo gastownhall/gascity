@@ -593,3 +593,232 @@ func TestMailReplyWithoutRigHintUsesResolvedRig(t *testing.T) {
 		t.Fatalf("reply event message rig = %q, want %q", payload.Message.Rig, "test-city")
 	}
 }
+
+// TestMailListFromFilterScopesBySender is the gu-2jr regression case: when a
+// previous incarnation of ?from= shipped, it silently returned every mail
+// bead regardless of value. After ga-rdz it must narrow to exactly the sender
+// (and only the sender) supplied.
+func TestMailListFromFilterScopesBySender(t *testing.T) {
+	state := newFakeState(t)
+	mp := state.cityMailProv
+	mp.Send("alice", "bob", "From alice", "to bob")     //nolint:errcheck
+	mp.Send("alice", "carol", "Also alice", "to carol") //nolint:errcheck
+	mp.Send("dave", "bob", "From dave", "to bob")       //nolint:errcheck
+
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail?from=alice&status=all"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("from=alice status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []mail.Message `json:"items"`
+		Total int            `json:"total"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	if resp.Total != 2 {
+		t.Fatalf("from=alice Total = %d, want 2 (gu-2jr regression: filter must not return every bead)", resp.Total)
+	}
+	for _, m := range resp.Items {
+		if m.From != "alice" {
+			t.Errorf("from=alice returned message From=%q, want alice", m.From)
+		}
+	}
+
+	req = httptest.NewRequest("GET", cityURL(state, "/mail?from=nobody&status=all"), nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	if resp.Total != 0 {
+		t.Errorf("from=nobody Total = %d, want 0 (unknown sender must yield empty list)", resp.Total)
+	}
+}
+
+// TestMailListArchivedForReturnsLabelMatchesIncludingRead is the gu-vx0
+// regression case: archived mail under the per-viewer label model
+// (status=open + archived:<viewer> label) is typically read, so the default
+// status=unread filter hid every archived row. archived_for must surface
+// those rows regardless of their read state.
+func TestMailListArchivedForReturnsLabelMatchesIncludingRead(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	mp := state.cityMailProv
+
+	// Archived for bob: status=open with the archived:bob label, marked read.
+	archived, err := store.Create(beads.Bead{
+		Title:    "Old thread",
+		Type:     "message",
+		Assignee: "bob",
+		From:     "alice",
+		Labels:   []string{"archived:bob", "read"},
+		Metadata: map[string]string{"from": "alice", "mail.read": "true"},
+	})
+	if err != nil {
+		t.Fatalf("seed archived bead: %v", err)
+	}
+
+	// Unrelated open message also for bob — should not appear under archived_for.
+	if _, err := mp.Send("alice", "bob", "Live message", "still in inbox"); err != nil {
+		t.Fatalf("send live: %v", err)
+	}
+
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail?archived_for=bob"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("archived_for status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []mail.Message `json:"items"`
+		Total int            `json:"total"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	if resp.Total != 1 {
+		t.Fatalf("archived_for=bob Total = %d, want 1 (gu-vx0 regression: read+archived rows must be visible)", resp.Total)
+	}
+	if resp.Items[0].ID != archived.ID {
+		t.Errorf("archived_for=bob returned %q, want archived bead %q", resp.Items[0].ID, archived.ID)
+	}
+	if !resp.Items[0].Read {
+		t.Errorf("archived_for=bob: returned message should still report Read=true (it is read)")
+	}
+}
+
+// TestMailListIncludeClosedSurfacesLegacyArchive covers the legacy archive
+// model that closed message beads (status=closed) rather than labeling them.
+// include_closed=true must surface those beads alongside open ones.
+func TestMailListIncludeClosedSurfacesLegacyArchive(t *testing.T) {
+	state := newFakeState(t)
+	mp := state.cityMailProv
+
+	open, _ := mp.Send("alice", "bob", "Open", "still here")
+	closedMsg, _ := mp.Send("alice", "bob", "Closed", "archived legacy-style")
+	if err := mp.Archive(closedMsg.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+
+	h := newTestCityHandler(t, state)
+
+	// Default (no include_closed): only open messages.
+	req := httptest.NewRequest("GET", cityURL(state, "/mail?agent=bob&status=all"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("default status = %d, body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Items []mail.Message `json:"items"`
+		Total int            `json:"total"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	if resp.Total != 1 {
+		t.Fatalf("default Total = %d, want 1 (closed message should be hidden)", resp.Total)
+	}
+	if resp.Items[0].ID != open.ID {
+		t.Errorf("default returned %q, want open %q", resp.Items[0].ID, open.ID)
+	}
+
+	// include_closed=true: both open and closed visible.
+	req = httptest.NewRequest("GET", cityURL(state, "/mail?agent=bob&status=all&include_closed=true"), nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("include_closed status = %d, body: %s", rec.Code, rec.Body.String())
+	}
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	if resp.Total != 2 {
+		t.Fatalf("include_closed Total = %d, want 2 (must include legacy-archived bead)", resp.Total)
+	}
+	gotIDs := map[string]bool{resp.Items[0].ID: true, resp.Items[1].ID: true}
+	if !gotIDs[open.ID] || !gotIDs[closedMsg.ID] {
+		t.Errorf("include_closed items = %v, want both %q and %q", []string{resp.Items[0].ID, resp.Items[1].ID}, open.ID, closedMsg.ID)
+	}
+}
+
+// TestMailListLabelFilter exercises the generic ?label= shape: callers can
+// pass any exact label match and the result narrows accordingly.
+func TestMailListLabelFilter(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	if _, err := store.Create(beads.Bead{
+		Title: "Tagged", Type: "message", Assignee: "bob", From: "alice",
+		Labels:   []string{"priority:high"},
+		Metadata: map[string]string{"from": "alice"},
+	}); err != nil {
+		t.Fatalf("seed labeled bead: %v", err)
+	}
+	if _, err := state.cityMailProv.Send("alice", "bob", "Untagged", "no labels"); err != nil {
+		t.Fatalf("send untagged: %v", err)
+	}
+
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail?label=priority:high&status=all"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("label= status = %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []mail.Message `json:"items"`
+		Total int            `json:"total"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	if resp.Total != 1 {
+		t.Fatalf("label= Total = %d, want 1", resp.Total)
+	}
+	if resp.Items[0].Subject != "Tagged" {
+		t.Errorf("label= returned %q, want Tagged", resp.Items[0].Subject)
+	}
+}
+
+// TestMailListArchivedForAndLabelConflict rejects callers that pass both
+// archived_for (sugar) and label (raw) — there is no sensible composition.
+func TestMailListArchivedForAndLabelConflict(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail?archived_for=bob&label=priority:high"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d (archived_for + label must conflict)", rec.Code, http.StatusBadRequest)
+	}
+}
+
+// TestMailListFromAndAgentCompose verifies the conjunctive contract:
+// passing both ?from=X and ?agent=Y matches only messages sent BY X TO Y.
+func TestMailListFromAndAgentCompose(t *testing.T) {
+	state := newFakeState(t)
+	mp := state.cityMailProv
+
+	mp.Send("alice", "bob", "alice→bob", "match")     //nolint:errcheck
+	mp.Send("alice", "carol", "alice→carol", "miss1") //nolint:errcheck
+	mp.Send("dave", "bob", "dave→bob", "miss2")       //nolint:errcheck
+
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/mail?from=alice&agent=bob&status=all"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	var resp struct {
+		Items []mail.Message `json:"items"`
+		Total int            `json:"total"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	if resp.Total != 1 {
+		t.Fatalf("from=alice&agent=bob Total = %d, want 1", resp.Total)
+	}
+	if resp.Items[0].From != "alice" || resp.Items[0].To != "bob" {
+		t.Errorf("from=alice&agent=bob got From=%q To=%q, want alice→bob", resp.Items[0].From, resp.Items[0].To)
+	}
+}

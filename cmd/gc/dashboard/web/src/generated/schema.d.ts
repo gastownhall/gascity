@@ -8882,12 +8882,20 @@ export interface operations {
                 cursor?: string;
                 /** @description Maximum number of results to return. 0 = server default. */
                 limit?: number;
-                /** @description Filter by agent name. */
+                /** @description Filter by recipient (mailbox). */
                 agent?: string;
-                /** @description Filter by status (unread, all). */
+                /** @description Read-state filter: 'unread' (default) or 'all'. This is independent of the bead status; pass include_closed=true to surface legacy archived (status=closed) beads. */
                 status?: string;
                 /** @description Filter by rig name. */
                 rig?: string;
+                /** @description Filter by sender (metadata.from / Bead.From). Empty = no sender constraint. */
+                from?: string;
+                /** @description Filter by exact label match (e.g. 'archived:viewer/me'). Empty = no label constraint. */
+                label?: string;
+                /** @description Convenience filter for the per-viewer archive model: equivalent to label='archived:<viewer>' with read messages included. Conflicts with 'label'. */
+                archived_for?: string;
+                /** @description Include status=closed message beads (legacy archived). Default false matches Inbox/All semantics. */
+                include_closed?: boolean;
             };
             header?: never;
             path: {

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/mail"
 )
 
 // BenchmarkArchiveMany measures the cost of an N-message batch close
@@ -71,5 +72,46 @@ func benchName(base string, n int) string {
 		return base + "_N200"
 	default:
 		return base
+	}
+}
+
+// BenchmarkFilter measures Filter dispatch cost at inbox sizes that match the
+// gas-ui ga-rdz acceptance shape (the /mail render budget is <250ms over a
+// 100+-message fixture inbox). Memstore is the lower bound on backing-store
+// cost; BdStore costs strictly more because of its bd-subprocess round-trips.
+//
+// Two shapes are exercised: a recipient-only filter (the inbox path) and a
+// sender-only filter (the Sent tab). Both use the metadata-indexed query path
+// from filterCandidates, not a broad type=message scan.
+func BenchmarkFilter(b *testing.B) {
+	for _, n := range []int{100, 500} {
+		b.Run(benchName("FilterByRecipient", n), func(b *testing.B) {
+			runFilterBench(b, n, mail.FilterOptions{Recipient: "bob", IncludeRead: true})
+		})
+		b.Run(benchName("FilterBySender", n), func(b *testing.B) {
+			runFilterBench(b, n, mail.FilterOptions{Sender: "alice", IncludeRead: true})
+		})
+	}
+}
+
+func runFilterBench(b *testing.B, n int, opts mail.FilterOptions) {
+	b.Helper()
+	b.ReportAllocs()
+	store := beads.NewMemStore()
+	p := New(store)
+	for i := 0; i < n; i++ {
+		if _, err := p.Send("alice", "bob", "", "bench"); err != nil {
+			b.Fatalf("Send: %v", err)
+		}
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		msgs, err := p.Filter(opts)
+		if err != nil {
+			b.Fatalf("Filter: %v", err)
+		}
+		if len(msgs) == 0 {
+			b.Fatalf("Filter returned 0 messages, want %d", n)
+		}
 	}
 }

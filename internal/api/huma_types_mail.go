@@ -35,13 +35,22 @@ type MailListOutput struct {
 // --- Mail types ---
 
 // MailListInput is the Huma input for GET /v0/city/{cityName}/mail.
+//
+// The filter shape extends the original (agent, status, rig) with sender,
+// label, archived-by-label, and closed-status filters so consumers like
+// gas-ui can render Sent/Archived tabs from a single typed API call
+// instead of falling back to `bd list` subprocess scans (ga-rdz).
 type MailListInput struct {
 	CityScope
 	BlockingParam
 	PaginationParam
-	Agent  string `query:"agent" required:"false" doc:"Filter by agent name."`
-	Status string `query:"status" required:"false" doc:"Filter by status (unread, all)."`
-	Rig    string `query:"rig" required:"false" doc:"Filter by rig name."`
+	Agent         string `query:"agent" required:"false" doc:"Filter by recipient (mailbox)."`
+	Status        string `query:"status" required:"false" doc:"Read-state filter: 'unread' (default) or 'all'. This is independent of the bead status; pass include_closed=true to surface legacy archived (status=closed) beads."`
+	Rig           string `query:"rig" required:"false" doc:"Filter by rig name."`
+	From          string `query:"from" required:"false" doc:"Filter by sender (metadata.from / Bead.From). Empty = no sender constraint."`
+	Label         string `query:"label" required:"false" doc:"Filter by exact label match (e.g. 'archived:viewer/me'). Empty = no label constraint."`
+	ArchivedFor   string `query:"archived_for" required:"false" doc:"Convenience filter for the per-viewer archive model: equivalent to label='archived:<viewer>' with read messages included. Conflicts with 'label'."`
+	IncludeClosed bool   `query:"include_closed" required:"false" doc:"Include status=closed message beads (legacy archived). Default false matches Inbox/All semantics."`
 }
 
 // MailGetInput is the Huma input for GET /v0/city/{cityName}/mail/{id}.
