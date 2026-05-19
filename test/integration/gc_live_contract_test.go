@@ -697,14 +697,7 @@ func closeLiveContractRigSessions(t *testing.T, baseURL string, v openapivalidat
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		sessions := liveContractJSON[struct {
-			Items []struct {
-				ID       string `json:"id"`
-				Rig      string `json:"rig"`
-				Template string `json:"template"`
-				State    string `json:"state"`
-			} `json:"items"`
-		}](t, baseURL, v, http.MethodGet, cityBase+"/sessions?limit=100", nil, http.StatusOK)
+		sessions := liveContractSessionListEventually(t, baseURL, v, cityBase+"/sessions?limit=100", deadline)
 
 		remaining := 0
 		for _, sess := range sessions.Items {
@@ -724,6 +717,63 @@ func closeLiveContractRigSessions(t *testing.T, baseURL string, v openapivalidat
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out closing %d live contract rig session(s)", remaining)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+type liveContractSessionListResponse struct {
+	Items []liveContractSessionListItem `json:"items"`
+}
+
+type liveContractSessionListItem struct {
+	ID       string `json:"id"`
+	Rig      string `json:"rig"`
+	Template string `json:"template"`
+	State    string `json:"state"`
+}
+
+func liveContractSessionListEventually(t *testing.T, baseURL string, v openapivalidator.Validator, path string, deadline time.Time) liveContractSessionListResponse {
+	t.Helper()
+	var lastStatus int
+	var lastBody string
+	var lastErr error
+	for {
+		req, err := liveContractHTTPRequest(baseURL, http.MethodGet, path, nil)
+		if err != nil {
+			t.Fatalf("GET %s build request: %v", path, err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			lastErr = err
+		} else {
+			raw, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if readErr != nil {
+				t.Fatalf("GET %s read response: %v", path, readErr)
+			}
+			lastErr = nil
+			lastStatus = resp.StatusCode
+			lastBody = string(raw)
+			if resp.StatusCode == http.StatusOK {
+				if v != nil {
+					validateLiveContractResponse(t, v, req, resp, raw)
+				}
+				var out liveContractSessionListResponse
+				if err := json.Unmarshal(raw, &out); err != nil {
+					t.Fatalf("GET %s decode response: %v\nbody: %s", path, err, string(raw))
+				}
+				return out
+			}
+			if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(lastBody, "cache_not_live:") {
+				t.Fatalf("GET %s status = %d, want 200; body: %s", path, resp.StatusCode, string(raw))
+			}
+		}
+		if time.Now().After(deadline) {
+			if lastErr != nil {
+				t.Fatalf("GET %s: %v", path, lastErr)
+			}
+			t.Fatalf("GET %s status = %d, want 200; body: %s", path, lastStatus, lastBody)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}

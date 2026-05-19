@@ -88,7 +88,7 @@ mode = "always"
 	for time.Now().Before(deadline) {
 		out, err := c.GC("session", "list", "--json")
 		if err == nil {
-			sessions = decodeSessionListJSON([]byte(out))
+			sessions := decodeSessionListJSON([]byte(out))
 			if hasNamedSession(sessions, "gs.captain", "gs__captain") &&
 				hasNamedSession(sessions, "repo/gs.watcher", "repo--gs__watcher") {
 				return
