@@ -53,11 +53,17 @@ fi
 # that guard — an ephemeral assignee whose template-stripped form did not
 # match any agent name was incorrectly reset, racing against active polekitten
 # work and producing the false-orphan loop tracked in ga-nvx.
-SESSIONS_JSON=$(gc session list --json 2>/dev/null) || SESSIONS_JSON="[]"
+SESSIONS_JSON=$(gc session list --json 2>/dev/null) || SESSIONS_JSON='{"sessions":[]}'
+# Two bugs the chronic strip pattern (gastownhall/gascity#2363) revealed:
+# (1) The JSON shape is {"sessions":[...], "summary":..., "filters":..., "schema_version":...},
+#     so `.[]` iterated four top-level scalar keys instead of session objects.
+# (2) Field names are snake_case lower (.closed/.id/.session_name/.alias/.agent_name),
+#     not PascalCase. Combined, LIVE_SESSION_IDS was ALWAYS empty and every
+#     ephemeral assignee like gastown__polecat-gc-XXXXX got stripped on every tick.
 LIVE_SESSION_IDS=$(echo "$SESSIONS_JSON" | jq -r '
-    .[]
-    | select(.Closed == false)
-    | [.ID, .SessionName, .Alias, .AgentName]
+    .sessions[]?
+    | select(.closed == false)
+    | [.id, .session_name, .alias, .agent_name]
     | .[]
     | select(. != null and . != "")
 ' 2>/dev/null) || LIVE_SESSION_IDS=""
