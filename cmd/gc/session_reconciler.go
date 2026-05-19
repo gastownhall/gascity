@@ -1122,7 +1122,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// builds a first-start command (--session-id <new_key>). Also set
 		// continuation_reset_pending so the next wake bumps the continuation
 		// epoch instead of silently reusing the prior continuation lineage.
-		// Then stop immediately; the next tick will re-create and re-wake.
+		//
+		// When the runtime is alive, stop it and yield this tick so the
+		// kill and the next wake run on separate reconciler passes; that
+		// keeps the start from racing the tmux alias release. When the
+		// runtime is already dead — for example, a named-always session
+		// whose tmux was killed by `gc handoff --target` before the bead's
+		// restart_requested flag was processed — there is no live runtime
+		// to stop. Apply the patch and fall through to the wake decision
+		// on this same tick instead of waiting for the next reconciler
+		// interval. The yield-a-tick rule existed to protect a live kill;
+		// extending it to the already-dead case is what caused the
+		// patrol_interval-sized post-handoff wake delay in #2345.
 		//
 		// Check both tmux metadata (dops) and bead metadata. The bead
 		// metadata flag survives tmux session death, so this works even
@@ -1168,8 +1179,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						_ = dops.clearRestartRequested(name)
 					}
 					fmt.Fprintf(stdout, "Stopped restart-requested session '%s'\n", name) //nolint:errcheck
+					// Yield this tick so the kill and the next wake run
+					// on separate reconciler passes; the new start should
+					// not race the tmux alias release.
+					continue
 				}
-				continue
+				// Runtime was already dead — no kill happened, no alias
+				// release to wait on. Fall through so the wake decision
+				// can pick up the freshly cleared metadata and emit a
+				// start_candidate on this same tick. See #2345.
 			}
 		}
 
