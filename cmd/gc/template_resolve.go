@@ -241,6 +241,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		"BEADS_ACTOR":         sessName,
 		"GC_DIR":              workDir,
 		"GC_BEADS_SCOPE_ROOT": p.cityPath,
+		// GC_CITY_BEADS_DIR pins the HQ city bd path so rig-scoped agents can
+		// federate their work_query against it (ga-xw6). Set even for
+		// city-scoped agents so the variable is stable across the runtime;
+		// EffectiveWorkQuery emits the federation block only when a.Dir != "".
+		"GC_CITY_BEADS_DIR": filepath.Join(p.cityPath, ".beads"),
 		// Explicit empty values matter here. tmux session creation uses `env -u`
 		// only for keys present with empty strings, which prevents stale rig
 		// scope from leaking out of the tmux server's inherited environment.

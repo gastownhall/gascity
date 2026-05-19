@@ -1760,6 +1760,180 @@ esac
 	}
 }
 
+// TestEffectiveWorkQueryFederatesCityBeadsForRigAgent verifies the ga-xw6
+// behavior: a rig-scoped agent's work_query queries the rig bd first, and on
+// empty falls back to the HQ city bd via $GC_CITY_BEADS_DIR. Without this
+// federation, beads filed in the city bd with gc.routed_to=<rig>/<role> are
+// invisible to the rig's agents — a documented dead-letter routing bug.
+func TestEffectiveWorkQueryFederatesCityBeadsForRigAgent(t *testing.T) {
+	a := Agent{Name: "polecat", Dir: "rig-x"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"BEADS_DIR":         "/rig/.beads",
+		"GC_CITY_BEADS_DIR": "/city/.beads",
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, `#!/bin/sh
+set -eu
+case "$BEADS_DIR" in
+  /city/.beads)
+    case "$*" in
+      *"--metadata-field gc.routed_to=rig-x/polecat"*"--unassigned"*)
+        printf '[{"id":"pe-fed","issue_type":"task"}]'
+        ;;
+      *)
+        printf '[]'
+        ;;
+    esac
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if !strings.Contains(out, "pe-fed") {
+		t.Fatalf("EffectiveWorkQuery() did not federate city bd: %q", out)
+	}
+}
+
+// TestEffectiveWorkQueryCityFederationSkippedWhenEnvUnset verifies the
+// federation guard: with GC_CITY_BEADS_DIR unset, the federation block does
+// not query the city bd. This preserves backwards-compatibility for runtimes
+// that have not been updated to inject the city beads dir env.
+func TestEffectiveWorkQueryCityFederationSkippedWhenEnvUnset(t *testing.T) {
+	a := Agent{Name: "polecat", Dir: "rig-x"}
+	calls := t.TempDir() + "/calls"
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"BEADS_DIR":         "/rig/.beads",
+		"GC_SESSION_ORIGIN": "ephemeral",
+		"CALL_LOG":          calls,
+	}, `#!/bin/sh
+set -eu
+printf '%s|%s\n' "${BEADS_DIR:-}" "$*" >> "$CALL_LOG"
+printf '[]'
+`)
+	if strings.TrimSpace(out) != "[]" {
+		t.Fatalf("EffectiveWorkQuery() = %q, want [] (no federation)", out)
+	}
+	data, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatalf("read call log: %v", err)
+	}
+	if strings.Contains(string(data), "/city/.beads") {
+		t.Fatalf("federation block queried city bd without GC_CITY_BEADS_DIR set: %s", data)
+	}
+}
+
+// TestEffectiveWorkQueryCityFederationSkippedWhenSameDir verifies that if
+// GC_CITY_BEADS_DIR equals BEADS_DIR (degenerate setup), the script skips the
+// redundant second query.
+func TestEffectiveWorkQueryCityFederationSkippedWhenSameDir(t *testing.T) {
+	a := Agent{Name: "polecat", Dir: "rig-x"}
+	calls := t.TempDir() + "/calls"
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"BEADS_DIR":         "/same/.beads",
+		"GC_CITY_BEADS_DIR": "/same/.beads",
+		"GC_SESSION_ORIGIN": "ephemeral",
+		"CALL_LOG":          calls,
+	}, `#!/bin/sh
+set -eu
+printf '%s|%s\n' "${BEADS_DIR:-}" "$*" >> "$CALL_LOG"
+printf '[]'
+`)
+	if strings.TrimSpace(out) != "[]" {
+		t.Fatalf("EffectiveWorkQuery() = %q, want []", out)
+	}
+	// The script should query /same/.beads only once per tier-3 step, not
+	// twice (rig + city aliased to same path).
+	data, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatalf("read call log: %v", err)
+	}
+	// Count the routed_to tier 3a calls. There should be exactly one
+	// (not two, which would happen if federation re-queried the same dir).
+	tier3aCount := strings.Count(string(data), "ready --metadata-field gc.routed_to=rig-x/polecat --unassigned --exclude-type=epic")
+	if tier3aCount != 1 {
+		t.Fatalf("expected exactly one tier-3a call, got %d: %s", tier3aCount, data)
+	}
+}
+
+// TestEffectiveWorkQueryCityFederationNotEmittedForCityScopedAgent verifies
+// that agents without a rig (a.Dir == "") do not have the federation block in
+// their emitted script. City-scoped agents already query the city bd as their
+// primary store.
+func TestEffectiveWorkQueryCityFederationNotEmittedForCityScopedAgent(t *testing.T) {
+	a := Agent{Name: "mayor"}
+	got := a.EffectiveWorkQuery()
+	if strings.Contains(got, "GC_CITY_BEADS_DIR") {
+		t.Fatalf("EffectiveWorkQuery() for city-scoped agent should not reference GC_CITY_BEADS_DIR: %q", got)
+	}
+}
+
+// TestEffectiveWorkQueryRigBdWorkBeatsCityBdWork verifies tier ordering: a
+// rig-bd Tier 3a result is returned before any city-bd Tier 3a query fires.
+// Federation must be a fallback, not a parallel/merged search.
+func TestEffectiveWorkQueryRigBdWorkBeatsCityBdWork(t *testing.T) {
+	a := Agent{Name: "polecat", Dir: "rig-x"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"BEADS_DIR":         "/rig/.beads",
+		"GC_CITY_BEADS_DIR": "/city/.beads",
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, `#!/bin/sh
+set -eu
+case "$BEADS_DIR" in
+  /rig/.beads)
+    case "$*" in
+      *"--metadata-field gc.routed_to=rig-x/polecat"*"--unassigned"*)
+        printf '[{"id":"rig-work","issue_type":"task"}]'
+        ;;
+      *)
+        printf '[]'
+        ;;
+    esac
+    ;;
+  /city/.beads)
+    printf '[{"id":"city-work-should-not-win","issue_type":"task"}]'
+    ;;
+esac
+`)
+	if !strings.Contains(out, "rig-work") {
+		t.Fatalf("rig bd work should win: %q", out)
+	}
+	if strings.Contains(out, "city-work-should-not-win") {
+		t.Fatalf("city bd work should not have been queried when rig had work: %q", out)
+	}
+}
+
+// TestEffectiveWorkQueryFederationCoversPoolPlaceholderRescue verifies the
+// Tier 3b placeholder-assignee rescue also federates: a city-bd bead with
+// assignee parked on the pool template name is still claimable.
+func TestEffectiveWorkQueryFederationCoversPoolPlaceholderRescue(t *testing.T) {
+	a := Agent{Name: "polecat", Dir: "rig-x"}
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"BEADS_DIR":         "/rig/.beads",
+		"GC_CITY_BEADS_DIR": "/city/.beads",
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, `#!/bin/sh
+set -eu
+case "$BEADS_DIR" in
+  /city/.beads)
+    case "$*" in
+      *"--metadata-field gc.routed_to=rig-x/polecat --assignee=rig-x/polecat"*)
+        printf '[{"id":"pe-parked","issue_type":"task"}]'
+        ;;
+      *)
+        printf '[]'
+        ;;
+    esac
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if !strings.Contains(out, "pe-parked") {
+		t.Fatalf("EffectiveWorkQuery() did not federate Tier 3b placeholder rescue: %q", out)
+	}
+}
+
 // TestEffectiveWorkQueryControlDispatcherFindsPoolPlaceholderAssignee mirrors
 // TestEffectiveWorkQueryFindsPoolPlaceholderAssignee for the control-dispatcher
 // path, which carries a separate Tier 3 emission and must apply the same
@@ -1774,6 +1948,71 @@ func TestEffectiveWorkQueryControlDispatcherFindsPoolPlaceholderAssignee(t *test
 	wantLegacy := "bd ready --metadata-field gc.routed_to=gascity/workflow-control --assignee=gascity/workflow-control --exclude-type=epic --json --limit=1"
 	if !strings.Contains(got, wantLegacy) {
 		t.Errorf("EffectiveWorkQuery() missing legacy placeholder-assignee route: %q", got)
+	}
+}
+
+// TestEffectiveScaleCheckFederatesCityBeadsForRigAgent verifies the ga-xw6
+// scale_check federation: a rig-scoped agent's demand counter sums beads
+// routed to it in both the rig bd and the HQ city bd.
+func TestEffectiveScaleCheckFederatesCityBeadsForRigAgent(t *testing.T) {
+	a := Agent{
+		Name:              "polecat",
+		Dir:               "rig-x",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(3),
+	}
+	got := runEffectiveScaleCheck(t, a, map[string]string{
+		"BEADS_DIR":         "/rig/.beads",
+		"GC_CITY_BEADS_DIR": "/city/.beads",
+	}, `#!/bin/sh
+set -eu
+case "$BEADS_DIR" in
+  /rig/.beads)
+    printf '[{"id":"r-1"},{"id":"r-2"}]'
+    ;;
+  /city/.beads)
+    printf '[{"id":"c-1"}]'
+    ;;
+esac
+`)
+	if strings.TrimSpace(got) != "3" {
+		t.Fatalf("EffectiveScaleCheck() = %q, want 3 (2 rig + 1 city)", got)
+	}
+}
+
+// TestEffectiveScaleCheckCityFederationSkippedWhenEnvUnset verifies the
+// scale_check federation is guarded by $GC_CITY_BEADS_DIR. Without the env
+// var, the federation block does not contribute extra demand counts.
+func TestEffectiveScaleCheckCityFederationSkippedWhenEnvUnset(t *testing.T) {
+	a := Agent{
+		Name:              "polecat",
+		Dir:               "rig-x",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(3),
+	}
+	got := runEffectiveScaleCheck(t, a, map[string]string{
+		"BEADS_DIR": "/rig/.beads",
+	}, `#!/bin/sh
+set -eu
+case "$BEADS_DIR" in
+  /rig/.beads)
+    printf '[{"id":"r-1"}]'
+    ;;
+  *)
+    printf '[{"id":"should-not-count"}]'
+    ;;
+esac
+`)
+	if strings.TrimSpace(got) != "1" {
+		t.Fatalf("EffectiveScaleCheck() = %q, want 1 (rig only, no federation)", got)
+	}
+}
+
+// TestEffectiveScaleCheckNoFederationForCityScopedAgent verifies that
+// city-scoped agents emit the simpler non-federation form.
+func TestEffectiveScaleCheckNoFederationForCityScopedAgent(t *testing.T) {
+	a := Agent{Name: "mayor"}
+	got := a.EffectiveScaleCheck()
+	if strings.Contains(got, "GC_CITY_BEADS_DIR") {
+		t.Fatalf("EffectiveScaleCheck() for city-scoped agent should not reference GC_CITY_BEADS_DIR: %q", got)
 	}
 }
 
@@ -3829,6 +4068,31 @@ func runEffectiveWorkQuery(t *testing.T, a Agent, env map[string]string, bdScrip
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("run work query: %v", err)
+	}
+	return string(out)
+}
+
+// runEffectiveScaleCheck executes the agent's effective scale check command
+// against a stub bd that emits configured JSON for `bd ready ...` calls.
+// Returns the captured stdout. The bd stub script can switch on $BEADS_DIR
+// to differentiate rig vs city federation tiers (ga-xw6).
+func runEffectiveScaleCheck(t *testing.T, a Agent, env map[string]string, bdScript string) string {
+	t.Helper()
+
+	tmp := t.TempDir()
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(bdScript), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	cmd := exec.Command("sh", "-c", a.EffectiveScaleCheck())
+	cmd.Env = []string{"PATH=" + tmp + ":" + os.Getenv("PATH")}
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run scale check: %v\n%s", err, out)
 	}
 	return string(out)
 }
