@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -329,12 +330,7 @@ func TestPackRegistrySearchWarnsOnStaleCache(t *testing.T) {
 
 func TestPackCommandTreeKeepsRegistryAndDependencySurfacesSeparate(t *testing.T) {
 	cmd := newPackCmd(&bytes.Buffer{}, &bytes.Buffer{})
-	for _, name := range []string{"show", "outdated"} {
-		if found, _, err := cmd.Find([]string{name}); err == nil && found != cmd {
-			t.Fatalf("gc pack unexpectedly exposes dependency verb %q", name)
-		}
-	}
-	for _, name := range []string{"add", "remove", "sync", "check", "upgrade", "why"} {
+	for _, name := range []string{"add", "remove", "sync", "check", "list", "show", "outdated", "upgrade", "why"} {
 		if found, _, err := cmd.Find([]string{name}); err != nil || found == cmd {
 			t.Fatalf("gc pack %s not found: found=%v err=%v", name, found, err)
 		}
@@ -363,6 +359,7 @@ schema = 1
 [imports.tools]
 source = "https://example.com/tools.git"
 version = "^1.0"
+transitive = false
 `)
 
 	prevCheck := checkInstalledImports
@@ -497,6 +494,26 @@ func TestPackAddRegistrySelectorWritesConcreteSourceAndRegistryLockMetadata(t *t
 
 	stdout.Reset()
 	stderr.Reset()
+	code = run([]string{"pack", "show", "lighthouse"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("pack show code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Origin:      main:lighthouse") || !strings.Contains(stdout.String(), "Hash:        "+hash) {
+		t.Fatalf("pack show stdout missing registry lock details: %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"pack", "list"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("pack list code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "lighthouse\t"+source) || !strings.Contains(stdout.String(), "1.2.0") {
+		t.Fatalf("pack list stdout missing dependency row: %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
 	code = run([]string{"pack", "why", "lighthouse"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("pack why code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
@@ -506,6 +523,128 @@ func TestPackAddRegistrySelectorWritesConcreteSourceAndRegistryLockMetadata(t *t
 	}
 	if !strings.Contains(stdout.String(), "registry source: "+catalogDir) {
 		t.Fatalf("pack why stdout missing registry source: %q", stdout.String())
+	}
+}
+
+func TestPackOutdatedReportsAllowedUpgrade(t *testing.T) {
+	clearGCEnv(t)
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_CITY", city)
+	writeCityToml(t, city, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, city, `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.0"
+transitive = false
+`)
+	if err := packman.WriteLockfile(fsys.OSFS{}, city, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/tools.git": {Version: "1.0.0", Commit: "old"},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	prevResolve := resolveImportVersion
+	t.Cleanup(func() { resolveImportVersion = prevResolve })
+	resolveImportVersion = func(source, constraint string) (packman.ResolvedVersion, error) {
+		if source != "https://example.com/tools.git" {
+			t.Fatalf("source = %q", source)
+		}
+		switch constraint {
+		case "^1.0":
+			return packman.ResolvedVersion{Version: "1.1.0", Commit: "new"}, nil
+		case "":
+			return packman.ResolvedVersion{Version: "2.0.0", Commit: "major"}, nil
+		default:
+			t.Fatalf("constraint = %q", constraint)
+			return packman.ResolvedVersion{}, nil
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"pack", "outdated"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("pack outdated code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "tools") || !strings.Contains(out, "1.0.0") || !strings.Contains(out, "1.1.0") || !strings.Contains(out, "2.0.0") || !strings.Contains(out, "upgrade_available") {
+		t.Fatalf("pack outdated stdout = %q", out)
+	}
+}
+
+func TestPackOutdatedFailsWhenResolutionFails(t *testing.T) {
+	clearGCEnv(t)
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_CITY", city)
+	writeCityToml(t, city, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, city, `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.0"
+transitive = false
+`)
+	if err := packman.WriteLockfile(fsys.OSFS{}, city, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/tools.git": {Version: "1.0.0", Commit: "old"},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	prevResolve := resolveImportVersion
+	t.Cleanup(func() { resolveImportVersion = prevResolve })
+	resolveImportVersion = func(_ string, _ string) (packman.ResolvedVersion, error) {
+		return packman.ResolvedVersion{}, errors.New("network unavailable")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"pack", "outdated"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("pack outdated succeeded stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "All pack dependencies are current.") {
+		t.Fatalf("pack outdated masked resolver failure stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "tools") || !strings.Contains(stderr.String(), "network unavailable") {
+		t.Fatalf("pack outdated stderr = %q", stderr.String())
+	}
+}
+
+func TestPackOutdatedEmptyDependenciesIsCurrent(t *testing.T) {
+	clearGCEnv(t)
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_CITY", city)
+	writeCityToml(t, city, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, city, "[pack]\nname = \"demo\"\nschema = 1\n")
+	if err := packman.WriteLockfile(fsys.OSFS{}, city, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs:  map[string]packman.LockedPack{},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"pack", "outdated"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("pack outdated code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "All pack dependencies are current.") {
+		t.Fatalf("pack outdated stdout = %q", stdout.String())
 	}
 }
 
@@ -557,8 +696,18 @@ func TestPackSyncCommandWrapsImportInstallAndLegacyPackFetchStillLegacy(t *testi
 	if code != 0 {
 		t.Fatalf("pack list code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
+	if !strings.Contains(stdout.String(), "No pack dependencies configured.") {
+		t.Fatalf("pack list stdout = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"pack", "list", "--legacy"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("legacy pack list code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
 	if !strings.Contains(stdout.String(), "No remote packs configured.") {
-		t.Fatalf("legacy pack list stdout = %q", stdout.String())
+		t.Fatalf("legacy pack list --legacy stdout = %q", stdout.String())
 	}
 }
 

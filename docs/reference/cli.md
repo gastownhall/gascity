@@ -2044,8 +2044,9 @@ gc order sweep-tracking [order ...] [flags]
 Manage remote pack sources that provide agent configurations.
 
 Packs are git repositories containing pack.toml files that
-define agent configurations for rigs. They are cached locally and
-can be pinned to specific git refs.
+define agent configurations for rigs. New dependency entries are
+declared in pack.toml with a durable source and optional version
+constraint.
 
 ```
 gc pack
@@ -2056,9 +2057,11 @@ gc pack
 | [gc pack add](#gc-pack-add) | Add a pack dependency |
 | [gc pack check](#gc-pack-check) | Verify pack dependencies against the lockfile and local cache |
 | [gc pack fetch](#gc-pack-fetch) | Clone missing and update existing remote packs |
-| [gc pack list](#gc-pack-list) | Show remote pack sources and cache status |
+| [gc pack list](#gc-pack-list) | List pack dependencies |
+| [gc pack outdated](#gc-pack-outdated) | Show pack dependencies with newer allowed versions |
 | [gc pack registry](#gc-pack-registry) | Manage pack registries |
 | [gc pack remove](#gc-pack-remove) | Remove a pack dependency |
+| [gc pack show](#gc-pack-show) | Show one pack dependency |
 | [gc pack sync](#gc-pack-sync) | Reconcile pack dependencies with the lockfile and local cache |
 | [gc pack upgrade](#gc-pack-upgrade) | Upgrade pack dependencies within their constraints |
 | [gc pack why](#gc-pack-why) | Explain why a pack dependency is present |
@@ -2088,9 +2091,9 @@ gc pack check
 
 Clone missing and update existing remote pack caches.
 
-Fetches all configured pack sources from their git repositories,
-updates the local cache, and writes a lockfile with commit hashes
-for reproducibility. Automatically called during "gc start".
+Fetches legacy [packs] sources from their git repositories,
+updates the local cache, and writes the legacy pack.lock file.
+New PackV2 dependencies should use "gc pack sync".
 
 ```
 gc pack fetch
@@ -2098,14 +2101,33 @@ gc pack fetch
 
 ## gc pack list
 
-Show configured pack sources with their cache status.
+List pack dependencies in the selected city or pack scope.
 
-Displays each pack's name, source URL, git ref, cache status,
-and locked commit hash (if available).
+Use --legacy to show the old [packs] cache-status view during the
+PackV2 transition.
 
 ```
-gc pack list
+gc pack list [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSONL result |
+| `--legacy` | bool |  | show legacy [packs] cache status |
+| `--transitive` | bool |  | show the dependency tree |
+
+## gc pack outdated
+
+Show pack dependencies with newer allowed versions
+
+```
+gc pack outdated [name-or-source] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSONL result |
+| `--refresh` | bool |  | refresh registry catalogs before checking |
 
 ## gc pack registry
 
@@ -2209,6 +2231,18 @@ Remove a pack dependency
 ```
 gc pack remove <name>
 ```
+
+## gc pack show
+
+Show one pack dependency
+
+```
+gc pack show <name-or-source> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSONL result |
 
 ## gc pack sync
 

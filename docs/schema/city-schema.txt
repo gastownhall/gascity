@@ -1596,15 +1596,15 @@
       "properties": {
         "source": {
           "type": "string",
-          "description": "Source is the git repository URL."
+          "description": "Source is the legacy git repository URL."
         },
         "ref": {
           "type": "string",
-          "description": "Ref is the git ref to checkout (branch, tag, or commit). Defaults to HEAD."
+          "description": "Ref is legacy [packs] metadata, not a public PackV2 import field."
         },
         "path": {
           "type": "string",
-          "description": "Path is a subdirectory within the repo containing the pack files."
+          "description": "Path is legacy [packs] metadata, not a public PackV2 import field."
         }
       },
       "additionalProperties": false,
@@ -1612,7 +1612,7 @@
       "required": [
         "source"
       ],
-      "description": "PackSource defines a remote pack repository."
+      "description": "PackSource defines a legacy remote pack repository for the old [packs] city config surface."
     },
     "Patches": {
       "properties": {

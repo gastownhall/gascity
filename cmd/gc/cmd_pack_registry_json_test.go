@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -42,6 +44,53 @@ func TestPackRegistryJSONOutputMatchesSchemasForFlagCombinations(t *testing.T) {
 	runPackRegistryJSONAndValidate(t, []string{"pack", "registry", "search", "light", "--refresh", "--json"})
 }
 
+func TestPackDependencyJSONOutputMatchesSchemas(t *testing.T) {
+	clearGCEnv(t)
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_CITY", city)
+	writeCityToml(t, city, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, city, `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.0"
+transitive = false
+`)
+	if err := packman.WriteLockfile(fsys.OSFS{}, city, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/tools.git": {
+				Version: "1.0.0",
+				Commit:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	runPackRegistryJSONAndValidate(t, []string{"pack", "list", "--json"})
+	runPackRegistryJSONAndValidate(t, []string{"pack", "show", "tools", "--json"})
+
+	prevResolve := resolveImportVersion
+	t.Cleanup(func() { resolveImportVersion = prevResolve })
+	resolveImportVersion = func(source, constraint string) (packman.ResolvedVersion, error) {
+		switch constraint {
+		case "^1.0":
+			return packman.ResolvedVersion{Version: "1.1.0", Commit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, nil
+		case "":
+			return packman.ResolvedVersion{Version: "2.0.0", Commit: "cccccccccccccccccccccccccccccccccccccccc"}, nil
+		default:
+			t.Fatalf("unexpected resolve %q %q", source, constraint)
+			return packman.ResolvedVersion{}, nil
+		}
+	}
+	runPackRegistryJSONAndValidate(t, []string{"pack", "outdated", "--json"})
+}
+
 func TestPackRegistryJSONFailureMatchesFailureSchema(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
@@ -67,6 +116,22 @@ func TestPackRegistryJSONFailureMatchesFailureSchema(t *testing.T) {
 			runPackRegistryJSONFailureAndValidate(t, tc.args)
 		})
 	}
+}
+
+func TestPackDependencyJSONFailureMatchesFailureSchema(t *testing.T) {
+	clearGCEnv(t)
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_CITY", city)
+	writeCityToml(t, city, `[workspace]
+name = "demo"
+
+[packs.legacy]
+source = "https://example.com/legacy.git"
+`)
+
+	runPackRegistryJSONFailureAndValidate(t, []string{"pack", "list", "--legacy", "--json"})
 }
 
 func TestPackRegistryRefreshJSONAllFailuresUsesResultSchemaWithNonzeroExit(t *testing.T) {
@@ -112,6 +177,9 @@ func runPackRegistryJSONFailureAndValidate(t *testing.T, args []string) {
 
 func TestPackRegistrySchemasHaveDescriptions(t *testing.T) {
 	for _, command := range [][]string{
+		{"pack", "list"},
+		{"pack", "show"},
+		{"pack", "outdated"},
 		{"pack", "registry", "add"},
 		{"pack", "registry", "list"},
 		{"pack", "registry", "refresh"},
@@ -222,6 +290,9 @@ func commandFromArgs(args []string) []string {
 			}
 		default:
 			command = append(command, arg)
+			if len(command) == 2 && command[0] == "pack" && command[1] != "registry" {
+				return command
+			}
 			if len(command) == 3 {
 				return command
 			}

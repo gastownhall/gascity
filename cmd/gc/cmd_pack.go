@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,8 +28,9 @@ func newPackCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Manage remote pack sources that provide agent configurations.
 
 Packs are git repositories containing pack.toml files that
-define agent configurations for rigs. They are cached locally and
-can be pinned to specific git refs.`,
+define agent configurations for rigs. New dependency entries are
+declared in pack.toml with a durable source and optional version
+constraint.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
@@ -38,10 +41,12 @@ can be pinned to specific git refs.`,
 	cmd.AddCommand(newPackRemoveCmd(stdout, stderr))
 	cmd.AddCommand(newPackSyncCmd(stdout, stderr))
 	cmd.AddCommand(newPackCheckCmd(stdout, stderr))
+	cmd.AddCommand(newPackListCmd(stdout, stderr))
+	cmd.AddCommand(newPackShowCmd(stdout, stderr))
+	cmd.AddCommand(newPackOutdatedCmd(stdout, stderr))
 	cmd.AddCommand(newPackUpgradeCmd(stdout, stderr))
 	cmd.AddCommand(newPackWhyCmd(stdout, stderr))
 	cmd.AddCommand(newPackFetchCmd(stdout, stderr))
-	cmd.AddCommand(newPackListCmd(stdout, stderr))
 	return cmd
 }
 
@@ -123,6 +128,96 @@ func newPackCheckCmd(stdout, stderr io.Writer) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func newPackListCmd(stdout, stderr io.Writer) *cobra.Command {
+	var tree bool
+	var legacy bool
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List pack dependencies",
+		Long: `List pack dependencies in the selected city or pack scope.
+
+Use --legacy to show the old [packs] cache-status view during the
+PackV2 transition.`,
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cityPath, err := resolveImportRoot()
+			if err != nil {
+				fmt.Fprintf(stderr, "gc pack list: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			if legacy {
+				if jsonOutput {
+					fmt.Fprintln(stderr, "gc pack list: --json is not supported for legacy [packs] status; migrate to [imports] or omit --json") //nolint:errcheck
+					return errExit
+				}
+				if doLegacyPackList(cityPath, stdout, stderr) != 0 {
+					return errExit
+				}
+				return nil
+			}
+			if doPackDependencyList(cityPath, tree, jsonOutput, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&tree, "transitive", false, "show the dependency tree")
+	cmd.Flags().BoolVar(&legacy, "legacy", false, "show legacy [packs] cache status")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL result")
+	return cmd
+}
+
+func newPackShowCmd(stdout, stderr io.Writer) *cobra.Command {
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "show <name-or-source>",
+		Short: "Show one pack dependency",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			cityPath, err := resolveImportRoot()
+			if err != nil {
+				fmt.Fprintf(stderr, "gc pack show: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			if doPackDependencyShow(cityPath, args[0], jsonOutput, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL result")
+	return cmd
+}
+
+func newPackOutdatedCmd(stdout, stderr io.Writer) *cobra.Command {
+	var refresh bool
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "outdated [name-or-source]",
+		Short: "Show pack dependencies with newer allowed versions",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			cityPath, err := resolveImportRoot()
+			if err != nil {
+				fmt.Fprintf(stderr, "gc pack outdated: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			target := ""
+			if len(args) == 1 {
+				target = args[0]
+			}
+			if doPackDependencyOutdated(cityPath, target, refresh, jsonOutput, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&refresh, "refresh", false, "refresh registry catalogs before checking")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL result")
+	return cmd
 }
 
 func newPackUpgradeCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -522,6 +617,49 @@ type packRegistryReleaseJSON struct {
 	Description     string `json:"description"`
 	Withdrawn       bool   `json:"withdrawn"`
 	WithdrawnReason string `json:"withdrawn_reason,omitempty"`
+}
+
+type packDependencyListJSONResult struct {
+	SchemaVersion string               `json:"schema_version"`
+	Transitive    bool                 `json:"transitive"`
+	Imports       []packDependencyJSON `json:"imports"`
+}
+
+type packDependencyShowJSONResult struct {
+	SchemaVersion string             `json:"schema_version"`
+	Import        packDependencyJSON `json:"import"`
+}
+
+type packDependencyOutdatedJSONResult struct {
+	SchemaVersion string                 `json:"schema_version"`
+	Refreshed     bool                   `json:"refreshed"`
+	Items         []packOutdatedItemJSON `json:"items"`
+}
+
+type packDependencyJSON struct {
+	Name            string `json:"name"`
+	Source          string `json:"source"`
+	Origin          string `json:"origin"`
+	SourceKind      string `json:"source_kind"`
+	Constraint      string `json:"constraint,omitempty"`
+	ResolvedVersion string `json:"resolved_version,omitempty"`
+	Ref             string `json:"ref,omitempty"`
+	Commit          string `json:"commit,omitempty"`
+	Hash            string `json:"hash,omitempty"`
+	Synced          bool   `json:"synced"`
+	Scope           string `json:"scope"`
+	Withdrawn       bool   `json:"withdrawn"`
+	WithdrawnReason string `json:"withdrawn_reason,omitempty"`
+}
+
+type packOutdatedItemJSON struct {
+	Name            string `json:"name"`
+	Current         string `json:"current"`
+	LatestAllowed   string `json:"latest_allowed"`
+	LatestAvailable string `json:"latest_available"`
+	Status          string `json:"status"`
+	Origin          string `json:"origin"`
+	Withdrawn       bool   `json:"withdrawn"`
 }
 
 func doPackRegistryList(jsonOutput bool, stdout, stderr io.Writer) int {
@@ -968,9 +1106,9 @@ func newPackFetchCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Clone missing and update existing remote packs",
 		Long: `Clone missing and update existing remote pack caches.
 
-Fetches all configured pack sources from their git repositories,
-updates the local cache, and writes a lockfile with commit hashes
-for reproducibility. Automatically called during "gc start".`,
+Fetches legacy [packs] sources from their git repositories,
+updates the local cache, and writes the legacy pack.lock file.
+New PackV2 dependencies should use "gc pack sync".`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if doPackFetch(stdout, stderr) != 0 {
@@ -1029,32 +1167,399 @@ func doPackFetch(stdout, stderr io.Writer) int {
 	return 0
 }
 
-func newPackListCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
-		Use:   "list",
-		Short: "Show remote pack sources and cache status",
-		Long: `Show configured pack sources with their cache status.
-
-Displays each pack's name, source URL, git ref, cache status,
-and locked commit hash (if available).`,
-		Args: cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if doPackList(stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
-		},
-	}
-}
-
-// doPackList shows configured packs and their cache status.
-func doPackList(stdout, stderr io.Writer) int {
-	cityPath, err := resolveCity()
+func doPackDependencyList(cityPath string, tree bool, jsonOutput bool, stdout, stderr io.Writer) int {
+	scope, err := loadImportScopeFS(fsys.OSFS{}, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack list: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	inspectImports, err := collectInspectableImportsFS(fsys.OSFS{}, cityPath, scope)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc pack list: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if len(inspectImports) == 0 && legacyPackSourceCount(cityPath) > 0 {
+		if jsonOutput {
+			fmt.Fprintln(stderr, "gc pack list: --json is not supported for legacy [packs] status; migrate to [imports] or use text --legacy") //nolint:errcheck
+			return 1
+		}
+		fmt.Fprintln(stderr, "warning: showing legacy [packs] status; run \"gc pack sync\" after migrating to [imports]") //nolint:errcheck
+		return doLegacyPackList(cityPath, stdout, stderr)
+	}
+	if len(inspectImports) == 0 {
+		if jsonOutput {
+			if err := writeCLIJSONLine(stdout, packDependencyListJSONResult{
+				SchemaVersion: "1",
+				Transitive:    tree,
+				Imports:       []packDependencyJSON{},
+			}); err != nil {
+				fmt.Fprintf(stderr, "gc pack list: %v\n", err) //nolint:errcheck
+				return 1
+			}
+			return 0
+		}
+		fmt.Fprintln(stdout, "No pack dependencies configured.") //nolint:errcheck
+		return 0
+	}
+	if legacyPackSourceCount(cityPath) > 0 {
+		fmt.Fprintln(stderr, "warning: legacy [packs] entries are not shown; use \"gc pack list --legacy\" for old cache status") //nolint:errcheck
+	}
+	if jsonOutput {
+		lock, err := readImportLockfile(fsys.OSFS{}, cityPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc pack list: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		nodes, err := buildImportGraph(inspectImports, lock)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc pack list: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		if err := writeCLIJSONLine(stdout, packDependencyListJSONResult{
+			SchemaVersion: "1",
+			Transitive:    tree,
+			Imports:       packDependencyJSONRows(nodes, tree),
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc pack list: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		return 0
+	}
+	return doImportListAs("gc pack list", cityPath, tree, stdout, stderr)
+}
 
+func doPackDependencyShow(cityPath, target string, jsonOutput bool, stdout, stderr io.Writer) int {
+	node, err := findPackDependencyNode(cityPath, target)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc pack show: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if jsonOutput {
+		if err := writeCLIJSONLine(stdout, packDependencyShowJSONResult{
+			SchemaVersion: "1",
+			Import:        packDependencyJSONRow(node),
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc pack show: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		return 0
+	}
+	writePackDependencyDetails(stdout, node)
+	return 0
+}
+
+func doPackDependencyOutdated(cityPath, target string, refresh bool, jsonOutput bool, stdout, stderr io.Writer) int {
+	nodes, err := packDependencyNodes(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc pack outdated: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if target != "" {
+		node, err := selectPackDependencyNode(nodes, target)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc pack outdated: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		nodes = []*importGraphNode{node}
+	}
+
+	if refresh {
+		if err := refreshPackDependencyRegistries(nodes, stderr); err != nil {
+			fmt.Fprintf(stderr, "gc pack outdated: %v\n", err) //nolint:errcheck
+			return 1
+		}
+	}
+
+	rows := []packOutdatedRow{}
+	for _, node := range nodes {
+		row, ok, err := resolvePackOutdatedRow(node)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc pack outdated: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		if ok {
+			rows = append(rows, row)
+		}
+	}
+	if jsonOutput {
+		items := make([]packOutdatedItemJSON, 0, len(rows))
+		for _, row := range rows {
+			items = append(items, packOutdatedItemJSON(row))
+		}
+		if err := writeCLIJSONLine(stdout, packDependencyOutdatedJSONResult{
+			SchemaVersion: "1",
+			Refreshed:     refresh,
+			Items:         items,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc pack outdated: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		return 0
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(stdout, "All pack dependencies are current.") //nolint:errcheck
+		return 0
+	}
+	fmt.Fprintln(stdout, "Name                  Current       Latest allowed Latest available Status") //nolint:errcheck
+	for _, row := range rows {
+		fmt.Fprintf(stdout, "%-21s %-13s %-14s %-16s %s\n", row.Name, row.Current, row.LatestAllowed, row.LatestAvailable, row.Status) //nolint:errcheck
+	}
+	return 0
+}
+
+func findPackDependencyNode(cityPath, target string) (*importGraphNode, error) {
+	nodes, err := packDependencyNodes(cityPath)
+	if err != nil {
+		return nil, err
+	}
+	return selectPackDependencyNode(nodes, target)
+}
+
+func packDependencyNodes(cityPath string) ([]*importGraphNode, error) {
+	scope, err := loadImportScopeFS(fsys.OSFS{}, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	lock, err := readImportLockfile(fsys.OSFS{}, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	inspectImports, err := collectInspectableImportsFS(fsys.OSFS{}, cityPath, scope)
+	if err != nil {
+		return nil, err
+	}
+	if len(inspectImports) == 0 {
+		return []*importGraphNode{}, nil
+	}
+	return buildImportGraph(inspectImports, lock)
+}
+
+func selectPackDependencyNode(nodes []*importGraphNode, target string) (*importGraphNode, error) {
+	matches, err := findImportWhyMatches(nodes, target)
+	if err != nil {
+		return nil, err
+	}
+	return matches[0][len(matches[0])-1], nil
+}
+
+func writePackDependencyDetails(stdout io.Writer, node *importGraphNode) {
+	name := importDisplayName(node.Name)
+	fmt.Fprintf(stdout, "Import:      %s\n", name)               //nolint:errcheck
+	fmt.Fprintf(stdout, "Source:      %s\n", node.Import.Source) //nolint:errcheck
+	if origin := packDependencyOrigin(node); origin != "" {
+		fmt.Fprintf(stdout, "Origin:      %s\n", origin) //nolint:errcheck
+	}
+	if node.Import.Version != "" {
+		fmt.Fprintf(stdout, "Constraint:  %s\n", node.Import.Version) //nolint:errcheck
+	}
+	if !isRemoteImportSource(node.Import.Source) {
+		fmt.Fprintln(stdout, "Synced:      path import")                         //nolint:errcheck
+		fmt.Fprintf(stdout, "Scope:       %s\n", packDependencyScope(node.Name)) //nolint:errcheck
+		return
+	}
+	if !node.HasLock {
+		fmt.Fprintln(stdout, "Synced:      no")                                  //nolint:errcheck
+		fmt.Fprintf(stdout, "Scope:       %s\n", packDependencyScope(node.Name)) //nolint:errcheck
+		return
+	}
+	fmt.Fprintf(stdout, "Resolved:    %s\n", node.Resolved.Version) //nolint:errcheck
+	fmt.Fprintf(stdout, "Commit:      %s\n", node.Resolved.Commit)  //nolint:errcheck
+	if node.Resolved.Ref != "" {
+		fmt.Fprintf(stdout, "Ref:         %s\n", node.Resolved.Ref) //nolint:errcheck
+	}
+	if node.Resolved.Hash != "" {
+		fmt.Fprintf(stdout, "Hash:        %s\n", node.Resolved.Hash) //nolint:errcheck
+	}
+	if node.Resolved.Withdrawn {
+		fmt.Fprintln(stdout, "Withdrawn:   yes") //nolint:errcheck
+		if node.Resolved.WithdrawnReason != "" {
+			fmt.Fprintf(stdout, "Reason:      %s\n", node.Resolved.WithdrawnReason) //nolint:errcheck
+		}
+	}
+	fmt.Fprintln(stdout, "Synced:      yes")                                 //nolint:errcheck
+	fmt.Fprintf(stdout, "Scope:       %s\n", packDependencyScope(node.Name)) //nolint:errcheck
+}
+
+func packDependencyJSONRows(nodes []*importGraphNode, transitive bool) []packDependencyJSON {
+	rows := []packDependencyJSON{}
+	var walk func(node *importGraphNode)
+	walk = func(node *importGraphNode) {
+		if node == nil {
+			return
+		}
+		rows = append(rows, packDependencyJSONRow(node))
+		if transitive {
+			for _, child := range node.Children {
+				walk(child)
+			}
+		}
+	}
+	for _, node := range nodes {
+		walk(node)
+	}
+	return rows
+}
+
+func packDependencyJSONRow(node *importGraphNode) packDependencyJSON {
+	row := packDependencyJSON{
+		Name:       importDisplayName(node.Name),
+		Source:     node.Import.Source,
+		Origin:     packDependencyOrigin(node),
+		SourceKind: "path",
+		Constraint: node.Import.Version,
+		Synced:     node.HasLock,
+		Scope:      packDependencyScope(node.Name),
+	}
+	if isRemoteImportSource(node.Import.Source) {
+		row.SourceKind = "git"
+	}
+	if node.HasLock {
+		if node.Resolved.SourceKind != "" {
+			row.SourceKind = node.Resolved.SourceKind
+		}
+		row.ResolvedVersion = node.Resolved.Version
+		row.Ref = node.Resolved.Ref
+		row.Commit = node.Resolved.Commit
+		row.Hash = node.Resolved.Hash
+		row.Withdrawn = node.Resolved.Withdrawn
+		row.WithdrawnReason = node.Resolved.WithdrawnReason
+	}
+	return row
+}
+
+type packOutdatedRow struct {
+	Name            string
+	Current         string
+	LatestAllowed   string
+	LatestAvailable string
+	Status          string
+	Origin          string
+	Withdrawn       bool
+}
+
+func resolvePackOutdatedRow(node *importGraphNode) (packOutdatedRow, bool, error) {
+	if node == nil || !isRemoteImportSource(node.Import.Source) || !node.HasLock {
+		return packOutdatedRow{}, false, nil
+	}
+	allowed, allowedErr := resolveLatestPackDependency(node, node.Import.Version)
+	available, availableErr := resolveLatestPackDependency(node, "")
+	if allowedErr != nil || availableErr != nil {
+		name := importDisplayName(node.Name)
+		switch {
+		case allowedErr != nil && availableErr != nil:
+			return packOutdatedRow{}, false, fmt.Errorf("%s: checking versions: %w", name, errors.Join(
+				fmt.Errorf("latest allowed: %w", allowedErr),
+				fmt.Errorf("latest available: %w", availableErr),
+			))
+		case allowedErr != nil:
+			return packOutdatedRow{}, false, fmt.Errorf("%s: checking latest allowed version: %w", name, allowedErr)
+		default:
+			return packOutdatedRow{}, false, fmt.Errorf("%s: checking latest available version: %w", name, availableErr)
+		}
+	}
+	current := node.Resolved.Version
+	row := packOutdatedRow{
+		Name:            importDisplayName(node.Name),
+		Current:         current,
+		LatestAllowed:   current,
+		LatestAvailable: current,
+		Status:          "current",
+		Origin:          packDependencyOrigin(node),
+		Withdrawn:       node.Resolved.Withdrawn,
+	}
+	if allowedErr == nil {
+		row.LatestAllowed = allowed.Version
+	}
+	if availableErr == nil {
+		row.LatestAvailable = available.Version
+	}
+	switch {
+	case row.LatestAllowed != "" && row.LatestAllowed != current:
+		row.Status = "upgrade_available"
+	case row.LatestAvailable != "" && row.LatestAvailable != current:
+		row.Status = "newer_outside_constraint"
+	default:
+		return packOutdatedRow{}, false, nil
+	}
+	return row, true, nil
+}
+
+func resolveLatestPackDependency(node *importGraphNode, constraint string) (packman.ResolvedVersion, error) {
+	source := node.Import.Source
+	if node.Resolved.Registry != "" && node.Resolved.RegistryPack != "" {
+		source = packsource.RegistryLocatorString(node.Resolved.Registry, node.Resolved.RegistryPack)
+		return packman.ResolveVersionWithOptions(source, constraint, packman.ResolveOptions{GCHome: gchome.Default()})
+	}
+	return resolveImportVersion(source, constraint)
+}
+
+func refreshPackDependencyRegistries(nodes []*importGraphNode, stderr io.Writer) error {
+	home := gchome.Default()
+	cfg, err := packregistry.LoadConfig(home)
+	if err != nil {
+		return err
+	}
+	needed := map[string]packregistry.Registry{}
+	for _, node := range nodes {
+		if node != nil && node.Resolved.Registry != "" {
+			for _, reg := range cfg.Registries {
+				if reg.Name == node.Resolved.Registry {
+					needed[reg.Name] = reg
+				}
+			}
+		}
+	}
+	names := make([]string, 0, len(needed))
+	for name := range needed {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if _, err := packregistry.RefreshRegistry(context.Background(), home, needed[name], packregistry.FetchOptions{}); err != nil {
+			fmt.Fprintf(stderr, "warning: registry %s refresh failed: %v\n", name, err) //nolint:errcheck
+			return fmt.Errorf("registry %s refresh failed: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func packDependencyOrigin(node *importGraphNode) string {
+	if node == nil {
+		return ""
+	}
+	if node.Resolved.Registry == "" {
+		if !isRemoteImportSource(node.Import.Source) {
+			return "path"
+		}
+		return "source"
+	}
+	if node.Resolved.RegistryPack != "" {
+		return node.Resolved.Registry + ":" + node.Resolved.RegistryPack
+	}
+	return node.Resolved.Registry
+}
+
+func packDependencyScope(name string) string {
+	switch {
+	case strings.HasPrefix(name, "default-rig:"):
+		return "default rig"
+	case strings.HasPrefix(name, "rig:"):
+		return "rig"
+	default:
+		return "pack"
+	}
+}
+
+func legacyPackSourceCount(cityPath string) int {
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		return 0
+	}
+	return len(cfg.Packs)
+}
+
+// doLegacyPackList shows configured legacy [packs] and their cache status.
+func doLegacyPackList(cityPath string, stdout, stderr io.Writer) int {
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack list: %v\n", err) //nolint:errcheck

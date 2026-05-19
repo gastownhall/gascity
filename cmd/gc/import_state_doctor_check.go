@@ -15,7 +15,7 @@ type importStateDoctorCheck struct {
 	cityPath string
 }
 
-const importStateSyncFixHint = `run "gc pack sync"`
+const importStateSyncFixHint = `run "gc doctor --fix" or "gc pack sync"`
 
 func newImportStateDoctorCheck(cityPath string) *importStateDoctorCheck {
 	return &importStateDoctorCheck{cityPath: cityPath}
@@ -76,9 +76,28 @@ func durableRegistryImportDetails(imports map[string]config.Import) []string {
 	return details
 }
 
-func (c *importStateDoctorCheck) CanFix() bool { return false }
+func (c *importStateDoctorCheck) CanFix() bool { return true }
 
-func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error { return nil }
+func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
+	imports, err := collectAllImportsFS(fsys.OSFS{}, c.cityPath)
+	if err != nil {
+		return fmt.Errorf("reading declared imports: %w", err)
+	}
+	if details := durableRegistryImportDetails(imports); len(details) > 0 {
+		return fmt.Errorf("durable registry selectors require manual remove/re-add with gc pack add")
+	}
+	lock, err := syncImports(c.cityPath, imports, packman.InstallResolveIfNeeded)
+	if err != nil {
+		return err
+	}
+	if err := writeImportLockfile(fsys.OSFS{}, c.cityPath, lock); err != nil {
+		return err
+	}
+	if _, err := installLockedImports(c.cityPath); err != nil {
+		return err
+	}
+	return nil
+}
 
 func formatImportStateDoctorDetail(issue packman.CheckIssue) string {
 	parts := []string{issue.Code}

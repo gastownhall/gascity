@@ -79,11 +79,87 @@ version = "^1.0"
 	if result.Status != doctor.StatusError {
 		t.Fatalf("status = %v, want Error; result=%#v", result.Status, result)
 	}
-	if check.CanFix() || result.FixHint != `run "gc pack sync"` {
-		t.Fatalf("result = %#v, want non-fixable sync hint", result)
+	if !check.CanFix() || !strings.Contains(result.FixHint, `gc doctor --fix`) || !strings.Contains(result.FixHint, `gc pack sync`) {
+		t.Fatalf("result = %#v, want fixable doctor/sync hint", result)
 	}
 	if len(result.Details) != 1 || !strings.Contains(result.Details[0], "missing-cache") {
 		t.Fatalf("details = %#v", result.Details)
+	}
+}
+
+func TestImportStateDoctorCheckFixRunsPackSyncPath(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	writeCityToml(t, cityDir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.0"
+`)
+
+	prevSync := syncImports
+	prevInstall := installLockedImports
+	prevCheck := checkInstalledImports
+	t.Cleanup(func() {
+		syncImports = prevSync
+		installLockedImports = prevInstall
+		checkInstalledImports = prevCheck
+	})
+	synced := false
+	installed := false
+	lock := &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/tools.git": {Version: "1.1.0", Commit: "new"},
+		},
+	}
+	syncImports = func(cityRoot string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
+		if cityRoot != cityDir {
+			t.Fatalf("sync cityRoot = %q, want %q", cityRoot, cityDir)
+		}
+		if _, ok := imports["pack:tools"]; !ok {
+			t.Fatalf("sync imports = %#v, want pack:tools", imports)
+		}
+		if mode != packman.InstallResolveIfNeeded {
+			t.Fatalf("sync mode = %v, want InstallResolveIfNeeded", mode)
+		}
+		synced = true
+		return lock, nil
+	}
+	installLockedImports = func(cityRoot string) (*packman.Lockfile, error) {
+		if cityRoot != cityDir {
+			t.Fatalf("install cityRoot = %q, want %q", cityRoot, cityDir)
+		}
+		installed = true
+		return lock, nil
+	}
+	checkInstalledImports = func(_ string, _ map[string]config.Import) (*packman.CheckReport, error) {
+		if !installed {
+			return &packman.CheckReport{Issues: []packman.CheckIssue{{
+				Severity: packman.CheckSeverityError,
+				Code:     "missing-lockfile",
+			}}}, nil
+		}
+		return &packman.CheckReport{CheckedSources: 1}, nil
+	}
+
+	check := newImportStateDoctorCheck(cityDir)
+	before := check.Run(&doctor.CheckContext{CityPath: cityDir})
+	if before.Status != doctor.StatusError {
+		t.Fatalf("before status = %v, want error", before.Status)
+	}
+	if err := check.Fix(&doctor.CheckContext{CityPath: cityDir}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if !synced || !installed {
+		t.Fatalf("sync/install called = %v/%v, want both", synced, installed)
+	}
+	after := check.Run(&doctor.CheckContext{CityPath: cityDir})
+	if after.Status != doctor.StatusOK {
+		t.Fatalf("after status = %v, want OK; result=%#v", after.Status, after)
 	}
 }
 
@@ -119,6 +195,9 @@ version = "^1.0"
 	}
 	if len(result.Details) != 1 || !strings.Contains(result.Details[0], "registry-selector-source") || !strings.Contains(result.Details[0], "registry:main:lighthouse") {
 		t.Fatalf("details = %#v", result.Details)
+	}
+	if err := newImportStateDoctorCheck(cityDir).Fix(&doctor.CheckContext{CityPath: cityDir}); err == nil {
+		t.Fatal("Fix succeeded for durable registry selector, want manual error")
 	}
 }
 
@@ -168,7 +247,7 @@ version = "^1.0"
 	var stdout, stderr bytes.Buffer
 	_ = doDoctor(false, true, false, false, &stdout, &stderr)
 	out := stdout.String() + stderr.String()
-	if !strings.Contains(out, "packv2-import-state") || !strings.Contains(out, `run "gc pack sync"`) {
+	if !strings.Contains(out, "packv2-import-state") || !strings.Contains(out, `gc pack sync`) {
 		t.Fatalf("doctor output missing import state check:\n%s", out)
 	}
 	if strings.Contains(out, `run "gc import install"`) {
@@ -214,7 +293,7 @@ version = "^1.0"
 	if !strings.Contains(out, "packv2-import-state") || !strings.Contains(out, "missing-lockfile") {
 		t.Fatalf("doctor output missing import-state failure for broken sync state:\n%s", out)
 	}
-	if !strings.Contains(out, `run "gc pack sync"`) {
+	if !strings.Contains(out, `gc pack sync`) {
 		t.Fatalf("doctor output missing sync hint:\n%s", out)
 	}
 	if strings.Contains(out, `run "gc import install"`) {

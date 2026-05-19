@@ -395,6 +395,7 @@ func collectAllImportsFS(fs fsys.FS, cityPath string) (map[string]config.Import,
 	return all, nil
 }
 
+//nolint:unparam // Keep fs injectable for symmetry with edit helpers and direct command tests.
 func collectInspectableImportsFS(fs fsys.FS, cityPath string, scope *importScopeState) (map[string]config.Import, error) {
 	imports := make(map[string]config.Import, len(scope.imports))
 	for name, imp := range scope.imports {
@@ -791,19 +792,23 @@ func doImportUpgradeAs(command string, cityPath, target string, stdout, stderr i
 }
 
 func doImportList(cityPath string, tree bool, stdout, stderr io.Writer) int {
+	return doImportListAs("gc import list", cityPath, tree, stdout, stderr)
+}
+
+func doImportListAs(command, cityPath string, tree bool, stdout, stderr io.Writer) int {
 	scope, err := loadImportScopeFS(fsys.OSFS{}, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
 		return 1
 	}
 	lock, err := readImportLockfile(fsys.OSFS{}, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
 		return 1
 	}
 	inspectImports, err := collectInspectableImportsFS(fsys.OSFS{}, cityPath, scope)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
 		return 1
 	}
 	var directNames []string
@@ -813,7 +818,7 @@ func doImportList(cityPath string, tree bool, stdout, stderr io.Writer) int {
 	sort.Strings(directNames)
 	if tree {
 		if err := writeImportTree(stdout, inspectImports, lock); err != nil {
-			fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck
+			fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
 			return 1
 		}
 		return 0
@@ -821,14 +826,14 @@ func doImportList(cityPath string, tree bool, stdout, stderr io.Writer) int {
 
 	allImports, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc import list: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
 		return 1
 	}
 	allowLockOnlyFallback := len(allImports) == len(inspectImports)
 
 	graph, graphErr := buildImportGraph(inspectImports, lock)
 	if graphErr != nil && !allowLockOnlyFallback {
-		fmt.Fprintf(stderr, "gc import list: %v\n", graphErr) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %v\n", command, graphErr) //nolint:errcheck
 		return 1
 	}
 

@@ -295,7 +295,7 @@ name = "worker"
 prompt_template = "prompts/worker.md"
 ```
 
-Multi-rig with pack and overrides (Level 5+):
+Multi-rig with overrides (Level 5+):
 
 ```toml
 [workspace]
