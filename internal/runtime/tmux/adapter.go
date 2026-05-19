@@ -842,7 +842,9 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 		return err
 	}
 	if cfg.Nudge != "" {
-		_ = ops.sendKeys(name, cfg.Nudge) // best-effort
+		if err := ops.sendKeys(name, cfg.Nudge); err != nil {
+			return fmt.Errorf("sending startup nudge: %w", err)
+		}
 	}
 
 	// Step 6.5: Run session_live commands (idempotent, re-applicable).

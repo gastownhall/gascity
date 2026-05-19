@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -113,6 +114,8 @@ type RuntimeTmuxConfig struct {
 // timed lock acquisition — preventing permanent lockout if a nudge hangs.
 var sessionNudgeLocks sync.Map // map[string]chan struct{}
 
+var pasteBufferSeq uint64
+
 // validSessionNameRe validates session names to prevent shell injection
 var validSessionNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
@@ -137,6 +140,7 @@ const (
 	hiddenAttachReadyTimeout = 2 * time.Second
 	hiddenAttachMaxLifetime  = 20 * time.Second
 	hiddenAttachPollInterval = 50 * time.Millisecond
+	maxSendKeysLiteralLen    = 4096
 )
 
 // tmuxSubprocessTimeout caps the wall-clock time any single tmux subprocess
@@ -1403,6 +1407,64 @@ func isTransientSendKeysError(err error) bool {
 	return strings.Contains(msg, "not in a mode")
 }
 
+func isCommandTooLongError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "command too long")
+}
+
+func nextPasteBufferName() string {
+	seq := atomic.AddUint64(&pasteBufferSeq, 1)
+	return fmt.Sprintf("gc-nudge-%d-%d", os.Getpid(), seq)
+}
+
+func (t *Tmux) sendLiteralText(target, text string) error {
+	if len(text) > maxSendKeysLiteralLen {
+		return t.pasteLiteralText(target, text)
+	}
+	_, err := t.run("send-keys", "-t", target, "-l", text)
+	if isCommandTooLongError(err) {
+		return t.pasteLiteralText(target, text)
+	}
+	return err
+}
+
+func (t *Tmux) pasteLiteralText(target, text string) error {
+	tmp, err := os.CreateTemp("", "gc-tmux-paste-*")
+	if err != nil {
+		return fmt.Errorf("creating tmux paste buffer file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if _, err := tmp.WriteString(text); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("writing tmux paste buffer file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing tmux paste buffer file: %w", err)
+	}
+
+	bufferName := nextPasteBufferName()
+	loaded := false
+	if _, err := t.run("load-buffer", "-b", bufferName, tmpName); err != nil {
+		return fmt.Errorf("loading tmux paste buffer: %w", err)
+	}
+	loaded = true
+	defer func() {
+		if loaded {
+			_, _ = t.run("delete-buffer", "-b", bufferName)
+		}
+	}()
+
+	if _, err := t.run("paste-buffer", "-p", "-d", "-b", bufferName, "-t", target); err != nil {
+		return fmt.Errorf("pasting tmux buffer: %w", err)
+	}
+	loaded = false
+	return nil
+}
+
 // sendKeysLiteralWithRetry sends literal text to a tmux target, retrying on
 // transient errors (e.g., "not in a mode" during agent TUI startup).
 // This is the core retry loop used by both NudgeSession and NudgePane.
@@ -1422,7 +1484,7 @@ func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Durati
 	var lastErr error
 
 	for time.Now().Before(deadline) {
-		_, err := t.run("send-keys", "-t", target, "-l", text)
+		err := t.sendLiteralText(target, text)
 		if err == nil {
 			return nil
 		}
