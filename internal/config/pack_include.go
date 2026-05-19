@@ -137,6 +137,7 @@ type remoteImportLockfile struct {
 
 type remoteImportLockEntry struct {
 	Commit string `toml:"commit"`
+	Source string `toml:"source,omitempty"`
 }
 
 func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
@@ -164,9 +165,13 @@ func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
 	}
 
 	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
-	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
+	cacheSource := source
+	if entry.Source != "" {
+		cacheSource = entry.Source
+	}
+	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(cacheSource, entry.Commit))
 	if err := WithRepoCacheReadLock(cacheRoot, func() error {
-		return validateInstalledRemoteCache(source, cacheDir, entry.Commit)
+		return validateInstalledRemoteCache(cacheSource, cacheDir, entry.Commit)
 	}); err != nil {
 		return "", false, err
 	}
@@ -198,9 +203,13 @@ func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
 	}
 
 	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
-	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
+	cacheSource := source
+	if entry.Source != "" {
+		cacheSource = entry.Source
+	}
+	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(cacheSource, entry.Commit))
 	if err := WithRepoCacheReadLock(cacheRoot, func() error {
-		return validateInstalledRemoteCache(source, cacheDir, entry.Commit)
+		return validateInstalledRemoteCache(cacheSource, cacheDir, entry.Commit)
 	}); err != nil {
 		return "", err
 	}

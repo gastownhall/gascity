@@ -10,6 +10,15 @@ title: "GC Import Launch Implementation Plan"
 | Issue | `ga-nv693` |
 | Scope | PackV2 `gc import` launch sweep |
 
+> **Successor surface marker:** This plan describes the original PackV2
+> `gc import` launch. The planned successor is the staged `gc pack` /
+> `gc pack registry` implementation in
+> [`pack-and-registry-cli-surface.md`](pack-and-registry-cli-surface.md).
+> New work should map `gc import` commands onto thin deprecated wrappers and
+> route migration/remediation pressure through `gc doctor`. In particular,
+> `gc import migrate` is replaced by `gc doctor --fix` after doctor parity
+> passes the existing migration golden corpus.
+
 ## Summary
 
 Ship the full `gc import` launch backlog in one patch train. The target

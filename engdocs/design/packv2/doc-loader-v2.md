@@ -1,5 +1,12 @@
 # V2 Loader & Pack Composition — Design
 
+> **Successor CLI marker:** Loader semantics remain reader-only, but command
+> remediation is moving from the original `gc import` surface to canonical
+> `gc pack` verbs. See
+> [`engdocs/design/pack-and-registry-cli-surface.md`](../../engdocs/design/pack-and-registry-cli-surface.md)
+> and treat `gc import` mentions below as launch-era compatibility/history
+> unless explicitly updated.
+
 > **Status:** Design description of the v.next loader as proposed in
 > [doc-pack-v2.md](doc-pack-v2.md) ([gastownhall/gascity#360](https://github.com/gastownhall/gascity/issues/360)).
 > Companion to the current release-branch loader behavior and to the v.next

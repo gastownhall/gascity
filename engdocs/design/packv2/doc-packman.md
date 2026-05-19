@@ -1,5 +1,12 @@
 # City/Pack Import Management
 
+> **Successor surface marker:** This document records the PackV2
+> `gc import` launch contract. The proposed successor surface is
+> `gc pack` / `gc pack registry`; see
+> [`engdocs/design/pack-and-registry-cli-surface.md`](../../engdocs/design/pack-and-registry-cli-surface.md).
+> Future implementation should keep `gc import` as deprecated thin wrappers
+> where mapped, with `gc doctor` owning migration/remediation guidance.
+
 **GitHub Issue:** TBD
 
 Title: `feat: gc import — import management for schema-2 Gas City packs`

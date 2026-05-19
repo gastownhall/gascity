@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "description": "Result payload for gc pack registry search.",
+  "required": ["schema_version", "query", "refreshed", "limit", "all", "truncated", "count", "results", "failures"],
+  "properties": {
+    "schema_version": {
+      "const": "1",
+      "description": "Version of this command result schema."
+    },
+    "query": {
+      "type": "string",
+      "description": "Plain text query used to filter pack names and descriptions."
+    },
+    "registry": {
+      "type": "string",
+      "description": "Registry name filter when the search was limited to one registry."
+    },
+    "refreshed": {
+      "type": "boolean",
+      "description": "Whether registry refreshes were attempted before searching."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Maximum result count applied when all is false."
+    },
+    "all": {
+      "type": "boolean",
+      "description": "Whether the default result limit was disabled."
+    },
+    "truncated": {
+      "type": "boolean",
+      "description": "Whether matching results were truncated by the limit."
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of search results returned."
+    },
+    "results": {
+      "type": "array",
+      "description": "Matching registry pack entries.",
+      "items": {
+        "type": "object",
+        "description": "One matching pack entry from a registry catalog.",
+        "required": ["registry", "name", "description", "source", "source_kind", "latest"],
+        "properties": {
+          "registry": {
+            "type": "string",
+            "description": "Registry that provided this pack entry."
+          },
+          "name": {
+            "type": "string",
+            "description": "Pack name as published in the registry catalog."
+          },
+          "description": {
+            "type": "string",
+            "description": "Pack description from the registry catalog."
+          },
+          "source": {
+            "type": "string",
+            "description": "Git source for the pack."
+          },
+          "source_kind": {
+            "type": "string",
+            "description": "Source type for this pack entry."
+          },
+          "latest": {
+            "type": "string",
+            "description": "Highest non-withdrawn semver release known for this pack."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "failures": {
+      "type": "array",
+      "description": "Registry refresh or cache failures encountered while searching.",
+      "items": {
+        "type": "object",
+        "description": "One registry search warning or failure.",
+        "required": ["name", "message"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Registry associated with the warning or failure."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable warning or failure message."
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

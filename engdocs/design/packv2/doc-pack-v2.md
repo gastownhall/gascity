@@ -1,5 +1,12 @@
 # Pack/City Model v.next
 
+> **Successor CLI marker:** PackV2 originally launched with `gc import` as the
+> import-management command surface. The planned successor is `gc pack` /
+> `gc pack registry`; see
+> [`engdocs/design/pack-and-registry-cli-surface.md`](../../engdocs/design/pack-and-registry-cli-surface.md).
+> Future command guidance should use `gc pack`, with `gc import` treated as
+> deprecated compatibility/history unless explicitly noted.
+
 **GitHub Issue:** [gastownhall/gascity#360](https://github.com/gastownhall/gascity/issues/360) (supersedes [#159](https://github.com/gastownhall/gascity/issues/159))
 
 Title: `feat: Pack/City Model v.next — cities as packs, import model, managed state`

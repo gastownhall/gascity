@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "description": "Result payload for gc pack registry remove.",
+  "required": ["schema_version", "name", "removed"],
+  "properties": {
+    "schema_version": {
+      "const": "1",
+      "description": "Version of this command result schema."
+    },
+    "name": {
+      "type": "string",
+      "description": "Name of the registry that was removed from configuration."
+    },
+    "removed": {
+      "type": "boolean",
+      "description": "Whether the named registry was removed."
+    }
+  },
+  "additionalProperties": false
+}

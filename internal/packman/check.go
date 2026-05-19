@@ -183,7 +183,7 @@ func (s *importCheckState) walkImport(name string, imp config.Import) {
 		return
 	}
 
-	packDir, ok := s.validateCachedPack(name, imp.Source, locked.Commit)
+	packDir, ok := s.validateCachedPack(name, imp.Source, locked)
 	if !ok {
 		return
 	}
@@ -213,8 +213,10 @@ func (s *importCheckState) walkImport(name string, imp config.Import) {
 	}
 }
 
-func (s *importCheckState) validateCachedPack(name, source, commit string) (string, bool) {
-	cachePath, err := RepoCachePath(source, commit)
+func (s *importCheckState) validateCachedPack(name, source string, pack LockedPack) (string, bool) {
+	cacheSource := materializedSource(source, pack)
+	commit := pack.Commit
+	cachePath, err := RepoCachePath(cacheSource, commit)
 	if err != nil {
 		s.closureIncomplete = true
 		s.addIssue(CheckIssue{
@@ -266,7 +268,7 @@ func (s *importCheckState) validateCachedPack(name, source, commit string) (stri
 		return "", false
 	}
 
-	packDir := cachedPackDir(source, cachePath)
+	packDir := cachedPackDir(cacheSource, cachePath)
 	if st, err := os.Stat(filepath.Join(packDir, "pack.toml")); err != nil {
 		if os.IsNotExist(err) {
 			s.closureIncomplete = true

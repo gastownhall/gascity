@@ -898,7 +898,7 @@ func writeImportTreeNode(stdout io.Writer, name string, imp config.Import, lock 
 			return nil
 		}
 
-		children, err := packman.ReadCachedPackImports(imp.Source, pack.Commit)
+		children, err := packman.ReadCachedPackImportsLocked(imp.Source, pack)
 		if err != nil {
 			return err
 		}
@@ -966,7 +966,7 @@ func buildImportGraphNode(name string, imp config.Import, lock *packman.Lockfile
 		return node, nil
 	}
 
-	children, err := packman.ReadCachedPackImports(imp.Source, pack.Commit)
+	children, err := packman.ReadCachedPackImportsLocked(imp.Source, pack)
 	if err != nil {
 		return nil, err
 	}
