@@ -38,6 +38,28 @@ func (g *Git) IsRepoCtx(ctx context.Context) bool {
 	return err == nil
 }
 
+// CommonDir returns the absolute path of the common git directory for
+// workDir. For a normal checkout this is "<repo>/.git"; for a linked
+// worktree it is the main clone's ".git", not the per-worktree directory.
+// Callers that want the repository root (the parent of ".git") should
+// take filepath.Dir of the result.
+func (g *Git) CommonDir() (string, error) {
+	return g.CommonDirCtx(context.Background())
+}
+
+// CommonDirCtx is like CommonDir but accepts a context for cancellation.
+func (g *Git) CommonDirCtx(ctx context.Context) (string, error) {
+	out, err := g.runCtx(ctx, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", fmt.Errorf("getting git common dir: %w", err)
+	}
+	common := strings.TrimSpace(out)
+	if common == "" {
+		return "", fmt.Errorf("git rev-parse --git-common-dir returned empty path")
+	}
+	return common, nil
+}
+
 // CurrentBranch returns the current branch name. Returns "HEAD" if detached.
 func (g *Git) CurrentBranch() (string, error) {
 	return g.CurrentBranchCtx(context.Background())

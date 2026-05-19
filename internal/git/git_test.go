@@ -55,6 +55,57 @@ func TestIsRepo(t *testing.T) {
 	}
 }
 
+// TestCommonDir verifies that CommonDir returns the main repository's
+// .git directory both from the main checkout and from a linked worktree.
+// The linked-worktree case is the key one for polecat rig auto-detection:
+// gc bd uses CommonDir to identify the rig when a worktree's
+// .beads/redirect is missing.
+func TestCommonDir(t *testing.T) {
+	repo := initTestRepo(t)
+	wantMainGit, err := filepath.EvalSymlinks(filepath.Join(repo, ".git"))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(repo/.git): %v", err)
+	}
+
+	g := New(repo)
+	got, err := g.CommonDir()
+	if err != nil {
+		t.Fatalf("CommonDir from main checkout: %v", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(got); err == nil {
+		got = resolved
+	}
+	if got != wantMainGit {
+		t.Fatalf("CommonDir from main checkout = %q, want %q", got, wantMainGit)
+	}
+
+	// Linked worktree: CommonDir must still point to the main repo's .git,
+	// not the per-worktree subdirectory under .git/worktrees/<name>.
+	worktree := filepath.Join(t.TempDir(), "linked-worktree")
+	runGit(t, repo, "worktree", "add", "--detach", worktree)
+
+	gw := New(worktree)
+	gotFromWorktree, err := gw.CommonDir()
+	if err != nil {
+		t.Fatalf("CommonDir from linked worktree: %v", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(gotFromWorktree); err == nil {
+		gotFromWorktree = resolved
+	}
+	if gotFromWorktree != wantMainGit {
+		t.Fatalf("CommonDir from linked worktree = %q, want %q (main repo .git)", gotFromWorktree, wantMainGit)
+	}
+}
+
+func TestCommonDir_NotARepo(t *testing.T) {
+	notRepo := t.TempDir()
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(notRepo))
+	g := New(notRepo)
+	if _, err := g.CommonDir(); err == nil {
+		t.Error("CommonDir() in non-repo returned nil error, want error")
+	}
+}
+
 func TestCurrentBranch(t *testing.T) {
 	repo := initTestRepo(t)
 	g := New(repo)
