@@ -37,6 +37,7 @@ can be pinned to specific git refs.`,
 	cmd.AddCommand(newPackAddCmd(stdout, stderr))
 	cmd.AddCommand(newPackRemoveCmd(stdout, stderr))
 	cmd.AddCommand(newPackSyncCmd(stdout, stderr))
+	cmd.AddCommand(newPackCheckCmd(stdout, stderr))
 	cmd.AddCommand(newPackUpgradeCmd(stdout, stderr))
 	cmd.AddCommand(newPackWhyCmd(stdout, stderr))
 	cmd.AddCommand(newPackFetchCmd(stdout, stderr))
@@ -98,6 +99,25 @@ func newPackSyncCmd(stdout, stderr io.Writer) *cobra.Command {
 				return errExit
 			}
 			if doImportInstallAs("gc pack sync", cityPath, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+}
+
+func newPackCheckCmd(stdout, stderr io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "check",
+		Short: "Verify pack dependencies against the lockfile and local cache",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cityPath, err := resolveImportRoot()
+			if err != nil {
+				fmt.Fprintf(stderr, "gc pack check: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			if doImportCheckAs("gc pack check", cityPath, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil

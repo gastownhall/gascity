@@ -2054,6 +2054,7 @@ gc pack
 | Subcommand | Description |
 |------------|-------------|
 | [gc pack add](#gc-pack-add) | Add a pack dependency |
+| [gc pack check](#gc-pack-check) | Verify pack dependencies against the lockfile and local cache |
 | [gc pack fetch](#gc-pack-fetch) | Clone missing and update existing remote packs |
 | [gc pack list](#gc-pack-list) | Show remote pack sources and cache status |
 | [gc pack registry](#gc-pack-registry) | Manage pack registries |
@@ -2074,6 +2075,14 @@ gc pack add <source> [flags]
 |------|------|---------|-------------|
 | `--name` | string |  | Local binding name override |
 | `--version` | string |  | Version constraint for git-backed dependencies |
+
+## gc pack check
+
+Verify pack dependencies against the lockfile and local cache
+
+```
+gc pack check
+```
 
 ## gc pack fetch
 

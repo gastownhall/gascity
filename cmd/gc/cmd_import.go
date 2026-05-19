@@ -668,22 +668,32 @@ func doImportInstallAs(command string, cityPath string, stdout, stderr io.Writer
 }
 
 func doImportCheck(cityPath string, stdout, stderr io.Writer) int {
+	return doImportCheckAs("gc import check", cityPath, stdout, stderr)
+}
+
+func doImportCheckAs(command string, cityPath string, stdout, stderr io.Writer) int {
 	allImports, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc import check: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
 		return 1
 	}
 	report, err := checkInstalledImports(cityPath, allImports)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc import check: %v\n", err) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
 		return 1
 	}
+	noun := "Import state"
+	checked := "remote import(s)"
+	if !strings.HasPrefix(command, "gc import") {
+		noun = "Pack dependency state"
+		checked = "remote pack dependency source(s)"
+	}
 	if !report.HasIssues() {
-		fmt.Fprintf(stdout, "Import state OK: %d remote import(s) checked\n", report.CheckedSources) //nolint:errcheck
+		fmt.Fprintf(stdout, "%s OK: %d %s checked\n", noun, report.CheckedSources, checked) //nolint:errcheck
 		return 0
 	}
 
-	fmt.Fprintf(stdout, "Import state has %d issue(s):\n", len(report.Issues)) //nolint:errcheck
+	fmt.Fprintf(stdout, "%s has %d issue(s):\n", noun, len(report.Issues)) //nolint:errcheck
 	writeImportCheckIssues(stdout, report.Issues)
 	return 1
 }

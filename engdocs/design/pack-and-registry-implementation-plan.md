@@ -387,6 +387,7 @@ removing existing commands.
   - `add`
   - `remove`
   - `sync`
+  - `check`
   - `list`
   - `show`
   - `outdated`
@@ -399,6 +400,13 @@ removing existing commands.
   through the new handler.
 - Add JSON output structs, result schemas, `--json-schema` tests, and goldens
   for pack read verbs in the same wave as the verbs they describe.
+
+Current workstream boundary: the registry/gc pack PR includes the registry
+commands and low-risk dependency wrappers for `add`, `remove`, `sync`,
+`check`, `upgrade`, and `why`. Dependency `show`, `outdated`, and canonical
+dependency `list` remain in Wave 4a/4b follow-up work. `gc pack list` stays on
+the legacy `[packs]` status surface until that compatibility collision is
+resolved intentionally.
 
 ### Dependencies
 
@@ -414,6 +422,8 @@ go test ./cmd/gc -run 'TestPack|TestDoPack|TestPackFetchAlias|TestPackList'
 
 - `gc pack fetch` executes sync path exactly once
 - legacy `gc pack list` text output has an explicit golden during transition
+- this workstream asserts that dependency `show` and `outdated` are absent, and
+  that `list` is still legacy `[packs]` status
 - JSON no-scope failure uses the PR #2222 shared failure schema
 - pack read-command `--json` stdout validates against `--json-schema=result`
 - failing pack read-command `--json` validates against `schemas/failure.schema.json`
@@ -501,7 +511,7 @@ coordination.
 - Refactor shared command handlers so `gc import` wraps `gc pack` operations:
   - `gc import add` -> `gc pack add`
   - `gc import remove` -> `gc pack remove`
-  - `gc import check` -> `gc pack sync --verify-only`
+  - `gc import check` -> `gc pack check`
   - `gc import install` -> `gc pack sync`
   - `gc import upgrade` -> `gc pack upgrade`
   - `gc import list` -> `gc pack list`

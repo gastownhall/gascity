@@ -334,7 +334,7 @@ func TestPackCommandTreeKeepsRegistryAndDependencySurfacesSeparate(t *testing.T)
 			t.Fatalf("gc pack unexpectedly exposes dependency verb %q", name)
 		}
 	}
-	for _, name := range []string{"add", "remove", "sync", "upgrade", "why"} {
+	for _, name := range []string{"add", "remove", "sync", "check", "upgrade", "why"} {
 		if found, _, err := cmd.Find([]string{name}); err != nil || found == cmd {
 			t.Fatalf("gc pack %s not found: found=%v err=%v", name, found, err)
 		}
@@ -346,6 +346,54 @@ func TestPackCommandTreeKeepsRegistryAndDependencySurfacesSeparate(t *testing.T)
 		if found, _, err := cmd.Find([]string{"registry", name}); err != nil || found == cmd {
 			t.Fatalf("gc pack registry %s not found: found=%v err=%v", name, found, err)
 		}
+	}
+}
+
+func TestPackCheckCommandWrapsImportCheck(t *testing.T) {
+	clearGCEnv(t)
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_CITY", city)
+	writeCityToml(t, city, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, city, `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.0"
+`)
+
+	prevCheck := checkInstalledImports
+	t.Cleanup(func() { checkInstalledImports = prevCheck })
+	checkInstalledImports = func(cityRoot string, imports map[string]config.Import) (*packman.CheckReport, error) {
+		if cityRoot != city {
+			t.Fatalf("cityRoot = %q, want %q", cityRoot, city)
+		}
+		if _, ok := imports["pack:tools"]; !ok {
+			t.Fatalf("imports = %#v, want pack:tools", imports)
+		}
+		return &packman.CheckReport{CheckedSources: 1}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"pack", "check"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("pack check code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Pack dependency state OK: 1 remote pack dependency source(s) checked") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = doImportCheck(city, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("import check code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Import state OK: 1 remote import(s) checked") {
+		t.Fatalf("import stdout = %q", stdout.String())
 	}
 }
 

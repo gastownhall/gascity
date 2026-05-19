@@ -250,7 +250,8 @@ The dependency verbs are grouped by the lifecycle of an existing pack's
 dependencies:
 
 - **edit the dependency manifest:** `add`, `remove`
-- **reconcile local state with the manifest and lockfile:** `sync`
+- **reconcile or verify local state with the manifest and lockfile:** `sync`,
+  `check`
 - **inspect current state:** `list`, `show`
 - **inspect and apply available changes:** `outdated`, `upgrade`
 
@@ -263,12 +264,21 @@ catalogs and catalog browsing.
 gc pack add <source-or-name> [--name <import-name>] [--version <constraint>] [--export] [--transitive] [--no-transitive] [--transitive-default] [--shadow <warn|silent>] [--no-sync] [--pack <path>] [--city <path>] [--rig <name-or-path>]
 gc pack remove <import-name> [--force] [--pack <path>] [--city <path>] [--rig <name-or-path>]
 gc pack sync [<import-name>] [--refresh] [--verify-only] [--pack <path>] [--city <path>] [--rig <name-or-path>]
+gc pack check [--pack <path>] [--city <path>] [--rig <name-or-path>]
 gc pack list [--transitive] [--json] [--pack <path>] [--city <path>] [--rig <name-or-path>]
 gc pack show <import-name> [--json] [--pack <path>] [--city <path>] [--rig <name-or-path>]
 gc pack outdated [<import-name>] [--refresh] [--json] [--pack <path>] [--city <path>] [--rig <name-or-path>]
 gc pack upgrade [<import-name>] [--refresh] [--pack <path>] [--city <path>] [--rig <name-or-path>]
 gc pack why <name-or-path> [--json] [--pack <path>] [--city <path>] [--rig <name-or-path>]
 ```
+
+Current implementation checkpoint: the registry workstream PR includes
+`gc pack registry list/add/remove/refresh/search/show` plus thin dependency
+wrappers for `gc pack add/remove/sync/check/upgrade/why`. Dependency
+`gc pack show` and `gc pack outdated` are intentionally deferred to the later
+read-command wave. Canonical dependency `gc pack list` is also deferred because
+the existing `gc pack list` command remains the legacy `[packs]` status command
+until the compatibility plan moves that surface.
 
 `sync` is the dependency-reconciliation verb. It replaces the old "fetch all
 declared imports into cache" meaning of `gc import install` and the legacy
