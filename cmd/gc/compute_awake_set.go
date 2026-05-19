@@ -320,9 +320,23 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		}
 
 		// Idle sleep: desired sessions idle too long should sleep.
-		// Attached, pinned, and mode=always named sessions are exempt.
+		// Attached, pinned, mode=always named, and sessions actively
+		// executing in_progress work are exempt. The in_progress
+		// exemption matters for pool workers in mid-task: a slow
+		// upstream API call between two of the agent's own bd writes
+		// can drive IdleSince past the threshold while the underlying
+		// CLI process is still alive. Without this exemption, the gate
+		// would flip ShouldWake back to false even though the
+		// assigned-work loop above tagged the session "must stay awake
+		// because it owns active work" — and downstream consumers (the
+		// session.stranded diagnostic and any witness-style recovery)
+		// would see a false positive. Queued ("open") work is
+		// intentionally not exempted: on-demand named sessions are
+		// allowed to idle-sleep with queued work and wake on the next
+		// on-demand trigger.
 		if decision.ShouldWake && !input.AttachedSessions[name] && !input.PendingSessions[name] && !bead.Pinned && !bead.IdleSince.IsZero() &&
-			!isAlwaysNamedSession(input.NamedSessions, bead) {
+			!isAlwaysNamedSession(input.NamedSessions, bead) &&
+			!sessionHasAssignedInProgressWork(input.WorkBeads, bead) {
 			agent, hasAgent := agentsByName[bead.Template]
 			var idleTimeout time.Duration
 			switch {
@@ -362,6 +376,35 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 	}
 
 	return result
+}
+
+// sessionHasAssignedInProgressWork reports whether any in_progress work
+// bead in workBeads is assigned to the given session bead. Matches by
+// concrete bead ID, the session's current SessionName token, or its
+// configured NamedIdentity — the same set of acceptable assignee values
+// used by the assigned-work gate at compute_awake_set.go:230-254.
+//
+// Status is restricted to "in_progress" specifically (not "open"). An
+// open assigned bead is queued work the agent has not yet claimed; an
+// on-demand named session is allowed to idle-sleep with queued work
+// pending and wake on the next on-demand trigger. An in_progress
+// assigned bead means the agent is actively executing it, and the
+// session must not be classified as idle while that's true.
+func sessionHasAssignedInProgressWork(workBeads []AwakeWorkBead, bead AwakeSessionBead) bool {
+	for _, wb := range workBeads {
+		if wb.Status != "in_progress" {
+			continue
+		}
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" {
+			continue
+		}
+		if assignee == bead.ID || assignee == bead.SessionName ||
+			(bead.NamedIdentity != "" && assignee == bead.NamedIdentity) {
+			return true
+		}
+	}
+	return false
 }
 
 func findNamedSessionName(beads []AwakeSessionBead, identity string) string {

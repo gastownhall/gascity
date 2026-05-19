@@ -1114,6 +1114,48 @@ func TestRegression_SessionWithWorkByAlias_DoesNotWake(t *testing.T) {
 // Asleep ephemeral with assigned work (e2e regression)
 // ---------------------------------------------------------------------------
 
+// TestRegression_IdleSleepDoesNotOverrideAssignedWork covers issue #1427:
+// a session that holds an open in_progress work bead must not be flipped
+// to ShouldWake=false / Reason="idle-sleep" by the idle-sleep gate, even
+// when its IdleSince is past the agent's SleepAfterIdle threshold.
+//
+// Production scenario: a pool worker is mid-task, blocked on a slow
+// upstream API response between two of its own bd writes. From the
+// outside, IdleSince walks past the threshold while the underlying CLI
+// process is still very much alive. The assigned-work gate marked it
+// "must stay awake because it owns active work"; the idle-sleep gate
+// then over-rode that and labeled the session asleep — handing
+// downstream recovery agents and #1425's session.stranded diagnostic a
+// false positive.
+func TestRegression_IdleSleepDoesNotOverrideAssignedWork(t *testing.T) {
+	idleTimeout := 10 * time.Minute
+	idleSince := now.Add(-(idleTimeout + time.Minute)) // 11 min ago: past threshold
+
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{
+			QualifiedName:  "hello-world/polecat",
+			SleepAfterIdle: idleTimeout,
+		}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:          "mc-sctve",
+			SessionName: "polecat-mc-sctve",
+			Template:    "hello-world/polecat",
+			State:       "active",
+			IdleSince:   idleSince,
+		}},
+		WorkBeads: []AwakeWorkBead{
+			{ID: "hw-8lb", Assignee: "mc-sctve", Status: "in_progress"},
+		},
+		ScaleCheckCounts: map[string]int{"hello-world/polecat": 0},
+		Now:              now,
+	})
+
+	assertAwake(t, result, "polecat-mc-sctve")
+	if got := result["polecat-mc-sctve"].Reason; got == "idle-sleep" {
+		t.Errorf("reason = %q, want non-idle-sleep — assigned-work must veto idle-sleep override", got)
+	}
+}
+
 func TestRegression_AsleepEphemeralWithAssignedWork_WakesViaAssignedWork(t *testing.T) {
 	// An asleep polecat that has in_progress work assigned to its bead ID
 	// must wake via the assigned-work path, even though scaleCheck alone
