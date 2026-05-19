@@ -1,6 +1,8 @@
 package api
 
 import (
+	"sort"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -42,6 +44,12 @@ func listSessionBeadsForReadModel(store beads.Store) ([]beads.Bead, error) {
 				seen[b.ID] = struct{}{}
 				merged = append(merged, b)
 			}
+			// Match the helper's global sort — the query is hardcoded
+			// to SortCreatedDesc, so cached and uncached paths must
+			// agree on order across mixed-shape rows.
+			sort.SliceStable(merged, func(i, j int) bool {
+				return merged[i].CreatedAt.After(merged[j].CreatedAt)
+			})
 			return merged, nil
 		}
 	}

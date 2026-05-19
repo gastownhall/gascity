@@ -214,6 +214,106 @@ func TestListAllSessionBeads_SortRespected(t *testing.T) {
 	}
 }
 
+// TestListAllSessionBeads_GlobalSortAcrossLegs guards against the
+// regression where each leg of the union was sorted independently but
+// the merged result was not. Creating beads with alternating shapes
+// (type-only, label-only, type-only) means a leg-local sort would
+// emit type-only rows before label-only rows regardless of CreatedAt;
+// only a global sort yields the expected creation order.
+func TestListAllSessionBeads_GlobalSortAcrossLegs(t *testing.T) {
+	store := beads.NewMemStore()
+	empty := ""
+
+	// First bead: type-only.
+	b0, err := store.Create(beads.Bead{Title: "t0", Type: BeadType})
+	if err != nil {
+		t.Fatalf("create b0: %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+
+	// Second bead: label-only (Type cleared after create).
+	b1, err := store.Create(beads.Bead{Title: "t1", Labels: []string{LabelSession}})
+	if err != nil {
+		t.Fatalf("create b1: %v", err)
+	}
+	if err := store.Update(b1.ID, beads.UpdateOpts{Type: &empty}); err != nil {
+		t.Fatalf("clear type on b1: %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+
+	// Third bead: type-only.
+	b2, err := store.Create(beads.Bead{Title: "t2", Type: BeadType})
+	if err != nil {
+		t.Fatalf("create b2: %v", err)
+	}
+
+	asc, err := ListAllSessionBeads(store, beads.ListQuery{Sort: beads.SortCreatedAsc})
+	if err != nil {
+		t.Fatalf("asc: %v", err)
+	}
+	wantAsc := []string{b0.ID, b1.ID, b2.ID}
+	if len(asc) != len(wantAsc) {
+		t.Fatalf("asc len = %d, want %d (%v)", len(asc), len(wantAsc), asc)
+	}
+	for i, want := range wantAsc {
+		if asc[i].ID != want {
+			t.Errorf("asc[%d] = %s, want %s (full order: %+v)", i, asc[i].ID, want, asc)
+		}
+	}
+
+	desc, err := ListAllSessionBeads(store, beads.ListQuery{Sort: beads.SortCreatedDesc})
+	if err != nil {
+		t.Fatalf("desc: %v", err)
+	}
+	wantDesc := []string{b2.ID, b1.ID, b0.ID}
+	if len(desc) != len(wantDesc) {
+		t.Fatalf("desc len = %d, want %d (%v)", len(desc), len(wantDesc), desc)
+	}
+	for i, want := range wantDesc {
+		if desc[i].ID != want {
+			t.Errorf("desc[%d] = %s, want %s (full order: %+v)", i, desc[i].ID, want, desc)
+		}
+	}
+}
+
+// TestListAllSessionBeads_LimitAppliedOnce verifies Limit is applied
+// to the merged result, not independently to each underlying query
+// (which could return up to 2× the requested rows).
+func TestListAllSessionBeads_LimitAppliedOnce(t *testing.T) {
+	store := beads.NewMemStore()
+	empty := ""
+
+	var ids []string
+	for i := 0; i < 4; i++ {
+		var b beads.Bead
+		var err error
+		if i%2 == 0 {
+			b, err = store.Create(beads.Bead{Title: "type-only", Type: BeadType})
+		} else {
+			b, err = store.Create(beads.Bead{Title: "label-only", Labels: []string{LabelSession}})
+			if err == nil {
+				err = store.Update(b.ID, beads.UpdateOpts{Type: &empty})
+			}
+		}
+		if err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+		ids = append(ids, b.ID)
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	got, err := ListAllSessionBeads(store, beads.ListQuery{Limit: 2, Sort: beads.SortCreatedAsc})
+	if err != nil {
+		t.Fatalf("ListAllSessionBeads: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2 (Limit must be applied to the union, not per leg)", len(got))
+	}
+	if got[0].ID != ids[0] || got[1].ID != ids[1] {
+		t.Errorf("got IDs [%s, %s], want [%s, %s] (oldest two)", got[0].ID, got[1].ID, ids[0], ids[1])
+	}
+}
+
 // TestListAllSessionBeads_NilStore returns empty without error.
 func TestListAllSessionBeads_NilStore(t *testing.T) {
 	got, err := ListAllSessionBeads(nil, beads.ListQuery{})

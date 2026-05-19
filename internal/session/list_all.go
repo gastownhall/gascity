@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -37,9 +38,14 @@ func ListAllSessionBeads(store beads.Store, base beads.ListQuery) ([]beads.Bead,
 		return nil, nil
 	}
 
+	// Limit is applied globally after the union (see below); passing
+	// base.Limit into each leg independently could return up to 2× the
+	// requested rows or drop the correct top-N when the union spans
+	// both legs.
 	byTypeQuery := base
 	byTypeQuery.Type = BeadType
 	byTypeQuery.Label = ""
+	byTypeQuery.Limit = 0
 	byType, typeErr := store.List(byTypeQuery)
 	if typeErr != nil && !beads.IsPartialResult(typeErr) {
 		return nil, fmt.Errorf("listing session beads by type: %w", typeErr)
@@ -48,15 +54,12 @@ func ListAllSessionBeads(store beads.Store, base beads.ListQuery) ([]beads.Bead,
 	byLabelQuery := base
 	byLabelQuery.Type = ""
 	byLabelQuery.Label = LabelSession
+	byLabelQuery.Limit = 0
 	byLabel, labelErr := store.List(byLabelQuery)
 	if labelErr != nil && !beads.IsPartialResult(labelErr) {
 		return nil, fmt.Errorf("listing session beads by label: %w", labelErr)
 	}
 
-	// Preserve the caller's Sort by emitting Type results first (already
-	// sorted by store.List) and then Label-only stragglers. Within each
-	// leg the order is store-defined per query.Sort; the union is stable
-	// across the two legs because dedup keeps the first occurrence.
 	seen := make(map[string]struct{}, len(byType)+len(byLabel))
 	out := make([]beads.Bead, 0, len(byType)+len(byLabel))
 	for _, b := range byType {
@@ -78,6 +81,25 @@ func ListAllSessionBeads(store beads.Store, base beads.ListQuery) ([]beads.Bead,
 		}
 		seen[b.ID] = struct{}{}
 		out = append(out, b)
+	}
+
+	// Each leg's store.List honored base.Sort within its result set, but
+	// the union concatenates them — sort globally so mixed-shape rows
+	// interleave correctly. Unknown Sort values are left alone for
+	// forward-compat with future sort modes.
+	switch base.Sort {
+	case beads.SortCreatedAsc:
+		sort.SliceStable(out, func(i, j int) bool {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		})
+	case beads.SortCreatedDesc:
+		sort.SliceStable(out, func(i, j int) bool {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		})
+	}
+
+	if base.Limit > 0 && len(out) > base.Limit {
+		out = out[:base.Limit]
 	}
 
 	// Surface the first partial-result error encountered. Either leg
