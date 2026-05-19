@@ -19,6 +19,7 @@ import (
 var (
 	newDoctorDoltServerCheck    = doctor.NewDoltServerCheck
 	newDoctorRigDoltServerCheck = doctor.NewRigDoltServerCheck
+	newDoctorDoltBackupCheck    = doctor.NewDoltBackupCheck
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -134,6 +135,10 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 
 	d := &doctor.Doctor{}
 	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: verbose}
+	managedDoltDataDir := filepath.Join(cityPath, ".beads", "dolt")
+	if layout, err := resolveManagedDoltRuntimeLayout(cityPath); err == nil {
+		managedDoltDataDir = layout.DataDir
+	}
 
 	// Core checks — always run.
 	d.Register(&doctor.CityStructureCheck{})
@@ -260,10 +265,13 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 			d.Register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || gcDoltSkip()))
 			// Custom types check — rig store.
 			d.Register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
-			// Dolt-backup registration — catches the gap left by `gc rig
-			// add` before mol-dog-doctor starts emitting backup-missing
-			// advisory mail (~6–12h after provisioning).
-			d.Register(doctor.NewDoltBackupCheck(cityPath, rig))
+			// Dolt-backup registration catches the silent gap left by
+			// `gc rig add` before the rig is eligible for mol-dog backup
+			// automation. Gated to match the sibling dolt-server check:
+			// skip non-managed-bdstore rigs and GC_DOLT=skip environments.
+			if rigUsesManagedBdStoreContract(cityPath, rig) && !gcDoltSkip() {
+				d.Register(newDoctorDoltBackupCheck(cityPath, rig, managedDoltDataDir))
+			}
 		}
 	}
 

@@ -182,6 +182,169 @@ prefix = "fe"
 	}
 }
 
+func TestDoDoctorRegistersDoltBackupCheckOnlyForActiveManagedRigs(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "managed"
+path = "managed"
+prefix = "ma"
+
+[[rigs]]
+name = "filebacked"
+path = "filebacked"
+prefix = "fi"
+
+[[rigs]]
+name = "sleeping"
+path = "sleeping"
+prefix = "sl"
+suspended = true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"managed", "filebacked", "sleeping"} {
+		if err := os.MkdirAll(filepath.Join(cityDir, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"managed", "sleeping"} {
+		rigDir := filepath.Join(cityDir, name)
+		if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(rigDir, ".beads", "metadata.json"), contract.MetadataState{
+			Database:     "dolt",
+			Backend:      "dolt",
+			DoltMode:     "server",
+			DoltDatabase: name,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	doltDataDir := filepath.Join(cityDir, "runtime-dolt")
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_DOLT_DATA_DIR", doltDataDir)
+	oldCityFlag := cityFlag
+	cityFlag = cityDir
+	t.Cleanup(func() { cityFlag = oldCityFlag })
+
+	oldCityCheck := newDoctorDoltServerCheck
+	oldRigCheck := newDoctorRigDoltServerCheck
+	oldBackupCheck := newDoctorDoltBackupCheck
+	registered := map[string]string{}
+	newDoctorDoltServerCheck = func(cityPath string, _ bool) *doctor.DoltServerCheck {
+		return doctor.NewDoltServerCheck(cityPath, true)
+	}
+	newDoctorRigDoltServerCheck = func(cityPath string, rig config.Rig, _ bool) *doctor.RigDoltServerCheck {
+		return doctor.NewRigDoltServerCheck(cityPath, rig, true)
+	}
+	newDoctorDoltBackupCheck = func(cityPath string, rig config.Rig, dataDir string) *doctor.DoltBackupCheck {
+		registered[rig.Name] = dataDir
+		return doctor.NewDoltBackupCheck(cityPath, rig, dataDir)
+	}
+	t.Cleanup(func() {
+		newDoctorDoltServerCheck = oldCityCheck
+		newDoctorRigDoltServerCheck = oldRigCheck
+		newDoctorDoltBackupCheck = oldBackupCheck
+	})
+
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, false, false, &stdout, &stderr)
+
+	if len(registered) != 1 {
+		t.Fatalf("registered dolt-backup checks = %#v, want only active managed rig", registered)
+	}
+	if got := registered["managed"]; got != doltDataDir {
+		t.Fatalf("managed rig data dir = %q, want runtime layout data dir %q", got, doltDataDir)
+	}
+	if _, ok := registered["filebacked"]; ok {
+		t.Fatalf("file-backed rig should not register dolt-backup check: %#v", registered)
+	}
+	if _, ok := registered["sleeping"]; ok {
+		t.Fatalf("suspended rig should not register dolt-backup check: %#v", registered)
+	}
+}
+
+func TestDoDoctorSkipsDoltBackupCheckWhenGCDoltSkip(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "managed")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "managed"
+path = "managed"
+prefix = "ma"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(rigDir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "managed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_DOLT", "skip")
+	oldCityFlag := cityFlag
+	cityFlag = cityDir
+	t.Cleanup(func() { cityFlag = oldCityFlag })
+
+	oldCityCheck := newDoctorDoltServerCheck
+	oldRigCheck := newDoctorRigDoltServerCheck
+	oldBackupCheck := newDoctorDoltBackupCheck
+	registered := 0
+	newDoctorDoltServerCheck = func(cityPath string, _ bool) *doctor.DoltServerCheck {
+		return doctor.NewDoltServerCheck(cityPath, true)
+	}
+	newDoctorRigDoltServerCheck = func(cityPath string, rig config.Rig, _ bool) *doctor.RigDoltServerCheck {
+		return doctor.NewRigDoltServerCheck(cityPath, rig, true)
+	}
+	newDoctorDoltBackupCheck = func(cityPath string, rig config.Rig, dataDir string) *doctor.DoltBackupCheck {
+		registered++
+		return doctor.NewDoltBackupCheck(cityPath, rig, dataDir)
+	}
+	t.Cleanup(func() {
+		newDoctorDoltServerCheck = oldCityCheck
+		newDoctorRigDoltServerCheck = oldRigCheck
+		newDoctorDoltBackupCheck = oldBackupCheck
+	})
+
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, false, false, &stdout, &stderr)
+
+	if registered != 0 {
+		t.Fatalf("registered %d dolt-backup checks, want 0 when GC_DOLT=skip", registered)
+	}
+}
+
 func TestDoDoctorRunsDoltTopologyForBdRigUnderFileBackedCity(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "frontend")
