@@ -260,6 +260,10 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 			d.Register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || gcDoltSkip()))
 			// Custom types check — rig store.
 			d.Register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
+			// Dolt-backup registration — catches the gap left by `gc rig
+			// add` before mol-dog-doctor starts emitting backup-missing
+			// advisory mail (~6–12h after provisioning).
+			d.Register(doctor.NewDoltBackupCheck(cityPath, rig))
 		}
 	}
 
