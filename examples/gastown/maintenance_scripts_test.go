@@ -2822,6 +2822,316 @@ exit 0
 	}
 }
 
+// reaperAlertDoltStub returns a dolt-mock script body where the open-wisp count
+// query (no created_at filter) returns openWispCount. All other COUNT queries
+// return 0. Used by the alert-dedup tests below.
+func reaperAlertDoltStub(openWispCount int) string {
+	return fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*)
+    printf 'COUNT(*)\n%d\n'
+    ;;
+  *"DELETE FROM "*"wisps"*)
+    printf 'ROW_COUNT()\n0\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`, openWispCount)
+}
+
+// reaperAlertBaseEnv returns the common env vars used by the alert-dedup
+// tests. Threshold is hardcoded to 10 so the test stubs (which return modest
+// open-wisp counts) exercise the alert path without inflated counters.
+func reaperAlertBaseEnv(cityDir, binDir, doltLog, gcLog, stateDir string) map[string]string {
+	return map[string]string{
+		"DOLT_ARGS_LOG":             doltLog,
+		"GC_CALL_LOG":               gcLog,
+		"GC_CITY":                   cityDir,
+		"GC_CITY_PATH":              cityDir,
+		"GC_DOLT_HOST":              "127.0.0.1",
+		"GC_DOLT_PORT":              "3307",
+		"GC_DOLT_USER":              "root",
+		"GC_DOLT_PASSWORD":          "",
+		"GC_PACK_STATE_DIR":         stateDir,
+		"GC_REAPER_ALERT_THRESHOLD": "10",
+		"PATH":                      binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+}
+
+// TestReaperAlertEmitsOnFirstThresholdCross verifies that the threshold-crossed
+// anomaly is escalated when no prior alert state exists. Pin against ga-sh6
+// regression: without dedup state, the first crossing should always escalate.
+func TestReaperAlertEmitsOnFirstThresholdCross(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), reaperAlertDoltStub(50))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := reaperAlertBaseEnv(cityDir, binDir, doltLog, gcLog, stateDir)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
+		t.Fatalf("reaper did not escalate on first threshold cross:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "50 open wisps (threshold: 10)") {
+		t.Fatalf("reaper escalation body missing open-wisp count:\n%s", gcLogText)
+	}
+
+	statePath := filepath.Join(stateDir, "reaper-alert-state.txt")
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("reaper did not persist alert state file %s: %v", statePath, err)
+	}
+	stateData, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("ReadFile(state): %v", err)
+	}
+	stateText := string(stateData)
+	if !strings.Contains(stateText, "count=50") {
+		t.Fatalf("state file missing recorded count:\n%s", stateText)
+	}
+}
+
+// TestReaperAlertDedupSkipsWithinWindowAndSmallDelta verifies that a second
+// reaper run within the dedup window with a small open-wisp delta does NOT
+// emit a duplicate mail. Pin against ga-sh6 feedback loop.
+func TestReaperAlertDedupSkipsWithinWindowAndSmallDelta(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), reaperAlertDoltStub(52))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(stateDir): %v", err)
+	}
+	// Prior alert: count=50, 30 seconds ago. Within 3600s window, delta=2 < 10.
+	priorEpoch := time.Now().Add(-30 * time.Second).Unix()
+	priorState := fmt.Sprintf("epoch=%d\ncount=50\n", priorEpoch)
+	statePath := filepath.Join(stateDir, "reaper-alert-state.txt")
+	if err := os.WriteFile(statePath, []byte(priorState), 0o644); err != nil {
+		t.Fatalf("WriteFile(state): %v", err)
+	}
+
+	env := reaperAlertBaseEnv(cityDir, binDir, doltLog, gcLog, stateDir)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION") {
+		t.Fatalf("reaper escalated duplicate alert within dedup window (small delta):\n%s", gcLogText)
+	}
+
+	// State should not be updated when dedup applies.
+	stateData, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("ReadFile(state): %v", err)
+	}
+	if !strings.Contains(string(stateData), "count=50") {
+		t.Fatalf("dedup-skip path overwrote prior state:\n%s", stateData)
+	}
+}
+
+// TestReaperAlertDedupEmitsOnLargeDelta verifies that a count delta >= 10
+// re-emits an alert even within the dedup window.
+func TestReaperAlertDedupEmitsOnLargeDelta(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), reaperAlertDoltStub(65))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(stateDir): %v", err)
+	}
+	// Prior alert: count=50, 30 seconds ago. Within window but delta=15 >= 10.
+	priorEpoch := time.Now().Add(-30 * time.Second).Unix()
+	priorState := fmt.Sprintf("epoch=%d\ncount=50\n", priorEpoch)
+	statePath := filepath.Join(stateDir, "reaper-alert-state.txt")
+	if err := os.WriteFile(statePath, []byte(priorState), 0o644); err != nil {
+		t.Fatalf("WriteFile(state): %v", err)
+	}
+
+	env := reaperAlertBaseEnv(cityDir, binDir, doltLog, gcLog, stateDir)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION") {
+		t.Fatalf("reaper did not escalate on large count delta:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "65 open wisps") {
+		t.Fatalf("reaper escalation body missing updated count:\n%s", gcLogText)
+	}
+
+	// State should be updated.
+	stateData, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("ReadFile(state): %v", err)
+	}
+	if !strings.Contains(string(stateData), "count=65") {
+		t.Fatalf("state file did not record updated count after re-emit:\n%s", stateData)
+	}
+}
+
+// TestReaperAlertDedupEmitsAfterWindow verifies that an alert older than the
+// dedup window is re-emitted even when count delta is small.
+func TestReaperAlertDedupEmitsAfterWindow(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), reaperAlertDoltStub(52))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(stateDir): %v", err)
+	}
+	// Prior alert: count=50, narrow window of 1s. Backdate 2 seconds to escape.
+	priorEpoch := time.Now().Add(-2 * time.Second).Unix()
+	priorState := fmt.Sprintf("epoch=%d\ncount=50\n", priorEpoch)
+	statePath := filepath.Join(stateDir, "reaper-alert-state.txt")
+	if err := os.WriteFile(statePath, []byte(priorState), 0o644); err != nil {
+		t.Fatalf("WriteFile(state): %v", err)
+	}
+
+	env := reaperAlertBaseEnv(cityDir, binDir, doltLog, gcLog, stateDir)
+	env["GC_REAPER_ALERT_DEDUP_WINDOW_SEC"] = "1"
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION") {
+		t.Fatalf("reaper did not escalate after dedup window expired:\n%s", gcLogText)
+	}
+}
+
+// TestReaperAlertNonThresholdAnomalyBypassesDedup verifies that anomalies other
+// than the wisp-count threshold (e.g. Dolt commit failures) are escalated
+// without dedup, even when the threshold alert state is fresh.
+func TestReaperAlertNonThresholdAnomalyBypassesDedup(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	// open-wisp count = 5 (below threshold of 10). Inject commit failure to
+	// force a non-threshold anomaly.
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"CALL DOLT_COMMIT"*)
+    printf 'commit failed\n' >&2
+    exit 42
+    ;;
+  *"DELETE FROM "*"wisps"*)
+    printf 'ROW_COUNT()\n1\n'
+    ;;
+  *"status = 'closed'"*"closed_at <"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(stateDir): %v", err)
+	}
+	// Fresh prior alert state — would normally trigger dedup, but a non-
+	// threshold anomaly must still escalate.
+	priorEpoch := time.Now().Unix()
+	priorState := fmt.Sprintf("epoch=%d\ncount=0\n", priorEpoch)
+	statePath := filepath.Join(stateDir, "reaper-alert-state.txt")
+	if err := os.WriteFile(statePath, []byte(priorState), 0o644); err != nil {
+		t.Fatalf("WriteFile(state): %v", err)
+	}
+
+	env := reaperAlertBaseEnv(cityDir, binDir, doltLog, gcLog, stateDir)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION") {
+		t.Fatalf("reaper suppressed a non-threshold anomaly via threshold dedup:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "Dolt commit failed") {
+		t.Fatalf("reaper non-threshold escalation lost commit-failure context:\n%s", gcLogText)
+	}
+}
+
 func TestReaperFormulaMatchesScriptDefaults(t *testing.T) {
 	scriptPath := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh")
 	scriptData, err := os.ReadFile(scriptPath)

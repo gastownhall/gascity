@@ -20,6 +20,14 @@ PURGE_AGE="${GC_REAPER_PURGE_AGE:-168h}"
 STALE_ISSUE_AGE="${GC_REAPER_STALE_ISSUE_AGE:-720h}"
 SESSION_PURGE_AGE="${GC_REAPER_SESSION_PURGE_AGE:-720h}"
 ALERT_THRESHOLD="${GC_REAPER_ALERT_THRESHOLD:-500}"
+# Alert dedup: skip threshold-only escalations when the previous emit is
+# fresher than ALERT_DEDUP_WINDOW_SEC and the open-wisp count has not moved
+# by at least ALERT_DEDUP_DELTA. Without this, every cycle past the
+# threshold spawns another mail wisp and feeds itself (ga-sh6).
+ALERT_DEDUP_WINDOW_SEC="${GC_REAPER_ALERT_DEDUP_WINDOW_SEC:-3600}"
+ALERT_DEDUP_DELTA="${GC_REAPER_ALERT_DEDUP_DELTA:-10}"
+PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/maintenance}"
+ALERT_STATE_FILE="$PACK_STATE_DIR/reaper-alert-state.txt"
 DRY_RUN="${GC_REAPER_DRY_RUN:-}"
 
 # Convert Go durations to SQL INTERVAL hours for Dolt.
@@ -120,6 +128,15 @@ TOTAL_SESSIONS_PRUNED=0
 SESSION_PRUNE_ATTEMPTED=0
 ANOMALIES=""
 
+# Track which kind(s) of anomaly fired this run so the report stage can
+# decide whether dedup applies (threshold-only) or must be bypassed
+# (non-threshold anomalies always escalate). MAX_OPEN_WISPS holds the
+# largest open-wisp count seen across databases this run; it feeds the
+# dedup delta comparison.
+THRESHOLD_ANOMALY_RECORDED=0
+NONTHRESHOLD_ANOMALY_RECORDED=0
+MAX_OPEN_WISPS=0
+
 sanitize_output() {
     printf '%s' "$1" | tr '\n' ' ' | cut -c1-500
 }
@@ -129,6 +146,58 @@ record_anomaly() {
     shift
     ANOMALIES="${ANOMALIES}$db: $*
 "
+    NONTHRESHOLD_ANOMALY_RECORDED=1
+}
+
+# reaper_alert_should_emit decides whether a threshold-only escalation is
+# allowed to leave the script. It is consulted only when no non-threshold
+# anomaly was recorded; non-threshold paths (commit failures, missing city
+# DB, etc.) bypass dedup unconditionally. Returns success (emit) when there
+# is no prior state, the state is unparseable, the dedup window has expired,
+# or the open-wisp count has moved by at least ALERT_DEDUP_DELTA. Returns
+# failure (skip) only when a fresh prior emit had a close-enough count.
+reaper_alert_should_emit() {
+    local current_max="$1"
+    [ -f "$ALERT_STATE_FILE" ] || return 0
+
+    local last_epoch=""
+    local last_count=""
+    local key value
+    while IFS='=' read -r key value; do
+        case "$key" in
+            epoch) last_epoch="$value" ;;
+            count) last_count="$value" ;;
+        esac
+    done < "$ALERT_STATE_FILE"
+
+    case "$last_epoch" in ''|*[!0-9]*) return 0 ;; esac
+    case "$last_count" in ''|*[!0-9]*) return 0 ;; esac
+
+    local now age diff
+    now=$(date +%s 2>/dev/null || echo 0)
+    case "$now" in ''|*[!0-9]*) return 0 ;; esac
+
+    age=$((now - last_epoch))
+    [ "$age" -lt 0 ] && age=0
+    diff=$((current_max - last_count))
+    [ "$diff" -lt 0 ] && diff=$((last_count - current_max))
+
+    if [ "$age" -lt "$ALERT_DEDUP_WINDOW_SEC" ] && [ "$diff" -lt "$ALERT_DEDUP_DELTA" ]; then
+        return 1
+    fi
+    return 0
+}
+
+# reaper_alert_save_state persists the most recent threshold-emit count and
+# timestamp so future runs can dedup. Best-effort: a write failure does not
+# fail the reaper run because the next cycle simply re-checks the threshold.
+reaper_alert_save_state() {
+    local current_max="$1"
+    mkdir -p "$PACK_STATE_DIR" 2>/dev/null || return 0
+    local now
+    now=$(date +%s 2>/dev/null || echo 0)
+    case "$now" in ''|*[!0-9]*) return 0 ;; esac
+    printf 'epoch=%d\ncount=%d\n' "$now" "$current_max" > "$ALERT_STATE_FILE" 2>/dev/null || true
 }
 
 CITY_DB_ANOMALY_RECORDED=0
@@ -474,6 +543,10 @@ while IFS= read -r DB; do
 
     if [ "$OPEN_WISPS" -gt "$ALERT_THRESHOLD" ]; then
         ANOMALIES="${ANOMALIES}$DB: $OPEN_WISPS open wisps (threshold: $ALERT_THRESHOLD)\n"
+        THRESHOLD_ANOMALY_RECORDED=1
+        if [ "$OPEN_WISPS" -gt "$MAX_OPEN_WISPS" ]; then
+            MAX_OPEN_WISPS=$OPEN_WISPS
+        fi
     fi
 
     # Commit Dolt changes. Must use CALL (not SELECT) and have an active
@@ -529,8 +602,22 @@ fi
 
 # Report.
 if [ -n "$ANOMALIES" ]; then
-    gc mail send mayor/ -s "ESCALATION: Reaper anomalies detected [MEDIUM]" \
-        -m "$ANOMALIES" 2>/dev/null || true
+    SHOULD_EMIT=1
+    # Threshold-only escalations dedup against the persisted state file.
+    # Any non-threshold anomaly always emits — operators need to see those
+    # promptly even if a recent threshold mail is still on file.
+    if [ "$NONTHRESHOLD_ANOMALY_RECORDED" -eq 0 ] && [ "$THRESHOLD_ANOMALY_RECORDED" -eq 1 ]; then
+        if ! reaper_alert_should_emit "$MAX_OPEN_WISPS"; then
+            SHOULD_EMIT=0
+        fi
+    fi
+    if [ "$SHOULD_EMIT" -eq 1 ]; then
+        gc mail send mayor/ -s "ESCALATION: Reaper anomalies detected [MEDIUM]" \
+            -m "$ANOMALIES" 2>/dev/null || true
+        if [ "$THRESHOLD_ANOMALY_RECORDED" -eq 1 ]; then
+            reaper_alert_save_state "$MAX_OPEN_WISPS"
+        fi
+    fi
 fi
 
 SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED"
