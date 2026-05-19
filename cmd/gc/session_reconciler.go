@@ -717,7 +717,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 			}
 			// Heal state using provider liveness, not agent membership.
-			healState(session, providerAlive, store, clk)
+			// rollbackAvailable mirrors the rollback gate at line ~639: when
+			// storeQueryPartial=true the formal rollback is deferred, so the
+			// heal path must also preserve pending_create_claim to avoid a
+			// half-applied rollback that races the next complete tick.
+			healStateWithRollback(session, providerAlive, store, clk, !storeQueryPartial)
 			switch {
 			case preserveNamed:
 				template := normalizedSessionTemplate(*session, cfg)

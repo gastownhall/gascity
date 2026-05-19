@@ -1552,6 +1552,61 @@ func TestHealState_StaleCreatingWithoutPendingClaimHealsToAsleep(t *testing.T) {
 	}
 }
 
+// ga-mf1 regression: a session bead that enters state=creating with
+// pending_create_claim=true and a now-stale pending_create_started_at must
+// settle in state=asleep after one heal tick and NOT flip back to creating on
+// the next tick. Previously the first tick wrote state=asleep+runtime-missing
+// but left pending_create_claim=true, so projectWakeCauses re-emitted
+// WakeCausePendingCreate and projectRuntimeProjection's post-creating branch
+// flipped the projection back to StateCreating — ping-ponging forever.
+func TestHealState_StaleCreatingPendingClaimDoesNotOscillateBackToCreating(t *testing.T) {
+	store := newTestStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 19, 8, 0, 0, 0, time.UTC)}
+
+	// Past pendingCreateNeverStartedTimeout (10m) so the never-started lease
+	// has expired. Anything shorter and the rollback path correctly waits
+	// for it (see TestReconcileSessionBeads_*PendingCreate*NeverStartedLease).
+	stale := clk.Now().Add(-(pendingCreateNeverStartedTimeout + time.Minute))
+	session := makeBead("b1", map[string]string{
+		"state":                     "creating",
+		"pending_create_claim":      "true",
+		"pending_create_started_at": stale.UTC().Format(time.RFC3339),
+		// Prior failed start attempt left resume identity behind; this drives
+		// ResetContinuation=true so the heal writes sleep_reason=runtime-missing.
+		"session_key":         "prior-key",
+		"started_config_hash": "prior-hash",
+	})
+	session.CreatedAt = stale
+
+	// First tick: stale creating → asleep+runtime-missing, with stale
+	// pending_create lease cleared in the same batch.
+	healState(&session, false, store, clk)
+	if got := session.Metadata["state"]; got != "asleep" {
+		t.Fatalf("after first heal: state = %q, want asleep", got)
+	}
+	if got := session.Metadata["sleep_reason"]; got != sleepReasonRuntimeMissing {
+		t.Fatalf("after first heal: sleep_reason = %q, want %q", got, sleepReasonRuntimeMissing)
+	}
+	if got := session.Metadata["pending_create_claim"]; got != "" {
+		t.Fatalf("after first heal: pending_create_claim = %q, want empty", got)
+	}
+	if got := session.Metadata["pending_create_started_at"]; got != "" {
+		t.Fatalf("after first heal: pending_create_started_at = %q, want empty", got)
+	}
+
+	// Second tick: with the lease cleared, nothing should pull the bead
+	// back into state=creating. Advance the clock slightly to simulate
+	// the next reconciler tick.
+	clk.Time = clk.Time.Add(30 * time.Second)
+	healState(&session, false, store, clk)
+	if got := session.Metadata["state"]; got != "asleep" {
+		t.Fatalf("after second heal: state = %q, want asleep (oscillation regression)", got)
+	}
+	if got := session.Metadata["pending_create_claim"]; got != "" {
+		t.Fatalf("after second heal: pending_create_claim = %q, want empty (oscillation regression)", got)
+	}
+}
+
 func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 	now := time.Date(2026, 4, 15, 14, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
@@ -1669,6 +1724,45 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 				"sleep_reason":              "failed-create",
 				"pending_create_claim":      "",
 				"pending_create_started_at": "",
+			},
+		},
+		{
+			// ga-mf1 regression: a state=creating bead with an expired
+			// pending_create lease (pending_create_started_at past
+			// staleCreatingStateTimeout) projects to RuntimeProjectionStaleCreating
+			// with ReconciledState=asleep. Previously healStatePatch wrote
+			// state=asleep (with continuation reset → sleep_reason=runtime-missing
+			// when prior session_key/started_config_hash were set) but left
+			// pending_create_claim=true and pending_create_started_at unchanged;
+			// the next tick's projectWakeCauses then re-emitted
+			// WakeCausePendingCreate and projectRuntimeProjection flipped the
+			// bead back to state=creating, ping-ponging forever. Clearing the
+			// stale lease in the same batch lets the bead settle in asleep.
+			name:  "stale-creating with stale pending_create_claim heals to asleep and clears claim",
+			alive: false,
+			session: func() beads.Bead {
+				// Past pendingCreateNeverStartedTimeout (10m) so the
+				// never-started lease has expired and the rollback path
+				// would clear the claim — heal mirrors that.
+				stale := now.Add(-(pendingCreateNeverStartedTimeout + time.Minute))
+				b := makeBead("b1", map[string]string{
+					"state":                     "creating",
+					"pending_create_claim":      "true",
+					"pending_create_started_at": stale.UTC().Format(time.RFC3339),
+					"session_key":               "stale-key",
+					"started_config_hash":       "stale-hash",
+				})
+				b.CreatedAt = stale
+				return b
+			}(),
+			want: map[string]string{
+				"state":                      "asleep",
+				"sleep_reason":               sleepReasonRuntimeMissing,
+				"session_key":                "",
+				"started_config_hash":        "",
+				"continuation_reset_pending": "true",
+				"pending_create_claim":       "",
+				"pending_create_started_at":  "",
 			},
 		},
 	}
