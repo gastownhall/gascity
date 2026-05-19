@@ -115,6 +115,39 @@ func (s *rollbackCloseFailStore) Close(string) error {
 	return s.closeErr
 }
 
+// TestEnsureQueuedNudgeBeadStampsRoutedToTarget pins the rule that the
+// nudge bead carries gc.routed_to=<target-agent>. Without it, the per-rig
+// auto-route order treats the freshly-created nudge bead as ready,
+// unrouted, work-type work and re-routes it to the host rig's polecat
+// pool — surfacing as phantom work for an unrelated rig (see ga-0qf).
+// The route value must match item.Agent so consumers reading the bead
+// can recover the intended target from the metadata alone.
+func TestEnsureQueuedNudgeBeadStampsRoutedToTarget(t *testing.T) {
+	store := beads.NewMemStore()
+	item := queuedNudge{
+		ID:        "nudge-routed-target",
+		Agent:     "gas-ui/gastown.refinery",
+		SessionID: "mc-routed",
+		Source:    "session",
+		Message:   "follow up",
+		CreatedAt: time.Now().Add(-time.Minute).UTC(),
+	}
+	createdID, created, err := ensureQueuedNudgeBead(store, item)
+	if err != nil {
+		t.Fatalf("ensureQueuedNudgeBead: %v", err)
+	}
+	if !created {
+		t.Fatal("expected ensureQueuedNudgeBead to create a backing nudge bead")
+	}
+	bead, err := store.Get(createdID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", createdID, err)
+	}
+	if got := bead.Metadata["gc.routed_to"]; got != item.Agent {
+		t.Fatalf("bead.Metadata[gc.routed_to] = %q, want %q (auto-route claims unrouted nudge beads as phantom polecat work)", got, item.Agent)
+	}
+}
+
 func TestMarkQueuedNudgeTerminalFallsBackWhenStoredBeadIDEmpty(t *testing.T) {
 	store := beads.NewMemStore()
 	item := queuedNudge{
