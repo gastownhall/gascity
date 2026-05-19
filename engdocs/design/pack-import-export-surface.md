@@ -15,7 +15,7 @@ explicit exports.
 
 This is a proposed replacement for the current PackV2 contract, not a change to
 the active user-facing syntax. The current contract remains documented in
-`docs/packv2/doc-pack-v2.md`, `docs/packv2/skew-analysis.md`,
+`engdocs/design/packv2/doc-pack-v2.md`, `engdocs/design/packv2/skew-analysis.md`,
 `docs/reference/config.md`, and `docs/guides/shareable-packs.md`. PR #2119 is
 the antecedent implementation model this note is trying to make easier to
 explain, migrate, and eventually supersede.

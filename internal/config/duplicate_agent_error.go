@@ -93,7 +93,7 @@ func orderV1V2(a, b Agent) (v1, v2 Agent, ok bool) {
 // migrationGuideDocPath is the documentation slug for the v1→v2 pack
 // migration. It tracks ga-6wrr's deliverable; the path is repository-
 // relative so the operator can copy-paste it without fighting an FQDN.
-const migrationGuideDocPath = "docs/packv2/migration.mdx"
+const migrationGuideDocPath = "engdocs/design/packv2/migration.mdx"
 
 // formatV1V2MigrationError renders the migration-guidance variant of
 // the duplicate-agent-name error. The headline is byte-stable; the

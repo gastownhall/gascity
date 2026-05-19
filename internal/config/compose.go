@@ -426,7 +426,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		// silently shadow a **bootstrap** implicit-import pack, hard-stop
 		// with a diagnostic. Non-bootstrap implicit imports retain the
 		// pre-v0.15.1 "explicit wins over implicit" contract and are
-		// shadowed silently (see docs/packv2/doc-packman.md). See
+		// shadowed silently (see engdocs/design/packv2/doc-packman.md). See
 		// engdocs/proposals/skill-materialization.md — "Name-collision
 		// with a user-declared [imports.core]".
 		bootstrapNames := bootstrapImportNames(implicitImports)

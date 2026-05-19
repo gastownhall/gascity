@@ -28,7 +28,7 @@ func TestSelfhostUX_PackV1V2Collision(t *testing.T) {
 		"pack v1/v2 layout collision",
 		"pack.toml ([[agent]] worker)",
 		"agents/worker/agent.toml",
-		"docs/packv2/migration.mdx",
+		"engdocs/design/packv2/migration.mdx",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("gc start fatal output missing %q:\n%s", want, out)

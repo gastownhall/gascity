@@ -9,7 +9,7 @@ const (
 	ansiBoldRed            = "\x1b[1;31m"
 	ansiReset              = "\x1b[0m"
 	docsBaseURL            = "https://docs.gascityhall.com/"
-	legacyMigrationDocPath = "docs/packv2/migration.mdx"
+	legacyMigrationDocPath = "engdocs/design/packv2/migration.mdx"
 )
 
 // FormatFatalLine formats a plain fatal marker line for non-TTY output.
