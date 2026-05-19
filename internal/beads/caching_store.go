@@ -197,12 +197,22 @@ func computeAutoStagger(agentID string) time.Duration {
 func NewCachingStore(backing Store, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
 	prefix := ""
 	bdBacking := false
-	if bd, ok := backing.(*BdStore); ok && bd != nil {
+	nilBdBacking := false
+	if bd, ok := backing.(*BdStore); ok {
 		bdBacking = true
-		prefix = bd.IDPrefix()
+		if bd == nil {
+			nilBdBacking = true
+		} else {
+			prefix = bd.IDPrefix()
+		}
 	}
 	cs := newCachingStore(backing, prefix, onChange)
-	if bdBacking && cs.idPrefix == "" {
+	switch {
+	case backing == nil:
+		cs.recordProblem("cache backing", errors.New("nil store backing; cache will panic on first use"))
+	case nilBdBacking:
+		cs.recordProblem("bd cache ownership", errors.New("nil *BdStore backing; cache will panic on first use"))
+	case bdBacking && cs.idPrefix == "":
 		cs.recordProblem("bd cache ownership", errors.New("missing issue prefix; foreign bead event filtering disabled"))
 	}
 	return cs

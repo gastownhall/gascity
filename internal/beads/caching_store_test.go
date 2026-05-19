@@ -2047,6 +2047,7 @@ func TestNewCachingStoreRecordsProblemForMissingProductionPrefix(t *testing.T) {
 }
 
 func TestNewCachingStoreWrapsAnyStoreImplementation(t *testing.T) {
+	t.Parallel()
 	mem := beads.NewMemStore()
 	created, err := mem.Create(beads.Bead{Title: "non-bd backing"})
 	if err != nil {
@@ -2075,6 +2076,37 @@ func TestNewCachingStoreWrapsAnyStoreImplementation(t *testing.T) {
 	if backing.listCalls == 0 {
 		t.Fatal("Prime did not delegate List to non-BdStore backing")
 	}
+}
+
+func TestNewCachingStoreRecordsProblemForInvalidBackings(t *testing.T) {
+	t.Parallel()
+
+	t.Run("typed nil BdStore", func(t *testing.T) {
+		t.Parallel()
+		var backing *beads.BdStore
+		cs := beads.NewCachingStore(backing, nil)
+
+		stats := cs.Stats()
+		if stats.ProblemCount != 1 {
+			t.Fatalf("ProblemCount = %d, want 1", stats.ProblemCount)
+		}
+		if !strings.Contains(stats.LastProblem, "nil *BdStore backing") {
+			t.Fatalf("LastProblem = %q, want nil *BdStore backing", stats.LastProblem)
+		}
+	})
+
+	t.Run("nil Store interface", func(t *testing.T) {
+		t.Parallel()
+		cs := beads.NewCachingStore(nil, nil)
+
+		stats := cs.Stats()
+		if stats.ProblemCount != 1 {
+			t.Fatalf("ProblemCount = %d, want 1", stats.ProblemCount)
+		}
+		if !strings.Contains(stats.LastProblem, "nil store backing") {
+			t.Fatalf("LastProblem = %q, want nil store backing", stats.LastProblem)
+		}
+	})
 }
 
 func TestCachingStoreApplyEventRefreshesPartialHookPayload(t *testing.T) {
