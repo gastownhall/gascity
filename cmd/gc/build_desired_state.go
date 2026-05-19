@@ -871,13 +871,20 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 			}
 		}
 		for _, b := range ready {
-			if strings.TrimSpace(b.Assignee) != "" {
+			template := strings.TrimSpace(b.Metadata["gc.routed_to"])
+			if _, ok := group.templates[template]; !ok {
 				continue
 			}
-			template := strings.TrimSpace(b.Metadata["gc.routed_to"])
-			if _, ok := group.templates[template]; ok {
-				counts[template]++
+			assignee := strings.TrimSpace(b.Assignee)
+			// Beads assigned to a specific session belong to that session.
+			// Beads with an empty assignee or parked on the pool template name
+			// (the placeholder pattern that hides them from --unassigned)
+			// remain pool demand — without this the scaler stops spawning
+			// for legitimate routed work and the bead never gets claimed (ga-2pz).
+			if assignee != "" && assignee != template {
+				continue
 			}
+			counts[template]++
 		}
 	}
 	return counts, partialTemplates, errs

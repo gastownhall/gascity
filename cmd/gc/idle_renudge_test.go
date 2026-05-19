@@ -16,7 +16,11 @@ import (
 
 // makeAliveEphemeralPoolBead builds a session bead that looks like a live
 // pool worker. Tests tweak individual fields after construction to cover
-// the eligibility predicates.
+// the eligibility predicates. The template parameter is retained for
+// call-site clarity even though current tests always pass "polecat";
+// future eligibility tests may vary it.
+//
+//nolint:unparam // template kept as a parameter intentionally; see above.
 func makeAliveEphemeralPoolBead(id, sessionName, template, lastWokeAt string) beads.Bead {
 	return beads.Bead{
 		ID:     id,
@@ -176,39 +180,39 @@ func TestDetectIdleReloadSurvivors_SkipsNonAliveOrSuppressed(t *testing.T) {
 	wokenLongAgo := now.Add(-1 * time.Hour).Format(time.RFC3339)
 
 	cases := []struct {
-		name  string
+		name   string
 		mutate func(b *beads.Bead)
 	}{
 		{
-			name: "state=asleep",
+			name:   "state=asleep",
 			mutate: func(b *beads.Bead) { b.Metadata["state"] = "asleep" },
 		},
 		{
-			name: "state=drained",
+			name:   "state=drained",
 			mutate: func(b *beads.Bead) { b.Metadata["state"] = "drained" },
 		},
 		{
-			name: "state=creating",
+			name:   "state=creating",
 			mutate: func(b *beads.Bead) { b.Metadata["state"] = "creating" },
 		},
 		{
-			name: "pending_create_claim=true",
+			name:   "pending_create_claim=true",
 			mutate: func(b *beads.Bead) { b.Metadata["pending_create_claim"] = "true" },
 		},
 		{
-			name: "status=closed",
+			name:   "status=closed",
 			mutate: func(b *beads.Bead) { b.Status = "closed" },
 		},
 		{
-			name: "held_until in future",
+			name:   "held_until in future",
 			mutate: func(b *beads.Bead) { b.Metadata["held_until"] = now.Add(time.Hour).Format(time.RFC3339) },
 		},
 		{
-			name: "quarantined_until in future",
+			name:   "quarantined_until in future",
 			mutate: func(b *beads.Bead) { b.Metadata["quarantined_until"] = now.Add(time.Hour).Format(time.RFC3339) },
 		},
 		{
-			name: "wait_hold set",
+			name:   "wait_hold set",
 			mutate: func(b *beads.Bead) { b.Metadata["wait_hold"] = "true" },
 		},
 		{

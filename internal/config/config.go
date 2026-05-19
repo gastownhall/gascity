@@ -2441,7 +2441,12 @@ func (a *Agent) AttachEnabled() bool {
 // was used when assigning.
 //
 // State priority: in_progress+assigned (crash recovery) >
-// ready+assigned (pre-assigned) > ready+unassigned+routed_to (pool).
+// ready+assigned (pre-assigned) > ready+routed_to (pool). Pool work matches
+// in two sub-tiers: --unassigned (the canonical "leave assignee empty"
+// pattern), then --assignee=<template> (callers that park work on the pool
+// template name as a placeholder, e.g. `bd update --assignee=<pool>
+// --set-metadata gc.routed_to=<pool>`). Without the placeholder sub-tier
+// the bead is invisible to every pool member and never claimed (ga-2pz).
 // Formula roots that are themselves executable must be represented as ready()
 // work (for example type=wisp); molecule containers are not routable demand.
 //
@@ -2478,14 +2483,21 @@ func (a *Agent) EffectiveWorkQuery() string {
 			`r=$(bd ready --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 			`done; ` +
-			// Tier 3: ready unassigned routed to this config (shared routed queue).
+			// Tier 3: ready routed to this config (shared routed queue).
 			// Only ephemeral sessions and controller probes consume generic config demand.
 			`case "$GC_SESSION_ORIGIN" in ` +
 			`ephemeral|"") ;; ` +
 			`*) exit 0 ;; ` +
 			`esac; ` +
+			// Tier 3a: assignee unset (canonical "leave assignee empty" pattern).
 			`r=$(bd ready --metadata-field gc.routed_to=` + target +
 			` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+			// Tier 3b: assignee parked on the pool template as a placeholder.
+			// Rescues beads routed with `bd update --assignee=<pool>` (ga-2pz)
+			// where --unassigned would otherwise hide them from every member.
+			`r=$(bd ready --metadata-field gc.routed_to=` + target +
+			` --assignee=` + target + ` --exclude-type=epic --json --limit=1 2>/dev/null); ` +
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 			`printf "[]"'`
 	}
@@ -2512,8 +2524,11 @@ func (a *Agent) EffectiveWorkQuery() string {
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`done; ` +
-		// Tier 3: ready unassigned routed to this config (shared routed queue),
-		// then the legacy workflow-control route for pre-rename graphs.
+		// Tier 3: ready routed to this config (shared routed queue), with the
+		// legacy workflow-control route as a pre-rename fallback. Each route
+		// checks two assignee shapes: unassigned (canonical) and parked on the
+		// route name itself (placeholder pattern that hides beads from
+		// --unassigned, ga-2pz).
 		// Only ephemeral sessions and controller probes consume generic config demand.
 		`case "$GC_SESSION_ORIGIN" in ` +
 		`ephemeral|"") ;; ` +
@@ -2522,8 +2537,14 @@ func (a *Agent) EffectiveWorkQuery() string {
 		`r=$(bd ready --metadata-field gc.routed_to=` + target +
 		` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`r=$(bd ready --metadata-field gc.routed_to=` + target +
+		` --assignee=` + target + ` --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`r=$(bd ready --metadata-field gc.routed_to=` + legacyTarget +
+		` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`bd ready --metadata-field gc.routed_to=` + legacyTarget +
-		` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null'`
+		` --assignee=` + legacyTarget + ` --exclude-type=epic --json --limit=1 2>/dev/null'`
 }
 
 func legacyWorkflowControlQualifiedName(target string) string {

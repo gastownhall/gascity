@@ -387,6 +387,80 @@ func TestDefaultScaleCheckCountsUsesCachedReadyReadModel(t *testing.T) {
 	}
 }
 
+// TestDefaultScaleCheckCountsTreatsPoolPlaceholderAssigneeAsDemand verifies
+// that the scaler counts beads parked on the pool template name (assignee ==
+// gc.routed_to) as new demand, not as already-claimed work. Without this, a
+// bead routed via `bd update --assignee=<pool> --set-metadata gc.routed_to=<pool>`
+// would never trigger a pool spawn even with zero polecats running (ga-2pz).
+func TestDefaultScaleCheckCountsTreatsPoolPlaceholderAssigneeAsDemand(t *testing.T) {
+	backing := &readyFailStore{Store: beads.NewMemStore()}
+	if _, err := backing.Create(beads.Bead{
+		Title:  "parked on template",
+		Type:   "task",
+		Status: "open",
+		// Placeholder pattern: assignee mirrors gc.routed_to. This is the
+		// shape ga-2pz observed when mayor (or any caller) used
+		// `bd update --assignee=<pool>` to reserve work for a pool.
+		Assignee: "gascity/workflows.codex-min",
+		Metadata: map[string]string{
+			"gc.routed_to": "gascity/workflows.codex-min",
+		},
+	}); err != nil {
+		t.Fatalf("create placeholder-assigned bead: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "gascity/workflows.codex-min",
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["gascity/workflows.codex-min"]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts = %d, want 1 (placeholder-assigned bead must count as demand)", got)
+	}
+}
+
+// TestDefaultScaleCheckCountsIgnoresSpecificSessionAssignee verifies that the
+// scaler still treats beads claimed by a specific session as non-demand —
+// only the pool-template placeholder and the empty assignee count.
+func TestDefaultScaleCheckCountsIgnoresSpecificSessionAssignee(t *testing.T) {
+	backing := &readyFailStore{Store: beads.NewMemStore()}
+	if _, err := backing.Create(beads.Bead{
+		Title:  "claimed by session",
+		Type:   "task",
+		Status: "open",
+		// Concrete session name, not the pool template — already claimed.
+		Assignee: "gastown__polecat-pe-abcd",
+		Metadata: map[string]string{
+			"gc.routed_to": "gascity/workflows.codex-min",
+		},
+	}); err != nil {
+		t.Fatalf("create session-assigned bead: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "gascity/workflows.codex-min",
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["gascity/workflows.codex-min"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts = %d, want 0 (session-assigned bead must NOT count as new demand)", got)
+	}
+}
+
 func TestDefaultScaleCheckCountsIgnoresOpenMoleculeContainers(t *testing.T) {
 	backing := &demandListCountingStore{Store: beads.NewMemStore()}
 	if _, err := backing.Create(beads.Bead{

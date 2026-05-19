@@ -1718,6 +1718,65 @@ esac
 	}
 }
 
+// TestEffectiveWorkQueryFindsPoolPlaceholderAssignee verifies the Tier 3b
+// fallback: a bead routed to the pool with `assignee` parked on the pool
+// template name (the documented `bd update --assignee=<pool>` pattern) is
+// still claimable by pool members. The original work_query only matched
+// --unassigned and dropped these beads on the floor (ga-2pz: polecats
+// spawned, found no work, drained while routed beads piled up).
+func TestEffectiveWorkQueryFindsPoolPlaceholderAssignee(t *testing.T) {
+	a := Agent{
+		Name:              "polecat",
+		Dir:               "hello-world",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(3),
+	}
+	got := a.EffectiveWorkQuery()
+	want := "bd ready --metadata-field gc.routed_to=hello-world/polecat --assignee=hello-world/polecat --exclude-type=epic --json --limit=1"
+	if !strings.Contains(got, want) {
+		t.Errorf("EffectiveWorkQuery() missing tier 3b placeholder-assignee route: %q", got)
+	}
+
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_ORIGIN": "ephemeral",
+		"GC_SESSION_NAME":   "polecat-instance-1",
+		"GC_ALIAS":          "hello-world/polecat-instance-1",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--unassigned"*)
+    printf '[]'
+    ;;
+  *"--assignee=hello-world/polecat"*"--metadata-field gc.routed_to=hello-world/polecat"*|\
+  *"--metadata-field gc.routed_to=hello-world/polecat"*"--assignee=hello-world/polecat"*)
+    printf '[{"id":"parked-on-template","issue_type":"task"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+	if !strings.Contains(out, "parked-on-template") {
+		t.Fatalf("EffectiveWorkQuery() did not return the template-parked bead: %q", out)
+	}
+}
+
+// TestEffectiveWorkQueryControlDispatcherFindsPoolPlaceholderAssignee mirrors
+// TestEffectiveWorkQueryFindsPoolPlaceholderAssignee for the control-dispatcher
+// path, which carries a separate Tier 3 emission and must apply the same
+// placeholder-assignee rescue.
+func TestEffectiveWorkQueryControlDispatcherFindsPoolPlaceholderAssignee(t *testing.T) {
+	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
+	got := a.EffectiveWorkQuery()
+	wantCanonical := "bd ready --metadata-field gc.routed_to=gascity/control-dispatcher --assignee=gascity/control-dispatcher --exclude-type=epic --json --limit=1"
+	if !strings.Contains(got, wantCanonical) {
+		t.Errorf("EffectiveWorkQuery() missing canonical placeholder-assignee route: %q", got)
+	}
+	wantLegacy := "bd ready --metadata-field gc.routed_to=gascity/workflow-control --assignee=gascity/workflow-control --exclude-type=epic --json --limit=1"
+	if !strings.Contains(got, wantLegacy) {
+		t.Errorf("EffectiveWorkQuery() missing legacy placeholder-assignee route: %q", got)
+	}
+}
+
 func TestDefaultPoolCheckUsesPoolName(t *testing.T) {
 	a := Agent{
 		Name:              "dog-1",

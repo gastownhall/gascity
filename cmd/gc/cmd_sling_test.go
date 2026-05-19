@@ -1035,8 +1035,13 @@ func TestBuiltInSlingPoolRouteContractUsesMetadataOnly(t *testing.T) {
 	if got := counts["saitoc/polecat"]; got != 0 {
 		t.Fatalf("polecat scale count after refinery handoff with stale pool label = %d, want 0", got)
 	}
-	if got := counts["saitoc/refinery"]; got != 0 {
-		t.Fatalf("refinery generic scale count for assigned handoff = %d, want 0", got)
+	// Polecat handoff sets assignee == gc.routed_to == "saitoc/refinery". With
+	// no refinery session running, this placeholder assignee is pool demand:
+	// the scaler must wake/spawn a refinery to claim it. Asserting count == 0
+	// here was the ga-2pz bug — beads parked on the pool template name sat
+	// invisible to both the scaler and every work_query.
+	if got := counts["saitoc/refinery"]; got != 1 {
+		t.Fatalf("refinery scale count for placeholder-assignee handoff = %d, want 1", got)
 	}
 }
 
