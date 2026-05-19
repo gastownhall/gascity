@@ -278,7 +278,7 @@ interval = "1h"
 
 // TestOrderScanContractOverrideEnabledFalseMarksOrderDisabled verifies that an
 // order overridden with enabled=false has IsEnabled()=false after loadAllOrders.
-// Consumers responsible for auto-dispatch must honour this flag.
+// Consumers responsible for auto-dispatch must honor this flag.
 func TestOrderScanContractOverrideEnabledFalseMarksOrderDisabled(t *testing.T) {
 	cityPath, cityFormulasDir := contractCitySetup(t)
 	writeContractOrder(t, filepath.Join(cityPath, "orders"), "nightly", `[order]
