@@ -4629,11 +4629,18 @@ func TestLoadSessionBeadSnapshotUsesActiveOnlyQuery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadSessionBeadSnapshot: %v", err)
 	}
-	if len(store.queries) != 1 {
-		t.Fatalf("List query count = %d, want 1", len(store.queries))
+	// Loader delegates to session.ListAllSessionBeads, which fires two
+	// indexed queries (Type and Label) and unions the results so
+	// configured_named_session beads that have lost their gc:session
+	// label still surface. Neither query may include closed history —
+	// that scan-on-close cost is the regression this test guards.
+	if len(store.queries) != 2 {
+		t.Fatalf("List query count = %d, want 2 (Type + Label)", len(store.queries))
 	}
-	if store.queries[0].IncludeClosed {
-		t.Fatalf("loadSessionBeadSnapshot used IncludeClosed query: %+v", store.queries[0])
+	for i, q := range store.queries {
+		if q.IncludeClosed {
+			t.Fatalf("loadSessionBeadSnapshot used IncludeClosed query[%d]: %+v", i, q)
+		}
 	}
 	if _, ok := snapshot.FindByID(open.ID); !ok {
 		t.Fatalf("snapshot missing open session bead %s", open.ID)

@@ -396,16 +396,14 @@ func resolveLiveSessionByPathAlias(store beads.Store, identifier string) (string
 	if identifier == "" {
 		return "", false, nil
 	}
-	all, err := store.List(beads.ListQuery{Label: session.LabelSession})
+	all, err := session.ListAllSessionBeads(store, beads.ListQuery{})
 	if err != nil {
 		return "", false, fmt.Errorf("resolveLiveSessionByPathAlias: listing sessions: %w", err)
 	}
 	var best beads.Bead
 	found := false
 	for _, b := range all {
-		if !session.IsSessionBeadOrRepairable(b) {
-			continue
-		}
+		// ListAllSessionBeads already filters via IsSessionBeadOrRepairable.
 		if apiIsNamedSessionBead(b) {
 			continue
 		}
