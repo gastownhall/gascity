@@ -1227,6 +1227,12 @@ replacement command and is parity-gated rather than time-gated; before it starts
 that window, `gc doctor` / `gc doctor --fix` must provide equivalent dry-run and
 fix guidance for the migration cases it used to cover.
 
+Current implementation checkpoint: `gc pack add/remove/sync/upgrade/why` share
+handlers with the existing `gc import` commands while keeping `gc import` text
+stable. `gc pack fetch` and legacy `gc pack list` remain compatibility commands
+for the existing `[packs]` surface until the PackV2 deprecation train explicitly
+advances them.
+
 `gc doctor` owns migration and registry-health pressure. It should report
 warnings or errors with complete remediation descriptions for:
 

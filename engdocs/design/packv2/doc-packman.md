@@ -4,8 +4,9 @@
 > `gc import` launch contract. The proposed successor surface is
 > `gc pack` / `gc pack registry`; see
 > [`engdocs/design/pack-and-registry-cli-surface.md`](../../engdocs/design/pack-and-registry-cli-surface.md).
-> Future implementation should keep `gc import` as deprecated thin wrappers
-> where mapped, with `gc doctor` owning migration/remediation guidance.
+> Current implementation work is adding `gc pack` as the pack-facing surface
+> while preserving `gc import` compatibility through shared handlers. Deprecation
+> warnings/removal remain gated on `gc doctor` / `gc doctor --fix` parity.
 
 **GitHub Issue:** TBD
 

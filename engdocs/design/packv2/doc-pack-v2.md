@@ -4,8 +4,9 @@
 > import-management command surface. The planned successor is `gc pack` /
 > `gc pack registry`; see
 > [`engdocs/design/pack-and-registry-cli-surface.md`](../../engdocs/design/pack-and-registry-cli-surface.md).
-> Future command guidance should use `gc pack`, with `gc import` treated as
-> deprecated compatibility/history unless explicitly noted.
+> Current command guidance should prefer `gc pack` for new pack dependency and
+> registry workflows. `gc import` remains compatibility surface until doctor
+> remediation parity is available and the deprecation train explicitly advances.
 
 **GitHub Issue:** [gastownhall/gascity#360](https://github.com/gastownhall/gascity/issues/360) (supersedes [#159](https://github.com/gastownhall/gascity/issues/159))
 

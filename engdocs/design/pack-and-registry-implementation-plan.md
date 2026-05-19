@@ -490,6 +490,12 @@ go test ./test/acceptance -tags acceptance_a -run 'Test(ConfigShowCommands|PackL
 **Goal:** Make old commands route through the new surface without retaining a
 second implementation.
 
+Implementation note: the current workstream takes the low-risk first step by
+sharing command handlers between `gc import` and the new `gc pack` dependency
+commands while keeping `gc import` output stable. Flipping `gc import` into
+explicit deprecated aliases remains gated on doctor parity and deprecation
+coordination.
+
 ### Tasks
 
 - Refactor shared command handlers so `gc import` wraps `gc pack` operations:

@@ -2053,8 +2053,27 @@ gc pack
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc pack add](#gc-pack-add) | Add a pack dependency |
 | [gc pack fetch](#gc-pack-fetch) | Clone missing and update existing remote packs |
 | [gc pack list](#gc-pack-list) | Show remote pack sources and cache status |
+| [gc pack registry](#gc-pack-registry) | Manage pack registries |
+| [gc pack remove](#gc-pack-remove) | Remove a pack dependency |
+| [gc pack sync](#gc-pack-sync) | Reconcile pack dependencies with the lockfile and local cache |
+| [gc pack upgrade](#gc-pack-upgrade) | Upgrade pack dependencies within their constraints |
+| [gc pack why](#gc-pack-why) | Explain why a pack dependency is present |
+
+## gc pack add
+
+Add a pack dependency
+
+```
+gc pack add <source> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--name` | string |  | Local binding name override |
+| `--version` | string |  | Version constraint for git-backed dependencies |
 
 ## gc pack fetch
 
@@ -2077,6 +2096,133 @@ and locked commit hash (if available).
 
 ```
 gc pack list
+```
+
+## gc pack registry
+
+Manage configured Gas City pack registries and inspect cached catalog entries.
+
+```
+gc pack registry
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc pack registry add](#gc-pack-registry-add) | Add a pack registry |
+| [gc pack registry list](#gc-pack-registry-list) | List configured pack registries |
+| [gc pack registry refresh](#gc-pack-registry-refresh) | Refresh cached pack registry catalogs |
+| [gc pack registry remove](#gc-pack-registry-remove) | Remove a pack registry |
+| [gc pack registry search](#gc-pack-registry-search) | Search cached pack registry catalogs |
+| [gc pack registry show](#gc-pack-registry-show) | Show one pack registry entry |
+
+## gc pack registry add
+
+Add a pack registry
+
+```
+gc pack registry add <registry-name> <source> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSONL result |
+| `--no-validate` | bool |  | record the registry without fetching its catalog now |
+
+## gc pack registry list
+
+List configured pack registries
+
+```
+gc pack registry list [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSONL result |
+
+## gc pack registry refresh
+
+Refresh cached pack registry catalogs
+
+```
+gc pack registry refresh [registry-name] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSONL result |
+
+## gc pack registry remove
+
+Remove a pack registry
+
+```
+gc pack registry remove <registry-name> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSONL result |
+
+## gc pack registry search
+
+Search cached pack registry catalogs
+
+```
+gc pack registry search [query] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all` | bool |  | show all results |
+| `--json` | bool |  | emit JSONL result |
+| `--limit` | int | `50` | maximum number of results |
+| `--refresh` | bool |  | refresh catalogs before searching |
+| `--registry` | string |  | search only one registry |
+
+## gc pack registry show
+
+Show one pack registry entry
+
+```
+gc pack registry show <pack-name> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSONL result |
+| `--refresh` | bool |  | refresh catalogs before showing |
+
+## gc pack remove
+
+Remove a pack dependency
+
+```
+gc pack remove <name>
+```
+
+## gc pack sync
+
+Reconcile pack dependencies with the lockfile and local cache
+
+```
+gc pack sync
+```
+
+## gc pack upgrade
+
+Upgrade pack dependencies within their constraints
+
+```
+gc pack upgrade [name]
+```
+
+## gc pack why
+
+Explain why a pack dependency is present
+
+```
+gc pack why <name-or-source>
 ```
 
 ## gc prime
