@@ -13,7 +13,9 @@ import (
 	"github.com/gastownhall/gascity/internal/deps"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/gchome"
+	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/packregistry"
+	"github.com/gastownhall/gascity/internal/packsource"
 	"github.com/spf13/cobra"
 )
 
@@ -32,9 +34,247 @@ can be pinned to specific git refs.`,
 		},
 	}
 	cmd.AddCommand(newPackRegistryCmd(stdout, stderr))
+	cmd.AddCommand(newPackAddCmd(stdout, stderr))
+	cmd.AddCommand(newPackRemoveCmd(stdout, stderr))
+	cmd.AddCommand(newPackSyncCmd(stdout, stderr))
+	cmd.AddCommand(newPackUpgradeCmd(stdout, stderr))
+	cmd.AddCommand(newPackWhyCmd(stdout, stderr))
 	cmd.AddCommand(newPackFetchCmd(stdout, stderr))
 	cmd.AddCommand(newPackListCmd(stdout, stderr))
 	return cmd
+}
+
+func newPackAddCmd(stdout, stderr io.Writer) *cobra.Command {
+	var version, name string
+	cmd := &cobra.Command{
+		Use:   "add <source>",
+		Short: "Add a pack dependency",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			cityPath, err := resolveImportRoot()
+			if err != nil {
+				fmt.Fprintf(stderr, "gc pack add: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			if doPackAdd(cityPath, args[0], name, version, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&version, "version", "", "Version constraint for git-backed dependencies")
+	cmd.Flags().StringVar(&name, "name", "", "Local binding name override")
+	return cmd
+}
+
+func newPackRemoveCmd(stdout, stderr io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "remove <name>",
+		Short: "Remove a pack dependency",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			cityPath, err := resolveImportRoot()
+			if err != nil {
+				fmt.Fprintf(stderr, "gc pack remove: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			if doImportRemoveAs("gc pack remove", fsys.OSFS{}, cityPath, args[0], stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+}
+
+func newPackSyncCmd(stdout, stderr io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "sync",
+		Short: "Reconcile pack dependencies with the lockfile and local cache",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cityPath, err := resolveImportRoot()
+			if err != nil {
+				fmt.Fprintf(stderr, "gc pack sync: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			if doImportInstallAs("gc pack sync", cityPath, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+}
+
+func newPackUpgradeCmd(stdout, stderr io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "upgrade [name]",
+		Short: "Upgrade pack dependencies within their constraints",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			cityPath, err := resolveImportRoot()
+			if err != nil {
+				fmt.Fprintf(stderr, "gc pack upgrade: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			name := ""
+			if len(args) == 1 {
+				name = args[0]
+			}
+			if doImportUpgradeAs("gc pack upgrade", cityPath, name, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+}
+
+func newPackWhyCmd(stdout, stderr io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "why <name-or-source>",
+		Short: "Explain why a pack dependency is present",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			cityPath, err := resolveImportRoot()
+			if err != nil {
+				fmt.Fprintf(stderr, "gc pack why: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			if doImportWhyAs("gc pack why", cityPath, args[0], stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+}
+
+func doPackAdd(cityPath, rawSource, nameOverride, versionFlag string, stdout, stderr io.Writer) int {
+	classification := packsource.Classify(rawSource)
+	switch classification.Kind {
+	case packsource.KindRegistryLocator, packsource.KindQualifiedName, packsource.KindBareName:
+		return doPackAddRegistrySelector(cityPath, rawSource, classification, nameOverride, versionFlag, stdout, stderr)
+	default:
+		return doImportAddAs("gc pack add", fsys.OSFS{}, cityPath, rawSource, nameOverride, versionFlag, stdout, stderr)
+	}
+}
+
+func doPackAddRegistrySelector(cityPath, rawSource string, classification packsource.Classification, nameOverride, versionFlag string, stdout, stderr io.Writer) int {
+	locator, err := resolvePackRegistryAddLocator(classification)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc pack add %q: %v\n", rawSource, err) //nolint:errcheck
+		return 1
+	}
+	resolverSource := packsource.RegistryLocatorString(locator.Registry, locator.Pack)
+	resolved, err := packman.ResolveVersionWithOptions(resolverSource, versionFlag, packman.ResolveOptions{
+		GCHome: gchome.Default(),
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "gc pack add %q: %v\n", rawSource, err) //nolint:errcheck
+		return 1
+	}
+	version := versionFlag
+	if version == "" {
+		version, err = defaultImportConstraint(resolved.Version)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc pack add %q: %v\n", rawSource, err) //nolint:errcheck
+			return 1
+		}
+	}
+	name := nameOverride
+	if name == "" {
+		name = deriveImportName(locator.Pack)
+	}
+	if name == "" {
+		fmt.Fprintln(stderr, "gc pack add: could not derive import name; use --name") //nolint:errcheck
+		return 1
+	}
+	if strings.HasPrefix(name, "default-rig:") {
+		fmt.Fprintf(stderr, "gc pack add: import name %q uses reserved prefix \"default-rig:\"\n", name) //nolint:errcheck
+		return 1
+	}
+
+	scope, err := loadImportScopeFS(fsys.OSFS{}, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc pack add: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if _, exists := scope.imports[name]; exists {
+		fmt.Fprintf(stderr, "gc pack add: import %q already exists\n", name) //nolint:errcheck
+		return 1
+	}
+	scope.imports[name] = config.Import{
+		Source:  resolved.Source,
+		Version: version,
+	}
+	allImports, err := collectAllImportsFS(fsys.OSFS{}, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc pack add %q: %v\n", rawSource, err) //nolint:errcheck
+		return 1
+	}
+	allImports[scope.syntheticKey(name)] = scope.imports[name]
+	lock, err := packman.SyncLockWithHints(cityPath, allImports, packman.InstallResolveIfNeeded, map[string]packman.SourceHint{
+		resolved.Source: {ResolverSource: resolverSource},
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "gc pack add %q: %v\n", rawSource, err) //nolint:errcheck
+		return 1
+	}
+	if err := scope.save(); err != nil {
+		fmt.Fprintf(stderr, "gc pack add %q: %v\n", rawSource, err) //nolint:errcheck
+		return 1
+	}
+	if err := writeImportLockfile(fsys.OSFS{}, cityPath, lock); err != nil {
+		fmt.Fprintf(stderr, "gc pack add %q: %v\n", rawSource, err) //nolint:errcheck
+		return 1
+	}
+	fmt.Fprintf(stdout, "Added pack dependency %q from %s (%s)\n", name, resolved.Source, resolverSource) //nolint:errcheck
+	return 0
+}
+
+func resolvePackRegistryAddLocator(classification packsource.Classification) (packsource.RegistryLocator, error) {
+	switch classification.Kind {
+	case packsource.KindRegistryLocator, packsource.KindQualifiedName:
+		return packsource.RegistryLocator{Registry: classification.Registry, Pack: classification.Pack}, nil
+	case packsource.KindBareName:
+		return resolveBarePackRegistryLocator(classification.Pack)
+	default:
+		return packsource.RegistryLocator{}, fmt.Errorf("not a registry selector")
+	}
+}
+
+func resolveBarePackRegistryLocator(packName string) (packsource.RegistryLocator, error) {
+	home := gchome.Default()
+	cfg, err := packregistry.LoadConfig(home)
+	if err != nil {
+		return packsource.RegistryLocator{}, err
+	}
+	var matches []packsource.RegistryLocator
+	var unavailable []string
+	for _, reg := range cfg.Registries {
+		catalog, _, err := packregistry.ReadCachedRegistryCatalog(home, reg)
+		if err != nil {
+			unavailable = append(unavailable, reg.Name)
+			continue
+		}
+		for _, pack := range catalog.Packs {
+			if pack.Name == packName {
+				matches = append(matches, packsource.RegistryLocator{Registry: reg.Name, Pack: packName})
+			}
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) > 1 {
+		choices := make([]string, 0, len(matches))
+		for _, match := range matches {
+			choices = append(choices, match.Registry+":"+match.Pack)
+		}
+		return packsource.RegistryLocator{}, fmt.Errorf("pack %q is ambiguous; use one of: %s", packName, strings.Join(choices, ", "))
+	}
+	if len(unavailable) > 0 {
+		return packsource.RegistryLocator{}, fmt.Errorf("pack %q was not found and registry cache(s) unavailable: %s", packName, strings.Join(unavailable, ", "))
+	}
+	return packsource.RegistryLocator{}, fmt.Errorf("pack %q not found in cached registries", packName)
 }
 
 func newPackRegistryCmd(stdout, stderr io.Writer) *cobra.Command {

@@ -30,6 +30,10 @@ type packConfig struct {
 	Imports map[string]config.Import `toml:"imports,omitempty"`
 }
 
+type SourceHint struct {
+	ResolverSource string
+}
+
 // ReadCachedPackImports loads a cached pack's nested imports from pack.toml.
 func ReadCachedPackImports(source, commit string) (map[string]config.Import, error) {
 	return ReadCachedPackImportsLocked(source, LockedPack{Commit: commit})
@@ -111,16 +115,20 @@ func InstallLocked(cityRoot string) (*Lockfile, error) {
 
 // SyncLock resolves the reachable remote-import closure and returns the updated lock.
 func SyncLock(cityRoot string, imports map[string]config.Import, mode InstallMode) (*Lockfile, error) {
-	return syncLock(cityRoot, imports, mode, nil)
+	return syncLock(cityRoot, imports, mode, nil, nil)
+}
+
+func SyncLockWithHints(cityRoot string, imports map[string]config.Import, mode InstallMode, hints map[string]SourceHint) (*Lockfile, error) {
+	return syncLock(cityRoot, imports, mode, nil, hints)
 }
 
 // SyncLockSelectiveUpgrade refreshes only the listed remote sources while
 // preserving every other reachable import from the existing lock when possible.
 func SyncLockSelectiveUpgrade(cityRoot string, imports map[string]config.Import, upgradeSources map[string]struct{}) (*Lockfile, error) {
-	return syncLock(cityRoot, imports, InstallResolveIfNeeded, upgradeSources)
+	return syncLock(cityRoot, imports, InstallResolveIfNeeded, upgradeSources, nil)
 }
 
-func syncLock(cityRoot string, imports map[string]config.Import, mode InstallMode, upgradeSources map[string]struct{}) (*Lockfile, error) {
+func syncLock(cityRoot string, imports map[string]config.Import, mode InstallMode, upgradeSources map[string]struct{}, hints map[string]SourceHint) (*Lockfile, error) {
 	existing, err := ReadLockfile(fsys.OSFS{}, cityRoot)
 	if err != nil {
 		return nil, err
@@ -130,6 +138,7 @@ func syncLock(cityRoot string, imports map[string]config.Import, mode InstallMod
 		mode:           mode,
 		existing:       existing,
 		upgradeSources: upgradeSources,
+		sourceHints:    hints,
 		chosen:         make(map[string]LockedPack),
 		refreshed:      make(map[string]bool),
 	}
@@ -167,6 +176,7 @@ type syncState struct {
 	mode           InstallMode
 	existing       *Lockfile
 	upgradeSources map[string]struct{}
+	sourceHints    map[string]SourceHint
 	chosen         map[string]LockedPack
 	refreshed      map[string]bool
 }
@@ -223,7 +233,8 @@ func (s *syncState) resolveSource(source, constraint string) (bool, error) {
 		return false, fmt.Errorf("unknown install mode %d", s.mode)
 	}
 
-	resolved, err := ResolveVersionWithOptions(source, constraint, ResolveOptions{
+	resolverSource := s.resolverSource(source, existingIf(hasExisting, existing))
+	resolved, err := ResolveVersionWithOptions(resolverSource, constraint, ResolveOptions{
 		Existing: existingIf(hasExisting, existing),
 	})
 	if err != nil {
@@ -243,6 +254,18 @@ func (s *syncState) resolveSource(source, constraint string) (bool, error) {
 		Withdrawn:       resolved.Withdrawn,
 		WithdrawnReason: resolved.WithdrawnReason,
 	}, true), nil
+}
+
+func (s *syncState) resolverSource(source string, existing *LockedPack) string {
+	if s != nil && s.sourceHints != nil {
+		if hint, ok := s.sourceHints[source]; ok && strings.TrimSpace(hint.ResolverSource) != "" {
+			return hint.ResolverSource
+		}
+	}
+	if existing != nil && existing.Registry != "" && existing.RegistryPack != "" {
+		return "registry:" + existing.Registry + ":" + existing.RegistryPack
+	}
+	return source
 }
 
 func (s *syncState) discoverReachableClosure(imports map[string]config.Import) (map[string]string, map[string]struct{}, bool, error) {

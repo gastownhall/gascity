@@ -3,11 +3,15 @@ package main
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/packregistry"
 )
 
@@ -323,11 +327,16 @@ func TestPackRegistrySearchWarnsOnStaleCache(t *testing.T) {
 	}
 }
 
-func TestPackRegistryCommandTreeDoesNotAddDependencyMutationVerbs(t *testing.T) {
+func TestPackCommandTreeKeepsRegistryAndDependencySurfacesSeparate(t *testing.T) {
 	cmd := newPackCmd(&bytes.Buffer{}, &bytes.Buffer{})
-	for _, name := range []string{"add", "remove", "sync", "upgrade", "why", "show", "outdated"} {
+	for _, name := range []string{"show", "outdated"} {
 		if found, _, err := cmd.Find([]string{name}); err == nil && found != cmd {
 			t.Fatalf("gc pack unexpectedly exposes dependency verb %q", name)
+		}
+	}
+	for _, name := range []string{"add", "remove", "sync", "upgrade", "why"} {
+		if found, _, err := cmd.Find([]string{name}); err != nil || found == cmd {
+			t.Fatalf("gc pack %s not found: found=%v err=%v", name, found, err)
 		}
 	}
 	if found, _, err := cmd.Find([]string{"registry", "list"}); err != nil || found == cmd {
@@ -340,6 +349,155 @@ func TestPackRegistryCommandTreeDoesNotAddDependencyMutationVerbs(t *testing.T) 
 	}
 }
 
+func TestPackAddCommandWrapsImportAddWithoutChangingImportCommand(t *testing.T) {
+	clearGCEnv(t)
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_CITY", city)
+	writeCityToml(t, city, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, city, "[pack]\nname = \"demo\"\nschema = 1\n")
+
+	prevSync := syncImports
+	t.Cleanup(func() { syncImports = prevSync })
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		return &packman.Lockfile{
+			Schema: packman.LockfileSchema,
+			Packs: map[string]packman.LockedPack{
+				"https://github.com/example/tools.git": {Version: "1.0.0", Commit: "abc123"},
+			},
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"pack", "add", "https://github.com/example/tools.git", "--name", "tools", "--version", "^1.0"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("pack add code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Added pack dependency") || strings.Contains(stdout.String(), "Added import") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(city, "pack.toml"))
+	if err != nil {
+		t.Fatalf("Load(pack.toml): %v", err)
+	}
+	if got := cfg.Imports["tools"].Source; got != "https://github.com/example/tools.git" {
+		t.Fatalf("imports.tools.source = %q", got)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = doImportAdd(fsys.OSFS{}, city, "https://github.com/example/other.git", "other", "^1.0", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("import add code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Added import") {
+		t.Fatalf("import stdout = %q", stdout.String())
+	}
+}
+
+func TestPackAddRegistrySelectorWritesConcreteSourceAndRegistryLockMetadata(t *testing.T) {
+	clearGCEnv(t)
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", home)
+	t.Setenv("GC_CITY", city)
+	writeCityToml(t, city, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, city, "[pack]\nname = \"demo\"\nschema = 1\n")
+
+	source, commit, hash := writeGitPackRepo(t)
+	catalogDir := writeRegistryCatalog(t, strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(packRegistryTestCatalog,
+		`https://packages.example/lighthouse.git`, source),
+		`0123456789abcdef0123456789abcdef01234567`, commit),
+		`sha256:3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7`, hash))
+	var stdout, stderr bytes.Buffer
+	if code := doPackRegistryAdd("main", catalogDir, false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("registry add code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code := run([]string{"pack", "add", "main:lighthouse", "--name", "lighthouse"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("pack add code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(city, "pack.toml"))
+	if err != nil {
+		t.Fatalf("Load(pack.toml): %v", err)
+	}
+	if got := cfg.Imports["lighthouse"].Source; got != source {
+		t.Fatalf("durable import source = %q, want concrete source %q", got, source)
+	}
+	if strings.Contains(cfg.Imports["lighthouse"].Source, "registry:") {
+		t.Fatalf("durable import stored registry selector: %+v", cfg.Imports["lighthouse"])
+	}
+	lock, err := packman.ReadLockfile(fsys.OSFS{}, city)
+	if err != nil {
+		t.Fatalf("ReadLockfile: %v", err)
+	}
+	locked, ok := lock.Packs[source]
+	if !ok {
+		t.Fatalf("lock missing concrete source %q: %+v", source, lock.Packs)
+	}
+	if locked.Registry != "main" || locked.RegistryPack != "lighthouse" || locked.Hash != hash || locked.Ref != "v1.2.0" {
+		t.Fatalf("registry lock metadata = %+v", locked)
+	}
+}
+
+func TestPackSyncCommandWrapsImportInstallAndLegacyPackFetchStillLegacy(t *testing.T) {
+	clearGCEnv(t)
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_CITY", city)
+	writeCityToml(t, city, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, city, "[pack]\nname = \"demo\"\nschema = 1\n")
+
+	prevSync := syncImports
+	prevInstall := installLockedImports
+	t.Cleanup(func() {
+		syncImports = prevSync
+		installLockedImports = prevInstall
+	})
+	lock := &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		return lock, nil
+	}
+	installLockedImports = func(_ string) (*packman.Lockfile, error) {
+		return lock, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"pack", "sync"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("pack sync code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Synced 0 remote pack dependencies") {
+		t.Fatalf("pack sync stdout = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"pack", "fetch"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("pack fetch code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No remote packs configured.") {
+		t.Fatalf("legacy pack fetch stdout = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"pack", "list"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("pack list code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No remote packs configured.") {
+		t.Fatalf("legacy pack list stdout = %q", stdout.String())
+	}
+}
+
 func writeRegistryCatalog(t *testing.T, body string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -347,4 +505,32 @@ func writeRegistryCatalog(t *testing.T, body string) string {
 		t.Fatalf("WriteFile(registry.toml): %v", err)
 	}
 	return dir
+}
+
+func writeGitPackRepo(t *testing.T) (source, commit, hash string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"lighthouse\"\nschema = 1\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+	runGitCmd(t, dir, "init")
+	runGitCmd(t, dir, "add", "pack.toml")
+	runGitCmd(t, dir, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+	out := runGitCmd(t, dir, "rev-parse", "HEAD")
+	hash, err := packman.HashPackTree(dir)
+	if err != nil {
+		t.Fatalf("HashPackTree: %v", err)
+	}
+	return "file://" + filepath.ToSlash(dir), strings.TrimSpace(out), hash
+}
+
+func runGitCmd(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return string(out)
 }
