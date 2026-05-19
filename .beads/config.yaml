@@ -1,0 +1,6 @@
+issue_prefix: ga
+issue-prefix: ga
+dolt.auto-start: false
+export.auto: false
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
