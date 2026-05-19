@@ -87,6 +87,41 @@ version = "^1.0"
 	}
 }
 
+func TestImportStateDoctorCheckReportsDurableRegistrySelectors(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	writeCityToml(t, cityDir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.lighthouse]
+source = "registry:main:lighthouse"
+version = "^1.0"
+`)
+
+	prevCheck := checkInstalledImports
+	t.Cleanup(func() { checkInstalledImports = prevCheck })
+	checkInstalledImports = func(_ string, _ map[string]config.Import) (*packman.CheckReport, error) {
+		t.Fatal("checkInstalledImports should not run when durable registry selectors are present")
+		return nil, nil
+	}
+
+	result := newImportStateDoctorCheck(cityDir).Run(&doctor.CheckContext{CityPath: cityDir})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("status = %v, want Error; result=%#v", result.Status, result)
+	}
+	if !strings.Contains(result.Message, "command-time registry selectors") {
+		t.Fatalf("message = %q", result.Message)
+	}
+	if !strings.Contains(result.FixHint, "gc pack add") {
+		t.Fatalf("fix hint = %q", result.FixHint)
+	}
+	if len(result.Details) != 1 || !strings.Contains(result.Details[0], "registry-selector-source") || !strings.Contains(result.Details[0], "registry:main:lighthouse") {
+		t.Fatalf("details = %#v", result.Details)
+	}
+}
+
 func TestDoDoctorRegistersImportStateCheck(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
