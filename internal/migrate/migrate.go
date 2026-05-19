@@ -64,6 +64,7 @@ type agentFile struct {
 	Session                string            `toml:"session,omitempty"`
 	Provider               string            `toml:"provider,omitempty"`
 	StartCommand           string            `toml:"start_command,omitempty"`
+	Lifecycle              string            `toml:"lifecycle,omitempty"`
 	Args                   []string          `toml:"args,omitempty"`
 	PromptMode             string            `toml:"prompt_mode,omitempty"`
 	PromptFlag             string            `toml:"prompt_flag,omitempty"`
@@ -722,6 +723,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		Session:                agent.Session,
 		Provider:               agent.Provider,
 		StartCommand:           agent.StartCommand,
+		Lifecycle:              agent.Lifecycle,
 		Args:                   agent.Args,
 		PromptMode:             agent.PromptMode,
 		PromptFlag:             agent.PromptFlag,
@@ -770,6 +772,7 @@ func isZeroAgentConfig(cfg agentFile) bool {
 		cfg.Session == "" &&
 		cfg.Provider == "" &&
 		cfg.StartCommand == "" &&
+		cfg.Lifecycle == "" &&
 		len(cfg.Args) == 0 &&
 		cfg.PromptMode == "" &&
 		cfg.PromptFlag == "" &&

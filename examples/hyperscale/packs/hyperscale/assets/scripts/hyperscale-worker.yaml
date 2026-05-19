@@ -10,6 +10,8 @@ description: |
   remains. This replaces mock-worker.sh's 10-attempt claim loop —
   retry-until-claimed is the reconciler's job now, not the script's.
 
+schema_version: v1
+
 turns:
   # Pool work on the hook: claim it, do the work, close it.
   - when:

@@ -228,6 +228,21 @@ func TestResolveProviderAgentStartCommandWinsOverWorkspace(t *testing.T) {
 	}
 }
 
+func TestResolveProviderAgentLifecycleSurvivesStartCommandEscapeHatch(t *testing.T) {
+	agent := &Agent{
+		Name:         "scripted",
+		StartCommand: "env GC_LOG_LEVEL=debug custom-once --work",
+		Lifecycle:    AgentLifecycleOneShot,
+	}
+	rp, err := ResolveProvider(agent, &Workspace{Name: "city", Provider: "claude"}, nil, lookPathNone)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if got, want := rp.Lifecycle, AgentLifecycleOneShot; got != want {
+		t.Fatalf("Lifecycle = %q, want %q", got, want)
+	}
+}
+
 func TestResolveProviderAutoDetect(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("codex"))

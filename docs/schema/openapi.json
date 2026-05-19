@@ -252,6 +252,12 @@
               "null"
             ]
           },
+          "Lifecycle": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "MCP": {
             "items": {
               "type": "string"
@@ -479,6 +485,7 @@
           "Session",
           "Provider",
           "StartCommand",
+          "Lifecycle",
           "Nudge",
           "IdleTimeout",
           "MaxSessionAge",

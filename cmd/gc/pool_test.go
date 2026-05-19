@@ -814,6 +814,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		Session:                      "acp",
 		Provider:                     "claude",
 		StartCommand:                 "claude --dangerously",
+		Lifecycle:                    config.AgentLifecycleOneShot,
 		Args:                         []string{"--arg1"},
 		PromptMode:                   "flag",
 		PromptFlag:                   "--prompt",

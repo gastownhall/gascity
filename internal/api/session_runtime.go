@@ -29,6 +29,7 @@ func (s *Server) sessionLogPaths() []string {
 
 func sessionCreateHints(resolved *config.ResolvedProvider, mcpServers []runtime.MCPServerConfig) runtime.Config {
 	return runtime.Config{
+		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 		ReadyDelayMs:           resolved.ReadyDelayMs,
 		ProcessNames:           resolved.ProcessNames,
@@ -48,6 +49,7 @@ func legacySessionKind(metadata map[string]string) string {
 func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, mcpServers []runtime.MCPServerConfig) runtime.Config {
 	return runtime.Config{
 		WorkDir:                workDir,
+		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 		ReadyDelayMs:           resolved.ReadyDelayMs,
 		ProcessNames:           resolved.ProcessNames,
@@ -489,12 +491,14 @@ func (s *Server) startedConfigHashProvesACPTransport(
 	}
 	acpHash := runtime.CoreFingerprint(runtime.Config{
 		Command:    acpCommand,
+		Lifecycle:  runtime.Lifecycle(resolved.Lifecycle),
 		Env:        resolved.Env,
 		MCPServers: mcpServers,
 	})
 	defaultHash := runtime.CoreFingerprint(runtime.Config{
-		Command: defaultCommand,
-		Env:     resolved.Env,
+		Command:   defaultCommand,
+		Lifecycle: runtime.Lifecycle(resolved.Lifecycle),
+		Env:       resolved.Env,
 	})
 	if acpHash == defaultHash {
 		return false

@@ -516,6 +516,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 12: Build startup hints.
 	hints := agent.StartupHints{
+		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 		ReadyDelayMs:           resolved.ReadyDelayMs,
 		ProcessNames:           resolved.ProcessNames,
@@ -659,6 +660,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 			return nil
 		}(),
 		WorkDir:                tp.WorkDir,
+		Lifecycle:              tp.Hints.Lifecycle,
 		ReadyPromptPrefix:      tp.Hints.ReadyPromptPrefix,
 		ReadyDelayMs:           tp.Hints.ReadyDelayMs,
 		ProcessNames:           tp.Hints.ProcessNames,

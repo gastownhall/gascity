@@ -10,9 +10,20 @@ description: |
   full handoff, and exits; gc's reconciler re-spawns it while pool work
   remains. This replaces mock-polecat.sh's 30-attempt claim loop.
 
+schema_version: v1
+
 setup:
   # Containers lack the host GPG keys and may lack a git identity.
   - shell: "git config --global commit.gpgsign false 2>/dev/null || true"
+  # Fail fast: missing credential setup silently corrupts later git fetch/push operations.
+  - shell: >
+      set -eu;
+      if [ -n "${GITHUB_TOKEN:-}" ]; then
+        NETRC="$HOME/.netrc";
+        umask 077;
+        printf 'machine github.com login x-access-token password %s\n' "$GITHUB_TOKEN" > "$NETRC";
+        chmod 600 "$NETRC";
+      fi
   - shell: "git config --global user.email >/dev/null 2>&1 || git config --global user.email gc-agent@gascity.local"
   - shell: "git config --global user.name >/dev/null 2>&1 || git config --global user.name gc-agent"
 
@@ -27,22 +38,52 @@ turns:
           body: "scripted polecat {alias} claimed {bead.id}; branch polecat/{bead.id}."
       - sleep_ms: 50
       - shell: >
-          WT=/tmp/gc-scripted-wt/{bead.id};
-          rm -rf "$WT";
-          git worktree prune;
-          git branch -D "polecat/{bead.id}" 2>/dev/null || true;
-          git worktree add "$WT" -b "polecat/{bead.id}" HEAD;
-          printf 'Implementation of %s\n' '{bead.id}' > "$WT/{bead.id}.txt";
-          git -C "$WT" add "{bead.id}.txt";
-          git -C "$WT" commit -m 'feat: {bead.title} ({bead.id})';
-          git worktree remove --force "$WT"
-      - shell: "git remote | grep -q origin && git push origin \"polecat/{bead.id}\" 2>/dev/null || true"
+          set -eu;
+          BEAD_ID="${GC_SCRIPT_BEAD_ID:-}";
+          case "$BEAD_ID" in
+            ""|*[!A-Za-z0-9-]*) echo "unsafe bead id: $BEAD_ID" >&2; exit 1 ;;
+          esac;
+          WT="/tmp/gc-scripted-wt/$BEAD_ID";
+          BRANCH="polecat/$BEAD_ID";
+          if git remote | grep -q '^origin$' &&
+             git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            git fetch origin "$BRANCH";
+            git update-ref "refs/heads/$BRANCH" FETCH_HEAD;
+          else
+            rm -rf "$WT";
+            git worktree prune;
+            git branch -D "$BRANCH" 2>/dev/null || true;
+            GIT_LFS_SKIP_SMUDGE=1 git worktree add "$WT" -b "$BRANCH" HEAD;
+            printf 'Implementation of %s\n' "$BEAD_ID" > "$WT/$BEAD_ID.txt";
+            git -C "$WT" add "$BEAD_ID.txt";
+            git -C "$WT" commit -m "feat: $BEAD_ID";
+            git worktree remove --force "$WT";
+          fi
+      - shell: >
+          set -eu;
+          BEAD_ID="${GC_SCRIPT_BEAD_ID:-}";
+          case "$BEAD_ID" in
+            ""|*[!A-Za-z0-9-]*) echo "unsafe bead id: $BEAD_ID" >&2; exit 1 ;;
+          esac;
+          BRANCH="polecat/$BEAD_ID";
+          if git remote | grep -q '^origin$'; then
+            if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+              git fetch origin "$BRANCH";
+              git update-ref "refs/heads/$BRANCH" FETCH_HEAD;
+            else
+              git push origin "$BRANCH:refs/heads/$BRANCH";
+            fi;
+          fi;
+          HEAD_SHA="$(git rev-parse "$BRANCH")";
+          bd update "$BEAD_ID" --set-metadata branch="$BRANCH" --set-metadata branch_head="$HEAD_SHA"
       - bd_update:
           id: "{bead.id}"
           assignee: "{rig}/lifecycle.refinery"
-          metadata:
-            branch: "polecat/{bead.id}"
           notes: "scripted polecat: implemented {bead.id}, handed off to refinery"
+      - mail_send:
+          to: "{rig}/lifecycle.refinery"
+          subject: "READY FOR MERGE: polecat/{bead.id} ({bead.id})"
+          body: "scripted polecat {alias} pushed polecat/{bead.id} for {rig}/lifecycle.refinery."
       - log: "handed off {bead.id} to {rig}/lifecycle.refinery"
       - exit: 0
   - when:

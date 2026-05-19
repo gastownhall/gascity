@@ -547,6 +547,8 @@ type AgentOverride struct {
 	Provider *string `toml:"provider,omitempty"`
 	// StartCommand overrides the start command.
 	StartCommand *string `toml:"start_command,omitempty"`
+	// Lifecycle overrides the runtime lifecycle ("one_shot" or empty).
+	Lifecycle *string `toml:"lifecycle,omitempty" jsonschema:"enum=one_shot"`
 	// Nudge overrides the nudge text.
 	Nudge *string `toml:"nudge,omitempty"`
 	// IdleTimeout overrides the idle timeout duration string (e.g., "30s", "5m", "1h").
@@ -2067,6 +2069,11 @@ func normalizeAgentDefaultsAlias(cfg *City, meta toml.MetaData) {
 	}
 }
 
+const (
+	// AgentLifecycleOneShot marks an agent command as intentionally short-lived.
+	AgentLifecycleOneShot = "one_shot"
+)
+
 // Agent defines a configured agent in the city.
 type Agent struct {
 	// Name is the unique identifier for this agent.
@@ -2105,6 +2112,10 @@ type Agent struct {
 	Provider string `toml:"provider,omitempty"`
 	// StartCommand overrides the provider's command for this agent.
 	StartCommand string `toml:"start_command,omitempty"`
+	// Lifecycle controls runtime lifetime semantics. Empty uses the default
+	// long-lived session lifecycle; "one_shot" means the command is expected
+	// to do bounded work and exit cleanly.
+	Lifecycle string `toml:"lifecycle,omitempty" jsonschema:"enum=one_shot"`
 	// Args overrides the provider's default arguments.
 	Args []string `toml:"args,omitempty"`
 	// PromptMode controls how prompts are delivered: "arg", "flag", or "none".
@@ -3164,6 +3175,13 @@ func ValidateAgents(agents []Agent) error {
 			// valid
 		default:
 			return fmt.Errorf("agent %q: prompt_mode must be \"arg\", \"flag\", \"none\", or empty, got %q", a.QualifiedName(), a.PromptMode)
+		}
+		// Lifecycle enum.
+		switch a.Lifecycle {
+		case "", AgentLifecycleOneShot:
+			// valid
+		default:
+			return fmt.Errorf("agent %q: lifecycle must be %q or empty, got %q", a.QualifiedName(), AgentLifecycleOneShot, a.Lifecycle)
 		}
 		// PromptFlag required when prompt_mode = "flag".
 		if a.PromptMode == "flag" && a.PromptFlag == "" {

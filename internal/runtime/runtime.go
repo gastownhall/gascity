@@ -383,6 +383,14 @@ func hashPathContentSkipEntry(d fs.DirEntry) bool {
 	return strings.HasSuffix(base, "~")
 }
 
+// Lifecycle describes the expected lifetime of a runtime command.
+type Lifecycle string
+
+const (
+	// LifecycleOneShot marks commands that are expected to do bounded work and exit.
+	LifecycleOneShot Lifecycle = "one_shot"
+)
+
 // Config holds the parameters for starting a new session.
 type Config struct {
 	// WorkDir is the working directory for the session process.
@@ -391,6 +399,10 @@ type Config struct {
 	// Command is the shell command to run in the session.
 	// If empty, a default shell is started.
 	Command string
+
+	// Lifecycle describes whether the command is long-lived or expected to
+	// exit after one turn. Empty means the default long-lived session lifecycle.
+	Lifecycle Lifecycle
 
 	// Env is additional environment variables set in the session.
 	Env map[string]string

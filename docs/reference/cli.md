@@ -21,6 +21,7 @@ gc [flags]
 | Subcommand | Description |
 |------------|-------------|
 | [gc agent](#gc-agent) | Manage agent configuration |
+| [gc agent-script](#gc-agent-script) | Run a deterministic YAML agent script |
 | [gc analyze](#gc-analyze) | Read-only analysis over events and beads |
 | [gc bd](#gc-bd) | Run bd in the correct rig directory |
 | [gc beads](#gc-beads) | Manage the beads provider |
@@ -166,6 +167,30 @@ gc agent suspend <name> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | Output in JSONL format |
+
+## gc agent-script
+
+Run a deterministic YAML agent script for examples and demos.
+
+The runner probes gc hook once, selects the matching turn, and executes the
+configured actions. It is intentionally small and generic: role behavior stays
+in the YAML script.
+
+Status: experimental. Gas City owns this runner so repository examples can be
+tested without external helper binaries; the YAML action surface may change
+until a stable SDK boundary exists.
+
+For k8s-backed agent-script agents, set lifecycle = "one_shot" in the agent
+config so the runtime treats a clean script exit as expected work completion
+instead of startup death.
+
+```
+gc agent-script --script <path> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--script` | string |  | agent script YAML file |
 
 ## gc analyze
 

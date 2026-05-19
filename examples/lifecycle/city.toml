@@ -4,9 +4,8 @@
 # they hand off to the refinery which merges to main. Same lifecycle as
 # Gas Town's polecat/refinery, but with scripted agents for reproducible demos.
 #
-# All agents use start_command (the gascity_tools scripted test-agent,
-# driven by a YAML agent-script) for deterministic, reproducible demo
-# recordings.
+# All agents use start_command (gc agent-script, driven by YAML
+# agent-scripts) for deterministic, reproducible demo recordings.
 #
 # To use: gc init --from examples/lifecycle ~/demo-city
 

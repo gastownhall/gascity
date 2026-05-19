@@ -74,6 +74,7 @@ export type AgentPatch = {
     InjectFragmentsAppend: Array<string> | null;
     InstallAgentHooks: Array<string> | null;
     InstallAgentHooksAppend: Array<string> | null;
+    Lifecycle: string | null;
     MCP: Array<string> | null;
     MCPAppend: Array<string> | null;
     MaxActiveSessions: number | null;

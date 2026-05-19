@@ -45,6 +45,8 @@ type AgentPatch struct {
 	Provider *string `toml:"provider,omitempty"`
 	// StartCommand overrides the start command.
 	StartCommand *string `toml:"start_command,omitempty"`
+	// Lifecycle overrides the runtime lifecycle ("one_shot" or empty).
+	Lifecycle *string `toml:"lifecycle,omitempty" jsonschema:"enum=one_shot"`
 	// Nudge overrides the nudge text.
 	Nudge *string `toml:"nudge,omitempty"`
 	// IdleTimeout overrides the idle timeout. Duration string (e.g., "30s", "5m", "1h").
@@ -322,6 +324,9 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if p.StartCommand != nil {
 		a.StartCommand = *p.StartCommand
+	}
+	if p.Lifecycle != nil {
+		a.Lifecycle = *p.Lifecycle
 	}
 	if p.Nudge != nil {
 		a.Nudge = *p.Nudge

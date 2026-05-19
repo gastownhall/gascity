@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 var testBeaconTime = time.Unix(1_700_000_000, 0)
@@ -366,6 +367,36 @@ func TestTemplateParamsToConfigNilResolvedProvider(t *testing.T) {
 	}
 	if strings.HasPrefix(cfg.PromptSuffix, "--") {
 		t.Errorf("nil ResolvedProvider should not add flag prefix, got %q", cfg.PromptSuffix)
+	}
+}
+
+func TestResolveTemplateCarriesOneShotLifecycleToRuntimeConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	params := &agentBuildParams{
+		fs:         fsys.NewFake(),
+		cityName:   "bright-lights",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Name: "bright-lights"},
+		beaconTime: testBeaconTime,
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{
+		Name:         "scripted",
+		StartCommand: "env GC_LOG_LEVEL=debug custom-once --work",
+		Lifecycle:    config.AgentLifecycleOneShot,
+		Nudge:        "Check your hook for work.",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if got, want := tp.Hints.Lifecycle, runtime.LifecycleOneShot; got != want {
+		t.Fatalf("TemplateParams.Hints.Lifecycle = %q, want %q", got, want)
+	}
+	if got, want := templateParamsToConfig(tp).Lifecycle, runtime.LifecycleOneShot; got != want {
+		t.Fatalf("runtime config Lifecycle = %q, want %q", got, want)
 	}
 }
 
