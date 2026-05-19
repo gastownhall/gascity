@@ -2855,7 +2855,12 @@ func TestNestedRalphScopePassPropagatesOutputJSONToLogical(t *testing.T) {
 		t.Fatalf("run1 gc.output_json = %q, want propagated body output", got)
 	}
 
-	checkResult, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	checkResult, err := ProcessControl(store, check1, ProcessOptions{
+		CityPath: cityPath,
+		// Surface ralph check-result trace fields in test logs so a
+		// recurrence of the flake here is diagnosable without re-instrumenting.
+		Tracef: func(format string, args ...any) { t.Logf(format, args...) },
+	})
 	if err != nil {
 		t.Fatalf("ProcessControl(check1): %v", err)
 	}
@@ -3309,6 +3314,95 @@ func TestProcessRalphCheckExhaustsRetries(t *testing.T) {
 	}
 	if got := logicalAfter.Metadata["gc.failed_attempt"]; got != "2" {
 		t.Fatalf("logical failed attempt = %q, want 2", got)
+	}
+}
+
+// TestProcessRalphCheckTraceCapturesGateResultFieldsOnFailure locks in that
+// the ralph check-result trace line surfaces every field a future
+// investigator needs to diagnose a non-pass check without rerunning the
+// scenario: outcome, numeric exit code, duration, truncation flag, and
+// both captured streams. Without these in the trace, a failing check
+// surfaces to callers as only {Processed:true Action:fail} — see the test
+// scenario below where stderr is the only path to the cause.
+func TestProcessRalphCheckTraceCapturesGateResultFieldsOnFailure(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	// Script writes a known marker to both stdout and stderr, then exits
+	// non-zero, so we can assert each stream surfaces in the trace.
+	const stderrMarker = "sentinel-stderr-marker"
+	const stdoutMarker = "sentinel-stdout-marker"
+	checkPath := writeCheckScript(t, cityPath, "trace-fail-check.sh",
+		"#!/bin/bash\nset -euo pipefail\necho \""+stdoutMarker+"\"\necho \""+stderrMarker+"\" 1>&2\nexit 1\n")
+	store, _, run1, check1 := newSimpleRalphLoop(t, "implement", checkPath, 1)
+	if err := store.Close(run1.ID); err != nil {
+		t.Fatalf("close run1: %v", err)
+	}
+
+	var trace bytes.Buffer
+	result, err := ProcessControl(store, check1, ProcessOptions{
+		CityPath: cityPath,
+		Tracef: func(format string, args ...any) {
+			fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
+		},
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(check1): %v", err)
+	}
+	if !result.Processed || result.Action != "fail" {
+		t.Fatalf("result = %+v, want processed fail", result)
+	}
+
+	traceText := trace.String()
+	for _, want := range []string{
+		"ralph check-result",
+		"outcome=fail",
+		"exit=1", // numeric, not a pointer address — see formatGateExitCode
+		stderrMarker,
+		stdoutMarker,
+		"dur=",
+		"truncated=",
+	} {
+		if !strings.Contains(traceText, want) {
+			t.Errorf("trace missing %q\nfull trace:\n%s", want, traceText)
+		}
+	}
+}
+
+// TestProcessRalphCheckTraceClipsLargeOutputs guards traceCheckOutputCap: a
+// runaway script that writes more than the cap must not produce an
+// unbounded trace line. The clip marker must appear, and the captured
+// length must be near the cap (not the script's full output).
+func TestProcessRalphCheckTraceClipsLargeOutputs(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	// Emit ~4 KiB of stderr — well above traceCheckOutputCap (512).
+	checkPath := writeCheckScript(t, cityPath, "trace-loud-check.sh",
+		"#!/bin/bash\nset -euo pipefail\nhead -c 4096 /dev/zero | tr '\\0' 'x' 1>&2\nexit 1\n")
+	store, _, run1, check1 := newSimpleRalphLoop(t, "implement", checkPath, 1)
+	if err := store.Close(run1.ID); err != nil {
+		t.Fatalf("close run1: %v", err)
+	}
+
+	var trace bytes.Buffer
+	if _, err := ProcessControl(store, check1, ProcessOptions{
+		CityPath: cityPath,
+		Tracef: func(format string, args ...any) {
+			fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
+		},
+	}); err != nil {
+		t.Fatalf("ProcessControl(check1): %v", err)
+	}
+	traceText := trace.String()
+	if !strings.Contains(traceText, "...[clipped]") {
+		t.Errorf("trace missing clip marker for oversize stderr\nfull trace:\n%s", traceText)
+	}
+	// Stderr was 4096 'x'. The trace line should be far smaller than that
+	// because of the clip; guard with a generous upper bound that still
+	// catches an unbounded regression.
+	if len(traceText) > 2048 {
+		t.Errorf("trace line length = %d, want <= 2048 (clip cap is %d)", len(traceText), traceCheckOutputCap)
 	}
 }
 
