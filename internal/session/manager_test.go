@@ -3730,3 +3730,124 @@ func TestEnsureRunning_StartupDeathClearMetadataFailurePropagates(t *testing.T) 
 		t.Fatal("session_key should remain set after failed metadata clear")
 	}
 }
+
+// TestRequestFreshRestartClearsSessionKeyForResumeWake covers the operator-
+// reported failure mode on mayor (2026-05-19): `gc session reset mayor` left
+// session_key stamped, so the next wake tried to --resume a Claude
+// conversation file that no longer existed.
+//
+// For resume-style providers (resume_flag set, no session_id_flag) the patch
+// must clear session_key and started_config_hash so the next wake starts
+// fresh. The reconciler does this when it processes restart_requested, but
+// only on paths that survive its gating checks; doing it here makes the
+// behavior deterministic for every caller of RequestFreshRestart.
+//
+// For session_id_flag providers we must NOT clear session_key here — the
+// reconciler rotates it to a fresh UUID and emits `--session-id <new_key>`
+// on the next start. Clearing here would race that rotation and leave the
+// next wake without a key.
+func TestRequestFreshRestartClearsSessionKeyForResumeWake(t *testing.T) {
+	t.Run("resume_flag session clears session_key", func(t *testing.T) {
+		store := beads.NewMemStore()
+		sp := runtime.NewFake()
+		mgr := NewManager(store, sp)
+
+		info, err := mgr.Create(
+			context.Background(),
+			"helper", "", "claude", t.TempDir(), "claude",
+			nil,
+			ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag"},
+			runtime.Config{},
+		)
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+
+		// Simulate a session that has been running long enough to have
+		// accumulated identity state we expect to clear on reset.
+		if err := store.SetMetadataBatch(info.ID, map[string]string{
+			"session_key":         "stale-conversation-uuid",
+			"started_config_hash": "deadbeef",
+		}); err != nil {
+			t.Fatalf("seeding session metadata: %v", err)
+		}
+
+		if err := mgr.RequestFreshRestart(info.ID); err != nil {
+			t.Fatalf("RequestFreshRestart: %v", err)
+		}
+
+		b, err := store.Get(info.ID)
+		if err != nil {
+			t.Fatalf("store.Get: %v", err)
+		}
+		if got := b.Metadata["restart_requested"]; got != "true" {
+			t.Errorf("restart_requested = %q, want %q", got, "true")
+		}
+		if got := b.Metadata["continuation_reset_pending"]; got != "true" {
+			t.Errorf("continuation_reset_pending = %q, want %q", got, "true")
+		}
+		if got := b.Metadata["session_key"]; got != "" {
+			t.Errorf("session_key = %q, want empty for resume-style reset", got)
+		}
+		if got := b.Metadata["started_config_hash"]; got != "" {
+			t.Errorf("started_config_hash = %q, want empty for resume-style reset", got)
+		}
+		// resume_flag itself must survive — it describes the provider, not
+		// the conversation identity.
+		if got := b.Metadata["resume_flag"]; got != "--resume" {
+			t.Errorf("resume_flag = %q, want %q (provider capability must persist)", got, "--resume")
+		}
+	})
+
+	t.Run("session_id_flag session preserves session_key for reconciler rotation", func(t *testing.T) {
+		store := beads.NewMemStore()
+		sp := runtime.NewFake()
+		mgr := NewManager(store, sp)
+
+		info, err := mgr.Create(
+			context.Background(),
+			"helper", "", "claude", t.TempDir(), "claude",
+			nil,
+			ProviderResume{SessionIDFlag: "--session-id"},
+			runtime.Config{},
+		)
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+
+		// Create stamps a generated session_key when SessionIDFlag is set.
+		// Capture it so we can assert it survives RequestFreshRestart and
+		// is left for the reconciler to rotate.
+		seedBead, err := store.Get(info.ID)
+		if err != nil {
+			t.Fatalf("store.Get seed: %v", err)
+		}
+		originalKey := seedBead.Metadata["session_key"]
+		if originalKey == "" {
+			t.Fatalf("expected Create to stamp session_key for SessionIDFlag provider")
+		}
+		// Mirror what worker_handle_test.go does: stamp session_id_flag onto
+		// the bead so RequestFreshRestart can detect this provider style.
+		if err := store.SetMetadata(info.ID, "session_id_flag", "--session-id"); err != nil {
+			t.Fatalf("seed session_id_flag: %v", err)
+		}
+
+		if err := mgr.RequestFreshRestart(info.ID); err != nil {
+			t.Fatalf("RequestFreshRestart: %v", err)
+		}
+
+		b, err := store.Get(info.ID)
+		if err != nil {
+			t.Fatalf("store.Get: %v", err)
+		}
+		if got := b.Metadata["restart_requested"]; got != "true" {
+			t.Errorf("restart_requested = %q, want %q", got, "true")
+		}
+		if got := b.Metadata["continuation_reset_pending"]; got != "true" {
+			t.Errorf("continuation_reset_pending = %q, want %q", got, "true")
+		}
+		if got := b.Metadata["session_key"]; got != originalKey {
+			t.Errorf("session_key = %q, want %q (reconciler must rotate, not RequestFreshRestart)", got, originalKey)
+		}
+	})
+}

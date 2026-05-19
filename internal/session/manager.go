@@ -799,16 +799,54 @@ func (m *Manager) Suspend(id string) error {
 
 // RequestFreshRestart marks a session for a controller-owned fresh restart
 // without closing its bead or clearing resume metadata immediately.
+//
+// For providers that wake via --resume (resume_flag / resume_command /
+// resume_style and no session_id_flag), the patch also clears the persisted
+// session_key and started_config_hash. The reconciler normally performs this
+// clear when it processes restart_requested, but several gating checks
+// (alive/dead state, circuit breaker, stale live_hash, etc.) can skip that
+// branch, leaving session_key stamped with a value pointing at a provider
+// conversation file that no longer exists. Doing the clear here makes
+// `gc session reset` deterministic for resume-style providers (e.g. claude
+// with --resume) so a missing provider conversation file is healed on the
+// next wake without operator intervention.
+//
+// For session_id_flag providers we deliberately do not touch session_key:
+// the reconciler must rotate it to a freshly generated UUID and emit
+// `--session-id <new_key>` on the next start. Clearing here would race that
+// rotation.
 func (m *Manager) RequestFreshRestart(id string) error {
 	return withSessionMutationLock(id, func() error {
-		if _, _, err := m.sessionBead(id); err != nil {
+		b, _, err := m.sessionBead(id)
+		if err != nil {
 			return err
 		}
-		return m.store.SetMetadataBatch(id, map[string]string{
+		patch := map[string]string{
 			"restart_requested":          "true",
 			"continuation_reset_pending": "true",
-		})
+		}
+		if usesResumeWake(b.Metadata) {
+			patch["session_key"] = ""
+			patch["started_config_hash"] = ""
+		}
+		return m.store.SetMetadataBatch(id, patch)
 	})
+}
+
+// usesResumeWake reports whether the bead metadata identifies a session that
+// wakes via a --resume-style command rather than session-id injection. The
+// session_id_flag branch takes precedence because providers that support both
+// (current claude config) wake via --session-id, not --resume.
+func usesResumeWake(meta map[string]string) bool {
+	if meta == nil {
+		return false
+	}
+	if strings.TrimSpace(meta["session_id_flag"]) != "" {
+		return false
+	}
+	return strings.TrimSpace(meta["resume_flag"]) != "" ||
+		strings.TrimSpace(meta["resume_command"]) != "" ||
+		strings.TrimSpace(meta["resume_style"]) != ""
 }
 
 // Close ends a conversation permanently.
