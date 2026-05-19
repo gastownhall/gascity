@@ -6,17 +6,22 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
-// slingTestStalePID starts a process, waits for it to exit, and returns
-// the now-dead PID.
-func slingTestStalePID(t *testing.T) int {
+const slingTestNonLivePID = 2147483647
+
+func slingTestNonLivePIDValue(t *testing.T) int {
 	t.Helper()
-	cmd := exec.Command("true")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("start subprocess for stale PID: %v", err)
+	if pidutil.Alive(slingTestNonLivePID) {
+		t.Skipf("test PID %d is unexpectedly alive", slingTestNonLivePID)
 	}
-	return cmd.ProcessState.Pid()
+	return slingTestNonLivePID
+}
+
+func slingPIDPrefixedTestDir(root, prefix string, pid int) string {
+	return filepath.Join(root, prefix+strconv.Itoa(pid)+"-fixture")
 }
 
 func TestSweepOrphanSlingSkipsNonDirectories(t *testing.T) {
@@ -55,6 +60,18 @@ func TestSweepOrphanSlingSkipsNonNumericPIDSuffix(t *testing.T) {
 	}
 }
 
+func TestSweepOrphanSlingSkipsNonDelimitedPIDSuffix(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "pfx123abc")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sweepOrphanSlingPIDPrefixedDirs(root, "pfx")
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		t.Error("sweepOrphanSlingPIDPrefixedDirs removed directory with non-delimited PID suffix")
+	}
+}
+
 func TestSweepOrphanSlingSkipsZeroPID(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "pfx0")
@@ -69,7 +86,6 @@ func TestSweepOrphanSlingSkipsZeroPID(t *testing.T) {
 
 func TestSweepOrphanSlingSkipsNegativePID(t *testing.T) {
 	root := t.TempDir()
-	// TrimPrefix("pfx-1", "pfx") → "-1"; Atoi → -1 → pid <= 0 → skip.
 	dir := filepath.Join(root, "pfx-1")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -83,7 +99,7 @@ func TestSweepOrphanSlingSkipsNegativePID(t *testing.T) {
 func TestSweepOrphanSlingSkipsCurrentPID(t *testing.T) {
 	root := t.TempDir()
 	self := os.Getpid()
-	dir := filepath.Join(root, "pfx"+strconv.Itoa(self))
+	dir := slingPIDPrefixedTestDir(root, "pfx", self)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +117,7 @@ func TestSweepOrphanSlingPreservesLivePID(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 
-	dir := filepath.Join(root, "pfx"+strconv.Itoa(cmd.Process.Pid))
+	dir := slingPIDPrefixedTestDir(root, "pfx", cmd.Process.Pid)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -113,8 +129,8 @@ func TestSweepOrphanSlingPreservesLivePID(t *testing.T) {
 
 func TestSweepOrphanSlingRemovesStalePIDDirectory(t *testing.T) {
 	root := t.TempDir()
-	pid := slingTestStalePID(t)
-	dir := filepath.Join(root, "pfx"+strconv.Itoa(pid))
+	pid := slingTestNonLivePIDValue(t)
+	dir := slingPIDPrefixedTestDir(root, "pfx", pid)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -131,12 +147,12 @@ func TestSweepOrphanSlingToleratesMissingRoot(t *testing.T) {
 func TestSweepOrphanSlingIsIdempotent(t *testing.T) {
 	root := t.TempDir()
 
-	selfDir := filepath.Join(root, "pfx"+strconv.Itoa(os.Getpid()))
+	selfDir := slingPIDPrefixedTestDir(root, "pfx", os.Getpid())
 	if err := os.MkdirAll(selfDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	pid := slingTestStalePID(t)
-	staleDir := filepath.Join(root, "pfx"+strconv.Itoa(pid))
+	pid := slingTestNonLivePIDValue(t)
+	staleDir := slingPIDPrefixedTestDir(root, "pfx", pid)
 	if err := os.MkdirAll(staleDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -162,12 +178,12 @@ func TestSweepOrphanSlingBothPrefixesStabilize(t *testing.T) {
 	}
 	root := t.TempDir()
 	self := os.Getpid()
-	pid := slingTestStalePID(t)
+	pid := slingTestNonLivePIDValue(t)
 
 	for _, pfx := range prefixes {
 		for _, d := range []string{
-			filepath.Join(root, pfx+strconv.Itoa(self)),
-			filepath.Join(root, pfx+strconv.Itoa(pid)),
+			slingPIDPrefixedTestDir(root, pfx, self),
+			slingPIDPrefixedTestDir(root, pfx, pid),
 		} {
 			if err := os.MkdirAll(d, 0o755); err != nil {
 				t.Fatalf("MkdirAll %s: %v", d, err)
@@ -180,8 +196,8 @@ func TestSweepOrphanSlingBothPrefixesStabilize(t *testing.T) {
 	}
 
 	for _, pfx := range prefixes {
-		selfDir := filepath.Join(root, pfx+strconv.Itoa(self))
-		staleDir := filepath.Join(root, pfx+strconv.Itoa(pid))
+		selfDir := slingPIDPrefixedTestDir(root, pfx, self)
+		staleDir := slingPIDPrefixedTestDir(root, pfx, pid)
 		if _, err := os.Stat(selfDir); os.IsNotExist(err) {
 			t.Errorf("prefix %q: current-PID dir removed", pfx)
 		}
@@ -195,7 +211,7 @@ func TestSweepOrphanSlingBothPrefixesStabilize(t *testing.T) {
 		sweepOrphanSlingPIDPrefixedDirs(root, pfx)
 	}
 	for _, pfx := range prefixes {
-		selfDir := filepath.Join(root, pfx+strconv.Itoa(self))
+		selfDir := slingPIDPrefixedTestDir(root, pfx, self)
 		if _, err := os.Stat(selfDir); os.IsNotExist(err) {
 			t.Errorf("prefix %q: current-PID dir removed on second sweep", pfx)
 		}

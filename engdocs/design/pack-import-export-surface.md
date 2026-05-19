@@ -157,6 +157,11 @@ from = "f"
 as = "."
 ```
 
+The repeated `as = "c"` entries are deliberate: `as` is the public namespace
+label chosen by the exporting pack, not necessarily the local import binding.
+Several imports may feed one public namespace only when the exported leaf names
+under that namespace are disjoint.
+
 ### Meaning
 
 - `g` is private/internal because it is imported but not exported
@@ -229,13 +234,36 @@ the new syntax should not be mixed for the same imported binding; if an import
 uses `export` or `transitive`, that binding is in legacy mode, and if an import
 is named by `[[exports]]`, that binding is in explicit-export mode.
 
+That mixing rule is a validation contract, not a best-effort warning. The
+loader should return a typed configuration error naming the import binding and
+the conflicting fields, for example: `import "tools" cannot use legacy field
+"export" and [[exports]] at the same time`.
+
+The migration is not always a mechanical one-line rewrite. The current default
+transitive behavior and `export = true` can expose subordinate public surfaces
+that a naive `[[exports]] from = "name" as = "."` entry would no longer expose.
+Migration tooling must choose and report one of two policies:
+
+1. **Behavior-preserving migration:** generate explicit `[[exports]]` entries
+   for every public namespace currently leaked through the resolved legacy import
+   graph, including surfaces exposed through `export = true` chains.
+2. **Intentional narrowing:** generate only the exports named by the pack author
+   and report every formerly public namespace that is no longer exported.
+
+The default automated migration should be behavior-preserving. Authors can then
+delete generated exports when they intentionally want to narrow their public
+surface. Packs that rely on `export = true` across package boundaries need an
+inter-pack coordination step, because the parent pack can preserve facade
+behavior only for public surfaces that the imported pack itself continues to
+publish.
+
 The migration mapping is:
 
 | Current import form | Current behavior | Explicit-export form |
 |---|---|---|
-| no `transitive`, no `export` | default transitive import; subordinate public surfaces remain reachable through the import chain | import the pack and export only the public namespaces the parent intentionally wants to expose |
+| no `transitive`, no `export` | default transitive import; subordinate public surfaces remain reachable through the import chain | import the pack and, for a behavior-preserving migration, generate explicit exports for every currently reachable public namespace |
 | `transitive = false` | imported pack is usable locally, but subordinate surfaces do not leak upstream | plain `[imports.name]` with no `[[exports]]` entry, unless the parent wants to expose selected public namespaces |
-| `export = true` | imported surface is flattened into the parent public surface | `[[exports]]` with `from = "name"` and `as = "."` |
+| `export = true` | imported surface is flattened into the parent public surface | `[[exports]]` with `from = "name"` and `as = "."`, plus generated explicit exports for any subordinate public surfaces needed to preserve legacy behavior |
 | `transitive = false`, `export = true` | reachable legacy combination that behaves like a shallow facade and must not be lost during migration | `[[exports]]` with `from = "name"` and `as = "."`; no transitive leakage beyond the imported pack's public API |
 
 The deprecation path should be:
@@ -246,8 +274,18 @@ The deprecation path should be:
    imports into explicit `[[exports]]`
 3. keep the old syntax until the PackV2 deprecation wave, `gc pack`, and pack
    registry migration have all shipped
-4. remove the old syntax only after the repository fixtures and user-facing
+4. update `docs/packv2/skew-analysis.md` in the same implementation wave so
+   `export`, `transitive`, and `shadow` have an explicit migration disposition
+5. remove the old syntax only after the repository fixtures and user-facing
    reference docs have been updated to the explicit-export contract
+
+During the deprecation window, `export` and `transitive` remain accepted legacy
+fields and produce warnings. After the window, they should be removed from the
+user-facing import syntax. `shadow` is not replaced by `[[exports]]`; it remains
+accepted during this proposal's migration window and must be either preserved as
+part of a separately designed override mechanism or deprecated in its own
+documented wave. It must not disappear as a side effect of the import/export
+rewrite.
 
 ## Local Definitions
 
@@ -256,6 +294,12 @@ Current recommendation:
 - local definitions remain public by default
 
 That keeps the first version simple.
+
+The rationale is that authoring a top-level definition in a pack is already an
+exposure decision for that pack's own public API. The asymmetry is intentional:
+local authorship publishes a local definition, while importing another pack is
+only permission to use that dependency internally. Re-publishing imported
+definitions still requires `[[exports]]`.
 
 Longer-term, we may want a per-definition visibility control, but we do not
 think it is required to validate the import/export redesign.
@@ -274,6 +318,14 @@ Important note:
 Current recommendation:
 
 - collisions in the same public slot should be hard errors
+
+This is a deliberate breaking change from the accepted PackV2 contract in
+`docs/packv2/doc-pack-v2.md`, where two imported packs defining the same bare
+name both load and only ambiguous referring sites must qualify the name. If this
+proposal is accepted, the implementation plan must call out that inversion,
+ship it through the deprecation path above, and provide migration diagnostics
+that list the colliding public names and the legacy qualified names that remain
+available before the hard-error phase.
 
 If two imported packs both export `worker` into the same resulting public
 namespace, that should fail loudly unless and until we design an explicit
@@ -325,12 +377,28 @@ The config model needs a first-class `Export` table-array alongside
 `from` against local import bindings, then project only that imported pack's
 public API into the requested public namespace or facade surface.
 
-The generated schema, TOML reference docs, and PackV2 guide should be updated
-in the same implementation wave so users see one coherent contract. Validation
-should reject unknown `from` bindings, malformed `as` values, duplicate public
-leaf names, and legacy/new syntax conflicts with context-rich messages such as
-`export from "tools": unknown import binding` or
-`export as "tools": duplicate public name "tools.worker"`.
+The generated schema, TOML reference docs, PackV2 guide, and
+`docs/packv2/skew-analysis.md` should be updated in the same implementation
+wave so users see one coherent contract. Validation should reject unknown
+`from` bindings, malformed `as` values, duplicate public leaf names, and
+legacy/new syntax conflicts with context-rich messages such as `export from
+"tools": unknown import binding`, `export as "tools": duplicate public name
+"tools.worker"`, or `import "tools" cannot use legacy field "export" and
+[[exports]] at the same time`.
+
+Resolved config should retain export provenance as typed projection metadata:
+source import binding, source pack identity, source definition name, resolved
+public name, and whether the projection came from a namespace export or facade
+export. `gc why` and related inspection commands should read that projection
+metadata instead of inferring provenance from the public name after namespaces
+have been collapsed.
+
+`packs.lock` should remain the lock for the resolved transitive import graph:
+repository, version, commit, and cache location. It should not become an export
+projection lock. Export projections are derived from the locked pack graph and
+the current `[[exports]]` declarations, so `gc import install` can keep the same
+responsibility boundary while `gc import check` and config loading validate the
+public surface projection.
 
 ## Open Questions
 
