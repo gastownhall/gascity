@@ -359,6 +359,69 @@ func TestResolveConditionPath(t *testing.T) {
 		}
 		testutil.AssertSamePath(t, got, script)
 	})
+
+	// Pins gastownhall/gascity#2354: when the rig store is a sibling of the
+	// city (neither is a subtree of the other), a relative conditionPath that
+	// resolves under `base` must succeed even though it lands outside
+	// `envelope`. The dispatcher passing storePath as `base` is an explicit
+	// declaration that storePath is a legitimate join target; rejecting paths
+	// that stay inside it would make sibling layouts unusable.
+	t.Run("sibling layout: relative path under base stays inside base", func(t *testing.T) {
+		parent := t.TempDir()
+		cityDir := filepath.Join(parent, "city")
+		rigDir := filepath.Join(parent, "rig")
+		if err := os.MkdirAll(cityDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Script lives under the rig (pack assets), at the path that
+		// runRalphCheck would synthesize for a pack-shipped check.
+		scriptDir := filepath.Join(rigDir, "assets", "pack", "scripts")
+		if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		script := filepath.Join(scriptDir, "check.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		// envelope = cityDir, base = rigDir (sibling, not a subtree).
+		// `assets/pack/scripts/check.sh` joins under base and lands inside
+		// base — outside envelope, but base itself is a declared root.
+		got, err := ResolveConditionPath(cityDir, rigDir, "assets/pack/scripts/check.sh")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		testutil.AssertSamePath(t, got, script)
+	})
+
+	// Pins the security contract for the sibling layout: a relative path
+	// that escapes BOTH envelope and base must still be rejected. The
+	// expansion above only legitimizes paths that stay inside one of the
+	// two declared roots.
+	t.Run("sibling layout: traversal outside both envelope and base rejected", func(t *testing.T) {
+		parent := t.TempDir()
+		cityDir := filepath.Join(parent, "city")
+		rigDir := filepath.Join(parent, "rig")
+		if err := os.MkdirAll(cityDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Script lives in the common parent, outside both city and rig.
+		script := filepath.Join(parent, "evil.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := ResolveConditionPath(cityDir, rigDir, "../evil.sh")
+		if err == nil {
+			t.Fatal("expected traversal rejection, got nil")
+		}
+		if !strings.Contains(err.Error(), "traversal") {
+			t.Errorf("expected path traversal error, got: %v", err)
+		}
+	})
 }
 
 func TestRunConditionPass(t *testing.T) {

@@ -6876,6 +6876,54 @@ func TestRunRalphCheckRigScopedRelativeCheckPathResolvesAgainstStore(t *testing.
 	}
 }
 
+// TestRunRalphCheckSiblingStoreRelativeCheckPathResolves pins the
+// gastownhall/gascity#2354 fix: when storePath is a SIBLING of cityPath
+// (neither a subtree of the other), a relative gc.check_path that joins
+// under the store must still resolve. Before the fix, the traversal
+// guard rejected paths under the store because they were outside the
+// city envelope; this is the canonical operator layout where rig and
+// city live as separate directories under $HOME.
+func TestRunRalphCheckSiblingStoreRelativeCheckPathResolves(t *testing.T) {
+	parent := t.TempDir()
+	cityPath := filepath.Join(parent, "city")
+	storePath := filepath.Join(parent, "rig")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatalf("mkdir city: %v", err)
+	}
+	// Script lives under the store at the path runRalphCheck would synthesize
+	// for a pack-shipped check (relative gc.check_path joined against base).
+	scriptDir := filepath.Join(storePath, "assets", "pack", "scripts")
+	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir script dir: %v", err)
+	}
+	scriptPath := filepath.Join(scriptDir, "check.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	check := beads.Bead{
+		ID:   "check-sibling",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":    "assets/pack/scripts/check.sh",
+			"gc.check_timeout": "30s",
+		},
+	}
+	subject := beads.Bead{ID: "run-sibling", Type: "task"}
+
+	result, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+		CityPath:  cityPath,
+		StorePath: storePath,
+	})
+	if err != nil {
+		t.Fatalf("runRalphCheck: %v", err)
+	}
+	if result.Outcome != "pass" {
+		t.Fatalf("Outcome = %q, want pass (stderr=%q)", result.Outcome, result.Stderr)
+	}
+}
+
 // TestRunRalphCheckRejectsPathTraversalAboveCityPath pins the security
 // contract: when envelope (cityPath) and base (scriptBase) diverge, a
 // relative gc.check_path that traverses above the city must still be
