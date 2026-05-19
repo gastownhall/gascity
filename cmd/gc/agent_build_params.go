@@ -29,6 +29,7 @@ type agentBuildParams struct {
 	sessionTemplate string
 	beaconTime      time.Time
 	packDirs        []string
+	rigPackDirs     map[string][]string
 	packOverlayDirs []string
 	rigOverlayDirs  map[string][]string
 	globalFragments []string
@@ -99,6 +100,7 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		sessionTemplate: cfg.Workspace.SessionTemplate,
 		beaconTime:      beaconTime,
 		packDirs:        cfg.PackDirs,
+		rigPackDirs:     cfg.RigPackDirs,
 		packOverlayDirs: cfg.PackOverlayDirs,
 		rigOverlayDirs:  cfg.RigOverlayDirs,
 		globalFragments: cfg.Workspace.GlobalFragments,
@@ -208,6 +210,29 @@ func (p *agentBuildParams) sharedSkillCatalogSnapshotForAgent(agent *config.Agen
 // effectiveOverlayDirs merges city-level and rig-level pack overlay dirs.
 // City dirs come first (lower priority), then rig-specific dirs.
 func effectiveOverlayDirs(cityDirs []string, rigDirs map[string][]string, rigName string) []string {
+	rigSpecific := rigDirs[rigName]
+	if len(rigSpecific) == 0 {
+		return cityDirs
+	}
+	if len(cityDirs) == 0 {
+		return rigSpecific
+	}
+	merged := make([]string, 0, len(cityDirs)+len(rigSpecific))
+	merged = append(merged, cityDirs...)
+	merged = append(merged, rigSpecific...)
+	return merged
+}
+
+// effectivePackDirs merges city-level and rig-level pack directories so
+// prompt rendering can discover template-fragments/ and prompts/shared/
+// inside packs imported only by a single rig. City dirs come first (lower
+// priority), then rig-specific dirs (higher priority — rig imports override
+// city imports on name collision), mirroring effectiveOverlayDirs.
+//
+// Returns city dirs unchanged when the rig has no extra imports and rig
+// dirs alone when no city-level packs are configured. Empty rigName
+// (city-only render) returns city dirs.
+func effectivePackDirs(cityDirs []string, rigDirs map[string][]string, rigName string) []string {
 	rigSpecific := rigDirs[rigName]
 	if len(rigSpecific) == 0 {
 		return cityDirs
