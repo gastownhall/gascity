@@ -1,0 +1,59 @@
+name: Request docs title owner review
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, ready_for_review]
+
+permissions: {}
+
+jobs:
+  request-docs-review:
+    # pull_request_target is safe here because this job never checks out or runs
+    # pull request code; it only requests review from trusted event metadata.
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Request csells review for docs PR titles
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const reviewer = 'csells';
+            const pullRequest = context.payload.pull_request;
+            if (!pullRequest) {
+              core.setFailed('Unable to determine pull request payload');
+              return;
+            }
+
+            if (pullRequest.draft) {
+              console.log(`Skipping draft PR #${pullRequest.number}`);
+              return;
+            }
+
+            if (!/^docs(?::|\([^)]*\):?)/.test(pullRequest.title)) {
+              console.log(`Skipping non-docs title for PR #${pullRequest.number}`);
+              return;
+            }
+
+            if (pullRequest.user.login === reviewer) {
+              console.log(`Skipping self-review request for PR #${pullRequest.number}`);
+              return;
+            }
+
+            const current = await github.rest.pulls.listRequestedReviewers({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pullRequest.number,
+            });
+            if (current.data.users.some(user => user.login === reviewer)) {
+              console.log(`Review already requested from ${reviewer} on PR #${pullRequest.number}`);
+              return;
+            }
+
+            await github.rest.pulls.requestReviewers({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pullRequest.number,
+              reviewers: [reviewer],
+            });
+            console.log(`Requested review from ${reviewer} on PR #${pullRequest.number}`);
