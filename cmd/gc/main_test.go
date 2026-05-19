@@ -300,7 +300,7 @@ func TestVersion(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("stdout lines = %d, want 1: %q", len(lines), stdout.String())
 	}
-	var got versionJSON
+	var got versionJSONResult
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
 	}

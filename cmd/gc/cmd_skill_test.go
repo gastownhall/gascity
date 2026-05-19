@@ -62,28 +62,28 @@ func TestSkillListJSON(t *testing.T) {
 
 	var payload struct {
 		SchemaVersion string `json:"schema_version"`
-		CityPath      string `json:"city_path"`
-		Skills        []struct {
+		Count         int    `json:"count"`
+		Entries       []struct {
 			Name   string `json:"name"`
 			Source string `json:"source"`
 			Path   string `json:"path"`
-		} `json:"skills"`
+		} `json:"entries"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
 	}
-	if payload.SchemaVersion != "1" || payload.CityPath != cityDir || len(payload.Skills) == 0 {
+	if payload.SchemaVersion != "1" || payload.Count == 0 || len(payload.Entries) == 0 {
 		t.Fatalf("payload = %+v", payload)
 	}
 	found := false
-	for _, got := range payload.Skills {
+	for _, got := range payload.Entries {
 		if got.Name == "code-review" && got.Source == "city" && got.Path == "skills/code-review/SKILL.md" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("city skill missing from %+v", payload.Skills)
+		t.Fatalf("city skill missing from %+v", payload.Entries)
 	}
 }
 
