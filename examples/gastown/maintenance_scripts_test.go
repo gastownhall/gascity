@@ -5968,7 +5968,7 @@ EOF
         ;;
     esac
     ;;
-  update|comment|delete)
+  update|comment|delete|close)
     printf '%%s\n' "$*" >> "$BD_LOG"
     exit 0
     ;;
@@ -6026,7 +6026,7 @@ func TestWispCompactReportsSummaryForActions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wisp-compact.sh failed: %v\n%s", err, out)
 	}
-	if got, want := strings.TrimSpace(string(out)), "wisp-compact: promoted=0 deleted=1 skipped=1"; got != want {
+	if got, want := strings.TrimSpace(string(out)), "wisp-compact: promoted=0 deleted=1 skipped=1 archived=0"; got != want {
 		t.Fatalf("summary = %q, want %q", got, want)
 	}
 }
@@ -6142,6 +6142,172 @@ func TestWispCompactSkipsNonEphemeralBeads(t *testing.T) {
 		if strings.Contains(s, banned) {
 			t.Fatalf("non-ephemeral bead must be ignored; saw %q in bd log:\n%s", banned, s)
 		}
+	}
+}
+
+// Pass 2 (mail archive) tests. These cover the read-mail TTL rule added for
+// ga-l17. Mail beads are non-ephemeral (issue_type=message), so they bypass
+// Pass 1; Pass 2 closes them with `bd close --reason "..."` once the
+// recipient has marked them read and the TTL has elapsed.
+
+func TestWispCompactArchivesAgedReadMessage(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-mail-aged","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["read","thread:abc"]}
+]`, pastTTL)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if !strings.Contains(s, "close ga-mail-aged") {
+		t.Fatalf("expected `bd close ga-mail-aged`; bd log:\n%s", s)
+	}
+	if !strings.Contains(s, "wisp-compact:") {
+		t.Fatalf("expected close reason to start with `wisp-compact:`; bd log:\n%s", s)
+	}
+	for _, banned := range []string{"delete ga-mail-aged", "update ga-mail-aged", "comment ga-mail-aged"} {
+		if strings.Contains(s, banned) {
+			t.Fatalf("aged read mail must be archived via close, not %q; bd log:\n%s", banned, s)
+		}
+	}
+}
+
+func TestWispCompactSkipsReadMessageWithinTTL(t *testing.T) {
+	withinTTL := time.Now().Add(-1 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-mail-fresh","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["read"]}
+]`, withinTTL)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if strings.Contains(s, "close ga-mail-fresh") {
+		t.Fatalf("within-TTL read mail must not be archived; bd log:\n%s", s)
+	}
+}
+
+func TestWispCompactSkipsUnreadMessage(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-mail-unread","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["thread:abc"]}
+]`, pastTTL)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if strings.Contains(s, "close ga-mail-unread") {
+		t.Fatalf("unread mail must never be archived even past TTL; bd log:\n%s", s)
+	}
+}
+
+func TestWispCompactSkipsReadMessageWithKeepLabel(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-mail-keep","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["read","keep"]}
+]`, pastTTL)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if strings.Contains(s, "close ga-mail-keep") {
+		t.Fatalf("read mail with `keep` label must not be archived; bd log:\n%s", s)
+	}
+}
+
+func TestWispCompactSkipsReadMessageWithComments(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-mail-discussed","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":2,"labels":["read"]}
+]`, pastTTL)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if strings.Contains(s, "close ga-mail-discussed") {
+		t.Fatalf("read mail with comments (proven value) must not be archived; bd log:\n%s", s)
+	}
+}
+
+func TestWispCompactSkipsClosedMessage(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-mail-closed","issue_type":"message","status":"closed","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["read"]}
+]`, pastTTL)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if strings.Contains(s, "close ga-mail-closed") {
+		t.Fatalf("already-closed message must not be re-closed; bd log:\n%s", s)
+	}
+}
+
+func TestWispCompactArchiveCountInSummary(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-mail-a","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["read"]},
+  {"id":"ga-mail-b","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["read"]}
+]`, pastTTL, pastTTL)
+
+	_, env := wispCompactEnv(t, beads)
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+	if err != nil {
+		t.Fatalf("wisp-compact.sh failed: %v\n%s", err, out)
+	}
+	want := "archived=2"
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("summary missing %q; got: %s", want, out)
+	}
+}
+
+func TestWispCompactMailArchiveAgeOverride(t *testing.T) {
+	// Override the default 24h TTL to 1h so a 2-hour-old read message archives.
+	twoHoursAgo := time.Now().Add(-2 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-mail-overridden","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["read"]}
+]`, twoHoursAgo)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	env["GC_MAIL_ARCHIVE_AGE_HOURS"] = "1"
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if !strings.Contains(s, "close ga-mail-overridden") {
+		t.Fatalf("GC_MAIL_ARCHIVE_AGE_HOURS=1 should archive a 2h-old read message; bd log:\n%s", s)
 	}
 }
 

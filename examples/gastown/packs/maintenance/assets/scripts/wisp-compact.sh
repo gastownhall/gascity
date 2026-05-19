@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# wisp-compact — TTL-based cleanup of expired ephemeral beads.
+# wisp-compact — TTL-based cleanup of expired ephemeral beads and aged read mail.
 #
 # Wisps are short-lived work items (heartbeats, pings, patrols) that
 # accumulate and bloat the database. This script applies retention policy:
@@ -13,30 +13,39 @@
 #   recovery, error, escalation: 7d
 #   default (untyped): 24h
 #
+# Pass 2 archives aged read mail messages (issue_type=message). Mail beads
+# are not ephemeral — they live in the issues tier and are git-synced — but
+# once the recipient has marked one "read" it has served its purpose, and
+# without active cleanup the read backlog drives the open-bead count past
+# the reaper alert threshold (see ga-l17).
+#
+# Rule (Pass 2): issue_type=message AND status=open AND label=read AND
+# updated_at past TTL AND no 'keep' label AND comment_count=0 → archive
+# (bd close with reason). The 'keep' label and any active discussion
+# (comment_count>0) opt the message out, mirroring Pass 1's "proven value"
+# escape hatches. TTL defaults to 24h; GC_MAIL_ARCHIVE_AGE_HOURS overrides.
+#
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
 CITY="${GC_CITY:-.}"
 
-# Get all ephemeral beads.
+# Get all beads.
 ALL=$(bd list --json --all -n 0 2>/dev/null) || exit 0
-EPHEMERALS=$(echo "$ALL" | jq '[.[] | select(.ephemeral == true)]' 2>/dev/null) || exit 0
-
-if [ -z "$EPHEMERALS" ] || [ "$EPHEMERALS" = "[]" ]; then
-    exit 0
-fi
+EPHEMERALS=$(echo "$ALL" | jq '[.[] | select(.ephemeral == true)]' 2>/dev/null) || EPHEMERALS="[]"
 
 NOW=$(date +%s)
 PROMOTED=0
 DELETED=0
 SKIPPED=0
 
-# Process each ephemeral bead. Capturing jq output into BEADS first
-# (instead of piping into the loop) preserves the original pipefail
-# fail-loud on jq error AND keeps PROMOTED/DELETED/SKIPPED in the parent
-# shell so they survive to the summary echo below. EPHEMERALS is
-# pre-validated as a non-empty array on lines 22-27, so BEADS is
-# guaranteed non-empty here.
+# Pass 1 (ephemerals): apply wisp_type TTL retention.
+#
+# Capturing jq output into BEADS first (instead of piping into the loop)
+# preserves the original pipefail fail-loud on jq error AND keeps
+# PROMOTED/DELETED/SKIPPED in the parent shell so they survive to the
+# summary echo below.
+if [ -n "$EPHEMERALS" ] && [ "$EPHEMERALS" != "[]" ]; then
 BEADS=$(echo "$EPHEMERALS" | jq -c '.[]' 2>/dev/null)
 while IFS= read -r bead; do
     id=$(echo "$bead" | jq -r '.id')
@@ -85,8 +94,60 @@ while IFS= read -r bead; do
     bd delete "$id" --force 2>/dev/null || true
     DELETED=$((DELETED + 1))
 done <<< "$BEADS"
+fi
 
-TOTAL=$((PROMOTED + DELETED))
+# Pass 2: archive aged read mail messages.
+#
+# Mail messages aren't ephemeral wisps, so they bypass Pass 1's
+# ephemeral-only filter. They need their own retention rule, keyed off the
+# 'read' label (set by beadmail.Read / MarkRead when a recipient consumes
+# the message). Unread mail is never archived here — only the recipient's
+# explicit acknowledgement triggers the TTL countdown.
+MAIL_ARCHIVE_AGE_H="${GC_MAIL_ARCHIVE_AGE_HOURS:-24}"
+ARCHIVED=0
+
+MESSAGES=$(echo "$ALL" | jq -c '.[] | select(.issue_type == "message" and .status == "open")' 2>/dev/null) || MESSAGES=""
+
+if [ -n "$MESSAGES" ]; then
+    while IFS= read -r msg; do
+        [ -z "$msg" ] && continue
+        id=$(echo "$msg" | jq -r '.id')
+        updated_at=$(echo "$msg" | jq -r '.updated_at // .created_at')
+        comment_count=$(echo "$msg" | jq -r '.comment_count // 0')
+        labels=$(echo "$msg" | jq -r '.labels // [] | .[]' 2>/dev/null)
+
+        # Skip messages the recipient hasn't consumed yet.
+        if ! echo "$labels" | grep -q '^read$'; then
+            continue
+        fi
+
+        # 'keep' overrides the auto-archive, same opt-out as Pass 1.
+        if echo "$labels" | grep -q '^keep$'; then
+            continue
+        fi
+
+        # Active discussion = proven value, leave it alone.
+        if [ "$comment_count" -gt 0 ]; then
+            continue
+        fi
+
+        # Same date fallback chain as Pass 1 (GNU → BSD with Z → BSD without Z).
+        MSG_TS=$(date -d "$updated_at" +%s 2>/dev/null || \
+                 date -ju -f "%Y-%m-%dT%H:%M:%SZ" "$updated_at" +%s 2>/dev/null || \
+                 date -ju -f "%Y-%m-%dT%H:%M:%S" "$updated_at" +%s 2>/dev/null) || continue
+        AGE_H=$(( (NOW - MSG_TS) / 3600 ))
+
+        if [ "$AGE_H" -lt "$MAIL_ARCHIVE_AGE_H" ]; then
+            continue
+        fi
+
+        # bd validation.on-close=error requires a reason >= 20 chars.
+        bd close "$id" --reason "wisp-compact: archived aged read mail past TTL" 2>/dev/null || true
+        ARCHIVED=$((ARCHIVED + 1))
+    done <<< "$MESSAGES"
+fi
+
+TOTAL=$((PROMOTED + DELETED + ARCHIVED))
 if [ "$TOTAL" -gt 0 ]; then
-    echo "wisp-compact: promoted=$PROMOTED deleted=$DELETED skipped=$SKIPPED"
+    echo "wisp-compact: promoted=$PROMOTED deleted=$DELETED skipped=$SKIPPED archived=$ARCHIVED"
 fi
