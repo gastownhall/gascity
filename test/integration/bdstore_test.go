@@ -74,12 +74,7 @@ func TestBdStoreConformance(t *testing.T) {
 
 	// Run conformance suite. We skip RunSequentialIDTests because BdStore
 	// uses bd's ID format (prefix-XXXX), not gc-N sequential format.
-	// TxRunsCallbackAndAppliesWriteSurface is skipped because the bd CLI
-	// clobbers unspecified fields in dolt-server mode; see bead ga-gxc8qr.
-	beadstest.RunStoreTestsWithOptions(t, newStore, beadstest.Options{
-		SkipTxApplyConformance: true,
-		SkipTxApplyReason:      "bd CLI clobbers unspecified fields in dolt-server mode; see bead ga-gxc8qr",
-	})
+	beadstest.RunStoreTests(t, newStore)
 	beadstest.RunMetadataTests(t, newStore)
 }
 
