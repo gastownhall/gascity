@@ -107,7 +107,7 @@ that value as `after_cursor` or `after_seq` to wait for the operation's
 request-result event without replaying unrelated historical backlog.
 
 Fatal setup errors are returned as normal Problem Details responses
-*before* the stream's 200 headers commit, never as a 200 stream that
+_before_ the stream's 200 headers commit, never as a 200 stream that
 closes immediately. For example, `GET /v0/events/stream` returns
 `503 application/problem+json` with `detail: "no_providers: ..."`
 when no running city has an event provider registered.

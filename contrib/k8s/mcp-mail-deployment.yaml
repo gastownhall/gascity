@@ -33,48 +33,48 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-      - name: mcp-mail
-        image: gc-mcp-mail:latest
-        imagePullPolicy: IfNotPresent
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop: ["ALL"]
-          readOnlyRootFilesystem: true
-        ports:
-        - containerPort: 8765
-          name: http
-        livenessProbe:
-          httpGet:
-            path: /health/liveness
-            port: 8765
-          initialDelaySeconds: 5
-          periodSeconds: 15
-          failureThreshold: 3
-        readinessProbe:
-          httpGet:
-            path: /health/liveness
-            port: 8765
-          initialDelaySeconds: 3
-          periodSeconds: 5
-          failureThreshold: 3
-        # Sized for 100-agent deployments. mcp-agent-mail uses SQLite
-        # (single-writer lock), so multiple replicas won't help — scale
-        # the single replica instead.
-        resources:
-          requests:
-            cpu: 500m
-            memory: 512Mi
-          limits:
-            cpu: "1"
-            memory: 1Gi
-        volumeMounts:
-        - name: mail-data
-          mountPath: /var/lib/mcp-mail
-        - name: tmp
-          mountPath: /tmp
+        - name: mcp-mail
+          image: gc-mcp-mail:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          ports:
+            - containerPort: 8765
+              name: http
+          livenessProbe:
+            httpGet:
+              path: /health/liveness
+              port: 8765
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/liveness
+              port: 8765
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 3
+          # Sized for 100-agent deployments. mcp-agent-mail uses SQLite
+          # (single-writer lock), so multiple replicas won't help — scale
+          # the single replica instead.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: mail-data
+              mountPath: /var/lib/mcp-mail
+            - name: tmp
+              mountPath: /tmp
       volumes:
-      - name: mail-data
-        emptyDir: {}
-      - name: tmp
-        emptyDir: {}
+        - name: mail-data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

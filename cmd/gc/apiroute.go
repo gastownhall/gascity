@@ -18,6 +18,10 @@ import (
 // (which runs in read-only mode). CLI commands use this to route writes through
 // the API when available, falling back to direct file mutation.
 func apiClient(cityPath string) *api.Client {
+	if client := supervisorCityAPIClient(cityPath); client != nil {
+		return client
+	}
+
 	// Check if controller is alive.
 	if controllerAlive(cityPath) != 0 {
 		// Load config to find API port.
@@ -27,14 +31,14 @@ func apiClient(cityPath string) *api.Client {
 			return nil
 		}
 		if cfg.API.Port <= 0 {
-			return nil
+			return supervisorCityAPIClient(cityPath)
 		}
 
 		// Non-localhost bind means API runs read-only — skip API routing
 		// (unless allow_mutations is set).
 		bind := cfg.API.BindOrDefault()
 		if bind != "127.0.0.1" && bind != "localhost" && bind != "::1" && !cfg.API.AllowMutations {
-			return nil
+			return supervisorCityAPIClient(cityPath)
 		}
 
 		baseURL := fmt.Sprintf("http://%s", net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port)))
@@ -44,7 +48,7 @@ func apiClient(cityPath string) *api.Client {
 		// serves one city in standalone mode.
 		return api.NewCityScopedClient(baseURL, standaloneControllerCityName(cfg, cityPath))
 	}
-	return supervisorCityAPIClient(cityPath)
+	return nil
 }
 
 // standaloneControllerCityName resolves the effective city name for a

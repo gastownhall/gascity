@@ -298,11 +298,13 @@ verify each component's contract in isolation; coordination tests verify
 the wiring between components.
 
 **What coordination tests prove:**
+
 - Lifecycle ordering (ensure-ready before init, shutdown after agents stop)
 - Hook survival (hooks reinstalled after init wipes them)
 - Qualification consistency (all effective methods use the same name form)
 
 **What they don't prove:**
+
 - Component correctness — that's what conformance tests cover
 - Full E2E behavior — that's integration tests
 
@@ -327,14 +329,14 @@ if !strings.HasPrefix(ops[0], "ensure-ready") {
 
 **When to write a coordination test vs conformance test:**
 
-| Question | Test type |
-|---|---|
-| Does the beads store handle corrupt JSONL? | Conformance |
-| Does `gc start` call ensure-ready before init? | Coordination |
-| Does the mail provider deliver to the right inbox? | Conformance |
-| Do all three Effective* methods use the qualified name? | Coordination |
-| Does the session provider start a session correctly? | Conformance |
-| Does `gc stop` shut down beads after agents? | Coordination |
+| Question                                                 | Test type    |
+| -------------------------------------------------------- | ------------ |
+| Does the beads store handle corrupt JSONL?               | Conformance  |
+| Does `gc start` call ensure-ready before init?           | Coordination |
+| Does the mail provider deliver to the right inbox?       | Conformance  |
+| Do all three Effective\* methods use the qualified name? | Coordination |
+| Does the session provider start a session correctly?     | Conformance  |
+| Does `gc stop` shut down beads after agents?             | Coordination |
 
 **The overtesting line:** don't re-verify contracts that conformance tests
 already cover. Coordination tests check call ordering and argument plumbing,
@@ -346,12 +348,12 @@ Every provider interface has a conformance test suite that validates the
 contract against all implementations. These live in `*test/conformance.go`
 packages and are imported by each implementation's test file:
 
-| Interface | Conformance suite | Implementations tested |
-|---|---|---|
-| `beads.Store` | `internal/beads/beadstest/conformance.go` | MemStore, FileStore, BdStore |
+| Interface          | Conformance suite                             | Implementations tested            |
+| ------------------ | --------------------------------------------- | --------------------------------- |
+| `beads.Store`      | `internal/beads/beadstest/conformance.go`     | MemStore, FileStore, BdStore      |
 | `runtime.Provider` | `internal/runtime/runtimetest/conformance.go` | Fake, tmux, subprocess, exec, k8s |
-| `mail.Provider` | `internal/mail/mailtest/conformance.go` | beadmail, exec |
-| `events.Recorder` | `internal/events/eventstest/conformance.go` | FileRecorder, exec |
+| `mail.Provider`    | `internal/mail/mailtest/conformance.go`       | beadmail, exec                    |
+| `events.Recorder`  | `internal/events/eventstest/conformance.go`   | FileRecorder, exec                |
 
 Conformance tests verify the behavioral contract (create/read/update/delete,
 error handling, concurrency). They deliberately don't test lifecycle ordering
@@ -367,15 +369,16 @@ lands, and what remains tracked but non-gating.
 All five provider seams, their lifecycle dependencies, and coordination
 test coverage. This table is the checklist for new provider implementations.
 
-| Seam | Implementations | Lifecycle deps | Coordination tested? |
-|---|---|---|---|
-| **Runtime** (`runtime.Provider`) | tmux, exec, k8s, fake | None (stateless start/stop) | Via lifecycle start order test |
-| **Beads** (`beads.Store`) | MemStore, FileStore, BdStore | ensure-ready → init → hooks | `TestLifecycleCoordination_*` |
-| **Mail** (`mail.Provider`) | beadmail, exec | Depends on beads store | No — not a lifecycle seam; conformance sufficient |
-| **Events** (`events.Recorder`) | FileRecorder, exec | None (append-only) | No — stateless append, conformance sufficient |
-| **Dolt** (internal) | dolt.EnsureRunning, dolt.StopCity | ensure → init, stop after agents | Covered by beads lifecycle (exec spy) |
+| Seam                             | Implementations                   | Lifecycle deps                   | Coordination tested?                              |
+| -------------------------------- | --------------------------------- | -------------------------------- | ------------------------------------------------- |
+| **Runtime** (`runtime.Provider`) | tmux, exec, k8s, fake             | None (stateless start/stop)      | Via lifecycle start order test                    |
+| **Beads** (`beads.Store`)        | MemStore, FileStore, BdStore      | ensure-ready → init → hooks      | `TestLifecycleCoordination_*`                     |
+| **Mail** (`mail.Provider`)       | beadmail, exec                    | Depends on beads store           | No — not a lifecycle seam; conformance sufficient |
+| **Events** (`events.Recorder`)   | FileRecorder, exec                | None (append-only)               | No — stateless append, conformance sufficient     |
+| **Dolt** (internal)              | dolt.EnsureRunning, dolt.StopCity | ensure → init, stop after agents | Covered by beads lifecycle (exec spy)             |
 
 **Adding a new provider:** When adding a new implementation of any seam:
+
 1. Run the conformance suite against it (mandatory)
 2. If the provider has lifecycle dependencies (startup ordering, shutdown
    sequencing), add a coordination test using the `exec:<spy>` pattern
@@ -383,24 +386,24 @@ test coverage. This table is the checklist for new provider implementations.
 
 ## Decision guide
 
-| Question you're testing | Tier |
-|---|---|
-| Does `bd create` print the right output? | Testscript |
-| Does `gc start` fail gracefully without tmux? | Testscript (`GC_SESSION=fail`) |
-| Does `gc rig add` fail for a missing path? | Testscript (real missing path) |
-| Does the beads store skip corrupted JSONL lines? | Unit test |
-| Does claim return ErrAlreadyClaimed on double-claim? | Unit test |
-| Does concurrent bead creation avoid corruption? | Unit test |
-| Does startup roll back if step 3 of 5 fails? | Unit test |
-| Does a real tmux session start and respond to send-keys? | Integration |
+| Question you're testing                                  | Tier                           |
+| -------------------------------------------------------- | ------------------------------ |
+| Does `bd create` print the right output?                 | Testscript                     |
+| Does `gc start` fail gracefully without tmux?            | Testscript (`GC_SESSION=fail`) |
+| Does `gc rig add` fail for a missing path?               | Testscript (real missing path) |
+| Does the beads store skip corrupted JSONL lines?         | Unit test                      |
+| Does claim return ErrAlreadyClaimed on double-claim?     | Unit test                      |
+| Does concurrent bead creation avoid corruption?          | Unit test                      |
+| Does startup roll back if step 3 of 5 fails?             | Unit test                      |
+| Does a real tmux session start and respond to send-keys? | Integration                    |
 
 ## Dependencies
 
-| Package | Purpose |
-|---|---|
-| `testing` (stdlib) | `t.TempDir()`, `t.Run()`, subtests, build tags |
-| `github.com/stretchr/testify` | `assert` and `require` — cleaner assertions |
-| `github.com/rogpeppe/go-internal/testscript` | Tutorial regression from `.txtar` files |
+| Package                                      | Purpose                                        |
+| -------------------------------------------- | ---------------------------------------------- |
+| `testing` (stdlib)                           | `t.TempDir()`, `t.Run()`, subtests, build tags |
+| `github.com/stretchr/testify`                | `assert` and `require` — cleaner assertions    |
+| `github.com/rogpeppe/go-internal/testscript` | Tutorial regression from `.txtar` files        |
 
 ## Test doubles
 
@@ -410,11 +413,11 @@ interface it implements.
 
 ### The four test doubles
 
-| Double | Interface | Package | Strategy |
-|---|---|---|---|
-| `runtime.Fake` | `runtime.Provider` | `internal/runtime` | In-memory state + spy + broken mode |
-| `fsys.Fake` | `fsys.FS` | `internal/fsys` | In-memory maps + spy + per-path error injection |
-| `beads.MemStore` | `beads.Store` | `internal/beads` | Real logic, in-memory backing (also used by `FileStore` internally) |
+| Double           | Interface          | Package            | Strategy                                                            |
+| ---------------- | ------------------ | ------------------ | ------------------------------------------------------------------- |
+| `runtime.Fake`   | `runtime.Provider` | `internal/runtime` | In-memory state + spy + broken mode                                 |
+| `fsys.Fake`      | `fsys.FS`          | `internal/fsys`    | In-memory maps + spy + per-path error injection                     |
+| `beads.MemStore` | `beads.Store`      | `internal/beads`   | Real logic, in-memory backing (also used by `FileStore` internally) |
 
 ### Spy pattern
 
@@ -438,12 +441,14 @@ for i, c := range sp.Calls {
 Three patterns, used where they fit:
 
 **Per-path errors** (`fsys.Fake`) — fine-grained, fail specific operations:
+
 ```go
 f := fsys.NewFake()
 f.Errors["/city/rigs"] = fmt.Errorf("disk full")
 ```
 
 **Modal errors** (`runtime.Fake`) — all-or-nothing broken mode:
+
 ```go
 f := runtime.NewFake()
 f.Broken = true // Start/Stop/Attach and related operations return errors
@@ -463,7 +468,7 @@ Fakes are exported types in the same package as their interface. This
 makes them importable by cross-package unit tests (e.g., `cmd/gc`
 imports `runtime.NewFake()`).
 
-## The do*() function pattern
+## The do\*() function pattern
 
 Every CLI command splits into two functions:
 
@@ -473,6 +478,7 @@ Every CLI command splits into two functions:
   Returns an exit code.
 
 Unit tests call `doFoo()` directly with fakes:
+
 ```go
 sp := runtime.NewFake()
 code := doSessionAttach(sp, "mayor", &stdout, &stderr)
@@ -483,10 +489,10 @@ Testscript tests call `gc foo` which routes through `cmdFoo()` →
 
 ### When to use each
 
-| I want to test... | Call |
-|---|---|
-| Pure logic with injected failures | `doFoo()` with a fake |
-| CLI output format, exit codes | `exec gc foo` in txtar |
+| I want to test...                  | Call                                          |
+| ---------------------------------- | --------------------------------------------- |
+| Pure logic with injected failures  | `doFoo()` with a fake                         |
+| CLI output format, exit codes      | `exec gc foo` in txtar                        |
 | That the factory wiring is correct | `exec gc foo` in txtar with `GC_SESSION=fake` |
 
 ## The executor interface pattern
@@ -516,13 +522,14 @@ implementation.
 
 **Current env vars:**
 
-| Env var | Values | Factory | Used by |
-|---|---|---|---|
-| `GC_SESSION` | `fake`, `fail`, (absent) | `newSessionProvider()` in `cmd/gc/providers.go` | `cmd_start.go`, `cmd_stop.go`, `cmd_agent.go` |
-| `GC_BEADS` | `file`, `bd`, (absent) | `beadsProvider()` in `cmd/gc/providers.go` | bead commands, `cmd_init.go`, `cmd_start.go` |
-| `GC_DOLT` | `skip`, (absent) | N/A (checked inline) | dolt lifecycle in `cmd_init.go`, `cmd_start.go`, `cmd_stop.go` |
+| Env var      | Values                   | Factory                                         | Used by                                                        |
+| ------------ | ------------------------ | ----------------------------------------------- | -------------------------------------------------------------- |
+| `GC_SESSION` | `fake`, `fail`, (absent) | `newSessionProvider()` in `cmd/gc/providers.go` | `cmd_start.go`, `cmd_stop.go`, `cmd_agent.go`                  |
+| `GC_BEADS`   | `file`, `bd`, (absent)   | `beadsProvider()` in `cmd/gc/providers.go`      | bead commands, `cmd_init.go`, `cmd_start.go`                   |
+| `GC_DOLT`    | `skip`, (absent)         | N/A (checked inline)                            | dolt lifecycle in `cmd_init.go`, `cmd_start.go`, `cmd_stop.go` |
 
 **Design rules for env var fakes:**
+
 - The fake never reads env vars itself — the factory function does
 - At most three modes per dependency: works, fails, real
 - If you need more than two env vars to set up a test scenario, it

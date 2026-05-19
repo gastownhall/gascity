@@ -142,7 +142,9 @@ describe("command palette action flows", () => {
 
     (document.getElementById("issue-modal-close-btn") as HTMLButtonElement).click();
     await executePaletteCommand("new convoy");
-    expect((document.getElementById("convoy-create-form") as HTMLElement).style.display).toBe("block");
+    expect((document.getElementById("convoy-create-form") as HTMLElement).style.display).toBe(
+      "block",
+    );
 
     (document.getElementById("convoy-create-cancel-btn") as HTMLButtonElement).click();
     await executePaletteCommand("assign work");

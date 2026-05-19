@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -66,7 +65,7 @@ func TestManagedDoltFirstUserDatabaseSkipsSystemDatabases(t *testing.T) {
 		lines []string
 		want  string
 	}{
-		{"all system", []string{"Database", "information_schema", "mysql", "dolt", "dolt_cluster", "performance_schema", "sys", "__gc_probe"}, ""},
+		{"all system", []string{"Database", "information_schema", "mysql", "dolt_cluster", "performance_schema", "sys", "__gc_probe"}, ""},
 		{"first user wins", []string{"Database", "__gc_probe", "dolt_cluster", "performance_schema", "sys", "gascity", "be"}, "gascity"},
 		{"case-insensitive system match", []string{"Database", "Information_Schema", "MySQL", "DOLT_CLUSTER", "PERFORMANCE_SCHEMA", "SYS", "__GC_PROBE", "gm"}, "gm"},
 		{"empty", []string{}, ""},
@@ -108,7 +107,7 @@ set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
   *"sql -r csv -q SHOW DATABASES"*)
-    printf 'Database\ninformation_schema\nmysql\ndolt\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
+    printf 'Database\ninformation_schema\nmysql\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
     exit 0
     ;;
   *"CREATE TABLE IF NOT EXISTS"*"__gc_read_only_probe"*)
@@ -150,11 +149,11 @@ func TestManagedDoltHealthCheckNoUserDatabaseIsUnknown(t *testing.T) {
 set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
-  *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"*)
+  *"sql -q SELECT active_branch()"*)
     exit 0
     ;;
   *"sql -r csv -q SHOW DATABASES"*)
-    printf 'Database\ninformation_schema\nmysql\ndolt\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
+    printf 'Database\ninformation_schema\nmysql\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
     exit 0
     ;;
   *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST"*)
@@ -242,7 +241,6 @@ func TestManagedDoltSystemDatabasesIncludesManagedAndDoltSystemDatabases(t *test
 	for _, name := range []string{
 		"information_schema",
 		"mysql",
-		"dolt",
 		"dolt_cluster",
 		"performance_schema",
 		"sys",
@@ -391,29 +389,5 @@ func TestRunManagedDoltSQLTimesOut(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "timed out after") {
 		t.Fatalf("runManagedDoltSQL() error = %v, want timeout", err)
-	}
-}
-
-func TestRunManagedDoltSQLIncludesConfiguredPasswordFlag(t *testing.T) {
-	binDir := t.TempDir()
-	argsFile := filepath.Join(t.TempDir(), "args.txt")
-	fakeDolt := filepath.Join(binDir, "dolt")
-	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\n", argsFile)
-	if err := os.WriteFile(fakeDolt, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("GC_DOLT_PASSWORD", "secret")
-
-	if _, err := runManagedDoltSQL("127.0.0.1", "3311", "root", "-q", "SELECT 1"); err != nil {
-		t.Fatalf("runManagedDoltSQL() error = %v", err)
-	}
-	data, err := os.ReadFile(argsFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "--password\nsecret\n") {
-		t.Fatalf("dolt args missing configured password flag:\n%s", data)
 	}
 }

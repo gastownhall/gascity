@@ -52,32 +52,37 @@ describe("activity feed ordering", () => {
     await seedActivity([oldEntry, newerEntry, { ...oldEntry }, sameTimestampDifferentScope]);
     renderActivity();
 
-    const ids = [...document.querySelectorAll<HTMLElement>(".tl-entry")].map((node) => node.dataset.ts);
-    expect(ids).toEqual([
-      "2026-04-02T10:00:00Z",
-      "2026-04-02T10:00:00Z",
-      "2026-04-01T10:00:00Z",
-    ]);
+    const ids = [...document.querySelectorAll<HTMLElement>(".tl-entry")].map(
+      (node) => node.dataset.ts,
+    );
+    expect(ids).toEqual(["2026-04-02T10:00:00Z", "2026-04-02T10:00:00Z", "2026-04-01T10:00:00Z"]);
     expect(document.querySelectorAll(".tl-entry")).toHaveLength(3);
     expect(document.getElementById("activity-count")?.textContent).toBe("3");
   });
 
   it("computes a city stream cursor from loaded history", () => {
-    const cursor = activityStreamCursorFromRecordsForTest([
-      { seq: 12, type: "bead.created", actor: "human", ts: "2026-04-01T10:00:00Z" },
-      { seq: 19, type: "bead.updated", actor: "human", ts: "2026-04-01T10:01:00Z" },
-      { seq: 15, type: "bead.closed", actor: "human", ts: "2026-04-01T10:02:00Z" },
-    ] as any, "mc-city");
+    const cursor = activityStreamCursorFromRecordsForTest(
+      [
+        { seq: 12, type: "bead.created", actor: "human", ts: "2026-04-01T10:00:00Z" },
+        { seq: 19, type: "bead.updated", actor: "human", ts: "2026-04-01T10:01:00Z" },
+        { seq: 15, type: "bead.closed", actor: "human", ts: "2026-04-01T10:02:00Z" },
+      ] as any,
+      "mc-city",
+    );
 
     expect(cursor).toEqual({ afterSeq: "19" });
   });
 
   it("resumes the supervisor stream from the history response cursor", () => {
-    const cursor = activityStreamCursorFromRecordsForTest([
-      { city: "beta", seq: 3, type: "bead.created", actor: "human", ts: "2026-04-01T10:00:00Z" },
-      { city: "alpha", seq: 9, type: "bead.updated", actor: "human", ts: "2026-04-01T10:01:00Z" },
-      { city: "beta", seq: 7, type: "bead.closed", actor: "human", ts: "2026-04-01T10:02:00Z" },
-    ] as any, "", "alpha:12,beta:8");
+    const cursor = activityStreamCursorFromRecordsForTest(
+      [
+        { city: "beta", seq: 3, type: "bead.created", actor: "human", ts: "2026-04-01T10:00:00Z" },
+        { city: "alpha", seq: 9, type: "bead.updated", actor: "human", ts: "2026-04-01T10:01:00Z" },
+        { city: "beta", seq: 7, type: "bead.closed", actor: "human", ts: "2026-04-01T10:02:00Z" },
+      ] as any,
+      "",
+      "alpha:12,beta:8",
+    );
 
     expect(cursor).toEqual({ afterCursor: "alpha:12,beta:8" });
   });

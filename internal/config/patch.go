@@ -8,6 +8,8 @@ import "fmt"
 type Patches struct {
 	// Agents targets agents by (dir, name).
 	Agents []AgentPatch `toml:"agent,omitempty"`
+	// NamedSessions targets configured named sessions by (dir, template).
+	NamedSessions []NamedSessionPatch `toml:"named_session,omitempty"`
 	// Rigs targets rigs by name.
 	Rigs []RigPatch `toml:"rigs,omitempty"`
 	// Providers targets providers by name.
@@ -49,10 +51,6 @@ type AgentPatch struct {
 	Nudge *string `toml:"nudge,omitempty"`
 	// IdleTimeout overrides the idle timeout. Duration string (e.g., "30s", "5m", "1h").
 	IdleTimeout *string `toml:"idle_timeout,omitempty"`
-	// MaxSessionAge overrides the max session age. Duration string (e.g., "5h").
-	MaxSessionAge *string `toml:"max_session_age,omitempty"`
-	// MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., "15m").
-	MaxSessionAgeJitter *string `toml:"max_session_age_jitter,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
@@ -99,11 +97,8 @@ type AgentPatch struct {
 	OverlayDir *string `toml:"overlay_dir,omitempty"`
 	// DefaultSlingFormula overrides the default sling formula.
 	DefaultSlingFormula *string `toml:"default_sling_formula,omitempty"`
-	// InjectFragments overrides the agent's inject_fragments list. Leave this
-	// field unset to keep inherited fragments; JSON callers may send null for
-	// the same no-op. Set an empty list to clear fragments; set a populated
-	// list to replace fragments.
-	InjectFragments *[]string `toml:"inject_fragments,omitempty"`
+	// InjectFragments overrides the agent's inject_fragments list.
+	InjectFragments []string `toml:"inject_fragments,omitempty"`
 	// AppendFragments overrides the agent's append_fragments list.
 	AppendFragments []string `toml:"append_fragments,omitempty"`
 	// Attach overrides the agent's attach setting.
@@ -140,6 +135,17 @@ type AgentPatch struct {
 	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
 }
 
+// NamedSessionPatch modifies an existing named session identified by
+// (Dir, Template).
+type NamedSessionPatch struct {
+	// Dir is the targeting key. Empty targets a city-scoped named session.
+	Dir string `toml:"dir,omitempty"`
+	// Template is the targeting key (required).
+	Template string `toml:"template" jsonschema:"required"`
+	// Mode overrides the named-session controller mode ("on_demand" or "always").
+	Mode *string `toml:"mode,omitempty" jsonschema:"enum=on_demand,enum=always"`
+}
+
 // PoolOverride modifies legacy [pool] fields that map to session scaling. Nil fields are not changed.
 type PoolOverride struct {
 	// Min overrides the minimum number of sessions.
@@ -167,14 +173,8 @@ type RigPatch struct {
 	Path *string `toml:"path,omitempty"`
 	// Prefix overrides the bead ID prefix.
 	Prefix *string `toml:"prefix,omitempty"`
-	// DefaultBranch overrides the rig's recorded mainline branch.
-	DefaultBranch *string `toml:"default_branch,omitempty"`
 	// Suspended overrides the rig's suspended state.
 	Suspended *bool `toml:"suspended,omitempty"`
-	// FormulaVars adds or overrides rig-scoped formula var defaults.
-	// Additive merge: patch keys win over existing rig keys, unspecified
-	// keys are preserved.
-	FormulaVars map[string]string `toml:"formula_vars,omitempty"`
 }
 
 // ProviderPatch modifies an existing provider identified by Name.
@@ -209,8 +209,6 @@ type ProviderPatch struct {
 	PromptFlag *string `toml:"prompt_flag,omitempty"`
 	// ReadyDelayMs overrides the ready delay in milliseconds.
 	ReadyDelayMs *int `toml:"ready_delay_ms,omitempty" jsonschema:"minimum=0"`
-	// AcceptStartupDialogs overrides startup dialog acceptance behavior.
-	AcceptStartupDialogs *bool `toml:"accept_startup_dialogs,omitempty"`
 	// Env adds or overrides environment variables.
 	Env map[string]string `toml:"env,omitempty"`
 	// EnvRemove lists env var keys to remove.
@@ -221,32 +219,7 @@ type ProviderPatch struct {
 
 // IsEmpty reports whether p has no patch operations.
 func (p *Patches) IsEmpty() bool {
-	return len(p.Agents) == 0 && len(p.Rigs) == 0 && len(p.Providers) == 0
-}
-
-// Fragments returns a pointer to the given inject_fragments list for use
-// in AgentPatch and AgentOverride literals. Mirrors the three
-// presence-aware states of InjectFragments:
-//
-//	Fragments()                 // empty list: clear
-//	Fragments("frag-a")         // single item: replace with one fragment
-//	Fragments("frag-a", "...")  // populated list: replace with all fragments
-//	nil                         // leave unchanged; do not call Fragments
-//
-// Calling Fragments() with no arguments is the canonical clear; it
-// makes the intent visible at the call site without ad-hoc
-// `&[]string{}` literals.
-func Fragments(items ...string) *[]string {
-	if items == nil {
-		items = []string{}
-	}
-	out := append([]string(nil), items...)
-	if out == nil {
-		// `append(nil, ...empty...)` returns nil; force a non-nil empty
-		// slice so the pointer dereferences to the clear signal.
-		out = []string{}
-	}
-	return &out
+	return len(p.Agents) == 0 && len(p.NamedSessions) == 0 && len(p.Rigs) == 0 && len(p.Providers) == 0
 }
 
 // ApplyPatches applies all patches to the config. Patches target existing
@@ -257,6 +230,11 @@ func ApplyPatches(cfg *City, patches Patches) error {
 	for i, p := range patches.Agents {
 		if err := applyAgentPatch(cfg, &p); err != nil {
 			return fmt.Errorf("patches.agent[%d]: %w", i, err)
+		}
+	}
+	for i, p := range patches.NamedSessions {
+		if err := applyNamedSessionPatch(cfg, &p); err != nil {
+			return fmt.Errorf("patches.named_session[%d]: %w", i, err)
 		}
 	}
 	for i, p := range patches.Rigs {
@@ -270,6 +248,30 @@ func ApplyPatches(cfg *City, patches Patches) error {
 		}
 	}
 	return nil
+}
+
+func applyNamedSessionPatch(cfg *City, patch *NamedSessionPatch) error {
+	if patch.Template == "" {
+		return fmt.Errorf("named_session patch: template is required")
+	}
+	target := patch.Template
+	if patch.Dir != "" {
+		target = patch.Dir + "/" + patch.Template
+	}
+	for i := range cfg.NamedSessions {
+		s := &cfg.NamedSessions[i]
+		if s.Dir == patch.Dir && s.Template == patch.Template {
+			applyNamedSessionPatchFields(s, patch)
+			return nil
+		}
+	}
+	return fmt.Errorf("named_session %q not found in merged config", target)
+}
+
+func applyNamedSessionPatchFields(s *NamedSession, p *NamedSessionPatch) {
+	if p.Mode != nil {
+		s.Mode = *p.Mode
+	}
 }
 
 // applyAgentPatch finds an agent by (dir, name) and applies the patch.
@@ -329,12 +331,6 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	if p.IdleTimeout != nil {
 		a.IdleTimeout = *p.IdleTimeout
 	}
-	if p.MaxSessionAge != nil {
-		a.MaxSessionAge = *p.MaxSessionAge
-	}
-	if p.MaxSessionAgeJitter != nil {
-		a.MaxSessionAgeJitter = *p.MaxSessionAgeJitter
-	}
 	if p.SleepAfterIdle != nil {
 		a.SleepAfterIdle = NormalizeSleepAfterIdle(*p.SleepAfterIdle)
 		a.SleepAfterIdleSource = "agent_patch"
@@ -388,21 +384,8 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	if p.WakeMode != nil {
 		a.WakeMode = *p.WakeMode
 	}
-	// InjectFragments uses presence-aware semantics via *[]string: a nil
-	// pointer means "leave unchanged"; a non-nil pointer (even to an
-	// empty slice) means "replace the agent's list with exactly this
-	// value". The pointer travels through TOML write/read intact —
-	// `inject_fragments = []` in a [[patches.agent]] block survives
-	// round-trip and clears an inherited list. Without this, downstream
-	// editors that want to clear a pack-baseline inject_fragments
-	// silently no-op because TOML's omitempty drops `[]string{}` on
-	// encode. The existing `len > 0` pattern remains for `depends_on`,
-	// `pre_start`, `session_setup`, and other list fields whose UX
-	// hasn't asked for clearing yet (see TODO above) — the same
-	// presence-aware pattern can be adopted field by field as the need
-	// arises.
-	if p.InjectFragments != nil {
-		a.InjectFragments = append([]string(nil), (*p.InjectFragments)...)
+	if len(p.InjectFragments) > 0 {
+		a.InjectFragments = append([]string(nil), p.InjectFragments...)
 	}
 	if len(p.AppendFragments) > 0 {
 		a.AppendFragments = append([]string(nil), p.AppendFragments...)
@@ -483,19 +466,8 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			if patch.Prefix != nil {
 				r.Prefix = *patch.Prefix
 			}
-			if patch.DefaultBranch != nil {
-				r.DefaultBranch = *patch.DefaultBranch
-			}
 			if patch.Suspended != nil {
 				r.Suspended = *patch.Suspended
-			}
-			if len(patch.FormulaVars) > 0 {
-				if r.FormulaVars == nil {
-					r.FormulaVars = make(map[string]string, len(patch.FormulaVars))
-				}
-				for k, v := range patch.FormulaVars {
-					r.FormulaVars[k] = v
-				}
 			}
 			return nil
 		}
@@ -552,9 +524,6 @@ func applyProviderPatch(cfg *City, patch *ProviderPatch) error {
 		if patch.ReadyDelayMs != nil {
 			newSpec.ReadyDelayMs = *patch.ReadyDelayMs
 		}
-		if patch.AcceptStartupDialogs != nil {
-			newSpec.AcceptStartupDialogs = cloneBoolPtr(patch.AcceptStartupDialogs)
-		}
 		if len(patch.Env) > 0 {
 			newSpec.Env = make(map[string]string, len(patch.Env))
 			for k, v := range patch.Env {
@@ -597,9 +566,6 @@ func applyProviderPatch(cfg *City, patch *ProviderPatch) error {
 	}
 	if patch.ReadyDelayMs != nil {
 		spec.ReadyDelayMs = *patch.ReadyDelayMs
-	}
-	if patch.AcceptStartupDialogs != nil {
-		spec.AcceptStartupDialogs = cloneBoolPtr(patch.AcceptStartupDialogs)
 	}
 	// Env: additive merge.
 	if len(patch.Env) > 0 {

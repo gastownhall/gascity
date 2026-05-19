@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doltauth"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -87,27 +88,17 @@ func orderStoreTargetKey(target execStoreTarget) string {
 	return target.ScopeKind + "\x00" + filepath.Clean(target.ScopeRoot)
 }
 
-func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) ([]string, error) {
+func orderExecEnv(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) []string {
 	var env map[string]string
-	var err error
 	if target.ScopeKind == "rig" {
-		env, err = bdRuntimeEnvForRigWithError(cityPath, cfg, target.ScopeRoot)
+		env = bdRuntimeEnvForRig(cityPath, cfg, target.ScopeRoot)
 	} else {
-		env, err = bdRuntimeEnvWithError(cityPath)
+		env = bdRuntimeEnv(cityPath)
 		env["BEADS_DIR"] = filepath.Join(target.ScopeRoot, ".beads")
-	}
-	if err != nil {
-		return nil, fmt.Errorf("building order env for %s: %w", a.ScopedName(), err)
 	}
 	env["GC_STORE_ROOT"] = target.ScopeRoot
 	env["GC_STORE_SCOPE"] = target.ScopeKind
 	env["GC_BEADS_PREFIX"] = target.Prefix
-	// Tag every bd interaction this exec order produces with the order's
-	// name so audit logs and the dashboard can attribute housekeeping
-	// activity to the responsible order rather than an ambient identity.
-	if name := strings.TrimSpace(a.Name); name != "" {
-		env["BEADS_ACTOR"] = "order:" + name
-	}
 	if target.ScopeKind == "rig" {
 		env["GC_RIG"] = target.RigName
 		env["GC_RIG_ROOT"] = target.ScopeRoot
@@ -134,8 +125,7 @@ func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTa
 	}
 	applyOrderExecCanonicalDoltEnv(cityPath, target.ScopeRoot, env)
 	ensureProjectedDoltEnvExplicit(env)
-	ensureProjectedPostgresEnvExplicit(env)
-	return mergeRuntimeEnv(nil, env), nil
+	return mergeRuntimeEnv(nil, env)
 }
 
 func orderTriggerOptions(cityPath string, cfg *config.City, a orders.Order) (orders.TriggerOptions, error) {
@@ -146,21 +136,17 @@ func orderTriggerOptions(cityPath string, cfg *config.City, a orders.Order) (ord
 	if err != nil {
 		return orders.TriggerOptions{}, err
 	}
-	return orderTriggerOptionsForTarget(cityPath, cfg, target, a)
+	return orderTriggerOptionsForTarget(cityPath, cfg, target, a), nil
 }
 
-func orderTriggerOptionsForTarget(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) (orders.TriggerOptions, error) {
+func orderTriggerOptionsForTarget(cityPath string, cfg *config.City, target execStoreTarget, a orders.Order) orders.TriggerOptions {
 	if a.Trigger != "condition" || strings.TrimSpace(cityPath) == "" {
-		return orders.TriggerOptions{}, nil
-	}
-	env, err := orderExecEnvWithError(cityPath, cfg, target, a)
-	if err != nil {
-		return orders.TriggerOptions{}, err
+		return orders.TriggerOptions{}
 	}
 	return orders.TriggerOptions{
 		ConditionDir: target.ScopeRoot,
-		ConditionEnv: env,
-	}, nil
+		ConditionEnv: orderExecEnv(cityPath, cfg, target, a),
+	}
 }
 
 func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]string) {
@@ -169,9 +155,6 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 	}
 	if strings.TrimSpace(scopeRoot) == "" {
 		scopeRoot = cityPath
-	}
-	if scopeBackendIsPostgres(cityPath, scopeRoot) {
-		return
 	}
 	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
 	if err != nil {
@@ -184,7 +167,7 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 		return
 	}
 	applyCanonicalDoltTargetEnv(env, target)
-	applyCanonicalDoltAuthEnv(env, cityPath, scopeRoot, target)
+	applyResolvedDoltAuthEnv(env, doltauth.AuthScopeRoot(cityPath, scopeRoot, target), strings.TrimSpace(target.User))
 	if target.External {
 		env["GC_DOLT_MANAGED_LOCAL"] = "0"
 		clearManagedDoltRuntimeLayoutEnv(env, cityPath)
@@ -196,9 +179,6 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 }
 
 func applyOrderExecManagedDoltFallback(cityPath, scopeRoot string, env map[string]string, _ error) bool {
-	if scopeBackendIsPostgres(cityPath, scopeRoot) {
-		return false
-	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
 	if err != nil || resolved.Kind != contract.ScopeConfigAuthoritative {
 		return false
@@ -226,11 +206,8 @@ func applyOrderExecManagedDoltFallback(cityPath, scopeRoot string, env map[strin
 	}
 	env["GC_DOLT_MANAGED_LOCAL"] = "1"
 	applyManagedDoltRuntimeLayoutEnv(env, cityPath)
-	target := contract.DoltConnectionTarget{
-		User:           strings.TrimSpace(resolved.State.DoltUser),
-		EndpointOrigin: resolved.State.EndpointOrigin,
-	}
-	applyCanonicalDoltAuthEnv(env, cityPath, scopeRoot, target)
+	target := contract.DoltConnectionTarget{EndpointOrigin: resolved.State.EndpointOrigin}
+	applyResolvedDoltAuthEnv(env, doltauth.AuthScopeRoot(cityPath, scopeRoot, target), strings.TrimSpace(resolved.State.DoltUser))
 	mirrorBeadsDoltEnv(env)
 	return true
 }

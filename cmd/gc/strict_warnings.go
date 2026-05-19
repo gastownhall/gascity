@@ -16,6 +16,5 @@ func splitStrictConfigWarnings(warnings []string) (fatal []string, nonFatal []st
 }
 
 func strictWarningIsNonFatal(warning string) bool {
-	return config.IsNonFatalSiteBindingWarning(warning) ||
-		config.IsLegacyV1SurfaceWarning(warning)
+	return config.IsNonFatalSiteBindingWarning(warning)
 }

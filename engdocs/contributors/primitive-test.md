@@ -20,11 +20,13 @@ already handles concurrency (e.g., SQL transactions, INSERT IGNORE),
 agents can call it directly.
 
 **Questions to ask:**
+
 - Can two agents hit this operation simultaneously?
 - Does the underlying tool (bd, git, tmux) already provide atomicity?
 - Is there a read-check-write pattern that could race?
 
 **Examples:**
+
 - `bd label add` → INSERT IGNORE deduplicates → safe → consumer layer
 - `bd slot clear` → idempotent set-to-empty → safe → consumer layer
 - `bd slot set hook` → read-check-write race → fix in beads, not Gas City
@@ -43,6 +45,7 @@ become less necessary (→ consumer layer) or exactly as necessary
 (→ primitive)?
 
 **Examples:**
+
 - "Decide whether to unhook a stale bead" → judgment → consumer layer
   (smarter model decides better)
 - "Atomically transition bead status" → plumbing → primitive
@@ -63,6 +66,7 @@ in the SDK.
 decision belongs in the prompt, not the code.
 
 **Examples:**
+
 - "Query all beads where status=hooked" → transport → primitive
 - "Decide recovery strategy for crashed agent" → cognition → consumer
 - "Remove a git worktree" → transport → primitive
@@ -73,13 +77,14 @@ decision belongs in the prompt, not the code.
 
 ### Decision table template
 
-| Capability | Atomicity needed? | Bitter Lesson pass? | ZFC pass? | Verdict |
-|---|---|---|---|---|
-| ... | Does the underlying tool race? | Does a smarter model still need this? | Is it pure transport? | All three → primitive |
+| Capability | Atomicity needed?              | Bitter Lesson pass?                   | ZFC pass?             | Verdict               |
+| ---------- | ------------------------------ | ------------------------------------- | --------------------- | --------------------- |
+| ...        | Does the underlying tool race? | Does a smarter model still need this? | Is it pure transport? | All three → primitive |
 
 ### Common verdicts
 
 **Primitive (all three pass):**
+
 - Bead CRUD, hook with conflict detection
 - Git worktree create/remove/list
 - Session start/stop/attach
@@ -87,6 +92,7 @@ decision belongs in the prompt, not the code.
 - Config parse/validate
 
 **Consumer layer (at least one fails):**
+
 - Done flow orchestration (fails Bitter Lesson — model decides)
 - Stale hook recovery strategy (fails ZFC — judgment)
 - Bidirectional hook tracking (fails Atomicity — two `bd` calls suffice)
@@ -94,6 +100,7 @@ decision belongs in the prompt, not the code.
 - Label management (fails Atomicity — `bd label` is safe)
 
 **Fix upstream (Atomicity problem in dependency):**
+
 - `bd slot set hook` race → fix in beads, not Gas City
 
 ## The corollary: when to fix upstream vs wrap

@@ -6,7 +6,21 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/api"
 )
+
+type fakeDashboardSupervisorClient struct {
+	baseURL string
+	err     error
+}
+
+func (f fakeDashboardSupervisorClient) ListCities() ([]api.CityInfo, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return []api.CityInfo{{Name: "gc", Path: "/tmp/gc", Running: true}}, nil
+}
 
 func TestRunDashboardServeAllowsNoCityWithSupervisor(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
@@ -81,6 +95,88 @@ func TestRunDashboardServeAllowsNoCityWithAPIOverride(t *testing.T) {
 	}
 	if gotURL != "http://127.0.0.1:9999" {
 		t.Fatalf("dashboard api URL = %q, want trimmed override", gotURL)
+	}
+}
+
+func TestRunDashboardServeIgnoresAmbientGCDirWithoutCityToml(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("mkdir .gc: %v", err)
+	}
+	t.Chdir(repoDir)
+
+	oldAlive := supervisorAliveHook
+	oldServe := dashboardServeHook
+	oldCityFlag := cityFlag
+	oldRigFlag := rigFlag
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		dashboardServeHook = oldServe
+		cityFlag = oldCityFlag
+		rigFlag = oldRigFlag
+	})
+
+	supervisorAliveHook = func() int { return 0 }
+	cityFlag = ""
+	rigFlag = ""
+
+	var gotURL string
+	dashboardServeHook = func(_ int, apiURL string) error {
+		gotURL = apiURL
+		return nil
+	}
+
+	if err := runDashboardServe("gc dashboard", 9090, "http://127.0.0.1:9999/", io.Discard); err != nil {
+		t.Fatalf("runDashboardServe() error: %v", err)
+	}
+	if gotURL != "http://127.0.0.1:9999" {
+		t.Fatalf("dashboard api URL = %q, want trimmed override", gotURL)
+	}
+}
+
+func TestRunDashboardServeUsesReachableSupervisorAPIWhenAliveProbeFails(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Chdir(t.TempDir())
+
+	oldAlive := supervisorAliveHook
+	oldBaseURL := effectiveAPIBaseURLHook
+	oldServe := dashboardServeHook
+	oldNewClient := effectiveAPIClientFactory
+	oldCityFlag := cityFlag
+	oldRigFlag := rigFlag
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		effectiveAPIBaseURLHook = oldBaseURL
+		dashboardServeHook = oldServe
+		effectiveAPIClientFactory = oldNewClient
+		cityFlag = oldCityFlag
+		rigFlag = oldRigFlag
+	})
+
+	supervisorAliveHook = func() int { return 0 }
+	effectiveAPIBaseURLHook = func() (string, error) { return "http://127.0.0.1:8372", nil }
+	effectiveAPIClientFactory = func(baseURL string) effectiveAPIClient {
+		return fakeDashboardSupervisorClient{
+			baseURL: baseURL,
+			err:     nil,
+		}
+	}
+	cityFlag = ""
+	rigFlag = ""
+
+	var gotURL string
+	dashboardServeHook = func(_ int, apiURL string) error {
+		gotURL = apiURL
+		return nil
+	}
+
+	if err := runDashboardServe("gc dashboard", 9090, "", io.Discard); err != nil {
+		t.Fatalf("runDashboardServe() error: %v", err)
+	}
+	if gotURL != "http://127.0.0.1:8372" {
+		t.Fatalf("dashboard api URL = %q, want reachable supervisor API", gotURL)
 	}
 }
 

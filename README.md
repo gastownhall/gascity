@@ -1,28 +1,9 @@
-<h1 align="center">Gas City</h1>
-
-<p align="center">
-  <strong>Composable orchestration infrastructure for multi-agent coding workflows.</strong>
-</p>
-
-<p align="center">
-  <a href="https://github.com/gastownhall/gascity/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://img.shields.io/github/actions/workflow/status/gastownhall/gascity/ci.yml?branch=main&label=Build&style=for-the-badge" alt="Build status"></a>
-  <a href="https://github.com/gastownhall/gascity/releases"><img src="https://img.shields.io/github/v/release/gastownhall/gascity?include_prereleases&style=for-the-badge" alt="GitHub release"></a>
-  <a href="https://discord.gg/xHpUGUzZp2"><img src="https://img.shields.io/discord/1462817445562814505?label=Discord&logo=discord&logoColor=white&color=5865F2&style=for-the-badge" alt="Discord"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
-</p>
+# Gas City
 
 Gas City is an orchestration-builder SDK for multi-agent systems. It extracts
 the reusable infrastructure from Gas Town into a configurable toolkit with
 runtime providers, work routing, formulas, orders, health patrol, and a
 declarative city configuration.
-
-## Sponsors
-
-<p align="center">
-  <a href="https://blacksmith.sh/">
-    <img src="docs/images/blacksmith-powered.png" alt="Powered by Blacksmith" height="40">
-  </a>
-</p>
 
 ## Coming from Gas Town?
 
@@ -48,22 +29,22 @@ See the full install guide at [docs/getting-started/installation.md](docs/gettin
 Gas City requires the following tools on your system. `gc init` and
 `gc start` check for these automatically and report any that are missing.
 
-| Dependency | Required | Min Version | Install (macOS) | Install (Linux) |
-|------------|----------|-------------|-----------------|-----------------|
-| tmux | Always | — | `brew install tmux` | `apt install tmux` |
-| git | Always | — | `brew install git` | `apt install git` |
-| jq | Always | — | `brew install jq` | `apt install jq` |
-| pgrep | Always | — | (included in macOS) | `apt install procps` |
-| lsof | Always | — | (included in macOS) | `apt install lsof` |
-| dolt | Beads provider `bd` | 1.86.2 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
-| bd | Beads provider `bd` | 1.0.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
-| flock | Beads provider `bd` | — | `brew install flock` | `apt install util-linux` |
-| gh | Optional GitHub gates | — | `brew install gh` | [cli.github.com](https://cli.github.com/) |
-| claude / codex / gemini | Per provider | — | See provider docs | See provider docs |
+| Dependency              | Required            | Min Version     | Install (macOS)                                           | Install (Linux)                                           |
+| ----------------------- | ------------------- | --------------- | --------------------------------------------------------- | --------------------------------------------------------- |
+| tmux                    | Always              | —               | `brew install tmux`                                       | `apt install tmux`                                        |
+| git                     | Always              | —               | `brew install git`                                        | `apt install git`                                         |
+| jq                      | Always              | —               | `brew install jq`                                         | `apt install jq`                                          |
+| pgrep                   | Always              | —               | (included in macOS)                                       | `apt install procps`                                      |
+| lsof                    | Always              | —               | (included in macOS)                                       | `apt install lsof`                                        |
+| dolt                    | Beads provider `bd` | 1.86.2 or newer | `brew install dolt`                                       | [releases](https://github.com/dolthub/dolt/releases)      |
+| bd                      | Beads provider `bd` | 1.0.0           | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
+| flock                   | Beads provider `bd` | —               | `brew install flock`                                      | `apt install util-linux`                                  |
+| claude / codex / gemini | Per provider        | —               | See provider docs                                         | See provider docs                                         |
 
-The `bd` (beads) provider is the default. To use a file-based store instead
-(no dolt/bd/flock needed), set `GC_BEADS=file` or add `[beads] provider = "file"`
-to your `city.toml`.
+The `bd` (beads) provider is the default. It uses managed Dolt by default.
+To keep `bd` but use doltlite storage, set `[beads] backend = "doltlite"`.
+To use a file-based store instead (no dolt/bd/flock needed), set
+`GC_BEADS=file` or add `[beads] provider = "file"` to your `city.toml`.
 
 Managed Dolt checks require a final Dolt 1.86.2 or newer. Earlier and
 pre-release builds can miss the upstream GC/writer deadlock fix in

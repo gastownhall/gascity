@@ -2,7 +2,6 @@
 title: "Life of a Molecule"
 ---
 
-
 > Last verified against code: 2026-03-17
 
 ## Summary
@@ -115,18 +114,18 @@ This cleanup is intentionally conservative:
 
 ## Function Reference
 
-| Phase | Function | File |
-|---|---|---|
-| Layer computation | `ComputeFormulaLayers()` | `internal/config/pack.go` |
-| Symlink staging | `ResolveFormulas()` | `cmd/gc/formula_resolve.go` |
-| Wisp creation | `Store.MolCook()` | `internal/beads/beads.go` |
-| Attached molecule creation | `Store.MolCookOn()` | `internal/beads/beads.go` |
-| Production backend cook | `BdStore.MolCook()` / `BdStore.MolCookOn()` | `internal/beads/bdstore.go` |
-| Script backend cook | `exec.Store.MolCook()` / `exec.Store.MolCookOn()` | `internal/beads/exec/exec.go` |
-| User dispatch | `doSling()` | `cmd/gc/cmd_sling.go` |
-| Order dispatch | `dispatchWisp()` | `cmd/gc/order_dispatch.go` |
-| GC creation | `newWispGC()` | `cmd/gc/wisp_gc.go` |
-| GC execution | `memoryWispGC.runGC()` | `cmd/gc/wisp_gc.go` |
+| Phase                      | Function                                          | File                          |
+| -------------------------- | ------------------------------------------------- | ----------------------------- |
+| Layer computation          | `ComputeFormulaLayers()`                          | `internal/config/pack.go`     |
+| Symlink staging            | `ResolveFormulas()`                               | `cmd/gc/formula_resolve.go`   |
+| Wisp creation              | `Store.MolCook()`                                 | `internal/beads/beads.go`     |
+| Attached molecule creation | `Store.MolCookOn()`                               | `internal/beads/beads.go`     |
+| Production backend cook    | `BdStore.MolCook()` / `BdStore.MolCookOn()`       | `internal/beads/bdstore.go`   |
+| Script backend cook        | `exec.Store.MolCook()` / `exec.Store.MolCookOn()` | `internal/beads/exec/exec.go` |
+| User dispatch              | `doSling()`                                       | `cmd/gc/cmd_sling.go`         |
+| Order dispatch             | `dispatchWisp()`                                  | `cmd/gc/order_dispatch.go`    |
+| GC creation                | `newWispGC()`                                     | `cmd/gc/wisp_gc.go`           |
+| GC execution               | `memoryWispGC.runGC()`                            | `cmd/gc/wisp_gc.go`           |
 
 ## See Also
 

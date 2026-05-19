@@ -48,10 +48,10 @@ This is static config data that should be on every agent response.
 
 **Add to `agentResponse`:**
 
-| Field | Type | Source | Notes |
-|-------|------|--------|-------|
-| `provider` | `string` | `config.Agent.Provider` | `"claude"`, `"codex"`, `"gemini"`, etc. |
-| `display_name` | `string` | `ProviderSpec.DisplayName` | `"Claude Code"`, `"Codex CLI"`, etc. |
+| Field          | Type     | Source                     | Notes                                   |
+| -------------- | -------- | -------------------------- | --------------------------------------- |
+| `provider`     | `string` | `config.Agent.Provider`    | `"claude"`, `"codex"`, `"gemini"`, etc. |
+| `display_name` | `string` | `ProviderSpec.DisplayName` | `"Claude Code"`, `"Codex CLI"`, etc.    |
 
 **Why:** Every dashboard wants to show what kind of agent this is. Today
 you'd have to cross-reference the agent name against the config to find the
@@ -69,8 +69,8 @@ what the agent is actually doing.
 
 **Add to `agentResponse`:**
 
-| Field | Type | Source | Notes |
-|-------|------|--------|-------|
+| Field   | Type     | Source              | Notes                                                                                 |
+| ------- | -------- | ------------------- | ------------------------------------------------------------------------------------- |
 | `state` | `string` | Derived (see below) | Enum: `"idle"`, `"working"`, `"waiting"`, `"stopped"`, `"suspended"`, `"quarantined"` |
 
 **Derivation logic (in API handler, not Go business logic — pure data mapping):**
@@ -102,8 +102,8 @@ data belongs on the agent response, not discovered by the consumer via `ps`.
 
 **Add to `agentResponse`:**
 
-| Field | Type | Source | Notes |
-|-------|------|--------|-------|
+| Field     | Type           | Source           | Notes                   |
+| --------- | -------------- | ---------------- | ----------------------- |
 | `process` | `*processInfo` | Session provider | `null` when not running |
 
 ```json
@@ -144,8 +144,8 @@ separately to learn what the agent is working on.
 
 **Add to `agentResponse`:**
 
-| Field | Type | Source | Notes |
-|-------|------|--------|-------|
+| Field         | Type           | Source            | Notes                      |
+| ------------- | -------------- | ----------------- | -------------------------- |
 | `active_work` | `*workContext` | Bead store lookup | `null` when no active bead |
 
 ```json
@@ -172,8 +172,8 @@ separate peek call. real-world app uses this for question detection and status d
 
 **Add to `agentResponse`:**
 
-| Field | Type | Source | Notes |
-|-------|------|--------|-------|
+| Field         | Type     | Source                  | Notes                                             |
+| ------------- | -------- | ----------------------- | ------------------------------------------------- |
 | `last_output` | `string` | `session.Peek(name, 5)` | Last ~5 lines, truncated. Empty when not running. |
 
 **Concern:** Peek is not free (tmux capture-pane). For the agent list
@@ -197,16 +197,16 @@ Dashboards want to know when a rig was last active and its git state.
 
 **Add to `rigResponse`:**
 
-| Field | Type | Source | Notes |
-|-------|------|--------|-------|
-| `last_activity` | `string` | Max of agent last_activity times for rig | ISO8601 or empty |
-| `agent_count` | `int` | Count of agents assigned to this rig | Includes pool expansion |
-| `running_count` | `int` | Count of running agents in this rig | |
+| Field           | Type     | Source                                   | Notes                   |
+| --------------- | -------- | ---------------------------------------- | ----------------------- |
+| `last_activity` | `string` | Max of agent last_activity times for rig | ISO8601 or empty        |
+| `agent_count`   | `int`    | Count of agents assigned to this rig     | Includes pool expansion |
+| `running_count` | `int`    | Count of running agents in this rig      |                         |
 
 **Git status** — new optional sub-object, populated when `?git=true`:
 
-| Field | Type | Source | Notes |
-|-------|------|--------|-------|
+| Field | Type         | Source              | Notes                   |
+| ----- | ------------ | ------------------- | ----------------------- |
 | `git` | `*gitStatus` | `git -C {path} ...` | `null` unless requested |
 
 ```json
@@ -232,14 +232,14 @@ the full picture.
 
 **Enrich `GET /v0/status`:**
 
-| Field | Type | Source | Notes |
-|-------|------|--------|-------|
-| `version` | `string` | Build-time constant | GC binary version |
-| `uptime_sec` | `int` | `time.Since(startTime)` | Controller uptime |
-| `agents` | `object` | Counts | `{ "total": N, "running": N, "suspended": N, "quarantined": N }` |
-| `rigs` | `object` | Counts | `{ "total": N, "suspended": N }` |
-| `work` | `object` | Bead store summary | `{ "in_progress": N, "ready": N, "open": N }` |
-| `mail` | `object` | Mail store summary | `{ "unread": N, "total": N }` |
+| Field        | Type     | Source                  | Notes                                                            |
+| ------------ | -------- | ----------------------- | ---------------------------------------------------------------- |
+| `version`    | `string` | Build-time constant     | GC binary version                                                |
+| `uptime_sec` | `int`    | `time.Since(startTime)` | Controller uptime                                                |
+| `agents`     | `object` | Counts                  | `{ "total": N, "running": N, "suspended": N, "quarantined": N }` |
+| `rigs`       | `object` | Counts                  | `{ "total": N, "suspended": N }`                                 |
+| `work`       | `object` | Bead store summary      | `{ "in_progress": N, "ready": N, "open": N }`                    |
+| `mail`       | `object` | Mail store summary      | `{ "unread": N, "total": N }`                                    |
 
 **Effort:** Small-medium — all data sources exist; this is aggregation.
 
@@ -270,16 +270,16 @@ that also gives enough context for dashboard connection verification.
 
 ## Summary: implementation order
 
-| # | Gap | Fields | Effort | Priority |
-|---|-----|--------|--------|----------|
-| 1 | Agent identity | `provider`, `display_name` | Trivial | P0 |
-| 2 | Agent state enum | `state` | Small | P0 |
-| 3 | Process metadata | `process.{pid, rss_mb, elapsed_sec}` | Medium | P0 |
-| 4 | Active work context | `active_work.{bead_id, title, type, started_at}` | Trivial | P0 |
-| 5 | Peek preview | `last_output` (opt-in) | Small | P1 |
-| 6 | Rig enrichment | `last_activity`, `agent_count`, `running_count`, `git` | Medium | P1 |
-| 7 | Status overview | Aggregate counts + version + uptime | Small | P1 |
-| 8 | Health enrichment | `version`, `city`, `uptime_sec` | Trivial | P2 |
+| #   | Gap                 | Fields                                                 | Effort  | Priority |
+| --- | ------------------- | ------------------------------------------------------ | ------- | -------- |
+| 1   | Agent identity      | `provider`, `display_name`                             | Trivial | P0       |
+| 2   | Agent state enum    | `state`                                                | Small   | P0       |
+| 3   | Process metadata    | `process.{pid, rss_mb, elapsed_sec}`                   | Medium  | P0       |
+| 4   | Active work context | `active_work.{bead_id, title, type, started_at}`       | Trivial | P0       |
+| 5   | Peek preview        | `last_output` (opt-in)                                 | Small   | P1       |
+| 6   | Rig enrichment      | `last_activity`, `agent_count`, `running_count`, `git` | Medium  | P1       |
+| 7   | Status overview     | Aggregate counts + version + uptime                    | Small   | P1       |
+| 8   | Health enrichment   | `version`, `city`, `uptime_sec`                        | Trivial | P2       |
 
 **P0** = needed for any useful dashboard integration (Gaps 1-4)
 **P1** = makes dashboards significantly better (Gaps 5-7, 9)
@@ -308,7 +308,7 @@ What it does NOT yet extract (but can, from the same JSONL data):
 
 - **Context usage %** — computed from the last assistant message's
   `message.usage` fields (`input_tokens + cache_read_input_tokens +
-  cache_creation_input_tokens`), adjusted by compaction overhead
+cache_creation_input_tokens`), adjusted by compaction overhead
   (`compactMetadata.preTokens`), divided by a model context window lookup.
 
 YepAnywhere computes context % like this (from `reader.ts`):
@@ -332,11 +332,11 @@ more fields from `message`.
 
 **Layer A: Agent-level summary fields (on `agentResponse`):**
 
-| Field | Type | Source | Notes |
-|-------|------|--------|-------|
-| `model` | `string` | sessionlog extraction | `"claude-opus-4-5-20251101"` or empty |
-| `context_pct` | `*int` | sessionlog extraction | 0-100, null if unavailable |
-| `context_window` | `*int` | Model lookup table | Token count, null if unknown |
+| Field            | Type     | Source                | Notes                                 |
+| ---------------- | -------- | --------------------- | ------------------------------------- |
+| `model`          | `string` | sessionlog extraction | `"claude-opus-4-5-20251101"` or empty |
+| `context_pct`    | `*int`   | sessionlog extraction | 0-100, null if unavailable            |
+| `context_window` | `*int`   | Model lookup table    | Token count, null if unknown          |
 
 These are populated by reading the agent's most recent session JSONL file.
 Discovery: the agent's working directory maps to a Claude projects slug
@@ -389,17 +389,17 @@ endpoint (medium), wire summary fields into agent response (small).
 
 ## Summary: updated implementation order
 
-| # | Gap | Fields | Effort | Priority |
-|---|-----|--------|--------|----------|
-| 1 | Agent identity | `provider`, `display_name` | Trivial | P0 |
-| 2 | Agent state enum | `state` | Small | P0 |
-| 3 | Process metadata | `process.{pid, rss_mb, elapsed_sec}` | Medium | P0 |
-| 4 | Active work context | `active_work.{bead_id, title, type, started_at}` | Trivial | P0 |
-| 5 | Peek preview | `last_output` (opt-in) | Small | P1 |
-| 6 | Rig enrichment | `last_activity`, `agent_count`, `running_count`, `git` | Medium | P1 |
-| 7 | Status overview | Aggregate counts + version + uptime | Small | P1 |
-| 8 | Health enrichment | `version`, `city`, `uptime_sec` | Trivial | P2 |
-| 9 | Session log + model/context | `model`, `context_pct`, `/v0/agent/{name}/log` | Medium | P1 |
+| #   | Gap                         | Fields                                                 | Effort  | Priority |
+| --- | --------------------------- | ------------------------------------------------------ | ------- | -------- |
+| 1   | Agent identity              | `provider`, `display_name`                             | Trivial | P0       |
+| 2   | Agent state enum            | `state`                                                | Small   | P0       |
+| 3   | Process metadata            | `process.{pid, rss_mb, elapsed_sec}`                   | Medium  | P0       |
+| 4   | Active work context         | `active_work.{bead_id, title, type, started_at}`       | Trivial | P0       |
+| 5   | Peek preview                | `last_output` (opt-in)                                 | Small   | P1       |
+| 6   | Rig enrichment              | `last_activity`, `agent_count`, `running_count`, `git` | Medium  | P1       |
+| 7   | Status overview             | Aggregate counts + version + uptime                    | Small   | P1       |
+| 8   | Health enrichment           | `version`, `city`, `uptime_sec`                        | Trivial | P2       |
+| 9   | Session log + model/context | `model`, `context_pct`, `/v0/agent/{name}/log`         | Medium  | P1       |
 
 ---
 

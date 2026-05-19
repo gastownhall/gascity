@@ -2,12 +2,12 @@
 title: "Session Model Unification"
 ---
 
-| Field | Value |
-|---|---|
-| Status | Accepted |
-| Date | 2026-04-10 |
-| Author(s) | Codex |
-| Issue | N/A |
+| Field      | Value                                                                                                 |
+| ---------- | ----------------------------------------------------------------------------------------------------- |
+| Status     | Accepted                                                                                              |
+| Date       | 2026-04-10                                                                                            |
+| Author(s)  | Codex                                                                                                 |
+| Issue      | N/A                                                                                                   |
 | Supersedes | named-configured-sessions (partially); clarifies the post-pool session model layered over agent-pools |
 
 ## Summary
@@ -186,14 +186,14 @@ Rules:
 
 #### Session-targeting token matrix
 
-| Token class | Accepted on | Lookup scope | Success rule | Notes |
-|---|---|---|---|---|
-| bead ID | session-targeting and compatibility surfaces | global exact bead lookup | exactly one open bead | never falls through |
-| fully qualified named identity `<rig>/<name>` | session-targeting and compatibility surfaces | exact `configured_named_identity` lookup | exactly one reserved or open canonical match | config-managed alias is only the mirrored presentation of this same identity, not a second lookup branch |
-| unqualified named token `<name>` | session-targeting and compatibility surfaces | city-scoped identities plus identities in the current rig only | exactly one reserved/open session-side match across configured named alias, current alias, and current `session_name` | cross-rig bare lookup is never permitted |
-| current alias | session-targeting and compatibility surfaces | same as unqualified named token | exactly one open bead | reserved configured named alias still wins conflicts by failing closed |
-| current `session_name` | session-targeting and compatibility surfaces | same as unqualified named token | exactly one open bead | compatibility only if the surface explicitly allows historical forms |
-| historical alias | compatibility-only surfaces | explicit compatibility lookup only | exactly one compatibility candidate | never used by normal target resolution |
+| Token class                                   | Accepted on                                  | Lookup scope                                                   | Success rule                                                                                                          | Notes                                                                                                    |
+| --------------------------------------------- | -------------------------------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| bead ID                                       | session-targeting and compatibility surfaces | global exact bead lookup                                       | exactly one open bead                                                                                                 | never falls through                                                                                      |
+| fully qualified named identity `<rig>/<name>` | session-targeting and compatibility surfaces | exact `configured_named_identity` lookup                       | exactly one reserved or open canonical match                                                                          | config-managed alias is only the mirrored presentation of this same identity, not a second lookup branch |
+| unqualified named token `<name>`              | session-targeting and compatibility surfaces | city-scoped identities plus identities in the current rig only | exactly one reserved/open session-side match across configured named alias, current alias, and current `session_name` | cross-rig bare lookup is never permitted                                                                 |
+| current alias                                 | session-targeting and compatibility surfaces | same as unqualified named token                                | exactly one open bead                                                                                                 | reserved configured named alias still wins conflicts by failing closed                                   |
+| current `session_name`                        | session-targeting and compatibility surfaces | same as unqualified named token                                | exactly one open bead                                                                                                 | compatibility only if the surface explicitly allows historical forms                                     |
+| historical alias                              | compatibility-only surfaces                  | explicit compatibility lookup only                             | exactly one compatibility candidate                                                                                   | never used by normal target resolution                                                                   |
 
 Unqualified session-targeting lookup never searches other rigs. If a
 token is not uniquely resolvable from city-scoped identities plus the
@@ -260,13 +260,13 @@ fail-closed; neither scope silently wins on a bare token.
 
 #### Factory-targeting token matrix
 
-| Token class | Accepted on | Lookup scope | Success rule | Notes |
-|---|---|---|---|---|
-| fully qualified config identity `<rig>/<name>` | factory-targeting surfaces | exact config lookup | exactly one configured agent | canonical stored form for rig-scoped config references |
-| city-scoped config identity `<name>` | factory-targeting surfaces | exact city-scoped config lookup | exactly one city-scoped configured agent | canonical stored form for city-scoped config references |
-| `template:<qualified>` | factory-targeting surfaces | exact config lookup after removing `template:` | exactly one configured agent | explicit family marker only |
-| `template:<name>` | factory-targeting surfaces | city plus current-rig config namespace | exactly one visible config | no reverse mapping from named-session aliases |
-| bare config name `<name>` | factory-targeting surfaces | city plus current-rig config namespace only | exactly one visible config | other rigs are never searched by bare lookup |
+| Token class                                    | Accepted on                | Lookup scope                                   | Success rule                             | Notes                                                   |
+| ---------------------------------------------- | -------------------------- | ---------------------------------------------- | ---------------------------------------- | ------------------------------------------------------- |
+| fully qualified config identity `<rig>/<name>` | factory-targeting surfaces | exact config lookup                            | exactly one configured agent             | canonical stored form for rig-scoped config references  |
+| city-scoped config identity `<name>`           | factory-targeting surfaces | exact city-scoped config lookup                | exactly one city-scoped configured agent | canonical stored form for city-scoped config references |
+| `template:<qualified>`                         | factory-targeting surfaces | exact config lookup after removing `template:` | exactly one configured agent             | explicit family marker only                             |
+| `template:<name>`                              | factory-targeting surfaces | city plus current-rig config namespace         | exactly one visible config               | no reverse mapping from named-session aliases           |
+| bare config name `<name>`                      | factory-targeting surfaces | city plus current-rig config namespace only    | exactly one visible config               | other rigs are never searched by bare lookup            |
 
 Cross-rig factory targeting always requires explicit qualification.
 There is no "search every rig and pick the only one" fallback.
@@ -310,12 +310,12 @@ Non-CLI entry points must not invent a current rig heuristically.
 
 Ambient-rig source by surface family:
 
-| Surface family | Ambient rig source |
-|---|---|
-| CLI commands | caller's current rig/session context |
-| workflow/automation actions | explicit rig carried on the workflow object or dispatch context |
-| API endpoints with explicit rig field/path | that explicit request scope |
-| API endpoints without explicit rig scope | none; bare rig-scoped lookup is qualification-required |
+| Surface family                             | Ambient rig source                                              |
+| ------------------------------------------ | --------------------------------------------------------------- |
+| CLI commands                               | caller's current rig/session context                            |
+| workflow/automation actions                | explicit rig carried on the workflow object or dispatch context |
+| API endpoints with explicit rig field/path | that explicit request scope                                     |
+| API endpoints without explicit rig scope   | none; bare rig-scoped lookup is qualification-required          |
 
 ### `template:` scope
 
@@ -420,16 +420,16 @@ Unclassified bare-token resolution is not allowed.
 
 ### Surface matrix
 
-| Surface class | Examples | Resolution family | Historical alias | Notes |
-|---|---|---|---|---|
-| session-targeting CLI | `gc session attach`, `gc session wake`, `gc session suspend`, `gc session close`, `gc mail`, `gc session nudge`, bare `gc sling` | session namespace | no | materialize named session if needed |
-| factory-targeting CLI | `gc session new`, `gc sling template:<config>`, explicit `template:` args | config namespace | no | generic dispatch/config creation |
-| session-targeting API/workflow | direct session-targeted workflow `assignee`, session action APIs mirroring attach/wake/close/suspend/mail/nudge | session namespace | no | concrete session delivery only |
-| factory-targeting API/workflow | provider/agent create surfaces normalized to config identity, workflow `gc.routed_to`, `gc.execution_routed_to` | config namespace | no | config-backed execution only |
-| stored metadata | `assignee`, `gc.routed_to`, `gc.execution_routed_to` | field-defined | restricted | `assignee` = session; routed fields = config |
-| compatibility readers | legacy `assignee`, older stored references | compatibility-only | restricted | may resolve only through explicit compatibility rules |
-| session-context execution | `gc hook` | non-target-bearing | n/a | may query `gc.routed_to=$GC_TEMPLATE` explicitly; this is not namespace fallback |
-| inspection surfaces | `status`, `doctor` | non-target-bearing unless separately declared | n/a | render/diagnose, not target resolution |
+| Surface class                  | Examples                                                                                                                         | Resolution family                             | Historical alias | Notes                                                                            |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- | ---------------- | -------------------------------------------------------------------------------- |
+| session-targeting CLI          | `gc session attach`, `gc session wake`, `gc session suspend`, `gc session close`, `gc mail`, `gc session nudge`, bare `gc sling` | session namespace                             | no               | materialize named session if needed                                              |
+| factory-targeting CLI          | `gc session new`, `gc sling template:<config>`, explicit `template:` args                                                        | config namespace                              | no               | generic dispatch/config creation                                                 |
+| session-targeting API/workflow | direct session-targeted workflow `assignee`, session action APIs mirroring attach/wake/close/suspend/mail/nudge                  | session namespace                             | no               | concrete session delivery only                                                   |
+| factory-targeting API/workflow | provider/agent create surfaces normalized to config identity, workflow `gc.routed_to`, `gc.execution_routed_to`                  | config namespace                              | no               | config-backed execution only                                                     |
+| stored metadata                | `assignee`, `gc.routed_to`, `gc.execution_routed_to`                                                                             | field-defined                                 | restricted       | `assignee` = session; routed fields = config                                     |
+| compatibility readers          | legacy `assignee`, older stored references                                                                                       | compatibility-only                            | restricted       | may resolve only through explicit compatibility rules                            |
+| session-context execution      | `gc hook`                                                                                                                        | non-target-bearing                            | n/a              | may query `gc.routed_to=$GC_TEMPLATE` explicitly; this is not namespace fallback |
+| inspection surfaces            | `status`, `doctor`                                                                                                               | non-target-bearing unless separately declared | n/a              | render/diagnose, not target resolution                                           |
 
 Phase 0 tests must pin every currently shipped target-bearing surface to
 one row in this matrix so the classification cannot drift silently in
@@ -440,23 +440,23 @@ implementation.
 Phase 1 treats the following as the complete target-bearing surface set
 that must be classified and tested:
 
-| Surface | Class | Notes |
-|---|---|---|
-| `gc session attach` | session-targeting | may materialize named |
-| `gc session wake` | session-targeting | may materialize named |
-| `gc session suspend` | session-targeting | may materialize named into held state |
-| `gc session close` | session-targeting | concrete session lifecycle only |
-| `gc mail` | session-targeting | delivery-only; may materialize named |
-| `gc session nudge` | session-targeting | delivery-only; may materialize named |
-| bare `gc sling <target>` | session-targeting | concrete session delivery |
-| `gc session new <config>` | factory-targeting | explicit config factory |
-| `gc sling template:<config> <work>` | factory-targeting | explicit config routing |
-| workflow/API direct `assignee` target | session-targeting | concrete session ownership |
-| workflow/API `gc.routed_to` | factory-targeting | generic config execution |
-| workflow/API `gc.execution_routed_to` | factory-targeting | control-dispatch preserved config lane |
+| Surface                                                   | Class                                | Notes                                         |
+| --------------------------------------------------------- | ------------------------------------ | --------------------------------------------- |
+| `gc session attach`                                       | session-targeting                    | may materialize named                         |
+| `gc session wake`                                         | session-targeting                    | may materialize named                         |
+| `gc session suspend`                                      | session-targeting                    | may materialize named into held state         |
+| `gc session close`                                        | session-targeting                    | concrete session lifecycle only               |
+| `gc mail`                                                 | session-targeting                    | delivery-only; may materialize named          |
+| `gc session nudge`                                        | session-targeting                    | delivery-only; may materialize named          |
+| bare `gc sling <target>`                                  | session-targeting                    | concrete session delivery                     |
+| `gc session new <config>`                                 | factory-targeting                    | explicit config factory                       |
+| `gc sling template:<config> <work>`                       | factory-targeting                    | explicit config routing                       |
+| workflow/API direct `assignee` target                     | session-targeting                    | concrete session ownership                    |
+| workflow/API `gc.routed_to`                               | factory-targeting                    | generic config execution                      |
+| workflow/API `gc.execution_routed_to`                     | factory-targeting                    | control-dispatch preserved config lane        |
 | provider-create boundary (`kind=provider`, provider name) | factory-targeting compatibility shim | boundary-only sugar before factory resolution |
-| stored legacy ownership/session-reference readers | compatibility-only | translation only |
-| doctor/debug/migration identity readers | compatibility-only | inspection/repair only |
+| stored legacy ownership/session-reference readers         | compatibility-only                   | translation only                              |
+| doctor/debug/migration identity readers                   | compatibility-only                   | inspection/repair only                        |
 
 If any other public entrypoint accepts a free-form target token, it is a
 bug against this design until it is added here with an explicit class.
@@ -641,11 +641,11 @@ and lifecycle semantics off `GC_SESSION_ORIGIN`, not off `GC_AGENT`.
 
 ### Token relationships by origin
 
-| Origin | `configured_named_identity` | `alias` | `session_name` | `GC_ALIAS` | `GC_AGENT` |
-|---|---|---|---|---|---|
-| `named` | present; immutable fully qualified named identity | always equals `configured_named_identity` while config-managed | deterministic runtime handle derived from the named identity and workspace naming policy | same as `alias` | same as `alias` |
-| `ephemeral` | absent | optional, mutable if non-conflicting | opaque runtime handle | alias if present | alias if present, otherwise `session_name` |
-| `manual` | absent | optional, mutable if non-conflicting | opaque runtime handle | alias if present | alias if present, otherwise `session_name` |
+| Origin      | `configured_named_identity`                       | `alias`                                                        | `session_name`                                                                           | `GC_ALIAS`       | `GC_AGENT`                                 |
+| ----------- | ------------------------------------------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ---------------- | ------------------------------------------ |
+| `named`     | present; immutable fully qualified named identity | always equals `configured_named_identity` while config-managed | deterministic runtime handle derived from the named identity and workspace naming policy | same as `alias`  | same as `alias`                            |
+| `ephemeral` | absent                                            | optional, mutable if non-conflicting                           | opaque runtime handle                                                                    | alias if present | alias if present, otherwise `session_name` |
+| `manual`    | absent                                            | optional, mutable if non-conflicting                           | opaque runtime handle                                                                    | alias if present | alias if present, otherwise `session_name` |
 
 Configured named sessions do not carry a second mutable runtime alias
 separate from their configured identity.
@@ -748,12 +748,12 @@ materialized/running, or currently blocked.
 
 Desired-state projection rules:
 
-| Inputs | Projected desired state | Notes |
-|---|---|---|
-| no wake/materialization cause and no requirement to preserve a concrete bead | `undesired` | configured named identity may still project `reserved-unmaterialized` |
-| concrete bead required for ownership/identity continuity, but no current wake cause | `desired-asleep` | typical for on-demand named materialized for ownership only |
-| durable or one-shot wake cause present and no hard blocker applies | `desired-running` | runtime should become `creating`/`active` |
-| durable or one-shot wake cause present, but a hard blocker applies | `desired-blocked` | health is degraded, not silently healthy |
+| Inputs                                                                              | Projected desired state | Notes                                                                 |
+| ----------------------------------------------------------------------------------- | ----------------------- | --------------------------------------------------------------------- |
+| no wake/materialization cause and no requirement to preserve a concrete bead        | `undesired`             | configured named identity may still project `reserved-unmaterialized` |
+| concrete bead required for ownership/identity continuity, but no current wake cause | `desired-asleep`        | typical for on-demand named materialized for ownership only           |
+| durable or one-shot wake cause present and no hard blocker applies                  | `desired-running`       | runtime should become `creating`/`active`                             |
+| durable or one-shot wake cause present, but a hard blocker applies                  | `desired-blocked`       | health is degraded, not silently healthy                              |
 
 `mode=always` plus per-session suspend is therefore a supported
 `desired-blocked` steady state: the named identity remains desired by
@@ -816,16 +816,16 @@ Overlay rules:
 
 ### Base bead states
 
-| State | Counts toward `max_active_sessions` | Meaning | Typical exits |
-|---|---|---|---|
-| `creating` | yes | bead exists and runtime start/rematerialization is in progress | `active`, `suspended`, `archived`, `closed` |
-| `active` | yes | runtime is live | `creating`, `asleep`, `drained`, `suspended`, `archived`, `closed` |
-| `asleep` | no | bead exists but runtime is not live | `creating`, `suspended`, `drained`, `archived`, `closed` |
-| `suspended` | no | per-session hold suppresses wake | `asleep`, `creating`, `closed`, `orphaned`, `archived` |
-| `drained` | no | non-terminal completed/retired bead that may later resume the same identity | `creating`, `archived`, `closed` |
-| `archived` | no | controller-retired historical bead preserved for inspection, quarantine recovery, duplicate repair, or explicit continuity re-adoption | `creating`, `closed` |
-| `orphaned` | no | backing config is missing, so the bead is not startable | `archived`, `creating`, `closed` |
-| `closed` | no | terminal bead; never reopened or re-adopted | none |
+| State       | Counts toward `max_active_sessions` | Meaning                                                                                                                                | Typical exits                                                      |
+| ----------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `creating`  | yes                                 | bead exists and runtime start/rematerialization is in progress                                                                         | `active`, `suspended`, `archived`, `closed`                        |
+| `active`    | yes                                 | runtime is live                                                                                                                        | `creating`, `asleep`, `drained`, `suspended`, `archived`, `closed` |
+| `asleep`    | no                                  | bead exists but runtime is not live                                                                                                    | `creating`, `suspended`, `drained`, `archived`, `closed`           |
+| `suspended` | no                                  | per-session hold suppresses wake                                                                                                       | `asleep`, `creating`, `closed`, `orphaned`, `archived`             |
+| `drained`   | no                                  | non-terminal completed/retired bead that may later resume the same identity                                                            | `creating`, `archived`, `closed`                                   |
+| `archived`  | no                                  | controller-retired historical bead preserved for inspection, quarantine recovery, duplicate repair, or explicit continuity re-adoption | `creating`, `closed`                                               |
+| `orphaned`  | no                                  | backing config is missing, so the bead is not startable                                                                                | `archived`, `creating`, `closed`                                   |
+| `closed`    | no                                  | terminal bead; never reopened or re-adopted                                                                                            | none                                                               |
 
 ### Continuity eligibility
 
@@ -903,24 +903,24 @@ Fresh rematerialization versus resume is exact:
 
 ### Origin-by-action summary
 
-| Origin | direct session target | generic `scale_check` demand | exact assigned continuity | generic dependency satisfaction | bound inbound continuity | suspend | close |
-|---|---|---|---|---|---|---|---|
-| `named/on_demand` | materialize or resume exact canonical bead | never | resume exact canonical bead | may use implicit/explicit named satisfier rules | resume exact bound bead | may materialize exact bead into held state | terminal for current bead; config rematerializes only on the next real demand/explicit target |
-| `named/always` | materialize or resume exact canonical bead | never | resume exact canonical bead | may use implicit/explicit named satisfier rules | resume exact bound bead | may materialize exact bead into held state | terminal for current bead; config immediately desires a fresh canonical bead once the close barrier completes |
-| `ephemeral` | existing bead only | create fresh generic bead | resume exact bead only if non-closed and continuity-eligible | generic dependency may create fresh ephemeral bead | resume exact bound bead | existing bead only | terminal for current bead |
-| `manual` | existing bead only | never | resume exact bead only if non-closed and continuity-eligible | never satisfies generic dependency by default | resume exact bound bead | existing bead only | terminal for current bead |
+| Origin            | direct session target                      | generic `scale_check` demand | exact assigned continuity                                    | generic dependency satisfaction                    | bound inbound continuity | suspend                                    | close                                                                                                         |
+| ----------------- | ------------------------------------------ | ---------------------------- | ------------------------------------------------------------ | -------------------------------------------------- | ------------------------ | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| `named/on_demand` | materialize or resume exact canonical bead | never                        | resume exact canonical bead                                  | may use implicit/explicit named satisfier rules    | resume exact bound bead  | may materialize exact bead into held state | terminal for current bead; config rematerializes only on the next real demand/explicit target                 |
+| `named/always`    | materialize or resume exact canonical bead | never                        | resume exact canonical bead                                  | may use implicit/explicit named satisfier rules    | resume exact bound bead  | may materialize exact bead into held state | terminal for current bead; config immediately desires a fresh canonical bead once the close barrier completes |
+| `ephemeral`       | existing bead only                         | create fresh generic bead    | resume exact bead only if non-closed and continuity-eligible | generic dependency may create fresh ephemeral bead | resume exact bound bead  | existing bead only                         | terminal for current bead                                                                                     |
+| `manual`          | existing bead only                         | never                        | resume exact bead only if non-closed and continuity-eligible | never satisfies generic dependency by default      | resume exact bound bead  | existing bead only                         | terminal for current bead                                                                                     |
 
 ### Resume vs fresh rematerialization
 
-| Identity/bead condition | Qualifying cause | Result |
-|---|---|---|
-| named identity, one open canonical bead, `continuity_eligible=true` | direct target, assigned continuity, dependency, binding, `pin_awake`, `mode=always` policy | resume/start that same bead |
-| named identity, one open matching bead, `continuity_eligible=false` | any named-session cause | repair removes it from canonical uniqueness; then mint a fresh canonical bead if the identity remains desired |
-| named identity, no open canonical bead | any named-session materialization cause | mint a fresh canonical bead |
-| ephemeral/manual bead, exact bead exists and `continuity_eligible=true` | direct exact-bead continuity (`assignee`, bound inbound event, direct session target) | resume/start that same bead |
-| ephemeral/manual bead, exact bead exists and `continuity_eligible=false` | direct exact-bead continuity | fail; do not invent successor identity |
-| ephemeral, no exact continuity target | generic `scale_check` or generic dependency demand | mint a fresh ephemeral bead |
-| manual, no exact continuity target | generic demand | fail; manual sessions are never generic capacity |
+| Identity/bead condition                                                  | Qualifying cause                                                                           | Result                                                                                                        |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| named identity, one open canonical bead, `continuity_eligible=true`      | direct target, assigned continuity, dependency, binding, `pin_awake`, `mode=always` policy | resume/start that same bead                                                                                   |
+| named identity, one open matching bead, `continuity_eligible=false`      | any named-session cause                                                                    | repair removes it from canonical uniqueness; then mint a fresh canonical bead if the identity remains desired |
+| named identity, no open canonical bead                                   | any named-session materialization cause                                                    | mint a fresh canonical bead                                                                                   |
+| ephemeral/manual bead, exact bead exists and `continuity_eligible=true`  | direct exact-bead continuity (`assignee`, bound inbound event, direct session target)      | resume/start that same bead                                                                                   |
+| ephemeral/manual bead, exact bead exists and `continuity_eligible=false` | direct exact-bead continuity                                                               | fail; do not invent successor identity                                                                        |
+| ephemeral, no exact continuity target                                    | generic `scale_check` or generic dependency demand                                         | mint a fresh ephemeral bead                                                                                   |
+| manual, no exact continuity target                                       | generic demand                                                                             | fail; manual sessions are never generic capacity                                                              |
 
 No policy or controller path may choose between "resume same bead" and
 "mint fresh bead" heuristically once the row above is known.
@@ -1481,29 +1481,29 @@ proactively, not only when a later targeting operation fails.
 
 Phase 1 surfaces should converge on this public error set:
 
-| Error | Meaning | Typical trigger | Notes |
-|---|---|---|---|
-| `session_not_found` | no session-family target exists | session-targeting miss | no materialization attempted unless the surface allows named materialization |
-| `factory_not_found` | no config target exists | factory-targeting miss | never consults session namespace |
-| `ambiguous_session_target` | multiple session-family candidates remain | bare session token conflict | qualification required |
-| `ambiguous_factory_target` | multiple config candidates remain | bare factory token conflict | qualification required |
-| `configured_named_conflict` | configured named identity is reserved but blocked by another session-side claimant | named alias collision | must fail closed |
-| `qualification_required` | bare token cannot be resolved safely under current scope rules | city/rig ambiguity or no ambient rig | caller must qualify |
-| `target_closing` | concrete target bead is closing and cannot accept new bead-ID-targeted work | close race on exact bead | named-identity successor demand may still exist separately |
-| `invalid_surface_class` | surface attempted an illegal resolver family or fallback | implementation bug / invalid API path | should never be silently coerced |
+| Error                       | Meaning                                                                            | Typical trigger                       | Notes                                                                        |
+| --------------------------- | ---------------------------------------------------------------------------------- | ------------------------------------- | ---------------------------------------------------------------------------- |
+| `session_not_found`         | no session-family target exists                                                    | session-targeting miss                | no materialization attempted unless the surface allows named materialization |
+| `factory_not_found`         | no config target exists                                                            | factory-targeting miss                | never consults session namespace                                             |
+| `ambiguous_session_target`  | multiple session-family candidates remain                                          | bare session token conflict           | qualification required                                                       |
+| `ambiguous_factory_target`  | multiple config candidates remain                                                  | bare factory token conflict           | qualification required                                                       |
+| `configured_named_conflict` | configured named identity is reserved but blocked by another session-side claimant | named alias collision                 | must fail closed                                                             |
+| `qualification_required`    | bare token cannot be resolved safely under current scope rules                     | city/rig ambiguity or no ambient rig  | caller must qualify                                                          |
+| `target_closing`            | concrete target bead is closing and cannot accept new bead-ID-targeted work        | close race on exact bead              | named-identity successor demand may still exist separately                   |
+| `invalid_surface_class`     | surface attempted an illegal resolver family or fallback                           | implementation bug / invalid API path | should never be silently coerced                                             |
 
 ### Materialization contract
 
-| Surface | Requires existing concrete session? | May materialize configured named session? | Must synchronously ensure liveness? |
-|---|---|---|---|
-| `gc session attach` | no for named; yes otherwise | yes | yes |
-| `gc session wake` | no for named; yes otherwise | yes | yes |
-| `gc session suspend` | no for named; yes otherwise | yes, into held state | no |
-| `gc mail` | no for named; yes otherwise | yes | no |
-| `gc session nudge` | no for named; yes otherwise | yes | no |
-| bare `gc sling <target>` / direct session-targeted workflow ownership | no for named; yes otherwise | yes | no |
-| `gc session close` | yes | no | n/a |
-| `gc session new <config>` / factory create | no | n/a | follows create surface contract |
+| Surface                                                               | Requires existing concrete session? | May materialize configured named session? | Must synchronously ensure liveness? |
+| --------------------------------------------------------------------- | ----------------------------------- | ----------------------------------------- | ----------------------------------- |
+| `gc session attach`                                                   | no for named; yes otherwise         | yes                                       | yes                                 |
+| `gc session wake`                                                     | no for named; yes otherwise         | yes                                       | yes                                 |
+| `gc session suspend`                                                  | no for named; yes otherwise         | yes, into held state                      | no                                  |
+| `gc mail`                                                             | no for named; yes otherwise         | yes                                       | no                                  |
+| `gc session nudge`                                                    | no for named; yes otherwise         | yes                                       | no                                  |
+| bare `gc sling <target>` / direct session-targeted workflow ownership | no for named; yes otherwise         | yes                                       | no                                  |
+| `gc session close`                                                    | yes                                 | no                                        | n/a                                 |
+| `gc session new <config>` / factory create                            | no                                  | n/a                                       | follows create surface contract     |
 
 Compatibility-only readers are not normal operator surfaces. Their only
 allowed materialization side effect is the exact configured named
@@ -1564,14 +1564,14 @@ currently satisfiable as running because it is:
 
 Canonical behavior must follow field-specific rules:
 
-| Field | Accepted legacy input | Canonical stored form | Normalization trigger | Must fail closed when |
-|---|---|---|---|---|
-| `assignee` | open bead ID, current alias, current `session_name`, exact configured named identity, limited template-era exact-to-named token | concrete session bead ID | any ownership mutation or compatibility rewrite | token is ambiguous or resolves only through config/factory namespace |
-| `template` | legacy qualified/unqualified config identity | canonical qualified config identity | any session-bead rewrite or create | rig-scoped legacy token is not uniquely mappable |
-| `configured_named_identity` | implicit `name=template` compatibility shape | canonical qualified named identity | named-session create/reconcile | multiple configured identities would result |
-| `gc.routed_to` | older config tokens | canonical qualified config identity | any workflow/config-routing mutation | no unique config target exists |
-| `gc.execution_routed_to` | older config tokens | canonical qualified config identity | control-dispatch mutation | no unique config target exists |
-| `session_origin` | legacy marker combinations | `named`, `ephemeral`, or `manual` | session create or touched-bead normalization | canonical fields are absent and legacy inputs conflict |
+| Field                       | Accepted legacy input                                                                                                           | Canonical stored form               | Normalization trigger                           | Must fail closed when                                                |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- | ----------------------------------------------- | -------------------------------------------------------------------- |
+| `assignee`                  | open bead ID, current alias, current `session_name`, exact configured named identity, limited template-era exact-to-named token | concrete session bead ID            | any ownership mutation or compatibility rewrite | token is ambiguous or resolves only through config/factory namespace |
+| `template`                  | legacy qualified/unqualified config identity                                                                                    | canonical qualified config identity | any session-bead rewrite or create              | rig-scoped legacy token is not uniquely mappable                     |
+| `configured_named_identity` | implicit `name=template` compatibility shape                                                                                    | canonical qualified named identity  | named-session create/reconcile                  | multiple configured identities would result                          |
+| `gc.routed_to`              | older config tokens                                                                                                             | canonical qualified config identity | any workflow/config-routing mutation            | no unique config target exists                                       |
+| `gc.execution_routed_to`    | older config tokens                                                                                                             | canonical qualified config identity | control-dispatch mutation                       | no unique config target exists                                       |
+| `session_origin`            | legacy marker combinations                                                                                                      | `named`, `ephemeral`, or `manual`   | session create or touched-bead normalization    | canonical fields are absent and legacy inputs conflict               |
 
 Canonical fields always govern runtime behavior. When canonical and
 legacy hints disagree on the same record:
@@ -1589,12 +1589,12 @@ rewrite outcome under concurrent readers.
 
 Allowed ownership/routing states:
 
-| Work state | `assignee` | `gc.routed_to` | Meaning |
-|---|---|---|---|
-| generic unclaimed | absent | config identity present | generic config demand |
-| generic claimed | bead ID present | config identity may remain as provenance | continuity belongs to `assignee`; route is non-operative provenance |
-| direct session-targeted | bead ID present | absent | direct concrete ownership |
-| explicitly unassigned/requeued | absent | config identity present or re-added intentionally | generic demand again |
+| Work state                     | `assignee`      | `gc.routed_to`                                    | Meaning                                                             |
+| ------------------------------ | --------------- | ------------------------------------------------- | ------------------------------------------------------------------- |
+| generic unclaimed              | absent          | config identity present                           | generic config demand                                               |
+| generic claimed                | bead ID present | config identity may remain as provenance          | continuity belongs to `assignee`; route is non-operative provenance |
+| direct session-targeted        | bead ID present | absent                                            | direct concrete ownership                                           |
+| explicitly unassigned/requeued | absent          | config identity present or re-added intentionally | generic demand again                                                |
 
 Atomic claim invariant:
 
@@ -1675,11 +1675,11 @@ may still be read during migration, but new writes should converge on:
 Phase 1 permits legacy-token interpretation only on the following
 surfaces:
 
-| Surface | Examples | Class | Historical alias consults | May materialize reserved named session? |
-|---|---|---|---|---|
-| stored ownership/reference readers | legacy `assignee`, legacy stored session refs | compatibility-only | yes, only as explicit compatibility translation | yes, but only when exact configured named identity wins ownership normalization |
-| provider-entry normalization boundary | `kind=provider`, provider-name create inputs | factory-targeting compatibility shim | no | no; normalize to config target first |
-| debug/doctor/migration tools | doctor checks, explicit migration repair tools | compatibility-only | yes | no unless the tool explicitly invokes a session-targeting surface afterward |
+| Surface                               | Examples                                       | Class                                | Historical alias consults                       | May materialize reserved named session?                                         |
+| ------------------------------------- | ---------------------------------------------- | ------------------------------------ | ----------------------------------------------- | ------------------------------------------------------------------------------- |
+| stored ownership/reference readers    | legacy `assignee`, legacy stored session refs  | compatibility-only                   | yes, only as explicit compatibility translation | yes, but only when exact configured named identity wins ownership normalization |
+| provider-entry normalization boundary | `kind=provider`, provider-name create inputs   | factory-targeting compatibility shim | no                                              | no; normalize to config target first                                            |
+| debug/doctor/migration tools          | doctor checks, explicit migration repair tools | compatibility-only                   | yes                                             | no unless the tool explicitly invokes a session-targeting surface afterward     |
 
 No other Phase 1 surface may ingest historical alias, provider-era name,
 template-era session token, or other legacy identifier form.
@@ -1708,11 +1708,11 @@ Stored ownership/reference readers are stricter still. They accept only:
 
 Compatibility precedence matrix:
 
-| Surface | Open bead ID | Current alias | Current `session_name` | Exact configured named identity | Historical alias | Template-era exact-to-named translation | Config/factory lookup |
-|---|---|---|---|---|---|---|---|
-| stored ownership/reference readers | yes | yes | yes | yes | yes, only if still unambiguous after current session-side checks | yes | never |
-| provider-entry normalization boundary | no | no | no | no | no | no | factory-only after sugar expansion |
-| debug/doctor/migration tools | yes when inspecting current state | yes | yes | yes for reporting | yes | yes for reporting only | never unless the tool explicitly invokes a factory-targeting action |
+| Surface                               | Open bead ID                      | Current alias | Current `session_name` | Exact configured named identity | Historical alias                                                 | Template-era exact-to-named translation | Config/factory lookup                                               |
+| ------------------------------------- | --------------------------------- | ------------- | ---------------------- | ------------------------------- | ---------------------------------------------------------------- | --------------------------------------- | ------------------------------------------------------------------- |
+| stored ownership/reference readers    | yes                               | yes           | yes                    | yes                             | yes, only if still unambiguous after current session-side checks | yes                                     | never                                                               |
+| provider-entry normalization boundary | no                                | no            | no                     | no                              | no                                                               | no                                      | factory-only after sugar expansion                                  |
+| debug/doctor/migration tools          | yes when inspecting current state | yes           | yes                    | yes for reporting               | yes                                                              | yes for reporting only                  | never unless the tool explicitly invokes a factory-targeting action |
 
 The surviving public boundary sugar set is intentionally tiny:
 

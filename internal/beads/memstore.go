@@ -260,9 +260,6 @@ func (m *MemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		if b.Status != "open" {
 			continue
 		}
-		if b.Ephemeral {
-			continue
-		}
 		if IsReadyExcludedType(b.Type) {
 			continue
 		}
@@ -327,7 +324,6 @@ func (m *MemStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bea
 		Limit:         limit,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedDesc,
-		TierMode:      TierModeFromOpts(opts),
 	})
 }
 
@@ -351,7 +347,6 @@ func (m *MemStore) ListByMetadata(filters map[string]string, limit int, opts ...
 		Limit:         limit,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedDesc,
-		TierMode:      TierModeFromOpts(opts),
 	})
 }
 
@@ -388,11 +383,6 @@ func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
 		}
 	}
 	return fmt.Errorf("setting metadata batch on %q: %w", id, ErrNotFound)
-}
-
-// Tx executes fn sequentially against the MemStore.
-func (m *MemStore) Tx(_ string, fn func(Tx) error) error {
-	return runSequentialTx(m, fn)
 }
 
 // Delete removes a bead from the in-memory store.

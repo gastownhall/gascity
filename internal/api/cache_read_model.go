@@ -11,8 +11,9 @@ type cachedListStore interface {
 
 func listSessionBeadsForReadModel(store beads.Store) ([]beads.Bead, error) {
 	query := beads.ListQuery{
-		Label: session.LabelSession,
-		Sort:  beads.SortCreatedDesc,
+		Label:      session.LabelSession,
+		SkipParent: true,
+		Sort:       beads.SortCreatedDesc,
 	}
 	if cached, ok := store.(cachedListStore); ok {
 		if rows, cacheOK := cached.CachedList(query); cacheOK {

@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -90,13 +89,9 @@ func newFormulaShowCmd(stdout, stderr io.Writer) *cobra.Command {
 By default, shows the recipe with {{variable}} placeholders intact.
 Use --var to substitute variables and preview the resolved output.
 
-When --rig is set (or cwd is inside a rig), rig-scoped formula_vars from
-city.toml are shown as "(rig default=...)" alongside each applicable var.
-
 Examples:
   gc formula show mol-feature
-  gc formula show mol-feature --var title="Auth system" --var branch=main
-  gc formula show mol-polecat-work --rig mo`,
+  gc formula show mol-feature --var title="Auth system" --var branch=main`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
@@ -112,20 +107,10 @@ Examples:
 
 			compileVars := vars
 
-			cityPath, err := resolveCity()
+			searchPaths, err := formulaSearchPathsForScope(stderr)
 			if err != nil {
 				return err
 			}
-			cfg, err := loadCityConfig(cityPath, stderr)
-			if err != nil {
-				return err
-			}
-			scope, err := resolveFormulaScope(cfg, cityPath)
-			if err != nil {
-				return err
-			}
-			searchPaths := scope.searchPaths
-			rigVars := rigFormulaVarsForScope(cfg, cityPath)
 			recipe, err := formula.CompileWithoutRuntimeVarValidation(cmd.Context(), name, searchPaths, compileVars)
 			if err != nil {
 				return err
@@ -182,15 +167,7 @@ Examples:
 					_, _ = fmt.Fprintln(stdout, "\nRequired vars:")
 					for _, name := range requiredNames {
 						def := recipe.Vars[name]
-						var attrs []string
-						if v, ok := rigVars[name]; ok {
-							attrs = append(attrs, "rig default="+strconv.Quote(v))
-						}
-						attrStr := ""
-						if len(attrs) > 0 {
-							attrStr = " (" + strings.Join(attrs, ", ") + ")"
-						}
-						_, _ = fmt.Fprintf(stdout, "  {{%s}}: %s%s\n", name, def.Description, attrStr)
+						_, _ = fmt.Fprintf(stdout, "  {{%s}}: %s\n", name, def.Description)
 					}
 				}
 				if len(optionalNames) > 0 {
@@ -202,9 +179,7 @@ Examples:
 					for _, name := range optionalNames {
 						def := recipe.Vars[name]
 						var attrs []string
-						if v, ok := rigVars[name]; ok {
-							attrs = append(attrs, "rig default="+strconv.Quote(v))
-						} else if def != nil && def.Default != nil {
+						if def != nil && def.Default != nil {
 							attrs = append(attrs, "default="+*def.Default)
 						}
 						attrStr := ""
@@ -443,26 +418,23 @@ func rigFormulaScope(cfg *config.City, cityPath string, rig config.Rig) formulaS
 	}
 }
 
-// rigFormulaVarsForScope returns rig-scoped formula var defaults for the
-// active scope (honoring --rig and cwd). Returns an empty map when no rig
-// context is active so callers can treat the result as read-only
-// annotations without nil checks.
-func rigFormulaVarsForScope(cfg *config.City, cityPath string) map[string]string {
-	if cfg == nil {
-		return map[string]string{}
+// formulaSearchPathsForScope resolves the active formula scope (honoring
+// --rig and cwd) and returns its search paths. Used by read-only commands
+// like `gc formula show` that don't need to open a store.
+func formulaSearchPathsForScope(warningWriter ...io.Writer) ([]string, error) {
+	cityPath, err := resolveCity()
+	if err != nil {
+		return nil, err
 	}
-	if name := strings.TrimSpace(rigFlag); name != "" {
-		if rig, ok := rigByName(cfg, name); ok {
-			return cloneStringMap(rig.FormulaVars)
-		}
-		return map[string]string{}
+	cfg, err := loadCityConfig(cityPath, warningWriter...)
+	if err != nil {
+		return nil, err
 	}
-	if cwd, err := os.Getwd(); err == nil {
-		if rig, ok, rerr := resolveRigForDir(cfg, cityPath, cwd); rerr == nil && ok {
-			return cloneStringMap(rig.FormulaVars)
-		}
+	scope, err := resolveFormulaScope(cfg, cityPath)
+	if err != nil {
+		return nil, err
 	}
-	return map[string]string{}
+	return scope.searchPaths, nil
 }
 
 // allFormulaSearchPaths returns the deduplicated union of formula search

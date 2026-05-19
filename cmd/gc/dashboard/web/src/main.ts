@@ -1,14 +1,36 @@
 import { cityScope } from "./api";
 import { renderCityTabs } from "./panels/cities";
 import { renderStatus } from "./panels/status";
-import { renderCrew, installCrewInteractions, closeLogDrawerExternal, resetCrewNoCity } from "./panels/crew";
+import {
+  renderCrew,
+  installCrewInteractions,
+  closeLogDrawerExternal,
+  resetCrewNoCity,
+} from "./panels/crew";
 import { renderIssues, installIssueInteractions, resetIssuesNoCity } from "./panels/issues";
 import { renderMail, installMailInteractions, resetMailNoCity } from "./panels/mail";
 import { renderConvoys, installConvoyInteractions, resetConvoysNoCity } from "./panels/convoys";
-import { eventTypeFromMessage, loadActivityHistory, resetActivity, startActivityStream, stopActivityStream, installActivityInteractions } from "./panels/activity";
-import { renderAdminPanels, installAdminInteractions, renderAdminEmptyStates } from "./panels/admin";
+import {
+  eventTypeFromMessage,
+  loadActivityHistory,
+  resetActivity,
+  startActivityStream,
+  stopActivityStream,
+  installActivityInteractions,
+} from "./panels/activity";
+import {
+  renderAdminPanels,
+  installAdminInteractions,
+  renderAdminEmptyStates,
+} from "./panels/admin";
 import { invalidateOptions } from "./panels/options";
-import { installPanelAffordances, popPause, refreshPaused, reportUIError, setPopPauseListener } from "./ui";
+import {
+  installPanelAffordances,
+  popPause,
+  refreshPaused,
+  reportUIError,
+  setPopPauseListener,
+} from "./ui";
 import { installCommandPalette } from "./palette";
 import { installDashboardLogging, logInfo } from "./logger";
 import {
@@ -73,20 +95,17 @@ function wireSSE(): void {
     return;
   }
   setConnectionBadge("connecting");
-  startActivityStream(
-    (msg) => {
-      const eventType = eventTypeFromMessage(msg);
-      if (!eventType || eventType === "heartbeat") return;
-      // Always mark the dirty set — the pause guard only defers the
-      // render. Without this, events that arrive while a modal is open
-      // get dropped and panels stay stale after the modal closes.
-      const needsRefresh = invalidateForEventType(eventType);
-      if (!needsRefresh) return;
-      if (refreshPaused()) return;
-      scheduleRefresh();
-    },
-    setConnectionBadge,
-  );
+  startActivityStream((msg) => {
+    const eventType = eventTypeFromMessage(msg);
+    if (!eventType || eventType === "heartbeat") return;
+    // Always mark the dirty set — the pause guard only defers the
+    // render. Without this, events that arrive while a modal is open
+    // get dropped and panels stay stale after the modal closes.
+    const needsRefresh = invalidateForEventType(eventType);
+    if (!needsRefresh) return;
+    if (refreshPaused()) return;
+    scheduleRefresh();
+  }, setConnectionBadge);
 }
 
 function setConnectionBadge(status: "connecting" | "live" | "reconnecting"): void {
@@ -155,7 +174,9 @@ function setControlState(id: string, enabled: boolean, disabledTitle: string): v
 
 function installCityScopeNavigation(): void {
   document.addEventListener("click", (event) => {
-    const link = (event.target as HTMLElement | null)?.closest("a.city-tab") as HTMLAnchorElement | null;
+    const link = (event.target as HTMLElement | null)?.closest(
+      "a.city-tab",
+    ) as HTMLAnchorElement | null;
     if (!link) return;
     const nextURL = link.href;
     if (!nextURL || nextURL === window.location.href) return;
@@ -266,7 +287,9 @@ async function refreshVisibleResources(force = false): Promise<void> {
   }
 
   const results = await Promise.allSettled(tasks);
-  const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+  const failure = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
   if (failure) {
     reportUIError("Panel refresh failed", failure.reason);
   }

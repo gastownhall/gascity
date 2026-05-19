@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "../api";
-import { canFetchCityScopedResources, currentCityStatus, syncCityScopeFromLocation } from "../state";
+import {
+  canFetchCityScopedResources,
+  currentCityStatus,
+  syncCityScopeFromLocation,
+} from "../state";
 import { renderCityTabs } from "./cities";
 
 describe("city tabs", () => {
@@ -21,7 +25,16 @@ describe("city tabs", () => {
     const get = vi.spyOn(api, "GET");
     get.mockResolvedValueOnce({
       data: {
-        items: [{ error: "", name: "mc-city", path: "/tmp/mc-city", phases_completed: [], running: true, status: "ok" }],
+        items: [
+          {
+            error: "",
+            name: "mc-city",
+            path: "/tmp/mc-city",
+            phases_completed: [],
+            running: true,
+            status: "ok",
+          },
+        ],
       },
     } as never);
     await renderCityTabs();
@@ -38,7 +51,16 @@ describe("city tabs", () => {
     const get = vi.spyOn(api, "GET");
     get.mockResolvedValueOnce({
       data: {
-        items: [{ error: "", name: "mc-city", path: "/tmp/mc-city", phases_completed: [], running: true, status: "ok" }],
+        items: [
+          {
+            error: "",
+            name: "mc-city",
+            path: "/tmp/mc-city",
+            phases_completed: [],
+            running: true,
+            status: "ok",
+          },
+        ],
       },
     } as never);
     await renderCityTabs();
@@ -56,7 +78,16 @@ describe("city tabs", () => {
     const get = vi.spyOn(api, "GET");
     get.mockResolvedValueOnce({
       data: {
-        items: [{ error: "", name: "mc-city", path: "/tmp/mc-city", phases_completed: [], running: false, status: "stopped" }],
+        items: [
+          {
+            error: "",
+            name: "mc-city",
+            path: "/tmp/mc-city",
+            phases_completed: [],
+            running: false,
+            status: "stopped",
+          },
+        ],
       },
     } as never);
     await renderCityTabs();

@@ -92,6 +92,7 @@ read keys off `ctx.URL().Query()` or `ctx.Header()` that are not
 declared fields. Hidden contract, §3.5.1 violation.
 
 ## 3. Operation handlers — Huma's escape hatch for cross-cutting
+
 ops-level metadata
 
 `huma.Get`/`Post`/`Put`/`Patch`/`Delete` take `operationHandlers
@@ -162,7 +163,7 @@ components:
   headers:
     X-Request-Id:
       description: ...
-      schema: {type: string}
+      schema: { type: string }
 
 paths:
   /foo:

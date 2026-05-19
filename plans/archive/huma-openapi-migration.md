@@ -231,15 +231,15 @@ HTTP + SSE surface is Go code only. Tooling produces everything else.
 
 Skipping any step lands on a CI failure, not a production bug:
 
-| Miss | Caught by |
-|---|---|
-| Spec not regenerated after Go-type change | `TestOpenAPISpecInSync` |
-| Generated Go client out of sync with spec | `TestGeneratedClientInSync` |
-| Handler response field undeclared in spec | Layer 1 response-validation tests |
-| Spec/client method-shape drift | Layer 2 round-trip tests |
-| End-to-end binary wire regression | Layer 3 integration tests |
+| Miss                                               | Caught by                                     |
+| -------------------------------------------------- | --------------------------------------------- |
+| Spec not regenerated after Go-type change          | `TestOpenAPISpecInSync`                       |
+| Generated Go client out of sync with spec          | `TestGeneratedClientInSync`                   |
+| Handler response field undeclared in spec          | Layer 1 response-validation tests             |
+| Spec/client method-shape drift                     | Layer 2 round-trip tests                      |
+| End-to-end binary wire regression                  | Layer 3 integration tests                     |
 | New event-type constant without registered payload | `TestEveryKnownEventTypeHasRegisteredPayload` |
-| Hard-coded SPA `/v0/...` path outside typed client | TypeScript build (`satisfies SpecPath`) |
+| Hard-coded SPA `/v0/...` path outside typed client | TypeScript build (`satisfies SpecPath`)       |
 
 ## Testing discipline (invariants)
 

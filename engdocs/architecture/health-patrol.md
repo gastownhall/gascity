@@ -2,7 +2,6 @@
 title: "Health Patrol"
 ---
 
-
 > Last verified against code: 2026-04-25
 
 ## Summary
@@ -152,6 +151,7 @@ must read the crash tracker quarantine state; subscribing to
 
 **Orphan cleanup** (Phase 2) handles sessions with the city prefix that
 are not in the desired set:
+
 - Pool excess members are drained gracefully via `drainOps`.
 - Suspended agents are drained or closed as not desired; `session.suspended`
   is a registered/reserved event type, but there is no production emitter
@@ -211,7 +211,7 @@ indicate bugs.
 
 - **Crash tracking is bounded**: `memoryCrashTracker.prune()` removes
   entries older than `restart_window` on every `recordStart()` and
-  `isQuarantined()` call. Memory grows at most O(max_restarts *
+  `isQuarantined()` call. Memory grows at most O(max_restarts \*
   num_agents).
 
 - **Quarantine auto-expires**: Once all start timestamps within the
@@ -252,53 +252,53 @@ indicate bugs.
 
 Health Patrol follows Erlang/OTP patterns mapped to Gas City:
 
-| Erlang/OTP concept       | Gas City equivalent                       |
-|--------------------------|-------------------------------------------|
-| Supervisor               | Controller (`controllerLoop`)             |
-| Worker                   | Session running an `[[agent]]` role       |
+| Erlang/OTP concept       | Gas City equivalent                      |
+| ------------------------ | ---------------------------------------- |
+| Supervisor               | Controller (`controllerLoop`)            |
+| Worker                   | Session running an `[[agent]]` role      |
 | Child spec               | `[[agent]]` entry in `city.toml`         |
-| one_for_one restart      | Restart dead agent only (no cascade)      |
-| max_restarts/max_seconds | `max_restarts` / `restart_window`         |
-| Links (death propagates) | Not implemented (no `depends_on` yet)     |
-| "Let it crash"           | GUPP + beads: agent dies, hook persists,  |
-|                          | fresh session picks up persisted work     |
-| Process mailbox          | Mail inbox (beads with type=message)      |
-| GenServer loop           | Agent loop: check hook -> run -> repeat   |
+| one_for_one restart      | Restart dead agent only (no cascade)     |
+| max_restarts/max_seconds | `max_restarts` / `restart_window`        |
+| Links (death propagates) | Not implemented (no `depends_on` yet)    |
+| "Let it crash"           | GUPP + beads: agent dies, hook persists, |
+|                          | fresh session picks up persisted work    |
+| Process mailbox          | Mail inbox (beads with type=message)     |
+| GenServer loop           | Agent loop: check hook -> run -> repeat  |
 
 ### Package Dependencies
 
-| Depends on | How |
-|---|---|
-| `internal/config` | Parses `DaemonConfig` for patrol interval, max restarts, restart window, shutdown timeout. Provides `Revision()` for config reload detection. |
-| `internal/runtime` | `Provider` interface for Start/Stop/IsRunning/ListRunning/GetLastActivity/SetMeta/GetMeta. `ConfigFingerprint()` for drift detection. |
-| `internal/events` | `Recorder` interface for emitted lifecycle events (`session.woke`, `session.stopped`, `session.crashed`, `session.draining`, `session.undrained`, `session.idle_killed`, `session.updated`, `controller.started`, `controller.stopped`, `order.fired`, `order.completed`, `order.failed`). `session.quarantined` and `session.suspended` are registered/reserved but currently un-emitted. `Provider` interface for event trigger queries. Event names were renamed from the `agent.*` prefix by commit `be8debd8`. |
-| `internal/beads` | `Store` interface for order tracking beads (create, update, list by label). `CommandRunner` for bd CLI invocation. |
-| `internal/orders` | `Scan()` to discover orders from formula layers. `CheckTrigger()` to evaluate trigger conditions. `Order` struct for dispatch metadata. |
-| `internal/agent` | `SessionNameFor()` for session name computation and `StartupHints` for runtime config assembly (`internal/agent/` is now a small helper package; the former `Agent` / `Handle` interfaces were removed by `dd90ac0a`). |
-| `github.com/fsnotify/fsnotify` | File system watcher for config directory change detection. |
+| Depends on                     | How                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `internal/config`              | Parses `DaemonConfig` for patrol interval, max restarts, restart window, shutdown timeout. Provides `Revision()` for config reload detection.                                                                                                                                                                                                                                                                                                                                                                       |
+| `internal/runtime`             | `Provider` interface for Start/Stop/IsRunning/ListRunning/GetLastActivity/SetMeta/GetMeta. `ConfigFingerprint()` for drift detection.                                                                                                                                                                                                                                                                                                                                                                               |
+| `internal/events`              | `Recorder` interface for emitted lifecycle events (`session.woke`, `session.stopped`, `session.crashed`, `session.draining`, `session.undrained`, `session.idle_killed`, `session.updated`, `controller.started`, `controller.stopped`, `order.fired`, `order.completed`, `order.failed`). `session.quarantined` and `session.suspended` are registered/reserved but currently un-emitted. `Provider` interface for event trigger queries. Event names were renamed from the `agent.*` prefix by commit `be8debd8`. |
+| `internal/beads`               | `Store` interface for order tracking beads (create, update, list by label). `CommandRunner` for bd CLI invocation.                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `internal/orders`              | `Scan()` to discover orders from formula layers. `CheckTrigger()` to evaluate trigger conditions. `Order` struct for dispatch metadata.                                                                                                                                                                                                                                                                                                                                                                             |
+| `internal/agent`               | `SessionNameFor()` for session name computation and `StartupHints` for runtime config assembly (`internal/agent/` is now a small helper package; the former `Agent` / `Handle` interfaces were removed by `dd90ac0a`).                                                                                                                                                                                                                                                                                              |
+| `github.com/fsnotify/fsnotify` | File system watcher for config directory change detection.                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
-| Depended on by | How |
-|---|---|
-| `cmd/gc/cmd_supervisor.go` | Starts and manages one `CityRuntime` per registered city under the machine-wide supervisor. |
-| `cmd/gc/cmd_start.go` | Hidden standalone compatibility path via `gc start --foreground`, which still calls `runController()` after building the initial agent list and config. |
+| Depended on by             | How                                                                                                                                                     |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cmd/gc/cmd_supervisor.go` | Starts and manages one `CityRuntime` per registered city under the machine-wide supervisor.                                                             |
+| `cmd/gc/cmd_start.go`      | Hidden standalone compatibility path via `gc start --foreground`, which still calls `runController()` after building the initial agent list and config. |
 
 ## Code Map
 
 All Health Patrol implementation lives in `cmd/gc/`:
 
-| File | Responsibility |
-|---|---|
-| `cmd/gc/controller.go` | Controller lock, Unix socket, fsnotify config watcher, `controllerLoop()`, `tryReloadConfig()`, `runController()`, `gracefulStopAll()` |
-| `cmd/gc/session_reconciler.go` | `reconcileSessionBeads()` bead-driven state machine for desired/live convergence, orphan/suspended drains, crash handling, idle drains, config-drift repair, and pool slot cleanup |
-| `cmd/gc/session_lifecycle_parallel.go` | Dependency-aware bounded parallel session starts and force-stops |
-| `cmd/gc/crash_tracker.go` | `crashTracker` interface, `memoryCrashTracker` (in-memory restart history with sliding window pruning) |
-| `cmd/gc/idle_tracker.go` | `idleTracker` interface, `memoryIdleTracker` (per-agent timeout + GetLastActivity query) |
-| `cmd/gc/order_dispatch.go` | `orderDispatcher` interface, `memoryOrderDispatcher` (trigger evaluation, exec dispatch, wisp dispatch, tracking bead lifecycle) |
-| `internal/config/config.go` | `DaemonConfig` struct with `PatrolIntervalDuration()`, `MaxRestartsOrDefault()`, `RestartWindowDuration()`, `ShutdownTimeoutDuration()` |
-| `internal/config/revision.go` | `Revision()` (SHA-256 bundle hash of all config sources + pack dirs), `WatchDirs()` |
-| `internal/runtime/fingerprint.go` | `ConfigFingerprint()` (SHA-256 of command + env + extras for drift detection) |
-| `internal/orders/triggers.go` | `CheckTrigger()` with cooldown, cron, condition, event, and manual trigger evaluators |
-| `internal/orders/order.go` | `Order` struct definition, `Scan()` for discovery |
+| File                                   | Responsibility                                                                                                                                                                     |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cmd/gc/controller.go`                 | Controller lock, Unix socket, fsnotify config watcher, `controllerLoop()`, `tryReloadConfig()`, `runController()`, `gracefulStopAll()`                                             |
+| `cmd/gc/session_reconciler.go`         | `reconcileSessionBeads()` bead-driven state machine for desired/live convergence, orphan/suspended drains, crash handling, idle drains, config-drift repair, and pool slot cleanup |
+| `cmd/gc/session_lifecycle_parallel.go` | Dependency-aware bounded parallel session starts and force-stops                                                                                                                   |
+| `cmd/gc/crash_tracker.go`              | `crashTracker` interface, `memoryCrashTracker` (in-memory restart history with sliding window pruning)                                                                             |
+| `cmd/gc/idle_tracker.go`               | `idleTracker` interface, `memoryIdleTracker` (per-agent timeout + GetLastActivity query)                                                                                           |
+| `cmd/gc/order_dispatch.go`             | `orderDispatcher` interface, `memoryOrderDispatcher` (trigger evaluation, exec dispatch, wisp dispatch, tracking bead lifecycle)                                                   |
+| `internal/config/config.go`            | `DaemonConfig` struct with `PatrolIntervalDuration()`, `MaxRestartsOrDefault()`, `RestartWindowDuration()`, `ShutdownTimeoutDuration()`                                            |
+| `internal/config/revision.go`          | `Revision()` (SHA-256 bundle hash of all config sources + pack dirs), `WatchDirs()`                                                                                                |
+| `internal/runtime/fingerprint.go`      | `ConfigFingerprint()` (SHA-256 of command + env + extras for drift detection)                                                                                                      |
+| `internal/orders/triggers.go`          | `CheckTrigger()` with cooldown, cron, condition, event, and manual trigger evaluators                                                                                              |
+| `internal/orders/order.go`             | `Order` struct definition, `Scan()` for discovery                                                                                                                                  |
 
 ## Configuration
 
@@ -331,14 +331,14 @@ idle_timeout = "30m"        # restart if no I/O activity for 30 minutes
 
 Each Health Patrol component has dedicated unit tests:
 
-| Test file | Coverage |
-|---|---|
-| `cmd/gc/controller_test.go` | Controller loop tick behavior, config reload, dirty flag, fsnotify debounce, order dispatch integration |
-| `cmd/gc/session_reconciler_test.go` | Session reconciliation states, zombie capture, crash loop quarantine integration, idle drains, pool drain, suspended session handling |
-| `cmd/gc/session_lifecycle_parallel_test.go` | Dependency-aware bounded parallel starts and force-stops |
-| `cmd/gc/crash_tracker_test.go` | Sliding window pruning, quarantine threshold, clear history, nil-guard (disabled tracker) |
-| `cmd/gc/idle_tracker_test.go` | Timeout detection, zero time handling, per-agent timeout configuration, nil-guard |
-| `cmd/gc/order_dispatch_test.go` | Trigger evaluation (cooldown, cron, condition, event, manual), exec dispatch, wisp dispatch, tracking bead creation, timeout capping, rig-scoped orders |
+| Test file                                   | Coverage                                                                                                                                                |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cmd/gc/controller_test.go`                 | Controller loop tick behavior, config reload, dirty flag, fsnotify debounce, order dispatch integration                                                 |
+| `cmd/gc/session_reconciler_test.go`         | Session reconciliation states, zombie capture, crash loop quarantine integration, idle drains, pool drain, suspended session handling                   |
+| `cmd/gc/session_lifecycle_parallel_test.go` | Dependency-aware bounded parallel starts and force-stops                                                                                                |
+| `cmd/gc/crash_tracker_test.go`              | Sliding window pruning, quarantine threshold, clear history, nil-guard (disabled tracker)                                                               |
+| `cmd/gc/idle_tracker_test.go`               | Timeout detection, zero time handling, per-agent timeout configuration, nil-guard                                                                       |
+| `cmd/gc/order_dispatch_test.go`             | Trigger evaluation (cooldown, cron, condition, event, manual), exec dispatch, wisp dispatch, tracking bead creation, timeout capping, rig-scoped orders |
 
 All tests use in-memory fakes (`runtime.Fake`, `events.Discard`,
 stubbed `ExecRunner`) with no external infrastructure dependencies. See

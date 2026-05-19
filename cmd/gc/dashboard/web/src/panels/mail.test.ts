@@ -72,8 +72,12 @@ describe("mail compose flows", () => {
     await Promise.resolve();
 
     expect((document.getElementById("mail-compose") as HTMLElement).style.display).toBe("block");
-    expect((document.getElementById("mail-compose-title") as HTMLElement).textContent).toBe("New Message");
-    const values = [...(document.getElementById("compose-to") as HTMLSelectElement).options].map((option) => option.value);
+    expect((document.getElementById("mail-compose-title") as HTMLElement).textContent).toBe(
+      "New Message",
+    );
+    const values = [...(document.getElementById("compose-to") as HTMLSelectElement).options].map(
+      (option) => option.value,
+    );
     expect(values).toContain("mayor");
     expect(values).not.toContain("mc-vv8");
   });
@@ -81,13 +85,23 @@ describe("mail compose flows", () => {
   it("sends mail to the recipient name instead of the session id", async () => {
     vi.spyOn(api, "POST").mockImplementation(async (path: string, init?: { body?: unknown }) => {
       if (path === "/v0/city/{cityName}/mail") {
-        return { data: { id: "mail-1" }, error: undefined, request: undefined, response: undefined } as never;
+        return {
+          data: { id: "mail-1" },
+          error: undefined,
+          request: undefined,
+          response: undefined,
+        } as never;
       }
       throw new Error(`unexpected POST ${path} ${JSON.stringify(init?.body)}`);
     });
     vi.spyOn(api, "GET").mockImplementation(async (path: string) => {
       if (path === "/v0/city/{cityName}/mail") {
-        return { data: { items: [] }, error: undefined, request: undefined, response: undefined } as never;
+        return {
+          data: { items: [] },
+          error: undefined,
+          request: undefined,
+          response: undefined,
+        } as never;
       }
       throw new Error(`unexpected GET ${path}`);
     });

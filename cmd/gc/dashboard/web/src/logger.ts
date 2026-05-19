@@ -90,11 +90,18 @@ function mirrorConsole(method: keyof typeof originalConsole, level: DashboardLog
   const original = originalConsole[method];
   console[method] = (...args: unknown[]) => {
     original(...args);
-    sendToServer(makeEntry(level, "console", extractMessage(args), args.length > 1 ? args.slice(1) : args[0]));
+    sendToServer(
+      makeEntry(level, "console", extractMessage(args), args.length > 1 ? args.slice(1) : args[0]),
+    );
   };
 }
 
-function makeEntry(level: DashboardLogLevel, scope: string, message: string, details?: unknown): DashboardLogEntry {
+function makeEntry(
+  level: DashboardLogLevel,
+  scope: string,
+  message: string,
+  details?: unknown,
+): DashboardLogEntry {
   return {
     city: currentCityScope(),
     details: details === undefined ? undefined : safeSerialize(details),

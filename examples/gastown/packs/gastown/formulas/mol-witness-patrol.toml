@@ -1,7 +1,7 @@
 description = """
 Witness patrol loop. Poured as a root-only wisp on startup:
 
-  gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{binding_prefix}}'
+  gc bd mol wisp mol-witness-patrol --root-only
   gc bd update $WISP --assignee=$GC_AGENT
 
 Each wisp is ONE iteration: check for work, patrol, pour the next
@@ -11,11 +11,8 @@ you left off from context (bead state, mail state, last action).
 Formula steps are NOT materialized as child beads. Read the step
 descriptions below and work through them in order.
 
-The loop mechanism: EVERY step is one leg of the same wisp. Never exit
-the wisp from an intermediate step — either continue to the next step
-or jump directly to `next-iteration` to pour and burn. Exiting without
-burning leaks wisps (see #1884). The prompt only bootstraps the first
-wisp.
+The loop mechanism: every exit path (happy or early) pours the next
+wisp before burning this one. The prompt only bootstraps the first wisp.
 
 ## Witness Role
 
@@ -58,13 +55,9 @@ the worktree. This makes the work schedulable again.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-witness-patrol"
-version = 9
+version = 8
 
 [vars]
-[vars.binding_prefix]
-description = "Import binding prefix for gastown agent identities, including trailing dot when bound."
-default = ""
-
 [vars.event_timeout]
 description = "Seconds to wait for events before re-checking (exponential backoff)"
 default = "30"
@@ -124,9 +117,7 @@ Archive after reading.
 **Hygiene principle**: Archive messages after they're fully processed.
 Inbox should be near-empty after this step.
 
-Close this step and continue to `recover-orphaned-beads` — do NOT exit
-the wisp here. The `next-iteration` step is the only place that pours
-the next wisp and burns this one."""
+Close this step and proceed."""
 
 [[steps]]
 id = "recover-orphaned-beads"
@@ -154,8 +145,7 @@ gc bd list --status=open --json --limit=0
 Filter for beads with an assignee (skip unassigned beads). This pass does not
 solve the controller race where orphaned work may already have been released to
 open/unassigned before witness observes it; that requires a separate
-worktree-salvage scan keyed by `metadata.work_dir`. Bound Gastown polecat
-assignees use the shape `<rig>/{{binding_prefix}}<polecat-suffix>`.
+worktree-salvage scan keyed by `metadata.work_dir`.
 
 Get the full session roster for liveness checks:
 ```bash
@@ -363,9 +353,7 @@ gc bd update <bead> --set-metadata recovered=true
 ```
 
 **Exit criteria:** All orphaned beads recovered, worktrees cleaned.
-Or no orphans found. Continue to `check-refinery` — do NOT exit the
-wisp here. The `next-iteration` step is the only place that pours the
-next wisp and burns this one."""
+Or no orphans found."""
 
 [[steps]]
 id = "check-refinery"
@@ -376,7 +364,7 @@ Ensure the refinery is processing work and the queue is healthy.
 
 **Step 1: Check work beads assigned to refinery:**
 ```bash
-gc bd list --assignee=<rig>/{{binding_prefix}}refinery --status=open --json
+gc bd list --assignee=<rig>/refinery --status=open --json
 ```
 
 These are work beads with `metadata.branch` and `metadata.target` that
@@ -396,7 +384,7 @@ wisp is stale, the refinery may be stuck.
 
 **Step 3: Nudge if needed:**
 ```bash
-gc session nudge <rig>/{{binding_prefix}}refinery "Work beads waiting for merge. Please check queue."
+gc session nudge <rig>/refinery "Work beads waiting for merge. Please check queue."
 ```
 
 **Step 4: Escalate if needed:**
@@ -407,10 +395,7 @@ Observation: <what you found>
 Recommendation: <what should happen>"
 ```
 
-**Exit criteria:** Queue health assessed; nudge sent or escalation
-filed if needed. Continue to `check-polecat-health` — do NOT exit the
-wisp here. The `next-iteration` step is the only place that pours the
-next wisp and burns this one."""
+Close this step after assessment."""
 
 [[steps]]
 id = "check-polecat-health"
@@ -448,10 +433,10 @@ Do NOT kill the agent directly. File a warrant bead and let the dog pool
 handle the shutdown dance (multi-stage interrogation with due process):
 
 ```bash
-gc bd create --type=task \
+gc bd create --type=warrant \
   --title="Stuck: <agent>" \
-  --metadata '{"target":"<session-name>","reason":"No progress on <bead> for <duration>","requester":"witness","gc.routed_to":"{{binding_prefix}}dog"}' \
-  --label=warrant
+  --metadata '{"target":"<session-name>","reason":"No progress on <bead> for <duration>","requester":"witness"}' \
+  --label=pool:dog
 ```
 
 The dog pool picks up the warrant and runs `mol-shutdown-dance`, which
@@ -465,9 +450,7 @@ system handles it. Only escalate if you see a pattern (many stuck
 polecats, systemic issue).
 
 **Exit criteria:** All active polecat work beads assessed. Warrants
-filed for stuck agents. Or no stuck polecats found. Continue to
-`next-iteration` — do NOT exit the wisp here. The `next-iteration` step
-is the only place that pours the next wisp and burns this one."""
+filed for stuck agents. Or no stuck polecats found."""
 
 [[steps]]
 id = "next-iteration"
@@ -489,7 +472,7 @@ is already assigned — the new session resumes from context.
 
 **2. Pour next iteration BEFORE burning:**
 ```bash
-NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id')
+NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --json | jq -r '.new_epic_id')
 gc bd update "$NEXT" --assignee=$GC_AGENT
 ```
 
@@ -499,8 +482,6 @@ SEQ=$(gc events --seq)
 gc events --watch --type=bead.updated \
   --after=$SEQ --timeout {{event_timeout}}s
 ```
-
-`--timeout` makes this command self-terminating — it exits on its own when an event arrives or the timeout fires. Do not add `&`, pipe to another command, or wrap in a background process.
 
 On event: proceed immediately.
 On timeout: double the timeout (cap 300s) and proceed anyway.

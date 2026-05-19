@@ -33,6 +33,7 @@ type agentBuildParams struct {
 	rigOverlayDirs  map[string][]string
 	globalFragments []string
 	appendFragments []string // V2: city-level [agents].append_fragments / [agent_defaults].append_fragments
+	apiURL          string
 	stderr          io.Writer
 
 	// beadStore is the city-level bead store for session bead lookups.
@@ -47,7 +48,9 @@ type agentBuildParams struct {
 	// assignedWorkBeads is the actionable assigned-work snapshot for this
 	// build. Pool new-tier materialization uses it to avoid treating sessions
 	// that already own work as available generic capacity.
-	assignedWorkBeads []beads.Bead
+	assignedWorkBeads  []beads.Bead
+	assignedWorkStores []beads.Store
+	assignedWorkKnown  bool
 
 	// beadNames caches qualifiedName → session_name mappings resolved
 	// during this build cycle. Populated lazily by resolveSessionName.
@@ -103,6 +106,7 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		rigOverlayDirs:  cfg.RigOverlayDirs,
 		globalFragments: cfg.Workspace.GlobalFragments,
 		appendFragments: mergeFragmentLists(cfg.AgentDefaults.AppendFragments, cfg.AgentsDefaults.AppendFragments),
+		apiURL:          cfg.API.URLOrDefault(),
 		beadStore:       store,
 		beadNames:       make(map[string]string),
 		stderr:          stderr,

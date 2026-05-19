@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"io"
-	"os"
 	"strings"
 )
 
@@ -41,10 +40,7 @@ func codexHookOutput(eventName, content string) map[string]any {
 }
 
 func codexHookAdditionalContext(eventName, content string) map[string]any {
-	if strings.TrimSpace(eventName) == "" {
-		eventName = strings.TrimSpace(os.Getenv("GC_HOOK_EVENT_NAME"))
-	}
-	if strings.TrimSpace(eventName) == "" {
+	if eventName == "" {
 		eventName = "SessionStart"
 	}
 	return map[string]any{

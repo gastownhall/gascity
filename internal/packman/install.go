@@ -9,11 +9,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
-	gitutil "github.com/gastownhall/gascity/internal/git"
-	"github.com/gastownhall/gascity/internal/remotesource"
 )
 
 // InstallMode controls whether lock resolution is strict or may refresh.
@@ -46,23 +43,8 @@ func ReadCachedPackImports(source, commit string) (map[string]config.Import, err
 	}
 	var imports map[string]config.Import
 	if err := config.WithRepoCacheReadLock(root, func() error {
-		if builtinpacks.IsSource(source) {
-			if err := builtinpacks.ValidateSyntheticRepo(cachePath, commit); err != nil {
-				gitInfo, gitErr := os.Stat(filepath.Join(cachePath, ".git"))
-				if gitutil.MissingCheckoutMarker(gitInfo, gitErr) {
-					return fmt.Errorf("synthetic cache is invalid: %w", err)
-				}
-				if gitErr != nil {
-					return fmt.Errorf("checking bundled repo cache %q: %w; synthetic cache is invalid: %w", cachePath, gitErr, err)
-				}
-				if err := validateCachedRepoCheckout(cachePath, commit); err != nil {
-					return err
-				}
-			}
-		} else {
-			if err := validateCachedRepoCheckout(cachePath, commit); err != nil {
-				return err
-			}
+		if err := validateCachedRepoCheckout(cachePath, commit); err != nil {
+			return err
 		}
 		var readErr error
 		imports, readErr = readPackImports(packPath)
@@ -412,5 +394,10 @@ func readPackImports(packDir string) (map[string]config.Import, error) {
 }
 
 func isRemoteSource(source string) bool {
-	return remotesource.IsRemote(source)
+	return strings.HasPrefix(source, "git@") ||
+		strings.HasPrefix(source, "ssh://") ||
+		strings.HasPrefix(source, "https://") ||
+		strings.HasPrefix(source, "http://") ||
+		strings.HasPrefix(source, "file://") ||
+		strings.HasPrefix(source, "github.com/")
 }

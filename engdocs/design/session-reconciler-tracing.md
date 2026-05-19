@@ -2,13 +2,13 @@
 title: "Session Reconciler Tracing"
 ---
 
-| Field | Value |
-|---|---|
-| Status | Proposed |
-| Date | 2026-04-04 |
-| Author(s) | Codex |
-| Issue | `test-ejn` |
-| Supersedes | N/A |
+| Field      | Value      |
+| ---------- | ---------- |
+| Status     | Proposed   |
+| Date       | 2026-04-04 |
+| Author(s)  | Codex      |
+| Issue      | `test-ejn` |
+| Supersedes | N/A        |
 
 ## Summary
 

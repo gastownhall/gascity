@@ -15,12 +15,6 @@ import (
 
 const poolManagedMetadataKey = "pool_managed"
 
-type poolSessionCreateIdentity struct {
-	AgentName string
-	Alias     string
-	Slot      int
-}
-
 func isPoolManagedSessionBead(bead beads.Bead) bool {
 	if isEphemeralSessionBead(bead) {
 		return true
@@ -29,20 +23,6 @@ func isPoolManagedSessionBead(bead beads.Bead) bool {
 		return true
 	}
 	return strings.TrimSpace(bead.Metadata["pool_slot"]) != ""
-}
-
-// isCanonicalPoolManagedSessionBeadForTemplate is the bead-shape companion to
-// config.Agent.UsesCanonicalSingletonPoolIdentity: pool-managed, no pool slot,
-// and canonical identity according to beadIdentifiesAsCanonical.
-func isCanonicalPoolManagedSessionBeadForTemplate(bead beads.Bead, template string) bool {
-	template = strings.TrimSpace(template)
-	if template == "" || !isPoolManagedSessionBead(bead) {
-		return false
-	}
-	if strings.TrimSpace(bead.Metadata["pool_slot"]) != "" {
-		return false
-	}
-	return beadIdentifiesAsCanonical(bead, template)
 }
 
 func resolveLegacyPoolTemplate(cfg *config.City, storedTemplate string) string {
@@ -143,22 +123,14 @@ func createPoolSessionBead(
 	template string,
 	sessionBeads *sessionBeadSnapshot,
 	now time.Time,
-	identity poolSessionCreateIdentity,
 ) (beads.Bead, error) {
 	if store == nil {
 		return beads.Bead{}, fmt.Errorf("session store unavailable for pool template %q", template)
 	}
 	instanceToken := sessionpkg.NewInstanceToken()
-	agentName := strings.TrimSpace(identity.AgentName)
-	title := targetBasename(template)
-	if agentName == "" {
-		agentName = template
-	} else {
-		title = agentName
-	}
 	meta := map[string]string{
 		"template":                  template,
-		"agent_name":                agentName,
+		"agent_name":                template,
 		"state":                     "creating",
 		"pending_create_claim":      "true",
 		"pending_create_started_at": pendingCreateStartedAtNow(now),
@@ -169,16 +141,10 @@ func createPoolSessionBead(
 		"session_name":              pendingPoolSessionName(template, instanceToken),
 		poolManagedMetadataKey:      boolMetadata(true),
 	}
-	if alias := strings.TrimSpace(identity.Alias); alias != "" {
-		meta["alias"] = alias
-	}
-	if identity.Slot > 0 {
-		meta["pool_slot"] = strconv.Itoa(identity.Slot)
-	}
 	bead, err := store.Create(beads.Bead{
-		Title:    title,
+		Title:    targetBasename(template),
 		Type:     sessionBeadType,
-		Labels:   []string{sessionBeadLabel, "agent:" + agentName},
+		Labels:   []string{sessionBeadLabel, "agent:" + template},
 		Metadata: meta,
 	})
 	if err != nil {
@@ -188,6 +154,9 @@ func createPoolSessionBead(
 	if err := store.SetMetadata(bead.ID, "session_name", sessionName); err != nil {
 		_ = store.Close(bead.ID)
 		return beads.Bead{}, err
+	}
+	if bead.Metadata == nil {
+		bead.Metadata = make(map[string]string, 1)
 	}
 	bead.Metadata["session_name"] = sessionName
 	if sessionBeads != nil {
@@ -302,7 +271,7 @@ func findSessionNameByAgentLabel(store beads.Store, template string) string {
 	if err != nil {
 		return ""
 	}
-	return chooseSessionNameForTemplate(store, items, true, "", "", template)
+	return chooseSessionNameForTemplate(store, items, true, "", "")
 }
 
 func findSessionNameByMetadata(store beads.Store, key, value string, agentNameMatch bool) string {
@@ -310,12 +279,11 @@ func findSessionNameByMetadata(store beads.Store, key, value string, agentNameMa
 	if err != nil {
 		return ""
 	}
-	return chooseSessionNameForTemplate(store, items, agentNameMatch, key, value, value)
+	return chooseSessionNameForTemplate(store, items, agentNameMatch, key, value)
 }
 
-func chooseSessionNameForTemplate(store beads.Store, items []beads.Bead, agentNameMatch bool, key, value, queryTemplate string) string {
+func chooseSessionNameForTemplate(store beads.Store, items []beads.Bead, agentNameMatch bool, key, value string) string {
 	var fallback string
-	var canonicalPoolFallback string
 	for _, b := range items {
 		if !sessionpkg.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
 			continue
@@ -324,8 +292,7 @@ func chooseSessionNameForTemplate(store beads.Store, items []beads.Bead, agentNa
 		if key != "" && strings.TrimSpace(b.Metadata[key]) != value {
 			continue
 		}
-		canonicalPoolManaged := isCanonicalPoolManagedSessionBeadForTemplate(b, queryTemplate)
-		if agentNameMatch && isPoolManagedSessionBead(b) && sessionBeadAgentName(b) == b.Metadata["template"] && !canonicalPoolManaged {
+		if agentNameMatch && isPoolManagedSessionBead(b) && sessionBeadAgentName(b) == b.Metadata["template"] {
 			continue
 		}
 		if !agentNameMatch && isPoolManagedSessionBead(b) {
@@ -338,18 +305,9 @@ func chooseSessionNameForTemplate(store beads.Store, items []beads.Bead, agentNa
 		if strings.TrimSpace(b.Metadata["configured_named_identity"]) != "" {
 			return sessionName
 		}
-		if canonicalPoolManaged {
-			if canonicalPoolFallback == "" {
-				canonicalPoolFallback = sessionName
-			}
-			continue
-		}
 		if fallback == "" {
 			fallback = sessionName
 		}
-	}
-	if fallback == "" {
-		return canonicalPoolFallback
 	}
 	return fallback
 }
@@ -427,9 +385,6 @@ func lookupPoolSessionNameCandidates(store beads.Store, template string, cfg *co
 		if b.Status == "closed" {
 			continue
 		}
-		if isFailedCreateSessionBead(b) {
-			continue
-		}
 		if isNamedSessionBead(b) || isManualSessionBeadForAgent(b, cfgAgent) {
 			continue
 		}
@@ -453,7 +408,7 @@ func lookupPoolSessionNameCandidates(store beads.Store, template string, cfg *co
 		if storedTemplateMatches && strings.TrimSpace(b.Metadata["alias"]) == "" && !beadOwnsPoolSessionName(b) {
 			sessionNameSlot = resolveSlot(sessionName)
 		}
-		if cfgAgent != nil && poolSlotHasConfiguredBound(cfgAgent) && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		if cfgAgent != nil && poolSlotHasConfiguredBound(cfgAgent) {
 			if agentSlot > 0 && !inBoundsPoolSlot(cfgAgent, agentSlot) {
 				agentSlot = 0
 			}
@@ -471,31 +426,7 @@ func lookupPoolSessionNameCandidates(store beads.Store, template string, cfg *co
 			continue
 		}
 		agentName := sessionBeadAgentName(b)
-		canonicalPoolManaged := cfgAgent.UsesCanonicalSingletonPoolIdentity() && isCanonicalPoolManagedSessionBeadForTemplate(b, template)
-		staleCanonicalSingletonSlot := 0
-		if cfgAgent.UsesCanonicalSingletonPoolIdentity() && isPoolManagedSessionBead(b) && !canonicalPoolManaged {
-			switch {
-			case agentSlot > 0:
-				staleCanonicalSingletonSlot = agentSlot
-			case aliasSlot > 0:
-				staleCanonicalSingletonSlot = aliasSlot
-			case sessionNameSlot > 0:
-				staleCanonicalSingletonSlot = sessionNameSlot
-			default:
-				if slot, err := strconv.Atoi(strings.TrimSpace(b.Metadata["pool_slot"])); err == nil && slot > 0 {
-					staleCanonicalSingletonSlot = slot
-				}
-			}
-			if staleCanonicalSingletonSlot == 0 {
-				continue
-			}
-		}
-		switch {
-		case canonicalPoolManaged:
-			agentName = template
-		case staleCanonicalSingletonSlot > 0:
-			agentName = qualifiedInstanceName(staleCanonicalSingletonSlot)
-		case storedTemplateMatches && (agentName == template || agentName == targetBasename(template)):
+		if storedTemplateMatches && (agentName == template || agentName == targetBasename(template)) {
 			agentName = ""
 		}
 		switch {

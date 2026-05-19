@@ -51,7 +51,6 @@ var (
 var managedDoltSystemDatabases = map[string]struct{}{
 	"information_schema":     {},
 	"mysql":                  {},
-	"dolt":                   {},
 	"dolt_cluster":           {},
 	"performance_schema":     {},
 	"sys":                    {},
@@ -98,7 +97,7 @@ func managedDoltQueryProbe(host, port, user string) error {
 	if managedDoltPassword() != "" {
 		return managedDoltQueryProbeDirectFn(host, port, user)
 	}
-	_, err := runManagedDoltSQL(host, port, user, "-r", "csv", "-q", "SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA")
+	_, err := runManagedDoltSQL(host, port, user, "-q", "SELECT active_branch()")
 	if err == nil {
 		return nil
 	}
@@ -297,8 +296,8 @@ func managedDoltQueryProbeDirect(host, port, user string) error {
 	if err := db.PingContext(ctx); err != nil {
 		return err
 	}
-	var cnt int64
-	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA").Scan(&cnt); err != nil {
+	var branch sql.NullString
+	if err := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&branch); err != nil {
 		return err
 	}
 	return nil

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,7 +22,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -35,27 +33,26 @@ import (
 // Protected by an RWMutex for hot-reload: readers take RLock,
 // the controller loop takes Lock when updating cfg/sp/stores.
 type controllerState struct {
-	mu                     sync.RWMutex
-	cfg                    *config.City
-	sp                     runtime.Provider
-	cacheCtx               context.Context
-	beadStores             map[string]beads.Store
-	cityBeadStore          beads.Store   // city-level store for session beads
-	cityMailProv           mail.Provider // city-level mail provider (all mail is city-scoped)
-	eventProv              events.Provider
-	editor                 *configedit.Editor
-	cityName               string
-	cityPath               string
-	version                string
-	startedAt              time.Time
-	storeMetadataSignature string
-	ct                     crashTracker  // nil if crash tracking disabled
-	pokeCh                 chan struct{} // nil when poke is not available; triggers immediate reconciler tick
-	configDirty            *atomic.Bool  // optional dirty flag shared with the reconciler reload path
-	services               workspacesvc.Registry
-	extmsgSvc              *extmsg.Services
-	adapterReg             *extmsg.AdapterRegistry
-	updateMu               sync.Mutex // serializes rebuild+swap so stale reloads cannot overtake newer mutations
+	mu            sync.RWMutex
+	cfg           *config.City
+	sp            runtime.Provider
+	cacheCtx      context.Context
+	beadStores    map[string]beads.Store
+	cityBeadStore beads.Store   // city-level store for session beads
+	cityMailProv  mail.Provider // city-level mail provider (all mail is city-scoped)
+	eventProv     events.Provider
+	editor        *configedit.Editor
+	cityName      string
+	cityPath      string
+	version       string
+	startedAt     time.Time
+	ct            crashTracker  // nil if crash tracking disabled
+	pokeCh        chan struct{} // nil when poke is not available; triggers immediate reconciler tick
+	configDirty   *atomic.Bool  // optional dirty flag shared with the reconciler reload path
+	services      workspacesvc.Registry
+	extmsgSvc     *extmsg.Services
+	adapterReg    *extmsg.AdapterRegistry
+	updateMu      sync.Mutex // serializes rebuild+swap so stale reloads cannot overtake newer mutations
 
 	// True after an API config mutation refreshes controller state ahead of the
 	// runtime reload loop. Runtime reloads from older revisions are ignored
@@ -108,7 +105,6 @@ func newControllerState(
 		svc := extmsg.NewServices(cs.cityBeadStore)
 		cs.extmsgSvc = &svc
 	}
-	cs.storeMetadataSignature = storeMetadataSignature(cityPath, cfg)
 	return cs
 }
 
@@ -158,7 +154,7 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 		if ctx.Err() != nil {
 			return
 		}
-		cs.StartReconciler(ctx, beads.WithStaggerAuto(), os.Getenv("GC_AGENT"))
+		cs.StartReconciler(ctx)
 	}()
 	return cs
 }
@@ -205,20 +201,12 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 	scopeRoot := resolveStoreScopeRoot(cs.cityPath, rigPath)
 	if strings.HasPrefix(provider, "exec:") {
 		s := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
-		env := gcExecStoreEnv(cs.cityPath, execStoreTarget{
+		s.SetEnv(gcExecStoreEnv(cs.cityPath, execStoreTarget{
 			ScopeRoot: scopeRoot,
 			ScopeKind: "rig",
 			Prefix:    prefix,
 			RigName:   rigName,
-		}, provider)
-		if execProviderNeedsScopedDoltStoreEnv(provider) {
-			projected, err := bdRuntimeEnvForRigWithError(cs.cityPath, cfg, scopeRoot)
-			if err != nil {
-				return unavailableStore{err: fmt.Errorf("project rig store env %s: %w", scopeRoot, err)}
-			}
-			copyExecProjectedBackendEnv(env, projected)
-		}
-		s.SetEnv(env)
+		}, provider))
 		return s
 	}
 	switch provider {
@@ -229,7 +217,11 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 		}
 		return store
 	default: // "bd" or unrecognized
-		return bdStoreForRig(scopeRoot, cs.cityPath, cfg, prefix)
+		store := bdStoreForRig(scopeRoot, cs.cityPath, cfg, prefix)
+		if direct, ok := openOptimizedDoltliteStore(scopeRoot, store); ok {
+			return direct
+		}
+		return store
 	}
 }
 
@@ -345,7 +337,6 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 
 	// Build new stores outside the lock (may do file I/O / subprocess spawns).
 	stores := cs.buildStores(cfg)
-	storeSignature := storeMetadataSignature(cs.cityPath, cfg)
 	// Reopen city-level store for session beads and mail.
 	cityStore, err := openCityStoreAt(cs.cityPath)
 	if err != nil {
@@ -368,7 +359,6 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	if cityStore != nil {
 		cs.cityBeadStore = cityStore
 		cs.cityMailProv = cityMailProv
-		cs.storeMetadataSignature = storeSignature
 	}
 	if extSvc != nil {
 		cs.extmsgSvc = extSvc
@@ -419,7 +409,6 @@ func (cs *controllerState) runtimeUpdateCanReuseCurrentStores(next *config.City)
 	cs.mu.RLock()
 	current := cs.cfg
 	cityStore := cs.cityBeadStore
-	storeSignature := cs.storeMetadataSignature
 	stores := make(map[string]beads.Store, len(cs.beadStores))
 	for name, store := range cs.beadStores {
 		stores[name] = store
@@ -427,9 +416,6 @@ func (cs *controllerState) runtimeUpdateCanReuseCurrentStores(next *config.City)
 	cs.mu.RUnlock()
 
 	if cityStore == nil || !sameStoreTopology(cs.cityPath, current, next) {
-		return false
-	}
-	if storeSignature != "" && storeSignature != storeMetadataSignature(cs.cityPath, next) {
 		return false
 	}
 	for _, rig := range next.Rigs {
@@ -441,51 +427,6 @@ func (cs *controllerState) runtimeUpdateCanReuseCurrentStores(next *config.City)
 		}
 	}
 	return true
-}
-
-func (cs *controllerState) storeMetadataChanged(next *config.City) bool {
-	cs.mu.RLock()
-	cityPath := cs.cityPath
-	storeSignature := cs.storeMetadataSignature
-	cs.mu.RUnlock()
-
-	return storeSignature != "" && storeSignature != storeMetadataSignature(cityPath, next)
-}
-
-func storeMetadataSignature(cityPath string, cfg *config.City) string {
-	if strings.TrimSpace(cityPath) == "" {
-		return ""
-	}
-	var b strings.Builder
-	appendScopeMetadataSignature := func(label, scopeRoot string) {
-		if strings.TrimSpace(scopeRoot) == "" {
-			scopeRoot = cityPath
-		}
-		scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
-		fmt.Fprintf(&b, "%s:%s:", label, filepath.Clean(scopeRoot))
-		data, err := os.ReadFile(scopeMetadataJSONPath(scopeRoot))
-		switch {
-		case err == nil:
-			sum := sha256.Sum256(data)
-			fmt.Fprintf(&b, "sha256=%x\n", sum)
-		case os.IsNotExist(err):
-			b.WriteString("missing\n")
-		default:
-			fmt.Fprintf(&b, "error=%T:%v\n", err, err)
-		}
-	}
-
-	appendScopeMetadataSignature("city", cityPath)
-	if cfg == nil {
-		return b.String()
-	}
-	for _, rig := range cfg.Rigs {
-		if strings.TrimSpace(rig.Path) == "" {
-			continue
-		}
-		appendScopeMetadataSignature("rig:"+rig.Name, rig.Path)
-	}
-	return b.String()
 }
 
 func (cs *controllerState) runtimeUpdateDropsPendingRigs(next *config.City) bool {
@@ -749,13 +690,8 @@ func (cs *controllerState) CityBeadStore() beads.Store {
 	return cs.cityBeadStore
 }
 
-// Orders scans formula layers and returns active orders.
+// Orders scans formula layers and returns all orders.
 func (cs *controllerState) Orders() []orders.Order {
-	return orders.FilterEnabled(cs.OrdersAll())
-}
-
-// OrdersAll scans formula layers and returns all orders after overrides.
-func (cs *controllerState) OrdersAll() []orders.Order {
 	cs.mu.RLock()
 	cfg := cs.cfg
 	cs.mu.RUnlock()
@@ -766,9 +702,7 @@ func (cs *controllerState) OrdersAll() []orders.Order {
 	}
 
 	if len(cfg.Orders.Overrides) > 0 {
-		if err := orders.ApplyOverrides(allAA, convertOverrides(cfg.Orders.Overrides)); err != nil {
-			log.Printf("gc api: applying order overrides for %s: %v", cs.cityPath, err)
-		}
+		orders.ApplyOverrides(allAA, convertOverrides(cfg.Orders.Overrides)) //nolint:errcheck // best-effort
 	}
 
 	return allAA
@@ -808,7 +742,7 @@ func (cs *controllerState) SuspendAgent(name string) error {
 	})
 }
 
-// ResumeAgent clears suspended in durable agent config.
+// ResumeAgent writes suspended=false in durable agent config.
 func (cs *controllerState) ResumeAgent(name string) error {
 	return cs.mutateAndPoke(func() error {
 		return cs.editor.ResumeAgent(name)
@@ -822,7 +756,7 @@ func (cs *controllerState) SuspendRig(name string) error {
 	})
 }
 
-// ResumeRig clears suspended on the rig in city.toml.
+// ResumeRig writes suspended=false on the rig in city.toml.
 func (cs *controllerState) ResumeRig(name string) error {
 	return cs.mutateAndPoke(func() error {
 		return cs.editor.ResumeRig(name)
@@ -879,30 +813,12 @@ func (cs *controllerState) DeleteAgent(name string) error {
 
 // CreateRig adds a new rig to city.toml.
 func (cs *controllerState) CreateRig(r config.Rig) error {
-	r = detectRigDefaultBranch(cs.cityPath, r)
 	if err := cs.initializeRigStoreForCreate(r); err != nil {
 		return err
 	}
 	return cs.mutateAndPoke(func() error {
 		return cs.editor.CreateRig(r)
 	})
-}
-
-func detectRigDefaultBranch(cityPath string, r config.Rig) config.Rig {
-	r.DefaultBranch = strings.TrimSpace(r.DefaultBranch)
-	if r.DefaultBranch != "" {
-		return r
-	}
-	rigPath := strings.TrimSpace(r.Path)
-	if rigPath == "" {
-		return r
-	}
-	rigPath = resolveStoreScopeRoot(cityPath, rigPath)
-	if _, err := os.Stat(filepath.Join(rigPath, ".git")); err != nil {
-		return r
-	}
-	r.DefaultBranch = git.New(rigPath).ProbeDefaultBranch()
-	return r
 }
 
 func (cs *controllerState) initializeRigStoreForCreate(r config.Rig) error {
@@ -934,10 +850,9 @@ func (cs *controllerState) initializeRigStoreForCreate(r config.Rig) error {
 func (cs *controllerState) UpdateRig(name string, patch api.RigUpdate) error {
 	return cs.mutateAndPoke(func() error {
 		return cs.editor.UpdateRig(name, configedit.RigUpdate{
-			Path:          patch.Path,
-			Prefix:        patch.Prefix,
-			DefaultBranch: patch.DefaultBranch,
-			Suspended:     patch.Suspended,
+			Path:      patch.Path,
+			Prefix:    patch.Prefix,
+			Suspended: patch.Suspended,
 		})
 	})
 }

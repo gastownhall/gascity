@@ -26,14 +26,24 @@ fi
 
 DOLT_LOG_FILE="${GC_DOLT_LOG_FILE:-$DOLT_STATE_DIR/dolt.log}"
 DOLT_PID_FILE="${GC_DOLT_PID_FILE:-$DOLT_STATE_DIR/dolt.pid}"
-if [ -n "${GC_DOLT_STATE_FILE:-}" ]; then
-  DOLT_STATE_FILE="$GC_DOLT_STATE_FILE"
-else
-  DOLT_STATE_FILE="$DOLT_STATE_DIR/dolt-state.json"
-fi
-DOLT_PROVIDER_STATE_FILE="$DOLT_STATE_DIR/dolt-provider-state.json"
+DOLT_STATE_FILE="${GC_DOLT_STATE_FILE:-$DOLT_STATE_DIR/dolt-state.json}"
 
 GC_BEADS_BD_SCRIPT="$GC_CITY_PATH/.gc/system/packs/bd/assets/scripts/gc-beads-bd.sh"
+
+city_toml_dolt_port() {
+  _city_toml="$GC_CITY_PATH/city.toml"
+  [ -f "$_city_toml" ] || return 0
+  awk '
+    /^\[dolt\][[:space:]]*$/ { in_dolt=1; next }
+    /^\[[^]]+\][[:space:]]*$/ { in_dolt=0 }
+    in_dolt && /^[[:space:]]*port[[:space:]]*=/ {
+      sub(/^[^=]*=[[:space:]]*/, "", $0)
+      gsub(/[[:space:]"]/, "", $0)
+      print
+      exit
+    }
+  ' "$_city_toml"
+}
 
 read_runtime_state_flag() (
   state_file="$1"
@@ -202,13 +212,17 @@ managed_runtime_port() (
   printf '%s\n' "$port"
 )
 
-# Resolve GC_DOLT_PORT if not already set by the caller. The shared helper
-# below honors the env override, falls through to validated managed runtime
-# state, and exits 78 if neither yields a port — replacing the silent 3307
-# fallback removed for ga-lsois.
-. "${GC_PACK_DIR:-${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}/dolt}/assets/scripts/port_resolve.sh"
-GC_DOLT_PORT=$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$DOLT_PROVIDER_STATE_FILE" "$DOLT_DATA_DIR" "$GC_CITY_PATH") || exit $?
+# Resolve GC_DOLT_PORT if not already set by the caller.
+# Priority: env override > validated managed runtime state > default 3307.
+if [ -z "$GC_DOLT_PORT" ]; then
+  GC_DOLT_PORT=$(managed_runtime_port "$DOLT_STATE_FILE" "$DOLT_DATA_DIR")
+  : "${GC_DOLT_PORT:=3307}"
+fi
 
+_city_port=$(city_toml_dolt_port)
+if [ -n "$_city_port" ]; then
+  GC_DOLT_PORT="$_city_port"
+fi
 # Resolve a bounded-execution helper. Prefer gtimeout (coreutils on
 # macOS), fall back to timeout (coreutils on Linux), then to running
 # the command directly if neither is installed. Running unbounded is

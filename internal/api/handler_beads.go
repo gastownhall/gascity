@@ -13,7 +13,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/sling"
 )
 
 func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, children []beads.Bead) []beads.Bead {
@@ -385,9 +384,21 @@ func mergeWorkflowDeps(primary, extra []workflowDepResponse) []workflowDepRespon
 	return primary
 }
 
-// beadPrefix extracts the config-free heuristic prefix from a bead ID.
+// beadPrefix extracts the configured prefix from a bead ID (e.g., "ga" from
+// "ga-5b8i"). bd prefixes may contain digits after the first character.
 func beadPrefix(id string) string {
-	return sling.BeadPrefix(id)
+	for i, c := range id {
+		if c == '-' {
+			return id[:i]
+		}
+		if c < 'a' || c > 'z' {
+			if i > 0 && c >= '0' && c <= '9' {
+				continue
+			}
+			return ""
+		}
+	}
+	return ""
 }
 
 // resolveRoutePrefix reads routes.jsonl from a rig's .beads/ directory and

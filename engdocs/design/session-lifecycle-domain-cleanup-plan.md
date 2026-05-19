@@ -2,13 +2,13 @@
 title: "Session Lifecycle Domain Cleanup Plan"
 ---
 
-| Field | Value |
-|---|---|
-| Status | Implemented with boundary hardening |
-| Date | 2026-04-15 |
-| Owner | Codex |
-| Tracking | `mc-nte1eb`; hardening follow-up `mc-tkxblx` |
-| Parent design | `session-model-unification` |
+| Field         | Value                                        |
+| ------------- | -------------------------------------------- |
+| Status        | Implemented with boundary hardening          |
+| Date          | 2026-04-15                                   |
+| Owner         | Codex                                        |
+| Tracking      | `mc-nte1eb`; hardening follow-up `mc-tkxblx` |
+| Parent design | `session-model-unification`                  |
 
 ## Purpose
 

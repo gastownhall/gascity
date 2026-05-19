@@ -55,33 +55,33 @@ not in the current live `dolt` label snapshot:
 
 ### Issues
 
-| Item | Disposition | Branch status | Primary coverage |
-|---|---|---|---|
-| `#245` | `fixes: #245` | fixed | env projection + `gc bd` regression tests |
-| `#323` | `fixes: #323` | fixed for the in-scope Dolt reliability symptoms | port pinning, canonical bootstrap, boundary-scan tests |
-| `#506` | `fixes: #506` | fixed | doctor uses contract-resolved targets |
-| `#525` | `fixes: #525` | fixed | stale runtime / stale port-file rejection |
-| `#541` | `fixes: #541` | fixed | sanitize-and-populate env projection tests |
-| `#560` | `fixes: #560` | fixed | idempotent start + transient probe no-restart tests |
-| `#561` | `fixes: #561` | fixed | canonical bootstrap / normalization / deferred init tests |
-| `#630` | `fixes: #630` | fixed | stale deleted-inode local server restart regression |
-| `#684` | `fixes: #684` | fixed | `exec:gc-beads-bd` CRUD/session/mail regressions |
-| `#696` | `fixes: #696` | fixed | managed-session `exec:gc-beads-bd` no-op regressions |
+| Item   | Disposition   | Branch status                                    | Primary coverage                                          |
+| ------ | ------------- | ------------------------------------------------ | --------------------------------------------------------- |
+| `#245` | `fixes: #245` | fixed                                            | env projection + `gc bd` regression tests                 |
+| `#323` | `fixes: #323` | fixed for the in-scope Dolt reliability symptoms | port pinning, canonical bootstrap, boundary-scan tests    |
+| `#506` | `fixes: #506` | fixed                                            | doctor uses contract-resolved targets                     |
+| `#525` | `fixes: #525` | fixed                                            | stale runtime / stale port-file rejection                 |
+| `#541` | `fixes: #541` | fixed                                            | sanitize-and-populate env projection tests                |
+| `#560` | `fixes: #560` | fixed                                            | idempotent start + transient probe no-restart tests       |
+| `#561` | `fixes: #561` | fixed                                            | canonical bootstrap / normalization / deferred init tests |
+| `#630` | `fixes: #630` | fixed                                            | stale deleted-inode local server restart regression       |
+| `#684` | `fixes: #684` | fixed                                            | `exec:gc-beads-bd` CRUD/session/mail regressions          |
+| `#696` | `fixes: #696` | fixed                                            | managed-session `exec:gc-beads-bd` no-op regressions      |
 
 ### PRs
 
-| Item | Disposition | Branch status | Primary coverage |
-|---|---|---|---|
-| `#454` | `supersedes: #454` | superseded by broader contract fix | doctor uses canonical target, not ambient env |
-| `#455` | `supersedes: #455` | superseded by broader contract fix | doctor uses canonical target, not ambient env |
-| `#459` | `supersedes: #459` | superseded by broader contract fix | shell-facing env uses resolved projection |
-| `#479` | `supersedes: #479` | superseded by broader contract fix | K8s projects canonical `GC_DOLT_*` then mirrors `BEADS_*` |
-| `#554` | `supersedes: #554` | superseded by broader contract fix | sanitize-and-populate env projection |
-| `#680` | `supersedes: #680` | superseded by broader contract fix | stale-state rejection + runtime-required managed resolution |
-| `#683` | `supersedes: #683` | superseded by canonical endpoint ownership | explicit rig endpoint preserved over city sync |
-| `#685` | `supersedes: #685` | superseded by exec-store bridge | `exec:gc-beads-bd` implements real data ops |
-| `#686` | `supersedes: #686` | superseded by rig-scoped projection | scale-check gets rig Dolt env from resolved target |
-| `#687` | `supersedes: #687` | superseded by broader session/store fix | session data ops work even through `exec:gc-beads-bd` |
+| Item   | Disposition        | Branch status                              | Primary coverage                                            |
+| ------ | ------------------ | ------------------------------------------ | ----------------------------------------------------------- |
+| `#454` | `supersedes: #454` | superseded by broader contract fix         | doctor uses canonical target, not ambient env               |
+| `#455` | `supersedes: #455` | superseded by broader contract fix         | doctor uses canonical target, not ambient env               |
+| `#459` | `supersedes: #459` | superseded by broader contract fix         | shell-facing env uses resolved projection                   |
+| `#479` | `supersedes: #479` | superseded by broader contract fix         | K8s projects canonical `GC_DOLT_*` then mirrors `BEADS_*`   |
+| `#554` | `supersedes: #554` | superseded by broader contract fix         | sanitize-and-populate env projection                        |
+| `#680` | `supersedes: #680` | superseded by broader contract fix         | stale-state rejection + runtime-required managed resolution |
+| `#683` | `supersedes: #683` | superseded by canonical endpoint ownership | explicit rig endpoint preserved over city sync              |
+| `#685` | `supersedes: #685` | superseded by exec-store bridge            | `exec:gc-beads-bd` implements real data ops                 |
+| `#686` | `supersedes: #686` | superseded by rig-scoped projection        | scale-check gets rig Dolt env from resolved target          |
+| `#687` | `supersedes: #687` | superseded by broader session/store fix    | session data ops work even through `exec:gc-beads-bd`       |
 
 ## Detailed Issue Entries
 

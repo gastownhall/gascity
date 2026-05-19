@@ -58,23 +58,37 @@ export async function renderConvoys(): Promise<void> {
         el("span", { class: "convoy-id" }, [row.id]),
         row.title ? el("div", { class: "convoy-title" }, [row.title]) : null,
         row.assignees.length
-          ? el("div", { class: "convoy-assignees" }, row.assignees.map((assignee) => el("span", { class: "assignee-chip" }, [assignee])))
+          ? el(
+              "div",
+              { class: "convoy-assignees" },
+              row.assignees.map((assignee) => el("span", { class: "assignee-chip" }, [assignee])),
+            )
           : null,
       ]),
       el("td", { class: "convoy-progress-cell" }, [
         el("div", { class: "convoy-progress-header" }, [
           el("span", { class: "convoy-progress-fraction" }, [`${row.closed}/${row.total}`]),
-          row.total > 0 ? el("span", { class: "convoy-progress-pct" }, [`${row.progressPct}%`]) : null,
+          row.total > 0
+            ? el("span", { class: "convoy-progress-pct" }, [`${row.progressPct}%`])
+            : null,
         ]),
         row.total > 0
-          ? el("div", { class: "progress-bar" }, [el("div", { class: "progress-fill", style: `width: ${row.progressPct}%;` })])
+          ? el("div", { class: "progress-bar" }, [
+              el("div", { class: "progress-fill", style: `width: ${row.progressPct}%;` }),
+            ])
           : null,
       ]),
       el("td", { class: "convoy-work-cell" }, [
         el("div", { class: "convoy-work-breakdown" }, [
-          row.ready > 0 ? el("span", { class: "work-chip work-ready" }, [`${row.ready} ready`]) : null,
-          row.inProgress > 0 ? el("span", { class: "work-chip work-inprogress" }, [`${row.inProgress} active`]) : null,
-          row.closed === row.total && row.total > 0 ? el("span", { class: "work-chip work-done" }, ["all done"]) : null,
+          row.ready > 0
+            ? el("span", { class: "work-chip work-ready" }, [`${row.ready} ready`])
+            : null,
+          row.inProgress > 0
+            ? el("span", { class: "work-chip work-inprogress" }, [`${row.inProgress} active`])
+            : null,
+          row.closed === row.total && row.total > 0
+            ? el("span", { class: "work-chip work-done" }, ["all done"])
+            : null,
         ]),
       ]),
       el("td", { class: `activity-${row.lastActivity.colorClass}` }, [
@@ -88,16 +102,20 @@ export async function renderConvoys(): Promise<void> {
     tbody.append(tr);
   });
 
-  container.append(el("table", {}, [
-    el("thead", {}, [el("tr", {}, [
-      el("th", {}, ["Status"]),
-      el("th", {}, ["Convoy"]),
-      el("th", {}, ["Progress"]),
-      el("th", {}, ["Work"]),
-      el("th", {}, ["Activity"]),
-    ])]),
-    tbody,
-  ]));
+  container.append(
+    el("table", {}, [
+      el("thead", {}, [
+        el("tr", {}, [
+          el("th", {}, ["Status"]),
+          el("th", {}, ["Convoy"]),
+          el("th", {}, ["Progress"]),
+          el("th", {}, ["Work"]),
+          el("th", {}, ["Activity"]),
+        ]),
+      ]),
+      tbody,
+    ]),
+  );
 }
 
 export function resetConvoysNoCity(): void {
@@ -114,7 +132,9 @@ export function resetConvoysNoCity(): void {
   byId("convoy-add-issue-form")!.style.display = "none";
   container.style.display = "block";
   clear(container);
-  container.append(el("div", { class: "empty-state" }, [el("p", {}, ["Select a city to view convoys"])]));
+  container.append(
+    el("div", { class: "empty-state" }, [el("p", {}, ["Select a city to view convoys"])]),
+  );
   if (hadSubview) popPause();
 }
 
@@ -142,7 +162,8 @@ async function buildConvoyRow(city: string, convoyID: string): Promise<ConvoyRow
     latest = [latest, child.created_at ?? ""].sort().slice(-1)[0] ?? latest;
   });
   const total = detail.data.progress?.total ?? children.length;
-  const closed = detail.data.progress?.closed ?? children.filter((child) => child.status === "closed").length;
+  const closed =
+    detail.data.progress?.closed ?? children.filter((child) => child.status === "closed").length;
   return {
     id: convoyID,
     title: detail.data.convoy?.title ?? convoyID,
@@ -238,13 +259,18 @@ async function openConvoyDetail(convoyID: string): Promise<void> {
   byId("convoy-issues-loading")!.style.display = "none";
   if (detail.error || !detail.data) {
     byId("convoy-issues-empty")!.style.display = "block";
-    byId("convoy-issues-empty")!.querySelector("p")!.textContent = detail.error?.detail ?? "Failed to load convoy";
+    byId("convoy-issues-empty")!.querySelector("p")!.textContent =
+      detail.error?.detail ?? "Failed to load convoy";
     return;
   }
 
   const total = detail.data.progress?.total ?? detail.data.children?.length ?? 0;
-  const closed = detail.data.progress?.closed ?? detail.data.children?.filter((child) => child.status === "closed").length ?? 0;
-  byId("convoy-detail-status")!.className = `badge ${statusBadgeClass(detail.data.convoy?.status ?? "open")}`;
+  const closed =
+    detail.data.progress?.closed ??
+    detail.data.children?.filter((child) => child.status === "closed").length ??
+    0;
+  byId("convoy-detail-status")!.className =
+    `badge ${statusBadgeClass(detail.data.convoy?.status ?? "open")}`;
   byId("convoy-detail-status")!.textContent = detail.data.convoy?.status ?? "open";
   byId("convoy-detail-progress")!.textContent = `${closed}/${total}`;
 
@@ -258,13 +284,23 @@ async function openConvoyDetail(convoyID: string): Promise<void> {
   }
   children.forEach((child) => {
     const progress = child.assignee ? child.assignee : child.status === "closed" ? "done" : "ready";
-    tbody.append(el("tr", {}, [
-      el("td", { class: "convoy-issue-status" }, [el("span", { class: `badge ${statusBadgeClass(child.status)}` }, [child.status ?? "unknown"])]),
-      el("td", {}, [el("span", { class: "issue-id" }, [child.id ?? ""])]),
-      el("td", { class: "issue-title" }, [child.title ?? child.id ?? ""]),
-      el("td", {}, [child.assignee ? el("span", { class: "badge badge-blue" }, [child.assignee]) : el("span", { class: "badge badge-muted" }, ["Unassigned"])]),
-      el("td", {}, [progress]),
-    ]));
+    tbody.append(
+      el("tr", {}, [
+        el("td", { class: "convoy-issue-status" }, [
+          el("span", { class: `badge ${statusBadgeClass(child.status)}` }, [
+            child.status ?? "unknown",
+          ]),
+        ]),
+        el("td", {}, [el("span", { class: "issue-id" }, [child.id ?? ""])]),
+        el("td", { class: "issue-title" }, [child.title ?? child.id ?? ""]),
+        el("td", {}, [
+          child.assignee
+            ? el("span", { class: "badge badge-blue" }, [child.assignee])
+            : el("span", { class: "badge badge-muted" }, ["Unassigned"]),
+        ]),
+        el("td", {}, [progress]),
+      ]),
+    );
   });
   byId("convoy-issues-table")!.style.display = "table";
 }

@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
-	"os"
 	"path/filepath"
 	"sort"
 	"time"
@@ -20,8 +18,6 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/spf13/cobra"
 )
-
-var orderLogf = log.Printf
 
 func newOrderCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
@@ -189,30 +185,14 @@ older than --stale-after so a fresh in-flight order is not interrupted.`,
 	return cmd
 }
 
-// loadOrders is the common preamble for active order commands: resolve city,
-// load config, scan formula layers, apply overrides, and filter disabled orders.
+// loadOrders is the common preamble for order commands: resolve city,
+// load config, scan formula layers for all orders (city + rig).
 func loadOrders(stderr io.Writer, cmdName string) ([]orders.Order, int) {
-	return loadActiveOrders(stderr, cmdName)
-}
-
-func loadActiveOrders(stderr io.Writer, cmdName string) ([]orders.Order, int) {
-	_, _, aa, code := loadActiveOrdersWithCity(stderr, cmdName)
+	_, _, aa, code := loadOrdersWithCity(stderr, cmdName)
 	return aa, code
 }
 
 func loadOrdersWithCity(stderr io.Writer, cmdName string) (string, *config.City, []orders.Order, int) {
-	return loadActiveOrdersWithCity(stderr, cmdName)
-}
-
-func loadActiveOrdersWithCity(stderr io.Writer, cmdName string) (string, *config.City, []orders.Order, int) {
-	cityPath, cfg, allAA, code := loadAllOrdersWithCity(stderr, cmdName)
-	if code != 0 {
-		return cityPath, cfg, allAA, code
-	}
-	return cityPath, cfg, orders.FilterEnabled(allAA), 0
-}
-
-func loadAllOrdersWithCity(stderr io.Writer, cmdName string) (string, *config.City, []orders.Order, int) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
@@ -227,9 +207,8 @@ func loadAllOrdersWithCity(stderr io.Writer, cmdName string) (string, *config.Ci
 	return cityPath, cfg, aa, code
 }
 
-// loadAllOrders scans city layers + per-rig exclusive layers for all orders
-// and applies configured overrides. Callers that execute or list active work
-// should use loadActiveOrders instead. Rig orders get their Rig field stamped.
+// loadAllOrders scans city layers + per-rig exclusive layers for orders.
+// Rig orders get their Rig field stamped.
 func loadAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, int) {
 	allAA, err := scanAllOrders(cityPath, cfg, stderr, cmdName)
 	if err != nil {
@@ -248,30 +227,11 @@ func loadAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName 
 	return allAA, 0
 }
 
-func loadActiveOrdersForCity(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, int) {
-	allAA, code := loadAllOrders(cityPath, cfg, stderr, cmdName)
-	if code != 0 {
-		return allAA, code
-	}
-	return orders.FilterEnabled(allAA), 0
-}
-
 func scanAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, error) {
-	return scanAllOrdersWithOptions(cityPath, cfg, stderr, cmdName, orders.ScanOptions{})
-}
-
-func scanAllOrdersWithOptions(cityPath string, cfg *config.City, stderr io.Writer, cmdName string, opts orders.ScanOptions) ([]orders.Order, error) {
-	return scanAllOrdersFSWithOptions(fsys.OSFS{}, cityPath, cfg, stderr, cmdName, opts)
-}
-
-func scanAllOrdersFSWithOptions(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string, opts orders.ScanOptions) ([]orders.Order, error) {
-	if cfg == nil {
-		cfg = &config.City{}
-	}
 	// City-level orders.
 	cRoots := cityOrderRoots(cityPath, cfg)
 	cLayers := cityFormulaLayers(cityPath, cfg)
-	cityAA, err := orders.ScanRootsWithOptions(fs, cRoots, cfg.Orders.Skip, opts)
+	cityAA, err := orders.ScanRoots(fsys.OSFS{}, cRoots, cfg.Orders.Skip)
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +243,7 @@ func scanAllOrdersFSWithOptions(fs fsys.FS, cityPath string, cfg *config.City, s
 		if len(exclusive) == 0 {
 			continue
 		}
-		ra, err := orders.ScanRootsWithOptions(fs, rigOrderRoots(cityPath, cfg, exclusive), cfg.Orders.Skip, opts)
+		ra, err := orders.ScanRoots(fsys.OSFS{}, rigOrderRoots(cityPath, cfg, exclusive), cfg.Orders.Skip)
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: rig %s: %v\n", cmdName, rigName, err) //nolint:errcheck // best-effort stderr
 			continue
@@ -425,7 +385,7 @@ func anyOrderHasRig(aa []orders.Order) bool {
 // --- gc order show ---
 
 func cmdOrderShow(name, rig string, stdout, stderr io.Writer) int {
-	_, _, aa, code := loadAllOrdersWithCity(stderr, "gc order show")
+	aa, code := loadOrders(stderr, "gc order show")
 	if code != 0 {
 		return code
 	}
@@ -635,9 +595,8 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, st
 		return 1
 	}
 	tracking, err := store.Create(beads.Bead{
-		Title:     "order:" + scoped,
-		Labels:    []string{"order-run:" + scoped, labelOrderTracking},
-		Ephemeral: true,
+		Title:  "order:" + scoped,
+		Labels: []string{"order-run:" + scoped, labelOrderTracking},
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: creating exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
@@ -652,33 +611,20 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, st
 		return 1
 	}
 
-	result := doOrderRunExecResult(a, cityPath, cfg, stdout, stderr)
+	code := doOrderRunExec(a, cityPath, cfg, stdout, stderr)
 	labels := []string{"exec"}
-	if result.code != 0 {
-		failureLabel := result.failureLabel
-		if failureLabel == "" {
-			failureLabel = "exec-failed"
-		}
-		labels = []string{failureLabel}
+	if code != 0 {
+		labels = []string{"exec-failed"}
 	}
 	if err := store.Update(tracking.ID, beads.UpdateOpts{Labels: labels}); err != nil {
 		fmt.Fprintf(stderr, "gc order run: labeling exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return result.code
+	return code
 }
 
 // doOrderRunExec runs an exec order directly via shell.
 func doOrderRunExec(a orders.Order, cityPath string, cfg *config.City, stdout, stderr io.Writer) int {
-	return doOrderRunExecResult(a, cityPath, cfg, stdout, stderr).code
-}
-
-type orderRunExecResult struct {
-	code         int
-	failureLabel string
-}
-
-func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, stdout, stderr io.Writer) orderRunExecResult {
 	var maxTimeout time.Duration
 	if cfg != nil {
 		maxTimeout = cfg.Orders.MaxTimeoutDuration()
@@ -689,14 +635,10 @@ func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, std
 
 	target, err := resolveOrderExecTarget(cityPath, cfg, a)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc order run: %s\n", redactOrderEnvError(err, os.Environ())) //nolint:errcheck // best-effort stderr
-		return orderRunExecResult{code: 1, failureLabel: "exec-failed"}
+		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
-	env, err := orderExecEnvWithError(cityPath, cfg, target, a)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc order run: %s\n", redactOrderEnvError(err, os.Environ())) //nolint:errcheck // best-effort stderr
-		return orderRunExecResult{code: 1, failureLabel: "exec-env-failed"}
-	}
+	env := orderExecEnv(cityPath, cfg, target, a)
 
 	output, err := shellExecRunner(ctx, a.Exec, target.ScopeRoot, env)
 	if err != nil {
@@ -704,13 +646,13 @@ func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, std
 		if len(output) > 0 {
 			fmt.Fprintf(stderr, "%s", output) //nolint:errcheck
 		}
-		return orderRunExecResult{code: 1, failureLabel: "exec-failed"}
+		return 1
 	}
 	if len(output) > 0 {
 		fmt.Fprintf(stdout, "%s", output) //nolint:errcheck
 	}
 	fmt.Fprintf(stdout, "Order %q executed (exec)\n", a.Name) //nolint:errcheck
-	return orderRunExecResult{code: 0}
+	return 0
 }
 
 // --- gc order check ---
@@ -732,7 +674,22 @@ func cmdOrderCheck(stdout, stderr io.Writer) int {
 // orderLastRunFn returns a LastRunFunc that queries BdStore for the most
 // recent bead labeled order-run:<name>. Returns zero time if never run.
 func orderLastRunFn(store beads.Store) orders.LastRunFunc {
-	return orders.LastRunFuncForStore(store)
+	return func(name string) (time.Time, error) {
+		label := "order-run:" + name
+		results, err := store.List(beads.ListQuery{
+			Label:         label,
+			Limit:         1,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedDesc,
+		})
+		if err != nil {
+			return time.Time{}, err
+		}
+		if len(results) == 0 {
+			return time.Time{}, nil
+		}
+		return results[0].CreatedAt, nil
+	}
 }
 
 // doOrderCheck evaluates triggers for all orders and prints a table.
@@ -852,7 +809,7 @@ func doOrderCheckWithStoresResolverScoped(cityPath string, cfg *config.City, aa 
 // --- gc order history ---
 
 func cmdOrderHistory(name, rig string, stdout, stderr io.Writer) int {
-	cityPath, cfg, aa, code := loadAllOrdersWithCity(stderr, "gc order history")
+	cityPath, cfg, aa, code := loadOrdersWithCity(stderr, "gc order history")
 	if code != 0 {
 		return code
 	}
@@ -918,16 +875,13 @@ func doOrderHistoryWithStoresResolver(name, rig string, aa []orders.Order, resol
 				Label:         label,
 				IncludeClosed: true,
 				Sort:          beads.SortCreatedDesc,
-				TierMode:      beads.TierBoth,
 			})
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order history: %v\n", err) //nolint:errcheck // best-effort stderr
-				if i == 0 && len(results) == 0 {
+				if i == 0 {
 					return 1
 				}
-				if len(results) == 0 {
-					continue
-				}
+				continue
 			}
 			for _, b := range results {
 				key := a.ScopedName() + "\x00" + b.ID + "\x00" + b.CreatedAt.Format(time.RFC3339Nano) + "\x00" + b.Title
@@ -1029,13 +983,9 @@ func bdCursor(store beads.Store, orderName string) (uint64, error) {
 		Label:         "order:" + orderName,
 		IncludeClosed: true,
 		Sort:          beads.SortCreatedDesc,
-		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
-		if len(beadList) == 0 {
-			return 0, fmt.Errorf("listing event cursor beads for order %q: %w", orderName, err)
-		}
-		orderLogf("gc order: event cursor lookup partially failed for %s: %v", orderName, err)
+		return 0, fmt.Errorf("listing event cursor beads for order %q: %w", orderName, err)
 	}
 	labelSets := make([][]string, len(beadList))
 	for i, b := range beadList {

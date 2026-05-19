@@ -6,6 +6,79 @@ import (
 	"time"
 )
 
+type defaultWorkQueryStore interface {
+	DefaultWorkQueryHasReadyWork(targets []string, identities []string, includeRouted bool) (bool, error)
+}
+
+type poolDemandCounterStore interface {
+	PoolDemandCount(template string) (int, error)
+}
+
+type orderRunHotPathStore interface {
+	LastOrderRun(name string) (time.Time, error)
+	HasOpenOrderRun(name string) (bool, error)
+}
+
+func (c *CachingStore) LastOrderRun(name string) (time.Time, error) {
+	if store, ok := c.backing.(orderRunHotPathStore); ok {
+		return store.LastOrderRun(name)
+	}
+	results, err := c.List(ListQuery{
+		Label:         "order-run:" + name,
+		Limit:         1,
+		IncludeClosed: true,
+		Sort:          SortCreatedDesc,
+	})
+	if err != nil {
+		return time.Time{}, err
+	}
+	if len(results) == 0 {
+		return time.Time{}, nil
+	}
+	return results[0].CreatedAt, nil
+}
+
+func (c *CachingStore) HasOpenOrderRun(name string) (bool, error) {
+	if store, ok := c.backing.(orderRunHotPathStore); ok {
+		return store.HasOpenOrderRun(name)
+	}
+	results, err := c.List(ListQuery{
+		Label: "order-run:" + name,
+		Sort:  SortCreatedDesc,
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, b := range results {
+		if b.Status != "closed" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (c *CachingStore) GetSessionBead(id string) (Bead, error) {
+	if store, ok := c.backing.(interface {
+		GetSessionBead(id string) (Bead, error)
+	}); ok {
+		return store.GetSessionBead(id)
+	}
+	return c.Get(id)
+}
+
+func (c *CachingStore) ListSessionBeads() ([]Bead, error) {
+	if store, ok := c.backing.(interface {
+		ListSessionBeads() ([]Bead, error)
+	}); ok {
+		return store.ListSessionBeads()
+	}
+	return c.List(ListQuery{
+		Label:      "gc:session",
+		SkipLabels: true,
+		SkipParent: true,
+	})
+}
+
 // List returns beads matching the query. Active-bead queries are served from
 // cache when available. IncludeClosed queries merge cached active results with
 // backing-store history when possible, preserving partial backing rows when bd
@@ -14,13 +87,6 @@ import (
 func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
-	}
-	// The cache only holds the issues tier (PrimeActive/Prime call the
-	// backing store without a TierMode). Wisps and union queries must
-	// reach the backing store directly so we do not return a stale or
-	// incomplete snapshot of the wisps table.
-	if query.TierMode != TierIssues {
-		return c.backing.List(query)
 	}
 	if query.Live || query.ParentID != "" {
 		c.mu.RLock()
@@ -109,9 +175,6 @@ func liveListQuery(query ListQuery) ListQuery {
 // snapshot; callers must treat this as a read model that may lag writes or
 // reconciliation by one tick.
 func (c *CachingStore) CachedList(query ListQuery) ([]Bead, bool) {
-	if query.TierMode != TierIssues {
-		return nil, false
-	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if c.state != cacheLive && c.state != cachePartial {
@@ -169,7 +232,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 			}
 			continue
 		}
-		if current, keep := c.recentLocalBeadConflictLocked(item.ID, item, now, false); keep {
+		if current, keep := c.recentLocalBeadConflictLocked(item.ID, item, now); keep {
 			if query.Matches(current) {
 				refreshed = append(refreshed, current)
 			}
@@ -182,7 +245,9 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 			}
 		}
 		c.beads[item.ID] = cloneBead(item)
-		c.deps[item.ID] = depsFromBeadFields(item)
+		if !query.SkipParent {
+			c.deps[item.ID] = depsFromBeadFields(item)
+		}
 		delete(c.dirty, item.ID)
 		delete(c.deletedSeq, item.ID)
 		if !recentLocalMutation(c.localBeadAt[item.ID], now) {
@@ -197,7 +262,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq uint64, item
 		if c.deletedSeq[id] > startSeq || c.beadSeq[id] > startSeq {
 			continue
 		}
-		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now, false); keep {
+		if _, keep := c.recentLocalBeadConflictLocked(id, bead, now); keep {
 			continue
 		}
 		c.beads[id] = bead
@@ -351,7 +416,7 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		openBeads := make([]Bead, 0, len(c.beads))
 		for _, b := range c.beads {
 			statusByID[b.ID] = b.Status
-			if b.Status == "open" && !b.Ephemeral && !IsReadyExcludedType(b.Type) {
+			if b.Status == "open" && !IsReadyExcludedType(b.Type) {
 				openBeads = append(openBeads, cloneBead(b))
 			}
 		}
@@ -403,7 +468,7 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	openBeads := make([]Bead, 0, len(c.beads))
 	for _, b := range c.beads {
 		statusByID[b.ID] = b.Status
-		if b.Status == "open" && !b.Ephemeral && !IsReadyExcludedType(b.Type) {
+		if b.Status == "open" && !IsReadyExcludedType(b.Type) {
 			openBeads = append(openBeads, cloneBead(b))
 		}
 	}
@@ -457,7 +522,6 @@ func (c *CachingStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([
 		Limit:         limit,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedDesc,
-		TierMode:      TierModeFromOpts(opts),
 	})
 }
 
@@ -480,7 +544,6 @@ func (c *CachingStore) ListByMetadata(filters map[string]string, limit int, opts
 		Limit:         limit,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedDesc,
-		TierMode:      TierModeFromOpts(opts),
 	})
 }
 
@@ -529,4 +592,26 @@ func (c *CachingStore) DepList(id, direction string) ([]Dep, error) {
 // Ping delegates to the backing store.
 func (c *CachingStore) Ping() error {
 	return c.backing.Ping()
+}
+
+// DefaultWorkQueryHasReadyWork preserves direct backend query capabilities
+// through the cache wrapper. Doltlite uses this to avoid spawning bd for the
+// built-in work_query probe.
+func (c *CachingStore) DefaultWorkQueryHasReadyWork(targets []string, identities []string, includeRouted bool) (bool, error) {
+	direct, ok := c.backing.(defaultWorkQueryStore)
+	if !ok {
+		return false, fmt.Errorf("default work query: backing store does not support direct query")
+	}
+	return direct.DefaultWorkQueryHasReadyWork(targets, identities, includeRouted)
+}
+
+// PoolDemandCount preserves direct backend demand counts through the cache
+// wrapper so controller scale checks observe the same rig-scoped store as
+// work_query probes.
+func (c *CachingStore) PoolDemandCount(template string) (int, error) {
+	direct, ok := c.backing.(poolDemandCounterStore)
+	if !ok {
+		return 0, fmt.Errorf("pool demand count: backing store does not support direct query")
+	}
+	return direct.PoolDemandCount(template)
 }

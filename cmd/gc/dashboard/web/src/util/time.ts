@@ -18,7 +18,11 @@ export function relativeTime(ts: string | undefined | null, now: Date = new Date
 }
 
 // Active-within-window check for badges like "idle / active".
-export function activeWithin(ts: string | undefined | null, windowMs: number, now: Date = new Date()): boolean {
+export function activeWithin(
+  ts: string | undefined | null,
+  windowMs: number,
+  now: Date = new Date(),
+): boolean {
   if (!ts) return false;
   const then = new Date(ts).getTime();
   if (isNaN(then)) return false;

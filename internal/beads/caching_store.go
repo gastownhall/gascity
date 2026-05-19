@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"log"
 	"strings"
 	"sync"
@@ -47,17 +46,6 @@ type CachingStore struct {
 	onChange     func(eventType, beadID string, payload json.RawMessage)
 	cancelFn     context.CancelFunc
 	problemf     func(string)
-	problemLog   map[string]cacheProblemLogState
-
-	// latencyWindow holds the most recent reconciliation bd-list
-	// durations for adaptive cadence decisions. Bounded at
-	// cacheLatencyWindowSize.
-	latencyWindow []time.Duration
-	// latencyDriverActive tracks whether sustained high P95 latency has
-	// promoted the cadence to MEDIUM and is keeping it there. Bead-count
-	// pressure is independent and not reflected here. Demotion happens
-	// once the rolling window has drained — see recomputeCadenceLocked.
-	latencyDriverActive bool
 
 	applyEventBeforeCommitForTest func()
 }
@@ -70,11 +58,6 @@ const (
 	cacheLive
 	cacheDegraded
 )
-
-type cacheProblemLogState struct {
-	lastAt     time.Time
-	suppressed int64
-}
 
 // CacheStats exposes cache freshness, reconciliation, and problem state.
 type CacheStats struct {
@@ -93,23 +76,6 @@ type CacheStats struct {
 	LastProblemAt           time.Time
 	LastProblem             string
 	State                   string
-	// StaggerOffsetMs is the one-shot startup delay applied between Prime
-	// and the first reconciler tick, in milliseconds. Set once when
-	// StartReconciler runs; zero if stagger is disabled.
-	StaggerOffsetMs int64
-	// CurrentReconcileInterval is the effective bd-list cadence the
-	// reconciler is currently using. Composed as max(bead-count cadence,
-	// latency cadence) — see adaptiveIntervalLocked.
-	CurrentReconcileInterval time.Duration
-	// LatencyP95Ms is the P95 of the most recent N=cacheLatencyWindowSize
-	// reconciliation bd-list durations, in milliseconds. Zero until the
-	// window has been filled.
-	LatencyP95Ms float64
-	// CadenceDriver names which input drives the current cadence:
-	// "default" (SMALL, nothing pressuring), "bead-count" (>=1000 beads),
-	// "latency" (P95 above the high-water mark), or "both" (bead count
-	// and latency both push to MEDIUM).
-	CadenceDriver string
 }
 
 const (
@@ -118,72 +84,7 @@ const (
 	cacheReconcileIntervalSmall  = 30 * time.Second
 	cacheReconcileIntervalMedium = 60 * time.Second
 	cacheReconcileIntervalLarge  = 120 * time.Second
-	cacheProblemLogWindow        = time.Minute
-	cacheReconcileFailureBackoff = time.Minute
 )
-
-// StaggerOption configures the deterministic startup stagger applied
-// between Prime and the first reconciler tick. N agents starting in
-// lockstep would otherwise hit the shared dolt server simultaneously;
-// the stagger spreads first-tick load across a 0–30 s window.
-//
-// Construct one via WithStaggerAuto, WithStaggerOff, or
-// WithStaggerFixed at the call site for self-documenting intent. The
-// zero value is equivalent to WithStaggerOff().
-type StaggerOption struct {
-	auto     bool
-	fixed    bool
-	explicit time.Duration
-}
-
-// WithStaggerAuto enables a deterministic per-agent stagger derived
-// from FNV-32a(agentID) mod cacheReconcileIntervalSmall. The stagger
-// is reproducible across runs given the same agent ID.
-func WithStaggerAuto() StaggerOption {
-	return StaggerOption{auto: true}
-}
-
-// WithStaggerOff disables stagger; the reconciler enters its loop with
-// no startup delay. This is the default for tests so existing behavior
-// is preserved.
-func WithStaggerOff() StaggerOption {
-	return StaggerOption{}
-}
-
-// WithStaggerFixed sets an explicit stagger duration regardless of
-// agentID. Negative durations clamp to zero.
-func WithStaggerFixed(d time.Duration) StaggerOption {
-	if d < 0 {
-		d = 0
-	}
-	return StaggerOption{fixed: true, explicit: d}
-}
-
-// resolve returns the concrete stagger duration for this option.
-// agentID is consulted only when the option is WithStaggerAuto.
-func (o StaggerOption) resolve(agentID string) time.Duration {
-	switch {
-	case o.fixed:
-		return o.explicit
-	case o.auto:
-		return computeAutoStagger(agentID)
-	}
-	return 0
-}
-
-// computeAutoStagger hashes agentID with FNV-32a and reduces it modulo
-// cacheReconcileIntervalSmall (in milliseconds). The result lies in
-// [0, cacheReconcileIntervalSmall) and is fully deterministic — no
-// time-seeding — so test runs reproduce.
-func computeAutoStagger(agentID string) time.Duration {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(agentID))
-	modMs := cacheReconcileIntervalSmall.Milliseconds()
-	if modMs <= 0 {
-		return 0
-	}
-	return time.Duration(int64(h.Sum32())%modMs) * time.Millisecond
-}
 
 // NewCachingStore wraps a BdStore with an in-memory read cache.
 // Call Prime() before serving reads, then StartReconciler() for
@@ -226,7 +127,6 @@ func newCachingStore(backing Store, idPrefix string, onChange func(eventType, be
 		beadSeq:     make(map[string]uint64),
 		localBeadAt: make(map[string]time.Time),
 		deletedSeq:  make(map[string]uint64),
-		problemLog:  make(map[string]cacheProblemLogState),
 		onChange:    onChange,
 		problemf: func(msg string) {
 			log.Printf("beads cache: %s", msg)
@@ -326,7 +226,7 @@ func (c *CachingStore) PrimeActive() error {
 				continue
 			}
 		}
-		if _, keep := c.recentLocalBeadConflictLocked(b.ID, b, now, false); keep {
+		if _, keep := c.recentLocalBeadConflictLocked(b.ID, b, now); keep {
 			continue
 		}
 		c.beads[b.ID] = cloneBead(b)
@@ -362,7 +262,7 @@ func (c *CachingStore) Prime(_ context.Context) error {
 	var err error
 	var partialErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		all, err = c.backing.List(ListQuery{AllowScan: true, SkipLabels: true}) // active beads only (default)
+		all, err = c.backing.List(ListQuery{AllowScan: true}) // active beads only (default)
 		if err == nil {
 			break
 		}
@@ -405,7 +305,7 @@ func (c *CachingStore) Prime(_ context.Context) error {
 				if recentLocalMutation(c.localBeadAt[id], now) {
 					c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
 				}
-				if _, keep := c.recentLocalBeadConflictLocked(id, fresh, now, true); keep {
+				if _, keep := c.recentLocalBeadConflictLocked(id, fresh, now); keep {
 					nextBeads[id] = cloneBead(current)
 					if deps, ok := c.deps[id]; ok {
 						nextDeps[id] = cloneDeps(deps)
@@ -457,24 +357,10 @@ func (c *CachingStore) Prime(_ context.Context) error {
 }
 
 // StartReconciler launches watchdog reconciliation. Cancel ctx to stop.
-// The stagger applies a one-time delay between this call and the first
-// reconciler tick (see StaggerOption); agentID is consulted only when
-// stagger is WithStaggerAuto. A single "beads cache: stagger=Nms
-// agent=..." log line is emitted before the loop starts, even when the
-// resolved stagger is zero, so absence is unambiguous.
-func (c *CachingStore) StartReconciler(ctx context.Context, stagger StaggerOption, agentID string) {
+func (c *CachingStore) StartReconciler(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	c.cancelFn = cancel
-
-	offset := stagger.resolve(agentID)
-
-	c.mu.Lock()
-	c.stats.StaggerOffsetMs = offset.Milliseconds()
-	c.mu.Unlock()
-
-	log.Printf("beads cache: stagger=%dms agent=%s", offset.Milliseconds(), agentID)
-
-	go c.reconcileLoop(ctx, offset)
+	go c.reconcileLoop(ctx)
 }
 
 // StopReconciler cancels the background reconciler.
@@ -532,34 +418,12 @@ func (c *CachingStore) recordProblemLocked(op string, err error) {
 		return
 	}
 	msg := fmt.Sprintf("%s: %v", op, err)
-	now := time.Now()
 	c.stats.ProblemCount++
-	c.stats.LastProblemAt = now
+	c.stats.LastProblemAt = time.Now()
 	c.stats.LastProblem = msg
 	if c.problemf != nil {
-		if logMsg, ok := c.problemLogMessageLocked(msg, now); ok {
-			c.problemf(logMsg)
-		}
+		c.problemf(msg)
 	}
-}
-
-func (c *CachingStore) problemLogMessageLocked(msg string, now time.Time) (string, bool) {
-	if c.problemLog == nil {
-		c.problemLog = make(map[string]cacheProblemLogState)
-	}
-	state := c.problemLog[msg]
-	if !state.lastAt.IsZero() && now.Sub(state.lastAt) < cacheProblemLogWindow {
-		state.suppressed++
-		c.problemLog[msg] = state
-		return "", false
-	}
-
-	logMsg := msg
-	if state.suppressed > 0 {
-		logMsg = fmt.Sprintf("%s (suppressed %d duplicate logs)", msg, state.suppressed)
-	}
-	c.problemLog[msg] = cacheProblemLogState{lastAt: now}
-	return logMsg, true
 }
 
 func (c *CachingStore) updateStatsLocked() {
@@ -570,7 +434,6 @@ func (c *CachingStore) updateStatsLocked() {
 	}
 	c.stats.TotalDeps = totalDeps
 	c.stats.SyncFailures = c.syncFailures
-	c.updateCadenceStatsLocked()
 }
 
 func beadIDs(beadMap map[string]Bead) []string {
@@ -589,6 +452,18 @@ func (c *CachingStore) fetchDepsForIDs(ids []string) (map[string][]Dep, bool, er
 
 	if _, ok := c.backing.(*BdStore); ok {
 		return depMap, false, nil
+	}
+	if depStore, ok := c.backing.(interface {
+		DepListBatch([]string) (map[string][]Dep, error)
+	}); ok {
+		batchDeps, err := depStore.DepListBatch(ids)
+		if err != nil {
+			return depMap, false, err
+		}
+		for id, deps := range batchDeps {
+			depMap[id] = cloneDeps(deps)
+		}
+		return depMap, true, nil
 	}
 
 	for _, id := range ids {

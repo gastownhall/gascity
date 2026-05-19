@@ -24,12 +24,12 @@ binaries match a specific version.
 
 Dependencies that need versioning:
 
-| Binary | Source repo | Notes |
-|--------|------------|-------|
-| `gc`   | gascity (this repo) | Built from `./cmd/gc` |
-| `bd`   | beads | Bead store CLI |
-| `br`   | beads_rust | Rust bead store CLI |
-| `wl`   | wasteland | Wasteland CLI (not yet included) |
+| Binary | Source repo         | Notes                            |
+| ------ | ------------------- | -------------------------------- |
+| `gc`   | gascity (this repo) | Built from `./cmd/gc`            |
+| `bd`   | beads               | Bead store CLI                   |
+| `br`   | beads_rust          | Rust bead store CLI              |
+| `wl`   | wasteland           | Wasteland CLI (not yet included) |
 
 ## Option 1: Multi-stage Docker build from source
 
@@ -84,12 +84,14 @@ docker-agent:
 ```
 
 **Pros:**
+
 - Fully reproducible — `deps.env` + Dockerfile is the complete build recipe.
 - Single command produces the image; no manual pre-build steps.
 - Version pinning is visible in version control (diff `deps.env`).
 - Works without a release pipeline.
 
 **Cons:**
+
 - Slower builds (compiles everything from source; mitigated by Docker layer cache
   and BuildKit cache mounts).
 - Needs git clone access to private repos from inside Docker build
@@ -108,11 +110,13 @@ RUN chmod +x /usr/local/bin/gc
 ```
 
 **Pros:**
+
 - Fast builds — downloads pre-compiled binaries.
 - Clear versioning via release tags.
 - Cacheable Docker layers (version in URL acts as cache key).
 
 **Cons:**
+
 - Requires a release pipeline for every dependency (CI to build, tag, publish).
 - Heavier infrastructure commitment upfront.
 - Private repos need auth tokens for artifact download.
@@ -132,11 +136,13 @@ fetch-deps:
 ```
 
 **Pros:**
+
 - Simple; minimal changes to existing Dockerfile.
 - Version pinning via manifest file.
 - Fast iteration (reuse host Go cache).
 
 **Cons:**
+
 - Not self-contained — depends on host having the repos checked out.
 - Reproducibility depends on host state (Go version, module cache).
 - Still `COPY`-based — no provenance in the image itself.
@@ -146,6 +152,7 @@ fetch-deps:
 **Option 1 (multi-stage build from source)** with a version manifest.
 
 Rationale:
+
 - All four dependencies are private Go/Rust projects in active development
   without release pipelines. Option 2 is premature.
 - Option 3 improves the status quo but still depends on host state. The

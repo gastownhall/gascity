@@ -28,13 +28,7 @@ const waitIdleNudgeTimeout = 30 * time.Second
 var ErrStateSync = errors.New("session state sync failed")
 
 // stripResumeFlag removes the resume flag and session key from a command
-// string, returning a command suitable for a fresh start. When the strip
-// is a no-op (the flag/key isn't in cmd, or either argument is empty),
-// the original cmd is returned exactly — TrimSpace only runs when a
-// replacement actually happened. Callers rely on exact equality with
-// the input to detect the no-op case; trimming on a non-replacement
-// path would corrupt that signal when cmd has leading/trailing
-// whitespace.
+// string, returning a command suitable for a fresh start.
 func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
 	if resumeFlag == "" || sessionKey == "" {
 		return cmd
@@ -45,9 +39,6 @@ func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
 	if result == cmd {
 		// Try without the leading space (flag at start of args).
 		result = strings.Replace(cmd, target+" ", "", 1)
-	}
-	if result == cmd {
-		return cmd
 	}
 	return strings.TrimSpace(result)
 }
@@ -83,22 +74,14 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	if b.Metadata["session_key"] == "" {
 		return false, nil
 	}
-	resumeFlag := b.Metadata["resume_flag"]
-	freshCmd := stripResumeFlag(resumeCommand, resumeFlag, b.Metadata["session_key"])
+	freshCmd := stripResumeFlag(resumeCommand, b.Metadata["resume_flag"], b.Metadata["session_key"])
 	if err := m.clearStaleResumeMetadata(id, b); err != nil {
 		if unroute != nil {
 			unroute()
 		}
 		return false, err
 	}
-	// An empty resume_flag means the command was never resume-capable
-	// (e.g. a named-always session whose start command carries no
-	// --resume-style flag). stripResumeFlag is intentionally a no-op in
-	// that case, so refusing to retry would leave the session stuck.
-	// Only treat the no-op as an error when resume_flag was non-empty
-	// but the strip still found nothing — that signals an inconsistency
-	// between the bead metadata and the actual resume command.
-	if resumeFlag != "" && freshCmd == resumeCommand {
+	if freshCmd == resumeCommand {
 		if unroute != nil {
 			unroute()
 		}
@@ -188,7 +171,18 @@ func sessionName(id string, b beads.Bead) string {
 }
 
 func (m *Manager) loadSessionBead(id string, allowClosed bool) (beads.Bead, string, error) {
-	b, err := m.store.Get(id)
+	type sessionBeadGetter interface {
+		GetSessionBead(id string) (beads.Bead, error)
+	}
+	var (
+		b   beads.Bead
+		err error
+	)
+	if getter, ok := m.store.(sessionBeadGetter); ok {
+		b, err = getter.GetSessionBead(id)
+	} else {
+		b, err = m.store.Get(id)
+	}
 	if err != nil {
 		return beads.Bead{}, "", fmt.Errorf("getting session: %w", err)
 	}
@@ -845,6 +839,7 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 	all, err := m.store.List(beads.ListQuery{
 		Label:         LabelSession,
 		IncludeClosed: b.Status == "closed",
+		SkipParent:    true,
 	})
 	if err != nil {
 		return "", fmt.Errorf("listing sessions: %w", err)

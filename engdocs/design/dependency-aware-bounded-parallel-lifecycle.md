@@ -2,13 +2,13 @@
 title: "Dependency-Aware Bounded Parallel Lifecycle"
 ---
 
-| Field | Value |
-|---|---|
-| Status | Implemented |
-| Date | 2026-03-18 |
-| Author(s) | Codex |
-| Issue | N/A |
-| Supersedes | N/A |
+| Field      | Value       |
+| ---------- | ----------- |
+| Status     | Implemented |
+| Date       | 2026-03-18  |
+| Author(s)  | Codex       |
+| Issue      | N/A         |
+| Supersedes | N/A         |
 
 ## Summary
 

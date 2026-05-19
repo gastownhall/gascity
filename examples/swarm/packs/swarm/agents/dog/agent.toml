@@ -1,0 +1,5 @@
+scope = "city"
+nudge = "Check your hook for work assignments."
+idle_timeout = "2h"
+min_active_sessions = 0
+max_active_sessions = 3

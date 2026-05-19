@@ -2,7 +2,6 @@
 title: "Formulas & Molecules"
 ---
 
-
 > Last verified against code: 2026-03-17
 
 ## Summary
@@ -63,45 +62,6 @@ Store.MolCook / Store.MolCookOn
         +--> exec.Store  -> script mol-cook / mol-cook-on
         \--> Mem/File    -> simplified molecule root for tests/tutorials
 ```
-
-### Review Quorum Formula
-
-`internal/bootstrap/packs/core/formulas/mol-review-quorum.toml` is a Gas
-City-owned review quorum formula scaffold. It is a core `graph.v2` formula,
-not a separate lifecycle controller. The graph has exactly two reviewer lanes,
-with lane IDs, providers, models, and dispatch targets supplied by formula
-variables, followed by a configured synthesis step.
-
-The reviewer lane identity and runtime binding are intentionally configured in
-one obvious place: formula vars. `lane_one_id`, `lane_one_provider`,
-`lane_one_model`, `lane_one_target`, `lane_two_id`, `lane_two_provider`,
-`lane_two_model`, and `lane_two_target` are required when the formula is
-instantiated. The synthesis dispatch target is configured separately through
-`synthesis_target`. Each reviewer lane has `[steps.retry] max_attempts = 3` and
-`on_exhausted = "soft_fail"` so transient provider exhaustion degrades quorum
-coverage instead of failing the whole formula. The synthesis step is hard-fail
-because it is responsible for persisting the final durable state.
-
-Reviewer output is structured for future automation. Lanes must write
-`lane_id`, `provider`, `model`, `verdict`, `summary`, `findings_count`,
-`findings`, `evidence`, `usage`, `read_only_enforcement`, `mutations_delta`,
-`failure_class`, and `failure_reason`; synthesis preserves lane provenance and
-writes a
-`review-quorum.summary.v1` output. `internal/reviewquorum` defines the durable
-Go contract and finalizer, but the current formula synthesis step is
-agent-executed and does not call `reviewquorum.Finalize` directly. Future
-`dx-review summarize` compatibility can consume that state, but `dx-review` is
-not the lifecycle owner.
-The summary `findings_count` is deduplicated, top-level `mutations_delta` is
-reserved for synthesis-created changes, and reviewer mutation deltas stay under
-the corresponding lane. Go finalizer lane failures use
-`lane=<lane_id> reason=<stable_reason>` entries joined by `; `; unknown lane
-verdict values are hard contract failures.
-
-Read-only enforcement is defined as a mutation baseline delta. A reviewer must
-record the workspace state before review with `git status --porcelain=v1 -z`
-and compare after review against that baseline; pre-existing tracked changes and
-untracked files do not count as reviewer-created mutations.
 
 ### Resolution
 
@@ -164,36 +124,35 @@ Closed wisps are purged by the controller's wisp GC in
 
 ## Interactions
 
-| Depends on | How |
-|---|---|
-| `internal/config` | Computes formula layers from city, packs, and rigs |
-| `internal/beads` | Instantiates formulas via `MolCook` and `MolCookOn` |
-| `internal/convergence` | Validates convergence-specific formula metadata |
+| Depends on             | How                                                 |
+| ---------------------- | --------------------------------------------------- |
+| `internal/config`      | Computes formula layers from city, packs, and rigs  |
+| `internal/beads`       | Instantiates formulas via `MolCook` and `MolCookOn` |
+| `internal/convergence` | Validates convergence-specific formula metadata     |
 
-| Depended on by | How |
-|---|---|
-| `cmd/gc/cmd_sling.go` | Creates wisps and attached molecules from formulas |
-| `cmd/gc/order_dispatch.go` | Fires formula-backed orders |
-| `cmd/gc/wisp_gc.go` | Purges expired closed molecules |
-| Contributor docs | Reference formula layout and resolution behavior |
+| Depended on by             | How                                                |
+| -------------------------- | -------------------------------------------------- |
+| `cmd/gc/cmd_sling.go`      | Creates wisps and attached molecules from formulas |
+| `cmd/gc/order_dispatch.go` | Fires formula-backed orders                        |
+| `cmd/gc/wisp_gc.go`        | Purges expired closed molecules                    |
+| Contributor docs           | Reference formula layout and resolution behavior   |
 
 ## Code Map
 
-| Path | Responsibility |
-|---|---|
-| `cmd/gc/formula_resolve.go` | Layer winner selection and symlink staging |
-| `cmd/gc/cmd_sling.go` | Formula-backed sling and attached-molecule flows |
-| `cmd/gc/order_dispatch.go` | Formula-backed order dispatch |
-| `cmd/gc/wisp_gc.go` | TTL-based cleanup for closed molecules |
-| `internal/config/config.go` | `FormulaLayers` data shape |
-| `internal/config/pack.go` | `ComputeFormulaLayers()` |
-| `internal/beads/beads.go` | `MolCook` / `MolCookOn` store interface |
-| `internal/beads/bdstore.go` | Production formula instantiation via `bd` |
-| `internal/beads/exec/exec.go` | Script-backed formula instantiation |
-| `internal/beads/memstore.go` | Simplified in-memory molecule creation |
-| `internal/beads/filestore.go` | Persistent wrapper over `MemStore` |
-| `internal/convergence/formula.go` | Convergence-specific formula validation |
-| `internal/bootstrap/packs/core/formulas/mol-review-quorum.toml` | Core two-lane review quorum formula scaffold |
+| Path                              | Responsibility                                   |
+| --------------------------------- | ------------------------------------------------ |
+| `cmd/gc/formula_resolve.go`       | Layer winner selection and symlink staging       |
+| `cmd/gc/cmd_sling.go`             | Formula-backed sling and attached-molecule flows |
+| `cmd/gc/order_dispatch.go`        | Formula-backed order dispatch                    |
+| `cmd/gc/wisp_gc.go`               | TTL-based cleanup for closed molecules           |
+| `internal/config/config.go`       | `FormulaLayers` data shape                       |
+| `internal/config/pack.go`         | `ComputeFormulaLayers()`                         |
+| `internal/beads/beads.go`         | `MolCook` / `MolCookOn` store interface          |
+| `internal/beads/bdstore.go`       | Production formula instantiation via `bd`        |
+| `internal/beads/exec/exec.go`     | Script-backed formula instantiation              |
+| `internal/beads/memstore.go`      | Simplified in-memory molecule creation           |
+| `internal/beads/filestore.go`     | Persistent wrapper over `MemStore`               |
+| `internal/convergence/formula.go` | Convergence-specific formula validation          |
 
 ## Configuration
 
@@ -203,31 +162,6 @@ Formula layers are assembled from:
 - `[formulas].dir` in `city.toml`
 - rig packs
 - `[[rigs]].formulas_dir`
-
-Rig-scoped formula var defaults live on the rig entry itself:
-
-```toml
-[[rigs]]
-name = "mo"
-path = "/home/me/projects/mo"
-
-[rigs.formula_vars]
-test_command = "make test-fast"
-lint_command = "golangci-lint run"
-```
-
-When a formula runs with an agent bound to a rig (via `dir = "mo"` or an
-absolute filesystem path), `BuildSlingFormulaVars` folds these entries into
-the final var map. Precedence (highest wins):
-
-1. Explicit `--var key=value` on the CLI
-2. `rigs.<name>.formula_vars[key]`
-3. Routing-injected defaults (`issue`, `rig_name`, `base_branch`, `target_branch`, ...)
-4. Formula-declared `[vars.<name>].default`
-
-`gc formula show --rig <name>` surfaces active rig defaults as
-`(rig default="...")` next to the var description so operators can verify
-what will actually substitute before dispatch.
 
 Wisp cleanup is configured in `city.toml`:
 

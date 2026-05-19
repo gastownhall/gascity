@@ -14,9 +14,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/gcexec"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 const (
@@ -137,25 +137,6 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 	if !running {
 		return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
 	}
-	if requiresHardRestartInterrupt(b) {
-		piTranscriptPath, err := piPendingTurnPath(b, hints)
-		if err != nil {
-			return err
-		}
-		if err := m.sp.Stop(sessName); err != nil {
-			return fmt.Errorf("stopping session for interrupt replacement: %w", err)
-		}
-		if err := discardPiPendingTurn(piTranscriptPath, hints); err != nil {
-			// Pi must be stopped before transcript truncation so it cannot race the
-			// write. If truncation fails, restart on the dirty transcript; the
-			// caller's retry will repeat this stop-and-discard sequence.
-			if restartErr := m.restoreAfterHardRestartFailureLocked(ctx, id, b, sessName, resumeCommand, hints); restartErr != nil {
-				return fmt.Errorf("%w; additionally failed to restore session: %w", err, restartErr)
-			}
-			return err
-		}
-		return m.restartAndSendLocked(ctx, id, b, sessName, message, resumeCommand, hints)
-	}
 	interruptStartedAt := time.Now()
 	if err := m.stopTurnLocked(b, sessName); err != nil {
 		return err
@@ -192,7 +173,7 @@ func (m *Manager) restartAndSendLocked(ctx context.Context, id string, b beads.B
 	if err := m.waitUntilRunningLocked(ctx, id, sessName, 2*time.Second); err != nil {
 		return err
 	}
-	if waiter, ok := m.sp.(runtime.IdleWaitProvider); ok && waitsForIdleAfterHardRestart(b) {
+	if waiter, ok := m.sp.(runtime.IdleWaitProvider); ok {
 		if err := waiter.WaitForIdle(ctx, sessName, 15*time.Second); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
 			return fmt.Errorf("waiting for restarted session to become idle: %w", err)
 		}
@@ -280,43 +261,38 @@ func (m *Manager) waitForInterruptBoundaryLocked(ctx context.Context, b beads.Be
 	return nil
 }
 
-// ProviderFamilyFromMetadata returns the canonical provider family for session
-// metadata. It prefers metadata stamped at session-bead creation over raw
-// provider names so wrapped custom aliases inherit their built-in family.
+// providerKind returns the canonical provider kind for a session bead.
 // Preference order:
 //  1. builtin_ancestor — stamped from ResolvedProvider.BuiltinAncestor
 //     at session-bead creation for custom providers with explicit
 //     `base = "builtin:..."` (see cmd/gc session-bead creation sites).
 //  2. provider_kind — stamped for command-matched custom aliases
 //     (legacy Phase A auto-inheritance path).
-//  3. provider — normalized through sessionlog.ProviderFamily as a
-//     last-resort fallback.
+//  3. provider — raw provider metadata value as a last-resort fallback.
 //
 // Callers that branch on Claude/Codex/Gemini-family behavior
 // (idle-wait-after-interrupt, soft-escape interrupt, default submit,
 // etc.) consume this helper so wrapped custom aliases inherit the
 // correct family behavior without every call site re-deriving it.
-func ProviderFamilyFromMetadata(meta map[string]string, fallback string) string {
+func providerKindFromMetadata(meta map[string]string, fallback string) string {
 	if ancestor := strings.TrimSpace(meta["builtin_ancestor"]); ancestor != "" {
-		return sessionlog.ProviderFamily(ancestor)
+		return ancestor
 	}
 	if kind := strings.TrimSpace(meta["provider_kind"]); kind != "" {
-		return sessionlog.ProviderFamily(kind)
+		return kind
 	}
 	if provider := strings.TrimSpace(meta["provider"]); provider != "" {
-		return sessionlog.ProviderFamily(provider)
+		return provider
 	}
-	return sessionlog.ProviderFamily(fallback)
+	return strings.TrimSpace(fallback)
 }
 
 func providerKind(b beads.Bead) string {
-	return ProviderFamilyFromMetadata(b.Metadata, "")
+	return providerKindFromMetadata(b.Metadata, "")
 }
 
 func wrappedProviderFamily(b beads.Bead, family string) bool {
-	ancestor := sessionlog.ProviderFamily(b.Metadata["builtin_ancestor"])
-	// Leave provider raw: normalizing it would collapse wrapped aliases such as
-	// "my-pi" onto their family and hide that the provider is wrapped.
+	ancestor := strings.TrimSpace(b.Metadata["builtin_ancestor"])
 	provider := strings.TrimSpace(b.Metadata["provider"])
 	return ancestor == family && provider != "" && provider != family
 }
@@ -329,7 +305,7 @@ func usesSoftEscapeInterrupt(b beads.Bead) bool {
 		return true
 	}
 	switch providerKind(b) {
-	case "codex", "kimi":
+	case "codex":
 		return true
 	default:
 		return false
@@ -344,7 +320,7 @@ func waitsForIdleAfterInterrupt(b beads.Bead) bool {
 		return false
 	}
 	switch providerKind(b) {
-	case "claude", "codex", "gemini", "kimi":
+	case "claude", "codex", "gemini":
 		return true
 	default:
 		return false
@@ -411,78 +387,6 @@ func requiresInterruptBoundaryWait(b beads.Bead) bool {
 		return false
 	}
 	return providerKind(b) == "codex"
-}
-
-func requiresHardRestartInterrupt(b beads.Bead) bool {
-	if transportFromMetadata(b) == "acp" {
-		return false
-	}
-	return providerKind(b) == "pi"
-}
-
-func waitsForIdleAfterHardRestart(b beads.Bead) bool {
-	if transportFromMetadata(b) == "acp" {
-		return false
-	}
-	return providerKind(b) != "pi"
-}
-
-func (m *Manager) restoreAfterHardRestartFailureLocked(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
-	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
-		return err
-	}
-	return m.waitUntilRunningLocked(ctx, id, sessName, 2*time.Second)
-}
-
-func piPendingTurnPath(b beads.Bead, hints runtime.Config) (string, error) {
-	searchPaths := piSessionSearchPaths(hints)
-	workDir := b.Metadata["work_dir"]
-	if sessionKey := strings.TrimSpace(b.Metadata["session_key"]); sessionKey != "" {
-		if path := strings.TrimSpace(sessionlog.FindPiSessionFileByID(searchPaths, workDir, sessionKey)); path != "" {
-			return path, nil
-		}
-		fallback, err := sessionlog.FindPiSessionFileStrict(searchPaths, workDir)
-		if err != nil {
-			if errors.Is(err, sessionlog.ErrAmbiguousPiSessionFile) {
-				return "", fmt.Errorf("resolving pi interrupted transcript for session_key %q workdir %q: %w", sessionKey, workDir, err)
-			}
-			return "", err
-		}
-		if fallback != "" {
-			return "", fmt.Errorf("resolving pi interrupted transcript for session_key %q workdir %q: keyed transcript not found; refusing same-workdir fallback %q", sessionKey, workDir, fallback)
-		}
-		return "", nil
-	}
-	path, err := sessionlog.FindPiSessionFileStrict(searchPaths, workDir)
-	if err != nil {
-		if errors.Is(err, sessionlog.ErrAmbiguousPiSessionFile) {
-			return "", fmt.Errorf("resolving pi interrupted transcript for workdir %q: %w", workDir, err)
-		}
-		return "", err
-	}
-	return strings.TrimSpace(path), nil
-}
-
-func discardPiPendingTurn(path string, hints runtime.Config) error {
-	if strings.TrimSpace(path) == "" {
-		return nil
-	}
-	if err := sessionlog.ResetPiInterruptedTurn(path, strings.TrimSpace(hints.Env["GC_PI_TRANSCRIPT_DIR"])); err != nil {
-		return fmt.Errorf("discarding pi interrupted turn: %w", err)
-	}
-	return nil
-}
-
-func piSessionSearchPaths(hints runtime.Config) []string {
-	var paths []string
-	if dir := strings.TrimSpace(hints.Env["PI_CODING_AGENT_SESSION_DIR"]); dir != "" {
-		paths = append(paths, dir)
-	}
-	if dir := strings.TrimSpace(hints.Env["PI_CODING_AGENT_DIR"]); dir != "" {
-		paths = append(paths, filepath.Join(dir, "sessions"))
-	}
-	paths = append(paths, sessionlog.DefaultPiSearchPaths()...)
-	return paths
 }
 
 func usesImmediateDefaultSubmit(b beads.Bead, resuming ...bool) bool {
@@ -557,7 +461,7 @@ func deferredSubmitAgentKey(b beads.Bead) string {
 
 var (
 	startSessionSubmitPoller      = ensureSessionSubmitPoller
-	sessionSubmitPollerExecutable = os.Executable
+	sessionSubmitPollerExecutable = gcexec.Current
 )
 
 func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
@@ -570,7 +474,7 @@ func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 		if err != nil {
 			return err
 		}
-		if isGoTestExecutable(exe) {
+		if gcexec.IsGoTestExecutable(exe) {
 			return fmt.Errorf("refusing to start nudge poller with Go test binary %q", exe)
 		}
 		cmd := exec.Command(exe, "nudge", "poll", "--city", cityPath, "--session", sessionName, agentName)
@@ -593,10 +497,6 @@ func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 		}
 		return cmd.Process.Release()
 	})
-}
-
-func isGoTestExecutable(path string) bool {
-	return strings.HasSuffix(filepath.Base(path), ".test")
 }
 
 func sessionSubmitPollerPIDPath(cityPath, sessionName string) string {

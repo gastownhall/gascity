@@ -119,6 +119,28 @@ func TestDoEventEmitPayload(t *testing.T) {
 	if evts[0].Payload == nil {
 		t.Fatal("Payload is nil, want JSON")
 	}
+	var got struct {
+		Bead map[string]any `json:"bead"`
+	}
+	if err := json.Unmarshal(evts[0].Payload, &got); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if got.Bead["title"] != "Fix login bug" {
+		t.Errorf("payload bead title = %v, want Fix login bug", got.Bead["title"])
+	}
+}
+
+func TestDoEventEmitPayloadLeavesWrappedBeadPayload(t *testing.T) {
+	ep := events.NewFake()
+
+	payload := `{"bead":{"id":"gc-42","title":"Fix login bug"}}`
+	var stderr bytes.Buffer
+	doEventEmit(ep, events.BeadCreated, "gc-42", "Fix login bug", "polecat", payload, &stderr)
+
+	evts, err := ep.List(events.Filter{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
 	if string(evts[0].Payload) != payload {
 		t.Errorf("Payload = %s, want %s", evts[0].Payload, payload)
 	}

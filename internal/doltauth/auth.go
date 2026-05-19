@@ -31,8 +31,6 @@ func AuthScopeRoot(cityRoot, scopeRoot string, target contract.DoltConnectionTar
 }
 
 // Resolve returns the effective Dolt auth for a scope and target.
-// Ambient BEADS_DOLT_PASSWORD is an intentional fallback for operators and
-// non-bd callers, after scope-local .beads/.env and before credentials files.
 func Resolve(scopeRoot, fallbackUser, host string, port int) Resolved {
 	overridePath := strings.TrimSpace(os.Getenv("BEADS_CREDENTIALS_FILE"))
 	return Resolved{
@@ -43,8 +41,6 @@ func Resolve(scopeRoot, fallbackUser, host string, port int) Resolved {
 }
 
 // ResolveFromEnv returns effective Dolt auth using projected environment values.
-// Projected BEADS_DOLT_PASSWORD is treated like an already-resolved fallback;
-// callers that switch auth scopes must clear stale projected passwords first.
 func ResolveFromEnv(scopeRoot, fallbackUser string, env map[string]string) Resolved {
 	host := strings.TrimSpace(env["GC_DOLT_HOST"])
 	port, ok := projectedPort(env)
@@ -54,16 +50,7 @@ func ResolveFromEnv(scopeRoot, fallbackUser string, env map[string]string) Resol
 	if !ok {
 		port = 0
 	}
-	overridePath := strings.TrimSpace(env["BEADS_CREDENTIALS_FILE"])
-	if overridePath == "" {
-		overridePath = strings.TrimSpace(os.Getenv("BEADS_CREDENTIALS_FILE"))
-	}
-	envPass := strings.TrimSpace(env["BEADS_DOLT_PASSWORD"])
-	return Resolved{
-		User:                    resolveUser(fallbackUser),
-		Password:                resolvePasswordWithEnv(envPass, scopeRoot, host, port, overridePath),
-		CredentialsFileOverride: overridePath,
-	}
+	return Resolve(scopeRoot, fallbackUser, host, port)
 }
 
 func resolveUser(fallbackUser string) string {
@@ -74,20 +61,10 @@ func resolveUser(fallbackUser string) string {
 }
 
 func resolvePassword(scopeRoot, host string, port int, overridePath string) string {
-	return resolvePasswordWithEnv("", scopeRoot, host, port, overridePath)
-}
-
-func resolvePasswordWithEnv(envPass, scopeRoot, host string, port int, overridePath string) string {
 	if pass := strings.TrimSpace(os.Getenv("GC_DOLT_PASSWORD")); pass != "" {
 		return pass
 	}
 	if pass := ReadStoreLocalPassword(scopeRoot); pass != "" {
-		return pass
-	}
-	if envPass != "" {
-		return envPass
-	}
-	if pass := strings.TrimSpace(os.Getenv("BEADS_DOLT_PASSWORD")); pass != "" {
 		return pass
 	}
 	host = strings.TrimSpace(host)

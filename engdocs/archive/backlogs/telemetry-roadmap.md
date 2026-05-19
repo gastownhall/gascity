@@ -94,11 +94,11 @@ gc.drain.transitions.total        Counter    Agent drain lifecycle   2
 
 ## Environment variables
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `GC_OTEL_METRICS_URL` | (none — opt-in) | VictoriaMetrics OTLP push endpoint |
-| `GC_OTEL_LOGS_URL` | (none — opt-in) | VictoriaLogs OTLP insert endpoint |
-| `GC_LOG_BD_OUTPUT` | `false` | Include bd stdout/stderr in OTel logs |
+| Variable              | Default         | Purpose                               |
+| --------------------- | --------------- | ------------------------------------- |
+| `GC_OTEL_METRICS_URL` | (none — opt-in) | VictoriaMetrics OTLP push endpoint    |
+| `GC_OTEL_LOGS_URL`    | (none — opt-in) | VictoriaLogs OTLP insert endpoint     |
+| `GC_LOG_BD_OUTPUT`    | `false`         | Include bd stdout/stderr in OTel logs |
 
 When neither `GC_OTEL_METRICS_URL` nor `GC_OTEL_LOGS_URL` is set, all
 telemetry is disabled and all `Record*` functions are no-ops.

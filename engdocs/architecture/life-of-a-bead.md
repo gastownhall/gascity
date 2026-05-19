@@ -357,28 +357,28 @@ also normalized to open.
 
 ## Code Map
 
-| Phase | Key function | File |
-|---|---|---|
-| Create | `BdStore.Create()` | `internal/beads/bdstore.go` |
-| Create | `exec.Store.Create()` | `internal/beads/exec/exec.go` |
-| Create (molecule) | `Store.MolCook()` / `Store.MolCookOn()` | `internal/beads/beads.go` |
-| Create (mail) | `beadmail.Provider.Send()` | `internal/mail/beadmail/beadmail.go` |
-| Create (convoy) | `doConvoyCreate()` | `cmd/gc/cmd_convoy.go` |
-| Discovery | `cmdHook()` / `doHook()` | `cmd/gc/cmd_hook.go` |
-| Discovery | `EffectiveWorkQuery()` | `internal/config/config.go` |
-| Discovery | `BdStore.Ready()` | `internal/beads/bdstore.go` |
-| Routing | `doSling()` / `doSlingBatch()` | `cmd/gc/cmd_sling.go` |
-| Routing | `EffectiveSlingQuery()` | `internal/config/config.go` |
-| Routing | `instantiateWisp()` | `cmd/gc/cmd_sling.go` |
-| Execution | `BdStore.Update()` | `internal/beads/bdstore.go` |
-| Execution | `BdStore.SetMetadata()` | `internal/beads/bdstore.go` |
-| Execution | provider-managed molecule step beads | `bd` or the configured beads backend |
-| Completion | `BdStore.Close()` | `internal/beads/bdstore.go` |
-| Completion | `doConvoyAutocloseWith()` | `cmd/gc/cmd_convoy.go` |
-| Completion | `doConvoyCheck()` | `cmd/gc/cmd_convoy.go` |
-| Afterlife | `memoryWispGC.runGC()` | `cmd/gc/wisp_gc.go` |
-| Afterlife | `BdStore.Purge()` | `internal/beads/bdstore.go` |
-| Afterlife | `beadmail.Provider.Archive()` | `internal/mail/beadmail/beadmail.go` |
+| Phase             | Key function                            | File                                 |
+| ----------------- | --------------------------------------- | ------------------------------------ |
+| Create            | `BdStore.Create()`                      | `internal/beads/bdstore.go`          |
+| Create            | `exec.Store.Create()`                   | `internal/beads/exec/exec.go`        |
+| Create (molecule) | `Store.MolCook()` / `Store.MolCookOn()` | `internal/beads/beads.go`            |
+| Create (mail)     | `beadmail.Provider.Send()`              | `internal/mail/beadmail/beadmail.go` |
+| Create (convoy)   | `doConvoyCreate()`                      | `cmd/gc/cmd_convoy.go`               |
+| Discovery         | `cmdHook()` / `doHook()`                | `cmd/gc/cmd_hook.go`                 |
+| Discovery         | `EffectiveWorkQuery()`                  | `internal/config/config.go`          |
+| Discovery         | `BdStore.Ready()`                       | `internal/beads/bdstore.go`          |
+| Routing           | `doSling()` / `doSlingBatch()`          | `cmd/gc/cmd_sling.go`                |
+| Routing           | `EffectiveSlingQuery()`                 | `internal/config/config.go`          |
+| Routing           | `instantiateWisp()`                     | `cmd/gc/cmd_sling.go`                |
+| Execution         | `BdStore.Update()`                      | `internal/beads/bdstore.go`          |
+| Execution         | `BdStore.SetMetadata()`                 | `internal/beads/bdstore.go`          |
+| Execution         | provider-managed molecule step beads    | `bd` or the configured beads backend |
+| Completion        | `BdStore.Close()`                       | `internal/beads/bdstore.go`          |
+| Completion        | `doConvoyAutocloseWith()`               | `cmd/gc/cmd_convoy.go`               |
+| Completion        | `doConvoyCheck()`                       | `cmd/gc/cmd_convoy.go`               |
+| Afterlife         | `memoryWispGC.runGC()`                  | `cmd/gc/wisp_gc.go`                  |
+| Afterlife         | `BdStore.Purge()`                       | `internal/beads/bdstore.go`          |
+| Afterlife         | `beadmail.Provider.Archive()`           | `internal/mail/beadmail/beadmail.go` |
 
 ## See Also
 

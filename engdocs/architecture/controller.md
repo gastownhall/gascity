@@ -2,7 +2,6 @@
 title: "Controller"
 ---
 
-
 > Last verified against code: 2026-04-25
 
 ## Summary
@@ -204,57 +203,57 @@ indicate bugs.
 
 ## Interactions
 
-| Depends on | How |
-|---|---|
-| `internal/config` | `LoadWithIncludes()` for config parsing, `DaemonConfig` for loop timing, `Revision()` for reload detection, `WatchDirs()` for fsnotify targets, `ValidateAgents()`/`ValidateRigs()` for validation, `ResolveProvider()` for agent commands. |
-| `internal/runtime` | `Provider` interface for Start/Stop/IsRunning/ListRunning/Interrupt/Peek/SetMeta/GetMeta/ClearScrollback. `ConfigFingerprint()` drives drift detection. |
-| `internal/agent` | `SessionNameFor()` computes session names and `StartupHints` feeds runtime config assembly. |
-| `internal/events` | `Recorder` for emitting lifecycle events. `Provider` for event trigger queries in order dispatch. `NewFileRecorder()` for JSONL persistence. |
-| `internal/beads` | `Store` for order tracking beads. `CommandRunner` for bd CLI invocation. `NewBdStore()` for rig-scoped stores. |
-| `internal/orders` | `Scan()` for order discovery. `CheckTrigger()` for trigger evaluation. |
-| `internal/hooks` | `Install()` for provider-specific agent hooks. `Validate()` for hook name validation. |
-| `cmd/gc/beads_provider_lifecycle.go` | Starts, initializes, health-checks, and shuts down the configured beads backend. |
-| `internal/fsys` | `OSFS{}` filesystem abstraction for testability. |
-| `github.com/fsnotify/fsnotify` | File system watcher for config directory change detection. |
+| Depends on                           | How                                                                                                                                                                                                                                         |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `internal/config`                    | `LoadWithIncludes()` for config parsing, `DaemonConfig` for loop timing, `Revision()` for reload detection, `WatchDirs()` for fsnotify targets, `ValidateAgents()`/`ValidateRigs()` for validation, `ResolveProvider()` for agent commands. |
+| `internal/runtime`                   | `Provider` interface for Start/Stop/IsRunning/ListRunning/Interrupt/Peek/SetMeta/GetMeta/ClearScrollback. `ConfigFingerprint()` drives drift detection.                                                                                     |
+| `internal/agent`                     | `SessionNameFor()` computes session names and `StartupHints` feeds runtime config assembly.                                                                                                                                                 |
+| `internal/events`                    | `Recorder` for emitting lifecycle events. `Provider` for event trigger queries in order dispatch. `NewFileRecorder()` for JSONL persistence.                                                                                                |
+| `internal/beads`                     | `Store` for order tracking beads. `CommandRunner` for bd CLI invocation. `NewBdStore()` for rig-scoped stores.                                                                                                                              |
+| `internal/orders`                    | `Scan()` for order discovery. `CheckTrigger()` for trigger evaluation.                                                                                                                                                                      |
+| `internal/hooks`                     | `Install()` for provider-specific agent hooks. `Validate()` for hook name validation.                                                                                                                                                       |
+| `cmd/gc/beads_provider_lifecycle.go` | Starts, initializes, health-checks, and shuts down the configured beads backend.                                                                                                                                                            |
+| `internal/fsys`                      | `OSFS{}` filesystem abstraction for testability.                                                                                                                                                                                            |
+| `github.com/fsnotify/fsnotify`       | File system watcher for config directory change detection.                                                                                                                                                                                  |
 
-| Depended on by | How |
-|---|---|
-| `cmd/gc/cmd_start.go` | Hidden compatibility entry point: `doStartStandalone()` calls `runController()` in foreground mode. |
-| `cmd/gc/cmd_supervisor.go` | Canonical machine-wide entry point: starts and reconciles one `CityRuntime` per registered city. |
-| `cmd/gc/cmd_stop.go` | `tryStopController()` connects to the Unix socket and sends "stop". |
+| Depended on by             | How                                                                                                 |
+| -------------------------- | --------------------------------------------------------------------------------------------------- |
+| `cmd/gc/cmd_start.go`      | Hidden compatibility entry point: `doStartStandalone()` calls `runController()` in foreground mode. |
+| `cmd/gc/cmd_supervisor.go` | Canonical machine-wide entry point: starts and reconciles one `CityRuntime` per registered city.    |
+| `cmd/gc/cmd_stop.go`       | `tryStopController()` connects to the Unix socket and sends "stop".                                 |
 
 ## Code Map
 
 All controller implementation lives in `cmd/gc/`:
 
-| File | Responsibility |
-|---|---|
-| `cmd/gc/controller.go` | `acquireControllerLock()`, `startControllerSocket()`, `watchConfigDirs()`, `tryReloadConfig()`, `gracefulStopAll()`, `controllerLoop()` compatibility shim, `runController()` |
-| `cmd/gc/city_runtime.go` | `CityRuntime` shared per-city runtime used by both supervisor-managed and standalone controller paths |
-| `cmd/gc/cmd_start.go` | `doStart()` supervisor registration path, `doStartStandalone()` hidden compatibility path, `buildAgents()` closure, `computeSuspendedNames()`, `computePoolSessions()`, `buildIdleTracker()` |
-| `cmd/gc/cmd_supervisor.go` | Machine-wide supervisor lifecycle, registry reconciliation, API hosting, and child `CityRuntime` management |
-| `cmd/gc/cmd_stop.go` | `cmdStop()`, `tryStopController()` (Unix socket IPC), `doStop()`, `gracefulStopAll()` |
-| `cmd/gc/cmd_suspend.go` | `doSuspendCity()` (sets `workspace.suspended` in TOML), `citySuspended()`, `isAgentEffectivelySuspended()` |
-| `cmd/gc/session_reconciler.go` | `reconcileSessionBeads()` bead-driven state machine for desired/live convergence, orphan/suspended drains, crash handling, idle drains, and config-drift repair |
-| `cmd/gc/session_lifecycle_parallel.go` | Dependency-aware bounded parallel session starts and force-stops |
-| `cmd/gc/pool.go` | `evaluatePool()`, `poolAgents()`, `expandSessionSetup()`, `expandDirTemplate()` |
-| `cmd/gc/providers.go` | `newSessionProvider()`, `beadsProvider()`, `newMailProvider()`, `newEventsProvider()` |
-| `cmd/gc/beads_provider_lifecycle.go` | `ensureBeadsProvider()`, `shutdownBeadsProvider()`, `initBeadsForDir()` |
-| `cmd/gc/formula_resolve.go` | `ResolveFormulas()` (layered symlink materialization) |
-| `cmd/gc/wisp_gc.go` | `wispGC` interface, `memoryWispGC` (TTL-based closed molecule purging) |
-| `cmd/gc/order_dispatch.go` | `orderDispatcher` interface, `memoryOrderDispatcher`, `buildOrderDispatcher()` |
-| `cmd/gc/crash_tracker.go` | `crashTracker` interface, `memoryCrashTracker` |
-| `cmd/gc/idle_tracker.go` | `idleTracker` interface, `memoryIdleTracker` |
-| `cmd/gc/cmd_agent_drain.go` | `drainOps` interface, `providerDrainOps` (session metadata-backed drain signals) |
+| File                                   | Responsibility                                                                                                                                                                               |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cmd/gc/controller.go`                 | `acquireControllerLock()`, `startControllerSocket()`, `watchConfigDirs()`, `tryReloadConfig()`, `gracefulStopAll()`, `controllerLoop()` compatibility shim, `runController()`                |
+| `cmd/gc/city_runtime.go`               | `CityRuntime` shared per-city runtime used by both supervisor-managed and standalone controller paths                                                                                        |
+| `cmd/gc/cmd_start.go`                  | `doStart()` supervisor registration path, `doStartStandalone()` hidden compatibility path, `buildAgents()` closure, `computeSuspendedNames()`, `computePoolSessions()`, `buildIdleTracker()` |
+| `cmd/gc/cmd_supervisor.go`             | Machine-wide supervisor lifecycle, registry reconciliation, API hosting, and child `CityRuntime` management                                                                                  |
+| `cmd/gc/cmd_stop.go`                   | `cmdStop()`, `tryStopController()` (Unix socket IPC), `doStop()`, `gracefulStopAll()`                                                                                                        |
+| `cmd/gc/cmd_suspend.go`                | `doSuspendCity()` (sets `workspace.suspended` in TOML), `citySuspended()`, `isAgentEffectivelySuspended()`                                                                                   |
+| `cmd/gc/session_reconciler.go`         | `reconcileSessionBeads()` bead-driven state machine for desired/live convergence, orphan/suspended drains, crash handling, idle drains, and config-drift repair                              |
+| `cmd/gc/session_lifecycle_parallel.go` | Dependency-aware bounded parallel session starts and force-stops                                                                                                                             |
+| `cmd/gc/pool.go`                       | `evaluatePool()`, `poolAgents()`, `expandSessionSetup()`, `expandDirTemplate()`                                                                                                              |
+| `cmd/gc/providers.go`                  | `newSessionProvider()`, `beadsProvider()`, `newMailProvider()`, `newEventsProvider()`                                                                                                        |
+| `cmd/gc/beads_provider_lifecycle.go`   | `ensureBeadsProvider()`, `shutdownBeadsProvider()`, `initBeadsForDir()`                                                                                                                      |
+| `cmd/gc/formula_resolve.go`            | `ResolveFormulas()` (layered symlink materialization)                                                                                                                                        |
+| `cmd/gc/wisp_gc.go`                    | `wispGC` interface, `memoryWispGC` (TTL-based closed molecule purging)                                                                                                                       |
+| `cmd/gc/order_dispatch.go`             | `orderDispatcher` interface, `memoryOrderDispatcher`, `buildOrderDispatcher()`                                                                                                               |
+| `cmd/gc/crash_tracker.go`              | `crashTracker` interface, `memoryCrashTracker`                                                                                                                                               |
+| `cmd/gc/idle_tracker.go`               | `idleTracker` interface, `memoryIdleTracker`                                                                                                                                                 |
+| `cmd/gc/cmd_agent_drain.go`            | `drainOps` interface, `providerDrainOps` (session metadata-backed drain signals)                                                                                                             |
 
 Supporting packages:
 
-| Package | Role |
-|---|---|
-| `internal/config/config.go` | `DaemonConfig` struct and duration accessors |
-| `internal/config/revision.go` | `Revision()` SHA-256 bundle hash, `WatchDirs()` |
-| `internal/config/pack.go` | Pack expansion during `LoadWithIncludes()` |
-| `internal/runtime/fingerprint.go` | `ConfigFingerprint()` for drift detection |
+| Package                           | Role                                            |
+| --------------------------------- | ----------------------------------------------- |
+| `internal/config/config.go`       | `DaemonConfig` struct and duration accessors    |
+| `internal/config/revision.go`     | `Revision()` SHA-256 bundle hash, `WatchDirs()` |
+| `internal/config/pack.go`         | Pack expansion during `LoadWithIncludes()`      |
+| `internal/runtime/fingerprint.go` | `ConfigFingerprint()` for drift detection       |
 
 ## Configuration
 
@@ -303,19 +302,19 @@ suspended = false           # when true, no agents are started
 
 Controller tests use in-memory fakes and require no external infrastructure:
 
-| Test file | Coverage |
-|---|---|
-| `cmd/gc/controller_test.go` | Controller loop tick behavior, config reload, dirty flag, fsnotify debounce, tracker rebuild on reload, order dispatch integration |
-| `cmd/gc/session_reconciler_test.go` | Session reconciliation states, zombie capture, crash quarantine integration, idle drains, pool drain, suspended session handling, orphan cleanup |
-| `cmd/gc/session_lifecycle_parallel_test.go` | Dependency-aware bounded parallel starts and force-stops |
-| `cmd/gc/pool_test.go` | `evaluatePool()` (clamping, error handling), `poolAgents()` (naming, deep-copy), `expandSessionSetup()`, `expandDirTemplate()` |
-| `cmd/gc/formula_resolve_test.go` | Layer priority, symlink creation/update/cleanup, idempotence, real file preservation |
-| `cmd/gc/wisp_gc_test.go` | TTL-based purging, `shouldRun()` interval, empty list handling |
-| `cmd/gc/order_dispatch_test.go` | Trigger evaluation, exec dispatch, wisp dispatch, tracking bead lifecycle, timeout capping, rig-scoped orders |
-| `cmd/gc/cmd_start_test.go` | Supervisor registration path, hidden foreground compatibility mode, existing-city validation, provider resolution |
-| `cmd/gc/cmd_supervisor_test.go` | Supervisor lifecycle, status reporting, service file generation |
-| `cmd/gc/cmd_suspend_test.go` | Suspend/resume TOML mutation, inheritance hierarchy |
-| `cmd/gc/beads_provider_lifecycle_test.go` | Provider ensure/shutdown/init lifecycle |
+| Test file                                   | Coverage                                                                                                                                         |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `cmd/gc/controller_test.go`                 | Controller loop tick behavior, config reload, dirty flag, fsnotify debounce, tracker rebuild on reload, order dispatch integration               |
+| `cmd/gc/session_reconciler_test.go`         | Session reconciliation states, zombie capture, crash quarantine integration, idle drains, pool drain, suspended session handling, orphan cleanup |
+| `cmd/gc/session_lifecycle_parallel_test.go` | Dependency-aware bounded parallel starts and force-stops                                                                                         |
+| `cmd/gc/pool_test.go`                       | `evaluatePool()` (clamping, error handling), `poolAgents()` (naming, deep-copy), `expandSessionSetup()`, `expandDirTemplate()`                   |
+| `cmd/gc/formula_resolve_test.go`            | Layer priority, symlink creation/update/cleanup, idempotence, real file preservation                                                             |
+| `cmd/gc/wisp_gc_test.go`                    | TTL-based purging, `shouldRun()` interval, empty list handling                                                                                   |
+| `cmd/gc/order_dispatch_test.go`             | Trigger evaluation, exec dispatch, wisp dispatch, tracking bead lifecycle, timeout capping, rig-scoped orders                                    |
+| `cmd/gc/cmd_start_test.go`                  | Supervisor registration path, hidden foreground compatibility mode, existing-city validation, provider resolution                                |
+| `cmd/gc/cmd_supervisor_test.go`             | Supervisor lifecycle, status reporting, service file generation                                                                                  |
+| `cmd/gc/cmd_suspend_test.go`                | Suspend/resume TOML mutation, inheritance hierarchy                                                                                              |
+| `cmd/gc/beads_provider_lifecycle_test.go`   | Provider ensure/shutdown/init lifecycle                                                                                                          |
 
 All tests use `session.NewFake()`, `events.Discard`, and stubbed
 `ExecRunner`/`CommandRunner` functions. See `TESTING.md` for the overall

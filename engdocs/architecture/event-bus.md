@@ -2,7 +2,6 @@
 title: "Event Bus"
 ---
 
-
 > Last verified against code: 2026-04-25
 
 ## Summary
@@ -214,44 +213,44 @@ are enforced by the conformance suite in
 
 ## Interactions
 
-| Depends on | How |
-|---|---|
-| `encoding/json` | All serialization uses standard library JSON |
-| `context` | Watch and Watcher use contexts for cancellation |
+| Depends on                          | How                                                                 |
+| ----------------------------------- | ------------------------------------------------------------------- |
+| `encoding/json`                     | All serialization uses standard library JSON                        |
+| `context`                           | Watch and Watcher use contexts for cancellation                     |
 | (no internal Gas City dependencies) | Event Bus is a pure Layer 0-1 primitive with no upward dependencies |
 
-| Depended on by | How |
-|---|---|
-| `cmd/gc/controller.go` | Records `controller.started` and `controller.stopped` events at lifecycle boundaries; passes `Recorder` to reconciliation and shutdown |
-| `cmd/gc/session_lifecycle_parallel.go` | Records `session.woke` and parallel lifecycle `session.stopped` events (renamed from `agent.*` by `be8debd8`) |
-| `cmd/gc/session_reconciler.go` | Records `session.crashed`, `session.draining`, `session.idle_killed`, `session.stopped`, and `session.updated` while reconciling session beads |
-| `cmd/gc/cmd_runtime_drain.go` | Records manual `session.draining` and `session.undrained` events |
-| `cmd/gc/cmd_handoff.go` | Records handoff-related `session.draining` and `session.stopped` events |
-| `cmd/gc/order_dispatch.go` | Records `order.fired`, `order.completed`, `order.failed` events during order dispatch |
-| `cmd/gc/cmd_events.go` | CLI `gc events` command: reads and displays events with filtering (`--type`, `--since`), watch mode (`--watch`), and sequence query (`--seq`) |
-| `cmd/gc/cmd_event_emit.go` | CLI `gc event emit` command: records custom events from scripts and bd hooks (best-effort, always exits 0) |
-| `cmd/gc/cmd_agent.go` | Records session lifecycle events during start/stop/restart operations |
-| `cmd/gc/cmd_suspend.go` | Records `city.suspended` and `city.resumed` events |
-| `cmd/gc/cmd_mail.go` | Records CLI `mail.*` events for send, read, archive, reply, mark-read/unread, and delete operations |
-| `cmd/gc/cmd_convoy.go` | Records `convoy.created` and `convoy.closed` events |
-| `internal/orders/triggers.go` | Event triggers query the Provider via `List(Filter{Type, AfterSeq})` to check if matching events exist since the last cursor position |
+| Depended on by                         | How                                                                                                                                            |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cmd/gc/controller.go`                 | Records `controller.started` and `controller.stopped` events at lifecycle boundaries; passes `Recorder` to reconciliation and shutdown         |
+| `cmd/gc/session_lifecycle_parallel.go` | Records `session.woke` and parallel lifecycle `session.stopped` events (renamed from `agent.*` by `be8debd8`)                                  |
+| `cmd/gc/session_reconciler.go`         | Records `session.crashed`, `session.draining`, `session.idle_killed`, `session.stopped`, and `session.updated` while reconciling session beads |
+| `cmd/gc/cmd_runtime_drain.go`          | Records manual `session.draining` and `session.undrained` events                                                                               |
+| `cmd/gc/cmd_handoff.go`                | Records handoff-related `session.draining` and `session.stopped` events                                                                        |
+| `cmd/gc/order_dispatch.go`             | Records `order.fired`, `order.completed`, `order.failed` events during order dispatch                                                          |
+| `cmd/gc/cmd_events.go`                 | CLI `gc events` command: reads and displays events with filtering (`--type`, `--since`), watch mode (`--watch`), and sequence query (`--seq`)  |
+| `cmd/gc/cmd_event_emit.go`             | CLI `gc event emit` command: records custom events from scripts and bd hooks (best-effort, always exits 0)                                     |
+| `cmd/gc/cmd_agent.go`                  | Records session lifecycle events during start/stop/restart operations                                                                          |
+| `cmd/gc/cmd_suspend.go`                | Records `city.suspended` and `city.resumed` events                                                                                             |
+| `cmd/gc/cmd_mail.go`                   | Records CLI `mail.*` events for send, read, archive, reply, mark-read/unread, and delete operations                                            |
+| `cmd/gc/cmd_convoy.go`                 | Records `convoy.created` and `convoy.closed` events                                                                                            |
+| `internal/orders/triggers.go`          | Event triggers query the Provider via `List(Filter{Type, AfterSeq})` to check if matching events exist since the last cursor position          |
 
 ## Code Map
 
-| Path | Description |
-|---|---|
-| `internal/events/events.go` | Event struct, Recorder interface, Provider interface, Watcher interface, event type constants, Discard sentinel |
-| `internal/events/recorder.go` | FileRecorder: JSONL file-backed Provider with O_APPEND + mutex; fileWatcher with 250ms polling |
-| `internal/events/reader.go` | Filter struct, ReadAll, ReadFiltered, ReadLatestSeq, ReadFrom (byte-offset incremental reading) |
-| `internal/events/fake.go` | Fake: in-memory Provider for testing with channel-based watcher notification; FailFake: error-returning variant |
-| `internal/events/exec/exec.go` | exec.Provider: delegates all operations to a user-supplied script via fork/exec with JSON wire protocol |
-| `internal/events/exec/exec_test.go` | exec.Provider tests including stateful mock script, conformance suite, timeout, and error handling |
-| `internal/events/eventstest/conformance.go` | RunProviderTests: 20+ subtests that any Provider must pass; RunConcurrencyTests: concurrent recording safety |
-| `internal/events/conformance_test.go` | Wires FileRecorder and Fake into the conformance suite |
-| `internal/events/events_test.go` | FileRecorder-specific tests: write, payload round-trip, monotonic seq, concurrent safety, seq resume, timestamp handling |
-| `cmd/gc/providers.go` | eventsProviderName: resolution logic (GC_EVENTS env -> city.toml -> default); newEventsProvider: factory function |
-| `cmd/gc/cmd_events.go` | `gc events` CLI: list, filter, watch, payload-match, seq query |
-| `cmd/gc/cmd_event_emit.go` | `gc event emit` CLI: best-effort custom event recording |
+| Path                                        | Description                                                                                                              |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `internal/events/events.go`                 | Event struct, Recorder interface, Provider interface, Watcher interface, event type constants, Discard sentinel          |
+| `internal/events/recorder.go`               | FileRecorder: JSONL file-backed Provider with O_APPEND + mutex; fileWatcher with 250ms polling                           |
+| `internal/events/reader.go`                 | Filter struct, ReadAll, ReadFiltered, ReadLatestSeq, ReadFrom (byte-offset incremental reading)                          |
+| `internal/events/fake.go`                   | Fake: in-memory Provider for testing with channel-based watcher notification; FailFake: error-returning variant          |
+| `internal/events/exec/exec.go`              | exec.Provider: delegates all operations to a user-supplied script via fork/exec with JSON wire protocol                  |
+| `internal/events/exec/exec_test.go`         | exec.Provider tests including stateful mock script, conformance suite, timeout, and error handling                       |
+| `internal/events/eventstest/conformance.go` | RunProviderTests: 20+ subtests that any Provider must pass; RunConcurrencyTests: concurrent recording safety             |
+| `internal/events/conformance_test.go`       | Wires FileRecorder and Fake into the conformance suite                                                                   |
+| `internal/events/events_test.go`            | FileRecorder-specific tests: write, payload round-trip, monotonic seq, concurrent safety, seq resume, timestamp handling |
+| `cmd/gc/providers.go`                       | eventsProviderName: resolution logic (GC_EVENTS env -> city.toml -> default); newEventsProvider: factory function        |
+| `cmd/gc/cmd_events.go`                      | `gc events` CLI: list, filter, watch, payload-match, seq query                                                           |
+| `cmd/gc/cmd_event_emit.go`                  | `gc event emit` CLI: best-effort custom event recording                                                                  |
 
 ### Event Type Constants
 
@@ -259,53 +258,53 @@ All event type constants in `events.KnownEventTypes` are defined in
 `internal/events/events.go` and must have a registered payload for the
 API/SSE projection:
 
-| Constant | Value | Emitted by |
-|---|---|---|
-| `SessionWoke` | `session.woke` | `cmd/gc/session_lifecycle_parallel.go` when a reconciler start succeeds |
-| `SessionStopped` | `session.stopped` | `cmd/gc/session_lifecycle_parallel.go`, `cmd/gc/session_reconciler.go`, `cmd/gc/controller.go`, `cmd/gc/cmd_handoff.go`, `cmd/gc/cmd_session.go` |
-| `SessionCrashed` | `session.crashed` | `cmd/gc/session_reconciler.go` when a runtime exists but the expected child process is gone |
-| `SessionDraining` | `session.draining` | `cmd/gc/session_reconciler.go`, `cmd/gc/cmd_runtime_drain.go`, `cmd/gc/cmd_handoff.go` |
-| `SessionUndrained` | `session.undrained` | `cmd/gc/cmd_runtime_drain.go` |
-| `SessionQuarantined` | `session.quarantined` | Registered/reserved; no production emitter today |
-| `SessionIdleKilled` | `session.idle_killed` | `cmd/gc/session_reconciler.go` when idle timeout handling stops a session |
-| `SessionSuspended` | `session.suspended` | Registered/reserved; no production emitter today |
-| `SessionUpdated` | `session.updated` | `cmd/gc/session_reconciler.go` on live-only config drift repair |
-| `BeadCreated` | `bead.created` | Bead creation hooks |
-| `BeadClosed` | `bead.closed` | Bead close hooks |
-| `BeadUpdated` | `bead.updated` | Bead update hooks |
-| `MailSent` | `mail.sent` | Mail send/API handlers and handoff command |
-| `MailRead` | `mail.read` | Mail read command |
-| `MailArchived` | `mail.archived` | Mail archive command and API handler |
-| `MailMarkedRead` | `mail.marked_read` | Mail mark-read command and API handler |
-| `MailMarkedUnread` | `mail.marked_unread` | Mail mark-unread command and API handler |
-| `MailReplied` | `mail.replied` | Mail reply command and API handler |
-| `MailDeleted` | `mail.deleted` | Mail delete command and API handler |
-| `ConvoyCreated` | `convoy.created` | Convoy creation |
-| `ConvoyClosed` | `convoy.closed` | Convoy close |
-| `ControllerStarted` | `controller.started` | Controller startup |
-| `ControllerStopped` | `controller.stopped` | Controller shutdown |
-| `CitySuspended` | `city.suspended` | City suspend command |
-| `CityResumed` | `city.resumed` | City resume command |
-| `RequestResultCityCreate` | `request.result.city.create` | Supervisor/API city create completion |
-| `RequestResultCityUnregister` | `request.result.city.unregister` | Supervisor city unregister completion |
-| `RequestResultSessionCreate` | `request.result.session.create` | API async session create completion |
-| `RequestResultSessionMessage` | `request.result.session.message` | API async session message completion |
-| `RequestResultSessionSubmit` | `request.result.session.submit` | API async session submit completion |
-| `RequestFailed` | `request.failed` | Supervisor/API async request failure handlers |
-| `CityCreated` | `city.created` | City init lifecycle diagnostics |
-| `CityUnregisterRequested` | `city.unregister_requested` | City unregister lifecycle diagnostics |
-| `OrderFired` | `order.fired` | Order dispatch when a trigger is due |
-| `OrderCompleted` | `order.completed` | Order dispatch on successful completion |
-| `OrderFailed` | `order.failed` | Order dispatch on failure |
-| `ProviderSwapped` | `provider.swapped` | Controller provider-swap reload path |
-| `WorkerOperation` | `worker.operation` | Worker session handle and runtime handle operation tracing |
-| `ExtMsgBound` | `extmsg.bound` | External messaging bind handler |
-| `ExtMsgUnbound` | `extmsg.unbound` | External messaging unbind handler |
-| `ExtMsgGroupCreated` | `extmsg.group_created` | External messaging group ensure handler |
-| `ExtMsgAdapterAdded` | `extmsg.adapter_added` | External messaging adapter registration handler |
-| `ExtMsgAdapterRemoved` | `extmsg.adapter_removed` | External messaging adapter unregister handler |
-| `ExtMsgInbound` | `extmsg.inbound` | External messaging inbound adapter pipeline |
-| `ExtMsgOutbound` | `extmsg.outbound` | External messaging outbound adapter pipeline |
+| Constant                      | Value                            | Emitted by                                                                                                                                       |
+| ----------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `SessionWoke`                 | `session.woke`                   | `cmd/gc/session_lifecycle_parallel.go` when a reconciler start succeeds                                                                          |
+| `SessionStopped`              | `session.stopped`                | `cmd/gc/session_lifecycle_parallel.go`, `cmd/gc/session_reconciler.go`, `cmd/gc/controller.go`, `cmd/gc/cmd_handoff.go`, `cmd/gc/cmd_session.go` |
+| `SessionCrashed`              | `session.crashed`                | `cmd/gc/session_reconciler.go` when a runtime exists but the expected child process is gone                                                      |
+| `SessionDraining`             | `session.draining`               | `cmd/gc/session_reconciler.go`, `cmd/gc/cmd_runtime_drain.go`, `cmd/gc/cmd_handoff.go`                                                           |
+| `SessionUndrained`            | `session.undrained`              | `cmd/gc/cmd_runtime_drain.go`                                                                                                                    |
+| `SessionQuarantined`          | `session.quarantined`            | Registered/reserved; no production emitter today                                                                                                 |
+| `SessionIdleKilled`           | `session.idle_killed`            | `cmd/gc/session_reconciler.go` when idle timeout handling stops a session                                                                        |
+| `SessionSuspended`            | `session.suspended`              | Registered/reserved; no production emitter today                                                                                                 |
+| `SessionUpdated`              | `session.updated`                | `cmd/gc/session_reconciler.go` on live-only config drift repair                                                                                  |
+| `BeadCreated`                 | `bead.created`                   | Bead creation hooks                                                                                                                              |
+| `BeadClosed`                  | `bead.closed`                    | Bead close hooks                                                                                                                                 |
+| `BeadUpdated`                 | `bead.updated`                   | Bead update hooks                                                                                                                                |
+| `MailSent`                    | `mail.sent`                      | Mail send/API handlers and handoff command                                                                                                       |
+| `MailRead`                    | `mail.read`                      | Mail read command                                                                                                                                |
+| `MailArchived`                | `mail.archived`                  | Mail archive command and API handler                                                                                                             |
+| `MailMarkedRead`              | `mail.marked_read`               | Mail mark-read command and API handler                                                                                                           |
+| `MailMarkedUnread`            | `mail.marked_unread`             | Mail mark-unread command and API handler                                                                                                         |
+| `MailReplied`                 | `mail.replied`                   | Mail reply command and API handler                                                                                                               |
+| `MailDeleted`                 | `mail.deleted`                   | Mail delete command and API handler                                                                                                              |
+| `ConvoyCreated`               | `convoy.created`                 | Convoy creation                                                                                                                                  |
+| `ConvoyClosed`                | `convoy.closed`                  | Convoy close                                                                                                                                     |
+| `ControllerStarted`           | `controller.started`             | Controller startup                                                                                                                               |
+| `ControllerStopped`           | `controller.stopped`             | Controller shutdown                                                                                                                              |
+| `CitySuspended`               | `city.suspended`                 | City suspend command                                                                                                                             |
+| `CityResumed`                 | `city.resumed`                   | City resume command                                                                                                                              |
+| `RequestResultCityCreate`     | `request.result.city.create`     | Supervisor/API city create completion                                                                                                            |
+| `RequestResultCityUnregister` | `request.result.city.unregister` | Supervisor city unregister completion                                                                                                            |
+| `RequestResultSessionCreate`  | `request.result.session.create`  | API async session create completion                                                                                                              |
+| `RequestResultSessionMessage` | `request.result.session.message` | API async session message completion                                                                                                             |
+| `RequestResultSessionSubmit`  | `request.result.session.submit`  | API async session submit completion                                                                                                              |
+| `RequestFailed`               | `request.failed`                 | Supervisor/API async request failure handlers                                                                                                    |
+| `CityCreated`                 | `city.created`                   | City init lifecycle diagnostics                                                                                                                  |
+| `CityUnregisterRequested`     | `city.unregister_requested`      | City unregister lifecycle diagnostics                                                                                                            |
+| `OrderFired`                  | `order.fired`                    | Order dispatch when a trigger is due                                                                                                             |
+| `OrderCompleted`              | `order.completed`                | Order dispatch on successful completion                                                                                                          |
+| `OrderFailed`                 | `order.failed`                   | Order dispatch on failure                                                                                                                        |
+| `ProviderSwapped`             | `provider.swapped`               | Controller provider-swap reload path                                                                                                             |
+| `WorkerOperation`             | `worker.operation`               | Worker session handle and runtime handle operation tracing                                                                                       |
+| `ExtMsgBound`                 | `extmsg.bound`                   | External messaging bind handler                                                                                                                  |
+| `ExtMsgUnbound`               | `extmsg.unbound`                 | External messaging unbind handler                                                                                                                |
+| `ExtMsgGroupCreated`          | `extmsg.group_created`           | External messaging group ensure handler                                                                                                          |
+| `ExtMsgAdapterAdded`          | `extmsg.adapter_added`           | External messaging adapter registration handler                                                                                                  |
+| `ExtMsgAdapterRemoved`        | `extmsg.adapter_removed`         | External messaging adapter unregister handler                                                                                                    |
+| `ExtMsgInbound`               | `extmsg.inbound`                 | External messaging inbound adapter pipeline                                                                                                      |
+| `ExtMsgOutbound`              | `extmsg.outbound`                | External messaging outbound adapter pipeline                                                                                                     |
 
 ## Configuration
 
@@ -336,6 +335,7 @@ is a complete, self-contained JSON object:
 ```
 
 The JSONL format provides:
+
 - **Append-only writes** -- new events are appended without reading or
   rewriting the file
 - **Crash resilience** -- partial writes (truncated last line) are
@@ -351,13 +351,13 @@ The exec provider (`exec:<script>`) delegates operations to a
 user-supplied script. The script receives the operation name as its
 first argument:
 
-| Operation | Script invocation | Stdin | Stdout |
-|---|---|---|---|
-| `ensure-running` | `script ensure-running` | (none) | (ignored) |
-| `record` | `script record` | JSON event | (ignored) |
-| `list` | `script list` | JSON filter | JSON array of events |
-| `latest-seq` | `script latest-seq` | (none) | Integer |
-| `watch` | `script watch <afterSeq>` | (none) | NDJSON stream |
+| Operation        | Script invocation         | Stdin       | Stdout               |
+| ---------------- | ------------------------- | ----------- | -------------------- |
+| `ensure-running` | `script ensure-running`   | (none)      | (ignored)            |
+| `record`         | `script record`           | JSON event  | (ignored)            |
+| `list`           | `script list`             | JSON filter | JSON array of events |
+| `latest-seq`     | `script latest-seq`       | (none)      | Integer              |
+| `watch`          | `script watch <afterSeq>` | (none)      | NDJSON stream        |
 
 Exit code 2 means "unknown operation" and is treated as success
 (forward compatible). `ensure-running` is called once per provider

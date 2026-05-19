@@ -13,9 +13,5 @@ export default defineConfig({
     path: "./src/generated",
     postProcess: ["prettier"],
   },
-  plugins: [
-    "@hey-api/client-fetch",
-    "@hey-api/typescript",
-    "@hey-api/sdk",
-  ],
+  plugins: ["@hey-api/client-fetch", "@hey-api/typescript", "@hey-api/sdk"],
 });

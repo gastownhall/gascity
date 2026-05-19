@@ -14,9 +14,9 @@ metadata:
 spec:
   type: ClusterIP
   ports:
-  - port: 8765
-    targetPort: 8765
-    protocol: TCP
-    name: http
+    - port: 8765
+      targetPort: 8765
+      protocol: TCP
+      name: http
   selector:
     app: mcp-mail

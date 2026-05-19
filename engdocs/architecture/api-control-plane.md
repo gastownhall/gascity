@@ -215,8 +215,8 @@ machinery. This principle forbids three anti-patterns specifically:
   values whose types are not schema-registered — hides the shape
   from the spec.
 
-The test a reviewer applies: *is there any line in your code that
-produces JSON-shaped output from non-typed or map-typed input?* If
+The test a reviewer applies: _is there any line in your code that
+produces JSON-shaped output from non-typed or map-typed input?_ If
 yes, violation. If every JSON byte comes from `encoder.Encode` of a
 typed, schema-registered struct, the principle holds.
 
@@ -551,15 +551,15 @@ else.
 
 Skipping any step lands on a CI failure, not a production bug:
 
-| Miss | Caught by |
-|---|---|
-| Spec not regenerated after Go-type change | `TestOpenAPISpecInSync` |
-| Generated Go client out of sync with spec | `TestGeneratedClientInSync` |
-| Handler response field undeclared in spec | Layer 1 response-validation tests |
-| Spec/client method-shape drift | Layer 2 round-trip tests (`genclient_roundtrip_test.go`) |
-| End-to-end binary wire regression | Layer 3 integration tests (`//go:build integration`) |
-| New event-type constant without registered payload | `TestEveryKnownEventTypeHasRegisteredPayload` |
-| Hard-coded SPA `/v0/...` path outside typed client | TypeScript build (`satisfies SpecPath` in `api.ts`) |
+| Miss                                               | Caught by                                                |
+| -------------------------------------------------- | -------------------------------------------------------- |
+| Spec not regenerated after Go-type change          | `TestOpenAPISpecInSync`                                  |
+| Generated Go client out of sync with spec          | `TestGeneratedClientInSync`                              |
+| Handler response field undeclared in spec          | Layer 1 response-validation tests                        |
+| Spec/client method-shape drift                     | Layer 2 round-trip tests (`genclient_roundtrip_test.go`) |
+| End-to-end binary wire regression                  | Layer 3 integration tests (`//go:build integration`)     |
+| New event-type constant without registered payload | `TestEveryKnownEventTypeHasRegisteredPayload`            |
+| Hard-coded SPA `/v0/...` path outside typed client | TypeScript build (`satisfies SpecPath` in `api.ts`)      |
 
 ## 6. Tooling landscape
 
@@ -577,7 +577,7 @@ per language.
 - **oapi-codegen** — our current Go client generator. Supports
   OpenAPI 3.0 (we feed it the downgrade from Huma). When given
   envelope-level `oneOf`, it generates `struct { union
-  json.RawMessage }` with `AsX`/`FromX`/`MergeX` accessor methods.
+json.RawMessage }` with `AsX`/`FromX`/`MergeX` accessor methods.
   That shape breaks field-based construction in
   `cmd/gc/cmd_events.go`. It does generate typed request methods
   for SSE endpoints, but does not parse SSE frames — the caller

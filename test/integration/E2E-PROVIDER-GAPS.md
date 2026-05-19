@@ -23,21 +23,21 @@ will pass on both providers.
 
 ### Docker: 18 PASS / 20 FAIL / 1 TIMEOUT / ~13 never ran
 
-| Result | Count | Tests |
-|--------|-------|-------|
-| PASS | 18 | Drain_Ack, RequestRestart, Nudge, EventEmit, EventsQuery, EventsSince, Hook_NoWork, Hook_WithWork, Hook_Inject, Kill, StopGraceful, Handoff_Remote, MailSend, MailCheck, MailCheckInject, MailInbox, MailRead, MailArchive |
-| FAIL | 20 | See root cause analysis below |
-| TIMEOUT | 1 | Pool_SharedDir (panic, killed entire run) |
-| Never ran | ~13 | EnvVars_*, Dir_*, Overlay, Hooks_*, PreStart, Suspended |
+| Result    | Count | Tests                                                                                                                                                                                                                      |
+| --------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PASS      | 18    | Drain_Ack, RequestRestart, Nudge, EventEmit, EventsQuery, EventsSince, Hook_NoWork, Hook_WithWork, Hook_Inject, Kill, StopGraceful, Handoff_Remote, MailSend, MailCheck, MailCheckInject, MailInbox, MailRead, MailArchive |
+| FAIL      | 20    | See root cause analysis below                                                                                                                                                                                              |
+| TIMEOUT   | 1     | Pool_SharedDir (panic, killed entire run)                                                                                                                                                                                  |
+| Never ran | ~13   | EnvVars*\*, Dir*\_, Overlay, Hooks\_\_, PreStart, Suspended                                                                                                                                                                |
 
 ### K8s: 1 PASS / 3 FAIL / 1 TIMEOUT / ~48 never ran
 
-| Result | Count | Tests |
-|--------|-------|-------|
-| PASS | 1 | RequestRestart |
-| FAIL | 3 | Drain_SetAndCheck, Drain_Ack, Undrain |
-| TIMEOUT | 1 | Nudge (panic at 10min, killed entire run) |
-| Never ran | ~48 | Everything after Nudge |
+| Result    | Count | Tests                                     |
+| --------- | ----- | ----------------------------------------- |
+| PASS      | 1     | RequestRestart                            |
+| FAIL      | 3     | Drain_SetAndCheck, Drain_Ack, Undrain     |
+| TIMEOUT   | 1     | Nudge (panic at 10min, killed entire run) |
+| Never ran | ~48   | Everything after Nudge                    |
 
 ---
 
@@ -54,6 +54,7 @@ into the container, but NOT the gascity source tree. The K8s provider
 has no access to the host filesystem at all.
 
 **Cascade effect:** When the agent command fails inside Docker:
+
 1. `bash /data/projects/gascity/test/agents/stuck-agent.sh` exits
    immediately (file not found)
 2. tmux session has no program to run, exits
@@ -66,6 +67,7 @@ has no access to the host filesystem at all.
    - `Nudge` → no tmux pane to send keys
 
 **Evidence:**
+
 ```
 $ docker exec gc-test-container ps aux
 PID  COMMAND
@@ -90,6 +92,7 @@ Drain_SetAndCheck, Undrain, Peek
 **Fix options (choose one):**
 
 **Option A: Copy scripts into cityDir during test setup (recommended)**
+
 ```go
 func copyAgentScripts(t *testing.T, cityDir string) {
     srcDir := filepath.Join(findModuleRoot(), "test", "agents")
@@ -102,24 +105,29 @@ func e2eReportScript() string {
     return "bash .gc/scripts/e2e-report.sh"  // relative to workdir
 }
 ```
+
 Pro: No provider changes needed. Scripts live inside the mounted cityDir.
 Con: Requires relative path support in commands.
 
 **Option B: Mount source tree into Docker containers**
 Add gascity source tree as a read-only mount in gc-session-docker:
+
 ```bash
 vol_args+=(-v "/data/projects/gascity:/data/projects/gascity:ro")
 ```
+
 Pro: Zero test changes.
 Con: Hard-codes host path; doesn't fix K8s; fragile for CI.
 
 **Option C: Inline simple commands instead of script paths**
+
 ```go
 func e2eSleepScript() string { return "sleep 3600" }
 func e2eReportScript() string {
     return `bash -c 'SAFE=${GC_AGENT//\//__}; mkdir -p ${GC_DIR}/.gc-reports; { echo STATUS=started; env | grep ^GC_ | sort; echo STATUS=complete; } > ${GC_DIR}/.gc-reports/${SAFE}.report; sleep 3600'`
 }
 ```
+
 Pro: No file dependencies at all.
 Con: Inline scripts are hard to maintain; may exceed command length limits.
 
@@ -139,6 +147,7 @@ start timeout). With 52 sequential tests, the suite would need ~100
 minutes — far beyond the 10-minute test timeout.
 
 **Fix:**
+
 1. Increase test timeout for K8s: `-timeout 120m`
 2. Pre-pull the image: `kubectl create daemonset` or `docker pull` first
 3. Consider test parallelization for K8s (each test creates its own city)
@@ -170,6 +179,7 @@ too tight for Docker when waiting for reports. Pool tests that start
 multiple containers compound this.
 
 **Fix:** Use a provider-aware timeout:
+
 ```go
 func e2eTimeout() time.Duration {
     if usingSubprocess() { return 15 * time.Second }
@@ -181,60 +191,60 @@ func e2eTimeout() time.Duration {
 
 ## Test-by-Test Docker Results
 
-| Test | Result | Root Cause |
-|------|--------|------------|
-| Drain_SetAndCheck | FAIL | RC-1 (tmux dead → GetMeta empty) |
-| Drain_Ack | PASS | SetMeta returns success even if tmux dead |
-| Undrain | FAIL | RC-1 (tmux dead → GetMeta empty) |
-| RequestRestart | PASS | Uses file-based metadata, no tmux needed |
-| Nudge | PASS | Nudge is best-effort, returns nil on failure |
-| Peek | FAIL | RC-1 (tmux dead → no pane to capture) |
-| ConfigDrift | FAIL | RC-1 (e2e-report.sh not in container) |
-| WorkspaceDefaults | FAIL | RC-1 |
-| AgentOverridesWorkspace | FAIL | RC-1 |
-| CustomProvider | FAIL | RC-1 |
-| ProviderEnvMerge | FAIL | RC-1 |
-| SessionTemplate | FAIL | RC-1 |
-| EventEmit | PASS | CLI-only, no agent needed |
-| EventsQuery | PASS | CLI-only |
-| EventsSince | PASS | CLI-only |
-| AgentLifecycleEvents | FAIL | RC-3 (events not emitted) |
-| Hook_NoWork | PASS | CLI-only |
-| Hook_WithWork | PASS | CLI-only |
-| Hook_Inject | PASS | CLI-only |
-| Kill | PASS | Container is running, kill works |
-| StopGraceful | PASS | Stop/cleanup works on containers |
-| Restart | FAIL | RC-1 (report needed after restart) |
-| SuspendResume_Agent | FAIL | RC-1 (report needed after resume) |
-| SuspendResume_City | FAIL | RC-1 (report needed after resume) |
-| StartIdempotent | FAIL | RC-1 (report needed) |
-| Handoff_Remote | PASS | CLI-only (mail + metadata) |
-| MailSend | PASS | CLI-only |
-| MailCheck | PASS | CLI-only |
-| MailCheckInject | PASS | CLI-only |
-| MailInbox | PASS | CLI-only |
-| MailRead | PASS | CLI-only |
-| MailArchive | PASS | CLI-only |
-| MultiAgent_Independent | FAIL | RC-1 |
-| MultiAgent_PoolAndFixed | FAIL | RC-1 |
-| MultiAgent_CityAndRig | FAIL | RC-1 |
-| Pool_InstanceNaming | FAIL | RC-1 |
-| Pool_SingletonNaming | FAIL | RC-1 |
-| Pool_WithDir | FAIL | RC-1 |
-| Pool_SharedDir | TIMEOUT | RC-1 + RC-4 |
-| Pool_EnvPerInstance | NOT RUN | Suite killed by timeout |
-| EnvVars_CityScoped | NOT RUN | |
-| EnvVars_Custom | NOT RUN | |
-| Dir_Default | NOT RUN | |
-| Dir_Relative | NOT RUN | |
-| Dir_GC_DIR | NOT RUN | |
-| Overlay | NOT RUN | |
-| Hooks_Gemini | NOT RUN | |
-| Hooks_Claude | NOT RUN | |
-| Hooks_WorkspaceDefault | NOT RUN | |
-| Hooks_AgentOverride | NOT RUN | |
-| PreStart | NOT RUN | |
-| Suspended | NOT RUN | |
+| Test                    | Result  | Root Cause                                   |
+| ----------------------- | ------- | -------------------------------------------- |
+| Drain_SetAndCheck       | FAIL    | RC-1 (tmux dead → GetMeta empty)             |
+| Drain_Ack               | PASS    | SetMeta returns success even if tmux dead    |
+| Undrain                 | FAIL    | RC-1 (tmux dead → GetMeta empty)             |
+| RequestRestart          | PASS    | Uses file-based metadata, no tmux needed     |
+| Nudge                   | PASS    | Nudge is best-effort, returns nil on failure |
+| Peek                    | FAIL    | RC-1 (tmux dead → no pane to capture)        |
+| ConfigDrift             | FAIL    | RC-1 (e2e-report.sh not in container)        |
+| WorkspaceDefaults       | FAIL    | RC-1                                         |
+| AgentOverridesWorkspace | FAIL    | RC-1                                         |
+| CustomProvider          | FAIL    | RC-1                                         |
+| ProviderEnvMerge        | FAIL    | RC-1                                         |
+| SessionTemplate         | FAIL    | RC-1                                         |
+| EventEmit               | PASS    | CLI-only, no agent needed                    |
+| EventsQuery             | PASS    | CLI-only                                     |
+| EventsSince             | PASS    | CLI-only                                     |
+| AgentLifecycleEvents    | FAIL    | RC-3 (events not emitted)                    |
+| Hook_NoWork             | PASS    | CLI-only                                     |
+| Hook_WithWork           | PASS    | CLI-only                                     |
+| Hook_Inject             | PASS    | CLI-only                                     |
+| Kill                    | PASS    | Container is running, kill works             |
+| StopGraceful            | PASS    | Stop/cleanup works on containers             |
+| Restart                 | FAIL    | RC-1 (report needed after restart)           |
+| SuspendResume_Agent     | FAIL    | RC-1 (report needed after resume)            |
+| SuspendResume_City      | FAIL    | RC-1 (report needed after resume)            |
+| StartIdempotent         | FAIL    | RC-1 (report needed)                         |
+| Handoff_Remote          | PASS    | CLI-only (mail + metadata)                   |
+| MailSend                | PASS    | CLI-only                                     |
+| MailCheck               | PASS    | CLI-only                                     |
+| MailCheckInject         | PASS    | CLI-only                                     |
+| MailInbox               | PASS    | CLI-only                                     |
+| MailRead                | PASS    | CLI-only                                     |
+| MailArchive             | PASS    | CLI-only                                     |
+| MultiAgent_Independent  | FAIL    | RC-1                                         |
+| MultiAgent_PoolAndFixed | FAIL    | RC-1                                         |
+| MultiAgent_CityAndRig   | FAIL    | RC-1                                         |
+| Pool_InstanceNaming     | FAIL    | RC-1                                         |
+| Pool_SingletonNaming    | FAIL    | RC-1                                         |
+| Pool_WithDir            | FAIL    | RC-1                                         |
+| Pool_SharedDir          | TIMEOUT | RC-1 + RC-4                                  |
+| Pool_EnvPerInstance     | NOT RUN | Suite killed by timeout                      |
+| EnvVars_CityScoped      | NOT RUN |                                              |
+| EnvVars_Custom          | NOT RUN |                                              |
+| Dir_Default             | NOT RUN |                                              |
+| Dir_Relative            | NOT RUN |                                              |
+| Dir_GC_DIR              | NOT RUN |                                              |
+| Overlay                 | NOT RUN |                                              |
+| Hooks_Gemini            | NOT RUN |                                              |
+| Hooks_Claude            | NOT RUN |                                              |
+| Hooks_WorkspaceDefault  | NOT RUN |                                              |
+| Hooks_AgentOverride     | NOT RUN |                                              |
+| PreStart                | NOT RUN |                                              |
+| Suspended               | NOT RUN |                                              |
 
 ---
 
@@ -244,14 +254,15 @@ If agent scripts are made available inside containers (Option A), the
 predicted Docker results would be:
 
 | Category | Before | After (predicted) |
-|----------|--------|-------------------|
-| PASS | 18 | ~46 |
-| FAIL | 20 | ~3 (RC-2, RC-3) |
-| SKIP | 0 | 0 |
-| TIMEOUT | 1 | 0 |
-| NOT RUN | 13 | 0 |
+| -------- | ------ | ----------------- |
+| PASS     | 18     | ~46               |
+| FAIL     | 20     | ~3 (RC-2, RC-3)   |
+| SKIP     | 0      | 0                 |
+| TIMEOUT  | 1      | 0                 |
+| NOT RUN  | 13     | 0                 |
 
 Remaining failures would be:
+
 - AgentLifecycleEvents (RC-3: investigate event emission for exec providers)
 - Drain_SetAndCheck, Undrain (if tmux stays alive with working scripts)
 

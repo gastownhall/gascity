@@ -21,10 +21,6 @@ const (
 	BaseStateAsleep BaseState = "asleep"
 	// BaseStateSuspended means config or policy has suspended the session.
 	BaseStateSuspended BaseState = "suspended"
-	// BaseStateFailedCreate means create rollback metadata landed but close did not.
-	// Runtime projection preserves it so pending create metadata cannot retry
-	// the rolled-back identity as a normal creating session.
-	BaseStateFailedCreate BaseState = "failed-create"
 	// BaseStateDraining means the session is waiting to stop cleanly.
 	BaseStateDraining BaseState = "draining"
 	// BaseStateDrained means the session completed its drain and is stopped.
@@ -367,8 +363,6 @@ func projectBaseState(status, storedState, sleepReason string) BaseState {
 		return BaseStateAsleep
 	case string(StateSuspended):
 		return BaseStateSuspended
-	case string(StateFailedCreate):
-		return BaseStateFailedCreate
 	case string(StateDraining):
 		return BaseStateDraining
 	case "drained":
@@ -400,8 +394,6 @@ func compatStateForBase(base BaseState) State {
 		return StateAsleep
 	case BaseStateSuspended:
 		return StateSuspended
-	case BaseStateFailedCreate:
-		return StateFailedCreate
 	case BaseStateDraining:
 		return StateDraining
 	case BaseStateArchived:
@@ -509,9 +501,6 @@ func projectRuntimeProjection(input LifecycleInput, base BaseState, compat State
 		}
 		return RuntimeProjectionStaleCreating, StateAsleep, shouldResetContinuation(base, input.Metadata, sleepReason)
 	}
-	if base == BaseStateFailedCreate {
-		return RuntimeProjectionMissing, StateFailedCreate, false
-	}
 	if hasWakeCause(wakeCauses, WakeCausePendingCreate) {
 		return RuntimeProjectionStartRequested, StateCreating, false
 	}
@@ -548,7 +537,7 @@ func shouldResetContinuation(base BaseState, meta map[string]string, sleepReason
 		return false
 	}
 	switch strings.TrimSpace(sleepReason) {
-	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained", "city-stop", "user-hold", "wait-hold", "rate_limit", "runtime-missing":
+	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained", "city-stop", "user-hold", "wait-hold", "rate_limit":
 		return false
 	}
 	return base == BaseStateActive || base == BaseStateCreating
@@ -561,9 +550,6 @@ func projectWakeCauses(input LifecycleInput, meta map[string]string) []WakeCause
 	}
 	if strings.TrimSpace(meta["pending_create_claim"]) == "true" {
 		causes = appendUniqueWakeCause(causes, WakeCausePendingCreate)
-	}
-	if strings.TrimSpace(meta["wake_request"]) == string(WakeCauseExplicit) {
-		causes = appendUniqueWakeCause(causes, WakeCauseExplicit)
 	}
 	if strings.TrimSpace(meta["pin_awake"]) == "true" {
 		causes = appendUniqueWakeCause(causes, WakeCausePinned)

@@ -24,11 +24,6 @@ import (
 // contention without letting a genuinely stuck workflow loiter.
 const reviewWorkflowTimeout = 18 * time.Minute
 
-// reviewWorkflowSlingTimeout only covers formula instantiation and source
-// routing. The personal-work graph is large enough that bd-backed graph apply
-// can exceed the generic 2-minute Dolt command budget on busy CI runners.
-const reviewWorkflowSlingTimeout = 5 * time.Minute
-
 const testAdoptPRReviewCheck = `#!/usr/bin/env bash
 set -euo pipefail
 
@@ -178,7 +173,7 @@ func TestPersonalWorkFormulaCompileAndRun(t *testing.T) {
 	issueID, workflowID := startReviewWorkflow(t, cityDir, "mol-personal-work-v2", map[string]string{
 		"issue":         "", // filled after create
 		"base_branch":   "main",
-		"skip_gemini":   "true",
+		"skip_gemini":   "false",
 		"setup_command": "true",
 		"test_command":  "true",
 	})
@@ -193,11 +188,8 @@ func TestPersonalWorkFormulaCompileAndRun(t *testing.T) {
 	steps := listWorkflowSteps(t, cityDir, workflowID)
 	wantSuffixes := []string{
 		"design-review-loop.iteration.1",
-		"design-review-pipeline.persona-gen-claude",
-		"design-review-pipeline.persona-gen-codex",
 		"code-review-loop.iteration.1",
 		"review-pipeline.review-claude",
-		"review-pipeline.review-codex",
 		"review-pipeline.synthesize",
 	}
 	for _, suffix := range wantSuffixes {
@@ -364,13 +356,12 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 	cityDir := filepath.Join(t.TempDir(), cityName)
 
 	startCommand := workflowAgentStartCommand(mode, extraEnv)
-	polecatScaleCheck := `ready_json=$(bd ready --metadata-field gc.routed_to=polecat --unassigned --exclude-type=epic --json --limit=0) && printf '%s\n' "$ready_json" | jq 'length'`
 	cityToml := fmt.Sprintf(
 		"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n"+
 			"[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n"+
 			"[[named_session]]\ntemplate = \"worker\"\nmode = \"always\"\n\n"+
-			"[[agent]]\nname = \"polecat\"\nstart_command = %q\nmin_active_sessions = 0\nmax_active_sessions = 3\nscale_check = %q\n",
-		cityName, startCommand, startCommand, polecatScaleCheck,
+			"[[agent]]\nname = \"polecat\"\nstart_command = %q\nmin_active_sessions = 0\nmax_active_sessions = 3\n",
+		cityName, startCommand, startCommand,
 	)
 	configPath := filepath.Join(t.TempDir(), "review-formula.toml")
 	if err := os.WriteFile(configPath, []byte(cityToml), 0o644); err != nil {
@@ -468,9 +459,8 @@ func startReviewWorkflow(t *testing.T, cityDir, formula string, vars map[string]
 	for k, v := range vars {
 		args = append(args, "--var", k+"="+v)
 	}
-	out, err = gcDoltWithTimeout(cityDir, reviewWorkflowSlingTimeout, args...)
+	out, err = gcDolt(cityDir, args...)
 	if err != nil {
-		dumpReviewFormulaCityState(t, cityDir)
 		t.Fatalf("gc sling failed: %v\noutput: %s", err, out)
 	}
 	slingOutput := out
@@ -538,11 +528,6 @@ func traceShowsSameAttemptTransientRetry(trace, stepRef string) bool {
 
 func dumpWorkflowState(t *testing.T, cityDir, workflowID string) {
 	t.Helper()
-	dumpReviewFormulaCityState(t, cityDir)
-}
-
-func dumpReviewFormulaCityState(t *testing.T, cityDir string) {
-	t.Helper()
 	out, _ := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
 	t.Logf("all beads:\n%s", out)
 	if traceFile := filepath.Join(cityDir, "graph-workflow-trace.log"); fileExists(traceFile) {
@@ -573,8 +558,6 @@ func installReviewFormulaFixtures(t *testing.T, cityDir string) {
 
 	writeLocalFormula(t, cityDir, "expansion-review-pr", reviewworkflows.ExpansionReviewPR)
 	writeLocalFormula(t, cityDir, "expansion-design-review", reviewworkflows.ExpansionDesignReview)
-	writeLocalFormula(t, cityDir, "expansion-review-pr-lite", reviewworkflows.ExpansionReviewPRLite)
-	writeLocalFormula(t, cityDir, "expansion-design-review-lite", reviewworkflows.ExpansionDesignReviewLite)
 	writeLocalFormula(t, cityDir, "mol-adopt-pr-v2", reviewworkflows.AdoptPR)
 	writeLocalFormula(t, cityDir, "mol-personal-work-v2", reviewworkflows.PersonalWork)
 

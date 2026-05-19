@@ -43,11 +43,15 @@ export function createRefreshScheduler(options: RefreshSchedulerOptions): Refres
       return;
     }
     const minIntervalMs = options.minIntervalMs ?? 0;
-    const elapsedSinceStart = lastStartedAt > 0 ? Date.now() - lastStartedAt : Number.POSITIVE_INFINITY;
+    const elapsedSinceStart =
+      lastStartedAt > 0 ? Date.now() - lastStartedAt : Number.POSITIVE_INFINITY;
     const intervalDelayMs = minIntervalMs > 0 ? Math.max(0, minIntervalMs - elapsedSinceStart) : 0;
-    timer = setTimeout(() => {
-      void flush();
-    }, Math.max(options.delayMs, intervalDelayMs));
+    timer = setTimeout(
+      () => {
+        void flush();
+      },
+      Math.max(options.delayMs, intervalDelayMs),
+    );
   }
 
   return { schedule };

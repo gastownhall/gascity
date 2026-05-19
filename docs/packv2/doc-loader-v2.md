@@ -12,8 +12,8 @@ V2 reframes loading around five ideas, all of which are missing or weak in
 V1:
 
 1. **A city is a pack.** The root of composition is a `pack.toml` (the
-   *definition*) plus a companion `city.toml` (the *deployment plan*) plus
-   `.gc/` (per-machine *site binding*). Delete `city.toml` and what
+   _definition_) plus a companion `city.toml` (the _deployment plan_) plus
+   `.gc/` (per-machine _site binding_). Delete `city.toml` and what
    remains is a valid, importable pack. The loader's root case becomes
    "load a pack, then layer the deployment file on top."
 
@@ -24,7 +24,7 @@ V1:
    that happens to be called `mayor`. Imports are versioned, aliasable,
    and transitive by default (with `transitive = false` opt-out).
 
-3. **Convention defines structure.** A pack's filesystem layout *is* its
+3. **Convention defines structure.** A pack's filesystem layout _is_ its
    declaration. If `agents/foo/` exists, an agent named `foo` exists. If
    `formulas/bar.formula.toml` exists, a formula named `bar` exists. The
    loader discovers content by walking standard directories instead of
@@ -69,8 +69,8 @@ func LoadCity(
 fragment paths, kept for parity with `-f` and for `gc init` flows that
 need to inject system fragments.
 
-`Provenance` extends V1's audit trail to track *qualified names* and
-*import bindings* in addition to source files:
+`Provenance` extends V1's audit trail to track _qualified names_ and
+_import bindings_ in addition to source files:
 
 ```go
 type Provenance struct {
@@ -175,7 +175,7 @@ type Import struct {
 ```
 
 `Source` accepts the same three formats as V1 includes (local, remote
-git, github tree URL), but the *meaning* is different: an import is a
+git, github tree URL), but the _meaning_ is different: an import is a
 named binding, not an inline insertion.
 
 ### `Deployment` (city.toml)
@@ -236,13 +236,13 @@ loader**. Mutations come from commands (`gc init`, `gc rig add`,
 `Agent` keeps most of its V1 fields, but composition-relevant identity
 changes:
 
-| Field | V1 | V2 |
-|---|---|---|
-| `Name` | bare name | bare name (e.g., `mayor`) |
-| `Dir` | rig prefix or empty | rig prefix or empty |
-| `BindingName` | — | name of the `[imports.X]` block this agent came from (`""` for the city pack itself) |
-| `PackName` | — | `pack.name` of the pack the agent came from |
-| `QualifiedName()` | `Dir/Name` | `Dir/BindingName.Name` (with simplification when `BindingName == ""` or unambiguous) |
+| Field             | V1                  | V2                                                                                   |
+| ----------------- | ------------------- | ------------------------------------------------------------------------------------ |
+| `Name`            | bare name           | bare name (e.g., `mayor`)                                                            |
+| `Dir`             | rig prefix or empty | rig prefix or empty                                                                  |
+| `BindingName`     | —                   | name of the `[imports.X]` block this agent came from (`""` for the city pack itself) |
+| `PackName`        | —                   | `pack.name` of the pack the agent came from                                          |
+| `QualifiedName()` | `Dir/Name`          | `Dir/BindingName.Name` (with simplification when `BindingName == ""` or unambiguous) |
 
 The `BindingName` is what makes `gastown.mayor` addressable as a real
 identity throughout the runtime. It's set during import expansion and
@@ -272,7 +272,7 @@ type Rig struct {
 }
 ```
 
-A rig is now a *two-phase object*: declared in `city.toml` (structural),
+A rig is now a _two-phase object_: declared in `city.toml` (structural),
 bound in `.gc/` (machine-local). A declared-but-unbound rig is a valid
 state; the loader produces it but `gc start` warns and offers to bind.
 
@@ -345,7 +345,7 @@ live next to the manifest that uses them or under `assets/`. See
 [doc-directory-conventions.md](doc-directory-conventions.md) and
 [doc-commands.md](doc-commands.md).
 
-`pack.toml` carries metadata, imports, and agent defaults — *not* a list
+`pack.toml` carries metadata, imports, and agent defaults — _not_ a list
 of agents:
 
 ```toml
@@ -376,25 +376,25 @@ model = "claude-sonnet-4"
 
 ## Convention-based loading
 
-The biggest workload shift from V1 → V2 is in *how* per-pack content is
+The biggest workload shift from V1 → V2 is in _how_ per-pack content is
 discovered. V1 reads explicit declarations from `pack.toml`; V2 walks
 standard subdirectories.
 
-| Content type | V1 source | V2 source |
-|---|---|---|
-| Agents | `[[agent]]` tables | `agents/<name>/` directories |
-| Agent prompts | `prompt_template = "prompts/x.md"` | `agents/<name>/prompt.md` |
-| Per-agent overlays | `overlay_dir = "overlay/x"` | `agents/<name>/overlay/` |
-| Pack-wide overlays | `overlay_dir = "overlay/default"` | `overlay/` directory |
-| Formulas | `[[formula]].path` + dir scan | `formulas/*.toml` directly |
-| Orders | inside formulas | `orders/*.toml` (top-level, convention-discovered) |
-| Scripts | `scripts_dir = "scripts"` | **Gone.** Scripts live next to the manifest that uses them (`commands/<id>/run.sh`, `agents/<name>/`) or under `assets/` |
-| Skills | n/a | `skills/` directory in the current city pack + `agents/<name>/skills/` (per-agent); imported-pack catalogs are later |
-| MCP defs | n/a | `mcp/` directory in the current city pack + `agents/<name>/mcp/` (per-agent); imported-pack catalogs are later |
-| Template fragments | inline strings | `template-fragments/` (pack-wide) + `agents/<name>/template-fragments/` (per-agent) |
-| Commands | `[[commands]]` in pack.toml | `commands/<id>/` directories (convention-based; optional `command.toml` manifest) |
-| Doctor checks | n/a | `doctor/<id>/` directories (convention-based; optional `doctor.toml` manifest) |
-| Opaque assets | scattered | `assets/` directory (loader-opaque, reached only via explicit path references) |
+| Content type       | V1 source                          | V2 source                                                                                                                |
+| ------------------ | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Agents             | `[[agent]]` tables                 | `agents/<name>/` directories                                                                                             |
+| Agent prompts      | `prompt_template = "prompts/x.md"` | `agents/<name>/prompt.md`                                                                                                |
+| Per-agent overlays | `overlay_dir = "overlay/x"`        | `agents/<name>/overlay/`                                                                                                 |
+| Pack-wide overlays | `overlay_dir = "overlay/default"`  | `overlay/` directory                                                                                                     |
+| Formulas           | `[[formula]].path` + dir scan      | `formulas/*.toml` directly                                                                                               |
+| Orders             | inside formulas                    | `orders/*.toml` (top-level, convention-discovered)                                                                       |
+| Scripts            | `scripts_dir = "scripts"`          | **Gone.** Scripts live next to the manifest that uses them (`commands/<id>/run.sh`, `agents/<name>/`) or under `assets/` |
+| Skills             | n/a                                | `skills/` directory in the current city pack + `agents/<name>/skills/` (per-agent); imported-pack catalogs are later     |
+| MCP defs           | n/a                                | `mcp/` directory in the current city pack + `agents/<name>/mcp/` (per-agent); imported-pack catalogs are later           |
+| Template fragments | inline strings                     | `template-fragments/` (pack-wide) + `agents/<name>/template-fragments/` (per-agent)                                      |
+| Commands           | `[[commands]]` in pack.toml        | `commands/<id>/` directories (convention-based; optional `command.toml` manifest)                                        |
+| Doctor checks      | n/a                                | `doctor/<id>/` directories (convention-based; optional `doctor.toml` manifest)                                           |
+| Opaque assets      | scattered                          | `assets/` directory (loader-opaque, reached only via explicit path references)                                           |
 
 The top level of a pack is **controlled surface area**. Standard directory
 names are explicitly recognized; unknown top-level directories are errors.
@@ -431,26 +431,14 @@ version = "^1.2"
 source = "./assets/local/helper"
 ```
 
-Local paths *cannot* take a version. Remote sources *must* take a
+Local paths _cannot_ take a version. Remote sources _must_ take a
 version (or pin to a commit). The loader rejects ambiguity.
 
 The actual fetch / cache mechanism is owned by `gc import`
 ([doc-packman.md](doc-packman.md)), not the loader. The loader assumes
 imports have already been resolved into local directories under the
-hidden cache (`~/.gc/cache/repos/<cache-key>/`) and reads the lock file
-(`packs.lock`) to know which commit to use. Ordinary remote imports use a
-normalized clone URL plus commit cache key. Bundled Gas City pack imports use a
-separate synthetic-cache namespace for the same source and commit so embedded
-current-binary content never collides with an ordinary git checkout from the
-same repository.
-
-Bundled synthetic caches are repo-shaped because relative imports between
-bundled pack subpaths should resolve like a real checkout. Their marker records
-the requested lock/cache commit and a hash of the bundled pack content embedded
-in the running `gc` binary. The commit is the lock identity; the content hash is
-the cache integrity proof. If the binary's bundled content changes, validation
-rejects the old synthetic cache and `gc import install` refreshes it from the
-current binary.
+hidden cache (`~/.gc/cache/repos/<sha256(url+commit)>/`) and reads the
+lock file (`packs.lock`) to know which commit to use.
 
 This is a significant separation-of-concerns change. In V1, the loader
 itself clones git repos. In V2, that responsibility moves to
@@ -482,7 +470,7 @@ parent  = "(root)"
 ```
 
 For each declared import, the loader looks up the matching `[packs.X]`
-record, finds the cached directory under the corresponding cache key,
+record, finds the cached directory under the corresponding sha256 key,
 and proceeds. If no match exists, or the cache entry is missing, that's
 a load-time error telling the user to run `gc import install`.
 
@@ -541,7 +529,7 @@ that escapes the pack directory is a hard error. This is the new
 For each entry in `Pack.Imports`:
 
 1. Look up the matching `[packs.X]` lock record. Error if missing.
-2. Resolve the on-disk path (the import cache directory).
+2. Resolve the on-disk path (the sha256 cache directory).
 3. Parse the imported pack's `pack.toml`.
 4. Validate the imported pack is self-contained.
 5. Validate the imported pack's `pack.name` matches the lock record (or
@@ -569,7 +557,8 @@ transitive graph). Mark any import flagged `export = true` as visible
 to the parent's parent.
 
 The DAG must be a tree (cycles are an error). Each node carries:
-- The binding name *as the root sees it* (qualified path,
+
+- The binding name _as the root sees it_ (qualified path,
   `gastown.maintenance`).
 - The original binding name inside the importing pack (`maintenance`).
 - The export flag.
@@ -605,7 +594,7 @@ V2's collision rules are stricter and simpler than V1's:
   agents exist; both are addressable by qualified name (`gastown.mayor`,
   `swarm.mayor`). The bare name `mayor` becomes ambiguous and any
   reference to it elsewhere (formulas, sling targets) must qualify.
-- **Bare name reference to an ambiguous name:** error at the *referring*
+- **Bare name reference to an ambiguous name:** error at the _referring_
   site, not at composition time.
 
 This is the core advantage of qualified names: collisions stop being
@@ -619,7 +608,7 @@ reference layer.
 qualified name now: `[[patches]]` can target `gastown.mayor` directly.
 Bare-name targeting still works when unambiguous.
 
-Patches from imported packs are scoped to the agents *they brought in*.
+Patches from imported packs are scoped to the agents _they brought in_.
 A pack cannot patch agents it didn't define.
 
 ### 14. Compose rig agents
@@ -629,7 +618,7 @@ For each rig declared in `Deployment.Rigs`:
 1. Read the rig's `Imports` (rig-scoped imports from `[rigs.imports.X]`).
 2. Resolve each import the same way as step 8 (lock-file-based).
 3. Walk each imported pack's `agents/` and load with `scope="rig"` filter.
-4. Stamp agents with `Dir = rig.Name` *and* `BindingName`.
+4. Stamp agents with `Dir = rig.Name` _and_ `BindingName`.
 5. Apply rig-level patches.
 6. Compute formula layers for this rig (see step 16).
 
@@ -640,8 +629,8 @@ Each pack can declare `[global]` content (currently `session_live`).
 with explicit `{{ template }}` inclusion. Pack globals apply to:
 
 - City-pack `[global]`: applies to all city-scope agents.
-- Imported-pack `[global]`: applies only to agents *that came from
-  that pack* (or its re-exports). This is a *fix* relative to V1, where
+- Imported-pack `[global]`: applies only to agents _that came from
+  that pack_ (or its re-exports). This is a _fix_ relative to V1, where
   pack globals applied indiscriminately to all agents.
 - Rig-import `[global]`: scoped to that rig's agent set.
 
@@ -694,8 +683,8 @@ Three passes, same shape as V1:
 1. **Named sessions** — template references must point at agents that
    exist in the composed view (qualified or unambiguous).
 2. **Durations** — every duration string parses.
-3. **Semantics** — pool config, work_query / sling_query consistency,
-   agent scope vs rig availability, *plus new V2 checks*:
+3. **Semantics** — pool config, work*query / sling_query consistency,
+   agent scope vs rig availability, \_plus new V2 checks*:
    - All `pack.requires` are satisfied.
    - No path in any pack escapes its directory.
    - Every imported pack's `pack.name` matches the lock record (or the
@@ -714,17 +703,17 @@ Return `(City, Provenance, nil)`. The `City` carries `ImportGraph`,
 
 ## Collision and precedence — the V1→V2 diff
 
-| Concern | V1 | V2 |
-|---|---|---|
-| Two packs define `mayor` | Error or fallback resolution | Both exist as `gastown.mayor` and `swarm.mayor`; bare `mayor` is ambiguous |
-| City and pack both define `mayor` | City wins via prepend ordering | City wins explicitly; optional warning |
-| `fallback = true` on agents | Used for soft-overrideable defaults | **Removed.** Qualified names + explicit precedence make it unnecessary |
-| Provider collisions | Per-field deep merge with warnings | Same |
-| Workspace field collisions | Per-field merge with warnings | N/A — workspace identity moves to `.gc/` |
-| Pack name collisions in `[packs.X]` | Last-writer-wins with warning | Lock file is canonical; multiple imports of the same pack at different versions are an error |
-| Patches missing target | Error | Error (qualified-name aware) |
-| Path escapes pack directory | Allowed | Hard error |
-| Cyclic imports | N/A (includes are flat) | Hard error |
+| Concern                             | V1                                  | V2                                                                                           |
+| ----------------------------------- | ----------------------------------- | -------------------------------------------------------------------------------------------- |
+| Two packs define `mayor`            | Error or fallback resolution        | Both exist as `gastown.mayor` and `swarm.mayor`; bare `mayor` is ambiguous                   |
+| City and pack both define `mayor`   | City wins via prepend ordering      | City wins explicitly; optional warning                                                       |
+| `fallback = true` on agents         | Used for soft-overrideable defaults | **Removed.** Qualified names + explicit precedence make it unnecessary                       |
+| Provider collisions                 | Per-field deep merge with warnings  | Same                                                                                         |
+| Workspace field collisions          | Per-field merge with warnings       | N/A — workspace identity moves to `.gc/`                                                     |
+| Pack name collisions in `[packs.X]` | Last-writer-wins with warning       | Lock file is canonical; multiple imports of the same pack at different versions are an error |
+| Patches missing target              | Error                               | Error (qualified-name aware)                                                                 |
+| Path escapes pack directory         | Allowed                             | Hard error                                                                                   |
+| Cyclic imports                      | N/A (includes are flat)             | Hard error                                                                                   |
 
 `fallback = true` is the most notable casualty. It exists in V1 as a way
 to let a system pack provide a default agent that user packs can
@@ -770,15 +759,15 @@ mechanisms move out of `internal/config/` and into `gc import` (which
 owns the cache under `~/.gc/cache/repos/`). The loader becomes a pure
 reader and gains no new I/O surface.
 
-Lock-file *reading* is the only new I/O the loader does, and it's
+Lock-file _reading_ is the only new I/O the loader does, and it's
 read-only.
 
 ## Migration story
 
 Cities running on V1 must be converted before V2 can load them. Hard
 cutover: `gc doctor` detects V1 patterns and `gc doctor --fix` handles
-the safe mechanical conversion. `gc import migrate` is deprecated shim
-territory and no longer performs in-place rewrites.
+the safe mechanical conversion. `gc import migrate` is no longer the
+primary public path.
 
 The migration is sequenced in two steps matching the implementation order:
 

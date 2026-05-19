@@ -175,18 +175,18 @@ only (explicit scope exclusion).
 
 ### What changes
 
-| Layer              | Before                                                  | After                                                                        |
-| ------------------ | ------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Route registration | `s.mux.HandleFunc("GET /v0/agents", s.handleAgentList)` | `huma.Get(api, "/v0/agents", s.handleAgentList)`                             |
-| Handler signature  | `func(w http.ResponseWriter, r *http.Request)`          | `func(ctx context.Context, input *AgentListInput) (*AgentListOutput, error)` |
-| Request parsing    | `decodeBody(r, &req)` + manual query/path parsing       | Automatic from Input struct tags                                             |
-| Response writing   | `writeJSON(w, 200, resp)`                               | `return &Output{Body: resp}, nil`                                            |
-| Error responses    | `writeJSON(w, 4xx, Error{...})`                         | `return nil, huma.Error404NotFound("msg")` (Problem Details)                 |
-| Error-emitting middleware | `writeError` in `withReadOnly`/`withCSRFCheck`   | Huma middleware via `api.UseMiddleware` + `huma.WriteErr` (Fix 3d)          |
-| SSE streaming      | Manual `writeSSE()` + goroutine + ticker                | `registerSSE` with typed event maps; string-ID variant for global stream    |
-| API spec           | None                                                    | Auto-generated at `/openapi.json` from registered types                      |
-| Validation         | Manual checks in each handler                           | Struct tags (`minLength`, `pattern`, `enum`); no `omitempty` on required    |
-| Client             | 346-line hand-written `client.go` + hand-written dashboard proxy | Generated Go client consumed by CLI and dashboard proxy (Fix 3a)      |
+| Layer                     | Before                                                           | After                                                                        |
+| ------------------------- | ---------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Route registration        | `s.mux.HandleFunc("GET /v0/agents", s.handleAgentList)`          | `huma.Get(api, "/v0/agents", s.handleAgentList)`                             |
+| Handler signature         | `func(w http.ResponseWriter, r *http.Request)`                   | `func(ctx context.Context, input *AgentListInput) (*AgentListOutput, error)` |
+| Request parsing           | `decodeBody(r, &req)` + manual query/path parsing                | Automatic from Input struct tags                                             |
+| Response writing          | `writeJSON(w, 200, resp)`                                        | `return &Output{Body: resp}, nil`                                            |
+| Error responses           | `writeJSON(w, 4xx, Error{...})`                                  | `return nil, huma.Error404NotFound("msg")` (Problem Details)                 |
+| Error-emitting middleware | `writeError` in `withReadOnly`/`withCSRFCheck`                   | Huma middleware via `api.UseMiddleware` + `huma.WriteErr` (Fix 3d)           |
+| SSE streaming             | Manual `writeSSE()` + goroutine + ticker                         | `registerSSE` with typed event maps; string-ID variant for global stream     |
+| API spec                  | None                                                             | Auto-generated at `/openapi.json` from registered types                      |
+| Validation                | Manual checks in each handler                                    | Struct tags (`minLength`, `pattern`, `enum`); no `omitempty` on required     |
+| Client                    | 346-line hand-written `client.go` + hand-written dashboard proxy | Generated Go client consumed by CLI and dashboard proxy (Fix 3a)             |
 
 ### What stays the same
 
@@ -788,18 +788,18 @@ At each phase:
 
 ## Risks and mitigations
 
-| Risk                                                                 | Mitigation / Phase 3 resolution                                                                                                                                                        |
-| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Huma SSE keepalive: no built-in comment frames                       | Manual 15s ticker in stream function (unchanged)                                                                                                                                       |
-| Huma SSE string event IDs not supported                              | Phase 3 Fix 3g adds a string-ID variant of `registerSSE` (decided)                                                                                                                     |
-| Response shape changes break dashboard                               | Phase 3 Fix 3a retargets the dashboard Go proxy (all dashboard files under `cmd/gc/dashboard/` that call `/v0/...`) to the generated client so shape changes are compile errors        |
-| Supervisor Huma API vs per-city Huma API mux conflict                | Phase 3 topology 1 (decided): single supervisor-owned Huma API, per-city operations live at `/v0/city/{name}/...`                                                                      |
-| Generic output types don't work with Huma OpenAPI                    | Verified: Huma reflection handles generics, generates schema names like `ListOutputAgentResponse`                                                                                      |
-| Blocking `?wait=...` handlers conflict with Huma timeouts            | Verified: no built-in timeout, context cancellation works correctly                                                                                                                    |
-| Middleware moved into Huma loses panic recovery for non-Huma routes  | Phase 3 Fix 3d keeps `withRecovery` outermost at the mux level; only error-emitting middleware (CSRF, read-only) becomes Huma middleware                                               |
-| Hybrid error format breaks clients                                   | Phase 3 Fix 3a regenerates client from spec; `configureHumaGlobals` 422→400 override is removed (Fix 3k); legacy `{code,message}` parsing deleted with `client.go`                     |
-| Raw-byte cache forces hand-written `json.Unmarshal` on cache hits    | Phase 3 Fix 3l converts caches to typed-struct storage; re-serialization cost is negligible at 2s TTL on localhost                                                                     |
-| oapi-codegen incomplete support for OpenAPI 3.1                      | Phase 3 prerequisite Fix 3.0 validates generator choice against committed spec; Huma v2.37.3 supports a 3.0 downgrade output that most generators handle cleanly                       |
+| Risk                                                                | Mitigation / Phase 3 resolution                                                                                                                                                 |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Huma SSE keepalive: no built-in comment frames                      | Manual 15s ticker in stream function (unchanged)                                                                                                                                |
+| Huma SSE string event IDs not supported                             | Phase 3 Fix 3g adds a string-ID variant of `registerSSE` (decided)                                                                                                              |
+| Response shape changes break dashboard                              | Phase 3 Fix 3a retargets the dashboard Go proxy (all dashboard files under `cmd/gc/dashboard/` that call `/v0/...`) to the generated client so shape changes are compile errors |
+| Supervisor Huma API vs per-city Huma API mux conflict               | Phase 3 topology 1 (decided): single supervisor-owned Huma API, per-city operations live at `/v0/city/{name}/...`                                                               |
+| Generic output types don't work with Huma OpenAPI                   | Verified: Huma reflection handles generics, generates schema names like `ListOutputAgentResponse`                                                                               |
+| Blocking `?wait=...` handlers conflict with Huma timeouts           | Verified: no built-in timeout, context cancellation works correctly                                                                                                             |
+| Middleware moved into Huma loses panic recovery for non-Huma routes | Phase 3 Fix 3d keeps `withRecovery` outermost at the mux level; only error-emitting middleware (CSRF, read-only) becomes Huma middleware                                        |
+| Hybrid error format breaks clients                                  | Phase 3 Fix 3a regenerates client from spec; `configureHumaGlobals` 422→400 override is removed (Fix 3k); legacy `{code,message}` parsing deleted with `client.go`              |
+| Raw-byte cache forces hand-written `json.Unmarshal` on cache hits   | Phase 3 Fix 3l converts caches to typed-struct storage; re-serialization cost is negligible at 2s TTL on localhost                                                              |
+| oapi-codegen incomplete support for OpenAPI 3.1                     | Phase 3 prerequisite Fix 3.0 validates generator choice against committed spec; Huma v2.37.3 supports a 3.0 downgrade output that most generators handle cleanly                |
 
 ## Phase 3: Zero Hand-Written Networking (historical — all fixes shipped)
 
@@ -868,7 +868,7 @@ OpenAPI 3.0 downgrade output; some generators prefer it.
      declared parameter name is `name`). Affects
      `/v0/agent/{name...}` and `/v0/patches/agent/{name...}`.
   2. Rename component schemas matching `^(Get|Post|Put|Patch|
-     Delete|Head|Options)-.*Response$` to replace the `Response`
+Delete|Head|Options)-.*Response$` to replace the `Response`
      suffix with `Body`. Huma auto-generates schema names
      matching `<OpId>Response`, which collide with oapi-codegen's
      per-operation `<OpId>Response` wrapper type.
@@ -937,7 +937,7 @@ follow-up plan, NOT here.)
 **Acceptance (CLI surface, met):**
 
 - `grep -nE 'http\.NewRequest|json\.Marshal\(|json\.NewDecoder'
-  internal/api/client.go` returns nothing.
+internal/api/client.go` returns nothing.
 - All CLI traffic to the typed API goes through the generated client.
 - Generated client builds under `go build ./...`; regeneration is
   idempotent (`TestGeneratedClientInSync`).
@@ -1135,7 +1135,7 @@ as separate response writers.
 **Acceptance:**
 
 - `grep -n 'writeJSON\|writeError\|writeListJSON\|decodeBody'
-  internal/api/` returns only `envelope.go` definitions (which Fix 3h
+internal/api/` returns only `envelope.go` definitions (which Fix 3h
   removes).
 - Test suite asserts only Problem Details on error paths.
 
@@ -1197,7 +1197,7 @@ has no contract for that endpoint. Affected files and patterns:
 **Acceptance:**
 
 - `grep -nE 'json\.Marshal\(|json\.RawMessage|map\[string\]any'
-  internal/api/huma_handlers_*.go` returns only the documented input
+internal/api/huma_handlers_*.go` returns only the documented input
   decoder in `huma_handlers_beads.go:348`.
 - `grep -nE 'json\.RawMessage' internal/api/huma_types*.go` returns
   nothing (Body fields are typed structs).
@@ -1361,7 +1361,7 @@ drift.
 - Remove the 422→400 rewrite in `configureHumaGlobals`. Generated
   client and CI tests must accept 422 for validation errors.
 - Delete any handler-side manual validation (`if input.Body.X ==
-  "" { ... }`) that Huma now covers.
+"" { ... }`) that Huma now covers.
 
 **Acceptance:**
 
@@ -1389,7 +1389,7 @@ prohibition.
 
 - Convert `response_cache.go` to generic typed storage:
   `cache.Get[T](key, index) (T, bool)` / `cache.Set[T](key, index,
-  value, ttl)`. Internal representation can still be `any`; the
+value, ttl)`. Internal representation can still be `any`; the
   generic type binds at the call site. No `json.Marshal`/`Unmarshal`
   inside the cache package.
 - Same treatment for `idempotency.go` — store the typed response
@@ -1406,12 +1406,12 @@ prohibition.
 **Acceptance:**
 
 - `grep -n 'json\.Unmarshal\|json\.Marshal'
-  internal/api/huma_handlers_*.go` returns nothing for cache paths.
+internal/api/huma_handlers_*.go` returns nothing for cache paths.
 - `grep -n 'json\.Marshal\|json\.Unmarshal'
-  internal/api/response_cache.go internal/api/idempotency.go`
+internal/api/response_cache.go internal/api/idempotency.go`
   returns nothing. Cache packages store typed values only.
 - `grep -n '\[\]byte' internal/api/response_cache.go
-  internal/api/idempotency.go` shows `[]byte` only for `bodyHash`
+internal/api/idempotency.go` shows `[]byte` only for `bodyHash`
   (request-body hash input), never for stored responses.
 - Cache-hit tests still pass; cache-hit behavior is
   indistinguishable from cache-miss modulo timing. Idempotency
@@ -1477,23 +1477,23 @@ and behavioral contracts.
 **Grep gate** (all must be empty inside `internal/api/`, excluding
 `*_test.go` unless stated):
 
-| Pattern                                   | Files allowed                                          |
-| ----------------------------------------- | ------------------------------------------------------ |
-| `writeError\(`                            | none                                                   |
-| `writeJSON\(`                             | none                                                   |
-| `writeListJSON\(`                         | none                                                   |
-| `writeSSE`                                | none                                                   |
-| `&apiError\{`                             | none                                                   |
-| `\bapiError\b` (type definition)          | none (type is deleted)                                 |
-| `decodeBody\(`                            | none                                                   |
-| `json\.Marshal\(`                         | none in `huma_handlers_*.go`, `response_cache.go`, `idempotency.go` |
-| `json\.Unmarshal\(`                       | none in `huma_handlers_*.go`, `response_cache.go`, `idempotency.go` |
-| `json\.RawMessage`                        | only `huma_handlers_beads.go:348` (documented input decoder)        |
-| `map\[string\]any` as Huma output body    | none                                                                |
-| `http\.NewRequest` / `http\.Client` / `http\.Get`        | none in `internal/api/client.go` or `cmd/gc/dashboard/{api,api_fetcher,serve,handler}.go` |
-| `json\.NewDecoder` / `json\.Unmarshal\(`  | none in `internal/api/client.go` or `cmd/gc/dashboard/{api,api_fetcher,serve,handler}.go` (except hits through the generated client) |
-| `StatusUnprocessableEntity` override      | none in `internal/api/server.go`                       |
-| `\bapi\.Error\b\|\bapi\.FieldError\b`     | none (legacy types deleted)                            |
+| Pattern                                           | Files allowed                                                                                                                        |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `writeError\(`                                    | none                                                                                                                                 |
+| `writeJSON\(`                                     | none                                                                                                                                 |
+| `writeListJSON\(`                                 | none                                                                                                                                 |
+| `writeSSE`                                        | none                                                                                                                                 |
+| `&apiError\{`                                     | none                                                                                                                                 |
+| `\bapiError\b` (type definition)                  | none (type is deleted)                                                                                                               |
+| `decodeBody\(`                                    | none                                                                                                                                 |
+| `json\.Marshal\(`                                 | none in `huma_handlers_*.go`, `response_cache.go`, `idempotency.go`                                                                  |
+| `json\.Unmarshal\(`                               | none in `huma_handlers_*.go`, `response_cache.go`, `idempotency.go`                                                                  |
+| `json\.RawMessage`                                | only `huma_handlers_beads.go:348` (documented input decoder)                                                                         |
+| `map\[string\]any` as Huma output body            | none                                                                                                                                 |
+| `http\.NewRequest` / `http\.Client` / `http\.Get` | none in `internal/api/client.go` or `cmd/gc/dashboard/{api,api_fetcher,serve,handler}.go`                                            |
+| `json\.NewDecoder` / `json\.Unmarshal\(`          | none in `internal/api/client.go` or `cmd/gc/dashboard/{api,api_fetcher,serve,handler}.go` (except hits through the generated client) |
+| `StatusUnprocessableEntity` override              | none in `internal/api/server.go`                                                                                                     |
+| `\bapi\.Error\b\|\bapi\.FieldError\b`             | none (legacy types deleted)                                                                                                          |
 
 **Behavioral + operational gate** (grep-insufficient checks):
 

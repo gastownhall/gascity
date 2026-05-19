@@ -8,8 +8,7 @@
 
 import { execSync } from "child_process";
 
-const PATH_PREFIX =
-  `${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
+const PATH_PREFIX = `${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
 
 function run(cmd: string): string {
   try {

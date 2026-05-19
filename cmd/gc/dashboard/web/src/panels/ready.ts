@@ -37,15 +37,13 @@ export async function renderReady(): Promise<void> {
   const list = el("div", { class: "ready-list" });
   for (const bead of unassigned) {
     const priority = bead.priority ?? 0;
-    list.append(el(
-      "div",
-      { class: `ready-row ready-p${priority}` },
-      [
+    list.append(
+      el("div", { class: `ready-row ready-p${priority}` }, [
         el("span", { class: `badge badge-p${priority}` }, [`P${priority || "?"}`]),
         el("span", { class: "ready-title" }, [bead.title ?? bead.id ?? ""]),
         bead.issue_type ? el("span", { class: "badge badge-muted" }, [bead.issue_type]) : null,
-      ],
-    ));
+      ]),
+    );
   }
   if (unassigned.length === 0) {
     list.append(el("div", { class: "panel-muted" }, ["Queue empty."]));

@@ -23,9 +23,7 @@ describe("options cache", () => {
       if (path === "/v0/city/{cityName}/config") {
         return {
           data: {
-            agents: [
-              { name: "mayor", display_name: "The Mayor" },
-            ],
+            agents: [{ name: "mayor", display_name: "The Mayor" }],
           },
           error: undefined,
           request: undefined,
@@ -33,13 +31,28 @@ describe("options cache", () => {
         } as never;
       }
       if (path === "/v0/city/{cityName}/rigs") {
-        return { data: { items: [] }, error: undefined, request: undefined, response: undefined } as never;
+        return {
+          data: { items: [] },
+          error: undefined,
+          request: undefined,
+          response: undefined,
+        } as never;
       }
       if (path === "/v0/city/{cityName}/beads") {
-        return { data: { items: [] }, error: undefined, request: undefined, response: undefined } as never;
+        return {
+          data: { items: [] },
+          error: undefined,
+          request: undefined,
+          response: undefined,
+        } as never;
       }
       if (path === "/v0/city/{cityName}/mail") {
-        return { data: { items: [] }, error: undefined, request: undefined, response: undefined } as never;
+        return {
+          data: { items: [] },
+          error: undefined,
+          request: undefined,
+          response: undefined,
+        } as never;
       }
       throw new Error(`unexpected GET ${path}`);
     });
@@ -47,12 +60,7 @@ describe("options cache", () => {
     const options = await getOptions(true);
 
     expect(options.agents).toEqual(["mayor"]);
-    expect(options.sessions).toEqual([
-      { id: "mayor", label: "mayor", recipient: "mayor" },
-    ]);
-    expect(getSpy).not.toHaveBeenCalledWith(
-      "/v0/city/{cityName}/sessions",
-      expect.anything(),
-    );
+    expect(options.sessions).toEqual([{ id: "mayor", label: "mayor", recipient: "mayor" }]);
+    expect(getSpy).not.toHaveBeenCalledWith("/v0/city/{cityName}/sessions", expect.anything());
   });
 });

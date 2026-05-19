@@ -22,8 +22,8 @@ const sharedSkillCatalogSnapshotEnvVar = "GC_SHARED_SKILL_CATALOG_SNAPSHOT"
 // be able to SEE that filesystem path — not that it execute
 // PreStart.
 //
-//	tmux, subprocess → eligible. Scope root on the host; agent reads
-//	                   files from that host filesystem.
+//	tmux, subprocess, t3bridge → eligible. Scope root on the host; agent
+//	                             reads files from that host filesystem.
 //	""               → eligible (workspace default is tmux).
 //	acp              → ineligible. In-process agent; scope-root files
 //	                   aren't what it reads from.
@@ -46,7 +46,7 @@ func canStage1Materialize(citySessionProvider string, agent *config.Agent) bool 
 		return false
 	}
 	switch strings.TrimSpace(citySessionProvider) {
-	case "", "tmux", "subprocess":
+	case "", "tmux", "subprocess", "t3bridge":
 		return true
 	default:
 		return false
@@ -58,8 +58,8 @@ func canStage1Materialize(citySessionProvider string, agent *config.Agent) bool 
 // materialization spec (§ "Stage 2 runtime gate") and the runtime
 // reality of which providers actually execute PreStart:
 //
-//	tmux  → eligible. PreStart runs on the host via tmux/adapter.go
-//	        runPreStart before the tmux session is created.
+//	tmux, t3bridge → eligible. PreStart runs on the host before the
+//	                 provider session is created.
 //	""    → eligible (workspace default maps to tmux).
 //	acp   → ineligible. Session runs in-process; out of scope v0.15.1.
 //	k8s   → ineligible. PreStart runs inside the pod; gc binary and
@@ -92,7 +92,7 @@ func isStage2EligibleSession(citySessionProvider string, agent *config.Agent) bo
 		return false
 	}
 	switch strings.TrimSpace(citySessionProvider) {
-	case "", "tmux":
+	case "", "tmux", "t3bridge":
 		return true
 	default:
 		// subprocess, k8s, acp, fake, fail, hybrid, exec:<script>, ...

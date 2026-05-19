@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -60,14 +59,12 @@ func newSlingCmd(stdout, stderr io.Writer) *cobra.Command {
 	var merge string
 	var noConvoy bool
 	var owned bool
-	var reassign bool
 	var onFormula string
 	var dryRun bool
 	var noFormula bool
 	var fromStdin bool
 	var scopeKind string
 	var scopeRef string
-	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "sling [target] <bead-or-formula-or-text>",
 		Short: "Route work to a session config or agent",
@@ -91,38 +88,32 @@ Examples:
   echo "fix login" | gc sling mayor --stdin # read bead text from stdin`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			argError := func(message string) error {
-				if jsonOutput {
-					return exitForCode(writeJSONError(stdout, stderr, "invalid_arguments", message, 1))
-				}
-				fmt.Fprintln(stderr, message) //nolint:errcheck // best-effort stderr
-				return errExit
-			}
 			if fromStdin {
 				if len(args) != 1 {
-					return argError("gc sling: --stdin requires exactly 1 argument (target)")
+					fmt.Fprintf(stderr, "gc sling: --stdin requires exactly 1 argument (target)\n") //nolint:errcheck // best-effort stderr
+					return errExit
 				}
 			} else if len(args) < 1 || len(args) > 2 {
-				return argError("gc sling: requires 1 or 2 arguments: [target] <bead-or-formula>")
+				fmt.Fprintf(stderr, "gc sling: requires 1 or 2 arguments: [target] <bead-or-formula>\n") //nolint:errcheck // best-effort stderr
+				return errExit
 			}
 			if owned && noConvoy {
-				return argError("gc sling: --owned requires a convoy (cannot use with --no-convoy)")
+				fmt.Fprintf(stderr, "gc sling: --owned requires a convoy (cannot use with --no-convoy)\n") //nolint:errcheck // best-effort stderr
+				return errExit
 			}
 			if merge != "" && merge != "direct" && merge != "mr" && merge != "local" {
-				return argError("gc sling: --merge must be direct, mr, or local")
+				fmt.Fprintf(stderr, "gc sling: --merge must be direct, mr, or local\n") //nolint:errcheck // best-effort stderr
+				return errExit
 			}
 			if (strings.TrimSpace(scopeKind) == "") != (strings.TrimSpace(scopeRef) == "") {
-				return argError("gc sling: --scope-kind and --scope-ref must be provided together")
+				fmt.Fprintf(stderr, "gc sling: --scope-kind and --scope-ref must be provided together\n") //nolint:errcheck // best-effort stderr
+				return errExit
 			}
 			if scopeKind != "" && scopeKind != "city" && scopeKind != "rig" {
-				return argError("gc sling: --scope-kind must be city or rig")
+				fmt.Fprintf(stderr, "gc sling: --scope-kind must be city or rig\n") //nolint:errcheck // best-effort stderr
+				return errExit
 			}
-			code := 0
-			if jsonOutput {
-				code = cmdSlingWithJSON(args, formula, nudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, true, stdout, stderr)
-			} else {
-				code = cmdSling(args, formula, nudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, stdout, stderr)
-			}
+			code := cmdSling(args, formula, nudge, force, title, vars, merge, noConvoy, owned, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, stdout, stderr)
 			return exitForCode(code)
 		},
 	}
@@ -134,14 +125,12 @@ Examples:
 	cmd.Flags().StringVar(&merge, "merge", "", "merge strategy: direct, mr, or local")
 	cmd.Flags().BoolVar(&noConvoy, "no-convoy", false, "skip auto-convoy creation")
 	cmd.Flags().BoolVar(&owned, "owned", false, "mark auto-convoy as owned (skip auto-close)")
-	cmd.Flags().BoolVar(&reassign, "reassign", false, "clear any existing human assignee before routing (for human→pool handoff)")
 	cmd.Flags().StringVar(&onFormula, "on", "", "attach wisp from formula to bead before routing")
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "show what would be done without executing")
 	cmd.Flags().BoolVar(&noFormula, "no-formula", false, "suppress default formula (route raw bead)")
 	cmd.Flags().BoolVar(&fromStdin, "stdin", false, "read bead text from stdin (first line = title, rest = description)")
 	cmd.Flags().StringVar(&scopeKind, "scope-kind", "", "logical workflow scope kind for graph.v2 launches")
 	cmd.Flags().StringVar(&scopeRef, "scope-ref", "", "logical workflow scope ref for graph.v2 launches")
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output dispatch result in JSON format")
 	cmd.MarkFlagsMutuallyExclusive("formula", "on")
 	cmd.MarkFlagsMutuallyExclusive("no-formula", "formula")
 	cmd.MarkFlagsMutuallyExclusive("no-formula", "on")
@@ -185,22 +174,7 @@ func shellSlingRunner(dir, command string, env map[string]string) (string, error
 }
 
 // cmdSling is the CLI entry point for gc sling.
-func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, stdout, stderr io.Writer) int {
-	return cmdSlingWithJSON(args, isFormula, doNudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, false, stdout, stderr)
-}
-
-func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, jsonOutput bool, stdout, stderr io.Writer) int {
-	humanStdout := stdout
-	if jsonOutput {
-		humanStdout = io.Discard
-	}
-	fail := func(code, message string) int {
-		if jsonOutput {
-			return writeJSONError(stdout, stderr, code, message, 1)
-		}
-		fmt.Fprintln(stderr, message) //nolint:errcheck // best-effort stderr
-		return 1
-	}
+func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, stdout, stderr io.Writer) int {
 	// --stdin: read bead text from stdin early (before city resolution)
 	// so errors are reported immediately. First line = title, rest = description.
 	var stdinDescription string
@@ -208,11 +182,13 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	if fromStdin {
 		data, err := io.ReadAll(slingStdin())
 		if err != nil {
-			return fail("stdin_read_failed", fmt.Sprintf("gc sling: reading stdin: %v", err))
+			fmt.Fprintf(stderr, "gc sling: reading stdin: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
 		}
 		content := strings.TrimRight(string(data), "\n")
 		if content == "" {
-			return fail("invalid_arguments", "gc sling: --stdin: no input received")
+			fmt.Fprintf(stderr, "gc sling: --stdin: no input received\n") //nolint:errcheck // best-effort stderr
+			return 1
 		}
 		lines := strings.SplitN(content, "\n", 2)
 		stdinTitle = lines[0]
@@ -223,11 +199,13 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 
 	cityPath, err := resolveCity()
 	if err != nil {
-		return fail("city_resolve_failed", fmt.Sprintf("gc sling: %v", err))
+		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	cfg, prov, err := loadSlingCityConfig(cityPath)
 	if err != nil {
-		return fail("config_load_failed", fmt.Sprintf("gc sling: %v", err))
+		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	emitLoadCityConfigWarnings(stderr, prov)
 	applyFeatureFlags(cfg)
@@ -245,35 +223,42 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		if !isFormula {
 			sourceBead, err = probeExistingSlingSourceBead(cfg, cityPath, beadOrFormula)
 			if err != nil {
-				return fail("source_bead_probe_failed", fmt.Sprintf("gc sling: %v", err))
+				fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
 			}
 		}
 	default:
 		// 1-arg: bead ID only, resolve target from rig's default_sling_target.
 		beadOrFormula = args[0]
 		if isFormula {
-			return fail("invalid_arguments", "gc sling: --formula requires explicit target")
+			fmt.Fprintf(stderr, "gc sling: --formula requires explicit target\n") //nolint:errcheck // best-effort stderr
+			return 1
 		}
 		sourceBead, err = probeExistingSlingSourceBead(cfg, cityPath, beadOrFormula)
 		if err != nil {
-			return fail("source_bead_probe_failed", fmt.Sprintf("gc sling: %v", err))
+			fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
 		}
 		if !canInferSlingDefaultTargetFromBead(cfg, beadOrFormula) && !sourceBead.exists {
-			return fail("invalid_arguments", fmt.Sprintf("gc sling: inline text requires explicit target; usage: gc sling <target> %q", beadOrFormula))
+			fmt.Fprintf(stderr, "gc sling: inline text requires explicit target\n  usage: gc sling <target> %q\n", beadOrFormula) //nolint:errcheck // best-effort stderr
+			return 1
 		}
 		bp := sling.BeadPrefixForCity(cfg, beadOrFormula)
 		if sourceBead.prefix != "" {
 			bp = sourceBead.prefix
 		}
 		if bp == "" {
-			return fail("target_resolve_failed", fmt.Sprintf("gc sling: cannot derive rig from bead %q (no prefix)", beadOrFormula))
+			fmt.Fprintf(stderr, "gc sling: cannot derive rig from bead %q (no prefix)\n", beadOrFormula) //nolint:errcheck // best-effort stderr
+			return 1
 		}
 		rig, found := findRigByPrefix(cfg, bp)
 		if !found {
-			return fail("target_resolve_failed", fmt.Sprintf("gc sling: no rig with prefix %q for bead %s", bp, beadOrFormula))
+			fmt.Fprintf(stderr, "gc sling: no rig with prefix %q for bead %s\n", bp, beadOrFormula) //nolint:errcheck // best-effort stderr
+			return 1
 		}
 		if rig.DefaultSlingTarget == "" {
-			return fail("target_resolve_failed", fmt.Sprintf("gc sling: rig %q has no default_sling_target", rig.Name))
+			fmt.Fprintf(stderr, "gc sling: rig %q has no default_sling_target\n", rig.Name) //nolint:errcheck // best-effort stderr
+			return 1
 		}
 		target = rig.DefaultSlingTarget
 	}
@@ -286,9 +271,6 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 
 	a, ok := resolveAgentIdentity(cfg, target, currentRigContext(cfg))
 	if !ok {
-		if jsonOutput {
-			return writeJSONError(stdout, stderr, "target_resolve_failed", agentNotFoundMsg("gc sling", target, cfg), 1)
-		}
 		fmt.Fprintln(stderr, agentNotFoundMsg("gc sling", target, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -301,20 +283,18 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		storeDir = sourceBead.storeDir
 		store, err = openStoreAtForCity(storeDir, cityPath)
 		if err != nil {
-			return fail("store_open_failed", fmt.Sprintf("gc sling: opening store %s: %v", storeDir, err))
+			fmt.Fprintf(stderr, "gc sling: opening store %s: %v\n", storeDir, err) //nolint:errcheck // best-effort stderr
+			return 1
 		}
 	} else {
 		storeDir, store, err = openSlingStoreForSource(cfg, cityPath, beadOrFormula, a)
 		if err != nil {
-			return fail("store_open_failed", fmt.Sprintf("gc sling: %v", err))
+			fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
 		}
 	}
 	storeRef := workflowStoreRefForDir(storeDir, cityPath, cityName, cfg)
-	storeEnv, err := slingStoreEnvWithError(cfg, cityPath, storeDir)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc sling: building store env: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
+	storeEnv := slingStoreEnv(cfg, cityPath, storeDir)
 	if sourceBead.exists && looksLikeInlineText(cfg, beadOrFormula) {
 		fmt.Fprintf(stderr, "gc sling: found existing bead %q in %s; routing it instead of creating inline text\n", beadOrFormula, storeRef) //nolint:errcheck // best-effort stderr
 	}
@@ -330,15 +310,17 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		}
 		createInlineBead, previewInlineText, err := resolveInlineBeadAction(cfg, beadOrFormula, dryRun, inlineProbeStore)
 		if err != nil {
-			return fail("inline_bead_resolve_failed", fmt.Sprintf("gc sling: %v", err))
+			fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
 		}
 		inlineText = previewInlineText
 		if createInlineBead {
 			created, err := store.Create(beads.Bead{Title: beadOrFormula, Description: stdinDescription, Type: "task"})
 			if err != nil {
-				return fail("bead_create_failed", fmt.Sprintf("gc sling: creating bead: %v", err))
+				fmt.Fprintf(stderr, "gc sling: creating bead: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
 			}
-			fmt.Fprintf(humanStdout, "Created %s — %q\n", created.ID, beadOrFormula) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "Created %s — %q\n", created.ID, beadOrFormula) //nolint:errcheck // best-effort stdout
 			beadOrFormula = created.ID
 		}
 	}
@@ -354,7 +336,6 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		Merge:         merge,
 		NoConvoy:      noConvoy,
 		Owned:         owned,
-		Reassign:      reassign,
 		Nudge:         doNudge,
 		Force:         force,
 		DryRun:        dryRun,
@@ -404,14 +385,14 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		},
 	}
 
-	return doSlingBatchWithJSON(opts, deps, store, jsonOutput, humanStdout, stdout, stderr)
+	return doSlingBatch(opts, deps, store, stdout, stderr)
 }
 
 func loadSlingCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
 	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
 }
 
-func slingStoreEnvWithError(cfg *config.City, cityPath, storeDir string) (map[string]string, error) {
+func slingStoreEnv(cfg *config.City, cityPath, storeDir string) map[string]string {
 	storeEnv := map[string]string{}
 	switch provider := rawBeadsProviderForScope(storeDir, cityPath); {
 	case provider == "file":
@@ -420,20 +401,12 @@ func slingStoreEnvWithError(cfg *config.City, cityPath, storeDir string) (map[st
 	case strings.HasPrefix(provider, "exec:"):
 		// Explicit custom sling_query commands own their env for exec providers.
 	default:
-		var err error
+		storeEnv = bdRuntimeEnv(cityPath)
 		if !samePath(storeDir, cityPath) {
-			storeEnv, err = bdRuntimeEnvForRigWithError(cityPath, cfg, storeDir)
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			storeEnv, err = bdRuntimeEnvWithError(cityPath)
-			if err != nil {
-				return nil, err
-			}
+			storeEnv = bdRuntimeEnvForRig(cityPath, cfg, storeDir)
 		}
 	}
-	return storeEnv, nil
+	return storeEnv
 }
 
 // findRigByPrefix returns the rig whose effective prefix matches (case-insensitive).
@@ -444,8 +417,8 @@ func findRigByPrefix(cfg *config.City, prefix string) (config.Rig, bool) {
 // beadPrefix returns the rig prefix for beadID, preferring the longest
 // configured prefix when cfg is non-nil. Pass cfg whenever the caller
 // needs hyphenated rig prefixes (e.g. "agent-diagnostics-hnn") to
-// resolve correctly; otherwise sling.BeadPrefix uses a config-free
-// last-hyphen heuristic with prose fallback.
+// resolve correctly; otherwise the underlying sling.BeadPrefix's
+// first-dash split is used.
 func beadPrefix(cfg *config.City, beadID string) string {
 	return sling.BeadPrefixForCity(cfg, beadID)
 }
@@ -807,10 +780,6 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, stderr
 
 // doSlingBatch creates a Sling instance and dispatches batch or single.
 func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier, stdout, stderr io.Writer) int {
-	return doSlingBatchWithJSON(opts, deps, querier, false, stdout, stdout, stderr)
-}
-
-func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQuerier, jsonOutput bool, humanStdout, jsonStdout, stderr io.Writer) int {
 	populateSlingDepsCallbacks(&deps)
 	sl, newErr := sling.New(deps)
 	if newErr != nil {
@@ -843,12 +812,10 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 	printSlingWarnings(result, stderr)
 	// Always print results when we have children (partial failures
 	// should still show per-child status).
-	if !jsonOutput {
-		if len(result.Children) > 0 {
-			printBatchSlingResult(result, humanStdout, stderr)
-		} else if err == nil {
-			printSlingResult(result, humanStdout, stderr)
-		}
+	if len(result.Children) > 0 {
+		printBatchSlingResult(result, stdout, stderr)
+	} else if err == nil {
+		printSlingResult(result, stdout, stderr)
 	}
 	if err != nil {
 		// Batch can surface multiple typed conflicts (one per conflicted
@@ -878,9 +845,6 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 		return 1
 	}
 	if result.DryRun {
-		if jsonOutput {
-			return writeSlingJSONResult(result, jsonStdout, stderr)
-		}
 		// For batch dry-run, look up the container bead for display.
 		if querier != nil {
 			if b, getErr := querier.Get(opts.BeadOrFormula); getErr == nil {
@@ -893,97 +857,15 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 						open = append(open, c)
 					}
 				}
-				return dryRunBatch(opts, deps, humanStdout, stderr, b, children, open, querier)
+				return dryRunBatch(opts, deps, stdout, stderr, b, children, open, querier)
 			}
 		}
-		return dryRunSingle(opts, deps, querier, humanStdout, stderr)
+		return dryRunSingle(opts, deps, querier, stdout, stderr)
 	}
 	if result.NudgeAgent != nil {
-		doSlingNudge(result.NudgeAgent, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, humanStdout, stderr)
-	}
-	if jsonOutput {
-		return writeSlingJSONResult(result, jsonStdout, stderr)
+		doSlingNudge(result.NudgeAgent, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, stdout, stderr)
 	}
 	return 0
-}
-
-type slingJSONResult struct {
-	SchemaVersion string                 `json:"schema_version"`
-	Success       bool                   `json:"success"`
-	Target        string                 `json:"target"`
-	Method        string                 `json:"method,omitempty"`
-	BeadID        string                 `json:"bead_id,omitempty"`
-	Formula       string                 `json:"formula,omitempty"`
-	MoleculeID    string                 `json:"molecule_id,omitempty"`
-	WorkflowID    string                 `json:"workflow_id,omitempty"`
-	ConvoyID      string                 `json:"convoy_id,omitempty"`
-	Routed        bool                   `json:"routed"`
-	Queued        bool                   `json:"queued"`
-	DryRun        bool                   `json:"dry_run"`
-	Warnings      []string               `json:"warnings,omitempty"`
-	Batch         *slingJSONBatchSummary `json:"batch,omitempty"`
-}
-
-type slingJSONBatchSummary struct {
-	ContainerType string `json:"container_type,omitempty"`
-	Total         int    `json:"total"`
-	Routed        int    `json:"routed"`
-	Failed        int    `json:"failed"`
-	Skipped       int    `json:"skipped"`
-	Idempotent    int    `json:"idempotent"`
-}
-
-func writeSlingJSONResult(result sling.SlingResult, stdout, stderr io.Writer) int {
-	payload := slingJSONFromResult(result)
-	enc := json.NewEncoder(stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(payload); err != nil {
-		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	return 0
-}
-
-func slingJSONFromResult(result sling.SlingResult) slingJSONResult {
-	payload := slingJSONResult{
-		SchemaVersion: "1",
-		Success:       true,
-		Target:        result.Target,
-		Method:        result.Method,
-		BeadID:        result.BeadID,
-		Formula:       result.FormulaName,
-		MoleculeID:    result.WispRootID,
-		WorkflowID:    result.WorkflowID,
-		ConvoyID:      result.ConvoyID,
-		Routed:        result.Routed > 0 || (!result.Idempotent && result.BeadID != "" && !result.DryRun),
-		Queued:        result.NudgeAgent != nil,
-		DryRun:        result.DryRun,
-		Warnings:      slingJSONWarnings(result),
-	}
-	if len(result.Children) > 0 || result.ContainerType != "" {
-		payload.Batch = &slingJSONBatchSummary{
-			ContainerType: result.ContainerType,
-			Total:         result.Total,
-			Routed:        result.Routed,
-			Failed:        result.Failed,
-			Skipped:       result.Skipped,
-			Idempotent:    result.IdempotentCt,
-		}
-	}
-	return payload
-}
-
-func slingJSONWarnings(result sling.SlingResult) []string {
-	var warnings []string
-	if result.AgentSuspended {
-		warnings = append(warnings, "agent_suspended")
-	}
-	if result.PoolEmpty {
-		warnings = append(warnings, "pool_empty")
-	}
-	warnings = append(warnings, result.BeadWarnings...)
-	warnings = append(warnings, result.MetadataErrors...)
-	return warnings
 }
 
 func printMissingBeadError(stderr io.Writer, err *sling.MissingBeadError, allowForce bool) {
@@ -1066,15 +948,97 @@ func collectConflictErrors(err error, visit func(*sourceworkflow.ConflictError))
 }
 
 // buildSlingFormulaVars merges caller-provided vars with the runtime context
-// needed by common work formulas. Delegates to the canonical implementation
-// in internal/sling so CLI dry-run previews match production routing, but
-// injects cliBranchResolver so live `git symbolic-ref origin/HEAD` probes
-// fire when neither bead metadata nor rig.DefaultBranch supply a branch.
+// needed by common work formulas. Explicit --var entries always win.
 func buildSlingFormulaVars(formulaName, beadID string, userVars []string, a config.Agent, deps slingDeps) map[string]string {
-	if deps.Branches == nil {
-		deps.Branches = cliBranchResolver{}
+	vars := make(map[string]string, len(userVars)+6)
+	for _, v := range userVars {
+		key, value, ok := strings.Cut(v, "=")
+		if ok && key != "" {
+			vars[key] = value
+		}
 	}
-	return sling.BuildSlingFormulaVars(formulaName, beadID, userVars, a, deps)
+	addVar := func(key, value string) {
+		if value == "" {
+			return
+		}
+		if _, explicit := vars[key]; explicit {
+			return
+		}
+		vars[key] = value
+	}
+	addRoutingVar := func(key, value string) {
+		if _, explicit := vars[key]; explicit {
+			return
+		}
+		vars[key] = value
+	}
+
+	if beadID != "" {
+		// Attached work formulas conventionally expect issue=<bead-id>.
+		addVar("issue", beadID)
+	}
+	addRoutingVar("rig_name", a.Dir)
+	addRoutingVar("binding_name", a.BindingName)
+	addRoutingVar("binding_prefix", a.BindingPrefix())
+
+	autoBranch := slingFormulaTargetBranch(beadID, deps, a)
+	if slingFormulaUsesBaseBranch(formulaName) {
+		addVar("base_branch", autoBranch)
+	}
+	if slingFormulaUsesTargetBranch(formulaName) {
+		addVar("target_branch", autoBranch)
+	}
+
+	return vars
+}
+
+// slingFormulaSearchPaths returns the formula search paths for the current
+// sling context. Uses the target agent's rig to select rig-specific layers,
+// falling back to city-level layers via FormulaLayers.SearchPaths.
+func slingFormulaTargetBranch(beadID string, deps slingDeps, a config.Agent) string {
+	if target := beadMetadataTarget(deps.Store, beadID); target != "" {
+		return target
+	}
+	return defaultBranchFor(slingFormulaRepoDir(beadID, deps, a))
+}
+
+func beadMetadataTarget(store beads.Store, beadID string) string {
+	if store == nil || beadID == "" {
+		return ""
+	}
+
+	seen := make(map[string]struct{}, 8)
+	rootID := beadID
+	for beadID != "" {
+		if _, ok := seen[beadID]; ok {
+			return ""
+		}
+		seen[beadID] = struct{}{}
+
+		b, err := store.Get(beadID)
+		if err != nil {
+			return ""
+		}
+		if target := strings.TrimSpace(b.Metadata["target"]); target != "" {
+			if beadID == rootID || b.Type == "convoy" {
+				return target
+			}
+		}
+		beadID = strings.TrimSpace(b.ParentID)
+	}
+	return ""
+}
+
+func slingFormulaRepoDir(beadID string, deps slingDeps, a config.Agent) string {
+	return resolveSlingStoreRoot(deps.Cfg, deps.CityPath, beadID, a)
+}
+
+func slingFormulaUsesBaseBranch(formula string) bool {
+	return strings.HasPrefix(formula, "mol-polecat-") || formula == "mol-scoped-work"
+}
+
+func slingFormulaUsesTargetBranch(formula string) bool {
+	return formula == "mol-refinery-patrol"
 }
 
 // resolveSlingEnv returns extra env vars for the sling command.
@@ -1487,8 +1451,11 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 // socket doesn't exist (supervisor model), falls back to sending
 // "reload" to the supervisor socket.
 func pokeController(cityPath string) error {
-	_, err := sendControllerCommand(cityPath, "poke")
+	_, err := sendControllerCommandWithTimeouts(cityPath, "poke", 500*time.Millisecond, 500*time.Millisecond, 250*time.Millisecond)
 	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errControllerUnresponsive) {
 		return nil
 	}
 	// Fall back to supervisor reload.
@@ -1555,7 +1522,6 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 			})
 			if nudgeErr == nil && result.Delivered {
 				telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
-				stampLastNudgeDeliveredAt(store, target.sessionID, time.Now())
 				fmt.Fprintf(stdout, "Nudged %s\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort
 				return
 			}
@@ -1907,9 +1873,6 @@ func looksLikeBeadID(s string) bool {
 	return looksLikeBeadIDSuffix(baseSuffix)
 }
 
-// looksLikeBeadIDSuffix is the CLI's config-free inline-text heuristic. It is
-// deliberately stricter than sling's configured-prefix suffix gate so longer
-// all-letter prose still creates inline work instead of being routed as an ID.
 func looksLikeBeadIDSuffix(baseSuffix string) bool {
 	if len(baseSuffix) <= 4 {
 		return true

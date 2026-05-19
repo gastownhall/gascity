@@ -29,22 +29,22 @@ This plan is grounded in:
 
 These are the branch scores that motivated this plan:
 
-| Criterion | Baseline |
-|---|---:|
-| TDD | 78 |
-| DRY | 59 |
-| Separation of Concerns | 67 |
-| Single Responsibility | 51 |
-| Clear Abstractions | 75 |
-| Low Coupling, High Cohesion | 64 |
-| KISS | 56 |
-| YAGNI | 62 |
-| Prefer Non-Nullable | 71 |
-| Prefer Async Notifications | 42 |
-| Eliminate Race Conditions | 60 |
-| Errors Are Not Optional | 68 |
-| Idiomatic Project Layout | 74 |
-| Write for Maintainability | 58 |
+| Criterion                   | Baseline |
+| --------------------------- | -------: |
+| TDD                         |       78 |
+| DRY                         |       59 |
+| Separation of Concerns      |       67 |
+| Single Responsibility       |       51 |
+| Clear Abstractions          |       75 |
+| Low Coupling, High Cohesion |       64 |
+| KISS                        |       56 |
+| YAGNI                       |       62 |
+| Prefer Non-Nullable         |       71 |
+| Prefer Async Notifications  |       42 |
+| Eliminate Race Conditions   |       60 |
+| Errors Are Not Optional     |       68 |
+| Idiomatic Project Layout    |       74 |
+| Write for Maintainability   |       58 |
 
 ## Target State
 
@@ -85,12 +85,14 @@ Split the broad `worker.Handle` contract into smaller capability interfaces and
 update callers to depend on the minimum surface they actually need.
 
 **Acceptance criteria:**
+
 - [ ] Core Worker capabilities are grouped into smaller interfaces.
 - [ ] Streaming and observation helpers depend on the smallest required
       capability surface.
 - [ ] Existing Worker/API behavior remains unchanged.
 
 **Verification:**
+
 - [ ] `go test -count=1 ./internal/worker ./internal/api`
 - [ ] `golangci-lint run --new ./internal/worker ./internal/api`
 
@@ -103,6 +105,7 @@ Break oversized Worker, API streaming, and conformance files into smaller files
 organized by responsibility instead of by historical accumulation.
 
 **Acceptance criteria:**
+
 - [x] Session API handlers are split by concern across
       `handler_session_create.go`, `handler_session_interaction.go`,
       `handler_session_transcript.go`, and `handler_session_stream.go`.
@@ -112,6 +115,7 @@ organized by responsibility instead of by historical accumulation.
       easier to locate and review.
 
 **Verification:**
+
 - [ ] `go test -count=1 ./internal/api ./internal/worker/...`
 - [ ] `go test -count=1 ./internal/worker/workertest`
 
@@ -124,6 +128,7 @@ Finish centralizing session/runtime resolution behind `Factory` so API and CLI
 callers stop constructing session specs by hand.
 
 **Acceptance criteria:**
+
 - [ ] `cmd/gc` uses `Factory` helpers instead of reconstructing worker session
       specs locally.
 - [ ] `internal/api` routes session-backed handle construction through
@@ -132,6 +137,7 @@ callers stop constructing session specs by hand.
       call sites.
 
 **Verification:**
+
 - [ ] `go test -count=1 ./cmd/gc ./internal/api`
 - [ ] `golangci-lint run --new ./cmd/gc ./internal/api ./internal/worker`
 
@@ -145,12 +151,14 @@ interrupt, stop, and history flows, then use those records to narrow or remove
 poll-driven state transitions where possible.
 
 **Acceptance criteria:**
+
 - [ ] Worker operations emit structured events with identity, timing, and
       outcome.
 - [ ] Startup/interrupt edges stop depending purely on ad hoc poll windows.
 - [ ] Failure evidence is available to callers without bespoke log scraping.
 
 **Verification:**
+
 - [ ] targeted Worker/session/API regressions for start, interrupt, and pending
       interaction flows
 - [ ] broader package tests for `./internal/worker ./internal/session ./internal/api ./cmd/gc`
@@ -165,6 +173,7 @@ Worker request shapes more explicit, with fewer ambient defaults and sentinel
 empty strings.
 
 **Acceptance criteria:**
+
 - [ ] Worker session construction has clearer required-field rules.
 - [ ] High-traffic request/result shapes stop relying on ad hoc empty-string
       conventions where explicit types are feasible.
@@ -172,6 +181,7 @@ empty strings.
       structs.
 
 **Verification:**
+
 - [ ] targeted constructor and resolution tests
 - [ ] package tests for `./internal/worker ./internal/api ./cmd/gc`
 
@@ -185,6 +195,7 @@ architecture path, then require review/fix loops before each major slice is
 considered done.
 
 **Acceptance criteria:**
+
 - [ ] Guardrail tests fail when callers bypass the Worker boundary or widen
       contracts again.
 - [ ] Each major slice completes with a `review-pr` pass and no major/blocking
@@ -192,6 +203,7 @@ considered done.
 - [ ] The hardening PR remains reviewable as a sequence of bounded slices.
 
 **Verification:**
+
 - [ ] targeted guardrail tests
 - [ ] `review-pr` reports archived with no unresolved major/blocking findings
 

@@ -13,7 +13,13 @@ import {
   type DashboardEventMessage,
   type SSEHandle,
 } from "../sse";
-import { eventCategory, eventIcon, eventSummary, extractRig, formatAgentAddress } from "../util/legacy";
+import {
+  eventCategory,
+  eventIcon,
+  eventSummary,
+  extractRig,
+  formatAgentAddress,
+} from "../util/legacy";
 import { relativeTime } from "../util/time";
 
 export interface ActivityEntry {
@@ -30,7 +36,10 @@ export interface ActivityEntry {
 }
 
 type DashboardHistoryRecord = CityEventRecord | SupervisorEventRecord;
-type DashboardEventRecord = DashboardHistoryRecord | CityEventStreamEnvelope | SupervisorEventStreamEnvelope;
+type DashboardEventRecord =
+  | DashboardHistoryRecord
+  | CityEventStreamEnvelope
+  | SupervisorEventStreamEnvelope;
 
 const MAX_ENTRIES = 150;
 const entries: ActivityEntry[] = [];
@@ -138,40 +147,56 @@ export function renderActivity(): void {
 
   const timeline = el("div", { class: "tl-timeline", id: "activity-timeline" });
   filtered.forEach((entry) => {
-    timeline.append(el("div", {
-      class: `tl-entry ${activityTypeClass(entry.category)}`,
-      "data-category": entry.category,
-      "data-rig": entry.rig,
-      "data-agent": entry.actor ?? "",
-      "data-type": entry.type,
-      "data-ts": entry.ts,
-    }, [
-      el("div", { class: "tl-rail" }, [
-        el("span", { class: "tl-time" }, [relativeTime(entry.ts)]),
-        el("span", { class: "tl-node" }),
-      ]),
-      el("div", { class: "tl-content" }, [
-        el("div", { class: "tl-header" }, [
-          el("span", { class: "tl-icon" }, [eventIcon(entry.type)]),
-          el("span", { class: "tl-summary" }, [eventSummary(entry.type, entry.actor, entry.subject, entry.message)]),
-        ]),
-        el("div", { class: "tl-meta" }, [
-          entry.actor ? el("span", { class: "tl-badge tl-badge-agent" }, [formatAgentAddress(entry.actor)]) : null,
-          entry.rig ? el("span", { class: "tl-badge tl-badge-rig" }, [entry.rig]) : null,
-          el("span", { class: "tl-badge tl-badge-type" }, [entry.type]),
-        ]),
-      ]),
-    ]));
+    timeline.append(
+      el(
+        "div",
+        {
+          class: `tl-entry ${activityTypeClass(entry.category)}`,
+          "data-category": entry.category,
+          "data-rig": entry.rig,
+          "data-agent": entry.actor ?? "",
+          "data-type": entry.type,
+          "data-ts": entry.ts,
+        },
+        [
+          el("div", { class: "tl-rail" }, [
+            el("span", { class: "tl-time" }, [relativeTime(entry.ts)]),
+            el("span", { class: "tl-node" }),
+          ]),
+          el("div", { class: "tl-content" }, [
+            el("div", { class: "tl-header" }, [
+              el("span", { class: "tl-icon" }, [eventIcon(entry.type)]),
+              el("span", { class: "tl-summary" }, [
+                eventSummary(entry.type, entry.actor, entry.subject, entry.message),
+              ]),
+            ]),
+            el("div", { class: "tl-meta" }, [
+              entry.actor
+                ? el("span", { class: "tl-badge tl-badge-agent" }, [
+                    formatAgentAddress(entry.actor),
+                  ])
+                : null,
+              entry.rig ? el("span", { class: "tl-badge tl-badge-rig" }, [entry.rig]) : null,
+              el("span", { class: "tl-badge tl-badge-type" }, [entry.type]),
+            ]),
+          ]),
+        ],
+      ),
+    );
   });
   feed.append(timeline);
 }
 
 export function installActivityInteractions(): void {
   document.addEventListener("click", (event) => {
-    const target = (event.target as HTMLElement | null)?.closest(".tl-filter-btn") as HTMLElement | null;
+    const target = (event.target as HTMLElement | null)?.closest(
+      ".tl-filter-btn",
+    ) as HTMLElement | null;
     if (!target) return;
     categoryFilter = target.dataset.value ?? "all";
-    document.querySelectorAll(".tl-filter-btn").forEach((button) => button.classList.remove("active"));
+    document
+      .querySelectorAll(".tl-filter-btn")
+      .forEach((button) => button.classList.remove("active"));
     target.classList.add("active");
     renderActivity();
   });
@@ -192,45 +217,71 @@ function renderFilters(): void {
   clear(container);
   if (entries.length === 0) return;
   const rigs = [...new Set(entries.map((entry) => entry.rig).filter(Boolean))].sort();
-  const agents = [...new Set(entries.map((entry) => entry.actor).filter(Boolean))].sort() as string[];
+  const agents = [
+    ...new Set(entries.map((entry) => entry.actor).filter(Boolean)),
+  ].sort() as string[];
 
-  const rigSelect = el("select", { class: "tl-filter-select", id: "tl-rig-filter" }) as HTMLSelectElement;
+  const rigSelect = el("select", {
+    class: "tl-filter-select",
+    id: "tl-rig-filter",
+  }) as HTMLSelectElement;
   rigSelect.append(el("option", { value: "all" }, ["All rigs"]));
-  rigs.forEach((rig) => rigSelect.append(el("option", { value: rig, selected: rig === rigFilter }, [rig])));
+  rigs.forEach((rig) =>
+    rigSelect.append(el("option", { value: rig, selected: rig === rigFilter }, [rig])),
+  );
   rigSelect.addEventListener("change", () => {
     rigFilter = rigSelect.value;
     renderActivity();
   });
 
-  const agentSelect = el("select", { class: "tl-filter-select", id: "tl-agent-filter" }) as HTMLSelectElement;
+  const agentSelect = el("select", {
+    class: "tl-filter-select",
+    id: "tl-agent-filter",
+  }) as HTMLSelectElement;
   agentSelect.append(el("option", { value: "all" }, ["All agents"]));
-  agents.forEach((agent) => agentSelect.append(el("option", { value: agent, selected: agent === agentFilter }, [formatAgentAddress(agent)])));
+  agents.forEach((agent) =>
+    agentSelect.append(
+      el("option", { value: agent, selected: agent === agentFilter }, [formatAgentAddress(agent)]),
+    ),
+  );
   agentSelect.addEventListener("change", () => {
     agentFilter = agentSelect.value;
     renderActivity();
   });
 
-  container.append(el("div", { class: "tl-filters" }, [
-    el("div", { class: "tl-filter-group" }, [
-      el("label", {}, ["Category:"]),
-      filterButton("all", "All"),
-      filterButton("agent", "Agent"),
-      filterButton("work", "Work"),
-      filterButton("comms", "Comms"),
-      filterButton("system", "System"),
+  container.append(
+    el("div", { class: "tl-filters" }, [
+      el("div", { class: "tl-filter-group" }, [
+        el("label", {}, ["Category:"]),
+        filterButton("all", "All"),
+        filterButton("agent", "Agent"),
+        filterButton("work", "Work"),
+        filterButton("comms", "Comms"),
+        filterButton("system", "System"),
+      ]),
+      el("div", { class: "tl-filter-group" }, [
+        el("label", { for: "tl-rig-filter" }, ["Rig:"]),
+        rigSelect,
+      ]),
+      el("div", { class: "tl-filter-group" }, [
+        el("label", { for: "tl-agent-filter" }, ["Agent:"]),
+        agentSelect,
+      ]),
     ]),
-    el("div", { class: "tl-filter-group" }, [el("label", { for: "tl-rig-filter" }, ["Rig:"]), rigSelect]),
-    el("div", { class: "tl-filter-group" }, [el("label", { for: "tl-agent-filter" }, ["Agent:"]), agentSelect]),
-  ]));
+  );
 }
 
 function filterButton(value: string, label: string): HTMLElement {
-  const btn = el("button", {
-    class: `tl-filter-btn${categoryFilter === value ? " active" : ""}`,
-    "data-filter": "category",
-    "data-value": value,
-    type: "button",
-  }, [label]);
+  const btn = el(
+    "button",
+    {
+      class: `tl-filter-btn${categoryFilter === value ? " active" : ""}`,
+      "data-filter": "category",
+      "data-value": value,
+      type: "button",
+    },
+    [label],
+  );
   btn.addEventListener("click", () => {
     categoryFilter = value;
     renderActivity();
@@ -261,7 +312,7 @@ function toActivityEntry(record: DashboardEventRecord, eventID?: string): Activi
     ts: record.ts,
     scope,
     seq,
-    rig: extractRig(record.actor) || ("city" in record ? (record.city || "") : ""),
+    rig: extractRig(record.actor) || ("city" in record ? record.city || "" : ""),
   };
 }
 
@@ -272,9 +323,7 @@ function normalizeEntries(nextEntries: ActivityEntry[]): ActivityEntry[] {
       deduped.set(entry.id, entry);
     }
   });
-  return [...deduped.values()]
-    .sort(compareEntries)
-    .slice(0, MAX_ENTRIES);
+  return [...deduped.values()].sort(compareEntries).slice(0, MAX_ENTRIES);
 }
 
 function compareEntries(a: ActivityEntry, b: ActivityEntry): number {

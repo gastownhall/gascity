@@ -25,22 +25,22 @@ This plan is grounded in:
 
 These are the branch scores that motivated this plan:
 
-| Criterion | Baseline |
-|---|---:|
-| TDD | 73 |
-| DRY | 79 |
-| Separation of Concerns | 83 |
-| Single Responsibility | 56 |
-| Clear Abstractions | 78 |
-| Low Coupling, High Cohesion | 69 |
-| KISS | 60 |
-| YAGNI | 77 |
-| Prefer Non-Nullable | 41 |
-| Prefer Async Notifications | 23 |
-| Eliminate Race Conditions | 80 |
-| Errors Are Not Optional | 58 |
-| Idiomatic Project Layout | 74 |
-| Write for Maintainability | 81 |
+| Criterion                   | Baseline |
+| --------------------------- | -------: |
+| TDD                         |       73 |
+| DRY                         |       79 |
+| Separation of Concerns      |       83 |
+| Single Responsibility       |       56 |
+| Clear Abstractions          |       78 |
+| Low Coupling, High Cohesion |       69 |
+| KISS                        |       60 |
+| YAGNI                       |       77 |
+| Prefer Non-Nullable         |       41 |
+| Prefer Async Notifications  |       23 |
+| Eliminate Race Conditions   |       80 |
+| Errors Are Not Optional     |       58 |
+| Idiomatic Project Layout    |       74 |
+| Write for Maintainability   |       81 |
 
 ## Target State
 
@@ -78,18 +78,21 @@ Write the execution plan for the remaining branch hardening and keep the Dolt
 regression audit as the traceability source for issues and PRs.
 
 **Acceptance criteria:**
+
 - [ ] This plan document exists and is committed.
 - [ ] The Dolt audit links every labeled Dolt issue and PR to tests and branch
       behavior.
 - [ ] The branch task tracks the active phase.
 
 **Verification:**
+
 - [ ] `sed -n '1,260p' engdocs/contributors/dolt-quality-hardening-plan.md`
 - [ ] `sed -n '1,260p' engdocs/contributors/dolt-regression-audit.md`
 
 **Dependencies:** None
 
 **Files likely touched:**
+
 - `engdocs/contributors/dolt-quality-hardening-plan.md`
 - `engdocs/contributors/dolt-regression-audit.md`
 
@@ -104,18 +107,21 @@ canonical file contract itself and instead consume already-normalized scope
 files.
 
 **Acceptance criteria:**
+
 - [ ] `gc-beads-bd` no longer owns canonical config/metadata shaping logic.
 - [ ] Go callers normalize canonical scope files before backend bootstrap.
 - [ ] Existing canonical file regressions continue to pass.
 - [ ] A new regression proves backend init still works after the ownership move.
 
 **Verification:**
+
 - [ ] `go test ./cmd/gc -run 'Test(NormalizeCanonicalBdScopeFiles|GcBeadsBdInit|FinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlock)' -count=1`
 - [ ] `rg -n 'ensure_config_yaml|ensure_metadata|metadata_patch_json' examples/bd/assets/scripts/gc-beads-bd.sh`
 
 **Dependencies:** Task 1
 
 **Files likely touched:**
+
 - `examples/bd/assets/scripts/gc-beads-bd.sh`
 - `cmd/gc/beads_provider_lifecycle.go`
 - `cmd/gc/init_provider_readiness.go`
@@ -141,18 +147,21 @@ runtime publication into typed structs with explicit endpoint kind, status,
 auth source, and availability state before any caller consumes the result.
 
 **Acceptance criteria:**
+
 - [ ] Core callers stop branching on empty host/port strings.
 - [ ] Managed versus external versus inherited resolution is represented as
       explicit typed state.
 - [ ] Invalid canonical state is rejected before projection.
 
 **Verification:**
+
 - [ ] `go test ./internal/beads/contract -run 'Test(ResolveDoltConnectionTarget|ValidateCanonicalConfigState|ResolveAuthoritativeConfigState)' -count=1`
 - [ ] `go test ./internal/doctor -run 'Test(DoltServerCheck|RigDoltServerCheck)' -count=1`
 
 **Dependencies:** Task 2
 
 **Files likely touched:**
+
 - `internal/beads/contract/connection.go`
 - `internal/beads/contract/files.go`
 - `cmd/gc/bd_env.go`
@@ -169,12 +178,14 @@ Require callers to use a single projection path for `GC_STORE_*`, `GC_DOLT_*`,
 and `BEADS_*` compatibility output.
 
 **Acceptance criteria:**
+
 - [ ] `cmd/gc`, doctor, K8s, sessions, and exec backends no longer assemble
       partial Dolt env by hand.
 - [ ] Projection sanitizes ambient env before setting new values.
 - [ ] Mixed raw `bd` / `gc bd` / GC-initiated flows continue to agree.
 
 **Verification:**
+
 - [ ] `go test ./cmd/gc -run 'Test(ManagedBdRigStoreConsistentAcrossRawBdGcBdAndProviderStore|ManagedBdCityStoreConsistentAcrossRawBdGcBdAndProviderStore|InheritedExternalBdRigStoreConsistentAcrossRawBdGcBdAndProviderStore|GcBdUsesProjectionNotAmbientEnv)' -count=1`
 - [ ] `go test ./internal/runtime/k8s -run 'Test(BuildPodEnv|ManagedServiceAlias)' -count=1`
 - [ ] `go test ./internal/beads/exec -run TestRunSanitizesAmbientLegacyAndStoreTargetEnv -count=1`
@@ -182,6 +193,7 @@ and `BEADS_*` compatibility output.
 **Dependencies:** Task 3
 
 **Files likely touched:**
+
 - `cmd/gc/bd_env.go`
 - `cmd/gc/cmd_bd.go`
 - `cmd/gc/template_resolve.go`
@@ -207,18 +219,21 @@ Move Dolt failures out of scattered local messages into a consistent error/event
 sink that records scope, mode, target, failure class, and suggested fix.
 
 **Acceptance criteria:**
+
 - [ ] Resolver, lifecycle, doctor, and projection failures emit a structured
       event.
 - [ ] User-facing commands still show concise actionable messages.
 - [ ] Silent best-effort fallbacks are eliminated or explicitly recorded.
 
 **Verification:**
+
 - [ ] `go test ./cmd/gc -run 'Test(RecordDoltError|DoltErrorsSurfaceToUser|StartBeadsLifecycleFailsOnCanonicalCompatDoltDrift)' -count=1`
 - [ ] `go test ./internal/doctor -run 'Test(DoltServerCheck_ManagedCityReportsStartHint|DoltServerCheck_ExternalFixHint)' -count=1`
 
 **Dependencies:** Task 4
 
 **Files likely touched:**
+
 - `cmd/gc/error_store.go`
 - `cmd/gc/beads_provider_lifecycle.go`
 - `cmd/gc/cmd_doctor.go`
@@ -234,17 +249,20 @@ Remove remaining caller-local Dolt failure classification and use shared failure
 classes with mode-aware fix hints instead.
 
 **Acceptance criteria:**
+
 - [ ] Doctor and CLI commands derive fix hints from shared failure types.
 - [ ] External versus managed guidance is consistent across commands.
 - [ ] Legacy `run gc start` overuse is removed where external fixes apply.
 
 **Verification:**
+
 - [ ] `go test ./internal/doctor -run 'Test(DoltServerCheck_ManagedCityReportsStartHint|DoltServerCheck_ExternalFixHint|RigDoltServerCheck_ExplicitRigUsesCanonicalTarget)' -count=1`
 - [ ] `go test ./cmd/gc -run 'Test(CmdRigSetEndpoint|DoBeadsCity|Doctor)' -count=1`
 
 **Dependencies:** Task 5
 
 **Files likely touched:**
+
 - `internal/beads/contract/connection.go`
 - `internal/doctor/checks.go`
 - `cmd/gc/cmd_doctor.go`
@@ -269,17 +287,20 @@ serialization into Go code. Leave the backend bridge responsible for actual
 server actions and SQL/database work only.
 
 **Acceptance criteria:**
+
 - [ ] Managed owner/state publication has one implementation in Go.
 - [ ] `gc-beads-bd` stops carrying publication-format policy.
 - [ ] Existing stale runtime/publication regressions remain green.
 
 **Verification:**
+
 - [ ] `go test ./cmd/gc -run 'Test(CurrentManagedDoltPort|CurrentDoltPort|GcBeadsBdStart|GcBeadsBdEnsureReady)' -count=1`
 - [ ] `go test ./internal/beads/contract -run 'Test(ResolveDoltConnectionTargetRequiresRuntimeForManagedScopes|ResolveManagedRuntimeState)' -count=1`
 
 **Dependencies:** Task 6
 
 **Files likely touched:**
+
 - `examples/bd/assets/scripts/gc-beads-bd.sh`
 - `cmd/gc/beads_provider_lifecycle.go`
 - `internal/beads/contract/*`
@@ -295,18 +316,21 @@ shared published state/cache path. Polling remains in the lifecycle owner and
 explicit health commands; consumers read the brokered state.
 
 **Acceptance criteria:**
+
 - [ ] Doctor, session/runtime checks, and other steady-state readers use the
       shared published state or cache.
 - [ ] Redundant probe loops are reduced.
 - [ ] No regression in stale-state detection.
 
 **Verification:**
+
 - [ ] `go test ./cmd/gc -run 'Test(ControllerQuery|EvaluatePool|RunPoolOnBoot|CmdSessionWake)' -count=1`
 - [ ] `go test ./internal/doctor -run 'Test(DoltServerCheck|RigDoltServerCheck)' -count=1`
 
 **Dependencies:** Task 7
 
 **Files likely touched:**
+
 - `cmd/gc/beads_provider_lifecycle.go`
 - `cmd/gc/controller.go`
 - `cmd/gc/pool.go`
@@ -331,6 +355,7 @@ convoy, order, hook, sling, and API paths so store and Dolt targeting are
 fully shared concerns.
 
 **Acceptance criteria:**
+
 - [ ] Callers resolve store root and Dolt target through shared helpers only.
 - [ ] No caller opens a raw `BdStore` or shells out to `bd` to bypass the
       store contract.
@@ -338,12 +363,14 @@ fully shared concerns.
       `exec:gc-beads-bd` where supported.
 
 **Verification:**
+
 - [ ] `go test ./cmd/gc -count=1 -timeout 1800s`
 - [ ] `go test ./internal/api ./internal/doctor ./internal/runtime/k8s ./internal/beads/exec -count=1 -timeout 1200s`
 
 **Dependencies:** Task 8
 
 **Files likely touched:**
+
 - `cmd/gc/order_dispatch.go`
 - `cmd/gc/cmd_hook.go`
 - `cmd/gc/cmd_sling.go`
@@ -361,12 +388,14 @@ Run the complete verification matrix, refresh the audit doc, rebase onto
 and run the best available review workflow.
 
 **Acceptance criteria:**
+
 - [ ] Full targeted and broad test matrix passes.
 - [ ] Lint/build/install pass.
 - [ ] Audit doc matches the branch exactly.
 - [ ] PR body includes issue-by-issue `fixes:` and PR-by-PR `supersedes:`.
 
 **Verification:**
+
 - [ ] `go test ./... -count=1 -timeout 1800s`
 - [ ] `go build ./cmd/gc`
 - [ ] `go install ./cmd/gc`
@@ -376,6 +405,7 @@ and run the best available review workflow.
 **Dependencies:** Task 9
 
 **Files likely touched:**
+
 - `engdocs/contributors/dolt-regression-audit.md`
 - PR description artifact
 - any final cleanup files
@@ -408,13 +438,13 @@ Sequential constraints:
 
 ## Risks and Mitigations
 
-| Risk | Impact | Mitigation |
-|---|---|---|
-| Moving file ownership out of `gc-beads-bd` breaks direct backend bootstrap | High | Keep one backend-init regression and local dogfood after the extraction |
-| Typed-state cleanup causes broad caller churn | High | Land it behind shared helper shims and migrate callers incrementally |
-| Event/error plumbing becomes noise instead of signal | Medium | Limit the first slice to scope, mode, target, class, and fix hint |
-| State broker adds new complexity without removing probes | Medium | Do not add broker consumers until at least one probe path is deleted |
-| Branch drift from `origin/main` complicates final rebase | Medium | Rebase after each phase checkpoint, not only at the end |
+| Risk                                                                       | Impact | Mitigation                                                              |
+| -------------------------------------------------------------------------- | ------ | ----------------------------------------------------------------------- |
+| Moving file ownership out of `gc-beads-bd` breaks direct backend bootstrap | High   | Keep one backend-init regression and local dogfood after the extraction |
+| Typed-state cleanup causes broad caller churn                              | High   | Land it behind shared helper shims and migrate callers incrementally    |
+| Event/error plumbing becomes noise instead of signal                       | Medium | Limit the first slice to scope, mode, target, class, and fix hint       |
+| State broker adds new complexity without removing probes                   | Medium | Do not add broker consumers until at least one probe path is deleted    |
+| Branch drift from `origin/main` complicates final rebase                   | Medium | Rebase after each phase checkpoint, not only at the end                 |
 
 ## Review Gate Per Task
 

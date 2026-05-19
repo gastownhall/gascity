@@ -36,7 +36,6 @@ func TestResolvePrefersProcessOverrides(t *testing.T) {
 	credentialsPath := writeCredentialsFile(t, "db.example.com", 3307, "credentials-secret")
 	t.Setenv("GC_DOLT_USER", "override-user")
 	t.Setenv("GC_DOLT_PASSWORD", "override-secret")
-	t.Setenv("BEADS_DOLT_PASSWORD", "")
 	t.Setenv("BEADS_CREDENTIALS_FILE", credentialsPath)
 
 	resolved := Resolve(scopeRoot, "fallback-user", "db.example.com", 3307)
@@ -56,7 +55,6 @@ func TestResolveUsesStoreLocalPasswordBeforeCredentialsFile(t *testing.T) {
 	writeStorePassword(t, scopeRoot, "store-secret")
 	t.Setenv("GC_DOLT_USER", "")
 	t.Setenv("GC_DOLT_PASSWORD", "")
-	t.Setenv("BEADS_DOLT_PASSWORD", "")
 	t.Setenv("BEADS_CREDENTIALS_FILE", writeCredentialsFile(t, "db.example.com", 3307, "credentials-secret"))
 
 	resolved := Resolve(scopeRoot, "fallback-user", "db.example.com", 3307)
@@ -73,7 +71,6 @@ func TestResolveUsesCredentialsFileFallback(t *testing.T) {
 	credentialsPath := writeCredentialsFile(t, "db.example.com", 3307, "credentials-secret")
 	t.Setenv("GC_DOLT_USER", "")
 	t.Setenv("GC_DOLT_PASSWORD", "")
-	t.Setenv("BEADS_DOLT_PASSWORD", "")
 	t.Setenv("BEADS_CREDENTIALS_FILE", credentialsPath)
 
 	resolved := Resolve(scopeRoot, "fallback-user", "db.example.com", 3307)
@@ -87,7 +84,6 @@ func TestResolveReturnsNoCredentialsPasswordWithoutHostOrPort(t *testing.T) {
 	credentialsPath := writeCredentialsFile(t, "db.example.com", 3307, "credentials-secret")
 	t.Setenv("GC_DOLT_USER", "")
 	t.Setenv("GC_DOLT_PASSWORD", "")
-	t.Setenv("BEADS_DOLT_PASSWORD", "")
 	t.Setenv("BEADS_CREDENTIALS_FILE", credentialsPath)
 
 	resolved := Resolve(scopeRoot, "fallback-user", "", 0)
@@ -101,56 +97,11 @@ func TestResolveFromEnvDefaultsLoopbackHostWhenOnlyPortIsPresent(t *testing.T) {
 	credentialsPath := writeCredentialsFile(t, "127.0.0.1", 3307, "loopback-secret")
 	t.Setenv("GC_DOLT_USER", "")
 	t.Setenv("GC_DOLT_PASSWORD", "")
-	t.Setenv("BEADS_DOLT_PASSWORD", "")
 	t.Setenv("BEADS_CREDENTIALS_FILE", credentialsPath)
 
 	resolved := ResolveFromEnv(scopeRoot, "fallback-user", map[string]string{"GC_DOLT_PORT": "3307"})
 	if resolved.Password != "loopback-secret" {
 		t.Fatalf("Password = %q, want loopback-secret", resolved.Password)
-	}
-}
-
-func TestResolveFromEnvUsesAmbientBeadsDoltPassword(t *testing.T) {
-	scopeRoot := t.TempDir()
-	t.Setenv("GC_DOLT_USER", "")
-	t.Setenv("GC_DOLT_PASSWORD", "")
-	t.Setenv("BEADS_DOLT_PASSWORD", "operator-secret")
-	t.Setenv("BEADS_CREDENTIALS_FILE", "")
-
-	resolved := ResolveFromEnv(scopeRoot, "fallback-user", map[string]string{})
-	if resolved.Password != "operator-secret" {
-		t.Fatalf("Password = %q, want operator-secret", resolved.Password)
-	}
-}
-
-func TestResolveFromEnvUsesProjectedBeadsDoltPassword(t *testing.T) {
-	scopeRoot := t.TempDir()
-	t.Setenv("GC_DOLT_USER", "")
-	t.Setenv("GC_DOLT_PASSWORD", "")
-	t.Setenv("BEADS_DOLT_PASSWORD", "")
-	t.Setenv("BEADS_CREDENTIALS_FILE", "")
-
-	resolved := ResolveFromEnv(scopeRoot, "fallback-user", map[string]string{
-		"BEADS_DOLT_PASSWORD": "projected-secret",
-	})
-	if resolved.Password != "projected-secret" {
-		t.Fatalf("Password = %q, want projected-secret", resolved.Password)
-	}
-}
-
-func TestResolveFromEnvPrefersStoreLocalPasswordOverProjectedPassword(t *testing.T) {
-	scopeRoot := t.TempDir()
-	writeStorePassword(t, scopeRoot, "rig-secret")
-	t.Setenv("GC_DOLT_USER", "")
-	t.Setenv("GC_DOLT_PASSWORD", "")
-	t.Setenv("BEADS_DOLT_PASSWORD", "")
-	t.Setenv("BEADS_CREDENTIALS_FILE", "")
-
-	resolved := ResolveFromEnv(scopeRoot, "fallback-user", map[string]string{
-		"BEADS_DOLT_PASSWORD": "projected-city-secret",
-	})
-	if resolved.Password != "rig-secret" {
-		t.Fatalf("Password = %q, want rig-secret", resolved.Password)
 	}
 }
 

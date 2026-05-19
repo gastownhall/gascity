@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -30,6 +32,29 @@ func namedSessionBackingTemplate(spec namedSessionSpec) string {
 	return session.NamedSessionBackingTemplate(spec)
 }
 
+func applyNamedSessionTemplateParams(tp *TemplateParams, spec namedSessionSpec) {
+	if tp == nil {
+		return
+	}
+	identity := strings.TrimSpace(spec.Identity)
+	backingTemplate := strings.TrimSpace(namedSessionBackingTemplate(spec))
+	if identity == "" || backingTemplate == "" {
+		return
+	}
+	tp.Alias = identity
+	tp.TemplateName = backingTemplate
+	tp.InstanceName = identity
+	tp.ConfiguredNamedIdentity = identity
+	tp.ConfiguredNamedMode = spec.Mode
+	if tp.Env == nil {
+		tp.Env = make(map[string]string)
+	}
+	tp.Env["GC_TEMPLATE"] = backingTemplate
+	tp.Env["GC_ALIAS"] = identity
+	tp.Env["GC_AGENT"] = identity
+	tp.Env["GC_SESSION_ORIGIN"] = "named"
+}
+
 func resolveNamedSessionSpecForConfigTarget(cfg *config.City, cityName, target, rigContext string) (namedSessionSpec, bool, error) {
 	return session.ResolveNamedSessionSpecForConfigTarget(cfg, cityName, target, rigContext)
 }
@@ -44,18 +69,6 @@ func isNamedSessionBead(b beads.Bead) bool {
 
 func namedSessionIdentity(b beads.Bead) string {
 	return session.NamedSessionIdentity(b)
-}
-
-func configuredNamedSessionBeadHasSpec(b beads.Bead, cfg *config.City, cityName string) bool {
-	if cfg == nil || !isNamedSessionBead(b) {
-		return false
-	}
-	identity := namedSessionIdentity(b)
-	if identity == "" {
-		return false
-	}
-	_, ok := findNamedSessionSpec(cfg, cityName, identity)
-	return ok
 }
 
 func namedSessionMode(b beads.Bead) string {

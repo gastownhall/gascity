@@ -80,14 +80,14 @@ logic stays in prompt (ZFC) — prompt increases `--timeout` each iteration.
 Mail is partially implemented. These complete it. Each is thin sugar
 over bd, but semantic naming makes prompts dramatically clearer.
 
-| Command | bd equivalent | Scope |
-|---------|--------------|-------|
-| `gc mail archive <id>` | `bd close <id>` | ~10 lines |
-| `gc mail delete <id>` | `bd delete <id>` | ~10 lines |
-| `gc mail mark-read <id>` | `bd update <id> --label=read` | ~10 lines |
-| `gc mail hook <id>` | `bd update <id> --status=hooked` | ~10 lines |
-| `gc mail send --human` | Delivery to tmux prompt vs inbox | ~30 lines |
-| `gc mail send --notify` | Nudge after mail creation | ~20 lines |
+| Command                  | bd equivalent                    | Scope     |
+| ------------------------ | -------------------------------- | --------- |
+| `gc mail archive <id>`   | `bd close <id>`                  | ~10 lines |
+| `gc mail delete <id>`    | `bd delete <id>`                 | ~10 lines |
+| `gc mail mark-read <id>` | `bd update <id> --label=read`    | ~10 lines |
+| `gc mail hook <id>`      | `bd update <id> --status=hooked` | ~10 lines |
+| `gc mail send --human`   | Delivery to tmux prompt vs inbox | ~30 lines |
+| `gc mail send --notify`  | Nudge after mail creation        | ~20 lines |
 
 **Total scope:** ~90 lines, all in existing cmd_mail.go.
 
@@ -117,16 +117,16 @@ exponential backoff tracking on agent bead labels.
 **Why Go:** Rig state management in the controller. Park/dock change
 how the reconciler treats agents in that rig.
 
-| Command | What it does |
-|---------|-------------|
-| `gc rig start <rig>` | Start all agents for rig |
-| `gc rig stop <rig>` | Stop all agents for rig |
-| `gc rig park <rig>` | Temporary pause — controller skips rig |
-| `gc rig unpark <rig>` | Resume parked rig |
-| `gc rig dock <rig>` | Permanent disable — rig removed from reconciliation |
-| `gc rig undock <rig>` | Re-enable docked rig |
-| `gc rig restart <rig>` | Stop + start |
-| `gc rig status <rig>` | Report rig health |
+| Command                | What it does                                        |
+| ---------------------- | --------------------------------------------------- |
+| `gc rig start <rig>`   | Start all agents for rig                            |
+| `gc rig stop <rig>`    | Stop all agents for rig                             |
+| `gc rig park <rig>`    | Temporary pause — controller skips rig              |
+| `gc rig unpark <rig>`  | Resume parked rig                                   |
+| `gc rig dock <rig>`    | Permanent disable — rig removed from reconciliation |
+| `gc rig undock <rig>`  | Re-enable docked rig                                |
+| `gc rig restart <rig>` | Stop + start                                        |
+| `gc rig status <rig>`  | Report rig health                                   |
 
 **Scope:** ~200 lines. Rig state stored in `.gc/rigs/<name>/state.json`.
 
@@ -157,6 +157,7 @@ rendering of `.md.tmpl` files with variables from city/rig/agent config.
 shell command before agent session starts (e.g., `git pull`).
 
 **Config:**
+
 ```toml
 [[agent]]
 name = "refinery"
@@ -171,6 +172,7 @@ pre_start = "git pull --rebase"
 instead of hardcoded `gc-{city}-{agent}`.
 
 **Config:**
+
 ```toml
 [session]
 name_template = "{prefix}-{name}"
@@ -189,6 +191,7 @@ orphaned sessions (tmux sessions without agent config), orphaned
 worktrees, event log corruption, etc.
 
 **Interface:** `gc doctor [-v] [--fix]`
+
 - Default: report problems
 - `-v`: verbose output
 - `--fix`: auto-repair what's safe to fix
@@ -202,6 +205,7 @@ uptime < threshold = crash (increment counter), >= threshold = normal
 exit (reset). `max_restarts` within `restart_window` → backoff.
 
 **Config:**
+
 ```toml
 [agent.pool]
 max_restarts = 3
@@ -219,6 +223,7 @@ in memory for full design.
 
 Convoys sit in the same space as epics — batch coordination over
 related beads. Which layer do they belong in? Options:
+
 - Bead metadata (labels + parent-child relationships)
 - Molecule grouping
 - Separate primitive
@@ -238,43 +243,43 @@ nudge (which is ephemeral). May not be needed.
 These were resolved as raw bd commands, controller responsibilities,
 or prompt-level logic. They get inlined into prompts/formulas:
 
-| Former gt command | Replacement |
-|-------------------|-------------|
-| `gc sling` | `bd update <bead> --assignee=<role>` |
-| `gc done` | `git push` + `bd create --type=merge-request` + `bd close` + exit |
-| `gc handoff` | `gc mail send -s "HANDOFF"` + exit |
-| `gc escalate` | `gc mail send witness/ -s "ESCALATION"` |
-| `gc polecat list/nuke/status` | `gc session list` (with filters) |
-| `gc session status/start/stop` | `gc session list` / controller |
-| `gc dog done/status/list` | `bd close` + exit / `gc session list` |
-| `gc deacon heartbeat/cleanup/redispatch/zombie-scan` | Controller |
-| `gc boot status/spawn/triage` | Controller |
-| `gc mayor stop/start` | Controller |
-| `gc warrant file` | `bd create --type=warrant` |
-| `gc compact` | bd list + bd close/delete (prompt-level) |
-| `gc patrol digest` | bd list + bd create (prompt-level) |
-| `gc worktree` | Raw `git worktree` commands |
-| `gc costs` | Removed — provider-specific |
-| `gc mq list/submit/integration` | bd queries + git workflow (gastown-gc helper) |
-| `gc convoy feed/cleanup` | Deprecated — pool auto-scaling |
-| `gc hook` | `bd ready --label=pool:$POOL --unassigned` + `bd update --claim` (prompt-level loop) |
-| Agent bead protocol | `bd update --label` + `bd show` |
-| Gates | `bd gate list/close/check` via `gc bd` |
-| Orders | Prompt-level (filesystem + state.json) |
+| Former gt command                                    | Replacement                                                                          |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `gc sling`                                           | `bd update <bead> --assignee=<role>`                                                 |
+| `gc done`                                            | `git push` + `bd create --type=merge-request` + `bd close` + exit                    |
+| `gc handoff`                                         | `gc mail send -s "HANDOFF"` + exit                                                   |
+| `gc escalate`                                        | `gc mail send witness/ -s "ESCALATION"`                                              |
+| `gc polecat list/nuke/status`                        | `gc session list` (with filters)                                                     |
+| `gc session status/start/stop`                       | `gc session list` / controller                                                       |
+| `gc dog done/status/list`                            | `bd close` + exit / `gc session list`                                                |
+| `gc deacon heartbeat/cleanup/redispatch/zombie-scan` | Controller                                                                           |
+| `gc boot status/spawn/triage`                        | Controller                                                                           |
+| `gc mayor stop/start`                                | Controller                                                                           |
+| `gc warrant file`                                    | `bd create --type=warrant`                                                           |
+| `gc compact`                                         | bd list + bd close/delete (prompt-level)                                             |
+| `gc patrol digest`                                   | bd list + bd create (prompt-level)                                                   |
+| `gc worktree`                                        | Raw `git worktree` commands                                                          |
+| `gc costs`                                           | Removed — provider-specific                                                          |
+| `gc mq list/submit/integration`                      | bd queries + git workflow (gastown-gc helper)                                        |
+| `gc convoy feed/cleanup`                             | Deprecated — pool auto-scaling                                                       |
+| `gc hook`                                            | `bd ready --label=pool:$POOL --unassigned` + `bd update --claim` (prompt-level loop) |
+| Agent bead protocol                                  | `bd update --label` + `bd show`                                                      |
+| Gates                                                | `bd gate list/close/check` via `gc bd`                                               |
+| Orders                                               | Prompt-level (filesystem + state.json)                                               |
 
 ---
 
 ## Estimated total scope
 
-| Tier | Lines (est.) | Priority |
-|------|-------------|----------|
-| 1: Core agent loop | ~100 | Immediate |
-| 2: Event watch | ~150 | High |
-| 3: Mail namespace | ~90 | High |
-| ~~4: Mol squash~~ | ~~150~~ | ~~RESOLVED~~ |
-| 5: Rig lifecycle | ~230 | Medium |
-| 6: Config infrastructure | ~160 | Medium |
-| 7: System health | ~300 | Low |
-| **Total** | **~1,180** | |
+| Tier                     | Lines (est.) | Priority     |
+| ------------------------ | ------------ | ------------ |
+| 1: Core agent loop       | ~100         | Immediate    |
+| 2: Event watch           | ~150         | High         |
+| 3: Mail namespace        | ~90          | High         |
+| ~~4: Mol squash~~        | ~~150~~      | ~~RESOLVED~~ |
+| 5: Rig lifecycle         | ~230         | Medium       |
+| 6: Config infrastructure | ~160         | Medium       |
+| 7: System health         | ~300         | Low          |
+| **Total**                | **~1,180**   |              |
 
 ~1,200 lines of Go to make Gas Town run as pure configuration.

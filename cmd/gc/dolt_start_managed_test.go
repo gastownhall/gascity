@@ -2,24 +2,28 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	bdpack "github.com/gastownhall/gascity/examples/bd"
 )
 
-func TestDoltServerEnv_DoesNotInjectGCSchedulerDefault(t *testing.T) {
+func TestDoltServerEnv_AppendsDefaultWhenMissing(t *testing.T) {
 	parent := []string{"PATH=/usr/bin", "HOME=/home/test"}
 	out := doltServerEnv(parent)
 
+	want := "DOLT_GC_SCHEDULER=NONE"
+	found := false
 	for _, kv := range out {
-		if strings.HasPrefix(kv, "DOLT_GC_SCHEDULER=") {
-			t.Fatalf("managed Dolt env should not inject GC scheduler default, got %v", out)
+		if kv == want {
+			found = true
+			break
 		}
+	}
+	if !found {
+		t.Fatalf("expected %q in env, got %v", want, out)
 	}
 	// Original entries preserved.
 	for _, kv := range parent {
@@ -55,15 +59,19 @@ func TestDoltServerEnv_RespectsUserOverride(t *testing.T) {
 	}
 }
 
-func TestDoltServerEnv_PreservesEmptyUserValue(t *testing.T) {
+func TestDoltServerEnv_RespectsEmptyUserValue(t *testing.T) {
+	// An explicit empty value (DOLT_GC_SCHEDULER=) is still a user
+	// override and we must not replace it.
 	parent := []string{"DOLT_GC_SCHEDULER="}
 	out := doltServerEnv(parent)
-	if len(out) != 1 || out[0] != "DOLT_GC_SCHEDULER=" {
-		t.Fatalf("explicit empty-value env not preserved: %v", out)
+	for _, kv := range out {
+		if kv == "DOLT_GC_SCHEDULER=NONE" {
+			t.Fatalf("explicit empty-value override clobbered: %v", out)
+		}
 	}
 }
 
-func TestGCBeadsBDScript_DoesNotDefaultDoltGCScheduler(t *testing.T) {
+func TestGCBeadsBDScript_RespectsEmptyUserValue(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller(0) failed")
@@ -75,10 +83,11 @@ func TestGCBeadsBDScript_DoesNotDefaultDoltGCScheduler(t *testing.T) {
 	}
 	script := string(data)
 
-	for _, forbidden := range []string{`DOLT_GC_SCHEDULER=NONE`, `DOLT_GC_SCHEDULER:=NONE`} {
-		if strings.Contains(script, forbidden) {
-			t.Fatalf("gc-beads-bd.sh must not default DOLT_GC_SCHEDULER; found %q", forbidden)
-		}
+	if !strings.Contains(script, `${DOLT_GC_SCHEDULER=NONE}`) {
+		t.Fatalf("gc-beads-bd.sh must default DOLT_GC_SCHEDULER only when unset")
+	}
+	if strings.Contains(script, `${DOLT_GC_SCHEDULER:=NONE}`) {
+		t.Fatalf("gc-beads-bd.sh must not clobber an explicitly empty DOLT_GC_SCHEDULER")
 	}
 }
 
@@ -115,10 +124,7 @@ func TestGCBeadsBDScript_UsesPortableSleepMS(t *testing.T) {
 	}
 }
 
-// TestGCBeadsBDScript_DoesNotMutateDoltInternals pins gc-beads-bd.sh against
-// re-introducing any mv/rm of files under a .dolt/ directory. Comments are
-// permitted; only non-comment occurrences fail the test.
-func TestGCBeadsBDScript_DoesNotMutateDoltInternals(t *testing.T) {
+func TestGCBeadsBDScript_QuarantinesRetiredReplacementDatabases(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller(0) failed")
@@ -130,23 +136,20 @@ func TestGCBeadsBDScript_DoesNotMutateDoltInternals(t *testing.T) {
 	}
 	script := string(data)
 
-	forbidden := []string{
-		"cleanup_stale_locks()",
-		"quarantine_phantom_dbs()",
+	required := []string{
+		"retired_replacement_db_name()",
+		"?*.replaced-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z)",
+		`reason="retired replacement"`,
+		`quarantining unservable database`,
 		`mv -f "$dir" "$quarantine_dir"`,
-		`rm -f "$lock_file"`,
 	}
-	for _, bad := range forbidden {
-		// Allow appearances inside comments (lines starting with `#`).
-		for _, line := range strings.Split(script, "\n") {
-			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "#") {
-				continue
-			}
-			if strings.Contains(line, bad) {
-				t.Fatalf("gc-beads-bd.sh contains forbidden Dolt-internal mutator %q: %s", bad, line)
-			}
+	for _, want := range required {
+		if !strings.Contains(script, want) {
+			t.Fatalf("gc-beads-bd.sh missing retired replacement fallback fragment %q", want)
 		}
+	}
+	if strings.Contains(script, "quarantining phantom database") {
+		t.Fatal("gc-beads-bd.sh still logs the broader fallback as phantom-only")
 	}
 }
 
@@ -275,57 +278,5 @@ func TestResolveDoltArchiveLevel(t *testing.T) {
 				t.Errorf("resolveDoltArchiveLevel(%d) = %d, want %d", tt.explicit, got, tt.want)
 			}
 		})
-	}
-}
-
-// TestTerminateManagedDoltPID_HonorsSubPollGrace asserts that terminate uses
-// the grace-clamped poll interval (managedDoltStopPollInterval) rather than a
-// fixed sleep: a SIGTERM-ignoring process with a tiny configured grace must be
-// SIGKILLed and the call must return quickly, not after a fixed ~100ms sleep
-// past the deadline (gastownhall/gascity#2090, finding 6).
-func TestTerminateManagedDoltPID_HonorsSubPollGrace(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX signal semantics required")
-	}
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`
-[workspace]
-name = "test"
-
-[daemon]
-dolt_stop_timeout = "5ms"
-
-[[agent]]
-name = "mayor"
-`), 0o644); err != nil {
-		t.Fatalf("write city.toml: %v", err)
-	}
-
-	// A process that ignores SIGTERM forces the wait loop to run to the
-	// deadline and escalate to SIGKILL.
-	cmd := exec.Command("/bin/sh", "-c", "trap '' TERM; sleep 30")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start sleeper: %v", err)
-	}
-	pid := cmd.Process.Pid
-	defer func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	}()
-
-	start := time.Now()
-	if err := terminateManagedDoltPID(dir, pid); err != nil {
-		t.Fatalf("terminateManagedDoltPID: %v", err)
-	}
-	elapsed := time.Since(start)
-
-	// 5ms grace + the fixed 250ms post-SIGKILL settle. A fixed-100ms poll
-	// could overshoot the 5ms deadline; the clamp keeps the SIGTERM wait at
-	// ~5ms. Allow generous slack for scheduler jitter under CI load.
-	if elapsed > 2*time.Second {
-		t.Errorf("terminateManagedDoltPID took %v with a 5ms grace; sub-poll clamp not honored", elapsed)
-	}
-	if pidAlive(pid) {
-		t.Errorf("pid %d still alive after terminateManagedDoltPID; SIGKILL escalation did not fire", pid)
 	}
 }

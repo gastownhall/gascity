@@ -9,10 +9,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
-	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/citylayout"
-	gitutil "github.com/gastownhall/gascity/internal/git"
-	"github.com/gastownhall/gascity/internal/remotesource"
 )
 
 var runRepoCacheGit = defaultRunRepoCacheGit
@@ -21,9 +18,15 @@ var runRepoCacheGit = defaultRunRepoCacheGit
 // remote pack includes are cached.
 const includeCacheDir = citylayout.CacheIncludesRoot
 
-// isRemoteInclude reports whether s is a remote include URL.
+// isRemoteInclude reports whether s is a remote include URL
+// (git@, ssh://, https://, http://, or file://).
 func isRemoteInclude(s string) bool {
-	return remotesource.IsRemote(s)
+	return strings.HasPrefix(s, "git@") ||
+		strings.HasPrefix(s, "ssh://") ||
+		strings.HasPrefix(s, "https://") ||
+		strings.HasPrefix(s, "http://") ||
+		strings.HasPrefix(s, "file://") ||
+		strings.HasPrefix(s, "github.com/")
 }
 
 // parseRemoteInclude splits a remote include string into source, subpath,
@@ -36,8 +39,28 @@ func isRemoteInclude(s string) bool {
 //	"https://github.com/org/repo.git#main"   → ("https://github.com/org/repo.git", "", "main")
 //	"git@github.com:org/repo.git"            → ("git@github.com:org/repo.git", "", "")
 func parseRemoteInclude(s string) (source, subpath, ref string) {
-	parsed := remotesource.Parse(s)
-	return parsed.CloneURL, parsed.Subpath, parsed.Ref
+	// Split off #ref first.
+	if i := strings.LastIndex(s, "#"); i >= 0 {
+		ref = s[i+1:]
+		s = s[:i]
+	}
+
+	// Find // for subpath. For URLs with scheme (https://...), we need
+	// to find // that is NOT part of the scheme. Search after the scheme.
+	searchFrom := 0
+	if idx := strings.Index(s, "://"); idx >= 0 {
+		searchFrom = idx + 3 // skip past scheme://
+	}
+
+	if i := strings.Index(s[searchFrom:], "//"); i >= 0 {
+		pos := searchFrom + i
+		subpath = s[pos+2:]
+		source = s[:pos]
+	} else {
+		source = s
+	}
+
+	return source, subpath, ref
 }
 
 // includeCacheName returns a deterministic, human-readable cache directory
@@ -70,12 +93,13 @@ func isRemoteRef(s string) bool {
 	return isRemoteInclude(s) || isGitHubTreeURL(s)
 }
 
-// isGitHubTreeURL reports whether s looks like a GitHub tree or blob URL.
+// isGitHubTreeURL reports whether s looks like a GitHub tree URL.
 // GitHub tree URLs have the format:
 //
 //	https://github.com/{owner}/{repo}/tree/{ref}[/{path}]
 func isGitHubTreeURL(s string) bool {
-	return remotesource.IsGitHubTreeOrBlob(s)
+	return strings.Contains(s, "github.com/") &&
+		strings.Contains(s, "/tree/")
 }
 
 // parseGitHubTreeURL extracts repo, ref, and subpath from a GitHub tree URL.
@@ -86,11 +110,34 @@ func isGitHubTreeURL(s string) bool {
 // Limitation: ref is parsed as a single path component. For branches
 // with "/" in the name, use the source//subpath#ref format instead.
 func parseGitHubTreeURL(s string) (source, subpath, ref string) {
-	parsed, ok := remotesource.ParseGitHubTreeOrBlob(s)
-	if !ok {
+	// Strip scheme prefix to get the path.
+	u := s
+	scheme := ""
+	if idx := strings.Index(u, "://"); idx >= 0 {
+		scheme = u[:idx+3]
+		u = u[idx+3:]
+	}
+
+	// u is now like: github.com/org/repo/tree/v1.0.0/packs/base
+	parts := strings.SplitN(u, "/", 6)
+	// parts: [github.com, org, repo, tree, ref, ...subpath]
+	if len(parts) < 5 {
+		// Malformed — return as-is.
 		return s, "", ""
 	}
-	return parsed.CloneURL, parsed.Subpath, parsed.Ref
+
+	host := parts[0] // github.com
+	owner := parts[1]
+	repo := parts[2]
+	// parts[3] == "tree"
+	ref = parts[4]
+
+	if len(parts) > 5 {
+		subpath = parts[5]
+	}
+
+	source = scheme + host + "/" + owner + "/" + repo + ".git"
+	return source, subpath, ref
 }
 
 // resolvePackRef resolves a pack reference to a local directory.
@@ -166,7 +213,16 @@ func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
 	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
 	if err := WithRepoCacheReadLock(cacheRoot, func() error {
-		return validateInstalledRemoteCache(source, cacheDir, entry.Commit)
+		if _, err := os.Stat(filepath.Join(cacheDir, ".git")); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc import install\"", source, cacheDir)
+			}
+			return fmt.Errorf("checking cached import %s: %w", source, err)
+		}
+		if err := validateLockedRemoteCache(source, cacheDir, entry.Commit); err != nil {
+			return err
+		}
+		return nil
 	}); err != nil {
 		return "", false, err
 	}
@@ -200,40 +256,20 @@ func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
 	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
 	if err := WithRepoCacheReadLock(cacheRoot, func() error {
-		return validateInstalledRemoteCache(source, cacheDir, entry.Commit)
+		if _, err := os.Stat(filepath.Join(cacheDir, ".git")); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc import install\"", source, cacheDir)
+			}
+			return fmt.Errorf("checking cached import %s: %w", source, err)
+		}
+		if err := validateLockedRemoteCache(source, cacheDir, entry.Commit); err != nil {
+			return err
+		}
+		return nil
 	}); err != nil {
 		return "", err
 	}
 	return cacheDir, nil
-}
-
-func validateInstalledRemoteCache(source, cacheDir, commit string) error {
-	gitPath := filepath.Join(cacheDir, ".git")
-	gitInfo, gitStatErr := os.Stat(gitPath)
-	if builtinpacks.IsSource(source) {
-		err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit)
-		if err == nil {
-			return nil
-		}
-		if gitutil.MissingCheckoutMarker(gitInfo, gitStatErr) {
-			return fmt.Errorf("remote import %s is locked but synthetic cache is invalid at %s: %w; run \"gc import install\"", source, cacheDir, err)
-		}
-		if gitStatErr != nil {
-			return fmt.Errorf("checking cached import %s: %w; synthetic cache is invalid at %s: %w", source, gitStatErr, cacheDir, err)
-		}
-		// Synthetic cache is invalid but a real git checkout exists at this
-		// path, so validate it with the ordinary remote-cache contract below.
-	}
-	if gitutil.MissingCheckoutMarker(gitInfo, gitStatErr) {
-		return fmt.Errorf("remote import %s is locked but not cached at %s; run \"gc import install\"", source, cacheDir)
-	}
-	if gitStatErr != nil {
-		return fmt.Errorf("checking cached import %s: %w", source, gitStatErr)
-	}
-	if err := validateLockedRemoteCache(source, cacheDir, commit); err != nil {
-		return err
-	}
-	return nil
 }
 
 func validateLockedRemoteCache(source, cacheDir, commit string) error {
@@ -241,7 +277,7 @@ func validateLockedRemoteCache(source, cacheDir, commit string) error {
 	if err != nil {
 		return fmt.Errorf("reading cached import %s HEAD: %w", source, err)
 	}
-	if !gitutil.SameCommit(head, commit) {
+	if !sameRepoCacheCommit(head, commit) {
 		return fmt.Errorf("cached import %s is checked out at %s, expected %s; run \"gc import install\"", source, strings.TrimSpace(head), commit)
 	}
 	status, err := runRepoCacheGit(cacheDir, "status", "--porcelain", "--ignored")
@@ -252,6 +288,18 @@ func validateLockedRemoteCache(source, cacheDir, commit string) error {
 		return fmt.Errorf("cached import %s has local worktree changes; run \"gc import install\"", source)
 	}
 	return nil
+}
+
+func sameRepoCacheCommit(actual, expected string) bool {
+	actual = strings.TrimSpace(actual)
+	expected = strings.TrimSpace(expected)
+	if actual == "" || expected == "" {
+		return false
+	}
+	if strings.EqualFold(actual, expected) {
+		return true
+	}
+	return len(expected) >= 7 && len(expected) < len(actual) && strings.HasPrefix(strings.ToLower(actual), strings.ToLower(expected))
 }
 
 func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
@@ -297,14 +345,9 @@ var repoCacheGitEnvBlacklist = map[string]bool{
 
 // RepoCacheKey computes the sha256 cache key for a remote source+commit pair.
 // This is the canonical implementation — packman.RepoCacheKey must produce
-// identical results. Bundled synthetic caches live in a distinct namespace so
-// current-binary content never collides with same-repo git checkouts.
+// identical results. The key is sha256(normalizedCloneURL + commit).
 func RepoCacheKey(source, commit string) string {
-	identity := NormalizeRemoteSource(source) + commit
-	if builtinpacks.IsSource(source) {
-		identity = builtinpacks.SyntheticCacheNamespace + "\x00" + NormalizeRemoteSource(source) + "\x00" + commit
-	}
-	sum := sha256.Sum256([]byte(identity))
+	sum := sha256.Sum256([]byte(NormalizeRemoteSource(source) + commit))
 	return fmt.Sprintf("%x", sum[:])
 }
 
@@ -312,10 +355,19 @@ func RepoCacheKey(source, commit string) string {
 // stripping subpath and ref suffixes. This is the canonical normalization
 // for cache key computation — packman must use the same logic.
 func NormalizeRemoteSource(source string) string {
-	if !isRemoteRef(source) {
+	switch {
+	case isGitHubTreeURL(source):
+		cloneURL, _, _ := parseGitHubTreeURL(source)
+		return cloneURL
+	case isRemoteInclude(source):
+		cloneURL, _, _ := parseRemoteInclude(source)
+		if strings.HasPrefix(cloneURL, "github.com/") {
+			return "https://" + cloneURL
+		}
+		return cloneURL
+	default:
 		return source
 	}
-	return remotesource.Parse(source).CloneURL
 }
 
 // fetchRemoteInclude resolves a remote pack include from the local cache.

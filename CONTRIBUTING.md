@@ -108,28 +108,26 @@ When updating docs:
 - Architecture docs describe current behavior
 - Design docs describe proposed behavior
 - Archive docs keep historical notes out of the main onboarding path
-- Updating `GastownCity()`'s `Imports` or `DefaultRigImports` map requires
-  updating the auto-import table in `docs/packv2/migration.mdx`
 
 ## Make Targets
 
 Run `make help` for the full list. The most useful targets are:
 
-| Command | What it does |
-|---|---|
-| `make setup` | Install local tools and git hooks |
-| `make build` | Build `gc` with version metadata |
-| `make install` | Install `gc` into `$(go env GOPATH)/bin` |
-| `make check` | Fast Go quality gates |
-| `make check-docs` | Docs sync tests plus Mintlify broken-link checks |
-| `make check-all` | Extended quality gates including integration tests |
-| `make test` | Unit and repo-level Go tests |
-| `make test-integration` | Integration tests |
+| Command                      | What it does                                                                                                 |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `make setup`                 | Install local tools and git hooks                                                                            |
+| `make build`                 | Build `gc` with version metadata                                                                             |
+| `make install`               | Install `gc` into `$(go env GOPATH)/bin`                                                                     |
+| `make check`                 | Fast Go quality gates                                                                                        |
+| `make check-docs`            | Docs sync tests plus Mintlify broken-link checks                                                             |
+| `make check-all`             | Extended quality gates including integration tests                                                           |
+| `make test`                  | Unit and repo-level Go tests                                                                                 |
+| `make test-integration`      | Integration tests                                                                                            |
 | `make test-integration-huma` | Supervisor binary smoke test (builds `gc`, boots the supervisor, asserts `/openapi.json` + `gc cities` work) |
-| `make dashboard-build` | Regenerate SPA types + compile the dashboard bundle |
-| `make dashboard-dev` | Vite dev server for SPA iteration |
-| `make dashboard-check` | Typecheck + build + test the dashboard |
-| `make cover` | Coverage run |
+| `make dashboard-build`       | Regenerate SPA types + compile the dashboard bundle                                                          |
+| `make dashboard-dev`         | Vite dev server for SPA iteration                                                                            |
+| `make dashboard-check`       | Typecheck + build + test the dashboard                                                                       |
+| `make cover`                 | Coverage run                                                                                                 |
 
 ## macOS Release Verification
 

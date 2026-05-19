@@ -131,11 +131,6 @@ const (
 	cleanupErrorKindInvalidMaxOrphanDBs = "invalid-max-orphan-dbs"
 	cleanupErrorKindMaxOrphanRefusal    = "max-orphan-refusal"
 	cleanupErrorKindRigProtection       = "rig-protection"
-	// cleanupErrorKindLiveSessionProbeFailed marks that the SHOW
-	// PROCESSLIST probe could not complete (timeout, auth, network,
-	// malformed result). FAIL-CLOSED: --force refuses to drop ANY DB
-	// when this kind is recorded.
-	cleanupErrorKindLiveSessionProbeFailed = "live-session-probe-failed"
 )
 
 // MarshalJSON ensures slices serialize as `[]` rather than `null` for empty
@@ -303,9 +298,6 @@ func runDoltCleanup(opts cleanupOptions, stdout, stderr io.Writer) int {
 
 	emitReport(report, resolution, opts, stdout, stderr)
 	if opts.DoltClientOpenErr != nil {
-		return 1
-	}
-	if opts.Force && hasFatalForceBlocker(&report) {
 		return 1
 	}
 	return 0
@@ -957,21 +949,6 @@ func recordUnsafeRigDatabaseNames(report *CleanupReport) {
 func hasRigProtectionError(report *CleanupReport) bool {
 	for _, e := range report.Errors {
 		if e.Kind == cleanupErrorKindRigProtection || e.Stage == "rig" {
-			return true
-		}
-	}
-	return false
-}
-
-// hasFatalForceBlocker reports whether a force-blocker has been
-// recorded that requires runDoltCleanup to exit non-zero in --force
-// mode. Currently only cleanupErrorKindLiveSessionProbeFailed counts;
-// rig-protection refusals are signaled via the Errors slice
-// (hasRigProtectionError), and max-orphan-refusal historically returns
-// exit 0 with the report (existing behavior preserved).
-func hasFatalForceBlocker(report *CleanupReport) bool {
-	for _, b := range report.ForceBlockers {
-		if b.Kind == cleanupErrorKindLiveSessionProbeFailed {
 			return true
 		}
 	}

@@ -17,9 +17,9 @@ export function renderSupervisorOverview(): void {
   clear(body);
 
   if (cities.length === 0) {
-    body.append(el("div", { class: "empty-state" }, [
-      el("p", {}, ["No managed cities available"]),
-    ]));
+    body.append(
+      el("div", { class: "empty-state" }, [el("p", {}, ["No managed cities available"])]),
+    );
     return;
   }
 

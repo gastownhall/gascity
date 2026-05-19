@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -186,12 +185,7 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 				}
 				managedStopScript = gcBeadsBdScriptPath(cityPath)
 			}
-			providerEnv, err := providerLifecycleProcessEnvWithError(cityPath, provider)
-			if err != nil {
-				fmt.Fprintf(stderr, "%s: building managed provider env: %v\n", name, err) //nolint:errcheck
-				return 1
-			}
-			managedStopEnv = append([]string(nil), providerEnv...)
+			managedStopEnv = append([]string(nil), providerLifecycleProcessEnv(cityPath, provider)...)
 		}
 	}
 
@@ -235,7 +229,7 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 			writeCityEndpointRollbackError(fs, stderr, snapshots, name, "stopping managed local provider", err)
 			return 1
 		}
-		if err := clearManagedDoltRuntimeStateUnlessPostgres(cityPath); err != nil {
+		if err := clearManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
 			writeCityEndpointRollbackError(fs, stderr, snapshots, name, "clearing managed runtime state", err)
 			return 1
 		}
@@ -461,21 +455,8 @@ func syncCityEndpointCompatConfig(fs fsys.FS, cityPath, tomlPath string, cfg *co
 func syncCityManagedPortArtifacts(fs fsys.FS, cityPath string, cityState contract.ConfigState, plans []cityRigEndpointPlan) error {
 	managedPort := ""
 	if cityState.EndpointOrigin == contract.EndpointOriginManagedCity {
-		owned, err := managedDoltLifecycleOwned(cityPath)
-		if err != nil {
-			return fmt.Errorf("determining managed dolt ownership for port artifact sync: %w", err)
-		}
-		if !owned {
-			return nil
-		}
 		port, err := readManagedRuntimePublishedPort(cityPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				managedPort = ""
-			} else {
-				return fmt.Errorf("reading managed runtime published port: %w", err)
-			}
-		} else {
+		if err == nil {
 			managedPort = port
 		}
 	}

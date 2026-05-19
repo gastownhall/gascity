@@ -48,23 +48,23 @@ type Store interface {
 
 ### Three Implementations
 
-| Provider | Backing | Used By |
-|----------|---------|---------|
-| `BdStore` | `bd` CLI → Dolt SQL | Production (default) |
+| Provider    | Backing                   | Used By                       |
+| ----------- | ------------------------- | ----------------------------- |
+| `BdStore`   | `bd` CLI → Dolt SQL       | Production (default)          |
 | `FileStore` | JSON file, wraps MemStore | Tutorials, lightweight setups |
-| `MemStore` | In-memory map | Unit tests |
+| `MemStore`  | In-memory map             | Unit tests                    |
 
 ### BdStore-Only Methods (Not in Store Interface)
 
 BdStore exposes methods that other subsystems use directly via `*BdStore`:
 
-| Method | Used By | Purpose |
-|--------|---------|---------|
-| `Init(prefix)` | `cmd/gc/beads_provider_lifecycle.go` | Initialize `.beads/` database |
-| `ConfigSet(key, value)` | `cmd/gc/beads_provider_lifecycle.go` | Set bd configuration |
-| `ListByLabel(label, limit)` | `cmd/gc/cmd_order.go` | Query beads by label (order history, cursors) |
-| `Purge(beadsDir, dryRun)` | `cmd/gc/wisp_gc.go` and admin flows | Remove closed ephemeral beads |
-| `SetPurgeRunner(fn)` | Tests only | Test injection |
+| Method                      | Used By                              | Purpose                                       |
+| --------------------------- | ------------------------------------ | --------------------------------------------- |
+| `Init(prefix)`              | `cmd/gc/beads_provider_lifecycle.go` | Initialize `.beads/` database                 |
+| `ConfigSet(key, value)`     | `cmd/gc/beads_provider_lifecycle.go` | Set bd configuration                          |
+| `ListByLabel(label, limit)` | `cmd/gc/cmd_order.go`                | Query beads by label (order history, cursors) |
+| `Purge(beadsDir, dryRun)`   | `cmd/gc/wisp_gc.go` and admin flows  | Remove closed ephemeral beads                 |
+| `SetPurgeRunner(fn)`        | Tests only                           | Test injection                                |
 
 ### Provider Selection
 
@@ -86,6 +86,7 @@ func beadsProvider(cityPath string) string {
 Priority: `GC_BEADS` env var → `city.toml [beads].provider` → `"bd"`.
 
 Config:
+
 ```toml
 [beads]
 provider = "bd"    # or "file", or "exec:/path/to/script"
@@ -96,6 +97,7 @@ provider = "bd"    # or "file", or "exec:/path/to/script"
 ### 1. Promote ListByLabel to the Store Interface
 
 `ListByLabel` is used by the order subsystem for:
+
 - **Order history** — list all wisps for a order
 - **Last run time** — find most recent wisp for a order
 - **Event cursor** — find max `seq:` label across order wisps
@@ -141,36 +143,36 @@ provider pattern exactly.
 
 ### Exit Codes
 
-| Code | Meaning |
-|------|---------|
-| 0 | Success |
-| 1 | Failure (stderr contains error message) |
-| 2 | Unknown operation (treated as success — forward compatible) |
+| Code | Meaning                                                     |
+| ---- | ----------------------------------------------------------- |
+| 0    | Success                                                     |
+| 1    | Failure (stderr contains error message)                     |
+| 2    | Unknown operation (treated as success — forward compatible) |
 
 ### Operations
 
 #### Core Store Operations (10 methods)
 
-| Operation | Invocation | Stdin | Stdout |
-|-----------|-----------|-------|--------|
-| `create` | `script create` | Bead JSON | Bead JSON (with ID, status, created_at) |
-| `get` | `script get <id>` | — | Bead JSON |
-| `update` | `script update <id>` | UpdateOpts JSON | — |
-| `close` | `script close <id>` | — | — |
-| `list` | `script list` | — | Bead JSON array |
-| `ready` | `script ready` | — | Bead JSON array |
-| `children` | `script children <parent-id>` | — | Bead JSON array |
-| `set-metadata` | `script set-metadata <id> <key>` | value on stdin | — |
-| `mol-cook` | `script mol-cook` | MolCookRequest JSON | root bead ID (plain text) |
-| `list-by-label` | `script list-by-label <label> <limit>` | — | Bead JSON array |
+| Operation       | Invocation                             | Stdin               | Stdout                                  |
+| --------------- | -------------------------------------- | ------------------- | --------------------------------------- |
+| `create`        | `script create`                        | Bead JSON           | Bead JSON (with ID, status, created_at) |
+| `get`           | `script get <id>`                      | —                   | Bead JSON                               |
+| `update`        | `script update <id>`                   | UpdateOpts JSON     | —                                       |
+| `close`         | `script close <id>`                    | —                   | —                                       |
+| `list`          | `script list`                          | —                   | Bead JSON array                         |
+| `ready`         | `script ready`                         | —                   | Bead JSON array                         |
+| `children`      | `script children <parent-id>`          | —                   | Bead JSON array                         |
+| `set-metadata`  | `script set-metadata <id> <key>`       | value on stdin      | —                                       |
+| `mol-cook`      | `script mol-cook`                      | MolCookRequest JSON | root bead ID (plain text)               |
+| `list-by-label` | `script list-by-label <label> <limit>` | —                   | Bead JSON array                         |
 
 #### Admin Operations (Optional)
 
-| Operation | Invocation | Stdin | Stdout |
-|-----------|-----------|-------|--------|
-| `init` | `script init <dir> <prefix>` | — | — |
-| `config-set` | `script config-set <key> <value>` | — | — |
-| `purge` | `script purge <beads-dir>` | PurgeOpts JSON | PurgeResult JSON |
+| Operation    | Invocation                        | Stdin          | Stdout           |
+| ------------ | --------------------------------- | -------------- | ---------------- |
+| `init`       | `script init <dir> <prefix>`      | —              | —                |
+| `config-set` | `script config-set <key> <value>` | —              | —                |
+| `purge`      | `script purge <beads-dir>`        | PurgeOpts JSON | PurgeResult JSON |
 
 Scripts that don't support admin operations return exit 2 (unknown
 operation). Gas City treats this as success — admin ops are only called
@@ -178,16 +180,16 @@ during `gc init` and `gc dolt sync`, not during normal operation.
 
 #### Lifecycle Operations (Optional)
 
-| Operation | Invocation | Stdin | Stdout | Purpose |
-|-----------|-----------|-------|--------|---------|
-| `ensure-ready` | `script ensure-ready` | — | — | Make backing service usable |
-| `start` | `script start` | — | — | Enhanced start with backoff/health tracking |
-| `stop` | `script stop` | — | — | Enhanced stop with graceful shutdown |
-| `shutdown` | `script shutdown` | — | — | Legacy graceful stop |
-| `init` | `script init <dir> <prefix>` | — | — | First-time setup for a directory |
-| `health` | `script health` | — | — | Check provider health (probe only, no side effects) |
-| `recover` | `script recover` | — | — | Stop, restart, verify health after failure |
-| `probe` | `script probe` | — | — | Check if backing service is available (exit 0 = yes, 2 = not running) |
+| Operation      | Invocation                   | Stdin | Stdout | Purpose                                                               |
+| -------------- | ---------------------------- | ----- | ------ | --------------------------------------------------------------------- |
+| `ensure-ready` | `script ensure-ready`        | —     | —      | Make backing service usable                                           |
+| `start`        | `script start`               | —     | —      | Enhanced start with backoff/health tracking                           |
+| `stop`         | `script stop`                | —     | —      | Enhanced stop with graceful shutdown                                  |
+| `shutdown`     | `script shutdown`            | —     | —      | Legacy graceful stop                                                  |
+| `init`         | `script init <dir> <prefix>` | —     | —      | First-time setup for a directory                                      |
+| `health`       | `script health`              | —     | —      | Check provider health (probe only, no side effects)                   |
+| `recover`      | `script recover`             | —     | —      | Stop, restart, verify health after failure                            |
+| `probe`        | `script probe`               | —     | —      | Check if backing service is available (exit 0 = yes, 2 = not running) |
 
 These operations are called by `gc start` and `gc stop` to manage the
 bead store's backing service — analogous to Docker Compose starting and
@@ -224,24 +226,12 @@ The wire format matches `beads.Bead` JSON tags — the same shape that
   "ref": "",
   "needs": [],
   "description": "",
-  "labels": ["order-run:digest", "pool:dog"],
-  "ephemeral": true
+  "labels": ["order-run:digest", "pool:dog"]
 }
 ```
 
 Fields omitted from the JSON are treated as zero values. The `id` field
 on `create` input is ignored (the script assigns IDs).
-
-`ephemeral=true` is part of the exec provider contract. Scripts must preserve
-it on create/read paths so Gas City can keep wisps-tier work out of normal
-ready-work and issues-tier queries. Backends without a native wisps table may
-store the bit internally, such as with a private label, but must return it as
-the `ephemeral` JSON field.
-
-`list`, `children`, and `list-by-label` should return every matching bead the
-script can see, including ephemeral beads. Gas City applies the caller's tier
-mode after parsing the JSON, so scripts do not receive a separate
-issues/wisps/both argument.
 
 #### Create Request
 
@@ -250,8 +240,7 @@ issues/wisps/both argument.
   "title": "my task",
   "type": "task",
   "labels": ["pool:dog"],
-  "parent_id": "WP-1",
-  "ephemeral": false
+  "parent_id": "WP-1"
 }
 ```
 
@@ -393,20 +382,20 @@ requires. This is how we verify the layering: if every operation in the
 "Uses" column is in the Store interface (or exec protocol), the subsystem
 works with any provider.
 
-| Subsystem | Layer | Uses (Store Interface) | Uses (*BdStore Only) |
-|-----------|-------|----------------------|---------------------|
-| Dispatch (sling) | L3 | Create, Get, Update, Close, MolCook | — |
-| Task loop | L2 | Ready, Get, Update, Close | — |
-| Molecules | L2 | Create, Children, Update, Close, MolCook | — |
-| Messaging | L2 | Create (type=message), List | — |
-| Order check | L3 | — | ListByLabel (→ promote) |
-| Order run | L3 | MolCook | ListByLabel (→ promote) |
-| Order history | L3 | — | ListByLabel (→ promote) |
-| Health patrol | L2 | Ready, SetMetadata | — |
-| Convoy | L3 | Create, Children, Close, Update | — |
-| Rig init | L0 | — | Init, ConfigSet |
-| Dolt sync | L0 | — | Purge |
-| Event cursor | L3 | — | ListByLabel (→ promote) |
+| Subsystem        | Layer | Uses (Store Interface)                   | Uses (\*BdStore Only)   |
+| ---------------- | ----- | ---------------------------------------- | ----------------------- |
+| Dispatch (sling) | L3    | Create, Get, Update, Close, MolCook      | —                       |
+| Task loop        | L2    | Ready, Get, Update, Close                | —                       |
+| Molecules        | L2    | Create, Children, Update, Close, MolCook | —                       |
+| Messaging        | L2    | Create (type=message), List              | —                       |
+| Order check      | L3    | —                                        | ListByLabel (→ promote) |
+| Order run        | L3    | MolCook                                  | ListByLabel (→ promote) |
+| Order history    | L3    | —                                        | ListByLabel (→ promote) |
+| Health patrol    | L2    | Ready, SetMetadata                       | —                       |
+| Convoy           | L3    | Create, Children, Close, Update          | —                       |
+| Rig init         | L0    | —                                        | Init, ConfigSet         |
+| Dolt sync        | L0    | —                                        | Purge                   |
+| Event cursor     | L3    | —                                        | ListByLabel (→ promote) |
 
 **After promoting ListByLabel:** Only `Init`, `ConfigSet`, and `Purge`
 remain outside the Store interface. These are all admin/lifecycle
@@ -422,33 +411,33 @@ maps to Gas City's requirements:
 
 ### Supported (Direct Mapping)
 
-| Store Method | br Command | Notes |
-|-------------|------------|-------|
-| `Create` | `br create --json <title>` | Has `--type`, `--label` |
-| `Get` | `br show --json <id>` | Returns JSON |
-| `Update` | `br update --json <id>` | Has `--description`, `--label` |
-| `Close` | `br close --json <id>` | Direct mapping |
-| `List` | `br list --json` | Has `--limit`, `--all` |
-| `Ready` | `br ready --json` | Open beads |
-| `ListByLabel` | `br list --json --label=X` | Has `--label` filter |
+| Store Method  | br Command                 | Notes                          |
+| ------------- | -------------------------- | ------------------------------ |
+| `Create`      | `br create --json <title>` | Has `--type`, `--label`        |
+| `Get`         | `br show --json <id>`      | Returns JSON                   |
+| `Update`      | `br update --json <id>`    | Has `--description`, `--label` |
+| `Close`       | `br close --json <id>`     | Direct mapping                 |
+| `List`        | `br list --json`           | Has `--limit`, `--all`         |
+| `Ready`       | `br ready --json`          | Open beads                     |
+| `ListByLabel` | `br list --json --label=X` | Has `--label` filter           |
 
 ### Gaps (Script Must Bridge)
 
-| Store Method | Gap | Workaround |
-|-------------|-----|------------|
-| `Children(parentID)` | No `--parent` on create | Script tracks parent→child in sidecar or labels |
-| `SetMetadata(id, key, value)` | No `--set-metadata` | Script uses labels (`meta:key=value`) or sidecar file |
-| `MolCook(formula, title, vars)` | No molecule concept | Script creates root bead + step beads from formula TOML |
+| Store Method                    | Gap                     | Workaround                                              |
+| ------------------------------- | ----------------------- | ------------------------------------------------------- |
+| `Children(parentID)`            | No `--parent` on create | Script tracks parent→child in sidecar or labels         |
+| `SetMetadata(id, key, value)`   | No `--set-metadata`     | Script uses labels (`meta:key=value`) or sidecar file   |
+| `MolCook(formula, title, vars)` | No molecule concept     | Script creates root bead + step beads from formula TOML |
 
 ### Not Needed by Store Interface
 
-| br Feature | Relevance |
-|-----------|-----------|
-| `br comment` | Not in Store interface — could be future extension |
-| `br search` | Not in Store interface — search is done via List + filter |
-| `br dep-tree` | Interesting for molecules but not required |
-| `br blocked` | Subset of Ready with dependency tracking |
-| `br priority` | Not in Gas City's bead model |
+| br Feature    | Relevance                                                 |
+| ------------- | --------------------------------------------------------- |
+| `br comment`  | Not in Store interface — could be future extension        |
+| `br search`   | Not in Store interface — search is done via List + filter |
+| `br dep-tree` | Interesting for molecules but not required                |
+| `br blocked`  | Subset of Ready with dependency tracking                  |
+| `br priority` | Not in Gas City's bead model                              |
 
 ### Feasibility Assessment
 
@@ -480,8 +469,8 @@ Gas City reads the formula TOML, creates the root bead via `Create`,
 creates step beads with ParentID via `Create`, wires dependencies via
 `Update`. The script only needs CRUD primitives.
 
-**Recommendation: Option B.** MolCook is a *mechanism* (Layer 2),
-not a *primitive*. It's composed from Task Store operations + Config
+**Recommendation: Option B.** MolCook is a _mechanism_ (Layer 2),
+not a _primitive_. It's composed from Task Store operations + Config
 parsing. Pushing formula knowledge into every backend script violates
 the Bitter Lesson — the SDK should handle composition, scripts handle
 storage.
@@ -511,38 +500,42 @@ get their own Go implementation.
 ## Migration Path
 
 ### Phase 1: Interface Promotion (This PR)
+
 1. Add `ListByLabel(label string, limit int) ([]Bead, error)` to Store
 2. Implement on MemStore and FileStore (filter existing data)
 3. Change `cmd/gc/cmd_order.go` functions from `*BdStore` to `Store`
 
 ### Phase 2: Exec Provider
+
 1. Create `internal/beads/exec/` package
 2. Implement ExecStore with all Store interface methods
 3. Add `exec:` prefix handling in `beadsProvider()`
 4. Write protocol documentation
 
 ### Phase 3: MolCook Decomposition
+
 1. Extract formula→bead-tree logic from `bd mol cook` into Go
 2. Implement composed MolCook on ExecStore using Create + Update
 3. Optionally add composed MolCook to FileStore/MemStore
 
 ### Phase 4: Reference Script
+
 1. Write `gc-beads-br` script wrapping beads_rust
 2. Verify all Gas City operations work end-to-end
 3. Document gaps and workarounds
 
 ## Comparison: Session vs. Beads Exec Pattern
 
-| Aspect | Session Exec | Beads Exec |
-|--------|-------------|------------|
-| Interface | `runtime.Provider` (14+ methods) | `beads.Store` (10 methods) |
-| Data format | Mixed (JSON for start, text for others) | JSON for all mutations and reads |
-| Selection | `GC_SESSION=exec:<script>` | `GC_BEADS=exec:<script>` |
-| Config | N/A (env var only) | `[beads] provider = "exec:..."` |
-| Forward compat | Exit 2 = unknown op | Exit 2 = unknown op |
-| Wire types | `startConfig` (stable subset) | `beads.Bead` JSON tags (stable) |
-| Timeout | 30s | 30s |
-| Composed ops | None (all primitive) | MolCook (composed from Create+Update) |
+| Aspect         | Session Exec                            | Beads Exec                            |
+| -------------- | --------------------------------------- | ------------------------------------- |
+| Interface      | `runtime.Provider` (14+ methods)        | `beads.Store` (10 methods)            |
+| Data format    | Mixed (JSON for start, text for others) | JSON for all mutations and reads      |
+| Selection      | `GC_SESSION=exec:<script>`              | `GC_BEADS=exec:<script>`              |
+| Config         | N/A (env var only)                      | `[beads] provider = "exec:..."`       |
+| Forward compat | Exit 2 = unknown op                     | Exit 2 = unknown op                   |
+| Wire types     | `startConfig` (stable subset)           | `beads.Bead` JSON tags (stable)       |
+| Timeout        | 30s                                     | 30s                                   |
+| Composed ops   | None (all primitive)                    | MolCook (composed from Create+Update) |
 
 ## Open Questions
 

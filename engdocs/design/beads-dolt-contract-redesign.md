@@ -2,13 +2,13 @@
 title: "Beads And Dolt Contract Redesign"
 ---
 
-| Field | Value |
-|---|---|
-| Status | Accepted |
-| Date | 2026-04-11 |
-| Author(s) | Codex |
-| Issue | Historical input: [#245](https://github.com/gastownhall/gascity/issues/245), [#506](https://github.com/gastownhall/gascity/issues/506), [#525](https://github.com/gastownhall/gascity/issues/525), [#541](https://github.com/gastownhall/gascity/issues/541), [#560](https://github.com/gastownhall/gascity/issues/560), [#561](https://github.com/gastownhall/gascity/issues/561) |
-| Supersedes | N/A |
+| Field      | Value                                                                                                                                                                                                                                                                                                                                                                              |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Status     | Accepted                                                                                                                                                                                                                                                                                                                                                                           |
+| Date       | 2026-04-11                                                                                                                                                                                                                                                                                                                                                                         |
+| Author(s)  | Codex                                                                                                                                                                                                                                                                                                                                                                              |
+| Issue      | Historical input: [#245](https://github.com/gastownhall/gascity/issues/245), [#506](https://github.com/gastownhall/gascity/issues/506), [#525](https://github.com/gastownhall/gascity/issues/525), [#541](https://github.com/gastownhall/gascity/issues/541), [#560](https://github.com/gastownhall/gascity/issues/560), [#561](https://github.com/gastownhall/gascity/issues/561) |
+| Supersedes | N/A                                                                                                                                                                                                                                                                                                                                                                                |
 
 ## Summary
 
@@ -162,13 +162,13 @@ compete with its managed runtime publication:
 The current state has too many independent or partially overlapping
 authorities:
 
-| Concern | Current competing authorities |
-|---|---|
+| Concern                  | Current competing authorities                                                                                                   |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
 | Managed runtime endpoint | `.gc/runtime/.../dolt-state.json`, `.beads/dolt-server.port`, `GC_DOLT_PORT`, `BEADS_DOLT_SERVER_PORT`, reachability heuristics |
-| Database identity | `.beads/metadata.json`, derived prefix defaults, historical metadata preservation logic |
-| Endpoint ownership | city config, rig config, env overrides, K8s-specific file mutation |
-| Raw `bd` compatibility | `.beads/config.yaml`, env projection, process-global mutation |
-| Secrets and auth | process env, `.beads/.env`, beads credentials file, duplicated `BEADS_*` projection |
+| Database identity        | `.beads/metadata.json`, derived prefix defaults, historical metadata preservation logic                                         |
+| Endpoint ownership       | city config, rig config, env overrides, K8s-specific file mutation                                                              |
+| Raw `bd` compatibility   | `.beads/config.yaml`, env projection, process-global mutation                                                                   |
+| Secrets and auth         | process env, `.beads/.env`, beads credentials file, duplicated `BEADS_*` projection                                             |
 
 This design collapses each of those concerns onto one canonical source
 plus an explicit compatibility layer.
@@ -825,15 +825,15 @@ new cities, not a forced rewrite of existing tracked identity.
 
 Every provider receives this finite, normative store-target contract:
 
-| Variable | City scope | Rig scope | Meaning |
-|---|---|---|---|
-| `GC_STORE_ROOT` | required | required | canonical scope root for persistence |
-| `GC_STORE_SCOPE` | `city` | `rig` | scope discriminator |
-| `GC_BEADS_PREFIX` | required | required | stable routing prefix, treated as opaque by non-`bd` providers |
-| `GC_CITY` | required | required | city name |
-| `GC_RIG` | unset | required | rig name |
-| `GC_RIG_ROOT` | unset | required | rig root path |
-| `GC_PROVIDER` | required | required | resolved provider name |
+| Variable          | City scope | Rig scope | Meaning                                                        |
+| ----------------- | ---------- | --------- | -------------------------------------------------------------- |
+| `GC_STORE_ROOT`   | required   | required  | canonical scope root for persistence                           |
+| `GC_STORE_SCOPE`  | `city`     | `rig`     | scope discriminator                                            |
+| `GC_BEADS_PREFIX` | required   | required  | stable routing prefix, treated as opaque by non-`bd` providers |
+| `GC_CITY`         | required   | required  | city name                                                      |
+| `GC_RIG`          | unset      | required  | rig name                                                       |
+| `GC_RIG_ROOT`     | unset      | required  | rig root path                                                  |
+| `GC_PROVIDER`     | required   | required  | resolved provider name                                         |
 
 No other provider-neutral vars are part of the contract.
 
@@ -916,17 +916,17 @@ reconcile.
 The owning CLI must be explicit in this design, not deferred to
 implementation:
 
-| Operation | Command shape | Notes |
-|---|---|---|
-| migrate legacy contract | `gc beads migrate-contract [--city] [--rig <rig>] [--all] [--dry-run]` | materializes canonical files and records migration progress |
-| city managed | `gc beads city use-managed [--dry-run]` | adopts or initializes managed-local city topology |
-| city external | `gc beads city use-external --host <host> --port <port> [--user <user>] [--adopt-unverified] [--dry-run]` | validates before write unless `--adopt-unverified` |
-| managed-local recovery | `gc beads city recover [--dry-run]` | the only operator-facing command that may request managed-local Dolt adopt or restart |
-| rig inherit | `gc rig set-endpoint <rig> --inherit [--dry-run]` | rewrites the rig into derived inherited shape |
-| rig explicit external | `gc rig set-endpoint <rig> --external --host <host> --port <port> [--user <user>] [--adopt-unverified] [--dry-run]` | validates before write unless `--adopt-unverified` |
-| endpoint repair | `gc beads endpoint repair (--city | --rig <rig>) [--create-missing-databases] [--dry-run]` | verify-only by default; explicit scope required; may create only when explicitly requested |
-| database migration | `gc beads database rename (--city | --rig <rig>) --to <database> [--dry-run]` | the only command that may rewrite `dolt_database`; explicit scope required |
-| resume interrupted operation | `gc beads resume --op <operation-id> [--dry-run]` | resumes a journaled migration or topology operation using the recorded pre-state hashes |
+| Operation                    | Command shape                                                                                                       | Notes                                                                                   |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| migrate legacy contract      | `gc beads migrate-contract [--city] [--rig <rig>] [--all] [--dry-run]`                                              | materializes canonical files and records migration progress                             |
+| city managed                 | `gc beads city use-managed [--dry-run]`                                                                             | adopts or initializes managed-local city topology                                       |
+| city external                | `gc beads city use-external --host <host> --port <port> [--user <user>] [--adopt-unverified] [--dry-run]`           | validates before write unless `--adopt-unverified`                                      |
+| managed-local recovery       | `gc beads city recover [--dry-run]`                                                                                 | the only operator-facing command that may request managed-local Dolt adopt or restart   |
+| rig inherit                  | `gc rig set-endpoint <rig> --inherit [--dry-run]`                                                                   | rewrites the rig into derived inherited shape                                           |
+| rig explicit external        | `gc rig set-endpoint <rig> --external --host <host> --port <port> [--user <user>] [--adopt-unverified] [--dry-run]` | validates before write unless `--adopt-unverified`                                      |
+| endpoint repair              | `gc beads endpoint repair (--city                                                                                   | --rig <rig>) [--create-missing-databases] [--dry-run]`                                  | verify-only by default; explicit scope required; may create only when explicitly requested |
+| database migration           | `gc beads database rename (--city                                                                                   | --rig <rig>) --to <database> [--dry-run]`                                               | the only command that may rewrite `dolt_database`; explicit scope required                 |
+| resume interrupted operation | `gc beads resume --op <operation-id> [--dry-run]`                                                                   | resumes a journaled migration or topology operation using the recorded pre-state hashes |
 
 CLI UX rules:
 
@@ -1011,14 +1011,14 @@ RECOVERED: managed city runtime restored
 
 ## Transition Table
 
-| Operation | Allowed pre-state | Post-state | Files changed | Validation / provisioning |
-|---|---|---|---|---|
-| city use-managed | uninitialized, managed legacy, or existing `city_canonical` | city `managed_city` + `verified` | city `.beads/metadata.json`, city `.beads/config.yaml`, inherited rig mirrors when converting from external | acquire lifecycle ownership, start or adopt the managed server, publish runtime state, create/verify required databases |
-| city use-external | uninitialized, external legacy, or existing `managed_city` | city `city_canonical` + `verified|unverified` | city `.beads/metadata.json`, city `.beads/config.yaml`, inherited rig mirrors, managed runtime publication retirement when converting from managed | validate endpoint first unless `--adopt-unverified`; create databases only in explicit bootstrap flows |
-| set rig inherit | rig `explicit` or legacy | rig `inherited_city` | rig `.beads/config.yaml` | derive local endpoint shape from current city origin |
-| set rig external | rig `inherited_city` or legacy | rig `explicit` + `verified|unverified` | rig `.beads/config.yaml` | validate endpoint first unless `--adopt-unverified`; create/verify rig database if requested |
-| database migration/rename | pinned DB exists | new pinned DB identity | `.beads/metadata.json`, optional backend files | explicit migration only |
-| endpoint repair/create | canonical topology already valid | same topology, repaired server inventory | none by default | endpoint-scoped create/repair only |
+| Operation                 | Allowed pre-state                                           | Post-state                               | Files changed                                                                                               | Validation / provisioning                                                                                                                          |
+| ------------------------- | ----------------------------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| city use-managed          | uninitialized, managed legacy, or existing `city_canonical` | city `managed_city` + `verified`         | city `.beads/metadata.json`, city `.beads/config.yaml`, inherited rig mirrors when converting from external | acquire lifecycle ownership, start or adopt the managed server, publish runtime state, create/verify required databases                            |
+| city use-external         | uninitialized, external legacy, or existing `managed_city`  | city `city_canonical` + `verified        | unverified`                                                                                                 | city `.beads/metadata.json`, city `.beads/config.yaml`, inherited rig mirrors, managed runtime publication retirement when converting from managed | validate endpoint first unless `--adopt-unverified`; create databases only in explicit bootstrap flows |
+| set rig inherit           | rig `explicit` or legacy                                    | rig `inherited_city`                     | rig `.beads/config.yaml`                                                                                    | derive local endpoint shape from current city origin                                                                                               |
+| set rig external          | rig `inherited_city` or legacy                              | rig `explicit` + `verified               | unverified`                                                                                                 | rig `.beads/config.yaml`                                                                                                                           | validate endpoint first unless `--adopt-unverified`; create/verify rig database if requested           |
+| database migration/rename | pinned DB exists                                            | new pinned DB identity                   | `.beads/metadata.json`, optional backend files                                                              | explicit migration only                                                                                                                            |
+| endpoint repair/create    | canonical topology already valid                            | same topology, repaired server inventory | none by default                                                                                             | endpoint-scoped create/repair only                                                                                                                 |
 
 Rules:
 
@@ -1270,15 +1270,15 @@ explicit commands.
 When multiple findings coexist, `gc doctor`, startup, and owning command
 preflight must select the same first command in this order:
 
-| Priority | Condition | First command | Notes |
-|---|---|---|---|
-| 1 | `topology_incomplete` or `migration_incomplete` journal exists | `gc beads resume --op <id>` | blocks all lower-priority fixes for scopes covered by the journal |
-| 2 | contradictory canonical topology or manual topology edit | owning topology command for the affected scope | examples: `gc beads city use-managed`, `gc beads city use-external ...`, `gc rig set-endpoint <rig> --inherit`, `gc rig set-endpoint <rig> --external ...` |
-| 3 | managed city unavailable and no incomplete journal exists | `gc beads city recover` | highest-priority managed-local runtime fix |
-| 4 | inherited-rig mirror drift with no journal and canonical city topology otherwise valid | `gc rig set-endpoint <rig> --inherit` | rewrites the rig back to derived inherited shape |
-| 5 | external endpoint unreachable, auth failure, or canonical external endpoint still `unverified` | `gc beads endpoint repair [--city | --rig <rig>]` | verifies endpoint and may guide follow-on repair |
-| 6 | endpoint reachable but pinned databases missing | `gc beads endpoint repair [--city | --rig <rig>] --create-missing-databases` | only after endpoint validation succeeds |
-| 7 | compatibility-only warnings | no owning repair command required | cleanup hints only |
+| Priority | Condition                                                                                      | First command                                  | Notes                                                                                                                                                      |
+| -------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| 1        | `topology_incomplete` or `migration_incomplete` journal exists                                 | `gc beads resume --op <id>`                    | blocks all lower-priority fixes for scopes covered by the journal                                                                                          |
+| 2        | contradictory canonical topology or manual topology edit                                       | owning topology command for the affected scope | examples: `gc beads city use-managed`, `gc beads city use-external ...`, `gc rig set-endpoint <rig> --inherit`, `gc rig set-endpoint <rig> --external ...` |
+| 3        | managed city unavailable and no incomplete journal exists                                      | `gc beads city recover`                        | highest-priority managed-local runtime fix                                                                                                                 |
+| 4        | inherited-rig mirror drift with no journal and canonical city topology otherwise valid         | `gc rig set-endpoint <rig> --inherit`          | rewrites the rig back to derived inherited shape                                                                                                           |
+| 5        | external endpoint unreachable, auth failure, or canonical external endpoint still `unverified` | `gc beads endpoint repair [--city              | --rig <rig>]`                                                                                                                                              | verifies endpoint and may guide follow-on repair |
+| 6        | endpoint reachable but pinned databases missing                                                | `gc beads endpoint repair [--city              | --rig <rig>] --create-missing-databases`                                                                                                                   | only after endpoint validation succeeds          |
+| 7        | compatibility-only warnings                                                                    | no owning repair command required              | cleanup hints only                                                                                                                                         |
 
 Precedence rules:
 
@@ -1482,16 +1482,16 @@ The resolver matrix must be explicit over these dimensions:
 
 Required valid-state coverage table:
 
-| Scope | Origin | Status | Required direct test |
-|---|---|---|---|
-| city | `managed_city` | `verified` | yes |
-| city | `city_canonical` | `verified` | yes |
-| city | `city_canonical` | `unverified` | yes |
-| rig inheriting managed city | `inherited_city` | `verified` | yes |
-| rig inheriting external city | `inherited_city` | `verified` | yes |
-| rig inheriting external city | `inherited_city` | `unverified` | yes |
-| rig explicit external | `explicit` | `verified` | yes |
-| rig explicit external | `explicit` | `unverified` | yes |
+| Scope                        | Origin           | Status       | Required direct test |
+| ---------------------------- | ---------------- | ------------ | -------------------- |
+| city                         | `managed_city`   | `verified`   | yes                  |
+| city                         | `city_canonical` | `verified`   | yes                  |
+| city                         | `city_canonical` | `unverified` | yes                  |
+| rig inheriting managed city  | `inherited_city` | `verified`   | yes                  |
+| rig inheriting external city | `inherited_city` | `verified`   | yes                  |
+| rig inheriting external city | `inherited_city` | `unverified` | yes                  |
+| rig explicit external        | `explicit`       | `verified`   | yes                  |
+| rig explicit external        | `explicit`       | `unverified` | yes                  |
 
 Each of those valid-state combinations must also be exercised across the
 database identity sources `default`, `adopted`, and `migrated`, with at
@@ -1500,16 +1500,16 @@ variant per family.
 
 Minimum concrete fixtures:
 
-| Fixture | Operation | Assertions |
-|---|---|---|
-| city `managed_city` | resolve + project | managed runtime publication is the only live endpoint source; `.beads/dolt-server.port` ignored for resolution; `GC_DOLT_*` and `BEADS_*` agree |
-| city `city_canonical` verified | resolve + project | canonical external host, port, user emitted; no managed lifecycle owner |
-| city `city_canonical` unverified | resolve + startup validation | canonical endpoint retained; startup reports typed unverified failure or promotes to verified after success |
-| rig `inherited_city` under managed city | resolve + project | no tracked external endpoint defaults; database identity stays rig-local |
-| rig `inherited_city` under external city | resolve + project | local mirrored host and port match city canonical external endpoint |
-| rig `explicit` | resolve + project | rig endpoint overrides city endpoint without changing pinned database identity |
-| legacy adopted city with non-default DB | migrate + resolve | `dolt_database` preserved exactly; default `hq` not written |
-| invalid rig managed-local attempt | resolve | hard failure with owning command |
+| Fixture                                  | Operation                    | Assertions                                                                                                                                      |
+| ---------------------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| city `managed_city`                      | resolve + project            | managed runtime publication is the only live endpoint source; `.beads/dolt-server.port` ignored for resolution; `GC_DOLT_*` and `BEADS_*` agree |
+| city `city_canonical` verified           | resolve + project            | canonical external host, port, user emitted; no managed lifecycle owner                                                                         |
+| city `city_canonical` unverified         | resolve + startup validation | canonical endpoint retained; startup reports typed unverified failure or promotes to verified after success                                     |
+| rig `inherited_city` under managed city  | resolve + project            | no tracked external endpoint defaults; database identity stays rig-local                                                                        |
+| rig `inherited_city` under external city | resolve + project            | local mirrored host and port match city canonical external endpoint                                                                             |
+| rig `explicit`                           | resolve + project            | rig endpoint overrides city endpoint without changing pinned database identity                                                                  |
+| legacy adopted city with non-default DB  | migrate + resolve            | `dolt_database` preserved exactly; default `hq` not written                                                                                     |
+| invalid rig managed-local attempt        | resolve                      | hard failure with owning command                                                                                                                |
 
 For every valid resolver fixture, assert:
 
@@ -1523,18 +1523,18 @@ For every valid resolver fixture, assert:
 
 At minimum the negative matrix must cover:
 
-| Invalid state | Expected outcome |
-|---|---|
-| city origin `inherited_city` | hard failure with owning command |
-| city origin `explicit` | hard failure with owning command |
-| rig origin `managed_city` | hard failure with owning command |
-| rig origin `city_canonical` | hard failure with owning command |
-| `managed_city` plus tracked `dolt.host` or `dolt.port` | hard drift failure |
-| `explicit` without host and port | hard drift failure |
-| `inherited_city` with external mirror that does not match city canonical external endpoint | hard drift failure |
-| pinned rig database `hq` | hard drift failure |
-| duplicate pinned databases on the same endpoint | hard drift failure |
-| contradictory canonical files plus incomplete topology journal | named `topology_incomplete` or `migration_incomplete` failure |
+| Invalid state                                                                              | Expected outcome                                              |
+| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| city origin `inherited_city`                                                               | hard failure with owning command                              |
+| city origin `explicit`                                                                     | hard failure with owning command                              |
+| rig origin `managed_city`                                                                  | hard failure with owning command                              |
+| rig origin `city_canonical`                                                                | hard failure with owning command                              |
+| `managed_city` plus tracked `dolt.host` or `dolt.port`                                     | hard drift failure                                            |
+| `explicit` without host and port                                                           | hard drift failure                                            |
+| `inherited_city` with external mirror that does not match city canonical external endpoint | hard drift failure                                            |
+| pinned rig database `hq`                                                                   | hard drift failure                                            |
+| duplicate pinned databases on the same endpoint                                            | hard drift failure                                            |
+| contradictory canonical files plus incomplete topology journal                             | named `topology_incomplete` or `migration_incomplete` failure |
 
 ### Canonical-file migration tests
 
@@ -1627,14 +1627,14 @@ Cover:
 
 ## Regression Traceability Matrix
 
-| Historical record | Caller classes | Required contract tests | Required assertion |
-|---|---|---|---|
-| [#245](https://github.com/gastownhall/gascity/issues/245) | `gc bd`, projected shells, K8s adapter | `TestProjectedEnvClearsAmbientDoltVars`, `TestGcBdUsesProjectionNotAmbientEnv`, `TestK8sProjectionUsesResolvedEnv` | one projection owner emits matching `GC_DOLT_*` and `BEADS_*`; stale parent env is cleared everywhere |
-| [#506](https://github.com/gastownhall/gascity/issues/506) | `gc doctor`, doctor subprocess env | `TestDoctorUsesResolvedManagedPort`, `TestDoctorSubprocessEnvUsesProjection` | doctor reports runtime-publication port only and never shells out with stale port-file authority |
-| [#525](https://github.com/gastownhall/gascity/issues/525) | resolver, startup validation, repair | `TestResolverRejectsStaleManagedPublication`, `TestManagedPortFileIgnoredForResolution`, `TestManagedUnavailablePointsToGCRepair` | resolver returns managed endpoint unavailable; no fallback to port file; repair path points to GC-owned recovery |
-| [#541](https://github.com/gastownhall/gascity/issues/541) | session env projection, startup helpers, controller and runtime helpers | `TestSanitizeAndPopulateProjection`, `TestStartupHelpersDoNotLeakAmbientBeadsEnv`, `TestControllerRuntimeHelpersUseProjection` | sanitize-and-populate removes unsupported keys and emits only resolved target values across all caller classes |
-| [#560](https://github.com/gastownhall/gascity/issues/560) | startup, doctor, repair, lifecycle owner | `TestSingleLifecycleOwnerFencesRecover`, `TestNonOwnerFlowsDelegateLifecycleMutation`, `TestOwnerEpochChangesAcrossAdoption` | only one lifecycle owner may start or recover Dolt; all other paths delegate or remain verify-only |
-| [#561](https://github.com/gastownhall/gascity/issues/561) | migration, bootstrap, startup resume | `TestExplicitMigrationCreatesCanonicalFiles`, `TestIncompleteJournalFailsClosed`, `TestResumeFromEachCrashBoundary` | canonical files are created through explicit migration or bootstrap with crash-safe journal; startup refuses partial state rather than half-repairing it |
+| Historical record                                         | Caller classes                                                          | Required contract tests                                                                                                           | Required assertion                                                                                                                                       |
+| --------------------------------------------------------- | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [#245](https://github.com/gastownhall/gascity/issues/245) | `gc bd`, projected shells, K8s adapter                                  | `TestProjectedEnvClearsAmbientDoltVars`, `TestGcBdUsesProjectionNotAmbientEnv`, `TestK8sProjectionUsesResolvedEnv`                | one projection owner emits matching `GC_DOLT_*` and `BEADS_*`; stale parent env is cleared everywhere                                                    |
+| [#506](https://github.com/gastownhall/gascity/issues/506) | `gc doctor`, doctor subprocess env                                      | `TestDoctorUsesResolvedManagedPort`, `TestDoctorSubprocessEnvUsesProjection`                                                      | doctor reports runtime-publication port only and never shells out with stale port-file authority                                                         |
+| [#525](https://github.com/gastownhall/gascity/issues/525) | resolver, startup validation, repair                                    | `TestResolverRejectsStaleManagedPublication`, `TestManagedPortFileIgnoredForResolution`, `TestManagedUnavailablePointsToGCRepair` | resolver returns managed endpoint unavailable; no fallback to port file; repair path points to GC-owned recovery                                         |
+| [#541](https://github.com/gastownhall/gascity/issues/541) | session env projection, startup helpers, controller and runtime helpers | `TestSanitizeAndPopulateProjection`, `TestStartupHelpersDoNotLeakAmbientBeadsEnv`, `TestControllerRuntimeHelpersUseProjection`    | sanitize-and-populate removes unsupported keys and emits only resolved target values across all caller classes                                           |
+| [#560](https://github.com/gastownhall/gascity/issues/560) | startup, doctor, repair, lifecycle owner                                | `TestSingleLifecycleOwnerFencesRecover`, `TestNonOwnerFlowsDelegateLifecycleMutation`, `TestOwnerEpochChangesAcrossAdoption`      | only one lifecycle owner may start or recover Dolt; all other paths delegate or remain verify-only                                                       |
+| [#561](https://github.com/gastownhall/gascity/issues/561) | migration, bootstrap, startup resume                                    | `TestExplicitMigrationCreatesCanonicalFiles`, `TestIncompleteJournalFailsClosed`, `TestResumeFromEachCrashBoundary`               | canonical files are created through explicit migration or bootstrap with crash-safe journal; startup refuses partial state rather than half-repairing it |
 
 ## Primary Implementation Seams
 

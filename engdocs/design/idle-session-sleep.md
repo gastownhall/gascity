@@ -2,13 +2,13 @@
 title: "Idle Session Sleep"
 ---
 
-| Field | Value |
-|---|---|
-| Status | Accepted |
-| Date | 2026-03-23 |
-| Author(s) | Codex |
-| Issue | N/A |
-| Supersedes | N/A |
+| Field      | Value      |
+| ---------- | ---------- |
+| Status     | Accepted   |
+| Date       | 2026-03-23 |
+| Author(s)  | Codex      |
+| Issue      | N/A        |
+| Supersedes | N/A        |
 
 ## Summary
 
@@ -244,14 +244,14 @@ Then requested idle-sleep policy resolves on the composed `config.Agent`:
 
 The controller also records the exact source, not only the value:
 
-| Source | Meaning |
-|---|---|
-| `agent` | direct `[[agent]] sleep_after_idle` |
-| `rig_override` | stamped from `[[rigs.overrides]]` |
-| `agent_patch` | stamped from `[[patches.agent]]` |
-| `rig_default` | inherited from `[rigs.session_sleep]` |
-| `workspace_default` | inherited from `[session_sleep]` |
-| `legacy_off` | no idle-sleep policy configured |
+| Source              | Meaning                               |
+| ------------------- | ------------------------------------- |
+| `agent`             | direct `[[agent]] sleep_after_idle`   |
+| `rig_override`      | stamped from `[[rigs.overrides]]`     |
+| `agent_patch`       | stamped from `[[patches.agent]]`      |
+| `rig_default`       | inherited from `[rigs.session_sleep]` |
+| `workspace_default` | inherited from `[session_sleep]`      |
+| `legacy_off`        | no idle-sleep policy configured       |
 
 Activation is class-specific, not table-driven:
 
@@ -591,22 +591,22 @@ reason in status/events.
 
 Capability is normative:
 
-| Capability | Contract |
-|---|---|
-| `full` | activity + safe idle-boundary support |
-| `timed_only` | activity without safe idle-boundary support |
-| `disabled` | no usable activity clock, so idle sleep is effectively off |
+| Capability   | Contract                                                   |
+| ------------ | ---------------------------------------------------------- |
+| `full`       | activity + safe idle-boundary support                      |
+| `timed_only` | activity without safe idle-boundary support                |
+| `disabled`   | no usable activity clock, so idle sleep is effectively off |
 
 Provider classes in current code:
 
-| Provider | Activity | Pending | Idle boundary | Notes |
-|---|---|---|---|---|
-| `tmux` | yes | no structured pending today | yes | strongest support |
-| `k8s` | yes | no | no | timed-only sleep |
-| `exec` | script-dependent | no | no | timed-only when activity exists, otherwise disabled |
-| `subprocess` | no useful activity | no | no | disabled |
-| `acp` | no | currently unsupported | no | disabled until ACP reports usable activity |
-| `auto` / `hybrid` | routed | routed | routed | decide per session, not globally |
+| Provider          | Activity           | Pending                     | Idle boundary | Notes                                               |
+| ----------------- | ------------------ | --------------------------- | ------------- | --------------------------------------------------- |
+| `tmux`            | yes                | no structured pending today | yes           | strongest support                                   |
+| `k8s`             | yes                | no                          | no            | timed-only sleep                                    |
+| `exec`            | script-dependent   | no                          | no            | timed-only when activity exists, otherwise disabled |
+| `subprocess`      | no useful activity | no                          | no            | disabled                                            |
+| `acp`             | no                 | currently unsupported       | no            | disabled until ACP reports usable activity          |
+| `auto` / `hybrid` | routed             | routed                      | routed        | decide per session, not globally                    |
 
 Composite providers must route `Pending(name)` the same way they already
 route `WaitForIdle(name, timeout)`: by asking the routed backend whether
@@ -756,17 +756,17 @@ Across patrol ticks, idle-drain precedence is:
 
 Restart and patrol recovery use one authoritative outcome table:
 
-| Runtime truth | `state` / `sleep_reason` | `sleep_intent` | Hard wake present | Outcome |
-|---|---|---|---|---|
-| running | awake | empty | no | keep awake / continue ordinary evaluation |
-| running | awake | `idle-stop-pending` | no | continue idle drain |
-| running | any | any | yes | clear idle intent and keep/wake awake |
-| stopped | asleep / `idle` | empty | no | keep cold slot asleep |
-| stopped | asleep / `idle` | empty | yes | wake now |
-| stopped | any | `idle-stop-confirmed` | no | commit or preserve `asleep: idle` |
-| stopped | any | `idle-stop-pending` | no | clear `idle-stop-pending`, emit recovery-ambiguous event, then rerun ordinary wake and idle-eligibility evaluation before any suppression is re-latched |
-| stopped | any | any | yes | clear idle markers and wake now |
-| any | any | any | structural action wins | ignore idle path and apply structural action |
+| Runtime truth | `state` / `sleep_reason` | `sleep_intent`        | Hard wake present      | Outcome                                                                                                                                                 |
+| ------------- | ------------------------ | --------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| running       | awake                    | empty                 | no                     | keep awake / continue ordinary evaluation                                                                                                               |
+| running       | awake                    | `idle-stop-pending`   | no                     | continue idle drain                                                                                                                                     |
+| running       | any                      | any                   | yes                    | clear idle intent and keep/wake awake                                                                                                                   |
+| stopped       | asleep / `idle`          | empty                 | no                     | keep cold slot asleep                                                                                                                                   |
+| stopped       | asleep / `idle`          | empty                 | yes                    | wake now                                                                                                                                                |
+| stopped       | any                      | `idle-stop-confirmed` | no                     | commit or preserve `asleep: idle`                                                                                                                       |
+| stopped       | any                      | `idle-stop-pending`   | no                     | clear `idle-stop-pending`, emit recovery-ambiguous event, then rerun ordinary wake and idle-eligibility evaluation before any suppression is re-latched |
+| stopped       | any                      | any                   | yes                    | clear idle markers and wake now                                                                                                                         |
+| any           | any                      | any                   | structural action wins | ignore idle path and apply structural action                                                                                                            |
 
 The missing-session classifier is therefore constrained:
 
@@ -890,15 +890,15 @@ Event payloads should carry structured fields for:
 
 Idle-sleep observability is evented explicitly:
 
-| Event | Trigger | Required fields |
-|---|---|---|
-| `session.sleep_policy_resolved` | requested or effective policy changes | requested/effective duration, source, class, capability, adjustment reason |
-| `session.draining` | idle drain begins | reason=`idle`, blockers snapshot before probe |
-| `session.sleep_aborted` | idle drain is canceled | abort reason, abort blockers, capability |
-| `session.stopped` | idle sleep commits | reason=`idle`, suppression state, fingerprint |
-| `session.woke` | idle-asleep session wakes | wake reason, previous sleep reason |
-| `session.sleep_capability_changed` | capability class changes | previous capability, new capability, requested/effective duration |
-| `session.updated` | edge-triggered change in material sleep state | blockers, source, effective duration, stable capability, probe health, suppression |
+| Event                              | Trigger                                       | Required fields                                                                    |
+| ---------------------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `session.sleep_policy_resolved`    | requested or effective policy changes         | requested/effective duration, source, class, capability, adjustment reason         |
+| `session.draining`                 | idle drain begins                             | reason=`idle`, blockers snapshot before probe                                      |
+| `session.sleep_aborted`            | idle drain is canceled                        | abort reason, abort blockers, capability                                           |
+| `session.stopped`                  | idle sleep commits                            | reason=`idle`, suppression state, fingerprint                                      |
+| `session.woke`                     | idle-asleep session wakes                     | wake reason, previous sleep reason                                                 |
+| `session.sleep_capability_changed` | capability class changes                      | previous capability, new capability, requested/effective duration                  |
+| `session.updated`                  | edge-triggered change in material sleep state | blockers, source, effective duration, stable capability, probe health, suppression |
 
 Status output should distinguish at least:
 
@@ -969,14 +969,14 @@ interactive_resume = "5m"
 
 ### Resolution examples
 
-| Agent field | Rig default | Workspace default | Effective value | Source |
-|---|---|---|---|---|
-| `30s` from `[[agent]]` | `5m` | `60s` | `30s` | `agent` |
-| omitted + rig override stamps `0s` | `5m` | `60s` | `0s` | `rig_override` |
-| omitted + patch stamps `"off"` | `5m` | `60s` | `off` | `agent_patch` |
-| omitted | `5m` | `60s` | `5m` | `rig_default` |
-| omitted | omitted | `60s` | `60s` | `workspace_default` |
-| omitted | omitted | omitted | `off` | `legacy_off` |
+| Agent field                        | Rig default | Workspace default | Effective value | Source              |
+| ---------------------------------- | ----------- | ----------------- | --------------- | ------------------- |
+| `30s` from `[[agent]]`             | `5m`        | `60s`             | `30s`           | `agent`             |
+| omitted + rig override stamps `0s` | `5m`        | `60s`             | `0s`            | `rig_override`      |
+| omitted + patch stamps `"off"`     | `5m`        | `60s`             | `off`           | `agent_patch`       |
+| omitted                            | `5m`        | `60s`             | `5m`            | `rig_default`       |
+| omitted                            | omitted     | `60s`             | `60s`           | `workspace_default` |
+| omitted                            | omitted     | omitted           | `off`           | `legacy_off`        |
 
 ### Sleep blockers
 
@@ -1041,7 +1041,7 @@ fresh session:
 - non-interactive use: require an affirmative flag (for example
   `--confirm-fresh`) or fail fast
 - both paths must print the concrete consequence string: `will start a
-  new session and discard prior interactive context`
+new session and discard prior interactive context`
 
 Concurrent attach attempts are single-writer in practice. If another
 attach is already waking the same session, the second caller should see
@@ -1145,12 +1145,12 @@ sleep_after_idle = "off"
 
 ### Provider rollout guidance
 
-| Provider capability | Suggested first rollout |
-|---|---|
-| `full` | use the starter policy directly |
+| Provider capability          | Suggested first rollout                                                             |
+| ---------------------------- | ----------------------------------------------------------------------------------- |
+| `full`                       | use the starter policy directly                                                     |
 | `timed_only` non-interactive | start with `30s`; explicit `0s` is an opt-in risk tradeoff, not the default starter |
-| `timed_only` interactive | stay inherited-off unless the agent explicitly opts in |
-| `disabled` | no idle sleep; fix provider capability first |
+| `timed_only` interactive     | stay inherited-off unless the agent explicitly opts in                              |
+| `disabled`                   | no idle sleep; fix provider capability first                                        |
 
 Until providers implement structured `Pending()`, `timed_only`
 non-interactive sessions have no pending-interaction guard beyond their
@@ -1159,10 +1159,10 @@ explicitly non-zero starter window such as `30s`.
 
 ### Migration from `idle_timeout`
 
-| Knob | Trigger | Post-action | Next message behavior | Best use |
-|---|---|---|---|---|
-| `idle_timeout` | no activity for timeout | stop and restart | always fresh process start | stale-session recovery |
-| `sleep_after_idle` | safe idle + no hard wake reason | drain to asleep | wake on demand | resource reduction |
+| Knob               | Trigger                         | Post-action      | Next message behavior      | Best use               |
+| ------------------ | ------------------------------- | ---------------- | -------------------------- | ---------------------- |
+| `idle_timeout`     | no activity for timeout         | stop and restart | always fresh process start | stale-session recovery |
+| `sleep_after_idle` | safe idle + no hard wake reason | drain to asleep  | wake on demand             | resource reduction     |
 
 Migration guidance:
 

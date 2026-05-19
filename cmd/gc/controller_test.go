@@ -244,7 +244,7 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, cancel, nil, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocket(cityPath, cancel, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
 	}
@@ -383,7 +383,6 @@ func TestSendControllerCommandWithTimeoutsTimesOutOnRead(t *testing.T) {
 func writeCityTOML(t *testing.T, dir string, cityName string, agentNames ...string) string {
 	t.Helper()
 	clearInheritedBeadsEnv(t)
-	requireNoLeakedDoltAfterForPaths(t, dir)
 	tomlPath := filepath.Join(dir, "city.toml")
 	var buf bytes.Buffer
 	buf.WriteString("[workspace]\nname = " + `"` + cityName + `"` + "\n\n")
@@ -401,7 +400,6 @@ func writeCityTOML(t *testing.T, dir string, cityName string, agentNames ...stri
 func writeControllerNamedSessionCityTOML(t *testing.T, dir, cityName, mode, idleTimeout string) string {
 	t.Helper()
 	clearInheritedBeadsEnv(t)
-	requireNoLeakedDoltAfterForPaths(t, dir)
 	tomlPath := filepath.Join(dir, "city.toml")
 	var buf bytes.Buffer
 	buf.WriteString("[workspace]\nname = " + `"` + cityName + `"` + "\n\n")
@@ -496,6 +494,8 @@ func TestControllerReloadsConfig(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
+
+	cancel()
 
 	deadline = time.After(1500 * time.Millisecond)
 	for {
@@ -1288,7 +1288,7 @@ func TestHandleControllerConnControlDispatcher(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, cityPath, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+		handleControllerConn(server, cityPath, func() {}, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
 		close(done)
 	}()
 
@@ -1793,10 +1793,8 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 	debounceDelay = 5 * time.Millisecond
 	t.Cleanup(func() { debounceDelay = old })
 
-	dir := shortSocketTempDir(t, "gc-reload-invalid-")
+	dir := shortSocketTempDir(t, "gc-invalid-")
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
-	disableManagedDoltRecoveryForTest(t)
-	cleanupManagedDoltTestCity(t, dir)
 
 	cfg, err := config.Load(osFS{}, tomlPath)
 	if err != nil {
@@ -1822,12 +1820,8 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 
-	done := make(chan struct{})
-	go func() {
-		controllerLoop(ctx, 20*time.Millisecond, cfg, "test", tomlPath, nil,
-			buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
-		close(done)
-	}()
+	go controllerLoop(ctx, 20*time.Millisecond, cfg, "test", tomlPath, nil,
+		buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
 
 	// Wait for initial reconcile.
 	for reconcileCount.Load() < 1 {
@@ -1851,11 +1845,7 @@ func TestControllerReloadInvalidConfig(t *testing.T) {
 	}
 
 	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for controllerLoop to exit")
-	}
+	time.Sleep(50 * time.Millisecond) // let controllerLoop goroutine exit before TempDir cleanup
 
 	if !strings.Contains(stderr.String(), "config reload") {
 		t.Errorf("expected config reload error in stderr, got: %s", stderr.String())
@@ -1909,12 +1899,13 @@ func TestControllerReloadCityNameChange(t *testing.T) {
 	// Change the city name.
 	writeCityTOML(t, dir, "different-city", "mayor")
 
+	// Wait for tick.
+	target := reconcileCount.Load() + 2
 	deadline := time.After(3 * time.Second)
-	for !strings.Contains(stderr.String(), "workspace.name changed") {
+	for reconcileCount.Load() < target {
 		select {
 		case <-deadline:
-			t.Fatalf("timed out waiting for city name change rejection; reconciles=%d stdout=%q stderr=%q",
-				reconcileCount.Load(), stdout.String(), stderr.String())
+			t.Fatal("timed out waiting for tick after name change")
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -2226,13 +2217,10 @@ func TestTryReloadConfig_IncludesBuiltinPackOrders(t *testing.T) {
 		}
 	}
 	// Dolt pack orders (included transitively via bd pack).
-	for _, want := range []string{"dolt-health", "dolt-remotes-patrol", "mol-dog-compactor"} {
+	for _, want := range []string{"dolt-health", "dolt-gc-nudge", "dolt-remotes-patrol"} {
 		if !names[want] {
 			t.Errorf("missing dolt order %q; got %v", want, names)
 		}
-	}
-	if names["dolt-gc-nudge"] {
-		t.Errorf("dolt-gc-nudge should not be registered as a recurring order; got %v", names)
 	}
 }
 

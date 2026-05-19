@@ -147,8 +147,8 @@ Find/spawn agent → select formula → create molecule → hook to agent →
 nudge → create convoy → log event.
 
 - **Derivation**: Session (find/spawn) + Config (select formula)
-  + Bead Store (create molecule, convoy) + Session (nudge) +
-  Event Bus (log event).
+  - Bead Store (create molecule, convoy) + Session (nudge) +
+    Event Bus (log event).
 - **Proof**: Pure composition of primitives 1-4. No new infrastructure.
 
 **Details**: [Dispatch](dispatch.md)
@@ -182,16 +182,16 @@ These hold across all nine concepts:
 
 Capabilities activate based on config section presence:
 
-| Level | Config Required | Adds |
-|---|---|---|
-| 0-1 | `[workspace]` + `[[agent]]` | Session + tasks |
-| 2 | `[daemon]` | Task loop (controller) |
-| 3 | `[[agent]]` with `[agent.pool]` | Multiple agents + pool |
-| 4 | `[mail]` | Messaging |
-| 5 | Formula files + `[formulas]` | Formulas & molecules |
-| 6 | `[daemon]` health fields | Health monitoring |
-| 7 | `orders/` directories | Orders |
-| 8 | All sections | Full orchestration |
+| Level | Config Required                 | Adds                   |
+| ----- | ------------------------------- | ---------------------- |
+| 0-1   | `[workspace]` + `[[agent]]`     | Session + tasks        |
+| 2     | `[daemon]`                      | Task loop (controller) |
+| 3     | `[[agent]]` with `[agent.pool]` | Multiple agents + pool |
+| 4     | `[mail]`                        | Messaging              |
+| 5     | Formula files + `[formulas]`    | Formulas & molecules   |
+| 6     | `[daemon]` health fields        | Health monitoring      |
+| 7     | `orders/` directories           | Orders                 |
+| 8     | All sections                    | Full orchestration     |
 
 ## See Also
 

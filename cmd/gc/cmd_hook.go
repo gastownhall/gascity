@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -23,7 +24,7 @@ func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Check for available work",
 		Long: `Checks for available work using the agent's work_query config.
 
-Without --inject: prints normalized ready-only output, exits 0 if work exists, 1 if empty.
+Without --inject: prints raw output, exits 0 if work exists, 1 if empty.
 With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
 
 		The agent is determined from $GC_AGENT or a positional argument.`,
@@ -55,7 +56,7 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 		return 0
 	}
 	// Accepted for compatibility with installed hook commands; non-inject
-	// gc hook output ignores provider-specific formatting.
+	// gc hook output is intentionally raw regardless of provider format.
 	_ = hookFormat
 
 	agentName := os.Getenv("GC_ALIAS")
@@ -112,12 +113,6 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 		return 1
 	}
 
-	cityName := loadedCityName(cfg, cityPath)
-	workQuery := a.EffectiveWorkQuery()
-	// Expand {{.Rig}}/{{.AgentBase}} in user-supplied work_query so agent-side
-	// hook invocation sees the same rig substitution as the controller-side
-	// probes in build_desired_state.go / session_reconcile.go. #793.
-	workQuery = expandAgentCommandTemplate(cityPath, cityName, &a, cfg.Rigs, "work_query", workQuery, stderr)
 	workDir := agentCommandDir(cityPath, &a, cfg.Rigs)
 
 	// Build the work query subprocess environment. Rig-backed agents get
@@ -127,6 +122,7 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 	// also key off session identity. Explicit hook targets get resolved
 	// names; named-session context preserves the runtime-supplied owner
 	// env while selecting the backing config through GC_TEMPLATE.
+	cityName := loadedCityName(cfg, cityPath)
 	resolvedAgentName := a.QualifiedName()
 	agentForQuery := resolvedAgentName
 	sessionForQuery := ""
@@ -142,11 +138,7 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 	} else {
 		sessionForQuery = cliSessionName(cityPath, cityName, resolvedAgentName, cfg.Workspace.SessionTemplate)
 	}
-	overrides, err := hookQueryEnv(cityPath, cfg, &a)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc hook: building work query env: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
+	overrides := hookQueryEnv(cityPath, cfg, &a)
 	overrides["GC_AGENT"] = agentForQuery
 	overrides["GC_SESSION_NAME"] = sessionForQuery
 	if sessionTemplateContext {
@@ -154,63 +146,184 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 		overrides["GC_SESSION_ID"] = os.Getenv("GC_SESSION_ID")
 		overrides["GC_SESSION_ORIGIN"] = os.Getenv("GC_SESSION_ORIGIN")
 		overrides["GC_TEMPLATE"] = os.Getenv("GC_TEMPLATE")
+	} else {
+		// An explicit hook target is a controller/debug probe, not the caller's
+		// current session. Clear inherited identity so routed pool work remains
+		// visible even when the command is launched from a named agent shell.
+		overrides["GC_ALIAS"] = resolvedAgentName
+		overrides["GC_SESSION_ID"] = ""
+		overrides["GC_SESSION_ORIGIN"] = ""
+		overrides["GC_TEMPLATE"] = ""
 	}
 	queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
+	if strings.TrimSpace(a.WorkQuery) == "" &&
+		!providerUsesBdStoreContract(rawBeadsProviderForScope(overrides["GC_STORE_ROOT"], cityPath)) {
+		return doDefaultHookQuery(cityPath, cfg, &a, overrides, stdout, stderr)
+	}
+
+	workQuery := a.EffectiveWorkQuery()
+	// Expand {{.Rig}}/{{.AgentBase}} in user-supplied work_query so agent-side
+	// hook invocation sees the same rig substitution as the controller-side
+	// probes in build_desired_state.go / session_reconcile.go. #793.
+	workQuery = expandAgentCommandTemplate(cityPath, cityName, &a, cfg.Rigs, "work_query", workQuery, stderr)
 	runner := func(command, dir string) (string, error) {
 		return shellWorkQueryWithEnv(command, dir, queryEnv)
 	}
 	return doHook(workQuery, workDir, inject, runner, stdout, stderr)
 }
 
+func doDefaultHookQuery(cityPath string, _ *config.City, a *config.Agent, env map[string]string, stdout, stderr io.Writer) int {
+	storeRoot := strings.TrimSpace(env["GC_STORE_ROOT"])
+	if storeRoot == "" {
+		storeRoot = cityPath
+	}
+	store, err := openStoreAtForCity(storeRoot, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook: open work store: %v\n", err) //nolint:errcheck
+		return 1
+	}
+
+	items, err := defaultHookQueryItems(store, a, env)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook: default work query: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if len(items) == 0 {
+		fmt.Fprint(stdout, "[]") //nolint:errcheck
+		return 1
+	}
+	data, err := json.Marshal(items)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook: encode work query output: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	fmt.Fprint(stdout, string(data)) //nolint:errcheck
+	return 0
+}
+
+func defaultHookQueryItems(store beads.Store, a *config.Agent, env map[string]string) ([]beads.Bead, error) {
+	for _, identity := range defaultHookIdentities(env) {
+		for _, candidate := range defaultHookIdentityCandidates(identity) {
+			items, err := store.ListByAssignee(candidate, "in_progress", 1)
+			if err != nil {
+				return nil, err
+			}
+			if len(items) > 0 {
+				return items[:1], nil
+			}
+		}
+	}
+	for _, identity := range defaultHookIdentities(env) {
+		for _, candidate := range defaultHookIdentityCandidates(identity) {
+			items, err := store.Ready(beads.ReadyQuery{Assignee: candidate, Limit: 1})
+			if err != nil {
+				return nil, err
+			}
+			if len(items) > 0 {
+				return items[:1], nil
+			}
+		}
+	}
+	if !defaultHookIncludesRouted(env) {
+		return nil, nil
+	}
+	ready, err := store.Ready()
+	if err != nil {
+		return nil, err
+	}
+	targets := defaultHookRouteTargets(a)
+	for _, item := range ready {
+		if strings.TrimSpace(item.Assignee) != "" {
+			continue
+		}
+		routedTo := strings.TrimSpace(item.Metadata["gc.routed_to"])
+		for _, target := range targets {
+			if routedTo == target {
+				return []beads.Bead{item}, nil
+			}
+		}
+	}
+	return nil, nil
+}
+
+func defaultHookIdentities(env map[string]string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, key := range []string{"GC_SESSION_ID", "GC_SESSION_NAME", "GC_ALIAS"} {
+		value := strings.TrimSpace(env[key])
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func defaultHookIdentityCandidates(identity string) []string {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return nil
+	}
+	legacy := legacyControlDispatcherIdentity(identity)
+	if legacy == "" {
+		return []string{identity}
+	}
+	return []string{identity, legacy}
+}
+
+func defaultHookRouteTargets(a *config.Agent) []string {
+	target := a.QualifiedName()
+	if a.PoolName != "" {
+		target = a.PoolName
+	}
+	out := []string{target}
+	if legacy := legacyControlDispatcherTarget(target); legacy != "" {
+		out = append(out, legacy)
+	}
+	return out
+}
+
+func defaultHookIncludesRouted(env map[string]string) bool {
+	switch strings.TrimSpace(env["GC_SESSION_ORIGIN"]) {
+	case "", "ephemeral":
+		return true
+	default:
+		return false
+	}
+}
+
 // hookQueryEnv returns the full work-query environment for a hook subprocess.
 // It includes scope metadata (store root/scope/prefix) plus any rig-scoped
 // runtime overrides so hook queries observe the same routing contract as the
 // controller probes.
-func hookQueryEnv(cityPath string, cfg *config.City, a *config.Agent) (map[string]string, error) {
-	env, err := controllerWorkQueryEnv(cityPath, cfg, a)
-	if err != nil {
-		return nil, err
-	}
+func hookQueryEnv(cityPath string, cfg *config.City, a *config.Agent) map[string]string {
+	env := controllerWorkQueryEnv(cityPath, cfg, a)
 	if env == nil {
 		env = map[string]string{}
 	}
-	return env, nil
+	return env
 }
 
 // WorkQueryRunner runs a work query command and returns its stdout.
 // dir sets the command's working directory.
 type WorkQueryRunner func(command, dir string) (string, error)
 
-// hookWorkQueryTimeout caps the work-query subprocess. Default matches
-// the pre-bounded behavior (30s) so existing tests that legitimately
-// take >15s don't regress; the package-level var lets us lower it in
-// follow-up work after slow paths are identified and optimized.
-var hookWorkQueryTimeout = 30 * time.Second
-
 // shellWorkQueryWithEnv runs a work query command via sh -c and returns
 // stdout. If env is non-nil it is used as the subprocess environment
 // (including any rig-scoped BEADS_DIR / GC_RIG_ROOT overrides); otherwise
-// the child inherits the parent process environment. Times out after a
-// short bounded interval so startup hooks cannot strand sessions behind a
-// wedged data-plane command.
+// the child inherits the parent process environment. Times out after 30
+// seconds.
 func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.WaitDelay = 2 * time.Second
-	prepareProviderOpCommand(cmd)
 	if dir != "" {
 		cmd.Dir = dir
 	}
 	cmd.Env = workQueryEnvForDir(env, dir)
 	out, err := cmd.Output()
-	if ctx.Err() == context.DeadlineExceeded {
-		msg := strings.TrimSpace(string(out))
-		if msg != "" {
-			return string(out), fmt.Errorf("running work query %q: timed out after %s with partial stdout %q", command, hookWorkQueryTimeout, msg)
-		}
-		return "", fmt.Errorf("running work query %q: timed out after %s", command, hookWorkQueryTimeout)
-	}
 	if err != nil {
 		return "", fmt.Errorf("running work query %q: %w", command, err)
 	}
@@ -234,9 +347,8 @@ func workQueryEnvForDir(env []string, dir string) []string {
 }
 
 // doHook is the pure logic for gc hook. Runs the work query and outputs
-// results based on mode. Without inject: prints normalized ready-only output,
-// returns 0 if work exists, 1 if empty. With inject: skips the work query and
-// returns 0.
+// results based on mode. Without inject: prints raw output, returns 0 if
+// work, 1 if empty. With inject: skips the work query and returns 0.
 func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, stderr io.Writer) int {
 	if inject {
 		return 0
@@ -244,19 +356,15 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 
 	output, err := runner(workQuery, dir)
 	if err != nil {
-		if normalized := normalizeWorkQueryOutput(strings.TrimSpace(output)); normalized != "" {
-			fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
-		}
 		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	trimmed := strings.TrimSpace(output)
 	normalized := normalizeWorkQueryOutput(trimmed)
-	normalized = filterUnreadyHookCandidates(normalized, time.Now())
 	hasWork := workQueryHasReadyWork(normalized)
 
-	// Non-inject mode: print normalized, ready-only output. Return 0 only when work exists.
+	// Non-inject mode: print raw output. Return 0 only when work exists.
 	if !hasWork {
 		if normalized != "" {
 			fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
@@ -288,84 +396,6 @@ func workQueryHasReadyWork(output string) bool {
 		}
 	}
 	return true
-}
-
-// filterUnreadyHookCandidates strips beads from work_query output that fail
-// bd ready semantics: future defer_until, or any open blocking dep in the
-// row's blocked_by array. The work_query is expected to gate these, but
-// defensive filtering here prevents a single broken query from cascading
-// into agent action on a bead it cannot progress.
-// Pure function over JSON; takes time.Time so tests stay deterministic.
-func filterUnreadyHookCandidates(output string, now time.Time) string {
-	if output == "" {
-		return output
-	}
-	var decoded any
-	if err := json.Unmarshal([]byte(output), &decoded); err != nil {
-		return output
-	}
-	arr, ok := decoded.([]any)
-	if !ok {
-		return output
-	}
-	filtered := make([]any, 0, len(arr))
-	for _, item := range arr {
-		obj, ok := item.(map[string]any)
-		if !ok {
-			filtered = append(filtered, item)
-			continue
-		}
-		if isFutureDeferredHookCandidate(obj, now) {
-			continue
-		}
-		if isDepBlockedHookCandidate(obj) {
-			continue
-		}
-		filtered = append(filtered, obj)
-	}
-	reencoded, err := json.Marshal(filtered)
-	if err != nil {
-		return output
-	}
-	return string(reencoded)
-}
-
-func isFutureDeferredHookCandidate(item map[string]any, now time.Time) bool {
-	raw, ok := item["defer_until"].(string)
-	if !ok {
-		return false
-	}
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return false
-	}
-	deferAt, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
-		return false
-	}
-	return deferAt.After(now)
-}
-
-func isDepBlockedHookCandidate(item map[string]any) bool {
-	blockedBy, ok := item["blocked_by"].([]any)
-	if !ok || len(blockedBy) == 0 {
-		return false
-	}
-	for _, b := range blockedBy {
-		dep, ok := b.(map[string]any)
-		if !ok {
-			continue
-		}
-		status, ok := dep["status"].(string)
-		if !ok {
-			continue
-		}
-		status = strings.TrimSpace(status)
-		if status != "" && !strings.EqualFold(status, "closed") {
-			return true
-		}
-	}
-	return false
 }
 
 func normalizeWorkQueryOutput(output string) string {

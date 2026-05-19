@@ -2,13 +2,13 @@
 title: "Worker Conformance & Canonical Worker API"
 ---
 
-| Field | Value |
-|---|---|
-| Status | Proposed |
-| Date | 2026-04-04 |
-| Author(s) | Codex |
-| Issue | `test-i83` |
-| Supersedes | N/A |
+| Field      | Value      |
+| ---------- | ---------- |
+| Status     | Proposed   |
+| Date       | 2026-04-04 |
+| Author(s)  | Codex      |
+| Issue      | `test-i83` |
+| Supersedes | N/A        |
 
 ## Summary
 
@@ -171,26 +171,26 @@ an untracked second writer alongside `runtime`, `config`, or
 
 #### 1.2 Responsibility matrix
 
-| Concern | Phase 1-3 authoritative owner | Phase 4+ authoritative owner | Notes |
-|---|---|---|---|
-| Transport process/session lifecycle | `internal/runtime` | `internal/runtime` | Worker requirements depend on substrate behavior but do not duplicate pane/process/container control. |
-| Launch materialization from city config | `internal/config` plus template/session materialization | `internal/worker` built-in profile plus `internal/config` override materialization | Until Phase 4, `WorkerClaims` is derived from materialized config and runtime metadata; it is not a second hand-authored source. |
-| Worker semantic contract, claims, requirement catalog, transcript contract | `internal/worker` | `internal/worker` | New canonical behavioral boundary. |
-| Session/bead persistence and controller reconciliation state | `internal/session` plus `cmd/gc/session_*` | `internal/session` plus `cmd/gc/session_*` | `internal/worker` returns observations and state transitions; it does not write bead/session metadata directly. |
-| Transcript discovery and normalization | `internal/sessionlog` implementation wrapped by `internal/worker` contract | `internal/worker` | Code may migrate, but the contract becomes explicit immediately. |
+| Concern                                                                    | Phase 1-3 authoritative owner                                              | Phase 4+ authoritative owner                                                       | Notes                                                                                                                            |
+| -------------------------------------------------------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Transport process/session lifecycle                                        | `internal/runtime`                                                         | `internal/runtime`                                                                 | Worker requirements depend on substrate behavior but do not duplicate pane/process/container control.                            |
+| Launch materialization from city config                                    | `internal/config` plus template/session materialization                    | `internal/worker` built-in profile plus `internal/config` override materialization | Until Phase 4, `WorkerClaims` is derived from materialized config and runtime metadata; it is not a second hand-authored source. |
+| Worker semantic contract, claims, requirement catalog, transcript contract | `internal/worker`                                                          | `internal/worker`                                                                  | New canonical behavioral boundary.                                                                                               |
+| Session/bead persistence and controller reconciliation state               | `internal/session` plus `cmd/gc/session_*`                                 | `internal/session` plus `cmd/gc/session_*`                                         | `internal/worker` returns observations and state transitions; it does not write bead/session metadata directly.                  |
+| Transcript discovery and normalization                                     | `internal/sessionlog` implementation wrapped by `internal/worker` contract | `internal/worker`                                                                  | Code may migrate, but the contract becomes explicit immediately.                                                                 |
 
 #### 1.3 Identity layers
 
 The design distinguishes the following identities explicitly:
 
-| Identity layer | Meaning | Current primary owner | Long-term owner |
-|---|---|---|---|
-| GC session identity | Stable Gas City session row / `session_key` used by UI, controller, and persistence | `internal/session` | `internal/session` |
-| GC continuation orchestration state | GC-local decision state such as `continuation_epoch` and `continuation_reset_pending` | `internal/session` plus `cmd/gc/session_*` | `internal/session` |
-| Logical conversation identity | Canonical notion of “same conversation” across restarts | implicit today | `internal/worker` |
-| Provider continuation handle | Provider-native resume token, session ID, SDK handle, or equivalent | provider launch/adapter path | `internal/worker` profile adapter |
-| Runtime instance identity | Process/pane/container instance currently executing the worker | `internal/runtime` | `internal/runtime` |
-| Transcript stream identity | Raw transcript file/stream generation or rotation instance | `internal/sessionlog` readers | `internal/worker` transcript adapter |
+| Identity layer                      | Meaning                                                                               | Current primary owner                      | Long-term owner                      |
+| ----------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------ | ------------------------------------ |
+| GC session identity                 | Stable Gas City session row / `session_key` used by UI, controller, and persistence   | `internal/session`                         | `internal/session`                   |
+| GC continuation orchestration state | GC-local decision state such as `continuation_epoch` and `continuation_reset_pending` | `internal/session` plus `cmd/gc/session_*` | `internal/session`                   |
+| Logical conversation identity       | Canonical notion of “same conversation” across restarts                               | implicit today                             | `internal/worker`                    |
+| Provider continuation handle        | Provider-native resume token, session ID, SDK handle, or equivalent                   | provider launch/adapter path               | `internal/worker` profile adapter    |
+| Runtime instance identity           | Process/pane/container instance currently executing the worker                        | `internal/runtime`                         | `internal/runtime`                   |
+| Transcript stream identity          | Raw transcript file/stream generation or rotation instance                            | `internal/sessionlog` readers              | `internal/worker` transcript adapter |
 
 When these disagree, the contract resolves them intentionally:
 
@@ -451,13 +451,13 @@ into runtime transport mechanics.
 The existing runtime substrate remains authoritative for these
 mechanisms:
 
-| Existing substrate surface | Stays in `runtime` | Worker contract depends on it for |
-|---|---|---|
-| `Start` / launch mechanics | yes | bring-up, continuation, startup delivery |
-| `Stop` / `Interrupt` | yes | control and recovery |
-| `Peek` / raw operational output | yes | operational observability |
-| optional idle/nudge/wait capabilities | yes | bounded startup and safe input delivery |
-| optional structured interaction transport | yes | required user interactions |
+| Existing substrate surface                | Stays in `runtime` | Worker contract depends on it for        |
+| ----------------------------------------- | ------------------ | ---------------------------------------- |
+| `Start` / launch mechanics                | yes                | bring-up, continuation, startup delivery |
+| `Stop` / `Interrupt`                      | yes                | control and recovery                     |
+| `Peek` / raw operational output           | yes                | operational observability                |
+| optional idle/nudge/wait capabilities     | yes                | bounded startup and safe input delivery  |
+| optional structured interaction transport | yes                | required user interactions               |
 
 `WorkerCore` never requires a transport to become tmux-like. Instead,
 it defines the behavioral outcomes that any transport-backed profile
@@ -876,12 +876,12 @@ Suggested status progression:
 
 These states are not only CI labels. They carry support posture:
 
-| State | Intended posture |
-|---|---|
-| `experimental` | opt-in only, not recommendable by default, support best-effort |
-| `core-conformant` | deterministic core is green, but live behavior may still be incomplete or unstable |
-| `tier-1-candidate` | close to supportable, not yet default-selectable until live stability is proven |
-| `tier-1-certified` | default-eligible and recommendable subject to product policy |
+| State              | Intended posture                                                                   |
+| ------------------ | ---------------------------------------------------------------------------------- |
+| `experimental`     | opt-in only, not recommendable by default, support best-effort                     |
+| `core-conformant`  | deterministic core is green, but live behavior may still be incomplete or unstable |
+| `tier-1-candidate` | close to supportable, not yet default-selectable until live stability is proven    |
+| `tier-1-certified` | default-eligible and recommendable subject to product policy                       |
 
 #### 7.1 Tier-1 bar
 

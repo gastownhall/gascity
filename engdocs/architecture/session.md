@@ -2,8 +2,7 @@
 title: "Session"
 ---
 
-
-> Last verified against code: 2026-05-16
+> Last verified against code: 2026-04-25
 
 ## Summary
 
@@ -144,41 +143,41 @@ Optional provider extensions also live in `runtime/runtime.go`:
 
 ## Interactions
 
-| Depends on | How |
-|---|---|
-| `internal/agent` | Session naming and startup-hint structures |
-| `internal/config` | Provider presets and resolved agent settings |
+| Depends on         | How                                                          |
+| ------------------ | ------------------------------------------------------------ |
+| `internal/agent`   | Session naming and startup-hint structures                   |
+| `internal/config`  | Provider presets and resolved agent settings                 |
 | `internal/session` | Session bead state, wait lifecycle, and blocked-turn helpers |
 
-| Depended on by | How |
-|---|---|
-| `cmd/gc/cmd_start.go` | Starts runtimes for configured agents |
+| Depended on by                 | How                                                                            |
+| ------------------------------ | ------------------------------------------------------------------------------ |
+| `cmd/gc/cmd_start.go`          | Starts runtimes for configured agents                                          |
 | `cmd/gc/session_reconciler.go` | Uses runtime liveness and drift signals for bead-driven session reconciliation |
-| `cmd/gc/cmd_session.go` | Attach, list, inspect, and session-level commands |
-| `cmd/gc/cmd_nudge.go` | Idle-aware and queued nudge delivery |
-| `internal/api/` | Session-aware API surfaces and status views |
+| `cmd/gc/cmd_session.go`        | Attach, list, inspect, and session-level commands                              |
+| `cmd/gc/cmd_nudge.go`          | Idle-aware and queued nudge delivery                                           |
+| `internal/api/`                | Session-aware API surfaces and status views                                    |
 
 ## Code Map
 
-| Path | Responsibility |
-|---|---|
-| `internal/runtime/runtime.go` | `Provider`, `Config`, optional runtime extensions |
-| `internal/runtime/fingerprint.go` | Deterministic runtime config hashing |
-| `internal/runtime/beacon.go` | Startup beacon formatting |
-| `internal/runtime/dialog.go` | Shared startup-dialog handling |
-| `internal/runtime/fake.go` | In-memory fake runtime for tests |
-| `internal/runtime/tmux/` | Interactive tmux-backed runtime |
-| `internal/runtime/subprocess/` | Non-interactive subprocess runtime |
-| `internal/runtime/exec/` | Script-backed runtime provider |
-| `internal/runtime/k8s/` | Kubernetes-backed runtime provider |
-| `internal/runtime/acp/` | ACP-backed runtime provider |
-| `internal/runtime/auto/` | Automatic routing between runtime backends |
-| `internal/runtime/hybrid/` | Hybrid routing between local and remote backends |
-| `internal/agent/hints.go` | `StartupHints` |
-| `internal/agent/session_name.go` | Session naming |
-| `cmd/gc/template_resolve.go` | Builds runtime configs from resolved agent config |
-| `internal/session/manager.go` | Higher-level session manager for session beads |
-| `internal/session/waits.go` | Wait state helpers |
+| Path                              | Responsibility                                    |
+| --------------------------------- | ------------------------------------------------- |
+| `internal/runtime/runtime.go`     | `Provider`, `Config`, optional runtime extensions |
+| `internal/runtime/fingerprint.go` | Deterministic runtime config hashing              |
+| `internal/runtime/beacon.go`      | Startup beacon formatting                         |
+| `internal/runtime/dialog.go`      | Shared startup-dialog handling                    |
+| `internal/runtime/fake.go`        | In-memory fake runtime for tests                  |
+| `internal/runtime/tmux/`          | Interactive tmux-backed runtime                   |
+| `internal/runtime/subprocess/`    | Non-interactive subprocess runtime                |
+| `internal/runtime/exec/`          | Script-backed runtime provider                    |
+| `internal/runtime/k8s/`           | Kubernetes-backed runtime provider                |
+| `internal/runtime/acp/`           | ACP-backed runtime provider                       |
+| `internal/runtime/auto/`          | Automatic routing between runtime backends        |
+| `internal/runtime/hybrid/`        | Hybrid routing between local and remote backends  |
+| `internal/agent/hints.go`         | `StartupHints`                                    |
+| `internal/agent/session_name.go`  | Session naming                                    |
+| `cmd/gc/template_resolve.go`      | Builds runtime configs from resolved agent config |
+| `internal/session/manager.go`     | Higher-level session manager for session beads    |
+| `internal/session/waits.go`       | Wait state helpers                                |
 
 ## Testing
 
@@ -190,87 +189,6 @@ Optional provider extensions also live in `runtime/runtime.go`:
 - `internal/runtime/k8s/provider_test.go` covers the Kubernetes provider
 - `internal/session/manager_test.go` and `internal/session/manager_states_test.go`
   cover higher-level session bookkeeping layered on top of the runtime
-
-## Fingerprint Versioning
-
-### Versioning Model
-
-When the reconciler ticks, it compares the hash a session was started with
-against the hash the current binary produces from the session's resolved
-`runtime.Config`. A real same-version hash difference is config drift and can
-drain the session. A binary upgrade that changes the hash input set is not
-operator intent, so it must not mass-drain already-running sessions.
-
-Stored config hashes carry a `vN:` prefix. The version literal comes from
-`runtime.FingerprintVersion` in
-[`internal/runtime/fingerprint.go`](https://github.com/gastownhall/gascity/blob/main/internal/runtime/fingerprint.go).
-`ConfigFingerprint`, `CoreFingerprint`, and `LiveFingerprint` all emit
-`<FingerprintVersion>:<sha256-hex>`. The current version is `v1`.
-
-The reconciler treats two stored-hash cases as silent rebaseline rather than
-drift:
-
-1. The stored hash has no version prefix, which means it was written by a
-   pre-versioning binary.
-2. The stored hash has a prefix that differs from the current
-   `runtime.FingerprintVersion`.
-
-Silent rebaseline atomically overwrites `started_config_hash`,
-`started_live_hash`, `live_hash`, and `core_hash_breakdown` with values from
-the current binary. The session keeps running, no `SessionDraining` event is
-recorded, and the supervisor log shows one info line for the affected session.
-The `core_hash_breakdown` JSON shape is part of the same upgrade contract: a
-shape change must be paired with a fingerprint version bump.
-
-Implementation references:
-[`internal/runtime/fingerprint.go`](https://github.com/gastownhall/gascity/blob/main/internal/runtime/fingerprint.go)
-owns the version constant and hash helpers,
-[`cmd/gc/session_reconciler.go`](https://github.com/gastownhall/gascity/blob/main/cmd/gc/session_reconciler.go)
-owns the silent-rebaseline branches, and
-[`cmd/gc/build_desired_state_test.go`](https://github.com/gastownhall/gascity/blob/main/cmd/gc/build_desired_state_test.go)
-contains the cross-tick fingerprint stability gate.
-
-### When To Bump And When Not
-
-Rule: if the byte sequence written by `hashCoreFields`, `hashLiveFields`, or a
-helper they call would differ for any valid input, bump
-`runtime.FingerprintVersion`.
-
-Bump the version when a change:
-
-- Adds, removes, or reorders an input to `hashCoreFields`, `hashLiveFields`, or
-  `buildFingerprintExtra`.
-- Changes `envFingerprintAllow`.
-- Changes the on-disk JSON shape stored in `core_hash_breakdown`.
-- Changes the bytes emitted by an existing input, such as re-encoding
-  `CopyEntry` or changing the `HASH_UNAVAILABLE` sentinel used when probed
-  file hashing fails.
-
-Do not bump the version for:
-
-- Pure refactors that produce the same hash for the same input. Verify with the
-  cross-tick stability test for the affected surface.
-- Comments, tests, or documentation.
-- Changes to consumers such as `session_reconciler.go` or
-  `LogCoreFingerprintDrift` that do not change hash output.
-
-### PR Review Checklist
-
-For PRs that touch `internal/runtime/fingerprint.go`:
-
-- [ ] Does the change affect hash output for any valid input?
-      If unclear, compare the affected cross-tick stability fixture before and
-      after the change.
-- [ ] If yes, has `runtime.FingerprintVersion` been bumped?
-- [ ] If yes, is there a new row in the version changelog with the adoption
-      date and a one-line description?
-- [ ] Does the relevant cross-tick stability test still pass?
-
-### Version Changelog
-
-| Version | Adopted    | Change |
-|---|---|---|
-| `v1` | 2026-04-27 | Initial introduction of the `vN:` prefix. Pre-existing unversioned hashes are silently rebaselined to `v1` on the first reconciler tick after upgrade. |
 
 ## Known Limitations
 
@@ -284,7 +202,5 @@ For PRs that touch `internal/runtime/fingerprint.go`:
 ## See Also
 
 - [Health Patrol](health-patrol.md) for liveness and drift handling
-- [Fingerprint Versioning](#fingerprint-versioning) for the version-bump and
-  silent-rebaseline contract
 - [Prompt Templates](prompt-templates.md) for what gets delivered into
   sessions once they start

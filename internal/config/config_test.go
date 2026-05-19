@@ -116,38 +116,6 @@ start_command = "claude --dangerously-skip-permissions"
 	}
 }
 
-func TestParseRigDefaultBranch(t *testing.T) {
-	data := []byte(`
-[workspace]
-name = "lights"
-
-[[rigs]]
-name = "scamper"
-path = "/scamper"
-default_branch = "master"
-`)
-	cfg, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if len(cfg.Rigs) != 1 {
-		t.Fatalf("len(Rigs) = %d, want 1", len(cfg.Rigs))
-	}
-	if got := cfg.Rigs[0].DefaultBranch; got != "master" {
-		t.Errorf("DefaultBranch = %q, want %q", got, "master")
-	}
-	if got := cfg.Rigs[0].EffectiveDefaultBranch(); got != "master" {
-		t.Errorf("EffectiveDefaultBranch = %q, want %q", got, "master")
-	}
-}
-
-func TestEffectiveDefaultBranch_EmptyWhenUnset(t *testing.T) {
-	r := Rig{Name: "rig"}
-	if got := r.EffectiveDefaultBranch(); got != "" {
-		t.Errorf("EffectiveDefaultBranch() = %q, want empty", got)
-	}
-}
-
 func TestParseAgentSkillsAndMCP(t *testing.T) {
 	data := []byte(`
 [workspace]
@@ -944,22 +912,11 @@ name = "bright-lights"
 provider = "claude"
 
 [providers.kiro]
-command = "kiro-cli"
-args = ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"]
+command = "kiro"
+args = ["--autonomous"]
 prompt_mode = "arg"
 ready_delay_ms = 5000
-process_names = ["kiro-cli", "kiro", "node"]
-supports_hooks = true
-instructions_file = "AGENTS.md"
-resume_flag = "--resume"
-resume_style = "flag"
-
-[providers.kiro.env]
-KIRO_AGENT_MODE = "headless"
-
-[providers.kiro.permission_modes]
-default = "--trust-mode default"
-unrestricted = "--trust-mode full"
+process_names = ["kiro", "node"]
 
 [[agent]]
 name = "mayor"
@@ -975,104 +932,17 @@ name = "mayor"
 	if !ok {
 		t.Fatal("Providers[kiro] not found")
 	}
-	if kiro.Command != "kiro-cli" {
-		t.Errorf("Command = %q, want %q", kiro.Command, "kiro-cli")
+	if kiro.Command != "kiro" {
+		t.Errorf("Command = %q, want %q", kiro.Command, "kiro")
 	}
-	if want := []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"}; !reflect.DeepEqual(kiro.Args, want) {
-		t.Errorf("Args = %v, want %v", kiro.Args, want)
+	if len(kiro.Args) != 1 || kiro.Args[0] != "--autonomous" {
+		t.Errorf("Args = %v, want [--autonomous]", kiro.Args)
 	}
 	if kiro.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q", kiro.PromptMode, "arg")
 	}
 	if kiro.ReadyDelayMs != 5000 {
 		t.Errorf("ReadyDelayMs = %d, want 5000", kiro.ReadyDelayMs)
-	}
-	if len(kiro.ProcessNames) != 3 || kiro.ProcessNames[0] != "kiro-cli" || kiro.ProcessNames[1] != "kiro" || kiro.ProcessNames[2] != "node" {
-		t.Errorf("ProcessNames = %v, want [kiro-cli kiro node]", kiro.ProcessNames)
-	}
-	if !derefBool(kiro.SupportsHooks) {
-		t.Error("SupportsHooks = false, want true")
-	}
-	if kiro.InstructionsFile != "AGENTS.md" {
-		t.Errorf("InstructionsFile = %q, want %q", kiro.InstructionsFile, "AGENTS.md")
-	}
-	if kiro.ResumeFlag != "--resume" {
-		t.Errorf("ResumeFlag = %q, want %q", kiro.ResumeFlag, "--resume")
-	}
-	if kiro.ResumeStyle != "flag" {
-		t.Errorf("ResumeStyle = %q, want %q", kiro.ResumeStyle, "flag")
-	}
-	if kiro.Env["KIRO_AGENT_MODE"] != "headless" {
-		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want %q", kiro.Env["KIRO_AGENT_MODE"], "headless")
-	}
-	if kiro.PermissionModes["unrestricted"] != "--trust-mode full" {
-		t.Errorf("PermissionModes[unrestricted] = %q, want %q", kiro.PermissionModes["unrestricted"], "--trust-mode full")
-	}
-	if kiro.PermissionModes["default"] != "--trust-mode default" {
-		t.Errorf("PermissionModes[default] = %q, want %q", kiro.PermissionModes["default"], "--trust-mode default")
-	}
-}
-
-func TestParseKiroProviderWithOptionsSchema(t *testing.T) {
-	data := []byte(`
-[workspace]
-name = "test"
-
-[providers.kiro]
-command = "kiro-cli"
-args = ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"]
-prompt_mode = "arg"
-ready_delay_ms = 5000
-
-[[providers.kiro.options_schema]]
-key = "permission_mode"
-label = "Trust Mode"
-type = "select"
-default = "unrestricted"
-
-  [[providers.kiro.options_schema.choices]]
-  value = "default"
-  label = "Default trust"
-  flag_args = ["--trust-mode", "default"]
-
-  [[providers.kiro.options_schema.choices]]
-  value = "unrestricted"
-  label = "Full trust"
-  flag_args = ["--trust-mode", "full"]
-
-[providers.kiro.option_defaults]
-permission_mode = "unrestricted"
-
-[[agent]]
-name = "worker"
-provider = "kiro"
-`)
-	cfg, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	kiro, ok := cfg.Providers["kiro"]
-	if !ok {
-		t.Fatal("Providers[kiro] not found")
-	}
-	if len(kiro.OptionsSchema) != 1 {
-		t.Fatalf("len(OptionsSchema) = %d, want 1", len(kiro.OptionsSchema))
-	}
-	opt := kiro.OptionsSchema[0]
-	if opt.Key != "permission_mode" {
-		t.Errorf("OptionsSchema[0].Key = %q, want %q", opt.Key, "permission_mode")
-	}
-	if len(opt.Choices) != 2 {
-		t.Fatalf("len(Choices) = %d, want 2", len(opt.Choices))
-	}
-	if opt.Choices[1].Value != "unrestricted" {
-		t.Errorf("Choices[1].Value = %q, want %q", opt.Choices[1].Value, "unrestricted")
-	}
-	if len(opt.Choices[1].FlagArgs) != 2 || opt.Choices[1].FlagArgs[1] != "full" {
-		t.Errorf("Choices[1].FlagArgs = %v, want [--trust-mode full]", opt.Choices[1].FlagArgs)
-	}
-	if kiro.OptionDefaults["permission_mode"] != "unrestricted" {
-		t.Errorf("OptionDefaults[permission_mode] = %q, want %q", kiro.OptionDefaults["permission_mode"], "unrestricted")
 	}
 }
 
@@ -1152,17 +1022,9 @@ func TestProvidersRoundTrip(t *testing.T) {
 		Workspace: Workspace{Name: "test"},
 		Providers: map[string]ProviderSpec{
 			"kiro": {
-				Command:          "kiro-cli",
-				Args:             []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
-				PromptMode:       "arg",
-				ReadyDelayMs:     5000,
-				ProcessNames:     []string{"kiro-cli", "kiro", "node"},
-				SupportsHooks:    boolPtr(true),
-				InstructionsFile: "AGENTS.md",
-				ResumeFlag:       "--resume",
-				ResumeStyle:      "flag",
-				Env:              map[string]string{"KIRO_AGENT_MODE": "headless"},
-				PermissionModes:  map[string]string{"unrestricted": "--trust-mode full"},
+				Command:    "kiro",
+				Args:       []string{"--autonomous"},
+				PromptMode: "arg",
 			},
 		},
 		Agents: []Agent{{Name: "mayor"}},
@@ -1182,38 +1044,14 @@ func TestProvidersRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("Providers[kiro] not found after round-trip")
 	}
-	if kiro.Command != "kiro-cli" {
-		t.Errorf("Command = %q, want %q", kiro.Command, "kiro-cli")
+	if kiro.Command != "kiro" {
+		t.Errorf("Command = %q, want %q", kiro.Command, "kiro")
 	}
-	if want := []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"}; !reflect.DeepEqual(kiro.Args, want) {
-		t.Errorf("Args = %v, want %v", kiro.Args, want)
+	if len(kiro.Args) != 1 || kiro.Args[0] != "--autonomous" {
+		t.Errorf("Args = %v, want [--autonomous]", kiro.Args)
 	}
 	if kiro.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q", kiro.PromptMode, "arg")
-	}
-	if kiro.ReadyDelayMs != 5000 {
-		t.Errorf("ReadyDelayMs = %d, want 5000", kiro.ReadyDelayMs)
-	}
-	if len(kiro.ProcessNames) != 3 || kiro.ProcessNames[0] != "kiro-cli" || kiro.ProcessNames[1] != "kiro" || kiro.ProcessNames[2] != "node" {
-		t.Errorf("ProcessNames = %v, want [kiro-cli kiro node]", kiro.ProcessNames)
-	}
-	if !derefBool(kiro.SupportsHooks) {
-		t.Error("SupportsHooks = false after round-trip, want true")
-	}
-	if kiro.InstructionsFile != "AGENTS.md" {
-		t.Errorf("InstructionsFile = %q after round-trip, want %q", kiro.InstructionsFile, "AGENTS.md")
-	}
-	if kiro.ResumeFlag != "--resume" {
-		t.Errorf("ResumeFlag = %q after round-trip, want %q", kiro.ResumeFlag, "--resume")
-	}
-	if kiro.ResumeStyle != "flag" {
-		t.Errorf("ResumeStyle = %q after round-trip, want %q", kiro.ResumeStyle, "flag")
-	}
-	if kiro.Env["KIRO_AGENT_MODE"] != "headless" {
-		t.Errorf("Env[KIRO_AGENT_MODE] = %q after round-trip, want %q", kiro.Env["KIRO_AGENT_MODE"], "headless")
-	}
-	if kiro.PermissionModes["unrestricted"] != "--trust-mode full" {
-		t.Errorf("PermissionModes[unrestricted] = %q after round-trip, want %q", kiro.PermissionModes["unrestricted"], "--trust-mode full")
 	}
 }
 
@@ -1452,7 +1290,7 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveWorkQuery()
 	// Tiered query: check that tier 3 (routed_to) and tier 1-2 (assignee resolution) are present.
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=mayor --unassigned --exclude-type=epic --json --limit=1") {
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=mayor --unassigned --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 	if !strings.Contains(got, `"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`) {
@@ -1472,7 +1310,7 @@ func TestEffectiveWorkQueryCustom(t *testing.T) {
 func TestEffectiveWorkQueryWithDir(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world"}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --exclude-type=epic --json --limit=1") {
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 }
@@ -1480,7 +1318,7 @@ func TestEffectiveWorkQueryWithDir(t *testing.T) {
 func TestEffectiveWorkQueryPoolDefault(t *testing.T) {
 	a := Agent{Name: "polecat", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --exclude-type=epic --json --limit=1") {
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 	if strings.Contains(got, "--type=molecule") {
@@ -1533,7 +1371,7 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --exclude-type=epic --json --limit=1") {
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to with pool name: %q", got)
 	}
 	if strings.Contains(got, "--type=molecule") {
@@ -1544,7 +1382,7 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 func TestEffectiveWorkQueryPoolNoPoolName(t *testing.T) {
 	a := Agent{Name: "dog", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
-	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --exclude-type=epic --json --limit=1") {
+	if !strings.Contains(got, "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 routed_to: %q", got)
 	}
 }
@@ -1574,14 +1412,14 @@ func TestEffectiveWorkQueryControlDispatcherClaimsLegacyAssignedWork(t *testing.
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "list --status in_progress --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=1"|\
-  "list --status in_progress --assignee=gascity/control-dispatcher --exclude-type=epic --json --limit=1"|\
-  "list --status in_progress --assignee=gascity--workflow-control --exclude-type=epic --json --limit=1"|\
-  "list --status in_progress --assignee=gascity/workflow-control --exclude-type=epic --json --limit=1")
+  "list --status in_progress --assignee=gascity--control-dispatcher --json --limit=1"|\
+  "list --status in_progress --assignee=gascity/control-dispatcher --json --limit=1"|\
+  "list --status in_progress --assignee=gascity--workflow-control --json --limit=1"|\
+  "list --status in_progress --assignee=gascity/workflow-control --json --limit=1")
     printf '[]'
     ;;
-  "ready --assignee=gascity--workflow-control --exclude-type=epic --json --limit=1"|\
-  "ready --assignee=gascity/workflow-control --exclude-type=epic --json --limit=1")
+  "ready --assignee=gascity--workflow-control --json --limit=1"|\
+  "ready --assignee=gascity/workflow-control --json --limit=1")
     printf '[{"id":"ga-legacy-ready"}]'
     ;;
   *)
@@ -1599,10 +1437,10 @@ func TestEffectiveWorkQueryControlDispatcherClaimsLegacyUnassignedRoute(t *testi
 	out := runEffectiveWorkQuery(t, a, nil, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --json --limit=1")
+  "ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --json --limit=1")
     printf '[]'
     ;;
-  "ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --exclude-type=epic --json --limit=1")
+  "ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --json --limit=1")
     printf '[{"id":"ga-legacy-route"}]'
     ;;
   *)
@@ -1626,95 +1464,6 @@ func TestEffectiveSlingQueryPoolNameOverride(t *testing.T) {
 	want := "bd update {} --set-metadata gc.routed_to=hello-world/dog-1"
 	if got != want {
 		t.Errorf("EffectiveSlingQuery() = %q, want %q", got, want)
-	}
-}
-
-// TestEffectiveWorkQueryExcludesEpics verifies that the default work query
-// excludes parent epic beads from claimable work — regression coverage for
-// gc-udx where workers were claiming open parent epics whose only role is
-// "all children done." Workers should only see leaf work; parent epics must
-// flow through an explicit override path (a custom work_query in the
-// agent's TOML), not the default tier-1/2/3 query.
-func TestEffectiveWorkQueryExcludesEpics(t *testing.T) {
-	a := Agent{Name: "worker", Dir: "hello-world"}
-	got := a.EffectiveWorkQuery()
-	// All three tiers (in_progress assignee, ready assignee, ready routed)
-	// must structurally exclude the epic type.
-	wantSnippets := []string{
-		`bd list --status in_progress --assignee="$id" --exclude-type=epic --json`,
-		`bd ready --assignee="$id" --exclude-type=epic --json`,
-		`bd ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --json`,
-	}
-	for _, want := range wantSnippets {
-		if !strings.Contains(got, want) {
-			t.Errorf("EffectiveWorkQuery() missing exclude-type=epic on tier:\n  want substring: %s\n  got: %s", want, got)
-		}
-	}
-}
-
-// TestEffectiveWorkQueryExcludesEpicsControlDispatcher verifies the
-// control-dispatcher path (which has an extra legacy workflow-control
-// route) also excludes epics on every tier.
-func TestEffectiveWorkQueryExcludesEpicsControlDispatcher(t *testing.T) {
-	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
-	got := a.EffectiveWorkQuery()
-	wantSnippets := []string{
-		`bd list --status in_progress --assignee="$cand" --exclude-type=epic --json`,
-		`bd ready --assignee="$cand" --exclude-type=epic --json`,
-		`bd ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --exclude-type=epic --json`,
-		`bd ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --exclude-type=epic --json`,
-	}
-	for _, want := range wantSnippets {
-		if !strings.Contains(got, want) {
-			t.Errorf("EffectiveWorkQuery() missing exclude-type=epic on control-dispatcher tier:\n  want substring: %s\n  got: %s", want, got)
-		}
-	}
-}
-
-// TestEffectiveWorkQueryCustomPreservesOverride verifies that an agent
-// that explicitly opts into epic-handling (e.g. an oversight role that
-// closes epics once their children complete) can do so via a custom
-// work_query — the explicit-override path required by gc-udx.
-func TestEffectiveWorkQueryCustomPreservesOverride(t *testing.T) {
-	custom := "bd ready --type=epic --assignee=closer --json --limit=1"
-	a := Agent{Name: "closer", WorkQuery: custom}
-	if got := a.EffectiveWorkQuery(); got != custom {
-		t.Errorf("EffectiveWorkQuery() = %q, want %q (custom override must pass through unmodified)", got, custom)
-	}
-}
-
-// TestEffectiveWorkQuerySkipsEpicLeafScenario simulates the gc-udx
-// reproduction state through the runEffectiveWorkQuery harness:
-//   - parent epic is open and routed_to the worker
-//   - one open leaf child is also routed_to the worker
-//
-// The default query must return the leaf, never the epic. The fake bd
-// stub here only returns results when --exclude-type=epic is present on
-// the tier-3 routed query — i.e. it asserts the flag is on the wire.
-func TestEffectiveWorkQuerySkipsEpicLeafScenario(t *testing.T) {
-	a := Agent{Name: "worker", Dir: "hello-world"}
-	out := runEffectiveWorkQuery(t, a, map[string]string{
-		"GC_SESSION_ORIGIN": "ephemeral",
-	}, `#!/bin/sh
-set -eu
-case "$*" in
-  *"--exclude-type=epic"*"--metadata-field gc.routed_to=hello-world/worker"*|\
-  *"--metadata-field gc.routed_to=hello-world/worker"*"--exclude-type=epic"*)
-    printf '[{"id":"leaf-child","issue_type":"task"}]'
-    ;;
-  *"--metadata-field gc.routed_to=hello-world/worker"*)
-    printf '[{"id":"parent-epic","issue_type":"epic"}]'
-    ;;
-  *)
-    printf '[]'
-    ;;
-esac
-`)
-	if !strings.Contains(out, "leaf-child") {
-		t.Fatalf("EffectiveWorkQuery() did not return the leaf child: %q", out)
-	}
-	if strings.Contains(out, "parent-epic") {
-		t.Fatalf("EffectiveWorkQuery() surfaced the parent epic to the worker: %q", out)
 	}
 }
 
@@ -1829,85 +1578,6 @@ func TestEffectiveScalingExplicit(t *testing.T) {
 	}
 	if a.EffectiveScaleCheck() != "echo 5" {
 		t.Errorf("EffectiveScaleCheck = %q, want %q", a.EffectiveScaleCheck(), "echo 5")
-	}
-}
-
-func TestAgentUsesCanonicalSingletonPoolIdentity(t *testing.T) {
-	tests := []struct {
-		name string
-		a    Agent
-		want bool
-	}{
-		{
-			name: "max one pool flavor uses canonical identity",
-			a:    Agent{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(1)},
-			want: true,
-		},
-		{
-			name: "namepool max one keeps instance identity",
-			a:    Agent{Name: "worker", MaxActiveSessions: ptrInt(1), NamepoolNames: []string{"alpha"}},
-		},
-		{
-			name: "multi session pool keeps instance identity",
-			a:    Agent{Name: "worker", MaxActiveSessions: ptrInt(2)},
-		},
-		{
-			name: "unbounded pool keeps instance identity",
-			a:    Agent{Name: "worker"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.a.UsesCanonicalSingletonPoolIdentity(); got != tt.want {
-				t.Fatalf("UsesCanonicalSingletonPoolIdentity() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestAgentSupportsExpandedSessionIdentities(t *testing.T) {
-	tests := []struct {
-		name string
-		a    *Agent
-		want bool
-	}{
-		{
-			name: "nil",
-		},
-		{
-			name: "disabled max zero",
-			a:    &Agent{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(0)},
-		},
-		{
-			name: "canonical singleton pool",
-			a:    &Agent{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(1)},
-		},
-		{
-			name: "fixed singleton",
-			a:    &Agent{Name: "worker", MaxActiveSessions: ptrInt(1)},
-		},
-		{
-			name: "bounded pool",
-			a:    &Agent{Name: "worker", MaxActiveSessions: ptrInt(2)},
-			want: true,
-		},
-		{
-			name: "unbounded pool",
-			a:    &Agent{Name: "worker"},
-			want: true,
-		},
-		{
-			name: "namepool max one",
-			a:    &Agent{Name: "worker", MaxActiveSessions: ptrInt(1), NamepoolNames: []string{"alpha", "beta"}},
-			want: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.a.SupportsExpandedSessionIdentities(); got != tt.want {
-				t.Fatalf("SupportsExpandedSessionIdentities() = %v, want %v", got, tt.want)
-			}
-		})
 	}
 }
 
@@ -2319,43 +1989,6 @@ name = "mayor"
 	}
 }
 
-func TestParseDaemonNudgeDispatcher(t *testing.T) {
-	data := []byte(`
-[workspace]
-name = "test"
-
-[daemon]
-nudge_dispatcher = "supervisor"
-
-[[agent]]
-name = "mayor"
-`)
-	cfg, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if cfg.Daemon.NudgeDispatcher != "supervisor" {
-		t.Errorf("Daemon.NudgeDispatcher = %q, want %q", cfg.Daemon.NudgeDispatcher, "supervisor")
-	}
-	if got := cfg.Daemon.NudgeDispatcherMode(); got != "supervisor" {
-		t.Errorf("NudgeDispatcherMode() = %q, want %q", got, "supervisor")
-	}
-}
-
-func TestDaemonNudgeDispatcherDefault(t *testing.T) {
-	d := DaemonConfig{}
-	if got := d.NudgeDispatcherMode(); got != "legacy" {
-		t.Errorf("NudgeDispatcherMode() = %q, want %q", got, "legacy")
-	}
-}
-
-func TestDaemonNudgeDispatcherUnknownFallsBack(t *testing.T) {
-	d := DaemonConfig{NudgeDispatcher: "garbage"}
-	if got := d.NudgeDispatcherMode(); got != "legacy" {
-		t.Errorf("NudgeDispatcherMode() with unknown value = %q, want %q", got, "legacy")
-	}
-}
-
 func TestDaemonMaxRestartsDefault(t *testing.T) {
 	d := DaemonConfig{}
 	got := d.MaxRestartsOrDefault()
@@ -2379,29 +2012,6 @@ func TestDaemonMaxRestartsZero(t *testing.T) {
 	got := d.MaxRestartsOrDefault()
 	if got != 0 {
 		t.Errorf("MaxRestartsOrDefault() = %d, want 0 (unlimited)", got)
-	}
-}
-
-func TestDaemonAutoRestartOnDriftDefault(t *testing.T) {
-	d := DaemonConfig{}
-	if !d.AutoRestartOnDriftEnabled() {
-		t.Errorf("AutoRestartOnDriftEnabled() = false, want true (default)")
-	}
-}
-
-func TestDaemonAutoRestartOnDriftExplicitTrue(t *testing.T) {
-	v := true
-	d := DaemonConfig{AutoRestartOnDrift: &v}
-	if !d.AutoRestartOnDriftEnabled() {
-		t.Errorf("AutoRestartOnDriftEnabled() = false, want true")
-	}
-}
-
-func TestDaemonAutoRestartOnDriftExplicitFalse(t *testing.T) {
-	v := false
-	d := DaemonConfig{AutoRestartOnDrift: &v}
-	if d.AutoRestartOnDriftEnabled() {
-		t.Errorf("AutoRestartOnDriftEnabled() = true, want false (kill switch)")
 	}
 }
 
@@ -2588,122 +2198,6 @@ name = "mayor"
 	got := cfg.Daemon.ShutdownTimeoutDuration()
 	if got != 3*time.Second {
 		t.Errorf("ShutdownTimeoutDuration() = %v, want 3s", got)
-	}
-}
-
-// --- DoltStopTimeout tests ---
-
-func TestDaemonDoltStopTimeoutDefault(t *testing.T) {
-	d := DaemonConfig{}
-	got := d.DoltStopTimeoutDuration()
-	if got != DefaultDoltStopTimeout {
-		t.Errorf("DoltStopTimeoutDuration() = %v, want %v", got, DefaultDoltStopTimeout)
-	}
-}
-
-func TestDaemonDoltStopTimeoutCustom(t *testing.T) {
-	d := DaemonConfig{DoltStopTimeout: "45s"}
-	got := d.DoltStopTimeoutDuration()
-	if got != 45*time.Second {
-		t.Errorf("DoltStopTimeoutDuration() = %v, want 45s", got)
-	}
-}
-
-func TestDaemonDoltStopTimeoutZero(t *testing.T) {
-	d := DaemonConfig{DoltStopTimeout: "0s"}
-	got := d.DoltStopTimeoutDuration()
-	if got != 0 {
-		t.Errorf("DoltStopTimeoutDuration() = %v, want 0", got)
-	}
-}
-
-func TestDaemonDoltStopTimeoutInvalid(t *testing.T) {
-	d := DaemonConfig{DoltStopTimeout: "not-a-duration"}
-	got := d.DoltStopTimeoutDuration()
-	if got != DefaultDoltStopTimeout {
-		t.Errorf("DoltStopTimeoutDuration() = %v, want %v (default for invalid)", got, DefaultDoltStopTimeout)
-	}
-}
-
-func TestParseDoltStopTimeout(t *testing.T) {
-	data := []byte(`
-[workspace]
-name = "test"
-
-[daemon]
-dolt_stop_timeout = "1m"
-
-[[agent]]
-name = "mayor"
-`)
-	cfg, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if cfg.Daemon.DoltStopTimeout != "1m" {
-		t.Errorf("Daemon.DoltStopTimeout = %q, want %q", cfg.Daemon.DoltStopTimeout, "1m")
-	}
-	got := cfg.Daemon.DoltStopTimeoutDuration()
-	if got != time.Minute {
-		t.Errorf("DoltStopTimeoutDuration() = %v, want 1m", got)
-	}
-}
-
-func TestValidateNonNegativeDurationsRejectsNegativeDoltStopTimeout(t *testing.T) {
-	cfg := &City{}
-	cfg.Daemon.DoltStopTimeout = "-1s"
-	err := ValidateNonNegativeDurations(cfg, "city.toml")
-	if err == nil {
-		t.Fatal("ValidateNonNegativeDurations() = nil, want error for negative dolt_stop_timeout")
-	}
-	if !strings.Contains(err.Error(), "dolt_stop_timeout") ||
-		!strings.Contains(err.Error(), "must not be negative") ||
-		!strings.Contains(err.Error(), `"-1s"`) {
-		t.Errorf("ValidateNonNegativeDurations() error = %q, want it to name the field, the constraint, and the value", err)
-	}
-}
-
-func TestValidateNonNegativeDurationsAllowsZeroAndPositive(t *testing.T) {
-	for _, v := range []string{"", "0s", "30s", "1m"} {
-		cfg := &City{}
-		cfg.Daemon.DoltStopTimeout = v
-		if err := ValidateNonNegativeDurations(cfg, "city.toml"); err != nil {
-			t.Errorf("ValidateNonNegativeDurations(dolt_stop_timeout=%q) = %v, want nil", v, err)
-		}
-	}
-}
-
-func TestValidateNonNegativeDurationsIgnoresUnparseable(t *testing.T) {
-	// Parse errors are ValidateDurations' job (warning-only); the negative
-	// guard must not promote a typo to a hard error.
-	cfg := &City{}
-	cfg.Daemon.DoltStopTimeout = "not-a-duration"
-	if err := ValidateNonNegativeDurations(cfg, "city.toml"); err != nil {
-		t.Errorf("ValidateNonNegativeDurations(unparseable) = %v, want nil", err)
-	}
-}
-
-func TestLoadWithIncludesRejectsNegativeDoltStopTimeout(t *testing.T) {
-	dir := t.TempDir()
-	cityPath := filepath.Join(dir, "city.toml")
-	if err := os.WriteFile(cityPath, []byte(`
-[workspace]
-name = "test"
-
-[daemon]
-dolt_stop_timeout = "-5s"
-
-[[agent]]
-name = "mayor"
-`), 0o644); err != nil {
-		t.Fatalf("write city.toml: %v", err)
-	}
-	_, _, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
-	if err == nil {
-		t.Fatal("LoadWithIncludes() = nil error, want rejection of negative dolt_stop_timeout")
-	}
-	if !strings.Contains(err.Error(), "must not be negative") {
-		t.Errorf("LoadWithIncludes() error = %q, want negative-duration rejection", err)
 	}
 }
 
@@ -2981,76 +2475,6 @@ func TestRigsRoundTrip(t *testing.T) {
 	}
 	if got.Rigs[1].Path != "/home/user/backend" {
 		t.Errorf("Rigs[1].Path after round-trip = %q, want %q", got.Rigs[1].Path, "/home/user/backend")
-	}
-}
-
-// TestRigFormulaVarsRoundTrip verifies that rigs.<name>.formula_vars survives
-// TOML marshal/unmarshal so city.toml can declare rig-scoped formula defaults.
-func TestRigFormulaVarsRoundTrip(t *testing.T) {
-	c := City{
-		Workspace: Workspace{Name: "test"},
-		Agents:    []Agent{{Name: "mayor"}},
-		Rigs: []Rig{
-			{
-				Name: "mo",
-				Path: "/home/user/mo",
-				FormulaVars: map[string]string{
-					"test_command": "make test-fast",
-					"lint_command": "golangci-lint run",
-				},
-			},
-		},
-	}
-	data, err := c.Marshal()
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	got, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse(Marshal output): %v", err)
-	}
-	if len(got.Rigs) != 1 {
-		t.Fatalf("len(Rigs) after round-trip = %d, want 1", len(got.Rigs))
-	}
-	if v := got.Rigs[0].FormulaVars["test_command"]; v != "make test-fast" {
-		t.Errorf("FormulaVars[test_command] = %q, want %q", v, "make test-fast")
-	}
-	if v := got.Rigs[0].FormulaVars["lint_command"]; v != "golangci-lint run" {
-		t.Errorf("FormulaVars[lint_command] = %q, want %q", v, "golangci-lint run")
-	}
-}
-
-// TestRigFormulaVarsParsing verifies the expected TOML surface — a
-// [rigs.formula_vars] table inside a [[rigs]] entry — decodes into the
-// FormulaVars map on the rig.
-func TestRigFormulaVarsParsing(t *testing.T) {
-	input := `
-[workspace]
-name = "my-city"
-
-[[agent]]
-name = "mayor"
-
-[[rigs]]
-name = "mo"
-path = "/home/user/mo"
-
-[rigs.formula_vars]
-test_command = "make test-fast"
-build_command = "make build"
-`
-	cfg, err := Parse([]byte(input))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if len(cfg.Rigs) != 1 {
-		t.Fatalf("len(Rigs) = %d, want 1", len(cfg.Rigs))
-	}
-	if got := cfg.Rigs[0].FormulaVars["test_command"]; got != "make test-fast" {
-		t.Errorf("FormulaVars[test_command] = %q, want %q", got, "make test-fast")
-	}
-	if got := cfg.Rigs[0].FormulaVars["build_command"]; got != "make build" {
-		t.Errorf("FormulaVars[build_command] = %q, want %q", got, "make build")
 	}
 }
 
@@ -3491,10 +2915,7 @@ func TestValidateAgentsDupNameMixedProvenance(t *testing.T) {
 }
 
 func TestValidateAgentsDupNameNoProvenance(t *testing.T) {
-	// Two zero-valued agents (no SourceDir, no source enum). Per ga-tpfc.1
-	// the rendered descriptor must always be non-empty; an unstamped agent
-	// renders as <unknown: ...>. The error must never contain an empty
-	// quoted "" path, regardless of the source category.
+	// Two inline agents with no SourceDir — plain error without provenance.
 	agents := []Agent{
 		{Name: "worker"},
 		{Name: "worker"},
@@ -3507,8 +2928,9 @@ func TestValidateAgentsDupNameNoProvenance(t *testing.T) {
 	if !strings.Contains(errStr, "duplicate name") {
 		t.Errorf("error should say 'duplicate name', got: %s", errStr)
 	}
-	if strings.Contains(errStr, `""`) {
-		t.Errorf(`error contains empty quoted "" — descriptors must always be non-empty, got: %s`, errStr)
+	// Should NOT contain "from" when neither has provenance.
+	if strings.Contains(errStr, "from") {
+		t.Errorf("error should not include provenance when neither has SourceDir, got: %s", errStr)
 	}
 }
 
@@ -3564,85 +2986,6 @@ func TestIdleTimeoutOmittedWhenEmpty(t *testing.T) {
 	}
 	if strings.Contains(string(data), "idle_timeout") {
 		t.Errorf("TOML output should omit idle_timeout when empty, got:\n%s", data)
-	}
-}
-
-// --- MaxSessionAge tests ---
-
-func TestMaxSessionAgeDurationEmpty(t *testing.T) {
-	a := Agent{Name: "witness"}
-	if got := a.MaxSessionAgeDuration(); got != 0 {
-		t.Errorf("MaxSessionAgeDuration() = %v, want 0", got)
-	}
-}
-
-func TestMaxSessionAgeDurationValid(t *testing.T) {
-	a := Agent{Name: "witness", MaxSessionAge: "5h"}
-	if got := a.MaxSessionAgeDuration(); got != 5*time.Hour {
-		t.Errorf("MaxSessionAgeDuration() = %v, want 5h", got)
-	}
-}
-
-func TestMaxSessionAgeDurationInvalid(t *testing.T) {
-	a := Agent{Name: "witness", MaxSessionAge: "bogus"}
-	if got := a.MaxSessionAgeDuration(); got != 0 {
-		t.Errorf("MaxSessionAgeDuration() = %v, want 0 for invalid", got)
-	}
-}
-
-func TestMaxSessionAgeJitterDurationIgnoredWhenAgeUnset(t *testing.T) {
-	a := Agent{Name: "witness", MaxSessionAgeJitter: "15m"}
-	if got := a.MaxSessionAgeJitterDuration(); got != 0 {
-		t.Errorf("MaxSessionAgeJitterDuration() = %v, want 0 when MaxSessionAge unset", got)
-	}
-}
-
-func TestMaxSessionAgeJitterDurationValid(t *testing.T) {
-	a := Agent{Name: "witness", MaxSessionAge: "5h", MaxSessionAgeJitter: "15m"}
-	if got := a.MaxSessionAgeJitterDuration(); got != 15*time.Minute {
-		t.Errorf("MaxSessionAgeJitterDuration() = %v, want 15m", got)
-	}
-}
-
-func TestMaxSessionAgeJitterDurationNegativeRejected(t *testing.T) {
-	a := Agent{Name: "witness", MaxSessionAge: "5h", MaxSessionAgeJitter: "-5m"}
-	if got := a.MaxSessionAgeJitterDuration(); got != 0 {
-		t.Errorf("MaxSessionAgeJitterDuration() = %v, want 0 for negative value", got)
-	}
-}
-
-func TestMaxSessionAgeRoundTrip(t *testing.T) {
-	c := City{
-		Workspace: Workspace{Name: "test"},
-		Agents:    []Agent{{Name: "witness", MaxSessionAge: "5h", MaxSessionAgeJitter: "15m"}},
-	}
-	data, err := c.Marshal()
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	got, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if got.Agents[0].MaxSessionAge != "5h" {
-		t.Errorf("MaxSessionAge after round-trip = %q, want %q", got.Agents[0].MaxSessionAge, "5h")
-	}
-	if got.Agents[0].MaxSessionAgeJitter != "15m" {
-		t.Errorf("MaxSessionAgeJitter after round-trip = %q, want %q", got.Agents[0].MaxSessionAgeJitter, "15m")
-	}
-}
-
-func TestMaxSessionAgeOmittedWhenEmpty(t *testing.T) {
-	c := City{
-		Workspace: Workspace{Name: "test"},
-		Agents:    []Agent{{Name: "witness"}},
-	}
-	data, err := c.Marshal()
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	if strings.Contains(string(data), "max_session_age") {
-		t.Errorf("TOML output should omit max_session_age when empty, got:\n%s", data)
 	}
 }
 
@@ -5401,11 +4744,8 @@ name = "mayor"
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
 
-	// This test guards the attachment-list tombstone warning, not the
-	// v1-surface warnings. Filter v1-surface warnings (the [[agent]] in
-	// the fixture intentionally exercises the legacy surface).
-	if other := warningsExcludingV1Surfaces(prov.Warnings); len(other) != 0 {
-		t.Errorf("expected no non-v1-surface warning, got:\n%s", strings.Join(other, "\n"))
+	if len(prov.Warnings) != 0 {
+		t.Errorf("expected no warning, got:\n%s", strings.Join(prov.Warnings, "\n"))
 	}
 }
 

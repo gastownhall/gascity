@@ -186,7 +186,7 @@ func TestHandleRigPatchSet(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	h := newTestCityHandler(t, fs)
 
-	body := `{"name":"myrig","default_branch":"develop","suspended":true}`
+	body := `{"name":"myrig","suspended":true}`
 	req := httptest.NewRequest("PUT", cityURL(fs, "/patches/rigs"), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
@@ -198,9 +198,6 @@ func TestHandleRigPatchSet(t *testing.T) {
 
 	if len(fs.cfg.Patches.Rigs) != 1 {
 		t.Fatalf("patches.rigs count = %d, want 1", len(fs.cfg.Patches.Rigs))
-	}
-	if fs.cfg.Patches.Rigs[0].DefaultBranch == nil || *fs.cfg.Patches.Rigs[0].DefaultBranch != "develop" {
-		t.Fatalf("DefaultBranch = %v, want develop", fs.cfg.Patches.Rigs[0].DefaultBranch)
 	}
 }
 
@@ -255,7 +252,7 @@ func TestHandleProviderPatchSet(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	h := newTestCityHandler(t, fs)
 
-	body := `{"name":"claude","command":"my-claude","acp_command":"my-claude-acp","acp_args":["serve","--stdio"],"accept_startup_dialogs":true}`
+	body := `{"name":"claude","command":"my-claude","acp_command":"my-claude-acp","acp_args":["serve","--stdio"]}`
 	req := httptest.NewRequest("PUT", cityURL(fs, "/patches/providers"), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
@@ -273,9 +270,6 @@ func TestHandleProviderPatchSet(t *testing.T) {
 	}
 	if got := fs.cfg.Patches.Providers[0].ACPArgs; len(got) != 2 || got[0] != "serve" || got[1] != "--stdio" {
 		t.Fatalf("ACPArgs = %#v, want [\"serve\" \"--stdio\"]", got)
-	}
-	if got := fs.cfg.Patches.Providers[0].AcceptStartupDialogs; got == nil || !*got {
-		t.Fatalf("AcceptStartupDialogs = %v, want true", got)
 	}
 }
 

@@ -28,12 +28,8 @@ Describe what this agent should do here.
 // in cmd_config.go and cmd_start.go that intentionally use config.Load to
 // discover remote packs before fetching them.
 func loadCityConfig(cityPath string, warningWriter ...io.Writer) (*config.City, error) {
-	tomlPath := filepath.Join(cityPath, "city.toml")
-	extras, err := builtinPackIncludesForConfigLoad(fsys.OSFS{}, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...))
-	if err != nil {
-		return nil, err
-	}
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, extras...)
+	extras := builtinPackIncludes(cityPath)
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), extras...)
 	if err != nil {
 		return nil, err
 	}
@@ -45,22 +41,19 @@ func loadCityConfig(cityPath string, warningWriter ...io.Writer) (*config.City, 
 // loadCityConfigSuppressDeprecatedOrderWarnings performs a full config load
 // while suppressing only legacy order-path migration warnings.
 func loadCityConfigSuppressDeprecatedOrderWarnings(cityPath string, warningWriter ...io.Writer) (*config.City, error) {
-	tomlPath := filepath.Join(cityPath, "city.toml")
-	resolvedWarningWriter := resolveLoadCityConfigWarningWriter(warningWriter...)
-	extras, err := builtinPackIncludesForConfigLoad(fsys.OSFS{}, tomlPath, resolvedWarningWriter)
-	if err != nil {
-		return nil, err
-	}
+	extras := builtinPackIncludes(cityPath)
 	cfg, prov, err := config.LoadWithIncludesOptions(
 		fsys.OSFS{},
-		tomlPath,
+		filepath.Join(cityPath, "city.toml"),
 		config.LoadOptions{SuppressDeprecatedOrderWarnings: true},
 		extras...,
 	)
 	if err != nil {
 		return nil, err
 	}
-	emitLoadCityConfigWarnings(resolvedWarningWriter, prov)
+	if len(warningWriter) > 0 {
+		emitLoadCityConfigWarnings(resolveLoadCityConfigWarningWriter(warningWriter...), prov)
+	}
 	applyFeatureFlags(cfg)
 	return cfg, nil
 }
@@ -69,44 +62,13 @@ func loadCityConfigSuppressDeprecatedOrderWarnings(cityPath string, warningWrite
 // filesystem implementation. Used by functions that take an fsys.FS parameter
 // for unit testing.
 func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (*config.City, error) {
-	extras, err := builtinPackIncludesForConfigLoad(fs, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...))
-	if err != nil {
-		return nil, err
-	}
-	cfg, prov, err := config.LoadWithIncludes(fs, tomlPath, extras...)
+	cfg, prov, err := config.LoadWithIncludes(fs, tomlPath)
 	if err != nil {
 		return nil, err
 	}
 	emitLoadCityConfigWarnings(resolveLoadCityConfigWarningWriter(warningWriter...), prov)
 	applyFeatureFlags(cfg)
 	return cfg, nil
-}
-
-// loadCityConfigWithoutBuiltinPackRefreshFS loads config using builtin packs
-// that are already materialized on disk. Completion paths use this to avoid
-// forcing refresh work on every shell invocation. That means completion may
-// briefly reflect stale builtin-pack content after an upgrade until a normal
-// gc command refreshes the generated packs.
-func loadCityConfigWithoutBuiltinPackRefreshFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (*config.City, error) {
-	var extras []string
-	if usesOSFS(fs) {
-		extras = builtinPackIncludes(filepath.Dir(tomlPath))
-	}
-	cfg, prov, err := config.LoadWithIncludes(fs, tomlPath, extras...)
-	if err != nil {
-		return nil, err
-	}
-	emitLoadCityConfigWarnings(resolveLoadCityConfigWarningWriter(warningWriter...), prov)
-	applyFeatureFlags(cfg)
-	return cfg, nil
-}
-
-func loadCityConfigWithoutBuiltinPackRefresh(cityPath string, warningWriter ...io.Writer) (*config.City, error) {
-	return loadCityConfigWithoutBuiltinPackRefreshFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), warningWriter...)
-}
-
-var loadCityConfigDefaultWarningWriter = func() io.Writer {
-	return os.Stderr
 }
 
 func resolveLoadCityConfigWarningWriter(warningWriter ...io.Writer) io.Writer {
@@ -115,7 +77,7 @@ func resolveLoadCityConfigWarningWriter(warningWriter ...io.Writer) io.Writer {
 			return w
 		}
 	}
-	return loadCityConfigDefaultWarningWriter()
+	return os.Stderr
 }
 
 func emitLoadCityConfigWarnings(w io.Writer, prov *config.Provenance) {
@@ -140,16 +102,10 @@ func emitLoadCityConfigWarnings(w io.Writer, prov *config.Provenance) {
 // [agent_defaults]/[agents] config remains strict-fatal because overlapping
 // default tables are ambiguous even after normalization.
 func isNonFatalLoadConfigWarning(warning string) bool {
-	if config.IsLegacyV1SurfaceWarning(warning) {
-		return true
-	}
 	if strings.Contains(warning, "[agents] is a deprecated compatibility alias for [agent_defaults]") {
 		return true
 	}
 	if strings.Contains(warning, "attachment-list fields") {
-		return true
-	}
-	if strings.HasPrefix(warning, "events.rotation: warning:") {
 		return true
 	}
 	if !strings.Contains(warning, `" is not supported`) {
@@ -339,7 +295,7 @@ func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config
 func resolvePoolInstance(cfg *config.City, input string) (config.Agent, bool) {
 	for _, a := range cfg.Agents {
 		sp := scaleParamsFor(&a)
-		if !a.SupportsInstanceExpansion() || a.UsesCanonicalSingletonPoolIdentity() {
+		if !a.SupportsInstanceExpansion() {
 			continue
 		}
 		prefix := a.QualifiedName() + "-"
@@ -365,7 +321,7 @@ func resolvePoolInstance(cfg *config.City, input string) (config.Agent, bool) {
 // pattern (e.g., "polecat-2" matches agent "polecat"). Returns the synthesized instance.
 func matchPoolInstance(a config.Agent, input string) (config.Agent, bool) {
 	sp := scaleParamsFor(&a)
-	if !a.SupportsInstanceExpansion() || a.UsesCanonicalSingletonPoolIdentity() {
+	if !a.SupportsInstanceExpansion() {
 		return config.Agent{}, false
 	}
 	prefix := a.Name + "-"
@@ -678,8 +634,8 @@ func doAgentResume(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer) 
 //   - Convention-discovered (agents/<name>/): write agent.toml, and
 //     strip any legacy [[patches.agent]] suspended override that would
 //     otherwise shadow the new value.
-//   - Pack-declared [[agent]] (city.toml or pack.toml): tell the user
-//     to use [[patches]].
+//   - Pack-declared [[agent]]: write a city-local [[patches.agent]]
+//     suspended override.
 func doAgentSuspendOrResume(fs fsys.FS, cityPath, name string, suspended bool, stdout, stderr io.Writer) int {
 	verb, past := "suspend", "Suspended"
 	if !suspended {
@@ -748,6 +704,16 @@ func doAgentSuspendOrResume(fs fsys.FS, cityPath, name string, suspended bool, s
 		fmt.Fprintf(stdout, "%s agent '%s'\n", past, name) //nolint:errcheck // best-effort stdout
 		return 0
 	}
-	fmt.Fprintf(stderr, "gc agent %s: agent %q is defined by a pack — use [[patches]] to override\n", verb, name) //nolint:errcheck // best-effort stderr
-	return 1
+	if err := configedit.AddOrUpdateAgentPatch(cfg, resolved.QualifiedName(), func(p *config.AgentPatch) {
+		p.Suspended = &suspended
+	}); err != nil {
+		fmt.Fprintf(stderr, "gc agent %s: %v\n", verb, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
+		fmt.Fprintf(stderr, "gc agent %s: %v\n", verb, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s agent '%s'\n", past, name) //nolint:errcheck // best-effort stdout
+	return 0
 }

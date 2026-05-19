@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/spf13/cobra"
@@ -55,7 +56,7 @@ attaching arbitrary JSON payloads.`,
 // cmdEventEmit records a single event to the city event log. Best-effort:
 // errors go to stderr but exit code is always 0 so bd hooks never fail.
 func cmdEventEmit(eventType, subject, message, actor, payload string, stderr io.Writer) int {
-	ep, code := openCityEventEmitProvider(stderr, "gc event emit")
+	ep, code := openCityEventsProvider(stderr, "gc event emit")
 	if ep == nil {
 		// Best-effort: if we can't open the provider, still exit 0.
 		_ = code
@@ -84,8 +85,37 @@ func doEventEmit(ep events.Provider, eventType, subject, message, actor, payload
 			fmt.Fprintf(stderr, "gc event emit: --payload is not valid JSON\n") //nolint:errcheck // best-effort stderr
 			return                                                              // best-effort — never fail
 		}
-		e.Payload = json.RawMessage(payload)
+		e.Payload = normalizeEventPayload(eventType, json.RawMessage(payload))
 	}
 
 	ep.Record(e)
+}
+
+func normalizeEventPayload(eventType string, payload json.RawMessage) json.RawMessage {
+	if !isBeadEventType(eventType) {
+		return payload
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &obj); err != nil {
+		return payload
+	}
+	if _, ok := obj["bead"]; ok {
+		return payload
+	}
+	wrapped, err := json.Marshal(struct {
+		Bead json.RawMessage `json:"bead"`
+	}{Bead: payload})
+	if err != nil {
+		return payload
+	}
+	return wrapped
+}
+
+func isBeadEventType(eventType string) bool {
+	switch strings.TrimSpace(eventType) {
+	case events.BeadCreated, events.BeadUpdated, events.BeadClosed:
+		return true
+	default:
+		return false
+	}
 }

@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestHookNoWork(t *testing.T) {
@@ -44,40 +42,6 @@ func TestHookCommandError(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "command failed") {
 		t.Errorf("stderr = %q, want to contain %q", stderr.String(), "command failed")
-	}
-}
-
-func TestHookCommandErrorPrintsPartialOutput(t *testing.T) {
-	runner := func(string, string) (string, error) {
-		return "[]\n", fmt.Errorf("timed out after 15s with partial stdout")
-	}
-	var stdout, stderr bytes.Buffer
-	code := doHook("bd ready", "", false, runner, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("doHook(error with output) = %d, want 1", code)
-	}
-	if got := stdout.String(); got != "[]" {
-		t.Errorf("stdout = %q, want partial JSON output", got)
-	}
-	if !strings.Contains(stderr.String(), "partial stdout") {
-		t.Errorf("stderr = %q, want timeout diagnostic", stderr.String())
-	}
-}
-
-func TestShellWorkQueryWithEnvTimeoutReportsPartialOutput(t *testing.T) {
-	oldTimeout := hookWorkQueryTimeout
-	hookWorkQueryTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { hookWorkQueryTimeout = oldTimeout })
-
-	out, err := shellWorkQueryWithEnv("printf '[]\\n'; sleep 1", "", nil)
-	if err == nil {
-		t.Fatal("shellWorkQueryWithEnv() error = nil, want timeout")
-	}
-	if strings.TrimSpace(out) != "[]" {
-		t.Fatalf("stdout = %q, want partial JSON output", out)
-	}
-	if !strings.Contains(err.Error(), "partial stdout") {
-		t.Fatalf("error = %v, want partial stdout diagnostic", err)
 	}
 }
 
@@ -157,7 +121,6 @@ func TestHookInjectDoesNotRunWorkQuery(t *testing.T) {
 
 func TestHookCommandCodexInjectDoesNotBlockStop(t *testing.T) {
 	clearGCEnv(t)
-	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -187,7 +150,6 @@ work_query = "printf '[{\"id\":\"hw-1\",\"title\":\"Fix the bug\"}]'"
 
 func TestHookCommandInjectSkipsConfiguredWorkQuery(t *testing.T) {
 	clearGCEnv(t)
-	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "work-query-ran")
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
@@ -221,7 +183,6 @@ work_query = "printf ran > %q"
 
 func TestHookCommandHookFormatIsIgnoredForNonInjectOutput(t *testing.T) {
 	clearGCEnv(t)
-	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -267,7 +228,6 @@ work_query = "printf '[{\"id\":\"hw-1\",\"title\":\"Fix the bug\"}]'"
 
 func TestCmdHookSessionTemplateContextDoesNotScanSessionsForName(t *testing.T) {
 	clearGCEnv(t)
-	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
 	fakeBin := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "bd.log")
@@ -342,30 +302,6 @@ func TestHookPassesWorkQuery(t *testing.T) {
 	}
 }
 
-func TestShellWorkQueryTimesOutPromptly(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh not available")
-	}
-
-	oldTimeout := hookWorkQueryTimeout
-	hookWorkQueryTimeout = 50 * time.Millisecond
-	t.Cleanup(func() {
-		hookWorkQueryTimeout = oldTimeout
-	})
-
-	start := time.Now()
-	_, err := shellWorkQueryWithEnv("sleep 5", t.TempDir(), nil)
-	if err == nil {
-		t.Fatal("shellWorkQueryWithEnv(sleep) err = nil, want timeout")
-	}
-	if !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("err = %v, want timeout diagnostic", err)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("shellWorkQueryWithEnv timeout elapsed %s, want under 1s", elapsed)
-	}
-}
-
 func TestWorkQueryHasReadyWorkEmptyJSONArray(t *testing.T) {
 	if workQueryHasReadyWork("[]") {
 		t.Fatal("workQueryHasReadyWork([]) = true, want false")
@@ -379,9 +315,8 @@ func TestWorkQueryHasReadyWorkNonEmptyJSONArray(t *testing.T) {
 }
 
 func TestCmdHookUsesAgentCityAndRigRoot(t *testing.T) {
-	clearGCEnv(t)
-	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_TMUX_SESSION", "host-session")
+	clearGCEnv(t)
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig-repo")
 	workDir := filepath.Join(cityDir, ".gc", "worktrees", "myrig", "polecat-1")
@@ -460,7 +395,7 @@ max = 5
 		t.Fatalf("stdout = %q, want GC_RIG_ROOT=%q", out, rigDir)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, "args=list --status in_progress --assignee=host-session --exclude-type=epic --json --limit=1") {
+	if !strings.Contains(out, "args=list --status in_progress --assignee=myrig--polecat --json --limit=1") {
 		t.Fatalf("stdout = %q, want pool work_query args", out)
 	}
 }
@@ -471,9 +406,8 @@ max = 5
 // for rig-backed agents. Without the fix, the subprocess reads the city
 // store and returns [] for rig-routed work.
 func TestCmdHookOverridesInheritedCityBeadsDir(t *testing.T) {
-	clearGCEnv(t)
-	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_TMUX_SESSION", "host-session")
+	clearGCEnv(t)
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig-repo")
 	fakeBin := t.TempDir()
@@ -543,9 +477,8 @@ dir = "myrig"
 // rig-matching loop misses the rig entirely (skipping GC_RIG and any
 // per-rig Dolt overrides).
 func TestCmdHookResolvesRelativeRigPath(t *testing.T) {
-	clearGCEnv(t)
-	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_TMUX_SESSION", "host-session")
+	clearGCEnv(t)
 	cityDir := t.TempDir()
 	fakeBin := t.TempDir()
 
@@ -605,9 +538,8 @@ dir = "myrig"
 }
 
 func TestCmdHookExpandsTemplateCommandsWithCityFallback(t *testing.T) {
-	clearGCEnv(t)
-	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_TMUX_SESSION", "host-session")
+	clearGCEnv(t)
 	cityDir := filepath.Join(t.TempDir(), "demo-city")
 	rigDir := filepath.Join(cityDir, "frontend")
 	fakeBin := t.TempDir()
@@ -656,9 +588,8 @@ work_query = "bd {{.CityName}} {{.Rig}} {{.AgentBase}}"
 // rig) must fall back to the city-scoped bead store, not mistakenly be
 // treated as rig-backed and pointed at `<dir>/.beads`.
 func TestCmdHookNonRigDirAgentUsesCityStore(t *testing.T) {
-	clearGCEnv(t)
-	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_TMUX_SESSION", "host-session")
+	clearGCEnv(t)
 	cityDir := t.TempDir()
 	fakeBin := t.TempDir()
 
@@ -708,9 +639,8 @@ dir = "workdir"
 }
 
 func TestCmdHookPoolInstanceUsesTemplatePoolLabel(t *testing.T) {
-	clearGCEnv(t)
-	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_TMUX_SESSION", "host-session")
+	clearGCEnv(t)
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig-repo")
 	workDir := filepath.Join(cityDir, ".gc", "worktrees", "myrig", "polecat-1")
@@ -775,7 +705,7 @@ max = 5
 		t.Fatalf("stdout = %q, want command to run from rig root %q", out, rigDir)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, "args=list --status in_progress --assignee=host-session --exclude-type=epic --json --limit=1") {
+	if !strings.Contains(out, "args=list --status in_progress --assignee=myrig--polecat-1 --json --limit=1") {
 		t.Fatalf("stdout = %q, want pool template work_query args", out)
 	}
 }
@@ -801,9 +731,8 @@ func TestWorkQueryEnvForDirOverridesInheritedPWD(t *testing.T) {
 }
 
 func TestCmdHookExportsResolvedIdentityForFixedAgentQuery(t *testing.T) {
-	clearGCEnv(t)
-	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_TMUX_SESSION", "host-session")
+	clearGCEnv(t)
 	cityDir := t.TempDir()
 	fakeBin := t.TempDir()
 
@@ -839,19 +768,18 @@ name = "worker"
 	if !strings.Contains(out, "agent=worker") {
 		t.Fatalf("stdout = %q, want GC_AGENT=worker", out)
 	}
-	if !strings.Contains(out, "session=host-session") {
-		t.Fatalf("stdout = %q, want GC_SESSION_NAME=host-session", out)
+	if !strings.Contains(out, "session=worker") {
+		t.Fatalf("stdout = %q, want GC_SESSION_NAME=worker", out)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, `args=list --status in_progress --assignee=host-session --exclude-type=epic --json --limit=1`) {
+	if !strings.Contains(out, `args=list --status in_progress --assignee=worker --json --limit=1`) {
 		t.Fatalf("stdout = %q, want metadata-routed work query", out)
 	}
 }
 
 func TestCmdHookExportsResolvedIdentityFromRigContext(t *testing.T) {
-	clearGCEnv(t)
-	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_TMUX_SESSION", "host-session")
+	clearGCEnv(t)
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig-repo")
 	fakeBin := t.TempDir()
@@ -904,7 +832,7 @@ dir = "myrig"
 		t.Fatalf("stdout = %q, want GC_SESSION_NAME=%s", out, wantSession)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, `args=list --status in_progress --assignee=host-session --exclude-type=epic --json --limit=1`) {
+	if !strings.Contains(out, `args=list --status in_progress --assignee=myrig--worker --json --limit=1`) {
 		t.Fatalf("stdout = %q, want metadata-routed work query", out)
 	}
 }

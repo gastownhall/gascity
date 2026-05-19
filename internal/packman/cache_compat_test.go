@@ -3,7 +3,6 @@ package packman
 import (
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -22,7 +21,6 @@ func TestCacheKeyAlignment(t *testing.T) {
 		{"https://github.com/org/repo/tree/v1.0/packs/base", "aaa111"},
 		{"file:///tmp/repo.git//sub/path", "bbb222"},
 		{"github.com/org/repo//subpath#v1.0", "ccc333"},
-		{builtinpacks.MustSource("core"), "abc123"},
 		{"simple-source", "ddd444"},
 	}
 

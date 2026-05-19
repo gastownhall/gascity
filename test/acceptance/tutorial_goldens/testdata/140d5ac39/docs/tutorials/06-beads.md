@@ -10,7 +10,7 @@ Beads are the universal work primitive in Gas City. Every trackable thing — ta
 
 We'll pick up where Tutorial 04 left off. You should have `my-city` running with `my-project` and `my-api` rigged, and agents for `mayor`, `helper`, `worker`, and `reviewer`.
 
-You don't need to understand beads to use Gas City productively. But if you want to understand *why* the system works the way it does, or if you want to query and manipulate work items directly, this is where it lives.
+You don't need to understand beads to use Gas City productively. But if you want to understand _why_ the system works the way it does, or if you want to query and manipulate work items directly, this is where it lives.
 
 ## What is a bead
 
@@ -44,14 +44,14 @@ Every bead has:
 
 The type determines what a bead represents:
 
-| Type | What it is | Created by |
-|---|---|---|
-| **task** | A unit of work | `bd create`, formula steps |
-| **message** | Inter-agent mail | `gc mail send` |
-| **session** | A running agent session | `gc session new` |
-| **molecule** | Persistent formula instance | `gc formula cook` |
-| **wisp** | Ephemeral formula instance | `gc sling --formula` |
-| **convoy** | Container grouping related beads | `gc convoy create`, auto-created by sling |
+| Type         | What it is                       | Created by                                |
+| ------------ | -------------------------------- | ----------------------------------------- |
+| **task**     | A unit of work                   | `bd create`, formula steps                |
+| **message**  | Inter-agent mail                 | `gc mail send`                            |
+| **session**  | A running agent session          | `gc session new`                          |
+| **molecule** | Persistent formula instance      | `gc formula cook`                         |
+| **wisp**     | Ephemeral formula instance       | `gc sling --formula`                      |
+| **convoy**   | Container grouping related beads | `gc convoy create`, auto-created by sling |
 
 The type system is simple by design. Gas City doesn't have separate storage for tasks vs. messages vs. sessions — they're all beads with different type labels. This is what makes the system composable: the same store, the same query interface, the same dependency model works for everything.
 
@@ -176,7 +176,7 @@ Now `mc-xp7` won't appear in any agent's work query until `mc-a4l` is closed. Th
 
 The dependency types are **`blocks`** (must close before the other can start), **`tracks`** (informational — "I care about this"), **`related`** (loose association), **`parent-child`** (containment), and **`discovered-from`** (work that surfaced while doing other work). Only `blocks` affects work visibility.
 
-Beads also have a separate *parent-child* relationship — a bead can set a `parent_id` linking it to a container. This is how convoys and molecules group their children. The difference: dependencies express ordering ("do A before B"), while parent-child expresses containment ("these beads belong to this group"). A convoy's children don't depend on each other — they're just members of the same batch.
+Beads also have a separate _parent-child_ relationship — a bead can set a `parent_id` linking it to a container. This is how convoys and molecules group their children. The difference: dependencies express ordering ("do A before B"), while parent-child expresses containment ("these beads belong to this group"). A convoy's children don't depend on each other — they're just members of the same batch.
 
 ## Convoys
 
@@ -284,13 +284,13 @@ Set target of convoy mc-zk1 to develop
 
 ## How agents find work
 
-This is where beads connect to the runtime. Agents discover work through *hooks* — shell commands that run between turns and check for available beads.
+This is where beads connect to the runtime. Agents discover work through _hooks_ — shell commands that run between turns and check for available beads.
 
 The typical flow:
 
 1. Work is created (via `bd create`, `gc sling`, formula cook, etc.)
 2. Work is routed to an agent (via `gc sling`, pool labels, assignee)
-3. Agent's hook runs a *work query*: `bd ready --assignee=<agent-name>`
+3. Agent's hook runs a _work query_: `bd ready --assignee=<agent-name>`
 4. If work is found, the hook injects it into the agent's context as a system reminder
 5. The agent sees the work and acts on it (GUPP: "if you find work on your hook, you run it")
 
@@ -357,7 +357,7 @@ Beads are the ground truth of the running state of the city. Everything else in 
 
 - **[Orders](/tutorials/07-orders)** — formulas and scripts on autopilot, gated by time, schedule, conditions, or events
 
-{/* BONEYARD — draft material for future sections. Not part of the published tutorial.
+{/\* BONEYARD — draft material for future sections. Not part of the published tutorial.
 
 ### The bead store internals
 
@@ -416,4 +416,4 @@ bd list --state open --json | jq '.[].title'
 bd ready --assignee=worker --json | jq length
 
 The work_query config on agents uses this — it's just a shell command that
-returns JSON, and the hook infrastructure parses it. */}
+returns JSON, and the hook infrastructure parses it. \*/}

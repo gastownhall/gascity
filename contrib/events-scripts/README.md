@@ -26,10 +26,10 @@ gc start my-city
 
 **Configuration:**
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GC_K8S_NAMESPACE` | `gc` | K8s namespace for event ConfigMaps |
-| `GC_K8S_CONTEXT` | current | kubectl context to use |
+| Variable           | Default | Description                        |
+| ------------------ | ------- | ---------------------------------- |
+| `GC_K8S_NAMESPACE` | `gc`    | K8s namespace for event ConfigMaps |
+| `GC_K8S_CONTEXT`   | current | kubectl context to use             |
 
 **ConfigMap layout:**
 

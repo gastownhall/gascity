@@ -64,6 +64,7 @@ Run `bd mol current <molecule-id>` to see your steps:
 - `[blocked]` — step is waiting on dependencies
 
 **Work one step at a time.** For each `[ready]` step:
+
 1. `bd show <step-id>` — read what to do
 2. Do the work described in that step
 3. `bd close <step-id>` — mark it done

@@ -32,9 +32,6 @@ const (
 	// StateCreating means the session bead has been written but the runtime
 	// process has not yet been confirmed alive. Counts against pool occupancy.
 	StateCreating State = "creating"
-	// StateFailedCreate means create rollback wrote terminal metadata but the
-	// bead status close did not complete. It is eligible for cleanup/replacement.
-	StateFailedCreate State = "failed-create"
 	// StateDraining means the session is being gracefully stopped (in-flight
 	// work completing). The pool routing label has been removed so no new
 	// work is routed to this session.
@@ -59,10 +56,6 @@ const BeadType = "session"
 // LabelSession is the label applied to all session beads for filtering.
 const LabelSession = "gc:session"
 
-// MetadataLastNudgeDeliveredAt is the session-bead metadata key that records
-// the wall-clock time of the most recent successful queued-nudge delivery.
-const MetadataLastNudgeDeliveredAt = "last_nudge_delivered_at"
-
 // Info holds the user-facing details of a chat session.
 type Info struct {
 	ID            string
@@ -83,13 +76,7 @@ type Info struct {
 	ResumeCommand string // explicit resume command template ({{.SessionKey}})
 	CreatedAt     time.Time
 	LastActive    time.Time
-	// LastNudgeDeliveredAt records the wall-clock time of the most recent
-	// successful nudge delivery to this session. Zero when no nudge has
-	// been delivered yet (or the metadata predates the stamping path).
-	// Surfaced in `gc session list` so operators can spot warm sessions
-	// whose delivery loop has stalled.
-	LastNudgeDeliveredAt time.Time
-	Attached             bool
+	Attached      bool
 }
 
 // RuntimeObservation reports the provider-backed live runtime state for a
@@ -142,11 +129,6 @@ type Manager struct {
 type PruneResult struct {
 	Count        int
 	SessionIDs   []string
-	WaitNudgeIDs []string
-}
-
-// CloseResult reports session-close cleanup artifacts needed by callers.
-type CloseResult struct {
 	WaitNudgeIDs []string
 }
 
@@ -490,7 +472,7 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 			DefaultContinuationEpoch,
 			meta["instance_token"],
 		))
-		if gcProvider := ProviderFamilyFromMetadata(meta, provider); gcProvider != "" {
+		if gcProvider := providerKindFromMetadata(meta, provider); gcProvider != "" {
 			cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 		}
 		cfg = runtime.SyncWorkDirEnv(cfg)
@@ -813,14 +795,7 @@ func (m *Manager) RequestFreshRestart(id string) error {
 
 // Close ends a conversation permanently.
 func (m *Manager) Close(id string) error {
-	_, err := m.CloseDetailed(id)
-	return err
-}
-
-// CloseDetailed ends a conversation permanently and reports cleanup artifacts.
-func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
-	result := CloseResult{}
-	err := withSessionMutationLock(id, func() error {
+	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.loadSessionBead(id, true)
 		if err != nil {
 			return err
@@ -848,14 +823,7 @@ func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 		// Best-effort stop cleans up any live runtime and allows auto.Provider
 		// to discard stale ACP route entries for suspended sessions as well.
 		_ = m.sp.Stop(sessName)
-		nudgeIDs, capped, err := CancelWaitsAndCollectNudgeIDs(m.store, id, time.Now().UTC())
-		if err != nil {
-			log.Printf("session %s: closing after wait cancellation lookup failed: %v", id, err)
-		}
-		if capped {
-			log.Printf("session %s: closing after capped wait cancellation lookup", id)
-		}
-		result.WaitNudgeIDs = append(result.WaitNudgeIDs, nudgeIDs...)
+		_ = CancelWaits(m.store, id, time.Now().UTC())
 		if err := m.clearWakeAndHoldOverrides(id); err != nil {
 			return err
 		}
@@ -869,7 +837,6 @@ func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 		_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
 		return nil
 	})
-	return result, err
 }
 
 func (m *Manager) clearWakeAndHoldOverrides(id string) error {
@@ -1127,7 +1094,8 @@ func (m *Manager) Prune(before time.Time) (int, error) {
 // given cutoff and reports the affected session IDs and queued wait nudges.
 func (m *Manager) PruneDetailed(before time.Time) (PruneResult, error) {
 	all, err := m.store.List(beads.ListQuery{
-		Label: LabelSession,
+		Label:      LabelSession,
+		SkipParent: true,
 	})
 	if err != nil {
 		return PruneResult{}, fmt.Errorf("listing sessions: %w", err)
@@ -1155,14 +1123,12 @@ func (m *Manager) PruneDetailed(before time.Time) (PruneResult, error) {
 		if !ts.Before(before) {
 			continue
 		}
-		nudgeIDs, capped, err := CancelWaitsAndCollectNudgeIDs(m.store, b.ID, time.Now().UTC())
-		if err != nil && !beads.IsLookupLimitError(err) {
-			return result, fmt.Errorf("canceling waits for session %s: %w", b.ID, err)
-		}
-		if capped || beads.IsLookupLimitError(err) {
-			log.Printf("session %s: pruning after capped wait nudge lookup: %v", b.ID, err)
+		nudgeIDs, err := WaitNudgeIDs(m.store, b.ID)
+		if err != nil {
+			return result, fmt.Errorf("listing wait nudges for session %s: %w", b.ID, err)
 		}
 		result.WaitNudgeIDs = append(result.WaitNudgeIDs, nudgeIDs...)
+		_ = CancelWaits(m.store, b.ID, time.Now().UTC())
 		if err := m.store.Close(b.ID); err != nil {
 			return result, fmt.Errorf("closing session %s: %w", b.ID, err)
 		}
@@ -1204,19 +1170,13 @@ func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) Runtim
 		return obs
 	}
 	obs.Running = m.sp.IsRunning(info.SessionName)
-	if len(processNames) > 0 {
-		obs.Alive = m.sp.ProcessAlive(info.SessionName, processNames)
-		if obs.Alive && !obs.Running {
-			obs.Running = true
-		}
-	} else {
-		obs.Alive = obs.Running
+	if !obs.Running {
+		return obs
 	}
-	if obs.Running {
-		obs.Attached = m.sp.IsAttached(info.SessionName)
-		if lastActive, err := m.sp.GetLastActivity(info.SessionName); err == nil {
-			obs.LastActive = lastActive
-		}
+	obs.Alive = m.sp.ProcessAlive(info.SessionName, processNames)
+	obs.Attached = m.sp.IsAttached(info.SessionName)
+	if lastActive, err := m.sp.GetLastActivity(info.SessionName); err == nil {
+		obs.LastActive = lastActive
 	}
 	return obs
 }
@@ -1241,8 +1201,9 @@ func (m *Manager) List(stateFilter string, templateFilter string) ([]Info, error
 // redundant store queries by the caller (e.g., for building a bead index).
 func (m *Manager) ListFull(stateFilter string, templateFilter string) (*ListResult, error) {
 	all, err := m.store.List(beads.ListQuery{
-		Label: LabelSession,
-		Sort:  beads.SortCreatedDesc,
+		Label:      LabelSession,
+		SkipParent: true,
+		Sort:       beads.SortCreatedDesc,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing sessions: %w", err)
@@ -1350,11 +1311,6 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 		ResumeStyle:   b.Metadata["resume_style"],
 		ResumeCommand: b.Metadata["resume_command"],
 		CreatedAt:     b.CreatedAt,
-	}
-	if raw := strings.TrimSpace(b.Metadata[MetadataLastNudgeDeliveredAt]); raw != "" {
-		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
-			info.LastNudgeDeliveredAt = parsed
-		}
 	}
 
 	// Enrich with live runtime state if active.

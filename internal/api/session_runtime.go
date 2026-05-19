@@ -33,7 +33,6 @@ func sessionCreateHints(resolved *config.ResolvedProvider, mcpServers []runtime.
 		ReadyDelayMs:           resolved.ReadyDelayMs,
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
 		MCPServers:             mcpServers,
 	}
 }
@@ -45,7 +44,6 @@ func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, mcpSe
 		ReadyDelayMs:           resolved.ReadyDelayMs,
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
 		Env:                    resolved.Env,
 		MCPServers:             mcpServers,
 	}

@@ -542,6 +542,34 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 	}, nil
 }
 
+// SubmitSessionAccepted sends a semantic submit request and returns once the
+// API accepts it. Use this for ephemeral nudges where the durable result stream
+// is not required by the caller.
+func (c *Client) SubmitSessionAccepted(id, message string, intent session.SubmitIntent) error {
+	if err := c.requireCityScope(); err != nil {
+		return err
+	}
+	body := genclient.SubmitSessionJSONRequestBody{Message: message}
+	if intent != "" {
+		i := genclient.SubmitIntent(intent)
+		body.Intent = &i
+	}
+	resp, err := c.cw.SubmitSessionWithResponse(context.Background(), c.cityName, id, nil, body)
+	if err != nil {
+		return &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return err
+	}
+	if resp.JSON202 == nil {
+		return fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return nil
+}
+
 var errClientUninitialized = errors.New("api client not initialized")
 
 // checkMutation handles the (resp, err) tuple from a generated mutation
@@ -566,7 +594,7 @@ func isNil(v any) bool {
 		return true
 	}
 	rv := reflect.ValueOf(v)
-	return rv.Kind() == reflect.Pointer && rv.IsNil()
+	return rv.Kind() == reflect.Ptr && rv.IsNil()
 }
 
 // pdOf extracts the generated client's decoded Problem Details pointer
@@ -585,7 +613,7 @@ func pdOf(resp any) *genclient.ErrorModel {
 		return nil
 	}
 	rv := reflect.ValueOf(resp)
-	if rv.Kind() == reflect.Pointer {
+	if rv.Kind() == reflect.Ptr {
 		if rv.IsNil() {
 			return nil
 		}

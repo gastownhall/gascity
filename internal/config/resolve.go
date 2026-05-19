@@ -103,22 +103,6 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 	return resolved, nil
 }
 
-// AgentProcessNames resolves the process-name hints used to observe an agent's
-// runtime liveness, following the same provider resolution path as launch.
-func AgentProcessNames(cfg *City, agent Agent, lookPath LookPathFunc) []string {
-	if len(agent.ProcessNames) > 0 {
-		return append([]string(nil), agent.ProcessNames...)
-	}
-	if cfg == nil || lookPath == nil {
-		return nil
-	}
-	resolved, err := ResolveProvider(&agent, &cfg.Workspace, cfg.Providers, lookPath)
-	if err != nil || len(resolved.ProcessNames) == 0 {
-		return nil
-	}
-	return append([]string(nil), resolved.ProcessNames...)
-}
-
 // ResolveInstallHooks returns the hook providers to install for an agent.
 // Agent-level overrides workspace-level (replace, not additive).
 // Returns nil if neither specifies hooks.
@@ -190,7 +174,7 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 	builtins := BuiltinProviders()
 	if spec, ok := builtins[name]; ok {
 		if _, err := lookPath(spec.pathCheckBinary()); err != nil {
-			return nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, spec.pathCheckBinary())
+			return nil, fmt.Errorf("%w: %q", ErrProviderNotInPATH, name)
 		}
 		return &spec, nil
 	}
@@ -246,9 +230,6 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	// otherwise base is preserved (including base's own &false).
 	if city.EmitsPermissionWarning != nil {
 		result.EmitsPermissionWarning = city.EmitsPermissionWarning
-	}
-	if city.AcceptStartupDialogs != nil {
-		result.AcceptStartupDialogs = cloneBoolPtr(city.AcceptStartupDialogs)
 	}
 	if city.PathCheck != "" {
 		result.PathCheck = city.PathCheck
@@ -547,7 +528,6 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		ReadyDelayMs:           spec.ReadyDelayMs,
 		ReadyPromptPrefix:      spec.ReadyPromptPrefix,
 		EmitsPermissionWarning: derefBool(spec.EmitsPermissionWarning),
-		AcceptStartupDialogs:   cloneBoolPtr(spec.AcceptStartupDialogs),
 		SupportsACP:            derefBool(spec.SupportsACP),
 		SupportsHooks:          derefBool(spec.SupportsHooks),
 		InstructionsFile:       spec.InstructionsFile,
@@ -755,9 +735,6 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 	if leaf.EmitsPermissionWarning == nil && providerBoolFieldSet(r, "emits_permission_warning") {
 		v := r.EmitsPermissionWarning
 		out.EmitsPermissionWarning = &v
-	}
-	if leaf.AcceptStartupDialogs == nil && providerBoolFieldSet(r, "accept_startup_dialogs") {
-		out.AcceptStartupDialogs = cloneBoolPtr(r.AcceptStartupDialogs)
 	}
 	if leaf.SupportsACP == nil && providerBoolFieldSet(r, "supports_acp") {
 		v := r.SupportsACP

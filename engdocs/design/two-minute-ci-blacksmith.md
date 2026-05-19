@@ -2,13 +2,13 @@
 title: "Two-Minute CI With Blacksmith"
 ---
 
-| Field | Value |
-|---|---|
-| Status | Proposed |
-| Date | 2026-04-29 |
-| Author(s) | Codex |
-| Issue | ga-nakct |
-| Supersedes | N/A |
+| Field      | Value      |
+| ---------- | ---------- |
+| Status     | Proposed   |
+| Date       | 2026-04-29 |
+| Author(s)  | Codex      |
+| Issue      | ga-nakct   |
+| Supersedes | N/A        |
 
 ## Summary
 
@@ -50,13 +50,13 @@ This design proposes:
 
 Recent production PR CI runs show a stable critical path:
 
-| Lane | Recent average |
-|---|---:|
-| `Integration / review-formulas` | ~23.1m |
-| `Integration / rest` | ~22.6m |
-| `Integration / packages` | ~9.8m |
-| `cmd/gc process suite` | ~8.8m |
-| `Check` | ~8.4m |
+| Lane                            | Recent average |
+| ------------------------------- | -------------: |
+| `Integration / review-formulas` |         ~23.1m |
+| `Integration / rest`            |         ~22.6m |
+| `Integration / packages`        |          ~9.8m |
+| `cmd/gc process suite`          |          ~8.8m |
+| `Check`                         |          ~8.4m |
 
 The last sampled real `ci.yml` PR runs clustered around a 23-24 minute wall
 clock. A representative run was
@@ -64,14 +64,14 @@ clock. A representative run was
 
 The `Check` job serializes several independent gates:
 
-| Step | Recent average |
-|---|---:|
-| `Lint` | ~3.35m |
-| `Test` / `make test-cover` | ~2.0-2.3m |
-| Tier A acceptance | ~1.7m |
-| `Vet` | ~0.25m |
-| dashboard drift check | ~0.25m |
-| docs/spec checks | less than 0.1m each |
+| Step                       |      Recent average |
+| -------------------------- | ------------------: |
+| `Lint`                     |              ~3.35m |
+| `Test` / `make test-cover` |           ~2.0-2.3m |
+| Tier A acceptance          |               ~1.7m |
+| `Vet`                      |              ~0.25m |
+| dashboard drift check      |              ~0.25m |
+| docs/spec checks           | less than 0.1m each |
 
 The repository already has useful shard boundaries:
 
@@ -108,41 +108,41 @@ Relevant sources:
 The migration must preserve the blocking intent of every current CI and RC
 lane. This is the starting classification:
 
-| Current lane | Current workflow | Target classification |
-|---|---|---|
-| `Check` | `ci.yml` | Required PR preflight, split into stable sublanes |
-| `Release config` | `ci.yml` | Required PR preflight |
-| `Dashboard SPA` | `ci.yml` | Required PR preflight |
-| `cmd/gc process suite` | `ci.yml` | Required PR integration when path-gated today; full on infra changes, main, and RC |
-| `Integration / packages` | `ci.yml` | Legacy lane may remain best-effort during overlap; replacement `CI / integration` lane is blocking with no `continue-on-error` |
-| `Integration / rest` | `ci.yml` | Legacy lane may remain best-effort during overlap; replacement `CI / integration` lane is blocking with no `continue-on-error` |
-| `Integration / bdstore` | `ci.yml` | Required provider integration when beads/Dolt paths change; full on main and RC |
-| `Integration / review-formulas` | `ci.yml` and `review-formulas.yml` | Required when review-formulas paths or label match; remove duplicate sequential lane |
-| `Worker core` and `Worker core phase 2` | `ci.yml` | Required when worker paths change |
-| `Worker inference phase 3` | `ci.yml` | Catalog/report lane until executable inference scenarios land |
-| `Pack compatibility gate` | `ci.yml` | Required when pack paths change |
-| `MCP mail conformance` | `ci.yml` | Optional until upstream API drift is under local control |
-| `Docker session` | `ci.yml` | Required when Docker-session paths change |
-| `K8s session` | `ci.yml` | Optional unless K8s CI is configured |
-| Tier B/C acceptance | `nightly.yml`, `rc-gate.yml` | RC-only and nightly, not two-minute PR path |
-| Tutorial goldens | `rc-gate.yml` | RC-only |
-| GoReleaser snapshot | `rc-gate.yml` | RC-only |
-| macOS parity | `mac-regression.yml`, `rc-gate.yml` | Separate macOS gate with separate SLO |
+| Current lane                            | Current workflow                    | Target classification                                                                                                          |
+| --------------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `Check`                                 | `ci.yml`                            | Required PR preflight, split into stable sublanes                                                                              |
+| `Release config`                        | `ci.yml`                            | Required PR preflight                                                                                                          |
+| `Dashboard SPA`                         | `ci.yml`                            | Required PR preflight                                                                                                          |
+| `cmd/gc process suite`                  | `ci.yml`                            | Required PR integration when path-gated today; full on infra changes, main, and RC                                             |
+| `Integration / packages`                | `ci.yml`                            | Legacy lane may remain best-effort during overlap; replacement `CI / integration` lane is blocking with no `continue-on-error` |
+| `Integration / rest`                    | `ci.yml`                            | Legacy lane may remain best-effort during overlap; replacement `CI / integration` lane is blocking with no `continue-on-error` |
+| `Integration / bdstore`                 | `ci.yml`                            | Required provider integration when beads/Dolt paths change; full on main and RC                                                |
+| `Integration / review-formulas`         | `ci.yml` and `review-formulas.yml`  | Required when review-formulas paths or label match; remove duplicate sequential lane                                           |
+| `Worker core` and `Worker core phase 2` | `ci.yml`                            | Required when worker paths change                                                                                              |
+| `Worker inference phase 3`              | `ci.yml`                            | Catalog/report lane until executable inference scenarios land                                                                  |
+| `Pack compatibility gate`               | `ci.yml`                            | Required when pack paths change                                                                                                |
+| `MCP mail conformance`                  | `ci.yml`                            | Optional until upstream API drift is under local control                                                                       |
+| `Docker session`                        | `ci.yml`                            | Required when Docker-session paths change                                                                                      |
+| `K8s session`                           | `ci.yml`                            | Optional unless K8s CI is configured                                                                                           |
+| Tier B/C acceptance                     | `nightly.yml`, `rc-gate.yml`        | RC-only and nightly, not two-minute PR path                                                                                    |
+| Tutorial goldens                        | `rc-gate.yml`                       | RC-only                                                                                                                        |
+| GoReleaser snapshot                     | `rc-gate.yml`                       | RC-only                                                                                                                        |
+| macOS parity                            | `mac-regression.yml`, `rc-gate.yml` | Separate macOS gate with separate SLO                                                                                          |
 
 ### Two-Minute Latency Budget
 
 The two-minute target is only accepted after a pilot proves this budget can
 close. Phase 3 may target 2-4 minutes until these numbers are measured.
 
-| Segment | Phase 4 budget |
-|---|---:|
-| Trusted planner workflow starts and emits manifests | 10s |
-| Worker runner pickup plus checkout/image verification | 25s |
-| Required shard execution p95 | 60s |
-| Shard result and coverage artifact upload | 10s |
-| Summary runner pickup and artifact fan-in | 10s |
-| Summary validation and status publish | 5s |
-| **Total** | **120s** |
+| Segment                                               | Phase 4 budget |
+| ----------------------------------------------------- | -------------: |
+| Trusted planner workflow starts and emits manifests   |            10s |
+| Worker runner pickup plus checkout/image verification |            25s |
+| Required shard execution p95                          |            60s |
+| Shard result and coverage artifact upload             |            10s |
+| Summary runner pickup and artifact fan-in             |            10s |
+| Summary validation and status publish                 |             5s |
+| **Total**                                             |       **120s** |
 
 Before Phase 3 replaces static sharding, run a Blacksmith pilot against
 `integration-rest` with at least 32 simultaneous workers. The pilot must
@@ -328,15 +328,15 @@ increases shard counts:
 
 Initial matrix partition:
 
-| Matrix caller | Maximum Phase 4 rows | Notes |
-|---|---:|---|
-| `matrix-preflight` | 64 | lint, fmt, vet, docs, spec, dashboard, unit shards |
-| `matrix-acceptance-a` | 32 | Tier A deterministic acceptance |
-| `matrix-cmd-gc` | 64 | process-backed `cmd/gc` tests |
-| `matrix-integration-packages` | 64 | package/test shards outside `test/integration` |
-| `matrix-integration-rest` | 128 | `test/integration` rest shards |
-| `matrix-review-formulas` | 64 | formula scenario shards |
-| `matrix-provider` | 64 | bdstore, Docker, K8s, MCP mail, worker profiles |
+| Matrix caller                 | Maximum Phase 4 rows | Notes                                              |
+| ----------------------------- | -------------------: | -------------------------------------------------- |
+| `matrix-preflight`            |                   64 | lint, fmt, vet, docs, spec, dashboard, unit shards |
+| `matrix-acceptance-a`         |                   32 | Tier A deterministic acceptance                    |
+| `matrix-cmd-gc`               |                   64 | process-backed `cmd/gc` tests                      |
+| `matrix-integration-packages` |                   64 | package/test shards outside `test/integration`     |
+| `matrix-integration-rest`     |                  128 | `test/integration` rest shards                     |
+| `matrix-review-formulas`      |                   64 | formula scenario shards                            |
+| `matrix-provider`             |                   64 | bdstore, Docker, K8s, MCP mail, worker profiles    |
 
 If a matrix would exceed its cap, the planner must either increase runner size
 and reduce shard count, split the suite into another matrix caller, or fail
@@ -390,26 +390,26 @@ into the repo.
 
 Allowed `isolation_class` values:
 
-| Class | Meaning |
-|---|---|
-| `command` | non-Go command with no shared runtime state |
-| `package` | Go package-level shard |
+| Class     | Meaning                                                |
+| --------- | ------------------------------------------------------ |
+| `command` | non-Go command with no shared runtime state            |
+| `package` | Go package-level shard                                 |
 | `process` | process-backed test with isolated tmux/Dolt/home state |
-| `subtest` | subtest-level shard proven safe by audit |
-| `serial` | cannot share a runner process with another unit |
+| `subtest` | subtest-level shard proven safe by audit               |
+| `serial`  | cannot share a runner process with another unit        |
 
 Allowed `skip_reason` values:
 
-| Reason | Meaning |
-|---|---|
-| `path-gated` | skipped by protected path policy |
-| `draft-pr` | skipped because the PR is draft |
-| `label-required` | skipped until a force label is present |
-| `oversized-deferred` | known non-required oversized unit deferred to nightly |
+| Reason                        | Meaning                                               |
+| ----------------------------- | ----------------------------------------------------- |
+| `path-gated`                  | skipped by protected path policy                      |
+| `draft-pr`                    | skipped because the PR is draft                       |
+| `label-required`              | skipped until a force label is present                |
+| `oversized-deferred`          | known non-required oversized unit deferred to nightly |
 | `variance-oversized-deferred` | high-variance unit deferred until split or stabilized |
-| `planner-fallback` | dynamic planning disabled and static fallback used |
-| `dependency-failed` | upstream required setup failed |
-| `not-configured` | provider lane lacks required repo secret/config |
+| `planner-fallback`            | dynamic planning disabled and static fallback used    |
+| `dependency-failed`           | upstream required setup failed                        |
+| `not-configured`              | provider lane lacks required repo secret/config       |
 
 ### Timing Database
 
@@ -494,33 +494,33 @@ The long-term runnable unit is:
 
 Initial suite mapping:
 
-| Suite | Initial unit | Target |
-|---|---|---|
-| lint | command | one 32 vCPU lane |
-| fmt | command | one small lane |
-| vet | command or package shard | one or more lanes |
-| unit-cover | package shard | 8-16 shards |
-| docs | command | one small lane |
-| spec | command | one small lane |
-| dashboard | command group | one small lane |
-| acceptance-a | top-level test | 2-4 shards |
-| cmd-gc-process | top-level test | 8-16 shards |
-| integration-packages | package/top-level test | 8-16 shards |
-| integration-rest | top-level test/subtest | 16-32 shards |
-| review-formulas | scenario/subtest | 8-16 shards |
-| bdstore | top-level test | one lane until it grows |
+| Suite                | Initial unit             | Target                  |
+| -------------------- | ------------------------ | ----------------------- |
+| lint                 | command                  | one 32 vCPU lane        |
+| fmt                  | command                  | one small lane          |
+| vet                  | command or package shard | one or more lanes       |
+| unit-cover           | package shard            | 8-16 shards             |
+| docs                 | command                  | one small lane          |
+| spec                 | command                  | one small lane          |
+| dashboard            | command group            | one small lane          |
+| acceptance-a         | top-level test           | 2-4 shards              |
+| cmd-gc-process       | top-level test           | 8-16 shards             |
+| integration-packages | package/top-level test   | 8-16 shards             |
+| integration-rest     | top-level test/subtest   | 16-32 shards            |
+| review-formulas      | scenario/subtest         | 8-16 shards             |
+| bdstore              | top-level test           | one lane until it grows |
 
 ### Runner Selection
 
 Runner choice is part of the matrix row:
 
-| Lane type | Default runner |
-|---|---|
-| tiny summary/docs/spec/fmt | `blacksmith-4vcpu-ubuntu-2404` |
-| normal Go tests | `blacksmith-8vcpu-ubuntu-2404` |
-| initial lint and package shards | `blacksmith-8vcpu-ubuntu-2404` |
-| ARM parity lanes | `blacksmith-8vcpu-ubuntu-2404-arm` |
-| macOS parity lanes | `blacksmith-12vcpu-macos-15`, outside the two-minute gate |
+| Lane type                       | Default runner                                            |
+| ------------------------------- | --------------------------------------------------------- |
+| tiny summary/docs/spec/fmt      | `blacksmith-4vcpu-ubuntu-2404`                            |
+| normal Go tests                 | `blacksmith-8vcpu-ubuntu-2404`                            |
+| initial lint and package shards | `blacksmith-8vcpu-ubuntu-2404`                            |
+| ARM parity lanes                | `blacksmith-8vcpu-ubuntu-2404-arm`                        |
+| macOS parity lanes              | `blacksmith-12vcpu-macos-15`, outside the two-minute gate |
 
 The gascity proof starts aggressively: tiny summaries can use 2-4 vCPU
 runners, while heavyweight Linux lanes can move directly to 16 or 32 vCPU
@@ -729,11 +729,11 @@ partial output from that shard into a green-looking profile.
 
 Coverage baselines are separate:
 
-| Baseline | Meaning |
-|---|---|
-| `required_pr_coverage` | always-run PR coverage only |
-| `path_gated_pr_coverage` | PR coverage from lanes enabled by path policy |
-| `full_deterministic_coverage` | full main/RC deterministic suite |
+| Baseline                      | Meaning                                       |
+| ----------------------------- | --------------------------------------------- |
+| `required_pr_coverage`        | always-run PR coverage only                   |
+| `path_gated_pr_coverage`      | PR coverage from lanes enabled by path policy |
+| `full_deterministic_coverage` | full main/RC deterministic suite              |
 
 Carryforward is allowed only from protected branch coverage, only for
 path-gated lanes, and only with a staleness bound: carryforward expires after
@@ -853,14 +853,14 @@ only test-owned temp roots and test-owned tmux sockets; it never runs bare
 
 Phase 1 also produces an unsafe-test inventory:
 
-| Field | Meaning |
-|---|---|
-| test identity | package/test/subtest |
+| Field               | Meaning                                         |
+| ------------------- | ----------------------------------------------- |
+| test identity       | package/test/subtest                            |
 | isolation violation | port, tmux, env, filesystem, Dolt, global state |
-| current CI lane | where it runs today |
-| required fix | concrete harness or test change |
-| owner | responsible component/team |
-| target phase | phase before which it must be fixed |
+| current CI lane     | where it runs today                             |
+| required fix        | concrete harness or test change                 |
+| owner               | responsible component/team                      |
+| target phase        | phase before which it must be fixed             |
 
 Tests not yet audited can still run in coarse static shards, but they cannot be
 subtest-sharded or marked `t.Parallel()` until the inventory marks them safe.
@@ -903,16 +903,16 @@ Branch protection changes are dual-published. No phase removes a currently
 protected context until the replacement context has reported successfully on
 the same PRs for an overlap window.
 
-| Phase | Current context | Replacement context | Overlap | Rollback |
-|---|---|---|---|---|
-| 1 | `Check` | `CI / preflight` and `CI / required` | 10 successful PR runs | Continue emitting `Check` as an alias summary until ruleset edit lands |
-| 1 | `Integration / review-formulas` sequential lane | split review-formulas plus `CI / integration` | 10 successful path-matched PR runs | Re-enable old Make target under the same summary name |
-| 1 | `Integration / rest` | `Integration / rest-smoke`, `Integration / rest-full`, `CI / integration` | 10 successful path-matched PR runs | Collapse to old `make test-integration-rest` row |
-| 2 | `cmd/gc process suite` | `cmd-gc[N]` plus `CI / integration` | 20 successful path-matched PR runs | Force one static shard running old target |
-| 2 | `Integration / packages` | `packages[N]` plus `CI / integration` | 20 successful path-matched PR runs | Force one static shard running old target |
-| 3 | static matrices | planner-generated matrices plus `CI / required` | 20 successful same-repo PR runs | Set `CI_PLANNER_MODE=static` and keep summary names |
-| 4 | multiple visible summaries | `CI / required` as sole protected check | 20 successful non-draft PR runs after cache warmup | Keep `CI / required` but switch implementation to static fallback |
-| RC | current `rc-gate.yml` job names | `RC / required` plus visible RC sub-summaries | 5 successful manual RC runs across two refs | Keep `RC / required` but switch implementation to current RC job graph |
+| Phase | Current context                                 | Replacement context                                                       | Overlap                                            | Rollback                                                               |
+| ----- | ----------------------------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------- |
+| 1     | `Check`                                         | `CI / preflight` and `CI / required`                                      | 10 successful PR runs                              | Continue emitting `Check` as an alias summary until ruleset edit lands |
+| 1     | `Integration / review-formulas` sequential lane | split review-formulas plus `CI / integration`                             | 10 successful path-matched PR runs                 | Re-enable old Make target under the same summary name                  |
+| 1     | `Integration / rest`                            | `Integration / rest-smoke`, `Integration / rest-full`, `CI / integration` | 10 successful path-matched PR runs                 | Collapse to old `make test-integration-rest` row                       |
+| 2     | `cmd/gc process suite`                          | `cmd-gc[N]` plus `CI / integration`                                       | 20 successful path-matched PR runs                 | Force one static shard running old target                              |
+| 2     | `Integration / packages`                        | `packages[N]` plus `CI / integration`                                     | 20 successful path-matched PR runs                 | Force one static shard running old target                              |
+| 3     | static matrices                                 | planner-generated matrices plus `CI / required`                           | 20 successful same-repo PR runs                    | Set `CI_PLANNER_MODE=static` and keep summary names                    |
+| 4     | multiple visible summaries                      | `CI / required` as sole protected check                                   | 20 successful non-draft PR runs after cache warmup | Keep `CI / required` but switch implementation to static fallback      |
+| RC    | current `rc-gate.yml` job names                 | `RC / required` plus visible RC sub-summaries                             | 5 successful manual RC runs across two refs        | Keep `RC / required` but switch implementation to current RC job graph |
 
 Ruleset edits are made only after the overlap window and are recorded in the
 implementation PR. Rollback must preserve the same protected check names; it

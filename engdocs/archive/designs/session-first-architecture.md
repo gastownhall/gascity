@@ -138,15 +138,15 @@ metadata:
 
 Every state transition records the reason. Valid values:
 
-| State | Valid Reasons |
-|---|---|
-| creating | `pool_scale_up`, `user_request`, `config_drift_replace` |
-| active | `creation_complete`, `resumed`, `reactivated`, `quarantine_cleared` |
-| suspended | `user_request`, `idle_timeout`, `dependency_down` |
-| draining | `scale_down`, `config_drift`, `manual` |
-| archived | `drain_complete`, `drain_timeout`, `crash_during_drain`, `suspended_scale_down`, `quarantine_evicted` |
-| quarantined | `crash_loop` |
-| closed | `user_request`, `pruned`, `manual`, `stale_creating` |
+| State       | Valid Reasons                                                                                         |
+| ----------- | ----------------------------------------------------------------------------------------------------- |
+| creating    | `pool_scale_up`, `user_request`, `config_drift_replace`                                               |
+| active      | `creation_complete`, `resumed`, `reactivated`, `quarantine_cleared`                                   |
+| suspended   | `user_request`, `idle_timeout`, `dependency_down`                                                     |
+| draining    | `scale_down`, `config_drift`, `manual`                                                                |
+| archived    | `drain_complete`, `drain_timeout`, `crash_during_drain`, `suspended_scale_down`, `quarantine_evicted` |
+| quarantined | `crash_loop`                                                                                          |
+| closed      | `user_request`, `pruned`, `manual`, `stale_creating`                                                  |
 
 Note: `crash_recovery` is used internally by the repair table for
 `active → suspended` transitions during crash recovery, mapping to
@@ -162,6 +162,7 @@ Session state uses two axes:
   `archived`, `quarantined`}: Operational lifecycle within an open bead.
 
 Invariants:
+
 - `closed` beads MUST have `bead.status = "closed"`. The `state` field is
   not meaningful for closed beads (set to empty string on close).
 - All other states require `bead.status = "open"`.
@@ -172,17 +173,17 @@ Invariants:
 
 Which states count against pool `max`:
 
-| State | Counts Against `max` | Rationale |
-|---|---|---|
-| creating | Yes | Reserves capacity; prevents creation burst |
-| active | Yes | Running and receiving work |
-| suspended | Yes | Holds context, temporarily paused |
-| draining | No | Being retired, already de-routed |
-| archived | No | Retired, no resources held |
-| quarantined | Yes* | Holds a slot; see note below |
-| closed | No | Terminal |
+| State       | Counts Against `max` | Rationale                                  |
+| ----------- | -------------------- | ------------------------------------------ |
+| creating    | Yes                  | Reserves capacity; prevents creation burst |
+| active      | Yes                  | Running and receiving work                 |
+| suspended   | Yes                  | Holds context, temporarily paused          |
+| draining    | No                   | Being retired, already de-routed           |
+| archived    | No                   | Retired, no resources held                 |
+| quarantined | Yes\*                | Holds a slot; see note below               |
+| closed      | No                   | Terminal                                   |
 
-*Quarantined sessions count against `max` to prevent replacement. When a
+\*Quarantined sessions count against `max` to prevent replacement. When a
 quarantined session's cooldown expires, the reconciler checks current pool
 occupancy. If the pool is at `max` (because other sessions were created),
 the quarantined session transitions to `archived` instead of `active`.
@@ -315,12 +316,12 @@ session are marked `blocked` with `reason=session_closed`.
 All state transitions that terminate or abandon a runtime MUST clean up
 claimed work. This applies to:
 
-| Transition | Orphan Action |
-|---|---|
-| drain timeout | Mark claimed beads `blocked` (`reason=session_archived`) |
-| crash during drain | Mark claimed beads `blocked` (`reason=session_crash_drain`) |
-| `gc session close` | Mark claimed beads `blocked` (`reason=session_closed`) |
-| `gc session suspend` | Mark claimed beads `blocked` (`reason=session_suspended`) |
+| Transition           | Orphan Action                                               |
+| -------------------- | ----------------------------------------------------------- |
+| drain timeout        | Mark claimed beads `blocked` (`reason=session_archived`)    |
+| crash during drain   | Mark claimed beads `blocked` (`reason=session_crash_drain`) |
+| `gc session close`   | Mark claimed beads `blocked` (`reason=session_closed`)      |
+| `gc session suspend` | Mark claimed beads `blocked` (`reason=session_suspended`)   |
 | active → quarantined | Mark claimed beads `blocked` (`reason=session_quarantined`) |
 
 The cleanup uses the session's `session_name` or bead ID to identify
@@ -336,6 +337,7 @@ are atomic for `MemStore` and `FileStore` (single lock). For `ExecStore`
 (bd/br CLI), writes are sequential but ordered to fail closed:
 
 **Creation ordering (fail closed):**
+
 1. Create bead with `state=creating`, NO `pool:` label
 2. Start runtime
 3. Confirm liveness (`IsRunning()`)
@@ -343,22 +345,26 @@ are atomic for `MemStore` and `FileStore` (single lock). For `ExecStore`
 5. Add `pool:` label (enables routing — only after runtime confirmed)
 
 **Suspend ordering (fail closed, pool sessions):**
+
 1. Remove `pool:` label (stops routing)
 2. Set `state=suspended`, `suspended_at`, `state_reason` (batch)
 3. Kill runtime
 
 **Archive ordering (fail closed):**
+
 1. Remove `pool:` label (stops routing — safe even if crash follows)
 2. Set `state=archived`, `archived_at`, `state_reason` (batch)
 3. Kill runtime
 
 **Reactivate ordering (fail closed):**
+
 1. Start runtime (session must be alive before routing)
 2. Confirm runtime liveness (`IsRunning()`)
 3. Set `state=active`, `state_reason=reactivated`, `generation++` (batch)
 4. Add `pool:` label (enables routing — only after runtime confirmed)
 
 **Resume ordering (fail closed, pool sessions):**
+
 1. Start runtime
 2. Confirm runtime liveness (`IsRunning()`)
 3. Set `state=active`, `state_reason=resumed` (batch)
@@ -376,26 +382,26 @@ deterministically. The guiding principle is **fail closed**: when in
 doubt, leave the session de-routed (no `pool:` label) rather than
 accidentally routing work to a broken session.
 
-| `state` | Has `pool:` label | Runtime running | Is pool session? | Repair Action |
-|---|---|---|---|---|
-| `creating` | No | Yes | Yes | Complete: set `state=active`, add `pool:` label |
-| `creating` | No | Yes | No | Complete: set `state=active` |
-| `creating` | No | No | Any | Close bead (`stale_creating`) if age > `creation_timeout` |
-| `active` | No | Yes | Yes | If pool under `max`: restore label. If at `max`: begin drain. |
-| `active` | No | Yes | No | No repair needed (non-pool, no label expected) |
-| `active` | No | No | Any | Set `state=suspended`, `state_reason=crash_recovery` |
-| `draining` | Yes | Yes | Yes | Remove `pool:` label (interrupted drain start) |
-| `draining` | Yes | No | Yes | Remove `pool:` label, set `state=archived` |
-| `draining` | No | Yes | Yes | No repair needed (drain in progress) |
-| `draining` | No | No | Yes | Set `state=archived` (drain crash completion) |
-| `archived` | Yes | No | Yes | Remove `pool:` label (interrupted archive) |
-| `archived` | No | Yes | Yes | Kill runtime (should not be running) |
-| `suspended` | Yes | No | Yes | Remove `pool:` label (interrupted suspend) |
-| `suspended` | No | Yes | Any | Kill runtime (should not be running) |
-| `quarantined` | Yes | No | Yes | Remove `pool:` label (interrupted quarantine entry) |
-| `quarantined` | Yes | Yes | Yes | Remove `pool:` label, kill runtime |
-| `quarantined` | No | Yes | Any | Kill runtime (quarantined should not be running) |
-| `quarantined` | No | No | Any | No repair needed (correct quarantine state) |
+| `state`       | Has `pool:` label | Runtime running | Is pool session? | Repair Action                                                 |
+| ------------- | ----------------- | --------------- | ---------------- | ------------------------------------------------------------- |
+| `creating`    | No                | Yes             | Yes              | Complete: set `state=active`, add `pool:` label               |
+| `creating`    | No                | Yes             | No               | Complete: set `state=active`                                  |
+| `creating`    | No                | No              | Any              | Close bead (`stale_creating`) if age > `creation_timeout`     |
+| `active`      | No                | Yes             | Yes              | If pool under `max`: restore label. If at `max`: begin drain. |
+| `active`      | No                | Yes             | No               | No repair needed (non-pool, no label expected)                |
+| `active`      | No                | No              | Any              | Set `state=suspended`, `state_reason=crash_recovery`          |
+| `draining`    | Yes               | Yes             | Yes              | Remove `pool:` label (interrupted drain start)                |
+| `draining`    | Yes               | No              | Yes              | Remove `pool:` label, set `state=archived`                    |
+| `draining`    | No                | Yes             | Yes              | No repair needed (drain in progress)                          |
+| `draining`    | No                | No              | Yes              | Set `state=archived` (drain crash completion)                 |
+| `archived`    | Yes               | No              | Yes              | Remove `pool:` label (interrupted archive)                    |
+| `archived`    | No                | Yes             | Yes              | Kill runtime (should not be running)                          |
+| `suspended`   | Yes               | No              | Yes              | Remove `pool:` label (interrupted suspend)                    |
+| `suspended`   | No                | Yes             | Any              | Kill runtime (should not be running)                          |
+| `quarantined` | Yes               | No              | Yes              | Remove `pool:` label (interrupted quarantine entry)           |
+| `quarantined` | Yes               | Yes             | Yes              | Remove `pool:` label, kill runtime                            |
+| `quarantined` | No                | Yes             | Any              | Kill runtime (quarantined should not be running)              |
+| `quarantined` | No                | No              | Any              | No repair needed (correct quarantine state)                   |
 
 **Key principle:** An `active` pool session missing its `pool:` label is
 auto-healed based on pool occupancy. If the pool is under `max`, the label
@@ -484,6 +490,7 @@ The controller's tick loop changes from "rebuild agents from config" to
 "reconcile session beads against desired state."
 
 #### Current Flow (agent-centric)
+
 ```
 tick:
   1. buildAgentsFromConfig() → []agent.Agent       # rebuild every tick
@@ -492,6 +499,7 @@ tick:
 ```
 
 #### Target Flow (session-first)
+
 ```
 tick:
   1. evaluateTemplates(config) → desired state      # which templates, how many
@@ -670,12 +678,12 @@ type CreateFromTemplate struct {
 
 #### Overlay Allowlist
 
-| Key | Description |
-|---|---|
-| `model` | Override provider model |
-| `name` | Override session display name |
-| `title` | Override session title |
-| `prompt` | Append to template prompt (see note) |
+| Key         | Description                                            |
+| ----------- | ------------------------------------------------------ |
+| `model`     | Override provider model                                |
+| `name`      | Override session display name                          |
+| `title`     | Override session title                                 |
+| `prompt`    | Append to template prompt (see note)                   |
 | `env.{KEY}` | Override environment variable (per-template allowlist) |
 
 **Prompt overlay semantics:** `overlay.prompt` is **appended** to the
@@ -722,7 +730,7 @@ Overlay fields are stored on the session bead (prefixed with `overlay.`)
 so that resume reconstructs the same configuration.
 
 **Overlay revalidation on resume/reactivate:** When a session is resumed
-or reactivated, stored overlays are revalidated against the *current*
+or reactivated, stored overlays are revalidated against the _current_
 template policy (`allow_overlay`, `allow_env_override`). If the template
 owner has revoked an overlay key since the session was created, the
 offending overlay fields are stripped from the bead and the session
@@ -781,16 +789,16 @@ Archived sessions accumulate over time. To prevent unbounded growth:
 The `agent.Agent` interface (`internal/agent/agent.go`) becomes unnecessary.
 Its operations map directly to `session.Manager` + `runtime.Provider`:
 
-| agent.Agent method | Replacement |
-|---|---|
-| `Start()` | `session.Manager.Create()` or `.Attach()` |
-| `Stop()` | `session.Manager.Suspend()` or `.Close()` |
-| `Attach()` | `session.Manager.Attach()` |
-| `IsRunning()` | `sp.IsRunning(sessionName)` |
-| `IsAttached()` | `sp.IsAttached(sessionName)` |
-| `Nudge()` | `sp.Nudge(sessionName, msg)` |
-| `Peek()` | `session.Manager.Peek()` |
-| `SessionConfig()` | Template resolution (pure function) |
+| agent.Agent method | Replacement                               |
+| ------------------ | ----------------------------------------- |
+| `Start()`          | `session.Manager.Create()` or `.Attach()` |
+| `Stop()`           | `session.Manager.Suspend()` or `.Close()` |
+| `Attach()`         | `session.Manager.Attach()`                |
+| `IsRunning()`      | `sp.IsRunning(sessionName)`               |
+| `IsAttached()`     | `sp.IsAttached(sessionName)`              |
+| `Nudge()`          | `sp.Nudge(sessionName, msg)`              |
+| `Peek()`           | `session.Manager.Peek()`                  |
+| `SessionConfig()`  | Template resolution (pure function)       |
 
 The `managed` struct (internal/agent/agent.go:246-258) is replaced by the
 session bead + template resolution. `buildOneAgent` (cmd/gc/build_agent.go)
@@ -804,6 +812,7 @@ a big-bang rewrite. Each phase has a defined single-writer for runtime
 lifecycle and a rollback procedure.
 
 #### Phase 0: Bead Schema Migration (no risk)
+
 Existing session beads use `type: "agent_session"` with label
 `gc:agent_session` and states `active/stopped/orphaned/suspended`. This
 phase adds forward-compatible handling: the controller recognizes both
@@ -815,22 +824,24 @@ command.
 
 **Legacy state mapping:**
 
-| Legacy state (`agent_session`) | New state (`session`) | Pool occupancy |
-|---|---|---|
-| `active` | `active` | Counts against `max` |
-| `suspended` | `suspended` | Counts against `max` |
-| `stopped` | `closed` (terminal) | Does not count |
-| `orphaned` | `suspended` (no runtime) | Counts against `max` |
+| Legacy state (`agent_session`) | New state (`session`)    | Pool occupancy       |
+| ------------------------------ | ------------------------ | -------------------- |
+| `active`                       | `active`                 | Counts against `max` |
+| `suspended`                    | `suspended`              | Counts against `max` |
+| `stopped`                      | `closed` (terminal)      | Does not count       |
+| `orphaned`                     | `suspended` (no runtime) | Counts against `max` |
 
 Legacy beads count against pool `max` during the hybrid period to prevent
 over-provisioning.
 
 **Phase 0 tests:**
+
 - `TestLegacyBeadRecognition` — controller reads `agent_session` beads
 - `TestLegacyStateMapping` — legacy states map to new model correctly
 - `TestHybridPoolOccupancy` — mixed legacy + new beads count correctly
 
 #### Phase 1: Template Resolution (low risk)
+
 Extract template resolution from `buildOneAgent` into a pure function that
 returns `session.CreateParams` (command, env, hints, workDir). No behavioral
 change — `buildOneAgent` calls the new function internally.
@@ -839,6 +850,7 @@ change — `buildOneAgent` calls the new function internally.
 **Rollback:** Revert the extraction. `buildOneAgent` is self-contained again.
 
 #### Phase 2: Controller Uses session.Manager (medium risk)
+
 Modify the controller to create sessions via `session.Manager.Create()`
 instead of `agent.Agent.Start()`. Session beads become the source of truth.
 `agent.Agent` objects are still built but become **read-only** — they are
@@ -854,6 +866,7 @@ are made unreachable in Phase 2 (panic if called, caught by tests).
 to use `agent.Agent.Start()`.
 
 #### Phase 3: Pool Archival (medium risk)
+
 Implement the drain protocol and archived state for pool sessions. Old pool
 sessions transition through `draining` → `archived` instead of being
 destroyed. Work routing excludes non-active sessions. Controller prefers
@@ -870,27 +883,29 @@ A `TestPhase3Downgrade_HashNamedSessions` integration test validates this.
 
 **Single writer:** `session.Manager` (lifecycle, including new drain/archive).
 **Rollback:** Revert to immediate destroy on scale-down. Rollback runbook:
+
 1. While the new controller is still running, execute cleanup via socket:
    `gc session drain-all --template=X` (drains active sessions)
    `gc session close --state=archived,quarantined,creating` (closes beads)
 2. Stop the new controller
 3. Start the old binary (Phase 2)
 4. Old binary skips unknown state values with warning (forward-compat)
-If the new controller has already crashed (can't use socket), use
-`gc session admin-close --offline` which: (a) acquires `controller.lock`
-(non-blocking — fails if another controller is running), (b) kills
-runtimes by `session_name` via `runtime.Provider.Stop()`, (c) marks
-orphaned beads as `blocked`, and (d) writes state changes directly to
-bead store (bypassing socket). Requires `--yes` flag for non-interactive
-confirmation. This is the ONLY sanctioned offline mutation path and does
-NOT require a running controller — it operates directly on the bead store
-and runtime provider.
-**Forward compatibility:** Unknown `state` values are skipped with a
-`session.unknown_state` warning event, not errors. This allows safe
-rollback from Phase 3 to Phase 2 without crashing on `draining`/`archived`
-beads that the older binary doesn't understand.
+   If the new controller has already crashed (can't use socket), use
+   `gc session admin-close --offline` which: (a) acquires `controller.lock`
+   (non-blocking — fails if another controller is running), (b) kills
+   runtimes by `session_name` via `runtime.Provider.Stop()`, (c) marks
+   orphaned beads as `blocked`, and (d) writes state changes directly to
+   bead store (bypassing socket). Requires `--yes` flag for non-interactive
+   confirmation. This is the ONLY sanctioned offline mutation path and does
+   NOT require a running controller — it operates directly on the bead store
+   and runtime provider.
+   **Forward compatibility:** Unknown `state` values are skipped with a
+   `session.unknown_state` warning event, not errors. This allows safe
+   rollback from Phase 3 to Phase 2 without crashing on `draining`/`archived`
+   beads that the older binary doesn't understand.
 
 #### Phase 4: Remove agent.Agent (low risk, large diff)
+
 Replace all `agent.Agent` usage with direct `session.Manager` +
 `runtime.Provider` calls. Remove `internal/agent/agent.go`, `buildOneAgent`,
 `buildAgentsFromConfig`. The controller operates entirely on session beads.
@@ -901,6 +916,7 @@ mechanically straightforward since Phase 2-3 already proved bead-driven
 lifecycle.
 
 #### Phase 5: Multi-Instance Consolidation
+
 Remove `multiRegistry`. Multi-instance agents are just templates with
 unlimited sessions — `gc session new {template}` creates a new session
 from the template. `gc session suspend {session}` suspends or closes it.
@@ -941,6 +957,7 @@ showing `[redacted]` instead.
 `quarantined`. Archived and closed sessions are hidden by default.
 
 **Flags:**
+
 - `--all` — show all states including archived and closed
 - `--state=archived` — filter to specific state
 - `--template=worker` — filter by template name
@@ -967,67 +984,67 @@ Each migration phase has a defined test plan. All pool lifecycle tests use
 
 ### Phase 1 Tests
 
-| Test | Type | What It Verifies |
-|---|---|---|
-| `TestResolveTemplate_Basic` | Unit | Pure function produces correct CreateParams |
-| `TestResolveTemplate_WithOverlay` | Unit | Overlay merges correctly with template defaults |
-| `TestResolveTemplate_OverlayDenylist` | Unit | Banned keys rejected at creation |
-| `TestConfigHash_Canonical` | Unit | Semantically identical configs produce identical hashes |
-| `TestConfigHash_Behavioral` | Unit | Non-behavioral changes (comments, whitespace) don't change hash |
+| Test                                  | Type | What It Verifies                                                |
+| ------------------------------------- | ---- | --------------------------------------------------------------- |
+| `TestResolveTemplate_Basic`           | Unit | Pure function produces correct CreateParams                     |
+| `TestResolveTemplate_WithOverlay`     | Unit | Overlay merges correctly with template defaults                 |
+| `TestResolveTemplate_OverlayDenylist` | Unit | Banned keys rejected at creation                                |
+| `TestConfigHash_Canonical`            | Unit | Semantically identical configs produce identical hashes         |
+| `TestConfigHash_Behavioral`           | Unit | Non-behavioral changes (comments, whitespace) don't change hash |
 
 **Existing tests that break:** None (pure extraction, no behavioral change).
 
 ### Phase 2 Tests
 
-| Test | Type | What It Verifies |
-|---|---|---|
-| `TestController_SessionManager_Create` | Integration | Controller creates sessions via Manager, not agent.Agent |
-| `TestController_AgentStart_Panics` | Unit | agent.Agent.Start() is unreachable |
-| `TestController_BeadDrivenLifecycle` | Integration | 3+ ticks with controller restart; no duplicate sessions, no orphaned beads |
-| `TestController_FailedBeadRead_AbortsTick` | Unit | Bead store error → tick aborted, no mutations |
+| Test                                       | Type        | What It Verifies                                                           |
+| ------------------------------------------ | ----------- | -------------------------------------------------------------------------- |
+| `TestController_SessionManager_Create`     | Integration | Controller creates sessions via Manager, not agent.Agent                   |
+| `TestController_AgentStart_Panics`         | Unit        | agent.Agent.Start() is unreachable                                         |
+| `TestController_BeadDrivenLifecycle`       | Integration | 3+ ticks with controller restart; no duplicate sessions, no orphaned beads |
+| `TestController_FailedBeadRead_AbortsTick` | Unit        | Bead store error → tick aborted, no mutations                              |
 
 **Existing tests that break:** Tests calling `agent.Agent.Start()` directly
 need updating to use `session.Manager.Create()`.
 
 ### Phase 3 Tests
 
-| Test | Type | What It Verifies |
-|---|---|---|
-| `TestDrainProtocol_InFlightCompletes` | Integration | Drain waits for work, then archives |
-| `TestDrainProtocol_Timeout` | Integration | Drain timeout → archive + orphan beads marked |
-| `TestDrainProtocol_CrashDuringDrain` | Integration | Crash during drain → immediate archive |
-| `TestArchive_LabelRemoved` | Unit | Archived session has no pool: label |
-| `TestSuspend_PoolLabelRemoved` | Unit | Suspended pool session has no pool: label |
-| `TestResume_LabelRestoredAfterLiveness` | Integration | Label only added after runtime confirmed alive |
-| `TestReactivate_LabelRestoredAfterLiveness` | Integration | Label only added after runtime confirmed alive |
-| `TestCreation_LabelAddedAfterLiveness` | Integration | pool: label only after state=active |
-| `TestArchive_Reactivate_AtomicMutations` | Unit | State + label changes are batched |
-| `TestArchivedSession_NoWorkRouting` | Integration | bd ready excludes archived sessions |
-| `TestSuspendedSession_NoWorkRouting` | Integration | bd ready excludes suspended sessions |
-| `TestRetentionPolicy_MaxArchived` | Unit | Oldest archived closed when cap exceeded |
-| `TestCrashLoop_Quarantine` | Integration | N crashes → quarantined, cooldown → reactivated |
-| `TestQuarantine_ReactivationBlockedAtMax` | Integration | At-max pool → quarantined→archived |
-| `TestQuarantine_CycleCountPersisted` | Unit | quarantine_cycle survives controller restart |
-| `TestScaleDown_SuspendedFirst` | Integration | Suspended archived before active drained |
-| `TestExecStore_PartialFailureRepair` | Integration | Each repair table row (uses fault-injecting store wrapper) |
-| `TestSocketConcurrency_MutationDuringTick` | Integration | CLI mutation via socket during active tick |
-| `TestCreating_StaleCleanup` | Integration | Creating bead >60s → closed or completed |
-| `TestForwardCompatibility_UnknownState` | Unit | Unknown state values skipped with warning |
-| `TestReactivate_OverlayRevalidation` | Integration | Revoked overlay keys stripped on reactivate |
-| `TestArchivedSecretTTL_FreshMode` | Integration | Secrets scrubbed after TTL for wake_mode=fresh |
-| `TestAdminClose_Offline_KillsRuntimes` | Integration | Offline admin-close kills runtimes + marks beads |
-| `TestDrainCompletion_AuthoritativeQuery` | Integration | Pre-archive query catches late work claims |
-| `TestExecStore_QuarantineRepair` | Integration | All quarantine repair table rows |
-| `TestActiveCrash_BelowThreshold_RestartInPlace` | Integration | Single crash restarts without state change |
+| Test                                            | Type        | What It Verifies                                           |
+| ----------------------------------------------- | ----------- | ---------------------------------------------------------- |
+| `TestDrainProtocol_InFlightCompletes`           | Integration | Drain waits for work, then archives                        |
+| `TestDrainProtocol_Timeout`                     | Integration | Drain timeout → archive + orphan beads marked              |
+| `TestDrainProtocol_CrashDuringDrain`            | Integration | Crash during drain → immediate archive                     |
+| `TestArchive_LabelRemoved`                      | Unit        | Archived session has no pool: label                        |
+| `TestSuspend_PoolLabelRemoved`                  | Unit        | Suspended pool session has no pool: label                  |
+| `TestResume_LabelRestoredAfterLiveness`         | Integration | Label only added after runtime confirmed alive             |
+| `TestReactivate_LabelRestoredAfterLiveness`     | Integration | Label only added after runtime confirmed alive             |
+| `TestCreation_LabelAddedAfterLiveness`          | Integration | pool: label only after state=active                        |
+| `TestArchive_Reactivate_AtomicMutations`        | Unit        | State + label changes are batched                          |
+| `TestArchivedSession_NoWorkRouting`             | Integration | bd ready excludes archived sessions                        |
+| `TestSuspendedSession_NoWorkRouting`            | Integration | bd ready excludes suspended sessions                       |
+| `TestRetentionPolicy_MaxArchived`               | Unit        | Oldest archived closed when cap exceeded                   |
+| `TestCrashLoop_Quarantine`                      | Integration | N crashes → quarantined, cooldown → reactivated            |
+| `TestQuarantine_ReactivationBlockedAtMax`       | Integration | At-max pool → quarantined→archived                         |
+| `TestQuarantine_CycleCountPersisted`            | Unit        | quarantine_cycle survives controller restart               |
+| `TestScaleDown_SuspendedFirst`                  | Integration | Suspended archived before active drained                   |
+| `TestExecStore_PartialFailureRepair`            | Integration | Each repair table row (uses fault-injecting store wrapper) |
+| `TestSocketConcurrency_MutationDuringTick`      | Integration | CLI mutation via socket during active tick                 |
+| `TestCreating_StaleCleanup`                     | Integration | Creating bead >60s → closed or completed                   |
+| `TestForwardCompatibility_UnknownState`         | Unit        | Unknown state values skipped with warning                  |
+| `TestReactivate_OverlayRevalidation`            | Integration | Revoked overlay keys stripped on reactivate                |
+| `TestArchivedSecretTTL_FreshMode`               | Integration | Secrets scrubbed after TTL for wake_mode=fresh             |
+| `TestAdminClose_Offline_KillsRuntimes`          | Integration | Offline admin-close kills runtimes + marks beads           |
+| `TestDrainCompletion_AuthoritativeQuery`        | Integration | Pre-archive query catches late work claims                 |
+| `TestExecStore_QuarantineRepair`                | Integration | All quarantine repair table rows                           |
+| `TestActiveCrash_BelowThreshold_RestartInPlace` | Integration | Single crash restarts without state change                 |
 
 **Existing tests that break:** Pool scaling tests that expect immediate
 destroy need updating to expect drain → archive flow.
 
 ### Phase 4 Tests
 
-| Test | Type | What It Verifies |
-|---|---|---|
-| `TestNoAgentAgentImports` | Build | No package imports `internal/agent` |
+| Test                              | Type        | What It Verifies                        |
+| --------------------------------- | ----------- | --------------------------------------- |
+| `TestNoAgentAgentImports`         | Build       | No package imports `internal/agent`     |
 | `TestController_DirectManagerOps` | Integration | All operations work without agent.Agent |
 
 **Existing tests that break:** All tests using `agent.Agent` interface
@@ -1035,10 +1052,10 @@ directly. Mechanical update to `session.Manager` equivalents.
 
 ### Phase 5 Tests
 
-| Test | Type | What It Verifies |
-|---|---|---|
+| Test                                | Type        | What It Verifies                                          |
+| ----------------------------------- | ----------- | --------------------------------------------------------- |
 | `TestMultiInstance_ViaSessionBeads` | Integration | gc session new creates session, gc session suspend closes |
-| `TestNoMultiRegistry` | Build | multi_registry.go removed, no references |
+| `TestNoMultiRegistry`               | Build       | multi_registry.go removed, no references                  |
 
 **Existing tests that break:** Multi-instance tests. Rewritten to use
 session-based operations.
@@ -1064,19 +1081,19 @@ The session conformance suite (`internal/session/conformance_test.go`) gains:
 
 ### Files to Change
 
-| File | Phase | Change |
-|---|---|---|
-| `internal/session/manager.go` | 1-2 | Extend Create to accept template resolution |
-| `cmd/gc/build_agent.go` | 1 | Extract resolveTemplate() |
-| `cmd/gc/build_agents.go` | 2-4 | Rewrite to produce desired template counts |
-| `cmd/gc/session_reconciler.go` | 2-3 | Reconcile against templates, not agents |
-| `cmd/gc/session_beads.go` | 2-3 | Simplify (beads are now canonical) |
-| `cmd/gc/session_wake.go` | 3 | Add drain/archived/quarantine state transitions |
-| `cmd/gc/pool.go` | 3-4 | Pool scaling creates/drains/archives sessions |
-| `cmd/gc/multi_registry.go` | 5 | Remove entirely |
-| `internal/agent/agent.go` | 4 | Remove entirely |
-| `cmd/gc/city_runtime.go` | 2-4 | Remove agent.Agent fields |
-| `internal/config/config.go` | 1 | Add defaults section to Agent |
+| File                           | Phase | Change                                          |
+| ------------------------------ | ----- | ----------------------------------------------- |
+| `internal/session/manager.go`  | 1-2   | Extend Create to accept template resolution     |
+| `cmd/gc/build_agent.go`        | 1     | Extract resolveTemplate()                       |
+| `cmd/gc/build_agents.go`       | 2-4   | Rewrite to produce desired template counts      |
+| `cmd/gc/session_reconciler.go` | 2-3   | Reconcile against templates, not agents         |
+| `cmd/gc/session_beads.go`      | 2-3   | Simplify (beads are now canonical)              |
+| `cmd/gc/session_wake.go`       | 3     | Add drain/archived/quarantine state transitions |
+| `cmd/gc/pool.go`               | 3-4   | Pool scaling creates/drains/archives sessions   |
+| `cmd/gc/multi_registry.go`     | 5     | Remove entirely                                 |
+| `internal/agent/agent.go`      | 4     | Remove entirely                                 |
+| `cmd/gc/city_runtime.go`       | 2-4   | Remove agent.Agent fields                       |
+| `internal/config/config.go`    | 1     | Add defaults section to Agent                   |
 
 ### Backward Compatibility
 
@@ -1159,6 +1176,7 @@ The session conformance suite (`internal/session/conformance_test.go`) gains:
 ### Creating a Pool Member
 
 **Current (7 steps, in-memory):**
+
 1. `evaluatePool()` → desired count
 2. `poolAgents()` → deep copy config per instance
 3. `buildOneAgent()` → resolve provider, build command, create agent.Agent
@@ -1168,6 +1186,7 @@ The session conformance suite (`internal/session/conformance_test.go`) gains:
 7. Agent picks up work via `bd ready --label=pool:{template}`
 
 **Target (5 steps, bead-driven):**
+
 1. `evaluatePool()` → desired count
 2. `resolveTemplate()` → session.CreateParams from config
 3. `session.Manager.Create()` → bead (state=creating, no pool: label)
@@ -1177,12 +1196,14 @@ The session conformance suite (`internal/session/conformance_test.go`) gains:
 ### Stopping a Pool Member
 
 **Current (destroyed):**
+
 1. Controller sees excess instances
 2. `agent.Agent.Stop()` → tmux session killed
 3. `syncSessionBeads()` → bead closed
 4. History lost
 
 **Target (drained + archived):**
+
 1. Controller sees excess active sessions
 2. `session.Manager.Drain()` → state=draining, pool label removed
 3. Wait for in-flight work (or timeout)

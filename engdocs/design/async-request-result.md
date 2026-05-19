@@ -114,14 +114,14 @@ payloads intentionally have the same fields. For example,
 both carry `{request_id, name, path}`; the envelope type is what
 makes them distinct.
 
-| Event type | Payload |
-|------------|---------|
-| `request.result.city.create` | `CityCreateSucceededPayload` |
+| Event type                       | Payload                          |
+| -------------------------------- | -------------------------------- |
+| `request.result.city.create`     | `CityCreateSucceededPayload`     |
 | `request.result.city.unregister` | `CityUnregisterSucceededPayload` |
-| `request.result.session.create` | `SessionCreateSucceededPayload` |
+| `request.result.session.create`  | `SessionCreateSucceededPayload`  |
 | `request.result.session.message` | `SessionMessageSucceededPayload` |
-| `request.result.session.submit` | `SessionSubmitSucceededPayload` |
-| `request.failed` | `RequestFailedPayload` |
+| `request.result.session.submit`  | `SessionSubmitSucceededPayload`  |
+| `request.failed`                 | `RequestFailedPayload`           |
 
 ### Success payloads
 
@@ -130,6 +130,7 @@ full typed data the old synchronous handler returned. No optional
 fields — every field is always present.
 
 **City create:**
+
 ```json
 {
   "type": "request.result.city.create",
@@ -142,6 +143,7 @@ fields — every field is always present.
 ```
 
 **City unregister:**
+
 ```json
 {
   "type": "request.result.city.unregister",
@@ -154,6 +156,7 @@ fields — every field is always present.
 ```
 
 **Session create:**
+
 ```json
 {
   "type": "request.result.session.create",
@@ -173,6 +176,7 @@ fields — every field is always present.
 ```
 
 **Session message:**
+
 ```json
 {
   "type": "request.result.session.message",
@@ -184,6 +188,7 @@ fields — every field is always present.
 ```
 
 **Session submit:**
+
 ```json
 {
   "type": "request.result.session.submit",
@@ -213,22 +218,22 @@ is an enum identifying which operation failed.
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `request_id` | string | Correlation number from the 202 response |
-| `operation` | enum | `city.create`, `city.unregister`, `session.create`, `session.message`, `session.submit` |
-| `error_code` | string | Machine-readable error code |
-| `error_message` | string | Human-readable description |
+| Field           | Type   | Description                                                                             |
+| --------------- | ------ | --------------------------------------------------------------------------------------- |
+| `request_id`    | string | Correlation number from the 202 response                                                |
+| `operation`     | enum   | `city.create`, `city.unregister`, `session.create`, `session.message`, `session.submit` |
+| `error_code`    | string | Machine-readable error code                                                             |
+| `error_message` | string | Human-readable description                                                              |
 
 ## Operations using this pattern
 
-| Endpoint | Success event type |
-|----------|--------------------|
-| `POST /v0/city` | `request.result.city.create` |
-| `POST /v0/city/{name}/unregister` | `request.result.city.unregister` |
-| `POST /v0/city/{city}/sessions` (all kinds) | `request.result.session.create` |
+| Endpoint                                     | Success event type               |
+| -------------------------------------------- | -------------------------------- |
+| `POST /v0/city`                              | `request.result.city.create`     |
+| `POST /v0/city/{name}/unregister`            | `request.result.city.unregister` |
+| `POST /v0/city/{city}/sessions` (all kinds)  | `request.result.session.create`  |
 | `POST /v0/city/{city}/session/{id}/messages` | `request.result.session.message` |
-| `POST /v0/city/{city}/session/{id}/submit` | `request.result.session.submit` |
+| `POST /v0/city/{city}/session/{id}/submit`   | `request.result.session.submit`  |
 
 ## Future: progress events
 
@@ -264,9 +269,7 @@ the API adapter: the server emits `request.failed` with
 `error_code=timeout` at the same boundary the CLI client waits for on
 the SSE stream. If the provider path ignores cancellation and returns
 after that timeout, the API logs a late `session.message` result with
-the request ID instead of emitting a second terminal event.
-6. On failure, `error_code` + `error_message` describe the problem.
-7. Do NOT use the resource before the success event arrives.
+the request ID instead of emitting a second terminal event. 6. On failure, `error_code` + `error_message` describe the problem. 7. Do NOT use the resource before the success event arrives.
 
 ## Implementation rules
 

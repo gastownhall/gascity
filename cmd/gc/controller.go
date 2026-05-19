@@ -122,7 +122,6 @@ func acquireControllerLock(cityPath string) (*os.File, error) {
 func startControllerSocket(
 	cityPath string,
 	cancelFn context.CancelFunc,
-	forceShutdown *atomic.Bool,
 	dirty *atomic.Bool,
 	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
@@ -145,21 +144,19 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+			go handleControllerConn(conn, cityPath, cancelFn, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 		}
 	}()
 	return lis, nil
 }
 
 // handleControllerConn reads from a connection and dispatches commands.
-// Supported commands: "stop" (shutdown), "stop-force" (shutdown without
-// interrupt grace), "ping" (liveness check, returns PID), "converge:{json}"
-// (convergence commands routed to event loop).
+// Supported commands: "stop" (shutdown), "ping" (liveness check, returns PID),
+// "converge:{json}" (convergence commands routed to event loop).
 func handleControllerConn(
 	conn net.Conn,
 	cityPath string,
 	cancelFn context.CancelFunc,
-	forceShutdown *atomic.Bool,
 	dirty *atomic.Bool,
 	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
@@ -175,12 +172,6 @@ func handleControllerConn(
 		line := scanner.Text()
 		switch {
 		case line == "stop":
-			cancelFn()
-			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
-		case line == "stop-force":
-			if forceShutdown != nil {
-				forceShutdown.Store(true)
-			}
 			cancelFn()
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case line == "ping":
@@ -390,7 +381,6 @@ func handleReloadSocketCmd(conn net.Conn, payload string, ch chan reloadRequest)
 	req := reloadRequest{
 		wait:       wire.Wait,
 		timeout:    timeout,
-		soft:       wire.Soft,
 		acceptedCh: make(chan reloadControlReply, 1),
 		doneCh:     make(chan reloadControlReply, 1),
 	}
@@ -962,20 +952,7 @@ func gracefulStopAll(
 	store beads.Store,
 	stdout, stderr io.Writer,
 ) {
-	gracefulStopAllWithForceSignal(names, sp, timeout, rec, cfg, store, stdout, stderr, nil)
-}
-
-func gracefulStopAllWithForceSignal(
-	names []string,
-	sp runtime.Provider,
-	timeout time.Duration,
-	rec events.Recorder,
-	cfg *config.City,
-	store beads.Store,
-	stdout, stderr io.Writer,
-	forceStopRequested func() bool,
-) {
-	if timeout <= 0 || len(names) == 0 || stopForceRequested(forceStopRequested) {
+	if timeout <= 0 || len(names) == 0 {
 		// Immediate kill (no grace period).
 		stopTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), cfg, store, sp, rec, "gc", stdout, stderr)
 		return
@@ -992,20 +969,14 @@ func gracefulStopAllWithForceSignal(
 	// The configured timeout is the post-dispatch grace window; dispatch
 	// latency is intentionally outside that budget so every interrupted
 	// session still gets the full graceful-exit wait once nudged.
-	sent := interruptTargetsBoundedWithForceSignal(targets, cfg, store, sp, stderr, forceStopRequested)
+	sent := interruptTargetsBounded(targets, cfg, store, sp, stderr)
 	fmt.Fprintf(stdout, "Sent interrupt to %d/%d agent(s), waiting %s...\n", //nolint:errcheck // best-effort stdout
 		sent, len(names), timeout)
 
 	// Poll until all agents exit or timeout expires (avoid sleeping full duration).
 	pollInterval := 500 * time.Millisecond
-	if forceStopRequested != nil {
-		pollInterval = 50 * time.Millisecond
-	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if stopForceRequested(forceStopRequested) {
-			break
-		}
 		allExited := true
 		if runningSet, ok := runningSessionSet(sp, names); ok {
 			allExited = len(runningSet) == 0
@@ -1022,9 +993,6 @@ func gracefulStopAllWithForceSignal(
 			break
 		}
 		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			break
-		}
 		if remaining < pollInterval {
 			time.Sleep(remaining)
 		} else {
@@ -1048,38 +1016,20 @@ func gracefulStopAllWithForceSignal(
 			}
 			fmt.Fprintf(stdout, "Agent '%s' exited gracefully\n", name) //nolint:errcheck // best-effort stdout
 			subject := name
-			// SessionLifecyclePayload.SessionID is contractually "always
-			// present" — when the targetByName lookup misses (or the
-			// bead's ID couldn't be filled) we fall back to the loop
-			// variable, which is the session_name. ResolveSessionID
-			// canonicalizes session_name → bead ID for any consumer.
-			sessionID := name
-			var template string
-			if target, ok := targetByName[name]; ok {
-				if target.subject != "" {
-					subject = target.subject
-				}
-				if target.sessionID != "" {
-					sessionID = target.sessionID
-				}
-				template = target.template
-				if cityStopSessionMarked(store, target.sessionID) {
-					markCityStopSessionAsAsleep(store, target.sessionID, stderr)
-				}
+			if target, ok := targetByName[name]; ok && target.subject != "" {
+				subject = target.subject
+			}
+			if target, ok := targetByName[name]; ok && cityStopSessionMarked(store, target.sessionID) {
+				markCityStopSessionAsAsleep(store, target.sessionID, stderr)
 			}
 			rec.Record(events.Event{
 				Type: events.SessionStopped, Actor: "gc", Subject: subject,
-				Payload: api.SessionLifecyclePayloadJSON(sessionID, template, "exited gracefully"),
 			})
 			continue
 		}
 		survivors = append(survivors, name)
 	}
 	stopTargetsBounded(filterStopTargets(targets, survivors), cfg, store, sp, rec, "gc", stdout, stderr)
-}
-
-func stopForceRequested(forceStopRequested func() bool) bool {
-	return forceStopRequested != nil && forceStopRequested()
 }
 
 func runningSessionSet(sp runtime.Provider, names []string) (map[string]bool, bool) {
@@ -1248,8 +1198,7 @@ func runController(
 	configDirty := &atomic.Bool{}
 
 	sockPath := controllerSocketPath(cityPath)
-	forceShutdown := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocket(cityPath, cancel, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1296,7 +1245,6 @@ func runController(
 		Rec:                     rec,
 		PoolSessions:            poolSessions,
 		PoolDeathHandlers:       poolDeathHandlers,
-		ForceStopShutdown:       forceShutdown,
 		ReloadReqCh:             reloadReqCh,
 		ConvergenceReqCh:        convergenceReqCh,
 		PokeCh:                  pokeCh,
@@ -1332,7 +1280,7 @@ func runController(
 		// not own the supervisor registry/reconciler path required by
 		// async POST /v0/city, so leave the initializer nil and let the
 		// handler return 501 for create/unregister routes.
-		apiMux := api.NewSupervisorMux(&singleCityStateResolver{state: cs}, nil, readOnly, "controller", commit, time.Now())
+		apiMux := api.NewSupervisorMux(&singleCityStateResolver{state: cs}, nil, readOnly, "controller", time.Now())
 		addr := net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port))
 		apiLis, apiErr := net.Listen("tcp", addr)
 		if apiErr != nil {

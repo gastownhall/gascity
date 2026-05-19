@@ -5,21 +5,21 @@ description: Where the main subsystems live in the Gas City repository.
 
 ## Top-Level Layout
 
-| Path | What it contains |
-|---|---|
-| `cmd/gc/` | CLI entrypoints, controller wiring, runtime assembly, and command handlers |
-| `internal/runtime/` | Runtime provider abstraction plus tmux, subprocess, exec, ACP, K8s, and hybrid implementations |
-| `internal/config/` | `city.toml` schema, validation, composition, packs, patches, and override resolution |
-| `internal/beads/` | Store abstraction and provider implementations used for work, mail, molecules, and waits |
-| `internal/session/` | Session bead metadata, wait lifecycle helpers, and session identity utilities |
-| `internal/orders/` | Order parsing and scanning for periodic dispatch |
-| `internal/convergence/` | Bounded iterative refinement loops and gate handling |
-| `internal/api/` | HTTP API handlers and resource views |
-| `docs/` | Mintlify docs site (tutorials, guides, reference) |
-| `engdocs/` | Contributor-facing architecture, design docs, proposals, and archive |
-| `examples/` | Example cities, packs, formulas, and reference topologies |
-| `contrib/` | Helper scripts, Dockerfiles, and integration support assets |
-| `test/` | Integration and support test packages |
+| Path                    | What it contains                                                                               |
+| ----------------------- | ---------------------------------------------------------------------------------------------- |
+| `cmd/gc/`               | CLI entrypoints, controller wiring, runtime assembly, and command handlers                     |
+| `internal/runtime/`     | Runtime provider abstraction plus tmux, subprocess, exec, ACP, K8s, and hybrid implementations |
+| `internal/config/`      | `city.toml` schema, validation, composition, packs, patches, and override resolution           |
+| `internal/beads/`       | Store abstraction and provider implementations used for work, mail, molecules, and waits       |
+| `internal/session/`     | Session bead metadata, wait lifecycle helpers, and session identity utilities                  |
+| `internal/orders/`      | Order parsing and scanning for periodic dispatch                                               |
+| `internal/convergence/` | Bounded iterative refinement loops and gate handling                                           |
+| `internal/api/`         | HTTP API handlers and resource views                                                           |
+| `docs/`                 | Mintlify docs site (tutorials, guides, reference)                                              |
+| `engdocs/`              | Contributor-facing architecture, design docs, proposals, and archive                           |
+| `examples/`             | Example cities, packs, formulas, and reference topologies                                      |
+| `contrib/`              | Helper scripts, Dockerfiles, and integration support assets                                    |
+| `test/`                 | Integration and support test packages                                                          |
 
 ## Where to Start
 

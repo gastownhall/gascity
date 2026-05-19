@@ -54,9 +54,8 @@ func ResolveAgent(cfg *config.City, input string, opts ResolveOpts) (config.Agen
 		return a, true
 	}
 
-	// Step 2b: qualified pool instance — "rig/polecat-2" or
-	// "binding.polecat-2" matches the corresponding pool template.
-	if opts.AllowPoolMembers && strings.ContainsAny(input, "/.") {
+	// Step 2b: qualified pool instance — "rig/polecat-2" matches pool "rig/polecat".
+	if opts.AllowPoolMembers && strings.Contains(input, "/") {
 		if a, ok := resolvePoolInstanceQualified(cfg, input); ok {
 			return a, true
 		}
@@ -108,8 +107,9 @@ func resolveTemplate(cfg *config.City, input string) (config.Agent, bool) {
 
 // findAgentByQualified looks up an agent by its exact qualified identity.
 func findAgentByQualified(cfg *config.City, identity string) (config.Agent, bool) {
+	dir, name := config.ParseQualifiedName(identity)
 	for _, a := range cfg.Agents {
-		if config.AgentMatchesIdentity(&a, identity) {
+		if a.Dir == dir && a.Name == name {
 			return a, true
 		}
 	}
@@ -170,7 +170,7 @@ func matchPoolInstanceBare(a config.Agent, input string) (config.Agent, bool) {
 // IsMultiSessionAgent reports whether a config agent supports multiple
 // concurrent sessions.
 func IsMultiSessionAgent(a *config.Agent) bool {
-	return a.SupportsExpandedSessionIdentities()
+	return a != nil && a.SupportsInstanceExpansion()
 }
 
 // DeepCopyAgent creates a deep copy of a config.Agent with a new name and dir.

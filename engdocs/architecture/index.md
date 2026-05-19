@@ -71,12 +71,12 @@ way to understand how the system fits together.
 Gas City uses four document types (following CockroachDB's tech-note /
 RFC distinction):
 
-| Type | Directory | Purpose | Lifecycle |
-|---|---|---|---|
-| Architecture doc | `engdocs/architecture/` | How it works **now** | Living; update when code changes |
-| Design doc | `engdocs/design/` | How we **want** it to work | Proposal → accepted → implemented → obsolete |
-| Reference doc | `docs/reference/` | Exhaustive lookup (CLI, config, API) | Must stay in sync; partially generated |
-| Tutorial | `docs/tutorials/` | Learning path with exercises | Ordered progression |
+| Type             | Directory               | Purpose                              | Lifecycle                                    |
+| ---------------- | ----------------------- | ------------------------------------ | -------------------------------------------- |
+| Architecture doc | `engdocs/architecture/` | How it works **now**                 | Living; update when code changes             |
+| Design doc       | `engdocs/design/`       | How we **want** it to work           | Proposal → accepted → implemented → obsolete |
+| Reference doc    | `docs/reference/`       | Exhaustive lookup (CLI, config, API) | Must stay in sync; partially generated       |
+| Tutorial         | `docs/tutorials/`       | Learning path with exercises         | Ordered progression                          |
 
 ## Conventions
 

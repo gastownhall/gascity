@@ -11,8 +11,8 @@
 #   parent:<id>  — tracks parent-child relationships
 #   needs:<id>   — tracks step dependencies
 #
-# Metadata is reconstructed from meta:<k>=<v> labels on read.
-# br does not yet support native --metadata; metadata is still written as labels.
+# Metadata is stored in br's metadata KV table under issue:<id>:metadata.
+# Older metahex labels are still decoded on read for already-created beads.
 #
 # Operations that Gas City composes in Go (exit 2):
 #   mol-cook  — composed from Create calls by exec.Store
@@ -24,10 +24,61 @@ set -euo pipefail
 op="${1:?usage: gc-beads-br <operation> [args...]}"
 shift
 
+ISSUE_METADATA_MAP_CACHE_FILE=""
+ISSUE_OBJECTS_CACHE_FILE=""
+cleanup_issue_metadata_cache() {
+  if [ -n "${ISSUE_METADATA_MAP_CACHE_FILE:-}" ]; then
+    rm -f "$ISSUE_METADATA_MAP_CACHE_FILE"
+  fi
+  if [ -n "${ISSUE_OBJECTS_CACHE_FILE:-}" ]; then
+    rm -f "$ISSUE_OBJECTS_CACHE_FILE"
+  fi
+}
+trap cleanup_issue_metadata_cache EXIT
+
 # If BR_DIR is set, change to that directory so br uses it as the store root.
+# Gas City exec providers project GC_STORE_ROOT for city/rig-scoped stores.
 if [ -n "${BR_DIR:-}" ]; then
   cd "$BR_DIR"
+elif [ -n "${GC_STORE_ROOT:-}" ]; then
+  cd "$GC_STORE_ROOT"
 fi
+
+if [ -z "${BR_BIN:-}" ]; then
+  script_source="${BASH_SOURCE[0]}"
+  while [ -L "$script_source" ]; do
+    script_dir="$(CDPATH= cd -P -- "$(dirname -- "$script_source")" && pwd)"
+    script_target="$(readlink "$script_source")"
+    case "$script_target" in
+      /*) script_source="$script_target" ;;
+      *) script_source="$script_dir/$script_target" ;;
+    esac
+  done
+  script_dir="$(CDPATH= cd -P -- "$(dirname -- "$script_source")" && pwd)"
+  if [ -x "$script_dir/br" ]; then
+    BR_BIN="$script_dir/br"
+  else
+    BR_BIN="br"
+  fi
+fi
+
+BR_DB_PATH="${BR_DB:-${BEADS_DB:-$PWD/.beads/beads.db}}"
+BR_BASE_CMD=("$BR_BIN" --db "$BR_DB_PATH")
+
+ensure_br_store() {
+  if [ -f "$BR_DB_PATH" ]; then
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$BR_DB_PATH")"
+  init_args=(init --db "$BR_DB_PATH")
+  if [ -n "${GC_BEADS_PREFIX:-}" ]; then
+    init_args+=(--prefix "$GC_BEADS_PREFIX")
+  fi
+  "$BR_BIN" "${init_args[@]}" >/dev/null
+}
+
+ensure_br_store
 
 # join_labels joins an array of labels with commas for br --labels flag.
 join_labels() {
@@ -49,14 +100,62 @@ hex_decode() {
   printf '%b' "$(printf '%s' "$hex" | sed 's/../\\x&/g')"
 }
 
-# meta_label encodes a metadata key/value into a br-safe label.
-meta_label() {
-  local key="$1"
-  local value="$2"
-  local key_hex value_hex
-  key_hex=$(printf '%s' "$key" | hex_encode)
-  value_hex=$(printf '%s' "$value" | hex_encode)
-  printf 'metahex:%s:%s\n' "$key_hex" "$value_hex"
+issue_metadata_json() {
+  local id="$1"
+  if [ -n "${ISSUE_METADATA_MAP_CACHE_FILE:-}" ] && [ -s "$ISSUE_METADATA_MAP_CACHE_FILE" ]; then
+    jq -cn --slurpfile metadata_map "$ISSUE_METADATA_MAP_CACHE_FILE" --arg id "$id" '($metadata_map[0][$id] // {})'
+    return 0
+  fi
+  "${BR_BASE_CMD[@]}" gc-metadata get "$id" 2>/dev/null || echo '{}'
+}
+
+load_issue_metadata_map() {
+  "${BR_BASE_CMD[@]}" gc-metadata list 2>/dev/null || echo '{}'
+}
+
+set_issue_metadata_json() {
+  local id="$1" metadata="$2"
+  if [ -z "$id" ] || [ -z "$metadata" ]; then
+    return 0
+  fi
+  if ! printf '%s' "$metadata" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    return 0
+  fi
+  # Older/current br builds may not expose gc-metadata yet. Metadata is
+  # advisory for GC routing, so bead creation must still return JSON.
+  printf '%s' "$metadata" | "${BR_BASE_CMD[@]}" gc-metadata set "$id" >/dev/null 2>/dev/null || true
+}
+
+# safe_label maps Gas City labels into br's stricter label grammar.
+safe_label() {
+  local label="$1" hex digest
+  if [[ "$label" =~ ^[A-Za-z0-9_:-]+$ ]] && [ "${#label}" -le 50 ]; then
+    printf '%s\n' "$label"
+    return 0
+  fi
+  hex=$(printf '%s' "$label" | hex_encode)
+  if [ $((9 + ${#hex})) -le 50 ]; then
+    printf 'labelhex:%s\n' "$hex"
+    return 0
+  fi
+  digest=$(printf '%s' "$label" | sha256sum | awk '{print substr($1,1,32)}')
+  printf 'labelhash:%s\n' "$digest"
+}
+
+decode_label() {
+  local label="$1" hex
+  case "$label" in
+    labelhex:*)
+      hex="${label#labelhex:}"
+      hex_decode "$hex"
+      ;;
+    labelhash:*)
+      printf '%s\n' "$label"
+      ;;
+    *)
+      printf '%s\n' "$label"
+      ;;
+  esac
 }
 
 # json_string_array renders argv as a JSON string array.
@@ -84,11 +183,11 @@ br_stream_objects() {
 # br_object_to_gc converts one compact br JSON object to Gas City wire format.
 br_object_to_gc() {
   local obj="$1"
-  local parent_id="" key value rest key_hex value_hex
-  local ephemeral=false
+  local parent_id="" key value rest key_hex value_hex decoded_label
   local -a kept_labels=()
   local -a needs=()
   local metadata='{}'
+  metadata=$(issue_metadata_json "$(printf '%s' "$obj" | jq -r '.id // ""')")
 
   while IFS= read -r label; do
     case "$label" in
@@ -112,11 +211,9 @@ br_object_to_gc() {
         value=$(hex_decode "$value_hex")
         metadata=$(jq -cn --argjson m "$metadata" --arg k "$key" --arg v "$value" '$m + {($k): $v}')
         ;;
-      gc:ephemeral)
-        ephemeral=true
-        ;;
       *)
-        kept_labels+=("$label")
+        decoded_label=$(decode_label "$label")
+        kept_labels+=("$decoded_label")
         ;;
     esac
   done < <(printf '%s' "$obj" | jq -r '.labels // [] | .[]')
@@ -130,7 +227,6 @@ br_object_to_gc() {
     --argjson labels "$labels_json" \
     --argjson needs "$needs_json" \
     --argjson metadata "$metadata" \
-    --argjson ephemeral "$ephemeral" \
     '{
       id: .id,
       title: .title,
@@ -141,12 +237,11 @@ br_object_to_gc() {
       assignee: (.assignee // ""),
       from: (.owner // .from // ""),
       parent_id: $parent_id,
-      ref: (.external_ref // .ref // ""),
+      ref: (.external_ref // .ref // ($metadata["gc.ref"] // "")),
       needs: $needs,
       description: (.description // ""),
       labels: $labels,
-      metadata: $metadata,
-      ephemeral: $ephemeral
+      metadata: $metadata
     }'
 }
 
@@ -171,9 +266,153 @@ br_list_to_gc() {
     echo '[]'
     return 0
   fi
+  ISSUE_OBJECTS_CACHE_FILE=$(mktemp "${TMPDIR:-/tmp}/gc-beads-br-objects.XXXXXX")
+  printf '%s' "$payload" | br_stream_objects >"$ISSUE_OBJECTS_CACHE_FILE"
+  if [ ! -s "$ISSUE_OBJECTS_CACHE_FILE" ]; then
+    echo '[]'
+    return 0
+  fi
+  ISSUE_METADATA_MAP_CACHE_FILE=$(mktemp "${TMPDIR:-/tmp}/gc-beads-br-metadata.XXXXXX")
+  load_issue_metadata_map >"$ISSUE_METADATA_MAP_CACHE_FILE"
   while IFS= read -r obj; do
     br_object_to_gc "$obj"
-  done < <(printf '%s' "$payload" | br_stream_objects) | jq -s .
+  done <"$ISSUE_OBJECTS_CACHE_FILE" | jq -s .
+}
+
+collect_br_list_args() {
+  br_filter_args=()
+  br_list_has_status=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json|--all)
+        shift
+        ;;
+      --metadata-field=*)
+        shift
+        ;;
+      --metadata-field)
+        shift
+        [ "$#" -gt 0 ] && shift
+        ;;
+      --status=*)
+        br_filter_args+=("$1")
+        br_list_has_status=1
+        shift
+        ;;
+      --status)
+        flag="$1"
+        shift
+        if [ "$#" -gt 0 ]; then
+          br_filter_args+=("$flag" "$1")
+          br_list_has_status=1
+          shift
+        fi
+        ;;
+      --assignee=*|--type=*|--label=*|--label-any=*|--priority=*|--priority-min=*|--priority-max=*|--id=*|--limit=*|--offset=*|--sort=*|--title-contains=*|--desc-contains=*|--notes-contains=*)
+        br_filter_args+=("$1")
+        shift
+        ;;
+      --assignee|--type|--label|--label-any|--priority|--priority-min|--priority-max|--id|--limit|--offset|--sort|--title-contains|--desc-contains|--notes-contains)
+        flag="$1"
+        shift
+        if [ "$#" -gt 0 ]; then
+          br_filter_args+=("$flag" "$1")
+          shift
+        fi
+        ;;
+      --unassigned|--deferred|--overdue|--reverse)
+        br_filter_args+=("$1")
+        shift
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+}
+
+collect_br_ready_args() {
+  br_filter_args=()
+  br_metadata_filters=()
+  br_ready_limit=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json|--all)
+        shift
+        ;;
+      --metadata-field=*)
+        br_metadata_filters+=("${1#--metadata-field=}")
+        shift
+        ;;
+      --metadata-field)
+        shift
+        if [ "$#" -gt 0 ]; then
+          br_metadata_filters+=("$1")
+          shift
+        fi
+        ;;
+      --limit=*)
+        br_ready_limit="${1#--limit=}"
+        shift
+        ;;
+      --limit)
+        shift
+        if [ "$#" -gt 0 ]; then
+          br_ready_limit="$1"
+          shift
+        fi
+        ;;
+      --assignee=*|--type=*|--label=*|--label-any=*|--priority=*|--sort=*|--parent=*)
+        br_filter_args+=("$1")
+        shift
+        ;;
+      --assignee|--type|--label|--label-any|--priority|--sort|--parent)
+        flag="$1"
+        shift
+        if [ "$#" -gt 0 ]; then
+          br_filter_args+=("$flag" "$1")
+          shift
+        fi
+        ;;
+      --unassigned)
+        br_filter_args+=("$1")
+        shift
+        ;;
+      --include-deferred|--recursive)
+        shift
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+}
+
+filter_gc_ready() {
+  local limit="${1:-0}"
+  shift || true
+  case "$limit" in
+    ''|*[!0-9]*) limit=0 ;;
+  esac
+  local filters_json
+  filters_json=$(json_string_array "$@")
+  jq --argjson metadata_filters "$filters_json" --argjson limit "$limit" '
+    def metadata_matches($filters):
+      . as $bead
+      | all($filters[]; . as $filter
+          | ($filter | split("=")) as $parts
+          | ($parts | length) >= 2
+            and (($bead.metadata[$parts[0]] // "") == ($parts[1:] | join("="))));
+
+    . as $all
+    | [
+        .[]
+        | select(.status == "open")
+        | select(metadata_matches($metadata_filters))
+        | select(all((.needs // [])[]; . as $need | any($all[]; .id == $need and .status == "closed")))
+      ]
+    | if $limit > 0 then .[:$limit] else . end
+  '
 }
 
 case "$op" in
@@ -191,7 +430,7 @@ case "$op" in
     all_labels=()
     # User-provided labels.
     while IFS= read -r label; do
-      [ -n "$label" ] && all_labels+=("$label")
+      [ -n "$label" ] && all_labels+=("$(safe_label "$label")")
     done < <(echo "$input" | jq -r '.labels // [] | .[]')
 
     # Parent tracking via label.
@@ -202,38 +441,36 @@ case "$op" in
       [ -n "$need" ] && all_labels+=("needs:$need")
     done < <(echo "$input" | jq -r '.needs // [] | .[]')
 
-    # Convert metadata entries to br-safe labels.
-    while IFS=$'\t' read -r meta_key meta_value; do
-      [ -n "$meta_key" ] && all_labels+=("$(meta_label "$meta_key" "$meta_value")")
-    done < <(echo "$input" | jq -r '.metadata // {} | to_entries[] | [.key, (.value|tostring)] | @tsv')
-
-    if [ "$(echo "$input" | jq -r '.ephemeral // false')" = "true" ]; then
-      all_labels+=("gc:ephemeral")
-    fi
+    metadata_json=$(echo "$input" | jq -c --arg ref "$ref" '
+      (.metadata // {}) as $metadata
+      | if $ref == "" then $metadata else $metadata + {"gc.ref": $ref} end
+    ')
 
     # Build create command.
-    cmd_args=(br create --json --type="$bead_type")
+    cmd_args=("${BR_BASE_CMD[@]}" create --json --lock-timeout 10000 --type="$bead_type")
     [ -n "$description" ] && cmd_args+=(--description "$description")
     [ -n "$assignee" ] && cmd_args+=(--assignee "$assignee")
     [ -n "$owner" ] && cmd_args+=(--owner "$owner")
-    [ -n "$ref" ] && cmd_args+=(--external-ref "$ref")
     if [ ${#all_labels[@]} -gt 0 ]; then
       cmd_args+=(--labels "$(join_labels "${all_labels[@]}")")
     fi
     cmd_args+=("$title")
 
-    "${cmd_args[@]}" | br_to_gc
+    created=$("${cmd_args[@]}")
+    created_id=$(printf '%s' "$created" | br_stream_objects | head -n 1 | jq -r '.id // ""')
+    set_issue_metadata_json "$created_id" "$metadata_json"
+    printf '%s' "$created" | br_to_gc
     ;;
 
   get)
     # br show returns an array; extract the first element.
-    br show --json "$1" | jq '.[0]' | br_to_gc
+    "${BR_BASE_CMD[@]}" show --json --lock-timeout 10000 "$1" | jq '.[0]' | br_to_gc
     ;;
 
   update)
     id="$1"
     input=$(cat)
-    cmd_args=(br update --json "$id")
+    cmd_args=("${BR_BASE_CMD[@]}" update --json --lock-timeout 10000 "$id")
 
     description=$(echo "$input" | jq -r '.description // empty')
     [ -n "$description" ] && cmd_args+=(--description "$description")
@@ -243,24 +480,22 @@ case "$op" in
 
     # Append labels via --add-label (one per flag).
     while IFS= read -r label; do
-      [ -n "$label" ] && cmd_args+=(--add-label "$label")
+      [ -n "$label" ] && cmd_args+=(--add-label "$(safe_label "$label")")
     done < <(echo "$input" | jq -r '.labels // [] | .[]')
 
     # Handle parent_id change.
     parent_id=$(echo "$input" | jq -r '.parent_id // empty')
     [ -n "$parent_id" ] && cmd_args+=(--add-label "parent:$parent_id")
 
-    # Convert metadata entries to br-safe labels.
-    while IFS=$'\t' read -r meta_key meta_value; do
-      [ -n "$meta_key" ] && cmd_args+=(--add-label "$(meta_label "$meta_key" "$meta_value")")
-    done < <(echo "$input" | jq -r '.metadata // {} | to_entries[] | [.key, (.value|tostring)] | @tsv')
-
     "${cmd_args[@]}" > /dev/null
+    metadata_json=$(echo "$input" | jq -c '.metadata // empty')
+    [ -n "$metadata_json" ] && set_issue_metadata_json "$id" "$metadata_json"
+    true
     ;;
 
   close)
     id="$1"
-    current=$(br show --json "$id" 2>/dev/null || true)
+    current=$("${BR_BASE_CMD[@]}" show --json --lock-timeout 10000 "$id" 2>/dev/null || true)
     if [ -z "$current" ]; then
       echo "bead $id not found" >&2
       exit 1
@@ -269,30 +504,37 @@ case "$op" in
     if [ "$status" = "closed" ]; then
       exit 0
     fi
-    br close --json "$id" > /dev/null
+    "${BR_BASE_CMD[@]}" close --json --lock-timeout 10000 "$id" > /dev/null
     ;;
 
   list)
-    br list --json --all | br_list_to_gc
+    collect_br_list_args "$@"
+    cmd_args=("${BR_BASE_CMD[@]}" list --json --lock-timeout 10000)
+    [ "$br_list_has_status" -eq 0 ] && cmd_args+=(--all)
+    cmd_args+=("${br_filter_args[@]}")
+    "${cmd_args[@]}" | br_list_to_gc
     ;;
 
   ready)
-    br ready --json | br_list_to_gc
+    collect_br_ready_args "$@"
+    cmd_args=("${BR_BASE_CMD[@]}" list --json --all --lock-timeout 10000 --status open)
+    cmd_args+=("${br_filter_args[@]}")
+    "${cmd_args[@]}" | br_list_to_gc | filter_gc_ready "$br_ready_limit" "${br_metadata_filters[@]}"
     ;;
 
   children)
     parent_id="$1"
     # Sort by created_at to match the "in creation order" contract.
-    br list --json --all --label "parent:$parent_id" | br_list_to_gc | jq 'sort_by(.created_at)'
+    "${BR_BASE_CMD[@]}" list --json --all --lock-timeout 10000 --label "parent:$parent_id" | br_list_to_gc | jq 'sort_by(.created_at)'
     ;;
 
   list-by-label)
     label="$1"
     limit="${2:-0}"
     if [ "$limit" -gt 0 ] 2>/dev/null; then
-      br list --json --all --label "$label" --limit "$limit" | br_list_to_gc
+      "${BR_BASE_CMD[@]}" list --json --all --lock-timeout 10000 --label "$label" --limit "$limit" | br_list_to_gc
     else
-      br list --json --all --label "$label" | br_list_to_gc
+      "${BR_BASE_CMD[@]}" list --json --all --lock-timeout 10000 --label "$label" | br_list_to_gc
     fi
     ;;
 
@@ -300,7 +542,9 @@ case "$op" in
     id="$1"
     key="$2"
     value=$(cat)
-    br update --json "$id" --add-label "$(meta_label "$key" "$value")" > /dev/null
+    current_metadata=$(issue_metadata_json "$id")
+    metadata_json=$(jq -cn --argjson m "$current_metadata" --arg k "$key" --arg v "$value" '$m + {($k): $v}')
+    set_issue_metadata_json "$id" "$metadata_json"
     ;;
 
   ensure-ready|shutdown)

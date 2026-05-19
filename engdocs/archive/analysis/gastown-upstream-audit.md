@@ -20,6 +20,7 @@ The biggest change in Gas Town: polecats no longer die after completing work.
 instead of nuking, completion signaling via agent beads instead of mail.
 
 ### 1a. Polecat lifecycle: done = idle
+
 - [~] **c410c10a** — `gt done` sets agent state to "idle" instead of self-nuking
   worktree. Sling reuses idle polecats before allocating new ones.
 - [~] **341fa43a** — Phase 1: `gt done` transitions to IDLE with sandbox preserved,
@@ -33,6 +34,7 @@ instead of nuking, completion signaling via agent beads instead of mail.
   model. Update polecat prompt similarly.
 
 ### 1b. Witness: restart, never nuke
+
 - [~] **016381ad** — All `gt polecat nuke` in zombie detection replaced with
   `gt session restart`. "Idle Polecat Heresy" replaced with "Completion Protocol."
 - [~] **b10863da** — Idle polecats with clean sandboxes skipped entirely by
@@ -41,6 +43,7 @@ instead of nuking, completion signaling via agent beads instead of mail.
   nuking with restart-first policy. Idle polecats are healthy.
 
 ### 1c. Bead-based completion discovery (replaces POLECAT_DONE mail)
+
 - [~] **c5ce08ed** — Agent bead completion metadata: exit_type, mr_id, branch,
   mr_failed, completion_time.
 - [~] **b45d1511** — POLECAT_DONE mail deprecated. Polecats write completion
@@ -51,6 +54,7 @@ instead of nuking, completion signaling via agent beads instead of mail.
   as deprecated fallback. Step 4a is the PRIMARY completion signal.
 
 ### 1d. Polecat nuke behavior
+
 - [~] **330664c2** — Nuke no longer deletes remote branches. Refinery owns
   remote branch cleanup after merge.
 - [~] **4bd189be** — Nuke checks CommitsAhead before deleting remote branches.
@@ -77,7 +81,7 @@ Major restructuring from 10 steps to 7, removing preflight tests entirely.
   ahead of origin/base_branch. Zero commits is now a hard error in commit-changes,
   cleanup-workspace, and submit-and-exit steps.
 - [~] **4ede6194** — No-changes exit protocol: polecat must run `bd close <id>
-  --reason="no-changes: <explanation>"` + `gt done` when bead has nothing to
+--reason="no-changes: <explanation>"` + `gt done` when bead has nothing to
   implement. Prevents spawn storms.
 - **Action:** Rewrite `mol-polecat-work.formula.toml` to match v7 structure.
   Add the HARD GATE commit verification and no-changes exit protocol.
@@ -94,39 +98,42 @@ Major restructuring from 10 steps to 7, removing preflight tests entirely.
 Every mail creates a permanent Dolt commit. Nudges are free (tmux send-keys).
 
 ### 3a. Role template sections
+
 - [x] **177606a4** — "Communication Hygiene: Nudge First, Mail Rarely" sections
-  added to deacon, dog, polecat, and witness templates. Dogs should NEVER send
-  mail. Polecats have 0-1 mail budget per session.
+      added to deacon, dog, polecat, and witness templates. Dogs should NEVER send
+      mail. Polecats have 0-1 mail budget per session.
 - [x] **a3ee0ae4** — "Dolt Health: Your Part" sections in polecat and witness
-  prompts. Nudge don't mail, don't create unnecessary beads, close your beads.
+      prompts. Nudge don't mail, don't create unnecessary beads, close your beads.
 - **Action:** ~~Add Communication Hygiene + Dolt Health sections to all four
   role prompts in examples/gastown.~~ DONE.
 
 ### 3b. Mail-to-nudge conversions (Go + formula)
+
 - [x] **7a578c2b** — Six mail sends converted to nudges: MERGE_FAILED,
-  CONVOY_NEEDS_FEEDING, worker rejection, MERGE_READY, RECOVERY_NEEDED,
-  HandleMergeFailed. Mail preserved only for convoy completion (handoff
-  context) and escalation to mayor.
-  **Done:** All role prompts updated with role-specific comm rules. Generic
-  nudge-first-mail-rarely principle extracted to `operational-awareness`
-  global fragment. MERGE_FAILED as nudge in refinery. Protocol messages
-  listed as ephemeral in global fragment.
+      CONVOY_NEEDS_FEEDING, worker rejection, MERGE_READY, RECOVERY_NEEDED,
+      HandleMergeFailed. Mail preserved only for convoy completion (handoff
+      context) and escalation to mayor.
+      **Done:** All role prompts updated with role-specific comm rules. Generic
+      nudge-first-mail-rarely principle extracted to `operational-awareness`
+      global fragment. MERGE_FAILED as nudge in refinery. Protocol messages
+      listed as ephemeral in global fragment.
 - [x] **5872d9af** — LIFECYCLE:Shutdown, MERGED, MERGE_READY, MERGE_FAILED
-  are now ephemeral wisps instead of permanent beads.
-  **Done:** Listed as ephemeral protocol messages in global fragment.
+      are now ephemeral wisps instead of permanent beads.
+      **Done:** Listed as ephemeral protocol messages in global fragment.
 - [x] **98767fa2** — WORK_DONE messages from `gt done` are ephemeral wisps.
-  **Done:** Listed as ephemeral in global fragment.
+      **Done:** Listed as ephemeral in global fragment.
 
 ### 3c. Mail drain + improved instructions
+
 - [x] **655620a1** — Witness patrol v8: `gt mail drain` step archives stale
-  protocol messages (>30 min). Batch processing when inbox > 10 messages.
-  **Done:** Added Mail Drain section to witness prompt.
+      protocol messages (>30 min). Batch processing when inbox > 10 messages.
+      **Done:** Added Mail Drain section to witness prompt.
 - [x] **9fb00901** — Overhauled mail instructions in crew and polecat templates:
-  `--stdin` heredoc pattern, address format docs, common mistakes section.
-  **Done:** `--stdin` heredoc pattern in global fragment. Common mail mistakes
-  + address format in crew prompt.
+      `--stdin` heredoc pattern, address format docs, common mistakes section.
+      **Done:** `--stdin` heredoc pattern in global fragment. Common mail mistakes
+  - address format in crew prompt.
 - [x] **8eb3d8bb** — Generic names (`alice/`) in crew template mail examples.
-  **Done:** Changed wolf → alice in crew prompt examples.
+      **Done:** Changed wolf → alice in crew prompt examples.
 
 ---
 
@@ -139,7 +146,7 @@ Fundamental change to refinery processing model.
 - [-] **c39372f4** — `gt mq post-merge` replaces multi-step cleanup. Our direct
   work-bead model (no MR beads) already handles this atomically. N/A.
 - [x] **048a73fe** — Duplicate bug check before filing pre-existing test failures.
-  Added `bd list --search` dedup check to handle-failures step.
+      Added `bd list --search` dedup check to handle-failures step.
 - **Also ported:** ZFC decision table in refinery prompt, patrol-summary step
   in formula for audit trail / handoff context.
 
@@ -150,38 +157,42 @@ Fundamental change to refinery processing model.
 Support for integration branches (not just always merging to main).
 
 - [x] **75b72064 + 15b4955d + 33534823 + 87caa55d** — Target Resolution Rule.
-  **Disposition:** No global toggle needed — polecat owns target via `metadata.target`,
-  refinery reads it mechanically. Ported: FORBIDDEN clause for raw integration branch
-  landing (prompt + formula), epic bead assignment for auto-land (formula), fixed
-  command quick-reference to use `$TARGET` instead of hardcoded default branch.
+      **Disposition:** No global toggle needed — polecat owns target via `metadata.target`,
+      refinery reads it mechanically. Ported: FORBIDDEN clause for raw integration branch
+      landing (prompt + formula), epic bead assignment for auto-land (formula), fixed
+      command quick-reference to use `$TARGET` instead of hardcoded default branch.
 
 ---
 
 ## 6. Witness Patrol Improvements
 
 ### 6a. MR bead verification
+
 - [-] **55c90da5** — Verify MR bead exists before sending MERGE_READY.
   **Disposition:** N/A — we don't use MR beads. Polecats assign work beads
   directly to refinery with branch metadata. The failure mode doesn't exist.
 
 ### 6b. Spawn storm detection
+
 - [x] **70c1cbf8** — Track bead respawn count, escalate on threshold.
-  **Disposition:** Implemented as exec order `spawn-storm-detect` in
-  maintenance pack. Script tracks reset counts in a ledger, mails mayor
-  when any bead exceeds threshold. Witness sets `metadata.recovered=true`
-  on reset beads to feed the detector.
+      **Disposition:** Implemented as exec order `spawn-storm-detect` in
+      maintenance pack. Script tracks reset counts in a ledger, mails mayor
+      when any bead exceeds threshold. Witness sets `metadata.recovered=true`
+      on reset beads to feed the detector.
 
 ### 6c. MQ verification in recovery
+
 - [-] **b5553115** — Three-verdict recovery model.
   **Disposition:** N/A — our reset-to-pool model covers this. Work bead
   assignment to refinery IS submission. Witness already checks assignee
   before recovering. No intermediate MR state to verify.
 
 ### 6d. Policy decisions moved to prompts (ZFC)
+
 - [x] **977953d8 + 3bf979db** — Remove hardcoded escalation policy.
-  **Disposition:** Replaced "In ALL cases: notify mayor" with judgment-based
-  notification table in witness formula and prompt. Routine pool resizes
-  no longer generate mayor mail. Witness decides severity.
+      **Disposition:** Replaced "In ALL cases: notify mayor" with judgment-based
+      notification table in witness formula and prompt. Routine pool resizes
+      no longer generate mayor mail. Witness decides severity.
 
 ---
 
@@ -190,17 +201,17 @@ Support for integration branches (not just always merging to main).
 From batch 3 analysis (session summary).
 
 - [x] Root-only wisps: `--root-only` flag added to all `bd mol wisp` calls
-  in patrol formulas (deacon, witness, refinery) and polecat work formula.
-  Formula steps are no longer materialized as child beads — agents read step
-  descriptions directly from the formula definition. Reduces Dolt write churn
-  by ~15x.
+      in patrol formulas (deacon, witness, refinery) and polecat work formula.
+      Formula steps are no longer materialized as child beads — agents read step
+      descriptions directly from the formula definition. Reduces Dolt write churn
+      by ~15x.
 - [x] All `bd mol current` / `bd mol step done` references removed from
-  shared templates (following-mol, propulsion), all role prompts, and all
-  formula descriptions. Replaced with "read formula steps and work through
-  them in order" pattern.
+      shared templates (following-mol, propulsion), all role prompts, and all
+      formula descriptions. Replaced with "read formula steps and work through
+      them in order" pattern.
 - [x] Crash recovery: agents re-read formula steps on restart and determine
-  resume position from context (git state, bead state, last completed action).
-  No step-tracking metadata needed on the wisp bead.
+      resume position from context (git state, bead state, last completed action).
+      No step-tracking metadata needed on the wisp bead.
 - **Disposition:** No new `gc` command needed (upstream's `gt prime` with
   `showFormulaSteps()` is unnecessary — the LLM reads formula steps directly).
   We keep the explicit `bd mol wisp`/`bd mol burn` dance but with `--root-only`.
@@ -210,46 +221,50 @@ From batch 3 analysis (session summary).
 ## 8. Infrastructure Dogs (New Formulas)
 
 ### 8a. Existing dogs updated
+
 - [x] **d2f9f2af** — JSONL Dog: spike detection + pollution firewall. New
-  `verify` step between export and push. `spike_threshold` variable.
-  **Done:** mol-dog-jsonl.formula.toml created with verify step.
+      `verify` step between export and push. `spike_threshold` variable.
+      **Done:** mol-dog-jsonl.formula.toml created with verify step.
 - [x] **37d57150** — Reaper Dog: auto-close step for issues > 30 days
-  (excluding epics, P0/P1, active deps). `stale_issue_age` variable.
-  **Done:** mol-dog-reaper.formula.toml created. ZFC revert noted (no
-  auto-close decisions in Go).
+      (excluding epics, P0/P1, active deps). `stale_issue_age` variable.
+      **Done:** mol-dog-reaper.formula.toml created. ZFC revert noted (no
+      auto-close decisions in Go).
 - [x] **bc9f395a** — Doctor Dog: structured JSON reporting model (advisory).
-  **Then** 176b4963 re-adds automated actions with 10-min cooldowns.
-  **Then** 89ccc218 reverts to configurable advisory recommendations.
-  **Done:** mol-dog-doctor.formula.toml uses advisory model. References
-  `gc dolt cleanup` for orphan detection.
+      **Then** 176b4963 re-adds automated actions with 10-min cooldowns.
+      **Then** 89ccc218 reverts to configurable advisory recommendations.
+      **Done:** mol-dog-doctor.formula.toml uses advisory model. References
+      `gc dolt cleanup` for orphan detection.
 
 ### 8b. New dog formulas
+
 - [x] **739a36b7** — Janitor Dog: cleans orphan test DBs on Dolt test server.
-  4 steps: scan, clean, verify (production read-only check), report.
-  **Done:** mol-dog-stale-db.formula.toml. References `gc dolt cleanup --force`.
+      4 steps: scan, clean, verify (production read-only check), report.
+      **Done:** mol-dog-stale-db.formula.toml. References `gc dolt cleanup --force`.
 - [x] **85887e88** — Compactor Dog: flattens Dolt commit history. Steps:
-  inspect, compact, verify, report. Threshold 10,000. Formula-only pattern.
-  **Done:** mol-dog-compactor.formula.toml.
+      inspect, compact, verify, report. Threshold 10,000. Formula-only pattern.
+      **Done:** mol-dog-compactor.formula.toml.
 - [x] **1123b96c** — Surgical rebase mode for Compactor. `mode` config
-  ('flatten'|'surgical'), `keep_recent` (default 50).
-  **Done:** Included in mol-dog-compactor.formula.toml vars.
+      ('flatten'|'surgical'), `keep_recent` (default 50).
+      **Done:** Included in mol-dog-compactor.formula.toml vars.
 - [x] **3924d560** — SQL-based flatten on running server. No downtime.
-  **Done:** mol-dog-compactor.formula.toml uses SQL-based approach.
+      **Done:** mol-dog-compactor.formula.toml uses SQL-based approach.
 - [x] mol-dog-phantom-db.formula.toml — Detect phantom database resurrection.
 - [x] mol-dog-backup.formula.toml — Database backup verification.
 
 ### 8c. Dog lifecycle
+
 - [x] **b4ed85bb** — `gt dog done` auto-terminates tmux session after 3s.
-  Dogs should NOT idle at prompt.
-  **Done:** Dog prompt updated with auto-termination note.
+      Dogs should NOT idle at prompt.
+      **Done:** Dog prompt updated with auto-termination note.
 - [x] **427c6e8a** — Lifecycle defaults: Wisp Reaper (30m), Compactor (24h),
-  Doctor (5m), Janitor (15m), JSONL Backup (15m), FS Backup (15m),
-  Maintenance (daily 03:00, threshold 1000).
-  **Done:** 7 order wrappers in `maintenance/formulas/orders/mol-dog-*/`
-  dispatch existing dog formulas on cooldown intervals via the generic order
-  system. No Go code needed — ZFC-compliant.
+      Doctor (5m), Janitor (15m), JSONL Backup (15m), FS Backup (15m),
+      Maintenance (daily 03:00, threshold 1000).
+      **Done:** 7 order wrappers in `maintenance/formulas/orders/mol-dog-*/`
+      dispatch existing dog formulas on cooldown intervals via the generic order
+      system. No Go code needed — ZFC-compliant.
 
 ### 8d. CLI: `gc dolt cleanup`
+
 - [x] `gc dolt cleanup` — List orphaned databases (dry-run).
 - [x] `gc dolt cleanup --force` — Remove orphaned databases.
 - [x] `gc dolt cleanup --max N` — Safety limit (refuse if too many orphans).
@@ -257,53 +272,58 @@ From batch 3 analysis (session summary).
 - [x] Dolt package synced from upstream at 117f014f (25 commits of drift resolved).
 
 ### 8e. Dolt-health pack extraction
+
 - [x] Dolt health formulas extracted from gastown into standalone reusable
-  pack at `examples/dolt-health/`. Dog formulas + exec orders.
+      pack at `examples/dolt-health/`. Dog formulas + exec orders.
 - [x] Fallback agents (`fallback = true`) — pack composition primitive.
-  Non-fallback wins silently over fallback; two fallbacks keep first loaded.
-  `resolveFallbackAgents()` runs before collision detection.
+      Non-fallback wins silently over fallback; two fallbacks keep first loaded.
+      `resolveFallbackAgents()` runs before collision detection.
 - [x] Dolt-health pack ships a `fallback = true` dog pool so it works
-  standalone. When composed with maintenance (non-fallback dog), maintenance wins.
+      standalone. When composed with maintenance (non-fallback dog), maintenance wins.
 - [x] `pack.requires` validation at city scope via `validateCityRequirements()`.
 - [x] Hybrid session provider (`internal/session/hybrid/`) — routes sessions
-  to tmux (local) or k8s (remote) based on name matching. Registered as
-  `provider = "hybrid"` in providers.go.
+      to tmux (local) or k8s (remote) based on name matching. Registered as
+      `provider = "hybrid"` in providers.go.
 
 ---
 
 ## 9. Prompt Template Updates
 
 ### 9a. Mayor
+
 - [x] **4c9309c8** — Rig Wake/Sleep Protocol: dormant-by-default workflow.
-  All rigs start suspended. Mayor resumes/suspends as needed.
-  **Done:** Added Rig Wake/Sleep Protocol section + suspend/resume command table.
+      All rigs start suspended. Mayor resumes/suspends as needed.
+      **Done:** Added Rig Wake/Sleep Protocol section + suspend/resume command table.
 - [-] **faf45d1c** — Fix-Merging Community PRs: `Co-Authored-By` attribution.
   N/A — not present in Gas Town upstream mayor template either.
 - [-] **39962be0** — `auto_start_on_boot` renamed to `auto_start_on_up`.
   N/A — Gas City uses `Suspended` field, not `auto_start_on_boot`.
 
 ### 9b. Crew
+
 - [x] **12cf3217** — Identity clarification: "You are the AI agent (crew/...).
-  The human is the Overseer."
-  **Done:** Added explicit identity line to crew prompt.
+      The human is the Overseer."
+      **Done:** Added explicit identity line to crew prompt.
 - [-] **faf45d1c** — Fix-Merging Community PRs section.
   N/A — not present in Gas Town upstream crew template either.
 - [x] **9fb00901** — Improved mail instructions with `--stdin` heredoc pattern,
-  common mistakes section.
-  **Done:** Added `--stdin` heredoc pattern and common mail mistakes to crew
-  prompt. Generic example names (alice instead of wolf).
+      common mistakes section.
+      **Done:** Added `--stdin` heredoc pattern and common mail mistakes to crew
+      prompt. Generic example names (alice instead of wolf).
 
 ### 9c. Boot
+
 - [x] **383945fb** — ZFC fix: removed Go decision engine from degraded triage.
-  Decisions (heartbeat staleness, idle detection, backoff labels, molecule
-  progress) now belong in boot formula, not Go code.
-  **Done:** Boot already uses judgment-based triage (ZFC-correct). Added
-  decision summary table, mail inbox check step, and explicit guidance.
+      Decisions (heartbeat staleness, idle detection, backoff labels, molecule
+      progress) now belong in boot formula, not Go code.
+      **Done:** Boot already uses judgment-based triage (ZFC-correct). Added
+      decision summary table, mail inbox check step, and explicit guidance.
 
 ### 9d. Template path fix
+
 - [x] (batch 3) Template paths changed from `~/gt` to `{{ .TownRoot }}`.
-  **Done:** All `~/gt` references replaced with `{{ .CityRoot }}` in mayor,
-  crew, and polecat prompts.
+      **Done:** All `~/gt` references replaced with `{{ .CityRoot }}` in mayor,
+      crew, and polecat prompts.
 
 ---
 
@@ -331,15 +351,15 @@ Go code making decisions that belong in prompts — moved to prompts.
   N/A — Gas City wisp GC only deletes closed molecules past TTL. No
   auto-close decisions in Go.
 - [x] **977953d8** — Witness handlers report data, don't make policy decisions.
-  Done in Section 6d.
+      Done in Section 6d.
 - [x] **3bf979db** — Remove hardcoded role names from witness error messages.
-  Done in Section 6d.
+      Done in Section 6d.
 - [-] **383945fb** — Remove boot triage decision engine from Go.
   N/A — Gas City reconciler is purely mechanical. Triage is data collection;
   all decisions driven by config (`max_restarts`, `restart_window`,
   `idle_timeout`) and agent requests.
 - [x] **89ccc218** — Doctor dog: advisory recommendations, not automated actions.
-  Done in Section 8a.
+      Done in Section 8a.
 - [-] **eb530d85** — Restart tracker crash-loop params configurable via
   `patrols.restart_tracker`.
   N/A — Gas City's `[daemon]` config has `max_restarts` and `restart_window`
@@ -352,6 +372,7 @@ Go code making decisions that belong in prompts — moved to prompts.
 ## 12. Configuration / Operational
 
 ### 12a. Per-role config
+
 - [-] **bd8df1e8** — Dog recognized as role in AgentEnv(). N/A — Gas City
   has no role concept; per-agent config via `[[agent]]` entries.
 - [-] **e060349b** — `worker_agents` map. N/A — crew members are individual
@@ -361,14 +382,16 @@ Go code making decisions that belong in prompts — moved to prompts.
   the hardcoded roleEmoji map in tmux.go (ZFC violation) — deferred, low priority.
 
 ### 12b. Rig lifecycle
+
 - [x] **95eff925** — `auto_start_on_boot` per-rig config. Gas City already has
-  `rig.Suspended`. Added `gc rig add --start-suspended` for dormant-by-default.
-  Sling enforcement deferred (prompt-level: mayor undocks rigs).
+      `rig.Suspended`. Added `gc rig add --start-suspended` for dormant-by-default.
+      Sling enforcement deferred (prompt-level: mayor undocks rigs).
 - [x] **d2350f27** — Polecat pool: `pool-init` maps to `pool.min` (reconciler
-  pre-spawns). Local branch cleanup added to mol-polecat-work submit step
-  (detach + delete local branch after push, before refinery assignment).
+      pre-spawns). Local branch cleanup added to mol-polecat-work submit step
+      (detach + delete local branch after push, before refinery assignment).
 
 ### 12c. Operational thresholds (ZFC)
+
 - [-] **3c1a9182 + 8325ebff** — OperationalConfig: 30+ hardcoded thresholds
   now configurable via config sub-sections (session, nudge, daemon, deacon,
   polecat, dolt, mail, web).
@@ -377,24 +400,26 @@ Go code making decisions that belong in prompts — moved to prompts.
   knobs. JSON schema (via `genschema`) documents all fields with defaults.
 
 ### 12d. Multi-instance isolation
+
 - [x] **33362a75** — Per-city tmux sockets via `tmux -L <cityname>`. Prevents
-  session name collisions across cities.
+      session name collisions across cities.
 - **Done:** `[session] socket` config field. `SocketName` flows through tmux
   `run()`, `Attach()`, and `Start()`. Executor interface + fakeExecutor tests.
 
 ### 12e. Misc operational
+
 - [x] **dab8af94** — `GIT_LFS_SKIP_SMUDGE=1` during worktree add. Reduces
-  polecat spawn from ~87s to ~15s.
-  **Done:** Added to worktree-setup.sh.
+      polecat spawn from ~87s to ~15s.
+      **Done:** Added to worktree-setup.sh.
 - [x] **a4b381de** — Unified rig ops cycle group: witness, refinery, polecats
-  share one n/p cycle group.
-  **Done:** cycle.sh updated with unified rig ops group.
+      share one n/p cycle group.
+      **Done:** cycle.sh updated with unified rig ops group.
 - [x] **6ab5046a** — Town-root CLAUDE.md template with operational awareness
-  guidance for all agents.
-  **Done:** `operational-awareness` global fragment with identity guard + Dolt
-  diagnostics-before-restart protocol.
+      guidance for all agents.
+      **Done:** `operational-awareness` global fragment with identity guard + Dolt
+      diagnostics-before-restart protocol.
 - [x] **b06df94d** — `--to` flag for mail send. Accepts well-known role addresses.
-  **Done:** `--to` flag added. Recipients validated against config agents (ZFC).
+      **Done:** `--to` flag added. Recipients validated against config agents (ZFC).
 - [-] **9a242b6c** — Path references fixed: `~/.gt/` to `$GT_TOWN_ROOT/`.
   N/A — Gas Town-only path fix. Gas City uses `{{ .CityRoot }}` template vars.
 
@@ -469,14 +494,14 @@ formulas — refactored or removed.
   N/A — Gas City has no compiled zombie classifier. Witness handles
   zombie/stuck detection via prompt-level judgment.
 - [x] **376ca2ef** — Compactor ZFC exemption documented. Compactor's Go-level
-  decisions (when to compact, threshold checks) explicitly documented as
-  acceptable ZFC exceptions with rationale.
-  Done: `mol-dog-compactor.formula.toml` updated to v2 — added surgical mode,
-  ZFC exemption section, concurrent write safety docs, `mode`/`keep_recent`
-  vars, `dolt_gc` in compact step, pre-flight row count verification.
-  Also updated `mol-dog-reaper.formula.toml` to v2 — added anomaly detection,
-  mail purging, parent-check in reap query, `mail_delete_age`/`alert_threshold`/
-  `dry_run`/`databases`/`dolt_port` vars.
+      decisions (when to compact, threshold checks) explicitly documented as
+      acceptable ZFC exceptions with rationale.
+      Done: `mol-dog-compactor.formula.toml` updated to v2 — added surgical mode,
+      ZFC exemption section, concurrent write safety docs, `mode`/`keep_recent`
+      vars, `dolt_gc` in compact step, pre-flight row count verification.
+      Also updated `mol-dog-reaper.formula.toml` to v2 — added anomaly detection,
+      mail purging, parent-check in reap query, `mail_delete_age`/`alert_threshold`/
+      `dry_run`/`databases`/`dolt_port` vars.
 
 ---
 
@@ -503,32 +528,32 @@ Extends Sections 8 and 10. New formula capabilities and molecule lifecycle
 improvements.
 
 - [x] **ecc6a9af** — `pour` flag for step materialization. When set, formula
-  steps are materialized as child beads (opt-in). Default remains root-only
-  wisps per Section 7.
-  Done: Added `Pour` and `Version` fields to `Formula` struct in
-  `internal/formula/formula.go`. Parser preserves the field; schema
-  regenerated. Behavioral use (creating child beads) deferred until
-  molecule creation supports it.
+      steps are materialized as child beads (opt-in). Default remains root-only
+      wisps per Section 7.
+      Done: Added `Pour` and `Version` fields to `Formula` struct in
+      `internal/formula/formula.go`. Parser preserves the field; schema
+      regenerated. Behavioral use (creating child beads) deferred until
+      molecule creation supports it.
 - [x] **8744c5d7** — `dolt-health` step added to deacon patrol formula.
-  Deacon checks Dolt server health as part of its regular patrol cycle.
-  Done: Added `gc dolt health` command (`--json` for machine-readable output)
-  to `internal/dolt/health.go` + `cmd/gc/cmd_dolt.go`. Checks server status,
-  per-DB commit counts, backup freshness, orphan DBs, zombie processes.
-  Added `dolt-health` step to deacon patrol formula with threshold table
-  and remediation actions (compactor dispatch, backup nudge, orphan cleanup).
-  Existing `system-health` step (gc doctor) retained as a separate step.
+      Deacon checks Dolt server health as part of its regular patrol cycle.
+      Done: Added `gc dolt health` command (`--json` for machine-readable output)
+      to `internal/dolt/health.go` + `cmd/gc/cmd_dolt.go`. Checks server status,
+      per-DB commit counts, backup freshness, orphan DBs, zombie processes.
+      Added `dolt-health` step to deacon patrol formula with threshold table
+      and remediation actions (compactor dispatch, backup nudge, orphan cleanup).
+      Existing `system-health` step (gc doctor) retained as a separate step.
 - [~] **f11e10c3** — Patrol step self-audit in cycle reports. Patrol formulas
   emit a summary of which steps ran, skipped, or errored at end of cycle.
   Deferred: requires `gc patrol report --steps` (no patrol reporting CLI yet).
   Concept is valuable — implement when patrol reporting infrastructure exists.
 - [x] **3accc203** — Deacon Capability Ledger. Already at parity: all 6 role
-  templates include `shared/capability-ledger.md.tmpl` (work/patrol/merge
-  variants). Hooked/pinned terminology also already correct in propulsion
-  templates. Gas City factored upstream's inline approach into shared fragments.
+      templates include `shared/capability-ledger.md.tmpl` (work/patrol/merge
+      variants). Hooked/pinned terminology also already correct in propulsion
+      templates. Gas City factored upstream's inline approach into shared fragments.
 - [x] **117f014f** — Auto-burn stale molecules on re-dispatch. Confirmed Gas
-  City had the same bug: stale wisps from failed mid-batch dispatch blocked
-  re-sling. Fixed: `checkNoMoleculeChildren` and `checkBatchNoMoleculeChildren`
-  now skip closed molecules and auto-burn open molecules on unassigned beads.
+      City had the same bug: stale wisps from failed mid-batch dispatch blocked
+      re-sling. Fixed: `checkNoMoleculeChildren` and `checkBatchNoMoleculeChildren`
+      now skip closed molecules and auto-burn open molecules on unassigned beads.
 - [-] **9b4e67a2** — Burn previous root wisps before new patrol. Gas City's
   controller-level wisp GC (`wisp_gc.go`) handles accumulation on a timer.
   Upstream needed per-cycle GC because Gas Town lacks controller-level GC.
@@ -550,8 +575,8 @@ monitoring enhancements.
   logic. In Gas City, anti-ping-pong behavior is prompt guidance in the
   witness formula, not SDK infrastructure (ZFC principle).
 - [x] **ac859828** — Verify work on main before resetting abandoned beads.
-  Added merge-base check to witness patrol formula Step 3: if branch is
-  already on main, close the bead instead of resetting to pool.
+      Added merge-base check to witness patrol formula Step 3: if branch is
+      already on main, close the bead instead of resetting to pool.
 - [-] **a237024a** — Spawning state in witness action table. Gas Town
   Go-level survey logic. Gas City witness checks live session state via CLI;
   spawning agents have active sessions visible to the witness.
@@ -586,18 +611,18 @@ event-driven feeding. Gas City has convoy CRUD/status/autoclose but is
 missing the coordination layer:
 
 - [ ] **Reactive feeding** — `feedNextReadyIssue` triggered by bead close
-  events via `CheckConvoysForIssue`. Without this, convoy progress depends
-  on polling (patrol cycles finding stranded work).
+      events via `CheckConvoysForIssue`. Without this, convoy progress depends
+      on polling (patrol cycles finding stranded work).
 - [ ] **`tracks` dependency type** — convoys use `tracks` deps to link
-  issues across rigs. Gas City beads use parent-child only.
+      issues across rigs. Gas City beads use parent-child only.
 - [ ] **Cross-rig dependency resolution** — `isIssueBlocked` checks
-  `blocks`, `conditional-blocks`, `waits-for` dep types with cross-rig
-  status freshness.
+      `blocks`, `conditional-blocks`, `waits-for` dep types with cross-rig
+      status freshness.
 - [ ] **Staged convoy statuses** — `staged_ready`, `staged_warnings`
-  prevent feeding before convoy is launched.
+      prevent feeding before convoy is launched.
 - [ ] **Rig-prefix dispatch** — `rigForIssue` + `dispatchIssue` routes
-  each convoy leg to its rig's polecat pool based on bead ID prefix.
-  Gas City sling has prefix resolution but convoy doesn't use it.
+      each convoy leg to its rig's polecat pool based on bead ID prefix.
+      Gas City sling has prefix resolution but convoy doesn't use it.
 - [-] **9f33b97d** — Nil `cobra.Command` guard. Gas Town internal defensive
   check. N/A.
 - [-] **5d9406e1** — Prevent duplicate polecat spawns. Gas Town internal
@@ -670,51 +695,61 @@ implementation details that don't affect Gas City's architecture or
 configuration patterns.
 
 ### 22a. TOCTOU race fixes
+
 - [-] ~7 commits fixing time-of-check/time-of-use races in compiled Go code.
   Gas Town-specific concurrency bugs in daemon, witness, and sling hot paths.
   N/A — Gas City's architecture avoids these patterns (filesystem beads with
   atomic rename, no concurrent Dolt writes).
 
 ### 22b. OTel / Telemetry
+
 - [-] ~10 commits adding/refining OpenTelemetry spans, trace propagation,
   and metrics collection. Gas City has no OTel integration. N/A.
 
 ### 22c. Dolt operational
+
 - [-] ~10 commits for Dolt SQL admin operations, server restart logic,
   connection pool tuning, and query optimization. Gas City uses filesystem
   beads, not Dolt. N/A.
 
 ### 22d. Daemon PID / lifecycle
+
 - [-] ~7 commits improving daemon PID file handling, process discovery,
   and graceful shutdown sequencing. Gas City's controller uses `flock(2)`
   for singleton enforcement and direct process table queries. N/A.
 
 ### 22e. Proxy / mTLS sandbox
+
 - [-] ~3 commits for sandbox proxy mTLS certificate rotation and proxy
   health checks. Gas Town infrastructure for isolated polecat networking.
   N/A — Gas City sandboxes are local worktrees.
 
 ### 22f. Namepool custom themes
+
 - [-] ~6 commits adding themed name pools (e.g., mythology, astronomy) for
   agent naming. Gas Town-specific flavor. N/A — Gas City uses config-defined
   agent names.
 
 ### 22g. Agent memory
+
 - [~] ~3 commits for `gt remember` / `gt forget` commands — persistent
   agent memory across sessions. Deferred — interesting capability but
   requires `gc remember`/`gc forget` CLI commands and agent bead metadata
   fields. Low priority vs core SDK work.
 
 ### 22h. Cross-platform / build / CI / deps
+
 - [-] ~12 commits for Windows/macOS compatibility, CI pipeline fixes,
   dependency updates, and build system changes. Gas Town build infrastructure.
   N/A.
 
 ### 22i. Misc operational
+
 - [-] ~15 commits for miscellaneous Gas Town bug fixes: tmux session cleanup,
   log rotation, error message improvements, CLI help text updates. N/A.
 
 ### 22j. Docs
+
 - [-] ~2 commits: agent API inventory and internal architecture docs.
   Informational only — already captured in Gas City's spec documents.
 
@@ -811,26 +846,26 @@ New theme. Nudge delivery reliability improvements.
 ### 24a. Wait-idle as default
 
 - [x] **6bc898ce** — Change default nudge delivery from `immediate` (tmux
-  send-keys) to `wait-idle` (poll for idle prompt before delivering).
-  Immediate mode interrupted active tool calls — the agent received nudge
-  text as user input mid-execution, aborting work. Wait-idle falls back to
-  cooperative queue (delivered at next turn boundary via UserPromptSubmit
-  hook). `--mode=immediate` preserved for emergencies.
-  **SDK:** Gas City's `NudgeSession` currently uses direct tmux send-keys
-  (immediate mode). Should add `WaitForIdle` as the default delivery path
-  with immediate as opt-in override. Also update nudge command help text.
+      send-keys) to `wait-idle` (poll for idle prompt before delivering).
+      Immediate mode interrupted active tool calls — the agent received nudge
+      text as user input mid-execution, aborting work. Wait-idle falls back to
+      cooperative queue (delivered at next turn boundary via UserPromptSubmit
+      hook). `--mode=immediate` preserved for emergencies.
+      **SDK:** Gas City's `NudgeSession` currently uses direct tmux send-keys
+      (immediate mode). Should add `WaitForIdle` as the default delivery path
+      with immediate as opt-in override. Also update nudge command help text.
 
 ### 24b. WaitForIdle false-positive fix
 
 - [x] **dfd945e9** — WaitForIdle returned immediately when it found a `❯`
-  prompt in the pane buffer, but during inter-tool-call gaps the prompt
-  remains visible in scrollback while Claude Code is actively processing.
-  Fix: (1) check Claude Code status bar for "esc to interrupt" — if present,
-  agent is busy; (2) require 2 consecutive idle polls (400ms window) to
-  confirm genuine idle state.
-  **SDK:** Gas City's `WaitForIdle` (`tmux.go:1947`) has exactly this bug —
-  single-poll prompt detection without status bar check or confirmation
-  window. Port the 2-poll + status bar check.
+      prompt in the pane buffer, but during inter-tool-call gaps the prompt
+      remains visible in scrollback while Claude Code is actively processing.
+      Fix: (1) check Claude Code status bar for "esc to interrupt" — if present,
+      agent is busy; (2) require 2 consecutive idle polls (400ms window) to
+      confirm genuine idle state.
+      **SDK:** Gas City's `WaitForIdle` (`tmux.go:1947`) has exactly this bug —
+      single-poll prompt detection without status bar check or confirmation
+      window. Port the 2-poll + status bar check.
 
 ---
 
@@ -843,7 +878,7 @@ New theme. Nudge delivery reliability improvements.
   directory; adding a new agent requires only a preset entry + template files.
   No Go boilerplate.
   N/A — Gas City already has the generic `install_agent_hooks` config field
-  + `internal/hooks/hooks.go` declarative installer. Validates our approach.
+  - `internal/hooks/hooks.go` declarative installer. Validates our approach.
 - [-] **730207a0** + **4c9767a1** — Remove old HookInstallerFunc registry and
   per-agent packages. Cleanup of the old system.
   N/A — Gas City never had per-agent hook packages.
@@ -851,13 +886,13 @@ New theme. Nudge delivery reliability improvements.
 ### 25b. Cursor hooks support
 
 - [x] **86e3b89b** — Add Cursor hooks support for polecat agent integration.
-  `SupportsHooks = true` for Cursor preset, dedicated hook config files for
-  autonomous and interactive modes.
-  **Done:** Added Cursor hook support to `internal/hooks/`. Moved cursor
-  from unsupported to supported, added `config/cursor.json` with Cursor's
-  native hook format (sessionStart, preCompact, beforeSubmitPrompt, stop)
-  calling gc prime / gc mail check --inject / gc hook --inject.
-  `install_agent_hooks = ["cursor"]` now works.
+      `SupportsHooks = true` for Cursor preset, dedicated hook config files for
+      autonomous and interactive modes.
+      **Done:** Added Cursor hook support to `internal/hooks/`. Moved cursor
+      from unsupported to supported, added `config/cursor.json` with Cursor's
+      native hook format (sessionStart, preCompact, beforeSubmitPrompt, stop)
+      calling gc prime / gc mail check --inject / gc hook --inject.
+      `install_agent_hooks = ["cursor"]` now works.
 
 ### 25c. Hook bead slot removal
 
@@ -901,11 +936,11 @@ New theme. Nudge delivery reliability improvements.
 ### 27a. Shortened TTLs
 
 - [x] **2dd21003** — Shorten reaper TTLs: auto-close stale issues 30d → 7d,
-  purge closed wisps 7d → 3d, purge closed mail 7d → 3d.
-  **Gastown:** Update `mol-dog-reaper.formula.toml` vars to match new
-  defaults: `stale_issue_age = "7d"`, `purge_age = "3d"`,
-  `mail_delete_age = "3d"`. Our formula already has these as configurable
-  vars — just update the default values.
+      purge closed wisps 7d → 3d, purge closed mail 7d → 3d.
+      **Gastown:** Update `mol-dog-reaper.formula.toml` vars to match new
+      defaults: `stale_issue_age = "7d"`, `purge_age = "3d"`,
+      `mail_delete_age = "3d"`. Our formula already has these as configurable
+      vars — just update the default values.
 
 ### 27b. Reaper operational fixes
 
@@ -1074,7 +1109,7 @@ Gas Town internal fixes, test improvements, and operational items. All N/A.
 - [-] **fbfb3cfa** — Add server-side timeouts to prevent CLOSE_WAIT
   accumulation (Dolt).
 - [x] **3b9b0f04** — Enrich dashboard convoy panel with progress % and
-  assignees.
+      assignees.
 - [-] **aa123968** — Use t.TempDir() in resetAbandonedBead tests.
 - [-] **e237a5ca** — Detect default branch from HEAD in bare clone.
 - [-] **9aa27c5d** — Show actionable guidance when removing orphaned rig dir.
@@ -1103,36 +1138,36 @@ Gas Town internal fixes, test improvements, and operational items. All N/A.
 
 **SDK items — done:**
 
-| # | Item | Section | Status |
-|---|------|---------|--------|
-| 1 | WaitForIdle 2-poll + status bar check | S24b | [x] Done |
-| 2 | Nudge wait-idle as default delivery mode | S24a | [x] Done |
-| 3 | Cursor hook support | S25b | [x] Done |
+| #   | Item                                     | Section | Status   |
+| --- | ---------------------------------------- | ------- | -------- |
+| 1   | WaitForIdle 2-poll + status bar check    | S24b    | [x] Done |
+| 2   | Nudge wait-idle as default delivery mode | S24a    | [x] Done |
+| 3   | Cursor hook support                      | S25b    | [x] Done |
 
 **SDK items — skipped (N/A):**
 
-| # | Item | Section | Reason |
-|---|------|---------|--------|
-| 1 | Health patrol idle-kill semantics | S23a | Already per-agent opt-in |
-| 2 | GC_AGENT_READY env var | S23b | Prompt-based readiness sufficient |
-| 3 | `--cascade` on bd close | S26a | No gastown formulas close parents |
-| 4 | hook_bead slot removal | S25c | Formula text is natural language, not API |
-| 5 | POLECAT_SLOT env var | S30a | Gas Town polecat manager feature |
+| #   | Item                              | Section | Reason                                    |
+| --- | --------------------------------- | ------- | ----------------------------------------- |
+| 1   | Health patrol idle-kill semantics | S23a    | Already per-agent opt-in                  |
+| 2   | GC_AGENT_READY env var            | S23b    | Prompt-based readiness sufficient         |
+| 3   | `--cascade` on bd close           | S26a    | No gastown formulas close parents         |
+| 4   | hook_bead slot removal            | S25c    | Formula text is natural language, not API |
+| 5   | POLECAT_SLOT env var              | S30a    | Gas Town polecat manager feature          |
 
 **Gastown items — done:**
 
-| # | Item | Section | Status |
-|---|------|---------|--------|
-| 1 | HELP assessment table in witness formula | S23 | [x] Done |
-| 2 | Reaper formula default TTLs (7d/3d/3d) | S27a | [x] Done |
+| #   | Item                                     | Section | Status   |
+| --- | ---------------------------------------- | ------- | -------- |
+| 1   | HELP assessment table in witness formula | S23     | [x] Done |
+| 2   | Reaper formula default TTLs (7d/3d/3d)   | S27a    | [x] Done |
 
 **Deferred:**
 
-| # | Item | Section | Blocked on |
-|---|------|---------|------------|
-| 1 | Add `bd close` to all role quick-reference tables | S29a | Same approach as gc skills |
-| 2 | Context-budget guard | S29b | env var plumbing |
-| 3 | Sling context TTL | S31a | sling scheduling implementation |
+| #   | Item                                              | Section | Blocked on                      |
+| --- | ------------------------------------------------- | ------- | ------------------------------- |
+| 1   | Add `bd close` to all role quick-reference tables | S29a    | Same approach as gc skills      |
+| 2   | Context-budget guard                              | S29b    | env var plumbing                |
+| 3   | Sling context TTL                                 | S31a    | sling scheduling implementation |
 
 ---
 
@@ -1209,22 +1244,22 @@ bucketed into SDK gaps, Gastown example gaps, or no-action items.
 
 **SDK items to take forward:**
 
-| # | Item | Section | Status |
-|---|------|---------|--------|
-| 1 | Copilot executable hooks + Codex hook support | S35 | [~] Needed |
-| 2 | Queue/deferred nudge delivery for non-Claude agents | S35 | [~] Needed |
-| 3 | `gc assign`, `--crew`, and `crew_agents` support | S35 | [~] Needed |
-| 4 | ACP propulsion follow-up stack | S35 | [~] Needed |
-| 5 | Base-branch / formula-var propagation for newer Gastown formulas | S35 | [~] Needed |
+| #   | Item                                                             | Section | Status     |
+| --- | ---------------------------------------------------------------- | ------- | ---------- |
+| 1   | Copilot executable hooks + Codex hook support                    | S35     | [~] Needed |
+| 2   | Queue/deferred nudge delivery for non-Claude agents              | S35     | [~] Needed |
+| 3   | `gc assign`, `--crew`, and `crew_agents` support                 | S35     | [~] Needed |
+| 4   | ACP propulsion follow-up stack                                   | S35     | [~] Needed |
+| 5   | Base-branch / formula-var propagation for newer Gastown formulas | S35     | [~] Needed |
 
 **Gastown example items to take forward:**
 
-| # | Item | Section | Status |
-|---|------|---------|--------|
-| 1 | Event-driven polecat/refinery lifecycle (`FIX_NEEDED`, `awaiting_verdict`) | S36 | [~] Needed |
-| 2 | `/review` command + merge-strategy refinery flow | S36 | [~] Needed |
-| 3 | `mol-idea-to-plan` v2 | S36 | [~] Needed |
-| 4 | Ignore provider `state.json` in workspaces | S36 | [~] Needed |
+| #   | Item                                                                       | Section | Status     |
+| --- | -------------------------------------------------------------------------- | ------- | ---------- |
+| 1   | Event-driven polecat/refinery lifecycle (`FIX_NEEDED`, `awaiting_verdict`) | S36     | [~] Needed |
+| 2   | `/review` command + merge-strategy refinery flow                           | S36     | [~] Needed |
+| 3   | `mol-idea-to-plan` v2                                                      | S36     | [~] Needed |
+| 4   | Ignore provider `state.json` in workspaces                                 | S36     | [~] Needed |
 
 ---
 
@@ -1239,18 +1274,18 @@ the Delta 4 landing work; already-landed Delta 4 parity items are not repeated.
 ## 39. SDK Gaps (Delta 5)
 
 - [x] **1d4ba3f8 + b91fdace + f3183e6a** — Gemini hook compatibility and stale-template auto-upgrade.
-  Landed in Gas City via `0b7e7ec2` (`internal/hooks/hooks.go`): Gemini hooks now render an install-time absolute `gc` path, and the installer upgrades known-stale generated Gemini settings instead of preserving broken `export PATH=... && gc ...` templates indefinitely.
+      Landed in Gas City via `0b7e7ec2` (`internal/hooks/hooks.go`): Gemini hooks now render an install-time absolute `gc` path, and the installer upgrades known-stale generated Gemini settings instead of preserving broken `export PATH=... && gc ...` templates indefinitely.
 
 - [x] **305f9ee0** — Codex workspace trust dialog handling on startup.
-  Landed in Gas City via `2fcb0952` (`internal/runtime/dialog.go`): startup dialog acceptance now recognizes Codex's "Do you trust the contents of this directory?" prompt alongside the existing Claude trust/bypass dialogs, so first-run Codex sessions no longer wedge at trust confirmation.
+      Landed in Gas City via `2fcb0952` (`internal/runtime/dialog.go`): startup dialog acceptance now recognizes Codex's "Do you trust the contents of this directory?" prompt alongside the existing Claude trust/bypass dialogs, so first-run Codex sessions no longer wedge at trust confirmation.
 
 - [x] **894049af + 829c1510** — Shell-quote provider args when building runtime commands.
-  Landed in Gas City via `bdbbf43c` (`internal/config/provider.go`): provider args now use shared shell-quoting before command-string assembly, and the session/dashboard parsing path was updated to round-trip those quoted commands correctly instead of misparsing metacharacters or spaced args.
+      Landed in Gas City via `bdbbf43c` (`internal/config/provider.go`): provider args now use shared shell-quoting before command-string assembly, and the session/dashboard parsing path was updated to round-trip those quoted commands correctly instead of misparsing metacharacters or spaced args.
 
 ## 40. Gastown Example Gaps (Delta 5)
 
 - [x] **aecdc21c + e6516e5c** — Keep worktree ignores local and cover modern runtime files.
-  Landed in Gas City via `f9e7205f` (`examples/gastown/packs/gastown/scripts/worktree-setup.sh`): polecat worktree bootstrap now writes runtime ignore patterns to the git exclude file resolved by `git rev-parse --git-path info/exclude` instead of mutating tracked `.gitignore`, and the local ignore block now covers modern runtime paths including `.claude/`, `.codex/`, `.gemini/`, `.opencode/`, `.runtime/`, `.logs/`, and `state.json`.
+      Landed in Gas City via `f9e7205f` (`examples/gastown/packs/gastown/scripts/worktree-setup.sh`): polecat worktree bootstrap now writes runtime ignore patterns to the git exclude file resolved by `git rev-parse --git-path info/exclude` instead of mutating tracked `.gitignore`, and the local ignore block now covers modern runtime paths including `.claude/`, `.codex/`, `.gemini/`, `.opencode/`, `.runtime/`, `.logs/`, and `state.json`.
 
 - [~] **1916b730** — Polecats should consult repo `CLAUDE.md` / `AGENTS.md` when gate vars are unset.
   Upstream stopped treating empty `setup_command` / `typecheck_command` / `lint_command` / `build_command` / `test_command` vars as a silent skip and explicitly told polecats to read project `CLAUDE.md` / `AGENTS.md` for the real Definition of Done. Gas City's `cmd/gc/formulas/mol-polecat-base.formula.toml` still tells polecats to skip empty commands silently, which can bypass project-specific gates in Gastown rigs that rely on repo instructions instead of pack config.
@@ -1285,15 +1320,15 @@ the Delta 4 landing work; already-landed Delta 4 parity items are not repeated.
 
 **SDK items to take forward:**
 
-| # | Item | Section | Status |
-|---|------|---------|--------|
-| 1 | Gemini absolute-path hooks + stale hook auto-upgrade | S39 | [x] Done |
-| 2 | Codex trust-dialog startup handling | S39 | [x] Done |
-| 3 | Shell-quote provider args in runtime commands | S39 | [x] Done |
+| #   | Item                                                 | Section | Status   |
+| --- | ---------------------------------------------------- | ------- | -------- |
+| 1   | Gemini absolute-path hooks + stale hook auto-upgrade | S39     | [x] Done |
+| 2   | Codex trust-dialog startup handling                  | S39     | [x] Done |
+| 3   | Shell-quote provider args in runtime commands        | S39     | [x] Done |
 
 **Gastown example items to take forward:**
 
-| # | Item | Section | Status |
-|---|------|---------|--------|
-| 1 | Move worktree runtime ignores to local excludes and expand coverage | S40 | [x] Done |
-| 2 | Read repo `CLAUDE.md` / `AGENTS.md` when pack gate vars are unset | S40 | [~] Needed |
+| #   | Item                                                                | Section | Status     |
+| --- | ------------------------------------------------------------------- | ------- | ---------- |
+| 1   | Move worktree runtime ignores to local excludes and expand coverage | S40     | [x] Done   |
+| 2   | Read repo `CLAUDE.md` / `AGENTS.md` when pack gate vars are unset   | S40     | [~] Needed |

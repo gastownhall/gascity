@@ -119,13 +119,13 @@ These four steps are interdependent. They arrive together.
 
 ## Not needed (permanent exclusions or handled differently)
 
-| Gastown step | Why not needed |
-|---|---|
-| Step 1: ResolveRoleAgentConfig | Done in CLI via `config.ResolveProvider()` |
-| Steps 3-5: Build command + env | Done in `agent.managed.Start()` + `cmd_start.go` |
-| Step 13: SleepForReadyDelay | Handled inside `WaitForRuntimeReady` fallback |
-| Step 4: ConfigDirEnv prepend | Gas City uses `-e` flags; `-e` survives respawn |
-| Step 8: SetEnvironment post-create | `-e` flags survive respawn (verified tmux 3.5a) |
+| Gastown step                       | Why not needed                                   |
+| ---------------------------------- | ------------------------------------------------ |
+| Step 1: ResolveRoleAgentConfig     | Done in CLI via `config.ResolveProvider()`       |
+| Steps 3-5: Build command + env     | Done in `agent.managed.Start()` + `cmd_start.go` |
+| Step 13: SleepForReadyDelay        | Handled inside `WaitForRuntimeReady` fallback    |
+| Step 4: ConfigDirEnv prepend       | Gas City uses `-e` flags; `-e` survives respawn  |
+| Step 8: SetEnvironment post-create | `-e` flags survive respawn (verified tmux 3.5a)  |
 
 ---
 

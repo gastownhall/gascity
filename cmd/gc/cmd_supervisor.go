@@ -26,7 +26,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
-	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -107,19 +106,17 @@ against lingering supervisor / controller subprocesses).`,
 }
 
 func newSupervisorStatusCmd(stdout, stderr io.Writer) *cobra.Command {
-	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Check if the supervisor is running",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if supervisorStatusWithOptions(stdout, stderr, asJSON) != 0 {
+			if supervisorStatus(stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON")
 	return cmd
 }
 
@@ -194,15 +191,6 @@ const (
 )
 
 const supervisorPreserveSessionsOnSignalEnv = "GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL"
-
-// supervisorOmitProviderCredsEnv, when set to "1" at the time the supervisor
-// service file is generated, causes provider-credential env vars
-// (ANTHROPIC_*, GEMINI_*, GOOGLE_*, OPENAI_*) to be excluded from the
-// generated launchd plist or systemd unit. Default behavior is unchanged.
-// When opted out, the user is responsible for delivering provider creds to
-// the supervisor's environment via some other mechanism (e.g. a wrapper
-// around `gc supervisor run` that sources a credentials file).
-const supervisorOmitProviderCredsEnv = "GC_SUPERVISOR_OMIT_PROVIDER_CREDS"
 
 var supervisorShutdownSettleDelay = 50 * time.Millisecond
 
@@ -579,21 +567,9 @@ func waitForSupervisorExitUntil(sockPath string, deadline time.Time) error {
 	}
 }
 
-func supervisorStatusWithOptions(stdout, _ io.Writer, asJSON bool) int {
-	sockPath, pid := runningSupervisorSocket()
-	if asJSON {
-		payload := map[string]any{
-			"schema_version": "1",
-			"running":        pid > 0,
-			"pid":            pid,
-			"socket_path":    sockPath,
-			"checked_paths":  supervisorSocketPathCandidates(),
-		}
-		if err := writeCLIJSONLine(stdout, payload); err != nil {
-			return 1
-		}
-		return 0
-	}
+// supervisorStatus checks and reports whether the supervisor is running.
+func supervisorStatus(stdout, _ io.Writer) int {
+	pid := supervisorAlive()
 	if pid > 0 {
 		fmt.Fprintf(stdout, "Supervisor is running (PID %d)\n", pid) //nolint:errcheck
 		return 0
@@ -687,14 +663,6 @@ func managedCityStopTimeout(mc *managedCity) time.Duration {
 	return mc.cr.cfg.Daemon.ShutdownTimeoutDuration()
 }
 
-func managedCityForcedStopTimeout(mc *managedCity) time.Duration {
-	timeout := managedCityStopTimeout(mc)
-	if timeout <= 0 {
-		return timeout
-	}
-	return timeout * 5
-}
-
 // stopManagedCity cancels a city's context, waits up to its configured
 // grace period for it to exit, forces shutdown if it doesn't, and then
 // closes the bead provider and file recorder. It returns a non-nil error
@@ -724,24 +692,20 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 		}
 	}
 	if mc.cr != nil {
-		if mc.cr.forceStopShutdown != nil {
-			mc.cr.forceStopShutdown.Store(true)
-		}
 		func() {
 			defer func() { recover() }() //nolint:errcheck
 			mc.cr.shutdown()
 		}()
 	}
-	forceTimeout := managedCityForcedStopTimeout(mc)
-	if forceTimeout > 0 {
+	if timeout > 0 {
 		select {
 		case <-mc.done:
 			// Forced shutdown completed before the second timeout — the
 			// city is out. Clear the pending error so we report success.
 			stopErr = nil
-		case <-time.After(forceTimeout):
-			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, forceTimeout) //nolint:errcheck
-			stopErr = fmt.Errorf("city %q did not exit within %s after forced shutdown", mc.name, forceTimeout)
+		case <-time.After(timeout):
+			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, timeout) //nolint:errcheck
+			stopErr = fmt.Errorf("city %q did not exit within %s after forced shutdown", mc.name, timeout)
 		}
 	}
 	if err := shutdownBeadsProvider(cityPath); err != nil {
@@ -872,10 +836,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	apiMux := api.NewSupervisorMux(registry, cityInitSvc, readOnly, version, commit, startedAt)
-	if len(supCfg.Supervisor.AllowedOrigins) > 0 {
-		apiMux.WithAllowedOrigins(supCfg.Supervisor.AllowedOrigins)
-	}
+	apiMux := api.NewSupervisorMux(registry, cityInitSvc, readOnly, version, startedAt)
 
 	pprofSrv, pprofErr := api.StartPprof("")
 	if pprofErr != nil {
@@ -1157,6 +1118,11 @@ func reconcileCities(
 				delete(initFailures, path)
 			}
 		}
+		for path := range cr.registeredStopped {
+			if _, ok := desired[path]; !ok {
+				delete(cr.registeredStopped, path)
+			}
+		}
 	})
 
 	// Detect name drift: if a running city's registry name changed,
@@ -1196,6 +1162,9 @@ func reconcileCities(
 	) {
 		for path, entry := range desired {
 			if _, running := cities[path]; !running {
+				if _, stopped := cr.registeredStopped[path]; stopped {
+					continue
+				}
 				if _, initializing := initStatus[path]; initializing {
 					continue
 				}
@@ -1301,7 +1270,6 @@ func reconcileCities(
 
 		// recordInitFailure logs the error and records backoff state.
 		recordInitFailure := func(cityName, msg string) {
-			fmt.Fprintln(stderr, logutil.FormatFatalLine(msg))                              //nolint:errcheck // best-effort stderr
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': %s (skipping)\n", cityName, msg) //nolint:errcheck
 			var configMod time.Time
 			if info, stErr := os.Stat(tomlPath); stErr == nil {
@@ -1359,6 +1327,28 @@ func reconcileCities(
 				cityName, liveName)
 		}
 		applyRuntimeCityIdentity(cfg, cityName)
+
+		if cfg.Workspace.Suspended {
+			cr.BatchUpdate(func(
+				_ map[string]*managedCity,
+				initStatus map[string]cityInitProgress,
+				initFailures map[string]*initFailRecord,
+				_ map[string]*panicRecord,
+			) {
+				delete(initStatus, path)
+				delete(initFailures, path)
+				cr.registeredStopped[path] = registeredStoppedCity{name: cityName, status: "suspended"}
+			})
+			continue
+		}
+		cr.BatchUpdate(func(
+			_ map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			delete(cr.registeredStopped, path)
+		})
 
 		// Track initialization progress for the API.
 		cr.BatchUpdate(func(
@@ -1463,7 +1453,7 @@ func reconcileCities(
 		rec := events.Discard
 		var eventProv events.Provider
 		evPath := filepath.Join(path, ".gc", "events.jsonl")
-		fr, frErr := newFileEventsRecorder(evPath, cfg.Events, stderr)
+		fr, frErr := events.NewFileRecorder(evPath, stderr)
 		if frErr == nil {
 			rec = fr
 			eventProv = fr
@@ -1476,7 +1466,6 @@ func reconcileCities(
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, path)
 		pokeCh := make(chan struct{}, 1)
 		configDirty := &atomic.Bool{}
-		forceShutdown := &atomic.Bool{}
 		reloadReqCh := make(chan reloadRequest)
 		cityCtx, cityCancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
@@ -1503,7 +1492,6 @@ func reconcileCities(
 				Rec:                     rec,
 				PoolSessions:            poolSessions,
 				PoolDeathHandlers:       poolDeathHandlers,
-				ForceStopShutdown:       forceShutdown,
 				ReloadReqCh:             reloadReqCh,
 				ConvergenceReqCh:        convergenceReqCh,
 				PokeCh:                  pokeCh,
@@ -1605,7 +1593,7 @@ func reconcileCities(
 		// Start controller socket AFTER the alreadyRunning check so we
 		// never destroy a live city's socket or leak a listener.
 		sockPath := filepath.Join(path, ".gc", "controller.sock")
-		lis, lisErr := startControllerSocket(path, cityCancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+		lis, lisErr := startControllerSocket(path, cityCancel, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 		if lisErr != nil {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
 			lock.Close()                                                                               //nolint:errcheck // no socket to race with

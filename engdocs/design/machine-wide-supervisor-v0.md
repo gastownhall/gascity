@@ -2,13 +2,13 @@
 title: "Machine-Wide Supervisor"
 ---
 
-| Field | Value |
-|---|---|
-| Status | Accepted |
-| Date | 2026-03-06 |
-| Author(s) | Claude |
-| Issue | N/A |
-| Supersedes | N/A |
+| Field      | Value      |
+| ---------- | ---------- |
+| Status     | Accepted   |
+| Date       | 2026-03-06 |
+| Author(s)  | Claude     |
+| Issue      | N/A        |
+| Supersedes | N/A        |
 
 ## Summary
 
@@ -58,14 +58,14 @@ unchanged via a compatibility shim.
 Gas City already explicitly follows the Erlang/OTP supervision model
 (documented in `engdocs/architecture/health-patrol.md`):
 
-| Erlang/OTP | Gas City today | Gas City proposed |
-|---|---|---|
-| Application | N/A | Tenant |
-| Top-level supervisor | N/A | Machine supervisor |
-| Supervisor | Controller per city | City supervisor (child of machine) |
-| Worker | Agent | Agent (unchanged) |
-| Child spec | `[[agent]]` in city.toml | `[[agent]]` (unchanged) |
-| Application controller | N/A | `~/.gc/supervisor.sock` |
+| Erlang/OTP             | Gas City today           | Gas City proposed                  |
+| ---------------------- | ------------------------ | ---------------------------------- |
+| Application            | N/A                      | Tenant                             |
+| Top-level supervisor   | N/A                      | Machine supervisor                 |
+| Supervisor             | Controller per city      | City supervisor (child of machine) |
+| Worker                 | Agent                    | Agent (unchanged)                  |
+| Child spec             | `[[agent]]` in city.toml | `[[agent]]` (unchanged)            |
+| Application controller | N/A                      | `~/.gc/supervisor.sock`            |
 
 Today each city is an independent Erlang "node." This proposal connects
 them under one application controller -- the same pattern as Erlang's
@@ -330,15 +330,16 @@ per-city config watching.
 
 Each city retains full isolation:
 
-| Resource | Isolation mechanism | Changed? |
-|---|---|---|
-| Tmux sessions | Per-city socket (`tmux -L <cityName>`) | No |
-| Bead stores | Per-rig within city (`.beads/` or bd) | No |
-| Event log | Per-city `.gc/events.jsonl` | No |
-| Config | Per-city `city.toml` | No |
-| Session names | Per-city tmux server = no collision | No |
+| Resource      | Isolation mechanism                    | Changed? |
+| ------------- | -------------------------------------- | -------- |
+| Tmux sessions | Per-city socket (`tmux -L <cityName>`) | No       |
+| Bead stores   | Per-rig within city (`.beads/` or bd)  | No       |
+| Event log     | Per-city `.gc/events.jsonl`            | No       |
+| Config        | Per-city `city.toml`                   | No       |
+| Session names | Per-city tmux server = no collision    | No       |
 
 The only thing that moves from per-city to machine-wide:
+
 - **Lock file:** `~/.gc/supervisor.lock` (replaces per-city `.gc/controller.lock`)
 - **Control socket:** `~/.gc/supervisor.sock` (replaces per-city `.gc/controller.sock`)
 - **API port:** Single port from `supervisor.toml` (replaces per-city `[api] port`)
@@ -378,15 +379,15 @@ Locking:
 
 ### 8) Backward Compatibility
 
-| Scenario | Behavior |
-|---|---|
-| `gc start` in a city dir (no supervisor running) | Auto-registers city, starts supervisor |
-| `gc start` in a city dir (supervisor running) | Auto-registers city, supervisor picks it up |
-| `gc start --standalone` | Legacy mode: per-city controller, no supervisor |
-| `gc stop` in a city dir | Unregisters city from supervisor |
-| `gc supervisor stop` | Stops all cities, then supervisor |
-| Existing `[api] port` in city.toml | Ignored when running under supervisor (warning logged) |
-| Single registered city, no city prefix in URL | Routes to sole city (backward compat) |
+| Scenario                                         | Behavior                                               |
+| ------------------------------------------------ | ------------------------------------------------------ |
+| `gc start` in a city dir (no supervisor running) | Auto-registers city, starts supervisor                 |
+| `gc start` in a city dir (supervisor running)    | Auto-registers city, supervisor picks it up            |
+| `gc start --standalone`                          | Legacy mode: per-city controller, no supervisor        |
+| `gc stop` in a city dir                          | Unregisters city from supervisor                       |
+| `gc supervisor stop`                             | Stops all cities, then supervisor                      |
+| Existing `[api] port` in city.toml               | Ignored when running under supervisor (warning logged) |
+| Single registered city, no city prefix in URL    | Routes to sole city (backward compat)                  |
 
 ### 9) Future: Multi-Tenant Isolation
 
@@ -402,6 +403,7 @@ machine supervisor
 ```
 
 Tenant boundaries provide:
+
 - **Resource limits:** max agents, max cities, CPU/memory cgroups
 - **API authentication:** tenant API keys, JWT with tenant claim
 - **Network isolation:** per-tenant bind addresses or Unix sockets
@@ -420,6 +422,7 @@ URL pattern extends naturally:
 
 This is not implemented in v0 but the design explicitly avoids
 decisions that would block it:
+
 - City names are unique within a registry (extend to unique within tenant)
 - No global mutable state shared between cities
 - API routing is a prefix match that can gain another segment

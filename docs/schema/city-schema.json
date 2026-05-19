@@ -52,7 +52,7 @@
         },
         "description": {
           "type": "string",
-          "description": "Description is a human-readable description shown in MC's session creation UI."
+          "description": "Description is a human-readable description shown in a real-world app's session creation UI."
         },
         "dir": {
           "type": "string",
@@ -64,10 +64,7 @@
         },
         "scope": {
           "type": "string",
-          "enum": [
-            "city",
-            "rig"
-          ],
+          "enum": ["city", "rig"],
           "description": "Scope defines where this agent is instantiated: \"city\" (one per city)\nor \"rig\" (one per rig, the default). Only meaningful for pack-defined\nagents; inline agents in city.toml use Dir directly."
         },
         "suspended": {
@@ -91,10 +88,8 @@
         },
         "session": {
           "type": "string",
-          "enum": [
-            "acp"
-          ],
-          "description": "Session overrides the session transport for this agent.\n\"\" (default) uses the city-level session provider (typically tmux).\n\"acp\" uses the Agent Client Protocol (JSON-RPC over stdio).\nThe agent's resolved provider must have supports_acp = true."
+          "enum": ["acp", "tmux"],
+          "description": "Session overrides the session transport for this agent.\n\"\" (default) uses the provider default.\n\"tmux\" uses the tmux-backed CLI path even when the provider supports ACP.\n\"acp\" uses the Agent Client Protocol (JSON-RPC over stdio); the agent's\nresolved provider must have supports_acp = true."
         },
         "provider": {
           "type": "string",
@@ -113,11 +108,7 @@
         },
         "prompt_mode": {
           "type": "string",
-          "enum": [
-            "arg",
-            "flag",
-            "none"
-          ],
+          "enum": ["arg", "flag", "none"],
           "description": "PromptMode controls how prompts are delivered: \"arg\", \"flag\", or \"none\".",
           "default": "arg"
         },
@@ -200,14 +191,6 @@
           "type": "string",
           "description": "IdleTimeout is the maximum time an agent session can be inactive before\nthe controller kills and restarts it. Duration string (e.g., \"15m\", \"1h\").\nEmpty (default) disables idle checking."
         },
-        "max_session_age": {
-          "type": "string",
-          "description": "MaxSessionAge is the maximum wall-clock lifetime of a single runtime\nsession before the controller preemptively restarts it. Duration string\n(e.g., \"5h\"). Empty (default) disables preemptive restarts. The restart\nis idle-gated: sessions with a pending interaction or an in-progress\nassigned work bead are left alone until they settle.\n\nMotivation: provider SDKs that cache credentials at session start (e.g.,\nClaude Code via Bedrock) can wedge when the underlying token expires if\nthe SDK doesn't re-chain providers. Cycling long-running sessions before\nthe token-expiry window prevents that failure mode without requiring\nupstream provider fixes."
-        },
-        "max_session_age_jitter": {
-          "type": "string",
-          "description": "MaxSessionAgeJitter bounds random jitter added to MaxSessionAge on a\nper-session basis so a fleet of identically-configured agents doesn't\nsynchronize restarts. Duration string (e.g., \"15m\"). Empty or 0\ndisables jitter (every session restarts at exactly MaxSessionAge).\nIgnored when MaxSessionAge is unset."
-        },
         "sleep_after_idle": {
           "type": "string",
           "description": "SleepAfterIdle overrides idle sleep policy for this agent. Accepts a\nduration string (e.g., \"30s\") or \"off\"."
@@ -287,7 +270,7 @@
         },
         "fallback": {
           "type": "boolean",
-          "description": "Fallback marks this agent as a fallback definition. During pack\ncomposition, a non-fallback agent with the same name wins silently.\nWhen two fallbacks collide, the first loaded (depth-first) wins.\nSee docs/packv2/migration.mdx for migration guidance."
+          "description": "Fallback marks this agent as a fallback definition. During pack\ncomposition, a non-fallback agent with the same name wins silently.\nWhen two fallbacks collide, the first loaded (depth-first) wins."
         },
         "depends_on": {
           "items": {
@@ -302,18 +285,13 @@
         },
         "wake_mode": {
           "type": "string",
-          "enum": [
-            "resume",
-            "fresh"
-          ],
+          "enum": ["resume", "fresh"],
           "description": "WakeMode controls context freshness across sleep/wake cycles.\n\"resume\" (default): reuse provider session key for conversation continuity.\n\"fresh\": start a new provider session on every wake (polecat pattern)."
         }
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "name"
-      ],
+      "required": ["name"],
       "description": "Agent defines a configured agent in the city."
     },
     "AgentDefaults": {
@@ -324,10 +302,7 @@
         },
         "wake_mode": {
           "type": "string",
-          "enum": [
-            "resume",
-            "fresh"
-          ],
+          "enum": ["resume", "fresh"],
           "description": "WakeMode is the parsed/composed default wake mode (\"resume\" or\n\"fresh\"), but it is not yet auto-applied at runtime."
         },
         "default_sling_formula": {
@@ -427,7 +402,7 @@
         },
         "session": {
           "type": "string",
-          "description": "Session overrides the session transport (\"acp\")."
+          "description": "Session overrides the session transport (\"acp\" or \"tmux\")."
         },
         "provider": {
           "type": "string",
@@ -444,14 +419,6 @@
         "idle_timeout": {
           "type": "string",
           "description": "IdleTimeout overrides the idle timeout duration string (e.g., \"30s\", \"5m\", \"1h\")."
-        },
-        "max_session_age": {
-          "type": "string",
-          "description": "MaxSessionAge overrides the max session age. Duration string (e.g., \"5h\").\nEmpty disables preemptive restart."
-        },
-        "max_session_age_jitter": {
-          "type": "string",
-          "description": "MaxSessionAgeJitter overrides the jitter added on top of MaxSessionAge.\nDuration string (e.g., \"15m\"). Empty disables jitter."
         },
         "sleep_after_idle": {
           "type": "string",
@@ -517,7 +484,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "InjectFragments overrides the agent's inject_fragments list. Leave this\nfield unset to keep inherited fragments; JSON callers may send null for\nthe same no-op. Set an empty list to clear fragments; set a populated\nlist to replace fragments."
+          "description": "InjectFragments overrides the agent's inject_fragments list."
         },
         "append_fragments": {
           "items": {
@@ -585,10 +552,7 @@
         },
         "wake_mode": {
           "type": "string",
-          "enum": [
-            "resume",
-            "fresh"
-          ],
+          "enum": ["resume", "fresh"],
           "description": "WakeMode overrides the agent's wake mode (\"resume\" or \"fresh\")."
         },
         "inject_fragments_append": {
@@ -620,9 +584,7 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "agent"
-      ],
+      "required": ["agent"],
       "description": "AgentOverride modifies a pack-stamped agent for a specific rig."
     },
     "AgentPatch": {
@@ -695,14 +657,6 @@
         "idle_timeout": {
           "type": "string",
           "description": "IdleTimeout overrides the idle timeout. Duration string (e.g., \"30s\", \"5m\", \"1h\")."
-        },
-        "max_session_age": {
-          "type": "string",
-          "description": "MaxSessionAge overrides the max session age. Duration string (e.g., \"5h\")."
-        },
-        "max_session_age_jitter": {
-          "type": "string",
-          "description": "MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., \"15m\")."
         },
         "sleep_after_idle": {
           "type": "string",
@@ -782,7 +736,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "InjectFragments overrides the agent's inject_fragments list. Leave this\nfield unset to keep inherited fragments; JSON callers may send null for\nthe same no-op. Set an empty list to clear fragments; set a populated\nlist to replace fragments."
+          "description": "InjectFragments overrides the agent's inject_fragments list."
         },
         "append_fragments": {
           "items": {
@@ -808,10 +762,7 @@
         },
         "wake_mode": {
           "type": "string",
-          "enum": [
-            "resume",
-            "fresh"
-          ],
+          "enum": ["resume", "fresh"],
           "description": "WakeMode overrides the agent's wake mode (\"resume\" or \"fresh\")."
         },
         "pre_start_append": {
@@ -871,10 +822,7 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "dir",
-        "name"
-      ],
+      "required": ["dir", "name"],
       "description": "AgentPatch modifies an existing agent identified by (Dir, Name)."
     },
     "BeadsConfig": {
@@ -1021,21 +969,11 @@
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
           "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies default_sling_formula and append_fragments; the\nattachment-list fields remain tombstones, and the other fields are\nparsed/composed but not yet inherited automatically."
-        },
-        "pricing": {
-          "items": {
-            "$ref": "#/$defs/ModelPricing"
-          },
-          "type": "array",
-          "description": "Pricing holds per-model cost rate overrides keyed by (provider, model).\nCity-level entries override pack-level entries which override the\ndefaults shipped with the pricing package. See internal/pricing for the\nestimation seam introduced by issue #1255 (1d)."
         }
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "workspace",
-        "agent"
-      ],
+      "required": ["workspace", "agent"],
       "description": "City is the top-level configuration for a Gas City instance."
     },
     "ConvergenceConfig": {
@@ -1103,11 +1041,6 @@
           "description": "ShutdownTimeout is the time to wait after sending Ctrl-C before force-killing\nagents during shutdown. Duration string (e.g., \"5s\", \"30s\"). Set to \"0s\"\nfor immediate kill. Defaults to \"5s\".",
           "default": "5s"
         },
-        "dolt_stop_timeout": {
-          "type": "string",
-          "description": "DoltStopTimeout is the SIGTERM→SIGKILL grace period for the managed dolt\nsubprocess during stop, unregister, restart, and startup/recovery\ncleanup. Independent of ShutdownTimeout (which gates agent drain) so a\nslow session drain cannot steal dolt's flush window. Duration string\n(e.g., \"30s\", \"1m\"). A too-short value risks SIGKILL during a journal\nindex update or manifest rotation, which corrupts dolt's chunk journal\n(see gastownhall/gascity#2090). Defaults to \"30s\", which absorbs the\nlongest observed flush window on commodity SSDs without unduly delaying\nunregister. Set to \"0s\" for immediate SIGKILL with no grace. Negative\nvalues are rejected at config load. Note: when a city is stopped via the\ncontroller (`gc stop` while a controller is running), the standalone\ncontroller-stop wait budget is `shutdown_timeout` + 15s (20s at the\ndefault `shutdown_timeout` of \"5s\"); a `dolt_stop_timeout` larger than\nthat budget can be cut short on that path even though the direct\nstop/unregister path always honors the full grace.",
-          "default": "30s"
-        },
         "wisp_gc_interval": {
           "type": "string",
           "description": "WispGCInterval is how often wisp GC runs. Duration string (e.g., \"5m\", \"1h\").\nWisp GC is disabled unless both WispGCInterval and WispTTL are set."
@@ -1137,20 +1070,6 @@
           "type": "integer",
           "description": "MaxWakesPerTick caps how many sessions the reconciler may start in a\nsingle tick. Nil (unset) defaults to 5. Values \u003c= 0 are treated as the\ndefault — set a positive integer to override.",
           "default": 5
-        },
-        "nudge_dispatcher": {
-          "type": "string",
-          "enum": [
-            "legacy",
-            "supervisor"
-          ],
-          "description": "NudgeDispatcher selects how queued nudges get delivered to running\nsessions. \"legacy\" (default) auto-spawns a per-session `gc nudge poll`\nprocess that polls the file-backed queue every 2s. \"supervisor\" runs\nthe delivery loop inside the city runtime instead, with a unix-socket\nwake fast path triggered by enqueue, eliminating the per-session bd\nshellout storm.",
-          "default": "legacy"
-        },
-        "auto_restart_on_drift": {
-          "type": "boolean",
-          "description": "AutoRestartOnDrift controls whether `gc start` automatically restarts\nthe supervisor when it detects the running supervisor's binary or\npack snapshot has drifted from on-disk state. Nil (unset) defaults\nto true — operators get the correct-by-default behavior. Set to\nfalse as a global kill switch (e.g., for production cities where a\nrebuild on the host should not auto-restart the supervisor).",
-          "default": true
         }
       },
       "additionalProperties": false,
@@ -1206,46 +1125,11 @@
         "provider": {
           "type": "string",
           "description": "Provider selects the events backend: \"fake\", \"fail\",\n\"exec:\u003cscript\u003e\", or \"\" (default: file-backed JSONL)."
-        },
-        "rotation": {
-          "$ref": "#/$defs/EventsRotationConfig",
-          "description": "Rotation configures file-backed JSONL rotation. Defaults are applied\nby EventsRotationConfig helper methods when this table is absent."
         }
       },
       "additionalProperties": false,
       "type": "object",
       "description": "EventsConfig holds events provider settings."
-    },
-    "EventsRotationConfig": {
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "description": "Enabled controls automatic size-triggered rotation. Defaults to true.",
-          "default": true
-        },
-        "max_size_bytes": {
-          "type": "integer",
-          "description": "MaxSizeBytes is the active events.jsonl size threshold. Defaults to\nDefaultEventsRotationMaxSizeBytes.",
-          "default": 268435456
-        },
-        "check_interval_records": {
-          "type": "integer",
-          "description": "CheckIntervalRecords is the number of records between size checks.\nDefaults to DefaultEventsRotationCheckIntervalRecords.",
-          "default": 1024
-        },
-        "check_interval_seconds": {
-          "type": "integer",
-          "description": "CheckIntervalSeconds is the time backstop between size checks. Defaults\nto DefaultEventsRotationCheckIntervalSeconds.",
-          "default": 60
-        },
-        "archive_retain_age": {
-          "type": "string",
-          "description": "ArchiveRetainAge is an optional Go duration. Empty keeps all archives."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "description": "EventsRotationConfig holds file-backed events rotation settings."
     },
     "FormulasConfig": {
       "properties": {
@@ -1279,18 +1163,13 @@
         },
         "shadow": {
           "type": "string",
-          "enum": [
-            "warn",
-            "silent"
-          ],
+          "enum": ["warn", "silent"],
           "description": "Shadow controls shadow warnings when the importer defines an agent\nwith the same name as one from this import. \"warn\" (default) emits\na warning; \"silent\" suppresses it."
         }
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "source"
-      ],
+      "required": ["source"],
       "description": "Import defines a named import of another pack."
     },
     "K8sConfig": {
@@ -1348,35 +1227,6 @@
       "type": "object",
       "description": "MailConfig holds mail provider settings."
     },
-    "ModelPricing": {
-      "properties": {
-        "provider": {
-          "type": "string",
-          "description": "Provider is the LLM provider label (e.g. \"claude\", \"codex\", \"gemini\")."
-        },
-        "model": {
-          "type": "string",
-          "description": "Model is the provider-specific model identifier (e.g. \"claude-opus-4-7\")."
-        },
-        "tier": {
-          "$ref": "#/$defs/Tier",
-          "description": "Tier holds the per-token-type rates."
-        },
-        "last_verified": {
-          "type": "string",
-          "description": "LastVerified is the date these rates were confirmed (YYYY-MM-DD)."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "provider",
-        "model",
-        "tier",
-        "last_verified"
-      ],
-      "description": "ModelPricing is a complete pricing entry for a (Provider, Model) pair."
-    },
     "NamedSession": {
       "properties": {
         "name": {
@@ -1389,10 +1239,7 @@
         },
         "scope": {
           "type": "string",
-          "enum": [
-            "city",
-            "rig"
-          ],
+          "enum": ["city", "rig"],
           "description": "Scope defines where this named session is instantiated in pack\nexpansion: \"city\" (one per city) or \"rig\" (one per rig)."
         },
         "dir": {
@@ -1401,18 +1248,13 @@
         },
         "mode": {
           "type": "string",
-          "enum": [
-            "on_demand",
-            "always"
-          ],
+          "enum": ["on_demand", "always"],
           "description": "Mode controls controller behavior for this named session.\n\"on_demand\" (default): reserve identity and materialize when work or\nan explicit reference requires it.\n\"always\": keep the canonical session controller-managed."
         }
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "template"
-      ],
+      "required": ["template"],
       "description": "NamedSession defines a canonical persistent session backed by an agent template."
     },
     "OptionChoice": {
@@ -1443,11 +1285,7 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "value",
-        "label",
-        "flag_args"
-      ],
+      "required": ["value", "label", "flag_args"],
       "description": "OptionChoice is one allowed value for a \"select\" option."
     },
     "OrderOverride": {
@@ -1458,7 +1296,7 @@
         },
         "rig": {
           "type": "string",
-          "description": "Rig scopes the override to a specific rig's order.\nEmpty matches city-level orders."
+          "description": "Rig scopes the override to a specific rig's order. Empty matches\nONLY city-level orders (those with no rig); it does NOT match\nper-rig instances of the same name — those expand at scan time\nand require an explicit rig. Use rig = \"*\" as a wildcard to match\nevery instance of the named order (city-level + every rig-scoped\ncopy). The literal \"*\" is reserved and rejected as a real rig\nname by config validation."
         },
         "enabled": {
           "type": "boolean",
@@ -1500,9 +1338,7 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "name"
-      ],
+      "required": ["name"],
       "description": "OrderOverride modifies a scanned order's scheduling fields."
     },
     "OrdersConfig": {
@@ -1547,9 +1383,7 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "source"
-      ],
+      "required": ["source"],
       "description": "PackSource defines a remote pack repository."
     },
     "Patches": {
@@ -1641,13 +1475,7 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "key",
-        "label",
-        "type",
-        "default",
-        "choices"
-      ],
+      "required": ["key", "label", "type", "default", "choices"],
       "description": "ProviderOption declares a single configurable option for a provider."
     },
     "ProviderPatch": {
@@ -1695,11 +1523,7 @@
         },
         "prompt_mode": {
           "type": "string",
-          "enum": [
-            "arg",
-            "flag",
-            "none"
-          ],
+          "enum": ["arg", "flag", "none"],
           "description": "PromptMode overrides prompt delivery mode."
         },
         "prompt_flag": {
@@ -1710,10 +1534,6 @@
           "type": "integer",
           "minimum": 0,
           "description": "ReadyDelayMs overrides the ready delay in milliseconds."
-        },
-        "accept_startup_dialogs": {
-          "type": "boolean",
-          "description": "AcceptStartupDialogs overrides startup dialog acceptance behavior."
         },
         "env": {
           "additionalProperties": {
@@ -1736,9 +1556,7 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "name"
-      ],
+      "required": ["name"],
       "description": "ProviderPatch modifies an existing provider identified by Name."
     },
     "ProviderSpec": {
@@ -1756,10 +1574,7 @@
         },
         "options_schema_merge": {
           "type": "string",
-          "enum": [
-            "replace",
-            "by_key"
-          ],
+          "enum": ["replace", "by_key"],
           "description": "OptionsSchemaMerge controls OptionsSchema merge mode across the\nchain: \"replace\" (default) or \"by_key\"."
         },
         "display_name": {
@@ -1775,15 +1590,11 @@
             "type": "string"
           },
           "type": "array",
-          "description": "Args are default command-line arguments passed to the provider. The\nbuilt-in Kiro provider defaults to\n[\"chat\", \"--no-interactive\", \"--agent\", \"gascity\", \"--trust-all-tools\"];\nremove or replace \"--trust-all-tools\" by defining [providers.kiro].args\nexplicitly in city.toml."
+          "description": "Args are default command-line arguments passed to the provider."
         },
         "prompt_mode": {
           "type": "string",
-          "enum": [
-            "arg",
-            "flag",
-            "none"
-          ],
+          "enum": ["arg", "flag", "none"],
           "description": "PromptMode controls how prompts are delivered: \"arg\", \"flag\", or \"none\".",
           "default": "arg"
         },
@@ -1810,10 +1621,6 @@
         "emits_permission_warning": {
           "type": "boolean",
           "description": "EmitsPermissionWarning is tri-state: nil = inherit, \u0026true = enable,\n\u0026false = explicit disable."
-        },
-        "accept_startup_dialogs": {
-          "type": "boolean",
-          "description": "AcceptStartupDialogs is tri-state: nil = default startup dialog handling,\n\u0026true = force dialog acceptance, \u0026false = suppress it for providers that\nhandle permissions entirely through launch flags."
         },
         "env": {
           "additionalProperties": {
@@ -1880,7 +1687,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "PrintArgs are CLI arguments that enable one-shot non-interactive mode.\nThe provider prints its response to stdout and exits. When empty, the\nprovider does not support one-shot invocation.\nExamples: [\"-p\"] (claude, gemini), [\"exec\"] (codex), [\"--quiet\", \"--prompt\"] (kimi)"
+          "description": "PrintArgs are CLI arguments that enable one-shot non-interactive mode.\nThe provider prints its response to stdout and exits. When empty, the\nprovider does not support one-shot invocation.\nExamples: [\"-p\"] (claude, gemini), [\"exec\"] (codex)"
         },
         "title_model": {
           "type": "string",
@@ -1915,10 +1722,6 @@
         "prefix": {
           "type": "string",
           "description": "Prefix overrides the auto-derived bead ID prefix for this rig."
-        },
-        "default_branch": {
-          "type": "string",
-          "description": "DefaultBranch is the rig repository's mainline branch (e.g. \"main\",\n\"master\", \"develop\"). When set, routing formulas use this as the\ndefault merge target instead of probing origin/HEAD at sling time.\nCaptured by `gc rig add` from the rig's git config; set manually for\nrigs whose mainline isn't reachable via origin/HEAD."
         },
         "suspended": {
           "type": "boolean",
@@ -1975,20 +1778,11 @@
         "dolt_port": {
           "type": "string",
           "description": "DoltPort overrides the city-level Dolt port for this rig's beads.\nWhen set, controller commands (scale_check, work_query) prefix their\nshell invocations with BEADS_DOLT_SERVER_PORT=\u003cport\u003e so bd connects to the\ncorrect server instead of the city-level default."
-        },
-        "formula_vars": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "type": "object",
-          "description": "FormulaVars provides rig-scoped defaults for formula vars. Keys match\nvar names declared in formula `[vars.\u003cname\u003e]` blocks. Values are used\nwhen a formula runs in this rig and the caller did not pass an\nexplicit --var override. Takes precedence over formula-level defaults\nbut loses to --var flags."
         }
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "name"
-      ],
+      "required": ["name"],
       "description": "Rig defines an external project registered in the city."
     },
     "RigPatch": {
@@ -2005,27 +1799,14 @@
           "type": "string",
           "description": "Prefix overrides the bead ID prefix."
         },
-        "default_branch": {
-          "type": "string",
-          "description": "DefaultBranch overrides the rig's recorded mainline branch."
-        },
         "suspended": {
           "type": "boolean",
           "description": "Suspended overrides the rig's suspended state."
-        },
-        "formula_vars": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "type": "object",
-          "description": "FormulaVars adds or overrides rig-scoped formula var defaults.\nAdditive merge: patch keys win over existing rig keys, unspecified\nkeys are preserved."
         }
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "name"
-      ],
+      "required": ["name"],
       "description": "RigPatch modifies an existing rig identified by Name."
     },
     "Service": {
@@ -2036,18 +1817,12 @@
         },
         "kind": {
           "type": "string",
-          "enum": [
-            "workflow",
-            "proxy_process"
-          ],
+          "enum": ["workflow", "proxy_process"],
           "description": "Kind selects how the service is implemented."
         },
         "publish_mode": {
           "type": "string",
-          "enum": [
-            "private",
-            "direct"
-          ],
+          "enum": ["private", "direct"],
           "description": "PublishMode declares how the service is intended to be published.\nv0 supports private services and direct reuse of the API listener."
         },
         "state_root": {
@@ -2069,9 +1844,7 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "required": [
-        "name"
-      ],
+      "required": ["name"],
       "description": "Service declares a workspace-owned HTTP service mounted under /svc/{name}."
     },
     "ServiceProcessConfig": {
@@ -2096,11 +1869,7 @@
       "properties": {
         "visibility": {
           "type": "string",
-          "enum": [
-            "private",
-            "public",
-            "tenant"
-          ],
+          "enum": ["private", "public", "tenant"],
           "description": "Visibility selects whether the service is private to the workspace,\navailable publicly, or gated by tenant auth at the platform edge."
         },
         "hostname": {
@@ -2208,31 +1977,6 @@
       "type": "object",
       "description": "SessionSleepConfig configures default idle sleep policies by session class."
     },
-    "Tier": {
-      "properties": {
-        "prompt_usd_per_1m": {
-          "type": "number"
-        },
-        "completion_usd_per_1m": {
-          "type": "number"
-        },
-        "cache_read_usd_per_1m": {
-          "type": "number"
-        },
-        "cache_creation_usd_per_1m": {
-          "type": "number"
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "prompt_usd_per_1m",
-        "completion_usd_per_1m",
-        "cache_read_usd_per_1m",
-        "cache_creation_usd_per_1m"
-      ],
-      "description": "Tier defines per-token-type rates in USD per 1 million tokens."
-    },
     "Workspace": {
       "properties": {
         "name": {
@@ -2268,7 +2012,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "InstallAgentHooks lists provider names whose hooks should be installed\ninto agent working directories. Agent-level overrides workspace-level\n(replace, not additive). Supported: \"claude\", \"codex\", \"gemini\",\n\"kiro\", \"opencode\", \"copilot\", \"cursor\", \"pi\", \"omp\"."
+          "description": "InstallAgentHooks lists provider names whose hooks should be installed\ninto agent working directories. Agent-level overrides workspace-level\n(replace, not additive). Supported: \"claude\", \"codex\", \"gemini\",\n\"opencode\", \"copilot\", \"cursor\", \"pi\", \"omp\"."
         },
         "global_fragments": {
           "items": {
@@ -2282,14 +2026,14 @@
             "type": "string"
           },
           "type": "array",
-          "description": "Includes is the legacy city.toml pack-composition list.\n\nDeprecated: use root pack.toml [imports.*] instead. Run gc doctor to\ninspect; gc doctor --fix handles the safe mechanical rewrites available\nin this release wave. Each entry is a local path, a git source//sub#ref\nURL, or a GitHub tree URL."
+          "description": "Includes lists pack directories or URLs to compose into this\nworkspace. Replaces the older pack/packs fields. Each entry\nis a local path, a git source//sub#ref URL, or a GitHub tree URL."
         },
         "default_rig_includes": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "DefaultRigIncludes is the legacy city.toml default-rig pack list.\n\nDeprecated: use root pack.toml [defaults.rig.imports.\u003cbinding\u003e] instead.\nRun gc doctor to inspect; gc doctor --fix handles the safe mechanical\nrewrites available in this release wave."
+          "description": "DefaultRigIncludes lists pack directories applied to new rigs when\n\"gc rig add\" is called without --include. Allows cities to define\na default pack for all rigs."
         }
       },
       "additionalProperties": false,

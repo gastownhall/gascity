@@ -31,18 +31,18 @@ provider = "exec:/path/to/contrib/beads-scripts/gc-beads-br"
 
 **Label conventions:**
 
-| Convention | Purpose |
-|-----------|---------|
-| `parent:<id>` | Tracks parent-child relationships (Children operation) |
-| `meta:<key>=<value>` | Stores metadata (SetMetadata operation) |
-| `needs:<step-id>` | Tracks step dependencies within molecules |
+| Convention           | Purpose                                                |
+| -------------------- | ------------------------------------------------------ |
+| `parent:<id>`        | Tracks parent-child relationships (Children operation) |
+| `meta:<key>=<value>` | Stores metadata (SetMetadata operation)                |
+| `needs:<step-id>`    | Tracks step dependencies within molecules              |
 
 **Lifecycle operations:**
 
-| Operation | Behavior |
-|-----------|----------|
+| Operation      | Behavior                                       |
+| -------------- | ---------------------------------------------- |
 | `ensure-ready` | Exit 2 (br uses embedded SQLite, always ready) |
-| `shutdown` | Exit 2 (no server process to stop) |
+| `shutdown`     | Exit 2 (no server process to stop)             |
 
 **Other optional operations:**
 
@@ -83,22 +83,22 @@ provider = "exec:/path/to/contrib/beads-scripts/gc-beads-k8s"
 
 **Environment variables:**
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GC_K8S_NAMESPACE` | `gc` | K8s namespace |
-| `GC_K8S_CONTEXT` | current | kubectl context |
-| `GC_K8S_IMAGE` | (required) | Container image (same as agent pods) |
-| `GC_K8S_DOLT_HOST` | `dolt.gc.svc.cluster.local` | Deprecated compatibility-only override for the in-cluster managed Dolt service DNS |
-| `GC_K8S_DOLT_PORT` | `3307` | Deprecated compatibility-only override for the in-cluster managed Dolt service port |
-| `GC_K8S_IMAGE_PULL_SECRET` | (none) | imagePullSecrets name (omitted if empty) |
-| `GC_K8S_CUSTOM_TYPES` | (none) | Custom bead types CSV for `bd config set types.custom` |
+| Variable                   | Default                     | Description                                                                         |
+| -------------------------- | --------------------------- | ----------------------------------------------------------------------------------- |
+| `GC_K8S_NAMESPACE`         | `gc`                        | K8s namespace                                                                       |
+| `GC_K8S_CONTEXT`           | current                     | kubectl context                                                                     |
+| `GC_K8S_IMAGE`             | (required)                  | Container image (same as agent pods)                                                |
+| `GC_K8S_DOLT_HOST`         | `dolt.gc.svc.cluster.local` | Deprecated compatibility-only override for the in-cluster managed Dolt service DNS  |
+| `GC_K8S_DOLT_PORT`         | `3307`                      | Deprecated compatibility-only override for the in-cluster managed Dolt service port |
+| `GC_K8S_IMAGE_PULL_SECRET` | (none)                      | imagePullSecrets name (omitted if empty)                                            |
+| `GC_K8S_CUSTOM_TYPES`      | (none)                      | Custom bead types CSV for `bd config set types.custom`                              |
 
 **Lifecycle operations:**
 
-| Operation | Behavior |
-|-----------|----------|
+| Operation                | Behavior                                                                    |
+| ------------------------ | --------------------------------------------------------------------------- |
 | `ensure-ready` / `start` | Create `gc-beads-runner` pod if not Running, wait for Ready, init `.beads/` |
-| `shutdown` / `stop` | `kubectl delete pod gc-beads-runner` |
+| `shutdown` / `stop`      | `kubectl delete pod gc-beads-runner`                                        |
 
 **Other optional operations:**
 

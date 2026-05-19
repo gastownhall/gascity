@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"net"
@@ -20,7 +19,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
@@ -53,7 +51,7 @@ func TestCmdReloadApplied(t *testing.T) {
 	reloadUnavailableMessageHook = func(string) string { return "" }
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, false, false, "30s", true, &stdout, &stderr); code != 0 {
+	if code := cmdReload([]string{dir}, false, "30s", true, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdReload = %d; stderr=%s", code, stderr.String())
 	}
 	if got := strings.TrimSpace(stdout.String()); got != "Config reloaded: 1 agents, 0 rigs (rev abc123def456)" {
@@ -64,63 +62,12 @@ func TestCmdReloadApplied(t *testing.T) {
 	}
 }
 
-func TestCmdReloadSoftPrintsAcceptedDriftCount(t *testing.T) {
-	dir := shortSocketTempDir(t, "gc-reload-soft-cli-")
-	writeCityTOML(t, dir, "test", "mayor")
-
-	oldSend := sendReloadControlRequestHook
-	oldUnavailable := reloadUnavailableMessageHook
-	t.Cleanup(func() {
-		sendReloadControlRequestHook = oldSend
-		reloadUnavailableMessageHook = oldUnavailable
-	})
-
-	accepted := 2
-	sendReloadControlRequestHook = func(cityPath string, req reloadControlRequest) (reloadControlReply, error) {
-		if !samePath(cityPath, dir) {
-			t.Fatalf("cityPath = %q, want %q", cityPath, canonicalTestPath(dir))
-		}
-		if !req.Soft {
-			t.Fatalf("req.Soft = false, want true")
-		}
-		return reloadControlReply{
-			Outcome:            reloadOutcomeApplied,
-			Message:            "Config reloaded: 1 agents, 0 rigs (rev abc123def456)",
-			Revision:           "abc123def4567890",
-			AcceptedDriftCount: &accepted,
-		}, nil
-	}
-	reloadUnavailableMessageHook = func(string) string { return "" }
-
-	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, false, true, "30s", true, &stdout, &stderr); code != 0 {
-		t.Fatalf("cmdReload = %d; stderr=%s", code, stderr.String())
-	}
-	wantStdout := "Config reloaded: 1 agents, 0 rigs (rev abc123def456)\nsoft reload: accepted config drift on 2 session(s)"
-	if got := strings.TrimSpace(stdout.String()); got != wantStdout {
-		t.Fatalf("stdout = %q, want %q", got, wantStdout)
-	}
-	if got := strings.TrimSpace(stderr.String()); got != "" {
-		t.Fatalf("stderr = %q", got)
-	}
-}
-
-func TestReloadControlReplyOmitsAcceptedDriftCountByDefault(t *testing.T) {
-	data, err := json.Marshal(reloadControlReply{})
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	if strings.Contains(string(data), "accepted_drift_count") {
-		t.Fatalf("zero-value reloadControlReply JSON = %s, want accepted_drift_count omitted", data)
-	}
-}
-
 func TestCmdReloadAsyncExplicitTimeoutInvalid(t *testing.T) {
 	dir := shortSocketTempDir(t, "gc-reload-flags-")
 	writeCityTOML(t, dir, "test", "mayor")
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, true, false, "30s", true, &stdout, &stderr); code != 1 {
+	if code := cmdReload([]string{dir}, true, "30s", true, &stdout, &stderr); code != 1 {
 		t.Fatalf("cmdReload = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "--async and --timeout cannot be used together") {
@@ -152,7 +99,7 @@ func TestCmdReloadControllerUnavailableUsesRicherMessage(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, false, false, "5s", true, &stdout, &stderr); code != 1 {
+	if code := cmdReload([]string{dir}, false, "5s", true, &stdout, &stderr); code != 1 {
 		t.Fatalf("cmdReload = %d, want 1", code)
 	}
 	if got := strings.TrimSpace(stderr.String()); got != "gc reload: city failed to start under supervisor: fetching packs: auth denied: connecting to controller: dial failed" {
@@ -183,7 +130,7 @@ func TestCmdReloadControllerUnresponsiveUsesRicherMessage(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, false, false, "5s", true, &stdout, &stderr); code != 1 {
+	if code := cmdReload([]string{dir}, false, "5s", true, &stdout, &stderr); code != 1 {
 		t.Fatalf("cmdReload = %d, want 1", code)
 	}
 	if got := strings.TrimSpace(stderr.String()); got != "gc reload: controller is running but not responding: reading response: i/o timeout" {
@@ -210,7 +157,7 @@ func TestCmdReloadPreservesProtocolErrors(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, false, false, "5s", true, &stdout, &stderr); code != 1 {
+	if code := cmdReload([]string{dir}, false, "5s", true, &stdout, &stderr); code != 1 {
 		t.Fatalf("cmdReload = %d, want 1", code)
 	}
 	if got := strings.TrimSpace(stderr.String()); got != "gc reload: parsing response: invalid character 'o' in literal null" {
@@ -241,7 +188,7 @@ func TestCmdReloadFailedReplyPrintsWarnings(t *testing.T) {
 	reloadUnavailableMessageHook = func(string) string { return "" }
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, false, false, "5s", true, &stdout, &stderr); code != 1 {
+	if code := cmdReload([]string{dir}, false, "5s", true, &stdout, &stderr); code != 1 {
 		t.Fatalf("cmdReload = %d, want 1", code)
 	}
 	got := stderr.String()
@@ -279,39 +226,6 @@ func TestHandleReloadSocketCmdAsyncAccepted(t *testing.T) {
 	}
 	if reply.Message != "Reload requested." {
 		t.Fatalf("reply.Message = %q", reply.Message)
-	}
-
-	client.Close() //nolint:errcheck
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("reload socket handler did not exit")
-	}
-}
-
-func TestHandleReloadSocketCmdPropagatesSoft(t *testing.T) {
-	server, client := net.Pipe()
-	defer client.Close() //nolint:errcheck
-
-	reloadReqCh := make(chan reloadRequest)
-	done := make(chan struct{})
-	go func() {
-		handleReloadSocketCmd(server, `{"wait":false,"soft":true}`, reloadReqCh)
-		close(done)
-	}()
-
-	req := <-reloadReqCh
-	if !req.soft {
-		t.Fatal("req.soft = false, want true")
-	}
-	req.acceptedCh <- reloadControlReply{
-		Outcome: reloadOutcomeAccepted,
-		Message: "Reload requested.",
-	}
-
-	reply := readReloadSocketReply(t, client)
-	if reply.Outcome != reloadOutcomeAccepted {
-		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeAccepted)
 	}
 
 	client.Close() //nolint:errcheck
@@ -559,140 +473,9 @@ func TestSendReloadControlRequestNoChange(t *testing.T) {
 	if reply.Message != "No config changes detected." {
 		t.Fatalf("reply.Message = %q", reply.Message)
 	}
-	// The fixture intentionally uses [[agent]] which now emits a loud v1
-	// surface deprecation warning at every config load. That warning is
-	// not what this test guards — filter it out so the assertion still
-	// reflects "no other warnings".
-	if other := warningsWithoutV1Surfaces(reply.Warnings); len(other) != 0 {
-		t.Fatalf("reply.Warnings = %v, want none (besides v1-surface deprecations)", other)
+	if len(reply.Warnings) != 0 {
+		t.Fatalf("reply.Warnings = %v, want none", reply.Warnings)
 	}
-}
-
-func TestReloadConfigTracedRescansOrdersWhenConfigRevisionUnchanged(t *testing.T) {
-	clearInheritedBeadsEnv(t)
-	t.Setenv("GC_BEADS", "")
-
-	dir := shortSocketTempDir(t, "gc-reload-orders-dynamic-")
-	disableManagedDoltRecoveryForTest(t)
-	cleanupManagedDoltTestCity(t, dir)
-	tomlPath := filepath.Join(dir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test\"\nschema = 1\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(pack.toml): %v", err)
-	}
-
-	result, err := tryReloadConfig(tomlPath, "test", dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := result.Cfg
-	applyFeatureFlags(cfg)
-	var stdout, stderr bytes.Buffer
-	initialOrders, err := scanOrderSetSnapshotFS(fsys.OSFS{}, dir, cfg, &stderr, "test")
-	if err != nil {
-		t.Fatalf("initial order scan: %v", err)
-	}
-	cr := &CityRuntime{
-		cityPath:           dir,
-		cityName:           "test",
-		configName:         "test",
-		tomlPath:           tomlPath,
-		configRev:          result.Revision,
-		cfg:                cfg,
-		sp:                 runtime.NewFake(),
-		dops:               newDrainOps(runtime.NewFake()),
-		od:                 buildOrderDispatcherFromOrderSet(dir, cfg, initialOrders.Orders, events.Discard, &stderr),
-		orderSet:           initialOrders.Orders,
-		orderSetSignature:  initialOrders.Signature,
-		orderRescanEnabled: true,
-		rec:                events.Discard,
-		stdout:             &stdout,
-		stderr:             &stderr,
-		logPrefix:          "gc test",
-	}
-	lastProviderName := cfg.Session.Provider
-
-	ordersDir := filepath.Join(dir, "orders")
-	if err := os.MkdirAll(ordersDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	orderPath := filepath.Join(ordersDir, "dynamic-tick.toml")
-	if err := os.WriteFile(orderPath, []byte(`
-[order]
-exec = "true"
-trigger = "cron"
-schedule = "*/1 * * * *"
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, dir, nil, reloadSourceManual)
-	if reply.Outcome != reloadOutcomeApplied {
-		t.Fatalf("add reply.Outcome = %q, want %q; message=%q stderr=%q",
-			reply.Outcome, reloadOutcomeApplied, reply.Message, stderr.String())
-	}
-	if strings.Contains(reply.Message, "No config changes detected") {
-		t.Fatalf("add reply.Message = %q, should not report no change", reply.Message)
-	}
-	if !memoryDispatcherHasOrder(cr.od, "dynamic-tick") {
-		t.Fatalf("dispatcher orders after add missing dynamic-tick")
-	}
-
-	if err := os.Remove(orderPath); err != nil {
-		t.Fatal(err)
-	}
-	reply = cr.reloadConfigTraced(context.Background(), &lastProviderName, dir, nil, reloadSourceManual)
-	if reply.Outcome != reloadOutcomeApplied {
-		t.Fatalf("remove reply.Outcome = %q, want %q; message=%q stderr=%q",
-			reply.Outcome, reloadOutcomeApplied, reply.Message, stderr.String())
-	}
-	if memoryDispatcherHasOrder(cr.od, "dynamic-tick") {
-		t.Fatalf("dispatcher orders after removal still contain dynamic-tick")
-	}
-	if !strings.Contains(stderr.String(), "orders reloaded: removed dynamic-tick") {
-		t.Fatalf("stderr = %q, want removal log", stderr.String())
-	}
-
-	reply = cr.reloadConfigTraced(context.Background(), &lastProviderName, dir, nil, reloadSourceManual)
-	if reply.Outcome != reloadOutcomeNoChange {
-		t.Fatalf("quiet reply.Outcome = %q, want %q; message=%q stderr=%q",
-			reply.Outcome, reloadOutcomeNoChange, reply.Message, stderr.String())
-	}
-	if reply.Message != "No config changes detected." {
-		t.Fatalf("quiet reply.Message = %q", reply.Message)
-	}
-}
-
-func memoryDispatcherHasOrder(od orderDispatcher, name string) bool {
-	m, ok := od.(*memoryOrderDispatcher)
-	if !ok {
-		return false
-	}
-	for _, a := range m.aa {
-		if a.Name == name {
-			return true
-		}
-	}
-	return false
-}
-
-// warningsWithoutV1Surfaces filters out warnings produced by
-// config.DetectLegacyV1Surfaces so existing tests whose fixtures use
-// the deprecated v1 surfaces continue to assert on the non-v1 set.
-func warningsWithoutV1Surfaces(in []string) []string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(in))
-	for _, w := range in {
-		if config.IsLegacyV1SurfaceWarning(w) {
-			continue
-		}
-		out = append(out, w)
-	}
-	return out
 }
 
 func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
@@ -712,12 +495,11 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 	}
 
 	dir := shortSocketTempDir(t, "gc-reload-invalid-")
+	cleanupManagedDoltTestCity(t, dir)
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
-	disableManagedDoltRecoveryForTest(t)
-	cleanupManagedDoltTestCity(t, dir)
 	cfg, prov, err := loadCityConfigWithBuiltinPacks(dir)
 	if err != nil {
 		t.Fatal(err)

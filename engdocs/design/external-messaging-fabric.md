@@ -1,12 +1,12 @@
 # External Messaging Fabric
 
-| Field | Value |
-|---|---|
-| Status | Implemented |
-| Date | 2026-03-23 |
-| Author(s) | Codex |
-| Issue | — |
-| Supersedes | — |
+| Field      | Value       |
+| ---------- | ----------- |
+| Status     | Implemented |
+| Date       | 2026-03-23  |
+| Author(s)  | Codex       |
+| Issue      | —           |
+| Supersedes | —           |
 
 Design for a provider-neutral external messaging layer in Gas City.
 This introduces explicit external conversation bindings, delivery-route
@@ -671,7 +671,7 @@ Phase 1 intentionally does not implement per-external-user cursors.
 ### Touch debouncing
 
 `Touch()` is debounced. Frequent adapter keepalives do not rewrite the
- same bead on every inbound event.
+same bead on every inbound event.
 
 ### Retention and expiry
 
@@ -870,15 +870,15 @@ loss or policy bugs.
 
 #### Legacy field mapping
 
-| Legacy source | Fabric destination |
-|---|---|
-| `chat.bindings[*].kind + conversation_id` | `SessionBindingRecord.Conversation` |
-| `chat.bindings[*].session_names[]` | one or more `ConversationGroupParticipant` or direct binding target session IDs |
-| `chat.bindings[*].policy` | `ConversationGroupRecord.FanoutPolicy` / ambient-read fields |
-| `chat.launchers[*].conversation_id` | `ConversationGroupRecord.RootConversation` |
-| `chat.launchers[*].response_mode` | `ConversationGroupRecord.Mode` |
-| `chat.launchers[*].default_qualified_handle` | `ConversationGroupRecord.DefaultHandle` |
-| `chat.launchers[*].policy` | `ConversationGroupRecord` fanout fields |
+| Legacy source                                | Fabric destination                                                              |
+| -------------------------------------------- | ------------------------------------------------------------------------------- |
+| `chat.bindings[*].kind + conversation_id`    | `SessionBindingRecord.Conversation`                                             |
+| `chat.bindings[*].session_names[]`           | one or more `ConversationGroupParticipant` or direct binding target session IDs |
+| `chat.bindings[*].policy`                    | `ConversationGroupRecord.FanoutPolicy` / ambient-read fields                    |
+| `chat.launchers[*].conversation_id`          | `ConversationGroupRecord.RootConversation`                                      |
+| `chat.launchers[*].response_mode`            | `ConversationGroupRecord.Mode`                                                  |
+| `chat.launchers[*].default_qualified_handle` | `ConversationGroupRecord.DefaultHandle`                                         |
+| `chat.launchers[*].policy`                   | `ConversationGroupRecord` fanout fields                                         |
 
 ## Initial Implementation Scope
 

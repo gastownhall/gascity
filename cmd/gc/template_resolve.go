@@ -16,14 +16,17 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"os"
 	"path"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
@@ -73,6 +76,8 @@ type TemplateParams struct {
 	RigName string
 	// RigRoot is the absolute path to the associated rig root (empty if none).
 	RigRoot string
+	// CityName is the resolved city identity used for runtime/session metadata.
+	CityName string
 	// WakeMode controls whether the next wake resumes or starts fresh conversation state.
 	WakeMode string
 	// IsACP is true when the resolved session transport is SessionTransportACP.
@@ -83,6 +88,12 @@ type TemplateParams struct {
 	// metadata, and start background helpers, but they do not initiate the
 	// first model turn on their own.
 	HookEnabled bool
+	// SessionOverride is the per-agent session provider override (e.g., "acp",
+	// "tmux", "exec:..."). Empty means use the city-level default.
+	SessionOverride string
+	// EffectiveSessionProvider is the actual session provider after applying
+	// city-level defaults.
+	EffectiveSessionProvider string
 	// DependencyOnly marks a realized cold slot kept only so dependency wake
 	// has something concrete to wake even when pool check wants zero.
 	DependencyOnly bool
@@ -171,7 +182,6 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		command = command + " " + shellquote.Join(defaultArgs)
 	}
 	providerFamily := resolvedProviderLaunchFamily(resolved)
-	installHooks := config.ResolveInstallHooks(cfgAgent, p.workspace)
 	sa, err := ensureClaudeSettingsArgs(p.fs, p.cityPath, providerFamily, p.stderr)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
@@ -193,7 +203,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			Probed: true, ContentHash: runtime.HashPathContent(scriptsDir),
 		})
 	}
-	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir, hookFileProvidersForResolved(resolved, installHooks, p.providers))
+	copyFiles = stageHookFiles(copyFiles, p.cityPath, workDir)
 
 	// Step 6: Compute session name.
 	// Uses bead-derived naming ("s-{beadID}") when a bead store is available,
@@ -231,6 +241,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 
 	// Step 8: Build agent environment.
+	storeRoot := p.cityPath
+	storeScope := "city"
+	storePrefix := config.EffectiveHQPrefix(p.city)
+	if rigName != "" {
+		storeRoot = rigRoot
+		storeScope = "rig"
+		storePrefix = findRigPrefix(rigName, p.rigs)
+	}
 	agentEnv := map[string]string{
 		"GC_SESSION_NAME":     sessName,
 		"GC_SESSION_ID":       sessionBeadID,
@@ -241,6 +259,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		"BEADS_ACTOR":         sessName,
 		"GC_DIR":              workDir,
 		"GC_BEADS_SCOPE_ROOT": p.cityPath,
+		"GC_STORE_ROOT":       storeRoot,
+		"GC_STORE_SCOPE":      storeScope,
+		"GC_BEADS_PREFIX":     storePrefix,
 		// Explicit empty values matter here. tmux session creation uses `env -u`
 		// only for keys present with empty strings, which prevents stale rig
 		// scope from leaking out of the tmux server's inherited environment.
@@ -256,28 +277,15 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	for key, value := range cityRuntimeEnvMapForCity(p.cityPath) {
 		agentEnv[key] = value
 	}
-	// Override the city-uniform GC_CONTROL_DISPATCHER_TRACE_DEFAULT with a
-	// per-dispatcher path so each control-dispatcher writes to its own
-	// trace file (closes #1650). Goes in agentEnv (last in mergeEnv) so it
-	// wins over both passthroughEnv and the uniform city default seeded by
-	// cityRuntimeEnvMapForCity above.
-	if cfgAgent.Name == config.ControlDispatcherAgentName {
-		agentEnv["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"] = citylayout.ControlDispatcherTraceDefaultPathForRuntimeDirAndName(
-			p.cityPath,
-			agentEnv["GC_CITY_RUNTIME_DIR"],
-			qualifiedName,
-		)
-	}
 	agentEnv["GC_BEADS"] = rawBeadsProviderForScope(rigRoot, p.cityPath)
-	if exe, err := os.Executable(); err == nil && exe != "" {
-		agentEnv["GC_BIN"] = exe
+	if gcBin := gcBinaryForAgentEnv(p.cityPath); gcBin != "" {
+		agentEnv["GC_BIN"] = gcBin
 	}
-	sessionBackendEnv, err := sessionBackendEnvWithError(p.cityPath, rigRoot, p.rigs)
-	if err != nil {
-		return TemplateParams{}, fmt.Errorf("agent %q: building session backend env: %w", qualifiedName, err)
-	}
-	for key, value := range sessionBackendEnv {
+	for key, value := range sessionDoltEnv(p.cityPath, rigRoot, p.rigs) {
 		agentEnv[key] = value
+	}
+	if p.apiURL != "" {
+		agentEnv["GC_API_URL"] = p.apiURL
 	}
 	if rigName != "" {
 		agentEnv["GC_RIG"] = rigName
@@ -298,23 +306,20 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		cfgAgent.InheritedAppendFragments,
 		p.appendFragments,
 	)
-	providerKey, providerDisplayName := providerInfoForAgent(cfgAgent, p.workspace, p.providers)
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
-		CityRoot:            p.cityPath,
-		AgentName:           qualifiedName,
-		TemplateName:        cfgAgent.Name,
-		BindingName:         cfgAgent.BindingName,
-		BindingPrefix:       cfgAgent.BindingPrefix(),
-		RigName:             rigName,
-		RigRoot:             rigRoot,
-		WorkDir:             workDir,
-		IssuePrefix:         findRigPrefix(rigName, p.rigs),
-		DefaultBranch:       defaultBranchForRig(rigName, p.rigs, workDir),
-		WorkQuery:           expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQuery(), p.stderr),
-		SlingQuery:          expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
-		ProviderKey:         providerKey,
-		ProviderDisplayName: providerDisplayName,
-		Env:                 cfgAgent.Env,
+		CityRoot:      p.cityPath,
+		AgentName:     qualifiedName,
+		TemplateName:  cfgAgent.Name,
+		BindingName:   cfgAgent.BindingName,
+		BindingPrefix: cfgAgent.BindingPrefix(),
+		RigName:       rigName,
+		RigRoot:       rigRoot,
+		WorkDir:       workDir,
+		IssuePrefix:   findRigPrefix(rigName, p.rigs),
+		DefaultBranch: defaultBranchFor(workDir),
+		WorkQuery:     expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQuery(), p.stderr),
+		SlingQuery:    expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
+		Env:           cfgAgent.Env,
 	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
@@ -323,6 +328,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	} else {
 		prompt = beacon
 	}
+	agentEnv["GC_PROVIDER"] = resolved.Name
 
 	// Step 9b: Append the assigned-skills appendix when the agent
 	// has a vendor sink, hasn't opted out, AND the runtime actually
@@ -376,6 +382,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	env := mergeEnv(passthroughEnv(), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
 	prependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
+	applyAssignedWorkContext(p.beadStore, SessionAssignmentLookup{
+		SessionName:        sessName,
+		AgentName:          qualifiedName,
+		AssignedWorkBeads:  p.assignedWorkBeads,
+		AssignedWorkStores: p.assignedWorkStores,
+		AssignedWorkKnown:  p.assignedWorkKnown,
+		Env:                env,
+	})
 
 	// Step 11: Expand session setup templates.
 	configDir := p.cityPath
@@ -520,43 +534,93 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		ReadyDelayMs:           resolved.ReadyDelayMs,
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
 		Nudge:                  cfgAgent.Nudge,
 		PreStart:               expandedPreStart,
 		SessionSetup:           expandedSetup,
 		SessionSetupScript:     resolvedScript,
 		SessionLive:            expandedLive,
 		ProviderName:           resolvedProviderLaunchFamily(resolved),
-		ProviderOverlayName:    strings.TrimSpace(resolved.Name),
-		InstallAgentHooks:      installHooks,
+		InstallAgentHooks:      config.ResolveInstallHooks(cfgAgent, p.workspace),
 		PackOverlayDirs:        effectiveOverlayDirs(p.packOverlayDirs, p.rigOverlayDirs, rigName),
 		OverlayDir:             overlayDir,
 		CopyFiles:              copyFiles,
 	}
 
 	return TemplateParams{
-		Command:          command,
-		Prompt:           prompt,
-		Env:              env,
-		Hints:            hints,
-		WorkDir:          workDir,
-		SessionName:      sessName,
-		Alias:            qualifiedName,
-		FPExtra:          fpExtra,
-		ResolvedProvider: resolved,
-		TemplateName:     templateNameFor(cfgAgent, qualifiedName),
-		InstanceName:     qualifiedName,
-		RigName:          rigName,
-		RigRoot:          rigRoot,
-		WakeMode:         cfgAgent.WakeMode,
-		IsACP:            sessionTransport == config.SessionTransportACP,
-		HookEnabled:      hasHooks,
-		MCPServers:       mcpServers,
+		Command:                  command,
+		Prompt:                   prompt,
+		Env:                      env,
+		Hints:                    hints,
+		WorkDir:                  workDir,
+		SessionName:              sessName,
+		Alias:                    qualifiedName,
+		FPExtra:                  fpExtra,
+		ResolvedProvider:         resolved,
+		TemplateName:             templateNameFor(cfgAgent, qualifiedName),
+		InstanceName:             qualifiedName,
+		RigName:                  rigName,
+		RigRoot:                  rigRoot,
+		CityName:                 p.cityName,
+		WakeMode:                 cfgAgent.WakeMode,
+		IsACP:                    sessionTransport == config.SessionTransportACP,
+		HookEnabled:              hasHooks,
+		SessionOverride:          cfgAgent.Session,
+		EffectiveSessionProvider: effectiveSessionProvider(cfgAgent.Session, p.sessionProvider),
+		MCPServers:               mcpServers,
 	}, nil
 }
 
-func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (map[string]string, error) {
+func gcBinaryForAgentEnv(cityPath string) string {
+	if gcBin := strings.TrimSpace(os.Getenv("GC_BIN")); gcBin != "" {
+		return gcBin
+	}
+	if gcHome := strings.TrimSpace(os.Getenv("GC_HOME")); gcHome != "" {
+		candidate := filepath.Join(gcHome, "bin", gcBinaryName())
+		if gcBinaryFileExists(candidate) {
+			return candidate
+		}
+	}
+	if cityPath != "" {
+		candidate := filepath.Join(filepath.Dir(cityPath), "bin", gcBinaryName())
+		if gcBinaryFileExists(candidate) {
+			return candidate
+		}
+	}
+	if exe, err := os.Executable(); err == nil && exe != "" {
+		return exe
+	}
+	return ""
+}
+
+func gcBinaryName() string {
+	if goruntime.GOOS == "windows" {
+		return "gc.exe"
+	}
+	return "gc"
+}
+
+func gcBinaryFileExists(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func sessionDoltEnv(cityPath, rigRoot string, rigs []config.Rig) map[string]string {
 	env := map[string]string{
+		// Explicit empty values let tmux unset stale Dolt vars inherited from
+		// the server environment when the current city/rig does not use them.
+		"GC_DOLT_HOST":             "",
+		"GC_DOLT_PORT":             "",
+		"GC_DOLT_USER":             "",
+		"GC_DOLT_PASSWORD":         "",
+		"BEADS_DOLT_SERVER_HOST":   "",
+		"BEADS_DOLT_SERVER_PORT":   "",
+		"BEADS_DOLT_SERVER_USER":   "",
+		"BEADS_DOLT_PASSWORD":      "",
+		"BEADS_DOLT_SERVER_MODE":   "1",
+		"BEADS_DOLT_SHARED_SERVER": "",
 		// Suppress bd's built-in Dolt auto-start. The gc controller manages
 		// the server; bd's CLI auto-start launches rogue servers from the
 		// agent's cwd with the wrong data_dir.
@@ -565,47 +629,35 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 	// Explicit empty values let tmux unset stale Dolt vars inherited from
 	// the server environment when the current city/rig does not use them.
 	setProjectedDoltEnvEmpty(env)
-	ensureProjectedPostgresEnvExplicit(env)
 
 	// Session env projection must not trigger provider recovery. Session setup
 	// only publishes the currently resolved target; store operations use the
 	// bd runtime env when recovery is allowed.
 	if rigRoot == "" {
-		if cityUsesBdStoreContract(cityPath) {
-			if usedPostgres, err := applyCityPostgresBackendEnv(env, cityPath); err != nil {
-				// On PG projection errors, keep explicit empty keys so tmux
-				// clears stale inherited backend variables for the session.
-				clearProjectedDoltEnv(env)
-				clearProjectedPostgresEnv(env)
-				mirrorBeadsDoltEnv(env)
-				ensureProjectedDoltEnvExplicit(env)
-				ensureProjectedPostgresEnvExplicit(env)
-				return env, err
-			} else if usedPostgres {
-				ensureProjectedDoltEnvExplicit(env)
-				return env, nil
-			}
-		}
 		if err := applyResolvedCityDoltEnv(env, cityPath, false); err != nil {
 			mirrorBeadsDoltEnv(env)
-			ensureProjectedPostgresEnvExplicit(env)
-			if !isRecoverableManagedDoltEnvError(err) {
-				return env, err
-			}
 		}
-		ensureProjectedPostgresEnvExplicit(env)
-		return env, nil
+		return env
 	}
 
-	if err := applyResolvedRigDoltEnv(env, cityPath, rigRoot, rigConfigForScopeRoot(cityPath, rigRoot, rigs), false); err != nil {
+	if err := applyResolvedRigDoltEnv(env, cityPath, rigRoot, rigConfigForScopeRoot(cityPath, rigRoot, rigs), true); err != nil {
 		mirrorBeadsDoltEnv(env)
-		ensureProjectedPostgresEnvExplicit(env)
-		if !isRecoverableManagedDoltEnvError(err) {
-			return env, err
+	}
+	if strings.TrimSpace(env["GC_DOLT_PORT"]) == "" {
+		if port := compatDoltServerPort(rigRoot); port != "" {
+			env["GC_DOLT_PORT"] = port
+			mirrorBeadsDoltEnv(env)
 		}
 	}
-	ensureProjectedPostgresEnvExplicit(env)
-	return env, nil
+	return env
+}
+
+func compatDoltServerPort(root string) string {
+	data, err := os.ReadFile(filepath.Join(root, ".beads", "dolt-server.port"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // templateParamsToConfig converts TemplateParams to the runtime.Config
@@ -641,6 +693,22 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 			}
 		}
 	}
+	if templateParamsUseT3Bridge(tp) {
+		alias := strings.TrimSpace(tp.Alias)
+		if alias == "" {
+			alias = strings.TrimSpace(env["GC_AGENT"])
+		}
+		if alias == "" {
+			alias = strings.TrimSpace(tp.InstanceName)
+		}
+		if alias == "" {
+			alias = strings.TrimSpace(tp.TemplateName)
+		}
+		if alias != "" && strings.TrimSpace(env["GC_ALIAS"]) == "" {
+			env["GC_ALIAS"] = alias
+		}
+	}
+	startupEnvelope := buildStartupEnvelope(tp, tp.Prompt)
 	if startupPromptDelivered {
 		if env == nil {
 			env = map[string]string{}
@@ -648,10 +716,11 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		env[startupPromptDeliveredEnv] = "1"
 	}
 	return runtime.Config{
-		Command:      tp.Command,
-		PromptSuffix: promptSuffix,
-		PromptFlag:   promptFlag,
-		Env:          env,
+		Command:         tp.Command,
+		PromptSuffix:    promptSuffix,
+		PromptFlag:      promptFlag,
+		Env:             env,
+		StartupEnvelope: startupEnvelope,
 		MCPServers: func() []runtime.MCPServerConfig {
 			if tp.IsACP {
 				return tp.MCPServers
@@ -663,14 +732,12 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		ReadyDelayMs:           tp.Hints.ReadyDelayMs,
 		ProcessNames:           tp.Hints.ProcessNames,
 		EmitsPermissionWarning: tp.Hints.EmitsPermissionWarning,
-		AcceptStartupDialogs:   tp.Hints.AcceptStartupDialogs,
 		Nudge:                  nudge,
 		PreStart:               tp.Hints.PreStart,
 		SessionSetup:           tp.Hints.SessionSetup,
 		SessionSetupScript:     tp.Hints.SessionSetupScript,
 		SessionLive:            tp.Hints.SessionLive,
 		ProviderName:           tp.Hints.ProviderName,
-		ProviderOverlayName:    tp.Hints.ProviderOverlayName,
 		InstallAgentHooks:      tp.Hints.InstallAgentHooks,
 		PackOverlayDirs:        tp.Hints.PackOverlayDirs,
 		OverlayDir:             tp.Hints.OverlayDir,
@@ -679,11 +746,263 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 	}
 }
 
+type SessionAssignmentLookup struct {
+	SessionName        string
+	AgentName          string
+	AssignedWorkBeads  []beads.Bead
+	AssignedWorkStores []beads.Store
+	AssignedWorkKnown  bool
+	Env                map[string]string
+}
+
+func applyAssignedWorkContext(store beads.Store, lookup SessionAssignmentLookup) {
+	if store == nil || lookup.Env == nil {
+		return
+	}
+	workBead, workIndex, ok := findAssignedWorkBead(store, lookup.SessionName, lookup.AgentName, lookup.AssignedWorkBeads, lookup.AssignedWorkKnown)
+	if !ok {
+		return
+	}
+	lookup.Env["GC_BEAD"] = workBead.ID
+	lookup.Env["GC_BEAD_TITLE"] = workBead.Title
+	workStore := store
+	if workIndex >= 0 && workIndex < len(lookup.AssignedWorkStores) && lookup.AssignedWorkStores[workIndex] != nil {
+		workStore = lookup.AssignedWorkStores[workIndex]
+	}
+
+	if workBead.Ref != "" {
+		lookup.Env["GC_FORMULA"] = workBead.Ref
+	}
+	if formula := workBead.Metadata["formula"]; formula != "" {
+		lookup.Env["GC_FORMULA"] = formula
+	}
+
+	current := workBead
+	for depth := 0; depth < 32; depth++ {
+		if current.ParentID == "" {
+			return
+		}
+		parent, err := workStore.Get(current.ParentID)
+		if err != nil {
+			return
+		}
+		if parent.Type == "convoy" && lookup.Env["GC_CONVOY"] == "" {
+			lookup.Env["GC_CONVOY"] = parent.ID
+			lookup.Env["GC_CONVOY_TITLE"] = parent.Title
+			if total, closed, ok := convoyProgress(workStore, parent.ID); ok {
+				lookup.Env["GC_CONVOY_TOTAL_COUNT"] = fmt.Sprintf("%d", total)
+				lookup.Env["GC_CONVOY_CLOSED_COUNT"] = fmt.Sprintf("%d", closed)
+				if total > 0 && closed >= total {
+					lookup.Env["GC_CONVOY_STATUS"] = "closed"
+				} else {
+					lookup.Env["GC_CONVOY_STATUS"] = "open"
+				}
+			}
+		}
+		if beads.IsMoleculeType(parent.Type) && lookup.Env["GC_MOLECULE"] == "" {
+			lookup.Env["GC_MOLECULE"] = parent.ID
+			if lookup.Env["GC_FORMULA"] == "" && parent.Ref != "" {
+				lookup.Env["GC_FORMULA"] = parent.Ref
+			}
+			if lookup.Env["GC_FORMULA"] == "" {
+				if formula := parent.Metadata["formula"]; formula != "" {
+					lookup.Env["GC_FORMULA"] = formula
+				}
+			}
+		}
+		current = parent
+	}
+}
+
+func convoyProgress(store beads.Store, convoyID string) (total int, closed int, ok bool) {
+	children, err := store.Children(convoyID)
+	if err != nil {
+		return 0, 0, false
+	}
+	for _, child := range children {
+		total++
+		if child.Status == "closed" {
+			closed++
+		}
+	}
+	return total, closed, true
+}
+
+func findAssignedWorkBead(store beads.Store, sessionName, agentName string, assignedWork []beads.Bead, assignedWorkKnown bool) (beads.Bead, int, bool) {
+	assignees := make([]string, 0, 2)
+	if sessionName != "" {
+		assignees = append(assignees, sessionName)
+	}
+	if agentName != "" && agentName != sessionName {
+		assignees = append(assignees, agentName)
+	}
+	for _, status := range []string{"in_progress", "open"} {
+		for _, assignee := range assignees {
+			for i, candidate := range assignedWork {
+				if candidate.Status == status && candidate.Assignee == assignee {
+					return candidate, i, true
+				}
+			}
+		}
+	}
+	if assignedWorkKnown {
+		return beads.Bead{}, -1, false
+	}
+	for _, status := range []string{"in_progress", "open"} {
+		for _, assignee := range assignees {
+			matches, err := store.ListByAssignee(assignee, status, 1)
+			if err != nil || len(matches) == 0 {
+				continue
+			}
+			return matches[0], -1, true
+		}
+	}
+	return beads.Bead{}, -1, false
+}
+
+func buildStartupEnvelope(tp TemplateParams, startupPrompt string) json.RawMessage {
+	if !templateParamsUseT3Bridge(tp) {
+		return nil
+	}
+	envelope := map[string]any{
+		"version": 1,
+		"gc": map[string]any{
+			"cityPath":    tp.Env["GC_CITY_PATH"],
+			"cityName":    startupEnvelopeCityName(tp),
+			"rigName":     tp.RigName,
+			"rigPath":     tp.RigRoot,
+			"agent":       tp.TemplateName,
+			"template":    tp.TemplateName,
+			"sessionName": tp.SessionName,
+		},
+		"runtime": map[string]any{
+			"provider":         tp.Env["GC_PROVIDER"],
+			"model":            startupEnvelopeModel(tp),
+			"sessionTransport": tp.EffectiveSessionProvider,
+			"runtimeMode":      "full-access",
+			"interactionMode":  "default",
+			"workDir":          tp.WorkDir,
+			"command":          tp.Command,
+		},
+		"startup": map[string]any{
+			"promptTemplate": tp.TemplateName,
+			"startupPrompt":  startupPrompt,
+			"initialNudge":   tp.Hints.Nudge,
+		},
+		"assignment": map[string]any{
+			"beadId":            tp.Env["GC_BEAD"],
+			"beadTitle":         tp.Env["GC_BEAD_TITLE"],
+			"convoyId":          tp.Env["GC_CONVOY"],
+			"convoyTitle":       tp.Env["GC_CONVOY_TITLE"],
+			"convoyStatus":      tp.Env["GC_CONVOY_STATUS"],
+			"convoyClosedCount": tp.Env["GC_CONVOY_CLOSED_COUNT"],
+			"convoyTotalCount":  tp.Env["GC_CONVOY_TOTAL_COUNT"],
+			"moleculeId":        tp.Env["GC_MOLECULE"],
+			"formula":           tp.Env["GC_FORMULA"],
+		},
+		"context": map[string]any{
+			"gcEnv": map[string]any{
+				"GC_AGENT":               tp.Env["GC_AGENT"],
+				"GC_PROVIDER":            tp.Env["GC_PROVIDER"],
+				"GC_TEMPLATE":            tp.Env["GC_TEMPLATE"],
+				"GC_BEAD":                tp.Env["GC_BEAD"],
+				"GC_BEAD_TITLE":          tp.Env["GC_BEAD_TITLE"],
+				"GC_CONVOY":              tp.Env["GC_CONVOY"],
+				"GC_CONVOY_TITLE":        tp.Env["GC_CONVOY_TITLE"],
+				"GC_CONVOY_STATUS":       tp.Env["GC_CONVOY_STATUS"],
+				"GC_CONVOY_CLOSED_COUNT": tp.Env["GC_CONVOY_CLOSED_COUNT"],
+				"GC_CONVOY_TOTAL_COUNT":  tp.Env["GC_CONVOY_TOTAL_COUNT"],
+				"GC_MOLECULE":            tp.Env["GC_MOLECULE"],
+				"GC_FORMULA":             tp.Env["GC_FORMULA"],
+				"GC_CITY_PATH":           tp.Env["GC_CITY_PATH"],
+				"GC_RIG":                 tp.Env["GC_RIG"],
+				"GC_SESSION_NAME":        tp.Env["GC_SESSION_NAME"],
+			},
+		},
+		"resume": map[string]any{
+			"policy":                 "match-or-recreate",
+			"allowThreadReuse":       true,
+			"requiredThreadProvider": tp.Env["GC_PROVIDER"],
+			"requiredThreadModel":    startupEnvelopeModel(tp),
+		},
+	}
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		return nil
+	}
+	return json.RawMessage(data)
+}
+
+func startupEnvelopeCityName(tp TemplateParams) string {
+	if name := cleanStartupEnvelopeCityName(tp.CityName); name != "" && !strings.ContainsAny(name, `/\`) {
+		return name
+	}
+	for _, value := range []string{tp.CityName, tp.Env["GC_CITY_PATH"], tp.Env["GC_CITY_ROOT"], tp.Env["GC_CITY"]} {
+		if base := cleanStartupEnvelopeCityName(filepath.Base(filepath.Clean(value))); base != "" {
+			return base
+		}
+		if name := cleanStartupEnvelopeCityName(value); name != "" {
+			return name
+		}
+	}
+	return "city"
+}
+
+func cleanStartupEnvelopeCityName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "." || value == ".." || value == string(filepath.Separator) {
+		return ""
+	}
+	return value
+}
+
+func templateParamsUseT3Bridge(tp TemplateParams) bool {
+	sessionProvider := strings.TrimSpace(tp.EffectiveSessionProvider)
+	if sessionProvider == "" {
+		sessionProvider = strings.TrimSpace(tp.SessionOverride)
+	}
+	if sessionProvider == "t3bridge" {
+		return true
+	}
+	if strings.HasPrefix(sessionProvider, "exec:") {
+		return isLegacyT3BridgeExecScript(strings.TrimPrefix(sessionProvider, "exec:"))
+	}
+	return false
+}
+
+func effectiveSessionProvider(sessionOverride, citySessionProvider string) string {
+	if strings.TrimSpace(sessionOverride) != "" {
+		return strings.TrimSpace(sessionOverride)
+	}
+	return strings.TrimSpace(citySessionProvider)
+}
+
+func startupEnvelopeModel(tp TemplateParams) string {
+	if model := strings.TrimSpace(tp.Env["GC_MODEL"]); model != "" {
+		return model
+	}
+	if strings.Contains(tp.Command, "--model ") {
+		parts := strings.Fields(tp.Command)
+		for i := 0; i < len(parts)-1; i++ {
+			if parts[i] == "--model" {
+				return parts[i+1]
+			}
+		}
+	}
+	switch tp.Env["GC_PROVIDER"] {
+	case "codex":
+		return "gpt-5.4"
+	case "codex-mini":
+		return "gpt-5.4-mini"
+	case "claude":
+		return "claude-sonnet-4-6"
+	}
+	return "claude-opus-4-6"
+}
+
 func prependStartupPromptToNudge(prompt, nudge string) string {
 	if nudge != "" {
-		return prompt + startupPromptNudgeSeparator + nudge
+		return prompt + "\n\n---\n\n" + nudge
 	}
 	return prompt
 }
-
-const startupPromptNudgeSeparator = "\n\n---\n\n"

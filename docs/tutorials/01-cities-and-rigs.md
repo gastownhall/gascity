@@ -142,6 +142,10 @@ $ cat pack.toml
 name = "my-city"
 schema = 2
 
+[[agent]]
+name = "mayor"
+prompt_template = "agents/mayor/prompt.template.md"
+
 [[named_session]]
 template = "mayor"
 mode = "always"
@@ -152,10 +156,10 @@ the provider. The machine-local workspace identity lives in `.gc/site.toml`
 instead, which is how `gc cities`, `gc status`, and other commands still know
 this city is named `my-city`.
 
-The built-in `mayor` comes from the scaffolded `agents/mayor/` content, and
+The `[[agent]]` entry in `pack.toml` defines the built-in `mayor`, and
 `[[named_session]]` keeps a `mayor` session running so you can talk to it at
-any time. When you add more agents later, Gas City creates `agents/<name>/`,
-with `prompt.template.md` for the prompt and `agent.toml` for any per-agent
+any time. When you add more agents later, Gas City creates `agents/<name>/`, with
+`prompt.template.md` for the prompt and `agent.toml` for any per-agent
 overrides.
 
 Gas City also gives you an implicit agent for each supported provider — so
@@ -169,25 +173,17 @@ To check on the status of your city, use `gc status`:
 ~/my-city
 $ gc status
 my-city  /Users/csells/my-city
-  Controller: supervisor-managed (PID 83621)
-  Authority: supervisor process PID 83621
+  Controller: standalone-managed (PID 83621)
+  Authority: standalone controller PID 83621
+  Next: gc stop /Users/csells/my-city && gc start /Users/csells/my-city to hand ownership to the supervisor
   Suspended:  no
 
 Agents:
-  dog                     scaled (min=0, max=3)
-    dog-1                 stopped
-    dog-2                 stopped
-    dog-3                 stopped
+  mayor                   pool (min=0, max=unlimited)
+  claude                  pool (min=0, max=unlimited)
 
-0/3 agents running
-
-Named sessions:
-  mayor                   reserved-unmaterialized (always)
+Sessions: 1 active, 0 suspended
 ```
-
-The `dog` pool is a background utility agent from the built-in maintenance
-pack. It handles internal housekeeping like shutdown coordination. You don't
-need to interact with it — ignore it for now.
 
 ## Adding a rig
 

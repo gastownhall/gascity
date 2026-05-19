@@ -476,9 +476,9 @@ func isAgentPatchOnlyIdentity(p config.AgentPatch) bool {
 }
 
 // WriteLocalDiscoveredAgentSuspended writes the suspended state to
-// agents/<name>/agent.toml using an atomic temp-file rename. When
-// suspended is false and the file would become empty (no other fields),
-// it is removed instead.
+// agents/<name>/agent.toml using an atomic temp-file rename. The
+// suspended key is always written explicitly so resume preserves
+// `suspended = false` durably.
 //
 // Decoding into map[string]any (rather than a typed struct) preserves
 // any user-set fields the caller didn't ask about. TOML comments and
@@ -502,18 +502,7 @@ func WriteLocalDiscoveredAgentSuspended(fs fsys.FS, cityRoot string, agent confi
 		return fmt.Errorf("reading agents/%s/agent.toml: %w", agent.Name, err)
 	}
 
-	if suspended {
-		values["suspended"] = true
-	} else {
-		delete(values, "suspended")
-	}
-
-	if len(values) == 0 {
-		if err := fs.Remove(agentTomlPath); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("removing agents/%s/agent.toml: %w", agent.Name, err)
-		}
-		return nil
-	}
+	values["suspended"] = suspended
 
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(values); err != nil {
@@ -645,10 +634,9 @@ func (e *Editor) CreateRig(r config.Rig) error {
 // distinguish "not set" from "set to zero value" to avoid the PATCH
 // zero-value trap (e.g., omitting suspended must not reset it to false).
 type RigUpdate struct {
-	Path          string
-	Prefix        string
-	DefaultBranch string
-	Suspended     *bool
+	Path      string
+	Prefix    string
+	Suspended *bool
 }
 
 // UpdateRig partially updates an existing rig. Only non-nil/non-empty
@@ -662,9 +650,6 @@ func (e *Editor) UpdateRig(name string, patch RigUpdate) error {
 				}
 				if patch.Prefix != "" {
 					cfg.Rigs[i].Prefix = patch.Prefix
-				}
-				if patch.DefaultBranch != "" {
-					cfg.Rigs[i].DefaultBranch = patch.DefaultBranch
 				}
 				if patch.Suspended != nil {
 					cfg.Rigs[i].Suspended = *patch.Suspended

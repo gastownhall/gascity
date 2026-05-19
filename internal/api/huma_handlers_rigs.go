@@ -66,10 +66,9 @@ func (s *Server) humaHandleRigCreate(_ context.Context, input *RigCreateInput) (
 	}
 
 	rig := config.Rig{
-		Name:          input.Body.Name,
-		Path:          input.Body.Path,
-		Prefix:        input.Body.Prefix,
-		DefaultBranch: input.Body.DefaultBranch,
+		Name:   input.Body.Name,
+		Path:   input.Body.Path,
+		Prefix: input.Body.Prefix,
 	}
 
 	if err := sm.CreateRig(rig); err != nil {
@@ -89,10 +88,9 @@ func (s *Server) humaHandleRigUpdate(_ context.Context, input *RigUpdateInput) (
 	}
 
 	patch := RigUpdate{
-		Path:          input.Body.Path,
-		Prefix:        input.Body.Prefix,
-		DefaultBranch: input.Body.DefaultBranch,
-		Suspended:     input.Body.Suspended,
+		Path:      input.Body.Path,
+		Prefix:    input.Body.Prefix,
+		Suspended: input.Body.Suspended,
 	}
 
 	if err := sm.UpdateRig(input.Name, patch); err != nil {

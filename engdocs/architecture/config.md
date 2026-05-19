@@ -2,7 +2,6 @@
 title: "Config System"
 ---
 
-
 > Last verified against code: 2026-03-01
 
 ## Summary
@@ -213,38 +212,38 @@ Provider resolution happens later, at agent startup time, via
 
 ## Interactions
 
-| Depends on | How |
-|---|---|
-| `internal/fsys` | Filesystem abstraction for `Load`, `LoadWithIncludes`, pack loading, and revision hashing |
-| `github.com/BurntSushi/toml` | TOML parsing and encoding for all config files |
+| Depends on                   | How                                                                                       |
+| ---------------------------- | ----------------------------------------------------------------------------------------- |
+| `internal/fsys`              | Filesystem abstraction for `Load`, `LoadWithIncludes`, pack loading, and revision hashing |
+| `github.com/BurntSushi/toml` | TOML parsing and encoding for all config files                                            |
 
-| Depended on by | How |
-|---|---|
-| `cmd/gc/controller.go` | Loads config via `LoadWithIncludes`, watches for changes via `WatchDirs`, detects reloads via `Revision` |
-| `cmd/gc/pool.go` | Reads `Agent.Pool` for scaling; deep-copies agent fields when spawning pool instances |
-| `cmd/gc/reconciler.go` | Reads resolved agent list and rig list to start/stop agents |
-| `internal/city/` | Uses `Load` for basic config operations (init, add rig) |
-| `internal/hooks/` | Reads agent config for hook installation decisions via `ResolveInstallHooks` |
-| `internal/runtime/` | Receives `ResolvedProvider` output to determine runtime startup parameters |
-| `internal/orders/` | Reads `OrdersConfig` skip list and formula layers |
-| `cmd/gc/formula_resolve.go` | Uses `FormulaLayers` to resolve formula directory symlinks |
-| `cmd/gc/cmd_sling.go` | Reads `Agent.EffectiveSlingQuery` for bead routing |
+| Depended on by              | How                                                                                                      |
+| --------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `cmd/gc/controller.go`      | Loads config via `LoadWithIncludes`, watches for changes via `WatchDirs`, detects reloads via `Revision` |
+| `cmd/gc/pool.go`            | Reads `Agent.Pool` for scaling; deep-copies agent fields when spawning pool instances                    |
+| `cmd/gc/reconciler.go`      | Reads resolved agent list and rig list to start/stop agents                                              |
+| `internal/city/`            | Uses `Load` for basic config operations (init, add rig)                                                  |
+| `internal/hooks/`           | Reads agent config for hook installation decisions via `ResolveInstallHooks`                             |
+| `internal/runtime/`         | Receives `ResolvedProvider` output to determine runtime startup parameters                               |
+| `internal/orders/`          | Reads `OrdersConfig` skip list and formula layers                                                        |
+| `cmd/gc/formula_resolve.go` | Uses `FormulaLayers` to resolve formula directory symlinks                                               |
+| `cmd/gc/cmd_sling.go`       | Reads `Agent.EffectiveSlingQuery` for bead routing                                                       |
 
 ## Code Map
 
 All implementation lives in `internal/config/`:
 
-| File | Purpose |
-|---|---|
-| `internal/config/config.go` | Core types: `City`, `Workspace`, `Agent`, `Rig`, `AgentOverride`, `PackSource`, `PackMeta`, `FormulaLayers`, `PoolConfig`, subsystem configs. Load/Parse/Marshal. Validation functions. |
-| `internal/config/compose.go` | `LoadWithIncludes`: the main entry point. Fragment merging, path resolution, provenance tracking. Orchestrates the full load pipeline. |
-| `internal/config/patch.go` | `Patches`, `AgentPatch`, `RigPatch`, `ProviderPatch`, `PoolOverride` types. `ApplyPatches` and per-type apply functions. |
-| `internal/config/pack.go` | `ExpandPacks`, `ExpandCityPacks`, `ComputeFormulaLayers`. Pack loading, agent stamping, city_agents partitioning, override application, collision detection. |
-| `internal/config/pack_fetch.go` | Legacy V1 remote-pack fetch and lock helpers. Schema-2 import bootstrap/repair belongs to `gc import`; config load consumes already-materialized imports. |
-| `internal/config/provider.go` | `ProviderSpec`, `ResolvedProvider`, `BuiltinProviders`. Built-in provider presets for seven CLI agents. |
-| `internal/config/resolve.go` | `ResolveProvider`: the five-step provider resolution chain. `AgentHasHooks` for hook detection. Auto-detection via PATH scanning. |
-| `internal/config/revision.go` | `Revision`: deterministic SHA-256 config hashing. `WatchDirs`: filesystem watch targets for config change detection. |
-| `internal/config/field_sync_test.go` | `TestAgentFieldSync`: reflection-based enforcement that Agent, AgentPatch, and AgentOverride stay in sync. |
+| File                                 | Purpose                                                                                                                                                                                 |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `internal/config/config.go`          | Core types: `City`, `Workspace`, `Agent`, `Rig`, `AgentOverride`, `PackSource`, `PackMeta`, `FormulaLayers`, `PoolConfig`, subsystem configs. Load/Parse/Marshal. Validation functions. |
+| `internal/config/compose.go`         | `LoadWithIncludes`: the main entry point. Fragment merging, path resolution, provenance tracking. Orchestrates the full load pipeline.                                                  |
+| `internal/config/patch.go`           | `Patches`, `AgentPatch`, `RigPatch`, `ProviderPatch`, `PoolOverride` types. `ApplyPatches` and per-type apply functions.                                                                |
+| `internal/config/pack.go`            | `ExpandPacks`, `ExpandCityPacks`, `ComputeFormulaLayers`. Pack loading, agent stamping, city_agents partitioning, override application, collision detection.                            |
+| `internal/config/pack_fetch.go`      | Legacy V1 remote-pack fetch and lock helpers. Schema-2 import bootstrap/repair belongs to `gc import`; config load consumes already-materialized imports.                               |
+| `internal/config/provider.go`        | `ProviderSpec`, `ResolvedProvider`, `BuiltinProviders`. Built-in provider presets for seven CLI agents.                                                                                 |
+| `internal/config/resolve.go`         | `ResolveProvider`: the five-step provider resolution chain. `AgentHasHooks` for hook detection. Auto-detection via PATH scanning.                                                       |
+| `internal/config/revision.go`        | `Revision`: deterministic SHA-256 config hashing. `WatchDirs`: filesystem watch targets for config change detection.                                                                    |
+| `internal/config/field_sync_test.go` | `TestAgentFieldSync`: reflection-based enforcement that Agent, AgentPatch, and AgentOverride stay in sync.                                                                              |
 
 ## Configuration
 
@@ -311,17 +310,17 @@ FormulaLayers priority (lowest to highest):
 
 Each source file has a companion `_test.go`:
 
-| Test file | Coverage |
-|---|---|
-| `internal/config/config_test.go` | Parse, Marshal, Load, DefaultCity, ValidateAgents, ValidateRigs, DeriveBeadsPrefix, QualifiedName |
-| `internal/config/compose_test.go` | LoadWithIncludes, fragment merging, collision warnings, path resolution, provenance tracking, recursive include rejection |
-| `internal/config/patch_test.go` | ApplyPatches for agents/rigs/providers, targeting errors, env merge/remove, pool sub-field patching, provider replace mode |
-| `internal/config/pack_test.go` | ExpandPacks, ExpandCityPacks, city_agents partitioning, agent collision detection, override application, formula layer computation |
-| `internal/config/pack_fetch_test.go` | Legacy fetch/lock helper coverage for the V1 `[packs]` path |
-| `internal/config/provider_test.go` | BuiltinProviders completeness, BuiltinProviderOrder coverage |
-| `internal/config/resolve_test.go` | ResolveProvider chain (all five steps), escape hatches, auto-detect, agent-level overrides, env additive merge |
-| `internal/config/revision_test.go` | Revision determinism, WatchDirs deduplication |
-| `internal/config/field_sync_test.go` | TestAgentFieldSync: reflection-based struct field parity between Agent, AgentPatch, AgentOverride |
+| Test file                            | Coverage                                                                                                                           |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `internal/config/config_test.go`     | Parse, Marshal, Load, DefaultCity, ValidateAgents, ValidateRigs, DeriveBeadsPrefix, QualifiedName                                  |
+| `internal/config/compose_test.go`    | LoadWithIncludes, fragment merging, collision warnings, path resolution, provenance tracking, recursive include rejection          |
+| `internal/config/patch_test.go`      | ApplyPatches for agents/rigs/providers, targeting errors, env merge/remove, pool sub-field patching, provider replace mode         |
+| `internal/config/pack_test.go`       | ExpandPacks, ExpandCityPacks, city_agents partitioning, agent collision detection, override application, formula layer computation |
+| `internal/config/pack_fetch_test.go` | Legacy fetch/lock helper coverage for the V1 `[packs]` path                                                                        |
+| `internal/config/provider_test.go`   | BuiltinProviders completeness, BuiltinProviderOrder coverage                                                                       |
+| `internal/config/resolve_test.go`    | ResolveProvider chain (all five steps), escape hatches, auto-detect, agent-level overrides, env additive merge                     |
+| `internal/config/revision_test.go`   | Revision determinism, WatchDirs deduplication                                                                                      |
+| `internal/config/field_sync_test.go` | TestAgentFieldSync: reflection-based struct field parity between Agent, AgentPatch, AgentOverride                                  |
 
 All tests are unit tests using `t.TempDir()` and `fsys.MemFS` (no
 integration tags needed). See [TESTING.md](https://github.com/gastownhall/gascity/blob/main/TESTING.md) for

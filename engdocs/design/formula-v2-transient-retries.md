@@ -1,12 +1,12 @@
 # Formula v2 Transient Retries v0
 
-| Field | Value |
-|---|---|
-| Status | Draft |
-| Date | 2026-03-23 |
-| Author(s) | Codex |
-| Issue | — |
-| Supersedes | — |
+| Field      | Value      |
+| ---------- | ---------- |
+| Status     | Draft      |
+| Date       | 2026-03-23 |
+| Author(s)  | Codex      |
+| Issue      | —          |
+| Supersedes | —          |
 
 Design for first-class transient retry semantics on executable formula v2
 steps, with explicit hard-vs-soft terminal behavior.
@@ -163,10 +163,10 @@ on_exhausted = "soft_fail"
 
 ### `steps.retry` fields
 
-| Field | Required | Meaning |
-|---|---|---|
-| `max_attempts` | yes | Total attempt budget including the first attempt |
-| `on_exhausted` | no | What to do when a transient failure exhausts the budget: `hard_fail` (default) or `soft_fail` |
+| Field          | Required | Meaning                                                                                       |
+| -------------- | -------- | --------------------------------------------------------------------------------------------- |
+| `max_attempts` | yes      | Total attempt budget including the first attempt                                              |
+| `on_exhausted` | no       | What to do when a transient failure exhausts the budget: `hard_fail` (default) or `soft_fail` |
 
 ### Defaults
 

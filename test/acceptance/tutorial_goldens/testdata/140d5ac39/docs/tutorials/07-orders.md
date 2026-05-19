@@ -4,9 +4,9 @@ sidebarTitle: 07 - Orders
 description: Schedule formulas and scripts to run automatically using gate conditions — cooldowns, cron schedules, shell checks, and events.
 ---
 
-Formulas describe *what* work looks like. Orders describe *when* it should happen. An order pairs a gate condition with an action — either a formula or a shell script — and the controller checks those gates automatically. When a gate opens, the order fires. No human dispatch needed.
+Formulas describe _what_ work looks like. Orders describe _when_ it should happen. An order pairs a gate condition with an action — either a formula or a shell script — and the controller checks those gates automatically. When a gate opens, the order fires. No human dispatch needed.
 
-When you run `gc start`, you launch a *controller* — a background process that wakes up every 30 seconds (a *tick*), checks the state of the city, and takes action. One of the things it does on each tick is evaluate the gates that unblock an order from running. That periodic check is what makes orders work.
+When you run `gc start`, you launch a _controller_ — a background process that wakes up every 30 seconds (a _tick_), checks the state of the city, and takes action. One of the things it does on each tick is evaluate the gates that unblock an order from running. That periodic check is what makes orders work.
 
 We'll pick up where Tutorial 06 left off. You should have `my-city` running with agents and formulas configured.
 
@@ -39,7 +39,7 @@ interval = "5m"
 pool = "worker"
 ```
 
-The `pool` field tells the controller where to send the work. A *pool* is a named group of one or more agents that share a work queue — the agents chapter introduced them briefly. When an order fires, the controller creates a wisp from the formula and routes it to the named pool. Any agent in that pool can pick it up.
+The `pool` field tells the controller where to send the work. A _pool_ is a named group of one or more agents that share a work queue — the agents chapter introduced them briefly. When an order fires, the controller creates a wisp from the formula and routes it to the named pool. Any agent in that pool can pick it up.
 
 The controller evaluates gate conditions on every tick. When five minutes have passed since the last run, it instantiates the `review` formula as a wisp and routes it to the `worker` pool. The order name comes from the subdirectory name — `review-check` — not from anything in the TOML.
 
@@ -103,7 +103,7 @@ This is useful for testing a new order or for kicking off work that's almost due
 
 ## Gate types
 
-The gate is what makes an order tick. It controls *when* the order fires. There are five gate types.
+The gate is what makes an order tick. It controls _when_ the order fires. There are five gate types.
 
 ### Cooldown
 
@@ -135,7 +135,7 @@ pool = "worker"
 
 The schedule is a 5-field cron expression: minute, hour, day-of-month, month, day-of-week. This example fires at 3:00 AM every day. Fields support `*` (any), exact integers, and comma-separated values (`1,15` for the 1st and 15th).
 
-The difference from cooldown: a cooldown fires *relative* to the last run ("every 5 minutes"), while cron fires at *absolute* times ("at 3 AM daily"). Cooldown drifts — if the last run was at 3:02, the next is at 3:07. Cron hits the same wall-clock times every day.
+The difference from cooldown: a cooldown fires _relative_ to the last run ("every 5 minutes"), while cron fires at _absolute_ times ("at 3 AM daily"). Cooldown drifts — if the last run was at 3:02, the next is at 3:07. Cron hits the same wall-clock times every day.
 
 Cron gates fire at most once per minute — if the order already ran during the current minute, it waits for the next match.
 
@@ -220,6 +220,7 @@ interval = "30s"
 pool = "worker"
 timeout = "60s"
 ```
+
 For formula orders, the timeout covers the initial dispatch — compiling the formula, creating the wisp, and routing it to the pool. Once the wisp is created and handed off, the agent works on it at its own pace; the timeout doesn't kill an agent mid-work. For exec orders, the timeout covers the full script execution — if the script is still running when time is up, the process is killed. You can also set a global cap in `city.toml`:
 
 ```toml
@@ -292,7 +293,7 @@ review-check    mc-zbd   2026-04-08T07:31:22Z
 review-check    mc-9p8   2026-04-08T07:26:18Z
 ```
 
-The tracking bead is created synchronously *before* the dispatch goroutine launches. This is what prevents the cooldown gate from re-firing on the very next tick — the gate checks for recent tracking beads when deciding if the order is due.
+The tracking bead is created synchronously _before_ the dispatch goroutine launches. This is what prevents the cooldown gate from re-firing on the very next tick — the gate checks for recent tracking beads when deciding if the order is due.
 
 ## Duplicate prevention
 
@@ -346,7 +347,7 @@ $ gc order show test-suite --rig my-api
 $ gc order run test-suite --rig my-api
 ```
 
-These are three independent orders. The city-level `test-suite` has its own cooldown timer, its own tracking beads, its own history. The `my-api` version tracks separately — if the city-level order fired two minutes ago, that doesn't affect whether the `my-api` order is due. Internally, Gas City distinguishes them by *scoped name*: `test-suite` vs `test-suite:rig:my-api` vs `test-suite:rig:my-frontend`.
+These are three independent orders. The city-level `test-suite` has its own cooldown timer, its own tracking beads, its own history. The `my-api` version tracks separately — if the city-level order fired two minutes ago, that doesn't affect whether the `my-api` order is due. Internally, Gas City distinguishes them by _scoped name_: `test-suite` vs `test-suite:rig:my-api` vs `test-suite:rig:my-frontend`.
 
 Pool names are auto-qualified: `pool = "worker"` in the order definition becomes `pool:my-api/worker` on the dispatched wisp, routing work to the rig's own agents rather than the city-level pool.
 
@@ -446,7 +447,7 @@ Over these seven tutorials you've built up a running city from scratch. You know
 
 From here, everything is composition. Packs bundle agents, formulas, and orders into reusable configurations. Rigs scope work to specific codebases. The same primitives — beads, formulas, gates — combine in different ways for different problems. The tutorials have given you the vocabulary; the real learning happens when you start building your own city.
 
-{/* BONEYARD — draft material for future sections. Not part of the published tutorial.
+{/\* BONEYARD — draft material for future sections. Not part of the published tutorial.
 
 ### Rig flag on CLI commands
 
@@ -462,6 +463,7 @@ Without --rig, the first match is used, preferring city-level.
 ### API endpoints
 
 The API server exposes REST endpoints for orders:
+
 - GET /orders — list all orders
 - GET /orders/{name} — details for a specific order
 - POST /orders/{name}/enable — enable at runtime
@@ -482,6 +484,7 @@ rapid re-fire within the cooldown window.
 ### Environment variables for exec orders
 
 Exec order scripts receive these environment variables:
+
 - ORDER_DIR — directory containing the order.toml file
 - PACK_DIR — parent of the formula layer directory
 - GC_PACK_DIR — same as PACK_DIR
@@ -504,8 +507,8 @@ ORDER_DIR environment variable set.
 
 ### Cron limitations
 
-The cron gate is minute-level granularity only. It supports *, exact integers,
-and comma-separated values. It does NOT support ranges (1-5) or steps (*/5).
+The cron gate is minute-level granularity only. It supports _, exact integers,
+and comma-separated values. It does NOT support ranges (1-5) or steps (_/5).
 For sub-minute scheduling, use cooldown with a short interval instead.
 
 ### Open work prevention details
@@ -513,4 +516,4 @@ For sub-minute scheduling, use cooldown with a short interval instead.
 Before dispatching, the controller checks hasOpenWork(): it queries all beads
 labeled order-run:<scopedName> and returns true if any non-closed bead exists
 (excluding the tracking bead itself). This prevents duplicate dispatch when
-an agent is still working through the previous run. */}
+an agent is still working through the previous run. \*/}

@@ -87,14 +87,14 @@ byType := events.CountByType(all)
 
 ## Implementation
 
-| Artifact | Purpose |
-|---|---|
-| `internal/events/reader.go` | `Filter` extended with `Subject`, `Until`, `Limit`; `matchesFilter` helper; `ReadFiltered` updated |
-| `internal/events/fake.go` | `Fake.List` updated to use `matchesFilter` and apply `Limit` |
-| `internal/events/exec/exec.go` | Exec provider keeps the legacy script filter JSON shape and applies SDK-side filtering after script output so old scripts cannot bypass new filter fields |
-| `internal/events/multiplexer.go` | Multiplexer applies `Limit` globally after deterministically merging and sorting provider results |
-| `internal/events/query.go` | `CountByType`, `CountByActor`, `CountBySubject` |
-| `internal/events/query_test.go` | Tests covering all new filter predicates and count helpers |
+| Artifact                         | Purpose                                                                                                                                                   |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `internal/events/reader.go`      | `Filter` extended with `Subject`, `Until`, `Limit`; `matchesFilter` helper; `ReadFiltered` updated                                                        |
+| `internal/events/fake.go`        | `Fake.List` updated to use `matchesFilter` and apply `Limit`                                                                                              |
+| `internal/events/exec/exec.go`   | Exec provider keeps the legacy script filter JSON shape and applies SDK-side filtering after script output so old scripts cannot bypass new filter fields |
+| `internal/events/multiplexer.go` | Multiplexer applies `Limit` globally after deterministically merging and sorting provider results                                                         |
+| `internal/events/query.go`       | `CountByType`, `CountByActor`, `CountBySubject`                                                                                                           |
+| `internal/events/query_test.go`  | Tests covering all new filter predicates and count helpers                                                                                                |
 
 `matchesFilter` is the predicate used by `ApplyFilter`, `ReadFiltered`, and the
 in-memory provider, ensuring code paths enforce the same predicate logic. The

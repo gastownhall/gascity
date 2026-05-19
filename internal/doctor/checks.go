@@ -27,7 +27,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltversion"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -315,7 +314,7 @@ func isSubpath(root, path string) bool {
 	if err != nil {
 		return false
 	}
-	return !pathutil.IsOutsideDir(rel)
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func readPackName(dir string) string {
@@ -948,6 +947,9 @@ func splitStoreDirExists(path string) bool {
 }
 
 func validateBDStoreTarget(cityPath, scopeRoot string) (contract.DoltConnectionTarget, string, bool, error) {
+	if scopeUsesBDDoltliteStore(cityPath, scopeRoot) {
+		return contract.DoltConnectionTarget{}, "", false, nil
+	}
 	if !scopeUsesBDDoltStore(cityPath, scopeRoot) {
 		return contract.DoltConnectionTarget{}, "", false, nil
 	}
@@ -963,6 +965,54 @@ func validateBDStoreTarget(cityPath, scopeRoot string) (contract.DoltConnectionT
 		return contract.DoltConnectionTarget{}, fixHintForBDScopeResolution(cityPath, resolved), true, err
 	}
 	return target, "", true, nil
+}
+
+func scopeUsesBDDoltliteStore(cityPath, scopePath string) bool {
+	resolvedScope := resolveDoctorScopePath(cityPath, scopePath)
+	if explicit, ok := scopedDoctorBeadsProviderOverride(cityPath, resolvedScope); ok && !providerUsesBDDoltStore(explicit) {
+		return false
+	}
+	if backend, ok := doctorScopeBDBackendFromMetadata(resolvedScope); ok {
+		return backend == "doltlite"
+	}
+	if !sameDoctorScope(resolvedScope, cityPath) && !scopeUsesBDDoltStore(cityPath, resolvedScope) {
+		return false
+	}
+	return providerUsesBDDoltStore(effectiveDoctorBeadsProvider(cityPath)) && configuredDoctorBeadsBackend(cityPath) == "doltlite"
+}
+
+func configuredDoctorBeadsBackend(cityPath string) string {
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return "dolt"
+	}
+	backend := strings.ToLower(strings.TrimSpace(cfg.Beads.Backend))
+	if backend == "" {
+		return "dolt"
+	}
+	return backend
+}
+
+func doctorScopeBDBackendFromMetadata(scopePath string) (string, bool) {
+	data, err := os.ReadFile(filepath.Join(scopePath, ".beads", "metadata.json"))
+	if err != nil {
+		return "", false
+	}
+	var meta struct {
+		Backend  string `json:"backend"`
+		Database string `json:"database"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", false
+	}
+	backend := strings.ToLower(strings.TrimSpace(meta.Backend))
+	if backend == "" {
+		backend = strings.ToLower(strings.TrimSpace(meta.Database))
+	}
+	if backend == "" {
+		return "", false
+	}
+	return backend, true
 }
 
 func fixHintForBDScopeResolution(cityPath string, resolved contract.ScopeConfigResolution) string {
@@ -2388,48 +2438,19 @@ type DoltConfigExpectedValue struct {
 //
 // This is intentionally a contract subset, not a byte-for-byte mirror of
 // writeManagedDoltConfigFile in cmd/gc/cmd_dolt_config.go. It covers the keys
-// whose drift would change managed runtime behavior materially. wait_timeout
-// follows the same GC_DOLT_WAIT_TIMEOUT environment override as config
-// generation. Dynamic values such as data_dir are checked by DoltConfigCheck
-// because they depend on the inspected city path.
+// whose drift would change managed runtime behavior materially. Dynamic values
+// such as data_dir are checked by DoltConfigCheck because they depend on the
+// inspected city path.
 func DoltConfigExpectedValues() []DoltConfigExpectedValue {
-	values := []DoltConfigExpectedValue{
-		{"behavior.auto_gc_behavior.enable", false},
+	return []DoltConfigExpectedValue{
+		{"behavior.auto_gc_behavior.enable", true},
 		{"behavior.auto_gc_behavior.archive_level", 0},
-		{"system_variables.dolt_auto_gc_enabled", "OFF"},
-		{"system_variables.dolt_stats_enabled", "OFF"},
-		{"system_variables.dolt_stats_gc_enabled", "OFF"},
-		{"system_variables.dolt_stats_memory_only", "ON"},
-		{"system_variables.dolt_stats_paused", "ON"},
 		{"listener.read_timeout_millis", 300000},
 		{"listener.write_timeout_millis", 300000},
 		{"listener.max_connections", 1000},
 		{"listener.back_log", 50},
 		{"listener.max_connections_timeout_millis", 5000},
 	}
-	if waitTimeout := managedDoltConfigExpectedWaitTimeout(); waitTimeout > 0 {
-		values = append(values, DoltConfigExpectedValue{
-			Path:  "system_variables.wait_timeout",
-			Value: strconv.Itoa(waitTimeout),
-		})
-	}
-	return values
-}
-
-func managedDoltConfigExpectedWaitTimeout() int {
-	const defaultWaitTimeout = 30
-	raw := os.Getenv("GC_DOLT_WAIT_TIMEOUT")
-	if raw == "" {
-		return defaultWaitTimeout
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil {
-		return defaultWaitTimeout
-	}
-	if n < 0 {
-		return 0
-	}
-	return n
 }
 
 // lookupYAMLPath walks a dotted key path through a decoded YAML map and

@@ -2940,6 +2940,33 @@ nudge = "beta dog"
 	}
 }
 
+func TestFallbackAgent_BoundImportsStillDedup(t *testing.T) {
+	agents := []Agent{
+		{
+			Name:        "dog",
+			BindingName: "dolt",
+			SourceDir:   "/packs/dolt",
+			Fallback:    true,
+			Nudge:       "dolt dog",
+		},
+		{
+			Name:        "dog",
+			BindingName: "maintenance",
+			SourceDir:   "/packs/maintenance",
+			Fallback:    true,
+			Nudge:       "maintenance dog",
+		},
+	}
+
+	got := resolveFallbackAgents(agents)
+	if len(got) != 1 {
+		t.Fatalf("got %d dogs, want 1", len(got))
+	}
+	if got[0].Nudge != "dolt dog" {
+		t.Fatalf("surviving dog nudge = %q, want %q", got[0].Nudge, "dolt dog")
+	}
+}
+
 func TestFallbackAgent_NeitherFallback_CollisionError(t *testing.T) {
 	// Two non-fallback dogs from different packs. Should still error.
 	dir := t.TempDir()
@@ -3447,82 +3474,6 @@ script = "doctor/check2.sh"
 	}
 	if entries[1].Entry.Fix != "" {
 		t.Errorf("Entry.Fix without fix field = %q, want empty", entries[1].Entry.Fix)
-	}
-}
-
-func TestPackDoctorWarmupFlagParses(t *testing.T) {
-	cases := []struct {
-		name       string
-		toml       string
-		wantWarmup bool
-	}{
-		{
-			name: "explicit_true",
-			toml: `
-[pack]
-name = "warmup-pack"
-schema = 1
-
-[[doctor]]
-name = "check-x"
-script = "doctor/check-x.sh"
-warmup = true
-`,
-			wantWarmup: true,
-		},
-		{
-			name: "explicit_false",
-			toml: `
-[pack]
-name = "warmup-pack"
-schema = 1
-
-[[doctor]]
-name = "check-x"
-script = "doctor/check-x.sh"
-warmup = false
-`,
-			wantWarmup: false,
-		},
-		{
-			name: "default_omitted",
-			toml: `
-[pack]
-name = "warmup-pack"
-schema = 1
-
-[[doctor]]
-name = "check-x"
-script = "doctor/check-x.sh"
-`,
-			wantWarmup: false,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			writeFile(t, dir, "pack.toml", tc.toml)
-
-			entries := LoadPackDoctorEntries(fsys.OSFS{}, []string{dir})
-			if len(entries) != 1 {
-				t.Fatalf("got %d entries, want 1", len(entries))
-			}
-			if entries[0].Entry.Warmup != tc.wantWarmup {
-				t.Fatalf("Entry.Warmup = %v, want %v", entries[0].Entry.Warmup, tc.wantWarmup)
-			}
-
-			doctors, err := legacyPackDoctors(fsys.OSFS{}, []PackDoctorEntry{entries[0].Entry}, dir, entries[0].PackName)
-			if err != nil {
-				t.Fatalf("legacyPackDoctors: %v", err)
-			}
-			if len(doctors) != 1 {
-				t.Fatalf("got %d synthesized doctors, want 1", len(doctors))
-			}
-			if doctors[0].Warmup != tc.wantWarmup {
-				t.Errorf("DiscoveredDoctor.Warmup = %v, want %v", doctors[0].Warmup, tc.wantWarmup)
-			}
-		})
 	}
 }
 

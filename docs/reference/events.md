@@ -58,7 +58,14 @@ object from `GET /v0/city/{cityName}/events`.
 Example:
 
 ```json
-{"actor":"human","message":"hello","seq":21,"subject":"mayor","ts":"2026-04-17T15:20:52.136314-07:00","type":"mail.sent"}
+{
+  "actor": "human",
+  "message": "hello",
+  "seq": 21,
+  "subject": "mayor",
+  "ts": "2026-04-17T15:20:52.136314-07:00",
+  "type": "mail.sent"
+}
 ```
 
 #### Supervisor Scope
@@ -69,7 +76,15 @@ is one `TypedTaggedEventStreamEnvelope` object from `GET /v0/events`.
 Example:
 
 ```json
-{"actor":"human","city":"mc-city","message":"hello","seq":21,"subject":"mayor","ts":"2026-04-17T15:20:52.136314-07:00","type":"mail.sent"}
+{
+  "actor": "human",
+  "city": "mc-city",
+  "message": "hello",
+  "seq": 21,
+  "subject": "mayor",
+  "ts": "2026-04-17T15:20:52.136314-07:00",
+  "type": "mail.sent"
+}
 ```
 
 The supervisor form adds `city` because the merged event bus spans multiple
@@ -98,7 +113,14 @@ Each line is one `EventStreamEnvelope` object, matching the API's
 Example:
 
 ```json
-{"actor":"human","message":"hello","seq":21,"subject":"mayor","ts":"2026-04-17T15:20:52.136314-07:00","type":"mail.sent"}
+{
+  "actor": "human",
+  "message": "hello",
+  "seq": 21,
+  "subject": "mayor",
+  "ts": "2026-04-17T15:20:52.136314-07:00",
+  "type": "mail.sent"
+}
 ```
 
 #### Supervisor Scope
@@ -109,7 +131,15 @@ Each line is one `TaggedEventStreamEnvelope` object, matching the API's
 Example:
 
 ```json
-{"actor":"human","city":"mc-city","message":"hello","seq":21,"subject":"mayor","ts":"2026-04-17T15:20:52.136314-07:00","type":"mail.sent"}
+{
+  "actor": "human",
+  "city": "mc-city",
+  "message": "hello",
+  "seq": 21,
+  "subject": "mayor",
+  "ts": "2026-04-17T15:20:52.136314-07:00",
+  "type": "mail.sent"
+}
 ```
 
 ### Cursor Mode
@@ -149,10 +179,6 @@ the JSON shape:
 - `--after-cursor`
 
 The same rule applies to both list mode and stream mode.
-
-`--payload-match` accepts top-level fields and dotted paths into nested
-payload objects. For example, use
-`--payload-match bead.issue_type=task` to match bead events by issue type.
 
 ## Machine-Readable Schema
 

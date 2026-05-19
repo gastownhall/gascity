@@ -2,12 +2,12 @@
 title: "API Operations Design"
 ---
 
-| Field | Value |
-|---|---|
-| Status | Implemented |
-| Date | 2026-03-06 |
-| Author(s) | Claude, Codex |
-| Issue | — |
+| Field      | Value                                                          |
+| ---------- | -------------------------------------------------------------- |
+| Status     | Implemented                                                    |
+| Date       | 2026-03-06                                                     |
+| Author(s)  | Claude, Codex                                                  |
+| Issue      | —                                                              |
 | Supersedes | Earlier drafts in this file and `gc-api-state-mutations-v0.md` |
 
 ---
@@ -66,6 +66,7 @@ migration is additive with explicit deprecation.
 Gas City currently has two write models that disagree on semantics:
 
 **CLI writes desired state to `city.toml`:**
+
 - `gc agent suspend worker` → sets `suspended=true` in city.toml
   (`cmd/gc/cmd_agent.go:488`)
 - `gc rig add ./payments` → writes `[[rigs]]` entry + bootstraps filesystem
@@ -73,8 +74,9 @@ Gas City currently has two write models that disagree on semantics:
   (`cmd/gc/cmd_suspend.go:104`)
 
 **API writes runtime state to session metadata:**
+
 - `POST /v0/agent/worker/suspend` → calls `sp.SetMeta(sessionName,
-  "suspended", "true")` (`cmd/gc/api_state.go:220`)
+"suspended", "true")` (`cmd/gc/api_state.go:220`)
 - `POST /v0/rig/payments/suspend` → sets metadata on all rig sessions
   (`cmd/gc/api_state.go:269`)
 
@@ -87,16 +89,16 @@ guarantees depending on which surface invoked it.
 
 Beyond the semantic mismatch, 26 CLI mutations have no API equivalent:
 
-| Category | Missing Operations |
-|---|---|
+| Category       | Missing Operations                    |
+| -------------- | ------------------------------------- |
 | City lifecycle | start, stop, restart, suspend, resume |
-| Agent CRUD | add, destroy, start, stop, scale |
-| Rig CRUD | add, remove, restart |
-| Config | apply, validate, provider CRUD |
-| Packs | fetch |
-| Orders | run, enable/disable |
-| Events | emit |
-| Misc | handoff, reconcile |
+| Agent CRUD     | add, destroy, start, stop, scale      |
+| Rig CRUD       | add, remove, restart                  |
+| Config         | apply, validate, provider CRUD        |
+| Packs          | fetch                                 |
+| Orders         | run, enable/disable                   |
+| Events         | emit                                  |
+| Misc           | handoff, reconcile                    |
 
 Dashboards, CI/CD pipelines, Terraform providers, and Kubernetes operators
 all need programmatic access to these operations.
@@ -122,35 +124,35 @@ and the API-applied state.
 
 ### Patterns We Adopt
 
-| Pattern | Source | GC Implementation |
-|---|---|---|
-| Desired state vs observed state | K8s spec/status | Config is spec; runtime view is status |
-| Resource-oriented URLs | K8s, Nomad | `/v0/{resource}` flat namespace |
-| Standard verbs | K8s, REST | GET, POST, PUT, PATCH, DELETE |
-| Action subresources | K8s, Fly.io | `POST /v0/agent/{name}/kill` |
-| Blocking queries | Nomad, Consul | `?index=N&wait=30s` (already implemented) |
-| SSE streaming | Nomad | `/v0/events/stream` (already implemented) |
-| Dry-run | K8s, AWS EC2 | `?dry_run=true` on desired-state mutations |
-| Idempotency tokens | AWS | `Idempotency-Key` header on creates/deletes |
-| Optimistic concurrency | K8s resourceVersion | `If-Match` / `ETag` on desired-state writes |
-| Structured errors | K8s, AWS | `{code, message, details[]}` (already implemented) |
-| Operation tracking | AWS CloudFormation | Async operations return trackable operation IDs |
-| Finalizer-like deletion | K8s | Drain-before-destroy for agents |
-| Generation tracking | K8s | `generation` bumps on spec change; `observed_generation` on reconcile |
-| Provenance/origin | K8s field ownership | `origin: inline|patch|derived` on resources |
+| Pattern                         | Source              | GC Implementation                                                     |
+| ------------------------------- | ------------------- | --------------------------------------------------------------------- | ----- | --------------------- |
+| Desired state vs observed state | K8s spec/status     | Config is spec; runtime view is status                                |
+| Resource-oriented URLs          | K8s, Nomad          | `/v0/{resource}` flat namespace                                       |
+| Standard verbs                  | K8s, REST           | GET, POST, PUT, PATCH, DELETE                                         |
+| Action subresources             | K8s, Fly.io         | `POST /v0/agent/{name}/kill`                                          |
+| Blocking queries                | Nomad, Consul       | `?index=N&wait=30s` (already implemented)                             |
+| SSE streaming                   | Nomad               | `/v0/events/stream` (already implemented)                             |
+| Dry-run                         | K8s, AWS EC2        | `?dry_run=true` on desired-state mutations                            |
+| Idempotency tokens              | AWS                 | `Idempotency-Key` header on creates/deletes                           |
+| Optimistic concurrency          | K8s resourceVersion | `If-Match` / `ETag` on desired-state writes                           |
+| Structured errors               | K8s, AWS            | `{code, message, details[]}` (already implemented)                    |
+| Operation tracking              | AWS CloudFormation  | Async operations return trackable operation IDs                       |
+| Finalizer-like deletion         | K8s                 | Drain-before-destroy for agents                                       |
+| Generation tracking             | K8s                 | `generation` bumps on spec change; `observed_generation` on reconcile |
+| Provenance/origin               | K8s field ownership | `origin: inline                                                       | patch | derived` on resources |
 
 ### Patterns We Reject
 
-| Pattern | Source | Why Not |
-|---|---|---|
-| API groups / discovery docs | K8s | Too much ceremony for single-binary SDK |
-| Admission webhooks | K8s | No extension model needed |
-| CRDs / dynamic schema | K8s | Static types sufficient |
-| Full MVCC | etcd | Event log provides similar semantics more simply |
-| Request-only CRUD | AWS Cloud Control | Direct resource verbs are simpler |
-| Lease-based mutation | Fly.io | Single controller, no contention |
-| Separate API server binary | — | Embedded server has direct state access |
-| gRPC transport | — | HTTP JSON sufficient; OpenAPI later |
+| Pattern                     | Source            | Why Not                                          |
+| --------------------------- | ----------------- | ------------------------------------------------ |
+| API groups / discovery docs | K8s               | Too much ceremony for single-binary SDK          |
+| Admission webhooks          | K8s               | No extension model needed                        |
+| CRDs / dynamic schema       | K8s               | Static types sufficient                          |
+| Full MVCC                   | etcd              | Event log provides similar semantics more simply |
+| Request-only CRUD           | AWS Cloud Control | Direct resource verbs are simpler                |
+| Lease-based mutation        | Fly.io            | Single controller, no contention                 |
+| Separate API server binary  | —                 | Embedded server has direct state access          |
+| gRPC transport              | —                 | HTTP JSON sufficient; OpenAPI later              |
 
 ### Key Insight: Nomad Is Our Closest Analog
 
@@ -197,16 +199,16 @@ Seven principles govern the write API:
 This is the most important thing to fix. The table below shows every
 existing mutation endpoint and its current vs correct behavior:
 
-| Endpoint | Current Behavior | Correct Behavior | Fix |
-|---|---|---|---|
-| `POST /v0/agent/{name}/suspend` | Sets session metadata | Write `suspended=true` to city.toml | Redefine as desired-state write |
-| `POST /v0/agent/{name}/resume` | Removes session metadata | Write `suspended=false` to city.toml | Redefine as desired-state write |
-| `POST /v0/rig/{name}/suspend` | Sets session metadata on all agents | Write `suspended=true` on rig in city.toml | Redefine as desired-state write |
-| `POST /v0/rig/{name}/resume` | Removes session metadata on all agents | Write `suspended=false` on rig in city.toml | Redefine as desired-state write |
-| `POST /v0/agent/{name}/kill` | Calls `sp.Stop()` | Correct (runtime action) | Keep as-is |
-| `POST /v0/agent/{name}/drain` | Sets drain metadata | Correct (runtime action) | Keep as-is |
-| `POST /v0/agent/{name}/undrain` | Removes drain metadata | Correct (runtime action) | Keep as-is |
-| `POST /v0/agent/{name}/nudge` | Sends to session | Correct (runtime action) | Keep as-is |
+| Endpoint                        | Current Behavior                       | Correct Behavior                            | Fix                             |
+| ------------------------------- | -------------------------------------- | ------------------------------------------- | ------------------------------- |
+| `POST /v0/agent/{name}/suspend` | Sets session metadata                  | Write `suspended=true` to city.toml         | Redefine as desired-state write |
+| `POST /v0/agent/{name}/resume`  | Removes session metadata               | Write `suspended=false` to city.toml        | Redefine as desired-state write |
+| `POST /v0/rig/{name}/suspend`   | Sets session metadata on all agents    | Write `suspended=true` on rig in city.toml  | Redefine as desired-state write |
+| `POST /v0/rig/{name}/resume`    | Removes session metadata on all agents | Write `suspended=false` on rig in city.toml | Redefine as desired-state write |
+| `POST /v0/agent/{name}/kill`    | Calls `sp.Stop()`                      | Correct (runtime action)                    | Keep as-is                      |
+| `POST /v0/agent/{name}/drain`   | Sets drain metadata                    | Correct (runtime action)                    | Keep as-is                      |
+| `POST /v0/agent/{name}/undrain` | Removes drain metadata                 | Correct (runtime action)                    | Keep as-is                      |
+| `POST /v0/agent/{name}/nudge`   | Sends to session                       | Correct (runtime action)                    | Keep as-is                      |
 
 Because the API is still v0, **now is the right time to fix this.** The
 suspend/resume endpoints change from runtime metadata writes to desired-state
@@ -242,30 +244,28 @@ but without the full ceremony:
   "status": {
     "ready": true,
     "running_count": 3,
-    "conditions": [
-      {"type": "Ready", "status": "True", "reason": "AllInstancesRunning"}
-    ]
+    "conditions": [{ "type": "Ready", "status": "True", "reason": "AllInstancesRunning" }]
   }
 }
 ```
 
 **Key fields:**
 
-| Field | Purpose |
-|---|---|
-| `resource_version` | Optimistic concurrency token. Changes on every mutation. Used with `If-Match`/`ETag`. |
-| `generation` | Bumps only when `spec` changes. Unchanged by metadata-only updates. |
+| Field                 | Purpose                                                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `resource_version`    | Optimistic concurrency token. Changes on every mutation. Used with `If-Match`/`ETag`.                               |
+| `generation`          | Bumps only when `spec` changes. Unchanged by metadata-only updates.                                                 |
 | `observed_generation` | Set by the reconciler when it processes a generation. `observed_generation < generation` means convergence pending. |
-| `origin` | `inline` (in city.toml), `patch` (via `[[patches]]`), or `derived` (from pack expansion). Controls mutability. |
-| `conditions` | Structured status signals. Types: `Ready`, `Healthy`, `Degraded`, `BootstrapComplete`. |
+| `origin`              | `inline` (in city.toml), `patch` (via `[[patches]]`), or `derived` (from pack expansion). Controls mutability.      |
+| `conditions`          | Structured status signals. Types: `Ready`, `Healthy`, `Degraded`, `BootstrapComplete`.                              |
 
 ### 6.2 Provenance and Mutability Rules
 
-| Origin | Mutable via resource endpoint? | How to modify |
-|---|---|---|
-| `inline` | Yes — PATCH/PUT/DELETE work | Direct config edit |
-| `patch` | Yes — PATCH/PUT/DELETE on the patch | Modifies `[[patches]]` entry |
-| `derived` | No — returns 409 | Create a patch resource via `POST /v0/patches/agents` |
+| Origin    | Mutable via resource endpoint?      | How to modify                                         |
+| --------- | ----------------------------------- | ----------------------------------------------------- |
+| `inline`  | Yes — PATCH/PUT/DELETE work         | Direct config edit                                    |
+| `patch`   | Yes — PATCH/PUT/DELETE on the patch | Modifies `[[patches]]` entry                          |
+| `derived` | No — returns 409                    | Create a patch resource via `POST /v0/patches/agents` |
 
 This matches the CLI's existing behavior where `gc agent suspend` on a
 pack-derived agent tells you to use `[[patches]]`.
@@ -273,6 +273,7 @@ pack-derived agent tells you to use `[[patches]]`.
 ### 6.3 Resource Kinds
 
 **Desired-state resources** (persisted in city.toml):
+
 - `City` — workspace-level settings
 - `Agent` — agent definitions (includes agents with pool config)
 - `Rig` — external project registrations
@@ -282,10 +283,12 @@ pack-derived agent tells you to use `[[patches]]`.
 - `ProviderPatch` — override for a derived provider
 
 **Runtime views** (computed, not persisted):
+
 - Agent list/detail with session state, active bead, etc. (existing `/v0/agents`)
 - Rig list/detail with running counts (existing `/v0/rigs`)
 
 **Operational resources**:
+
 - `Operation` — tracks async mutation progress
 
 ### 6.4 Agent vs AgentPool: One Resource
@@ -318,14 +321,14 @@ state and runtime actions. Reasons:
 
 Instead, the **HTTP method + path** communicates the intent:
 
-| Pattern | Semantics |
-|---|---|
-| `GET /v0/{resource}` | Read current state |
-| `POST /v0/{resources}` | Create new resource (desired state) |
-| `PUT /v0/{resource}/{id}` | Replace resource spec (desired state) |
-| `PATCH /v0/{resource}/{id}` | Partial update spec (desired state) |
-| `DELETE /v0/{resource}/{id}` | Remove resource (desired state) |
-| `POST /v0/{resource}/{id}/{action}` | Imperative runtime action |
+| Pattern                             | Semantics                             |
+| ----------------------------------- | ------------------------------------- |
+| `GET /v0/{resource}`                | Read current state                    |
+| `POST /v0/{resources}`              | Create new resource (desired state)   |
+| `PUT /v0/{resource}/{id}`           | Replace resource spec (desired state) |
+| `PATCH /v0/{resource}/{id}`         | Partial update spec (desired state)   |
+| `DELETE /v0/{resource}/{id}`        | Remove resource (desired state)       |
+| `POST /v0/{resource}/{id}/{action}` | Imperative runtime action             |
 
 Documentation and error messages always clarify which state plane an
 operation affects. The `operation` response field shows whether the
@@ -430,8 +433,8 @@ is present, creates a pool agent. Requires `Idempotency-Key`.
     "rig": "payments",
     "provider": "claude",
     "prompt_template": "reviewer.md",
-    "pool": {"min": 1, "max": 4, "check": "echo 2"},
-    "env": {"REVIEW_MODE": "strict"},
+    "pool": { "min": 1, "max": 4, "check": "echo 2" },
+    "env": { "REVIEW_MODE": "strict" },
     "work_query": "gc hook reviewer",
     "sling_query": "bd assign {{.BeadID}} reviewer"
   }
@@ -439,6 +442,7 @@ is present, creates a pool agent. Requires `Idempotency-Key`.
 ```
 
 Response `201`:
+
 ```json
 {
   "resource": {
@@ -492,6 +496,7 @@ Removes from city.toml. Requires `Idempotency-Key`. Default behavior:
 drain running sessions first, then remove config.
 
 Query params:
+
 - `?force=true` — skip drain, immediate kill + remove
 - `?drain_timeout=30s` — override default
 
@@ -524,10 +529,11 @@ Stops then starts. The reconciler handles the restart naturally.
 Adjusts pool instance count. Only valid for pool agents.
 
 ```json
-{"desired": 6}
+{ "desired": 6 }
 ```
 
 **Enhanced `GET /v0/agent/{name}` response:**
+
 ```json
 {
   "name": "payments/reviewer-1",
@@ -589,6 +595,7 @@ Bootstrap work (bead init, hook install, route generation) may be async.
 ```
 
 When bootstrap is needed, response is `202 Accepted` with operation:
+
 ```json
 {
   "resource": { ... },
@@ -675,7 +682,7 @@ Patch resources project into `[[patches.agent]]`, `[[patches.rigs]]`, and
     "target": "payments/reviewer",
     "provider": "codex",
     "suspended": true,
-    "pool": {"max": 8}
+    "pool": { "max": 8 }
   }
 }
 ```
@@ -689,7 +696,7 @@ agent, the error response includes:
   "code": "conflict",
   "message": "agent \"payments/reviewer\" is pack-derived (origin=derived); create a patch resource instead",
   "details": [
-    {"field": "origin", "message": "use POST /v0/patches/agents to override derived resources"}
+    { "field": "origin", "message": "use POST /v0/patches/agents to override derived resources" }
   ]
 }
 ```
@@ -711,22 +718,23 @@ partial config document and merges it into city.toml. Supports
 
 ```json
 {
-  "workspace": {"provider": "gemini"},
-  "agents": [{"name": "reviewer", "provider": "claude"}],
+  "workspace": { "provider": "gemini" },
+  "agents": [{ "name": "reviewer", "provider": "claude" }],
   "patches": {
-    "agents": [{"name": "polecat", "dir": "myapp", "pool": {"max": 8}}]
+    "agents": [{ "name": "polecat", "dir": "myapp", "pool": { "max": 8 } }]
   },
   "dry_run": false
 }
 ```
 
 Response includes a diff of what changed and what the reconciler will do:
+
 ```json
 {
   "status": "applied",
   "changes": [
-    {"path": "workspace.provider", "old": "claude", "new": "gemini"},
-    {"path": "agents[reviewer]", "action": "created"}
+    { "path": "workspace.provider", "old": "claude", "new": "gemini" },
+    { "path": "agents[reviewer]", "action": "created" }
   ],
   "reconciliation": {
     "agents_to_restart": ["myapp/polecat-1"],
@@ -781,15 +789,15 @@ drain-then-destroy, pool scale-down).
 {
   "id": "op_01JN...",
   "action": "CreateRig",
-  "target": {"kind": "Rig", "name": "payments"},
+  "target": { "kind": "Rig", "name": "payments" },
   "phase": "Running",
   "idempotency_key": "4db0a739-...",
   "created_at": "2026-03-06T10:00:00Z",
   "started_at": "2026-03-06T10:00:01Z",
   "steps": [
-    {"name": "config_written", "status": "complete", "finished_at": "..."},
-    {"name": "beads_initialized", "status": "running"},
-    {"name": "hooks_installed", "status": "pending"}
+    { "name": "config_written", "status": "complete", "finished_at": "..." },
+    { "name": "beads_initialized", "status": "running" },
+    { "name": "hooks_installed", "status": "pending" }
   ],
   "last_error": null,
   "retryable": false
@@ -797,6 +805,7 @@ drain-then-destroy, pool scale-down).
 ```
 
 Phase state machine:
+
 ```
 Accepted → Running → Succeeded
 Accepted → Running → Failed
@@ -817,13 +826,14 @@ POST   /v0/events                                  (new)
 ```
 
 **`POST /v0/events`** — Emit custom event:
+
 ```json
 {
   "type": "deploy.completed",
   "actor": "ci-pipeline",
   "subject": "myapp",
   "message": "Deployed v2.3.1",
-  "payload": {"version": "2.3.1"}
+  "payload": { "version": "2.3.1" }
 }
 ```
 
@@ -847,24 +857,24 @@ optional `Idempotency-Key` support but no behavioral changes.
 
 ### 8.13 Endpoint Summary
 
-| Category | Existing | Redefined | New | Total |
-|---|---|---|---|---|
-| Health/Status | 2 | 0 | 1 | 3 |
-| City | 0 | 0 | 6 | 6 |
-| Agents | 8 | 2 | 8 | 18 |
-| Rigs | 4 | 2 | 3 | 9 |
-| Providers | 0 | 0 | 6 | 6 |
-| Patches | 0 | 0 | 15 | 15 |
-| Config | 0 | 0 | 4 | 4 |
-| Orders | 0 | 0 | 7 | 7 |
-| Packs | 0 | 0 | 2 | 2 |
-| Operations | 0 | 0 | 4 | 4 |
-| Events | 2 | 0 | 1 | 3 |
-| Beads | 7 | 0 | 4 | 11 |
-| Mail | 9 | 0 | 1 | 10 |
-| Convoys | 4 | 0 | 3 | 7 |
-| Sling | 1 | 0 | 0 | 1 |
-| **Total** | **37** | **4** | **65** | **106** |
+| Category      | Existing | Redefined | New    | Total   |
+| ------------- | -------- | --------- | ------ | ------- |
+| Health/Status | 2        | 0         | 1      | 3       |
+| City          | 0        | 0         | 6      | 6       |
+| Agents        | 8        | 2         | 8      | 18      |
+| Rigs          | 4        | 2         | 3      | 9       |
+| Providers     | 0        | 0         | 6      | 6       |
+| Patches       | 0        | 0         | 15     | 15      |
+| Config        | 0        | 0         | 4      | 4       |
+| Orders        | 0        | 0         | 7      | 7       |
+| Packs         | 0        | 0         | 2      | 2       |
+| Operations    | 0        | 0         | 4      | 4       |
+| Events        | 2        | 0         | 1      | 3       |
+| Beads         | 7        | 0         | 4      | 11      |
+| Mail          | 9        | 0         | 1      | 10      |
+| Convoys       | 4        | 0         | 3      | 7       |
+| Sling         | 1        | 0         | 0      | 1       |
+| **Total**     | **37**   | **4**     | **65** | **106** |
 
 ---
 
@@ -1037,13 +1047,13 @@ Gas City's design principle: **no status files — query live state.** State
 files go stale on crash and create false positives. Every piece of metadata
 the API needs is derivable from existing sources of truth:
 
-| Need | Derivation |
-|---|---|
-| Optimistic concurrency (ETag) | SHA256 hash of the resource's serialized TOML section |
-| Provenance/origin | Raw config vs expanded config comparison (CLI already does this) |
-| Convergence tracking | Event log records `controller.config_reloaded` events |
-| Idempotency cache | In-memory map with TTL (single-process, single-user) |
-| Operation tracking | Event log with correlation IDs (Phase 3) |
+| Need                          | Derivation                                                       |
+| ----------------------------- | ---------------------------------------------------------------- |
+| Optimistic concurrency (ETag) | SHA256 hash of the resource's serialized TOML section            |
+| Provenance/origin             | Raw config vs expanded config comparison (CLI already does this) |
+| Convergence tracking          | Event log records `controller.config_reloaded` events            |
+| Idempotency cache             | In-memory map with TTL (single-process, single-user)             |
+| Operation tracking            | Event log with correlation IDs (Phase 3)                         |
 
 **ETag computation** is a pure function — same config = same ETag, no stored
 counter needed:
@@ -1062,6 +1072,7 @@ func agentETag(cfg *config.City, name string) string {
 ```
 
 **Provenance detection** reuses the CLI's proven two-phase pattern:
+
 1. Load raw config (no pack expansion) → look for agent
 2. Found? → `origin=inline`
 3. Not found? Load expanded config → found there? → `origin=derived`
@@ -1075,6 +1086,7 @@ The suspend/resume semantic fix is implemented by changing the
 `controllerState` methods:
 
 **Before (runtime only):**
+
 ```go
 func (cs *controllerState) SuspendAgent(name string) error {
     sp, sessionName := cs.spAndSession(name)
@@ -1083,6 +1095,7 @@ func (cs *controllerState) SuspendAgent(name string) error {
 ```
 
 **After (desired state):**
+
 ```go
 func (cs *controllerState) SuspendAgent(name string) error {
     return cs.editor.EditExpanded(func(raw, expanded *config.City) error {
@@ -1133,10 +1146,12 @@ Same extension for `withReadOnly`.
 inherently imperative).
 
 Read responses include:
+
 - `ETag: "rv_184"` header
 - `metadata.resource_version: "rv_184"` in body
 
 Write requests must include:
+
 - `If-Match: "rv_184"` header
 
 Stale version → `412 Precondition Failed`.
@@ -1144,6 +1159,7 @@ Stale version → `412 Precondition Failed`.
 ### 11.2 Idempotency
 
 **Required** on non-idempotent creates and deletes:
+
 - `POST /v0/agents` — `Idempotency-Key` required
 - `POST /v0/rigs` — `Idempotency-Key` required
 - `DELETE /v0/agent/{name}` — `Idempotency-Key` required
@@ -1151,6 +1167,7 @@ Stale version → `412 Precondition Failed`.
 **Optional but supported** on PATCH, runtime actions.
 
 Rules:
+
 - Same key + same request body hash → return original result
 - Same key + different body hash → `422 Unprocessable Entity`
 - Expired/evicted key → treated as new request
@@ -1162,6 +1179,7 @@ TTL: 10 minutes (covers retry window for network failures).
 Supported on desired-state mutation endpoints via `?dry_run=true`.
 
 Behavior:
+
 - Full validation runs
 - Provenance checks run
 - Optimistic concurrency checks run
@@ -1181,37 +1199,37 @@ side-effectful).
 
 Same as today: single-user, local-machine operation.
 
-| Threat | Mitigation |
-|---|---|
-| Cross-origin browser attacks | CORS (localhost-only) + CSRF header |
-| Non-localhost exposure | Automatic read-only mode |
-| Stale concurrent writes | Optimistic concurrency (If-Match) |
-| Config injection | Full validation on all config mutations |
-| Path traversal | Rig paths validated |
-| Oversized requests | 1 MiB body limit |
-| Duplicate side effects | Idempotency keys |
+| Threat                       | Mitigation                              |
+| ---------------------------- | --------------------------------------- |
+| Cross-origin browser attacks | CORS (localhost-only) + CSRF header     |
+| Non-localhost exposure       | Automatic read-only mode                |
+| Stale concurrent writes      | Optimistic concurrency (If-Match)       |
+| Config injection             | Full validation on all config mutations |
+| Path traversal               | Rig paths validated                     |
+| Oversized requests           | 1 MiB body limit                        |
+| Duplicate side effects       | Idempotency keys                        |
 
 ### Destructive Operation Safety
 
-| Operation | Protection |
-|---|---|
-| DELETE agent | Drain-first; `?force=true` to skip |
-| DELETE rig | 409 if agents running; `?force=true` to skip |
-| City stop | No extra protection (matches Ctrl-C) |
-| Config apply | Dry-run available; validation always runs |
-| DELETE bead | 409 if open children exist |
+| Operation    | Protection                                   |
+| ------------ | -------------------------------------------- |
+| DELETE agent | Drain-first; `?force=true` to skip           |
+| DELETE rig   | 409 if agents running; `?force=true` to skip |
+| City stop    | No extra protection (matches Ctrl-C)         |
+| Config apply | Dry-run available; validation always runs    |
+| DELETE bead  | 409 if open children exist                   |
 
 ### Future: Token Auth
 
 When implemented, tokens will have scoped capabilities:
 
-| Scope | Access |
-|---|---|
-| `gc.read` | All GET endpoints |
-| `gc.write` | Desired-state mutations |
-| `gc.runtime` | Runtime actions (kill, drain, nudge) |
-| `gc.admin` | City lifecycle, config apply |
-| `gc.operations` | Read/cancel operations |
+| Scope           | Access                               |
+| --------------- | ------------------------------------ |
+| `gc.read`       | All GET endpoints                    |
+| `gc.write`      | Desired-state mutations              |
+| `gc.runtime`    | Runtime actions (kill, drain, nudge) |
+| `gc.admin`      | City lifecycle, config apply         |
+| `gc.operations` | Read/cancel operations               |
 
 The interface decomposition (Section 9.2) is designed to support
 per-capability authorization.
@@ -1222,17 +1240,17 @@ per-capability authorization.
 
 ### Error Codes
 
-| HTTP | Code | When |
-|---|---|---|
-| 400 | `invalid` | Malformed body, invalid field values |
-| 404 | `not_found` | Resource doesn't exist |
-| 409 | `conflict` | Duplicate create, derived resource direct edit, busy delete |
-| 412 | `precondition_failed` | Stale `If-Match` value |
-| 422 | `idempotency_mismatch` | Same key, different request body |
-| 403 | `read_only` | Non-localhost mutation |
-| 403 | `csrf` | Missing `X-GC-Request` header |
-| 501 | `not_implemented` | Capability not available on this controller |
-| 500 | `internal` | Unexpected server error |
+| HTTP | Code                   | When                                                        |
+| ---- | ---------------------- | ----------------------------------------------------------- |
+| 400  | `invalid`              | Malformed body, invalid field values                        |
+| 404  | `not_found`            | Resource doesn't exist                                      |
+| 409  | `conflict`             | Duplicate create, derived resource direct edit, busy delete |
+| 412  | `precondition_failed`  | Stale `If-Match` value                                      |
+| 422  | `idempotency_mismatch` | Same key, different request body                            |
+| 403  | `read_only`            | Non-localhost mutation                                      |
+| 403  | `csrf`                 | Missing `X-GC-Request` header                               |
+| 501  | `not_implemented`      | Capability not available on this controller                 |
+| 500  | `internal`             | Unexpected server error                                     |
 
 ### Recovery Model
 
@@ -1246,18 +1264,18 @@ per-capability authorization.
 
 ## 14. Legacy Endpoint Policy
 
-| Existing Endpoint | Policy |
-|---|---|
-| `POST /v0/agent/{name}/suspend` | Redefined: now writes city.toml |
-| `POST /v0/agent/{name}/resume` | Redefined: now writes city.toml |
-| `POST /v0/rig/{name}/suspend` | Redefined: now writes city.toml |
-| `POST /v0/rig/{name}/resume` | Redefined: now writes city.toml |
-| `POST /v0/agent/{name}/kill` | Kept, same path |
-| `POST /v0/agent/{name}/drain` | Kept, same path |
-| `POST /v0/agent/{name}/undrain` | Kept, same path |
-| `POST /v0/agent/{name}/nudge` | Kept, same path |
-| `POST /v0/bead/{id}/update` | Kept, deprecated in favor of `PATCH /v0/bead/{id}` |
-| All bead/mail/convoy/sling | Kept, gain audit events + optional idempotency |
+| Existing Endpoint               | Policy                                             |
+| ------------------------------- | -------------------------------------------------- |
+| `POST /v0/agent/{name}/suspend` | Redefined: now writes city.toml                    |
+| `POST /v0/agent/{name}/resume`  | Redefined: now writes city.toml                    |
+| `POST /v0/rig/{name}/suspend`   | Redefined: now writes city.toml                    |
+| `POST /v0/rig/{name}/resume`    | Redefined: now writes city.toml                    |
+| `POST /v0/agent/{name}/kill`    | Kept, same path                                    |
+| `POST /v0/agent/{name}/drain`   | Kept, same path                                    |
+| `POST /v0/agent/{name}/undrain` | Kept, same path                                    |
+| `POST /v0/agent/{name}/nudge`   | Kept, same path                                    |
+| `POST /v0/bead/{id}/update`     | Kept, deprecated in favor of `PATCH /v0/bead/{id}` |
+| All bead/mail/convoy/sling      | Kept, gain audit events + optional idempotency     |
 
 Because the API is v0, fixing the suspend/resume semantic mismatch is
 acceptable as a behavioral change rather than a breaking change.
@@ -1272,6 +1290,7 @@ acceptable as a behavioral change rather than a breaking change.
 CRUD for agents and rigs.
 
 **Endpoints delivered:**
+
 ```
 PATCH  /v0/city                        # city suspend/resume (desired state)
 POST   /v0/agents                      # create agent
@@ -1288,6 +1307,7 @@ DELETE /v0/rig/{name}                  # remove rig
 ```
 
 **Implementation files:**
+
 - `internal/fsys/atomic.go` — atomic file write helper (temp + rename)
 - `internal/fsys/fsys.go` — added `Remove` to FS interface
 - `internal/configedit/configedit.go` — serialized config editor with provenance detection
@@ -1300,6 +1320,7 @@ DELETE /v0/rig/{name}                  # remove rig
 - `cmd/gc/api_state.go` — suspend/resume rewritten to use `configedit.Editor`
 
 **Deferred from original design (moved to Phase 2+):**
+
 - PUT (full replace) — PATCH-only is simpler and avoids the PUT=PATCH trap
 - ETags / optimistic concurrency
 - start/stop/restart/scale actions (remain as existing POST actions)
@@ -1310,6 +1331,7 @@ DELETE /v0/rig/{name}                  # remove rig
 **Status:** Delivered. 20 endpoints across 3 commits.
 
 **Endpoints delivered:**
+
 ```
 Provider CRUD (5):
   GET /v0/providers — list all (builtins + city overrides)
@@ -1330,6 +1352,7 @@ Patch resources (12):
 ```
 
 **Implementation:**
+
 - `configedit.Editor` methods: CreateProvider, UpdateProvider, DeleteProvider,
   SetAgentPatch, DeleteAgentPatch, SetRigPatch, DeleteRigPatch,
   SetProviderPatch, DeleteProviderPatch
@@ -1340,6 +1363,7 @@ Patch resources (12):
 - ConfigEdit unit tests for all 9 new Editor methods
 
 **Files added/changed:**
+
 - `internal/api/handler_providers.go` — provider list/get
 - `internal/api/handler_provider_crud.go` — provider create/update/delete
 - `internal/api/handler_provider_crud_test.go` — provider tests
@@ -1354,6 +1378,7 @@ Patch resources (12):
 - `cmd/gc/api_state.go` — bridge methods
 
 **Deferred from original design (moved to Phase 3+):**
+
 - Config apply (POST /v0/config) — complex diff/merge engine
 - PUT (full replace) for providers
 - Optimistic concurrency (ETags)
@@ -1363,6 +1388,7 @@ Patch resources (12):
 **Status:** Delivered. Orders, events, enhanced status, rig restart all implemented.
 
 **Endpoints implemented:**
+
 - `GET /v0/city` — city info
 - Order CRUD: list/show/enable/disable
 - `POST /v0/events` — event emission
@@ -1377,6 +1403,7 @@ Patch resources (12):
 **Status:** Delivered. All bead/mail extensions, cursor pagination, and idempotency implemented.
 
 **Endpoints implemented:**
+
 ```
 Packs list/fetch (2)
 PATCH /v0/bead/{id} (1)
@@ -1388,6 +1415,7 @@ POST /v0/events (1)
 ```
 
 **Cross-cutting features:**
+
 - Cursor pagination on list endpoints (beads, mail, convoys, events)
   via `?cursor=<opaque>&limit=N` with `next_cursor` in response
 - `Idempotency-Key` header on `POST /v0/beads` and `POST /v0/mail`
@@ -1400,6 +1428,7 @@ POST /v0/events (1)
 when controller is running.
 
 **Implementation:**
+
 - `internal/api/client.go` — HTTP client wrapping mutation endpoints
   (SuspendCity, ResumeCity, SuspendAgent, ResumeAgent, SuspendRig, ResumeRig)
 - `cmd/gc/apiroute.go` — `apiClient(cityPath)` detects running controller
@@ -1408,6 +1437,7 @@ when controller is running.
   `gc rig suspend/resume`
 
 **Pattern:**
+
 ```go
 if c := apiClient(cityPath); c != nil {
     return c.SuspendAgent(name)
@@ -1417,6 +1447,7 @@ return doAgentSuspend(fs, cityPath, name, stdout, stderr)
 ```
 
 **Tests:**
+
 - `internal/api/client_test.go` — 8 tests covering all client methods,
   error responses, and CSRF header propagation
 
@@ -1510,8 +1541,9 @@ Separate URL namespaces for desired-state and runtime operations (from
 
 **Rejected for v0:** Adds cognitive overhead (users must pick the right
 prefix). Backward-incompatible with existing endpoints. The HTTP method
-+ action subresource already communicates intent. The conceptual distinction
-is preserved in documentation and error messages, not URL structure.
+
+- action subresource already communicates intent. The conceptual distinction
+  is preserved in documentation and error messages, not URL structure.
 
 **May revisit for v1** if the flat namespace proves confusing in practice.
 
@@ -1521,8 +1553,8 @@ Full `metadata`, API groups, discovery documents, admission webhooks, scale
 subresources.
 
 **Rejected:** Too much ceremony for a single-binary SDK serving one city.
-We adopt K8s *patterns* (spec/status, generation, conditions, optimistic
-concurrency) without K8s *structure*.
+We adopt K8s _patterns_ (spec/status, generation, conditions, optimistic
+concurrency) without K8s _structure_.
 
 ### D. Thin CLI Wrapper
 

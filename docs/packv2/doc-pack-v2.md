@@ -22,9 +22,10 @@ The current model tangles three concerns that should be separate: portable **def
 
 4. **Packs are not self-contained.** Content can reference paths outside the pack boundary. No enforced transitive closure. We want packs to be fully portable — directory tree plus declared imports, nothing else.
 
-5. **Managed state has no clear home.** `workspace.name`, `rig.path`, and operational toggles live in checked-in TOML alongside shareable definition. We want clean separation: `pack.toml` is the *definition* (what this city is), `city.toml` is the *deployment plan* (team-shared decisions about how to run it), `.gc/` is the *site binding* (machine-local state that attaches the deployment to a specific filesystem).
+5. **Managed state has no clear home.** `workspace.name`, `rig.path`, and operational toggles live in checked-in TOML alongside shareable definition. We want clean separation: `pack.toml` is the _definition_ (what this city is), `city.toml` is the _deployment plan_ (team-shared decisions about how to run it), `.gc/` is the _site binding_ (machine-local state that attaches the deployment to a specific filesystem).
 
 This proposal does not cover `.gc/` internals beyond what the pack changes require, any package-registry or implicit-import surface, or the mechanical migration UX for breaking existing cities. Old cities may hard-break until migrated; the public migration path is `gc doctor` followed by `gc doctor --fix`.
+
 ## Proposed change
 
 ### Cities
@@ -66,7 +67,7 @@ Embedded packs (if needed) live under `assets/` and are referenced by explicit i
 source = "./assets/maintenance"
 ```
 
-The city's `pack.toml` contains everything that defines *what this city is*. Imports are covered in their own section below — for now, note that pack composition is declared here rather than in city.toml:
+The city's `pack.toml` contains everything that defines _what this city is_. Imports are covered in their own section below — for now, note that pack composition is declared here rather than in city.toml:
 
 ```toml
 # pack.toml (the city pack)
@@ -95,7 +96,7 @@ mode = "always"
 model = "claude-sonnet-4-20250514"
 ```
 
-The city deployment file `city.toml` contains what the team agrees on for *how this city runs*:
+The city deployment file `city.toml` contains what the team agrees on for _how this city runs_:
 
 ```toml
 # city.toml (team-shared deployment — no identity fields)
@@ -266,13 +267,13 @@ The root city's lock file (`packs.lock`) records every pack in the entire transi
 
 Four distinct operations, currently partially conflated:
 
-| Operation | Verb | What it does |
-|---|---|---|
-| Define a city's contents | `gc init` (creates files), or hand-edit | Creates pack.toml, city.toml, directory structure |
-| Validate installed imports | `gc import check` | Checks declared imports, `packs.lock`, and local cache state without fetching or mutating |
-| Install a city's packs | `gc import install` | Bootstraps or repairs `packs.lock` and materializes all imports into the cache |
-| Register a city with the controller | `gc register` | Binds the city to `.gc/`; tells the controller it exists |
-| Start the city's runtime | `gc start` | Controller activates the registered city |
+| Operation                           | Verb                                    | What it does                                                                              |
+| ----------------------------------- | --------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Define a city's contents            | `gc init` (creates files), or hand-edit | Creates pack.toml, city.toml, directory structure                                         |
+| Validate installed imports          | `gc import check`                       | Checks declared imports, `packs.lock`, and local cache state without fetching or mutating |
+| Install a city's packs              | `gc import install`                     | Bootstraps or repairs `packs.lock` and materializes all imports into the cache            |
+| Register a city with the controller | `gc register`                           | Binds the city to `.gc/`; tells the controller it exists                                  |
+| Start the city's runtime            | `gc start`                              | Controller activates the registered city                                                  |
 
 `gc start` implies `gc register` if not yet done (zero-config preserved). `gc register` is the explicit binding step for workflows that want to stage a city before activating it.
 
@@ -328,14 +329,14 @@ my-pack/
 
 **What convention replaces:**
 
-| Current mechanism | Convention replacement |
-|---|---|
-| `[[agent]]` tables in pack.toml | `agents/<name>/` directory exists → agent exists |
-| `prompt_template = "prompts/mayor.md"` | `agents/<name>/prompt.md` |
-| `[[formula]].path` | File exists in `formulas/` → it's a formula |
-| `overlay_dir = "overlay/default"` | `overlay/` + `agents/<name>/overlay/` |
-| `scripts_dir = "scripts"` | Gone. Scripts live next to the manifest that uses them (`commands/<id>/run.sh`, `agents/<name>/`) or under `assets/` |
-| `[formulas].dir` | Gone. `formulas/` is a fixed convention, not a configurable path |
+| Current mechanism                      | Convention replacement                                                                                               |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `[[agent]]` tables in pack.toml        | `agents/<name>/` directory exists → agent exists                                                                     |
+| `prompt_template = "prompts/mayor.md"` | `agents/<name>/prompt.md`                                                                                            |
+| `[[formula]].path`                     | File exists in `formulas/` → it's a formula                                                                          |
+| `overlay_dir = "overlay/default"`      | `overlay/` + `agents/<name>/overlay/`                                                                                |
+| `scripts_dir = "scripts"`              | Gone. Scripts live next to the manifest that uses them (`commands/<id>/run.sh`, `agents/<name>/`) or under `assets/` |
+| `[formulas].dir`                       | Gone. `formulas/` is a fixed convention, not a configurable path                                                     |
 
 The rule: **if a standard directory exists, its contents are loaded.** `assets/` is the one exception — it exists but is opaque to the loader, reachable only via explicit path references.
 
@@ -368,7 +369,7 @@ After composition, every agent, formula, and prompt retains its pack provenance.
 
 Bare names work when unambiguous. Qualification is required only when two imported packs export the same agent name. The city pack's own agents are never ambiguous — they always win.
 
-Two imports defining the same bare name is **not** a composition-time error. Both agents exist; both are addressable by their qualified names. The error moves to the *referring* site: any formula, sling target, or named-session template that uses the ambiguous bare name must qualify it. This is the central advantage of named imports over V1 includes — collisions become resolution problems, not load-time failures.
+Two imports defining the same bare name is **not** a composition-time error. Both agents exist; both are addressable by their qualified names. The error moves to the _referring_ site: any formula, sling target, or named-session template that uses the ambiguous bare name must qualify it. This is the central advantage of named imports over V1 includes — collisions become resolution problems, not load-time failures.
 
 #### Pack global scoping
 
@@ -390,13 +391,13 @@ A pack is self-contained. Its transitive closure is its directory tree plus its 
 
 Per-machine state lives in `.gc/` and is managed by `gc` commands:
 
-| Category | Examples | Set by |
-|---|---|---|
-| **Identity bindings** | Workspace name, workspace prefix | `gc init`, `gc config set` |
-| **Rig bindings** | Rig paths, rig prefixes | `gc rig add` |
-| **Operational toggles** | Rig suspended flag | `gc rig suspend/resume` |
-| **Machine-local config** | api.bind, session.socket, dolt.host | `gc config set` |
-| **Runtime state** | Sessions, beads, caches, logs, sockets | `gc` runtime |
+| Category                 | Examples                               | Set by                     |
+| ------------------------ | -------------------------------------- | -------------------------- |
+| **Identity bindings**    | Workspace name, workspace prefix       | `gc init`, `gc config set` |
+| **Rig bindings**         | Rig paths, rig prefixes                | `gc rig add`               |
+| **Operational toggles**  | Rig suspended flag                     | `gc rig suspend/resume`    |
+| **Machine-local config** | api.bind, session.socket, dolt.host    | `gc config set`            |
+| **Runtime state**        | Sessions, beads, caches, logs, sockets | `gc` runtime               |
 
 The rule: **if it's in a checked-in TOML file, it's definition or deployment. If it's in `.gc/`, it's site binding.** No gray area.
 
@@ -428,7 +429,7 @@ A declared-but-unbound rig is a valid state. `gc start` warns about unbound rigs
 - **New concepts:** Import model with aliasing, versioning, transitive-by-default imports, flattened re-export, single root lock file (`packs.lock`). Lock file consumption (loader is a reader; `gc import` owns bootstrap, repair, and cache materialization). Shadow warnings. Lifecycle verb separation (define / install / register / start).
 - **Config split:** Current city.toml splits into pack.toml (definition) + city.toml (deployment) + `.gc/` (site binding).
 - **Convention:** Filesystem layout replaces most TOML path declarations.
-- **Migration:** Hard cutover. `gc doctor` detects V1 patterns and `gc doctor --fix` handles the safe mechanical conversion. `gc import migrate` is deprecated shim territory, not a co-equal migration path, and no longer performs in-place rewrites. After the last-call wave, the V2 loader will refuse V1 shapes.
+- **Migration:** Hard cutover. `gc doctor` detects V1 patterns and `gc doctor --fix` handles the safe mechanical conversion. `gc import migrate` is no longer the primary public path. After one release of deprecation warnings, the V2 loader will refuse V1 shapes.
 
 ## Resolved questions
 
@@ -474,60 +475,60 @@ backlog.
 
 ### Identity
 
-| Field | pack.toml | city.toml | `.gc/` | Rationale |
-|---|---|---|---|---|
-| `[pack].name` | **yes** | | | Pack identity is definition |
-| `[pack].version` | **yes** | | | Pack version is definition |
-| Workspace name | | | **yes** | Derived from `pack.name` at registration |
+| Field            | pack.toml | city.toml | `.gc/`  | Rationale                                |
+| ---------------- | --------- | --------- | ------- | ---------------------------------------- |
+| `[pack].name`    | **yes**   |           |         | Pack identity is definition              |
+| `[pack].version` | **yes**   |           |         | Pack version is definition               |
+| Workspace name   |           |           | **yes** | Derived from `pack.name` at registration |
 
 ### Composition
 
-| Field | pack.toml | city.toml | `.gc/` | Rationale |
-|---|---|---|---|---|
-| `[imports]` | **yes** | | | What packs compose this city |
-| `[defaults.rig.imports.<binding>]` | **yes** | | | Default imports for new rigs |
+| Field                              | pack.toml | city.toml | `.gc/` | Rationale                    |
+| ---------------------------------- | --------- | --------- | ------ | ---------------------------- |
+| `[imports]`                        | **yes**   |           |        | What packs compose this city |
+| `[defaults.rig.imports.<binding>]` | **yes**   |           |        | Default imports for new rigs |
 
 ### Agents and sessions
 
-| Field | pack.toml | city.toml | `.gc/` | Rationale |
-|---|---|---|---|---|
-| Agent definitions | **yes** | | | Behavioral definition |
-| `[[named_session]]` | **yes** | | | Behavioral definition |
-| `[agent_defaults]` defaults | **yes** | **yes** | | Pack-wide in pack.toml; city-level overrides in city.toml |
-| `[patches]` | **yes** | | | Definition-level modification |
+| Field                       | pack.toml | city.toml | `.gc/` | Rationale                                                 |
+| --------------------------- | --------- | --------- | ------ | --------------------------------------------------------- |
+| Agent definitions           | **yes**   |           |        | Behavioral definition                                     |
+| `[[named_session]]`         | **yes**   |           |        | Behavioral definition                                     |
+| `[agent_defaults]` defaults | **yes**   | **yes**   |        | Pack-wide in pack.toml; city-level overrides in city.toml |
+| `[patches]`                 | **yes**   |           |        | Definition-level modification                             |
 
 ### Providers
 
-| Field | pack.toml | city.toml | `.gc/` | Rationale |
-|---|---|---|---|---|
-| `[providers]` model/defaults | **yes** | | | Behavioral definition |
-| Provider credentials/endpoints | | | **yes** | Per-developer |
+| Field                          | pack.toml | city.toml | `.gc/`  | Rationale             |
+| ------------------------------ | --------- | --------- | ------- | --------------------- |
+| `[providers]` model/defaults   | **yes**   |           |         | Behavioral definition |
+| Provider credentials/endpoints |           |           | **yes** | Per-developer         |
 
 ### Rigs
 
-| Field | pack.toml | city.toml | `.gc/` | Rationale |
-|---|---|---|---|---|
-| `[[rigs]].name` | | **yes** | | Structural deployment config |
-| `[[rigs]].path` | | | **yes** | Machine-local binding |
-| `[[rigs]].prefix` | | | **yes** | Derived, baked into bead IDs |
-| `[[rigs]].suspended` | | | **yes** | Operational toggle |
-| `[[rigs]].imports` | | **yes** | | Team-shared rig composition |
-| `[[rigs]].patches` | | **yes** | | Deployment-specific customization |
-| `[[rigs]].max_active_sessions` | | **yes** | | Deployment capacity |
+| Field                          | pack.toml | city.toml | `.gc/`  | Rationale                         |
+| ------------------------------ | --------- | --------- | ------- | --------------------------------- |
+| `[[rigs]].name`                |           | **yes**   |         | Structural deployment config      |
+| `[[rigs]].path`                |           |           | **yes** | Machine-local binding             |
+| `[[rigs]].prefix`              |           |           | **yes** | Derived, baked into bead IDs      |
+| `[[rigs]].suspended`           |           |           | **yes** | Operational toggle                |
+| `[[rigs]].imports`             |           | **yes**   |         | Team-shared rig composition       |
+| `[[rigs]].patches`             |           | **yes**   |         | Deployment-specific customization |
+| `[[rigs]].max_active_sessions` |           | **yes**   |         | Deployment capacity               |
 
 ### Runtime substrates
 
-| Field | pack.toml | city.toml | `.gc/` | Rationale |
-|---|---|---|---|---|
-| `[beads]`, `[session]`, `[events]` | | **yes** | | Substrate choice is deployment |
-| `[session].socket` | | | **yes** | Machine-local tmux state |
+| Field                              | pack.toml | city.toml | `.gc/`  | Rationale                      |
+| ---------------------------------- | --------- | --------- | ------- | ------------------------------ |
+| `[beads]`, `[session]`, `[events]` |           | **yes**   |         | Substrate choice is deployment |
+| `[session].socket`                 |           |           | **yes** | Machine-local tmux state       |
 
 ### Infrastructure
 
-| Field | pack.toml | city.toml | `.gc/` | Rationale |
-|---|---|---|---|---|
-| `[api].port` | | **yes** | | Team default |
-| `[api].bind` | | | **yes** | Machine-local network |
-| `[daemon]`, `[orders]`, `[convergence]` | | **yes** | | Deployment behavior |
+| Field                                   | pack.toml | city.toml | `.gc/`  | Rationale             |
+| --------------------------------------- | --------- | --------- | ------- | --------------------- |
+| `[api].port`                            |           | **yes**   |         | Team default          |
+| `[api].bind`                            |           |           | **yes** | Machine-local network |
+| `[daemon]`, `[orders]`, `[convergence]` |           | **yes**   |         | Deployment behavior   |
 
 ---END ISSUE---

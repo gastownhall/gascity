@@ -21,6 +21,7 @@ gc sling <session-config> <bead-id> --on <formula>  # Attach wisp to existing be
 ## Targeting
 
 The `<session-config>` is a qualified config name from `gc session list`:
+
 - **Single-session config:** `mayor`, `hello-world/refinery`
 - **Multi-session config:** `hello-world/polecat` — routes to the config's shared work queue
 
@@ -159,6 +160,7 @@ gc convoy autoclose                                   # Close convoys where all 
 ```
 
 Migration note:
+
 - Existing epic beads are no longer first-class containers. Migrate open epics to convoys before relying on convoy-only tooling such as `gc convoy target`, `gc sling <convoy>`, or the Gastown refinery convoy flow.
 
 ## Orders

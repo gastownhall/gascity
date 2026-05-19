@@ -51,7 +51,18 @@ func ResolveSessionBeadByExactID(store beads.Store, identifier string) (beads.Be
 	if store == nil {
 		return beads.Bead{}, "", fmt.Errorf("session store unavailable")
 	}
-	b, err := store.Get(identifier)
+	type sessionBeadGetter interface {
+		GetSessionBead(id string) (beads.Bead, error)
+	}
+	var (
+		b   beads.Bead
+		err error
+	)
+	if getter, ok := store.(sessionBeadGetter); ok {
+		b, err = getter.GetSessionBead(identifier)
+	} else {
+		b, err = store.Get(identifier)
+	}
 	if err == nil && IsSessionBeadOrRepairable(b) {
 		RepairEmptyType(store, &b)
 		return b, b.ID, nil
@@ -130,6 +141,7 @@ func listSessionBeadsByMetadata(store beads.Store, key, value string, allowClose
 	raw, err := store.List(beads.ListQuery{
 		Metadata:      map[string]string{key: value},
 		IncludeClosed: allowClosed,
+		SkipParent:    true,
 	})
 	if err != nil {
 		return nil, err

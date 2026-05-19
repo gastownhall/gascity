@@ -80,11 +80,13 @@ describe("status panel scope rendering", () => {
     const { renderStatus } = await import("./status");
     const render = renderStatus();
     window.history.pushState({}, "", "/dashboard");
-    cityStatus.resolve(ok({
-      agents: { running: 2 },
-      mail: { unread: 0 },
-      work: { in_progress: 1, open: 28 },
-    }));
+    cityStatus.resolve(
+      ok({
+        agents: { running: 2 },
+        mail: { unread: 0 },
+        work: { in_progress: 1, open: 28 },
+      }),
+    );
     await render;
 
     expect(document.getElementById("scope-badge")?.textContent).toBe("Supervisor");
@@ -99,11 +101,13 @@ describe("status panel scope rendering", () => {
     const sessions = deferred<{ data: unknown }>();
     apiGet.mockImplementation((path: string) => {
       if (path.includes("/status")) {
-        return Promise.resolve(ok({
-          agents: { running: 2 },
-          mail: { unread: 0 },
-          work: { in_progress: 1, open: 28 },
-        }));
+        return Promise.resolve(
+          ok({
+            agents: { running: 2 },
+            mail: { unread: 0 },
+            work: { in_progress: 1, open: 28 },
+          }),
+        );
       }
       if (path.includes("/sessions")) return sessions.promise;
       if (path.includes("/beads")) return Promise.resolve(ok({ items: [] }));
@@ -114,15 +118,19 @@ describe("status panel scope rendering", () => {
     const { renderStatus } = await import("./status");
     const render = renderStatus();
     window.history.pushState({}, "", "/dashboard");
-    sessions.resolve(ok({
-      items: [{
-        attached: false,
-        configured_named_session: true,
-        last_active: new Date().toISOString(),
-        running: true,
-        template: "control-dispatcher",
-      }],
-    }));
+    sessions.resolve(
+      ok({
+        items: [
+          {
+            attached: false,
+            configured_named_session: true,
+            last_active: new Date().toISOString(),
+            running: true,
+            template: "control-dispatcher",
+          },
+        ],
+      }),
+    );
     await render;
 
     expect(document.getElementById("scope-badge")?.textContent).toBe("Supervisor");
@@ -136,15 +144,19 @@ describe("status panel scope rendering", () => {
     apiGet.mockImplementation((path: string) => {
       if (path.includes("/status")) return cityStatus.promise;
       if (path.includes("/sessions")) {
-        return Promise.resolve(ok({
-          items: [{
-            attached: false,
-            configured_named_session: true,
-            last_active: now,
-            running: true,
-            template: "control-dispatcher",
-          }],
-        }));
+        return Promise.resolve(
+          ok({
+            items: [
+              {
+                attached: false,
+                configured_named_session: true,
+                last_active: now,
+                running: true,
+                template: "control-dispatcher",
+              },
+            ],
+          }),
+        );
       }
       if (path.includes("/beads")) return Promise.resolve(ok({ items: [] }));
       if (path.includes("/convoys")) return Promise.resolve(ok({ items: [] }));
@@ -163,11 +175,13 @@ describe("status panel scope rendering", () => {
       State: "Running",
     });
 
-    cityStatus.resolve(ok({
-      agents: { running: 2 },
-      mail: { unread: 0 },
-      work: { in_progress: 1, open: 28 },
-    }));
+    cityStatus.resolve(
+      ok({
+        agents: { running: 2 },
+        mail: { unread: 0 },
+        work: { in_progress: 1, open: 28 },
+      }),
+    );
     await render;
   });
 
@@ -178,25 +192,33 @@ describe("status panel scope rendering", () => {
     apiGet.mockImplementation((path: string) => {
       if (path.includes("/status")) return new Promise(() => {});
       if (path.includes("/sessions")) {
-        return Promise.resolve(ok({
-          items: [{
-            attached: false,
-            configured_named_session: true,
-            last_active: now,
-            running: true,
-            template: "control-dispatcher",
-          }],
-        }));
+        return Promise.resolve(
+          ok({
+            items: [
+              {
+                attached: false,
+                configured_named_session: true,
+                last_active: now,
+                running: true,
+                template: "control-dispatcher",
+              },
+            ],
+          }),
+        );
       }
       if (path.includes("/beads")) {
-        return Promise.resolve(ok({
-          items: [{
-            assignee: "agent-one",
-            id: "bd-1",
-            priority: 1,
-            status: "open",
-          }],
-        }));
+        return Promise.resolve(
+          ok({
+            items: [
+              {
+                assignee: "agent-one",
+                id: "bd-1",
+                priority: 1,
+                status: "open",
+              },
+            ],
+          }),
+        );
       }
       if (path.includes("/convoys")) return Promise.resolve(ok({ items: [] }));
       return Promise.resolve(ok({}));
@@ -218,22 +240,28 @@ describe("status panel scope rendering", () => {
     const now = new Date().toISOString();
     apiGet.mockImplementation((path: string) => {
       if (path.includes("/status")) {
-        return Promise.resolve(ok({
-          agents: { running: 2 },
-          mail: { unread: 0 },
-          work: { in_progress: 1, open: 28 },
-        }));
+        return Promise.resolve(
+          ok({
+            agents: { running: 2 },
+            mail: { unread: 0 },
+            work: { in_progress: 1, open: 28 },
+          }),
+        );
       }
       if (path.includes("/sessions")) {
-        return Promise.resolve(ok({
-          items: [{
-            attached: false,
-            configured_named_session: true,
-            last_active: now,
-            running: true,
-            template: "control-dispatcher",
-          }],
-        }));
+        return Promise.resolve(
+          ok({
+            items: [
+              {
+                attached: false,
+                configured_named_session: true,
+                last_active: now,
+                running: true,
+                template: "control-dispatcher",
+              },
+            ],
+          }),
+        );
       }
       if (path.includes("/beads")) return Promise.resolve(ok({ items: [] }));
       if (path.includes("/convoys")) return Promise.resolve(ok({ items: [] }));
@@ -257,22 +285,28 @@ describe("status panel scope rendering", () => {
     const now = new Date().toISOString();
     apiGet.mockImplementation((path: string) => {
       if (path.includes("/status")) {
-        return Promise.resolve(ok({
-          agents: { running: 1 },
-          mail: { unread: 0 },
-          work: { in_progress: 0, open: 0 },
-        }));
+        return Promise.resolve(
+          ok({
+            agents: { running: 1 },
+            mail: { unread: 0 },
+            work: { in_progress: 0, open: 0 },
+          }),
+        );
       }
       if (path.includes("/sessions")) {
-        return Promise.resolve(ok({
-          items: [{
-            attached: true,
-            configured_named_session: true,
-            last_active: now,
-            running: true,
-            template: "control-dispatcher",
-          }],
-        }));
+        return Promise.resolve(
+          ok({
+            items: [
+              {
+                attached: true,
+                configured_named_session: true,
+                last_active: now,
+                running: true,
+                template: "control-dispatcher",
+              },
+            ],
+          }),
+        );
       }
       if (path.includes("/beads")) return Promise.resolve(ok({ items: [] }));
       if (path.includes("/convoys")) return Promise.resolve(ok({ items: [] }));

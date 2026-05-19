@@ -22,6 +22,7 @@ func TestIsStage2EligibleSession(t *testing.T) {
 	}{
 		{"default empty → tmux (eligible)", "", "", true},
 		{"tmux eligible", "tmux", "", true},
+		{"t3bridge eligible", "t3bridge", "", true},
 		// subprocess runtime does not execute PreStart in v0.15.1 —
 		// ineligible per Phase 3 pass-1 review.
 		{"subprocess ineligible (no PreStart execution)", "subprocess", "", false},

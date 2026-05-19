@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -16,61 +15,19 @@ import (
 // reconciler calls this several times per tick, and closed history grows
 // without bound. Callers that need a closed record must fetch that one ID
 // explicitly.
-//
-// loadErr captures a non-fatal load failure (timeout, list error) so callers
-// can distinguish "snapshot loaded clean, the bead simply isn't present" from
-// "snapshot is degraded and may be missing entries it would otherwise have".
-// See gastownhall/gascity#2148 for the named-session lookup-error visibility
-// regression this field exists to surface.
 type sessionBeadSnapshot struct {
-	// mu guards open + the four lookup maps. add() (called from inside
-	// createPoolSessionBead) can fire from multiple goroutines when
-	// realizePoolDesiredSessions parallelizes pool session bead creates
-	// across distinct aliases — see gastownhall/gascity#2319. All read
-	// methods take RLock; add() takes Lock.
-	mu                        sync.RWMutex
 	open                      []beads.Bead
 	beadIDByAgentName         map[string]string
 	beadIDByTemplateHint      map[string]string
 	sessionNameByAgentName    map[string]string
 	sessionNameByTemplateHint map[string]string
-	loadErr                   error
-}
-
-// LoadError reports a non-fatal error from the snapshot's load path (timeout
-// or list error). Returns nil when the snapshot loaded cleanly or when the
-// receiver is nil. Callers in degraded-fail-soft paths (status rendering,
-// named-session lookups) check this to surface the failure to operators
-// instead of returning a synthetic "not present" result.
-func (s *sessionBeadSnapshot) LoadError() error {
-	if s == nil {
-		return nil
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.loadErr
-}
-
-// newSessionBeadSnapshotWithError builds a snapshot from beadsIn and tags it
-// with a non-fatal load error. Callers that fail-soft on load (returning an
-// empty snapshot instead of nil) use this so downstream consumers can still
-// see the underlying failure via LoadError.
-func newSessionBeadSnapshotWithError(beadsIn []beads.Bead, err error) *sessionBeadSnapshot {
-	s := newSessionBeadSnapshot(beadsIn)
-	// loadErr is set during construction, before s is published to any other
-	// goroutine, so no s.mu lock is needed here even though LoadError() reads
-	// it under RLock.
-	s.loadErr = err
-	return s
 }
 
 func loadSessionBeadSnapshot(store beads.Store) (*sessionBeadSnapshot, error) {
 	if store == nil {
 		return newSessionBeadSnapshot(nil), nil
 	}
-	all, err := store.List(beads.ListQuery{
-		Label: sessionBeadLabel,
-	})
+	all, err := loadSessionBeads(store)
 	if err != nil {
 		return nil, fmt.Errorf("listing session beads: %w", err)
 	}
@@ -103,11 +60,7 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 		isCanonicalNamed := strings.TrimSpace(b.Metadata["configured_named_identity"]) != ""
 		if agentName := sessionBeadAgentName(b); agentName != "" {
 			if isPoolManagedSessionBead(b) && agentName == b.Metadata["template"] {
-				if stamped := stampedPoolQualifiedIdentity(b); stamped != "" {
-					agentName = stamped
-				} else if !isCanonicalPoolManagedSessionBeadForTemplate(b, agentName) {
-					agentName = ""
-				}
+				agentName = stampedPoolQualifiedIdentity(b)
 			}
 			if agentName == "" {
 				continue
@@ -146,35 +99,33 @@ func newSessionBeadSnapshot(beadsIn []beads.Bead) *sessionBeadSnapshot {
 	}
 }
 
-// replaceOpenLocked replaces the snapshot's open set and rebuilt lookup maps
-// from `open`. Callers must hold s.mu.
-func (s *sessionBeadSnapshot) replaceOpenLocked(open []beads.Bead) {
+func (s *sessionBeadSnapshot) replaceOpen(open []beads.Bead) {
+	if s == nil {
+		return
+	}
 	rebuilt := newSessionBeadSnapshot(open)
-	s.open = rebuilt.open
-	s.beadIDByAgentName = rebuilt.beadIDByAgentName
-	s.beadIDByTemplateHint = rebuilt.beadIDByTemplateHint
-	s.sessionNameByAgentName = rebuilt.sessionNameByAgentName
-	s.sessionNameByTemplateHint = rebuilt.sessionNameByTemplateHint
+	if rebuilt == nil {
+		s.open = nil
+		s.sessionNameByAgentName = nil
+		s.sessionNameByTemplateHint = nil
+		return
+	}
+	*s = *rebuilt
 }
 
 func (s *sessionBeadSnapshot) add(bead beads.Bead) {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	open := make([]beads.Bead, 0, len(s.open)+1)
-	open = append(open, s.open...)
+	open := s.Open()
 	open = append(open, bead)
-	s.replaceOpenLocked(open)
+	s.replaceOpen(open)
 }
 
 func (s *sessionBeadSnapshot) Open() []beads.Bead {
 	if s == nil {
 		return nil
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	result := make([]beads.Bead, len(s.open))
 	copy(result, s.open)
 	return result
@@ -184,8 +135,6 @@ func (s *sessionBeadSnapshot) FindSessionNameByTemplate(template string) string 
 	if s == nil {
 		return ""
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	if sn := s.sessionNameByAgentName[template]; sn != "" {
 		return sn
 	}
@@ -196,13 +145,11 @@ func (s *sessionBeadSnapshot) FindSessionBeadByTemplate(template string) (beads.
 	if s == nil {
 		return beads.Bead{}, false
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	if id := s.beadIDByAgentName[template]; id != "" {
-		return s.findByIDLocked(id)
+		return s.FindByID(id)
 	}
 	if id := s.beadIDByTemplateHint[template]; id != "" {
-		return s.findByIDLocked(id)
+		return s.FindByID(id)
 	}
 	return beads.Bead{}, false
 }
@@ -211,13 +158,6 @@ func (s *sessionBeadSnapshot) FindByID(id string) (beads.Bead, bool) {
 	if s == nil || strings.TrimSpace(id) == "" {
 		return beads.Bead{}, false
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.findByIDLocked(id)
-}
-
-// findByIDLocked is the inner lookup; callers must hold at least s.mu.RLock.
-func (s *sessionBeadSnapshot) findByIDLocked(id string) (beads.Bead, bool) {
 	for _, bead := range s.open {
 		if bead.ID == id {
 			return bead, true
@@ -227,24 +167,28 @@ func (s *sessionBeadSnapshot) findByIDLocked(id string) (beads.Bead, bool) {
 }
 
 func (s *sessionBeadSnapshot) FindSessionNameByNamedIdentity(identity string) string {
-	bead, ok := s.FindSessionBeadByNamedIdentity(identity)
-	if !ok {
+	if s == nil || strings.TrimSpace(identity) == "" {
 		return ""
 	}
-	return strings.TrimSpace(bead.Metadata["session_name"])
+	for _, bead := range s.open {
+		if strings.TrimSpace(bead.Metadata["configured_named_identity"]) != identity {
+			continue
+		}
+		if sessionName := strings.TrimSpace(bead.Metadata["session_name"]); sessionName != "" {
+			return sessionName
+		}
+	}
+	return ""
 }
 
 func (s *sessionBeadSnapshot) FindSessionBeadByNamedIdentity(identity string) (beads.Bead, bool) {
 	if s == nil || strings.TrimSpace(identity) == "" {
 		return beads.Bead{}, false
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	for _, bead := range s.open {
-		if strings.TrimSpace(bead.Metadata["configured_named_identity"]) != identity {
-			continue
+		if strings.TrimSpace(bead.Metadata["configured_named_identity"]) == identity {
+			return bead, true
 		}
-		return bead, true
 	}
 	return beads.Bead{}, false
 }

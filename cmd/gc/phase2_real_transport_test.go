@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -194,10 +193,10 @@ func launchPhase2RealTransportSession(t *testing.T, tc phase2ProviderCase, mater
 		`printf "%s" "${GC_SESSION_ORIGIN:-}" > "$GC_REAL_TRANSPORT_SESSION_ORIGIN_PATH"`,
 		`printf "%s" "${GC_STARTUP_PROMPT_DELIVERED:-}" > "$GC_REAL_TRANSPORT_STARTUP_DELIVERED_PATH"`,
 		`printf "started\n" > "$GC_REAL_TRANSPORT_STARTED_PATH"`,
-		`case "${GC_REAL_TRANSPORT_STARTUP_PROMPT_SOURCE:-none}" in flag) printf "%s" "${1:-}" > "$GC_REAL_TRANSPORT_STARTUP_PROMPT_PATH" ;; arg) printf "%s" "$0" > "$GC_REAL_TRANSPORT_STARTUP_PROMPT_PATH" ;; *) : > "$GC_REAL_TRANSPORT_STARTUP_PROMPT_PATH" ;; esac`,
+		`if [ -n "${GC_REAL_TRANSPORT_STARTUP_PROMPT_FLAG:-}" ]; then printf "%s" "${1:-}" > "$GC_REAL_TRANSPORT_STARTUP_PROMPT_PATH"; else printf "%s" "$0" > "$GC_REAL_TRANSPORT_STARTUP_PROMPT_PATH"; fi`,
 		`if cmp -s "$GC_REAL_TRANSPORT_STARTUP_PROMPT_PATH" "$GC_REAL_TRANSPORT_EXPECTED_PROMPT_PATH"; then printf "launch-prompt\n" > "$GC_REAL_TRANSPORT_AUTONOMOUS_PATH"; fi`,
-		`: > "$GC_REAL_TRANSPORT_INPUT_PATH"`,
-		`i=0; input_lines="${GC_REAL_TRANSPORT_INPUT_LINES:-1}"; while [ "$i" -lt "$input_lines" ]; do IFS= read -r line; if [ "$i" -gt 0 ]; then printf "\n" >> "$GC_REAL_TRANSPORT_INPUT_PATH"; fi; printf "%s" "$line" >> "$GC_REAL_TRANSPORT_INPUT_PATH"; i=$((i + 1)); done`,
+		`IFS= read -r line`,
+		`printf "%s\n" "$line" > "$GC_REAL_TRANSPORT_INPUT_PATH"`,
 		`while [ ! -f "$GC_REAL_TRANSPORT_STOP_PATH" ]; do sleep 0.05; done`,
 	}, "; ")
 
@@ -224,11 +223,8 @@ func launchPhase2RealTransportSession(t *testing.T, tc phase2ProviderCase, mater
 	cfg.Env["GC_REAL_TRANSPORT_EXPECTED_PROMPT_PATH"] = expectedPromptPath
 	cfg.Env["GC_REAL_TRANSPORT_AUTONOMOUS_PATH"] = autonomousPath
 	cfg.Env["GC_REAL_TRANSPORT_STOP_PATH"] = stopPath
-	cfg.Env["GC_REAL_TRANSPORT_INPUT_LINES"] = strconv.Itoa(runtimeInputLineCount(materialized.Nudge))
 	if cfg.PromptFlag != "" {
-		cfg.Env["GC_REAL_TRANSPORT_STARTUP_PROMPT_SOURCE"] = "flag"
-	} else if cfg.PromptSuffix != "" {
-		cfg.Env["GC_REAL_TRANSPORT_STARTUP_PROMPT_SOURCE"] = "arg"
+		cfg.Env["GC_REAL_TRANSPORT_STARTUP_PROMPT_FLAG"] = cfg.PromptFlag
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), phase2RealTransportBound)
@@ -313,13 +309,6 @@ func launchPhase2RealTransportSession(t *testing.T, tc phase2ProviderCase, mater
 		RunningAfterInput:        sp.IsRunning(sessionName),
 		StartElapsed:             startElapsed,
 	}
-}
-
-func runtimeInputLineCount(input string) int {
-	if input == "" {
-		return 0
-	}
-	return strings.Count(input, "\n") + 1
 }
 
 func phase2RealTransportResult(tc phase2ProviderCase, run phase2RealTransportRun) workertest.Result {

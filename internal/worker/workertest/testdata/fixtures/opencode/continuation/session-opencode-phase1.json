@@ -9,10 +9,14 @@
         "id": "msg_user_1",
         "sessionID": "ses_opencode_phase1",
         "role": "user",
-        "time": {"created": 1770000000000}
+        "time": { "created": 1770000000000 }
       },
       "parts": [
-        {"id": "part_user_1", "type": "text", "text": "Summarize the OpenCode worker transcript contract."}
+        {
+          "id": "part_user_1",
+          "type": "text",
+          "text": "Summarize the OpenCode worker transcript contract."
+        }
       ]
     },
     {
@@ -21,10 +25,14 @@
         "sessionID": "ses_opencode_phase1",
         "role": "assistant",
         "parentID": "msg_user_1",
-        "time": {"created": 1770000001000}
+        "time": { "created": 1770000001000 }
       },
       "parts": [
-        {"id": "part_assistant_1", "type": "text", "text": "OpenCode phase 1 validates the tmux CLI transcript contract."}
+        {
+          "id": "part_assistant_1",
+          "type": "text",
+          "text": "OpenCode phase 1 validates the tmux CLI transcript contract."
+        }
       ]
     },
     {
@@ -33,10 +41,14 @@
         "sessionID": "ses_opencode_phase1",
         "role": "user",
         "parentID": "msg_assistant_1",
-        "time": {"created": 1770000002000}
+        "time": { "created": 1770000002000 }
       },
       "parts": [
-        {"id": "part_user_2", "type": "text", "text": "Repeat the exact OpenCode phase-1 summary from earlier before answering."}
+        {
+          "id": "part_user_2",
+          "type": "text",
+          "text": "Repeat the exact OpenCode phase-1 summary from earlier before answering."
+        }
       ]
     },
     {
@@ -45,10 +57,14 @@
         "sessionID": "ses_opencode_phase1",
         "role": "assistant",
         "parentID": "msg_user_2",
-        "time": {"created": 1770000003000}
+        "time": { "created": 1770000003000 }
       },
       "parts": [
-        {"id": "part_assistant_2", "type": "text", "text": "OpenCode phase 1 validates the tmux CLI transcript contract."}
+        {
+          "id": "part_assistant_2",
+          "type": "text",
+          "text": "OpenCode phase 1 validates the tmux CLI transcript contract."
+        }
       ]
     }
   ]

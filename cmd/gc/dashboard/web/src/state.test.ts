@@ -17,7 +17,8 @@ describe("dashboard state invalidation", () => {
 
   it("does not refresh supervisor resources for city-scoped bead events", async () => {
     window.history.pushState({}, "", "/dashboard");
-    const { consumeInvalidated, invalidateForEventType, syncCityScopeFromLocation } = await import("./state");
+    const { consumeInvalidated, invalidateForEventType, syncCityScopeFromLocation } =
+      await import("./state");
     syncCityScopeFromLocation();
     consumeInvalidated();
 

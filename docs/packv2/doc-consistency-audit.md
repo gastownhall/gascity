@@ -1,6 +1,7 @@
 # Consistency Audit: Directory Conventions and TOML Structure — RETIRED
 
 > **Status: Retired.** All findings have been folded into the canonical spec docs:
+>
 > - Orders → top-level `orders/` (doc-directory-conventions.md, doc-pack-v2.md, doc-loader-v2.md)
 > - `[formulas].dir` → fixed convention (doc-directory-conventions.md, doc-pack-v2.md)
 > - Pack/city agent defaults use `[agent_defaults]` (doc-agent-v2.md)
@@ -14,7 +15,7 @@
 
 # Original Audit (historical)
 
-**GitHub Issue:** *(to be filed)*
+**GitHub Issue:** _(to be filed)_
 
 Title: `feat: Consistency audit — directory conventions and TOML structure`
 
@@ -40,64 +41,64 @@ Every user-declarable definition in Gas City, with its current pattern:
 
 These are single-instance settings. Pure TOML is the right pattern — no issues.
 
-| Block | Purpose |
-|---|---|
-| `[workspace]` | City metadata, default provider |
-| `[daemon]` | Patrol interval, restart policy, wisp GC |
-| `[beads]` | Bead store provider |
-| `[session]` | Session provider, timeouts, K8s/ACP sub-configs |
-| `[mail]` | Mail provider |
-| `[events]` | Events provider |
-| `[dolt]` | Dolt host/port |
-| `[api]` | API port, bind address |
-| `[chat_sessions]` | Idle timeout |
-| `[session_sleep]` | Sleep policies by session class |
-| `[convergence]` | Max convergence per agent/total |
-| `[orders]` | Skip list, max timeout |
-| `[agent_defaults]` | Model, wake mode, overlay defaults |
-| `[formulas]` | Formula directory path |
+| Block              | Purpose                                         |
+| ------------------ | ----------------------------------------------- |
+| `[workspace]`      | City metadata, default provider                 |
+| `[daemon]`         | Patrol interval, restart policy, wisp GC        |
+| `[beads]`          | Bead store provider                             |
+| `[session]`        | Session provider, timeouts, K8s/ACP sub-configs |
+| `[mail]`           | Mail provider                                   |
+| `[events]`         | Events provider                                 |
+| `[dolt]`           | Dolt host/port                                  |
+| `[api]`            | API port, bind address                          |
+| `[chat_sessions]`  | Idle timeout                                    |
+| `[session_sleep]`  | Sleep policies by session class                 |
+| `[convergence]`    | Max convergence per agent/total                 |
+| `[orders]`         | Skip list, max timeout                          |
+| `[agent_defaults]` | Model, wake mode, overlay defaults              |
+| `[formulas]`       | Formula directory path                          |
 
 **One inconsistency:** `[formulas].dir` is configurable but every other convention-based directory (`scripts/`, `commands/`, `doctor/`) is discovered by fixed name. Should `formulas/` be a fixed convention too?
 
 ### Singleton TOML blocks (pack.toml)
 
-| Block | Purpose |
-|---|---|
-| `[pack]` | Pack name, schema version, requirements |
-| `[global]` | Pack-wide session_live commands |
-| `[agent_defaults]` (v.next) | Pack-wide agent defaults |
+| Block                       | Purpose                                 |
+| --------------------------- | --------------------------------------- |
+| `[pack]`                    | Pack name, schema version, requirements |
+| `[global]`                  | Pack-wide session_live commands         |
+| `[agent_defaults]` (v.next) | Pack-wide agent defaults                |
 
 No issues — these are metadata.
 
 ### Collections declared as TOML arrays-of-tables
 
-| Definition | TOML | Also has files? | Pattern |
-|---|---|---|---|
-| **Agents** | `[[agent]]` | prompt, overlay, namepool | Hybrid — **redesigned in #356** |
-| **Named sessions** | `[[named_session]]` | none | Pure TOML — fine as-is, they reference agents by name |
-| **Rigs** | `[[rigs]]` | external project dir | Hybrid (TOML + path binding) — **addressed in #360** |
-| **Services** | `[[service]]` | runtime state in `.gc/` | Pure TOML — fine as-is |
-| **Providers** | `[providers.<name>]` | none | Pure TOML — fine as-is |
-| **Patches** | `[[patches.agent]]` etc. | optional prompt file in `patches/` | Hybrid — **addressed in #356** |
+| Definition         | TOML                     | Also has files?                    | Pattern                                               |
+| ------------------ | ------------------------ | ---------------------------------- | ----------------------------------------------------- |
+| **Agents**         | `[[agent]]`              | prompt, overlay, namepool          | Hybrid — **redesigned in #356**                       |
+| **Named sessions** | `[[named_session]]`      | none                               | Pure TOML — fine as-is, they reference agents by name |
+| **Rigs**           | `[[rigs]]`               | external project dir               | Hybrid (TOML + path binding) — **addressed in #360**  |
+| **Services**       | `[[service]]`            | runtime state in `.gc/`            | Pure TOML — fine as-is                                |
+| **Providers**      | `[providers.<name>]`     | none                               | Pure TOML — fine as-is                                |
+| **Patches**        | `[[patches.agent]]` etc. | optional prompt file in `patches/` | Hybrid — **addressed in #356**                        |
 
 ### Convention-based directories
 
 These are discovered by scanning a directory. No TOML declaration needed.
 
-| Directory | File pattern | Provides identity from... | Consistent? |
-|---|---|---|---|
-| `agents/` (v.next) | `<name>/prompt.md` | Directory name | Yes — #356 |
-| `formulas/` | `<name>.formula.toml` | Filename | **Yes** |
-| `orders/` | `<name>/order.toml` | **Directory name** | **No — see below** |
-| `scripts/` | `<path>.sh` | Path | Yes |
-| `prompts/` | `<name>.md.tmpl` | Filename | Being replaced by `agents/<name>/prompt.md` |
-| `overlays/` | directory tree | N/A (copied wholesale) | Being replaced by per-agent + per-provider |
-| `namepools/` | `<name>.txt` | Filename | Being replaced by `agents/<name>/namepool.txt` |
-| `template-fragments/` (v.next) | `<name>.md.tmpl` | Filename | Yes — #356 |
-| `skills/` (v.next) | `<name>/SKILL.md` | Directory name | Yes — #356 |
-| `mcp/` (v.next) | `<name>.toml` | Filename | Yes — #356 |
-| `commands/` | See below | | **Hybrid — see below** |
-| `doctor/` | See below | | **Hybrid — see below** |
+| Directory                      | File pattern          | Provides identity from... | Consistent?                                    |
+| ------------------------------ | --------------------- | ------------------------- | ---------------------------------------------- |
+| `agents/` (v.next)             | `<name>/prompt.md`    | Directory name            | Yes — #356                                     |
+| `formulas/`                    | `<name>.formula.toml` | Filename                  | **Yes**                                        |
+| `orders/`                      | `<name>/order.toml`   | **Directory name**        | **No — see below**                             |
+| `scripts/`                     | `<path>.sh`           | Path                      | Yes                                            |
+| `prompts/`                     | `<name>.md.tmpl`      | Filename                  | Being replaced by `agents/<name>/prompt.md`    |
+| `overlays/`                    | directory tree        | N/A (copied wholesale)    | Being replaced by per-agent + per-provider     |
+| `namepools/`                   | `<name>.txt`          | Filename                  | Being replaced by `agents/<name>/namepool.txt` |
+| `template-fragments/` (v.next) | `<name>.md.tmpl`      | Filename                  | Yes — #356                                     |
+| `skills/` (v.next)             | `<name>/SKILL.md`     | Directory name            | Yes — #356                                     |
+| `mcp/` (v.next)                | `<name>.toml`         | Filename                  | Yes — #356                                     |
+| `commands/`                    | See below             |                           | **Hybrid — see below**                         |
+| `doctor/`                      | See below             |                           | **Hybrid — see below**                         |
 
 ## Issues found
 
@@ -109,16 +110,17 @@ Orders use `formulas/orders/<name>/order.toml` — a subdirectory per order cont
 
 Additionally, orders can live in `formulas/orders/` or top-level `orders/`, but only cities support both — packs only support `formulas/orders/`.
 
-Orders aren't formulas — they *reference* formulas. They schedule dispatch; formulas define workflow.
+Orders aren't formulas — they _reference_ formulas. They schedule dispatch; formulas define workflow.
 
 **Suggestion:**
+
 - Standardize on top-level `orders/` for both cities and packs
 - Adopt flat files: `orders/<name>.order.toml` (matches formula convention)
 - Deprecate `formulas/orders/` nesting
 
 ### 2. Doctor checks and commands: leave alone for now
 
-Doctor checks (`[[doctor]]`) and commands (`[[commands]]`) are both hybrid — TOML metadata + script file references. They *could* become pure convention (model 2), but there's an open question: can two definitions share a script with different arguments? Today they don't, but the pattern is plausible (e.g., `check-provider.sh --provider claude` vs. `check-provider.sh --provider codex`). If sharing is needed, TOML is the right place to express it.
+Doctor checks (`[[doctor]]`) and commands (`[[commands]]`) are both hybrid — TOML metadata + script file references. They _could_ become pure convention (model 2), but there's an open question: can two definitions share a script with different arguments? Today they don't, but the pattern is plausible (e.g., `check-provider.sh --provider claude` vs. `check-provider.sh --provider codex`). If sharing is needed, TOML is the right place to express it.
 
 These are model 1 today and it works. Revisit if the shared-script question resolves.
 
@@ -144,13 +146,14 @@ The dolt pack's fallback dog agent has no `prompt_template`. The maintenance pac
 
 Three models for named definitions:
 
-| Model | When to use | Examples |
-|---|---|---|
-| **1. TOML table** | Singleton settings, lightweight declarations, definitions that may share scripts | `[daemon]`, `[[named_session]]`, `[[doctor]]`, `[[commands]]` |
-| **2. Directory of named files** | Collections where each definition is one file | `formulas/<name>.formula.toml`, `orders/<name>.order.toml` |
-| **3. Directory of directories** | Complex entities with multiple associated files | `agents/<name>/`, `skills/<name>/` |
+| Model                           | When to use                                                                      | Examples                                                      |
+| ------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| **1. TOML table**               | Singleton settings, lightweight declarations, definitions that may share scripts | `[daemon]`, `[[named_session]]`, `[[doctor]]`, `[[commands]]` |
+| **2. Directory of named files** | Collections where each definition is one file                                    | `formulas/<name>.formula.toml`, `orders/<name>.order.toml`    |
+| **3. Directory of directories** | Complex entities with multiple associated files                                  | `agents/<name>/`, `skills/<name>/`                            |
 
 **What changes:**
+
 - Orders move from model 3 (directory per order) to model 2 (flat files), and from `formulas/orders/` to top-level `orders/`
 - Agents move from model 1 to model 3 (#356)
 - `[formulas].dir` becomes a fixed convention

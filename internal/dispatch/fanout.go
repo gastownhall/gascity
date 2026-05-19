@@ -29,16 +29,14 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 			}
 			return ControlResult{}, fmt.Errorf("%s: resolving fanout outcome: %w", bead.ID, err)
 		}
-		closeMetadata := map[string]string{"gc.outcome": outcome}
-		clearControllerSpawnErrorMetadata(closeMetadata)
-		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
+		if err := setOutcomeAndClose(store, bead.ID, outcome); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing fanout: %w", bead.ID, err)
 		}
 		closedBead, err := store.Get(bead.ID)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reloading closed fanout: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, closedBead, opts)
+		scopeResult, err := reconcileTerminalScopedMember(store, closedBead)
 		if err != nil {
 			return ControlResult{}, err
 		}
@@ -80,7 +78,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reloading failed fanout: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, closedBead, opts)
+		scopeResult, err := reconcileTerminalScopedMember(store, closedBead)
 		if err != nil {
 			return ControlResult{}, err
 		}
@@ -99,7 +97,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reloading empty fanout: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, closedBead, opts)
+		scopeResult, err := reconcileTerminalScopedMember(store, closedBead)
 		if err != nil {
 			return ControlResult{}, err
 		}
@@ -119,9 +117,6 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 	}
 	if strings.TrimSpace(bead.Metadata["gc.fanout_state"]) == "" {
 		if err := store.SetMetadataBatch(bead.ID, map[string]string{"gc.fanout_state": "spawning"}); err != nil {
-			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
-				return ControlResult{}, ErrControlPending
-			}
 			return ControlResult{}, fmt.Errorf("%s: recording fanout spawn start: %w", bead.ID, err)
 		}
 	}
@@ -173,9 +168,6 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 				ExternalDeps: externalDeps,
 			})
 			if err != nil {
-				if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
-					return ControlResult{}, ErrControlPending
-				}
 				return ControlResult{}, fmt.Errorf("%s: instantiating fragment %d: %w", bead.ID, index+1, err)
 			}
 			totalCreated += inst.Created
@@ -185,9 +177,6 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		sinkIDs := mapStepIDs(fragment.Sinks, idMapping)
 		for _, sinkID := range sinkIDs {
 			if err := store.DepAdd(bead.ID, sinkID, "blocks"); err != nil {
-				if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
-					return ControlResult{}, ErrControlPending
-				}
 				return ControlResult{}, fmt.Errorf("%s: wiring fanout blocker: %w", bead.ID, err)
 			}
 		}
@@ -196,15 +185,10 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		}
 	}
 
-	spawnedMetadata := map[string]string{
+	if err := store.SetMetadataBatch(bead.ID, map[string]string{
 		"gc.fanout_state":  "spawned",
 		"gc.spawned_count": strconv.Itoa(len(items)),
-	}
-	clearControllerSpawnErrorMetadata(spawnedMetadata)
-	if err := store.SetMetadataBatch(bead.ID, spawnedMetadata); err != nil {
-		if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
-			return ControlResult{}, ErrControlPending
-		}
+	}); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: recording fanout state: %w", bead.ID, err)
 	}
 	return ControlResult{Processed: true, Action: "fanout-spawn", Created: totalCreated}, nil

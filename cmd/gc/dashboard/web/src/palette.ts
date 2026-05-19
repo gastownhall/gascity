@@ -36,72 +36,157 @@ export function installCommandPalette(deps: { refreshAll: () => Promise<void> })
       openOutput(label, JSON.stringify(data, null, 2));
     };
     return [
-      { name: "refresh", desc: "Refresh all panels", category: "Dashboard", run: () => deps.refreshAll() },
-      { name: "supervisor health", desc: "Show supervisor health JSON", category: "Supervisor", run: () => read("health", api.GET("/health")) },
-      { name: "city list", desc: "Show managed cities JSON", category: "Supervisor", run: () => read("cities", api.GET("/v0/cities")) },
-      { name: "global events", desc: "Show recent supervisor events JSON", category: "Supervisor", run: () => read("events", api.GET("/v0/events", {
-        params: { query: { since: "1h" } },
-      })) },
-      ...(city ? [
-        { name: "new issue", desc: "Open the issue creation modal", category: "Work", run: () => openIssueModal() },
-        { name: "compose mail", desc: "Open the compose mail form", category: "Mail", run: () => openMailComposer() },
-        { name: "new convoy", desc: "Open the convoy creation form", category: "Convoys", run: () => openConvoyCreate() },
-        { name: "assign work", desc: "Open the assignment modal", category: "Assigned", run: () => openAssignModal() },
-        {
-          name: "status",
-          desc: "Show current city status JSON",
-          category: "Status",
-          run: () => read("status", api.GET("/v0/city/{cityName}/status", { params: { path: { cityName: city } } })),
-        },
-        {
-          name: "agent list",
-          desc: "Show current sessions JSON",
-          category: "Status",
-          run: () => read("sessions", api.GET("/v0/city/{cityName}/sessions", {
-            params: { path: { cityName: city }, query: { state: "active", peek: true } },
-          })),
-        },
-        {
-          name: "convoy list",
-          desc: "Show current convoys JSON",
-          category: "Convoys",
-          run: () => read("convoys", api.GET("/v0/city/{cityName}/convoys", {
-            params: { path: { cityName: city }, query: { limit: 200 } },
-          })),
-        },
-        {
-          name: "mail inbox",
-          desc: "Show current mail JSON",
-          category: "Mail",
-          run: () => read("mail", api.GET("/v0/city/{cityName}/mail", {
-            params: { path: { cityName: city }, query: { status: "all", limit: 200 } },
-          })),
-        },
-        {
-          name: "rig list",
-          desc: "Show rig JSON",
-          category: "Rigs",
-          run: () => read("rigs", api.GET("/v0/city/{cityName}/rigs", {
-            params: { path: { cityName: city }, query: { git: true } },
-          })),
-        },
-        {
-          name: "list",
-          desc: "Show open and in-progress beads JSON",
-          category: "Beads",
-          run: async () => {
-            const [open, progress] = await Promise.all([
-              api.GET("/v0/city/{cityName}/beads", { params: { path: { cityName: city }, query: { status: "open", limit: 500 } } }),
-              api.GET("/v0/city/{cityName}/beads", { params: { path: { cityName: city }, query: { status: "in_progress", limit: 500 } } }),
-            ]);
-            openOutput("beads", JSON.stringify({
-              open: open.data?.items ?? [],
-              in_progress: progress.data?.items ?? [],
-            }, null, 2));
-          },
-        },
-      ] : []),
-      { name: "close output", desc: "Hide the output panel", category: "Dashboard", run: () => closeOutput() },
+      {
+        name: "refresh",
+        desc: "Refresh all panels",
+        category: "Dashboard",
+        run: () => deps.refreshAll(),
+      },
+      {
+        name: "supervisor health",
+        desc: "Show supervisor health JSON",
+        category: "Supervisor",
+        run: () => read("health", api.GET("/health")),
+      },
+      {
+        name: "city list",
+        desc: "Show managed cities JSON",
+        category: "Supervisor",
+        run: () => read("cities", api.GET("/v0/cities")),
+      },
+      {
+        name: "global events",
+        desc: "Show recent supervisor events JSON",
+        category: "Supervisor",
+        run: () =>
+          read(
+            "events",
+            api.GET("/v0/events", {
+              params: { query: { since: "1h" } },
+            }),
+          ),
+      },
+      ...(city
+        ? [
+            {
+              name: "new issue",
+              desc: "Open the issue creation modal",
+              category: "Work",
+              run: () => openIssueModal(),
+            },
+            {
+              name: "compose mail",
+              desc: "Open the compose mail form",
+              category: "Mail",
+              run: () => openMailComposer(),
+            },
+            {
+              name: "new convoy",
+              desc: "Open the convoy creation form",
+              category: "Convoys",
+              run: () => openConvoyCreate(),
+            },
+            {
+              name: "assign work",
+              desc: "Open the assignment modal",
+              category: "Assigned",
+              run: () => openAssignModal(),
+            },
+            {
+              name: "status",
+              desc: "Show current city status JSON",
+              category: "Status",
+              run: () =>
+                read(
+                  "status",
+                  api.GET("/v0/city/{cityName}/status", { params: { path: { cityName: city } } }),
+                ),
+            },
+            {
+              name: "agent list",
+              desc: "Show current sessions JSON",
+              category: "Status",
+              run: () =>
+                read(
+                  "sessions",
+                  api.GET("/v0/city/{cityName}/sessions", {
+                    params: { path: { cityName: city }, query: { state: "active", peek: true } },
+                  }),
+                ),
+            },
+            {
+              name: "convoy list",
+              desc: "Show current convoys JSON",
+              category: "Convoys",
+              run: () =>
+                read(
+                  "convoys",
+                  api.GET("/v0/city/{cityName}/convoys", {
+                    params: { path: { cityName: city }, query: { limit: 200 } },
+                  }),
+                ),
+            },
+            {
+              name: "mail inbox",
+              desc: "Show current mail JSON",
+              category: "Mail",
+              run: () =>
+                read(
+                  "mail",
+                  api.GET("/v0/city/{cityName}/mail", {
+                    params: { path: { cityName: city }, query: { status: "all", limit: 200 } },
+                  }),
+                ),
+            },
+            {
+              name: "rig list",
+              desc: "Show rig JSON",
+              category: "Rigs",
+              run: () =>
+                read(
+                  "rigs",
+                  api.GET("/v0/city/{cityName}/rigs", {
+                    params: { path: { cityName: city }, query: { git: true } },
+                  }),
+                ),
+            },
+            {
+              name: "list",
+              desc: "Show open and in-progress beads JSON",
+              category: "Beads",
+              run: async () => {
+                const [open, progress] = await Promise.all([
+                  api.GET("/v0/city/{cityName}/beads", {
+                    params: { path: { cityName: city }, query: { status: "open", limit: 500 } },
+                  }),
+                  api.GET("/v0/city/{cityName}/beads", {
+                    params: {
+                      path: { cityName: city },
+                      query: { status: "in_progress", limit: 500 },
+                    },
+                  }),
+                ]);
+                openOutput(
+                  "beads",
+                  JSON.stringify(
+                    {
+                      open: open.data?.items ?? [],
+                      in_progress: progress.data?.items ?? [],
+                    },
+                    null,
+                    2,
+                  ),
+                );
+              },
+            },
+          ]
+        : []),
+      {
+        name: "close output",
+        desc: "Hide the output panel",
+        category: "Dashboard",
+        run: () => closeOutput(),
+      },
     ].filter((command) => typeof command.run === "function");
   }
 
@@ -109,26 +194,33 @@ export function installCommandPalette(deps: { refreshAll: () => Promise<void> })
     clear(paletteResults);
     const query = paletteInput.value.trim().toLowerCase();
     commands = buildCommands();
-    visible = commands.filter((command) =>
-      query === "" ||
-      command.name.includes(query) ||
-      command.desc.toLowerCase().includes(query) ||
-      command.category.toLowerCase().includes(query),
+    visible = commands.filter(
+      (command) =>
+        query === "" ||
+        command.name.includes(query) ||
+        command.desc.toLowerCase().includes(query) ||
+        command.category.toLowerCase().includes(query),
     );
     if (selected >= visible.length) selected = 0;
     if (visible.length === 0) {
-      paletteResults.append(el("div", { class: "command-palette-empty" }, ["No matching commands"]));
+      paletteResults.append(
+        el("div", { class: "command-palette-empty" }, ["No matching commands"]),
+      );
       return;
     }
     visible.forEach((command, index) => {
-      const item = el("button", {
-        class: `command-item${index === selected ? " selected" : ""}`,
-        type: "button",
-      }, [
-        el("span", { class: "command-name" }, [`gt ${command.name}`]),
-        el("span", { class: "command-desc" }, [command.desc]),
-        el("span", { class: "command-category" }, [command.category]),
-      ]);
+      const item = el(
+        "button",
+        {
+          class: `command-item${index === selected ? " selected" : ""}`,
+          type: "button",
+        },
+        [
+          el("span", { class: "command-name" }, [`gt ${command.name}`]),
+          el("span", { class: "command-desc" }, [command.desc]),
+          el("span", { class: "command-category" }, [command.category]),
+        ],
+      );
       item.addEventListener("click", () => {
         void execute(index);
       });

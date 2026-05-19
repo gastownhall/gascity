@@ -81,24 +81,6 @@ func (e ConversationKind) Valid() bool {
 	}
 }
 
-// Defines values for EventRotateArchiveCompressionStatus.
-const (
-	Complete EventRotateArchiveCompressionStatus = "complete"
-	Pending  EventRotateArchiveCompressionStatus = "pending"
-)
-
-// Valid indicates whether the value is a known member of the EventRotateArchiveCompressionStatus enum.
-func (e EventRotateArchiveCompressionStatus) Valid() bool {
-	switch e {
-	case Complete:
-		return true
-	case Pending:
-		return true
-	default:
-		return false
-	}
-}
-
 // Defines values for RequestFailedPayloadOperation.
 const (
 	CityCreate     RequestFailedPayloadOperation = "city.create"
@@ -307,8 +289,6 @@ type AgentPatch struct {
 	MCP                     *[]string         `json:"MCP"`
 	MCPAppend               *[]string         `json:"MCPAppend"`
 	MaxActiveSessions       *int64            `json:"MaxActiveSessions"`
-	MaxSessionAge           *string           `json:"MaxSessionAge"`
-	MaxSessionAgeJitter     *string           `json:"MaxSessionAgeJitter"`
 	MinActiveSessions       *int64            `json:"MinActiveSessions"`
 	Name                    string            `json:"Name"`
 	Nudge                   *string           `json:"Nudge"`
@@ -460,7 +440,6 @@ type Bead struct {
 	CreatedAt    time.Time          `json:"created_at"`
 	Dependencies *[]Dep             `json:"dependencies,omitempty"`
 	Description  *string            `json:"description,omitempty"`
-	Ephemeral    *bool              `json:"ephemeral,omitempty"`
 	From         *string            `json:"from,omitempty"`
 	Id           string             `json:"id"`
 	IssueType    string             `json:"issue_type"`
@@ -900,48 +879,6 @@ type EventEmitRequest struct {
 // EventPayload defines model for EventPayload.
 type EventPayload struct {
 	union json.RawMessage
-}
-
-// EventRotateAnchor defines model for EventRotateAnchor.
-type EventRotateAnchor struct {
-	// Seq Anchor event sequence.
-	Seq int64 `json:"seq"`
-
-	// Ts Anchor event timestamp.
-	Ts time.Time `json:"ts"`
-
-	// Type Anchor event type.
-	Type string `json:"type"`
-}
-
-// EventRotateArchive defines model for EventRotateArchive.
-type EventRotateArchive struct {
-	// CompressionStatus Archive compression status.
-	CompressionStatus EventRotateArchiveCompressionStatus `json:"compression_status"`
-
-	// FirstSeq First event sequence included in the archive.
-	FirstSeq int64 `json:"first_seq"`
-
-	// LastSeq Last event sequence included in the archive.
-	LastSeq int64 `json:"last_seq"`
-
-	// Path Absolute path to the archive.
-	Path string `json:"path"`
-}
-
-// EventRotateArchiveCompressionStatus Archive compression status.
-type EventRotateArchiveCompressionStatus string
-
-// EventRotateResponse defines model for EventRotateResponse.
-type EventRotateResponse struct {
-	AnchorEvent *EventRotateAnchor  `json:"anchor_event,omitempty"`
-	Archive     *EventRotateArchive `json:"archive,omitempty"`
-
-	// Reason No-op reason when rotated is false.
-	Reason *string `json:"reason,omitempty"`
-
-	// Rotated Whether an archive was produced.
-	Rotated bool `json:"rotated"`
 }
 
 // EventStreamEnvelope defines model for EventStreamEnvelope.
@@ -1874,15 +1811,6 @@ type PoolOverride struct {
 	OnDeath      *string `json:"OnDeath"`
 }
 
-// ProjectIdentityStampedPayload defines model for ProjectIdentityStampedPayload.
-type ProjectIdentityStampedPayload struct {
-	Layer     string  `json:"layer"`
-	NewId     string  `json:"new_id"`
-	OldId     *string `json:"old_id,omitempty"`
-	ScopeRoot string  `json:"scope_root"`
-	Source    string  `json:"source"`
-}
-
 // ProviderCreateInputBody defines model for ProviderCreateInputBody.
 type ProviderCreateInputBody struct {
 	// AcpArgs ACP transport command arguments override.
@@ -1945,28 +1873,24 @@ type ProviderOptionDTO struct {
 
 // ProviderPatch defines model for ProviderPatch.
 type ProviderPatch struct {
-	ACPArgs              *[]string         `json:"ACPArgs"`
-	ACPCommand           *string           `json:"ACPCommand"`
-	AcceptStartupDialogs *bool             `json:"AcceptStartupDialogs"`
-	Args                 *[]string         `json:"Args"`
-	ArgsAppend           *[]string         `json:"ArgsAppend"`
-	Base                 *string           `json:"Base"`
-	Command              *string           `json:"Command"`
-	Env                  map[string]string `json:"Env"`
-	EnvRemove            *[]string         `json:"EnvRemove"`
-	Name                 string            `json:"Name"`
-	OptionsSchemaMerge   *string           `json:"OptionsSchemaMerge"`
-	PromptFlag           *string           `json:"PromptFlag"`
-	PromptMode           *string           `json:"PromptMode"`
-	ReadyDelayMs         *int64            `json:"ReadyDelayMs"`
-	Replace              bool              `json:"Replace"`
+	ACPArgs            *[]string         `json:"ACPArgs"`
+	ACPCommand         *string           `json:"ACPCommand"`
+	Args               *[]string         `json:"Args"`
+	ArgsAppend         *[]string         `json:"ArgsAppend"`
+	Base               *string           `json:"Base"`
+	Command            *string           `json:"Command"`
+	Env                map[string]string `json:"Env"`
+	EnvRemove          *[]string         `json:"EnvRemove"`
+	Name               string            `json:"Name"`
+	OptionsSchemaMerge *string           `json:"OptionsSchemaMerge"`
+	PromptFlag         *string           `json:"PromptFlag"`
+	PromptMode         *string           `json:"PromptMode"`
+	ReadyDelayMs       *int64            `json:"ReadyDelayMs"`
+	Replace            bool              `json:"Replace"`
 }
 
 // ProviderPatchSetInputBody defines model for ProviderPatchSetInputBody.
 type ProviderPatchSetInputBody struct {
-	// AcceptStartupDialogs Override startup dialog acceptance behavior.
-	AcceptStartupDialogs *bool `json:"accept_startup_dialogs,omitempty"`
-
 	// AcpArgs Override ACP transport command arguments.
 	AcpArgs *[]string `json:"acp_args,omitempty"`
 
@@ -2159,9 +2083,6 @@ type RigActionBody struct {
 
 // RigCreateInputBody defines model for RigCreateInputBody.
 type RigCreateInputBody struct {
-	// DefaultBranch Mainline branch (e.g. main, master). Auto-detected when omitted.
-	DefaultBranch *string `json:"default_branch,omitempty"`
-
 	// Name Rig name.
 	Name string `json:"name"`
 
@@ -2183,19 +2104,14 @@ type RigCreatedOutputBody struct {
 
 // RigPatch defines model for RigPatch.
 type RigPatch struct {
-	DefaultBranch *string           `json:"DefaultBranch"`
-	FormulaVars   map[string]string `json:"FormulaVars"`
-	Name          string            `json:"Name"`
-	Path          *string           `json:"Path"`
-	Prefix        *string           `json:"Prefix"`
-	Suspended     *bool             `json:"Suspended"`
+	Name      string  `json:"Name"`
+	Path      *string `json:"Path"`
+	Prefix    *string `json:"Prefix"`
+	Suspended *bool   `json:"Suspended"`
 }
 
 // RigPatchSetInputBody defines model for RigPatchSetInputBody.
 type RigPatchSetInputBody struct {
-	// DefaultBranch Override mainline branch.
-	DefaultBranch *string `json:"default_branch,omitempty"`
-
 	// Name Rig name.
 	Name *string `json:"name,omitempty"`
 
@@ -2211,22 +2127,18 @@ type RigPatchSetInputBody struct {
 
 // RigResponse defines model for RigResponse.
 type RigResponse struct {
-	AgentCount    int64      `json:"agent_count"`
-	DefaultBranch *string    `json:"default_branch,omitempty"`
-	Git           *GitStatus `json:"git,omitempty"`
-	LastActivity  *time.Time `json:"last_activity,omitempty"`
-	Name          string     `json:"name"`
-	Path          string     `json:"path"`
-	Prefix        *string    `json:"prefix,omitempty"`
-	RunningCount  int64      `json:"running_count"`
-	Suspended     bool       `json:"suspended"`
+	AgentCount   int64      `json:"agent_count"`
+	Git          *GitStatus `json:"git,omitempty"`
+	LastActivity *time.Time `json:"last_activity,omitempty"`
+	Name         string     `json:"name"`
+	Path         string     `json:"path"`
+	Prefix       *string    `json:"prefix,omitempty"`
+	RunningCount int64      `json:"running_count"`
+	Suspended    bool       `json:"suspended"`
 }
 
 // RigUpdateInputBody defines model for RigUpdateInputBody.
 type RigUpdateInputBody struct {
-	// DefaultBranch Mainline branch (e.g. main, master).
-	DefaultBranch *string `json:"default_branch,omitempty"`
-
 	// Path Filesystem path.
 	Path *string `json:"path,omitempty"`
 
@@ -2235,13 +2147,6 @@ type RigUpdateInputBody struct {
 
 	// Suspended Whether rig is suspended.
 	Suspended *bool `json:"suspended,omitempty"`
-}
-
-// RotatedPayload defines model for RotatedPayload.
-type RotatedPayload struct {
-	PriorArchive  string `json:"prior_archive"`
-	PriorFirstSeq int64  `json:"prior_first_seq"`
-	PriorLastSeq  int64  `json:"prior_last_seq"`
 }
 
 // ScopeGroup defines model for ScopeGroup.
@@ -2335,18 +2240,6 @@ type SessionInfo struct {
 	Name         string     `json:"name"`
 }
 
-// SessionLifecyclePayload defines model for SessionLifecyclePayload.
-type SessionLifecyclePayload struct {
-	// Reason Short human-readable reason.
-	Reason *string `json:"reason,omitempty"`
-
-	// SessionId Canonical session bead ID. Always present.
-	SessionId string `json:"session_id"`
-
-	// Template Session template name when known at the emission site.
-	Template *string `json:"template,omitempty"`
-}
-
 // SessionMessageInputBody defines model for SessionMessageInputBody.
 type SessionMessageInputBody struct {
 	// Message Message text to send.
@@ -2414,7 +2307,6 @@ type SessionRespondOutputBody struct {
 type SessionResponse struct {
 	ActiveBead             *string                 `json:"active_bead,omitempty"`
 	Activity               *string                 `json:"activity,omitempty"`
-	AgentKind              *string                 `json:"agent_kind,omitempty"`
 	Alias                  *string                 `json:"alias,omitempty"`
 	Attached               bool                    `json:"attached"`
 	ConfiguredNamedSession *bool                   `json:"configured_named_session,omitempty"`
@@ -2425,7 +2317,6 @@ type SessionResponse struct {
 	Id                     string                  `json:"id"`
 	Kind                   *string                 `json:"kind,omitempty"`
 	LastActive             *string                 `json:"last_active,omitempty"`
-	LastNudgeDeliveredAt   *string                 `json:"last_nudge_delivered_at,omitempty"`
 	LastOutput             *string                 `json:"last_output,omitempty"`
 	Metadata               *map[string]string      `json:"metadata,omitempty"`
 	Model                  *string                 `json:"model,omitempty"`
@@ -2688,32 +2579,8 @@ type SupervisorEventListOutputBody struct {
 	Total       int64                             `json:"total"`
 }
 
-// SupervisorFSPressureSkippedTickPayload defines model for SupervisorFSPressureSkippedTickPayload.
-type SupervisorFSPressureSkippedTickPayload struct {
-	// Avg60 The Linux PSI some avg60 value observed for filesystem IO pressure.
-	Avg60 float64 `json:"avg60"`
-
-	// ConsecutiveSkips Number of consecutive pressure skips including this tick.
-	ConsecutiveSkips int64 `json:"consecutive_skips"`
-
-	// MaxConsecutiveSkips Maximum consecutive skips before the supervisor forces one reconciliation tick.
-	MaxConsecutiveSkips int64 `json:"max_consecutive_skips"`
-
-	// Outcome The pressure decision outcome: skipped for a shed tick or forced for the bounded liveness tick.
-	Outcome string `json:"outcome"`
-
-	// Threshold The configured avg60 threshold that triggered the skip.
-	Threshold float64 `json:"threshold"`
-
-	// Trigger The daemon tick trigger, such as patrol or poke.
-	Trigger *string `json:"trigger,omitempty"`
-}
-
 // SupervisorHealthOutputBody defines model for SupervisorHealthOutputBody.
 type SupervisorHealthOutputBody struct {
-	// BuildId Build identity (typically a short git commit hash, with "-dirty" suffix when built from an unclean tree). Empty when unavailable.
-	BuildId *string `json:"build_id,omitempty"`
-
 	// CitiesRunning Cities currently running.
 	CitiesRunning int64 `json:"cities_running"`
 
@@ -2904,18 +2771,6 @@ type TypedEventStreamEnvelopeCustom struct {
 	Actor    string                   `json:"actor"`
 	Message  *string                  `json:"message,omitempty"`
 	Payload  interface{}              `json:"payload"`
-	Seq      int64                    `json:"seq"`
-	Subject  *string                  `json:"subject,omitempty"`
-	Ts       time.Time                `json:"ts"`
-	Type     string                   `json:"type"`
-	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
-}
-
-// TypedEventStreamEnvelopeEventsRotated defines model for TypedEventStreamEnvelopeEventsRotated.
-type TypedEventStreamEnvelopeEventsRotated struct {
-	Actor    string                   `json:"actor"`
-	Message  *string                  `json:"message,omitempty"`
-	Payload  RotatedPayload           `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -3127,18 +2982,6 @@ type TypedEventStreamEnvelopeOrderFired struct {
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
-// TypedEventStreamEnvelopeProjectIdentityStamped defines model for TypedEventStreamEnvelopeProjectIdentityStamped.
-type TypedEventStreamEnvelopeProjectIdentityStamped struct {
-	Actor    string                        `json:"actor"`
-	Message  *string                       `json:"message,omitempty"`
-	Payload  ProjectIdentityStampedPayload `json:"payload"`
-	Seq      int64                         `json:"seq"`
-	Subject  *string                       `json:"subject,omitempty"`
-	Ts       time.Time                     `json:"ts"`
-	Type     string                        `json:"type"`
-	Workflow *WorkflowEventProjection      `json:"workflow,omitempty"`
-}
-
 // TypedEventStreamEnvelopeProviderSwapped defines model for TypedEventStreamEnvelopeProviderSwapped.
 type TypedEventStreamEnvelopeProviderSwapped struct {
 	Actor    string                   `json:"actor"`
@@ -3227,7 +3070,7 @@ type TypedEventStreamEnvelopeRequestResultSessionSubmit struct {
 type TypedEventStreamEnvelopeSessionCrashed struct {
 	Actor    string                   `json:"actor"`
 	Message  *string                  `json:"message,omitempty"`
-	Payload  SessionLifecyclePayload  `json:"payload"`
+	Payload  NoPayload                `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -3259,18 +3102,6 @@ type TypedEventStreamEnvelopeSessionIdleKilled struct {
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
-// TypedEventStreamEnvelopeSessionMaxAgeKilled defines model for TypedEventStreamEnvelopeSessionMaxAgeKilled.
-type TypedEventStreamEnvelopeSessionMaxAgeKilled struct {
-	Actor    string                   `json:"actor"`
-	Message  *string                  `json:"message,omitempty"`
-	Payload  NoPayload                `json:"payload"`
-	Seq      int64                    `json:"seq"`
-	Subject  *string                  `json:"subject,omitempty"`
-	Ts       time.Time                `json:"ts"`
-	Type     string                   `json:"type"`
-	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
-}
-
 // TypedEventStreamEnvelopeSessionQuarantined defines model for TypedEventStreamEnvelopeSessionQuarantined.
 type TypedEventStreamEnvelopeSessionQuarantined struct {
 	Actor    string                   `json:"actor"`
@@ -3287,7 +3118,7 @@ type TypedEventStreamEnvelopeSessionQuarantined struct {
 type TypedEventStreamEnvelopeSessionStopped struct {
 	Actor    string                   `json:"actor"`
 	Message  *string                  `json:"message,omitempty"`
-	Payload  SessionLifecyclePayload  `json:"payload"`
+	Payload  NoPayload                `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -3341,18 +3172,6 @@ type TypedEventStreamEnvelopeSessionWoke struct {
 	Ts       time.Time                `json:"ts"`
 	Type     string                   `json:"type"`
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
-}
-
-// TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick defines model for TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick.
-type TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick struct {
-	Actor    string                                 `json:"actor"`
-	Message  *string                                `json:"message,omitempty"`
-	Payload  SupervisorFSPressureSkippedTickPayload `json:"payload"`
-	Seq      int64                                  `json:"seq"`
-	Subject  *string                                `json:"subject,omitempty"`
-	Ts       time.Time                              `json:"ts"`
-	Type     string                                 `json:"type"`
-	Workflow *WorkflowEventProjection               `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeWorkerOperation defines model for TypedEventStreamEnvelopeWorkerOperation.
@@ -3521,19 +3340,6 @@ type TypedTaggedEventStreamEnvelopeCustom struct {
 	City     string                   `json:"city"`
 	Message  *string                  `json:"message,omitempty"`
 	Payload  interface{}              `json:"payload"`
-	Seq      int64                    `json:"seq"`
-	Subject  *string                  `json:"subject,omitempty"`
-	Ts       time.Time                `json:"ts"`
-	Type     string                   `json:"type"`
-	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
-}
-
-// TypedTaggedEventStreamEnvelopeEventsRotated defines model for TypedTaggedEventStreamEnvelopeEventsRotated.
-type TypedTaggedEventStreamEnvelopeEventsRotated struct {
-	Actor    string                   `json:"actor"`
-	City     string                   `json:"city"`
-	Message  *string                  `json:"message,omitempty"`
-	Payload  RotatedPayload           `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -3762,19 +3568,6 @@ type TypedTaggedEventStreamEnvelopeOrderFired struct {
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
-// TypedTaggedEventStreamEnvelopeProjectIdentityStamped defines model for TypedTaggedEventStreamEnvelopeProjectIdentityStamped.
-type TypedTaggedEventStreamEnvelopeProjectIdentityStamped struct {
-	Actor    string                        `json:"actor"`
-	City     string                        `json:"city"`
-	Message  *string                       `json:"message,omitempty"`
-	Payload  ProjectIdentityStampedPayload `json:"payload"`
-	Seq      int64                         `json:"seq"`
-	Subject  *string                       `json:"subject,omitempty"`
-	Ts       time.Time                     `json:"ts"`
-	Type     string                        `json:"type"`
-	Workflow *WorkflowEventProjection      `json:"workflow,omitempty"`
-}
-
 // TypedTaggedEventStreamEnvelopeProviderSwapped defines model for TypedTaggedEventStreamEnvelopeProviderSwapped.
 type TypedTaggedEventStreamEnvelopeProviderSwapped struct {
 	Actor    string                   `json:"actor"`
@@ -3871,7 +3664,7 @@ type TypedTaggedEventStreamEnvelopeSessionCrashed struct {
 	Actor    string                   `json:"actor"`
 	City     string                   `json:"city"`
 	Message  *string                  `json:"message,omitempty"`
-	Payload  SessionLifecyclePayload  `json:"payload"`
+	Payload  NoPayload                `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -3905,19 +3698,6 @@ type TypedTaggedEventStreamEnvelopeSessionIdleKilled struct {
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
-// TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled defines model for TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled.
-type TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled struct {
-	Actor    string                   `json:"actor"`
-	City     string                   `json:"city"`
-	Message  *string                  `json:"message,omitempty"`
-	Payload  NoPayload                `json:"payload"`
-	Seq      int64                    `json:"seq"`
-	Subject  *string                  `json:"subject,omitempty"`
-	Ts       time.Time                `json:"ts"`
-	Type     string                   `json:"type"`
-	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
-}
-
 // TypedTaggedEventStreamEnvelopeSessionQuarantined defines model for TypedTaggedEventStreamEnvelopeSessionQuarantined.
 type TypedTaggedEventStreamEnvelopeSessionQuarantined struct {
 	Actor    string                   `json:"actor"`
@@ -3936,7 +3716,7 @@ type TypedTaggedEventStreamEnvelopeSessionStopped struct {
 	Actor    string                   `json:"actor"`
 	City     string                   `json:"city"`
 	Message  *string                  `json:"message,omitempty"`
-	Payload  SessionLifecyclePayload  `json:"payload"`
+	Payload  NoPayload                `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -3996,19 +3776,6 @@ type TypedTaggedEventStreamEnvelopeSessionWoke struct {
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
-// TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick defines model for TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick.
-type TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick struct {
-	Actor    string                                 `json:"actor"`
-	City     string                                 `json:"city"`
-	Message  *string                                `json:"message,omitempty"`
-	Payload  SupervisorFSPressureSkippedTickPayload `json:"payload"`
-	Seq      int64                                  `json:"seq"`
-	Subject  *string                                `json:"subject,omitempty"`
-	Ts       time.Time                              `json:"ts"`
-	Type     string                                 `json:"type"`
-	Workflow *WorkflowEventProjection               `json:"workflow,omitempty"`
-}
-
 // TypedTaggedEventStreamEnvelopeWorkerOperation defines model for TypedTaggedEventStreamEnvelopeWorkerOperation.
 type TypedTaggedEventStreamEnvelopeWorkerOperation struct {
 	Actor    string                      `json:"actor"`
@@ -4030,52 +3797,20 @@ type UnboundEventPayload struct {
 
 // WorkerOperationEventPayload defines model for WorkerOperationEventPayload.
 type WorkerOperationEventPayload struct {
-	// AgentName Qualified agent identity (best-effort, absent if the session has no agent_name metadata or alias).
-	AgentName *string `json:"agent_name,omitempty"`
-
-	// BeadId Work bead this operation is acting on (best-effort, may be absent for non-bead-scoped ops).
-	BeadId *string `json:"bead_id,omitempty"`
-
-	// CacheCreationTokens Input tokens written into the prompt cache (best-effort, currently always absent).
-	CacheCreationTokens *int64 `json:"cache_creation_tokens,omitempty"`
-
-	// CacheReadTokens Cached input tokens read (best-effort, currently always absent).
-	CacheReadTokens *int64 `json:"cache_read_tokens,omitempty"`
-
-	// CompletionTokens Output tokens (best-effort, currently always absent).
-	CompletionTokens *int64 `json:"completion_tokens,omitempty"`
-
-	// CostUsdEstimate Estimated invocation cost in USD (best-effort, currently always absent; see #1255 for pricing seam).
-	CostUsdEstimate *float64  `json:"cost_usd_estimate,omitempty"`
-	Delivered       *bool     `json:"delivered,omitempty"`
-	DurationMs      int64     `json:"duration_ms"`
-	Error           *string   `json:"error,omitempty"`
-	FinishedAt      time.Time `json:"finished_at"`
-
-	// LatencyMs LLM invocation wall-clock latency (best-effort, currently always absent — no source).
-	LatencyMs *int64 `json:"latency_ms,omitempty"`
-
-	// Model LLM model identifier (best-effort, may be absent until follow-up wiring lands).
-	Model     *string `json:"model,omitempty"`
-	OpId      string  `json:"op_id"`
-	Operation string  `json:"operation"`
-
-	// PromptSha SHA-256 of the rendered prompt (best-effort, currently always absent; #1256 follow-up).
-	PromptSha *string `json:"prompt_sha,omitempty"`
-
-	// PromptTokens Non-cached input tokens (best-effort, currently always absent; treat zero as 'not measured', not 'free').
-	PromptTokens *int64 `json:"prompt_tokens,omitempty"`
-
-	// PromptVersion Template version frontmatter (best-effort, currently always absent; #1256 follow-up).
-	PromptVersion *string   `json:"prompt_version,omitempty"`
-	Provider      *string   `json:"provider,omitempty"`
-	Queued        *bool     `json:"queued,omitempty"`
-	Result        string    `json:"result"`
-	SessionId     *string   `json:"session_id,omitempty"`
-	SessionName   *string   `json:"session_name,omitempty"`
-	StartedAt     time.Time `json:"started_at"`
-	Template      *string   `json:"template,omitempty"`
-	Transport     *string   `json:"transport,omitempty"`
+	Delivered   *bool     `json:"delivered,omitempty"`
+	DurationMs  int64     `json:"duration_ms"`
+	Error       *string   `json:"error,omitempty"`
+	FinishedAt  time.Time `json:"finished_at"`
+	OpId        string    `json:"op_id"`
+	Operation   string    `json:"operation"`
+	Provider    *string   `json:"provider,omitempty"`
+	Queued      *bool     `json:"queued,omitempty"`
+	Result      string    `json:"result"`
+	SessionId   *string   `json:"session_id,omitempty"`
+	SessionName *string   `json:"session_name,omitempty"`
+	StartedAt   time.Time `json:"started_at"`
+	Template    *string   `json:"template,omitempty"`
+	Transport   *string   `json:"transport,omitempty"`
 }
 
 // WorkflowAttemptSummary defines model for WorkflowAttemptSummary.
@@ -4431,15 +4166,6 @@ type GetV0CityByCityNameEventsParams struct {
 
 // EmitEventParams defines parameters for EmitEvent.
 type EmitEventParams struct {
-	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
-	XGCRequest string `json:"X-GC-Request"`
-}
-
-// RotateEventsParams defines parameters for RotateEvents.
-type RotateEventsParams struct {
-	// Wait Wait for archive compression to complete before returning.
-	Wait *bool `form:"wait,omitempty" json:"wait,omitempty"`
-
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
 }
@@ -5501,32 +5227,6 @@ func (t *EventPayload) MergeOutboundEventPayload(v OutboundEventPayload) error {
 	return err
 }
 
-// AsProjectIdentityStampedPayload returns the union data inside the EventPayload as a ProjectIdentityStampedPayload
-func (t EventPayload) AsProjectIdentityStampedPayload() (ProjectIdentityStampedPayload, error) {
-	var body ProjectIdentityStampedPayload
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromProjectIdentityStampedPayload overwrites any union data inside the EventPayload as the provided ProjectIdentityStampedPayload
-func (t *EventPayload) FromProjectIdentityStampedPayload(v ProjectIdentityStampedPayload) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeProjectIdentityStampedPayload performs a merge with any union data inside the EventPayload, using the provided ProjectIdentityStampedPayload
-func (t *EventPayload) MergeProjectIdentityStampedPayload(v ProjectIdentityStampedPayload) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
 // AsRequestFailedPayload returns the union data inside the EventPayload as a RequestFailedPayload
 func (t EventPayload) AsRequestFailedPayload() (RequestFailedPayload, error) {
 	var body RequestFailedPayload
@@ -5553,32 +5253,6 @@ func (t *EventPayload) MergeRequestFailedPayload(v RequestFailedPayload) error {
 	return err
 }
 
-// AsRotatedPayload returns the union data inside the EventPayload as a RotatedPayload
-func (t EventPayload) AsRotatedPayload() (RotatedPayload, error) {
-	var body RotatedPayload
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromRotatedPayload overwrites any union data inside the EventPayload as the provided RotatedPayload
-func (t *EventPayload) FromRotatedPayload(v RotatedPayload) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeRotatedPayload performs a merge with any union data inside the EventPayload, using the provided RotatedPayload
-func (t *EventPayload) MergeRotatedPayload(v RotatedPayload) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
 // AsSessionCreateSucceededPayload returns the union data inside the EventPayload as a SessionCreateSucceededPayload
 func (t EventPayload) AsSessionCreateSucceededPayload() (SessionCreateSucceededPayload, error) {
 	var body SessionCreateSucceededPayload
@@ -5595,32 +5269,6 @@ func (t *EventPayload) FromSessionCreateSucceededPayload(v SessionCreateSucceede
 
 // MergeSessionCreateSucceededPayload performs a merge with any union data inside the EventPayload, using the provided SessionCreateSucceededPayload
 func (t *EventPayload) MergeSessionCreateSucceededPayload(v SessionCreateSucceededPayload) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsSessionLifecyclePayload returns the union data inside the EventPayload as a SessionLifecyclePayload
-func (t EventPayload) AsSessionLifecyclePayload() (SessionLifecyclePayload, error) {
-	var body SessionLifecyclePayload
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromSessionLifecyclePayload overwrites any union data inside the EventPayload as the provided SessionLifecyclePayload
-func (t *EventPayload) FromSessionLifecyclePayload(v SessionLifecyclePayload) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeSessionLifecyclePayload performs a merge with any union data inside the EventPayload, using the provided SessionLifecyclePayload
-func (t *EventPayload) MergeSessionLifecyclePayload(v SessionLifecyclePayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -5673,32 +5321,6 @@ func (t *EventPayload) FromSessionSubmitSucceededPayload(v SessionSubmitSucceede
 
 // MergeSessionSubmitSucceededPayload performs a merge with any union data inside the EventPayload, using the provided SessionSubmitSucceededPayload
 func (t *EventPayload) MergeSessionSubmitSucceededPayload(v SessionSubmitSucceededPayload) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsSupervisorFSPressureSkippedTickPayload returns the union data inside the EventPayload as a SupervisorFSPressureSkippedTickPayload
-func (t EventPayload) AsSupervisorFSPressureSkippedTickPayload() (SupervisorFSPressureSkippedTickPayload, error) {
-	var body SupervisorFSPressureSkippedTickPayload
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromSupervisorFSPressureSkippedTickPayload overwrites any union data inside the EventPayload as the provided SupervisorFSPressureSkippedTickPayload
-func (t *EventPayload) FromSupervisorFSPressureSkippedTickPayload(v SupervisorFSPressureSkippedTickPayload) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeSupervisorFSPressureSkippedTickPayload performs a merge with any union data inside the EventPayload, using the provided SupervisorFSPressureSkippedTickPayload
-func (t *EventPayload) MergeSupervisorFSPressureSkippedTickPayload(v SupervisorFSPressureSkippedTickPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -6157,34 +5779,6 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeConvoyCreated(v T
 // MergeTypedEventStreamEnvelopeConvoyCreated performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeConvoyCreated
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeConvoyCreated(v TypedEventStreamEnvelopeConvoyCreated) error {
 	v.Type = "convoy.created"
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsTypedEventStreamEnvelopeEventsRotated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeEventsRotated
-func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeEventsRotated() (TypedEventStreamEnvelopeEventsRotated, error) {
-	var body TypedEventStreamEnvelopeEventsRotated
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromTypedEventStreamEnvelopeEventsRotated overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeEventsRotated
-func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeEventsRotated(v TypedEventStreamEnvelopeEventsRotated) error {
-	v.Type = "events.rotated"
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeTypedEventStreamEnvelopeEventsRotated performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeEventsRotated
-func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeEventsRotated(v TypedEventStreamEnvelopeEventsRotated) error {
-	v.Type = "events.rotated"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -6671,34 +6265,6 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeOrderFired(v Typ
 	return err
 }
 
-// AsTypedEventStreamEnvelopeProjectIdentityStamped returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeProjectIdentityStamped
-func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeProjectIdentityStamped() (TypedEventStreamEnvelopeProjectIdentityStamped, error) {
-	var body TypedEventStreamEnvelopeProjectIdentityStamped
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromTypedEventStreamEnvelopeProjectIdentityStamped overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeProjectIdentityStamped
-func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeProjectIdentityStamped(v TypedEventStreamEnvelopeProjectIdentityStamped) error {
-	v.Type = "project.identity.stamped"
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeTypedEventStreamEnvelopeProjectIdentityStamped performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeProjectIdentityStamped
-func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeProjectIdentityStamped(v TypedEventStreamEnvelopeProjectIdentityStamped) error {
-	v.Type = "project.identity.stamped"
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
 // AsTypedEventStreamEnvelopeProviderSwapped returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeProviderSwapped
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeProviderSwapped() (TypedEventStreamEnvelopeProviderSwapped, error) {
 	var body TypedEventStreamEnvelopeProviderSwapped
@@ -6979,34 +6545,6 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionIdleKille
 	return err
 }
 
-// AsTypedEventStreamEnvelopeSessionMaxAgeKilled returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionMaxAgeKilled
-func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionMaxAgeKilled() (TypedEventStreamEnvelopeSessionMaxAgeKilled, error) {
-	var body TypedEventStreamEnvelopeSessionMaxAgeKilled
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromTypedEventStreamEnvelopeSessionMaxAgeKilled overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionMaxAgeKilled
-func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionMaxAgeKilled(v TypedEventStreamEnvelopeSessionMaxAgeKilled) error {
-	v.Type = "session.max_age_killed"
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeTypedEventStreamEnvelopeSessionMaxAgeKilled performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionMaxAgeKilled
-func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionMaxAgeKilled(v TypedEventStreamEnvelopeSessionMaxAgeKilled) error {
-	v.Type = "session.max_age_killed"
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
 // AsTypedEventStreamEnvelopeSessionQuarantined returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionQuarantined
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionQuarantined() (TypedEventStreamEnvelopeSessionQuarantined, error) {
 	var body TypedEventStreamEnvelopeSessionQuarantined
@@ -7175,34 +6713,6 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionWoke(v Ty
 	return err
 }
 
-// AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
-func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick() (TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick, error) {
-	var body TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
-func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick(v TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick) error {
-	v.Type = "supervisor.fs_pressure.skipped_tick"
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
-func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick(v TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick) error {
-	v.Type = "supervisor.fs_pressure.skipped_tick"
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
 // AsTypedEventStreamEnvelopeWorkerOperation returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkerOperation
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkerOperation() (TypedEventStreamEnvelopeWorkerOperation, error) {
 	var body TypedEventStreamEnvelopeWorkerOperation
@@ -7297,8 +6807,6 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeConvoyClosed()
 	case "convoy.created":
 		return t.AsTypedEventStreamEnvelopeConvoyCreated()
-	case "events.rotated":
-		return t.AsTypedEventStreamEnvelopeEventsRotated()
 	case "extmsg.adapter_added":
 		return t.AsTypedEventStreamEnvelopeExtmsgAdapterAdded()
 	case "extmsg.adapter_removed":
@@ -7333,8 +6841,6 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeOrderFailed()
 	case "order.fired":
 		return t.AsTypedEventStreamEnvelopeOrderFired()
-	case "project.identity.stamped":
-		return t.AsTypedEventStreamEnvelopeProjectIdentityStamped()
 	case "provider.swapped":
 		return t.AsTypedEventStreamEnvelopeProviderSwapped()
 	case "request.failed":
@@ -7355,8 +6861,6 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionDraining()
 	case "session.idle_killed":
 		return t.AsTypedEventStreamEnvelopeSessionIdleKilled()
-	case "session.max_age_killed":
-		return t.AsTypedEventStreamEnvelopeSessionMaxAgeKilled()
 	case "session.quarantined":
 		return t.AsTypedEventStreamEnvelopeSessionQuarantined()
 	case "session.stopped":
@@ -7369,8 +6873,6 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionUpdated()
 	case "session.woke":
 		return t.AsTypedEventStreamEnvelopeSessionWoke()
-	case "supervisor.fs_pressure.skipped_tick":
-		return t.AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
 	case "worker.operation":
 		return t.AsTypedEventStreamEnvelopeWorkerOperation()
 	default:
@@ -7686,34 +7188,6 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeConvo
 // MergeTypedTaggedEventStreamEnvelopeConvoyCreated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeConvoyCreated
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeConvoyCreated(v TypedTaggedEventStreamEnvelopeConvoyCreated) error {
 	v.Type = "convoy.created"
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsTypedTaggedEventStreamEnvelopeEventsRotated returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeEventsRotated
-func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeEventsRotated() (TypedTaggedEventStreamEnvelopeEventsRotated, error) {
-	var body TypedTaggedEventStreamEnvelopeEventsRotated
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromTypedTaggedEventStreamEnvelopeEventsRotated overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeEventsRotated
-func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeEventsRotated(v TypedTaggedEventStreamEnvelopeEventsRotated) error {
-	v.Type = "events.rotated"
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeTypedTaggedEventStreamEnvelopeEventsRotated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeEventsRotated
-func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeEventsRotated(v TypedTaggedEventStreamEnvelopeEventsRotated) error {
-	v.Type = "events.rotated"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -8200,34 +7674,6 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeOrde
 	return err
 }
 
-// AsTypedTaggedEventStreamEnvelopeProjectIdentityStamped returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeProjectIdentityStamped
-func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeProjectIdentityStamped() (TypedTaggedEventStreamEnvelopeProjectIdentityStamped, error) {
-	var body TypedTaggedEventStreamEnvelopeProjectIdentityStamped
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromTypedTaggedEventStreamEnvelopeProjectIdentityStamped overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeProjectIdentityStamped
-func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeProjectIdentityStamped(v TypedTaggedEventStreamEnvelopeProjectIdentityStamped) error {
-	v.Type = "project.identity.stamped"
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeTypedTaggedEventStreamEnvelopeProjectIdentityStamped performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeProjectIdentityStamped
-func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeProjectIdentityStamped(v TypedTaggedEventStreamEnvelopeProjectIdentityStamped) error {
-	v.Type = "project.identity.stamped"
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
 // AsTypedTaggedEventStreamEnvelopeProviderSwapped returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeProviderSwapped
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeProviderSwapped() (TypedTaggedEventStreamEnvelopeProviderSwapped, error) {
 	var body TypedTaggedEventStreamEnvelopeProviderSwapped
@@ -8508,34 +7954,6 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
-// AsTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled
-func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled() (TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled, error) {
-	var body TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled
-func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled(v TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled) error {
-	v.Type = "session.max_age_killed"
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled
-func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled(v TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled) error {
-	v.Type = "session.max_age_killed"
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
 // AsTypedTaggedEventStreamEnvelopeSessionQuarantined returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionQuarantined
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionQuarantined() (TypedTaggedEventStreamEnvelopeSessionQuarantined, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionQuarantined
@@ -8704,34 +8122,6 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
-// AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
-func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick() (TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick, error) {
-	var body TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
-func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick(v TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick) error {
-	v.Type = "supervisor.fs_pressure.skipped_tick"
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
-func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick(v TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick) error {
-	v.Type = "supervisor.fs_pressure.skipped_tick"
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
 // AsTypedTaggedEventStreamEnvelopeWorkerOperation returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkerOperation
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkerOperation() (TypedTaggedEventStreamEnvelopeWorkerOperation, error) {
 	var body TypedTaggedEventStreamEnvelopeWorkerOperation
@@ -8826,8 +8216,6 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeConvoyClosed()
 	case "convoy.created":
 		return t.AsTypedTaggedEventStreamEnvelopeConvoyCreated()
-	case "events.rotated":
-		return t.AsTypedTaggedEventStreamEnvelopeEventsRotated()
 	case "extmsg.adapter_added":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgAdapterAdded()
 	case "extmsg.adapter_removed":
@@ -8862,8 +8250,6 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeOrderFailed()
 	case "order.fired":
 		return t.AsTypedTaggedEventStreamEnvelopeOrderFired()
-	case "project.identity.stamped":
-		return t.AsTypedTaggedEventStreamEnvelopeProjectIdentityStamped()
 	case "provider.swapped":
 		return t.AsTypedTaggedEventStreamEnvelopeProviderSwapped()
 	case "request.failed":
@@ -8884,8 +8270,6 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionDraining()
 	case "session.idle_killed":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionIdleKilled()
-	case "session.max_age_killed":
-		return t.AsTypedTaggedEventStreamEnvelopeSessionMaxAgeKilled()
 	case "session.quarantined":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionQuarantined()
 	case "session.stopped":
@@ -8898,8 +8282,6 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionUpdated()
 	case "session.woke":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionWoke()
-	case "supervisor.fs_pressure.skipped_tick":
-		return t.AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
 	case "worker.operation":
 		return t.AsTypedTaggedEventStreamEnvelopeWorkerOperation()
 	default:
@@ -9147,9 +8529,6 @@ type ClientInterface interface {
 	EmitEventWithBody(ctx context.Context, cityName string, params *EmitEventParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	EmitEvent(ctx context.Context, cityName string, params *EmitEventParams, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	// RotateEvents request
-	RotateEvents(ctx context.Context, cityName string, params *RotateEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// StreamEvents request
 	StreamEvents(ctx context.Context, cityName string, params *StreamEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -10177,18 +9556,6 @@ func (c *Client) EmitEventWithBody(ctx context.Context, cityName string, params 
 
 func (c *Client) EmitEvent(ctx context.Context, cityName string, params *EmitEventParams, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewEmitEventRequest(c.Server, cityName, params, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) RotateEvents(ctx context.Context, cityName string, params *RotateEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRotateEventsRequest(c.Server, cityName, params)
 	if err != nil {
 		return nil, err
 	}
@@ -14434,75 +13801,6 @@ func NewEmitEventRequestWithBody(server string, cityName string, params *EmitEve
 	}
 
 	req.Header.Add("Content-Type", contentType)
-
-	if params != nil {
-
-		var headerParam0 string
-
-		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
-		if err != nil {
-			return nil, err
-		}
-
-		req.Header.Set("X-GC-Request", headerParam0)
-
-	}
-
-	return req, nil
-}
-
-// NewRotateEventsRequest generates requests for RotateEvents
-func NewRotateEventsRequest(server string, cityName string, params *RotateEventsParams) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/v0/city/%s/events/rotate", pathParam0)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if params != nil {
-		queryValues := queryURL.Query()
-
-		if params.Wait != nil {
-
-			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "wait", *params.Wait, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		queryURL.RawQuery = queryValues.Encode()
-	}
-
-	req, err := http.NewRequest("POST", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
 
 	if params != nil {
 
@@ -21061,9 +20359,6 @@ type ClientWithResponsesInterface interface {
 
 	EmitEventWithResponse(ctx context.Context, cityName string, params *EmitEventParams, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*EmitEventResponse, error)
 
-	// RotateEventsWithResponse request
-	RotateEventsWithResponse(ctx context.Context, cityName string, params *RotateEventsParams, reqEditors ...RequestEditorFn) (*RotateEventsResponse, error)
-
 	// StreamEventsWithResponse request
 	StreamEventsWithResponse(ctx context.Context, cityName string, params *StreamEventsParams, reqEditors ...RequestEditorFn) (*StreamEventsResponse, error)
 
@@ -22420,29 +21715,6 @@ func (r EmitEventResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r EmitEventResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type RotateEventsResponse struct {
-	Body                          []byte
-	HTTPResponse                  *http.Response
-	JSON200                       *EventRotateResponse
-	ApplicationproblemJSONDefault *ErrorModel
-}
-
-// Status returns HTTPResponse.Status
-func (r RotateEventsResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r RotateEventsResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -25223,15 +24495,6 @@ func (c *ClientWithResponses) EmitEventWithResponse(ctx context.Context, cityNam
 	return ParseEmitEventResponse(rsp)
 }
 
-// RotateEventsWithResponse request returning *RotateEventsResponse
-func (c *ClientWithResponses) RotateEventsWithResponse(ctx context.Context, cityName string, params *RotateEventsParams, reqEditors ...RequestEditorFn) (*RotateEventsResponse, error) {
-	rsp, err := c.RotateEvents(ctx, cityName, params, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseRotateEventsResponse(rsp)
-}
-
 // StreamEventsWithResponse request returning *StreamEventsResponse
 func (c *ClientWithResponses) StreamEventsWithResponse(ctx context.Context, cityName string, params *StreamEventsParams, reqEditors ...RequestEditorFn) (*StreamEventsResponse, error) {
 	rsp, err := c.StreamEvents(ctx, cityName, params, reqEditors...)
@@ -27764,39 +27027,6 @@ func ParseEmitEventResponse(rsp *http.Response) (*EmitEventResponse, error) {
 			return nil, err
 		}
 		response.JSON201 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest ErrorModel
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.ApplicationproblemJSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseRotateEventsResponse parses an HTTP response from a RotateEventsWithResponse call
-func ParseRotateEventsResponse(rsp *http.Response) (*RotateEventsResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &RotateEventsResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest EventRotateResponse
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest ErrorModel

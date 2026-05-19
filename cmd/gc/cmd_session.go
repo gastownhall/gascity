@@ -68,6 +68,7 @@ continuity.`,
 		newSessionLogsCmd(stdout, stderr),
 		newSessionWakeCmd(stdout, stderr),
 		newSessionWaitCmd(stdout, stderr),
+		newSessionAuditEnvCmd(stdout, stderr),
 	)
 	return cmd
 }
@@ -544,17 +545,7 @@ func resolveSessionTemplate(cfg *config.City, input, currentRigDir string) (conf
 	if cfg == nil || input == "" {
 		return config.Agent{}, false
 	}
-	if currentRigDir != "" && !strings.Contains(input, "/") && strings.Contains(input, ".") {
-		for _, a := range cfg.Agents {
-			if a.QualifiedName() == currentRigDir+"/"+input {
-				return a, true
-			}
-		}
-	}
-
-	// Inputs that include a rig separator ("/") or a binding prefix (".")
-	// must match a qualified name exactly after any current-rig lookup.
-	if strings.ContainsAny(input, "/.") {
+	if strings.Contains(input, "/") {
 		for _, a := range cfg.Agents {
 			if a.QualifiedName() == input {
 				return a, true
@@ -648,26 +639,19 @@ func newSessionListCmd(stdout, stderr io.Writer) *cobra.Command {
 
 // cmdSessionList is the CLI entry point for "gc session list".
 func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
-	storeStderr := stderr
-	if jsonOutput {
-		storeStderr = io.Discard
-	}
-	store, code := openCityStore(storeStderr, "gc session list")
+	store, code := openCityStore(stderr, "gc session list")
 	if store == nil {
-		if jsonOutput {
-			return writeJSONError(stdout, stderr, "store_open_failed", "gc session list: opening bead store failed", code)
-		}
 		return code
 	}
 
 	providerCtx := loadSessionProviderContext()
+	var sp runtime.Provider
 
 	// Launch readyWaitSet concurrently with the shared session-bead load,
 	// but only on the non-JSON path — JSON output returns early and doesn't
 	// need wait-state computation.
 	type waitResult struct {
 		set map[string]bool
-		err error
 	}
 	var waitCh chan waitResult
 
@@ -675,30 +659,27 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 		waitCh = make(chan waitResult, 1)
 
 		go func() {
-			set, err := readyWaitSetForList(store)
-			waitCh <- waitResult{set: set, err: err}
+			waitCh <- waitResult{set: readyWaitSetForList(store)}
 		}()
 	}
 
-	allSessionBeads, err := store.List(beads.ListQuery{
-		Label: session.LabelSession,
-		Sort:  beads.SortCreatedDesc,
-	})
+	sessionQuery := beads.ListQuery{
+		Type:       sessionBeadType,
+		SkipLabels: true,
+		SkipParent: true,
+		Sort:       beads.SortCreatedDesc,
+	}
+	if stateFilter == "" {
+		sessionQuery.Status = "open"
+	}
+	allSessionBeads, err := store.List(sessionQuery)
 	if err != nil {
-		if jsonOutput {
-			return writeJSONError(stdout, stderr, "session_list_failed", fmt.Sprintf("gc session list: listing sessions: %v", err), 1)
-		}
 		fmt.Fprintf(stderr, "gc session list: listing sessions: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	sessionBeads := newSessionBeadSnapshot(allSessionBeads)
-	sp := newSessionProviderFromContext(providerCtx, sessionBeads)
 	catalog, err := workerSessionCatalogWithConfig("", store, sp, providerCtx.cfg)
 	if err != nil {
-		if jsonOutput {
-			return writeJSONError(stdout, stderr, "session_catalog_failed", fmt.Sprintf("gc session list: %v", err), 1)
-		}
 		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -706,7 +687,10 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	sessions := listResult.Sessions
 
 	if jsonOutput {
-		return writeSessionListJSON(sessions, stateFilter, templateFilter, stdout, stderr)
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(sessions) //nolint:errcheck // best-effort stdout
+		return 0
 	}
 
 	// Build bead index from the beads already fetched by ListFull (no duplicate query).
@@ -715,11 +699,7 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 		beadIndex[b.ID] = b
 	}
 
-	waitRes := <-waitCh
-	if waitRes.err != nil {
-		fmt.Fprintf(stderr, "gc session list: ready wait indicators degraded: %v\n", waitRes.err) //nolint:errcheck // best-effort stderr
-	}
-	readyWaitSet := waitRes.set
+	readyWaitSet := (<-waitCh).set
 	cfg := providerCtx.cfg
 	poolDesired := cliPoolDesired(cfg)
 
@@ -745,7 +725,7 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	cachedSP := &attachmentCachingProvider{Provider: sp, cache: attachedSet}
 
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tAGE\tLAST ACTIVE\tLAST NUDGE") //nolint:errcheck // best-effort stdout
+	fmt.Fprintln(w, "ID\tTEMPLATE\tSTATE\tREASON\tTARGET\tTITLE\tAGE\tLAST ACTIVE") //nolint:errcheck // best-effort stdout
 	for _, s := range sessions {
 		state := string(s.State)
 		if s.State == "" {
@@ -759,146 +739,10 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 		if !s.LastActive.IsZero() {
 			lastActive = formatDuration(time.Since(s.LastActive)) + " ago"
 		}
-		lastNudge := "-"
-		if !s.LastNudgeDeliveredAt.IsZero() {
-			lastNudge = formatDuration(time.Since(s.LastNudgeDeliveredAt)) + " ago"
-		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, age, lastActive, lastNudge) //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.ID, s.Template, state, reason, target, title, age, lastActive) //nolint:errcheck // best-effort stdout
 	}
 	_ = w.Flush() //nolint:errcheck // best-effort stdout
 	return 0
-}
-
-type sessionListJSONRow struct {
-	ID                   string        `json:"id"`
-	Name                 string        `json:"name,omitempty"`
-	Template             string        `json:"template"`
-	Provider             string        `json:"provider,omitempty"`
-	State                session.State `json:"state"`
-	Title                string        `json:"title,omitempty"`
-	Rig                  string        `json:"rig,omitempty"`
-	Alias                string        `json:"alias,omitempty"`
-	AgentName            string        `json:"agent_name,omitempty"`
-	Transport            string        `json:"transport,omitempty"`
-	Command              string        `json:"command,omitempty"`
-	WorkDir              string        `json:"work_dir,omitempty"`
-	SessionName          string        `json:"session_name,omitempty"`
-	SessionKey           string        `json:"session_key,omitempty"`
-	ResumeFlag           string        `json:"resume_flag,omitempty"`
-	ResumeStyle          string        `json:"resume_style,omitempty"`
-	ResumeCommand        string        `json:"resume_command,omitempty"`
-	CreatedAt            time.Time     `json:"created_at"`
-	LastActive           time.Time     `json:"last_active"`
-	LastNudgeDeliveredAt *time.Time    `json:"last_nudge_delivered_at,omitempty"`
-	Attached             bool          `json:"attached"`
-	Closed               bool          `json:"closed"`
-}
-
-type sessionListJSON struct {
-	SchemaVersion string               `json:"schema_version"`
-	Filters       sessionListFilters   `json:"filters"`
-	Sessions      []sessionListJSONRow `json:"sessions"`
-	Summary       sessionListSummary   `json:"summary"`
-}
-
-type sessionListFilters struct {
-	State    string `json:"state,omitempty"`
-	Template string `json:"template,omitempty"`
-}
-
-type sessionListSummary struct {
-	Total     int `json:"total"`
-	Active    int `json:"active"`
-	Suspended int `json:"suspended"`
-	Closed    int `json:"closed"`
-}
-
-func writeSessionListJSON(sessions []session.Info, stateFilter, templateFilter string, stdout, stderr io.Writer) int {
-	rows := sessionListJSONRows(sessions)
-	result := sessionListJSON{
-		SchemaVersion: "1",
-		Filters:       sessionListFilters{State: stateFilter, Template: templateFilter},
-		Sessions:      rows,
-		Summary:       summarizeSessionList(rows),
-	}
-	enc := json.NewEncoder(stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(result); err != nil {
-		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	return 0
-}
-
-func summarizeSessionList(rows []sessionListJSONRow) sessionListSummary {
-	summary := sessionListSummary{Total: len(rows)}
-	for _, row := range rows {
-		switch {
-		case row.Closed:
-			summary.Closed++
-		case row.State == session.StateActive:
-			summary.Active++
-		case row.State == session.StateSuspended:
-			summary.Suspended++
-		}
-	}
-	return summary
-}
-
-func sessionListJSONRows(sessions []session.Info) []sessionListJSONRow {
-	rows := make([]sessionListJSONRow, len(sessions))
-	for i, s := range sessions {
-		rows[i] = sessionListJSONRow{
-			ID:            s.ID,
-			Name:          sessionListJSONName(s),
-			Template:      s.Template,
-			State:         s.State,
-			Closed:        s.Closed,
-			Title:         s.Title,
-			Rig:           sessionListJSONRig(s),
-			Alias:         s.Alias,
-			AgentName:     s.AgentName,
-			Provider:      s.Provider,
-			Transport:     s.Transport,
-			Command:       s.Command,
-			WorkDir:       s.WorkDir,
-			SessionName:   s.SessionName,
-			SessionKey:    s.SessionKey,
-			ResumeFlag:    s.ResumeFlag,
-			ResumeStyle:   s.ResumeStyle,
-			ResumeCommand: s.ResumeCommand,
-			CreatedAt:     s.CreatedAt,
-			LastActive:    s.LastActive,
-			Attached:      s.Attached,
-		}
-		if !s.LastNudgeDeliveredAt.IsZero() {
-			stamp := s.LastNudgeDeliveredAt.UTC()
-			rows[i].LastNudgeDeliveredAt = &stamp
-		}
-	}
-	return rows
-}
-
-func sessionListJSONName(s session.Info) string {
-	if s.Alias != "" {
-		return s.Alias
-	}
-	if s.SessionName != "" {
-		return s.SessionName
-	}
-	return s.ID
-}
-
-func sessionListJSONRig(s session.Info) string {
-	template := strings.TrimSpace(s.Template)
-	if before, _, ok := strings.Cut(template, "/"); ok {
-		return before
-	}
-	name := strings.TrimSpace(s.SessionName)
-	if before, _, ok := strings.Cut(name, "--"); ok {
-		return before
-	}
-	return ""
 }
 
 func sessionListTarget(s session.Info) string {
@@ -1081,8 +925,11 @@ func metadataTimeInFuture(raw string, now time.Time) bool {
 	return err == nil && !t.IsZero() && now.Before(t)
 }
 
-func readyWaitSetForList(store beads.Store) (map[string]bool, error) {
+func readyWaitSetForList(store beads.Store) map[string]bool {
 	items, err := loadWaitBeads(store)
+	if err != nil {
+		return nil
+	}
 	ready := make(map[string]bool)
 	for _, item := range items {
 		if item.Metadata["state"] != waitStateReady {
@@ -1093,7 +940,7 @@ func readyWaitSetForList(store beads.Store) (map[string]bool, error) {
 			ready[sessionID] = true
 		}
 	}
-	return ready, err
+	return ready
 }
 
 // cliPoolDesired computes a static pool desired count from config.
@@ -1256,7 +1103,6 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 			ReadyDelayMs:           resolved.ReadyDelayMs,
 			ProcessNames:           resolved.ProcessNames,
 			EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-			AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
 			Env:                    resolved.Env,
 		}
 	}
@@ -1401,18 +1247,22 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer) int {
 	}
 
 	sp := newSessionProvider()
+	nudgeIDs, err := waitNudgeIDsForSession(store, sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	closeResult, err := handle.CloseDetailed(context.Background())
-	if err != nil {
+	if err := handle.Close(context.Background()); err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if cityErr == nil {
-		if err := withdrawQueuedWaitNudges(cityPath, closeResult.WaitNudgeIDs); err != nil {
+		if err := withdrawQueuedWaitNudges(cityPath, nudgeIDs); err != nil {
 			fmt.Fprintf(stderr, "gc session close: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 	}
@@ -1568,7 +1418,16 @@ func newSessionPeekCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "peek <session-id-or-alias>",
 		Short: "View session output without attaching",
-		Args:  cobra.ExactArgs(1),
+		Long: `View recent session output without attaching.
+
+Accepts either a GC session ID or a session alias.
+
+Provider behavior:
+- tmux / exec / acp sessions: peeks the provider runtime output directly
+- t3bridge sessions: previews the latest thread messages via the T3 GC peek surface
+
+Use --lines to control how much preview content is returned.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSessionPeek(args, lines, stdout, stderr) != 0 {
 				return errExit
@@ -1681,7 +1540,6 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
 		Actor:   eventActor(),
 		Subject: sessionID,
 		Message: "killed",
-		Payload: api.SessionLifecyclePayloadJSON(sessionID, "", "killed"),
 	})
 
 	fmt.Fprintf(stdout, "Session %s killed.\n", sessionID) //nolint:errcheck // best-effort stdout
@@ -1805,6 +1663,21 @@ func emitSessionSubmitResult(stdout io.Writer, target string, intent session.Sub
 func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, stdout, stderr io.Writer) int {
 	target := args[0]
 	message := strings.Join(args[1:], " ")
+
+	if delivery != nudgeDeliveryQueue {
+		cityPath, err := resolveCity()
+		if err == nil {
+			if c := apiClient(cityPath); c != nil {
+				if err := c.SubmitSessionAccepted(target, message, session.SubmitIntentDefault); err == nil {
+					fmt.Fprintf(stdout, "Nudged %s\n", target) //nolint:errcheck // best-effort stdout
+					return 0
+				} else if !api.ShouldFallback(err) {
+					fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
+					return 1
+				}
+			}
+		}
+	}
 
 	targetInfo, err := resolveNudgeTarget(target)
 	if err != nil {

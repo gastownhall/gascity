@@ -9,11 +9,12 @@ import (
 // It provides a structured view of the expanded (post-pack, post-patch)
 // configuration state.
 type configResponse struct {
-	Workspace workspaceResponse           `json:"workspace"`
-	Agents    []configAgentResponse       `json:"agents"`
-	Rigs      []configRigResponse         `json:"rigs"`
-	Providers map[string]providerSpecJSON `json:"providers,omitempty"`
-	Patches   *configPatchesResponse      `json:"patches,omitempty"`
+	Workspace       workspaceResponse           `json:"workspace"`
+	EffectiveAPIURL string                      `json:"effective_api_url,omitempty"`
+	Agents          []configAgentResponse       `json:"agents"`
+	Rigs            []configRigResponse         `json:"rigs"`
+	Providers       map[string]providerSpecJSON `json:"providers,omitempty"`
+	Patches         *configPatchesResponse      `json:"patches,omitempty"`
 }
 
 type workspaceResponse struct {
@@ -27,12 +28,13 @@ type workspaceResponse struct {
 }
 
 type configAgentResponse struct {
-	Name      string `json:"name"`
-	Dir       string `json:"dir,omitempty"`
-	Provider  string `json:"provider,omitempty"`
-	IsPool    bool   `json:"is_pool,omitempty"`
-	Scope     string `json:"scope,omitempty"`
-	Suspended bool   `json:"suspended"`
+	Name             string `json:"name"`
+	Dir              string `json:"dir,omitempty"`
+	Provider         string `json:"provider,omitempty"`
+	IsPool           bool   `json:"is_pool,omitempty"`
+	Scope            string `json:"scope,omitempty"`
+	Suspended        bool   `json:"suspended"`
+	NamedSessionMode string `json:"named_session_mode,omitempty"`
 }
 
 type configRigResponse struct {
@@ -58,6 +60,16 @@ type configPatchesResponse struct {
 	AgentCount    int `json:"agent_count"`
 	RigCount      int `json:"rig_count"`
 	ProviderCount int `json:"provider_count"`
+}
+
+func configAgentNamedSessionMode(agent config.Agent, namedSessionModes map[string]string) string {
+	if mode := namedSessionModes[agent.QualifiedName()]; mode != "" {
+		return mode
+	}
+	if agent.Implicit || isMultiSessionAgent(agent) {
+		return "on_demand"
+	}
+	return "always"
 }
 
 // agentOrigin determines the provenance of an agent. When raw config is

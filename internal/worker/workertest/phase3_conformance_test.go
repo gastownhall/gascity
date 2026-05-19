@@ -5,7 +5,6 @@ import "testing"
 func TestPhase3Catalog(t *testing.T) {
 	expected := []RequirementCode{
 		RequirementInferenceFreshSpawn,
-		RequirementInferenceTemplateStartup,
 		RequirementInferenceFreshTask,
 		RequirementInferenceWorkspaceTask,
 		RequirementInferenceMultiTurnWorkflow,

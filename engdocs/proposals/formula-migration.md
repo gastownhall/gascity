@@ -120,6 +120,7 @@ Layer 0  config/         imports: (stdlib + BurntSushi/toml only)
 ```
 
 **Invariants:**
+
 - formula/ NEVER imports molecule/, beads/, or config/
 - molecule/ NEVER imports cmd/gc/ or config/
 - beads/ NEVER imports formula/ or molecule/
@@ -220,6 +221,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 ### Store interface changes
 
 Remove from `beads.Store`:
+
 ```go
 // REMOVED
 MolCook(formula, title string, vars []string) (string, error)
@@ -257,17 +259,17 @@ times. A failure mid-way leaves orphaned beads. Policy:
 
 9 production call sites + 1 convergence adapter:
 
-| # | File | Line | Method | Title Used? | Error Strategy |
-|---|------|------|--------|-------------|----------------|
-| 1 | `cmd/gc/cmd_sling.go` | 422 | `MolCook` | `opts.Title` | exit 1 |
-| 2 | `cmd/gc/cmd_sling.go` | 438 | `MolCookOn` | `opts.Title` | exit 1 |
-| 3 | `cmd/gc/cmd_sling.go` | 461 | `MolCookOn` | `opts.Title` | exit 1 |
-| 4 | `cmd/gc/cmd_sling.go` | 657 | `MolCookOn` | `opts.Title` | exit 1 (batch) |
-| 5 | `cmd/gc/cmd_sling.go` | 669 | `MolCookOn` | `opts.Title` | exit 1 (batch) |
-| 6 | `cmd/gc/cmd_order.go` | 440 | `MolCook` | `""` | event + continue |
-| 7 | `cmd/gc/order_dispatch.go` | 236 | `MolCook` | `""` | event + continue |
-| 8 | `internal/api/handler_sling.go` | 72 | `MolCook` | `body.Formula` | HTTP 500 |
-| 9 | `cmd/gc/convergence_store.go` | 156 | `MolCookOn` | `""` | sling failure handler |
+| #   | File                            | Line | Method      | Title Used?    | Error Strategy        |
+| --- | ------------------------------- | ---- | ----------- | -------------- | --------------------- |
+| 1   | `cmd/gc/cmd_sling.go`           | 422  | `MolCook`   | `opts.Title`   | exit 1                |
+| 2   | `cmd/gc/cmd_sling.go`           | 438  | `MolCookOn` | `opts.Title`   | exit 1                |
+| 3   | `cmd/gc/cmd_sling.go`           | 461  | `MolCookOn` | `opts.Title`   | exit 1                |
+| 4   | `cmd/gc/cmd_sling.go`           | 657  | `MolCookOn` | `opts.Title`   | exit 1 (batch)        |
+| 5   | `cmd/gc/cmd_sling.go`           | 669  | `MolCookOn` | `opts.Title`   | exit 1 (batch)        |
+| 6   | `cmd/gc/cmd_order.go`           | 440  | `MolCook`   | `""`           | event + continue      |
+| 7   | `cmd/gc/order_dispatch.go`      | 236  | `MolCook`   | `""`           | event + continue      |
+| 8   | `internal/api/handler_sling.go` | 72   | `MolCook`   | `body.Formula` | HTTP 500              |
+| 9   | `cmd/gc/convergence_store.go`   | 156  | `MolCookOn` | `""`           | sling failure handler |
 
 Plus test doubles: `cmd/gc/cmd_sling_test.go` (5 refs), `internal/beads/bdstore_test.go` (8 refs),
 `internal/beads/exec/exec_test.go` (3 refs), `internal/beads/memstore_test.go` (2 refs).
@@ -339,6 +341,7 @@ This phase is purely additive -- no existing code changes. New code can be
 tested in isolation with MemStore.
 
 **Tests:**
+
 - Happy path: compile + instantiate simple formula
 - Variable substitution in titles/descriptions
 - Dependency wiring (needs, depends_on, parent-child)
@@ -427,21 +430,22 @@ All 7 test files from `beads/internal/formula/` port directly.
 ### Test double migration
 
 Existing test doubles that implement MolCook:
+
 - `errStore`, `selectiveErrStore`, `recordingStore` in cmd_sling_test.go
 - These are updated to compose molecule.Instantiate over their base Store,
   or to inject pre-compiled Recipes via a test helper.
 
 ## Risks and mitigations
 
-| Risk | Impact | Mitigation |
-|------|--------|------------|
-| Formula behavior divergence | High | Golden fixture tests as CI gate. Port ALL tests. |
-| Partial instantiation failure | High | Best-effort cleanup + idempotency key in Options. Fault tests. |
-| Caller migration regression | Medium | GC_NATIVE_FORMULA toggle for instant rollback. |
-| Store.Create ID assignment | Medium | Molecule package uses server-assigned IDs. Never assumes format. |
-| Variable format change | Medium | Isolated in buildSlingFormulaVars update. Map semantics documented. |
-| exec.Store mol-cook deprecation | Low | CRUD-only path per Option B. Toggle provides transition period. |
-| Cross-repo drift | Low | Deliberate fork with Gas City as sole owner. Beads copy frozen. |
+| Risk                            | Impact | Mitigation                                                          |
+| ------------------------------- | ------ | ------------------------------------------------------------------- |
+| Formula behavior divergence     | High   | Golden fixture tests as CI gate. Port ALL tests.                    |
+| Partial instantiation failure   | High   | Best-effort cleanup + idempotency key in Options. Fault tests.      |
+| Caller migration regression     | Medium | GC_NATIVE_FORMULA toggle for instant rollback.                      |
+| Store.Create ID assignment      | Medium | Molecule package uses server-assigned IDs. Never assumes format.    |
+| Variable format change          | Medium | Isolated in buildSlingFormulaVars update. Map semantics documented. |
+| exec.Store mol-cook deprecation | Low    | CRUD-only path per Option B. Toggle provides transition period.     |
+| Cross-repo drift                | Low    | Deliberate fork with Gas City as sole owner. Beads copy frozen.     |
 
 ## Migration order and dependencies
 

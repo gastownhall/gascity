@@ -121,18 +121,18 @@ prompt dynamically customized to its deployment context.
 
 ## Interactions
 
-| Depends on | How |
-|---|---|
-| `internal/fsys` | Reads template files from disk |
-| `internal/config` | Agent.PromptTemplate path, Agent.Env vars |
-| `internal/git` | DefaultBranch for PromptContext |
-| `internal/agent` | SessionNameFor() via `session` template function |
+| Depends on        | How                                              |
+| ----------------- | ------------------------------------------------ |
+| `internal/fsys`   | Reads template files from disk                   |
+| `internal/config` | Agent.PromptTemplate path, Agent.Env vars        |
+| `internal/git`    | DefaultBranch for PromptContext                  |
+| `internal/agent`  | SessionNameFor() via `session` template function |
 
-| Depended on by | How |
-|---|---|
-| `cmd/gc/cmd_prime.go` | `gc prime` outputs rendered prompt |
+| Depended on by        | How                                      |
+| --------------------- | ---------------------------------------- |
+| `cmd/gc/cmd_prime.go` | `gc prime` outputs rendered prompt       |
 | `cmd/gc/providers.go` | Rendered prompt passed to agent on start |
-| Agent hooks | Hook calls `gc prime` to get the prompt |
+| Agent hooks           | Hook calls `gc prime` to get the prompt  |
 
 ## Code Map
 
@@ -162,25 +162,25 @@ append_fragments = ["safety"]
 
 ### Template Variables
 
-| Variable | Source | Example |
-|---|---|---|
-| `CityRoot` | City directory path | `/home/user/my-city` |
-| `AgentName` | Qualified agent name | `frontend/worker-1` |
-| `TemplateName` | Config template name | `worker` |
-| `RigName` | Rig name (empty for city agents) | `frontend` |
-| `WorkDir` | Agent working directory | `/projects/frontend` |
-| `IssuePrefix` | Rig bead ID prefix | `FE` |
-| `Branch` | Current git branch | `feature-x` |
-| `DefaultBranch` | Default branch | `main` |
-| `WorkQuery` | Work discovery command | `bd ready --assignee=...` |
-| `SlingQuery` | Work routing command | `gc sling ...` |
+| Variable        | Source                           | Example                   |
+| --------------- | -------------------------------- | ------------------------- |
+| `CityRoot`      | City directory path              | `/home/user/my-city`      |
+| `AgentName`     | Qualified agent name             | `frontend/worker-1`       |
+| `TemplateName`  | Config template name             | `worker`                  |
+| `RigName`       | Rig name (empty for city agents) | `frontend`                |
+| `WorkDir`       | Agent working directory          | `/projects/frontend`      |
+| `IssuePrefix`   | Rig bead ID prefix               | `FE`                      |
+| `Branch`        | Current git branch               | `feature-x`               |
+| `DefaultBranch` | Default branch                   | `main`                    |
+| `WorkQuery`     | Work discovery command           | `bd ready --assignee=...` |
+| `SlingQuery`    | Work routing command             | `gc sling ...`            |
 
 ### Template Functions
 
-| Function | Usage | Returns |
-|---|---|---|
-| `cmd` | `{{cmd}}` | Binary name (`gc`) |
-| `session` | `{{session .AgentName}}` | Session name for agent |
+| Function   | Usage                     | Returns                       |
+| ---------- | ------------------------- | ----------------------------- |
+| `cmd`      | `{{cmd}}`                 | Binary name (`gc`)            |
+| `session`  | `{{session .AgentName}}`  | Session name for agent        |
 | `basename` | `{{basename .AgentName}}` | Base name from qualified name |
 
 ### Fragment Composition
@@ -188,12 +188,12 @@ append_fragments = ["safety"]
 There are two distinct ways fragment content can appear in a rendered
 prompt:
 
-| Mechanism | Where declared | Effect |
-|---|---|---|
-| `{{ template "name" . }}` | inside `prompt.template.md` | Places fragment content exactly where referenced |
-| `append_fragments = ["name"]` | `[agent_defaults]` | Appends fragment content after the rendered prompt body |
-| `append_fragments = ["name"]` | per-agent (`[[agent]]` or `agents/<name>/agent.toml`) | Appends fragment content after the rendered prompt body; layers in front of `[agent_defaults]` |
-| `inject_fragments = ["name"]` | per-agent settings (legacy) | Appends fragment content after the rendered prompt body; retained for migration, new configs should use `append_fragments` |
+| Mechanism                     | Where declared                                        | Effect                                                                                                                     |
+| ----------------------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `{{ template "name" . }}`     | inside `prompt.template.md`                           | Places fragment content exactly where referenced                                                                           |
+| `append_fragments = ["name"]` | `[agent_defaults]`                                    | Appends fragment content after the rendered prompt body                                                                    |
+| `append_fragments = ["name"]` | per-agent (`[[agent]]` or `agents/<name>/agent.toml`) | Appends fragment content after the rendered prompt body; layers in front of `[agent_defaults]`                             |
+| `inject_fragments = ["name"]` | per-agent settings (legacy)                           | Appends fragment content after the rendered prompt body; retained for migration, new configs should use `append_fragments` |
 
 ## Testing
 

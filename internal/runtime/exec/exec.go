@@ -143,10 +143,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 }
 
 func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg runtime.Config) error {
-	if cfg.AcceptStartupDialogs != nil && !*cfg.AcceptStartupDialogs {
-		return nil
-	}
-	if cfg.AcceptStartupDialogs == nil && !cfg.EmitsPermissionWarning && len(cfg.ProcessNames) == 0 {
+	if !cfg.EmitsPermissionWarning && len(cfg.ProcessNames) == 0 {
 		return nil
 	}
 

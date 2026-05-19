@@ -77,36 +77,22 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		p.mu.Unlock()
 	}
 
-	if err := stageStartFiles(cfg, os.Stderr); err != nil {
-		return err
-	}
-
-	err = doStartSession(ctx, &tmuxStartOps{tm: p.tm}, name, cfg, p.cfg.SetupTimeout)
-	if err == nil {
-		p.cache.Invalidate()
-		return nil
-	}
-	p.cleanupFailedStart(name, cfg)
-	return err
-}
-
-func stageStartFiles(cfg runtime.Config, warnings io.Writer) error {
 	// Copy overlays and CopyFiles before creating the tmux session.
 	// Local provider: files are on the same filesystem.
-	// V2 per-provider overlay support: StageProviderOverlayDir copies universal
-	// files then flattened per-provider/<provider>/ slots for ProviderOverlayName
-	// with ProviderName fallback, plus any InstallAgentHooks entries.
-	overlayProviders := runtime.OverlayProviderNames(cfg)
+	// V2 per-provider overlay support: CopyDirForProviders copies universal
+	// files then per-provider/<provider>/ slots for ProviderName plus any
+	// InstallAgentHooks entries (flattened).
+	overlayProviders := append([]string{cfg.ProviderName}, cfg.InstallAgentHooks...)
 	if cfg.WorkDir != "" {
 		for _, od := range cfg.PackOverlayDirs {
-			if err := runtime.StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings); err != nil {
+			if err := overlay.CopyDirForProviders(od, cfg.WorkDir, overlayProviders, io.Discard); err != nil {
 				return fmt.Errorf("copying pack overlay %s: %w", od, err)
 			}
 		}
 	}
 	// Agent-level overlay (highest priority; merges known settings files, overwrites others).
 	if cfg.OverlayDir != "" && cfg.WorkDir != "" {
-		if err := runtime.StageProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, overlayProviders, warnings); err != nil {
+		if err := overlay.CopyDirForProviders(cfg.OverlayDir, cfg.WorkDir, overlayProviders, io.Discard); err != nil {
 			return fmt.Errorf("copying overlay %s: %w", cfg.OverlayDir, err)
 		}
 	}
@@ -123,7 +109,14 @@ func stageStartFiles(cfg runtime.Config, warnings io.Writer) error {
 		}
 		_ = overlay.CopyFileOrDir(cf.Src, dst, io.Discard)
 	}
-	return nil
+
+	err = doStartSession(ctx, &tmuxStartOps{tm: p.tm}, name, cfg, p.cfg.SetupTimeout)
+	if err == nil {
+		p.cache.Invalidate()
+		return nil
+	}
+	p.cleanupFailedStart(name, cfg)
+	return err
 }
 
 func ensureInstanceToken(env map[string]string) (map[string]string, error) {
@@ -145,9 +138,6 @@ func injectSessionRuntimeHintsEnv(env map[string]string, cfg runtime.Config) map
 	cloned := make(map[string]string, len(env)+1)
 	for k, v := range env {
 		cloned[k] = v
-	}
-	if provider := strings.TrimSpace(cfg.ProviderName); provider != "" && strings.TrimSpace(cloned["GC_PROVIDER"]) == "" {
-		cloned["GC_PROVIDER"] = provider
 	}
 	if prompt := strings.TrimSpace(cfg.ReadyPromptPrefix); prompt != "" {
 		cloned[sessionReadyPromptEnvKey] = cfg.ReadyPromptPrefix
@@ -214,7 +204,7 @@ func (p *Provider) Stop(name string) error {
 func (p *Provider) Interrupt(name string) error {
 	if p.tm.requiresHiddenAttachedInterrupt(name) && !p.tm.IsSessionAttached(name) {
 		if err := p.tm.ensureHiddenAttachedClient(name); err != nil {
-			return fmt.Errorf("preparing detached interrupt: %w", err)
+			return fmt.Errorf("preparing detached gemini interrupt: %w", err)
 		}
 	}
 	if used, err := p.tm.sendHiddenAttachedKeys(name, "C-c"); used {
@@ -630,16 +620,6 @@ func (o *tmuxStartOps) acceptStartupDialogs(ctx context.Context, name string) er
 	return o.tm.AcceptStartupDialogs(ctx, name)
 }
 
-func shouldAcceptStartupDialogs(cfg runtime.Config) bool {
-	if cfg.AcceptStartupDialogs != nil {
-		return *cfg.AcceptStartupDialogs
-	}
-	if len(cfg.ProcessNames) == 0 && !cfg.EmitsPermissionWarning {
-		return false
-	}
-	return true
-}
-
 func (o *tmuxStartOps) waitForReady(ctx context.Context, name string, rc *RuntimeConfig, timeout time.Duration) error {
 	return o.tm.WaitForRuntimeReady(ctx, name, rc, timeout)
 }
@@ -705,7 +685,6 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 
 	hasHints := cfg.ReadyPromptPrefix != "" || cfg.ReadyDelayMs > 0 ||
 		len(cfg.ProcessNames) > 0 || cfg.EmitsPermissionWarning ||
-		cfg.AcceptStartupDialogs != nil ||
 		cfg.Nudge != "" || len(cfg.PreStart) > 0 || len(cfg.SessionSetup) > 0 || cfg.SessionSetupScript != "" ||
 		len(cfg.SessionLive) > 0
 
@@ -729,7 +708,7 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 	// Step 3: Accept startup dialogs (workspace trust + bypass permissions).
 	// Always attempted when process names are set, since any Claude-like
 	// agent may show a trust dialog regardless of EmitsPermissionWarning.
-	if shouldAcceptStartupDialogs(cfg) {
+	if len(cfg.ProcessNames) > 0 || cfg.EmitsPermissionWarning {
 		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
 		if err := ctx.Err(); err != nil {
 			return err
@@ -752,7 +731,7 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 	// Some CLIs surface trust or permissions dialogs only after their initial
 	// ready screen. Re-run dialog acceptance after readiness so late dialogs do
 	// not strand the session in an unusable startup state.
-	if shouldAcceptStartupDialogs(cfg) {
+	if len(cfg.ProcessNames) > 0 || cfg.EmitsPermissionWarning {
 		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
 		if err := ctx.Err(); err != nil {
 			return err
@@ -765,7 +744,7 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 		return fmt.Errorf("verifying session: %w", err)
 	}
 	if !alive {
-		return fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, name)
+		return fmt.Errorf("session %q died during startup", name)
 	}
 
 	// Step 5.5: Run session setup commands and script.

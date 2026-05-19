@@ -75,7 +75,9 @@ func preCompactHookConfigPaths(t *testing.T, repoRoot string) []string {
 
 			dir := filepath.Base(filepath.Dir(path))
 			name := filepath.Base(path)
-			if (dir == ".claude" && name == "settings.json") || (dir == ".cursor" && name == "hooks.json") {
+			if (dir == ".claude" && name == "settings.json") ||
+				(dir == ".codex" && name == "hooks.json") ||
+				(dir == ".cursor" && name == "hooks.json") {
 				paths = append(paths, path)
 			}
 			return nil

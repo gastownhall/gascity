@@ -20,11 +20,11 @@ Gas City has basic worktree isolation:
 
 Gas Town distinguishes **pause** vs **permanent shutdown**:
 
-| Gas Town command | Sessions | Worktrees | Beads | Gas City equivalent |
-|------------------|----------|-----------|-------|---------------------|
-| `gt down` (pause) | Killed | **Preserved** | Preserved | `gc stop` |
-| `gt up` (resume) | Re-created | **Auto-discovered** | Read | `gc start` |
-| `gt shutdown` | Killed | **Removed** | Preserved | `gc stop --clean` (future) |
+| Gas Town command  | Sessions   | Worktrees           | Beads     | Gas City equivalent        |
+| ----------------- | ---------- | ------------------- | --------- | -------------------------- |
+| `gt down` (pause) | Killed     | **Preserved**       | Preserved | `gc stop`                  |
+| `gt up` (resume)  | Re-created | **Auto-discovered** | Read      | `gc start`                 |
+| `gt shutdown`     | Killed     | **Removed**         | Preserved | `gc stop --clean` (future) |
 
 **Fixed:** `gc stop` now preserves worktrees (pause). `gc stop --clean`
 removes them with safety checks (permanent shutdown).
@@ -124,6 +124,7 @@ but the hook exists, something is wrong → flag for recovery.
 ### 4. Stale hook = dead session + hooked bead
 
 Before unhooking:
+
 1. Check if agent session is alive (tmux + process check)
 2. Check if worktree has uncommitted changes
 3. If dead + clean → unhook bead (status → open, reassignable)
@@ -257,15 +258,15 @@ from `.gc/worktrees/<rig>/` directory contents.
 
 #### Step 7: Error cases
 
-| Failure mode | Detection | Recovery |
-|---|---|---|
-| Agent crash mid-work | Session dead + hook exists + no done-intent | Restart agent in same worktree, resume from hook |
-| Agent crash mid-done | Session dead + done-intent label present | Witness completes cleanup |
-| Zombie session | Session alive + process dead | Health patrol kills session, unhooks bead |
-| Stuck agent | Hook age > threshold | Health patrol nudges, then escalates |
-| Orphaned bead | Hook exists + no matching agent/worktree | Stale hook scan unhooks (if worktree clean) |
-| Uncommitted work + dead agent | Dirty worktree + session dead | **Manual recovery required** — warn operator |
-| Name stuck in .pending | .pending file age > 5 min | Reconciliation deletes stale .pending |
+| Failure mode                  | Detection                                   | Recovery                                         |
+| ----------------------------- | ------------------------------------------- | ------------------------------------------------ |
+| Agent crash mid-work          | Session dead + hook exists + no done-intent | Restart agent in same worktree, resume from hook |
+| Agent crash mid-done          | Session dead + done-intent label present    | Witness completes cleanup                        |
+| Zombie session                | Session alive + process dead                | Health patrol kills session, unhooks bead        |
+| Stuck agent                   | Hook age > threshold                        | Health patrol nudges, then escalates             |
+| Orphaned bead                 | Hook exists + no matching agent/worktree    | Stale hook scan unhooks (if worktree clean)      |
+| Uncommitted work + dead agent | Dirty worktree + session dead               | **Manual recovery required** — warn operator     |
+| Name stuck in .pending        | .pending file age > 5 min                   | Reconciliation deletes stale .pending            |
 
 ### SDK implications for Gas City
 
@@ -477,23 +478,23 @@ rely on CWD surviving worktree operations.
 
 ## Gas Town reference files
 
-| Concept | Gas Town file | Key function |
-|---------|---------------|--------------|
-| Worktree preserved on down | internal/cmd/down.go | runDown() |
-| Auto-discovery on up | internal/polecat/manager.go:1289 | ReconcilePool() |
-| Session stale check | internal/polecat/session_manager.go:448 | Start() |
-| Agent bead registry | internal/polecat/manager.go:1621 | loadPolecatState() |
-| Crew worktree (permanent) | internal/cmd/worktree.go:96 | runWorktree() |
-| Zombie detection | internal/doctor/zombie_check.go | isSessionProcessDead() |
-| Stale hook scan | internal/deacon/stale_hooks.go:75 | scanStaleHooks() |
-| Worktree safety check | internal/deacon/stale_hooks.go:191 | checkUncommittedWork() |
-| PID tracking | internal/session/pidtrack.go | WritePID() / CheckPID() |
-| Startup beacon | internal/session/startup.go | FormatStartupBeacon() |
-| Polecat spawn (full flow) | internal/polecat/manager.go | SpawnPolecatForSling() |
-| Name allocation | internal/polecat/name_pool.go | AllocateName() / Release() |
-| Hook bead (atomic assign) | internal/polecat/manager.go | hookBead() |
-| Done flow | internal/cmd/done.go | runDone() |
-| Self-nuke | internal/cmd/done.go | selfNukePolecat() |
-| Done-intent label | internal/cmd/done.go | writeDoneIntent() |
-| Witness post-merge | internal/polecat/witness.go | handleMergedMR() |
-| Session wait-for-start | internal/polecat/session_manager.go | waitForProcess() |
+| Concept                    | Gas Town file                           | Key function               |
+| -------------------------- | --------------------------------------- | -------------------------- |
+| Worktree preserved on down | internal/cmd/down.go                    | runDown()                  |
+| Auto-discovery on up       | internal/polecat/manager.go:1289        | ReconcilePool()            |
+| Session stale check        | internal/polecat/session_manager.go:448 | Start()                    |
+| Agent bead registry        | internal/polecat/manager.go:1621        | loadPolecatState()         |
+| Crew worktree (permanent)  | internal/cmd/worktree.go:96             | runWorktree()              |
+| Zombie detection           | internal/doctor/zombie_check.go         | isSessionProcessDead()     |
+| Stale hook scan            | internal/deacon/stale_hooks.go:75       | scanStaleHooks()           |
+| Worktree safety check      | internal/deacon/stale_hooks.go:191      | checkUncommittedWork()     |
+| PID tracking               | internal/session/pidtrack.go            | WritePID() / CheckPID()    |
+| Startup beacon             | internal/session/startup.go             | FormatStartupBeacon()      |
+| Polecat spawn (full flow)  | internal/polecat/manager.go             | SpawnPolecatForSling()     |
+| Name allocation            | internal/polecat/name_pool.go           | AllocateName() / Release() |
+| Hook bead (atomic assign)  | internal/polecat/manager.go             | hookBead()                 |
+| Done flow                  | internal/cmd/done.go                    | runDone()                  |
+| Self-nuke                  | internal/cmd/done.go                    | selfNukePolecat()          |
+| Done-intent label          | internal/cmd/done.go                    | writeDoneIntent()          |
+| Witness post-merge         | internal/polecat/witness.go             | handleMergedMR()           |
+| Session wait-for-start     | internal/polecat/session_manager.go     | waitForProcess()           |

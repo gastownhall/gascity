@@ -4,19 +4,19 @@ sidebarTitle: 05 - Formulas
 description: Write declarative workflow templates with steps, dependencies, variables, and control flow, then dispatch them to agents.
 ---
 
-So far you've been giving agents work one piece at a time — `gc sling helper "do this thing"`. That works, but real workflows have multiple steps with dependencies between them. This tutorial shows how to define multi-step workflows as *formulas* and dispatch them as a unit.
+So far you've been giving agents work one piece at a time — `gc sling helper "do this thing"`. That works, but real workflows have multiple steps with dependencies between them. This tutorial shows how to define multi-step workflows as _formulas_ and dispatch them as a unit.
 
 We'll pick up where Tutorial 04 left off. You should have `my-city` running with `my-project` and `my-api` rigged, and agents for `mayor`, `helper`, `worker`, and `reviewer`.
 
-One of the main reasons agent orchestration engines like Gas City exist is to coordinate various pieces of work without a human or shell script trying to feed the right prompts at the right times. In Gas City, we use *formulas* to write down all of the things we want to happen, and then hand them off to the agent to do our bidding.
+One of the main reasons agent orchestration engines like Gas City exist is to coordinate various pieces of work without a human or shell script trying to feed the right prompts at the right times. In Gas City, we use _formulas_ to write down all of the things we want to happen, and then hand them off to the agent to do our bidding.
 
-A formula describes the steps that need to take place, but it's not *quite* step by step instructions. As with many things in life, some things need to happen one after another, but a lot of things can happen in parallel. Parallelism is generally good, as it scales well to machines, and can shorten the path from beginning to end.
+A formula describes the steps that need to take place, but it's not _quite_ step by step instructions. As with many things in life, some things need to happen one after another, but a lot of things can happen in parallel. Parallelism is generally good, as it scales well to machines, and can shorten the path from beginning to end.
 
-A formula is a TOML file that describes a collection of steps with dependencies, variables, and optional control flow. To run a formula, you `gc sling` it to an agent just as you would any other work. 
+A formula is a TOML file that describes a collection of steps with dependencies, variables, and optional control flow. To run a formula, you `gc sling` it to an agent just as you would any other work.
 
 ## A simple formula
 
->***donna** Chris, to this point, the tutorials have been building upon anoter. Pancakes is a fun diversion, but if you like, we can go more linear.  Just LMK.*
+> **\*donna** Chris, to this point, the tutorials have been building upon anoter. Pancakes is a fun diversion, but if you like, we can go more linear. Just LMK.\*
 
 Formula files use the `.formula.toml` extension and live in your city's `formulas/` directory. `gc init` already dropped a few in there for you, including a pancakes recipe:
 
@@ -55,6 +55,7 @@ needs = ["cook"]
 ```
 
 The `needs` field declares dependencies between sibling steps.
+
 - `dry` and `wet` can run in parallel
 - `combine` needs both `dry` and `wet` to complete before it runs
 - `cook` waits for `combine`
@@ -102,6 +103,7 @@ Steps (6):
 ## Instantiating a formula
 
 The whole reason we write formulas is because we want to see them do things. The simplest way to see your formula do things is to sling it to an agent.
+
 ```shell
 ~/my-city
 $ gc sling mayor pancakes --formula
@@ -411,7 +413,7 @@ That covers the core of formulas — defining steps, wiring dependencies, parame
 
 ---
 
-{/* BONEYARD — draft material for future sections. Not part of the published tutorial.
+{/\* BONEYARD — draft material for future sections. Not part of the published tutorial.
 
 ### Gates
 
@@ -593,4 +595,4 @@ Dispatched wisp gc-10 (review) → worker
 
 The worker gets a three-step workflow for reviewing PR #42. Each step has clear dependencies, the agent works through them in order, and the wisp closes when the last step is done.
 
-That's formulas — declarative workflow templates, compiled into recipes, instantiated as beads, dispatched to agents. The same machinery scales from a three-step code review to a multi-agent orchestration pipeline with conditional steps, retry loops, and scheduled dispatch. */}
+That's formulas — declarative workflow templates, compiled into recipes, instantiated as beads, dispatched to agents. The same machinery scales from a three-step code review to a multi-agent orchestration pipeline with conditional steps, retry loops, and scheduled dispatch. \*/}

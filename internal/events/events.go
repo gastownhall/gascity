@@ -34,19 +34,14 @@ const (
 	SessionUndrained   = "session.undrained"
 	SessionQuarantined = "session.quarantined"
 	SessionIdleKilled  = "session.idle_killed"
-	// SessionMaxAgeKilled fires when the controller preemptively restarts a
-	// long-running session because its wall-clock age exceeded the agent's
-	// max_session_age threshold. Motivating case: provider SDKs that cache
-	// credentials at session start and wedge when the cached token expires.
-	SessionMaxAgeKilled = "session.max_age_killed"
-	SessionSuspended    = "session.suspended"
-	SessionUpdated      = "session.updated"
-	ConvoyCreated       = "convoy.created"
-	ConvoyClosed        = "convoy.closed"
-	ControllerStarted   = "controller.started"
-	ControllerStopped   = "controller.stopped"
-	CitySuspended       = "city.suspended"
-	CityResumed         = "city.resumed"
+	SessionSuspended   = "session.suspended"
+	SessionUpdated     = "session.updated"
+	ConvoyCreated      = "convoy.created"
+	ConvoyClosed       = "convoy.closed"
+	ControllerStarted  = "controller.started"
+	ControllerStopped  = "controller.stopped"
+	CitySuspended      = "city.suspended"
+	CityResumed        = "city.resumed"
 	// Typed async request result events. 5 success types (one per
 	// operation, fully typed payload) + 1 shared failure type.
 	RequestResultCityCreate     = "request.result.city.create"
@@ -58,15 +53,13 @@ const (
 
 	// Non-terminal city lifecycle events recorded in the per-city
 	// event log during init/unregister for diagnostics.
-	CityCreated                     = "city.created"
-	CityUnregisterRequested         = "city.unregister_requested"
-	OrderFired                      = "order.fired"
-	OrderCompleted                  = "order.completed"
-	OrderFailed                     = "order.failed"
-	ProviderSwapped                 = "provider.swapped"
-	WorkerOperation                 = "worker.operation"
-	ProjectIdentityStamped          = "project.identity.stamped"
-	SupervisorFSPressureSkippedTick = "supervisor.fs_pressure.skipped_tick"
+	CityCreated             = "city.created"
+	CityUnregisterRequested = "city.unregister_requested"
+	OrderFired              = "order.fired"
+	OrderCompleted          = "order.completed"
+	OrderFailed             = "order.failed"
+	ProviderSwapped         = "provider.swapped"
+	WorkerOperation         = "worker.operation"
 
 	// External messaging events.
 	ExtMsgBound          = "extmsg.bound"
@@ -76,12 +69,6 @@ const (
 	ExtMsgAdapterRemoved = "extmsg.adapter_removed"
 	ExtMsgInbound        = "extmsg.inbound"
 	ExtMsgOutbound       = "extmsg.outbound"
-
-	// EventsRotated is the forensic anchor written as the first event in
-	// a freshly-rotated active log. Its payload carries the prior
-	// archive's filename and seq range so log readers can stitch back
-	// across rotations.
-	EventsRotated = "events.rotated"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -91,7 +78,7 @@ const (
 var KnownEventTypes = []string{
 	SessionWoke, SessionStopped, SessionCrashed,
 	SessionDraining, SessionUndrained, SessionQuarantined,
-	SessionIdleKilled, SessionMaxAgeKilled, SessionSuspended, SessionUpdated,
+	SessionIdleKilled, SessionSuspended, SessionUpdated,
 	BeadCreated, BeadClosed, BeadUpdated,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
@@ -103,11 +90,10 @@ var KnownEventTypes = []string{
 	RequestResultSessionSubmit, RequestFailed,
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed,
-	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
+	ProviderSwapped, WorkerOperation,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,
-	EventsRotated,
 }
 
 // Event is a single recorded occurrence in the system.

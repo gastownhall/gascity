@@ -36,8 +36,6 @@ type wakeEvaluation struct {
 	ConfigSuppressed bool
 }
 
-const sleepReasonRuntimeMissing = "runtime-missing"
-
 // Deprecated: evaluateWakeReasons and wakeReasons are legacy functions
 // superseded by ComputeAwakeSet (compute_awake_set.go). The production
 // reconciler at session_reconciler.go:438 uses ComputeAwakeSet →
@@ -394,6 +392,10 @@ func hasDependencyWakeRoot(reasons []WakeReason) bool {
 // isolated work_dir sandboxes. Non-empty output means work exists. Agents
 // without a work_query produce no WakeWork reason.
 func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir string, store beads.Store, sessionBeads *sessionBeadSnapshot, stderr io.Writer) map[string]bool { //nolint:unparam // cityName varies at runtime; tests use a fixed value
+	return computeWorkSetWithStores(cfg, runner, cityName, cityDir, store, nil, sessionBeads, stderr)
+}
+
+func computeWorkSetWithStores(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir string, store beads.Store, rigStores map[string]beads.Store, sessionBeads *sessionBeadSnapshot, stderr io.Writer) map[string]bool { //nolint:unparam // cityName varies at runtime; tests use a fixed value
 	if cfg == nil || runner == nil {
 		return nil
 	}
@@ -418,11 +420,17 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 			continue
 		}
 		seen[qn] = true
-		probeEnv, err := controllerQueryRuntimeEnv(cityDir, cfg, a)
-		if err != nil {
-			fmt.Fprintf(stderr, "session reconcile: building probe env for %s: %v\n", qn, err) //nolint:errcheck
-			continue
+		queryStore := workQueryStoreForAgent(cityDir, cfg, a, store, rigStores)
+		if strings.TrimSpace(a.WorkQuery) == "" {
+			ok, handled := defaultWorkQueryHasReadyWork(cfg, cityDir, cityName, queryStore, sessionBeads, a)
+			if handled {
+				if ok {
+					work[qn] = true
+				}
+				continue
+			}
 		}
+		probeEnv := controllerQueryRuntimeEnv(cityDir, cfg, a)
 		wq := prefixedWorkQueryForProbeWithEnv(controllerQueryPrefixEnv(probeEnv), cfg, cityDir, cityName, store, sessionBeads, a, stderr)
 		if wq == "" {
 			continue
@@ -456,6 +464,96 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 		}
 	}
 	return work
+}
+
+type defaultWorkQueryStore interface {
+	DefaultWorkQueryHasReadyWork(targets []string, identities []string, includeRouted bool) (bool, error)
+}
+
+func workQueryStoreForAgent(cityPath string, cfg *config.City, a *config.Agent, cityStore beads.Store, rigStores map[string]beads.Store) beads.Store {
+	if cfg == nil || a == nil {
+		return cityStore
+	}
+	if rigName := configuredRigName(cityPath, a, cfg.Rigs); rigName != "" {
+		if rigStore := rigStores[rigName]; rigStore != nil {
+			return rigStore
+		}
+	}
+	return cityStore
+}
+
+func defaultWorkQueryHasReadyWork(
+	cfg *config.City,
+	cityPath string,
+	cityName string,
+	store beads.Store,
+	sessionBeads *sessionBeadSnapshot,
+	a *config.Agent,
+) (bool, bool) {
+	direct, ok := store.(defaultWorkQueryStore)
+	if !ok || a == nil {
+		return false, false
+	}
+	target := a.QualifiedName()
+	if strings.TrimSpace(a.PoolName) != "" {
+		target = strings.TrimSpace(a.PoolName)
+	}
+	targets := []string{target}
+	if legacy := legacyControlDispatcherTarget(target); legacy != "" {
+		targets = append(targets, legacy)
+	}
+	identities := defaultWorkQueryIdentities(cfg, cityName, store, sessionBeads, a)
+	for _, identity := range append([]string{}, identities...) {
+		if legacy := legacyControlDispatcherIdentity(identity); legacy != "" {
+			identities = append(identities, legacy)
+		}
+	}
+	includeRouted := true
+	found, err := direct.DefaultWorkQueryHasReadyWork(targets, identities, includeRouted)
+	if err != nil {
+		return false, true
+	}
+	return found, true
+}
+
+func defaultWorkQueryIdentities(cfg *config.City, cityName string, store beads.Store, sessionBeads *sessionBeadSnapshot, a *config.Agent) []string {
+	if a == nil || a.SupportsMultipleSessions() {
+		return nil
+	}
+	sessionName := probeSessionNameForTemplate(cfg, cityName, store, sessionBeads, a.QualifiedName())
+	if sessionName == "" {
+		return nil
+	}
+	ids := []string{sessionName}
+	if sessionBeads != nil {
+		for _, bead := range sessionBeads.Open() {
+			if strings.TrimSpace(bead.Metadata["session_name"]) == sessionName {
+				ids = append(ids, bead.ID)
+				break
+			}
+		}
+	}
+	return ids
+}
+
+func legacyControlDispatcherTarget(target string) string {
+	target = strings.TrimSpace(target)
+	if target == config.ControlDispatcherAgentName {
+		return "workflow-control"
+	}
+	const suffix = "/" + config.ControlDispatcherAgentName
+	if strings.HasSuffix(target, suffix) {
+		return strings.TrimSuffix(target, suffix) + "/workflow-control"
+	}
+	return ""
+}
+
+func legacyControlDispatcherIdentity(identity string) string {
+	identity = strings.TrimSpace(identity)
+	if strings.HasSuffix(identity, config.ControlDispatcherAgentName) {
+		return strings.TrimSuffix(identity, config.ControlDispatcherAgentName) + "workflow-control"
+	}
+	return ""
 }
 
 // findAgentByTemplate looks up a config agent by template name.
@@ -711,12 +809,6 @@ func checkChurn(session *beads.Bead, cfg *config.City, alive bool, dt *drainTrac
 	if alive {
 		return false
 	}
-	// Pending-create sessions have not completed startup yet. A stale create
-	// lease should trigger a retried wake, not a churn increment that blocks
-	// the retry before start execution.
-	if session != nil && strings.TrimSpace(session.Metadata["pending_create_claim"]) == "true" {
-		return false
-	}
 	// Subprocess sessions exit intentionally — not churn.
 	if cfg != nil && cfg.Session.Provider == "subprocess" {
 		return false
@@ -761,7 +853,7 @@ func checkChurn(session *beads.Bead, cfg *config.City, alive bool, dt *drainTrac
 func isDeliberateSleepReason(reason string) bool {
 	switch strings.TrimSpace(reason) {
 	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained",
-		sleepReasonCityStop, "user-hold", "wait-hold", "rate_limit", "failed-create":
+		sleepReasonCityStop, "user-hold", "wait-hold", "rate_limit":
 		return true
 	default:
 		return false
@@ -884,15 +976,6 @@ func healState(session *beads.Bead, alive bool, store beads.Store, clk clock.Clo
 	if session == nil {
 		return
 	}
-	// healState is the third writer in the closed-bead flap cycle. The
-	// lifecycle projection still resolves to BaseStateDrained for closed
-	// beads, so without this guard healState writes state=asleep on
-	// every reconciler tick of a terminal bead — alternating with the
-	// gc_swept / orphaned writes from the closeBead path. Closed beads
-	// are terminal; their advisory state metadata should not move.
-	if session.Status == "closed" {
-		return
-	}
 	batch := healStatePatch(*session, alive, clk)
 	if len(batch) == 0 {
 		return
@@ -948,43 +1031,16 @@ func healStatePatch(session beads.Bead, alive bool, clk clock.Clock) map[string]
 			target = string(sessionpkg.StateCreating)
 		}
 	}
-	// failed-create is a terminal rollback marker written by
-	// rollbackPendingCreate when a start attempt failed. A bead in this state
-	// whose runtime is not alive must heal toward asleep, even if
-	// pending_create_claim is still set from the failed attempt — otherwise
-	// sessionStartRequested pulls the bead back to creating and the
-	// reconciler ping-pongs forever. Clearing the stale claim in the same
-	// batch finishes the rollback the lifecycle path started.
-	if !alive && strings.TrimSpace(meta["state"]) == "failed-create" {
-		if strings.TrimSpace(meta["pending_create_claim"]) == "true" && pendingCreateLeaseActive(session, clk, 0) {
-			return nil
-		}
-		target = string(sessionpkg.StateAsleep)
-		if strings.TrimSpace(meta["pending_create_claim"]) == "true" {
-			batch["pending_create_claim"] = ""
-			batch["pending_create_started_at"] = ""
-		}
-	}
 	if target == "" {
 		return nil
 	}
 	if meta["state"] != target {
 		batch["state"] = target
-		if target == string(sessionpkg.StateAsleep) && view.ResetContinuation && strings.TrimSpace(meta["sleep_reason"]) == "" {
-			batch["sleep_reason"] = sleepReasonRuntimeMissing
-		}
 	}
-	if target == string(sessionpkg.StateAsleep) {
-		if strings.TrimSpace(meta["sleep_reason"]) == "" && strings.TrimSpace(meta["state"]) == "failed-create" {
-			batch["sleep_reason"] = "failed-create"
-		}
-		if view.ResetContinuation {
-			if !isNamedSessionBead(session) || namedSessionMode(session) != "always" {
-				batch["session_key"] = ""
-				batch["started_config_hash"] = ""
-				batch["continuation_reset_pending"] = "true"
-			}
-		}
+	if target == string(sessionpkg.StateAsleep) && view.ResetContinuation {
+		batch["session_key"] = ""
+		batch["started_config_hash"] = ""
+		batch["continuation_reset_pending"] = "true"
 	}
 	return emptyNil(batch)
 }
@@ -1134,18 +1190,17 @@ func topoOrder(sessions []beads.Bead, deps map[string][]string) []beads.Bead {
 // during reconciliation to allow forward-compatible rollback from newer
 // versions that add states like "draining" or "archived".
 var knownSessionStates = map[string]bool{
-	"active":                             true,
-	"asleep":                             true,
-	"awake":                              true,
-	"stopped":                            true,
-	"suspended":                          true,
-	"orphaned":                           true,
-	"closed":                             true,
-	"quarantined":                        true,
-	"creating":                           true,
-	"drained":                            true,
-	string(sessionpkg.StateFailedCreate): true, // processed so skip/orphan-close can release the slot
-	"":                                   true, // empty state is valid (legacy beads)
+	"active":      true,
+	"asleep":      true,
+	"awake":       true,
+	"stopped":     true,
+	"suspended":   true,
+	"orphaned":    true,
+	"closed":      true,
+	"quarantined": true,
+	"creating":    true,
+	"drained":     true,
+	"":            true, // empty state is valid (legacy beads)
 }
 
 // isKnownState returns true if the bead's metadata state is recognized by

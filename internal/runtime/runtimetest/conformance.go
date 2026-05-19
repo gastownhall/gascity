@@ -13,7 +13,6 @@ package runtimetest
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 
@@ -577,8 +576,8 @@ func RunSessionTests(t *testing.T, sp runtime.Provider, cfg runtime.Config, name
 	})
 
 	t.Run("Nudge_MissingSession", func(t *testing.T) {
-		if err := sp.Nudge("nonexistent-conformance-session", runtime.TextContent("hello")); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
-			t.Errorf("Nudge on missing session error = %v, want nil or ErrSessionNotFound", err)
+		if err := sp.Nudge("nonexistent-conformance-session", runtime.TextContent("hello")); err != nil {
+			t.Errorf("Nudge on missing session should not error: %v", err)
 		}
 	})
 }

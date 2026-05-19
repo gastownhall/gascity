@@ -1,4 +1,5 @@
 {{ define "architecture" }}
+
 ## Gas City Maintenance Context
 
 ```
@@ -15,9 +16,10 @@ City ({{ .CityRoot }})
 ```
 
 **Key concepts:**
+
 - **City**: the working root for this Gas City instance
 - **Maintenance pack**: shared infrastructure for dogs, doctor checks, formulas, and orders
 - **Dog**: utility agent pool for operational cleanup and shutdown dance work
 - **Beads**: work ledger used to route and track infrastructure tasks
 - **Molecule**: multi-step formula instance guiding an agent's work
-{{ end }}
+  {{ end }}

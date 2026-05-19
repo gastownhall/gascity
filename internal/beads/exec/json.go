@@ -25,7 +25,6 @@ type createRequest struct {
 	Assignee    string            `json:"assignee,omitempty"`
 	From        string            `json:"from,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
-	Ephemeral   bool              `json:"ephemeral,omitempty"`
 }
 
 // updateRequest is the JSON wire format sent on stdin for update operations.
@@ -64,7 +63,6 @@ type beadWire struct {
 	Description string                     `json:"description"`
 	Labels      []string                   `json:"labels"`
 	Metadata    map[string]json.RawMessage `json:"metadata,omitempty"`
-	Ephemeral   bool                       `json:"ephemeral,omitempty"`
 }
 
 // marshalCreate converts a Bead to JSON for the exec script's create operation.
@@ -81,7 +79,6 @@ func marshalCreate(b beads.Bead) ([]byte, error) {
 		Assignee:    b.Assignee,
 		From:        b.From,
 		Metadata:    b.Metadata,
-		Ephemeral:   b.Ephemeral,
 	}
 	return json.Marshal(r)
 }

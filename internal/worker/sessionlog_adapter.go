@@ -347,7 +347,7 @@ func actorForEntry(entry *sessionlog.Entry) Actor {
 		return ActorUser
 	case "tool_result":
 		return ActorTool
-	case "system", "error":
+	case "system":
 		return ActorSystem
 	}
 

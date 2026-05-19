@@ -3,8 +3,8 @@ package main
 import (
 	"fmt"
 	"io"
-	"net"
-	"strconv"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/cmd/gc/dashboard"
@@ -91,10 +91,13 @@ func runDashboardServe(commandName string, port int, apiURLOverride string, stde
 func resolveDashboardContext(warningWriter ...io.Writer) (cityPath string, cfg *config.City, err error) {
 	cityPath, err = resolveCity()
 	if err != nil {
-		if strings.TrimSpace(cityFlag) == "" && strings.Contains(err.Error(), "not in a city directory") {
+		if strings.TrimSpace(cityFlag) == "" && dashboardCanRunWithoutCity(err) {
 			return "", nil, nil
 		}
 		return "", nil, err
+	}
+	if strings.TrimSpace(cityFlag) == "" && !dashboardCityTomlExists(cityPath) {
+		return "", nil, nil
 	}
 	cfg, err = loadCityConfig(cityPath, warningWriter...)
 	if err != nil {
@@ -103,13 +106,32 @@ func resolveDashboardContext(warningWriter ...io.Writer) (cityPath string, cfg *
 	return cityPath, cfg, nil
 }
 
+func dashboardCanRunWithoutCity(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "not in a city directory") || strings.Contains(msg, "not a city directory")
+}
+
+func dashboardCityTomlExists(cityPath string) bool {
+	if strings.TrimSpace(cityPath) == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); err == nil {
+		return true
+	}
+	return false
+}
+
 func resolveDashboardAPI(cityPath string, cfg *config.City, apiURLOverride string) (apiURL string, err error) {
 	if override := strings.TrimSpace(apiURLOverride); override != "" {
 		return strings.TrimRight(override, "/"), nil
 	}
 
+	if baseURL, ok := discoverReachableSupervisorAPIBaseURL(); ok {
+		return baseURL, nil
+	}
+
 	if supervisorAliveHook() != 0 {
-		baseURL, err := supervisorAPIBaseURL()
+		baseURL, err := effectiveAPIBaseURLHook()
 		if err != nil {
 			return "", err
 		}
@@ -133,29 +155,4 @@ func resolveDashboardAPI(cityPath string, cfg *config.City, apiURLOverride strin
 
 func hasStandaloneDashboardAPI(cfg *config.City) bool {
 	return cfg != nil && cfg.API.Port > 0
-}
-
-// standaloneAPIBaseURL assembles the local URL of the controller's API.
-// The controller publishes /v0/city/{cityName}/... routes, so the CLI
-// can target it the same way it targets the supervisor.
-//
-// Bind normalization:
-//   - "" → 127.0.0.1 (empty = default in config.API.BindOrDefault edge cases)
-//   - "0.0.0.0" → 127.0.0.1 (listener accepts any v4; connect to loopback)
-//   - "::" → ::1 (listener accepts any v6; connect to loopback)
-//
-// Non-wildcard binds (explicit 127.0.0.1, ::1, 192.168.x.x, 2001::...) are
-// passed through unchanged. net.JoinHostPort wraps IPv6 literals in
-// brackets so the URL parser sees `http://[::1]:8080/...` correctly;
-// plain fmt.Sprintf would produce `http://::1:8080` which parses as
-// host=":" port="1:8080" and fails.
-func standaloneAPIBaseURL(cfg *config.City) string {
-	bind := cfg.API.BindOrDefault()
-	switch bind {
-	case "", "0.0.0.0":
-		bind = "127.0.0.1"
-	case "::":
-		bind = "::1"
-	}
-	return "http://" + net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port))
 }

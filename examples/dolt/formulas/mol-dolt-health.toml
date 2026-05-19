@@ -1,27 +1,28 @@
 description = """
-Check dolt server health.
+Check dolt server health and restart on failure.
 
 This is an **order formula** — dispatched by the order system on a cooldown
 trigger (default: 30s, matching gastown). Configured in
 `orders/dolt-health.toml`.
 
-Runs the structured health check so patrol can surface server reachability,
-latency, backup freshness, orphan databases, and zombie processes without
-mutating the Dolt lifecycle on a transient status failure."""
+Detects dolt crashes via status check and restarts the server if needed."""
 formula = "mol-dolt-health"
 version = 1
 
 [[steps]]
 id = "check"
-title = "Check dolt health"
+title = "Check dolt health and restart if needed"
 description = """
-Run the structured Dolt health check through the order parser:
+Check dolt server status and restart if it has crashed:
 
 ```bash
-gc dolt health --json | gc dolt health-check
+gc dolt status
 ```
 
-Close this step after the health check completes. The parser fails the order
-with a concise message for critical data-plane failures such as
-`server.reachable=false`; lifecycle actions should be explicit follow-up work,
-not a hidden side effect of the cooldown order."""
+If the server is not running:
+
+```bash
+gc dolt start
+```
+
+Close this step after the health check completes (even if no restart was needed)."""

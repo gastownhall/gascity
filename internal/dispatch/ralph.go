@@ -94,9 +94,6 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 			"gc.retry_state":  "spawning",
 			"gc.next_attempt": strconv.Itoa(nextAttempt),
 		}); err != nil {
-			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
-				return ControlResult{}, ErrControlPending
-			}
 			return ControlResult{}, fmt.Errorf("%s: recording retry spawn start: %w", bead.ID, err)
 		}
 	case "spawning":
@@ -109,21 +106,13 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	if bead.Metadata["gc.retry_state"] != "spawned" {
 		opts.tracef("ralph retry-append-start bead=%s next=%d", bead.ID, nextAttempt)
 		if _, err := appendRalphRetry(store, logicalID, subject, bead, nextAttempt, opts); err != nil {
-			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
-				return ControlResult{}, ErrControlPending
-			}
 			return ControlResult{}, fmt.Errorf("%s: appending retry: %w", bead.ID, err)
 		}
 		opts.tracef("ralph retry-append-done bead=%s next=%d", bead.ID, nextAttempt)
-		spawnedMetadata := map[string]string{
+		if err := store.SetMetadataBatch(bead.ID, map[string]string{
 			"gc.retry_state":  "spawned",
 			"gc.next_attempt": strconv.Itoa(nextAttempt),
-		}
-		clearControllerSpawnErrorMetadata(spawnedMetadata)
-		if err := store.SetMetadataBatch(bead.ID, spawnedMetadata); err != nil {
-			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
-				return ControlResult{}, ErrControlPending
-			}
+		}); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: recording retry spawn complete: %w", bead.ID, err)
 		}
 	}
@@ -175,11 +164,7 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	if resolvedWorkDir != "" {
 		scriptBase = resolvedWorkDir
 	}
-	// Pass cityPath and scriptBase as distinct envelope/base roles: in
-	// gastownhall/gascity#2320 storePath (a rig subtree) was passed as both,
-	// causing relative gc.check_path values to be looked up under the rig
-	// tree even when the script lives in the city tree.
-	scriptPath, err := convergence.ResolveConditionPath(cityPath, scriptBase, checkPath)
+	scriptPath, err := convergence.ResolveConditionPath(scriptBase, checkPath)
 	if err != nil {
 		return convergence.GateResult{}, fmt.Errorf("%s: resolving check path: %w", bead.ID, err)
 	}
@@ -1172,9 +1157,6 @@ func rewriteRalphAttemptRef(ref string, oldAttempt, nextAttempt int) string {
 		return rewritten
 	}
 	if rewritten, ok := rewriteAttemptSegment(ref, "check", oldAttempt, nextAttempt); ok {
-		return rewritten
-	}
-	if rewritten, ok := rewriteAttemptSegment(ref, "iteration", oldAttempt, nextAttempt); ok {
 		return rewritten
 	}
 	return ref

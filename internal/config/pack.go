@@ -14,7 +14,6 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
-	"github.com/gastownhall/gascity/internal/pricing"
 )
 
 // packFile is the expected filename inside a pack directory.
@@ -40,7 +39,6 @@ type packConfig struct {
 	Doctor         []PackDoctorEntry       `toml:"doctor,omitempty"`
 	Commands       []PackCommandEntry      `toml:"commands,omitempty"`
 	Global         PackGlobal              `toml:"global,omitempty"`
-	Pricing        []pricing.ModelPricing  `toml:"pricing,omitempty"`
 }
 
 type packDefaults struct {
@@ -436,7 +434,7 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 }
 
 func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) ([]string, []PackRequirement, []string, error) {
-	topos := cfg.Workspace.LegacyIncludes()
+	topos := cfg.Workspace.Includes
 	hasImports := len(cfg.Imports) > 0
 	if len(topos) == 0 && !hasImports {
 		return nil, nil, nil, nil
@@ -860,6 +858,13 @@ func ComputeFormulaLayers(cityTopoFormulas []string, cityLocalFormulas string, r
 // Agents from the same SourceDir are never in conflict (they're duplicates
 // within one pack, handled elsewhere). Order is preserved.
 func resolveFallbackAgents(agents []Agent) []Agent {
+	fallbackGroupKey := func(a Agent) string {
+		if a.Dir == "" {
+			return a.Name
+		}
+		return a.Dir + "/" + a.Name
+	}
+
 	// Build per-name groups from distinct SourceDirs.
 	type entry struct {
 		idx      int
@@ -868,9 +873,14 @@ func resolveFallbackAgents(agents []Agent) []Agent {
 	}
 	groups := make(map[string][]entry)
 	for i, a := range agents {
-		// Use QualifiedName so agents with different bindings
-		// (e.g., "gs.mayor" and "maint.mayor") don't collide.
-		groups[a.QualifiedName()] = append(groups[a.QualifiedName()], entry{i, a.Fallback, a.SourceDir})
+		key := a.QualifiedName()
+		if a.Fallback {
+			// Fallback agents are interchangeable defaults. If two packs
+			// contribute the same logical fallback agent, they should
+			// compete on the bare city/rig identity, not on import binding.
+			key = fallbackGroupKey(a)
+		}
+		groups[key] = append(groups[key], entry{i, a.Fallback, a.SourceDir})
 	}
 
 	// Determine which indices to remove.
@@ -1297,13 +1307,6 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	// Collect this pack's own requirements.
 	allRequires = append(allRequires, tc.Pack.Requires...)
 
-	// Stamp layoutV1Inline on this pack's [[agent]] blocks BEFORE v2
-	// discovery appends to tc.Agents. Discovery stamps layoutV2Convention
-	// itself; the field is preserved through the merge below. (ga-9ogb)
-	for i := range tc.Agents {
-		tc.Agents[i].layout = layoutV1Inline
-	}
-
 	// V2 convention-based agent discovery: scan agents/ directory.
 	// Convention-discovered agents are appended AFTER TOML-declared agents
 	// so [[agent]] tables take precedence when both exist.
@@ -1352,10 +1355,6 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		}
 		// Track where this agent's config was defined.
 		agents[i].SourceDir = topoDir
-		// Stamp source provenance (ga-tpfc). expandCityPacks may
-		// later override sourcePack → sourceAutoImport for bindings
-		// that came from [defaults.rig.imports].
-		agents[i].source = sourcePack
 		// Resolve prompt_template paths relative to pack directory.
 		if agents[i].PromptTemplate != "" {
 			agents[i].PromptTemplate = adjustFragmentPath(
@@ -2088,7 +2087,6 @@ func legacyPackDoctors(fs fsys.FS, entries []PackDoctorEntry, packDir, packName 
 			SourceDir:   packDir,
 			PackDir:     packDir,
 			PackName:    packName,
-			Warmup:      entry.Warmup,
 		})
 	}
 	return out, nil
@@ -2369,12 +2367,6 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if ov.IdleTimeout != nil {
 		a.IdleTimeout = *ov.IdleTimeout
 	}
-	if ov.MaxSessionAge != nil {
-		a.MaxSessionAge = *ov.MaxSessionAge
-	}
-	if ov.MaxSessionAgeJitter != nil {
-		a.MaxSessionAgeJitter = *ov.MaxSessionAgeJitter
-	}
 	if ov.SleepAfterIdle != nil {
 		a.SleepAfterIdle = NormalizeSleepAfterIdle(*ov.SleepAfterIdle)
 		a.SleepAfterIdleSource = "rig_override"
@@ -2424,8 +2416,8 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if ov.WakeMode != nil {
 		a.WakeMode = *ov.WakeMode
 	}
-	if ov.InjectFragments != nil {
-		a.InjectFragments = append([]string(nil), (*ov.InjectFragments)...)
+	if len(ov.InjectFragments) > 0 {
+		a.InjectFragments = append([]string(nil), ov.InjectFragments...)
 	}
 	if len(ov.AppendFragments) > 0 {
 		a.AppendFragments = append([]string(nil), ov.AppendFragments...)
@@ -2581,13 +2573,11 @@ func resolveNamedPacks(cfg *City, cityRoot string) {
 		return
 	}
 	// City includes.
-	includes := cfg.Workspace.LegacyIncludes()
-	for i, ref := range includes {
+	for i, ref := range cfg.Workspace.Includes {
 		if src, ok := cfg.Packs[ref]; ok {
-			includes[i] = PackCachePath(cityRoot, ref, src)
+			cfg.Workspace.Includes[i] = PackCachePath(cityRoot, ref, src)
 		}
 	}
-	cfg.Workspace.SetLegacyIncludes(includes)
 	// Rig includes.
 	for i := range cfg.Rigs {
 		for j, ref := range cfg.Rigs[i].Includes {

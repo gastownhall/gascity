@@ -46,13 +46,6 @@ func TestNamedSessionContinuityEligible_ArchivedRequiresExplicitContinuity(t *te
 			want: false,
 		},
 		{
-			name: "failed create releases continuity",
-			meta: map[string]string{
-				"state": string(StateFailedCreate),
-			},
-			want: false,
-		},
-		{
 			name: "asleep missing continuity",
 			meta: map[string]string{
 				"state": "asleep",
@@ -68,30 +61,6 @@ func TestNamedSessionContinuityEligible_ArchivedRequiresExplicitContinuity(t *te
 				t.Fatalf("NamedSessionContinuityEligible() = %v, want %v", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestFindCanonicalNamedSessionBead_SkipsFailedCreate(t *testing.T) {
-	spec := NamedSessionSpec{
-		Identity:    "mayor",
-		SessionName: "test-city--mayor",
-	}
-	candidates := []beads.Bead{
-		{
-			ID:     "failed",
-			Type:   BeadType,
-			Status: "open",
-			Metadata: map[string]string{
-				NamedSessionMetadataKey:      "true",
-				NamedSessionIdentityMetadata: spec.Identity,
-				"session_name":               spec.SessionName,
-				"state":                      string(StateFailedCreate),
-			},
-		},
-	}
-
-	if got, ok := FindCanonicalNamedSessionBead(candidates, spec); ok {
-		t.Fatalf("FindCanonicalNamedSessionBead() = %q, want no canonical failed-create bead", got.ID)
 	}
 }
 
@@ -225,35 +194,6 @@ func TestFindClosedNamedSessionBeadForSessionName_SkipsTerminalRetiredCandidate(
 	}
 }
 
-func TestFindClosedNamedSessionBeadForSessionName_SkipsFailedCreateCandidate(t *testing.T) {
-	store := beads.NewMemStore()
-	failed, err := store.Create(beads.Bead{
-		Type:   BeadType,
-		Labels: []string{LabelSession},
-		Metadata: map[string]string{
-			"session_name":               "test-city--mayor",
-			"close_reason":               string(StateFailedCreate),
-			"state":                      string(StateFailedCreate),
-			NamedSessionMetadataKey:      "true",
-			NamedSessionIdentityMetadata: "mayor",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Create(failed-create): %v", err)
-	}
-	if err := store.Close(failed.ID); err != nil {
-		t.Fatalf("Close(failed-create): %v", err)
-	}
-
-	found, ok, err := FindClosedNamedSessionBeadForSessionName(store, "mayor", "test-city--mayor")
-	if err != nil {
-		t.Fatalf("FindClosedNamedSessionBeadForSessionName: %v", err)
-	}
-	if ok {
-		t.Fatalf("FindClosedNamedSessionBeadForSessionName returned %q, want no reusable failed-create bead", found.ID)
-	}
-}
-
 func TestFindClosedNamedSessionBead_PrefersNewestClosedCanonical(t *testing.T) {
 	store := beads.NewMemStore()
 	older, err := store.Create(beads.Bead{
@@ -320,6 +260,26 @@ func TestResolveNamedSessionSpecForConfigTarget_BareNameResolvesV2BoundSession(t
 	}
 	if spec.Identity != "gastown.mayor" {
 		t.Fatalf("spec.Identity = %q, want gastown.mayor", spec.Identity)
+	}
+}
+
+func TestNamedSessionBackingTemplate_UsesTemplatePatchIdentity(t *testing.T) {
+	spec := NamedSessionSpec{
+		Named: &config.NamedSession{
+			Template:    "witness",
+			BindingName: "gastown",
+			Dir:         "demo",
+		},
+		Agent: &config.Agent{
+			Name:        "witness",
+			BindingName: "gastown",
+			Dir:         "demo",
+		},
+		Identity: "demo/gastown.witness",
+	}
+
+	if got := NamedSessionBackingTemplate(spec); got != "witness" {
+		t.Fatalf("NamedSessionBackingTemplate() = %q, want template patch key %q", got, "witness")
 	}
 }
 

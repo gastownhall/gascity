@@ -153,7 +153,7 @@ func TestRegression_GastownConfig(t *testing.T) {
 		// workspace.includes. Accept either form so this regression test
 		// covers both the legacy-includes and the V2-imports layouts.
 		hasGastownReference := false
-		for _, inc := range cfg.Workspace.LegacyIncludes() {
+		for _, inc := range cfg.Workspace.Includes {
 			if strings.Contains(inc, "gastown") {
 				hasGastownReference = true
 				break

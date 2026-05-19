@@ -11,7 +11,7 @@ spec:
   selector:
     app: dolt
   ports:
-  - name: mysql
-    port: 3307
-    targetPort: mysql
-    protocol: TCP
+    - name: mysql
+      port: 3307
+      targetPort: mysql
+      protocol: TCP

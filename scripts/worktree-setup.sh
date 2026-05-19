@@ -1,0 +1,1 @@
+/data/projects/gc/packs/gastown/scripts/worktree-setup.sh

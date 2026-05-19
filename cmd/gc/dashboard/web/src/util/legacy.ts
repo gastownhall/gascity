@@ -56,7 +56,11 @@ export function extractRig(actor: string | undefined | null): string {
 
 export function eventCategory(eventType: string): string {
   if (eventType.startsWith("agent.") || eventType.startsWith("session.")) return "agent";
-  if (eventType.startsWith("bead.") || eventType.startsWith("convoy.") || eventType.startsWith("order.")) {
+  if (
+    eventType.startsWith("bead.") ||
+    eventType.startsWith("convoy.") ||
+    eventType.startsWith("order.")
+  ) {
     return "work";
   }
   if (eventType.startsWith("mail.")) return "comms";

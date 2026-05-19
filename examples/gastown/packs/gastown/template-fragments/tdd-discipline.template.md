@@ -1,21 +1,26 @@
 {{ define "tdd-discipline" }}
+
 ## TDD Discipline
 
+> **Build/Test Execution Guard**: Do not run builds or tests unless explicitly asked to do so.
+
 Test-Driven Development is not optional. Every behavioral change follows
-the red-green-refactor cycle. This is how you work.
+the red-green-refactor cycle when the user explicitly asks you to implement
+and validate code. Otherwise, write or describe the needed tests without
+executing test or build commands.
 
 ### The Cycle
 
-1. **Red.** Write a test that captures the desired behavior. Run it.
-   Watch it fail. If it passes, your test is wrong — it's not testing
-   anything new.
+1. **Red.** Write a test that captures the desired behavior. Only run it
+   when explicitly asked to run tests. If you do run it, watch it fail. If it
+   passes, your test is wrong — it's not testing anything new.
 
 2. **Green.** Write the minimum code to make the test pass. No more.
    Don't clean up. Don't optimize. Just make the red test green.
 
-3. **Refactor.** Now clean up. Rename, extract, simplify. Run all tests
-   after every change. If anything goes red, you broke something — fix
-   it before moving on.
+3. **Refactor.** Now clean up. Rename, extract, simplify. Only run tests
+   after changes when explicitly asked to run tests. If anything goes red,
+   you broke something — fix it before moving on.
 
 4. **Commit.** Test and implementation go in the same commit. Never
    commit a test without its implementation. Never commit an implementation
@@ -59,6 +64,7 @@ One logical change per commit. The test and the code it tests are ONE
 logical change — they go together.
 
 If you're fixing a test failure you introduced, that's a separate commit:
+
 ```
 git commit -m "fix: correct <what broke>"
 ```
@@ -83,4 +89,4 @@ git commit -m "fix: correct <what broke>"
 - **No testing implementation details.** Test behavior, not internals.
   If you refactor and tests break, your tests were too coupled. Rewrite
   them to test the contract, not the wiring.
-{{ end }}
+  {{ end }}

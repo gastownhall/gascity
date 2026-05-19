@@ -27,20 +27,29 @@ export async function getOptions(force = false): Promise<Options> {
   if (!force && existing && now - existing.fetchedAt < TTL_MS) return existing;
   const pending = inflight.get(city);
   if (pending) return pending;
-  const next = fetchOptions(city).then((options) => {
-    cached.set(city, options);
-    inflight.delete(city);
-    return options;
-  }).catch((error) => {
-    inflight.delete(city);
-    throw error;
-  });
+  const next = fetchOptions(city)
+    .then((options) => {
+      cached.set(city, options);
+      inflight.delete(city);
+      return options;
+    })
+    .catch((error) => {
+      inflight.delete(city);
+      throw error;
+    });
   inflight.set(city, next);
   return next;
 }
 
 async function fetchOptions(city: string): Promise<Options> {
-  const empty: Options = { agents: [], rigs: [], sessions: [], beads: [], mail: [], fetchedAt: Date.now() };
+  const empty: Options = {
+    agents: [],
+    rigs: [],
+    sessions: [],
+    beads: [],
+    mail: [],
+    fetchedAt: Date.now(),
+  };
   if (!city) return empty;
 
   const [configR, rigsR, beadsR, mailR] = await Promise.all([

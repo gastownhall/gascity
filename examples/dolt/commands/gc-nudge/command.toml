@@ -1,0 +1,1 @@
+description = "Size-triggered CALL DOLT_GC() to compact a bloated Dolt database"

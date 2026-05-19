@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
@@ -119,11 +118,6 @@ func writeManagedDoltConfigFile(path, host, port, dataDir, logLevel string, arch
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
-	waitTimeout := managedDoltWaitTimeout()
-	waitTimeoutLine := ""
-	if waitTimeout > 0 {
-		waitTimeoutLine = fmt.Sprintf("  wait_timeout: %q\n", strconv.Itoa(waitTimeout))
-	}
 	content := fmt.Sprintf(`# Dolt SQL server configuration — managed by gc-beads-bd
 # Do not edit manually; changes are overwritten on each server start.
 # To customize, set environment variables:
@@ -142,43 +136,13 @@ listener:
 
 data_dir: %q
 
-# auto_gc is disabled — dolt#10944 load-avg gating means upstream auto-GC effectively never fires.
-# Compaction-driven scheduled GC replaces it. See gastownhall/gascity#1918, #1200, #1977 for context.
 behavior:
   auto_gc_behavior:
-    enable: false
+    enable: true
     archive_level: %d
-
-# Managed Gas City workloads generate short-lived probe and metadata queries.
-# Dolt's persistent stats worker can make those tiny databases grow large
-# stats stores and burn CPU, especially on macOS endpoint-managed machines.
-# Keep stats disabled for managed servers; use explicit gc dolt maintenance
-# commands for storage cleanup instead of background workers.
-system_variables:
-  dolt_auto_gc_enabled: "OFF"
-  dolt_stats_enabled: "OFF"
-  dolt_stats_gc_enabled: "OFF"
-  dolt_stats_memory_only: "ON"
-  dolt_stats_paused: "ON"
-%s`, logLevel, port, host, dataDir, archiveLevel, waitTimeoutLine)
+`, logLevel, port, host, dataDir, archiveLevel)
 	if err := fsys.WriteFileAtomic(fsys.OSFS{}, path, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("write config file: %w", err)
 	}
 	return nil
-}
-
-func managedDoltWaitTimeout() int {
-	const defaultWaitTimeout = 30
-	raw := os.Getenv("GC_DOLT_WAIT_TIMEOUT")
-	if raw == "" {
-		return defaultWaitTimeout
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil {
-		return defaultWaitTimeout
-	}
-	if n < 0 {
-		return 0
-	}
-	return n
 }

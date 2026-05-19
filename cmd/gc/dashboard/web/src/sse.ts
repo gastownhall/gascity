@@ -20,16 +20,8 @@
 // still drives REST.
 
 import { client } from "./generated/client.gen";
-import {
-  streamEvents,
-  streamSession,
-  streamSupervisorEvents,
-} from "./generated/sdk.gen";
-import type {
-  CityEventStreamEnvelope,
-  HeartbeatEvent,
-  SupervisorEventStreamEnvelope,
-} from "./api";
+import { streamEvents, streamSession, streamSupervisorEvents } from "./generated/sdk.gen";
+import type { CityEventStreamEnvelope, HeartbeatEvent, SupervisorEventStreamEnvelope } from "./api";
 import { reportUIError } from "./ui";
 
 export interface SSEHandle {
@@ -62,10 +54,7 @@ export type SupervisorEventMessage = {
   data: SupervisorEventStreamEnvelope;
 };
 
-export type DashboardEventMessage =
-  | HeartbeatMessage
-  | CityEventMessage
-  | SupervisorEventMessage;
+export type DashboardEventMessage = HeartbeatMessage | CityEventMessage | SupervisorEventMessage;
 
 export interface AgentOutputMessage {
   id?: string;
@@ -90,11 +79,11 @@ function isBaseEventEnvelope(value: unknown): value is {
   type: string;
 } {
   return (
-    isRecord(value)
-    && typeof value.actor === "string"
-    && typeof value.seq === "number"
-    && typeof value.ts === "string"
-    && typeof value.type === "string"
+    isRecord(value) &&
+    typeof value.actor === "string" &&
+    typeof value.seq === "number" &&
+    typeof value.ts === "string" &&
+    typeof value.type === "string"
   );
 }
 

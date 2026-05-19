@@ -28,15 +28,12 @@ func findCityWithOptions(dir string, opts cityDiscoveryOptions) (string, error) 
 	}
 
 	var legacy string
-	for {
+	for !isCityDiscoveryCeiling(dir, opts.ceilingDirs) {
 		if citylayout.HasCityConfig(dir) {
 			return dir, nil
 		}
 		if legacy == "" && citylayout.HasRuntimeRoot(dir) && !isIgnoredLegacyRuntimeRoot(dir, opts.ignoredLegacyRuntime) {
 			legacy = dir
-		}
-		if isCityDiscoveryCeiling(dir, opts.ceilingDirs) {
-			break
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {

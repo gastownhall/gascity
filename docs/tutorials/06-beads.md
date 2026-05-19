@@ -23,6 +23,10 @@ $ cat pack.toml
 name = "my-city"
 schema = 2
 
+[[agent]]
+name = "mayor"
+prompt_template = "agents/mayor/prompt.template.md"
+
 [[named_session]]
 template = "mayor"
 mode = "always"

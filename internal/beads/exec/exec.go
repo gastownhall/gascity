@@ -169,7 +169,6 @@ func (w *beadWire) toBead() beads.Bead {
 		Description: w.Description,
 		Labels:      w.Labels,
 		Metadata:    coerceMetadata(w.Metadata),
-		Ephemeral:   w.Ephemeral,
 	}
 }
 
@@ -335,9 +334,20 @@ func (s *Store) ListOpen(status ...string) ([]beads.Bead, error) {
 }
 
 // Ready returns actionable open beads (excluding infrastructure types):
-// script ready
+// script ready [--assignee=<name>] [--limit=<n>]
 func (s *Store) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
-	out, err := s.run(nil, "ready")
+	args := []string{"ready"}
+	if len(query) > 0 {
+		q := query[0]
+		if q.Assignee != "" {
+			args = append(args, "--assignee="+q.Assignee)
+		}
+		if q.Limit > 0 && q.Assignee != "" {
+			args = append(args, "--limit="+strconv.Itoa(q.Limit))
+		}
+	}
+
+	out, err := s.run(nil, args...)
 	if err != nil {
 		return nil, fmt.Errorf("exec beads ready: %w", err)
 	}
@@ -347,7 +357,7 @@ func (s *Store) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 	}
 	result := all[:0]
 	for _, b := range all {
-		if !b.Ephemeral && !beads.IsReadyExcludedType(b.Type) {
+		if !beads.IsReadyExcludedType(b.Type) {
 			result = append(result, b)
 		}
 	}
@@ -376,7 +386,6 @@ func (s *Store) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]
 		Limit:         limit,
 		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
 		Sort:          beads.SortCreatedDesc,
-		TierMode:      beads.TierModeFromOpts(opts),
 	})
 }
 
@@ -399,7 +408,6 @@ func (s *Store) ListByMetadata(filters map[string]string, limit int, opts ...bea
 		Limit:         limit,
 		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
 		Sort:          beads.SortCreatedDesc,
-		TierMode:      beads.TierModeFromOpts(opts),
 	})
 }
 
@@ -421,14 +429,6 @@ func (s *Store) SetMetadataBatch(id string, kvs map[string]string) error {
 		}
 	}
 	return nil
-}
-
-// Tx executes fn sequentially against the exec store.
-func (s *Store) Tx(_ string, fn func(beads.Tx) error) error {
-	if fn == nil {
-		return errors.New("beads tx: nil callback")
-	}
-	return fn(s)
 }
 
 // Delete permanently removes a bead by calling the "delete" subcommand.

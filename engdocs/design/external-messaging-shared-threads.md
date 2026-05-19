@@ -1,11 +1,11 @@
 # External Messaging Shared Threads
 
-| Field | Value |
-|---|---|
-| Status | Implemented |
-| Date | 2026-03-23 |
-| Author(s) | Codex |
-| Issue | — |
+| Field      | Value                                                          |
+| ---------- | -------------------------------------------------------------- |
+| Status     | Implemented                                                    |
+| Date       | 2026-03-23                                                     |
+| Author(s)  | Codex                                                          |
+| Issue      | —                                                              |
 | Supersedes | [external-messaging-fabric.md](./external-messaging-fabric.md) |
 
 Design update for Gas City's external messaging fabric so sessions can

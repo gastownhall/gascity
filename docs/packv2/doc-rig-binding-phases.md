@@ -3,6 +3,7 @@
 Doc state: transition truth
 
 GitHub issues:
+
 - [gastownhall/gascity#588](https://github.com/gastownhall/gascity/issues/588)
 - [gastownhall/gascity#587](https://github.com/gastownhall/gascity/issues/587)
 

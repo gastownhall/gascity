@@ -1,7 +1,6 @@
 package overlay
 
 import (
-	"bytes"
 	"encoding/json"
 	"testing"
 )
@@ -59,23 +58,6 @@ func TestMergeSettingsJSON_UnionHookCategories(t *testing.T) {
 		if _, ok := hooks[cat]; !ok {
 			t.Errorf("missing hook category %q after merge", cat)
 		}
-	}
-}
-
-func TestMergeSettingsJSON_CanonicalizesCommandsWithoutHTMLEscaping(t *testing.T) {
-	base := `{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"export PATH=\"$HOME/bin:$PATH\" && gc prime"}]}]}}`
-	over := `{}`
-
-	result, err := MergeSettingsJSON([]byte(base), []byte(over))
-	if err != nil {
-		t.Fatalf("MergeSettingsJSON: %v", err)
-	}
-
-	if bytes.Contains(result, []byte(`\u0026`)) {
-		t.Fatalf("merged JSON escaped command operator:\n%s", result)
-	}
-	if !bytes.Contains(result, []byte(` && gc prime`)) {
-		t.Fatalf("merged JSON missing literal command operator:\n%s", result)
 	}
 }
 
@@ -293,16 +275,6 @@ func TestMergeSettingsJSON_InvalidOverlay(t *testing.T) {
 	_, err := MergeSettingsJSON([]byte(`{}`), []byte(`not json`))
 	if err == nil {
 		t.Error("expected error for invalid overlay JSON")
-	}
-}
-
-func TestMergeSettingsJSON_NullOverlayIsNotObject(t *testing.T) {
-	_, err := MergeSettingsJSON([]byte(`{}`), []byte(`null`))
-	if err == nil {
-		t.Fatal("expected error for null overlay JSON")
-	}
-	if !IsOverlayObjectShapeError(err) {
-		t.Fatalf("expected overlay object-shape error, got %v", err)
 	}
 }
 

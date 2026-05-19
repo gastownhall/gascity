@@ -1,11 +1,12 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -22,7 +23,7 @@ var (
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
-	var fix, verbose, jsonOut bool
+	var fix, verbose bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check workspace health",
@@ -31,30 +32,26 @@ func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
 Checks city structure, config validity, binary dependencies (tmux, git,
 bd, dolt), controller status, agent sessions, zombie/orphan sessions,
 bead stores, Dolt server health, event log integrity, and per-rig
-health. Use --fix for the canonical remediation path, including any
-safe mechanical PackV1-to-PackV2 rewrites that are available on this
-branch.`,
+health. Use --fix to attempt automatic repairs.`,
 		Example: `  gc doctor
   gc doctor --fix
-  gc doctor --verbose
-  gc doctor --json`,
+  gc doctor --verbose`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doDoctor(fix, verbose, jsonOut, stdout, stderr) != 0 {
+			if doDoctor(fix, verbose, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&fix, "fix", false, "attempt automatic repairs and safe mechanical migrations")
+	cmd.Flags().BoolVar(&fix, "fix", false, "attempt to fix issues automatically")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show extra diagnostic details")
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit structured JSON instead of human-readable output")
 	return cmd
 }
 
 // doDoctor runs all health checks and prints results.
 func doctorSkipsDoltChecks(cityPath string) bool {
-	if gcDoltSkip() {
+	if os.Getenv("GC_DOLT") == "skip" || cityUsesDoltliteBeadsBackend(cityPath) {
 		return true
 	}
 	cfg, err := loadCityConfig(cityPath, io.Discard)
@@ -66,6 +63,9 @@ func doctorSkipsDoltChecks(cityPath string) bool {
 }
 
 func workspaceNeedsCityDoltCheck(cityPath string, cfg *config.City) bool {
+	if cityUsesDoltliteBeadsBackend(cityPath) {
+		return false
+	}
 	if cfg == nil {
 		return false
 	}
@@ -82,7 +82,7 @@ func workspaceNeedsCityDoltCheck(cityPath string, cfg *config.City) bool {
 }
 
 func managedDoltOpsCheckSkip(cityPath string, cfg *config.City, cfgErr error) bool {
-	if gcDoltSkip() {
+	if os.Getenv("GC_DOLT") == "skip" || cityUsesDoltliteBeadsBackend(cityPath) {
 		return true
 	}
 	return !doctor.ManagedLocalDoltChecksApplicableForConfig(cityPath, cfg, cfgErr)
@@ -101,7 +101,7 @@ func (c *doltTopologyCheck) Name() string { return "dolt-topology" }
 
 func (c *doltTopologyCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name()}
-	if c.cfg == nil || !workspaceUsesManagedBdStoreContract(c.cityPath, c.cfg.Rigs) {
+	if c.cfg == nil || cityUsesDoltliteBeadsBackend(c.cityPath) || !workspaceUsesManagedBdStoreContract(c.cityPath, c.cfg.Rigs) {
 		r.Status = doctor.StatusOK
 		r.Message = "not using bd-backed Dolt topology"
 		return r
@@ -121,13 +121,9 @@ func (c *doltTopologyCheck) CanFix() bool { return false }
 
 func (c *doltTopologyCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
-func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
+func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		if jsonOut {
-			_ = writeDoctorJSONError(stdout, err)
-			return 1
-		}
 		fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -147,26 +143,33 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 	cfg, cfgErr := loadCityConfig(cityPath, stderr)
 	if cfgErr == nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
-		if workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
+		if !cityUsesDoltliteBeadsBackend(cityPath) && workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
 			d.Register(newDoltTopologyCheck(cityPath, cfg))
-			d.Register(newDoltDriftCheck(cityPath, cfg))
 		}
+		if cfg.Dolt.Host != "" || cfg.Dolt.Port != 0 {
+			cityDoltConfigs.Store(cityPath, cfg.Dolt)
+			defer cityDoltConfigs.Delete(cityPath)
+		}
+		// Seed the current city Dolt port/env before any doctor store ping
+		// checks. This makes doctor deterministic even when the calling shell
+		// inherited stale GC_DOLT_* values from an older session.
+		oldPinnedPort := pinnedDoltPort
+		defer func() { pinnedDoltPort = oldPinnedPort }()
+		if cfg.Dolt.Port != 0 {
+			pinnedDoltPort = strconv.Itoa(cfg.Dolt.Port)
+		}
+		_ = currentDoltPort(cityPath)
 		d.Register(doctor.NewConfigValidCheck(cfg))
 		d.Register(doctor.NewConfigRefsCheck(cfg, cityPath))
-		d.Register(doctor.NewPreStartScriptsCheck(cfg))
 		d.Register(doctor.NewBuiltinPackFamilyCheck(cfg, cityPath))
 		d.Register(doctor.NewConfigSemanticsCheck(cfg, filepath.Join(cityPath, "city.toml")))
 		d.Register(doctor.NewDurationRangeCheck(cfg))
-		d.Register(doctor.NewProviderParityCheck(cfg))
 		d.Register(doctor.NewSkillCollisionCheck(cfg, cityPath))
-		d.Register(doctor.NewOrderFiringCurrentCheck(cfg, cityPath))
-		d.Register(newCodexHooksDriftCheck(codexHookWorkDirs(cityPath, cfg)))
 		d.Register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		d.Register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
 	}
 	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
 		d.Register(newImportStateDoctorCheck(cityPath))
-		d.Register(newJsonlArchiveDoctorCheck(cityPath))
 	}
 
 	// System formulas/orders now ship via the core bootstrap pack; pack
@@ -216,7 +219,7 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 		d.Register(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
 		d.Register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 	}
-	skipCityDoltCheck := gcDoltSkip() || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
+	skipCityDoltCheck := os.Getenv("GC_DOLT") == "skip" || cityUsesDoltliteBeadsBackend(cityPath) || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
 	d.Register(newDoctorDoltServerCheck(cityPath, skipCityDoltCheck))
 	// Managed Dolt ops checks (PR 3). Size + config drift are only
 	// meaningful when the workspace uses the managed bd/Dolt backend; rigs
@@ -257,7 +260,7 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 			d.Register(doctor.NewRigGitCheck(rig))
 			d.Register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
 			d.Register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
-			d.Register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || gcDoltSkip()))
+			d.Register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || os.Getenv("GC_DOLT") == "skip" || cityUsesDoltliteBeadsBackend(cityPath)))
 			// Custom types check — rig store.
 			d.Register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
 		}
@@ -275,94 +278,17 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 				FixScript: entry.FixScript,
 				PackDir:   entry.PackDir,
 				PackName:  entry.PackName,
-				Warmup:    entry.Warmup,
 			})
 		}
 	}
 
-	var report *doctor.Report
-	if jsonOut {
-		report = d.RunCollect(ctx, fix)
-		if err := writeDoctorJSON(stdout, report); err != nil {
-			fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-	} else {
-		report = d.Run(ctx, stdout, fix)
-		doctor.PrintSummary(stdout, report)
-	}
+	report := d.Run(ctx, stdout, fix)
+	doctor.PrintSummary(stdout, report)
 
 	if report.Failed > 0 {
 		return 1
 	}
 	return 0
-}
-
-// doctorJSONResult mirrors doctor.CheckResult for JSON output. Keeping the
-// shape separate from the internal type keeps the wire format stable if the
-// internal struct grows new fields that shouldn't leak out.
-type doctorJSONResult struct {
-	Name         string   `json:"name"`
-	Status       string   `json:"status"`
-	Message      string   `json:"message"`
-	FixHint      string   `json:"fix_hint,omitempty"`
-	Details      []string `json:"details,omitempty"`
-	FixAttempted bool     `json:"fix_attempted,omitempty"`
-	FixError     string   `json:"fix_error,omitempty"`
-	Fixed        bool     `json:"fixed,omitempty"`
-}
-
-type doctorJSONReport struct {
-	Passed  int                `json:"passed"`
-	Warned  int                `json:"warned"`
-	Failed  int                `json:"failed"`
-	Fixed   int                `json:"fixed"`
-	Results []doctorJSONResult `json:"results"`
-	Error   string             `json:"error,omitempty"`
-}
-
-func doctorStatusString(s doctor.CheckStatus) string {
-	switch s {
-	case doctor.StatusOK:
-		return "ok"
-	case doctor.StatusWarning:
-		return "warning"
-	case doctor.StatusError:
-		return "error"
-	}
-	return "unknown"
-}
-
-func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
-	out := doctorJSONReport{
-		Passed:  report.Passed,
-		Warned:  report.Warned,
-		Failed:  report.Failed,
-		Fixed:   report.Fixed,
-		Results: make([]doctorJSONResult, 0, len(report.Results)),
-	}
-	for _, r := range report.Results {
-		out.Results = append(out.Results, doctorJSONResult{
-			Name:         r.Name,
-			Status:       doctorStatusString(r.Status),
-			Message:      r.Message,
-			FixHint:      r.FixHint,
-			Details:      r.Details,
-			FixAttempted: r.FixAttempted,
-			FixError:     r.FixError,
-			Fixed:        r.Fixed,
-		})
-	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(out)
-}
-
-func writeDoctorJSONError(w io.Writer, err error) error {
-	out := doctorJSONReport{Error: err.Error(), Results: []doctorJSONResult{}}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(out)
 }
 
 // collectPackDirs returns all unique pack directories from the city

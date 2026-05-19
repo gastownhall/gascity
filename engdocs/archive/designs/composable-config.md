@@ -48,6 +48,7 @@ type agentKey struct{ dir, name string }
 ```
 
 The canonical string form is `QualifiedName()`:
+
 - City-wide: `"mayor"` (dir is empty)
 - Rig-scoped: `"hello-world/polecat"` (dir/name)
 
@@ -70,11 +71,11 @@ reference qualified names, not array indices.
 Any reusable config system needs three fundamental operations. Kustomize's
 success comes from supporting all three without templates:
 
-| Operation | Mechanism | Layer | Example |
-|-----------|-----------|-------|---------|
-| **Add** | Array concatenation | 1 | Fragment adds new agents/rigs |
-| **Patch** | Keyed patch blocks | 1 | Override pool.max on one agent |
-| **Suspend** | `suspended = true` | 1 | Skip refinery on small rigs |
+| Operation   | Mechanism           | Layer | Example                        |
+| ----------- | ------------------- | ----- | ------------------------------ |
+| **Add**     | Array concatenation | 1     | Fragment adds new agents/rigs  |
+| **Patch**   | Keyed patch blocks  | 1     | Override pool.max on one agent |
+| **Suspend** | `suspended = true`  | 1     | Skip refinery on small rigs    |
 
 All three operations are available at Layer 1. Without patch/suspend at
 Layer 1, CLI file layering (`gc start -f base -f prod`) can only add
@@ -93,18 +94,18 @@ Go's zero value (`false` = not suspended = active) works correctly here
 
 The mapping between K8s and Gas City is surprisingly tight:
 
-| Kubernetes | Gas City | Notes |
-|-----------|----------|-------|
-| Pod | Agent session | Smallest schedulable unit |
-| Deployment | Agent + pool config | Declares desired replicas |
-| ReplicaSet | Pool instances | Maintains N copies |
-| Service | Session name | How agents address each other |
-| ConfigMap | Prompt template | Injected config that shapes behavior |
-| Namespace | Rig | Scoping / isolation boundary |
-| Node | Rig path | Physical location where work runs |
-| Controller loop | `gc supervisor run` | Reconcile desired → actual |
-| etcd | Beads store | Persistent state |
-| kube-apiserver | controller.sock + city.toml | Declared desired state |
+| Kubernetes      | Gas City                    | Notes                                |
+| --------------- | --------------------------- | ------------------------------------ |
+| Pod             | Agent session               | Smallest schedulable unit            |
+| Deployment      | Agent + pool config         | Declares desired replicas            |
+| ReplicaSet      | Pool instances              | Maintains N copies                   |
+| Service         | Session name                | How agents address each other        |
+| ConfigMap       | Prompt template             | Injected config that shapes behavior |
+| Namespace       | Rig                         | Scoping / isolation boundary         |
+| Node            | Rig path                    | Physical location where work runs    |
+| Controller loop | `gc supervisor run`         | Reconcile desired → actual           |
+| etcd            | Beads store                 | Persistent state                     |
+| kube-apiserver  | controller.sock + city.toml | Declared desired state               |
 
 K8s solved config composition three times, each learning from the last:
 
@@ -116,7 +117,7 @@ Helm is powerful but widely criticized for Go-template-in-YAML debugging
 pain. Kustomize is simpler and covers 80% of cases. The lesson: **start
 with the simplest useful mechanism.**
 
-**Important nuance:** Kustomize patches *replace* fields; they don't merge
+**Important nuance:** Kustomize patches _replace_ fields; they don't merge
 them. The lesson is that explicit, predictable override semantics beat
 clever merging. Our design should favor explicitness over magic.
 
@@ -244,6 +245,7 @@ accidental collisions (two fragments both adding the same agent). Explicit
 patches are intentional by definition and produce no noise.
 
 **Patch targeting:** Patches match by identity key:
+
 - Agents: `(dir, name)` — both fields required
 - Rigs: `name`
 - Providers: `name`
@@ -742,6 +744,7 @@ including the content hash of the resolved prompt template (and its
 transitive dependencies if templates can include partials).
 
 Fields explicitly excluded from fingerprint (observation-only hints):
+
 - `ReadyDelayMs`, `ReadyPromptPrefix`, `ProcessNames`,
   `EmitsPermissionWarning` — these are startup detection hints that
   don't change agent behavior.
@@ -767,6 +770,7 @@ gc start: patch targets "hello-world/refinery" but no such agent in merged confi
 ```
 
 Pack `[pack]` metadata is validated early:
+
 - `schema` must be a supported version
 - `requires_gc` (if present) must be satisfied by current gc version
 
@@ -780,11 +784,13 @@ func LoadWithIncludes(fs FS, path string) (*City, *Provenance, error)
 ```
 
 The `Provenance` struct tracks, per field and per resource:
+
 - Source file path and line number
 - Whether the value came from root, fragment, patch, or pack
 - For patches: what the value was before patching
 
 This enables:
+
 - `gc config show --provenance` — annotate every field with its source
 - `gc config explain --rig X --agent Y` — show resolved config + origins
 - Error messages that reference source files, not array indices
@@ -992,10 +998,11 @@ design, not the implementation plan.
 
 ## Rejected Alternatives
 
-### Auto-discovery (scan directory for *.toml)
+### Auto-discovery (scan directory for \*.toml)
 
 Like `kubectl apply -f .` — load all TOML files in the city directory.
 Rejected because:
+
 - Ordering is implicit (alphabetical? modification time?)
 - Hard to know which files contribute to the config
 - Accidental inclusion of unrelated TOML files
@@ -1004,6 +1011,7 @@ Rejected because:
 ### TOML templating (Go templates in TOML)
 
 Like Helm — `max = {{.Values.maxPolecats}}`. Rejected because:
+
 - Go templates in TOML are ugly and fragile
 - Syntax errors are confusing (TOML parse error? Template error?)
 - Helm's biggest pain point is exactly this
@@ -1012,6 +1020,7 @@ Like Helm — `max = {{.Values.maxPolecats}}`. Rejected because:
 ### Deep nesting / recursive includes
 
 Fragments that include other fragments. Rejected because:
+
 - Cycle detection needed
 - Hard to debug ("where did this agent come from?")
 - Transitive dependency resolution is complex
@@ -1020,6 +1029,7 @@ Fragments that include other fragments. Rejected because:
 ### Inheritance-based config (extends/inherits)
 
 Like CSS or OOP inheritance. Rejected because:
+
 - "Which field came from which ancestor?" is notoriously hard to debug
 - Kustomize proved that explicit patches beat inheritance
 - Gas City's override cascade (workspace → agent inline) is already
@@ -1028,6 +1038,7 @@ Like CSS or OOP inheritance. Rejected because:
 ### Config as code (Go/Lua/Starlark/CUE)
 
 Programmatic config generation. Rejected because:
+
 - Violates "config is data, not code"
 - Makes validation, linting, and tooling much harder
 - Models work better with structured data than with programs
@@ -1038,6 +1049,7 @@ Programmatic config generation. Rejected because:
 ### Rig-local config files
 
 Each rig directory contains its own agent definitions. Rejected because:
+
 - Violates city-as-single-source-of-truth (controller needs centralized
   desired state)
 - Coupling to rig filesystem availability breaks config loading
@@ -1049,6 +1061,7 @@ Each rig directory contains its own agent definitions. Rejected because:
 Pack is the primary artifact; city is just runtime rig bindings.
 Interesting conceptual separation (WHAT agents vs WHERE they run) but
 rejected because:
+
 - Requires two files mandatory instead of one for simple cases
 - City-wide agents (no `dir`) don't fit cleanly
 - Conflicts with city-as-directory model (settled decision)
@@ -1058,6 +1071,7 @@ rejected because:
 ### Shallow provider replacement
 
 Replace entire provider block on key conflict. Rejected because:
+
 - Silently drops fields like `api_key_env` when fragment only wants to
   change `model`
 - Deep merge per-field with opt-in `_replace = true` is safer
@@ -1066,6 +1080,7 @@ Replace entire provider block on key conflict. Rejected because:
 
 Fragments can only add resources, not modify existing ones. Rejected
 because:
+
 - CLI file layering (`-f base -f prod`) becomes useless for overlays
 - Can't change a rig path, disable an agent, or tune a pool via overlay
 - Forces forks for any environment-specific customization

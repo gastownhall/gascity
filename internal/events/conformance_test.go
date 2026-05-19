@@ -23,7 +23,6 @@ func TestFileRecorderConformance(t *testing.T) {
 	}
 	eventstest.RunProviderTests(t, factory)
 	eventstest.RunConcurrencyTests(t, factory)
-	eventstest.RunRotationTests(t, factory)
 }
 
 func TestFakeConformance(t *testing.T) {

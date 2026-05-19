@@ -2,7 +2,7 @@ name: Close stale needs-info / needs-repro issues
 
 on:
   schedule:
-    - cron: '37 9 * * *'
+    - cron: "37 9 * * *"
   workflow_dispatch:
 
 permissions: {}

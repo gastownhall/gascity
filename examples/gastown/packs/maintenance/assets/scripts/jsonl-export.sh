@@ -41,14 +41,9 @@ count_jsonl_rows() {
     jq -s -r 'if length == 0 then 0 else ((.[0].rows // []) | length) end' || echo "0"
 }
 
-# Scrub test-only rows and ephemeral system rows while preserving the JSON
-# export structure and legitimate rows in the same payload. The input is one
-# JSON object with a .rows array, not newline-delimited JSON, so row-level
-# filtering must happen inside jq.
-#
-# Mirrors the SQL SCRUB_FILTER built below so post-export validation matches
-# the pre-export filter — any system issue_type, system-task title pattern, or
-# scoped auto-convoy that slips past the SQL filter is still removed here.
+# Scrub test-only rows while preserving the JSON export structure and legitimate
+# rows in the same payload. The input is one JSON object with a .rows array, not
+# newline-delimited JSON, so row-level filtering must happen inside jq.
 scrub_exported_issues() {
     jq -c '
         if (.rows? | type) == "array" then
@@ -61,10 +56,7 @@ scrub_exported_issues() {
                             (.id // "") == "bd-abc12" or
                             ((.id // "") | test("^(testdb_|beads_t)"))
                         ) | not
-                    ) and
-                    ((.issue_type // "") | test("^(message|event|wisp|agent)$") | not) and
-                    ((.title // "") | test("^(gc:|order:)") | not) and
-                    ((((.issue_type // "") == "convoy") and ((.title // "") | test("^sling-"))) | not)
+                    )
                 )
             )
         else
@@ -75,7 +67,7 @@ scrub_exported_issues() {
 
 validate_exported_issues() {
     jq -e -c '
-        if (type == "object") and ((.rows? // [] | type) == "array") then
+        if (type == "object") and ((.rows? | type) == "array") then
             .
         else
             error("issues export must be a JSON object with a rows array")
@@ -166,65 +158,6 @@ set_consecutive_push_failures() {
     write_state_json "$(read_state_json | jq -c --argjson count "$count" '.consecutive_push_failures = $count')"
 }
 
-mark_push_failure_escalated() {
-    write_state_json "$(read_state_json | jq -c '.push_failure_escalated = true')"
-}
-
-clear_push_failure_escalation() {
-    write_state_json "$(read_state_json | jq -c 'del(.push_failure_escalated)')"
-}
-
-# Truncate push stderr before persisting it to state so the state file stays
-# small regardless of how verbose git/network errors get. The head of the
-# output is almost always the actionable message.
-truncate_push_stderr_for_state() {
-    local raw="$1"
-    local max_bytes=512
-
-    if [ -z "$raw" ]; then
-        printf '%s' ""
-        return
-    fi
-    printf '%s' "$raw" | LC_ALL=C awk -v max="$max_bytes" '
-        BEGIN { total = 0 }
-        {
-            line = $0
-            if (NR > 1) {
-                line = "\n" line
-            }
-            len = length(line)
-            if (total + len > max) {
-                remaining = max - total
-                if (remaining > 0) {
-                    printf "%s", substr(line, 1, remaining)
-                }
-                printf "..."
-                exit
-            }
-            printf "%s", line
-            total += len
-        }
-    '
-}
-
-# Record a successful push in state so `gc doctor` can surface a timestamp for
-# the archive health check. Clears any stale stderr from previous failures and
-# any prior escalation marker so the next failure-cycle escalates fresh.
-record_archive_push_success() {
-    local now
-    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    write_state_json "$(
-        read_state_json \
-            | jq -c \
-                --arg now "$now" \
-                '.consecutive_push_failures = 0
-                 | del(.pending_archive_push)
-                 | del(.push_failure_escalated)
-                 | .last_push_at = $now
-                 | del(.last_push_stderr)'
-    )"
-}
-
 set_pending_archive_push() {
     write_state_json "$(read_state_json | jq -c '.pending_archive_push = true')"
 }
@@ -261,94 +194,6 @@ archive_has_local_only_commits() {
         return 0
     fi
     return 1
-}
-
-# Detect the archive's push mode from the live state of its remotes rather
-# than from a cached state field. Operators opt into off-box backup by adding
-# an `origin` remote; removing it reverts to local-only on the next run with
-# no extra command.
-get_archive_mode() {
-    if [ -d "$ARCHIVE_REPO/.git" ] \
-        && git -C "$ARCHIVE_REPO" remote get-url origin >/dev/null 2>&1; then
-        echo "push"
-    else
-        echo "local-only"
-    fi
-}
-
-should_attempt_push() {
-    [ "$(get_archive_mode)" = "push" ]
-}
-
-# Log the archive mode on transitions and re-log weekly so operators who
-# missed the first line still see the current configuration. State fields
-# last_logged_mode and last_logged_at drive the re-log interval.
-log_archive_mode_if_needed() {
-    local current_mode
-    local state_json
-    local last_logged_mode
-    local last_logged_at
-    local stale_push_failures
-    local stale_push_escalation
-    local now
-    local now_ts
-    local last_ts
-    local should_log=0
-    local message
-
-    current_mode=$(get_archive_mode)
-    state_json=$(read_state_json)
-    last_logged_mode=$(printf '%s\n' "$state_json" | jq -r '.last_logged_mode // empty')
-    last_logged_at=$(printf '%s\n' "$state_json" | jq -r '.last_logged_at // empty')
-    stale_push_failures=$(printf '%s\n' "$state_json" | jq -r '.consecutive_push_failures // 0')
-    stale_push_escalation=$(printf '%s\n' "$state_json" | jq -r '.push_failure_escalated // false')
-    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    now_ts=$(date -u +%s)
-
-    if [ "$current_mode" != "$last_logged_mode" ]; then
-        should_log=1
-    elif [ -z "$last_logged_at" ]; then
-        should_log=1
-    else
-        last_ts=$(jq -n -r --arg ts "$last_logged_at" '$ts | try fromdateiso8601 catch 0')
-        if [ "$last_ts" = "0" ] || [ "$((now_ts - last_ts))" -gt 604800 ]; then
-            should_log=1
-        fi
-    fi
-
-    if [ "$should_log" -eq 0 ] && [ "$current_mode" = "local-only" ] && { [ "$stale_push_failures" != "0" ] || [ "$stale_push_escalation" = "true" ]; }; then
-        write_state_json "$(printf '%s\n' "$state_json" | jq -c '.consecutive_push_failures = 0 | del(.push_failure_escalated)')"
-        return 0
-    fi
-
-    if [ "$should_log" -eq 0 ]; then
-        return 0
-    fi
-
-    if [ "$current_mode" = "push" ]; then
-        message="jsonl-export: archive running in push mode (origin configured; will push commits to remote)"
-    else
-        message="jsonl-export: archive running in local-only mode (no origin remote; commits stay on this host — off-box backup disabled)"
-    fi
-    echo "$message" >&2
-
-    # On entering local-only mode, clear consecutive_push_failures so a later
-    # return to push mode starts from a clean counter. Without this, a
-    # push→local-only→push round-trip (operator removes then re-adds origin)
-    # would carry the old failure count forward and could trigger a premature
-    # HIGH escalation on the very first failure after origin returns.
-    # pending_archive_push is intentionally NOT cleared here — it correctly
-    # tracks that local commits still need to be pushed once origin returns.
-    # shellcheck disable=SC2016  # $mode/$at are jq variables, not bash
-    local jq_filter='.last_logged_mode = $mode | .last_logged_at = $at'
-    if [ "$current_mode" = "local-only" ]; then
-        jq_filter="$jq_filter | .consecutive_push_failures = 0 | del(.push_failure_escalated)"
-    fi
-
-    write_state_json "$(
-        printf '%s\n' "$state_json" \
-            | jq -c --arg mode "$current_mode" --arg at "$now" "$jq_filter"
-    )"
 }
 
 set_pending_spike_alert() {
@@ -471,83 +316,28 @@ retry_pending_spike_alert() {
 
 push_archive_main() {
     local consecutive
-    local fetch_err
-    local rebase_err
-    local push_err
-
-    # Retain only the last ~20 lines of stderr so an extremely chatty failure
-    # doesn't drown the escalation body.
-    truncate_stderr_context() {
-        local raw="$1"
-
-        [ -z "$raw" ] && return 0
-        printf '%s\n' "$raw" | tail -n 20
-    }
 
     record_archive_push_failure() {
         local message="$1"
-        local stderr_context="$2"
-        local body
-        local stderr_display
-        local already_escalated
-        local state_stderr=""
 
         echo "$message" >&2
-        if [ -n "$stderr_context" ]; then
-            state_stderr=$(truncate_push_stderr_for_state "$stderr_context")
-        fi
         consecutive=$(read_state_json | jq -r '.consecutive_push_failures // 0' || echo "0")
         consecutive=$((consecutive + 1))
-        write_state_json "$(
-            read_state_json \
-                | jq -c \
-                    --argjson count "$consecutive" \
-                    --arg stderr "$state_stderr" \
-                    '.consecutive_push_failures = $count
-                     | .pending_archive_push = true
-                     | if $stderr == "" then del(.last_push_stderr) else .last_push_stderr = $stderr end'
-        )"
+        set_consecutive_push_failures "$consecutive"
+        set_pending_archive_push
 
-        already_escalated=$(read_state_json | jq -r '.push_failure_escalated // false' || echo "false")
-        if [ "$consecutive" -ge "$MAX_PUSH_FAILURES" ] && [ "$already_escalated" != "true" ]; then
-            stderr_display=$(truncate_stderr_context "$stderr_context")
-            if [ -z "$stderr_display" ]; then
-                stderr_display="(no stderr captured)"
-            fi
-            body=$(cat <<ESCALATION
-Order: mol-dog-jsonl
-Archive: $ARCHIVE_REPO
-Consecutive failures: $consecutive (threshold: $MAX_PUSH_FAILURES)
-
-Last git push stderr:
-$stderr_display
-
-Remediation:
-- Check remote: git -C $ARCHIVE_REPO remote -v
-- Verify remote is reachable and credentials are valid
-- Temporarily suppress: export GC_JSONL_MAX_PUSH_FAILURES=99
-- See docs/getting-started/troubleshooting.md#jsonl-archive-push-failures
-ESCALATION
-)
-            if gc mail send mayor/ -s "ESCALATION: JSONL push failed [HIGH]" \
-                -m "$body" \
-                2>/dev/null; then
-                mark_push_failure_escalated
-            fi
+        if [ "$consecutive" -ge "$MAX_PUSH_FAILURES" ]; then
+            gc mail send mayor/ -s "ESCALATION: JSONL push failed [HIGH]" \
+                -m "Consecutive failures: $consecutive (threshold: $MAX_PUSH_FAILURES)" \
+                2>/dev/null || true
         fi
 
         return 1
     }
 
-    # Branch on the actual git exit status, not on whether stderr is non-empty.
-    # Successful git commands can emit benign stderr (e.g. "warning: redirecting
-    # to https://...", credential-helper notes, protocol upgrade hints) which
-    # would otherwise misclassify the run as a failure and falsely escalate.
-    if ! fetch_err=$(git fetch origin main -q 2>&1 >/dev/null); then
+    if ! refresh_archive_remote_main; then
         if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
-            record_archive_push_failure \
-                "jsonl-export: fetching origin/main failed" \
-                "$fetch_err"
+            record_archive_push_failure "jsonl-export: fetching origin/main failed"
             return 1
         fi
         echo "jsonl-export: origin/main missing; attempting initial push bootstrap" >&2
@@ -555,29 +345,26 @@ ESCALATION
 
     if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
         if ! git merge-base --is-ancestor refs/remotes/origin/main HEAD >/dev/null 2>&1; then
-            if ! rebase_err=$(git rebase refs/remotes/origin/main 2>&1 >/dev/null); then
+            if ! git rebase refs/remotes/origin/main >/dev/null 2>&1; then
                 git rebase --abort >/dev/null 2>&1 || true
-                record_archive_push_failure \
-                    "jsonl-export: rebase onto origin/main failed during archive push recovery" \
-                    "$rebase_err"
+                record_archive_push_failure "jsonl-export: rebase onto origin/main failed during archive push recovery"
                 return 1
             fi
         fi
         if ! archive_has_local_only_commits_from_tracking; then
-            record_archive_push_success
+            set_consecutive_push_failures "0"
+            clear_pending_archive_push
             return 0
         fi
     fi
 
-    if ! push_err=$(git push origin main -q 2>&1 >/dev/null); then
-        record_archive_push_failure \
-            "jsonl-export: pushing archive main failed" \
-            "$push_err"
-        return 1
+    if git push origin main -q 2>/dev/null; then
+        set_consecutive_push_failures "0"
+        clear_pending_archive_push
+        return 0
     fi
 
-    record_archive_push_success
-    return 0
+    record_archive_push_failure "jsonl-export: pushing archive main failed"
 }
 
 commit_archive_snapshot() {
@@ -638,7 +425,6 @@ fi
 STATE_FILE_BACKUP="${STATE_FILE}.bak"
 mkdir -p "$(dirname "$STATE_FILE")"
 
-log_archive_mode_if_needed
 retry_pending_spike_alert
 
 is_user_database() {
@@ -675,13 +461,9 @@ if [ -z "$DATABASES" ]; then
     if [ -d "$ARCHIVE_REPO/.git" ]; then
         cd "$ARCHIVE_REPO"
         if has_pending_archive_push || archive_has_local_only_commits; then
-            if should_attempt_push; then
-                PUSH_STATUS="ok"
-                if ! push_archive_main; then
-                    PUSH_STATUS="failed"
-                fi
-            else
-                PUSH_STATUS="skipped (local-only)"
+            PUSH_STATUS="ok"
+            if ! push_archive_main; then
+                PUSH_STATUS="failed"
             fi
             SUMMARY="jsonl — no user databases, push: $PUSH_STATUS"
             gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
@@ -700,7 +482,7 @@ fi
 # Build scrub filter for the issues table.
 SCRUB_FILTER=""
 if [ "$SCRUB" = "true" ]; then
-    SCRUB_FILTER="WHERE issue_type NOT IN ('message', 'event', 'wisp', 'agent') AND title NOT LIKE 'gc:%' AND title NOT LIKE 'order:%' AND NOT (issue_type = 'convoy' AND title LIKE 'sling-%')"
+    SCRUB_FILTER="WHERE type NOT IN ('message', 'event', 'wisp', 'agent') AND title NOT LIKE 'gc:%'"
 fi
 
 TOTAL_EXPORTED=0
@@ -733,14 +515,6 @@ while IFS= read -r DB; do
         FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
         FAILED_DBS="${FAILED_DBS}$DB
 "
-        continue
-    fi
-    if ! has_wisps_table "$DB"; then
-        # Not a bd-managed bead store. Decrement the count we just
-        # bumped — schemaless DBs aren't part of the export universe
-        # and shouldn't appear in TOTAL_DBS or FAILED_DBS summaries.
-        # See dolt-target.sh:has_wisps_table and gastownhall/gascity#1816.
-        TOTAL_DBS=$((TOTAL_DBS - 1))
         continue
     fi
 
@@ -896,13 +670,9 @@ fi
 
 if git diff --cached --quiet 2>/dev/null; then
     if has_pending_archive_push || archive_has_local_only_commits; then
-        if should_attempt_push; then
-            PUSH_STATUS="ok"
-            if ! push_archive_main; then
-                PUSH_STATUS="failed"
-            fi
-        else
-            PUSH_STATUS="skipped (local-only)"
+        PUSH_STATUS="ok"
+        if ! push_archive_main; then
+            PUSH_STATUS="failed"
         fi
         if [ -n "$FAILED_DBS" ]; then
             EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT))
@@ -935,13 +705,9 @@ commit_archive_snapshot \
 }
 set_pending_archive_push
 
-if should_attempt_push; then
-    PUSH_STATUS="ok"
-    if ! push_archive_main; then
-        PUSH_STATUS="failed"
-    fi
-else
-    PUSH_STATUS="skipped (local-only)"
+PUSH_STATUS="ok"
+if ! push_archive_main; then
+    PUSH_STATUS="failed"
 fi
 
 SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: $PUSH_STATUS"

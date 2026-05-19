@@ -1112,47 +1112,26 @@ func liveContractHTTPRequest(baseURL, method, path string, body any) (*http.Requ
 
 func assertLiveContractStreamOpens(t *testing.T, baseURL, path string) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	var lastStatus int
-	var lastBody string
-	var lastContentType string
-	var lastErr error
-	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+path, nil)
-		if err != nil {
-			cancel()
-			t.Fatalf("build stream request %s: %v", path, err)
-		}
-		req.Header.Set("Accept", "text/event-stream")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			cancel()
-			lastErr = err
-			time.Sleep(250 * time.Millisecond)
-			continue
-		}
-		lastErr = nil
-		lastStatus = resp.StatusCode
-		lastContentType = resp.Header.Get("Content-Type")
-		if resp.StatusCode == http.StatusOK {
-			_ = resp.Body.Close()
-			cancel()
-			if !strings.Contains(lastContentType, "text/event-stream") {
-				t.Fatalf("GET %s stream content-type = %q, want text/event-stream", path, lastContentType)
-			}
-			return
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+path, nil)
+	if err != nil {
+		t.Fatalf("build stream request %s: %v", path, err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s stream: %v", path, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		cancel()
-		lastBody = string(raw)
-		time.Sleep(250 * time.Millisecond)
+		t.Fatalf("GET %s stream status = %d, want 200; body: %s", path, resp.StatusCode, string(raw))
 	}
-	if lastErr != nil {
-		t.Fatalf("GET %s stream: %v", path, lastErr)
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.Contains(contentType, "text/event-stream") {
+		t.Fatalf("GET %s stream content-type = %q, want text/event-stream", path, contentType)
 	}
-	t.Fatalf("GET %s stream status = %d, want 200; body: %s", path, lastStatus, lastBody)
 }
 
 func validateLiveContractResponse(t *testing.T, v openapivalidator.Validator, req *http.Request, resp *http.Response, raw []byte) {

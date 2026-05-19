@@ -1,0 +1,276 @@
+description = """
+Safe upmerge workflow for a long-lived branch with local dirty changes.
+
+Use this formula when you need latest `main` (usually `upstream/main`) merged
+into the current branch without losing uncommitted local work.
+
+This formula is procedural. Read each step, run the commands, and keep the
+primary worktree recoverable at all times. Do the risky merge in a detached
+scratch worktree, not in the only checkout that contains your local overlay.
+
+For `feature/t3-session-bridge`, current guidance is:
+- prefer `upstream/main` over `origin/main`
+- expect manual conflict resolution in `template_resolve`, session/bead
+  lifecycle code, and status/API integration
+- preserve dirty local edits before any merge attempt
+"""
+formula = "mol-upmerge-branch"
+version = 1
+
+[vars]
+[vars.gc_repo]
+description = "Repo root to operate in"
+default = "/data/projects/gascity"
+
+[vars.target_ref]
+description = "Ref to merge into the current branch"
+default = "upstream/main"
+
+[vars.issue]
+description = "Optional bead or ticket for notes"
+default = ""
+
+[vars.typecheck_command]
+description = "Optional typecheck command"
+default = ""
+
+[vars.lint_command]
+description = "Optional lint command"
+default = ""
+
+[vars.build_command]
+description = "Optional build command"
+default = ""
+
+[vars.test_command]
+description = "Primary test command"
+default = "go test ./..."
+
+[vars.vet_command]
+description = "Static analysis command"
+default = "go vet ./..."
+
+[vars.smoke_command]
+description = "Quick smoke command after merge"
+default = "gc prime"
+
+[vars.restore_overlay]
+description = "Whether to re-apply local dirty overlay after validated merge"
+default = "true"
+
+[[steps]]
+id = "load-context"
+title = "Load branch context and choose merge target"
+description = """
+Start by loading current state and choosing the target ref.
+
+```bash
+cd {{gc_repo}}
+git status --short --branch
+git branch --show-current
+git fetch origin main
+git fetch upstream main
+git rev-parse --short HEAD
+git rev-parse --short {{target_ref}}
+```
+
+If `{{issue}}` is not empty, load it too:
+
+```bash
+test -n "{{issue}}" && bd show {{issue}}
+```
+
+For `feature/t3-session-bridge`, default target should be `upstream/main`,
+not `origin/main`.
+
+Record:
+- current branch
+- current HEAD
+- target ref
+- whether the worktree is dirty
+"""
+metadata = { "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
+
+[[steps]]
+id = "protect-local-state"
+title = "Protect local state before any merge"
+needs = ["load-context"]
+description = """
+Preserve everything first.
+
+```bash
+cd {{gc_repo}}
+BRANCH=$(git branch --show-current)
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+mkdir -p .git/upmerge
+git branch "safety/${BRANCH##*/}-${STAMP}" HEAD
+git diff --binary > ".git/upmerge/${STAMP}.worktree.patch"
+git diff --binary --cached > ".git/upmerge/${STAMP}.index.patch"
+git stash push -u -m "upmerge:${BRANCH}:${STAMP}"
+git stash list | sed -n '1,5p'
+```
+
+Do not continue until all three recovery paths exist:
+- `safety/...` branch
+- patch files under `.git/upmerge/`
+- stash entry named `upmerge:<branch>:<stamp>`
+"""
+metadata = { "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
+
+[[steps]]
+id = "compare-target"
+title = "Compare branch against incoming target"
+needs = ["protect-local-state"]
+description = """
+Measure the merge surface before doing the real merge.
+
+```bash
+cd {{gc_repo}}
+git rev-list --left-right --count {{target_ref}}...HEAD
+git diff --name-status {{target_ref}}...HEAD
+git diff --name-status HEAD..{{target_ref}} -- \
+  cmd/gc/api_state.go \
+  cmd/gc/cmd_reload.go \
+  cmd/gc/providers.go \
+  cmd/gc/template_resolve.go
+```
+
+For `feature/t3-session-bridge`, expect hot spots in:
+- `cmd/gc/template_resolve.go`
+- `cmd/gc/session_beads.go`
+- `cmd/gc/beads_provider_lifecycle.go`
+- `internal/runtime/t3bridge/provider.go`
+- config patch/edit paths
+"""
+metadata = { "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
+
+[[steps]]
+id = "scratch-merge"
+title = "Merge in detached scratch worktree"
+needs = ["compare-target"]
+description = """
+Do the risky merge in a scratch worktree, not in the primary checkout.
+
+```bash
+cd {{gc_repo}}
+BRANCH=$(git branch --show-current)
+STAMP=$(ls -t .git/upmerge/*.worktree.patch | head -n1 | xargs -n1 basename | sed 's/.worktree.patch$//')
+SCRATCH="../gascity-upmerge-${STAMP}"
+git worktree add --detach "$SCRATCH" HEAD
+cd "$SCRATCH"
+git switch -c "upmerge/${BRANCH##*/}-${STAMP}"
+git merge --no-ff {{target_ref}}
+```
+
+If merge fails:
+- inspect conflicts in the scratch worktree
+- resolve there
+- never fix conflicts by damaging the primary worktree
+"""
+metadata = { "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
+
+[[steps]]
+id = "resolve-and-validate"
+title = "Resolve conflicts and validate merged scratch tree"
+needs = ["scratch-merge"]
+description = """
+Resolve merge conflicts in scratch, then validate.
+
+For `feature/t3-session-bridge`, current probe against `upstream/main`
+hit these conflict files:
+- `cmd/gc/agent_build_params.go`
+- `cmd/gc/cmd_citystatus.go`
+- `cmd/gc/cmd_doctor.go`
+- `cmd/gc/cmd_status.go`
+- `cmd/gc/session_beads.go`
+- `cmd/gc/template_resolve.go`
+- `examples/dolt/assets/scripts/runtime.sh`
+- `go.mod`
+- `internal/api/handler_config_test.go`
+- `internal/api/huma_handlers_config.go`
+- `internal/doctor/checks.go`
+
+After conflict resolution, run:
+
+```bash
+cd "$SCRATCH"
+{{typecheck_command}}
+{{lint_command}}
+{{build_command}}
+{{test_command}}
+{{vet_command}}
+{{smoke_command}}
+```
+
+If any optional command is empty, skip it silently.
+
+Re-check specifically:
+- T3 bridge startup path
+- native auth path
+- session bead behavior
+- beads lifecycle behavior
+- config persistence for explicit `suspended = false`
+"""
+metadata = { "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
+
+[[steps]]
+id = "restore-overlay"
+title = "Restore local overlay on top of validated merge"
+needs = ["resolve-and-validate"]
+description = """
+If `{{restore_overlay}} != true`, skip this step.
+
+Otherwise apply the saved local overlay in the scratch worktree first:
+
+```bash
+cd {{gc_repo}}
+BRANCH=$(git branch --show-current)
+STAMP=$(ls -t .git/upmerge/*.worktree.patch | head -n1 | xargs -n1 basename | sed 's/.worktree.patch$//')
+SCRATCH="../gascity-upmerge-${STAMP}"
+cd "$SCRATCH"
+git stash apply --index "stash^{/upmerge:${BRANCH}:${STAMP}}" || true
+```
+
+If stash application is incomplete or conflicts, fall back to patch files:
+
+```bash
+cd "$SCRATCH"
+git apply --3way "{{gc_repo}}/.git/upmerge/${STAMP}.worktree.patch" || true
+git apply --3way --cached "{{gc_repo}}/.git/upmerge/${STAMP}.index.patch" || true
+```
+
+Then re-check the known local overlay files:
+- `cmd/gc/api_state.go`
+- `cmd/gc/cmd_reload.go`
+- `cmd/gc/providers.go`
+- `cmd/gc/template_resolve.go`
+"""
+metadata = { "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
+
+[[steps]]
+id = "land-and-clean"
+title = "Land validated merge and clean scratch state"
+needs = ["restore-overlay"]
+description = """
+Fast-forward the primary branch to the validated scratch result, then clean up.
+
+```bash
+cd {{gc_repo}}
+BRANCH=$(git branch --show-current)
+STAMP=$(ls -t .git/upmerge/*.worktree.patch | head -n1 | xargs -n1 basename | sed 's/.worktree.patch$//')
+SCRATCH="../gascity-upmerge-${STAMP}"
+git merge --ff-only "upmerge/${BRANCH##*/}-${STAMP}"
+git worktree remove -f "$SCRATCH"
+git branch -D "upmerge/${BRANCH##*/}-${STAMP}"
+```
+
+Only drop the stash after verifying the merged branch is correct:
+
+```bash
+git stash drop "stash^{/upmerge:${BRANCH}:${STAMP}}"
+```
+
+Keep the `safety/...` branch until the merged branch is pushed and verified.
+Never use `git reset --hard` on the primary worktree for this flow.
+"""
+metadata = { "gc.continuation_group" = "main", "gc.session_affinity" = "require" }

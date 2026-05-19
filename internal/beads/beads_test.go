@@ -5,13 +5,6 @@ import (
 	"time"
 )
 
-var (
-	_ Tx = (*BdStore)(nil)
-	_ Tx = (*CachingStore)(nil)
-	_ Tx = (*FileStore)(nil)
-	_ Tx = (*MemStore)(nil)
-)
-
 func TestIsContainerType(t *testing.T) {
 	tests := []struct {
 		typ  string
@@ -59,7 +52,6 @@ func TestIsReadyExcludedType(t *testing.T) {
 		{"merge-request", true},
 		{"gate", true},
 		{"molecule", true},
-		{"step", true},
 		{"message", true},
 		{"session", true},
 		{"agent", true},

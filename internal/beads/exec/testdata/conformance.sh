@@ -84,7 +84,6 @@ create)
 	parent_id=$(echo "$input" | jq -r '.parent_id // ""')
 	ref=$(echo "$input" | jq -r '.ref // ""')
 	description=$(echo "$input" | jq -r '.description // ""')
-	ephemeral=$(echo "$input" | jq -r '.ephemeral // false')
 	created_at=$(now)
 
 	# Build labels array from input, including metadata as meta: labels.
@@ -112,7 +111,6 @@ create)
 		--argjson needs "$needs" \
 		--arg description "$description" \
 		--argjson labels "$labels" \
-		--argjson ephemeral "$ephemeral" \
 		'{
         id: $id,
         title: $title,
@@ -125,8 +123,7 @@ create)
         ref: $ref,
         needs: $needs,
         description: $description,
-        labels: $labels,
-        ephemeral: $ephemeral
+        labels: $labels
       }' >"$STATE_ROOT/$id.json"
 
 	# Output the created bead (normalized: meta: labels → .metadata map).

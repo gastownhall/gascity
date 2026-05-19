@@ -5,10 +5,12 @@ import { showToast } from "./ui";
 describe("showToast", () => {
   it("shows visible toast notifications", () => {
     document.body.innerHTML = `<div id="toast-container"></div>`;
-    const raf = vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb: FrameRequestCallback) => {
-      cb(0);
-      return 1;
-    });
+    const raf = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((cb: FrameRequestCallback) => {
+        cb(0);
+        return 1;
+      });
     const timeout = vi.spyOn(window, "setTimeout").mockImplementation(() => 1 as unknown as number);
 
     showToast("success", "Sent", "hello");

@@ -29,7 +29,9 @@ let confirmResolver: ((confirmed: boolean) => void) | null = null;
 export function installSharedModals(): void {
   byId("action-modal-close-btn")?.addEventListener("click", () => closeActionModal(null));
   byId("action-modal-cancel-btn")?.addEventListener("click", () => closeActionModal(null));
-  byId("action-modal")?.querySelector(".modal-backdrop")?.addEventListener("click", () => closeActionModal(null));
+  byId("action-modal")
+    ?.querySelector(".modal-backdrop")
+    ?.addEventListener("click", () => closeActionModal(null));
   byId("action-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
     const beadID = byId<HTMLInputElement>("action-bead-id")?.value.trim() ?? "";
@@ -42,7 +44,9 @@ export function installSharedModals(): void {
   byId("confirm-modal-close-btn")?.addEventListener("click", () => closeConfirmModal(false));
   byId("confirm-modal-cancel-btn")?.addEventListener("click", () => closeConfirmModal(false));
   byId("confirm-modal-confirm-btn")?.addEventListener("click", () => closeConfirmModal(true));
-  byId("confirm-modal")?.querySelector(".modal-backdrop")?.addEventListener("click", () => closeConfirmModal(false));
+  byId("confirm-modal")
+    ?.querySelector(".modal-backdrop")
+    ?.addEventListener("click", () => closeConfirmModal(false));
 
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
@@ -56,7 +60,9 @@ export function installSharedModals(): void {
   });
 }
 
-export async function promptActionDialog(config: ActionDialogConfig): Promise<ActionDialogResult | null> {
+export async function promptActionDialog(
+  config: ActionDialogConfig,
+): Promise<ActionDialogResult | null> {
   const modal = byId("action-modal");
   const form = byId<HTMLFormElement>("action-form");
   const title = byId("action-modal-title");
@@ -72,9 +78,20 @@ export async function promptActionDialog(config: ActionDialogConfig): Promise<Ac
   const targetList = byId("action-target-list");
   const rigList = byId("action-rig-list");
   if (
-    !modal || !form || !title || !submit || !beadGroup || !beadInput ||
-    !beadHint || !targetInput || !targetLabel || !rigGroup || !rigInput ||
-    !help || !targetList || !rigList
+    !modal ||
+    !form ||
+    !title ||
+    !submit ||
+    !beadGroup ||
+    !beadInput ||
+    !beadHint ||
+    !targetInput ||
+    !targetLabel ||
+    !rigGroup ||
+    !rigInput ||
+    !help ||
+    !targetList ||
+    !rigList
   ) {
     reportUIError("Action modal unavailable", new Error("missing action modal DOM"));
     return null;

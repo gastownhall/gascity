@@ -1,7 +1,6 @@
 {
   "skipDangerousModePermissionPrompt": true,
   "editorMode": "normal",
-  "awaySummaryEnabled": false,
   "hooks": {
     "SessionStart": [
       {
@@ -9,7 +8,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"
+            "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook"
           }
         ]
       }

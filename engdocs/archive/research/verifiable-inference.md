@@ -5,6 +5,7 @@ title: "Verifiable Distributed LLM Work"
 ## The Problem
 
 You want to:
+
 1. **Publish work** = (prompt, required model)
 2. **Workers execute** = run prompt with specified model
 3. **Submit results** = output + cryptographic proof that the specified model produced it
@@ -16,13 +17,13 @@ You want to:
 
 The dream: a mathematical proof that a specific neural network produced a specific output.
 
-| System | Max Model | Proof Time | Overhead |
-|--------|-----------|------------|----------|
-| **ZKTorch** | GPT-J 6B | 23 min (64 threads) | 3,500x |
-| **zkLLM** | LLaMA-2 13B | 15 min (A100) | 500,000x |
-| **zkPyTorch** | Llama-3 8B | 150s/token (1 CPU) | 10,000x |
-| **DeepProve** | GPT-2 124M | 54-158x faster than EZKL | Unknown |
-| **EZKL** | Small models | Minutes | 100-1000x |
+| System        | Max Model    | Proof Time               | Overhead  |
+| ------------- | ------------ | ------------------------ | --------- |
+| **ZKTorch**   | GPT-J 6B     | 23 min (64 threads)      | 3,500x    |
+| **zkLLM**     | LLaMA-2 13B  | 15 min (A100)            | 500,000x  |
+| **zkPyTorch** | Llama-3 8B   | 150s/token (1 CPU)       | 10,000x   |
+| **DeepProve** | GPT-2 124M   | 54-158x faster than EZKL | Unknown   |
+| **EZKL**      | Small models | Minutes                  | 100-1000x |
 
 **Model identity**: All use **cryptographic commitment to weights**. The verification key binds to exact weights -- change one parameter and the proof fails. This proves "the model with commitment X produced output Y from input Z."
 
@@ -34,7 +35,7 @@ NVIDIA H100 confidential computing runs LLMs with **&lt;7% overhead** (approache
 
 **But**: The **TEE.Fail attack** (October 2025) broke Intel TDX, AMD SEV-SNP, and NVIDIA CC attestation with a **&lt;$1,000 DDR5 bus interposer**. Researchers forged attestation quotes indistinguishable from legitimate ones. Intel and AMD consider physical interposer attacks "out of scope" and have no planned fixes.
 
-Worse: GPU attestation measures *firmware*, not *model weights*. Application-layer extensions can hash weights into measurement registers, but this requires trusting the inference framework code -- turtles all the way down.
+Worse: GPU attestation measures _firmware_, not _model weights_. Application-layer extensions can hash weights into measurement registers, but this requires trusting the inference framework code -- turtles all the way down.
 
 **TEEs reduce to physical security**, not cryptographic security. Fine for cloud providers with locked cages. Not "unstoppable."
 
@@ -78,6 +79,7 @@ No single approach works alone. The "unstoppable" solution is a **layered escala
 ### How It Works
 
 **Work Publication:**
+
 ```
 WorkUnit {
     prompt:       "Implement the user authentication module..."
@@ -93,6 +95,7 @@ WorkUnit {
 ```
 
 **Worker Execution:**
+
 1. Worker stakes `stake_req`
 2. Downloads model weights, verifies `SHA384(weights) == model_hash`
 3. Runs inference with **batch-invariant kernels** + fixed seed (deterministic)
@@ -121,12 +124,14 @@ Result {
 ### Model Identity: The Key Innovation
 
 For **open-weight models** (Llama, Mistral, Qwen, etc.):
+
 - `model_hash = SHA384(canonical_weights_file)`
 - A public registry maps model names to weight hashes (think: Hugging Face + content-addressable storage)
 - Worker must demonstrate they loaded the exact weights
 - Deterministic execution proves the committed model produced the output
 
 For **closed-weight API models** (Claude, GPT-4):
+
 - The API provider signs responses: `sign(provider_key, prompt_hash || response || model_version || timestamp)`
 - **Token-DiFR fingerprinting**: regenerate with same seed, >98% token match confirms the claimed model
 - Provider reputation + legal accountability replaces cryptographic proof
@@ -146,15 +151,15 @@ For **closed-weight API models** (Claude, GPT-4):
 
 ### What Exists Today vs. What Needs Building
 
-| Component | Status | Who |
-|-----------|--------|-----|
-| Deterministic inference kernels | Production | SGLang, Thinking Machines |
-| Weight commitment registry | Exists (Hugging Face hashes) | Needs formalization |
-| Economic staking/slashing | Production | EigenLayer, Hyperbolic PoSP |
-| Merkle tree over hidden states | Research prototype | VeriLLM |
-| zkML for LLMs | Research (ZKTorch, zkLLM) | 6-13B proven |
-| Commit-reveal protocol | Production | VeriLLM, Atoma Network |
-| TEE attestation for inference | Production | Phala, Chutes |
+| Component                       | Status                       | Who                         |
+| ------------------------------- | ---------------------------- | --------------------------- |
+| Deterministic inference kernels | Production                   | SGLang, Thinking Machines   |
+| Weight commitment registry      | Exists (Hugging Face hashes) | Needs formalization         |
+| Economic staking/slashing       | Production                   | EigenLayer, Hyperbolic PoSP |
+| Merkle tree over hidden states  | Research prototype           | VeriLLM                     |
+| zkML for LLMs                   | Research (ZKTorch, zkLLM)    | 6-13B proven                |
+| Commit-reveal protocol          | Production                   | VeriLLM, Atoma Network      |
+| TEE attestation for inference   | Production                   | Phala, Chutes               |
 
 The gap is **integration** -- combining these pieces into a single protocol. Each piece exists. Nobody has assembled the full layered stack.
 

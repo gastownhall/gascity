@@ -2,7 +2,6 @@
 title: "Orders"
 ---
 
-
 > Last verified against code: 2026-03-01
 
 ## Summary
@@ -269,28 +268,28 @@ Violations indicate bugs.
 
 ## Interactions
 
-| Depends on | How |
-|---|---|
-| `internal/config` | `OrdersConfig` for skip list and max timeout. `FormulaLayers` for formula directory resolution. `City` struct for config access. |
-| `internal/events` | `Recorder` for emitting `order.fired`, `order.completed`, `order.failed` events. `Provider` for event trigger queries (`List` with `AfterSeq` filtering). |
-| `internal/beads` | `Store` for creating tracking beads, querying last-run history (`ListByLabel`), and instantiating wisps (`MolCook`). `CommandRunner` for bd CLI invocation. |
-| `internal/fsys` | `FS` interface for filesystem abstraction in `Scan()` (enables fake filesystem in tests). `OSFS` for production. |
+| Depends on        | How                                                                                                                                                         |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `internal/config` | `OrdersConfig` for skip list and max timeout. `FormulaLayers` for formula directory resolution. `City` struct for config access.                            |
+| `internal/events` | `Recorder` for emitting `order.fired`, `order.completed`, `order.failed` events. `Provider` for event trigger queries (`List` with `AfterSeq` filtering).   |
+| `internal/beads`  | `Store` for creating tracking beads, querying last-run history (`ListByLabel`), and instantiating wisps (`MolCook`). `CommandRunner` for bd CLI invocation. |
+| `internal/fsys`   | `FS` interface for filesystem abstraction in `Scan()` (enables fake filesystem in tests). `OSFS` for production.                                            |
 
-| Depended on by | How |
-|---|---|
-| `cmd/gc/controller.go` | The controller loop calls `buildOrderDispatcher()` on startup and config reload, then calls `dispatch()` on each tick. |
-| `cmd/gc/cmd_order.go` | CLI commands (`gc order list/show/run/check/history`) use `orders.Scan()` and `orders.CheckTrigger()` for user-facing operations. |
-| Health Patrol (`cmd/gc/`) | Order dispatch is one phase of the Health Patrol tick cycle, running after agent reconciliation and wisp GC. |
+| Depended on by            | How                                                                                                                               |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `cmd/gc/controller.go`    | The controller loop calls `buildOrderDispatcher()` on startup and config reload, then calls `dispatch()` on each tick.            |
+| `cmd/gc/cmd_order.go`     | CLI commands (`gc order list/show/run/check/history`) use `orders.Scan()` and `orders.CheckTrigger()` for user-facing operations. |
+| Health Patrol (`cmd/gc/`) | Order dispatch is one phase of the Health Patrol tick cycle, running after agent reconciliation and wisp GC.                      |
 
 ## Code Map
 
-| File | Responsibility |
-|---|---|
-| `internal/orders/order.go` | `Order` struct, `Parse()`, `Validate()`, `IsEnabled()`, `IsExec()`, `TimeoutOrDefault()`, `ScopedName()` |
-| `internal/orders/triggers.go` | `TriggerResult`, `CheckTrigger()`, `checkCooldown()`, `checkCron()`, `checkCondition()`, `checkEvent()`, `cronFieldMatches()`, `MaxSeqFromLabels()` |
-| `internal/orders/scanner.go` | `Scan()` -- discovers orders across formula layers with priority override |
-| `cmd/gc/order_dispatch.go` | `orderDispatcher` interface, `memoryOrderDispatcher`, `buildOrderDispatcher()`, `dispatch()`, `dispatchOne()`, `dispatchExec()`, `dispatchWisp()`, `effectiveTimeout()`, `rigExclusiveLayers()`, `qualifyPool()`, `ExecRunner`, `shellExecRunner` |
-| `cmd/gc/cmd_order.go` | CLI commands: `gc order list`, `show`, `run`, `check`, `history`. Helper functions: `loadOrders()`, `loadAllOrders()`, `cityFormulaLayers()`, `findOrder()`, `orderLastRunFn()`, `bdCursorFunc()` |
+| File                          | Responsibility                                                                                                                                                                                                                                    |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `internal/orders/order.go`    | `Order` struct, `Parse()`, `Validate()`, `IsEnabled()`, `IsExec()`, `TimeoutOrDefault()`, `ScopedName()`                                                                                                                                          |
+| `internal/orders/triggers.go` | `TriggerResult`, `CheckTrigger()`, `checkCooldown()`, `checkCron()`, `checkCondition()`, `checkEvent()`, `cronFieldMatches()`, `MaxSeqFromLabels()`                                                                                               |
+| `internal/orders/scanner.go`  | `Scan()` -- discovers orders across formula layers with priority override                                                                                                                                                                         |
+| `cmd/gc/order_dispatch.go`    | `orderDispatcher` interface, `memoryOrderDispatcher`, `buildOrderDispatcher()`, `dispatch()`, `dispatchOne()`, `dispatchExec()`, `dispatchWisp()`, `effectiveTimeout()`, `rigExclusiveLayers()`, `qualifyPool()`, `ExecRunner`, `shellExecRunner` |
+| `cmd/gc/cmd_order.go`         | CLI commands: `gc order list`, `show`, `run`, `check`, `history`. Helper functions: `loadOrders()`, `loadAllOrders()`, `cityFormulaLayers()`, `findOrder()`, `orderLastRunFn()`, `bdCursorFunc()`                                                 |
 
 ## Configuration
 
@@ -355,13 +354,13 @@ name. This produces independent scoped tracking:
 The order subsystem has comprehensive unit tests across three test
 files in the library and two in the CLI:
 
-| Test file | Coverage |
-|---|---|
-| `internal/orders/automation_test.go` | Parse (formula, exec, event orders), Validate (all trigger types, mutual exclusion, missing fields, timeout validation), IsEnabled default/explicit, IsExec, TimeoutOrDefault (defaults and custom), ScopedName (city and rig) |
-| `internal/orders/triggers_test.go` | CheckTrigger for all five trigger types: cooldown (never run, due, not due), cron (matched, not matched, already run this minute), condition (pass, fail), event (due, with cursor, cursor past all, not due, nil provider), rig-scoped triggers (cooldown, cron, event use ScopedName), MaxSeqFromLabels (various label configurations) |
-| `internal/orders/scanner_test.go` | Scan (basic discovery, empty layers, layer override priority, skip list, disabled filtering, source path recording) |
-| `cmd/gc/order_dispatch_test.go` | Dispatcher nil-guard (no orders, manual-only), cooldown dispatch (due, not due, multiple), exec dispatch (due, failure, cooldown, ORDER_DIR env, timeout), rig-scoped dispatch (rig stamping, independent cooldown, qualified pool), rigExclusiveLayers, qualifyPool, effectiveTimeout (default, custom, capped) |
-| `cmd/gc/cmd_order_test.go` | CLI commands: list (empty, with data, exec type), show (found, not found), check (due, not due), history, findOrder |
+| Test file                            | Coverage                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `internal/orders/automation_test.go` | Parse (formula, exec, event orders), Validate (all trigger types, mutual exclusion, missing fields, timeout validation), IsEnabled default/explicit, IsExec, TimeoutOrDefault (defaults and custom), ScopedName (city and rig)                                                                                                           |
+| `internal/orders/triggers_test.go`   | CheckTrigger for all five trigger types: cooldown (never run, due, not due), cron (matched, not matched, already run this minute), condition (pass, fail), event (due, with cursor, cursor past all, not due, nil provider), rig-scoped triggers (cooldown, cron, event use ScopedName), MaxSeqFromLabels (various label configurations) |
+| `internal/orders/scanner_test.go`    | Scan (basic discovery, empty layers, layer override priority, skip list, disabled filtering, source path recording)                                                                                                                                                                                                                      |
+| `cmd/gc/order_dispatch_test.go`      | Dispatcher nil-guard (no orders, manual-only), cooldown dispatch (due, not due, multiple), exec dispatch (due, failure, cooldown, ORDER_DIR env, timeout), rig-scoped dispatch (rig stamping, independent cooldown, qualified pool), rigExclusiveLayers, qualifyPool, effectiveTimeout (default, custom, capped)                         |
+| `cmd/gc/cmd_order_test.go`           | CLI commands: list (empty, with data, exec type), show (found, not found), check (due, not due), history, findOrder                                                                                                                                                                                                                      |
 
 All tests use in-memory fakes (`fsys.NewFake()`, `beads.NewMemStore()`,
 stubbed `ExecRunner`, `memRecorder`) with no external infrastructure

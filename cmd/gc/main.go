@@ -2,7 +2,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -36,17 +35,6 @@ var errExit = errors.New("exit")
 
 type commandExitError struct {
 	code int
-}
-
-type switchableWriter struct {
-	target io.Writer
-}
-
-func (w *switchableWriter) Write(p []byte) (int, error) {
-	if w == nil || w.target == nil {
-		return 0, io.ErrClosedPipe
-	}
-	return w.target.Write(p)
 }
 
 func (e *commandExitError) Error() string {
@@ -119,55 +107,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 		telemetry.SetProcessOTELAttrs()
 	}
 
-	execStdout := &switchableWriter{target: stdout}
-	var jsonStdout bytes.Buffer
-	root := newRootCmd(execStdout, stderr)
+	root := newRootCmd(stdout, stderr)
 	if args == nil {
 		args = []string{}
 	}
-	jsonExecution := shouldBufferJSONExecution(root, args)
-	if jsonExecution {
-		execStdout.target = &jsonStdout
-	}
 	root.SetArgs(args)
-	root.SetOut(execStdout)
+	root.SetOut(stdout)
 	root.SetErr(stderr)
-	if handled, code := handleJSONSchemaRequest(root, args, stdout); handled {
-		return code
-	}
-	if handled, code := handleJSONContractRequest(root, args, stdout, stderr); handled {
-		return code
-	}
 	if err := root.Execute(); err != nil {
-		code := commandExitCode(err)
-		if jsonExecution {
-			if len(bytes.TrimSpace(jsonStdout.Bytes())) > 0 {
-				if _, copyErr := io.Copy(stdout, &jsonStdout); copyErr != nil {
-					return 1
-				}
-			} else {
-				_ = writeJSONFailure(stdout, "command_failed", commandFailureMessage(err), code)
-			}
-		}
-		return code
-	}
-	if jsonExecution {
-		if _, err := io.Copy(stdout, &jsonStdout); err != nil {
-			return 1
-		}
+		return commandExitCode(err)
 	}
 	return 0
-}
-
-func commandFailureMessage(err error) string {
-	if err == nil {
-		return "command failed"
-	}
-	msg := strings.TrimSpace(err.Error())
-	if msg == "" || errors.Is(err, errExit) {
-		return "command failed; see stderr for diagnostics"
-	}
-	return msg
 }
 
 // newRootCmd creates the root cobra command with all subcommands.
@@ -200,7 +150,6 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		"path to the city directory (default: walk up from cwd)")
 	root.PersistentFlags().StringVar(&rigFlag, "rig", "",
 		"rig name or path (default: discover from cwd)")
-	configureJSONSchemaFlag(root)
 	_ = root.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	root.AddCommand(
 		newStartCmd(stdout, stderr),
@@ -230,7 +179,6 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newConvoyCmd(stdout, stderr),
 		newWispCmd(stdout, stderr),
 		newPrimeCmd(stdout, stderr),
-		newPromptCmd(stdout, stderr),
 		newHandoffCmd(stdout, stderr),
 		newBeadsCmd(stdout, stderr),
 		newBuildImageCmd(stdout, stderr),
@@ -250,12 +198,12 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newRuntimeCmd(stdout, stderr),
 		newFormulaCmd(stdout, stderr),
 		newBdCmd(stdout, stderr),
+		newPoolCountCmd(stdout, stderr),
 		newBdStoreBridgeCmd(stdout, stderr),
 		newDoltCleanupCmd(stdout, stderr),
 		newDoltConfigCmd(stdout, stderr),
 		newDoltStateCmd(stdout, stderr),
 		newShellCmd(stdout, stderr),
-		newAnalyzeCmd(stdout, stderr),
 	)
 	// gen-doc needs the root command to walk the tree; add after construction.
 	root.AddCommand(newGenDocCmd(stdout, stderr, root))
@@ -264,7 +212,6 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	registerPackCommands(root, stdout, stderr)
 
 	installArgUsageErrors(root, stderr)
-	installFlagGroupUsageErrors(root, stderr)
 
 	return root
 }
@@ -282,32 +229,6 @@ func installArgUsageErrors(cmd *cobra.Command, stderr io.Writer) {
 	}
 	for _, child := range cmd.Commands() {
 		installArgUsageErrors(child, stderr)
-	}
-}
-
-// installFlagGroupUsageErrors wraps PreRunE on every command so mutually
-// exclusive / required-together / one-required flag violations surface as
-// readable usage errors. Without this, cobra's own ValidateFlagGroups error
-// returns through RunE and is swallowed by the root's SilenceErrors, causing
-// `gc <cmd> --a --b` (with --a/--b mutex) to exit 1 with no output.
-func installFlagGroupUsageErrors(cmd *cobra.Command, stderr io.Writer) {
-	prev := cmd.PreRunE
-	prevRun := cmd.PreRun
-	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
-		if err := cmd.ValidateFlagGroups(); err != nil {
-			printCommandUsageError(stderr, cmd, err)
-			return errExit
-		}
-		if prev != nil {
-			return prev(cmd, args)
-		}
-		if prevRun != nil {
-			prevRun(cmd, args)
-		}
-		return nil
-	}
-	for _, child := range cmd.Commands() {
-		installFlagGroupUsageErrors(child, stderr)
 	}
 }
 
@@ -812,12 +733,8 @@ func openCityRecorder(stderr io.Writer) events.Recorder {
 }
 
 func openCityRecorderAt(cityPath string, stderr io.Writer) events.Recorder {
-	eventsCfg := config.EventsConfig{}
-	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
-		eventsCfg = cfg.Events
-	}
-	rec, err := newFileEventsRecorder(
-		filepath.Join(cityPath, ".gc", "events.jsonl"), eventsCfg, stderr)
+	rec, err := events.NewFileRecorder(
+		filepath.Join(cityPath, ".gc", "events.jsonl"), stderr)
 	if err != nil {
 		return events.Discard
 	}
@@ -826,11 +743,7 @@ func openCityRecorderAt(cityPath string, stderr io.Writer) events.Recorder {
 
 // eventActor returns the public actor identity for events.
 // Prefer the session alias when present, but preserve GC_AGENT fallback for
-// managed-session hooks and older event-emitting contexts. BEADS_ACTOR is
-// the cross-process identity signal shared with bd; falling through to it
-// before "human" lets supervisor-spawned hooks (e.g., bd on_close →
-// `gc event emit`) be attributed correctly to the controller or the order
-// that triggered the close.
+// managed-session hooks and older event-emitting contexts.
 func eventActor() string {
 	if alias := strings.TrimSpace(os.Getenv("GC_ALIAS")); alias != "" {
 		return alias
@@ -841,9 +754,6 @@ func eventActor() string {
 	if sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID")); sessionID != "" {
 		return sessionID
 	}
-	if beadsActor := strings.TrimSpace(os.Getenv("BEADS_ACTOR")); beadsActor != "" {
-		return beadsActor
-	}
 	return "human"
 }
 
@@ -851,25 +761,18 @@ func eventActor() string {
 // Store using the configured provider. On error it writes to stderr and returns
 // nil plus an exit code.
 func openCityStore(stderr io.Writer, cmdName string) (beads.Store, int) {
-	store, _, code := openCityStoreWithPath(stderr, cmdName)
-	return store, code
-}
-
-// openCityStoreWithPath locates the city root and opens its Store, returning
-// the resolved city path used for the store.
-func openCityStoreWithPath(stderr io.Writer, cmdName string) (beads.Store, string, int) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-		return nil, "", 1
+		return nil, 1
 	}
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
-		return nil, "", 1
+		return nil, 1
 	}
-	return store, cityPath, 0
+	return store, 0
 }
 
 // openCityStoreAt opens a bead store at the given city path.
@@ -961,17 +864,9 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 				if err != nil {
 					return nil, err
 				}
-				projected, err := bdRuntimeEnvForRigWithError(runtimeCityPath, cfg, target.ScopeRoot)
-				if err != nil {
-					return nil, err
-				}
-				copyExecProjectedBackendEnv(env, projected)
+				copyExecProjectedDoltEnv(env, bdRuntimeEnvForRig(runtimeCityPath, cfg, target.ScopeRoot))
 			} else {
-				projected, err := bdRuntimeEnvWithError(runtimeCityPath)
-				if err != nil {
-					return nil, err
-				}
-				copyExecProjectedBackendEnv(env, projected)
+				copyExecProjectedDoltEnv(env, bdRuntimeEnv(runtimeCityPath))
 			}
 		}
 		store := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
@@ -1009,11 +904,19 @@ func resolveStoreScopeRoot(cityPath, storePath string) string {
 
 func openBdStoreAt(storePath, cityPath string) (beads.Store, error) {
 	if filepath.Clean(storePath) == filepath.Clean(cityPath) {
-		return bdStoreForCity(storePath, cityPath), nil
+		store := bdStoreForCity(storePath, cityPath)
+		if direct, ok := openOptimizedDoltliteStore(storePath, store); ok {
+			return direct, nil
+		}
+		return store, nil
 	}
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		cfg = nil
 	}
-	return bdStoreForRig(storePath, cityPath, cfg), nil
+	store := bdStoreForRig(storePath, cityPath, cfg)
+	if direct, ok := openOptimizedDoltliteStore(storePath, store); ok {
+		return direct, nil
+	}
+	return store, nil
 }

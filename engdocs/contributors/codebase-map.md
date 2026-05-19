@@ -5,16 +5,16 @@ description: Key packages, ownership boundaries, and the fastest routes through 
 
 ## Core Paths
 
-| Area | Start here | Why |
-|---|---|---|
-| CLI and controller | `cmd/gc/` | Most user-visible behavior is wired here |
-| Runtime provider contract | `internal/runtime/runtime.go` | The provider interface is the lowest-level agent runtime seam |
-| Config and packs | `internal/config/` | `city.toml`, pack composition, and override logic live here |
-| Work store | `internal/beads/` | Tasks, molecules, waits, and mail all land on the store abstraction |
-| Session lifecycle | `internal/session/` | Session identity, wait helpers, and session bead metadata |
-| Orders | `internal/orders/` | Order parsing and scanner logic |
-| Convergence | `internal/convergence/` | Iterative refinement loops, gates, and convergence metadata |
-| API | `internal/api/` | HTTP resources used by dashboards and external clients |
+| Area                      | Start here                    | Why                                                                 |
+| ------------------------- | ----------------------------- | ------------------------------------------------------------------- |
+| CLI and controller        | `cmd/gc/`                     | Most user-visible behavior is wired here                            |
+| Runtime provider contract | `internal/runtime/runtime.go` | The provider interface is the lowest-level agent runtime seam       |
+| Config and packs          | `internal/config/`            | `city.toml`, pack composition, and override logic live here         |
+| Work store                | `internal/beads/`             | Tasks, molecules, waits, and mail all land on the store abstraction |
+| Session lifecycle         | `internal/session/`           | Session identity, wait helpers, and session bead metadata           |
+| Orders                    | `internal/orders/`            | Order parsing and scanner logic                                     |
+| Convergence               | `internal/convergence/`       | Iterative refinement loops, gates, and convergence metadata         |
+| API                       | `internal/api/`               | HTTP resources used by dashboards and external clients              |
 
 ## Common Change Paths
 

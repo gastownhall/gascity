@@ -19,8 +19,6 @@ var managedMCPGitignoreEntries = []string{
 	".mcp.json",
 	filepath.ToSlash(filepath.Join(".gemini", "settings.json")),
 	filepath.ToSlash(filepath.Join(".codex", "config.toml")),
-	filepath.ToSlash(filepath.Join(".cursor", "mcp.json")),
-	"opencode.json",
 }
 
 type mcpTargetSpec struct {
@@ -42,11 +40,7 @@ type resolvedMCPProjection struct {
 
 func supportsMCPProviderKind(kind string) bool {
 	switch strings.TrimSpace(kind) {
-	case materialize.MCPProviderClaude,
-		materialize.MCPProviderCodex,
-		materialize.MCPProviderGemini,
-		materialize.MCPProviderOpenCode,
-		materialize.MCPProviderCursor:
+	case materialize.MCPProviderClaude, materialize.MCPProviderCodex, materialize.MCPProviderGemini:
 		return true
 	default:
 		return false
@@ -73,6 +67,9 @@ func resolveAgentMCPProjection(
 	qualifiedName, workDir string,
 	providerKind string,
 ) (materialize.MCPCatalog, materialize.MCPProjection, error) {
+	if skipsProviderNativeMCP(agent) {
+		return materialize.MCPCatalog{}, materialize.MCPProjection{}, nil
+	}
 	catalog, err := loadEffectiveMCPForAgent(cityPath, cfg, agent, qualifiedName, workDir)
 	if err != nil {
 		return materialize.MCPCatalog{}, materialize.MCPProjection{}, err
@@ -89,6 +86,13 @@ func resolveAgentMCPProjection(
 		return materialize.MCPCatalog{}, materialize.MCPProjection{}, err
 	}
 	return catalog, projection, nil
+}
+
+func skipsProviderNativeMCP(agent *config.Agent) bool {
+	if agent == nil {
+		return false
+	}
+	return agent.Name == config.ControlDispatcherAgentName && strings.TrimSpace(agent.StartCommand) != ""
 }
 
 func mergeMCPFingerprintEntry(fpExtra map[string]string, projection materialize.MCPProjection) map[string]string {

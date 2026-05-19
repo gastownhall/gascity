@@ -1,12 +1,12 @@
 # Inline Ralph v0
 
-| Field | Value |
-|---|---|
-| Status | Draft |
-| Date | 2026-03-19 |
-| Author(s) | Codex |
-| Issue | — |
-| Supersedes | — |
+| Field      | Value      |
+| ---------- | ---------- |
+| Status     | Draft      |
+| Date       | 2026-03-19 |
+| Author(s)  | Codex      |
+| Issue      | —          |
+| Supersedes | —          |
 
 Small design for a first prototype of first-class workflow beads with a
 single Ralph-style retry loop.

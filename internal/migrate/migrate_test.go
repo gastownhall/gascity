@@ -164,90 +164,14 @@ default_rig_includes = ["../packs/z-pack", "../packs/a-pack"]
 	if err != nil {
 		t.Fatalf("LoadWithIncludes after migration: %v", err)
 	}
-	if len(cfg.Workspace.LegacyDefaultRigIncludes()) != 2 {
-		t.Fatalf("len(DefaultRigIncludes) = %d, want 2", len(cfg.Workspace.LegacyDefaultRigIncludes()))
+	if len(cfg.Workspace.DefaultRigIncludes) != 2 {
+		t.Fatalf("len(DefaultRigIncludes) = %d, want 2", len(cfg.Workspace.DefaultRigIncludes))
 	}
-	if cfg.Workspace.LegacyDefaultRigIncludes()[0] != "../packs/z-pack" {
-		t.Fatalf("DefaultRigIncludes[0] = %q, want %q", cfg.Workspace.LegacyDefaultRigIncludes()[0], "../packs/z-pack")
+	if cfg.Workspace.DefaultRigIncludes[0] != "../packs/z-pack" {
+		t.Fatalf("DefaultRigIncludes[0] = %q, want %q", cfg.Workspace.DefaultRigIncludes[0], "../packs/z-pack")
 	}
-	if cfg.Workspace.LegacyDefaultRigIncludes()[1] != "../packs/a-pack" {
-		t.Fatalf("DefaultRigIncludes[1] = %q, want %q", cfg.Workspace.LegacyDefaultRigIncludes()[1], "../packs/a-pack")
-	}
-}
-
-func TestMigrateRemovesPacksAfterMigratingNamedIncludes(t *testing.T) {
-	t.Parallel()
-
-	cityDir := t.TempDir()
-	writeFile(t, cityDir, "city.toml", `
-[workspace]
-name = "legacy-city"
-includes = ["team"]
-default_rig_includes = ["ops"]
-
-[packs.team]
-source = "https://example.com/team.git"
-path = "pack"
-ref = "v1"
-
-[packs.ops]
-source = "../packs/ops"
-`)
-
-	if _, err := Apply(cityDir, Options{}); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-
-	packToml := readFile(t, filepath.Join(cityDir, "pack.toml"))
-	for _, want := range []string{
-		"[imports.team]",
-		`source = "https://example.com/team.git//pack#v1"`,
-		"[defaults.rig.imports.ops]",
-		`source = "../packs/ops"`,
-	} {
-		if !strings.Contains(packToml, want) {
-			t.Fatalf("pack.toml missing %q after named pack migration:\n%s", want, packToml)
-		}
-	}
-
-	cityToml := readFile(t, filepath.Join(cityDir, "city.toml"))
-	if strings.Contains(cityToml, "[packs.") || strings.Contains(cityToml, "[packs]") {
-		t.Fatalf("city.toml still contains migrated [packs] entries:\n%s", cityToml)
-	}
-}
-
-func TestMigrateKeepsPacksStillReferencedByRigIncludes(t *testing.T) {
-	t.Parallel()
-
-	cityDir := t.TempDir()
-	writeFile(t, cityDir, "city.toml", `
-[workspace]
-name = "legacy-city"
-includes = ["team"]
-
-[[rigs]]
-name = "app"
-path = "app"
-includes = ["team"]
-
-[packs.team]
-source = "../packs/team"
-`)
-
-	if _, err := Apply(cityDir, Options{}); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-
-	cityToml := readFile(t, filepath.Join(cityDir, "city.toml"))
-	if !strings.Contains(cityToml, "[packs.team]") {
-		t.Fatalf("city.toml removed pack still referenced by rig includes:\n%s", cityToml)
-	}
-	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
-	if err != nil {
-		t.Fatalf("Load migrated city: %v", err)
-	}
-	if len(cfg.Workspace.LegacyIncludes()) != 0 {
-		t.Fatalf("workspace legacy includes = %v, want none", cfg.Workspace.LegacyIncludes())
+	if cfg.Workspace.DefaultRigIncludes[1] != "../packs/a-pack" {
+		t.Fatalf("DefaultRigIncludes[1] = %q, want %q", cfg.Workspace.DefaultRigIncludes[1], "../packs/a-pack")
 	}
 }
 
@@ -691,8 +615,6 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		WorkQuery:              "bd ready",
 		SlingQuery:             "bd update {}",
 		IdleTimeout:            "15m",
-		MaxSessionAge:          "5h",
-		MaxSessionAgeJitter:    "15m",
 		SleepAfterIdle:         "30s",
 		InstallAgentHooks:      []string{"claude"},
 		HooksInstalled:         &trueVal,
@@ -726,9 +648,6 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		"PoolName":                     true,
 		"BindingName":                  true,
 		"PackName":                     true,
-		// Runtime-only provenance consumed inside internal/config.
-		"source": true,
-		"layout": true,
 		// v0.15.1 tombstones — still on Agent but intentionally not propagated
 		// by migrate (removed in v0.16).
 		"Skills":       true,

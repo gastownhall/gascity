@@ -54,7 +54,11 @@ export function closeOutput(): void {
   byId("output-panel")?.classList.remove("open");
 }
 
-export function showToast(type: "success" | "error" | "info", title: string, message: string): void {
+export function showToast(
+  type: "success" | "error" | "info",
+  title: string,
+  message: string,
+): void {
   const container = byId("toast-container");
   if (!container) return;
   const toast = document.createElement("div");
@@ -73,7 +77,11 @@ export function showToast(type: "success" | "error" | "info", title: string, mes
   }, lifetimeMs);
 }
 
-export function reportUIError(title: string, error: unknown, fallbackMessage = "Unexpected dashboard error"): void {
+export function reportUIError(
+  title: string,
+  error: unknown,
+  fallbackMessage = "Unexpected dashboard error",
+): void {
   const message = error instanceof Error ? error.message : fallbackMessage;
   logError("ui", title, { error, fallbackMessage, message });
   showToast("error", title, message);

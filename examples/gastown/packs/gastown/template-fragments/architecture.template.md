@@ -1,4 +1,5 @@
 {{ define "architecture" }}
+
 ## Gas Town Architecture
 
 ```
@@ -15,6 +16,7 @@ Town ({{ .CityRoot }})
 ```
 
 **Key concepts:**
+
 - **Town**: Workspace root containing all rigs
 - **Rig**: Container for a project (polecats, refinery, witness)
 - **Polecat**: Transient worker agent with its own git worktree
@@ -25,4 +27,4 @@ Town ({{ .CityRoot }})
 - **Dog**: Utility agent pool (shutdown dance, warrants)
 - **Beads**: Issue tracking system shared by all rig agents
 - **Molecule**: Multi-step formula instance guiding an agent's work
-{{ end }}
+  {{ end }}

@@ -2,13 +2,13 @@
 title: "Agent Pools & Autoscaling"
 ---
 
-| Field | Value |
-|---|---|
-| Status | Implemented |
-| Date | 2026-03-01 |
-| Author(s) | Claude |
-| Issue | — |
-| Supersedes | — |
+| Field      | Value       |
+| ---------- | ----------- |
+| Status     | Implemented |
+| Date       | 2026-03-01  |
+| Author(s)  | Claude      |
+| Issue      | —           |
+| Supersedes | —           |
 
 Design document for elastic agent pools in Gas City. Covers the full
 picture: upscaling, downscaling, drain mode, and the ZFC-compliant
@@ -31,18 +31,18 @@ Both are: `desired_count = f(bead_store_state)`, bounded by min/max.
 
 ## Kubernetes parallel
 
-| Kubernetes | Gas City | Notes |
-|---|---|---|
-| Pod | Agent session | Unit of compute |
-| Deployment | Pool config in TOML | Template + desired count |
-| HPA / KEDA | `check` shell command | Computes desired from observables |
-| Metrics Server | Bead store (`bd` queries) | Observable state |
-| Controller loop | Reconciler | Already exists (`doReconcileAgents`) |
-| Scheduler | `runtime.Provider.Start` | No node selection needed |
-| Graceful termination | Drain mode + prompt | Agent-aware, not just SIGTERM |
-| preStop hook | Drain signal in prompt | Agent decides how to wrap up |
-| terminationGracePeriodSeconds | `drain_timeout` | Hard deadline for draining |
-| Pod disruption budget | `min` field | Never go below this count |
+| Kubernetes                    | Gas City                  | Notes                                |
+| ----------------------------- | ------------------------- | ------------------------------------ |
+| Pod                           | Agent session             | Unit of compute                      |
+| Deployment                    | Pool config in TOML       | Template + desired count             |
+| HPA / KEDA                    | `check` shell command     | Computes desired from observables    |
+| Metrics Server                | Bead store (`bd` queries) | Observable state                     |
+| Controller loop               | Reconciler                | Already exists (`doReconcileAgents`) |
+| Scheduler                     | `runtime.Provider.Start`  | No node selection needed             |
+| Graceful termination          | Drain mode + prompt       | Agent-aware, not just SIGTERM        |
+| preStop hook                  | Drain signal in prompt    | Agent decides how to wrap up         |
+| terminationGracePeriodSeconds | `drain_timeout`           | Hard deadline for draining           |
+| Pod disruption budget         | `min` field               | Never go below this count            |
 
 **What Gas City doesn't need from Kubernetes:** node scheduling, resource
 requests/limits, affinity/anti-affinity, multi-node networking, rolling
@@ -141,17 +141,18 @@ check = "echo $(( $(bd ready --json | jq length) + $(bd list --status hooked --j
 
 ### ZFC analysis
 
-| Concern | Where | ZFC role |
-|---------|-------|----------|
-| min/max bounds | TOML config | User-supplied policy |
-| Scaling signal | Shell command in config | User-supplied policy |
-| "Finish current work" | Prompt template | Agent cognition |
-| drain_timeout | TOML config | User-supplied policy |
-| Start/stop sessions | Go state machine | Deterministic transport |
-| Clamp desired to [min,max] | Go code | Arithmetic (transport) |
-| Re-queue hooked beads | Go code | Deterministic safety |
+| Concern                    | Where                   | ZFC role                |
+| -------------------------- | ----------------------- | ----------------------- |
+| min/max bounds             | TOML config             | User-supplied policy    |
+| Scaling signal             | Shell command in config | User-supplied policy    |
+| "Finish current work"      | Prompt template         | Agent cognition         |
+| drain_timeout              | TOML config             | User-supplied policy    |
+| Start/stop sessions        | Go state machine        | Deterministic transport |
+| Clamp desired to [min,max] | Go code                 | Arithmetic (transport)  |
+| Re-queue hooked beads      | Go code                 | Deterministic safety    |
 
 The spec explicitly allows:
+
 - **Deterministic infrastructure operations** in Go (concepts.md:
   "Some infrastructure operations must be deterministic to be safe")
 - **Config-driven thresholds** read by Go (health patrol pattern)
@@ -293,6 +294,7 @@ scaling check once at `gc start` and let polecats self-terminate.
 ### Phase 1: Tutorial 08 — upscale only
 
 Minimum viable pools:
+
 - Parse `[[pools]]` from city.toml
 - Evaluate `check` shell command
 - Start agents up to `min(desired, max)`

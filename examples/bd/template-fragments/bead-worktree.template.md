@@ -1,4 +1,5 @@
 {{- define "bead-worktree" -}}
+
 ## Worktree recovery
 
 When you create a git worktree (via `git worktree add` or the EnterWorktree tool), save its path to your task bead so the orchestrator starts you there on restart:

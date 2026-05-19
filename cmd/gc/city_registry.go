@@ -50,6 +50,11 @@ type citySnapshot struct {
 	builtAt time.Time            // for staleness instrumentation
 }
 
+type registeredStoppedCity struct {
+	name   string
+	status string
+}
+
 // cityRegistry owns the mutable cities map and the atomic snapshot.
 // All mutation methods acquire citiesMu, mutate, rebuild, and release.
 // The snapshot rebuild is always called while citiesMu is held —
@@ -61,6 +66,7 @@ type cityRegistry struct {
 
 	// init/backoff state (co-protected by citiesMu)
 	initStatus           map[string]cityInitProgress
+	registeredStopped    map[string]registeredStoppedCity
 	initFailures         map[string]*initFailRecord
 	panicHistory         map[string]*panicRecord
 	pendingRequestIDs    map[string]string    // city path → request_id for async correlation
@@ -75,6 +81,7 @@ func newCityRegistry() *cityRegistry {
 	r := &cityRegistry{
 		cities:               make(map[string]*managedCity),
 		initStatus:           make(map[string]cityInitProgress),
+		registeredStopped:    make(map[string]registeredStoppedCity),
 		initFailures:         make(map[string]*initFailRecord),
 		panicHistory:         make(map[string]*panicRecord),
 		pendingRequestIDs:    make(map[string]string),
@@ -175,6 +182,7 @@ func (r *cityRegistry) Remove(path string) {
 	defer r.citiesMu.Unlock()
 	delete(r.cities, path)
 	delete(r.initStatus, path)
+	delete(r.registeredStopped, path)
 	delete(r.initFailures, path)
 	delete(r.panicHistory, path)
 	r.rebuildSnapshotLocked()
@@ -457,8 +465,8 @@ func phasesCompletedBefore(current string) []string {
 func (r *cityRegistry) rebuildSnapshotLocked() {
 	r.gen++
 
-	// Count total entries: cities + init-only + failure-only entries.
-	totalEstimate := len(r.cities) + len(r.initStatus) + len(r.initFailures)
+	// Count total entries: cities + stopped + init-only + failure-only entries.
+	totalEstimate := len(r.cities) + len(r.registeredStopped) + len(r.initStatus) + len(r.initFailures)
 
 	snap := &citySnapshot{
 		byName:  make(map[string]*cityView, totalEstimate),
@@ -471,6 +479,21 @@ func (r *cityRegistry) rebuildSnapshotLocked() {
 	// Build views for cities in the main map.
 	for path, mc := range r.cities {
 		view := r.toCityView(path, mc)
+		snap.byPath[path] = view
+		snap.byName[view.Name] = view
+		snap.all = append(snap.all, view)
+	}
+
+	// Build views for registered cities that are intentionally not running.
+	for path, stopped := range r.registeredStopped {
+		if _, exists := snap.byPath[path]; exists {
+			continue
+		}
+		view := &cityView{
+			Name:   stopped.name,
+			Path:   path,
+			Status: stopped.status,
+		}
 		snap.byPath[path] = view
 		snap.byName[view.Name] = view
 		snap.all = append(snap.all, view)

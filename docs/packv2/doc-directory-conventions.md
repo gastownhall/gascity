@@ -326,7 +326,7 @@ Holds order definitions discovered by convention.
 
 Expected contents: `*.toml` files (one per order). The `.order.` infix is transitional and targeted for removal.
 
-Orders are not formulas — they *reference* formulas to schedule dispatch. They live at top level, not nested under `formulas/`.
+Orders are not formulas — they _reference_ formulas to schedule dispatch. They live at top level, not nested under `formulas/`.
 
 ### `patches/`
 

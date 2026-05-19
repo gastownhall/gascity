@@ -37,15 +37,6 @@ func TestProjectLifecycleNormalizesCompatibilityStates(t *testing.T) {
 			wantState: StateAsleep,
 		},
 		{
-			name: "failed-create projects as typed cleanup state",
-			metadata: map[string]string{
-				"state":        string(StateFailedCreate),
-				"session_name": "s-worker",
-			},
-			wantBase:  BaseStateFailedCreate,
-			wantState: StateFailedCreate,
-		},
-		{
 			name: "asleep with drained sleep reason projects as drained",
 			metadata: map[string]string{
 				"state":        "asleep",
@@ -112,20 +103,6 @@ func TestProjectLifecycleDesiredStateAndBlockers(t *testing.T) {
 			},
 			wantDesired: DesiredStateRunning,
 			wantCauses:  []WakeCause{WakeCausePendingCreate},
-		},
-		{
-			name: "explicit wake request is a durable wake cause",
-			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":        "asleep",
-					"session_name": "s-worker",
-					"wake_request": "explicit",
-				},
-				Now: now,
-			},
-			wantDesired: DesiredStateRunning,
-			wantCauses:  []WakeCause{WakeCauseExplicit},
 		},
 		{
 			name: "future hold blocks an otherwise runnable create claim",
@@ -409,23 +386,6 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 			wantReconciledState: StateAsleep,
 		},
 		{
-			name: "dead active runtime with runtime-missing reason preserves resume identity",
-			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":               "active",
-					"session_name":        "s-worker",
-					"session_key":         "provider-conversation",
-					"started_config_hash": "config",
-					"sleep_reason":        "runtime-missing",
-				},
-				Runtime: RuntimeFacts{Observed: true, Alive: false},
-				Now:     now,
-			},
-			wantRuntime:         RuntimeProjectionMissing,
-			wantReconciledState: StateAsleep,
-		},
-		{
 			name: "fresh creating state stays creating after restart",
 			input: LifecycleInput{
 				Status: "open",
@@ -501,23 +461,6 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 			},
 			wantRuntime:         RuntimeProjectionStartRequested,
 			wantReconciledState: StateCreating,
-		},
-		{
-			name: "failed-create with pending_create_claim stays failed-create",
-			input: LifecycleInput{
-				Status: "open",
-				Metadata: map[string]string{
-					"state":                string(StateFailedCreate),
-					"session_name":         "s-worker",
-					"pending_create_claim": "true",
-				},
-				Runtime:            RuntimeFacts{Observed: true, Alive: false},
-				CreatedAt:          now.Add(-30 * time.Second),
-				StaleCreatingAfter: time.Minute,
-				Now:                now,
-			},
-			wantRuntime:         RuntimeProjectionMissing,
-			wantReconciledState: StateFailedCreate,
 		},
 		{
 			name: "non-creating pending_create_claim remains start requested",

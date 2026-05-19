@@ -35,15 +35,6 @@ func (c *CachingStore) Create(b Bead) (Bead, error) {
 
 // Update passes through to the backing store and refreshes the cache.
 func (c *CachingStore) Update(id string, opts UpdateOpts) error {
-	// Idempotence: if every non-nil field in opts already matches the
-	// cached bead AND the cache is primed, the backing call is a no-op.
-	// Skipping it avoids the bd subprocess invocation, the on_update
-	// hook, and the post-update Get refresh — same payoff as the
-	// SetMetadata short-circuit at metadataAlreadyMatchesCached.
-	// See gastownhall/gascity#1978 Phase 1.
-	if c.updateMatchesCached(id, opts) {
-		return nil
-	}
 	if err := c.backing.Update(id, opts); err != nil {
 		return err
 	}
@@ -75,13 +66,6 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 
 // Close marks a bead as closed in the backing store and cache.
 func (c *CachingStore) Close(id string) error {
-	// Idempotence: if the cached bead status is already "closed" AND the
-	// cache is primed, the backing call is a no-op. Skipping it avoids
-	// the bd subprocess invocation, the on_update hook, and the
-	// post-close Get refresh. See gastownhall/gascity#1978 Phase 1.
-	if c.closeAlreadyMatchesCached(id) {
-		return nil
-	}
 	if err := c.backing.Close(id); err != nil {
 		return err
 	}
@@ -117,6 +101,7 @@ func (c *CachingStore) Close(id string) error {
 	c.mu.Unlock()
 
 	if found {
+		closed.Status = "closed"
 		c.notifyChange("bead.closed", closed)
 	}
 	return nil
@@ -221,54 +206,42 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 
 // SetMetadata sets a single metadata key-value on a bead.
 func (c *CachingStore) SetMetadata(id, key, value string) error {
-	// Idempotence: if the cached bead already has metadata[key] == value,
-	// the backing call is a no-op semantically. Skipping it avoids the
-	// bd subprocess invocation and — crucially — avoids firing bd's
-	// on_update hook, which calls "gc event emit bead.updated" and
-	// appends a line to the city's events.jsonl. Reconciler tick logic
-	// repeatedly writes the same heartbeat / deferral fields every ~2s,
-	// producing thousands of no-op events per hour. The cache is the
-	// supervisor's authoritative read source, so a value-match here is
-	// a value-match in the store.
-	if c.metadataAlreadyMatchesCached(id, map[string]string{key: value}) {
-		return nil
-	}
-	if err := c.backing.SetMetadata(id, key, value); err != nil {
+	if err := c.SetMetadataBatch(id, map[string]string{key: value}); err != nil {
 		return err
 	}
-
-	c.mu.Lock()
-	c.noteLocalMutationLocked(id)
-	if b, ok := c.beads[id]; ok {
-		if b.Metadata == nil {
-			b.Metadata = make(map[string]string)
-		}
-		b.Metadata[key] = value
-		c.beads[id] = b
-		delete(c.dirty, id)
-		delete(c.deletedSeq, id)
-	}
-	c.markFreshLocked(time.Now())
-	c.updateStatsLocked()
-	c.mu.Unlock()
 	return nil
+}
+
+func (c *CachingStore) cachedMetadataDiff(id string, kvs map[string]string) map[string]string {
+	if len(kvs) == 0 {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	b, ok := c.beads[id]
+	if !ok {
+		changed := make(map[string]string, len(kvs))
+		for k, v := range kvs {
+			changed[k] = v
+		}
+		return changed
+	}
+	changed := make(map[string]string, len(kvs))
+	for k, v := range kvs {
+		if b.Metadata[k] != v {
+			changed[k] = v
+		}
+	}
+	return changed
 }
 
 // SetMetadataBatch sets multiple metadata key-values on a bead.
 func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error {
-	if len(kvs) == 0 {
+	changed := c.cachedMetadataDiff(id, kvs)
+	if len(changed) == 0 {
 		return nil
 	}
-	// Idempotence: see SetMetadata. If every kv pair already matches the
-	// cached bead's metadata, skip the backing write — no bd subprocess,
-	// no on_update hook fire, no events.jsonl entry. Reconciler ticks
-	// re-stamp deferral timestamps and other "I observed this" markers
-	// on every cycle; without this guard each cycle generates a
-	// bead.updated event even when nothing changed.
-	if c.metadataAlreadyMatchesCached(id, kvs) {
-		return nil
-	}
-	if err := c.backing.SetMetadataBatch(id, kvs); err != nil {
+	if err := c.backing.SetMetadataBatch(id, changed); err != nil {
 		return err
 	}
 
@@ -276,9 +249,9 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 	c.noteLocalMutationLocked(id)
 	if b, ok := c.beads[id]; ok {
 		if b.Metadata == nil {
-			b.Metadata = make(map[string]string, len(kvs))
+			b.Metadata = make(map[string]string, len(changed))
 		}
-		for k, v := range kvs {
+		for k, v := range changed {
 			b.Metadata[k] = v
 		}
 		c.beads[id] = b
@@ -289,152 +262,6 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 	c.updateStatsLocked()
 	c.mu.Unlock()
 	return nil
-}
-
-// Tx executes fn sequentially against the CachingStore.
-func (c *CachingStore) Tx(_ string, fn func(Tx) error) error {
-	return runSequentialTx(c, fn)
-}
-
-// updateMatchesCached returns true when every non-nil field in opts already
-// reflects the cached bead's state AND the cache is primed. Returns false on
-// cache miss, uninitialized cache, or any field mismatch — in which case the
-// caller falls through to the backing write. Companion to
-// metadataAlreadyMatchesCached but covers the full UpdateOpts surface
-// (Title, Status, Type, Priority, Description, ParentID, Assignee, Metadata,
-// Labels, RemoveLabels). See gastownhall/gascity#1978 Phase 1.
-//
-// The short-circuit path skips the deduplication that
-// applyUpdateOptsToBead performs on the non-short-circuit pass. Cached
-// bead labels come from bd/dolt's canonical state, which never produces
-// duplicates, so a Labels-equal match here is a Labels-equal match in
-// the store after applyUpdateOptsToBead would have run. If a future
-// path injects duplicate labels into the cache, this short-circuit
-// would skip the dedup-fixup — file an issue rather than relaxing the
-// invariant here.
-func (c *CachingStore) updateMatchesCached(id string, opts UpdateOpts) bool {
-	if id == "" {
-		return false
-	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.state != cacheLive && c.state != cachePartial {
-		return false
-	}
-	b, ok := c.beads[id]
-	if !ok {
-		return false
-	}
-	if opts.Title != nil && b.Title != *opts.Title {
-		return false
-	}
-	if opts.Status != nil && b.Status != *opts.Status {
-		return false
-	}
-	if opts.Type != nil && b.Type != *opts.Type {
-		return false
-	}
-	if opts.Priority != nil {
-		if b.Priority == nil || *b.Priority != *opts.Priority {
-			return false
-		}
-	}
-	if opts.Description != nil && b.Description != *opts.Description {
-		return false
-	}
-	if opts.ParentID != nil && b.ParentID != *opts.ParentID {
-		return false
-	}
-	if opts.Assignee != nil && b.Assignee != *opts.Assignee {
-		return false
-	}
-	for k, v := range opts.Metadata {
-		if b.Metadata == nil {
-			if v != "" {
-				return false
-			}
-			continue
-		}
-		if b.Metadata[k] != v {
-			return false
-		}
-	}
-	if len(opts.Labels) > 0 || len(opts.RemoveLabels) > 0 {
-		// Set-equality check: opts.Labels ⊆ existing AND
-		// (opts.RemoveLabels ∩ existing) = ∅ implies the final label set
-		// after applyUpdateOptsToBead equals the current set. We skip
-		// that function's dedup pass here — see the doc comment above
-		// for why that's safe under bd/dolt's canonical labels.
-		existing := make(map[string]struct{}, len(b.Labels))
-		for _, l := range b.Labels {
-			existing[l] = struct{}{}
-		}
-		for _, l := range opts.Labels {
-			if _, present := existing[l]; !present {
-				return false
-			}
-		}
-		for _, l := range opts.RemoveLabels {
-			if _, present := existing[l]; present {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-// closeAlreadyMatchesCached returns true when the cached bead status is
-// already "closed" AND the cache is primed. Returns false on cache miss or
-// uninitialized cache. See gastownhall/gascity#1978 Phase 1.
-func (c *CachingStore) closeAlreadyMatchesCached(id string) bool {
-	if id == "" {
-		return false
-	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.state != cacheLive && c.state != cachePartial {
-		return false
-	}
-	b, ok := c.beads[id]
-	if !ok {
-		return false
-	}
-	return b.Status == "closed"
-}
-
-// metadataAlreadyMatchesCached returns true when the cache holds a primed
-// copy of the bead and every key/value in kvs is already present with the
-// same value. A cache miss returns false (we cannot prove no-op), so the
-// caller falls through to the backing write. Empty maps (no keys) match
-// trivially, but callers should handle len==0 explicitly to avoid acquiring
-// the lock for a guaranteed no-op.
-func (c *CachingStore) metadataAlreadyMatchesCached(id string, kvs map[string]string) bool {
-	if id == "" {
-		return false
-	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	b, ok := c.beads[id]
-	if !ok {
-		return false
-	}
-	if b.Metadata == nil {
-		// Cache has the bead but no metadata map — any non-empty value
-		// would be a write; an empty value (clearing a never-set key)
-		// is already the desired state.
-		for _, v := range kvs {
-			if v != "" {
-				return false
-			}
-		}
-		return true
-	}
-	for k, v := range kvs {
-		if b.Metadata[k] != v {
-			return false
-		}
-	}
-	return true
 }
 
 // DepAdd adds a dependency and updates the cache.

@@ -132,7 +132,9 @@ export function currentCityStatus(): CurrentCityStatus {
   return city.running ? { kind: "running", city } : { kind: "not-running", city };
 }
 
-export function canFetchCityScopedResources(status: CurrentCityStatus = currentCityStatus()): boolean {
+export function canFetchCityScopedResources(
+  status: CurrentCityStatus = currentCityStatus(),
+): boolean {
   if (status.kind === "running") return true;
   if (status.kind === "unknown") return !cachedCitiesKnown;
   return false;

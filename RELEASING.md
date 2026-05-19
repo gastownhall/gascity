@@ -2,11 +2,11 @@
 
 ## Distribution Channels
 
-| Channel | Mechanism | Automatic? |
-|---------|-----------|------------|
-| **GitHub Release** | GoReleaser via `release.yml` on tag push | Yes |
-| **Homebrew tap** (`gastownhall/gascity`) | `release.yml` writes an asset-based formula after archives upload | Yes |
-| **Homebrew core** (`Homebrew/homebrew-core`) | BrewTestBot autobump, once listed | Yes (~3h delay) |
+| Channel                                      | Mechanism                                                         | Automatic?      |
+| -------------------------------------------- | ----------------------------------------------------------------- | --------------- |
+| **GitHub Release**                           | GoReleaser via `release.yml` on tag push                          | Yes             |
+| **Homebrew tap** (`gastownhall/gascity`)     | `release.yml` writes an asset-based formula after archives upload | Yes             |
+| **Homebrew core** (`Homebrew/homebrew-core`) | BrewTestBot autobump, once listed                                 | Yes (~3h delay) |
 
 The homebrew-core submission is [in progress](https://github.com/Homebrew/homebrew-core). Until it lands and is added to the autobump list, users install via `brew install gastownhall/gascity/gascity`.
 
@@ -90,13 +90,13 @@ Manual `brew bump-formula-pr` is refused for autobump formulae. If the bot stall
 
 ## Files Updated During a Release
 
-| File | What changes | Updated by |
-|------|-------------|------------|
-| `CHANGELOG.md` | `[Unreleased]` → `[X.Y.Z] - DATE` | `scripts/bump-version.sh` |
-| Git tag `vX.Y.Z` | Created and pushed | `scripts/bump-version.sh` |
-| GitHub Release page | Created with binaries + grouped changelog | GoReleaser in `release.yml` |
-| Release SBOM + attestations | SPDX SBOM uploaded and release archives attested | `attest-release` in `release.yml` |
-| `gastownhall/homebrew-gascity/Formula/gascity.rb` | asset URLs + `sha256` updated | `update-homebrew-formula` in `release.yml` |
+| File                                              | What changes                                     | Updated by                                 |
+| ------------------------------------------------- | ------------------------------------------------ | ------------------------------------------ |
+| `CHANGELOG.md`                                    | `[Unreleased]` → `[X.Y.Z] - DATE`                | `scripts/bump-version.sh`                  |
+| Git tag `vX.Y.Z`                                  | Created and pushed                               | `scripts/bump-version.sh`                  |
+| GitHub Release page                               | Created with binaries + grouped changelog        | GoReleaser in `release.yml`                |
+| Release SBOM + attestations                       | SPDX SBOM uploaded and release archives attested | `attest-release` in `release.yml`          |
+| `gastownhall/homebrew-gascity/Formula/gascity.rb` | asset URLs + `sha256` updated                    | `update-homebrew-formula` in `release.yml` |
 
 ## Troubleshooting
 

@@ -20,7 +20,7 @@ hits them.
 
 This is infrastructure work. You:
 1. Scan the .dolt-data/ directory for unservable databases
-2. Escalate any phantoms or retired replacements found without moving them
+2. Quarantine any phantoms or retired replacements found
 3. Report findings and exit
 4. Return to kennel
 
@@ -33,9 +33,8 @@ This is infrastructure work. You:
 ## Safety
 
 Phantom database directories have NO valid data (missing noms/manifest).
-Retired replacement directories may contain recoverable data. Do not move,
-delete, or otherwise mutate either case. Escalate to an operator so cleanup
-happens deliberately with the Dolt server stopped or through Dolt itself.
+Retired replacement directories may contain recoverable data, so move both
+cases into .quarantine/ instead of deleting them.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-dog-phantom-db"
@@ -83,47 +82,44 @@ A retired replacement database has:
 **Exit criteria:** Scan complete, unservable databases identified."""
 
 [[steps]]
-id = "escalate"
-title = "Escalate unservable databases"
+id = "quarantine"
+title = "Quarantine unservable databases"
 needs = ["scan"]
 description = """
-Escalate unservable database directories without mutating them.
+Move unservable database directories to quarantine before Dolt auto-discovers them.
 
 **1. If no unservable databases were found:**
-Skip this step — nothing to escalate.
+Skip this step — nothing to quarantine.
 
 **2. For each phantom or retired replacement database:**
-Record the directory name and category. Do not move or delete it:
+Move the directory into .quarantine/:
 ```bash
-# Safe response is observation only. Do not run mv/rm against {{data_dir}}.
+mkdir -p {{data_dir}}/.quarantine
+mv -f {{data_dir}}/<database-name> {{data_dir}}/.quarantine/$(date +%Y%m%dT%H%M%S)-<database-name>
 ```
 
-This is required because:
-- Dolt owns the database directory layout
-- Filesystem moves can race a running Dolt server
-- Retired replacements may still contain recoverable data
+This is safe because:
+- Missing-manifest phantoms cannot be served by Dolt
+- Retired replacements are no longer the active database
+- The move preserves data for later inspection or recovery
 
 **3. Record results:**
-- Count of phantom directories
-- Count of retired replacement directories
-- Names and paths that need operator review
+- Count of unservable databases quarantined
+- Any errors during removal
 
 **4. Escalate if unservable databases were found:**
-Unservable databases indicate a Dolt cleanup or data-dir hygiene issue that should be investigated.
-The exec order implementation in `assets/scripts/mol-dog-phantom-db.sh` sends the
-canonical escalation body; any formula-driven equivalent must include separate
-phantom and retired-replacement counts and state that no files were moved or deleted:
+Unservable databases indicate a Dolt cleanup or data-dir hygiene issue that should be investigated:
 ```bash
-gc mail send mayor/ -s "ESCALATION: Unservable Dolt databases detected [HIGH]" \\
-  -m "Found <count> unservable database directories: <names>. Phantoms: <count>; retired replacements: <count>. No files were moved or deleted."
+gc mail send mayor/ -s "ESCALATION: Quarantined unservable databases [HIGH]" \\
+  -m "Found and quarantined <count> unservable database(s): <names>"
 ```
 
-**Exit criteria:** All unservable databases escalated (or none found)."""
+**Exit criteria:** All unservable databases quarantined (or none found)."""
 
 [[steps]]
 id = "report"
 title = "Report findings and return to kennel"
-needs = ["escalate"]
+needs = ["quarantine"]
 description = """
 Generate summary and signal completion.
 
@@ -131,7 +127,7 @@ Generate summary and signal completion.
 - Directories scanned
 - Phantoms found
 - Retired replacements found
-- Unservable databases escalated
+- Unservable databases quarantined
 - Valid databases
 
 **2. Signal completion:**

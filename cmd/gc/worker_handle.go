@@ -103,7 +103,6 @@ func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config 
 		ReadyDelayMs:           resolved.ReadyDelayMs,
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
 	}
 }
 
@@ -496,7 +495,6 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 			ReadyDelayMs:           resolved.ReadyDelayMs,
 			ProcessNames:           resolved.ProcessNames,
 			EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-			AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
 			MCPServers:             mcpServers,
 		},
 		Resume: session.ProviderResume{

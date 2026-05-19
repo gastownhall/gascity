@@ -132,16 +132,16 @@ is a thin composition layer proving the primitives are sufficient.
 
 ## Interactions
 
-| Depends on | How |
-|---|---|
-| `internal/beads` | beadmail stores messages as beads |
+| Depends on         | How                                  |
+| ------------------ | ------------------------------------ |
+| `internal/beads`   | beadmail stores messages as beads    |
 | `internal/runtime` | Nudge delivered via Provider.Nudge() |
 
-| Depended on by | How |
-|---|---|
+| Depended on by       | How                                                                                                  |
+| -------------------- | ---------------------------------------------------------------------------------------------------- |
 | `cmd/gc/cmd_mail.go` | CLI commands: send, inbox, read, peek, reply, archive, delete, mark-read, mark-unread, thread, count |
-| `cmd/gc/cmd_hook.go` | Hook checks for unread mail via Check() |
-| Agent prompts | Templates reference `gc mail` commands |
+| `cmd/gc/cmd_hook.go` | Hook checks for unread mail via Check()                                                              |
+| Agent prompts        | Templates reference `gc mail` commands                                                               |
 
 ## Code Map
 

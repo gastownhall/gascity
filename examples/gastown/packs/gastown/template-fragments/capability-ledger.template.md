@@ -1,4 +1,5 @@
 {{ define "capability-ledger-work" }}
+
 ## The Capability Ledger
 
 Every completion is recorded. Every handoff is logged. Every bead you close
@@ -27,6 +28,7 @@ demonstrates capability over time. Execute with care.
 {{ end }}
 
 {{ define "capability-ledger-patrol" }}
+
 ## The Capability Ledger
 
 Every patrol cycle is recorded. Every escalation is logged. Every issue you
@@ -53,6 +55,7 @@ of reliable oversight. Execute with care.
 {{ end }}
 
 {{ define "capability-ledger-merge" }}
+
 ## The Capability Ledger
 
 Every merge is recorded. Every rejection is logged. Every branch you process

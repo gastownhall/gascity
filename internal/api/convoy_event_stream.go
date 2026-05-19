@@ -389,6 +389,12 @@ func workflowEventBeadFromPayload(payload json.RawMessage) (beads.Bead, bool) {
 	if len(payload) == 0 {
 		return beads.Bead{}, false
 	}
+	var envelope struct {
+		Bead json.RawMessage `json:"bead,omitempty"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err == nil && len(envelope.Bead) > 0 {
+		payload = envelope.Bead
+	}
 	var bead beads.Bead
 	if err := json.Unmarshal(payload, &bead); err != nil {
 		return beads.Bead{}, false

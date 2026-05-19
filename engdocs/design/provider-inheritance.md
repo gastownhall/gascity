@@ -1,12 +1,12 @@
 # Custom Provider Inheritance
 
-| Field | Value |
-|---|---|
-| Status | Draft — revised after design-review round 3 |
-| Date | 2026-04-18 |
-| Author(s) | Julian, Claude |
-| Issue | — |
-| Supersedes | — |
+| Field      | Value                                       |
+| ---------- | ------------------------------------------- |
+| Status     | Draft — revised after design-review round 3 |
+| Date       | 2026-04-18                                  |
+| Author(s)  | Julian, Claude                              |
+| Issue      | —                                           |
+| Supersedes | —                                           |
 
 Design for first-class, opt-in inheritance between provider definitions in
 `pack.toml` / `city.toml`, replacing today's silent name-match and
@@ -99,23 +99,23 @@ args_append = ["-m", "gpt-5.4",
 supports_hooks = false          # optional tri-state override
 ```
 
-| Field | Type | Required | Semantics |
-|---|---|---|---|
-| `base` | `*string` (presence-aware) | no | Name of the parent provider. Stored as a pointer so parse/compose/patch can distinguish *omitted* from *explicit empty*. Absent = no declaration (inherits any pack-level `base` during compose; triggers Phase A warning if legacy auto-inheritance matches). `""` (explicit empty) = standalone opt-out — no inheritance at all, silences Phase A warning, bypasses Phase A legacy-merge synthesis. `"<name>"` looks up custom first, then built-in (self-exclusion applies). `"builtin:<name>"` forces built-in lookup (recommended form). `"provider:<name>"` forces custom lookup. |
-| `args_append` | `[]string` | no | String list appended to the effective `args` of the resolved chain. Applied after that layer's `args` replacement. Inner-argv composition only — cannot wrap `Command`. |
-| capability-bool overrides (`supports_hooks`, `supports_acp`, `emits_permission_warning`) | `*bool` | no | Tri-state: absent = inherit; `true` = enable; `false` = explicitly disable. Serialized as optional TOML bool; internal representation is `*bool`. |
+| Field                                                                                    | Type                       | Required | Semantics                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------------------------------------------------------------------------------- | -------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `base`                                                                                   | `*string` (presence-aware) | no       | Name of the parent provider. Stored as a pointer so parse/compose/patch can distinguish _omitted_ from _explicit empty_. Absent = no declaration (inherits any pack-level `base` during compose; triggers Phase A warning if legacy auto-inheritance matches). `""` (explicit empty) = standalone opt-out — no inheritance at all, silences Phase A warning, bypasses Phase A legacy-merge synthesis. `"<name>"` looks up custom first, then built-in (self-exclusion applies). `"builtin:<name>"` forces built-in lookup (recommended form). `"provider:<name>"` forces custom lookup. |
+| `args_append`                                                                            | `[]string`                 | no       | String list appended to the effective `args` of the resolved chain. Applied after that layer's `args` replacement. Inner-argv composition only — cannot wrap `Command`.                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| capability-bool overrides (`supports_hooks`, `supports_acp`, `emits_permission_warning`) | `*bool`                    | no       | Tri-state: absent = inherit; `true` = enable; `false` = explicitly disable. Serialized as optional TOML bool; internal representation is `*bool`.                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 Plus one changed field:
 
-| Field | Change |
-|---|---|
+| Field            | Change                                                                                                                                     |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `options_schema` | Merge mode controlled by new `options_schema_merge` field (see below). Defaults to **replace** (unchanged from today) for backward compat. |
 
 New opt-in:
 
-| Field | Type | Required | Semantics |
-|---|---|---|---|
-| `options_schema_merge` | `string` | no | `"replace"` (default, today's semantics) or `"by_key"`. When `"by_key"`, child entries with matching `Key` replace parent entries; new keys append; `omit = true` removes inherited entries. |
+| Field                  | Type     | Required | Semantics                                                                                                                                                                                    |
+| ---------------------- | -------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `options_schema_merge` | `string` | no       | `"replace"` (default, today's semantics) or `"by_key"`. When `"by_key"`, child entries with matching `Key` replace parent entries; new keys append; `omit = true` removes inherited entries. |
 
 **`resume_command` is an existing field** ([`provider.go:73-77`](../../internal/config/provider.go#L73)). This design does not change its syntax. Existing `{{.SessionKey}}` template variable is preserved — no new placeholder is introduced. What changes: wrapper descendants of subcommand-style resume providers become **required** to declare `resume_command` (previously optional; silently broken for wrappers).
 
@@ -125,7 +125,7 @@ Resolving `base = "X"` for a provider named `P`:
 
 1. **Namespaced built-in** (`base = "builtin:X"`): look up `X` in
    `BuiltinProviders()` only. Miss → error `unknown builtin "X" for
-   provider "P"`.
+provider "P"`.
 2. **Namespaced custom** (`base = "provider:X"`): look up `X` in
    custom providers. `X == P` → self-cycle error. Miss → error
    `unknown custom provider "X" for provider "P"`.
@@ -133,7 +133,7 @@ Resolving `base = "X"` for a provider named `P`:
    - Look up `X` in custom providers, excluding `P` itself.
    - If not found, look up `X` in `BuiltinProviders()`.
    - Both miss → error `unknown base "X" for provider "P" (no custom
-     provider or built-in with that name)`.
+provider or built-in with that name)`.
 4. **Presence-aware empty / absent**:
    - **Absent** (`base` field omitted in this layer): defer to parent layer during compose. If no layer sets `base`, the provider has no declared parent → Phase A legacy-merge synthesis applies when name/command matches a built-in; warning is emitted.
    - **Explicit empty** (`base = ""`): standalone opt-out. No inheritance. Phase A legacy-merge synthesis is **bypassed**. Phase A warning is **silenced**. `base = ""` set at ANY layer (pack fragment, city override, patch) sticks — subsequent absent layers do not re-enable legacy merge because the explicit empty is an explicit declaration, not "no declaration."
@@ -254,17 +254,17 @@ loudly.
 
 ### Field-level merge rules
 
-| Field | Merge rule | Change? |
-|---|---|---|
-| Scalar strings | Non-zero child replaces parent. | Unchanged |
-| Scalar integers (`ReadyDelayMs`) | Non-zero child replaces parent. | Unchanged |
-| Tri-state capability booleans | `*bool`: nil = inherit; non-nil replaces. | **Changed (new `*bool`)** |
-| `Args` | Non-nil child replaces parent. `[] = clear`. Absent inherits. | Nil-vs-empty pinned |
-| `ArgsAppend` | Accumulated across chain: each layer's `args_append` extends the running list, applied after that layer's `args` replace. `[] = append nothing` (not a clear). | **New** |
-| `ProcessNames`, `PrintArgs` | Non-nil child replaces. `[]` clears. Absent inherits. | Nil-vs-empty pinned |
-| `Env`, `PermissionModes`, `OptionDefaults` | Additive map merge; child keys win on collision. | Unchanged |
-| `OptionsSchema` | Merge mode per `options_schema_merge`: `"replace"` (default) = current slice-replace; `"by_key"` = merge by `Key` with `omit = true` removal. | **New opt-in** |
-| `ResumeCommand` | Non-zero child replaces. Inherited by default. | Unchanged (field semantic new) |
+| Field                                      | Merge rule                                                                                                                                                     | Change?                        |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| Scalar strings                             | Non-zero child replaces parent.                                                                                                                                | Unchanged                      |
+| Scalar integers (`ReadyDelayMs`)           | Non-zero child replaces parent.                                                                                                                                | Unchanged                      |
+| Tri-state capability booleans              | `*bool`: nil = inherit; non-nil replaces.                                                                                                                      | **Changed (new `*bool`)**      |
+| `Args`                                     | Non-nil child replaces parent. `[] = clear`. Absent inherits.                                                                                                  | Nil-vs-empty pinned            |
+| `ArgsAppend`                               | Accumulated across chain: each layer's `args_append` extends the running list, applied after that layer's `args` replace. `[] = append nothing` (not a clear). | **New**                        |
+| `ProcessNames`, `PrintArgs`                | Non-nil child replaces. `[]` clears. Absent inherits.                                                                                                          | Nil-vs-empty pinned            |
+| `Env`, `PermissionModes`, `OptionDefaults` | Additive map merge; child keys win on collision.                                                                                                               | Unchanged                      |
+| `OptionsSchema`                            | Merge mode per `options_schema_merge`: `"replace"` (default) = current slice-replace; `"by_key"` = merge by `Key` with `omit = true` removal.                  | **New opt-in**                 |
+| `ResumeCommand`                            | Non-zero child replaces. Inherited by default.                                                                                                                 | Unchanged (field semantic new) |
 
 Schema-managed flags in `args` or `args_append` are normalized at the
 provider layer that declares them before the layer is merged. For a single
@@ -531,19 +531,19 @@ test for base-only descendants is required.
   values → HTTP 400.
 - `omit = true` IS authorable via CRUD (the round-2 decision to strip
   it from public DTOs is reversed — users must be able to author the
-  removal sentinel). The public *read* DTO still renders `omit`
+  removal sentinel). The public _read_ DTO still renders `omit`
   entries as resolved absences rather than raw structs; the CRUD round
   trip preserves the user's raw input.
 
 **PATCH semantics for presence-sensitive fields** (`base`, capability
 `*bool` overrides, `options_schema_merge`):
 
-| PATCH body | Effect |
-|---|---|
-| Field omitted from body | no-op (keep current value) |
-| Field present, value `null` | clear the explicit declaration, restore inherit-from-parent behavior (equivalent to removing the TOML key) |
-| Field present, value `""` | set to explicit empty (distinct from null; e.g., `base = ""` = standalone opt-out) |
-| Field present, concrete value | set to that value |
+| PATCH body                    | Effect                                                                                                     |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Field omitted from body       | no-op (keep current value)                                                                                 |
+| Field present, value `null`   | clear the explicit declaration, restore inherit-from-parent behavior (equivalent to removing the TOML key) |
+| Field present, value `""`     | set to explicit empty (distinct from null; e.g., `base = ""` = standalone opt-out)                         |
+| Field present, concrete value | set to that value                                                                                          |
 
 `null` vs omitted distinction is load-bearing — this is why raw DTOs
 use JSON `null` rather than dropping keys.
@@ -810,7 +810,7 @@ in the next release. Phase 9 docs update ships alongside Phase 1–7.
 ### Phase 2 — chain resolver + hop identity
 
 - Add `resolveProviderChain(name, allProviders) (ResolvedProvider,
-  error)` to
+error)` to
   [`resolve.go`](../../internal/config/resolve.go).
 - Implement namespaced prefixes (`builtin:`, `provider:`) +
   self-exclusion bare-name lookup.
