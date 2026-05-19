@@ -1637,6 +1637,15 @@ func closeFailedCreateBead(store beads.Store, id string, now time.Time, stderr i
 	patch["pending_create_claim"] = ""
 	patch["pending_create_started_at"] = ""
 	patch["sleep_intent"] = ""
+	// Match the release-on-close behavior in closeBead so failed-create
+	// retirement frees its pool-slot alias on the same write that closes
+	// the bead, not only via the failedCreateIdentityReleased state guard
+	// in ensureSessionAliasAvailable (ga-bgz).
+	if existing, err := store.Get(id); err == nil {
+		for k, v := range session.ReleaseClaimedIdentityPatch(existing.Metadata) {
+			patch[k] = v
+		}
+	}
 	if setMetaBatch(store, id, patch, stderr) != nil {
 		return false
 	}
@@ -1910,13 +1919,27 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 	// bead.updated event. Skipping the write when status is already
 	// closed is safe because all three callers are reconciler tick logic
 	// that should be no-op on terminal beads.
-	if existing, err := store.Get(id); err == nil && existing.Status == "closed" {
+	existing, getErr := store.Get(id)
+	if getErr == nil && existing.Status == "closed" {
 		return false
 	}
 	if reason == string(session.StateFailedCreate) {
 		return closeFailedCreateBead(store, id, now, stderr)
 	}
-	if setMetaBatch(store, id, session.ClosePatch(now, reason), stderr) != nil {
+	patch := session.ClosePatch(now, reason)
+	// Terminal close reasons (gc_swept, orphaned, stale-session, ...)
+	// produce beads that cannot be reopened. Release the bead's
+	// runtime-identity claim (alias, agent_name) so the next pool spawn
+	// can take the same slot. Without this, a stale cache view of the
+	// closed bead still surfaces as an open alias claim in
+	// ensureSessionAliasAvailable, blocking new sessions until a
+	// supervisor reload primes the cache from backing (ga-bgz).
+	if getErr == nil && session.ReleaseClaimedIdentityOnCloseState(reason) {
+		for k, v := range session.ReleaseClaimedIdentityPatch(existing.Metadata) {
+			patch[k] = v
+		}
+	}
+	if setMetaBatch(store, id, patch, stderr) != nil {
 		return false
 	}
 	if err := store.Close(id); err != nil {

@@ -5584,6 +5584,128 @@ func TestCloseBeadIsNoopOnAlreadyClosedBead(t *testing.T) {
 	}
 }
 
+// TestCloseBeadReleasesAliasOnTerminalCloseState locks in ga-bgz: a pool
+// session bead closed with a terminal state (gc_swept, orphaned, ...) must
+// clear its alias and agent_name metadata, preserving the prior alias in
+// alias_history. Without this, a stale "open" cache view of the closed
+// bead still surfaces as an alias claim in ensureSessionAliasAvailable,
+// blocking new pool sessions from taking the same slot until a supervisor
+// reload re-primes the cache from the backing store.
+func TestCloseBeadReleasesAliasOnTerminalCloseState(t *testing.T) {
+	cases := []struct {
+		name   string
+		reason string
+	}{
+		{"gc_swept", "gc_swept"},
+		{"orphaned", "orphaned"},
+		{"stale-session", "stale-session"},
+		{"duplicate", "duplicate"},
+		{"reconfigured", "reconfigured"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			sessionBead, err := store.Create(beads.Bead{
+				Title:  "gastown.furiosa",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel, "agent:zack/gastown.furiosa"},
+				Metadata: map[string]string{
+					"session_name": "gastown__polecat-pe-r7c1",
+					"agent_name":   "zack/gastown.furiosa",
+					"alias":        "zack/gastown.furiosa",
+					"template":     "zack/gastown.polecat",
+					"pool_managed": "true",
+					"state":        "active",
+				},
+			})
+			if err != nil {
+				t.Fatalf("create session bead: %v", err)
+			}
+
+			var stderr bytes.Buffer
+			now := time.Date(2026, 5, 19, 17, 15, 54, 0, time.UTC)
+			if !closeBead(store, sessionBead.ID, tc.reason, now, &stderr) {
+				t.Fatalf("closeBead returned false: stderr=%s", stderr.String())
+			}
+
+			got, err := store.Get(sessionBead.ID)
+			if err != nil {
+				t.Fatalf("get after close: %v", err)
+			}
+			if got.Status != "closed" {
+				t.Fatalf("status = %q, want closed", got.Status)
+			}
+			if alias := got.Metadata["alias"]; alias != "" {
+				t.Errorf("metadata.alias = %q, want \"\" — terminal close must release alias claim", alias)
+			}
+			if agentName := got.Metadata["agent_name"]; agentName != "" {
+				t.Errorf("metadata.agent_name = %q, want \"\" — terminal close must release agent_name", agentName)
+			}
+			if history := got.Metadata["alias_history"]; history != "zack/gastown.furiosa" {
+				t.Errorf("metadata.alias_history = %q, want %q", history, "zack/gastown.furiosa")
+			}
+			// session_name is the unique bead identifier, not a pool-slot
+			// alias, so it remains intact for historical lookups.
+			if sn := got.Metadata["session_name"]; sn != "gastown__polecat-pe-r7c1" {
+				t.Errorf("metadata.session_name = %q, want %q (unchanged)", sn, "gastown__polecat-pe-r7c1")
+			}
+
+			// The alias resolver must agree the slot is free for a fresh
+			// pool spawn under the same identity.
+			if err := session.EnsureAliasAvailableWithConfigForOwner(store, nil, "zack/gastown.furiosa", "", "zack/gastown.furiosa"); err != nil {
+				t.Errorf("EnsureAliasAvailableWithConfigForOwner after %s close = %v, want nil", tc.reason, err)
+			}
+		})
+	}
+}
+
+// TestCloseBeadPreservesAliasForReopenEligibleClose verifies the other
+// half of the contract: non-terminal close reasons that
+// closedNamedSessionReopenEligible accepts must keep the alias intact so
+// gc start can reopen the bead under the same identity.
+func TestCloseBeadPreservesAliasForReopenEligibleClose(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":              "mayor",
+			"alias":                     "mayor",
+			"agent_name":                "mayor",
+			"configured_named_session":  "true",
+			"configured_named_identity": "mayor",
+			"state":                     "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	now := time.Date(2026, 5, 19, 17, 15, 54, 0, time.UTC)
+	// "suspended" and the empty-state fallthrough in
+	// closedNamedSessionReopenEligible both pass the eligibility check;
+	// "suspended" is the canonical case where gc start should resume the
+	// same bead.
+	if !closeBead(store, sessionBead.ID, "suspended", now, &stderr) {
+		t.Fatalf("closeBead returned false: stderr=%s", stderr.String())
+	}
+	got, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get after close: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+	if alias := got.Metadata["alias"]; alias != "mayor" {
+		t.Errorf("metadata.alias = %q, want %q — reopen-eligible close must preserve alias", alias, "mayor")
+	}
+	if agentName := got.Metadata["agent_name"]; agentName != "mayor" {
+		t.Errorf("metadata.agent_name = %q, want %q — reopen-eligible close must preserve agent_name", agentName, "mayor")
+	}
+}
+
 // setupSessionWithExtmsgMembership creates a session bead and registers a
 // participant in a group, which also writes the matching membership via
 // ensureMembershipLocked. Returns the session bead, fabric, and caller so
