@@ -3748,7 +3748,7 @@ export interface components {
             bead_id: string;
             /** @description Status of the stranded bead at emission time (typically 'in_progress' for cap-hit, 'open' if recovery races claim). */
             bead_status?: string;
-            /** @description Short diagnostic context (e.g., 'drain_acked_provider_dead'). */
+            /** @description Short diagnostic context. Today both emission sites pass 'drain_acked_with_assigned_work'; reserved for finer-grained shape discriminators if later Shape-N variants land. */
             reason?: string;
             /** @description Canonical session bead ID for the session that drain-acked. */
             session_id: string;

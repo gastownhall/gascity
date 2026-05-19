@@ -379,7 +379,7 @@ type SessionDrainAckedWithAssignedWorkPayload struct {
 	BeadID     string `json:"bead_id" doc:"ID of the work bead still holding this session as its assignee."`
 	Template   string `json:"template,omitempty" doc:"Pool template name when known at the emission site."`
 	BeadStatus string `json:"bead_status,omitempty" doc:"Status of the stranded bead at emission time (typically 'in_progress' for cap-hit, 'open' if recovery races claim)."`
-	Reason     string `json:"reason,omitempty" doc:"Short diagnostic context (e.g., 'drain_acked_provider_dead')."`
+	Reason     string `json:"reason,omitempty" doc:"Short diagnostic context. Today both emission sites pass 'drain_acked_with_assigned_work'; reserved for finer-grained shape discriminators if later Shape-N variants land."`
 }
 
 // IsEventPayload marks SessionDrainAckedWithAssignedWorkPayload as an events.Payload variant.

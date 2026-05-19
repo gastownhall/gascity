@@ -2425,7 +2425,7 @@ export type SessionDrainAckedWithAssignedWorkPayload = {
      */
     bead_status?: string;
     /**
-     * Short diagnostic context (e.g., 'drain_acked_provider_dead').
+     * Short diagnostic context. Today both emission sites pass 'drain_acked_with_assigned_work'; reserved for finer-grained shape discriminators if later Shape-N variants land.
      */
     reason?: string;
     /**

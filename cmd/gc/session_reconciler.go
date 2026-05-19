@@ -1984,11 +1984,16 @@ func assignedWorkStoreRefForSession(cityPath string, cfg *config.City, session b
 
 // firstOpenAssignedWorkBeadForReachableStore returns the first open or
 // in-progress work bead still assigned to the given session in the store the
-// session's configured agent can query, plus whether one was found. Mirrors
-// the reachability semantics of sessionHasOpenAssignedWorkForReachableStore;
-// emission sites that need the stranded bead's ID (e.g., for the
-// SessionDrainAckedWithAssignedWork event payload per
+// session's configured agent can query, plus whether one was found. Uses the
+// same reachability resolution as sessionHasOpenAssignedWorkForReachableStore
+// (configured agent's store, with cross-store fallback when the agent
+// template isn't resolvable); emission sites that need the stranded bead's
+// ID (e.g., for the SessionDrainAckedWithAssignedWork event payload per
 // gastownhall/gascity#2293) call this instead of the bool-only helper.
+// Status iteration prefers "in_progress" over "open" so the bead returned is
+// the most-urgent stranded candidate — this is intentional and asymmetric
+// with the bool helpers, which short-circuit on any match and so iterate
+// in the historical "open" / "in_progress" order.
 // Returns (zero-bead, false, nil) when nothing matches.
 func firstOpenAssignedWorkBeadForReachableStore(
 	cityPath string,
