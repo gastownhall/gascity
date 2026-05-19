@@ -312,15 +312,9 @@ func doPackRegistryAdd(name, source string, noValidate, jsonOutput bool, stdout,
 			catalogData = data
 		}
 	}
-	if err := packregistry.AddRegistry(home, reg); err != nil {
+	if err := packregistry.AddRegistryWithCache(home, reg, catalogData); err != nil {
 		fmt.Fprintf(stderr, "gc pack registry add: %v\n", err) //nolint:errcheck
 		return 1
-	}
-	if !noValidate {
-		if err := packregistry.WriteCatalogCache(home, name, catalogData); err != nil {
-			fmt.Fprintf(stderr, "gc pack registry add: caching catalog: %v\n", err) //nolint:errcheck
-			return 1
-		}
 	}
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, packRegistryAddJSONResult{
@@ -464,7 +458,7 @@ func doPackRegistrySearch(query, registry string, refresh bool, limit int, all b
 				fmt.Fprintf(stderr, "warning: registry %s refresh failed: %v\n", reg.Name, err) //nolint:errcheck
 			}
 		}
-		catalog, _, err := packregistry.ReadCachedCatalog(home, reg.Name)
+		catalog, _, err := packregistry.ReadCachedRegistryCatalog(home, reg)
 		if err != nil {
 			failures++
 			cacheFailures = append(cacheFailures, packRegistryFailureJSON{Name: reg.Name, Message: err.Error()})
@@ -573,7 +567,7 @@ func doPackRegistryShow(target string, refresh bool, jsonOutput bool, stdout, st
 				fmt.Fprintf(stderr, "warning: registry %s refresh failed: %v\n", reg.Name, err) //nolint:errcheck
 			}
 		}
-		catalog, _, err := packregistry.ReadCachedCatalog(home, reg.Name)
+		catalog, _, err := packregistry.ReadCachedRegistryCatalog(home, reg)
 		if err != nil {
 			unavailable = append(unavailable, reg.Name)
 			continue

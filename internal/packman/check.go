@@ -307,6 +307,35 @@ func (s *importCheckState) validateCachedPack(name, source string, pack LockedPa
 		})
 		return "", false
 	}
+	if pack.Hash != "" {
+		got, err := HashPackTree(packDir)
+		if err != nil {
+			s.closureIncomplete = true
+			s.addIssue(CheckIssue{
+				Code:       "pack-hash-unreadable",
+				ImportName: name,
+				Source:     source,
+				Commit:     commit,
+				Path:       packDir,
+				Message:    fmt.Sprintf("cannot hash cached pack: %v", err),
+				RepairHint: `run "gc import install"`,
+			})
+			return "", false
+		}
+		if got != pack.Hash {
+			s.closureIncomplete = true
+			s.addIssue(CheckIssue{
+				Code:       "pack-hash-mismatch",
+				ImportName: name,
+				Source:     source,
+				Commit:     commit,
+				Path:       packDir,
+				Message:    fmt.Sprintf("cached pack hash is %s, expected %s", got, pack.Hash),
+				RepairHint: `run "gc import install"`,
+			})
+			return "", false
+		}
+	}
 
 	return packDir, true
 }

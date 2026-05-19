@@ -69,6 +69,9 @@ func ReadCachedPackImportsLocked(lockSource string, pack LockedPack) (map[string
 				return err
 			}
 		}
+		if err := validateLockedPackHash(lockSource, pack, cachePath); err != nil {
+			return err
+		}
 		var readErr error
 		imports, readErr = readPackImports(packPath)
 		return readErr
@@ -95,7 +98,11 @@ func InstallLocked(cityRoot string) (*Lockfile, error) {
 		if pack.Commit == "" {
 			return nil, fmt.Errorf("lock entry %q is missing commit", source)
 		}
-		if _, err := EnsureRepoInCache(materializedSource(source, pack), pack.Commit); err != nil {
+		cachePath, err := EnsureRepoInCache(materializedSource(source, pack), pack.Commit)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateLockedPackHash(source, pack, cachePath); err != nil {
 			return nil, err
 		}
 	}
@@ -311,10 +318,29 @@ func (s *syncState) cachedPackPath(source string, pack LockedPack) (string, erro
 	if err != nil {
 		return "", err
 	}
+	if err := validateLockedPackHash(source, pack, cachePath); err != nil {
+		return "", err
+	}
 	if subpath := normalizeRemoteSource(cacheSource).Subpath; subpath != "" {
 		cachePath = filepath.Join(cachePath, subpath)
 	}
 	return cachePath, nil
+}
+
+func validateLockedPackHash(lockSource string, pack LockedPack, cachePath string) error {
+	if pack.Hash == "" {
+		return nil
+	}
+	source := materializedSource(lockSource, pack)
+	packRoot := cachedPackDir(source, cachePath)
+	got, err := HashPackTree(packRoot)
+	if err != nil {
+		return fmt.Errorf("hashing locked pack %q at %s: %w", lockSource, packRoot, err)
+	}
+	if got != pack.Hash {
+		return fmt.Errorf("locked pack %q hash mismatch at %s: got %s, expected %s", lockSource, packRoot, got, pack.Hash)
+	}
+	return nil
 }
 
 func (s *syncState) storeChosen(source string, pack LockedPack, refreshed bool) bool {

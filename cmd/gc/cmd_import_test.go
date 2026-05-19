@@ -1070,6 +1070,22 @@ func TestDoImportAddRejectsReservedDefaultRigPrefix(t *testing.T) {
 	}
 }
 
+func TestDoImportAddRejectsRegistryLocatorAsDurableSource(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, "[pack]\nname = \"demo\"\nschema = 1\n")
+
+	var stdout, stderr bytes.Buffer
+	code := doImportAdd(fsys.OSFS{}, dir, "registry:main:lighthouse", "", "^1.0", &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("expected registry locator import add to fail")
+	}
+	if !strings.Contains(stderr.String(), "not durable import sources") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 func TestDoImportListShowsDirectAndTransitive(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()

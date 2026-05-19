@@ -1293,6 +1293,9 @@ func defaultImportVersionForSource(source string) (string, error) {
 }
 
 func normalizeImportAddSource(fs fsys.FS, cityPath, source string) (string, bool, error) {
+	if strings.HasPrefix(strings.TrimSpace(source), "registry:") {
+		return "", false, fmt.Errorf("registry selectors are command-time locators, not durable import sources")
+	}
 	if isRemoteImportSource(source) {
 		return source, true, nil
 	}

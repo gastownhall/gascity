@@ -96,6 +96,39 @@ schema = 1
 	}
 }
 
+func TestSyncLockFromLockRejectsPackHashMismatch(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	stubCachedPackGit(t)
+
+	source := "https://example.com/a.git"
+	commit := "aaaa"
+	lock := &Lockfile{
+		Packs: map[string]LockedPack{
+			source: {Version: "1.2.0", Commit: commit, Hash: "sha256:0000000000000000000000000000000000000000000000000000000000000000", Fetched: time.Unix(10, 0).UTC()},
+		},
+	}
+	if err := WriteLockfile(fsys.OSFS{}, city, lock); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+	stageCachedPack(t, source, commit, `
+[pack]
+name = "a"
+schema = 1
+`)
+
+	_, err := SyncLock(city, map[string]config.Import{
+		"a": {Source: source, Version: "^1.0"},
+	}, InstallFromLock)
+	if err == nil {
+		t.Fatal("SyncLock succeeded, want hash mismatch")
+	}
+	if !strings.Contains(err.Error(), "hash mismatch") {
+		t.Fatalf("SyncLock error = %v, want hash mismatch", err)
+	}
+}
+
 func TestSyncLockExpandsRepeatedSourceWhenAnyImportIsTransitive(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()

@@ -108,7 +108,7 @@ func resolveRegistryVersion(source, constraint string, opts ResolveOptions) (Res
 	if !ok {
 		return ResolvedVersion{}, fmt.Errorf("registry %q is not configured", loc.Registry)
 	}
-	catalog, _, err := packregistry.ReadCachedCatalog(home, loc.Registry)
+	catalog, _, err := packregistry.ReadCachedRegistryCatalog(home, reg)
 	if err != nil {
 		return ResolvedVersion{}, fmt.Errorf("reading cached catalog for registry %q: %w; run \"gc pack registry refresh %s\"", loc.Registry, err, loc.Registry)
 	}

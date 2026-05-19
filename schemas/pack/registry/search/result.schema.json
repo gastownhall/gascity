@@ -14,6 +14,8 @@
     },
     "registry": {
       "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "maxLength": 64,
       "description": "Registry name filter when the search was limited to one registry."
     },
     "refreshed": {
@@ -48,10 +50,13 @@
         "properties": {
           "registry": {
             "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "maxLength": 64,
             "description": "Registry that provided this pack entry."
           },
           "name": {
             "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)?$",
             "description": "Pack name as published in the registry catalog."
           },
           "description": {
@@ -63,7 +68,7 @@
             "description": "Git source for the pack."
           },
           "source_kind": {
-            "type": "string",
+            "const": "git",
             "description": "Source type for this pack entry."
           },
           "latest": {
@@ -84,6 +89,8 @@
         "properties": {
           "name": {
             "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "maxLength": 64,
             "description": "Registry associated with the warning or failure."
           },
           "message": {

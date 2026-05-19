@@ -11,6 +11,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/gchome"
 	gitutil "github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/remotesource"
 )
@@ -159,12 +160,7 @@ func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
 		return "", false, nil
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", false, fmt.Errorf("resolving home dir: %w", err)
-	}
-
-	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
+	cacheRoot := filepath.Join(gchome.Default(), "cache", "repos")
 	cacheSource := source
 	if entry.Source != "" {
 		cacheSource = entry.Source
@@ -197,12 +193,7 @@ func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
 		return "", fmt.Errorf("remote import %s is not installed (missing packs.lock entry); run \"gc import install\"", source)
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolving home dir: %w", err)
-	}
-
-	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
+	cacheRoot := filepath.Join(gchome.Default(), "cache", "repos")
 	cacheSource := source
 	if entry.Source != "" {
 		cacheSource = entry.Source

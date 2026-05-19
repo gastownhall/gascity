@@ -10,10 +10,13 @@
     },
     "registry": {
       "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "maxLength": 64,
       "description": "Registry that provided this pack entry."
     },
     "name": {
       "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)?$",
       "description": "Pack name as published in the registry catalog."
     },
     "description": {
@@ -25,7 +28,7 @@
       "description": "Git source for the pack."
     },
     "source_kind": {
-      "type": "string",
+      "const": "git",
       "description": "Source type for this pack entry."
     },
     "latest": {
@@ -42,6 +45,7 @@
         "properties": {
           "version": {
             "type": "string",
+            "pattern": "^[0-9]+\\.[0-9]+(\\.[0-9]+)?$",
             "description": "Release version string."
           },
           "ref": {
@@ -50,10 +54,12 @@
           },
           "commit": {
             "type": "string",
+            "pattern": "^[0-9a-f]{40}$",
             "description": "Full resolved git commit SHA for the release."
           },
           "hash": {
             "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$",
             "description": "SHA-256 canonical pack tree digest for the release."
           },
           "description": {

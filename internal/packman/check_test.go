@@ -63,6 +63,28 @@ func TestCheckInstalledReportsMissingCache(t *testing.T) {
 	assertSingleIssue(t, report, "missing-cache")
 }
 
+func TestCheckInstalledReportsPackHashMismatch(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	stubCachedPackGit(t)
+
+	source := "https://example.com/tools.git"
+	commit := "aaaa"
+	writeTestLockfile(t, city, map[string]LockedPack{
+		source: {Version: "1.0.0", Commit: commit, Hash: "sha256:0000000000000000000000000000000000000000000000000000000000000000"},
+	})
+	stageCachedPackAtCommit(t, source, commit, commit, "[pack]\nname = \"tools\"\nschema = 1\n")
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:tools": {Source: source, Version: "^1.0"},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "pack-hash-mismatch")
+}
+
 func TestCheckInstalledAcceptsBundledSyntheticCache(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()

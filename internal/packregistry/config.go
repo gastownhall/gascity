@@ -87,6 +87,10 @@ func SaveConfig(home string, cfg Config) error {
 }
 
 func AddRegistry(home string, reg Registry) error {
+	return AddRegistryWithCache(home, reg, nil)
+}
+
+func AddRegistryWithCache(home string, reg Registry, catalogData []byte) error {
 	if err := ValidateRegistryName(reg.Name); err != nil {
 		return err
 	}
@@ -107,6 +111,11 @@ func AddRegistry(home string, reg Registry) error {
 			}
 		}
 		cfg.Registries = append(cfg.Registries, reg)
+		if catalogData != nil {
+			if err := WriteCatalogCache(home, reg.Name, catalogData); err != nil {
+				return err
+			}
+		}
 		return SaveConfig(home, cfg)
 	})
 }
@@ -159,6 +168,9 @@ func validateConfig(cfg Config) error {
 		}
 		if reg.Source == "" {
 			return fmt.Errorf("registry %q source is required", reg.Name)
+		}
+		if _, err := NormalizeSource(reg.Source); err != nil {
+			return fmt.Errorf("registry %q source: %w", reg.Name, err)
 		}
 		if seen[reg.Name] {
 			return fmt.Errorf("duplicate registry %q", reg.Name)

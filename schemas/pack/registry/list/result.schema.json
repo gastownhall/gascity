@@ -23,6 +23,8 @@
         "properties": {
           "name": {
             "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "maxLength": 64,
             "description": "Registry name used in qualified pack references."
           },
           "source": {

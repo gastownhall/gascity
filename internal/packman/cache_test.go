@@ -33,6 +33,18 @@ func TestRepoCachePathUsesHome(t *testing.T) {
 	}
 }
 
+func TestRepoCachePathUsesGCHomeWhenSet(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GC_HOME", home)
+	got, err := RepoCachePath("https://github.com/example/repo", "abc123")
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if !strings.HasPrefix(got, filepath.Join(home, "cache", "repos")) {
+		t.Fatalf("RepoCachePath = %q", got)
+	}
+}
+
 func TestRepoCacheKeyNormalizesSubpathSources(t *testing.T) {
 	plain := RepoCacheKey("file:///tmp/repo.git", "abc123")
 	subpath := RepoCacheKey("file:///tmp/repo.git//packs/base", "abc123")

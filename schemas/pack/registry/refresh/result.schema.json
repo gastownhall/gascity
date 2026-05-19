@@ -10,6 +10,8 @@
     },
     "target": {
       "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "maxLength": 64,
       "description": "Requested registry name, or omitted when all configured registries were targeted."
     },
     "refreshed": {
@@ -22,6 +24,8 @@
         "properties": {
           "name": {
             "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "maxLength": 64,
             "description": "Name of the refreshed registry."
           },
           "pack_count": {
@@ -43,6 +47,8 @@
         "properties": {
           "name": {
             "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "maxLength": 64,
             "description": "Name of the registry that failed."
           },
           "message": {

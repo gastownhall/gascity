@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -86,7 +87,11 @@ func NormalizeSource(raw string) (Source, error) {
 			}
 			if u.Path == "" || strings.HasSuffix(u.Path, "/") {
 				u.Path = strings.TrimRight(u.Path, "/") + "/registry.toml"
-			} else if path.Base(u.Path) != "registry.toml" {
+			} else if path.Base(u.Path) == "registry.toml" {
+				// Use the explicit catalog path as provided.
+			} else if !strings.Contains(path.Base(u.Path), ".") {
+				u.Path = strings.TrimRight(u.Path, "/") + "/registry.toml"
+			} else {
 				return Source{}, fmt.Errorf("HTTPS registry source path must end with registry.toml: %q", raw)
 			}
 			return Source{Raw: raw, Remote: true, URL: u}, nil
@@ -220,6 +225,23 @@ func WriteCatalogCache(home, registryName string, data []byte) error {
 	return fsys.WriteFileAtomic(fsys.OSFS{}, path, data, 0o644)
 }
 
+func WithCatalogCacheLock(home, registryName string, fn func() error) error {
+	lockPath := CachePath(home, registryName) + ".lock"
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		return fmt.Errorf("creating registry cache lock directory: %w", err)
+	}
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("opening registry cache lock: %w", err)
+	}
+	defer lockFile.Close() //nolint:errcheck
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("acquiring registry cache lock: %w", err)
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	return fn()
+}
+
 func ReadCachedCatalog(home, registryName string) (Catalog, []byte, error) {
 	path := CachePath(home, registryName)
 	data, err := os.ReadFile(path)
@@ -233,17 +255,36 @@ func ReadCachedCatalog(home, registryName string) (Catalog, []byte, error) {
 	return catalog, data, ValidateCatalog(catalog, false)
 }
 
+func ReadCachedRegistryCatalog(home string, reg Registry) (Catalog, []byte, error) {
+	source, err := NormalizeSource(reg.Source)
+	if err != nil {
+		return Catalog{}, nil, err
+	}
+	path := CachePath(home, reg.Name)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Catalog{}, nil, err
+	}
+	catalog, err := ParseCatalog(data)
+	if err != nil {
+		return Catalog{}, data, err
+	}
+	return catalog, data, ValidateCatalog(catalog, source.Remote)
+}
+
 func RefreshRegistry(ctx context.Context, home string, reg Registry, opts FetchOptions) (Catalog, error) {
 	next, data, _, err := ReadCatalog(ctx, reg.Source, opts)
 	if err != nil {
 		return Catalog{}, err
 	}
-	if prev, _, err := ReadCachedCatalog(home, reg.Name); err == nil {
-		if err := CheckImmutable(prev, next); err != nil {
-			return Catalog{}, err
+	if err := WithCatalogCacheLock(home, reg.Name, func() error {
+		if prev, _, err := ReadCachedRegistryCatalog(home, reg); err == nil {
+			if err := CheckImmutable(prev, next); err != nil {
+				return err
+			}
 		}
-	}
-	if err := WriteCatalogCache(home, reg.Name, data); err != nil {
+		return WriteCatalogCache(home, reg.Name, data)
+	}); err != nil {
 		return Catalog{}, err
 	}
 	return next, nil

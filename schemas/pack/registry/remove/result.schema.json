@@ -10,6 +10,8 @@
     },
     "name": {
       "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "maxLength": 64,
       "description": "Name of the registry that was removed from configuration."
     },
     "removed": {

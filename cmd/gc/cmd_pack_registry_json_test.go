@@ -24,34 +24,86 @@ func TestPackRegistryJSONOutputMatchesSchemas(t *testing.T) {
 	runPackRegistryJSONAndValidate(t, []string{"pack", "registry", "remove", "main", "--json"})
 }
 
+func TestPackRegistryJSONOutputMatchesSchemasForFlagCombinations(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GC_HOME", home)
+	goodDir := writeRegistryCatalog(t, packRegistryTestCatalog)
+	otherDir := writeRegistryCatalog(t, packRegistryOtherCatalog)
+
+	runPackRegistryJSONAndValidate(t, []string{"pack", "registry", "add", "good", goodDir, "--json"})
+	runPackRegistryJSONAndValidate(t, []string{"pack", "registry", "add", "other", otherDir, "--no-validate", "--json"})
+	runPackRegistryJSONAndValidate(t, []string{"pack", "registry", "refresh", "good", "--json"})
+	runPackRegistryJSONAndValidate(t, []string{"pack", "registry", "search", "light", "--registry", "good", "--json"})
+	runPackRegistryJSONAndValidate(t, []string{"pack", "registry", "search", "light", "--limit", "1", "--json"})
+	runPackRegistryJSONAndValidate(t, []string{"pack", "registry", "search", "light", "--all", "--json"})
+
+	missing := filepath.Join(t.TempDir(), "missing")
+	runPackRegistryJSONAndValidate(t, []string{"pack", "registry", "add", "bad", missing, "--no-validate", "--json"})
+	runPackRegistryJSONAndValidate(t, []string{"pack", "registry", "search", "light", "--refresh", "--json"})
+}
+
 func TestPackRegistryJSONFailureMatchesFailureSchema(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
+	catalogDir := writeRegistryCatalog(t, packRegistryTestCatalog)
+	otherDir := writeRegistryCatalog(t, packRegistryOtherCatalog)
 
+	runPackRegistryJSONAndValidate(t, []string{"pack", "registry", "add", "main", catalogDir, "--json"})
+	runPackRegistryJSONAndValidate(t, []string{"pack", "registry", "add", "other", otherDir, "--json"})
+	runPackRegistryJSONAndValidate(t, []string{"pack", "registry", "add", "bad", filepath.Join(t.TempDir(), "missing"), "--no-validate", "--json"})
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"show missing", []string{"pack", "registry", "show", "missing", "--json"}},
+		{"add duplicate", []string{"pack", "registry", "add", "main", catalogDir, "--json"}},
+		{"remove missing", []string{"pack", "registry", "remove", "missing", "--json"}},
+		{"search unknown registry", []string{"pack", "registry", "search", "--registry", "missing", "--json"}},
+		{"search unavailable caches", []string{"pack", "registry", "search", "--registry", "bad", "--json"}},
+		{"show ambiguous", []string{"pack", "registry", "show", "lighthouse", "--json"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runPackRegistryJSONFailureAndValidate(t, tc.args)
+		})
+	}
+}
+
+func TestPackRegistryRefreshJSONAllFailuresUsesResultSchemaWithNonzeroExit(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GC_HOME", home)
+	runPackRegistryJSONAndValidate(t, []string{"pack", "registry", "add", "bad", filepath.Join(t.TempDir(), "missing"), "--no-validate", "--json"})
+	runPackRegistryJSONAndValidateExitCode(t, []string{"pack", "registry", "refresh", "--json"}, 1)
+}
+
+func runPackRegistryJSONFailureAndValidate(t *testing.T, args []string) {
+	t.Helper()
+	command := commandFromArgs(args)
 	var schemaStdout, schemaStderr bytes.Buffer
-	code := run([]string{"pack", "registry", "show", "missing", "--json-schema=failure"}, &schemaStdout, &schemaStderr)
+	schemaArgs := append(append([]string{}, command...), "--json-schema=failure")
+	code := run(schemaArgs, &schemaStdout, &schemaStderr)
 	if code != 0 {
-		t.Fatalf("failure schema code=%d stderr=%q stdout=%q", code, schemaStderr.String(), schemaStdout.String())
+		t.Fatalf("%s failure schema code=%d stderr=%q stdout=%q", strings.Join(command, " "), code, schemaStderr.String(), schemaStdout.String())
 	}
 	if schemaStderr.Len() != 0 {
-		t.Fatalf("failure schema stderr=%q, want empty", schemaStderr.String())
+		t.Fatalf("%s failure schema stderr=%q, want empty", strings.Join(command, " "), schemaStderr.String())
 	}
-	schema := compileJSONSchema(t, "gc://schemas/pack/registry/show/failure.schema.json", schemaStdout.Bytes())
+	schema := compileJSONSchema(t, "gc://schemas/"+strings.Join(command, "/")+"/failure.schema.json", schemaStdout.Bytes())
 
 	var stdout, stderr bytes.Buffer
-	code = run([]string{"pack", "registry", "show", "missing", "--json"}, &stdout, &stderr)
+	code = run(args, &stdout, &stderr)
 	if code == 0 {
-		t.Fatalf("show missing code=0, want nonzero stdout=%q stderr=%q", stdout.String(), stderr.String())
+		t.Fatalf("%s code=0, want nonzero stdout=%q stderr=%q", strings.Join(args, " "), stdout.String(), stderr.String())
 	}
-	if strings.Contains(stdout.String(), "gc pack registry show:") {
+	if strings.Contains(stdout.String(), "gc pack registry") {
 		t.Fatalf("diagnostic leaked into JSON stdout: %q", stdout.String())
 	}
 	var payload any
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
-		t.Fatalf("failure stdout is not JSON: %v\n%s", err, stdout.String())
+		t.Fatalf("%s failure stdout is not JSON: %v\n%s", strings.Join(args, " "), err, stdout.String())
 	}
 	if err := schema.Validate(payload); err != nil {
-		t.Fatalf("failure stdout does not match schema: %v\nschema=%s\npayload=%s", err, schemaStdout.String(), stdout.String())
+		t.Fatalf("%s failure stdout does not match schema: %v\nschema=%s\npayload=%s", strings.Join(args, " "), err, schemaStdout.String(), stdout.String())
 	}
 	if stderr.Len() == 0 {
 		t.Fatalf("stderr empty, want human diagnostics")
@@ -106,6 +158,11 @@ func TestPackRegistryJSONUnsupportedPathUsesPlatformFailure(t *testing.T) {
 
 func runPackRegistryJSONAndValidate(t *testing.T, args []string) {
 	t.Helper()
+	runPackRegistryJSONAndValidateExitCode(t, args, 0)
+}
+
+func runPackRegistryJSONAndValidateExitCode(t *testing.T, args []string, wantCode int) {
+	t.Helper()
 	command := commandFromArgs(args)
 	var schemaStdout, schemaStderr bytes.Buffer
 	schemaArgs := append(append([]string{}, command...), "--json-schema=result")
@@ -120,8 +177,8 @@ func runPackRegistryJSONAndValidate(t *testing.T, args []string) {
 
 	var stdout, stderr bytes.Buffer
 	code = run(args, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("%s code=%d stderr=%q stdout=%q", strings.Join(args, " "), code, stderr.String(), stdout.String())
+	if code != wantCode {
+		t.Fatalf("%s code=%d, want %d stderr=%q stdout=%q", strings.Join(args, " "), code, wantCode, stderr.String(), stdout.String())
 	}
 	if strings.Contains(stdout.String(), "warning:") || strings.Contains(stdout.String(), "gc pack registry") {
 		t.Fatalf("%s stdout contains diagnostics: %q", strings.Join(args, " "), stdout.String())

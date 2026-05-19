@@ -160,6 +160,7 @@ func TestNormalizeHTTPSRegistrySourcePaths(t *testing.T) {
 	}{
 		{"https://example.com", "https://example.com/registry.toml"},
 		{"https://example.com/", "https://example.com/registry.toml"},
+		{"https://example.com/main", "https://example.com/main/registry.toml"},
 		{"https://example.com/main/", "https://example.com/main/registry.toml"},
 		{"https://example.com/main/registry.toml", "https://example.com/main/registry.toml"},
 	}
@@ -332,5 +333,21 @@ func TestPruneRemovedRegistryCaches(t *testing.T) {
 	}
 	if _, err := os.Stat(CachePath(home, "main")); err != nil {
 		t.Fatalf("main cache missing: %v", err)
+	}
+}
+
+func TestReadCachedRegistryCatalogUsesRegistrySourceTrustBoundary(t *testing.T) {
+	home := t.TempDir()
+	local := strings.Replace(validCatalog, `source = "https://packages.example/lighthouse.git"`, `source = "file:///tmp/lighthouse.git"`, 1)
+	if err := WriteCatalogCache(home, "main", []byte(local)); err != nil {
+		t.Fatalf("WriteCatalogCache: %v", err)
+	}
+	reg := Registry{Name: "main", Source: "https://registry.example/main"}
+	if _, _, err := ReadCachedRegistryCatalog(home, reg); err == nil {
+		t.Fatal("ReadCachedRegistryCatalog accepted local pack source for remote registry")
+	}
+	reg.Source = "file:///tmp/main/registry.toml"
+	if _, _, err := ReadCachedRegistryCatalog(home, reg); err != nil {
+		t.Fatalf("ReadCachedRegistryCatalog rejected local registry cache: %v", err)
 	}
 }

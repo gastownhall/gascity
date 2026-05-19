@@ -33,6 +33,42 @@ func TestConfigRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLoadConfigValidatesRegistrySources(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(ConfigPath(home)), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	body := "schema = 1\n\n[[registry]]\nname = \"main\"\nsource = \"http://registry.example/registry.toml\"\n"
+	if err := os.WriteFile(ConfigPath(home), []byte(body), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := LoadConfig(home); err == nil {
+		t.Fatal("LoadConfig accepted invalid registry source")
+	}
+}
+
+func TestAddRegistryWithCacheDoesNotConfigureWhenCacheWriteFails(t *testing.T) {
+	home := t.TempDir()
+	cacheParent := filepath.Join(home, "registry-cache", "main")
+	if err := os.MkdirAll(filepath.Dir(cacheParent), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(cacheParent, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("WriteFile(cache blocker): %v", err)
+	}
+	err := AddRegistryWithCache(home, Registry{Name: "main", Source: "https://example.com/main"}, []byte("schema = 1\n"))
+	if err == nil {
+		t.Fatal("AddRegistryWithCache succeeded, want cache write error")
+	}
+	cfg, loadErr := LoadConfig(home)
+	if loadErr != nil {
+		t.Fatalf("LoadConfig: %v", loadErr)
+	}
+	if len(cfg.Registries) != 0 {
+		t.Fatalf("registry configured despite cache failure: %+v", cfg.Registries)
+	}
+}
+
 func TestValidateRegistryName(t *testing.T) {
 	valid64 := "a" + strings.Repeat("b", 63)
 	for _, name := range []string{"main", "acme-1", "r0", valid64} {
