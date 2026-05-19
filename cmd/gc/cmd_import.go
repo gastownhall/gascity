@@ -1162,6 +1162,20 @@ func writeImportWhy(stdout io.Writer, target string, matches [][]*importGraphNod
 		if _, err := fmt.Fprintf(stdout, "resolved: %s\n", primary.Resolved.Version); err != nil {
 			return err
 		}
+		if primary.Resolved.Registry != "" {
+			registry := primary.Resolved.Registry
+			if primary.Resolved.RegistryPack != "" {
+				registry += ":" + primary.Resolved.RegistryPack
+			}
+			if _, err := fmt.Fprintf(stdout, "registry: %s\n", registry); err != nil {
+				return err
+			}
+			if primary.Resolved.RegistrySource != "" {
+				if _, err := fmt.Fprintf(stdout, "registry source: %s\n", primary.Resolved.RegistrySource); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	for _, path := range matches {
 		if len(path) <= 1 {

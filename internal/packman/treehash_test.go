@@ -9,10 +9,10 @@ import (
 
 func TestHashPackTreeDigestChangesWhenFileBytesChange(t *testing.T) {
 	root := t.TempDir()
-	writeTreeHashTestFile(t, root, "pack.toml", "name = \"demo\"\n", 0o644)
+	writeTreeHashTestFile(t, root, "pack.toml", "name = \"demo\"\n")
 
 	first := hashPackTreeForTest(t, root)
-	writeTreeHashTestFile(t, root, "pack.toml", "name = \"changed\"\n", 0o644)
+	writeTreeHashTestFile(t, root, "pack.toml", "name = \"changed\"\n")
 	second := hashPackTreeForTest(t, root)
 
 	if first == second {
@@ -22,16 +22,16 @@ func TestHashPackTreeDigestChangesWhenFileBytesChange(t *testing.T) {
 
 func TestHashPackTreeLexicalOrderingStableIndependentOfCreationOrder(t *testing.T) {
 	firstRoot := t.TempDir()
-	writeTreeHashTestFile(t, firstRoot, "b.txt", "bravo\n", 0o644)
-	writeTreeHashTestFile(t, firstRoot, "a.txt", "alpha\n", 0o644)
-	writeTreeHashTestFile(t, firstRoot, "nested/z.txt", "zulu\n", 0o644)
-	writeTreeHashTestFile(t, firstRoot, "nested/c.txt", "charlie\n", 0o644)
+	writeTreeHashTestFile(t, firstRoot, "b.txt", "bravo\n")
+	writeTreeHashTestFile(t, firstRoot, "a.txt", "alpha\n")
+	writeTreeHashTestFile(t, firstRoot, "nested/z.txt", "zulu\n")
+	writeTreeHashTestFile(t, firstRoot, "nested/c.txt", "charlie\n")
 
 	secondRoot := t.TempDir()
-	writeTreeHashTestFile(t, secondRoot, "nested/c.txt", "charlie\n", 0o644)
-	writeTreeHashTestFile(t, secondRoot, "a.txt", "alpha\n", 0o644)
-	writeTreeHashTestFile(t, secondRoot, "nested/z.txt", "zulu\n", 0o644)
-	writeTreeHashTestFile(t, secondRoot, "b.txt", "bravo\n", 0o644)
+	writeTreeHashTestFile(t, secondRoot, "nested/c.txt", "charlie\n")
+	writeTreeHashTestFile(t, secondRoot, "a.txt", "alpha\n")
+	writeTreeHashTestFile(t, secondRoot, "nested/z.txt", "zulu\n")
+	writeTreeHashTestFile(t, secondRoot, "b.txt", "bravo\n")
 
 	first := hashPackTreeForTest(t, firstRoot)
 	second := hashPackTreeForTest(t, secondRoot)
@@ -42,7 +42,7 @@ func TestHashPackTreeLexicalOrderingStableIndependentOfCreationOrder(t *testing.
 
 func TestHashPackTreeExecutableBitAffectsDigest(t *testing.T) {
 	root := t.TempDir()
-	path := writeTreeHashTestFile(t, root, "bin/tool", "#!/bin/sh\n", 0o644)
+	path := writeTreeHashTestFile(t, root, "bin/tool", "#!/bin/sh\n")
 
 	plain := hashPackTreeForTest(t, root)
 	if err := os.Chmod(path, 0o755); err != nil {
@@ -57,8 +57,8 @@ func TestHashPackTreeExecutableBitAffectsDigest(t *testing.T) {
 
 func TestHashPackTreeSymlinkTargetAffectsDigest(t *testing.T) {
 	root := t.TempDir()
-	writeTreeHashTestFile(t, root, "a.txt", "same\n", 0o644)
-	writeTreeHashTestFile(t, root, "b.txt", "same\n", 0o644)
+	writeTreeHashTestFile(t, root, "a.txt", "same\n")
+	writeTreeHashTestFile(t, root, "b.txt", "same\n")
 	if err := os.Symlink("a.txt", filepath.Join(root, "link")); err != nil {
 		t.Fatalf("Symlink: %v", err)
 	}
@@ -79,17 +79,17 @@ func TestHashPackTreeSymlinkTargetAffectsDigest(t *testing.T) {
 
 func TestHashPackTreeIgnoresLocalMetadata(t *testing.T) {
 	cleanRoot := t.TempDir()
-	writeTreeHashTestFile(t, cleanRoot, "pack.toml", "name = \"demo\"\n", 0o644)
-	writeTreeHashTestFile(t, cleanRoot, "src/main.gc", "body\n", 0o644)
+	writeTreeHashTestFile(t, cleanRoot, "pack.toml", "name = \"demo\"\n")
+	writeTreeHashTestFile(t, cleanRoot, "src/main.gc", "body\n")
 
 	noisyRoot := t.TempDir()
-	writeTreeHashTestFile(t, noisyRoot, "pack.toml", "name = \"demo\"\n", 0o644)
-	writeTreeHashTestFile(t, noisyRoot, "src/main.gc", "body\n", 0o644)
-	writeTreeHashTestFile(t, noisyRoot, ".DS_Store", "root metadata\n", 0o644)
-	writeTreeHashTestFile(t, noisyRoot, "src/.DS_Store", "nested metadata\n", 0o644)
-	writeTreeHashTestFile(t, noisyRoot, ".git/config", "ignored git metadata\n", 0o644)
-	writeTreeHashTestFile(t, noisyRoot, ".gc/cache/state", "ignored gc state\n", 0o644)
-	writeTreeHashTestFile(t, noisyRoot, "runtime/cache/result", "ignored runtime cache\n", 0o644)
+	writeTreeHashTestFile(t, noisyRoot, "pack.toml", "name = \"demo\"\n")
+	writeTreeHashTestFile(t, noisyRoot, "src/main.gc", "body\n")
+	writeTreeHashTestFile(t, noisyRoot, ".DS_Store", "root metadata\n")
+	writeTreeHashTestFile(t, noisyRoot, "src/.DS_Store", "nested metadata\n")
+	writeTreeHashTestFile(t, noisyRoot, ".git/config", "ignored git metadata\n")
+	writeTreeHashTestFile(t, noisyRoot, ".gc/cache/state", "ignored gc state\n")
+	writeTreeHashTestFile(t, noisyRoot, "runtime/cache/result", "ignored runtime cache\n")
 
 	clean := hashPackTreeForTest(t, cleanRoot)
 	noisy := hashPackTreeForTest(t, noisyRoot)
@@ -100,7 +100,7 @@ func TestHashPackTreeIgnoresLocalMetadata(t *testing.T) {
 
 func TestHashPackTreeRejectsSymlinkEscape(t *testing.T) {
 	root := t.TempDir()
-	outside := writeTreeHashTestFile(t, t.TempDir(), "outside.txt", "outside\n", 0o644)
+	outside := writeTreeHashTestFile(t, t.TempDir(), "outside.txt", "outside\n")
 	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
 		t.Fatalf("Symlink: %v", err)
 	}
@@ -116,8 +116,8 @@ func TestHashPackTreeRejectsSymlinkEscape(t *testing.T) {
 
 func TestHashPackTreeRejectsNestedGitFile(t *testing.T) {
 	root := t.TempDir()
-	writeTreeHashTestFile(t, root, "nested/.git", "gitdir: ../.git/modules/nested\n", 0o644)
-	writeTreeHashTestFile(t, root, "nested/pack.toml", "name = \"nested\"\n", 0o644)
+	writeTreeHashTestFile(t, root, "nested/.git", "gitdir: ../.git/modules/nested\n")
+	writeTreeHashTestFile(t, root, "nested/pack.toml", "name = \"nested\"\n")
 
 	_, err := HashPackTree(root)
 	if err == nil {
@@ -140,13 +140,13 @@ func hashPackTreeForTest(t *testing.T, root string) string {
 	return got
 }
 
-func writeTreeHashTestFile(t *testing.T, root, rel, contents string, mode os.FileMode) string {
+func writeTreeHashTestFile(t *testing.T, root, rel, contents string) string {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(rel))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("MkdirAll(%q): %v", filepath.Dir(path), err)
 	}
-	if err := os.WriteFile(path, []byte(contents), mode); err != nil {
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatalf("WriteFile(%q): %v", path, err)
 	}
 	return path

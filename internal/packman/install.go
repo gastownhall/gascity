@@ -30,6 +30,7 @@ type packConfig struct {
 	Imports map[string]config.Import `toml:"imports,omitempty"`
 }
 
+// SourceHint supplies resolved source metadata for lock synchronization.
 type SourceHint struct {
 	ResolverSource string
 }
@@ -39,6 +40,7 @@ func ReadCachedPackImports(source, commit string) (map[string]config.Import, err
 	return ReadCachedPackImportsLocked(source, LockedPack{Commit: commit})
 }
 
+// ReadCachedPackImportsLocked loads nested imports using an existing lock entry.
 func ReadCachedPackImportsLocked(lockSource string, pack LockedPack) (map[string]config.Import, error) {
 	source := materializedSource(lockSource, pack)
 	cachePath, err := RepoCachePath(source, pack.Commit)
@@ -118,6 +120,7 @@ func SyncLock(cityRoot string, imports map[string]config.Import, mode InstallMod
 	return syncLock(cityRoot, imports, mode, nil, nil)
 }
 
+// SyncLockWithHints resolves imports while preserving caller-provided source hints.
 func SyncLockWithHints(cityRoot string, imports map[string]config.Import, mode InstallMode, hints map[string]SourceHint) (*Lockfile, error) {
 	return syncLock(cityRoot, imports, mode, nil, hints)
 }

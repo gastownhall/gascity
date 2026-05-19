@@ -1,3 +1,4 @@
+// Package packregistry manages configured pack registries and cached catalogs.
 package packregistry
 
 import (
@@ -23,8 +24,11 @@ import (
 )
 
 const (
-	CatalogSchema       = 1
-	DefaultMaxBytes     = 16 << 20
+	// CatalogSchema is the supported registry catalog schema version.
+	CatalogSchema = 1
+	// DefaultMaxBytes is the default maximum registry catalog size.
+	DefaultMaxBytes = 16 << 20
+	// DefaultFetchTimeout is the default timeout for remote registry fetches.
 	DefaultFetchTimeout = 15 * time.Second
 )
 
@@ -37,11 +41,13 @@ var (
 	windowsUNCPath = regexp.MustCompile(`^\\\\[^\\]+\\[^\\]+`)
 )
 
+// Catalog is the parsed contents of a registry catalog.
 type Catalog struct {
 	Schema int           `toml:"schema"`
 	Packs  []CatalogPack `toml:"pack,omitempty"`
 }
 
+// CatalogPack describes one pack entry in a registry catalog.
 type CatalogPack struct {
 	Name        string           `toml:"name"`
 	Description string           `toml:"description"`
@@ -50,6 +56,7 @@ type CatalogPack struct {
 	Releases    []CatalogRelease `toml:"release,omitempty"`
 }
 
+// CatalogRelease describes an immutable published version of a catalog pack.
 type CatalogRelease struct {
 	Version         string `toml:"version"`
 	Ref             string `toml:"ref"`
@@ -60,6 +67,7 @@ type CatalogRelease struct {
 	WithdrawnReason string `toml:"withdrawn_reason,omitempty"`
 }
 
+// Source is a normalized registry catalog source.
 type Source struct {
 	Raw    string
 	Remote bool
@@ -67,12 +75,14 @@ type Source struct {
 	Path   string
 }
 
+// FetchOptions controls registry catalog fetches.
 type FetchOptions struct {
 	Client   *http.Client
 	Timeout  time.Duration
 	MaxBytes int64
 }
 
+// NormalizeSource parses a user-provided registry source into a concrete catalog location.
 func NormalizeSource(raw string) (Source, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -85,13 +95,13 @@ func NormalizeSource(raw string) (Source, error) {
 			if u.Host == "" {
 				return Source{}, fmt.Errorf("invalid HTTPS registry source %q", raw)
 			}
-			if u.Path == "" || strings.HasSuffix(u.Path, "/") {
+			switch {
+			case u.Path == "" || strings.HasSuffix(u.Path, "/"):
 				u.Path = strings.TrimRight(u.Path, "/") + "/registry.toml"
-			} else if path.Base(u.Path) == "registry.toml" {
-				// Use the explicit catalog path as provided.
-			} else if !strings.Contains(path.Base(u.Path), ".") {
+			case path.Base(u.Path) == "registry.toml":
+			case !strings.Contains(path.Base(u.Path), "."):
 				u.Path = strings.TrimRight(u.Path, "/") + "/registry.toml"
-			} else {
+			default:
 				return Source{}, fmt.Errorf("HTTPS registry source path must end with registry.toml: %q", raw)
 			}
 			return Source{Raw: raw, Remote: true, URL: u}, nil
@@ -110,6 +120,7 @@ func NormalizeSource(raw string) (Source, error) {
 	return Source{Raw: raw, Path: raw}, nil
 }
 
+// FetchCatalog reads a registry catalog from a normalized source.
 func FetchCatalog(ctx context.Context, source Source, opts FetchOptions) ([]byte, error) {
 	if source.Remote {
 		return fetchRemoteCatalog(ctx, source.URL, opts)
@@ -117,6 +128,7 @@ func FetchCatalog(ctx context.Context, source Source, opts FetchOptions) ([]byte
 	return readLocalCatalog(source.Path, maxBytes(opts))
 }
 
+// ParseCatalog decodes and version-checks registry catalog data.
 func ParseCatalog(data []byte) (Catalog, error) {
 	var catalog Catalog
 	if _, err := toml.Decode(string(data), &catalog); err != nil {
@@ -131,6 +143,7 @@ func ParseCatalog(data []byte) (Catalog, error) {
 	return catalog, nil
 }
 
+// ValidateCatalog validates registry catalog structure and source policy.
 func ValidateCatalog(catalog Catalog, remote bool) error {
 	seenPacks := map[string]bool{}
 	for _, pack := range catalog.Packs {
@@ -182,6 +195,7 @@ func ValidateCatalog(catalog Catalog, remote bool) error {
 	return nil
 }
 
+// ValidatePackName validates a canonical registry pack name.
 func ValidatePackName(name string) error {
 	if !packNameRE.MatchString(name) {
 		return fmt.Errorf("invalid pack name %q", name)
@@ -194,6 +208,7 @@ func ValidatePackName(name string) error {
 	return nil
 }
 
+// ReadCatalog fetches, parses, and validates a registry catalog.
 func ReadCatalog(ctx context.Context, raw string, opts FetchOptions) (Catalog, []byte, Source, error) {
 	source, err := NormalizeSource(raw)
 	if err != nil {
@@ -213,10 +228,12 @@ func ReadCatalog(ctx context.Context, raw string, opts FetchOptions) (Catalog, [
 	return catalog, data, source, nil
 }
 
+// CachePath returns the cached catalog path for a registry.
 func CachePath(home, registryName string) string {
 	return filepath.Join(gchome.RegistryCacheRoot(home), registryName, "registry.toml")
 }
 
+// WriteCatalogCache writes catalog data to the registry cache.
 func WriteCatalogCache(home, registryName string, data []byte) error {
 	path := CachePath(home, registryName)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -225,6 +242,7 @@ func WriteCatalogCache(home, registryName string, data []byte) error {
 	return fsys.WriteFileAtomic(fsys.OSFS{}, path, data, 0o644)
 }
 
+// WithCatalogCacheLock serializes access to one registry cache.
 func WithCatalogCacheLock(home, registryName string, fn func() error) error {
 	lockPath := CachePath(home, registryName) + ".lock"
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
@@ -242,6 +260,7 @@ func WithCatalogCacheLock(home, registryName string, fn func() error) error {
 	return fn()
 }
 
+// ReadCachedCatalog reads and validates a cached catalog by registry name.
 func ReadCachedCatalog(home, registryName string) (Catalog, []byte, error) {
 	path := CachePath(home, registryName)
 	data, err := os.ReadFile(path)
@@ -255,6 +274,7 @@ func ReadCachedCatalog(home, registryName string) (Catalog, []byte, error) {
 	return catalog, data, ValidateCatalog(catalog, false)
 }
 
+// ReadCachedRegistryCatalog reads and validates a cached catalog using registry metadata.
 func ReadCachedRegistryCatalog(home string, reg Registry) (Catalog, []byte, error) {
 	source, err := NormalizeSource(reg.Source)
 	if err != nil {
@@ -272,6 +292,7 @@ func ReadCachedRegistryCatalog(home string, reg Registry) (Catalog, []byte, erro
 	return catalog, data, ValidateCatalog(catalog, source.Remote)
 }
 
+// RefreshRegistry fetches a registry catalog and updates the local cache.
 func RefreshRegistry(ctx context.Context, home string, reg Registry, opts FetchOptions) (Catalog, error) {
 	next, data, _, err := ReadCatalog(ctx, reg.Source, opts)
 	if err != nil {
@@ -290,6 +311,7 @@ func RefreshRegistry(ctx context.Context, home string, reg Registry, opts FetchO
 	return next, nil
 }
 
+// CheckImmutable rejects changes to previously cached immutable release metadata.
 func CheckImmutable(prev, next Catalog) error {
 	prevReleases := map[string]CatalogPack{}
 	for _, pack := range prev.Packs {
@@ -318,6 +340,7 @@ func CheckImmutable(prev, next Catalog) error {
 	return nil
 }
 
+// PruneRemovedRegistryCaches removes cache directories for registries no longer configured.
 func PruneRemovedRegistryCaches(home string, active map[string]bool) error {
 	root := gchome.RegistryCacheRoot(home)
 	entries, err := os.ReadDir(root)
@@ -338,6 +361,7 @@ func PruneRemovedRegistryCaches(home string, active map[string]bool) error {
 	return nil
 }
 
+// CatalogFresh reports whether a cached catalog is within the maximum age.
 func CatalogFresh(path string, now time.Time, maxAge time.Duration) (bool, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -346,6 +370,7 @@ func CatalogFresh(path string, now time.Time, maxAge time.Duration) (bool, error
 	return now.Sub(info.ModTime()) <= maxAge, nil
 }
 
+// FreshnessFromEnv returns the registry freshness duration configured in the environment.
 func FreshnessFromEnv(def time.Duration) (time.Duration, error) {
 	raw := strings.TrimSpace(os.Getenv("GC_REGISTRY_FRESHNESS"))
 	if raw == "" {
@@ -371,15 +396,15 @@ func fetchRemoteCatalog(ctx context.Context, u *url.URL, opts FetchOptions) ([]b
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	client := http.DefaultClient
+	var client *http.Client
 	if opts.Client != nil {
-		copy := *opts.Client
-		client = &copy
+		clientCopy := *opts.Client
+		client = &clientCopy
 	} else {
-		copy := *http.DefaultClient
-		client = &copy
+		clientCopy := *http.DefaultClient
+		client = &clientCopy
 	}
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+	client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
 		if req.URL.Scheme != "https" {
 			return fmt.Errorf("insecure redirect to %s", req.URL.String())
 		}
@@ -393,7 +418,7 @@ func fetchRemoteCatalog(ctx context.Context, u *url.URL, opts FetchOptions) ([]b
 	if err != nil {
 		return nil, fmt.Errorf("fetching registry catalog: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("fetching registry catalog: HTTP %d", resp.StatusCode)
 	}
@@ -403,7 +428,7 @@ func fetchRemoteCatalog(ctx context.Context, u *url.URL, opts FetchOptions) ([]b
 		if err != nil {
 			return nil, fmt.Errorf("opening gzip registry catalog: %w", err)
 		}
-		defer gz.Close()
+		defer gz.Close() //nolint:errcheck
 		body = gz
 	}
 	return readLimited(body, maxBytes(opts))
@@ -421,7 +446,7 @@ func readLocalCatalog(path string, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening local registry catalog: %w", err)
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck
 	return readLimited(f, limit)
 }
 

@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/gchome"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -364,7 +365,7 @@ schedule = "*/5 * * * *"
 	mustGitImport(t, repoDir, "commit", "-m", "initial")
 	commit := gitOutputImport(t, repoDir, "rev-parse", "HEAD")
 
-	cacheDir := filepath.Join(home, ".gc", "cache", "repos", config.RepoCacheKey(source, commit))
+	cacheDir := config.GlobalRepoCachePath(gchome.Default(), source, commit)
 	if err := os.MkdirAll(filepath.Dir(cacheDir), 0o755); err != nil {
 		t.Fatal(err)
 	}

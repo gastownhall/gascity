@@ -246,7 +246,7 @@ func doPackAddRegistrySelector(cityPath, rawSource string, classification packso
 		fmt.Fprintf(stderr, "gc pack add %q: %v\n", rawSource, err) //nolint:errcheck
 		return 1
 	}
-	fmt.Fprintf(stdout, "Added pack dependency %q from %s (%s)\n", name, resolved.Source, resolverSource) //nolint:errcheck
+	fmt.Fprintf(stdout, "Added pack dependency %q from %s (selected via registry %s:%s)\n", name, resolved.Source, locator.Registry, locator.Pack) //nolint:errcheck
 	return 0
 }
 
@@ -565,12 +565,12 @@ func doPackRegistryAdd(name, source string, noValidate, jsonOutput bool, stdout,
 	}
 	var catalogData []byte
 	if !noValidate {
-		if _, data, _, err := packregistry.ReadCatalog(context.Background(), source, packregistry.FetchOptions{}); err != nil {
+		_, data, _, err := packregistry.ReadCatalog(context.Background(), source, packregistry.FetchOptions{})
+		if err != nil {
 			fmt.Fprintf(stderr, "gc pack registry add: validating catalog: %v\n", err) //nolint:errcheck
 			return 1
-		} else {
-			catalogData = data
 		}
+		catalogData = data
 	}
 	if err := packregistry.AddRegistryWithCache(home, reg, catalogData); err != nil {
 		fmt.Fprintf(stderr, "gc pack registry add: %v\n", err) //nolint:errcheck

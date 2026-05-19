@@ -143,7 +143,7 @@ func hashRegularFile(h io.Writer, entry treeHashEntry) error {
 	if err != nil {
 		return fmt.Errorf("reading file %q: %w", entry.path, err)
 	}
-	defer file.Close()
+	defer file.Close() //nolint:errcheck
 	if _, err := io.Copy(h, file); err != nil {
 		return fmt.Errorf("hashing file %q: %w", entry.path, err)
 	}

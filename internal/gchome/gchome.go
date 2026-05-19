@@ -1,3 +1,4 @@
+// Package gchome resolves machine-local Gas City state paths.
 package gchome
 
 import (
@@ -20,10 +21,12 @@ func Default() string {
 	return filepath.Join(home, ".gc")
 }
 
+// RegistriesPath returns the configured registry file path under home.
 func RegistriesPath(home string) string {
 	return filepath.Join(home, "registries.toml")
 }
 
+// RegistryCacheRoot returns the registry catalog cache directory under home.
 func RegistryCacheRoot(home string) string {
 	return filepath.Join(home, "registry-cache")
 }

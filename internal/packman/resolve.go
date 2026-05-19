@@ -30,6 +30,7 @@ type ResolvedVersion struct {
 	WithdrawnReason string
 }
 
+// ResolveOptions controls registry and lock-aware version resolution.
 type ResolveOptions struct {
 	GCHome   string
 	Existing *LockedPack
@@ -41,6 +42,7 @@ func ResolveVersion(source, constraint string) (ResolvedVersion, error) {
 	return ResolveVersionWithOptions(source, constraint, ResolveOptions{})
 }
 
+// ResolveVersionWithOptions discovers a concrete version using explicit resolution options.
 func ResolveVersionWithOptions(source, constraint string, opts ResolveOptions) (ResolvedVersion, error) {
 	if strings.HasPrefix(source, "registry:") {
 		return resolveRegistryVersion(source, constraint, opts)

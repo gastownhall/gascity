@@ -15,25 +15,30 @@ import (
 	"github.com/gastownhall/gascity/internal/gchome"
 )
 
+// ConfigSchema is the supported registries.toml schema version.
 const ConfigSchema = 1
 
 var registryNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
+// Config is the parsed registry configuration stored under the Gas City home.
 type Config struct {
 	Schema     int        `toml:"schema"`
 	Registry   []Registry `toml:"registry,omitempty"`
 	Registries []Registry `toml:"-"`
 }
 
+// Registry names one configured pack registry and its source.
 type Registry struct {
 	Name   string `toml:"name"`
 	Source string `toml:"source"`
 }
 
+// ConfigPath returns the registries.toml path for a Gas City home.
 func ConfigPath(home string) string {
 	return gchome.RegistriesPath(home)
 }
 
+// LoadConfig reads and validates registry configuration.
 func LoadConfig(home string) (Config, error) {
 	path := ConfigPath(home)
 	var cfg Config
@@ -57,6 +62,7 @@ func LoadConfig(home string) (Config, error) {
 	return cfg, validateConfig(cfg)
 }
 
+// SaveConfig validates and writes registry configuration.
 func SaveConfig(home string, cfg Config) error {
 	cfg.Schema = ConfigSchema
 	cfg.Registry = append([]Registry(nil), cfg.Registries...)
@@ -86,10 +92,12 @@ func SaveConfig(home string, cfg Config) error {
 	return fsys.WriteFileAtomic(fsys.OSFS{}, path, buf.Bytes(), 0o644)
 }
 
+// AddRegistry adds a registry to the registry configuration.
 func AddRegistry(home string, reg Registry) error {
 	return AddRegistryWithCache(home, reg, nil)
 }
 
+// AddRegistryWithCache adds a registry and optionally seeds its catalog cache.
 func AddRegistryWithCache(home string, reg Registry, catalogData []byte) error {
 	if err := ValidateRegistryName(reg.Name); err != nil {
 		return err
@@ -120,6 +128,7 @@ func AddRegistryWithCache(home string, reg Registry, catalogData []byte) error {
 	})
 }
 
+// RemoveRegistry removes a registry from the registry configuration.
 func RemoveRegistry(home, name string) (bool, error) {
 	if err := ValidateRegistryName(name); err != nil {
 		return false, err
@@ -147,6 +156,7 @@ func RemoveRegistry(home, name string) (bool, error) {
 	return removed, err
 }
 
+// ValidateRegistryName validates a configured registry name.
 func ValidateRegistryName(name string) error {
 	if len(name) == 0 {
 		return errors.New("registry name is required")
@@ -180,6 +190,7 @@ func validateConfig(cfg Config) error {
 	return nil
 }
 
+// WithConfigLock serializes registry configuration updates.
 func WithConfigLock(home string, fn func() error) error {
 	lockPath := ConfigPath(home) + ".lock"
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {

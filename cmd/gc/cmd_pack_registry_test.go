@@ -470,6 +470,9 @@ func TestPackAddRegistrySelectorWritesConcreteSourceAndRegistryLockMetadata(t *t
 	if code != 0 {
 		t.Fatalf("pack add code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
+	if !strings.Contains(stdout.String(), "selected via registry main:lighthouse") || strings.Contains(stdout.String(), "registry:main:lighthouse") {
+		t.Fatalf("pack add stdout = %q", stdout.String())
+	}
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(city, "pack.toml"))
 	if err != nil {
 		t.Fatalf("Load(pack.toml): %v", err)
@@ -488,8 +491,21 @@ func TestPackAddRegistrySelectorWritesConcreteSourceAndRegistryLockMetadata(t *t
 	if !ok {
 		t.Fatalf("lock missing concrete source %q: %+v", source, lock.Packs)
 	}
-	if locked.Registry != "main" || locked.RegistryPack != "lighthouse" || locked.Hash != hash || locked.Ref != "v1.2.0" {
+	if locked.Registry != "main" || locked.RegistrySource != catalogDir || locked.RegistryPack != "lighthouse" || locked.Hash != hash || locked.Ref != "v1.2.0" {
 		t.Fatalf("registry lock metadata = %+v", locked)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"pack", "why", "lighthouse"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("pack why code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "registry: main:lighthouse") {
+		t.Fatalf("pack why stdout missing registry provenance: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "registry source: "+catalogDir) {
+		t.Fatalf("pack why stdout missing registry source: %q", stdout.String())
 	}
 }
 
