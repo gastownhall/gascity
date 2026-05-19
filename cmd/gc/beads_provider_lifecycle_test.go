@@ -156,6 +156,64 @@ func TestProviderLifecycleProcessEnvCanonicalizesSymlinkedCityPath(t *testing.T)
 	}
 }
 
+func TestEnsureCanonicalScopeConfigStatePreservesExplicitOptOutJSONL(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"id":"rig-1"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: rig\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, contract.ConfigState{
+		IssuePrefix:    "rig",
+		EndpointOrigin: contract.EndpointOriginExplicit,
+		EndpointStatus: contract.EndpointStatusUnverified,
+		DoltHost:       "db.example.com",
+		DoltPort:       "3306",
+	})
+	if err != nil {
+		t.Fatalf("ensureCanonicalScopeConfigState: %v", err)
+	}
+
+	if _, err := os.Stat(jsonlPath); err != nil {
+		t.Fatalf("issues.jsonl removed for explicit opt-out scope: %v", err)
+	}
+}
+
+func TestEnsureCanonicalScopeConfigStateReapsManagedJSONL(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"id":"gc-1"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: gc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, contract.ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: contract.EndpointOriginManagedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("ensureCanonicalScopeConfigState: %v", err)
+	}
+
+	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
+		t.Fatalf("issues.jsonl present after managed canonicalization; stat err = %v, want IsNotExist", err)
+	}
+}
+
 func TestProviderLifecycleProcessEnvProjectsResolvedGCBin(t *testing.T) {
 	cityPath := t.TempDir()
 	t.Setenv("GC_BIN", "/tmp/wrong-gc")

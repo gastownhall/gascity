@@ -4457,6 +4457,7 @@ dolt.auto-start: false
 		t.Errorf("errors.As(*MetadataParseError) = false, want true; err=%v", err)
 	}
 }
+
 // TestBdRuntimeEnvDisablesAutoExport pins the env-var defense against
 // bd's auto-export-on-write trap (sa-41j3kp): every gc-initiated bd call
 // must set BD_EXPORT_AUTO=false so that even if .beads/config.yaml has not
@@ -4587,6 +4588,52 @@ func TestReapStaleBdExportJSONLRemovesFileOnManagedScope(t *testing.T) {
 
 	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
 		t.Fatalf("jsonl present after reap; stat err = %v, want IsNotExist", err)
+	}
+}
+
+func TestControlBdStoreForCityReapsStaleBdExportJSONL(t *testing.T) {
+	cityPath := t.TempDir()
+	beadsDir := filepath.Join(cityPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"_type":"issue","id":"gc-1"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	controlBdStoreForCity(cityPath, cityPath, nil)
+
+	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
+		t.Fatalf("jsonl present after control city store construction; stat err = %v, want IsNotExist", err)
+	}
+}
+
+func TestControlBdStoreForRigReapsStaleBdExportJSONL(t *testing.T) {
+	cityPath := t.TempDir()
+	rigDir := filepath.Join(cityPath, "repo")
+	beadsDir := filepath.Join(rigDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"_type":"issue","id":"repo-1"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: repo\ngc.endpoint_origin: inherited_city\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir, Prefix: "repo"}}}
+
+	controlBdStoreForRig(rigDir, cityPath, cfg)
+
+	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
+		t.Fatalf("jsonl present after control rig store construction; stat err = %v, want IsNotExist", err)
 	}
 }
 

@@ -141,6 +141,7 @@ func scopeIsGCManaged(scopeRoot string) bool {
 }
 
 func controlBdStoreForCity(dir, cityPath string, cfg *config.City) *beads.BdStore {
+	reapStaleBdExportJSONL(dir)
 	return beads.NewBdStoreWithPrefix(dir, controlBdCommandRunnerForCity(cityPath), issuePrefixForScope(dir, cityPath, cfg))
 }
 
@@ -154,6 +155,7 @@ func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix
 			}
 		}
 	}
+	reapStaleBdExportJSONL(rigDir)
 	return beads.NewBdStoreWithPrefix(rigDir, controlBdCommandRunnerForRig(cityPath, cfg, rigDir), prefix)
 }
 
