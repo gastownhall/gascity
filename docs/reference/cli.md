@@ -2353,6 +2353,7 @@ gc session
 |------------|-------------|
 | [gc session attach](#gc-session-attach) | Attach to (or resume) a chat session |
 | [gc session close](#gc-session-close) | Close a session permanently |
+| [gc session doctor](#gc-session-doctor) | Detect sessions parked on unsubmitted input |
 | [gc session kill](#gc-session-kill) | Force-kill session runtime (reconciler restarts) |
 | [gc session list](#gc-session-list) | List chat sessions |
 | [gc session logs](#gc-session-logs) | Show session logs for a session |
@@ -2392,6 +2393,42 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 ```
 gc session close <session-id-or-alias>
 ```
+
+## gc session doctor
+
+Detect interactive sessions whose tmux pane has typed-but-unsubmitted
+input AND no model-thinking indicator AND the model is idle on the last
+turn boundary.
+
+This is the recurring "mayor came back from restart but didn't press
+Enter on the queued prompt" failure mode. Takes two pane samples
+--sample-gap apart (default 20s); flags sessions whose pane is
+byte-identical AND has typed text after the ❯ cursor AND shows no
+thinking indicator.
+
+Exit code: 0 if no sessions parked, 2 if at least one is parked.
+
+Use --fix to send Enter to each parked session and re-sample 10s later
+to confirm the input was consumed.
+
+```
+gc session doctor [flags]
+```
+
+**Example:**
+
+```
+gc session doctor
+  gc session doctor --sample-gap=10s
+  gc session doctor --fix
+  gc session doctor --json
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--fix` | bool |  | send Enter to each parked session and re-sample to confirm unblock |
+| `--json` | bool |  | machine-readable JSON output |
+| `--sample-gap` | duration | `20s` | wait between the two pane captures used to detect motion |
 
 ## gc session kill
 
