@@ -49,6 +49,13 @@ func removeDoltRuntimeStateFile(path string) error {
 }
 
 func readPublishedDoltRuntimeStateHint(cityPath string) (doltRuntimeState, bool, error) {
+	owned, err := managedDoltLifecycleOwned(cityPath)
+	if err != nil {
+		return doltRuntimeState{}, false, fmt.Errorf("determine managed dolt ownership for published hint: %w", err)
+	}
+	if !owned {
+		return doltRuntimeState{}, false, nil
+	}
 	hint, err := readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
 	if err == nil {
 		return hint, true, nil
@@ -61,6 +68,13 @@ func readPublishedDoltRuntimeStateHint(cityPath string) (doltRuntimeState, bool,
 
 func managedDoltLifecycleOwned(cityPath string) (bool, error) {
 	if cityUsesBdStoreContract(cityPath) {
+		_, usesPostgres, err := postgresMetadataForScope(cityPath, cityPath)
+		if err != nil {
+			return false, err
+		}
+		if usesPostgres {
+			return false, nil
+		}
 		_, _, ok, invalid := resolveConfiguredCityDoltTarget(cityPath)
 		if invalid {
 			return false, fmt.Errorf("invalid canonical city endpoint state")
@@ -112,6 +126,13 @@ func syncManagedDoltPortMirrors(cityPath string) error {
 }
 
 func publishManagedDoltRuntimeState(cityPath string) error {
+	owned, err := managedDoltLifecycleOwned(cityPath)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return nil
+	}
 	providerStatePath := providerManagedDoltStatePath(cityPath)
 	state, readErr := readDoltRuntimeStateFile(providerStatePath)
 	if readErr != nil && !os.IsNotExist(readErr) {
@@ -158,6 +179,10 @@ func publishManagedDoltRuntimeState(cityPath string) error {
 		state = repaired
 	}
 
+	return publishManagedDoltRuntimeStateFromState(cityPath, state)
+}
+
+func publishManagedDoltRuntimeStateFromState(cityPath string, state doltRuntimeState) error {
 	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), state); err != nil {
 		return fmt.Errorf("write published dolt runtime state: %w", err)
 	}
@@ -177,21 +202,53 @@ func clearManagedDoltRuntimeState(cityPath string) error {
 	return nil
 }
 
+func clearManagedDoltRuntimeStateUnlessPostgres(cityPath string) error {
+	if cityUsesBdStoreContract(cityPath) {
+		_, usesPostgres, err := postgresMetadataForScope(cityPath, cityPath)
+		if err != nil {
+			return err
+		}
+		if usesPostgres {
+			return nil
+		}
+	}
+	return clearManagedDoltRuntimeState(cityPath)
+}
+
 func publishManagedDoltRuntimeStateIfOwned(cityPath string) error {
+	_, err := publishManagedDoltRuntimeStateIfOwnedResult(cityPath)
+	return err
+}
+
+func publishManagedDoltRuntimeStateIfOwnedResult(cityPath string) (bool, error) {
 	owned, err := managedDoltLifecycleOwned(cityPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !owned {
-		return nil
+		return false, nil
 	}
-	return publishManagedDoltRuntimeState(cityPath)
+	if err := publishManagedDoltRuntimeState(cityPath); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func publishManagedDoltRuntimeStateIfOwnedResultFromState(cityPath string, state doltRuntimeState) (bool, error) {
+	owned, err := managedDoltLifecycleOwned(cityPath)
+	if err != nil {
+		return false, err
+	}
+	if !owned {
+		return false, nil
+	}
+	if err := publishManagedDoltRuntimeStateFromState(cityPath, state); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func clearManagedDoltRuntimeStateIfOwned(cityPath string) error {
-	if cityUsesBdStoreContract(cityPath) {
-		return clearManagedDoltRuntimeState(cityPath)
-	}
 	owned, err := managedDoltLifecycleOwned(cityPath)
 	if err != nil {
 		return err

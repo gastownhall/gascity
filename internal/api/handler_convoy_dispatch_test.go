@@ -791,6 +791,48 @@ func TestWorkflowSQLCandidatesForWorkflowIDResolveBeadPrefixViaRoutes(t *testing
 	}
 }
 
+func TestWorkflowSQLCandidatesForWorkflowIDUsesConfiguredHyphenatedPrefix(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "bright-lights"
+	state.cityPath = t.TempDir()
+	state.cityBeadStore = beads.NewMemStore()
+	state.cfg.Rigs = []config.Rig{
+		{Name: "pieces", Path: "rigs/pieces", Prefix: "pieces"},
+		{Name: "pieces-annotator", Path: "rigs/pieces-annotator", Prefix: "pieces-annotator"},
+	}
+	state.stores = map[string]beads.Store{
+		"pieces":           beads.NewMemStore(),
+		"pieces-annotator": beads.NewMemStore(),
+	}
+
+	piecesPath := filepath.Join(state.cityPath, "rigs/pieces")
+	if err := os.MkdirAll(filepath.Join(piecesPath, ".beads"), 0o700); err != nil {
+		t.Fatalf("MkdirAll(pieces .beads): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(piecesPath, ".beads", "routes.jsonl"), []byte(`{"prefix":"pieces","path":"."}`+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pieces routes.jsonl): %v", err)
+	}
+
+	annotatorPath := filepath.Join(state.cityPath, "rigs/pieces-annotator")
+	if err := os.MkdirAll(filepath.Join(annotatorPath, ".beads"), 0o700); err != nil {
+		t.Fatalf("MkdirAll(pieces-annotator .beads): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(annotatorPath, ".beads", "routes.jsonl"), []byte(`{"prefix":"pieces-annotator","path":"."}`+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pieces-annotator routes.jsonl): %v", err)
+	}
+
+	candidates := workflowSQLCandidatesForWorkflowID(state, "pieces-annotator-gnpgief", "", "")
+	if len(candidates) != 1 {
+		t.Fatalf("len(candidates) = %d, want 1", len(candidates))
+	}
+	if candidates[0].info.ref != "rig:pieces-annotator" {
+		t.Fatalf("candidate.ref = %q, want rig:pieces-annotator", candidates[0].info.ref)
+	}
+	if candidates[0].path != annotatorPath {
+		t.Fatalf("candidate.path = %q, want %q", candidates[0].path, annotatorPath)
+	}
+}
+
 func TestWorkflowGetNormalizesShortScopeRefs(t *testing.T) {
 	state := newFakeState(t)
 	state.cityName = "test-city"

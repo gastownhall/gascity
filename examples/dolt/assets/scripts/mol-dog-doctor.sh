@@ -11,7 +11,7 @@ set -euo pipefail
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 . "$PACK_DIR/assets/scripts/runtime.sh"
 
-PORT="${GC_DOLT_PORT:-3307}"
+PORT="$GC_DOLT_PORT"
 HOST="${GC_DOLT_HOST:-127.0.0.1}"
 USER="${GC_DOLT_USER:-root}"
 LATENCY_WARN_S="${GC_DOCTOR_LATENCY_WARN_S:-1}"

@@ -48,13 +48,20 @@ Your formula: `mol-refinery-patrol`
 
 ## Startup
 
+Use `$GC_AGENT` as your canonical mailbox identity. The session harness
+(`internal/session/lifecycle.go:RuntimeEnvWithSessionContext`) guarantees
+`$GC_AGENT` is set for every live session — it falls back to the session
+name when no alias is configured. `$GC_ALIAS` can be empty or stale, which
+is how a refinery once self-polled for 13h42m with seven queued beads
+without catching the mismatch (upstream #1833).
+
 ```bash
 # Check for an in-progress patrol wisp
-gc bd list --assignee="$GC_ALIAS" --status=in_progress
+gc bd list --assignee="$GC_AGENT" --status=in_progress
 
 # If none found, pour one (root-only — no child step beads) and assign it
 WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id')
-gc bd update "$WISP" --assignee="$GC_ALIAS"
+gc bd update "$WISP" --assignee="$GC_AGENT"
 ```
 
 Then follow the formula. The step descriptions below are your instructions —
@@ -115,6 +122,18 @@ On rebase conflict or test failure:
 A new polecat picks up the bead, sees `metadata.branch` and
 `metadata.rejection_reason`, rebases or redoes work, reassigns to refinery.
 
+**On the next merge of a previously-rejected bead, clear
+`rejection_reason` before `gc bd close`.** A bead carrying both a
+"closed merged" status and a stale `rejection_reason` is internally
+contradictory — downstream tooling that reads `metadata.rejection_reason`
+to surface "this bead failed" can't tell the rejection has been
+resolved. The formula's `merge-push` step chains `--unset-metadata
+rejection_reason` into each terminal `gc bd update` before `gc bd
+close`; do not split the chain, and do not skip the unset because the
+bead's previous rejection looks like ancient history. The cost of the
+unset is one CLI flag; the cost of leaving it set is a permanent
+contradictory record on the bead.
+
 ## Merge Strategy
 
 `metadata.merge_strategy` controls the terminal handoff:
@@ -145,13 +164,13 @@ and then ignored by landing directly to the target branch.
 
 ```bash
 gc mail inbox                                          # Check for messages
-gc session nudge {{ .RigName }}/<polecat-name> "Run gc hook; it checks assigned work before routed pool work"
+gc session nudge {{ .RigName }}/{{ .BindingPrefix }}<polecat-suffix> "Run gc hook; it checks assigned work before routed pool work"
 gc mail send mayor/ -s "ESCALATION: ..." -m "..."      # Escalate (mail — must survive)
 ```
 
-Use the concrete polecat name from `gc status` or `gc session list`;
-Gastown's default namepool yields names like `furiosa` or `nux`. There is no
-`{{ .RigName }}/polecats/<name>` address form.
+Use the bare polecat suffix after the binding prefix; Gastown's default
+namepool yields suffixes like `furiosa` or `nux`{{ if .BindingPrefix }}, not `{{ .BindingPrefix }}furiosa`{{ end }}.
+There is no `{{ .RigName }}/polecats/<name>` address form.
 
 Nudging a polecat does not assign work. It only wakes that session; actual
 work still arrives through bead assignment or pool routing.
@@ -174,7 +193,7 @@ alert the witness, not `gc mail send`.
 |------------|----------------|
 | Pour next wisp | `gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }}` |
 | Burn current wisp | `gc bd mol burn <wisp-id> --force` |
-| Find assigned work | `gc bd list --assignee="$GC_ALIAS" --status=open` |
+| Find assigned work | `gc bd list --assignee="$GC_AGENT" --status=open` |
 | Snapshot event position | `gc events --seq` |
 | Wait for assignment | `gc events --watch --type=bead.updated --after=$SEQ` |
 | Read work metadata | `gc bd show $WORK --json \| jq '.[0].metadata'` |
@@ -187,5 +206,5 @@ alert the witness, not `gc mail send`.
 
 Rig: {{ .RigName }}
 Working directory: {{ .WorkDir }}
-Mail identity: {{ .RigName }}/refinery
+Mail identity: {{ .AgentName }}
 Formula: mol-refinery-patrol

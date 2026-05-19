@@ -100,7 +100,7 @@ git worktree remove {{ .CityRoot }}/.gc/worktrees/$TARGET_RIG/crew/{{ basename .
 |----------|----------|
 | Quick fix in another rig | Use `git worktree add` |
 | Substantial work in another rig | Use `git worktree add` |
-| Work should be done by target rig's workers | `{{ cmd }} convoy create` + `gc bd update --label=pool:<rig>/polecat` |
+| Work should be done by target rig's workers | `{{ cmd }} convoy create` + `gc sling <rig>/<binding>.polecat <bead>` |
 | Infrastructure task | Leave it to the Deacon's dogs |
 
 **Note**: Dogs are utility agents that handle infrastructure tasks (warrants,
@@ -208,13 +208,14 @@ directly to another agent's Claude Code session via tmux.
 **Common patterns:**
 ```bash
 gc session nudge {{ .RigName }}/crew/alice "Check your mail - PR review waiting"
-gc session nudge {{ .RigName }}/<polecat-name> "Run gc hook; it checks assigned work before routed pool work"
+gc session nudge {{ .RigName }}/<binding>.<polecat-suffix> "Run gc hook; it checks assigned work before routed pool work"
 gc mail send {{ .RigName }}/alice -s "Urgent" -m "..." --notify
 ```
 
-Use the concrete polecat name from `gc status` or `gc session list`;
-Gastown's default namepool yields names like `furiosa` or `nux`. There is no
-`{{ .RigName }}/polecats/<name>` address form.
+Use the import binding plus the bare polecat suffix; Gastown's default
+namepool yields suffixes like `furiosa` or `nux`, so an import bound as
+`gastown` targets `gastown.furiosa`, not `gastown.gastown.furiosa`.
+There is no `{{ .RigName }}/polecats/<name>` address form.
 
 Nudging a polecat does not assign work. It only wakes that session; actual
 work still arrives through bead assignment or pool routing.
@@ -234,7 +235,9 @@ EOF
 
 **Common mail mistakes:**
 - Sending mail when a nudge would suffice (every mail = permanent Dolt commit)
-- Forgetting the address format: `<rig>/<agent>` for rig agents, `mayor/` for city agents
+- Forgetting the address format: rig agents need the canonical configured identity,
+  e.g. `<rig>/gastown.witness` for Gastown imported as `gastown`; city agents
+  can use named-session aliases like `mayor/`
 - Unquoted multi-line text (shell eats newlines) — use `"$(cat <<'EOF' ... EOF)"` pattern
 
 **Important:** `{{ cmd }} session nudge` is the ONLY reliable way to send text to Claude sessions.
@@ -399,7 +402,7 @@ See `{{ .CityRoot }}/docs/AGENT-ERGONOMICS.md` for the full philosophy.
 
 | Want to... | Correct command | Common mistake |
 |------------|----------------|----------------|
-| Dispatch work to polecat | `gc bd update <bead> --label=pool:<rig>/polecat` | ~~gc polecat spawn~~ / ~~--assignee=<rig>/polecat~~ |
+| Dispatch work to polecat | `gc sling <rig>/<binding>.polecat <bead>` | ~~gc bd update --label=pool:...~~ / ~~--assignee=<rig>/polecat~~ |
 | Stop my session | `{{ cmd }} runtime drain {{ basename .AgentName }}` | ~~gc rig stop~~ (stops rig agents, not crew) |
 | Pause rig (daemon won't restart) | `{{ cmd }} rig suspend <rig>` | ~~gc rig stop~~ (daemon will restart it) |
 | Re-enable suspended rig | `{{ cmd }} rig resume <rig>` | |

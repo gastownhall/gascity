@@ -1007,8 +1007,10 @@ func TestResolveAgentIdentity(t *testing.T) {
 		// Pool instance negative (parsed as non-numeric due to dash).
 		{"pool instance worker--1", "worker--1", false, "", false, ""},
 
-		// Max=1 pool: the guard requires Max > 1, so {name}-1 does NOT match.
-		{"singleton-1 no match", "singleton-1", false, "", false, ""},
+		// Max=1 pool-shaped agents still run through pool reconciliation, but
+		// non-namepool singleton pools use the canonical configured identity.
+		// A numeric suffix would materialize a phantom concrete agent.
+		{"singleton-1 rejected for canonical max=1 pool", "singleton-1", false, "", false, ""},
 
 		// Nonexistent agent.
 		{"nonexistent", "nobody", false, "", false, ""},
@@ -1212,16 +1214,14 @@ func TestFindAgentByNamePoolOutOfRange(t *testing.T) {
 	}
 }
 
-func TestFindAgentByNameSingletonPoolNoMatch(t *testing.T) {
+func TestFindAgentByNameSingletonPoolRejectsSuffix(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
 			{Name: "singleton", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), ScaleCheck: "echo 1"},
 		},
 	}
-	// Max=1 pools don't get instance suffixes.
-	_, ok := findAgentByName(cfg, "singleton-1")
-	if ok {
-		t.Error("singleton-1 should not match pool with max=1")
+	if _, ok := findAgentByName(cfg, "singleton-1"); ok {
+		t.Fatal("singleton-1 should not match a canonical singleton pool agent")
 	}
 }
 

@@ -735,14 +735,11 @@ func (s *Server) humaHandleSessionClose(_ context.Context, input *SessionCloseIn
 		strings.Contains(strings.TrimSpace(b.Metadata[apiNamedSessionIdentityKey]), "/") {
 		return nil, huma.Error409Conflict("configured always-on named sessions cannot be closed while config-managed")
 	}
-	nudgeIDs, err := session.WaitNudgeIDs(store, id)
+	closeResult, err := mgr.CloseDetailed(id)
 	if err != nil {
-		return nil, huma.Error500InternalServerError(err.Error())
-	}
-	if err := mgr.Close(id); err != nil {
 		return nil, humaSessionManagerError(err)
 	}
-	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), nudgeIDs); err != nil {
+	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), closeResult.WaitNudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after close %s: %v", id, err)
 	}
 

@@ -26,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -106,17 +107,19 @@ against lingering supervisor / controller subprocesses).`,
 }
 
 func newSupervisorStatusCmd(stdout, stderr io.Writer) *cobra.Command {
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Check if the supervisor is running",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if supervisorStatus(stdout, stderr) != 0 {
+			if supervisorStatusWithOptions(stdout, stderr, asJSON) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON")
 	return cmd
 }
 
@@ -576,9 +579,21 @@ func waitForSupervisorExitUntil(sockPath string, deadline time.Time) error {
 	}
 }
 
-// supervisorStatus checks and reports whether the supervisor is running.
-func supervisorStatus(stdout, _ io.Writer) int {
-	pid := supervisorAlive()
+func supervisorStatusWithOptions(stdout, _ io.Writer, asJSON bool) int {
+	sockPath, pid := runningSupervisorSocket()
+	if asJSON {
+		payload := map[string]any{
+			"schema_version": "1",
+			"running":        pid > 0,
+			"pid":            pid,
+			"socket_path":    sockPath,
+			"checked_paths":  supervisorSocketPathCandidates(),
+		}
+		if err := writeCLIJSONLine(stdout, payload); err != nil {
+			return 1
+		}
+		return 0
+	}
 	if pid > 0 {
 		fmt.Fprintf(stdout, "Supervisor is running (PID %d)\n", pid) //nolint:errcheck
 		return 0
@@ -672,6 +687,14 @@ func managedCityStopTimeout(mc *managedCity) time.Duration {
 	return mc.cr.cfg.Daemon.ShutdownTimeoutDuration()
 }
 
+func managedCityForcedStopTimeout(mc *managedCity) time.Duration {
+	timeout := managedCityStopTimeout(mc)
+	if timeout <= 0 {
+		return timeout
+	}
+	return timeout * 5
+}
+
 // stopManagedCity cancels a city's context, waits up to its configured
 // grace period for it to exit, forces shutdown if it doesn't, and then
 // closes the bead provider and file recorder. It returns a non-nil error
@@ -701,20 +724,24 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 		}
 	}
 	if mc.cr != nil {
+		if mc.cr.forceStopShutdown != nil {
+			mc.cr.forceStopShutdown.Store(true)
+		}
 		func() {
 			defer func() { recover() }() //nolint:errcheck
 			mc.cr.shutdown()
 		}()
 	}
-	if timeout > 0 {
+	forceTimeout := managedCityForcedStopTimeout(mc)
+	if forceTimeout > 0 {
 		select {
 		case <-mc.done:
 			// Forced shutdown completed before the second timeout — the
 			// city is out. Clear the pending error so we report success.
 			stopErr = nil
-		case <-time.After(timeout):
-			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, timeout) //nolint:errcheck
-			stopErr = fmt.Errorf("city %q did not exit within %s after forced shutdown", mc.name, timeout)
+		case <-time.After(forceTimeout):
+			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, forceTimeout) //nolint:errcheck
+			stopErr = fmt.Errorf("city %q did not exit within %s after forced shutdown", mc.name, forceTimeout)
 		}
 	}
 	if err := shutdownBeadsProvider(cityPath); err != nil {
@@ -845,7 +872,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	apiMux := api.NewSupervisorMux(registry, cityInitSvc, readOnly, version, startedAt)
+	apiMux := api.NewSupervisorMux(registry, cityInitSvc, readOnly, version, commit, startedAt)
 	if len(supCfg.Supervisor.AllowedOrigins) > 0 {
 		apiMux.WithAllowedOrigins(supCfg.Supervisor.AllowedOrigins)
 	}
@@ -1274,6 +1301,7 @@ func reconcileCities(
 
 		// recordInitFailure logs the error and records backoff state.
 		recordInitFailure := func(cityName, msg string) {
+			fmt.Fprintln(stderr, logutil.FormatFatalLine(msg))                              //nolint:errcheck // best-effort stderr
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': %s (skipping)\n", cityName, msg) //nolint:errcheck
 			var configMod time.Time
 			if info, stErr := os.Stat(tomlPath); stErr == nil {
@@ -1435,7 +1463,7 @@ func reconcileCities(
 		rec := events.Discard
 		var eventProv events.Provider
 		evPath := filepath.Join(path, ".gc", "events.jsonl")
-		fr, frErr := events.NewFileRecorder(evPath, stderr)
+		fr, frErr := newFileEventsRecorder(evPath, cfg.Events, stderr)
 		if frErr == nil {
 			rec = fr
 			eventProv = fr

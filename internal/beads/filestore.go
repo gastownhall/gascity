@@ -365,6 +365,11 @@ func (fs *FileStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	return nil
 }
 
+// Tx executes fn sequentially against the FileStore.
+func (fs *FileStore) Tx(_ string, fn func(Tx) error) error {
+	return runSequentialTx(fs, fn)
+}
+
 // Get reloads the on-disk store before reading a bead by ID.
 func (fs *FileStore) Get(id string) (Bead, error) {
 	fs.fmu.Lock()

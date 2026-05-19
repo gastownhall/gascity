@@ -59,7 +59,7 @@ func Revision(fs fsys.FS, prov *Provenance, cfg *City, cityRoot string) string {
 	}
 
 	// Hash city-level pack directory contents.
-	for _, ref := range cfg.Workspace.Includes {
+	for _, ref := range cfg.Workspace.LegacyIncludes() {
 		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
 		writeRevisionDirHash(h, prov, "city-pack:"+ref, fs, topoDir)
 	}
@@ -133,7 +133,7 @@ func (p *Provenance) captureRevisionSnapshot(fs fsys.FS, cfg *City, cityRoot str
 			recordDir("pack:"+r.Name+":"+ref, topoDir)
 		}
 	}
-	for _, ref := range cfg.Workspace.Includes {
+	for _, ref := range cfg.Workspace.LegacyIncludes() {
 		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
 		recordDir("city-pack:"+ref, topoDir)
 	}
@@ -279,7 +279,7 @@ func WatchTargets(prov *Provenance, cfg *City, cityRoot string) []WatchTarget {
 		}
 	}
 
-	for _, ref := range cfg.Workspace.Includes {
+	for _, ref := range cfg.Workspace.LegacyIncludes() {
 		topoDir, ok := revisionPackDir(ref, cityRoot, cityRoot)
 		if !ok {
 			continue

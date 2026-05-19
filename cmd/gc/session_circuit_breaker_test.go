@@ -780,6 +780,16 @@ func TestComputeNamedSessionProgressSignaturesSkipsAmbiguousBareKeys(t *testing.
 
 func intPtrCircuit(n int) *int { return &n }
 
+func circuitTestAgent(name string) config.Agent {
+	return config.Agent{
+		Name:         name,
+		Dir:          "rig-a",
+		Provider:     "codex",
+		StartCommand: "test-cmd",
+		PromptMode:   "none",
+	}
+}
+
 func configureAlwaysNamedSession(env *reconcilerTestEnv) {
 	env.cfg = &config.City{
 		Daemon: config.DaemonConfig{
@@ -787,7 +797,7 @@ func configureAlwaysNamedSession(env *reconcilerTestEnv) {
 			SessionCircuitBreakerMaxRestarts: intPtrCircuit(5),
 			SessionCircuitBreakerWindow:      "30m",
 		},
-		Agents: []config.Agent{{Name: "template-a", Dir: "rig-a"}},
+		Agents: []config.Agent{circuitTestAgent("template-a")},
 		NamedSessions: []config.NamedSession{{
 			Name:     "session-a",
 			Template: "template-a",
@@ -799,7 +809,7 @@ func configureAlwaysNamedSession(env *reconcilerTestEnv) {
 
 func configureAlwaysNamedSessionWithoutCircuit(env *reconcilerTestEnv) {
 	env.cfg = &config.City{
-		Agents: []config.Agent{{Name: "template-a", Dir: "rig-a"}},
+		Agents: []config.Agent{circuitTestAgent("template-a")},
 		NamedSessions: []config.NamedSession{{
 			Name:     "session-a",
 			Template: "template-a",
@@ -878,7 +888,7 @@ func TestReconciler_CircuitUsesConfiguredDaemonThresholds(t *testing.T) {
 			SessionCircuitBreakerMaxRestarts: intPtrCircuit(2),
 			SessionCircuitBreakerWindow:      "30m",
 		},
-		Agents: []config.Agent{{Name: "template-a", Dir: "rig-a"}},
+		Agents: []config.Agent{circuitTestAgent("template-a")},
 		NamedSessions: []config.NamedSession{{
 			Name:     "session-a",
 			Template: "template-a",
@@ -1044,8 +1054,8 @@ func TestReconciler_CircuitDoesNotRecordRestartForDependencyBlockedNamedSession(
 			SessionCircuitBreakerWindow:      "30m",
 		},
 		Agents: []config.Agent{
-			{Name: "template-a", DependsOn: []string{"db"}},
-			{Name: "db"},
+			{Name: "template-a", Provider: "codex", StartCommand: "test-cmd", PromptMode: "none", DependsOn: []string{"db"}},
+			{Name: "db", Provider: "codex", StartCommand: "test-cmd", PromptMode: "none"},
 		},
 		NamedSessions: []config.NamedSession{{
 			Name:     "session-a",
@@ -1083,8 +1093,8 @@ func TestReconciler_CircuitDoesNotRecordRestartForWakeBudgetDeferredNamedSession
 			SessionCircuitBreakerWindow:      "30m",
 		},
 		Agents: []config.Agent{
-			{Name: "template-a", Dir: "rig-a"},
-			{Name: "template-b", Dir: "rig-a"},
+			circuitTestAgent("template-a"),
+			circuitTestAgent("template-b"),
 		},
 		NamedSessions: []config.NamedSession{
 			{Name: "session-a", Template: "template-a", Dir: "rig-a", Mode: "always"},

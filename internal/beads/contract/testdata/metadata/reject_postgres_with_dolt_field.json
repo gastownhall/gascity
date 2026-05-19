@@ -1,0 +1,5 @@
+{
+  "database": "beads",
+  "backend": "postgres",
+  "dolt_database": "beads"
+}

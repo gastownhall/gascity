@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -285,16 +286,23 @@ func formatInjectOutput(messages []mail.Message) string {
 		fmt.Fprintf(&sb, "Showing the first %d message(s) here; run 'gc mail inbox' for the full list.\n\n", limit)
 	}
 	for _, m := range messages[:limit] {
-		subject, subjectTruncated := mailInjectSubjectPreview(m.Subject)
-		body, bodyTruncated := mailInjectBodyPreview(m.Body)
+		// Sanitize attacker-controllable fields (sender identity, subject,
+		// body) before interpolating into the <system-reminder> block.
+		// Without this, a sender can inject </system-reminder> sequences
+		// and break out of the reminder. See gastownhall/gascity#2195.
+		from := extmsg.SanitizeForSystemReminder(m.From)
+		rawSubject, subjectTruncated := mailInjectSubjectPreview(m.Subject)
+		subject := extmsg.SanitizeForSystemReminder(rawSubject)
+		rawBody, bodyTruncated := mailInjectBodyPreview(m.Body)
+		body := extmsg.SanitizeForSystemReminder(rawBody)
 		if subject != "" && subject != body {
-			fmt.Fprintf(&sb, "- %s from %s [%s", m.ID, m.From, subject)
+			fmt.Fprintf(&sb, "- %s from %s [%s", m.ID, from, subject)
 			if subjectTruncated {
 				sb.WriteString(" ... [subject truncated]")
 			}
 			fmt.Fprintf(&sb, "]: %s", body)
 		} else {
-			fmt.Fprintf(&sb, "- %s from %s: %s", m.ID, m.From, body)
+			fmt.Fprintf(&sb, "- %s from %s: %s", m.ID, from, body)
 		}
 		if bodyTruncated {
 			sb.WriteString(" ... [preview truncated]")

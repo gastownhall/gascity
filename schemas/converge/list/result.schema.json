@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["id", "state", "iteration", "gate", "formula", "target", "title"],
+    "properties": {
+      "id": { "type": "string" },
+      "state": { "type": "string" },
+      "iteration": { "type": "string" },
+      "gate": { "type": "string" },
+      "formula": { "type": "string" },
+      "target": { "type": "string" },
+      "title": { "type": "string" }
+    },
+    "additionalProperties": true
+  }
+}

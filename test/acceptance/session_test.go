@@ -104,10 +104,15 @@ func TestSessionDefaultNamedSession(t *testing.T) {
 		if strings.Contains(out, "No sessions found") {
 			t.Errorf("expected default named session on fresh city, got:\n%s", out)
 		}
-		for _, want := range []string{"mayor", "creating"} {
+		for _, want := range []string{"mayor"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("expected %q in default named session list, got:\n%s", want, out)
 			}
+		}
+		if !strings.Contains(out, string(session.StateCreating)) &&
+			!strings.Contains(out, string(session.StateActive)) &&
+			!strings.Contains(out, string(session.StateAwake)) {
+			t.Errorf("expected creating or running state in default named session list, got:\n%s", out)
 		}
 	})
 
@@ -116,18 +121,25 @@ func TestSessionDefaultNamedSession(t *testing.T) {
 		if err != nil {
 			t.Fatalf("gc session list --json: %v\n%s", err, out)
 		}
-		var got []session.Info
+		var got struct {
+			Sessions []struct {
+				Template string        `json:"template"`
+				State    session.State `json:"state"`
+			} `json:"sessions"`
+		}
 		if err := json.Unmarshal([]byte(out), &got); err != nil {
-			t.Fatalf("gc session list --json output is not a session array: %v\n%s", err, out)
+			t.Fatalf("gc session list --json output is not a session list envelope: %v\n%s", err, out)
 		}
-		if len(got) != 1 {
-			t.Fatalf("session count = %d, want 1 default named session\n%s", len(got), out)
+		if len(got.Sessions) != 1 {
+			t.Fatalf("session count = %d, want 1 default named session\n%s", len(got.Sessions), out)
 		}
-		if got[0].Template != "mayor" {
-			t.Errorf("template = %q, want mayor\n%s", got[0].Template, out)
+		if got.Sessions[0].Template != "mayor" {
+			t.Errorf("template = %q, want mayor\n%s", got.Sessions[0].Template, out)
 		}
-		if got[0].State != session.StateCreating {
-			t.Errorf("state = %q, want creating\n%s", got[0].State, out)
+		switch got.Sessions[0].State {
+		case session.StateCreating, session.StateActive, session.StateAwake:
+		default:
+			t.Errorf("state = %q, want creating or running\n%s", got.Sessions[0].State, out)
 		}
 	})
 

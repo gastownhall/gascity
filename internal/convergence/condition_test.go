@@ -203,7 +203,7 @@ func TestResolveConditionPath(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		got, err := ResolveConditionPath("/some/city", script)
+		got, err := ResolveConditionPath("/some/city", "/some/city", script)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -220,7 +220,7 @@ func TestResolveConditionPath(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		got, err := ResolveConditionPath(dir, "gates/check.sh")
+		got, err := ResolveConditionPath(dir, dir, "gates/check.sh")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -239,7 +239,7 @@ func TestResolveConditionPath(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		got, err := ResolveConditionPath(dir, "link.sh")
+		got, err := ResolveConditionPath(dir, dir, "link.sh")
 		if err != nil {
 			t.Fatalf("unexpected error for symlink: %v", err)
 		}
@@ -256,7 +256,7 @@ func TestResolveConditionPath(t *testing.T) {
 		}
 		defer func() { _ = os.Remove(script) }()
 
-		_, err := ResolveConditionPath(dir, "../outside.sh")
+		_, err := ResolveConditionPath(dir, dir, "../outside.sh")
 		if err == nil {
 			t.Fatal("expected error for path traversal, got nil")
 		}
@@ -266,17 +266,97 @@ func TestResolveConditionPath(t *testing.T) {
 	})
 
 	t.Run("empty path", func(t *testing.T) {
-		_, err := ResolveConditionPath("/some/city", "")
+		_, err := ResolveConditionPath("/some/city", "/some/city", "")
 		if err == nil {
 			t.Fatal("expected error for empty path, got nil")
 		}
 	})
 
 	t.Run("nonexistent file", func(t *testing.T) {
-		_, err := ResolveConditionPath("/some/city", "/nonexistent/file.sh")
+		_, err := ResolveConditionPath("/some/city", "/some/city", "/nonexistent/file.sh")
 		if err == nil {
 			t.Fatal("expected error for nonexistent file, got nil")
 		}
+	})
+
+	// Pins gastownhall/gascity#2320: a relative path that escapes the base
+	// (the rig subtree) upward but stays inside the envelope (the city tree)
+	// must resolve successfully. This is the exact case the envelope/base
+	// split fixes — and the only one that genuinely distinguishes the new
+	// behavior from the old single-arg API. Pre-fix, base and envelope were
+	// the same value (the rig), so `../scripts/check.sh` was validated
+	// against the rig and the traversal check wrongly rejected it.
+	t.Run("rig-scoped: relative path escapes base but stays inside envelope", func(t *testing.T) {
+		cityDir := t.TempDir()
+		rigDir := filepath.Join(cityDir, "frontend")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Script lives under the city tree, not under the rig base.
+		scriptDir := filepath.Join(cityDir, "scripts")
+		if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		script := filepath.Join(scriptDir, "check.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		// envelope = cityDir (security boundary), base = rigDir (join target).
+		// `../scripts/check.sh` climbs out of base into the city tree; it
+		// stays inside envelope, so it resolves.
+		got, err := ResolveConditionPath(cityDir, rigDir, "../scripts/check.sh")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		testutil.AssertSamePath(t, got, script)
+	})
+
+	// Pins the security contract: when envelope and base diverge, traversal
+	// validation must use the envelope. A relative path that resolves
+	// (under the larger base) to a location outside the envelope must be
+	// rejected even though it stays inside base.
+	t.Run("rig-scoped: traversal still rejected against envelope", func(t *testing.T) {
+		cityDir := t.TempDir()
+		rigDir := filepath.Join(cityDir, "frontend")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Script lives outside both envelope and base; traversal should reject.
+		parent := filepath.Dir(cityDir)
+		script := filepath.Join(parent, "outside.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Remove(script) }()
+
+		_, err := ResolveConditionPath(cityDir, rigDir, "../../outside.sh")
+		if err == nil {
+			t.Fatal("expected traversal rejection, got nil")
+		}
+		if !strings.Contains(err.Error(), "traversal") {
+			t.Errorf("expected path traversal error, got: %v", err)
+		}
+	})
+
+	// Empty base falls back to envelope for backward compatibility with
+	// callers that have no rig/city distinction to make.
+	t.Run("empty base falls back to envelope", func(t *testing.T) {
+		dir := t.TempDir()
+		scriptDir := filepath.Join(dir, "gates")
+		if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		script := filepath.Join(scriptDir, "check.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := ResolveConditionPath(dir, "", "gates/check.sh")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		testutil.AssertSamePath(t, got, script)
 	})
 }
 

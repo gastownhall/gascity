@@ -7,12 +7,51 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
+
+// statusObservationConcurrency caps how many agent observations gc status
+// runs in parallel. Observations are mostly tmux probes; the bound keeps the
+// command from fanning out to hundreds of goroutines on very large cities
+// while still cutting wall time on the common 10-30 agent case.
+const statusObservationConcurrency = 8
+
+// observeStatusTargetsParallel runs observeSessionTargetWithWarning for each
+// target concurrently with a bounded worker pool. Results are returned in
+// input order. stderr is shared safely across goroutines.
+func observeStatusTargetsParallel(
+	sp runtime.Provider,
+	cfg *config.City,
+	cityPath string,
+	store beads.Store,
+	targets []statusObservationTarget,
+	stderr io.Writer,
+) []worker.LiveObservation {
+	out := make([]worker.LiveObservation, len(targets))
+	if len(targets) == 0 {
+		return out
+	}
+	safeStderr := lockedStderr(stderr)
+	sem := make(chan struct{}, statusObservationConcurrency)
+	var wg sync.WaitGroup
+	for i, t := range targets {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, t statusObservationTarget) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			out[i] = observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, t, safeStderr)
+		}(i, t)
+	}
+	wg.Wait()
+	return out
+}
 
 type cityStatusSnapshot struct {
 	CityName      string
@@ -121,6 +160,18 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 		}
 	}
 
+	// Phase 1: walk the agent config and materialize a row + observation
+	// target per (agent or pool instance) without contacting the runtime.
+	// Each plan entry remembers everything needed to stitch the observation
+	// result back in once it arrives.
+	type agentPlan struct {
+		row       cityStatusAgentRow
+		target    statusObservationTarget
+		suspended bool
+		rigDir    string
+	}
+	var plans []agentPlan
+
 	for _, a := range cfg.Agents {
 		suspended := a.Suspended || (a.Dir != "" && suspendedRigs[a.Dir])
 		sp0 := scaleParamsFor(&a)
@@ -138,15 +189,12 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 			headerShown := false
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, snapshot.CityName, cfg.Workspace.SessionTemplate, sp) {
 				target := statusObservationTargetForIdentity(statusSnapshot, snapshot.CityName, qualifiedInstance, cfg.Workspace.SessionTemplate)
-				obs := observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, target, stderr)
 				_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 				row := cityStatusAgentRow{
 					Agent: StatusAgentJSON{
 						Name:          instanceName,
 						QualifiedName: qualifiedInstance,
 						Scope:         scope,
-						Running:       obs.Running,
-						Suspended:     suspended || obs.Suspended || target.suspended,
 						Pool:          nil,
 					},
 					SessionName: target.runtimeSessionName,
@@ -157,35 +205,46 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 					row.ScaleLabel = scaleLabel
 					headerShown = true
 				}
-				snapshot.Agents = append(snapshot.Agents, row)
-				snapshot.Summary.TotalAgents++
-				if obs.Running {
-					snapshot.Summary.RunningAgents++
-				}
-				addRigCount(a.Dir, suspended || obs.Suspended || target.suspended)
+				plans = append(plans, agentPlan{row: row, target: target, suspended: suspended, rigDir: a.Dir})
 			}
 			continue
 		}
 
 		target := statusObservationTargetForIdentity(statusSnapshot, snapshot.CityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
-		obs := observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, target, stderr)
-		snapshot.Agents = append(snapshot.Agents, cityStatusAgentRow{
+		row := cityStatusAgentRow{
 			Agent: StatusAgentJSON{
 				Name:          a.Name,
 				QualifiedName: a.QualifiedName(),
 				Scope:         scope,
-				Running:       obs.Running,
-				Suspended:     suspended || obs.Suspended || target.suspended,
 			},
 			SessionName: target.runtimeSessionName,
 			GroupName:   a.QualifiedName(),
 			Expanded:    false,
-		})
+		}
+		plans = append(plans, agentPlan{row: row, target: target, suspended: suspended, rigDir: a.Dir})
+	}
+
+	// Phase 2: fan out runtime observations across the worker pool. This is
+	// the long pole on multi-rig cities; running the probes serially used to
+	// dominate gc status wall time.
+	targets := make([]statusObservationTarget, len(plans))
+	for i, p := range plans {
+		targets[i] = p.target
+	}
+	observations := observeStatusTargetsParallel(sp, cfg, cityPath, store, targets, stderr)
+
+	// Phase 3: stitch observation results back into rows and tallies in the
+	// original order to keep output deterministic.
+	for i, p := range plans {
+		obs := observations[i]
+		p.row.Agent.Running = obs.Running
+		p.row.Agent.Suspended = p.suspended || obs.Suspended || p.target.suspended
+		snapshot.Agents = append(snapshot.Agents, p.row)
 		snapshot.Summary.TotalAgents++
 		if obs.Running {
 			snapshot.Summary.RunningAgents++
 		}
-		addRigCount(a.Dir, suspended || obs.Suspended || target.suspended)
+		addRigCount(p.rigDir, p.suspended || obs.Suspended || p.target.suspended)
 	}
 
 	for _, r := range cfg.Rigs {
@@ -196,9 +255,11 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 			}
 		}
 		snapshot.Rigs = append(snapshot.Rigs, StatusRigJSON{
-			Name:      r.Name,
-			Path:      r.Path,
-			Suspended: suspended,
+			Name:               r.Name,
+			Path:               r.Path,
+			Prefix:             r.EffectivePrefix(),
+			Suspended:          suspended,
+			DefaultSlingTarget: r.DefaultSlingTarget,
 		})
 	}
 
@@ -241,6 +302,13 @@ func namedSessionStatusForCity(
 				return state
 			}
 			return "materialized"
+		}
+		// Bead not in snapshot. If the snapshot itself is degraded
+		// (load timeout or list error), surface that as a lookup error
+		// so operators see the same signal the pre-snapshot resolver
+		// path produced. See gastownhall/gascity#2148.
+		if err := statusSnapshot.LoadError(); err != nil {
+			return "lookup error: " + err.Error()
 		}
 		return status
 	}
@@ -318,18 +386,38 @@ func countCitySessionsFromSnapshot(snapshot *sessionBeadSnapshot) StatusSummaryJ
 }
 
 func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSummaryJSON) StatusJSON {
-	var agents []StatusAgentJSON
+	agents := make([]StatusAgentJSON, 0, len(snapshot.Agents))
 	for _, row := range snapshot.Agents {
 		agents = append(agents, row.Agent)
 	}
+	rigs := snapshot.Rigs
+	if rigs == nil {
+		rigs = []StatusRigJSON{}
+	}
+	var signals []string
+	if snapshot.Suspended {
+		signals = append(signals, "city_suspended")
+	}
+	if !snapshot.Controller.Running {
+		signals = append(signals, "controller_not_running")
+	}
+	if snapshot.Summary.TotalAgents > 0 && snapshot.Summary.RunningAgents == 0 {
+		signals = append(signals, "no_agents_running")
+	}
+	degraded := len(signals) > 0
+	running := snapshot.Controller.Running
 	return StatusJSON{
-		CityName:   snapshot.CityName,
-		CityPath:   snapshot.CityPath,
-		Controller: snapshot.Controller,
-		Suspended:  snapshot.Suspended,
-		Agents:     agents,
-		Rigs:       snapshot.Rigs,
-		Summary:    summary,
+		SchemaVersion: "1",
+		CityName:      snapshot.CityName,
+		Workspace:     WorkspaceJSON{Name: snapshot.CityName, Path: snapshot.CityPath},
+		CityPath:      snapshot.CityPath,
+		Controller:    snapshot.Controller,
+		Running:       running,
+		Suspended:     snapshot.Suspended,
+		Health:        HealthJSON{Usable: running && !snapshot.Suspended, Degraded: degraded, Signals: signals},
+		Agents:        agents,
+		Rigs:          rigs,
+		Summary:       summary,
 	}
 }
 

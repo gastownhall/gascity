@@ -17,6 +17,14 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 		want  MetadataPatch
 	}{
 		{
+			name:  "request explicit wake",
+			patch: RequestExplicitWakePatch("explicit", now),
+			want: MetadataPatch{
+				"wake_request":      "explicit",
+				"wake_requested_at": now.UTC().Format(time.RFC3339),
+			},
+		},
+		{
 			name:  "request wake",
 			patch: RequestWakePatch("explicit", now),
 			want: MetadataPatch{
@@ -52,6 +60,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"sleep_reason":               "idle-timeout",
 				"sleep_intent":               "",
 				"generation":                 "3",
+				"wake_request":               "",
+				"wake_requested_at":          "",
 			},
 		},
 		{
@@ -72,6 +82,8 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 				"sleep_reason":               "",
 				"sleep_intent":               "",
 				"generation":                 "4",
+				"wake_request":               "",
+				"wake_requested_at":          "",
 				"session_key":                "",
 				"started_config_hash":        "",
 				"started_live_hash":          "",

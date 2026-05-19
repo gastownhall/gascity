@@ -198,26 +198,32 @@ func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainSt
 		return err
 	}
 	if err := sp.SetMeta(name, reconcilerDrainAckReasonKey, ds.reason); err != nil {
-		clearReconcilerDrainAckMetadata(sp, name)
+		_ = clearReconcilerDrainAckMetadata(sp, name)
 		return err
 	}
 	if err := sp.SetMeta(name, reconcilerDrainAckGenerationKey, strconv.Itoa(ds.generation)); err != nil {
-		clearReconcilerDrainAckMetadata(sp, name)
+		_ = clearReconcilerDrainAckMetadata(sp, name)
 		return err
 	}
 	if err := sp.SetMeta(name, "GC_DRAIN_ACK", "1"); err != nil {
-		clearReconcilerDrainAckMetadata(sp, name)
+		_ = clearReconcilerDrainAckMetadata(sp, name)
 		return err
 	}
 	return nil
 }
 
-func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) {
+func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) error {
+	if sp == nil {
+		return fmt.Errorf("session provider is nil")
+	}
+	var errs []error
 	for _, key := range []string{"GC_DRAIN_ACK", reconcilerDrainAckSourceKey, reconcilerDrainAckReasonKey, reconcilerDrainAckGenerationKey} {
 		if err := sp.RemoveMeta(name, key); err != nil {
 			log.Printf("session wake: clearing reconciler drain ack metadata %s for %s: %v", key, name, err)
+			errs = append(errs, fmt.Errorf("removing %s: %w", key, err))
 		}
 	}
+	return errors.Join(errs...)
 }
 
 // cancelSessionDrain removes a cancelable drain if wake reasons reappeared for
@@ -265,7 +271,7 @@ func cancelSessionDrainIf(session beads.Bead, sp runtime.Provider, dt *drainTrac
 		// Clear GC_DRAIN_ACK if it was set — prevents stale ack from
 		// killing the session on the next Phase 1 drain-ack check.
 		if ds.ackSet {
-			clearReconcilerDrainAckMetadata(sp, name)
+			_ = clearReconcilerDrainAckMetadata(sp, name)
 		}
 		telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "cancel")
 		return true
@@ -348,7 +354,7 @@ func cancelRecoveredReconcilerAckedDrain(session beads.Bead, sp runtime.Provider
 	if !ok || !pendingDrainReasonCancelable(reason) {
 		return false
 	}
-	clearReconcilerDrainAckMetadata(sp, name)
+	_ = clearReconcilerDrainAckMetadata(sp, name)
 	telemetry.RecordDrainTransition(context.Background(), name, reason, "cancel")
 	return true
 }
@@ -358,7 +364,7 @@ func cancelRecoveredOrphanedDrainForAssignedWork(session beads.Bead, sp runtime.
 	if !ok || reason != "orphaned" {
 		return false
 	}
-	clearReconcilerDrainAckMetadata(sp, name)
+	_ = clearReconcilerDrainAckMetadata(sp, name)
 	telemetry.RecordDrainTransition(context.Background(), name, reason, "cancel")
 	return true
 }
@@ -433,7 +439,7 @@ func advanceSessionDrainsWithSessionsTraced(
 		if gen != ds.generation {
 			dt.clearIdleProbe(id)
 			if ds.ackSet {
-				clearReconcilerDrainAckMetadata(sp, name)
+				_ = clearReconcilerDrainAckMetadata(sp, name)
 			}
 			dt.remove(id)
 			if trace != nil {
@@ -497,7 +503,7 @@ func advanceSessionDrainsWithSessionsTraced(
 				// Clear GC_DRAIN_ACK if it was set — prevents stale ack
 				// from killing the session on the next Phase 1 check.
 				if ds.ackSet {
-					clearReconcilerDrainAckMetadata(sp, name)
+					_ = clearReconcilerDrainAckMetadata(sp, name)
 				}
 				dt.remove(id)
 				if trace != nil {

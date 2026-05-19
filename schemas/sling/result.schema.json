@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc sling --json result",
+  "description": "One JSONL record describing the result of dispatching work through gc sling.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "success", "target", "routed", "queued", "dry_run"],
+  "properties": {
+    "schema_version": { "type": "string", "description": "Schema version for this command output." },
+    "success": { "type": "boolean", "description": "Whether sling produced a successful dispatch result." },
+    "target": { "type": "string", "description": "Resolved sling target." },
+    "method": { "type": "string", "description": "Dispatch method used." },
+    "bead_id": { "type": "string", "description": "Created or selected work bead ID." },
+    "formula": { "type": "string", "description": "Formula name used for dispatch, when applicable." },
+    "molecule_id": { "type": "string", "description": "Created molecule/root workflow bead ID, when applicable." },
+    "workflow_id": { "type": "string", "description": "Created workflow ID, when applicable." },
+    "convoy_id": { "type": "string", "description": "Created or selected convoy ID, when applicable." },
+    "routed": { "type": "boolean", "description": "Whether work was routed or considered routed." },
+    "queued": { "type": "boolean", "description": "Whether the dispatch queued a nudge for an agent." },
+    "dry_run": { "type": "boolean", "description": "Whether the command ran without mutating dispatch state." },
+    "warnings": {
+      "type": "array",
+      "description": "Non-fatal warnings from dispatch.",
+      "items": { "type": "string" }
+    },
+    "batch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "routed", "failed", "skipped", "idempotent"],
+      "properties": {
+        "container_type": { "type": "string" },
+        "total": { "type": "integer" },
+        "routed": { "type": "integer" },
+        "failed": { "type": "integer" },
+        "skipped": { "type": "integer" },
+        "idempotent": { "type": "integer" }
+      }
+    }
+  }
+}

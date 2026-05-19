@@ -149,6 +149,9 @@ func isNonFatalLoadConfigWarning(warning string) bool {
 	if strings.Contains(warning, "attachment-list fields") {
 		return true
 	}
+	if strings.HasPrefix(warning, "events.rotation: warning:") {
+		return true
+	}
 	if !strings.Contains(warning, `" is not supported`) {
 		return false
 	}
@@ -336,7 +339,7 @@ func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config
 func resolvePoolInstance(cfg *config.City, input string) (config.Agent, bool) {
 	for _, a := range cfg.Agents {
 		sp := scaleParamsFor(&a)
-		if !a.SupportsInstanceExpansion() {
+		if !a.SupportsInstanceExpansion() || a.UsesCanonicalSingletonPoolIdentity() {
 			continue
 		}
 		prefix := a.QualifiedName() + "-"
@@ -362,7 +365,7 @@ func resolvePoolInstance(cfg *config.City, input string) (config.Agent, bool) {
 // pattern (e.g., "polecat-2" matches agent "polecat"). Returns the synthesized instance.
 func matchPoolInstance(a config.Agent, input string) (config.Agent, bool) {
 	sp := scaleParamsFor(&a)
-	if !a.SupportsInstanceExpansion() {
+	if !a.SupportsInstanceExpansion() || a.UsesCanonicalSingletonPoolIdentity() {
 		return config.Agent{}, false
 	}
 	prefix := a.Name + "-"

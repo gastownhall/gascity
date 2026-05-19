@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sling"
 )
 
 // sessionBeadAssigneeIdentities returns every identifier under which a work
@@ -251,9 +252,9 @@ func storeForPoolAssignment(cfg *config.City, cityStore beads.Store, rigStores m
 			}
 		}
 	}
-	idPrefix := beadIDPrefix(wb.ID)
+	idPrefix := sling.BeadPrefixForCity(cfg, wb.ID)
 	for _, rig := range cfg.Rigs {
-		if idPrefix == rig.EffectivePrefix() {
+		if strings.EqualFold(idPrefix, rig.EffectivePrefix()) {
 			if store := rigStores[rig.Name]; store != nil {
 				return store
 			}
@@ -272,14 +273,6 @@ func isRecoverableUnassignedInProgressPoolWork(cfg *config.City, wb beads.Bead) 
 	}
 	agentCfg := findAgentByTemplate(cfg, template)
 	return agentCfg != nil && agentCfg.SupportsGenericEphemeralSessions()
-}
-
-func beadIDPrefix(id string) string {
-	trimmed := strings.TrimSpace(id)
-	if dash := strings.IndexByte(trimmed, '-'); dash > 0 {
-		return trimmed[:dash]
-	}
-	return ""
 }
 
 func releaseOrphanedPoolAssignment(store beads.Store, id string) bool {

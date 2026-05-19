@@ -51,6 +51,12 @@ func TestNormalizeRemoteSourceGitHubShortcut(t *testing.T) {
 	}
 }
 
+func TestNormalizeRemoteSourceGitHubBlob(t *testing.T) {
+	if got, want := NormalizeRemoteSource("https://github.com/org/repo/blob/main/packs/base/pack.toml"), "https://github.com/org/repo.git"; got != want {
+		t.Fatalf("NormalizeRemoteSource blob = %q, want %q", got, want)
+	}
+}
+
 func TestParseRemoteInclude(t *testing.T) {
 	tests := []struct {
 		input       string
@@ -126,6 +132,7 @@ func TestIsGitHubTreeURL(t *testing.T) {
 		// Positive cases.
 		{"https://github.com/org/repo/tree/v1.0.0/packs/base", true},
 		{"https://github.com/org/repo/tree/main", true},
+		{"https://github.com/org/repo/blob/main/packs/base/pack.toml", true},
 		{"http://github.com/org/repo/tree/v2.0/deep/path", true},
 
 		// Negative cases.
@@ -174,6 +181,14 @@ func TestParseGitHubTreeURL(t *testing.T) {
 			"https://github.com/org/infra.git",
 			"packages/topo/base",
 			"v2.0",
+		},
+		// Blob URLs address a file under the same repo ref and are normalized
+		// with the file path as the remote subpath.
+		{
+			"https://github.com/org/repo/blob/main/packs/base/pack.toml",
+			"https://github.com/org/repo.git",
+			"packs/base",
+			"main",
 		},
 		// HTTP (not HTTPS).
 		{

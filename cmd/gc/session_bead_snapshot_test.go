@@ -84,3 +84,30 @@ func BenchmarkLoadSessionBeadSnapshot_OpenOnlyBaseline(b *testing.B) {
 		}
 	}
 }
+
+func TestSessionBeadSnapshotIndexesCanonicalSingletonPoolManagedBead(t *testing.T) {
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		ID:     "refinery-session",
+		Title:  "cashmaster/refinery",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:cashmaster/refinery"},
+		Metadata: map[string]string{
+			"template":             "cashmaster/refinery",
+			"agent_name":           "cashmaster/refinery",
+			"session_name":         "s-canonical-refinery",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}})
+
+	if got := snapshot.FindSessionNameByTemplate("cashmaster/refinery"); got != "s-canonical-refinery" {
+		t.Fatalf("FindSessionNameByTemplate(canonical singleton pool bead) = %q, want s-canonical-refinery", got)
+	}
+	bead, ok := snapshot.FindSessionBeadByTemplate("cashmaster/refinery")
+	if !ok {
+		t.Fatal("FindSessionBeadByTemplate(canonical singleton pool bead) = false")
+	}
+	if bead.ID != "refinery-session" {
+		t.Fatalf("FindSessionBeadByTemplate ID = %q, want refinery-session", bead.ID)
+	}
+}

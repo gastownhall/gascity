@@ -90,16 +90,20 @@ func computePoolDesiredStates(
 	// orphaned and let a duplicate spawn for the same bead.
 	assigneeToSessionBeadID := make(map[string]string)
 	sessionBeadTemplate := make(map[string]string)
+	namedSessionBeadIDs := make(map[string]bool)
 	for _, sb := range sessionBeads {
 		if sb.Status == "closed" {
 			continue
 		}
-		template := strings.TrimSpace(sb.Metadata["template"])
+		template := strings.TrimSpace(normalizedSessionTemplate(sb, cfg))
 		if template != "" {
 			sessionBeadTemplate[sb.ID] = template
 		}
 		for _, id := range sessionBeadAssigneeIdentities(sb) {
 			assigneeToSessionBeadID[id] = sb.ID
+		}
+		if isNamedSessionBead(sb) {
+			namedSessionBeadIDs[sb.ID] = true
 		}
 	}
 
@@ -133,10 +137,25 @@ func computePoolDesiredStates(
 					routedTo = cfg.Agents[0].QualifiedName()
 				}
 			}
+			if sessionBeadID != "" {
+				sessionTemplate := strings.TrimSpace(sessionBeadTemplate[sessionBeadID])
+				if sessionTemplate != "" && routedTo != "" && routedTo != sessionTemplate {
+					continue
+				}
+			}
 			if routedTo != template {
 				continue
 			}
 			if sessionBeadID != "" {
+				// Named-session beads are materialized by the named-session
+				// loop in buildDesiredState, not by the pool path. Skipping
+				// here prevents realizePoolDesiredSessions from renaming the
+				// canonical named identity to a phantom "{name}-1" pool
+				// instance — which would create two desired sessions for the
+				// same agent even when max_active_sessions=1.
+				if namedSessionBeadIDs[sessionBeadID] {
+					continue
+				}
 				resumeRequests = append(resumeRequests, SessionRequest{
 					Template:      template,
 					BeadPriority:  beadPriority(wb),

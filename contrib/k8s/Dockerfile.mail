@@ -16,10 +16,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
+    libnghttp2-14 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY .github/requirements/mcp-agent-mail.txt /tmp/requirements-mcp-agent-mail.txt
 RUN python -m pip install --no-cache-dir --require-hashes \
+    --no-deps \
     -r /tmp/requirements-mcp-agent-mail.txt \
     && rm -f /tmp/requirements-mcp-agent-mail.txt
 

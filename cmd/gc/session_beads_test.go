@@ -3,17 +3,22 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
@@ -124,6 +129,14 @@ type failingPoolSessionNameStore struct {
 	*beads.MemStore
 }
 
+type poolSessionNameLockProbeStore struct {
+	*beads.MemStore
+
+	cityPath string
+	alias    string
+	checked  bool
+}
+
 func (s *failingPoolSessionNameStore) SetMetadata(id, key, value string) error {
 	if key == "session_name" {
 		return errors.New("session_name metadata failed")
@@ -131,8 +144,41 @@ func (s *failingPoolSessionNameStore) SetMetadata(id, key, value string) error {
 	return s.MemStore.SetMetadata(id, key, value)
 }
 
+func (s *poolSessionNameLockProbeStore) SetMetadata(id, key, value string) error {
+	if key == "session_name" {
+		held, err := citySessionIdentifierLockHeld(s.cityPath, s.alias)
+		if err != nil {
+			return fmt.Errorf("checking session identifier lock for %q: %w", s.alias, err)
+		}
+		if !held {
+			return fmt.Errorf("session identifier lock for %q was not held while setting session_name", s.alias)
+		}
+		s.checked = true
+	}
+	return s.MemStore.SetMetadata(id, key, value)
+}
+
 func (s *failingPoolSessionNameStore) Close(_ string) error {
 	return errors.New("close failed")
+}
+
+func citySessionIdentifierLockHeld(cityPath, identifier string) (bool, error) {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(identifier)))
+	lockPath := filepath.Join(citylayout.SessionNameLocksDir(cityPath), hex.EncodeToString(sum[:])+".lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close() //nolint:errcheck
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err == nil {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		return false, nil
+	}
+	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+		return true, nil
+	}
+	return false, err
 }
 
 func newCountingMetadataStore() *countingMetadataStore {
@@ -2537,7 +2583,13 @@ func TestSyncSessionBeads_DoesNotRewriteReconcilerOwnedState(t *testing.T) {
 	}
 }
 
-func TestCloseBeadPreservesPendingCreateClaimWhenCloseFails(t *testing.T) {
+// TestCloseFailedCreateBeadClearsPendingCreateClaimEvenWhenCloseFails documents
+// the corrected failed-create contract: the terminal metadata batch clears the
+// stale create claim before store.Close runs. If store.Close then fails, the
+// bead is left with state=failed-create + closed_at set but Status=open; the
+// reconciler can close it on a later tick without resurrecting it into
+// StateCreating.
+func TestCloseBeadClearsPendingCreateClaimEvenWhenCloseFails(t *testing.T) {
 	store := &failingCloseStore{MemStore: beads.NewMemStore()}
 	now := time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)
 	b, err := store.Create(beads.Bead{
@@ -2552,15 +2604,21 @@ func TestCloseBeadPreservesPendingCreateClaimWhenCloseFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if closeBead(store, b.ID, "failed-create", now, ioDiscard{}) {
-		t.Fatal("closeBead returned true, want false when Close fails")
+	if closeFailedCreateBead(store, b.ID, now, ioDiscard{}) {
+		t.Fatal("closeFailedCreateBead returned true, want false when Close fails")
 	}
 	got, err := store.Get(b.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Metadata["pending_create_claim"] != "true" {
-		t.Fatalf("pending_create_claim = %q, want preserved when close fails", got.Metadata["pending_create_claim"])
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared (terminal close writes atomic metadata; stale claim would ping-pong the reconciler)", got.Metadata["pending_create_claim"])
+	}
+	if got.Metadata["state"] != "failed-create" {
+		t.Fatalf("state = %q, want failed-create", got.Metadata["state"])
+	}
+	if want := session.CanonicalCloseReason(string(session.StateFailedCreate)); got.Metadata["close_reason"] != want {
+		t.Fatalf("close_reason = %q, want %q", got.Metadata["close_reason"], want)
 	}
 }
 
@@ -2851,6 +2909,42 @@ func TestSyncSessionBeads_StalePoolSnapshotReusesVisibleOwner(t *testing.T) {
 				t.Fatalf("new pool bead session_name = %q, want %q", got, want)
 			}
 		}
+	}
+}
+
+func TestSyncSessionBeads_FinalizesPoolSessionNameUnderAliasLock(t *testing.T) {
+	alias := "pack/worker-1"
+	store := &poolSessionNameLockProbeStore{
+		MemStore: beads.NewMemStore(),
+		cityPath: t.TempDir(),
+		alias:    alias,
+	}
+	clk := &clock.Fake{Time: time.Date(2026, 5, 15, 8, 30, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	template := "pack/worker"
+	desired := map[string]TemplateParams{
+		"legacy-worker-1": {
+			TemplateName: template,
+			InstanceName: alias,
+			PoolSlot:     1,
+			Command:      "codex",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads(store.cityPath, store, desired, sp, allConfiguredDS(desired), nil, clk, &stderr, false)
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+	if !store.checked {
+		t.Fatal("pool session_name metadata was not finalized through SetMetadata")
+	}
+	all := allSessionBeads(t, store)
+	if len(all) != 1 {
+		t.Fatalf("session bead count = %d, want 1", len(all))
+	}
+	if got, want := all[0].Metadata["session_name"], PoolSessionName(template, all[0].ID); got != want {
+		t.Fatalf("session_name = %q, want %q", got, want)
 	}
 }
 
@@ -3231,6 +3325,92 @@ func TestSyncSessionBeads_ValidatesPreStampedPoolAlias(t *testing.T) {
 	}
 	if got.Metadata[poolAliasConflictAtMetadataKey] != "2026-05-06T02:12:00Z" {
 		t.Fatalf("pool_alias_conflict_at = %q, want 2026-05-06T02:12:00Z", got.Metadata[poolAliasConflictAtMetadataKey])
+	}
+	if !strings.Contains(stderr.String(), "unavailable") {
+		t.Fatalf("stderr %q does not mention alias conflict", stderr.String())
+	}
+}
+
+func TestSyncSessionBeads_ClearsStaleWrongPoolAliasWhenRepairFails(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 6, 2, 13, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:              "worker",
+				Dir:               "pack",
+				MaxActiveSessions: intPtr(10),
+			},
+			{
+				Name:              "helper",
+				Dir:               "pack",
+				MaxActiveSessions: intPtr(10),
+			},
+		},
+	}
+	template := "pack/worker"
+	if _, err := store.Create(beads.Bead{
+		Title:  "manual alias owner",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:pack/manual"},
+		Metadata: map[string]string{
+			"template":       "pack/manual",
+			"session_name":   "manual-pack-worker-3",
+			"agent_name":     "pack/manual",
+			"alias":          "pack/worker-3",
+			"state":          "awake",
+			"session_origin": "manual",
+			"manual_session": "true",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	live, err := store.Create(beads.Bead{
+		Title:  "poisoned worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + template},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         "pack-worker-live",
+			"agent_name":           "pack/worker-3",
+			"alias":                "pack/helper-3",
+			"pool_slot":            "3",
+			"state":                "awake",
+			"session_origin":       "ephemeral",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	desired := map[string]TemplateParams{
+		"pack-worker-live": {
+			TemplateName: template,
+			InstanceName: "pack/worker-3",
+			Alias:        "pack/worker-3",
+			PoolSlot:     3,
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, false)
+	got, err := store.Get(live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["alias"] != "" {
+		t.Fatalf("alias = %q, want stale wrong alias cleared after repair conflict", got.Metadata["alias"])
+	}
+	if got.Metadata[poolAliasConflictMetadataKey] != "pack/worker-3" {
+		t.Fatalf("pool_alias_conflict = %q, want pack/worker-3", got.Metadata[poolAliasConflictMetadataKey])
+	}
+	if got.Metadata[poolAliasConflictCountMetadataKey] != "1" {
+		t.Fatalf("pool_alias_conflict_count = %q, want 1", got.Metadata[poolAliasConflictCountMetadataKey])
+	}
+	if got.Metadata[poolAliasConflictAtMetadataKey] != "2026-05-06T02:13:00Z" {
+		t.Fatalf("pool_alias_conflict_at = %q, want 2026-05-06T02:13:00Z", got.Metadata[poolAliasConflictAtMetadataKey])
 	}
 	if !strings.Contains(stderr.String(), "unavailable") {
 		t.Fatalf("stderr %q does not mention alias conflict", stderr.String())
@@ -5456,6 +5636,106 @@ func countOpenMembershipsForSession(t *testing.T, fabric extmsg.Services, caller
 	return len(members)
 }
 
+func TestReassignStateAssignedToRetiredSessionBeadConvergesAfterWaitLookupLimit(t *testing.T) {
+	store := beads.NewMemStore()
+	oldSessionID := "retired-session"
+	newSessionID := "replacement-session"
+	for i := 0; i < waitLookupLimit+1; i++ {
+		if _, err := store.Create(beads.Bead{
+			Title:  fmt.Sprintf("wait-%d", i),
+			Type:   waitBeadType,
+			Labels: []string{waitBeadLabel, "session:" + oldSessionID},
+			Metadata: map[string]string{
+				"session_id": oldSessionID,
+				"state":      waitStatePending,
+			},
+		}); err != nil {
+			t.Fatalf("create wait %d: %v", i, err)
+		}
+	}
+
+	var stderr bytes.Buffer
+	now := time.Date(2026, 5, 15, 9, 30, 0, 0, time.UTC)
+	reassignStateAssignedToRetiredSessionBead(store, oldSessionID, newSessionID, now, &stderr)
+	if strings.Contains(stderr.String(), "reassigning waits") {
+		t.Fatalf("stderr = %q, want converged reassign without cap error", stderr.String())
+	}
+	oldRows, err := store.List(beads.ListQuery{Label: "session:" + oldSessionID})
+	if err != nil {
+		t.Fatalf("list old waits: %v", err)
+	}
+	if len(oldRows) != 0 {
+		t.Fatalf("old session wait count = %d, want 0", len(oldRows))
+	}
+	newRows, err := store.List(beads.ListQuery{Label: "session:" + newSessionID})
+	if err != nil {
+		t.Fatalf("list new waits: %v", err)
+	}
+	if len(newRows) != waitLookupLimit+1 {
+		t.Fatalf("new session wait count = %d, want %d", len(newRows), waitLookupLimit+1)
+	}
+	for _, wait := range newRows {
+		if wait.Metadata["session_id"] != newSessionID {
+			t.Fatalf("wait %s session_id = %q, want %q", wait.ID, wait.Metadata["session_id"], newSessionID)
+		}
+	}
+}
+
+func TestCancelStateAssignedToRetiredSessionBeadConvergesAfterWaitLookupLimit(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "retired",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "retired",
+			"state":        string(session.StateArchived),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create retired session bead: %v", err)
+	}
+	for i := 0; i < waitLookupLimit+1; i++ {
+		if _, err := store.Create(beads.Bead{
+			Title:  fmt.Sprintf("wait-%d", i),
+			Type:   waitBeadType,
+			Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+			Metadata: map[string]string{
+				"session_id": sessionBead.ID,
+				"state":      waitStatePending,
+			},
+		}); err != nil {
+			t.Fatalf("create wait %d: %v", i, err)
+		}
+	}
+
+	var stderr bytes.Buffer
+	now := time.Date(2026, 5, 15, 10, 0, 0, 0, time.UTC)
+	cancelStateAssignedToRetiredSessionBead(store, sessionBead.ID, now, &stderr)
+	if strings.Contains(stderr.String(), "canceling waits") {
+		t.Fatalf("stderr = %q, want converged cleanup without cap error", stderr.String())
+	}
+	waits, err := store.List(beads.ListQuery{Label: "session:" + sessionBead.ID, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("list waits: %v", err)
+	}
+	for _, wait := range waits {
+		if !session.IsWaitBead(wait) {
+			continue
+		}
+		if wait.Status != "closed" || wait.Metadata["state"] != waitStateCanceled {
+			t.Fatalf("wait %s status/state = %q/%q, want closed/canceled", wait.ID, wait.Status, wait.Metadata["state"])
+		}
+	}
+	updatedSession, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if got := updatedSession.Metadata["wait_lookup_capped_source"]; got != "retired-session-cleanup" {
+		t.Fatalf("wait_lookup_capped_source = %q, want retired-session-cleanup", got)
+	}
+}
+
 // TestCloseBeadCascadesExtmsgState verifies the cascade fires from the pool
 // close path. Named-session retirement already calls
 // cancelStateAssignedToRetiredSessionBead at
@@ -5808,6 +6088,65 @@ func TestPreserveConfiguredNamedSessionBead_StateGate(t *testing.T) {
 			if got != tc.want {
 				t.Fatalf("preserveConfiguredNamedSessionBead(state=%q sleep_reason=%q last_woke_at=%q) = %v, want %v",
 					tc.state, tc.sleepReason, tc.lastWokeAt, got, tc.want)
+			}
+		})
+	}
+}
+
+// validPoolSessionNamePattern mirrors the tmux session-name validator in
+// internal/runtime/tmux/tmux.go (^[a-zA-Z0-9_-]+$). Replicated here as a
+// regression-test guard so future drift in the validator surfaces locally.
+var validPoolSessionNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// TestPendingPoolSessionName_SanitizesDottedTemplate is the regression test
+// for gastownhall/gascity#2205. Templates like "gastown.dog" (imported from
+// packs) used to produce session names with a literal dot — e.g.
+// "gastown.dog-pending-<uuid>" — which the tmux session-name validator
+// (^[a-zA-Z0-9_-]+$) rejects. That landed sessions in "failed-create" state
+// and pinned dolt CPU at 70%+ as the reconciler iterated over the wedged
+// beads every tick.
+func TestPendingPoolSessionName_SanitizesDottedTemplate(t *testing.T) {
+	cases := []struct {
+		name     string
+		template string
+		token    string
+		want     string
+	}{
+		{
+			name:     "dotted template (the #2205 bug)",
+			template: "gastown.dog",
+			token:    "04bac82a08846ba44210744efd0e9e15",
+			want:     "gastown__dog-pending-04bac82a08846ba44210744efd0e9e15",
+		},
+		{
+			name:     "slashed template (rig-qualified)",
+			template: "saitoc/refinery",
+			token:    "abc123",
+			want:     "refinery-pending-abc123", // targetBasename strips the rig prefix
+		},
+		{
+			name:     "dotted template with rig prefix",
+			template: "saitoc/gastown.dog",
+			token:    "deadbeef",
+			want:     "gastown__dog-pending-deadbeef",
+		},
+		{
+			name:     "plain template (no separators)",
+			template: "mayor",
+			token:    "00000000",
+			want:     "mayor-pending-00000000",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pendingPoolSessionName(tc.template, tc.token)
+			if got != tc.want {
+				t.Errorf("pendingPoolSessionName(%q, %q) = %q, want %q",
+					tc.template, tc.token, got, tc.want)
+			}
+			if !validPoolSessionNamePattern.MatchString(got) {
+				t.Errorf("pendingPoolSessionName(%q, %q) = %q, fails tmux session-name validator ^[a-zA-Z0-9_-]+$ (this is the #2205 bug)",
+					tc.template, tc.token, got)
 			}
 		})
 	}

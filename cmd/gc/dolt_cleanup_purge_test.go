@@ -767,6 +767,10 @@ func (f *fakeCleanupDoltClientCustomPurge) PurgeDroppedDatabases(_ context.Conte
 	return nil
 }
 
+func (f *fakeCleanupDoltClientCustomPurge) ProbeLiveSessions(_ context.Context) (map[string]int, error) {
+	return map[string]int{}, nil
+}
+
 func (f *fakeCleanupDoltClientCustomPurge) Close() error { return nil }
 
 type purgeConnRecord struct {

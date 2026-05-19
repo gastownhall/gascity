@@ -136,7 +136,11 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 		if !a.SupportsInstanceExpansion() {
 			continue
 		}
-		agentEnv := controllerQueryRuntimeEnv(cityPath, cfg, &a)
+		agentEnv, err := controllerQueryRuntimeEnv(cityPath, cfg, &a)
+		if err != nil {
+			fmt.Fprintf(stderr, "on_death %s env: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
+			continue
+		}
 		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 			_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 			instance := deepCopyAgent(&a, instanceName, a.Dir)
@@ -165,6 +169,15 @@ var noStrictMode bool
 
 // dryRunMode previews what agents would start without actually starting them.
 var dryRunMode bool
+
+// noAutoRestartMode opts out of `gc start`'s supervisor auto-restart on
+// drift. When set, drift is detected and reported but the operator must
+// restart the supervisor manually. Honors the design's exit-1 contract
+// so CI scripts can pin "supervisor is on the build I just produced."
+var noAutoRestartMode bool
+
+// startVerboseMode disables gc start warning deduplication.
+var startVerboseMode bool
 
 // buildIdleTracker creates an idleTracker from the config, populating
 // timeouts for agents that have idle_timeout set. Returns nil if no
@@ -312,20 +325,63 @@ Use "gc supervisor run" for foreground operation.`,
 	cmd.Flags().MarkHidden("no-strict") //nolint:errcheck // flag always exists
 	cmd.Flags().BoolVarP(&dryRunMode, "dry-run", "n", false,
 		"preview what agents would start without starting them")
+	cmd.Flags().BoolVar(&noAutoRestartMode, "no-auto-restart", false,
+		"detect supervisor binary drift but do not auto-restart; exits non-zero on drift")
+	cmd.Flags().BoolVar(&startVerboseMode, "verbose", false,
+		"disable warning deduplication and print every supervisor warning")
 	return cmd
 }
 
 func doStart(args []string, controllerMode bool, stdout, stderr io.Writer) int {
-	return doStartWithNameOverride(args, controllerMode, stdout, stderr, "")
+	return doStartWithNameOverrideAndSummary(args, controllerMode, stdout, stderr, "")
 }
 
 func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr io.Writer, nameOverride string) int {
-	if controllerMode || dryRunMode {
-		return doStartStandalone(args, controllerMode, stdout, stderr)
+	return doStartWithNameOverrideRaw(args, controllerMode, stdout, stderr, nameOverride)
+}
+
+func doStartWithNameOverrideAndSummary(args []string, controllerMode bool, stdout, stderr io.Writer, nameOverride string) int {
+	if controllerMode {
+		code := doStartWithNameOverrideRaw(args, controllerMode, stdout, stderr, nameOverride)
+		writeStartSummary(stderr, startSummary{
+			PID:      currentSupervisorPID(),
+			Binary:   startSummaryBinaryPath(),
+			Build:    shortBuildHash(),
+			Drift:    "unknown",
+			Warnings: 0,
+			Fatal:    "",
+		})
+		return code
 	}
-	if len(extraConfigFiles) > 0 || noStrictMode {
-		fmt.Fprintln(stderr, "gc start: --file and --no-strict only apply to the legacy standalone controller; use --foreground or remove those flags") //nolint:errcheck // best-effort stderr
-		return 1
+	proxy := newStartOutputProxy(stderr, startOutputProxyOptions{
+		Verbose: startVerboseMode,
+		TTY:     startOutputIsTerminal(stderr),
+	})
+	code := doStartWithNameOverrideRaw(args, controllerMode, stdout, proxy, nameOverride)
+	fatal := ""
+	if code != 0 {
+		fatal = proxy.deriveFatalFromRecords()
+		proxy.SetFatal(fatal)
+	}
+	if err := proxy.Flush(); err != nil && stderr != nil {
+		fmt.Fprintf(stderr, "gc start: flushing output: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+	writeStartSummary(stderr, startSummary{
+		PID:      currentSupervisorPID(),
+		Binary:   startSummaryBinaryPath(),
+		Build:    shortBuildHash(),
+		Drift:    "unknown",
+		Warnings: proxy.WarningCount(),
+		Fatal:    fatalSummaryCause(fatal),
+	})
+	return code
+}
+
+func doStartWithNameOverrideRaw(args []string, controllerMode bool, stdout, stderr io.Writer, nameOverride string) int {
+	// --foreground / --controller bypass the supervisor entirely (legacy
+	// standalone reconciler). No drift to check.
+	if controllerMode {
+		return doStartStandalone(args, controllerMode, stdout, stderr)
 	}
 
 	dir, err := resolveStartDir(args)
@@ -339,6 +395,29 @@ func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr 
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+
+	// Flag validation runs before any drift side effects so a malformed
+	// invocation (e.g. `gc start --file=foo`) fails fast without
+	// triggering a supervisor restart.
+	if len(extraConfigFiles) > 0 || noStrictMode {
+		fmt.Fprintln(stderr, "gc start: --file and --no-strict only apply to the legacy standalone controller; use --foreground or remove those flags") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// Drift detection runs against any already-running supervisor before
+	// we hand work to it. When no supervisor is running the check is a
+	// no-op (registration spawns a fresh one).
+	if exitCode, cont := runStartDriftCheck(cityPath, stdout, stderr); !cont {
+		return exitCode
+	}
+
+	// --dry-run routes to the standalone preview path *after* the drift
+	// check, so operators get a Supervisor: identity line and any drift
+	// report even in preview mode.
+	if dryRunMode {
+		return doStartStandalone(args, controllerMode, stdout, stderr)
+	}
+
 	if err := ensureCityScaffold(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc start: runtime scaffold: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -354,6 +433,10 @@ func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr 
 		}
 		fmt.Fprintln(stderr)                                                               //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "gc start: install the missing dependencies, then try again") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if status := checkDoltAuthorIdentity(cityPath); status.blocked() {
+		printDoltAuthorIdentityBlock(stderr, "gc start", status)
 		return 1
 	}
 	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, stdout, stderr, "gc start", true); code != 0 {
@@ -421,6 +504,23 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	}
 	if err := ensureCityScaffold(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc start: runtime scaffold: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if missing := checkHardDependencies(cityPath); len(missing) > 0 {
+		fmt.Fprintf(stderr, "gc start: missing required dependencies:\n\n") //nolint:errcheck // best-effort stderr
+		for _, dep := range missing {
+			fmt.Fprintf(stderr, "  - %s", dep.name) //nolint:errcheck // best-effort stderr
+			if dep.installHint != "" {
+				fmt.Fprintf(stderr, "\n    Install: %s", dep.installHint) //nolint:errcheck // best-effort stderr
+			}
+			fmt.Fprintln(stderr) //nolint:errcheck // best-effort stderr
+		}
+		fmt.Fprintln(stderr)                                                               //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "gc start: install the missing dependencies, then try again") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if status := checkDoltAuthorIdentity(cityPath); status.blocked() {
+		printDoltAuthorIdentityBlock(stderr, "gc start", status)
 		return 1
 	}
 	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
@@ -577,8 +677,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	recorder := events.Discard
 	var eventProv events.Provider // nil when events disabled or FileRecorder fails
-	if fr, err := events.NewFileRecorder(
-		filepath.Join(cityPath, ".gc", "events.jsonl"), stderr); err == nil {
+	if fr, err := newFileEventsRecorder(
+		filepath.Join(cityPath, ".gc", "events.jsonl"), cfg.Events, stderr); err == nil {
 		recorder = fr
 		eventProv = fr
 	}
@@ -621,7 +721,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		oneShotStore = store
 
 		// Run adoption barrier before sync.
-		result, passed := runAdoptionBarrier(store, sp, cfg, cityName, clock.Real{}, stderr, false)
+		result, passed := runAdoptionBarrier(cityPath, store, sp, cfg, cityName, clock.Real{}, stderr, false)
 		if result.Adopted > 0 {
 			fmt.Fprintf(stdout, "Adopted %d running session(s) into bead store.\n", result.Adopted) //nolint:errcheck
 		}
@@ -860,10 +960,9 @@ func claudeSettingsSource(cityPath string) (src, rel string) {
 // (bind-mount), but the extra entries are harmless.
 //
 // Claude's city-level .gc/settings.json is staged here because settingsArgs
-// points --settings at the city-root path. All other provider hook files
-// ship via the core pack overlay and flow through PackOverlayDirs staging,
-// so they are not handled here.
-func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []runtime.CopyEntry {
+// points --settings at the city-root path. Workdir hook files are included
+// only when they match the resolved provider or requested install-hook slots.
+func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hookProviders []string) []runtime.CopyEntry {
 	// Compute the relative path from cityPath to workDir so that
 	// container-side RelDst places files under the agent's WorkingDir
 	// (/workspace/<relWorkDir>/), not always at /workspace/.
@@ -875,23 +974,20 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 		}
 	}
 
+	providerSet := hookProviderSet(hookProviders)
 	// workDir-based hooks: gemini, codex, opencode, copilot, cursor, pi, omp.
-	for _, rel := range []string{
-		path.Join(".gemini", "settings.json"),
-		path.Join(".codex", "hooks.json"),
-		path.Join(".opencode", "plugins", "gascity.js"),
-		path.Join(".github", "hooks", "gascity.json"),
-		path.Join(".github", "copilot-instructions.md"),
-		path.Join(".cursor", "hooks.json"),
-		path.Join(".pi", "extensions", "gc-hooks.js"),
-		path.Join(".omp", "hooks", "gc-hook.ts"),
-	} {
-		abs := filepath.Join(workDir, rel)
-		if _, err := os.Stat(abs); err == nil {
-			copyFiles = append(copyFiles, runtime.CopyEntry{
-				Src: abs, RelDst: path.Join(relWorkDir, rel),
-				Probed: true, ContentHash: runtime.HashPathContent(abs),
-			})
+	for _, provider := range orderedWorkDirHookProviders {
+		if !providerSet[provider.name] {
+			continue
+		}
+		for _, rel := range provider.relPaths {
+			abs := filepath.Join(workDir, rel)
+			if _, err := os.Stat(abs); err == nil {
+				copyFiles = append(copyFiles, runtime.CopyEntry{
+					Src: abs, RelDst: path.Join(relWorkDir, rel),
+					Probed: true, ContentHash: runtime.HashPathContent(abs),
+				})
+			}
 		}
 	}
 
@@ -920,6 +1016,60 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 		}
 	}
 	return copyFiles
+}
+
+type workDirHookProvider struct {
+	name     string
+	relPaths []string
+}
+
+var orderedWorkDirHookProviders = []workDirHookProvider{
+	{name: "gemini", relPaths: []string{path.Join(".gemini", "settings.json")}},
+	{name: "codex", relPaths: []string{path.Join(".codex", "hooks.json")}},
+	{name: "opencode", relPaths: []string{path.Join(".opencode", "plugins", "gascity.js")}},
+	{name: "copilot", relPaths: []string{
+		path.Join(".github", "hooks", "gascity.json"),
+		path.Join(".github", "copilot-instructions.md"),
+	}},
+	{name: "cursor", relPaths: []string{path.Join(".cursor", "hooks.json")}},
+	{name: "pi", relPaths: []string{path.Join(".pi", "extensions", "gc-hooks.js")}},
+	{name: "omp", relPaths: []string{path.Join(".omp", "hooks", "gc-hook.ts")}},
+}
+
+func hookFileProvidersForResolved(resolved *config.ResolvedProvider, installHooks []string, providers map[string]config.ProviderSpec) []string {
+	var out []string
+	appendProvider := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		for _, existing := range out {
+			if existing == name {
+				return
+			}
+		}
+		out = append(out, name)
+	}
+	if resolved != nil {
+		appendProvider(resolvedProviderLaunchFamily(resolved))
+		appendProvider(resolved.Name)
+	}
+	for _, hook := range installHooks {
+		appendProvider(hook)
+		appendProvider(config.BuiltinFamily(hook, providers))
+	}
+	return out
+}
+
+func hookProviderSet(providers []string) map[string]bool {
+	out := make(map[string]bool, len(providers))
+	for _, provider := range providers {
+		provider = strings.TrimSpace(provider)
+		if provider != "" {
+			out[provider] = true
+		}
+	}
+	return out
 }
 
 // resolveAgentDirPath returns the absolute filesystem path for an agent dir
@@ -1207,14 +1357,9 @@ func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *c
 		return count
 	}
 
-	// Bounded: build the set of expected pool instance session names.
+	// Bounded: build the set of expected pool runtime session names.
 	expected := make(map[string]bool, sp0.Max)
-	for i := 1; i <= sp0.Max; i++ {
-		instanceName := poolInstanceName(agentName, i, a)
-		qualifiedInstance := instanceName
-		if agentDir != "" {
-			qualifiedInstance = agentDir + "/" + instanceName
-		}
+	for _, qualifiedInstance := range discoverPoolInstances(agentName, agentDir, sp0, a, cityName, sessionTemplate, sp) {
 		expected[sessionName(nil, cityName, qualifiedInstance, sessionTemplate)] = true
 	}
 

@@ -160,11 +160,12 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store beads.Stor
 		if target.sessionName == "" {
 			continue
 		}
-		if target.sessionTransport() == "acp" {
-			// ACP sessions use the inject-on-hook delivery path; the
-			// dispatcher does not own ACP delivery.
-			continue
-		}
+		// ACP sessions also flow through this dispatcher. The inject-on-hook
+		// drain path still catches deliveries when the agent receives external
+		// prompts, but a warm-idle ACP session never fires its hook on its
+		// own — queued patrol wisps would otherwise pile up forever. The
+		// atomic queue claim in claimDueQueuedNudgesForTarget guarantees a
+		// nudge is delivered exactly once across the dispatcher + drain paths.
 		matched := false
 		for _, key := range target.queueKeys() {
 			if pendingAgents[key] {

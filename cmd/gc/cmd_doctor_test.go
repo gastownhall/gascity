@@ -172,7 +172,7 @@ prefix = "fe"
 	})
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, false, &stdout, &stderr)
+	_ = doDoctor(false, false, false, &stdout, &stderr)
 
 	if citySkip == nil || *citySkip {
 		t.Fatalf("city dolt check skip = %v, want false when a bd-backed rig inherits the city endpoint", citySkip)
@@ -235,7 +235,7 @@ dolt_port = "3308"
 	})
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, false, &stdout, &stderr)
+	_ = doDoctor(false, false, false, &stdout, &stderr)
 
 	if !strings.Contains(stdout.String(), "canonical/compat Dolt drift") {
 		t.Fatalf("doctor output missing Dolt topology drift:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
@@ -266,7 +266,7 @@ func TestDoDoctorReportsLegacyBDSplitStore(t *testing.T) {
 	t.Cleanup(func() { cityFlag = origCityFlag })
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, false, &stdout, &stderr)
+	_ = doDoctor(false, false, false, &stdout, &stderr)
 	out := stdout.String() + stderr.String()
 	if !strings.Contains(out, "bd-split-store") {
 		t.Fatalf("doctor output missing bd-split-store check:\n%s", out)

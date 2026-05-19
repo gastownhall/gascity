@@ -169,6 +169,7 @@ func (w *beadWire) toBead() beads.Bead {
 		Description: w.Description,
 		Labels:      w.Labels,
 		Metadata:    coerceMetadata(w.Metadata),
+		Ephemeral:   w.Ephemeral,
 	}
 }
 
@@ -346,7 +347,7 @@ func (s *Store) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 	}
 	result := all[:0]
 	for _, b := range all {
-		if !beads.IsReadyExcludedType(b.Type) {
+		if !b.Ephemeral && !beads.IsReadyExcludedType(b.Type) {
 			result = append(result, b)
 		}
 	}
@@ -375,6 +376,7 @@ func (s *Store) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]
 		Limit:         limit,
 		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
 		Sort:          beads.SortCreatedDesc,
+		TierMode:      beads.TierModeFromOpts(opts),
 	})
 }
 
@@ -397,6 +399,7 @@ func (s *Store) ListByMetadata(filters map[string]string, limit int, opts ...bea
 		Limit:         limit,
 		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
 		Sort:          beads.SortCreatedDesc,
+		TierMode:      beads.TierModeFromOpts(opts),
 	})
 }
 
@@ -418,6 +421,14 @@ func (s *Store) SetMetadataBatch(id string, kvs map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// Tx executes fn sequentially against the exec store.
+func (s *Store) Tx(_ string, fn func(beads.Tx) error) error {
+	if fn == nil {
+		return errors.New("beads tx: nil callback")
+	}
+	return fn(s)
 }
 
 // Delete permanently removes a bead by calling the "delete" subcommand.

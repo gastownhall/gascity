@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/logutil"
 )
 
 func TestDiscoverRootPrefersFlatFiles(t *testing.T) {
@@ -106,6 +107,35 @@ schedule = "*/5 * * * *"
 
 	if !strings.Contains(logs, "move to orders/health-check.toml") {
 		t.Fatalf("logs = %q, want move warning", logs)
+	}
+}
+
+func TestDiscoverRootDedupsDeprecatedPathWarnings(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Dirs["/pack/orders/health-check"] = true
+	fs.Files["/pack/orders/health-check/order.toml"] = []byte(`
+	[order]
+	formula = "health-check"
+	trigger = "cron"
+	schedule = "*/5 * * * *"
+	`)
+
+	var logs bytes.Buffer
+	opts := ScanOptions{
+		DeprecatedPathWarningDedup:  logutil.NewDedup(10),
+		DeprecatedPathWarningWriter: &logs,
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := discoverRootWithOptions(fs, ScanRoot{
+			Dir:          "/pack/orders",
+			FormulaLayer: "/pack/formulas",
+		}, opts); err != nil {
+			t.Fatalf("discoverRootWithOptions: %v", err)
+		}
+	}
+
+	if got := strings.Count(logs.String(), "deprecated order path"); got != 1 {
+		t.Fatalf("deprecated warning count = %d, want 1; logs=%q", got, logs.String())
 	}
 }
 

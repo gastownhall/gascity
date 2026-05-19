@@ -139,32 +139,58 @@ func (ce ConditionEnv) Environ() []string {
 }
 
 // ResolveConditionPath resolves and validates a gate condition path.
-// - Resolves relative paths against cityPath
-// - Rejects symlinks (EvalSymlinks must equal cleaned path)
-// - Returns the canonical absolute path
-func ResolveConditionPath(cityPath, conditionPath string) (string, error) {
+//
+//   - envelope: the security boundary; relative-path traversal validation
+//     enforces containment under this root. For city-scoped gates pass the
+//     city path; for rig-scoped ralph checks (gastownhall/gascity#2320) pass
+//     the city path here even though `base` may point at a rig subtree.
+//     Must be non-empty — an empty envelope would silently disable the
+//     traversal check, so it is rejected.
+//   - base: the directory that relative conditionPath values are joined
+//     against. Pass the same value as `envelope` for callers with no
+//     rig/city distinction. When empty, falls back to `envelope` to preserve
+//     historical single-arg behavior.
+//   - conditionPath: the path declared by the gate. May be absolute or
+//     relative to `base`.
+//
+// Resolves relative paths against `base`, validates traversal against
+// `envelope`, resolves symlinks, and requires a regular executable file.
+// Returns the canonical absolute path.
+func ResolveConditionPath(envelope, base, conditionPath string) (string, error) {
 	if conditionPath == "" {
 		return "", fmt.Errorf("resolving gate condition path: empty path")
 	}
+	if envelope == "" {
+		return "", fmt.Errorf("resolving gate condition path: empty envelope")
+	}
+	if base == "" {
+		base = envelope
+	}
 
-	// Canonicalize cityPath first so that symlinked workspace roots
+	// Canonicalize envelope first so that symlinked workspace roots
 	// (e.g., /tmp → /private/tmp on macOS) don't cause false rejections.
-	canonCity, err := filepath.EvalSymlinks(cityPath)
+	canonEnvelope, err := filepath.EvalSymlinks(envelope)
 	if err != nil {
-		canonCity = filepath.Clean(cityPath) // best-effort if city doesn't exist yet
+		canonEnvelope = filepath.Clean(envelope) // best-effort if envelope doesn't exist yet
+	}
+	canonBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		canonBase = filepath.Clean(base) // best-effort if base doesn't exist yet
 	}
 
 	var absPath string
 	if filepath.IsAbs(conditionPath) {
 		absPath = filepath.Clean(conditionPath)
 	} else {
-		absPath = filepath.Clean(filepath.Join(canonCity, conditionPath))
+		absPath = filepath.Clean(filepath.Join(canonBase, conditionPath))
 	}
 
-	// Reject path traversal: the resolved path must be under cityPath
-	// for relative paths.
+	// Reject path traversal: the resolved path must be under envelope
+	// for relative paths. Absolute paths skip the containment check (they
+	// are joined against no root) — unchanged from the pre-split behavior;
+	// callers must not pass attacker-influenced absolute paths.
 	if !filepath.IsAbs(conditionPath) {
-		rel, err := filepath.Rel(canonCity, absPath)
+		rel, err := filepath.Rel(canonEnvelope, absPath)
 		if err != nil || pathutil.IsOutsideDir(rel) {
 			return "", fmt.Errorf("resolving gate condition path: path traversal not allowed: %s", conditionPath)
 		}
