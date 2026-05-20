@@ -481,6 +481,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			apply(&reconcileOpts)
 		}
 	}
+	if startupTimeout <= 0 && cfg != nil {
+		startupTimeout = cfg.Session.StartupTimeoutDuration()
+	}
 	maxAgeTr := reconcileOpts.maxSessionAgeTr
 	deps := buildDepsMap(cfg)
 	if cityName == "" {
@@ -721,7 +724,22 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// storeQueryPartial=true the formal rollback is deferred, so the
 			// heal path must also preserve pending_create_claim to avoid a
 			// half-applied rollback that races the next complete tick.
-			healStateWithRollback(session, providerAlive, store, clk, !storeQueryPartial)
+			stateBeforeHeal := strings.TrimSpace(session.Metadata["state"])
+			pendingCreateStartedAtBeforeHeal := strings.TrimSpace(session.Metadata["pending_create_started_at"])
+			lastWokeAtBeforeHeal := strings.TrimSpace(session.Metadata["last_woke_at"])
+			healBatch := healStateWithRollback(session, providerAlive, store, clk, startupTimeout, !storeQueryPartial)
+			traceHealClearedPendingCreateLease(
+				trace,
+				*session,
+				cfg,
+				"",
+				name,
+				stateBeforeHeal,
+				pendingCreateStartedAtBeforeHeal,
+				lastWokeAtBeforeHeal,
+				providerAlive,
+				healBatch,
+			)
 			switch {
 			case preserveNamed:
 				template := normalizedSessionTemplate(*session, cfg)
@@ -1133,7 +1151,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 		// Heal advisory state metadata.
 		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(session.Metadata["state"]))
-		healState(session, alive, store, clk)
+		pendingCreateStartedAtBeforeHeal := strings.TrimSpace(session.Metadata["pending_create_started_at"])
+		lastWokeAtBeforeHeal := strings.TrimSpace(session.Metadata["last_woke_at"])
+		healBatch := healStateWithRollback(session, alive, store, clk, startupTimeout, true)
+		traceHealClearedPendingCreateLease(
+			trace,
+			*session,
+			cfg,
+			tp.TemplateName,
+			name,
+			string(stateBeforeHeal),
+			pendingCreateStartedAtBeforeHeal,
+			lastWokeAtBeforeHeal,
+			alive,
+			healBatch,
+		)
 		if recoverPendingIdleSleep(session, store, running, clk) {
 			alive = false
 		}
@@ -2306,6 +2338,44 @@ func configDriftTracePayload(storedHash, currentHash string, driftedFields []str
 	payload["current_hash"] = currentHash
 	payload["drifted_fields"] = fields
 	return payload
+}
+
+func traceHealClearedPendingCreateLease(
+	trace *sessionReconcilerTraceCycle,
+	session beads.Bead,
+	cfg *config.City,
+	template string,
+	name string,
+	stateBeforeHeal string,
+	pendingCreateStartedAtBeforeHeal string,
+	lastWokeAtBeforeHeal string,
+	providerAlive bool,
+	batch map[string]string,
+) {
+	if trace == nil || strings.TrimSpace(stateBeforeHeal) != string(sessionpkg.StateCreating) {
+		return
+	}
+	if cleared, ok := batch["pending_create_claim"]; !ok || cleared != "" {
+		return
+	}
+	template = strings.TrimSpace(template)
+	if template == "" {
+		template = normalizedSessionTemplate(session, cfg)
+	}
+	if template == "" {
+		template = session.Metadata["template"]
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = session.Metadata["session_name"]
+	}
+	trace.recordDecision("reconciler.session.pending_create", template, name, "heal_cleared_stale_lease", string(TraceOutcomeApplied), traceRecordPayload{
+		"last_woke_at":              lastWokeAtBeforeHeal,
+		"pending_create_started_at": pendingCreateStartedAtBeforeHeal,
+		"provider_alive":            providerAlive,
+		"state_after":               session.Metadata["state"],
+		"state_before":              stateBeforeHeal,
+	}, nil, "")
 }
 
 func applyTemplateOverridesToConfig(agentCfg *runtime.Config, session beads.Bead, tp TemplateParams) {

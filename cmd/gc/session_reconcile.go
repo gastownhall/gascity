@@ -881,7 +881,7 @@ func isPoolExcess(session beads.Bead, cfg *config.City, poolDesired map[string]i
 
 // healState updates advisory state metadata only when changed (dirty check).
 func healState(session *beads.Bead, alive bool, store beads.Store, clk clock.Clock) {
-	healStateWithRollback(session, alive, store, clk, true)
+	healStateWithRollback(session, alive, store, clk, 0, true)
 }
 
 // healStateWithRollback is the explicit-control variant of healState. When
@@ -889,11 +889,11 @@ func healState(session *beads.Bead, alive bool, store beads.Store, clk clock.Clo
 // stale-pending-create rollback because storeQueryPartial=true) the heal path
 // preserves pending_create_claim so the next non-partial tick can do the
 // proper rollback. When true (default), healState clears the stale claim
-// in-line to break the state=creating ↔ state=asleep oscillation described
-// in ga-mf1.
-func healStateWithRollback(session *beads.Bead, alive bool, store beads.Store, clk clock.Clock, rollbackAvailable bool) {
+// in-line after startupTimeout has elapsed to break the state=creating ↔
+// state=asleep oscillation described in ga-mf1.
+func healStateWithRollback(session *beads.Bead, alive bool, store beads.Store, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) map[string]string {
 	if session == nil {
-		return
+		return nil
 	}
 	// healState is the third writer in the closed-bead flap cycle. The
 	// lifecycle projection still resolves to BaseStateDrained for closed
@@ -902,11 +902,11 @@ func healStateWithRollback(session *beads.Bead, alive bool, store beads.Store, c
 	// gc_swept / orphaned writes from the closeBead path. Closed beads
 	// are terminal; their advisory state metadata should not move.
 	if session.Status == "closed" {
-		return
+		return nil
 	}
-	batch := healStatePatchWithRollback(*session, alive, clk, rollbackAvailable)
+	batch := healStatePatchWithRollback(*session, alive, clk, startupTimeout, rollbackAvailable)
 	if len(batch) == 0 {
-		return
+		return nil
 	}
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string, len(batch))
@@ -917,13 +917,14 @@ func healStateWithRollback(session *beads.Bead, alive bool, store beads.Store, c
 	for k, v := range batch {
 		session.Metadata[k] = v
 	}
+	return batch
 }
 
 func healStatePatch(session beads.Bead, alive bool, clk clock.Clock) map[string]string {
-	return healStatePatchWithRollback(session, alive, clk, true)
+	return healStatePatchWithRollback(session, alive, clk, 0, true)
 }
 
-func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock, rollbackAvailable bool) map[string]string {
+func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) map[string]string {
 	meta := session.Metadata
 	if meta == nil {
 		meta = map[string]string{}
@@ -996,7 +997,7 @@ func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock,
 	// (e.g. storeQueryPartial); preserve the claim so the next complete tick
 	// can drive attemptRollbackPendingCreate properly.
 	if rollbackAvailable && !alive && view.RuntimeProjection == sessionpkg.RuntimeProjectionStaleCreating {
-		if pendingCreateLeaseExpiredForRollback(session, clk, 0) {
+		if pendingCreateLeaseExpiredForRollback(session, clk, startupTimeout) {
 			clearPendingCreateLease(meta, batch)
 		}
 	}

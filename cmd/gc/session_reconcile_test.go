@@ -1607,6 +1607,54 @@ func TestHealState_StaleCreatingPendingClaimDoesNotOscillateBackToCreating(t *te
 	}
 }
 
+func TestHealStatePatchWithRollbackHonorsConfiguredStartupTimeout(t *testing.T) {
+	now := time.Date(2026, 5, 19, 9, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	startupTimeout := 5 * time.Minute
+
+	inFlightAt := now.Add(-90 * time.Second)
+	inFlight := makeBead("b1", map[string]string{
+		"state":                     "creating",
+		"pending_create_claim":      "true",
+		"pending_create_started_at": inFlightAt.UTC().Format(time.RFC3339),
+		"last_woke_at":              inFlightAt.UTC().Format(time.RFC3339),
+		"session_key":               "in-flight-key",
+		"started_config_hash":       "in-flight-hash",
+	})
+	inFlight.CreatedAt = inFlightAt
+
+	if pendingCreateLeaseExpiredForRollback(inFlight, clk, startupTimeout) {
+		t.Fatal("configured startup lease reported expired while Start is still in flight")
+	}
+	got := healStatePatchWithRollback(inFlight, false, clk, startupTimeout, true)
+	if _, ok := got["pending_create_claim"]; ok {
+		t.Fatalf("healStatePatchWithRollback cleared pending_create_claim while configured startup lease is active: %#v", got)
+	}
+	if _, ok := got["pending_create_started_at"]; ok {
+		t.Fatalf("healStatePatchWithRollback cleared pending_create_started_at while configured startup lease is active: %#v", got)
+	}
+
+	expiredAt := now.Add(-(startupTimeout + staleKeyDetectDelay + 6*time.Second))
+	expired := makeBead("b1", map[string]string{
+		"state":                     "creating",
+		"pending_create_claim":      "true",
+		"pending_create_started_at": expiredAt.UTC().Format(time.RFC3339),
+		"last_woke_at":              expiredAt.UTC().Format(time.RFC3339),
+	})
+	expired.CreatedAt = expiredAt
+
+	if !pendingCreateLeaseExpiredForRollback(expired, clk, startupTimeout) {
+		t.Fatal("configured startup lease stayed active after startup timeout and stale-key delay elapsed")
+	}
+	got = healStatePatchWithRollback(expired, false, clk, startupTimeout, true)
+	if got["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim clear = %q, want empty after configured lease expiry", got["pending_create_claim"])
+	}
+	if got["pending_create_started_at"] != "" {
+		t.Fatalf("pending_create_started_at clear = %q, want empty after configured lease expiry", got["pending_create_started_at"])
+	}
+}
+
 func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 	now := time.Date(2026, 4, 15, 14, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}

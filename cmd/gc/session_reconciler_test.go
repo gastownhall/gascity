@@ -4563,6 +4563,69 @@ func TestPendingCreateLeaseExpiredForRollbackFallsBackToStaleWindowForInvalidLas
 	}
 }
 
+func TestTraceHealClearedPendingCreateLeaseRecordsDecision(t *testing.T) {
+	trace := &sessionReconcilerTraceCycle{
+		tracer: &SessionReconcilerTracer{
+			detail: map[string]TraceSource{"helper": TraceSourceManual},
+		},
+		dropReasons:       map[string]int{},
+		pendingDetail:     map[string][]SessionReconcilerTraceRecord{},
+		pendingDropped:    map[string]int{},
+		templatesTouched:  map[string]struct{}{},
+		detailedTemplates: map[string]struct{}{},
+		decisionCounts:    map[string]int{},
+		operationCounts:   map[string]int{},
+		mutationCounts:    map[string]int{},
+		reasonCounts:      map[string]int{},
+		outcomeCounts:     map[string]int{},
+	}
+	session := makeBead("b1", map[string]string{
+		"session_name": "helper",
+		"state":        "asleep",
+		"template":     "helper",
+	})
+
+	traceHealClearedPendingCreateLease(
+		trace,
+		session,
+		&config.City{Agents: []config.Agent{{Name: "helper"}}},
+		"",
+		"",
+		"creating",
+		"2026-05-19T08:58:30Z",
+		"2026-05-19T08:58:30Z",
+		false,
+		map[string]string{
+			"pending_create_claim":      "",
+			"pending_create_started_at": "",
+			"state":                     "asleep",
+		},
+	)
+
+	if len(trace.records) != 1 {
+		t.Fatalf("trace records = %d, want 1", len(trace.records))
+	}
+	rec := trace.records[0]
+	if rec.RecordType != TraceRecordDecision {
+		t.Fatalf("record type = %q, want decision", rec.RecordType)
+	}
+	if rec.SiteCode != TraceSiteReconcilerPendingCreate {
+		t.Fatalf("site = %q, want %q", rec.SiteCode, TraceSiteReconcilerPendingCreate)
+	}
+	if rec.OutcomeCode != TraceOutcomeApplied {
+		t.Fatalf("outcome = %q, want %q", rec.OutcomeCode, TraceOutcomeApplied)
+	}
+	if got := rec.Fields["raw_reason_code"]; got != "heal_cleared_stale_lease" {
+		t.Fatalf("raw_reason_code = %#v, want heal_cleared_stale_lease", got)
+	}
+	if got := rec.Fields["state_before"]; got != "creating" {
+		t.Fatalf("state_before = %#v, want creating", got)
+	}
+	if got := rec.Fields["state_after"]; got != "asleep" {
+		t.Fatalf("state_after = %#v, want asleep", got)
+	}
+}
+
 func TestReconcileSessionBeads_RollsBackPendingCreateWhenConflictingRuntimeAlreadyRunning(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
