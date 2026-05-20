@@ -1157,6 +1157,14 @@ func mergeWorkspace(base, fragment *City, fragMeta toml.MetaData, fragPath strin
 			prov.Workspace[f.key] = fragPath
 		}
 	}
+	if fragMeta.IsDefined("workspace", "suspended") {
+		if base.Workspace.Suspended {
+			prov.Warnings = append(prov.Warnings,
+				fmt.Sprintf("workspace.suspended redefined by %q", fragPath))
+		}
+		base.Workspace.Suspended = fragment.Workspace.Suspended
+		prov.Workspace["suspended"] = fragPath
+	}
 	// install_agent_hooks is a []string — handle outside the wsField loop.
 	if fragMeta.IsDefined("workspace", "install_agent_hooks") {
 		if len(base.Workspace.InstallAgentHooks) > 0 {

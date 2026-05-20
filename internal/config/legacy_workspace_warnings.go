@@ -5,23 +5,55 @@ import (
 	"strings"
 )
 
-// legacyWorkspaceFieldMarkers are stable substrings that uniquely identify
-// each warning produced by DetectLegacyWorkspaceFields. Callers that enforce
-// strict warning policies use them to keep these soft-deprecation warnings
-// non-fatal.
-var legacyWorkspaceFieldMarkers = []string{
-	"workspace.provider is deprecated",
-	"workspace.start_command is deprecated",
-	"workspace.suspended is deprecated",
-	"workspace.install_agent_hooks is deprecated",
-	"workspace.global_fragments is deprecated",
+type legacyWorkspaceFieldRule struct {
+	field      string
+	suggestion string
+	defined    func(Workspace, map[string]string) bool
+}
+
+var legacyWorkspaceFieldRules = []legacyWorkspaceFieldRule{
+	{
+		field:      "provider",
+		suggestion: "Set provider per agent in agents/<name>/agent.toml.",
+		defined: func(ws Workspace, _ map[string]string) bool {
+			return ws.Provider != ""
+		},
+	},
+	{
+		field:      "start_command",
+		suggestion: "Use per-agent `start_command` in `agent.toml` instead.",
+		defined: func(ws Workspace, _ map[string]string) bool {
+			return ws.StartCommand != ""
+		},
+	},
+	{
+		field:      "suspended",
+		suggestion: "This will move to `.gc/site.toml` in a future release. No action is required now.",
+		defined: func(ws Workspace, workspaceSources map[string]string) bool {
+			return ws.Suspended || workspaceFieldDefined(workspaceSources, "suspended")
+		},
+	},
+	{
+		field:      "install_agent_hooks",
+		suggestion: "Set install_agent_hooks per agent in agents/<name>/agent.toml.",
+		defined: func(ws Workspace, _ map[string]string) bool {
+			return len(ws.InstallAgentHooks) > 0
+		},
+	},
+	{
+		field:      "global_fragments",
+		suggestion: "Use `[agent_defaults] append_fragments` or explicit `{{ template }}` instead.",
+		defined: func(ws Workspace, _ map[string]string) bool {
+			return len(ws.GlobalFragments) > 0
+		},
+	},
 }
 
 // IsLegacyWorkspaceFieldWarning reports whether warning is one of the
 // soft-deprecation warnings emitted by DetectLegacyWorkspaceFields.
 func IsLegacyWorkspaceFieldWarning(warning string) bool {
-	for _, marker := range legacyWorkspaceFieldMarkers {
-		if strings.Contains(warning, marker) {
+	for _, rule := range legacyWorkspaceFieldRules {
+		if strings.Contains(warning, legacyWorkspaceFieldMarker(rule.field)) {
 			return true
 		}
 	}
@@ -42,8 +74,8 @@ func IsLegacyWorkspaceFieldWarning(warning string) bool {
 // Detection rules per field:
 //   - workspace.provider: warn when non-empty.
 //   - workspace.start_command: warn when non-empty.
-//   - workspace.suspended: warn when true (the false zero-value is
-//     indistinguishable from unset).
+//   - workspace.suspended: warn when true, or when load provenance shows the
+//     field was explicitly defined.
 //   - workspace.install_agent_hooks: warn when non-empty.
 //   - workspace.global_fragments: warn when non-empty.
 func DetectLegacyWorkspaceFields(cfg *City, source string) []string {
@@ -70,20 +102,21 @@ func detectLegacyWorkspaceFields(cfg *City, defaultSource string, workspaceSourc
 		))
 	}
 
-	if ws.Provider != "" {
-		emit("provider", "Set provider per agent in agents/<name>/agent.toml.")
-	}
-	if ws.StartCommand != "" {
-		emit("start_command", "Use per-agent `start_command` in `agent.toml` instead.")
-	}
-	if ws.Suspended {
-		emit("suspended", "This will move to `.gc/site.toml` in a future release. No action is required now.")
-	}
-	if len(ws.InstallAgentHooks) > 0 {
-		emit("install_agent_hooks", "Set install_agent_hooks per agent in agents/<name>/agent.toml.")
-	}
-	if len(ws.GlobalFragments) > 0 {
-		emit("global_fragments", "Use `[agent_defaults] append_fragments` or explicit `{{ template }}` instead.")
+	for _, rule := range legacyWorkspaceFieldRules {
+		if rule.defined(ws, workspaceSources) {
+			emit(rule.field, rule.suggestion)
+		}
 	}
 	return warnings
+}
+
+func legacyWorkspaceFieldMarker(field string) string {
+	return "workspace." + field + " is deprecated"
+}
+
+func workspaceFieldDefined(workspaceSources map[string]string, field string) bool {
+	if workspaceSources == nil {
+		return false
+	}
+	return workspaceSources[field] != ""
 }
