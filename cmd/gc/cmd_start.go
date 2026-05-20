@@ -183,17 +183,21 @@ var startVerboseMode bool
 // timeouts for agents that have idle_timeout set. Returns nil if no
 // agents use idle timeout (disabled).
 //
-// Two registration paths:
-//   - Named sessions (and singletons whose name is the qualified template)
-//     register a per-session-name timeout — their runtime name is stable
-//     and known at startup.
-//   - Pool agents register a per-template timeout. Their runtime session
-//     names carry per-instance bead IDs that are minted later when work
-//     is slung; static slot enumeration (worker-1, worker-2, ...) does
-//     not match those names, so per-name registration silently misses
-//     every pool session. The reconciler's checkIdle call site supplies
-//     the template name and the tracker falls back to it.
-func buildIdleTracker(cfg *config.City, cityName, _ string, _ runtime.Provider) idleTracker {
+// Two registration paths, complementary rather than exclusive:
+//   - Per-session-name registration via discoverPoolInstances covers stable
+//     identities known at startup: configured named sessions, canonical
+//     singleton pool members, namepool members ("furiosa"), and any
+//     currently-running stale "{name}-N" suffixes a previous pool layout
+//     left behind. Tests assert these exact keys, and the reconciler still
+//     hits them via the per-name lookup.
+//   - Per-template registration covers ephemeral pool agents whose runtime
+//     session names are minted from bead IDs at sling time
+//     (e.g. "local-core__builder-fm-abc123") and never match anything a
+//     static enumeration could produce. checkIdle falls back to the
+//     template lookup when the per-name lookup misses, so canonical and
+//     namepool members keep their per-name hit while bead-derived names
+//     pick up the template's timeout.
+func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider) idleTracker {
 	var hasAny bool
 	st := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
@@ -213,27 +217,47 @@ func buildIdleTracker(cfg *config.City, cityName, _ string, _ runtime.Provider) 
 			continue
 		}
 		named := config.FindNamedSession(cfg, a.QualifiedName())
+		namedAlways := named != nil && named.ModeOrDefault() == "always"
 		if named != nil {
 			// Configured named sessions own the canonical runtime session for
 			// direct configured identities. mode="always" must never be subject
 			// to idle timeout.
-			if named.ModeOrDefault() != "always" {
+			if !namedAlways {
 				it.setTimeout(config.NamedSessionRuntimeName(cityName, cfg.Workspace, a.QualifiedName()), timeout)
 				registeredAny = true
 			}
-			// Named agents whose template also serves as a pool are an
-			// uncommon hybrid; skip pool-side template registration so the
-			// always-running named identity is not re-imposed with a
-			// timeout via the template fallback path.
-			continue
+			if !a.SupportsInstanceExpansion() {
+				continue
+			}
+			// Hybrid named-and-pool: fall through to the pool registrations
+			// below so any non-named members of the pool still pick up a
+			// timeout. The named identity's registration above takes
+			// precedence in checkIdle's per-name lookup.
 		}
-		if a.SupportsGenericEphemeralSessions() && a.SupportsInstanceExpansion() {
-			// Pool agents: runtime session names are bead-derived and minted
-			// at sling time. Register the timeout per-template so any
-			// bead-derived pool session belonging to this agent picks it up
-			// via the template fallback in checkIdle.
-			it.setTimeoutForTemplate(a.QualifiedName(), timeout)
-			registeredAny = true
+		if a.SupportsInstanceExpansion() {
+			// Per-name registration for stable instance identities.
+			// discoverPoolInstances returns canonical / namepool / live-stale
+			// names. For bounded non-namepool pools it also returns static
+			// "{name}-N" slot names — those won't match runtime bead-derived
+			// names, but registering them is harmless and keeps the existing
+			// canonical-singleton and namepool tests asserting the right keys.
+			sp0 := scaleParamsFor(&a)
+			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
+				sn := startupSessionName(cityName, qualifiedInstance, st)
+				it.setTimeout(sn, timeout)
+				registeredAny = true
+			}
+			// Per-template fallback so bead-derived runtime names for pool
+			// agents (e.g. "local-core__builder-fm-abc123") still pick up
+			// this timeout via checkIdle's template lookup. Skip when an
+			// always-mode named overlay claims the agent — that overlay
+			// exempts the canonical identity from idle timeout entirely, and
+			// without it we'd silently re-impose a timeout via the template
+			// fallback for any session belonging to the agent.
+			if a.SupportsGenericEphemeralSessions() && !namedAlways {
+				it.setTimeoutForTemplate(a.QualifiedName(), timeout)
+				registeredAny = true
+			}
 			continue
 		}
 		sn := startupSessionName(cityName, a.QualifiedName(), st)
