@@ -14,7 +14,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     TMPDIR=/tmp
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends --only-upgrade \
+    libcap2 \
+    libsystemd0 \
+    libudev1 \
+    && apt-get install -y --no-install-recommends \
     git \
     libnghttp2-14 \
     && rm -rf /var/lib/apt/lists/*
