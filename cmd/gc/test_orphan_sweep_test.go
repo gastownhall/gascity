@@ -9,7 +9,7 @@ import (
 
 const (
 	testGCBinaryDirPrefix     = "gc-test-binary-pid"
-	testCmdGCTempRootPrefix   = "gctest-pid"
+	testCmdGCTempRootPrefix   = "gct"
 	testSlingFormulaDirPrefix = "gc-sling-test-formulas-pid"
 	testSlingCityDirPrefix    = "gc-sling-test-city-pid"
 	testGCHomeDirPrefix       = "gascity-gc-home-pid"
