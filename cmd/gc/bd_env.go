@@ -39,6 +39,7 @@ func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 	if err != nil {
 		cfg = nil
 	}
+	reapStaleBdExportJSONL(dir)
 	return beads.NewBdStoreWithPrefix(dir, bdCommandRunnerForCity(cityPath), issuePrefixForScope(dir, cityPath, cfg))
 }
 
@@ -55,10 +56,92 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...str
 			}
 		}
 	}
+	reapStaleBdExportJSONL(rigDir)
 	return beads.NewBdStoreWithPrefix(rigDir, bdCommandRunnerForRig(cityPath, cfg, rigDir), prefix)
 }
 
+// reapStaleBdExportJSONL removes .beads/issues.jsonl best-effort when the
+// scope is gc-managed. The file is a stale export from when bd's auto-export
+// was on (the upstream default); keeping it on disk causes bd 1.x to detect
+// a "fresh clone" / "empty database" on the next write and stall bd create /
+// gc mail send for the full 2m subprocess timeout while it re-imports the
+// JSONL (sa-41j3kp).
+//
+// Cleanup conditions (any of which proves the scope is gc-managed and the
+// JSONL is therefore stale):
+//
+//   - config.yaml explicitly sets export.auto:false (PR 1965 canonical state)
+//   - config.yaml's gc.endpoint_origin is one of the managed origins
+//
+// Best-effort: any error is ignored because the env-var BD_EXPORT_AUTO=false
+// in bdRuntimeEnv is a second line of defense, and a concurrent reader of the
+// file (e.g., a bd-aware viewer) shouldn't fail the caller's operation. Reads
+// use os.Stat/os.Remove (not fsys.OSFS) so the helper stays callable from
+// store constructors that don't carry an fs seam.
+func reapStaleBdExportJSONL(scopeRoot string) {
+	scopeRoot = strings.TrimSpace(scopeRoot)
+	if scopeRoot == "" {
+		return
+	}
+	jsonlPath := filepath.Join(scopeRoot, ".beads", "issues.jsonl")
+	if _, err := os.Stat(jsonlPath); err != nil {
+		// Fast path: no file → nothing to do. This is the steady state
+		// once the cleanup has run once, so the rest of the helper is
+		// only reached during the one-shot transition.
+		return
+	}
+	if !scopeIsGCManaged(scopeRoot) {
+		// Unmanaged scope: leave the file alone. Removing it under those
+		// conditions could race with a legitimate auto-exporter (e.g., a
+		// rig that opted out of managed canonicalization).
+		return
+	}
+	_ = os.Remove(jsonlPath)
+}
+
+// scopeIsGCManaged reports whether a scope's .beads/config.yaml proves the
+// scope is gc-managed under the canonical (non-explicit) shape. Either of
+// two signals counts as proof:
+//   - export.auto is explicitly false (PR 1965 wrote it; the user did not
+//     opt back into auto-export afterward)
+//   - gc.endpoint_origin is one of the canonical managed origins (the scope
+//     was initialized by gc, even if the export.auto key has not yet been
+//     normalized into the config on disk)
+//
+// Either signal alone is sufficient: the first covers post-normalization
+// state, the second covers the transitional state where samtown-style
+// long-lived cities still have a pre-PR-1965 config but were always
+// gc-managed.
+//
+// EndpointOriginExplicit is intentionally excluded: per PR 1965, that is
+// the deliberate opt-out path for rigs that want to keep JSONL-based
+// sharing, so issues.jsonl there is load-bearing, not stale. The
+// endpoint-origin check runs first so that an opt-out rig that *also*
+// has export.auto:false (e.g. left over from a prior canonicalization,
+// or hand-set) is still treated as unmanaged and never reaped.
+func scopeIsGCManaged(scopeRoot string) bool {
+	configPath := filepath.Join(scopeRoot, ".beads", "config.yaml")
+	state, stateOK, stateErr := contract.ReadConfigState(fsys.OSFS{}, configPath)
+	if stateErr == nil && stateOK {
+		switch state.EndpointOrigin {
+		case contract.EndpointOriginExplicit:
+			// Deliberate opt-out — JSONL is load-bearing, leave alone
+			// regardless of any other signal in the config.
+			return false
+		case contract.EndpointOriginManagedCity,
+			contract.EndpointOriginCityCanonical,
+			contract.EndpointOriginInheritedCity:
+			return true
+		}
+	}
+	if autoExport, ok, err := contract.ReadExportAuto(fsys.OSFS{}, configPath); err == nil && ok && !autoExport {
+		return true
+	}
+	return false
+}
+
 func controlBdStoreForCity(dir, cityPath string, cfg *config.City) *beads.BdStore {
+	reapStaleBdExportJSONL(dir)
 	return beads.NewBdStoreWithPrefix(dir, controlBdCommandRunnerForCity(cityPath), issuePrefixForScope(dir, cityPath, cfg))
 }
 
@@ -72,6 +155,7 @@ func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix
 			}
 		}
 	}
+	reapStaleBdExportJSONL(rigDir)
 	return beads.NewBdStoreWithPrefix(rigDir, controlBdCommandRunnerForRig(cityPath, cfg, rigDir), prefix)
 }
 
@@ -935,6 +1019,16 @@ func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
 	// dolt.auto-start:false config (beads resolveAutoStart priority bug) and
 	// starts rogue servers from the agent's cwd with the wrong data_dir.
 	env["BEADS_DOLT_AUTO_START"] = "0"
+	// Suppress bd's auto-export of issues.jsonl on every write. The canonical
+	// config also persists export.auto:false (see internal/beads/contract/files.go),
+	// but the env var is the bulletproof per-invocation guard: it covers fresh
+	// scopes whose config has not yet been canonicalized, and it short-circuits
+	// the export → next-write-auto-import stall cycle (sa-41j3kp) even when an
+	// out-of-band caller has left a stale .beads/issues.jsonl on disk. Without
+	// this, bd's "auto-importing N bytes ... into empty database" path can
+	// stall bd create / gc mail send for the full 2m subprocess timeout on
+	// large datasets.
+	env["BD_EXPORT_AUTO"] = "false"
 	if !cityUsesBdStoreContract(cityPath) {
 		return env, nil
 	}

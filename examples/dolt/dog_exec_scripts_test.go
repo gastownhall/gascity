@@ -2193,8 +2193,10 @@ func TestDoctorScriptChecksBackupArtifactFreshnessPerDatabase(t *testing.T) {
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		t.Fatalf("mkdir artifact dir: %v", err)
 	}
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		t.Fatalf("mkdir data dir: %v", err)
+	for _, db := range []string{"prod", "archive"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", db, err)
+		}
 	}
 	freshBackup := filepath.Join(artifactDir, "prod.backup")
 	writeTestFile(t, freshBackup, "backup")
@@ -2213,6 +2215,15 @@ func TestDoctorScriptChecksBackupArtifactFreshnessPerDatabase(t *testing.T) {
 	gcLogPath := writeDogFakeGC(t, binDir)
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
 set -euo pipefail
+case "$1" in
+  backup)
+    case "$(basename "$PWD")" in
+      prod) printf 'prod-backup\n' ;;
+      archive) printf 'archive-backup\n' ;;
+    esac
+    exit 0
+    ;;
+esac
 case "$*" in
   *"COUNT(*) FROM information_schema.PROCESSLIST"*)
     printf 'COUNT(*)\n1\n'
@@ -2291,6 +2302,68 @@ exit 0
 	}
 }
 
+// TestDoctorBackupOnlyChecksDBsWithBackupRemote asserts mol-dog-doctor's backup
+// freshness scope mirrors mol-dog-backup.sh — only DBs with a configured
+// "<db>-backup" remote are eligible. Cities with user DBs but no backup
+// remotes (legitimate config) get no false stale-backup alarms.
+//
+// Companion to TestBackupScriptIgnoresDocumentedSystemSchemasForAutoDiscovery:
+// backup.sh already filters by remote presence; doctor.sh must use the same
+// gate so the two scripts agree on what "backup-eligible" means.
+func TestDoctorBackupOnlyChecksDBsWithBackupRemote(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatalf("mkdir artifact dir: %v", err)
+	}
+	for _, db := range []string{"prod", "archive"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", db, err)
+		}
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  backup)
+    if [ "$(basename "$PWD")" = "prod" ]; then
+      printf 'prod-backup\n'
+    fi
+    exit 0
+    ;;
+esac
+case "$*" in
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\n1\n'
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nprod\narchive\n'
+    exit 0
+    ;;
+esac
+exit 0
+`)
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("unexpected doctor output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if strings.Contains(string(gcLog), "archive backup missing") {
+		t.Fatalf("doctor warned about archive (no <db>-backup remote configured); should be filtered out:\n%s", gcLog)
+	}
+	if !strings.Contains(string(gcLog), "prod backup missing") {
+		t.Fatalf("doctor did not warn about prod (eligible: has prod-backup remote, no artifact); scope filter should not exclude it:\n%s", gcLog)
+	}
+}
+
 func TestDoctorScriptDetectsDoctestOrphansWithBSDGrep(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")
@@ -2340,8 +2413,10 @@ func TestDoctorScriptDoesNotCreditSharedPrefixBackupToDatabase(t *testing.T) {
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		t.Fatalf("mkdir artifact dir: %v", err)
 	}
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		t.Fatalf("mkdir data dir: %v", err)
+	for _, db := range []string{"prod", "prod_dev"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", db, err)
+		}
 	}
 	freshSiblingBackup := filepath.Join(artifactDir, "prod_dev.backup")
 	writeTestFile(t, freshSiblingBackup, "backup")
@@ -2354,6 +2429,15 @@ func TestDoctorScriptDoesNotCreditSharedPrefixBackupToDatabase(t *testing.T) {
 	gcLogPath := writeDogFakeGC(t, binDir)
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
 set -euo pipefail
+case "$1" in
+  backup)
+    case "$(basename "$PWD")" in
+      prod) printf 'prod-backup\n' ;;
+      prod_dev) printf 'prod_dev-backup\n' ;;
+    esac
+    exit 0
+    ;;
+esac
 case "$*" in
   *"COUNT(*) FROM information_schema.PROCESSLIST"*)
     printf 'COUNT(*)\n1\n'

@@ -166,6 +166,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	reapStaleBdExportJSONL(target.ScopeRoot)
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
 	bdPath, err := exec.LookPath("bd")
