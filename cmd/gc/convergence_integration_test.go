@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,16 +48,31 @@ func setupConvergenceRuntime(t *testing.T) (*CityRuntime, *beads.MemStore) {
 		stderr:              &bytes.Buffer{},
 	}
 
-	// Initialize convergence handler (mimics initConvergenceHandler).
-	adapter := newConvergenceStoreAdapter(store, []string{sharedTestFormulaDir})
-	emitter := &convergenceEventEmitter{rec: cr.rec}
-	cr.convStoreAdapter = adapter
-	cr.convHandler = &convergence.Handler{
-		Store:   adapter,
-		Emitter: emitter,
+	// Initialize the city/HQ convergence scope (mimics initConvergenceHandler).
+	cr.convScopes = map[string]*convergenceScope{
+		"": cr.newConvergenceScope("", store, []string{sharedTestFormulaDir}),
 	}
 
 	return cr, store
+}
+
+// hqScope returns the city/HQ convergence scope from a test runtime,
+// failing the test if convergence was not initialized.
+func hqScope(t *testing.T, cr *CityRuntime) *convergenceScope {
+	t.Helper()
+	scope := cr.convScopes[""]
+	if scope == nil {
+		t.Fatal("city/HQ convergence scope not initialized")
+	}
+	return scope
+}
+
+// addConvergenceRigScope attaches a rig-scoped convergence scope backed by
+// the given store, mimicking initConvergenceHandler's per-rig wiring.
+func addConvergenceRigScope(cr *CityRuntime, rig string, store beads.Store) *convergenceScope {
+	scope := cr.newConvergenceScope(rig, store, []string{sharedTestFormulaDir})
+	cr.convScopes[rig] = scope
+	return scope
 }
 
 // sendAndReceive sends a convergence request via handleConvergenceRequest
@@ -126,7 +142,7 @@ func TestConvergence_StopCommand(t *testing.T) {
 	}
 
 	// Verify state is terminated.
-	meta, err := cr.convHandler.Store.GetMetadata(created.BeadID)
+	meta, err := hqScope(t, cr).handler.Store.GetMetadata(created.BeadID)
 	if err != nil {
 		t.Fatalf("GetMetadata: %v", err)
 	}
@@ -149,10 +165,10 @@ func TestConvergence_UnknownCommand(t *testing.T) {
 func TestConvergence_PanicRecovery(t *testing.T) {
 	cr, _ := setupConvergenceRuntime(t)
 
-	// Temporarily replace convHandler with nil to cause a panic
-	// when handleConvergenceRequest tries to access it for "approve".
-	savedHandler := cr.convHandler
-	cr.convHandler = nil
+	// Clear convScopes so handleConvergenceRequest hits the
+	// "convergence not available" guard for "approve".
+	savedScopes := cr.convScopes
+	cr.convScopes = nil
 
 	reply := cr.safeHandleConvergenceRequest(context.Background(), convergenceRequest{
 		Command: "approve",
@@ -160,10 +176,10 @@ func TestConvergence_PanicRecovery(t *testing.T) {
 	})
 	// safeHandleConvergenceRequest should return error, not panic.
 	if reply.Error == "" {
-		t.Error("expected error reply from nil handler")
+		t.Error("expected error reply when convergence is unavailable")
 	}
 
-	cr.convHandler = savedHandler
+	cr.convScopes = savedScopes
 }
 
 func TestConvergence_TickProcessesClosedWisp(t *testing.T) {
@@ -187,7 +203,7 @@ func TestConvergence_TickProcessesClosedWisp(t *testing.T) {
 	}
 
 	// Populate the active index so convergenceTick works.
-	adapter := cr.convHandler.Store.(*convergenceStoreAdapter)
+	adapter := hqScope(t, cr).adapter
 	if err := adapter.populateIndex(); err != nil {
 		t.Fatalf("populateIndex: %v", err)
 	}
@@ -202,7 +218,7 @@ func TestConvergence_TickProcessesClosedWisp(t *testing.T) {
 
 	// After processing, active_wisp should have changed (iterated to next wisp
 	// or terminated, depending on gate mode — manual mode transitions to waiting_manual).
-	meta, _ := cr.convHandler.Store.GetMetadata(created.BeadID)
+	meta, _ := hqScope(t, cr).handler.Store.GetMetadata(created.BeadID)
 	state := meta[convergence.FieldState]
 	// With manual gate mode, closing a wisp transitions to waiting_manual.
 	if state != convergence.StateWaitingManual {
@@ -229,7 +245,7 @@ func TestConvergence_TickRecoversMissingActiveWisp(t *testing.T) {
 		t.Fatalf("unmarshaling: %v", err)
 	}
 
-	adapter := cr.convHandler.Store.(*convergenceStoreAdapter)
+	adapter := hqScope(t, cr).adapter
 	if err := adapter.populateIndex(); err != nil {
 		t.Fatalf("populateIndex: %v", err)
 	}
@@ -240,7 +256,7 @@ func TestConvergence_TickRecoversMissingActiveWisp(t *testing.T) {
 
 	cr.convergenceTick(context.Background())
 
-	meta, err := cr.convHandler.Store.GetMetadata(created.BeadID)
+	meta, err := hqScope(t, cr).handler.Store.GetMetadata(created.BeadID)
 	if err != nil {
 		t.Fatalf("GetMetadata: %v", err)
 	}
@@ -287,9 +303,202 @@ func TestConvergence_StartupReconcile(t *testing.T) {
 	}
 
 	// The active index should be populated after startup reconcile.
-	adapter := cr.convHandler.Store.(*convergenceStoreAdapter)
+	adapter := hqScope(t, cr).adapter
 	if adapter.activeIndex == nil {
 		t.Error("active index should be populated after startup reconcile")
+	}
+}
+
+// --- Rig-scoped convergence tests (issue #2357) ---
+
+func TestConvergence_CreateRoutesToRigStore(t *testing.T) {
+	cr, cityStore := setupConvergenceRuntime(t)
+	rigStore := beads.NewMemStore()
+	addConvergenceRigScope(cr, "gascity-prod", rigStore)
+
+	reply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "create",
+		Params: map[string]string{
+			"formula":        "test-formula",
+			"target":         "test-agent",
+			"max_iterations": "3",
+			"rig":            "gascity-prod",
+		},
+	})
+	if reply.Error != "" {
+		t.Fatalf("unexpected error: %s", reply.Error)
+	}
+	var result convergence.CreateResult
+	if err := json.Unmarshal(reply.Result, &result); err != nil {
+		t.Fatalf("unmarshaling result: %v", err)
+	}
+
+	// The convergence bead must land in the rig store, not city/HQ.
+	if _, err := rigStore.Get(result.BeadID); err != nil {
+		t.Errorf("convergence bead %q not found in rig store: %v", result.BeadID, err)
+	}
+	if _, err := cityStore.Get(result.BeadID); err == nil {
+		t.Errorf("convergence bead %q leaked into the city/HQ store", result.BeadID)
+	}
+
+	// The bead records its owning rig for status/list and audit.
+	bead, err := rigStore.Get(result.BeadID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if bead.Metadata[convergence.FieldRig] != "gascity-prod" {
+		t.Errorf("rig metadata = %q, want %q", bead.Metadata[convergence.FieldRig], "gascity-prod")
+	}
+}
+
+func TestConvergence_CreateUnknownRigErrors(t *testing.T) {
+	cr, _ := setupConvergenceRuntime(t)
+
+	reply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "create",
+		Params: map[string]string{
+			"formula":        "test-formula",
+			"target":         "test-agent",
+			"max_iterations": "3",
+			"rig":            "no-such-rig",
+		},
+	})
+	// An unknown --rig must fail loudly, not silently write to HQ.
+	if reply.Error == "" {
+		t.Fatal("expected error for unknown rig, got success")
+	}
+	if !strings.Contains(reply.Error, "no-such-rig") {
+		t.Errorf("error = %q, want it to name the unknown rig", reply.Error)
+	}
+}
+
+func TestConvergence_TickDrivesRigScopedLoop(t *testing.T) {
+	cr, _ := setupConvergenceRuntime(t)
+	rigStore := beads.NewMemStore()
+	rigScope := addConvergenceRigScope(cr, "gascity-prod", rigStore)
+
+	createReply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "create",
+		Params: map[string]string{
+			"formula":        "test-formula",
+			"target":         "test-agent",
+			"max_iterations": "5",
+			"rig":            "gascity-prod",
+		},
+	})
+	if createReply.Error != "" {
+		t.Fatalf("create error: %s", createReply.Error)
+	}
+	var created convergence.CreateResult
+	if err := json.Unmarshal(createReply.Result, &created); err != nil {
+		t.Fatalf("unmarshaling: %v", err)
+	}
+
+	// Populate the rig scope's active index so convergenceTick processes it.
+	if err := rigScope.adapter.populateIndex(); err != nil {
+		t.Fatalf("populateIndex: %v", err)
+	}
+
+	// Close the active wisp to simulate it finishing.
+	if err := rigStore.Close(created.FirstWispID); err != nil {
+		t.Fatalf("closing wisp: %v", err)
+	}
+
+	// convergenceTick must iterate the rig scope, not just city/HQ — without
+	// this the rig-scoped loop would be created but never driven.
+	cr.convergenceTick(context.Background())
+
+	bead, err := rigStore.Get(created.BeadID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if state := bead.Metadata[convergence.FieldState]; state != convergence.StateWaitingManual {
+		t.Errorf("rig-scoped loop state after tick = %q, want %q", state, convergence.StateWaitingManual)
+	}
+}
+
+func TestConvergence_StartupReconcileCoversRigScopes(t *testing.T) {
+	cr, _ := setupConvergenceRuntime(t)
+	rigStore := beads.NewMemStore()
+	rigScope := addConvergenceRigScope(cr, "data-rig", rigStore)
+
+	// A convergence bead interrupted mid-creation in the rig store.
+	b, err := rigStore.Create(beads.Bead{Title: "interrupted", Type: "convergence", Status: "in_progress"})
+	if err != nil {
+		t.Fatalf("creating bead: %v", err)
+	}
+	if err := rigStore.SetMetadata(b.ID, convergence.FieldState, convergence.StateCreating); err != nil {
+		t.Fatalf("setting state: %v", err)
+	}
+
+	cr.convergenceStartupReconcile(context.Background())
+
+	// The interrupted rig bead should be terminated and closed.
+	updated, err := rigStore.Get(b.ID)
+	if err != nil {
+		t.Fatalf("getting bead: %v", err)
+	}
+	if updated.Status != "closed" {
+		t.Errorf("rig bead status = %q, want closed", updated.Status)
+	}
+	// Both scopes' active indexes must be populated.
+	if rigScope.adapter.activeIndex == nil {
+		t.Error("rig scope active index should be populated after startup reconcile")
+	}
+	if hqScope(t, cr).adapter.activeIndex == nil {
+		t.Error("city scope active index should be populated after startup reconcile")
+	}
+}
+
+func TestConvergence_StopRoutesToRigScope(t *testing.T) {
+	cr, _ := setupConvergenceRuntime(t)
+	rigStore := beads.NewMemStore()
+	addConvergenceRigScope(cr, "gascity-prod", rigStore)
+
+	createReply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "create",
+		Params: map[string]string{
+			"formula":        "test-formula",
+			"target":         "test-agent",
+			"max_iterations": "5",
+			"rig":            "gascity-prod",
+		},
+	})
+	if createReply.Error != "" {
+		t.Fatalf("create error: %s", createReply.Error)
+	}
+	var created convergence.CreateResult
+	if err := json.Unmarshal(createReply.Result, &created); err != nil {
+		t.Fatalf("unmarshaling: %v", err)
+	}
+
+	// Stopping without the rig param looks in city/HQ and cannot find the
+	// rig-scoped bead — it must fail rather than affecting the wrong store.
+	noRigReply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "stop",
+		BeadID:  created.BeadID,
+		User:    "test-operator",
+	})
+	if noRigReply.Error == "" {
+		t.Error("stop without --rig should not find the rig-scoped loop")
+	}
+
+	// With the rig param, stop routes to the rig scope and terminates it.
+	stopReply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "stop",
+		BeadID:  created.BeadID,
+		User:    "test-operator",
+		Params:  map[string]string{"rig": "gascity-prod"},
+	})
+	if stopReply.Error != "" {
+		t.Fatalf("stop error: %s", stopReply.Error)
+	}
+	bead, err := rigStore.Get(created.BeadID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if bead.Metadata[convergence.FieldState] != convergence.StateTerminated {
+		t.Errorf("state = %q, want %q", bead.Metadata[convergence.FieldState], convergence.StateTerminated)
 	}
 }
 

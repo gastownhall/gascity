@@ -27,35 +27,105 @@ type convergenceReply struct {
 	Error  string          `json:"error,omitempty"`
 }
 
-// initConvergenceHandler creates the convergence handler if a bead store is
-// available. Called once during CityRuntime.run() initialization.
+// convergenceScope binds a convergence handler to one bead store — the
+// city/HQ store or a single rig's store. The controller maintains one
+// scope per store so a convergence loop is created, ticked, and reconciled
+// in whichever store the operator's --rig context selected. The empty rig
+// name ("") denotes the city/HQ scope.
+type convergenceScope struct {
+	rig     string // "" for the city/HQ store
+	store   beads.Store
+	adapter *convergenceStoreAdapter
+	handler *convergence.Handler
+}
+
+// logSuffix returns a human-readable scope qualifier for log lines: empty
+// for the city/HQ scope, " (rig <name>)" for a rig scope. Keeping the
+// city-scope suffix empty leaves city-scope log lines byte-identical to
+// the pre-rig-scoping output.
+func (s *convergenceScope) logSuffix() string {
+	if s.rig == "" {
+		return ""
+	}
+	return " (rig " + s.rig + ")"
+}
+
+// initConvergenceHandler builds one convergence scope per available bead
+// store: the city/HQ store plus every bound rig store. Called once during
+// CityRuntime.run() initialization. Rigs added by a later config reload
+// are not picked up until the controller restarts — this matches how the
+// city-level handler has always been built once at startup.
 func (cr *CityRuntime) initConvergenceHandler() {
-	store := cr.cityBeadStore()
-	if store == nil {
+	cityStore := cr.cityBeadStore()
+	if cityStore == nil {
 		return
 	}
-	adapter := newConvergenceStoreAdapter(store, cr.cfg.FormulaLayers.City)
-	emitter := &convergenceEventEmitter{rec: cr.rec}
-	cr.convStoreAdapter = adapter
-	cr.convHandler = &convergence.Handler{
-		Store:   adapter,
-		Emitter: emitter,
+	scopes := map[string]*convergenceScope{
+		"": cr.newConvergenceScope("", cityStore, cr.cfg.FormulaLayers.City),
+	}
+	for rigName, store := range cr.rigBeadStores() {
+		if store == nil {
+			continue
+		}
+		scopes[rigName] = cr.newConvergenceScope(
+			rigName, store, cr.cfg.FormulaLayers.SearchPaths(rigName))
+	}
+	cr.convScopes = scopes
+}
+
+// newConvergenceScope wires a store adapter and convergence handler for a
+// single bead store. Each rig scope resolves formulas through that rig's
+// formula search paths so rig-local formulas are honored.
+func (cr *CityRuntime) newConvergenceScope(rig string, store beads.Store, formulaSearchPaths []string) *convergenceScope {
+	adapter := newConvergenceStoreAdapter(store, formulaSearchPaths)
+	return &convergenceScope{
+		rig:     rig,
+		store:   store,
+		adapter: adapter,
+		handler: &convergence.Handler{
+			Store:   adapter,
+			Emitter: &convergenceEventEmitter{rec: cr.rec},
+		},
 	}
 }
 
-// convergenceTick processes active convergence loops by checking indexed
-// beads for closed wisps and calling HandleWispClosed. Called from tick().
-// Uses the in-memory active index (O(active) instead of O(all beads)).
+// convergenceScopeForRig returns the convergence scope for a rig name. An
+// empty rig selects the city/HQ scope. An unknown rig is an error so a
+// mistyped or unbound --rig fails loudly instead of silently writing the
+// bead to HQ (the defect tracked in issue #2357).
+func (cr *CityRuntime) convergenceScopeForRig(rig string) (*convergenceScope, error) {
+	if cr.convScopes == nil {
+		return nil, fmt.Errorf("convergence not available (no bead store)")
+	}
+	scope, ok := cr.convScopes[rig]
+	if !ok {
+		return nil, fmt.Errorf("rig %q has no bead store; convergence loops require a registered, bound rig", rig)
+	}
+	return scope, nil
+}
+
+// convergenceTick processes active convergence loops in every scope — the
+// city/HQ store and each bound rig store. Called from tick().
 func (cr *CityRuntime) convergenceTick(ctx context.Context) {
-	if cr.convHandler == nil || cr.convergenceReqCh == nil {
+	if cr.convScopes == nil || cr.convergenceReqCh == nil {
 		return
 	}
-	if cr.convStoreAdapter == nil || cr.convStoreAdapter.activeIndex == nil {
+	for _, scope := range cr.convScopes {
+		cr.convergenceTickScope(ctx, scope)
+	}
+}
+
+// convergenceTickScope processes active convergence loops in a single
+// scope by checking indexed beads for closed wisps and calling
+// HandleWispClosed. Uses the scope's in-memory active index (O(active)
+// instead of O(all beads)).
+func (cr *CityRuntime) convergenceTickScope(ctx context.Context, scope *convergenceScope) {
+	if scope.adapter == nil || scope.adapter.activeIndex == nil {
 		return
 	}
 
-	for _, beadID := range cr.convStoreAdapter.activeBeadIDs() {
-		meta, err := cr.convStoreAdapter.GetMetadata(beadID)
+	for _, beadID := range scope.adapter.activeBeadIDs() {
+		meta, err := scope.adapter.GetMetadata(beadID)
 		if err != nil {
 			continue
 		}
@@ -69,12 +139,12 @@ func (cr *CityRuntime) convergenceTick(ctx context.Context) {
 			continue
 		}
 		// Check if the active wisp is closed.
-		wispInfo, wErr := cr.convStoreAdapter.GetBead(activeWisp)
+		wispInfo, wErr := scope.adapter.GetBead(activeWisp)
 		if wErr != nil {
 			if !errors.Is(wErr, beads.ErrNotFound) {
 				continue
 			}
-			reconciler := &convergence.Reconciler{Handler: cr.convHandler}
+			reconciler := &convergence.Reconciler{Handler: scope.handler}
 			report, rErr := reconciler.ReconcileBeads(ctx, []string{beadID})
 			if rErr != nil {
 				fmt.Fprintf(cr.stderr, "%s: convergence: reconcile(%s): %v\n", //nolint:errcheck
@@ -91,7 +161,7 @@ func (cr *CityRuntime) convergenceTick(ctx context.Context) {
 			continue
 		}
 		// Process the closed wisp.
-		result, hErr := cr.convHandler.HandleWispClosed(ctx, beadID, activeWisp)
+		result, hErr := scope.handler.HandleWispClosed(ctx, beadID, activeWisp)
 		if hErr != nil {
 			fmt.Fprintf(cr.stderr, "%s: convergence: HandleWispClosed(%s, %s): %v\n", //nolint:errcheck
 				cr.logPrefix, beadID, activeWisp, hErr)
@@ -108,7 +178,7 @@ func (cr *CityRuntime) convergenceTick(ctx context.Context) {
 // processes each command serially. Called from the event loop to serialize
 // CLI commands with tick-based processing.
 func (cr *CityRuntime) processConvergenceRequests(ctx context.Context) {
-	if cr.convHandler == nil || cr.convergenceReqCh == nil {
+	if cr.convScopes == nil || cr.convergenceReqCh == nil {
 		return
 	}
 	for {
@@ -141,9 +211,10 @@ func (cr *CityRuntime) safeHandleConvergenceRequest(ctx context.Context, req con
 	return reply
 }
 
-// handleConvergenceRequest dispatches a single convergence command.
+// handleConvergenceRequest dispatches a single convergence command to the
+// scope selected by the request's "rig" parameter.
 func (cr *CityRuntime) handleConvergenceRequest(ctx context.Context, req convergenceRequest) convergenceReply {
-	if cr.convHandler == nil {
+	if cr.convScopes == nil {
 		return convergenceReply{Error: "convergence not available (no bead store)"}
 	}
 
@@ -157,24 +228,12 @@ func (cr *CityRuntime) handleConvergenceRequest(ctx context.Context, req converg
 	switch req.Command {
 	case "create":
 		return cr.handleConvergenceCreate(ctx, req)
-	case "approve":
-		result, err := cr.convHandler.ApproveHandler(ctx, req.BeadID, username, "")
+	case "approve", "iterate", "stop":
+		scope, err := cr.convergenceScopeForRig(req.Params["rig"])
 		if err != nil {
 			return convergenceReply{Error: err.Error()}
 		}
-		return marshalReply(result)
-	case "iterate":
-		result, err := cr.convHandler.IterateHandler(ctx, req.BeadID, username, "")
-		if err != nil {
-			return convergenceReply{Error: err.Error()}
-		}
-		return marshalReply(result)
-	case "stop":
-		result, err := cr.convHandler.StopHandler(ctx, req.BeadID, username, "")
-		if err != nil {
-			return convergenceReply{Error: err.Error()}
-		}
-		return marshalReply(result)
+		return cr.handleConvergenceLifecycle(ctx, scope, req.Command, req.BeadID, username)
 	case "retry":
 		return cr.handleConvergenceRetry(ctx, req)
 	default:
@@ -182,8 +241,39 @@ func (cr *CityRuntime) handleConvergenceRequest(ctx context.Context, req converg
 	}
 }
 
-// handleConvergenceCreate processes a create command.
+// handleConvergenceLifecycle dispatches approve/iterate/stop to the
+// convergence handler bound to the resolved scope's bead store.
+func (cr *CityRuntime) handleConvergenceLifecycle(ctx context.Context, scope *convergenceScope, command, beadID, username string) convergenceReply {
+	var (
+		result convergence.HandlerResult
+		err    error
+	)
+	switch command {
+	case "approve":
+		result, err = scope.handler.ApproveHandler(ctx, beadID, username, "")
+	case "iterate":
+		result, err = scope.handler.IterateHandler(ctx, beadID, username, "")
+	case "stop":
+		result, err = scope.handler.StopHandler(ctx, beadID, username, "")
+	default:
+		return convergenceReply{Error: fmt.Sprintf("unknown convergence command: %q", command)}
+	}
+	if err != nil {
+		return convergenceReply{Error: err.Error()}
+	}
+	return marshalReply(result)
+}
+
+// handleConvergenceCreate processes a create command. The "rig" parameter
+// selects the bead store: empty creates the loop in the city/HQ store, a
+// rig name creates it in that rig's store.
 func (cr *CityRuntime) handleConvergenceCreate(ctx context.Context, req convergenceRequest) convergenceReply {
+	rig := req.Params["rig"]
+	scope, err := cr.convergenceScopeForRig(rig)
+	if err != nil {
+		return convergenceReply{Error: err.Error()}
+	}
+
 	formula := req.Params["formula"]
 	target := req.Params["target"]
 	maxIter := 5
@@ -196,12 +286,13 @@ func (cr *CityRuntime) handleConvergenceCreate(ctx context.Context, req converge
 		gateMode = convergence.GateModeManual
 	}
 
-	// Concurrency checks.
+	// Concurrency checks are scoped to this store: each bead store accounts
+	// for its own active convergence loops independently.
 	maxPerAgent := cr.cfg.Convergence.MaxPerAgentOrDefault()
-	if err := convergence.CheckConcurrencyLimits(cr.convHandler.Store, target, maxPerAgent); err != nil {
+	if err := convergence.CheckConcurrencyLimits(scope.handler.Store, target, maxPerAgent); err != nil {
 		return convergenceReply{Error: err.Error()}
 	}
-	if err := convergence.CheckNestedConvergence(cr.convHandler.Store, "", target); err != nil {
+	if err := convergence.CheckNestedConvergence(scope.handler.Store, "", target); err != nil {
 		return convergenceReply{Error: err.Error()}
 	}
 
@@ -225,17 +316,25 @@ func (cr *CityRuntime) handleConvergenceCreate(ctx context.Context, req converge
 		Vars:              vars,
 		CityPath:          cr.cityPath,
 		EvaluatePrompt:    req.Params["evaluate_prompt"],
+		Rig:               rig,
 	}
 
-	result, err := cr.convHandler.CreateHandler(ctx, params)
+	result, err := scope.handler.CreateHandler(ctx, params)
 	if err != nil {
 		return convergenceReply{Error: err.Error()}
 	}
 	return marshalReply(result)
 }
 
-// handleConvergenceRetry processes a retry command.
+// handleConvergenceRetry processes a retry command. The retry loop is
+// created in the same scope as the source loop, selected by the request's
+// "rig" parameter.
 func (cr *CityRuntime) handleConvergenceRetry(ctx context.Context, req convergenceRequest) convergenceReply {
+	scope, err := cr.convergenceScopeForRig(req.Params["rig"])
+	if err != nil {
+		return convergenceReply{Error: err.Error()}
+	}
+
 	sourceBeadID := req.BeadID
 	maxIter := 0
 	if v, ok := convergence.DecodeInt(req.Params["max_iterations"]); ok && v > 0 {
@@ -243,7 +342,7 @@ func (cr *CityRuntime) handleConvergenceRetry(ctx context.Context, req convergen
 	}
 
 	// Read source bead metadata once for both max_iterations and target.
-	meta, err := cr.convHandler.Store.GetMetadata(sourceBeadID)
+	meta, err := scope.handler.Store.GetMetadata(sourceBeadID)
 	if err != nil {
 		return convergenceReply{Error: fmt.Sprintf("reading source bead: %v", err)}
 	}
@@ -262,10 +361,10 @@ func (cr *CityRuntime) handleConvergenceRetry(ctx context.Context, req convergen
 
 	// Concurrency checks.
 	maxPerAgent := cr.cfg.Convergence.MaxPerAgentOrDefault()
-	if err := convergence.CheckConcurrencyLimits(cr.convHandler.Store, target, maxPerAgent); err != nil {
+	if err := convergence.CheckConcurrencyLimits(scope.handler.Store, target, maxPerAgent); err != nil {
 		return convergenceReply{Error: err.Error()}
 	}
-	if err := convergence.CheckNestedConvergence(cr.convHandler.Store, "", target); err != nil {
+	if err := convergence.CheckNestedConvergence(scope.handler.Store, "", target); err != nil {
 		return convergenceReply{Error: err.Error()}
 	}
 
@@ -274,29 +373,34 @@ func (cr *CityRuntime) handleConvergenceRetry(ctx context.Context, req convergen
 		username = currentUsername()
 	}
 
-	result, err := cr.convHandler.RetryHandler(ctx, sourceBeadID, username, maxIter)
+	result, err := scope.handler.RetryHandler(ctx, sourceBeadID, username, maxIter)
 	if err != nil {
 		return convergenceReply{Error: err.Error()}
 	}
 	return marshalReply(result)
 }
 
-// convergenceStartupReconcile runs convergence bead reconciliation on startup
-// and then populates the in-memory active index.
+// convergenceStartupReconcile runs convergence bead reconciliation on
+// startup for every scope and then populates each scope's in-memory
+// active index.
 func (cr *CityRuntime) convergenceStartupReconcile(ctx context.Context) {
-	if cr.convHandler == nil || cr.convergenceReqCh == nil {
+	if cr.convScopes == nil || cr.convergenceReqCh == nil {
 		return
 	}
-	store := cr.cityBeadStore()
-	if store == nil {
-		return
+	for _, scope := range cr.convScopes {
+		cr.convergenceStartupReconcileScope(ctx, scope)
 	}
+}
 
+// convergenceStartupReconcileScope reconciles interrupted convergence
+// beads in one scope's store and then populates that scope's active index.
+func (cr *CityRuntime) convergenceStartupReconcileScope(ctx context.Context, scope *convergenceScope) {
 	// List() waits for CachingStore prime if not yet live, then serves
 	// from memory. No subprocess stampede.
-	all, err := store.List(beads.ListQuery{Type: "convergence"})
+	all, err := scope.store.List(beads.ListQuery{Type: "convergence"})
 	if err != nil {
-		fmt.Fprintf(cr.stderr, "%s: convergence reconcile: listing beads: %v\n", cr.logPrefix, err) //nolint:errcheck
+		fmt.Fprintf(cr.stderr, "%s: convergence reconcile%s: listing beads: %v\n", //nolint:errcheck
+			cr.logPrefix, scope.logSuffix(), err)
 		return
 	}
 
@@ -306,24 +410,24 @@ func (cr *CityRuntime) convergenceStartupReconcile(ctx context.Context) {
 	}
 
 	if len(beadIDs) > 0 {
-		reconciler := &convergence.Reconciler{Handler: cr.convHandler}
+		reconciler := &convergence.Reconciler{Handler: scope.handler}
 		report, err := reconciler.ReconcileBeads(ctx, beadIDs)
 		if err != nil {
-			fmt.Fprintf(cr.stderr, "%s: convergence reconciliation: %v\n", cr.logPrefix, err) //nolint:errcheck
+			fmt.Fprintf(cr.stderr, "%s: convergence reconciliation%s: %v\n", //nolint:errcheck
+				cr.logPrefix, scope.logSuffix(), err)
 			return
 		}
 		if report.Recovered > 0 || report.Errors > 0 {
-			fmt.Fprintf(cr.stdout, "Convergence recovery: %d scanned, %d recovered, %d errors\n", //nolint:errcheck
-				report.Scanned, report.Recovered, report.Errors)
+			fmt.Fprintf(cr.stdout, "Convergence recovery%s: %d scanned, %d recovered, %d errors\n", //nolint:errcheck
+				scope.logSuffix(), report.Scanned, report.Recovered, report.Errors)
 		}
 	}
 
 	// Populate the active index after reconciliation so it reflects
 	// post-recovery state.
-	if cr.convStoreAdapter != nil {
-		if err := cr.convStoreAdapter.populateIndex(); err != nil {
-			fmt.Fprintf(cr.stderr, "%s: convergence: populating active index: %v\n", cr.logPrefix, err) //nolint:errcheck
-		}
+	if err := scope.adapter.populateIndex(); err != nil {
+		fmt.Fprintf(cr.stderr, "%s: convergence: populating active index%s: %v\n", //nolint:errcheck
+			cr.logPrefix, scope.logSuffix(), err)
 	}
 }
 

@@ -281,3 +281,54 @@ func TestCreateHandler_DefaultGateMode(t *testing.T) {
 		t.Errorf("gate_mode = %q, want %q", meta[FieldGateMode], GateModeManual)
 	}
 }
+
+func TestCreateHandler_PersistsRig(t *testing.T) {
+	store := newFakeStore()
+	handler := &Handler{
+		Store:   store,
+		Emitter: &fakeEmitter{},
+		Clock:   time.Now,
+	}
+
+	result, err := handler.CreateHandler(context.Background(), CreateParams{
+		Formula:       "test-formula",
+		Target:        "test-agent",
+		MaxIterations: 3,
+		GateMode:      GateModeManual,
+		Rig:           "gascity-prod",
+	})
+	if err != nil {
+		t.Fatalf("CreateHandler returned error: %v", err)
+	}
+	meta, err := store.GetMetadata(result.BeadID)
+	if err != nil {
+		t.Fatalf("GetMetadata(%q): %v", result.BeadID, err)
+	}
+	if meta[FieldRig] != "gascity-prod" {
+		t.Errorf("rig = %q, want %q", meta[FieldRig], "gascity-prod")
+	}
+}
+
+func TestCreateHandler_EmptyRigForCityScope(t *testing.T) {
+	store := newFakeStore()
+	handler := &Handler{
+		Store:   store,
+		Emitter: &fakeEmitter{},
+		Clock:   time.Now,
+	}
+
+	result, err := handler.CreateHandler(context.Background(), CreateParams{
+		Formula:       "test-formula",
+		Target:        "test-agent",
+		MaxIterations: 3,
+		GateMode:      GateModeManual,
+		// Rig left empty — city/HQ scope.
+	})
+	if err != nil {
+		t.Fatalf("CreateHandler returned error: %v", err)
+	}
+	meta, _ := store.GetMetadata(result.BeadID)
+	if meta[FieldRig] != "" {
+		t.Errorf("rig = %q, want empty for city scope", meta[FieldRig])
+	}
+}

@@ -52,13 +52,15 @@ func newConvergeCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Use:   "create",
 		Short: "Create a convergence loop",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			cityPath, err := resolveCity()
+			rctx, err := resolveContext()
 			if err != nil {
 				fmt.Fprintf(stderr, "gc converge create: %v\n", err) //nolint:errcheck
 				return errExit
 			}
 
-			// Build params map.
+			// Build params map. "rig" carries the resolved --rig context
+			// so the controller creates the loop in the rig's bead store
+			// instead of silently writing it to city/HQ (issue #2357).
 			params := map[string]string{
 				"formula":             formula,
 				"target":              target,
@@ -69,6 +71,7 @@ func newConvergeCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 				"gate_timeout_action": gateTimeoutAction,
 				"title":               title,
 				"evaluate_prompt":     evaluatePrompt,
+				"rig":                 rctx.RigName,
 			}
 			for _, v := range vars {
 				parts := strings.SplitN(v, "=", 2)
@@ -84,7 +87,7 @@ func newConvergeCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 				User:    currentUsername(),
 				Params:  params,
 			}
-			reply, err := sendConvergenceRequest(cityPath, req)
+			reply, err := sendConvergenceRequest(rctx.CityPath, req)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc converge create: %v\n", err) //nolint:errcheck
 				return errExit
@@ -127,7 +130,7 @@ func newConvergeStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			beadID := args[0]
-			store, code := openCityStore(stderr, "gc converge status")
+			store, _, code := openConvergeStore(stderr, "gc converge status")
 			if code != 0 {
 				return errExit
 			}
@@ -158,6 +161,7 @@ func newConvergeStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 			gateMode := meta[convergence.FieldGateMode]
 			formula := meta[convergence.FieldFormula]
 			target := meta[convergence.FieldTarget]
+			rig := meta[convergence.FieldRig]
 			gateOutcome := meta[convergence.FieldGateOutcome]
 			waitingReason := meta[convergence.FieldWaitingReason]
 			terminalReason := meta[convergence.FieldTerminalReason]
@@ -169,7 +173,10 @@ func newConvergeStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 			fmt.Fprintf(stdout, "Iteration:       %d/%d\n", iteration, maxIter) //nolint:errcheck
 			fmt.Fprintf(stdout, "Formula:         %s\n", formula)               //nolint:errcheck
 			fmt.Fprintf(stdout, "Target:          %s\n", target)                //nolint:errcheck
-			fmt.Fprintf(stdout, "Gate:            %s\n", gateMode)              //nolint:errcheck
+			if rig != "" {
+				fmt.Fprintf(stdout, "Rig:             %s\n", rig) //nolint:errcheck
+			}
+			fmt.Fprintf(stdout, "Gate:            %s\n", gateMode) //nolint:errcheck
 			if gateOutcome != "" {
 				fmt.Fprintf(stdout, "Gate Outcome:    %s\n", gateOutcome) //nolint:errcheck
 			}
@@ -195,7 +202,7 @@ func newConvergeApproveCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Approve and close a convergence loop (manual gate)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return convergeSocketCmd(args[0], "approve", nil, stdout, stderr)
+			return convergeSocketCmd(args[0], "approve", stdout, stderr)
 		},
 	}
 }
@@ -206,7 +213,7 @@ func newConvergeIterateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Force next iteration (manual gate)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return convergeSocketCmd(args[0], "iterate", nil, stdout, stderr)
+			return convergeSocketCmd(args[0], "iterate", stdout, stderr)
 		},
 	}
 }
@@ -217,7 +224,7 @@ func newConvergeStopCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Stop a convergence loop",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return convergeSocketCmd(args[0], "stop", nil, stdout, stderr)
+			return convergeSocketCmd(args[0], "stop", stdout, stderr)
 		},
 	}
 }
@@ -232,7 +239,7 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 		Use:   "list",
 		Short: "List convergence loops",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			store, code := openCityStore(stderr, "gc converge list")
+			store, _, code := openConvergeStore(stderr, "gc converge list")
 			if code != 0 {
 				return errExit
 			}
@@ -312,7 +319,7 @@ func newConvergeTestGateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			beadID := args[0]
-			store, code := openCityStore(stderr, "gc converge test-gate")
+			store, rctx, code := openConvergeStore(stderr, "gc converge test-gate")
 			if code != 0 {
 				return errExit
 			}
@@ -345,7 +352,7 @@ func newConvergeTestGateCmd(stdout, stderr io.Writer) *cobra.Command {
 				return nil
 			}
 
-			cityPath, _ := resolveCity()
+			cityPath := rctx.CityPath
 			iter, _ := convergence.DecodeInt(meta[convergence.FieldIteration])
 			maxIter, _ := convergence.DecodeInt(meta[convergence.FieldMaxIterations])
 			env := convergence.ConditionEnv{
@@ -384,13 +391,15 @@ func newConvergeRetryCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Retry a terminated convergence loop",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			cityPath, err := resolveCity()
+			rctx, err := resolveContext()
 			if err != nil {
 				fmt.Fprintf(stderr, "gc converge retry: %v\n", err) //nolint:errcheck
 				return errExit
 			}
 
-			params := map[string]string{}
+			// "rig" routes the retry to the same bead store as the source
+			// loop; the retry loop is created in that store.
+			params := map[string]string{"rig": rctx.RigName}
 			if maxIterations > 0 {
 				params["max_iterations"] = convergence.EncodeInt(maxIterations)
 			}
@@ -401,7 +410,7 @@ func newConvergeRetryCmd(stdout, stderr io.Writer) *cobra.Command {
 				BeadID:  args[0],
 				Params:  params,
 			}
-			reply, err := sendConvergenceRequest(cityPath, req)
+			reply, err := sendConvergenceRequest(rctx.CityPath, req)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc converge retry: %v\n", err) //nolint:errcheck
 				return errExit
@@ -425,9 +434,11 @@ func newConvergeRetryCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 // convergeSocketCmd sends a simple convergence command (approve, iterate, stop)
-// through the controller socket and prints the result.
-func convergeSocketCmd(beadID, command string, params map[string]string, stdout, stderr io.Writer) error {
-	cityPath, err := resolveCity()
+// through the controller socket and prints the result. The resolved --rig
+// context is forwarded as the "rig" parameter so the command targets the
+// rig's bead store rather than always city/HQ.
+func convergeSocketCmd(beadID, command string, stdout, stderr io.Writer) error {
+	rctx, err := resolveContext()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc converge %s: %v\n", command, err) //nolint:errcheck
 		return errExit
@@ -437,9 +448,9 @@ func convergeSocketCmd(beadID, command string, params map[string]string, stdout,
 		Command: command,
 		User:    currentUsername(),
 		BeadID:  beadID,
-		Params:  params,
+		Params:  map[string]string{"rig": rctx.RigName},
 	}
-	reply, err := sendConvergenceRequest(cityPath, req)
+	reply, err := sendConvergenceRequest(rctx.CityPath, req)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc converge %s: %v\n", command, err) //nolint:errcheck
 		return errExit
@@ -454,4 +465,49 @@ func convergeSocketCmd(beadID, command string, params map[string]string, stdout,
 		fmt.Fprintf(stdout, "%s: %s\n", beadID, result.Action) //nolint:errcheck
 	}
 	return nil
+}
+
+// openConvergeStore opens the bead store for a read-side converge
+// subcommand (status, list, test-gate), honoring --rig. With no rig
+// context it opens the city/HQ store; with a rig context it opens that
+// rig's store so rig-scoped convergence loops are visible. It also returns
+// the resolved context for callers that need the city path.
+func openConvergeStore(stderr io.Writer, cmdName string) (beads.Store, resolvedContext, int) {
+	rctx, err := resolveContext()
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck
+		return nil, resolvedContext{}, 1
+	}
+	store, err := openContextStore(rctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck
+		return nil, resolvedContext{}, 1
+	}
+	return store, rctx, 0
+}
+
+// openContextStore opens the bead store for a resolved city+rig context:
+// the city/HQ store when RigName is empty, otherwise the named rig's
+// store. An unbound or unknown rig is an error so that --rig fails loudly
+// rather than silently falling back to city/HQ.
+func openContextStore(rctx resolvedContext) (beads.Store, error) {
+	if rctx.RigName == "" {
+		return openCityStoreAt(rctx.CityPath)
+	}
+	cfg, err := loadCityConfig(rctx.CityPath, io.Discard)
+	if err != nil {
+		return nil, fmt.Errorf("loading city config: %w", err)
+	}
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name != rctx.RigName {
+			continue
+		}
+		if strings.TrimSpace(cfg.Rigs[i].Path) == "" {
+			return nil, fmt.Errorf("rig %q is registered but unbound (no rig path); "+
+				"convergence loops require a bound rig", rctx.RigName)
+		}
+		return openStoreAtForCity(cfg.Rigs[i].Path, rctx.CityPath)
+	}
+	return nil, fmt.Errorf("rig %q not found in city configuration", rctx.RigName)
 }
