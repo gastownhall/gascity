@@ -3252,7 +3252,8 @@ func (s *delayingPoolCreateStore) maxConcurrentSessionCreates() int {
 func TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates(t *testing.T) {
 	const (
 		requestCount = 8
-		createDelay  = 50 * time.Millisecond
+		// Keep scheduler overhead small relative to the half-serial ceiling.
+		createDelay = 100 * time.Millisecond
 	)
 	store := &delayingPoolCreateStore{MemStore: beads.NewMemStore(), delay: createDelay}
 	cityPath := t.TempDir()

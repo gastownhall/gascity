@@ -196,8 +196,15 @@ mechanical.
 ## Agents
 
 Agents move out of inline TOML inventories and into agent directories.
-For the focused `[[agent]]` block split, see
-[Pack v1 → v2 migration](/packv2/migration).
+The focused `[[agent]]` block split follows the same pattern: move the
+identity into `agents/<name>/agent.toml`, move prompt content beside it, and
+validate with `gc doctor`.
+
+> **Advanced details:** The historical step-by-step agent split notes now live
+> in the
+> [PackV2 migration design note](https://github.com/gastownhall/gascity/blob/main/engdocs/design/packv2/migration.mdx#agents).
+> Treat that page as design history; prefer this guide, `gc doctor`, and the
+> generated config reference when they disagree.
 
 ### Old shape
 

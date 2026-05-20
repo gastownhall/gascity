@@ -735,6 +735,61 @@ func TestPrepareStartCandidate_UsesSessionIDForTaskWorkDir(t *testing.T) {
 	}
 }
 
+func TestPrepareStartCandidateReloadsOverridesBeforeWake(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"template":            "worker",
+			"session_name":        "worker",
+			"state":               "asleep",
+			"session_key":         "abc-123",
+			"started_config_hash": "previous-start",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(session.ID, "template_overrides", `{"permission_mode":"plan"}`); err != nil {
+		t.Fatalf("SetMetadata(template_overrides): %v", err)
+	}
+
+	prepared, err := prepareStartCandidate(startCandidate{
+		session: &session,
+		tp: TemplateParams{
+			TemplateName: "worker",
+			SessionName:  "worker",
+			Command:      "codex --ask-for-approval on-request",
+			ResolvedProvider: &config.ResolvedProvider{
+				Name:          "codex",
+				ResumeFlag:    "resume",
+				ResumeStyle:   "subcommand",
+				ResumeCommand: "codex resume {{.SessionKey}} --ask-for-approval on-request",
+				OptionsSchema: []config.ProviderOption{{
+					Key: "permission_mode",
+					Choices: []config.OptionChoice{
+						{Value: "default", FlagArgs: []string{"--ask-for-approval", "on-request"}},
+						{Value: "plan", FlagArgs: []string{"--ask-for-approval", "never"}},
+					},
+				}},
+			},
+		},
+		order: 0,
+	}, &config.City{}, store, &clock.Fake{Time: time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+	if !strings.Contains(prepared.cfg.Command, "--ask-for-approval never") {
+		t.Fatalf("prepared.cfg.Command = %q, want reloaded permission override", prepared.cfg.Command)
+	}
+	want := "codex resume --ask-for-approval never abc-123"
+	if prepared.cfg.Command != want {
+		t.Fatalf("prepared.cfg.Command = %q, want %q", prepared.cfg.Command, want)
+	}
+}
+
 func TestExecutePlannedStarts_FreshWakeAfterDrainRetainsStartupContext(t *testing.T) {
 	skipSlowCmdGCTest(t, "waits through stale session-key detection; run make test-cmd-gc-process for full coverage")
 	sp := runtime.NewFake()
@@ -886,17 +941,16 @@ func TestPrepareStartCandidate_GeneratesMissingSessionKeyBeforeWake(t *testing.T
 		t.Fatalf("prepareStartCandidate: %v", err)
 	}
 
-	sessionKey := session.Metadata["session_key"]
+	stored, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	sessionKey := stored.Metadata["session_key"]
 	if sessionKey == "" {
 		t.Fatal("session_key should be generated before wake")
 	}
 	if !strings.Contains(prepared.cfg.Command, "--session-id "+sessionKey) {
 		t.Fatalf("prepared.cfg.Command = %q, want --session-id %s", prepared.cfg.Command, sessionKey)
-	}
-
-	stored, err := store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("store.Get: %v", err)
 	}
 	if stored.Metadata["session_key"] != sessionKey {
 		t.Fatalf("stored session_key = %q, want %q", stored.Metadata["session_key"], sessionKey)
@@ -5738,25 +5792,29 @@ func TestPrepareStartCandidate_PreservesRuntimeConfigAndProviderEnv(t *testing.T
 		t.Fatalf("prepareStartCandidate: %v", err)
 	}
 
-	generation, err := strconv.Atoi(bead.Metadata["generation"])
+	stored, err := store.Get(bead.ID)
 	if err != nil {
-		t.Fatalf("generation metadata = %q: %v", bead.Metadata["generation"], err)
+		t.Fatalf("store.Get: %v", err)
 	}
-	continuationEpoch, err := strconv.Atoi(bead.Metadata["continuation_epoch"])
+	generation, err := strconv.Atoi(stored.Metadata["generation"])
 	if err != nil {
-		t.Fatalf("continuation_epoch metadata = %q: %v", bead.Metadata["continuation_epoch"], err)
+		t.Fatalf("generation metadata = %q: %v", stored.Metadata["generation"], err)
+	}
+	continuationEpoch, err := strconv.Atoi(stored.Metadata["continuation_epoch"])
+	if err != nil {
+		t.Fatalf("continuation_epoch metadata = %q: %v", stored.Metadata["continuation_epoch"], err)
 	}
 
 	expected := templateParamsToConfig(tp)
 	expected.Env = mergeEnv(expected.Env, sessionpkg.RuntimeEnvWithSessionContext(
-		bead.ID,
+		stored.ID,
 		tp.SessionName,
 		tp.Alias,
-		bead.Metadata["template"],
-		bead.Metadata["session_origin"],
+		stored.Metadata["template"],
+		stored.Metadata["session_origin"],
 		generation,
 		continuationEpoch,
-		bead.Metadata["instance_token"],
+		stored.Metadata["instance_token"],
 	))
 	expected.Env = mergeEnv(expected.Env, map[string]string{"GC_PROVIDER": "gemini"})
 	expected = runtime.SyncWorkDirEnv(expected)
@@ -6015,9 +6073,11 @@ func TestCommitStartResult_TransitionsCreatingToActive(t *testing.T) {
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
-			"template":     "worker",
-			"session_name": "worker-1",
-			"state":        "creating",
+			"template":            "worker",
+			"session_name":        "worker-1",
+			"state":               "creating",
+			"template_overrides":  `{"effort":"high","permission_mode":"plan"}`,
+			"opt_permission_mode": "plan",
 		},
 	})
 	if err != nil {
@@ -6054,6 +6114,19 @@ func TestCommitStartResult_TransitionsCreatingToActive(t *testing.T) {
 	}
 	if got.Metadata["started_config_hash"] != "core-abc" {
 		t.Errorf("started_config_hash = %q, want %q", got.Metadata["started_config_hash"], "core-abc")
+	}
+	var overrides map[string]string
+	if err := json.Unmarshal([]byte(got.Metadata["template_overrides"]), &overrides); err != nil {
+		t.Fatalf("unmarshal template_overrides: %v", err)
+	}
+	if overrides["permission_mode"] != "plan" {
+		t.Fatalf("permission_mode override = %q, want plan", overrides["permission_mode"])
+	}
+	if overrides["effort"] != "high" {
+		t.Fatalf("effort override = %q, want high", overrides["effort"])
+	}
+	if got.Metadata["opt_permission_mode"] != "plan" {
+		t.Fatalf("opt_permission_mode = %q, want plan", got.Metadata["opt_permission_mode"])
 	}
 }
 

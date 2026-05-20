@@ -9,6 +9,7 @@ package session
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -135,6 +137,7 @@ type Manager struct {
 	sp                runtime.Provider
 	cityPath          string
 	transportResolver func(template, provider string) transportResolution
+	clk               clock.Clock
 }
 
 // PruneResult reports which sessions were pruned and which queued wait nudges
@@ -220,6 +223,13 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 		return
 	}
 	_ = m.store.SetMetadata(id, "transport", transport)
+}
+
+func (m *Manager) now() time.Time {
+	if m != nil && m.clk != nil {
+		return m.clk.Now()
+	}
+	return time.Now()
 }
 
 func (m *Manager) routeACPIfNeeded(provider, transport, sessName string) func() {
@@ -1113,6 +1123,94 @@ func (m *Manager) UpdatePresentation(id string, title *string, alias *string) er
 		}
 		return m.store.Update(id, update)
 	})
+}
+
+// UpdateTemplateOverrides merges option overrides into the session metadata.
+func (m *Manager) UpdateTemplateOverrides(id string, updates map[string]string) (map[string]string, error) {
+	var merged map[string]string
+	err := withSessionMutationLock(id, func() error {
+		b, sessName, err := m.loadSessionBead(id, true)
+		if err != nil {
+			return err
+		}
+		state := State(b.Metadata["state"])
+		if IsTemplateOverrideRuntimeActive(state) || templateOverrideWakeInFlight(b.Metadata, state, m.now()) || (strings.TrimSpace(sessName) != "" && m.sp != nil && m.sp.IsRunning(sessName)) {
+			return fmt.Errorf("%w: template overrides apply only before the next launch", ErrSessionActive)
+		}
+		overrides, err := ParseTemplateOverrides(b.Metadata)
+		if err != nil {
+			log.Printf("session %s: repairing malformed template_overrides: %v", id, err)
+			overrides = nil
+		}
+		if overrides == nil {
+			overrides = make(map[string]string, len(updates))
+		}
+		for key, value := range updates {
+			overrides[key] = value
+		}
+		raw, err := json.Marshal(overrides)
+		if err != nil {
+			return fmt.Errorf("marshal template_overrides: %w", err)
+		}
+		metadata := map[string]string{"template_overrides": string(raw)}
+		for key, value := range updates {
+			if key == "initial_message" {
+				continue
+			}
+			metadata["opt_"+key] = value
+		}
+		if err := m.store.SetMetadataBatch(id, metadata); err != nil {
+			return err
+		}
+		merged = make(map[string]string, len(overrides))
+		for key, value := range overrides {
+			merged[key] = value
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return merged, nil
+}
+
+// IsTemplateOverrideRuntimeActive reports whether a session state is too live
+// for template override changes that only apply on the next launch.
+func IsTemplateOverrideRuntimeActive(state State) bool {
+	switch state {
+	case StateActive, StateAwake, StateCreating, StateDraining, StateQuarantined:
+		return true
+	default:
+		return false
+	}
+}
+
+func templateOverrideWakeInFlightGrace() time.Duration {
+	return time.Minute + staleKeyDetectDelay + 5*time.Second
+}
+
+func templateOverrideWakeInFlight(metadata map[string]string, state State, now time.Time) bool {
+	if metadata == nil {
+		return false
+	}
+	switch state {
+	case StateFailedCreate, StateDrained, StateArchived:
+		return false
+	}
+	if strings.TrimSpace(metadata["pending_create_claim"]) == "true" {
+		return true
+	}
+	lastWoke := strings.TrimSpace(metadata["last_woke_at"])
+	if lastWoke == "" {
+		return false
+	}
+	started, err := time.Parse(time.RFC3339, lastWoke)
+	if err != nil {
+		return false
+	}
+	// PreWakePatch records last_woke_at before the reconciler can observe
+	// runtime liveness; keep overrides locked out through that startup window.
+	return now.UTC().Before(started.UTC().Add(templateOverrideWakeInFlightGrace()))
 }
 
 // Prune closes suspended sessions whose suspension time is before the given

@@ -1202,11 +1202,10 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 //
 // stderr receives projection errors (use io.Discard to ignore).
 //
-// sessionKind mirrors the real_world_app_session_kind bead metadata: "provider" means
-// the session was created from a bare provider name (not an agent template),
-// so the agent-template lookup should be skipped. This matches the guard in
-// the API handler (handler_session_chat.go).
-func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, sessionKind string, stderr io.Writer) (string, runtime.Config) {
+// sessionKind is the persisted session kind when available. A provider session
+// was created from a bare provider name, so agent-template lookup must be
+// skipped to avoid agent/provider name collisions.
+func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, sessionKind string, metadata map[string]string, stderr io.Writer) (string, runtime.Config) {
 	cmd := session.BuildResumeCommand(info)
 	if cfg == nil {
 		return cmd, runtime.Config{WorkDir: info.WorkDir}
@@ -1220,8 +1219,25 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 		// Build command with default args and settings, matching the
 		// reconciler's template_resolve.go command construction.
 		command := resolved.CommandString()
-		if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
-			command = command + " " + shellquote.Join(defaultArgs)
+		resumeCommand := resolved.ResumeCommand
+		appendDefaultArgs := func() {
+			if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
+				command = command + " " + shellquote.Join(defaultArgs)
+			}
+		}
+		if overrides, err := session.ParseTemplateOverrides(metadata); err == nil {
+			transport := strings.TrimSpace(info.Transport)
+			launchCommand, err := config.BuildProviderLaunchCommand(cityPath, resolved, overrides, transport)
+			if err == nil && strings.TrimSpace(launchCommand.Command) != "" {
+				command = launchCommand.Command
+			} else {
+				appendDefaultArgs()
+			}
+			if command, err := config.BuildProviderResumeCommand(resolved, overrides); err == nil && strings.TrimSpace(command) != "" {
+				resumeCommand = command
+			}
+		} else {
+			appendDefaultArgs()
 		}
 		// buildResumeCommand is best-effort: log projection failures and
 		// continue so `gc session attach` still starts the agent. The strict
@@ -1229,7 +1245,7 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 		// creation on projection errors.
 		providerFamily := resolvedProviderLaunchFamily(resolved)
 		sa, saErr := ensureClaudeSettingsArgs(fsys.OSFS{}, cityPath, providerFamily, stderr)
-		if saErr == nil && sa != "" {
+		if saErr == nil && sa != "" && !storedCommandHasSettingsArg(command) {
 			command = command + " " + sa
 		} else if saErr != nil {
 			// Projection failed this tick. Fall back to the last-known-good
@@ -1248,7 +1264,7 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 		resolvedInfo.Provider = resolved.Name
 		resolvedInfo.ResumeFlag = resolved.ResumeFlag
 		resolvedInfo.ResumeStyle = resolved.ResumeStyle
-		resolvedInfo.ResumeCommand = resolved.ResumeCommand
+		resolvedInfo.ResumeCommand = resumeCommand
 		return session.BuildResumeCommand(resolvedInfo), runtime.Config{
 			WorkDir:                info.WorkDir,
 			ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
@@ -1260,21 +1276,29 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 		}
 	}
 
-	// Check persisted kind to avoid agent/provider name collisions.
-	// If kind is "provider", skip the agent template lookup entirely.
-	if sessionKind != "provider" {
-		// Prefer the current resolved agent template/provider config over stale
-		// stored command text so submit/restart paths honor provider overrides.
-		if found, ok := resolveAgentIdentity(cfg, info.Template, ""); ok {
+	// Prefer the current resolved agent template/provider config over stale
+	// stored command text so submit/restart paths honor provider overrides.
+	// Use the same collision guard as the runtime resolver so provider-track
+	// sessions do not accidentally resolve through an agent with the same name.
+	found, foundAgent := resolveAgentIdentity(cfg, info.Template, "")
+	if session.UseAgentTemplateForProviderResolution(sessionKind, metadata, info.Provider, found.Provider, foundAgent) {
+		if foundAgent {
 			if resolved, err := config.ResolveProvider(&found, &cfg.Workspace, cfg.Providers, exec.LookPath); err == nil {
 				return buildResolved(resolved)
 			}
 		}
 	}
 
-	// Fallback for provider-only sessions whose Template is a provider name.
-	if resolved, err := config.ResolveProvider(&config.Agent{Provider: info.Template}, &cfg.Workspace, cfg.Providers, exec.LookPath); err == nil {
-		return buildResolved(resolved)
+	// Fallback for provider-only sessions. Prefer the persisted provider so
+	// resumed sessions use the same schema-backed provider selected at create.
+	for _, providerName := range []string{info.Provider, info.Template} {
+		providerName = strings.TrimSpace(providerName)
+		if providerName == "" {
+			continue
+		}
+		if resolved, err := config.ResolveProvider(&config.Agent{Provider: providerName}, &cfg.Workspace, cfg.Providers, exec.LookPath); err == nil {
+			return buildResolved(resolved)
+		}
 	}
 
 	return cmd, runtime.Config{WorkDir: info.WorkDir}

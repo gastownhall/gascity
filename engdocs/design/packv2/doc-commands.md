@@ -4,9 +4,9 @@
 > authority for the shipped command or doctor surface.
 >
 > **Durable truth lives in:**
-> - `docs/packv2/doc-directory-conventions.md`
-> - `docs/packv2/skew-analysis.md`
-> - `docs/packv2/doc-conformance-matrix.md`
+> - `engdocs/design/packv2/doc-directory-conventions.md`
+> - `engdocs/design/packv2/skew-analysis.md`
+> - `engdocs/design/packv2/doc-conformance-matrix.md`
 > - `docs/guides/migrating-to-pack-vnext.md`
 
 **GitHub Issue:** TBD

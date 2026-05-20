@@ -9,7 +9,7 @@ const (
 	ansiBoldRed            = "\x1b[1;31m"
 	ansiReset              = "\x1b[0m"
 	docsBaseURL            = "https://docs.gascityhall.com/"
-	legacyMigrationDocPath = "docs/packv2/migration.mdx"
+	migrationGuideRepoPath = "docs/guides/migrating-to-pack-vnext.md"
 )
 
 // FormatFatalLine formats a plain fatal marker line for non-TTY output.
@@ -27,7 +27,7 @@ func FormatFatalMessage(message string) string {
 		return message
 	}
 	if url := FatalSeeURL(message); url != "" {
-		message = strings.TrimSpace(strings.ReplaceAll(message, legacyMigrationDocPath, ""))
+		message = strings.TrimSpace(strings.ReplaceAll(message, migrationGuideRepoPath, ""))
 		message = strings.TrimSpace(strings.TrimSuffix(message, "see:"))
 		return message + " see: " + url
 	}

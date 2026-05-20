@@ -287,7 +287,7 @@
         },
         "fallback": {
           "type": "boolean",
-          "description": "Fallback marks this agent as a fallback definition. During pack\ncomposition, a non-fallback agent with the same name wins silently.\nWhen two fallbacks collide, the first loaded (depth-first) wins.\nSee docs/packv2/migration.mdx for migration guidance."
+          "description": "Fallback marks this agent as a fallback definition. During pack\ncomposition, a non-fallback agent with the same name wins silently.\nWhen two fallbacks collide, the first loaded (depth-first) wins.\nSee docs/guides/migrating-to-pack-vnext.md for migration guidance."
         },
         "depends_on": {
           "items": {

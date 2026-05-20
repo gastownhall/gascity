@@ -344,7 +344,7 @@ set_hash() {
 case "$query" in
   *"SELECT COUNT(*) FROM dolt_remotes WHERE name = 'origin'"*)
     case "$mode" in
-      remote_success|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|multiple_remotes_with_origin)
+      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|multiple_remotes_with_origin)
         print_cell 1
         ;;
       *)
@@ -366,7 +366,7 @@ case "$query" in
     ;;
   *"SELECT COUNT(*) FROM dolt_remotes"*)
     case "$mode" in
-      remote_success|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure)
+      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure)
         print_cell 1
         ;;
       multiple_remotes_with_origin|multiple_remotes_no_origin)
@@ -383,7 +383,7 @@ case "$query" in
     ;;
   *"SELECT name FROM dolt_remotes ORDER BY name LIMIT 1"*)
     case "$mode" in
-      remote_success|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|multiple_remotes_with_origin)
+      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|multiple_remotes_with_origin)
         print_cell origin
         ;;
       explicit_backup_remote)
@@ -418,6 +418,16 @@ case "$query" in
   *"DOLT_FETCH('backup')"*)
     exit 0
     ;;
+  *"SELECT active_branch()"*)
+    if [ "$mode" = "remote_active_branch" ]; then
+      print_cell gascity-3
+    elif [ "$mode" = "remote_invalid_active_branch" ]; then
+      print_cell --force
+    else
+      print_cell main
+    fi
+    exit 0
+    ;;
   *"SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/origin/main'"*)
     if [ "$mode" = "remote_advances_before_push" ]; then
       calls_file="$state_file.remote-head-calls"
@@ -439,6 +449,14 @@ case "$query" in
     else
       print_cell headcommit
     fi
+    exit 0
+    ;;
+  *"SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/origin/gascity-3'"*)
+    print_cell headcommit
+    exit 0
+    ;;
+  *"SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/origin/trunk'"*)
+    print_cell headcommit
     exit 0
     ;;
   *"SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/backup/main'"*)
@@ -610,6 +628,19 @@ case "$query" in
     fi
     exit 0
     ;;
+  *"DOLT_PUSH('--force', '--set-upstream', 'origin', 'gascity-3')"*)
+    exit 0
+    ;;
+  *"DOLT_PUSH('--force', '--set-upstream', 'origin', 'gascity-3:trunk')"*)
+    exit 0
+    ;;
+  *"DOLT_PUSH('--force', '--set-upstream', 'origin', 'main:gascity-3')"*)
+    if [ "$mode" = "remote_push_failure" ] || [ "$mode" = "remote_empty_head_push_failure" ]; then
+      printf 'push unavailable\n' >&2
+      exit 53
+    fi
+    exit 0
+    ;;
   *"DOLT_PUSH('--force', '--set-upstream', 'backup', 'main')"*)
     exit 0
     ;;
@@ -702,6 +733,119 @@ func TestCompactScriptRefetchesAndForcePushesRemote(t *testing.T) {
 	}
 	if strings.Count(log, "CALL DOLT_FETCH('origin')") < 2 {
 		t.Fatalf("compact should re-fetch immediately before remote push:\n%s", log)
+	}
+}
+
+func TestCompactScriptPushesActiveBranchToRemote(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "remote_active_branch", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("compact failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "remote=origin pushed compacted gascity-3") {
+		t.Fatalf("output missing active-branch remote push success:\n%s", out)
+	}
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(data)
+	for _, want := range []string{
+		"SELECT active_branch()",
+		"SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/origin/gascity-3'",
+		"CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'gascity-3')",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("dolt log missing %q:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main')") {
+		t.Fatalf("compact must not hardcode main for non-main active branch:\n%s", log)
+	}
+}
+
+func TestCompactScriptUsesRefspecEnvOverrideForRemoteBranch(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "remote_active_branch",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_REFSPEC_BEADS=gascity-3:trunk",
+	)
+	if err != nil {
+		t.Fatalf("compact failed with refspec override: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "remote=origin pushed compacted trunk") {
+		t.Fatalf("output missing refspec remote push success:\n%s", out)
+	}
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(data)
+	for _, want := range []string{
+		"SELECT active_branch()",
+		"SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/origin/trunk'",
+		"CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'gascity-3:trunk')",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("dolt log missing %q:\n%s", want, log)
+		}
+	}
+}
+
+func TestCompactScriptRejectsRefspecEnvOverrideForDifferentActiveBranch(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "remote_active_branch",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_REFSPEC_BEADS=main:trunk",
+	)
+	if err == nil {
+		t.Fatalf("compact succeeded with mismatched refspec local branch:\n%s", out)
+	}
+	if !strings.Contains(out, "refspec override local branch=main does not match active branch=gascity-3") {
+		t.Fatalf("output missing mismatched refspec error:\n%s", out)
+	}
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(data)
+	for _, forbidden := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_PUSH"} {
+		if strings.Contains(log, forbidden) {
+			t.Fatalf("mismatched refspec must block compact before %s:\n%s", forbidden, log)
+		}
+	}
+}
+
+func TestCompactScriptRefspecOptionShapedOverrideFails(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "remote_success",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_REFSPEC_BEADS=--force",
+	)
+	if err == nil {
+		t.Fatalf("compact succeeded with option-shaped refspec override:\n%s", out)
+	}
+	if !strings.Contains(out, "invalid refspec override") {
+		t.Fatalf("output missing invalid refspec override error:\n%s", out)
+	}
+}
+
+func TestCompactScriptWarnsWhenActiveBranchFallbacksToMain(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "remote_invalid_active_branch", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("compact failed after active-branch fallback: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "WARN: active branch unresolved; falling back to main") {
+		t.Fatalf("output missing active-branch fallback warning:\n%s", out)
+	}
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(data)
+	if !strings.Contains(log, "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main')") {
+		t.Fatalf("fallback should push main after warning:\n%s", log)
 	}
 }
 
@@ -947,6 +1091,45 @@ func TestCompactScriptRetriesPendingPushWhenRemoteHeadBecomesLocalLogAncestor(t 
 	}
 	if _, err := os.Stat(pendingPush); !os.IsNotExist(err) {
 		t.Fatalf("successful self-healed retry should clear marker, stat err=%v", err)
+	}
+}
+
+func TestCompactScriptRetriesPendingPushWithRefspecRemoteBranch(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "remote_push_failure",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		"GC_DOLT_REFSPEC_BEADS=main:gascity-3",
+	)
+	if err != nil {
+		t.Fatalf("initial compact should leave refspec remote push pending: %v\n%s", err, firstOut)
+	}
+	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
+	marker, err := os.ReadFile(pendingPush)
+	if err != nil {
+		t.Fatalf("initial compact should write pending-push marker: %v", err)
+	}
+	if !strings.Contains(string(marker), "local_branch=main") ||
+		!strings.Contains(string(marker), "remote_branch=gascity-3") {
+		t.Fatalf("pending-push marker should preserve refspec branches:\n%s", marker)
+	}
+
+	secondOut, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("pending-push retry should use marker refspec: %v\n%s", err, secondOut)
+	}
+	if !strings.Contains(secondOut, "pending_push=present") ||
+		!strings.Contains(secondOut, "pushed compacted gascity-3") {
+		t.Fatalf("retry missing refspec remote push explanation:\n%s", secondOut)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if !strings.Contains(string(logData), "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main:gascity-3')") {
+		t.Fatalf("pending-push retry should push stored refspec:\n%s", logData)
+	}
+	if _, err := os.Stat(pendingPush); !os.IsNotExist(err) {
+		t.Fatalf("successful refspec retry should clear marker, stat err=%v", err)
 	}
 }
 
