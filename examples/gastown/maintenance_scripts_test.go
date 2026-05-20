@@ -7180,3 +7180,320 @@ exit 0
 		t.Fatalf("cross-rig-deps summary missing or wrong (subshell counter regression?)\nwant substring: %q\ngot output:\n%s\nbd log:\n%s", want, out, logData)
 	}
 }
+
+// strandedBeadSweepGCStub is a `gc` stub that:
+//   - logs every invocation to $GC_CALL_LOG;
+//   - serves a one-rig topology (rig=project, prefix=ga);
+//   - serves bd list responses driven by env vars
+//     (GC_TEST_CANDIDATES_JSON, GC_TEST_DIGEST_JSON);
+//   - records mail sends to $GC_MAIL_LOG.
+//
+// Sweep candidate queries carry --unassigned; digest still-stranded
+// queries carry --label= without --unassigned. We dispatch on those.
+const strandedBeadSweepGCStub = `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      cat <<'JSON'
+{"rigs":[{"name":"project","prefix":"ga","hq":false,"beads":"initialized","suspended":false}]}
+JSON
+      exit 0
+    fi
+    ;;
+  bd)
+    case "$2" in
+      --rig|-C) shift 2 ;;
+    esac
+    case "$2" in
+      list)
+        case "$*" in
+          *"--unassigned"*)
+            printf '%s\n' "${GC_TEST_CANDIDATES_JSON:-[]}"
+            ;;
+          *"--label="*)
+            printf '%s\n' "${GC_TEST_DIGEST_JSON:-[]}"
+            ;;
+          *)
+            printf '[]\n'
+            ;;
+        esac
+        exit 0
+        ;;
+      update)
+        exit 0
+        ;;
+    esac
+    ;;
+  mail)
+    if [ "$2" = "send" ]; then
+      printf '%s\n' "$*" >> "$GC_MAIL_LOG"
+      exit 0
+    fi
+    ;;
+esac
+exit 0
+`
+
+// runStrandedBeadSweep wires up the test environment and invokes the
+// stranded-bead-sweep.py script via python3 (bypassing the uv-run
+// shebang so tests don't require uv on PATH). Optional flags is the
+// "--dry-run" toggle.
+func runStrandedBeadSweep(
+	t *testing.T,
+	overrides map[string]string,
+	candidatesJSON, digestJSON string,
+	flags ...string,
+) (stdout []byte, gcCalls, mailLog string) {
+	t.Helper()
+
+	python3, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLogPath := filepath.Join(t.TempDir(), "mail.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), strandedBeadSweepGCStub)
+
+	env := map[string]string{
+		"GC_CALL_LOG":             gcLog,
+		"GC_MAIL_LOG":             mailLogPath,
+		"GC_PACK_STATE_DIR":       stateDir,
+		"GC_TEST_CANDIDATES_JSON": candidatesJSON,
+		"GC_TEST_DIGEST_JSON":     digestJSON,
+		"PATH":                    binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+	for k, v := range overrides {
+		env[k] = v
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "stranded-bead-sweep.py")
+	args := append([]string{script}, flags...)
+	cmd := exec.Command(python3, args...)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stranded-bead-sweep.py failed: %v\n%s", err, out)
+	}
+	gcData, _ := os.ReadFile(gcLog)
+	mailData, _ := os.ReadFile(mailLogPath)
+	return out, string(gcData), string(mailData)
+}
+
+func TestStrandedBeadSweepLabelsCandidates(t *testing.T) {
+	candidates := `[
+		{"id":"ga-stranded","issue_type":"task","status":"open","title":"unrouted","updated_at":"2026-05-01T00:00:00Z","priority":2,"metadata":{}},
+		{"id":"ga-routed","issue_type":"task","status":"open","title":"already routed","updated_at":"2026-05-01T00:00:00Z","metadata":{"gc.routed_to":"project/worker"}},
+		{"id":"ga-assigned","issue_type":"task","status":"open","title":"already assigned","updated_at":"2026-05-01T00:00:00Z","assignee":"alice","metadata":{}},
+		{"id":"ga-message","issue_type":"message","status":"open","title":"non-work-type","updated_at":"2026-05-01T00:00:00Z","metadata":{}},
+		{"id":"za-wrong-rig","issue_type":"task","status":"open","title":"wrong-rig","updated_at":"2026-05-01T00:00:00Z","metadata":{}}
+	]`
+
+	out, gcCalls, mailLog := runStrandedBeadSweep(t, nil, candidates, "[]")
+
+	if !strings.Contains(gcCalls, "bd --rig project update ga-stranded --add-label needs:human") {
+		t.Fatalf("expected ga-stranded to be labeled needs:human; gc calls:\n%s", gcCalls)
+	}
+	for _, skip := range []string{"ga-routed", "ga-assigned", "ga-message", "za-wrong-rig"} {
+		if strings.Contains(gcCalls, "bd --rig project update "+skip) {
+			t.Fatalf("expected %s to be skipped; gc calls:\n%s", skip, gcCalls)
+		}
+	}
+	if mailLog != "" {
+		t.Fatalf("did not expect digest mail (state file missing means first run advances quietly); mail log:\n%s", mailLog)
+	}
+	if !strings.Contains(string(out), "labeled 1") {
+		t.Fatalf("expected summary 'labeled 1'; got:\n%s", out)
+	}
+}
+
+func TestStrandedBeadSweepDryRunSkipsWrites(t *testing.T) {
+	candidates := `[
+		{"id":"ga-stranded","issue_type":"task","status":"open","title":"unrouted","updated_at":"2026-05-01T00:00:00Z","metadata":{}}
+	]`
+	digest := `[
+		{"id":"ga-stranded","issue_type":"task","status":"open","title":"unrouted","updated_at":"2026-05-01T00:00:00Z","priority":2,"metadata":{}}
+	]`
+
+	out, gcCalls, mailLog := runStrandedBeadSweep(t, nil, candidates, digest, "--dry-run")
+
+	if strings.Contains(gcCalls, " update ga-stranded ") {
+		t.Fatalf("dry-run should not call bd update; gc calls:\n%s", gcCalls)
+	}
+	if mailLog != "" {
+		t.Fatalf("dry-run should not send mail; mail log:\n%s", mailLog)
+	}
+	if !strings.Contains(string(out), "would label ga-stranded") {
+		t.Fatalf("expected dry-run preview line; got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "would send digest") {
+		t.Fatalf("expected dry-run digest preview; got:\n%s", out)
+	}
+}
+
+func TestStrandedBeadSweepCustomSurfaceLabel(t *testing.T) {
+	candidates := `[
+		{"id":"ga-stranded","issue_type":"task","status":"open","title":"unrouted","updated_at":"2026-05-01T00:00:00Z","metadata":{}}
+	]`
+
+	_, gcCalls, _ := runStrandedBeadSweep(t,
+		map[string]string{"GC_STRANDED_SURFACE_LABEL": "needs:operator"},
+		candidates, "[]")
+
+	if !strings.Contains(gcCalls, "update ga-stranded --add-label needs:operator") {
+		t.Fatalf("expected custom surface label needs:operator; gc calls:\n%s", gcCalls)
+	}
+	// The candidate-query exclude-label filter must include the configured
+	// surface label so already-labeled beads stay exempt across runs.
+	if !strings.Contains(gcCalls, "--exclude-label=needs:operator,skip:auto-route") {
+		t.Fatalf("expected exclude-label to lead with needs:operator; gc calls:\n%s", gcCalls)
+	}
+}
+
+func TestStrandedBeadSweepCustomExemptLabels(t *testing.T) {
+	candidates := `[
+		{"id":"ga-stranded","issue_type":"task","status":"open","title":"unrouted","updated_at":"2026-05-01T00:00:00Z","metadata":{}}
+	]`
+
+	_, gcCalls, _ := runStrandedBeadSweep(t,
+		map[string]string{"GC_STRANDED_EXEMPT_LABELS": "foo,bar"},
+		candidates, "[]")
+
+	if !strings.Contains(gcCalls, "--exclude-label=needs:human,foo,bar") {
+		t.Fatalf("expected configured exempt labels appended after surface; gc calls:\n%s", gcCalls)
+	}
+}
+
+func TestStrandedBeadSweepDigestSilentWithRecentState(t *testing.T) {
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	maintStateDir := filepath.Join(stateDir, "maintenance")
+	if err := os.MkdirAll(maintStateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(maintStateDir, "stranded-bead-digest-last")
+	recent := time.Now().UTC().Add(-1 * time.Hour).Format("2006-01-02T15:04:05Z")
+	if err := os.WriteFile(statePath, []byte(recent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "mail.log")
+	writeExecutable(t, filepath.Join(binDir, "gc"), strandedBeadSweepGCStub)
+
+	digest := `[
+		{"id":"ga-stranded","issue_type":"task","status":"open","title":"unrouted","updated_at":"2026-05-01T00:00:00Z","priority":2,"metadata":{}}
+	]`
+
+	python3, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	env := map[string]string{
+		"GC_CALL_LOG":             gcLog,
+		"GC_MAIL_LOG":             mailLog,
+		"GC_PACK_STATE_DIR":       maintStateDir,
+		"GC_TEST_CANDIDATES_JSON": "[]",
+		"GC_TEST_DIGEST_JSON":     digest,
+		"PATH":                    binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "stranded-bead-sweep.py")
+	cmd := exec.Command(python3, script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stranded-bead-sweep.py failed: %v\n%s", err, out)
+	}
+	mailData, _ := os.ReadFile(mailLog)
+	if len(mailData) != 0 {
+		t.Fatalf("digest mail sent within interval; mail log:\n%s", mailData)
+	}
+	// State file should be unchanged (not advanced) when interval hasn't elapsed.
+	stateBytes, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("ReadFile(state): %v", err)
+	}
+	if got := strings.TrimSpace(string(stateBytes)); got != recent {
+		t.Fatalf("state file should be unchanged within interval; got %q want %q", got, recent)
+	}
+}
+
+func TestStrandedBeadSweepDigestSendsWhenDue(t *testing.T) {
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "mail.log")
+	writeExecutable(t, filepath.Join(binDir, "gc"), strandedBeadSweepGCStub)
+
+	digest := `[
+		{"id":"ga-stranded","issue_type":"task","status":"open","title":"unrouted","updated_at":"2026-05-01T00:00:00Z","priority":2,"metadata":{}}
+	]`
+
+	python3, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	env := map[string]string{
+		"GC_CALL_LOG":             gcLog,
+		"GC_MAIL_LOG":             mailLog,
+		"GC_PACK_STATE_DIR":       stateDir,
+		"GC_TEST_CANDIDATES_JSON": "[]",
+		"GC_TEST_DIGEST_JSON":     digest,
+		"PATH":                    binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "stranded-bead-sweep.py")
+	cmd := exec.Command(python3, script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stranded-bead-sweep.py failed: %v\n%s", err, out)
+	}
+	mailData, _ := os.ReadFile(mailLog)
+	if !strings.Contains(string(mailData), "send mayor") {
+		t.Fatalf("digest mail should go to mayor; mail log:\n%s\nstdout:\n%s", mailData, out)
+	}
+	if !strings.Contains(string(mailData), "Weekly stranded-bead digest") {
+		t.Fatalf("digest mail subject missing; mail log:\n%s", mailData)
+	}
+	// State file should now exist.
+	statePath := filepath.Join(stateDir, "stranded-bead-digest-last")
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("state file not advanced after digest send: %v", err)
+	}
+}
+
+func TestStrandedBeadSweepDigestRecipientConfigurable(t *testing.T) {
+	digest := `[
+		{"id":"ga-stranded","issue_type":"task","status":"open","title":"unrouted","updated_at":"2026-05-01T00:00:00Z","priority":2,"metadata":{}}
+	]`
+
+	_, _, mailLog := runStrandedBeadSweep(t,
+		map[string]string{"GC_STRANDED_DIGEST_TO": "watcher"},
+		"[]", digest)
+
+	if !strings.Contains(mailLog, "send watcher") {
+		t.Fatalf("digest should target configured recipient; mail log:\n%s", mailLog)
+	}
+}
+
+func TestStrandedBeadSweepSilentAdvanceWhenNoStranded(t *testing.T) {
+	stateDir := t.TempDir()
+	_, gcCalls, mailLog := runStrandedBeadSweep(t,
+		map[string]string{"GC_PACK_STATE_DIR": stateDir},
+		"[]", "[]")
+
+	if mailLog != "" {
+		t.Fatalf("should not send mail when no stranded beads; mail log:\n%s", mailLog)
+	}
+	if strings.Contains(gcCalls, "mail send") {
+		t.Fatalf("should not call mail send when no stranded beads; gc calls:\n%s", gcCalls)
+	}
+	// State file is advanced silently so the next due window stays an
+	// interval away rather than firing on every tick.
+	statePath := filepath.Join(stateDir, "stranded-bead-digest-last")
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("state file should be advanced silently when nothing to send: %v", err)
+	}
+}
