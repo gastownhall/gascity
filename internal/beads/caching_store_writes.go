@@ -291,9 +291,153 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 	return nil
 }
 
-// Tx executes fn sequentially against the CachingStore.
-func (c *CachingStore) Tx(_ string, fn func(Tx) error) error {
-	return runSequentialTx(c, fn)
+// Tx executes fn through the backing store transaction and refreshes touched
+// cache entries after a successful commit.
+func (c *CachingStore) Tx(commitMsg string, fn func(Tx) error) error {
+	if fn == nil {
+		return errors.New("beads tx: nil callback")
+	}
+	tx := newCachingStoreTx()
+	if err := c.backing.Tx(commitMsg, func(backingTx Tx) error {
+		tx.backing = backingTx
+		return fn(tx)
+	}); err != nil {
+		return err
+	}
+	c.refreshTxTouchedBeads(tx.ids, tx.closed)
+	return nil
+}
+
+type cachingStoreTx struct {
+	backing Tx
+	seen    map[string]struct{}
+	closed  map[string]struct{}
+	ids     []string
+}
+
+func newCachingStoreTx() *cachingStoreTx {
+	return &cachingStoreTx{
+		seen:   make(map[string]struct{}),
+		closed: make(map[string]struct{}),
+	}
+}
+
+func (tx *cachingStoreTx) Update(id string, opts UpdateOpts) error {
+	if err := tx.backing.Update(id, opts); err != nil {
+		return err
+	}
+	tx.touch(id)
+	return nil
+}
+
+func (tx *cachingStoreTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	if len(kvs) == 0 {
+		return nil
+	}
+	if err := tx.backing.SetMetadataBatch(id, kvs); err != nil {
+		return err
+	}
+	tx.touch(id)
+	return nil
+}
+
+func (tx *cachingStoreTx) Close(id string) error {
+	if err := tx.backing.Close(id); err != nil {
+		return err
+	}
+	tx.touch(id)
+	tx.closed[id] = struct{}{}
+	return nil
+}
+
+func (tx *cachingStoreTx) touch(id string) {
+	if id == "" {
+		return
+	}
+	if _, ok := tx.seen[id]; ok {
+		return
+	}
+	tx.seen[id] = struct{}{}
+	tx.ids = append(tx.ids, id)
+}
+
+type txTouchedBead struct {
+	id     string
+	bead   Bead
+	found  bool
+	closed bool
+	err    error
+}
+
+func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]struct{}) {
+	if len(ids) == 0 {
+		return
+	}
+
+	refreshed := make([]txTouchedBead, 0, len(ids))
+	var refreshErr error
+	for _, id := range ids {
+		_, wasClosed := closed[id]
+		fresh, err := c.backing.Get(id)
+		item := txTouchedBead{id: id, closed: wasClosed, err: err}
+		if err == nil {
+			item.bead = fresh
+			item.found = true
+		} else if !wasClosed || !errors.Is(err, ErrNotFound) {
+			refreshErr = errors.Join(refreshErr, fmt.Errorf("refresh bead after tx %s: %w", id, err))
+		}
+		refreshed = append(refreshed, item)
+	}
+
+	notifications := make([]cacheNotification, 0, len(refreshed))
+	now := time.Now()
+	c.mu.Lock()
+	c.noteLocalMutationLocked(ids...)
+	if refreshErr != nil {
+		c.recordProblemLocked("tx refresh", refreshErr)
+	}
+	for _, item := range refreshed {
+		if item.found {
+			previous, hadPrevious := c.beads[item.id]
+			fresh := cloneBead(item.bead)
+			c.beads[item.id] = fresh
+			c.deps[item.id] = depsFromBeadFields(fresh)
+			delete(c.dirty, item.id)
+			delete(c.deletedSeq, item.id)
+			eventType := "bead.updated"
+			if fresh.Status == "closed" {
+				eventType = "bead.closed"
+			}
+			if !hadPrevious || beadChanged(previous, fresh, false) || fresh.Status == "closed" {
+				notifications = append(notifications, cacheNotification{
+					eventType: eventType,
+					bead:      cloneBead(fresh),
+				})
+			}
+			continue
+		}
+		if item.closed {
+			if b, ok := c.beads[item.id]; ok {
+				b.Status = "closed"
+				c.beads[item.id] = b
+				delete(c.dirty, item.id)
+				delete(c.deletedSeq, item.id)
+				notifications = append(notifications, cacheNotification{
+					eventType: "bead.closed",
+					bead:      cloneBead(b),
+				})
+			}
+			continue
+		}
+		if item.err != nil {
+			c.dirty[item.id] = struct{}{}
+		}
+	}
+	c.markFreshLocked(now)
+	c.updateStatsLocked()
+	c.mu.Unlock()
+
+	c.notifyChanges(notifications)
 }
 
 // updateMatchesCached returns true when every non-nil field in opts already
