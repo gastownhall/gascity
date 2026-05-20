@@ -1494,8 +1494,12 @@ Show total and unread message counts for a session alias or human.
 The recipient defaults to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human".
 
 ```
-gc mail count [session]
+gc mail count [session] [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSON result |
 
 ## gc mail delete
 
@@ -1515,8 +1519,12 @@ Shows message ID, sender, subject, and body in a table. The recipient defaults
 to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Pass a session alias to view another inbox.
 
 ```
-gc mail inbox [session]
+gc mail inbox [session] [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSON result |
 
 ## gc mail mark-read
 
@@ -1542,8 +1550,12 @@ Same output as "gc mail read" but does not change the message's read status.
 The message will continue to appear in inbox results.
 
 ```
-gc mail peek <id>
+gc mail peek <id> [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSON result |
 
 ## gc mail read
 
@@ -1553,8 +1565,12 @@ Shows the full message details (ID, sender, recipient, subject, date, body).
 The message stays in the store — use "gc mail archive" to permanently close it.
 
 ```
-gc mail read <id>
+gc mail read <id> [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSON result |
 
 ## gc mail reply
 
@@ -1615,8 +1631,12 @@ gc mail send mayor "Build is green"
 Show all messages sharing a thread ID or message ID, ordered by time.
 
 ```
-gc mail thread <id>
+gc mail thread <id> [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSON result |
 
 ## gc mcp
 
@@ -3052,7 +3072,7 @@ gc trace show [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--json` | bool | `true` | emit JSON array |
+| `--json` | bool |  | emit JSON result |
 | `--reason` | string |  | filter by reason code |
 | `--since` | string |  | show records since duration ago |
 | `--template` | string |  | exact normalized template selector |
@@ -3080,8 +3100,12 @@ gc trace start [flags]
 Show trace arms and stream state
 
 ```
-gc trace status
+gc trace status [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSON result |
 
 ## gc trace stop
 

@@ -87,6 +87,18 @@ func TestTraceStartStopStatusOfflineFallback(t *testing.T) {
 	}
 }
 
+func TestTraceStatusJSONEmptyArmsConformsToSchema(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityTOML(t, cityDir, "trace-town", "mayor")
+	t.Setenv("GC_CITY", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdTraceStatusWithJSON(true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdTraceStatusWithJSON = %d; stderr=%s", code, stderr.String())
+	}
+	validateJSONResultSchema(t, []string{"trace", "status"}, stdout.Bytes())
+}
+
 func TestTraceControllerSocketCommands(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime"), 0o755); err != nil {
@@ -245,6 +257,32 @@ func TestTraceShowAndReasonsWithoutTemplateFilter(t *testing.T) {
 	}
 	if got := stdout.String(); !strings.Contains(got, string(TraceReasonIdle)) {
 		t.Fatalf("trace reasons output = %q, want idle reason", got)
+	}
+}
+
+func TestTraceShowJSONEmptyRecordsConformsToSchema(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityTOML(t, cityDir, "trace-town", "mayor")
+	t.Setenv("GC_CITY", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdTraceShow("", "", "", "", "", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdTraceShow = %d; stderr=%s", code, stderr.String())
+	}
+	validateJSONResultSchema(t, []string{"trace", "show"}, stdout.Bytes())
+}
+
+func TestTraceShowEmptyTextReportsNoRecords(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityTOML(t, cityDir, "trace-town", "mayor")
+	t.Setenv("GC_CITY", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdTraceShow("", "", "", "", "", "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdTraceShow = %d; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No trace records found") {
+		t.Fatalf("stdout = %q, want empty trace message", stdout.String())
 	}
 }
 

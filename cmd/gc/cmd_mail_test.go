@@ -30,6 +30,11 @@ type failingListByLabelStore struct {
 	err error
 }
 
+type threadOnlyMailProvider struct {
+	countOnlyMailProvider
+	messages []mail.Message
+}
+
 func (countOnlyMailProvider) Send(string, string, string, string) (mail.Message, error) {
 	panic("unexpected Send")
 }
@@ -69,6 +74,10 @@ func (s failingListByLabelStore) ListByLabel(_ string, _ int, _ ...beads.QueryOp
 
 func (s failingListByLabelStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	return nil, s.err
+}
+
+func (p threadOnlyMailProvider) Thread(string) ([]mail.Message, error) {
+	return p.messages, nil
 }
 
 // --- gc mail send ---
@@ -1231,13 +1240,14 @@ func TestMailInboxJSON(t *testing.T) {
 	if stderr.Len() > 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
 	}
-	var got mailMessagesJSONResult
+	var got mailInboxJSONResult
 	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
 		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
 	}
 	if got.SchemaVersion != "1" || got.Recipient != "mayor" || len(got.Messages) != 1 || got.Messages[0].Body != "json body" {
 		t.Fatalf("unexpected JSON result: %+v", got)
 	}
+	validateJSONResultSchema(t, []string{"mail", "inbox"}, stdout.Bytes())
 }
 
 func TestMailInboxFiltersCorrectly(t *testing.T) {
@@ -1393,6 +1403,37 @@ func TestMailReadJSON(t *testing.T) {
 	if got.SchemaVersion != "1" || got.Message.ID != "gc-1" || got.Message.Body != "read json" || !got.Message.Read {
 		t.Fatalf("unexpected JSON result: %+v", got)
 	}
+	validateJSONResultSchema(t, []string{"mail", "read"}, stdout.Bytes())
+}
+
+func TestMailReadJSONRecordsEventWhenOutputFails(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("human", "mayor", "Hello", "read json") //nolint:errcheck
+	rec := events.NewFake()
+
+	var stderr bytes.Buffer
+	code := doMailReadWithJSON(mp, rec, []string{"gc-1"}, true, failingWriter{}, &stderr)
+	if code != 1 {
+		t.Fatalf("doMailReadWithJSON = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "write failed") {
+		t.Fatalf("stderr = %q, want write failure", stderr.String())
+	}
+	msg, err := mp.Get("gc-1")
+	if err != nil {
+		t.Fatalf("Get gc-1: %v", err)
+	}
+	if !msg.Read {
+		t.Fatal("message was not marked read")
+	}
+	if len(rec.Events) != 1 {
+		t.Fatalf("recorded events = %d, want 1: %#v", len(rec.Events), rec.Events)
+	}
+	got := rec.Events[0]
+	if got.Type != events.MailRead || got.Subject != "gc-1" {
+		t.Fatalf("recorded event = %#v, want MailRead for gc-1", got)
+	}
 }
 
 // --- gc mail peek ---
@@ -1451,6 +1492,7 @@ func TestMailPeekJSON(t *testing.T) {
 	if got.SchemaVersion != "1" || got.Message.ID != "gc-1" || got.Message.Body != "peek json" || got.Message.Read {
 		t.Fatalf("unexpected JSON result: %+v", got)
 	}
+	validateJSONResultSchema(t, []string{"mail", "peek"}, stdout.Bytes())
 }
 
 // --- gc mail reply ---
@@ -2006,12 +2048,59 @@ func TestMailThreadJSON(t *testing.T) {
 	if stderr.Len() > 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
 	}
-	var got mailMessagesJSONResult
+	var got mailThreadJSONResult
 	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
 		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
 	}
 	if got.SchemaVersion != "1" || got.ThreadID != sent.ThreadID || len(got.Messages) != 2 {
 		t.Fatalf("unexpected JSON result: %+v", got)
+	}
+	validateJSONResultSchema(t, []string{"mail", "thread"}, stdout.Bytes())
+}
+
+func TestMailThreadJSONResolvesMessageIDToThreadID(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	sent, _ := mp.Send("alice", "bob", "Hello", "first")        //nolint:errcheck
+	reply, _ := mp.Reply(sent.ID, "bob", "RE: Hello", "second") //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	code := doMailThreadWithJSON(mp, []string{reply.ID}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailThreadWithJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var got mailThreadJSONResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
+	}
+	if got.ThreadID != sent.ThreadID {
+		t.Fatalf("thread_id = %q, want canonical thread ID %q", got.ThreadID, sent.ThreadID)
+	}
+	validateJSONResultSchema(t, []string{"mail", "thread"}, stdout.Bytes())
+}
+
+func TestMailThreadJSONEmptyMessagesConformsToSchema(t *testing.T) {
+	mp := threadOnlyMailProvider{}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailThreadWithJSON(mp, []string{"empty-thread"}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailThreadWithJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	validateJSONResultSchema(t, []string{"mail", "thread"}, stdout.Bytes())
+}
+
+func TestMailThreadRejectsEmptyIDAfterTrim(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+
+	var stdout, stderr bytes.Buffer
+	code := doMailThreadWithJSON(mp, []string{" \t "}, true, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("doMailThreadWithJSON = 0, want nonzero; stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "missing thread or message ID") {
+		t.Fatalf("stderr = %q, want missing ID error", stderr.String())
 	}
 }
 
@@ -2056,6 +2145,7 @@ func TestMailCountJSON(t *testing.T) {
 	if got.SchemaVersion != "1" || got.Recipient != "bob" || got.Total != 2 || got.Unread != 1 {
 		t.Fatalf("unexpected JSON result: %+v", got)
 	}
+	validateJSONResultSchema(t, []string{"mail", "count"}, stdout.Bytes())
 }
 
 func TestMailCountTargetIncludesHistoricalAliases(t *testing.T) {

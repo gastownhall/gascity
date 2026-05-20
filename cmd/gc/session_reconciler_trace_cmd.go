@@ -343,6 +343,10 @@ func cmdTraceStatusWithJSON(jsonOut bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc trace status: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	activeArms := status.ActiveArms
+	if activeArms == nil {
+		activeArms = []TraceArm{}
+	}
 	result := traceStatusResultJSON{
 		SchemaVersion:     "1",
 		CityPath:          cityPath,
@@ -350,7 +354,7 @@ func cmdTraceStatusWithJSON(jsonOut bool, stdout, stderr io.Writer) int {
 		ControllerRunning: status.ControllerRunning,
 		ControllerPID:     status.ControllerPID,
 		HeadSeq:           head,
-		ActiveArms:        status.ActiveArms,
+		ActiveArms:        activeArms,
 	}
 	if jsonOut {
 		if err := writeCLIJSONLine(stdout, result); err != nil {
@@ -365,9 +369,9 @@ func cmdTraceStatusWithJSON(jsonOut bool, stdout, stderr io.Writer) int {
 	if status.ControllerPID > 0 {
 		fmt.Fprintf(stdout, "Controller PID: %d\n", status.ControllerPID) //nolint:errcheck
 	}
-	fmt.Fprintf(stdout, "Head seq: %d\n", head)                            //nolint:errcheck
-	fmt.Fprintf(stdout, "Active trace arms: %d\n", len(status.ActiveArms)) //nolint:errcheck
-	for _, arm := range status.ActiveArms {
+	fmt.Fprintf(stdout, "Head seq: %d\n", head)                     //nolint:errcheck
+	fmt.Fprintf(stdout, "Active trace arms: %d\n", len(activeArms)) //nolint:errcheck
+	for _, arm := range activeArms {
 		_, _ = fmt.Fprintf(stdout, "- %s %s %s until %s\n",
 			arm.Source, arm.ScopeValue, arm.Level, arm.ExpiresAt.Format(time.RFC3339))
 	}
@@ -400,7 +404,14 @@ func cmdTraceShow(template, since, traceID, tickID, recordType, reason string, j
 		fmt.Fprintf(stderr, "gc trace show: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	if recs == nil {
+		recs = []SessionReconcilerTraceRecord{}
+	}
 	if !jsonOut {
+		if len(recs) == 0 {
+			fmt.Fprintln(stdout, "No trace records found") //nolint:errcheck
+			return 0
+		}
 		for _, rec := range recs {
 			fmt.Fprintln(stdout, traceRecordSummary(rec)) //nolint:errcheck
 		}
