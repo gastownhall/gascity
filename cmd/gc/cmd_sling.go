@@ -157,6 +157,7 @@ type slingOpts = sling.SlingOpts
 var (
 	slingPokeController        = pokeController
 	slingPokeControlDispatcher = pokeControlDispatch
+	slingOpenCityStore         = openCityStoreAt
 )
 
 // slingDeps is an alias for sling.SlingDeps.
@@ -1463,21 +1464,33 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 	}
 
 	if a.SupportsInstanceExpansion() {
-		// Find a running multi-session instance to nudge.
 		sp0 := scaleParamsFor(a)
-		for _, ref := range resolvePoolSessionRefs(store, cfg, a.Name, a.Dir, sp0, a, cityName, st, sp, stderr) {
-			qn := ref.qualifiedInstance
-			sn := ref.sessionName
-			running, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, sn)
-			if err == nil && running {
-				member, ok := resolveAgentIdentity(cfg, qn, currentRigContext(cfg))
+		tryNudgeStore := func(sessionStore beads.Store) bool {
+			refs := resolvePoolSessionRefs(sessionStore, cfg, a.Name, a.Dir, sp0, a, cityName, st, sp, stderr)
+			for _, ref := range refs {
+				running, err := workerSessionTargetRunningWithConfig(cityPath, sessionStore, sp, cfg, ref.sessionName)
+				if err != nil || !running {
+					continue
+				}
+				member, ok := resolveAgentIdentity(cfg, ref.qualifiedInstance, currentRigContext(cfg))
 				if !ok {
-					fmt.Fprintf(stderr, "gc sling: agent %q not found in config\n", qn) //nolint:errcheck // best-effort
+					fmt.Fprintf(stderr, "gc sling: agent %q not found in config\n", ref.qualifiedInstance) //nolint:errcheck // best-effort
+					return true
+				}
+				target := buildSlingNudgeTarget(member, cityName, cityPath, cfg, sessionStore, ref.sessionName)
+				deliverSlingNudge(target, sp, sessionStore, cityPath, stdout, stderr)
+				return true
+			}
+			return false
+		}
+		if tryNudgeStore(store) {
+			return
+		}
+		if cityPath != "" {
+			if _, statErr := os.Stat(filepath.Join(cityPath, "city.toml")); statErr == nil {
+				if cityStore, err := slingOpenCityStore(cityPath); err == nil && cityStore != nil && tryNudgeStore(cityStore) {
 					return
 				}
-				target := buildSlingNudgeTarget(member, cityName, cityPath, cfg, store, sn)
-				deliverSlingNudge(target, sp, store, cityPath, stdout, stderr)
-				return
 			}
 		}
 		// No running config session — poke controller for immediate wake.
