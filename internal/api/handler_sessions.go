@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -137,31 +136,38 @@ func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.Cit
 	// per-session template_overrides. The dashboard uses this to display
 	// the actual permission mode and other settings.
 	if b != nil && cfg != nil {
-		rp, _ := resolveProviderForTemplate(info.Template, cfg)
-		if rp != nil && len(rp.EffectiveDefaults) > 0 {
-			merged := make(map[string]string, len(rp.EffectiveDefaults))
-			for k, v := range rp.EffectiveDefaults {
-				merged[k] = v
-			}
-			if raw := b.Metadata["template_overrides"]; raw != "" {
-				var overrides map[string]string
-				if err := json.Unmarshal([]byte(raw), &overrides); err == nil {
+		agentTemplateOK := true
+		agent, agentFound := findAgent(cfg, info.Template)
+		if session.UseAgentTemplateForProviderResolution(legacySessionKind(b.Metadata), b.Metadata, info.Provider, agent.Provider, agentFound) {
+			r.Kind = "agent"
+			agentTemplateOK = agentFound
+		} else {
+			r.Kind = "provider"
+		}
+		if agentTemplateOK {
+			rp, _ := resolveProviderForSessionOptions(info, b.Metadata, cfg)
+			if rp != nil {
+				merged := make(map[string]string, len(rp.EffectiveDefaults))
+				for k, v := range rp.EffectiveDefaults {
+					merged[k] = v
+				}
+				hasOverrides := false
+				if overrides, err := session.ParseTemplateOverrides(b.Metadata); err == nil {
 					for k, v := range overrides {
 						if k != "initial_message" {
 							merged[k] = v
+							hasOverrides = true
 						}
 					}
 				}
+				if len(rp.EffectiveDefaults) > 0 || hasOverrides {
+					r.Options = merged
+				}
 			}
-			r.Options = merged
 		}
 	}
 	if b == nil || info.Closed {
 		return r
-	}
-	// Populate kind from persisted metadata.
-	if k := b.Metadata["real_world_app_session_kind"]; k != "" {
-		r.Kind = k
 	}
 	r.Reason = session.LifecycleDisplayReason(b.Status, b.Metadata, time.Now().UTC())
 	r.ConfiguredNamedSession = strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true"
@@ -186,6 +192,9 @@ func filterMetadata(m map[string]string) map[string]string {
 	}
 	filtered := make(map[string]string)
 	for k, v := range m {
+		if k == "real_world_app_session_kind" {
+			continue
+		}
 		if strings.HasPrefix(k, "real_world_app_") || filterMetadataAllowedKeys[k] {
 			filtered[k] = v
 		}
@@ -395,6 +404,25 @@ func isTransientBeadDeleteConflict(err error) bool {
 	return strings.Contains(msg, "Error 1213") ||
 		strings.Contains(msg, "40001") ||
 		strings.Contains(msg, "serialization failure")
+}
+
+func (s *Server) handleSessionPermissionMode(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get(csrfHeaderName) == "" {
+		writeError(w, http.StatusForbidden, "csrf", "X-GC-Request header required on mutation endpoints")
+		return
+	}
+	var body SessionPermissionModeBody
+	if err := decodeBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+	resp, err := s.updateSessionPermissionMode(r.PathValue("id"), body)
+	if err != nil {
+		writeHumaStatusError(w, err)
+		return
+	}
+	w.Header().Set("X-GC-Index", fmt.Sprintf("%d", resp.Index))
+	writeJSON(w, http.StatusOK, resp.Body)
 }
 
 // handleSessionWake clears hold and quarantine on a session.
@@ -716,15 +744,31 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, presp)
 }
 
-// resolveProviderForTemplate resolves the provider for an agent template,
-// returning the full ResolvedProvider with EffectiveDefaults and OptionsSchema.
-func resolveProviderForTemplate(template string, cfg *config.City) (*config.ResolvedProvider, error) {
+func resolveProviderForSessionOptions(info session.Info, metadata map[string]string, cfg *config.City) (*config.ResolvedProvider, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("no config")
 	}
-	agent, ok := findAgent(cfg, template)
-	if !ok {
-		return nil, fmt.Errorf("agent %q not found", template)
+	agent, agentFound := findAgent(cfg, info.Template)
+	if session.UseAgentTemplateForProviderResolution(legacySessionKind(metadata), metadata, info.Provider, agent.Provider, agentFound) {
+		if !agentFound {
+			return nil, fmt.Errorf("agent template %q not found", info.Template)
+		}
+		return config.ResolveProvider(&agent, &cfg.Workspace, cfg.Providers, exec.LookPath)
 	}
-	return config.ResolveProvider(&agent, &cfg.Workspace, cfg.Providers, exec.LookPath)
+	var lastErr error
+	for _, providerName := range []string{info.Provider, info.Template} {
+		providerName = strings.TrimSpace(providerName)
+		if providerName == "" {
+			continue
+		}
+		rp, err := config.ResolveProvider(&config.Agent{Provider: providerName}, &cfg.Workspace, cfg.Providers, exec.LookPath)
+		if err == nil {
+			return rp, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("provider for session %q not found", info.ID)
 }

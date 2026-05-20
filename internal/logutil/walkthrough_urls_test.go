@@ -10,7 +10,7 @@ import (
 var expectedWalkthroughURLs = map[string]string{
 	"bd_op_init_timeout":   "https://docs.gascityhall.com/troubleshooting/gc-start-walkthrough#bd-op-init-timeout",
 	"pack_schema_mismatch": "https://docs.gascityhall.com/troubleshooting/gc-start-walkthrough#pack-schema-mismatch",
-	"duplicate_name_v1v2":  "https://docs.gascityhall.com/packv2/migration",
+	"duplicate_name_v1v2":  "https://docs.gascityhall.com/guides/migrating-to-pack-vnext#agents",
 	"duplicate_name_other": "https://docs.gascityhall.com/troubleshooting/gc-start-walkthrough#duplicate-name",
 	"unknown_field":        "https://docs.gascityhall.com/troubleshooting/gc-start-walkthrough#unknown-field-agent-pool",
 	"rig_path_required":    "https://docs.gascityhall.com/troubleshooting/gc-start-walkthrough#rig-path-required",

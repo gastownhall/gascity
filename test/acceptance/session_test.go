@@ -104,10 +104,8 @@ func TestSessionDefaultNamedSession(t *testing.T) {
 		if strings.Contains(out, "No sessions found") {
 			t.Errorf("expected default named session on fresh city, got:\n%s", out)
 		}
-		for _, want := range []string{"mayor"} {
-			if !strings.Contains(out, want) {
-				t.Errorf("expected %q in default named session list, got:\n%s", want, out)
-			}
+		if !strings.Contains(out, "mayor") {
+			t.Errorf("expected default named session in list, got:\n%s", out)
 		}
 		if !strings.Contains(out, string(session.StateCreating)) &&
 			!strings.Contains(out, string(session.StateActive)) &&

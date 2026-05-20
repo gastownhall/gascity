@@ -37,7 +37,7 @@ effective values rather than raw `city.toml` fields.
 ## Phase 1: Site Binding Foundation
 
 ### 1A. Extend `.gc/site.toml` schema
-**Files:** `internal/config/site_binding.go`, `internal/config/site_binding_test.go`, `docs/packv2/doc-loader-v2.md`
+**Files:** `internal/config/site_binding.go`, `internal/config/site_binding_test.go`, `engdocs/design/packv2/doc-loader-v2.md`
 
 **Scope:**
 - add workspace name/prefix fields to `SiteBinding`
@@ -143,7 +143,7 @@ effective values rather than raw `city.toml` fields.
 - API response tests for effective name/prefix
 
 ### 4B. Update docs and schema
-**Files:** `docs/reference/config.md`, `docs/packv2/doc-pack-v2.md`, `docs/packv2/skew-analysis.md`, `docs/guides/migrating-to-pack-vnext.md`, schema/reference outputs
+**Files:** `docs/reference/config.md`, `engdocs/design/packv2/doc-pack-v2.md`, `engdocs/design/packv2/skew-analysis.md`, `docs/guides/migrating-to-pack-vnext.md`, schema/reference outputs
 
 **Scope:**
 - document `.gc/site.toml` as the home of machine-local workspace identity

@@ -90,10 +90,10 @@ func orderV1V2(a, b Agent) (v1, v2 Agent, ok bool) {
 	return Agent{}, Agent{}, false
 }
 
-// migrationGuideDocPath is the documentation slug for the v1→v2 pack
-// migration. It tracks ga-6wrr's deliverable; the path is repository-
-// relative so the operator can copy-paste it without fighting an FQDN.
-const migrationGuideDocPath = "docs/packv2/migration.mdx"
+// migrationGuideDocPath is the repository-relative user-facing guide for the
+// v1→v2 pack migration, so operators can copy-paste it without fighting an
+// FQDN.
+const migrationGuideDocPath = "docs/guides/migrating-to-pack-vnext.md"
 
 // formatV1V2MigrationError renders the migration-guidance variant of
 // the duplicate-agent-name error. The headline is byte-stable; the

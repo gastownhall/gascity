@@ -206,6 +206,7 @@ func (s *Server) legacySessionHandler() http.Handler {
 	mux.HandleFunc("GET /v0/session/{id}/stream", s.handleSessionStream)
 	mux.HandleFunc("PATCH /v0/session/{id}", s.handleSessionPatch)
 	mux.HandleFunc("POST /v0/session/{id}/messages", s.handleSessionMessage)
+	mux.HandleFunc("POST /v0/session/{id}/permission-mode", s.handleSessionPermissionMode)
 	mux.HandleFunc("POST /v0/session/{id}/stop", s.handleSessionStop)
 	mux.HandleFunc("POST /v0/session/{id}/kill", s.handleSessionKill)
 	mux.HandleFunc("POST /v0/session/{id}/respond", s.handleSessionRespond)

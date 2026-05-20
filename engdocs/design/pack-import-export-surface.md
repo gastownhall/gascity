@@ -15,7 +15,7 @@ explicit exports.
 
 This is a proposed replacement for the current PackV2 contract, not a change to
 the active user-facing syntax. The current contract remains documented in
-`docs/packv2/doc-pack-v2.md`, `docs/packv2/skew-analysis.md`,
+`engdocs/design/packv2/doc-pack-v2.md`, `engdocs/design/packv2/skew-analysis.md`,
 `docs/reference/config.md`, and `docs/guides/shareable-packs.md`. PR #2119 is
 the antecedent implementation model this note is trying to make easier to
 explain, migrate, and eventually supersede.
@@ -274,7 +274,7 @@ The deprecation path should be:
    imports into explicit `[[exports]]`
 3. keep the old syntax until the PackV2 deprecation wave, `gc pack`, and pack
    registry migration have all shipped
-4. update `docs/packv2/skew-analysis.md` in the same implementation wave so
+4. update `engdocs/design/packv2/skew-analysis.md` in the same implementation wave so
    `export`, `transitive`, and `shadow` have an explicit migration disposition
 5. remove the old syntax only after the repository fixtures and user-facing
    reference docs have been updated to the explicit-export contract
@@ -320,7 +320,7 @@ Current recommendation:
 - collisions in the same public slot should be hard errors
 
 This is a deliberate breaking change from the accepted PackV2 contract in
-`docs/packv2/doc-pack-v2.md`, where two imported packs defining the same bare
+`engdocs/design/packv2/doc-pack-v2.md`, where two imported packs defining the same bare
 name both load and only ambiguous referring sites must qualify the name. If this
 proposal is accepted, the implementation plan must call out that inversion,
 ship it through the deprecation path above, and provide migration diagnostics
@@ -378,7 +378,7 @@ The config model needs a first-class `Export` table-array alongside
 public API into the requested public namespace or facade surface.
 
 The generated schema, TOML reference docs, PackV2 guide, and
-`docs/packv2/skew-analysis.md` should be updated in the same implementation
+`engdocs/design/packv2/skew-analysis.md` should be updated in the same implementation
 wave so users see one coherent contract. Validation should reject unknown
 `from` bindings, malformed `as` values, duplicate public leaf names, and
 legacy/new syntax conflicts with context-rich messages such as `export from

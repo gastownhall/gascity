@@ -300,8 +300,8 @@ func TestFormatDuplicateAgentError_MigrationContainsBothSources(t *testing.T) {
 		if !strings.Contains(got, "agents/mayor/agent.toml") {
 			t.Errorf(`expected "agents/mayor/agent.toml" reference on the v2 line, got: %s`, got)
 		}
-		if !strings.Contains(got, "docs/packv2/migration.mdx") {
-			t.Errorf(`expected migration doc link "docs/packv2/migration.mdx", got: %s`, got)
+		if !strings.Contains(got, "docs/guides/migrating-to-pack-vnext.md") {
+			t.Errorf(`expected migration doc link "docs/guides/migrating-to-pack-vnext.md", got: %s`, got)
 		}
 	}
 }

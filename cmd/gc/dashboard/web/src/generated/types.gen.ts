@@ -2493,6 +2493,13 @@ export type SessionPendingResponse = {
     supported: boolean;
 };
 
+export type SessionPermissionModeBody = {
+    /**
+     * Provider schema value for the permission_mode option.
+     */
+    permission_mode: string;
+};
+
 /**
  * Session raw transcript frame
  *
@@ -9769,6 +9776,46 @@ export type GetV0CityByCityNameSessionByIdPendingResponses = {
 };
 
 export type GetV0CityByCityNameSessionByIdPendingResponse = GetV0CityByCityNameSessionByIdPendingResponses[keyof GetV0CityByCityNameSessionByIdPendingResponses];
+
+export type PostV0CityByCityNameSessionByIdPermissionModeData = {
+    body: SessionPermissionModeBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Session ID, alias, or runtime session_name.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/permission-mode';
+};
+
+export type PostV0CityByCityNameSessionByIdPermissionModeErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type PostV0CityByCityNameSessionByIdPermissionModeError = PostV0CityByCityNameSessionByIdPermissionModeErrors[keyof PostV0CityByCityNameSessionByIdPermissionModeErrors];
+
+export type PostV0CityByCityNameSessionByIdPermissionModeResponses = {
+    /**
+     * OK
+     */
+    200: SessionResponse;
+};
+
+export type PostV0CityByCityNameSessionByIdPermissionModeResponse = PostV0CityByCityNameSessionByIdPermissionModeResponses[keyof PostV0CityByCityNameSessionByIdPermissionModeResponses];
 
 export type PostV0CityByCityNameSessionByIdRenameData = {
     body: SessionRenameInputBody;

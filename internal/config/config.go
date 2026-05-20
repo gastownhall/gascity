@@ -2315,7 +2315,7 @@ type Agent struct {
 	// Fallback marks this agent as a fallback definition. During pack
 	// composition, a non-fallback agent with the same name wins silently.
 	// When two fallbacks collide, the first loaded (depth-first) wins.
-	// See docs/packv2/migration.mdx for migration guidance.
+	// See docs/guides/migrating-to-pack-vnext.md for migration guidance.
 	Fallback bool `toml:"fallback,omitempty"`
 	// DependsOn lists agent names that must be awake before this agent wakes.
 	// Used for dependency-ordered startup and shutdown. Validated for cycles

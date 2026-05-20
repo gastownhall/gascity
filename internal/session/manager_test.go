@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -264,6 +265,255 @@ func TestCreate(t *testing.T) {
 	}
 	if got := startCall.Config.Env["GC_DIR"]; got != "/tmp" {
 		t.Errorf("GC_DIR = %q, want %q", got, "/tmp")
+	}
+}
+
+func TestUpdateTemplateOverridesRejectsRunningSessionUnderLock(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "my chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if _, err := mgr.UpdateTemplateOverrides(info.ID, map[string]string{"permission_mode": "auto-edit"}); !errors.Is(err, ErrSessionActive) {
+		t.Fatalf("UpdateTemplateOverrides active error = %v, want ErrSessionActive", err)
+	}
+}
+
+func TestUpdateTemplateOverridesRejectsLiveRuntimeEvenWhenStateLooksDormant(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "my chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadataBatch(info.ID, map[string]string{"state": string(StateAsleep)}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+
+	if _, err := mgr.UpdateTemplateOverrides(info.ID, map[string]string{"permission_mode": "auto-edit"}); !errors.Is(err, ErrSessionActive) {
+		t.Fatalf("UpdateTemplateOverrides live-runtime error = %v, want ErrSessionActive", err)
+	}
+}
+
+func TestUpdateTemplateOverridesAllowsSuspendedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "my chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	overrides, err := mgr.UpdateTemplateOverrides(info.ID, map[string]string{"permission_mode": "auto-edit"})
+	if err != nil {
+		t.Fatalf("UpdateTemplateOverrides suspended: %v", err)
+	}
+	if got := overrides["permission_mode"]; got != "auto-edit" {
+		t.Fatalf("permission_mode = %q, want auto-edit", got)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := b.Metadata["opt_permission_mode"]; got != "auto-edit" {
+		t.Fatalf("opt_permission_mode = %q, want auto-edit", got)
+	}
+}
+
+func TestUpdateTemplateOverridesRejectsRecentWakeInFlight(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "my chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "last_woke_at", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("SetMetadata(last_woke_at): %v", err)
+	}
+
+	_, err = mgr.UpdateTemplateOverrides(info.ID, map[string]string{"permission_mode": "auto-edit"})
+	if !errors.Is(err, ErrSessionActive) {
+		t.Fatalf("UpdateTemplateOverrides recent wake err = %v, want ErrSessionActive", err)
+	}
+}
+
+func TestUpdateTemplateOverridesRejectsPendingCreateClaim(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "my chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "pending_create_claim", "true"); err != nil {
+		t.Fatalf("SetMetadata(pending_create_claim): %v", err)
+	}
+
+	_, err = mgr.UpdateTemplateOverrides(info.ID, map[string]string{"permission_mode": "auto-edit"})
+	if !errors.Is(err, ErrSessionActive) {
+		t.Fatalf("UpdateTemplateOverrides pending create err = %v, want ErrSessionActive", err)
+	}
+}
+
+func TestUpdateTemplateOverridesWakeInFlightGraceBoundary(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+	mgr.clk = &clock.Fake{Time: time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)}
+
+	info, err := mgr.Create(context.Background(), "helper", "my chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	insideGrace := mgr.clk.Now().Add(-templateOverrideWakeInFlightGrace() + time.Second).UTC().Format(time.RFC3339)
+	if err := store.SetMetadata(info.ID, "last_woke_at", insideGrace); err != nil {
+		t.Fatalf("SetMetadata(last_woke_at inside): %v", err)
+	}
+	_, err = mgr.UpdateTemplateOverrides(info.ID, map[string]string{"permission_mode": "auto-edit"})
+	if !errors.Is(err, ErrSessionActive) {
+		t.Fatalf("UpdateTemplateOverrides inside grace err = %v, want ErrSessionActive", err)
+	}
+
+	outsideGrace := mgr.clk.Now().Add(-templateOverrideWakeInFlightGrace() - time.Second).UTC().Format(time.RFC3339)
+	if err := store.SetMetadata(info.ID, "last_woke_at", outsideGrace); err != nil {
+		t.Fatalf("SetMetadata(last_woke_at outside): %v", err)
+	}
+	overrides, err := mgr.UpdateTemplateOverrides(info.ID, map[string]string{"permission_mode": "auto-edit"})
+	if err != nil {
+		t.Fatalf("UpdateTemplateOverrides outside grace: %v", err)
+	}
+	if got := overrides["permission_mode"]; got != "auto-edit" {
+		t.Fatalf("permission_mode = %q, want auto-edit", got)
+	}
+}
+
+func TestUpdateTemplateOverridesAllowsOldWakeTimestamp(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "my chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	oldWake := time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339)
+	if err := store.SetMetadata(info.ID, "last_woke_at", oldWake); err != nil {
+		t.Fatalf("SetMetadata(last_woke_at): %v", err)
+	}
+
+	overrides, err := mgr.UpdateTemplateOverrides(info.ID, map[string]string{"permission_mode": "auto-edit"})
+	if err != nil {
+		t.Fatalf("UpdateTemplateOverrides old wake: %v", err)
+	}
+	if got := overrides["permission_mode"]; got != "auto-edit" {
+		t.Fatalf("permission_mode = %q, want auto-edit", got)
+	}
+}
+
+func TestUpdateTemplateOverridesUsesManagerClockForWakeWindow(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+	mgr.clk = &clock.Fake{Time: time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)}
+
+	info, err := mgr.Create(context.Background(), "helper", "my chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	oldForManagerClock := mgr.clk.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339)
+	if err := store.SetMetadata(info.ID, "last_woke_at", oldForManagerClock); err != nil {
+		t.Fatalf("SetMetadata(last_woke_at): %v", err)
+	}
+
+	overrides, err := mgr.UpdateTemplateOverrides(info.ID, map[string]string{"permission_mode": "auto-edit"})
+	if err != nil {
+		t.Fatalf("UpdateTemplateOverrides old fake-clock wake: %v", err)
+	}
+	if got := overrides["permission_mode"]; got != "auto-edit" {
+		t.Fatalf("permission_mode = %q, want auto-edit", got)
+	}
+}
+
+func TestUpdateTemplateOverridesAllowsFailedCreateWithRecentWake(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+	mgr.clk = &clock.Fake{Time: time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)}
+
+	info, err := mgr.Create(context.Background(), "helper", "my chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if err := store.SetMetadataBatch(info.ID, map[string]string{
+		"state":        string(StateFailedCreate),
+		"last_woke_at": mgr.clk.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+
+	overrides, err := mgr.UpdateTemplateOverrides(info.ID, map[string]string{"permission_mode": "auto-edit"})
+	if err != nil {
+		t.Fatalf("UpdateTemplateOverrides failed-create recent wake: %v", err)
+	}
+	if got := overrides["permission_mode"]; got != "auto-edit" {
+		t.Fatalf("permission_mode = %q, want auto-edit", got)
+	}
+}
+
+func TestUpdateTemplateOverridesRepairsMalformedMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "my chat", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "template_overrides", "{not-json"); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+
+	overrides, err := mgr.UpdateTemplateOverrides(info.ID, map[string]string{"permission_mode": "auto-edit"})
+	if err != nil {
+		t.Fatalf("UpdateTemplateOverrides malformed metadata: %v", err)
+	}
+	if got := overrides["permission_mode"]; got != "auto-edit" {
+		t.Fatalf("permission_mode = %q, want auto-edit", got)
 	}
 }
 

@@ -195,6 +195,14 @@ func createTestSession(t *testing.T, store beads.Store, sp *runtime.Fake, title 
 	return info
 }
 
+func suspendSessionForPermissionModeTest(t *testing.T, fs *fakeState, id string) {
+	t.Helper()
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	if err := mgr.Suspend(id); err != nil {
+		t.Fatalf("suspend session: %v", err)
+	}
+}
+
 type cachedOnlyListStoreForSessionTest struct {
 	*beads.MemStore
 	blockList bool
@@ -2414,8 +2422,7 @@ func TestHandleSessionCreateAsyncEmitsBeforeOptionalMetadataPersistenceCompletes
 	blocking := &blockingSetMetadataBatchStore{
 		Store: fs.cityBeadStore,
 		shouldBlock: func(kvs map[string]string) bool {
-			return kvs["real_world_app_session_kind"] == "agent" &&
-				kvs["real_world_app_project_id"] == "myrig"
+			return kvs["real_world_app_project_id"] == "myrig"
 		},
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
@@ -2592,7 +2599,7 @@ args = ["{{.AgentName}}", "{{.WorkDir}}", "{{.TemplateName}}"]
 	if err != nil {
 		t.Fatalf("resolveAgentCreateContext: %v", err)
 	}
-	mcpServers, err := srv.sessionMCPServers("myrig/ant", "opencode", createCtx.Identity, createCtx.WorkDir, "acp", "agent")
+	mcpServers, err := srv.sessionMCPServers("myrig/ant", "opencode", createCtx.Identity, createCtx.WorkDir, "acp", "agent", nil)
 	if err != nil {
 		t.Fatalf("sessionMCPServers: %v", err)
 	}
@@ -3597,6 +3604,725 @@ func TestHandleSessionCreatePreservesInitialMessageWithOptions(t *testing.T) {
 	}
 	if parsed["effort"] != "high" {
 		t.Errorf("effort = %q, want %q", parsed["effort"], "high")
+	}
+}
+
+func TestHandleSessionPermissionModeUpdatesSchemaBackedOverride(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	body := `{"kind":"agent","name":"myrig/worker","message":"keep me","options":{"effort":"high"}}`
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	suspendSessionForPermissionModeTest(t, fs, success.Session.ID)
+
+	req = newPostRequest(cityURL(fs, "/session/"+success.Session.ID+"/permission-mode"), strings.NewReader(`{"permission_mode":"plan"}`))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("permission-mode status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := resp.Options["permission_mode"]; got != "plan" {
+		t.Fatalf("response options.permission_mode = %q, want plan", got)
+	}
+	if got := w.Header().Get("X-GC-Index"); got == "" {
+		t.Fatal("permission-mode response missing X-GC-Index")
+	}
+	if got := resp.Options["effort"]; got != "high" {
+		t.Fatalf("response options.effort = %q, want high", got)
+	}
+
+	b, err := fs.cityBeadStore.Get(success.Session.ID)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	var overrides map[string]string
+	if err := json.Unmarshal([]byte(b.Metadata["template_overrides"]), &overrides); err != nil {
+		t.Fatalf("parse template_overrides: %v", err)
+	}
+	if got := overrides["permission_mode"]; got != "plan" {
+		t.Fatalf("template_overrides.permission_mode = %q, want plan", got)
+	}
+	if got := b.Metadata["opt_permission_mode"]; got != "plan" {
+		t.Fatalf("opt_permission_mode = %q, want plan", got)
+	}
+	if got := overrides["effort"]; got != "high" {
+		t.Fatalf("template_overrides.effort = %q, want high", got)
+	}
+	if got := overrides["initial_message"]; got != "keep me" {
+		t.Fatalf("template_overrides.initial_message = %q, want keep me", got)
+	}
+}
+
+func TestLegacySessionPermissionModeRouteUpdatesSchemaBackedOverride(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/worker"}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	suspendSessionForPermissionModeTest(t, fs, success.Session.ID)
+
+	req = newPostRequest("/v0/session/"+success.Session.ID+"/permission-mode", strings.NewReader(`{"permission_mode":"plan"}`))
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("legacy permission-mode status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := resp.Options["permission_mode"]; got != "plan" {
+		t.Fatalf("response options.permission_mode = %q, want plan", got)
+	}
+	if got := w.Header().Get("X-GC-Index"); got == "" {
+		t.Fatal("legacy permission-mode response missing X-GC-Index")
+	}
+
+	b, err := fs.cityBeadStore.Get(success.Session.ID)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	if got := b.Metadata["opt_permission_mode"]; got != "plan" {
+		t.Fatalf("opt_permission_mode = %q, want plan", got)
+	}
+	var overrides map[string]string
+	if err := json.Unmarshal([]byte(b.Metadata["template_overrides"]), &overrides); err != nil {
+		t.Fatalf("parse template_overrides: %v", err)
+	}
+	if got := overrides["permission_mode"]; got != "plan" {
+		t.Fatalf("template_overrides.permission_mode = %q, want plan", got)
+	}
+}
+
+func TestLegacySessionPermissionModeRouteRequiresCSRFHeader(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+
+	req := httptest.NewRequest(http.MethodPost, "/v0/session/session-1/permission-mode", strings.NewReader(`{"permission_mode":"plan"}`))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("legacy permission-mode status = %d, want %d; body: %s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+}
+
+func TestHandleSessionPermissionModeRejectsValueOutsideProviderSchema(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/worker"}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	suspendSessionForPermissionModeTest(t, fs, success.Session.ID)
+
+	req = newPostRequest(cityURL(fs, "/session/"+success.Session.ID+"/permission-mode"), strings.NewReader(`{"permission_mode":"bypassPermissions"}`))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("permission-mode status = %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+
+	b, err := fs.cityBeadStore.Get(success.Session.ID)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	if strings.Contains(b.Metadata["template_overrides"], "bypassPermissions") {
+		t.Fatalf("invalid schema value was persisted: %s", b.Metadata["template_overrides"])
+	}
+}
+
+func TestHandleSessionPermissionModeRejectsProviderWithoutPermissionModeOption(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	fs.cfg.Providers["test-agent"] = config.ProviderSpec{
+		DisplayName: "Test Agent",
+		Command:     "echo",
+		OptionsSchema: []config.ProviderOption{{
+			Key: "effort", Label: "Effort", Type: "select",
+			Choices: []config.OptionChoice{{Value: "high", Label: "High", FlagArgs: []string{"--effort", "high"}}},
+		}},
+	}
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/worker"}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	suspendSessionForPermissionModeTest(t, fs, success.Session.ID)
+
+	req = newPostRequest(cityURL(fs, "/session/"+success.Session.ID+"/permission-mode"), strings.NewReader(`{"permission_mode":"plan"}`))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("permission-mode status = %d, want %d; body: %s", w.Code, http.StatusNotImplemented, w.Body.String())
+	}
+}
+
+func TestHandleSessionPermissionModeUpdatesProviderSessionOptions(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"provider","name":"test-agent"}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	suspendSessionForPermissionModeTest(t, fs, success.Session.ID)
+
+	req = newPostRequest(cityURL(fs, "/session/"+success.Session.ID+"/permission-mode"), strings.NewReader(`{"permission_mode":"auto-edit"}`))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("permission-mode status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := resp.Options["permission_mode"]; got != "auto-edit" {
+		t.Fatalf("response options.permission_mode = %q, want auto-edit", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, cityURL(fs, "/session/"+success.Session.ID), nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode get response: %v", err)
+	}
+	if got := resp.Options["permission_mode"]; got != "auto-edit" {
+		t.Fatalf("get options.permission_mode = %q, want auto-edit", got)
+	}
+	if got := resp.Options["effort"]; got != "max" {
+		t.Fatalf("get options.effort = %q, want max default", got)
+	}
+}
+
+func TestHandleSessionPermissionModePreservesProviderCreateOptions(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"provider","name":"test-agent","options":{"permission_mode":"plan","effort":"high"}}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	suspendSessionForPermissionModeTest(t, fs, success.Session.ID)
+
+	req = newPostRequest(cityURL(fs, "/session/"+success.Session.ID+"/permission-mode"), strings.NewReader(`{"permission_mode":"auto-edit"}`))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("permission-mode status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := resp.Options["permission_mode"]; got != "auto-edit" {
+		t.Fatalf("response options.permission_mode = %q, want auto-edit", got)
+	}
+	if got := resp.Options["effort"]; got != "high" {
+		t.Fatalf("response options.effort = %q, want high from create-time provider option", got)
+	}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Get(success.Session.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	bead, err := fs.cityBeadStore.Get(success.Session.ID)
+	if err != nil {
+		t.Fatalf("Get bead: %v", err)
+	}
+	runtimeCfg, err := srv.resolveWorkerSessionRuntimeWithMetadata(info, "", bead.Metadata)
+	if err != nil {
+		t.Fatalf("resolveWorkerSessionRuntimeWithMetadata: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("resolveWorkerSessionRuntimeWithMetadata() = nil")
+	}
+	if !strings.Contains(runtimeCfg.Command, "--permission-mode auto-edit") {
+		t.Fatalf("runtime command %q missing updated permission_mode", runtimeCfg.Command)
+	}
+	if !strings.Contains(runtimeCfg.Command, "--effort high") {
+		t.Fatalf("runtime command %q missing preserved effort", runtimeCfg.Command)
+	}
+}
+
+func TestLegacyHandleProviderSessionCreatePersistsOptionsInTemplateOverrides(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+
+	req := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"provider","name":"test-agent","options":{"permission_mode":"plan","effort":"high"}}`))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d; body: %s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	bead, err := fs.cityBeadStore.Get(resp.ID)
+	if err != nil {
+		t.Fatalf("Get bead: %v", err)
+	}
+	overrides, err := session.ParseTemplateOverrides(bead.Metadata)
+	if err != nil {
+		t.Fatalf("ParseTemplateOverrides: %v", err)
+	}
+	if got := overrides["permission_mode"]; got != "plan" {
+		t.Fatalf("template_overrides.permission_mode = %q, want plan", got)
+	}
+	if got := overrides["effort"]; got != "high" {
+		t.Fatalf("template_overrides.effort = %q, want high", got)
+	}
+}
+
+func TestHandleSessionPermissionModePrefersPersistedProviderOverTemplateProvider(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	fs.cfg.Providers["template-provider"] = config.ProviderSpec{
+		DisplayName: "Template Provider",
+		Command:     "echo",
+		OptionsSchema: []config.ProviderOption{{
+			Key:     "permission_mode",
+			Label:   "Permission Mode",
+			Type:    "select",
+			Default: "plan",
+			Choices: []config.OptionChoice{{
+				Value:    "plan",
+				Label:    "Plan",
+				FlagArgs: []string{"--permission-mode", "plan"},
+			}},
+		}},
+	}
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"provider","name":"test-agent"}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	suspendSessionForPermissionModeTest(t, fs, success.Session.ID)
+	if err := fs.cityBeadStore.SetMetadata(success.Session.ID, "template", "template-provider"); err != nil {
+		t.Fatalf("SetMetadata(template): %v", err)
+	}
+
+	req = newPostRequest(cityURL(fs, "/session/"+success.Session.ID+"/permission-mode"), strings.NewReader(`{"permission_mode":"auto-edit"}`))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("permission-mode status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := resp.Options["permission_mode"]; got != "auto-edit" {
+		t.Fatalf("response options.permission_mode = %q, want auto-edit", got)
+	}
+	if got := resp.Options["effort"]; got != "max" {
+		t.Fatalf("response options.effort = %q, want max from persisted provider", got)
+	}
+}
+
+func TestHandleSessionPermissionModeDoesNotFallbackToAgentWhenProviderMissing(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"provider","name":"test-agent"}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	suspendSessionForPermissionModeTest(t, fs, success.Session.ID)
+	delete(fs.cfg.Providers, "test-agent")
+	if err := fs.cityBeadStore.SetMetadata(success.Session.ID, "template", "myrig/worker"); err != nil {
+		t.Fatalf("SetMetadata(template): %v", err)
+	}
+
+	req = newPostRequest(cityURL(fs, "/session/"+success.Session.ID+"/permission-mode"), strings.NewReader(`{"permission_mode":"plan"}`))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("permission-mode status = %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+	}
+	b, err := fs.cityBeadStore.Get(success.Session.ID)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	if strings.Contains(b.Metadata["template_overrides"], "plan") {
+		t.Fatalf("permission_mode persisted after missing provider: %s", b.Metadata["template_overrides"])
+	}
+}
+
+func TestHandleSessionGetUsesAgentDefaultsForConfiguredNamedSession(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	fs.cfg.Agents[0].OptionDefaults = map[string]string{
+		"permission_mode": "plan",
+	}
+	fs.cfg.Providers["myrig/worker"] = config.ProviderSpec{
+		DisplayName: "Colliding Provider",
+		Command:     "echo",
+		OptionDefaults: map[string]string{
+			"permission_mode": "auto-edit",
+		},
+		OptionsSchema: fs.cfg.Providers["test-agent"].OptionsSchema,
+	}
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "myrig/worker", "worker", "echo test", "/tmp", "test-agent", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	suspendSessionForPermissionModeTest(t, fs, info.ID)
+	if err := fs.cityBeadStore.SetMetadata(info.ID, apiNamedSessionMetadataKey, "true"); err != nil {
+		t.Fatalf("SetMetadata(%s): %v", apiNamedSessionMetadataKey, err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/session/"+info.ID), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := resp.Options["permission_mode"]; got != "plan" {
+		t.Fatalf("get options.permission_mode = %q, want plan from configured agent defaults", got)
+	}
+	if got := resp.Kind; got != "agent" {
+		t.Fatalf("get kind = %q, want agent", got)
+	}
+}
+
+func TestHandleSessionGetUsesLegacyProviderKindForNameCollision(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	fs.cfg.Agents = []config.Agent{{
+		Name:     "codex",
+		Provider: "codex",
+		OptionDefaults: map[string]string{
+			"permission_mode": "plan",
+			"effort":          "low",
+		},
+	}}
+	fs.cfg.Providers["codex"] = config.ProviderSpec{
+		DisplayName: "Codex",
+		Command:     "echo",
+		OptionDefaults: map[string]string{
+			"permission_mode": "auto-edit",
+			"effort":          "max",
+		},
+		OptionsSchema: fs.cfg.Providers["test-agent"].OptionsSchema,
+	}
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "codex", "codex", "echo", "/tmp/provider", "codex", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	suspendSessionForPermissionModeTest(t, fs, info.ID)
+	if err := fs.cityBeadStore.SetMetadata(info.ID, "real_world_app_session_kind", "provider"); err != nil {
+		t.Fatalf("SetMetadata(real_world_app_session_kind): %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/session/"+info.ID), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := resp.Options["permission_mode"]; got != "auto-edit" {
+		t.Fatalf("get options.permission_mode = %q, want provider default auto-edit", got)
+	}
+	if got := resp.Options["effort"]; got != "max" {
+		t.Fatalf("get options.effort = %q, want provider default max", got)
+	}
+	if got := resp.Kind; got != "provider" {
+		t.Fatalf("get kind = %q, want provider", got)
+	}
+}
+
+func TestHandleSessionPermissionModeRepairsMalformedTemplateOverrides(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/worker"}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	suspendSessionForPermissionModeTest(t, fs, success.Session.ID)
+	if err := fs.cityBeadStore.SetMetadata(success.Session.ID, "template_overrides", "{not-json"); err != nil {
+		t.Fatalf("SetMetadata(template_overrides): %v", err)
+	}
+
+	req = newPostRequest(cityURL(fs, "/session/"+success.Session.ID+"/permission-mode"), strings.NewReader(`{"permission_mode":"plan"}`))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("permission-mode status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	b, err := fs.cityBeadStore.Get(success.Session.ID)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	overrides, err := session.ParseTemplateOverrides(b.Metadata)
+	if err != nil {
+		t.Fatalf("ParseTemplateOverrides: %v", err)
+	}
+	if got := overrides["permission_mode"]; got != "plan" {
+		t.Fatalf("permission_mode = %q, want plan", got)
+	}
+}
+
+func TestHandleSessionPermissionModeRejectsMissingAgentTemplate(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/worker"}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	suspendSessionForPermissionModeTest(t, fs, success.Session.ID)
+	if err := fs.cityBeadStore.SetMetadata(success.Session.ID, "template", "myrig/missing-agent"); err != nil {
+		t.Fatalf("SetMetadata(template): %v", err)
+	}
+	if err := fs.cityBeadStore.SetMetadata(success.Session.ID, "agent_name", "myrig/missing-agent"); err != nil {
+		t.Fatalf("SetMetadata(agent_name): %v", err)
+	}
+
+	req = newPostRequest(cityURL(fs, "/session/"+success.Session.ID+"/permission-mode"), strings.NewReader(`{"permission_mode":"plan"}`))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("permission-mode status = %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+	}
+
+	b, err := fs.cityBeadStore.Get(success.Session.ID)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	if strings.Contains(b.Metadata["template_overrides"], "plan") {
+		t.Fatalf("permission_mode persisted for missing agent template: %s", b.Metadata["template_overrides"])
+	}
+}
+
+func TestHandleSessionGetDoesNotExposeOptionsForMissingAgentTemplate(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/worker","options":{"effort":"high"}}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	if err := fs.cityBeadStore.SetMetadata(success.Session.ID, "template", "myrig/missing-agent"); err != nil {
+		t.Fatalf("SetMetadata(template): %v", err)
+	}
+	if err := fs.cityBeadStore.SetMetadata(success.Session.ID, "agent_name", "myrig/missing-agent"); err != nil {
+		t.Fatalf("SetMetadata(agent_name): %v", err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, cityURL(fs, "/session/"+success.Session.ID), nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Options) != 0 {
+		t.Fatalf("response options = %#v, want none for missing agent template", resp.Options)
+	}
+}
+
+func TestHandleSessionPermissionModeRejectsRunningSession(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/worker"}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+
+	req = newPostRequest(cityURL(fs, "/session/"+success.Session.ID+"/permission-mode"), strings.NewReader(`{"permission_mode":"plan"}`))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("permission-mode status = %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+	}
+}
+
+func TestSessionPermissionModeRuntimeActiveStates(t *testing.T) {
+	for _, state := range []session.State{session.StateActive, session.StateAwake, session.StateCreating, session.StateDraining, session.StateQuarantined} {
+		if !session.IsTemplateOverrideRuntimeActive(state) {
+			t.Fatalf("IsTemplateOverrideRuntimeActive(%q) = false, want true", state)
+		}
+	}
+	for _, state := range []session.State{session.StateAsleep, session.StateSuspended, session.StateDrained, session.StateArchived} {
+		if session.IsTemplateOverrideRuntimeActive(state) {
+			t.Fatalf("IsTemplateOverrideRuntimeActive(%q) = true, want false", state)
+		}
+	}
+}
+
+func TestHandleSessionPermissionModeReturnsOverrideWithoutProviderDefault(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	provider := fs.cfg.Providers["test-agent"]
+	delete(provider.OptionDefaults, "permission_mode")
+	for i := range provider.OptionsSchema {
+		if provider.OptionsSchema[i].Key == "permission_mode" {
+			provider.OptionsSchema[i].Default = ""
+		}
+	}
+	fs.cfg.Providers["test-agent"] = provider
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/worker"}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	accepted := decodeAsyncAccepted(t, w.Body)
+	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+	suspendSessionForPermissionModeTest(t, fs, success.Session.ID)
+
+	req = newPostRequest(cityURL(fs, "/session/"+success.Session.ID+"/permission-mode"), strings.NewReader(`{"permission_mode":"plan"}`))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("permission-mode status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := resp.Options["permission_mode"]; got != "plan" {
+		t.Fatalf("response options.permission_mode = %q, want plan", got)
 	}
 }
 
@@ -6159,9 +6885,9 @@ func TestFilterMetadataAllowlistsRealWorldAppPrefix(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "real_world_app_ keys preserved",
+			name: "real_world_app_ keys preserved except removed session kind discriminator",
 			in:   map[string]string{"real_world_app_session_kind": "agent", "real_world_app_permission_mode": "plan", "session_key": "secret"},
-			want: map[string]string{"real_world_app_session_kind": "agent", "real_world_app_permission_mode": "plan"},
+			want: map[string]string{"real_world_app_permission_mode": "plan"},
 		},
 		{
 			name: "mixed keys",
