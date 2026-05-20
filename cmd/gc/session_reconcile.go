@@ -881,8 +881,19 @@ func isPoolExcess(session beads.Bead, cfg *config.City, poolDesired map[string]i
 
 // healState updates advisory state metadata only when changed (dirty check).
 func healState(session *beads.Bead, alive bool, store beads.Store, clk clock.Clock) {
+	healStateWithRollback(session, alive, store, clk, 0, true)
+}
+
+// healStateWithRollback is the explicit-control variant of healState. When
+// rollbackAvailable is false (e.g. the reconciler short-circuited the
+// stale-pending-create rollback because storeQueryPartial=true) the heal path
+// preserves pending_create_claim so the next non-partial tick can do the
+// proper rollback. When true (default), healState clears the stale claim
+// in-line after startupTimeout has elapsed to break the state=creating ↔
+// state=asleep oscillation described in ga-mf1.
+func healStateWithRollback(session *beads.Bead, alive bool, store beads.Store, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) map[string]string {
 	if session == nil {
-		return
+		return nil
 	}
 	// healState is the third writer in the closed-bead flap cycle. The
 	// lifecycle projection still resolves to BaseStateDrained for closed
@@ -891,11 +902,11 @@ func healState(session *beads.Bead, alive bool, store beads.Store, clk clock.Clo
 	// gc_swept / orphaned writes from the closeBead path. Closed beads
 	// are terminal; their advisory state metadata should not move.
 	if session.Status == "closed" {
-		return
+		return nil
 	}
-	batch := healStatePatch(*session, alive, clk)
+	batch := healStatePatchWithRollback(*session, alive, clk, startupTimeout, rollbackAvailable)
 	if len(batch) == 0 {
-		return
+		return nil
 	}
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string, len(batch))
@@ -906,9 +917,14 @@ func healState(session *beads.Bead, alive bool, store beads.Store, clk clock.Clo
 	for k, v := range batch {
 		session.Metadata[k] = v
 	}
+	return batch
 }
 
 func healStatePatch(session beads.Bead, alive bool, clk clock.Clock) map[string]string {
+	return healStatePatchWithRollback(session, alive, clk, 0, true)
+}
+
+func healStatePatchWithRollback(session beads.Bead, alive bool, clk clock.Clock, startupTimeout time.Duration, rollbackAvailable bool) map[string]string {
 	meta := session.Metadata
 	if meta == nil {
 		meta = map[string]string{}
@@ -960,9 +976,29 @@ func healStatePatch(session beads.Bead, alive bool, clk clock.Clock) map[string]
 			return nil
 		}
 		target = string(sessionpkg.StateAsleep)
-		if strings.TrimSpace(meta["pending_create_claim"]) == "true" {
-			batch["pending_create_claim"] = ""
-			batch["pending_create_started_at"] = ""
+		clearPendingCreateLease(meta, batch)
+	}
+	// ga-mf1: stale-creating projects to ReconciledState=asleep once the
+	// pending_create lease has expired (creatingStateIsStale → true). Same
+	// reasoning as failed-create above: if we leave pending_create_claim=true
+	// in metadata, the next tick's projectWakeCauses re-emits
+	// WakeCausePendingCreate and projectRuntimeProjection's post-creating
+	// branch flips the projection back to StateCreating, ping-ponging the
+	// bead forever between creating and asleep+runtime-missing. Clearing the
+	// expired lease in the same heal batch lets the bead settle in asleep.
+	//
+	// Gate the clear on pendingCreateLeaseExpiredForRollback — the same
+	// predicate the orphan rollback path uses — so we honor the longer
+	// never-started lease (10 min) for beads that haven't yet had
+	// last_woke_at recorded. creatingStateIsStale alone fires at 60s and
+	// would race the rollback path's reservation.
+	//
+	// rollbackAvailable=false means the caller deferred the formal rollback
+	// (e.g. storeQueryPartial); preserve the claim so the next complete tick
+	// can drive attemptRollbackPendingCreate properly.
+	if rollbackAvailable && !alive && view.RuntimeProjection == sessionpkg.RuntimeProjectionStaleCreating {
+		if pendingCreateLeaseExpiredForRollback(session, clk, startupTimeout) {
+			clearPendingCreateLease(meta, batch)
 		}
 	}
 	if target == "" {
@@ -987,6 +1023,20 @@ func healStatePatch(session beads.Bead, alive bool, clk clock.Clock) map[string]
 		}
 	}
 	return emptyNil(batch)
+}
+
+// clearPendingCreateLease writes empty-string clears for pending_create_claim
+// and pending_create_started_at into the heal batch when the metadata
+// currently carries a claim. Shared between the failed-create rollback path
+// and the stale-creating heal path so both finish the rollback the lifecycle
+// projection started, instead of letting the stale claim re-emit
+// WakeCausePendingCreate on the next tick and re-enter state=creating.
+func clearPendingCreateLease(meta, batch map[string]string) {
+	if strings.TrimSpace(meta["pending_create_claim"]) != "true" {
+		return
+	}
+	batch["pending_create_claim"] = ""
+	batch["pending_create_started_at"] = ""
 }
 
 func emptyNil(batch map[string]string) map[string]string {
