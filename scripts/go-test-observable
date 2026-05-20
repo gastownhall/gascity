@@ -14,7 +14,12 @@ if [ "$#" -eq 0 ]; then
   exit 2
 fi
 
-log="${OBSERVABLE_TEST_LOG:-/tmp/gascity-${name}.jsonl}"
+if [ -n "${OBSERVABLE_TEST_LOG:-}" ]; then
+  log="$OBSERVABLE_TEST_LOG"
+else
+  safe_name="$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
+  log="$(mktemp "${TMPDIR:-/tmp}/gascity-${safe_name}.jsonl.XXXXXX")"
+fi
 rm -f "$log"
 
 echo "observable go test: log=$log" >&2

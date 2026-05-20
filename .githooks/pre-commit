@@ -5,16 +5,35 @@ staged_go_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go' || t
 staged_web_src=$(git diff --cached --name-only --diff-filter=ACM -- 'cmd/gc/dashboard/web/src/' 'cmd/gc/dashboard/web/index.html' 'cmd/gc/dashboard/web/public/' 'cmd/gc/dashboard/web/package.json' 'cmd/gc/dashboard/web/openapi-ts.config.ts' 'cmd/gc/dashboard/web/vite.config.ts' 'cmd/gc/dashboard/web/tsconfig.json' || true)
 staged_docs=$(git diff --cached --name-only --diff-filter=ACM -- '*.md' 'docs/**' 'engdocs/**' 'plans/**' 'specs/**' 'AGENTS.md' 'CONTRIBUTING.md' 'README.md' 'TESTING.md' || true)
 
+format_staged_go_files() {
+  local file tmp
+  while IFS= read -r file; do
+    if [ -z "$file" ] || [ ! -f "$file" ]; then
+      continue
+    fi
+    tmp=$(mktemp "${TMPDIR:-/tmp}/gc-precommit-fmt.XXXXXX")
+    if ! golangci-lint fmt --stdin <"$file" >"$tmp"; then
+      rm -f "$tmp"
+      return 1
+    fi
+    if cmp -s "$file" "$tmp"; then
+      rm -f "$tmp"
+    else
+      mv -f "$tmp" "$file"
+    fi
+  done
+}
+
 if [ -z "$staged_go_files" ] && [ -z "$staged_web_src" ] && [ -z "$staged_docs" ]; then
   exit 0
 fi
 
 if [ -n "$staged_go_files" ]; then
-  golangci-lint fmt ./... 2>/dev/null
-  echo "$staged_go_files" | xargs git add
+  printf '%s\n' "$staged_go_files" | format_staged_go_files
+  printf '%s\n' "$staged_go_files" | xargs git add
 
   make lint-changed LINT_CHANGED_SCOPE=staged LINT_FLAGS="--new-from-rev=HEAD --whole-files --fix" || exit 1
-  echo "$staged_go_files" | xargs git add
+  printf '%s\n' "$staged_go_files" | xargs git add
 
   # Regenerate the OpenAPI spec from the live Huma API and stage both
   # canonical copies. Keeps the committed spec and the published
@@ -33,7 +52,7 @@ if [ -n "$staged_go_files" ]; then
   git add docs/schema/city-schema.json docs/schema/city-schema.txt docs/reference/config.md docs/reference/cli.md
 
   make vet
-  make test
+  make test-fast-parallel
 fi
 
 if [ -n "$staged_docs" ]; then
