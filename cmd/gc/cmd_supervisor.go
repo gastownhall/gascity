@@ -230,7 +230,27 @@ func newSupervisorShutdownController() *supervisorShutdownController {
 	return &supervisorShutdownController{destructiveCh: make(chan struct{})}
 }
 
-func supervisorSignalLoop(sigCh <-chan os.Signal, done <-chan struct{}, requestShutdown func(supervisorShutdownMode), requestReconcile func()) {
+// shutdownTrigger carries the attribution for a supervisor shutdown so
+// the requestShutdown wrapper can log and emit it before the context is
+// canceled. Source values are "signal" or "socket_stop".
+type shutdownTrigger struct {
+	Source     string
+	Signal     string
+	ClientAddr string
+}
+
+// supervisorShutdownModeName returns the stable string for a shutdown
+// mode, used in log lines and structured event payloads.
+func supervisorShutdownModeName(mode supervisorShutdownMode) string {
+	switch mode {
+	case supervisorShutdownPreserveSessions:
+		return "preserve_sessions"
+	default:
+		return "destructive"
+	}
+}
+
+func supervisorSignalLoop(sigCh <-chan os.Signal, done <-chan struct{}, requestShutdown func(supervisorShutdownMode, shutdownTrigger), requestReconcile func()) {
 	for {
 		select {
 		case sig := <-sigCh:
@@ -241,7 +261,10 @@ func supervisorSignalLoop(sigCh <-chan os.Signal, done <-chan struct{}, requestS
 				requestReconcile()
 				continue
 			}
-			requestShutdown(supervisorShutdownModeForSignal(sig))
+			requestShutdown(supervisorShutdownModeForSignal(sig), shutdownTrigger{
+				Source: "signal",
+				Signal: sig.String(),
+			})
 		case <-done:
 			return
 		}
@@ -313,7 +336,7 @@ func (s *shutdownState) finish(err error) {
 	close(s.done)
 }
 
-func startSupervisorSocket(sockPath string, requestShutdown func(supervisorShutdownMode), reconcileCh chan reconcileRequest, shut *shutdownState) (net.Listener, error) {
+func startSupervisorSocket(sockPath string, requestShutdown func(supervisorShutdownMode, shutdownTrigger), reconcileCh chan reconcileRequest, shut *shutdownState) (net.Listener, error) {
 	os.Remove(sockPath) //nolint:errcheck // remove stale socket from previous crash
 	lis, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -345,14 +368,21 @@ func startSupervisorSocket(sockPath string, requestShutdown func(supervisorShutd
 // then — if the client keeps the connection open — blocks until shutdown
 // completes and sends a second line "done:ok\n" or "done:err:<detail>\n"
 // so --wait clients can distinguish clean shutdown from partial failure.
-func handleSupervisorConn(conn net.Conn, requestShutdown func(supervisorShutdownMode), reconcileCh chan reconcileRequest, shut *shutdownState) {
+func handleSupervisorConn(conn net.Conn, requestShutdown func(supervisorShutdownMode, shutdownTrigger), reconcileCh chan reconcileRequest, shut *shutdownState) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(60 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
 	if scanner.Scan() {
 		switch scanner.Text() {
 		case "stop":
-			requestShutdown(supervisorShutdownDestructive)
+			peer := ""
+			if addr := conn.RemoteAddr(); addr != nil {
+				peer = addr.String()
+			}
+			requestShutdown(supervisorShutdownDestructive, shutdownTrigger{
+				Source:     "socket_stop",
+				ClientAddr: peer,
+			})
 			if _, err := conn.Write([]byte("ok\n")); err != nil {
 				return
 			}
@@ -813,7 +843,34 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	shutdownCtl := newSupervisorShutdownController()
-	requestShutdown := func(mode supervisorShutdownMode) {
+	// supervisorEventRecorder is a late-binding accessor: the supervisor
+	// registry is constructed below, after this closure is declared. We
+	// resolve at emit time so requestShutdown can be wired into the
+	// signal loop and socket handler before the registry exists.
+	var supervisorEventRecorder func() events.Recorder
+	requestShutdown := func(mode supervisorShutdownMode, trigger shutdownTrigger) {
+		modeName := supervisorShutdownModeName(mode)
+		// Plain-text breadcrumb to stderr → ~/.gc/supervisor.log via the
+		// launchd/systemd-redirected stream. This is the canonical place
+		// operators look after an unexpected exit; before this line, the
+		// supervisor exited silently and forensics required scraping the
+		// macOS unified log or launchd state. Cheap, no behavior change.
+		fmt.Fprintf(stderr, "gc supervisor: shutdown requested: source=%s signal=%q client=%q mode=%s\n", //nolint:errcheck
+			trigger.Source, trigger.Signal, trigger.ClientAddr, modeName)
+		// Structured event for consumers that subscribe to the supervisor
+		// event bus (dashboards, follow --json). Defensive: skip silently
+		// when the recorder isn't wired yet (early startup) or when the
+		// registry is nil.
+		if supervisorEventRecorder != nil {
+			if rec := supervisorEventRecorder(); rec != nil {
+				api.EmitTypedEvent(rec, events.SupervisorShutdownRequested, "supervisor", api.SupervisorShutdownPayload{
+					Source:     trigger.Source,
+					Signal:     trigger.Signal,
+					ClientAddr: trigger.ClientAddr,
+					Mode:       modeName,
+				})
+			}
+		}
 		shutdownCtl.request(mode)
 		cancel()
 	}
@@ -857,6 +914,11 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		registry.SetSupervisorRecorder(supFR)
 		defer supFR.Close() //nolint:errcheck
 	}
+	// Late-bind the recorder accessor used by requestShutdown for the
+	// SupervisorShutdownRequested event. The closure was declared before
+	// the registry existed; binding here keeps the recorder lookup live
+	// for the lifetime of the supervisor.
+	supervisorEventRecorder = func() events.Recorder { return registry.SupervisorEventRecorder() }
 
 	// Start API server with city-namespaced routing (Phase 2).
 	startedAt := time.Now()

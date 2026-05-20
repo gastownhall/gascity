@@ -4464,7 +4464,7 @@ func TestSupervisorSignalLoopKeepsLateDestructiveEscalationUntilShutdownDone(t *
 	var shutdownStartedOnce sync.Once
 	ctl := newSupervisorShutdownController()
 
-	go supervisorSignalLoop(sigCh, done, func(mode supervisorShutdownMode) {
+	go supervisorSignalLoop(sigCh, done, func(mode supervisorShutdownMode, _ shutdownTrigger) {
 		ctl.request(mode)
 		shutdownStartedOnce.Do(func() { close(shutdownStarted) })
 	}, func() {})
@@ -4480,6 +4480,77 @@ func TestSupervisorSignalLoopKeepsLateDestructiveEscalationUntilShutdownDone(t *
 
 	if got := ctl.preservesSessionsAfterSettle(200 * time.Millisecond); got {
 		t.Fatal("preservesSessionsAfterSettle() = true, want false after late SIGINT escalation")
+	}
+}
+
+// TestSupervisorSignalLoopRecordsSignalAttribution ensures the signal
+// loop forwards the triggering signal name to requestShutdown so the
+// supervisor can log/emit it. Without this attribution, a graceful
+// exit via SIGTERM/SIGINT leaves no forensic trail (see gc-exue3).
+func TestSupervisorSignalLoopRecordsSignalAttribution(t *testing.T) {
+	sigCh := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	defer close(done)
+
+	gotMode := make(chan supervisorShutdownMode, 1)
+	gotTrigger := make(chan shutdownTrigger, 1)
+	go supervisorSignalLoop(sigCh, done, func(mode supervisorShutdownMode, trigger shutdownTrigger) {
+		gotMode <- mode
+		gotTrigger <- trigger
+	}, func() {})
+
+	sigCh <- syscall.SIGTERM
+	select {
+	case mode := <-gotMode:
+		if mode != supervisorShutdownDestructive {
+			t.Fatalf("mode = %v, want destructive (SIGTERM without preserve env)", mode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for shutdown request after SIGTERM")
+	}
+	trigger := <-gotTrigger
+	if trigger.Source != "signal" {
+		t.Errorf("trigger.Source = %q, want %q", trigger.Source, "signal")
+	}
+	if trigger.Signal == "" {
+		t.Error("trigger.Signal is empty; want non-empty signal name (e.g. \"terminated\")")
+	}
+}
+
+// TestHandleSupervisorConnStopRecordsSocketAttribution ensures the
+// socket "stop" handler forwards a socket_stop trigger to
+// requestShutdown so future silent exits via the controller socket
+// have an attributable cause in supervisor.log.
+func TestHandleSupervisorConnStopRecordsSocketAttribution(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close() //nolint:errcheck
+	defer server.Close() //nolint:errcheck
+
+	gotMode := make(chan supervisorShutdownMode, 1)
+	gotTrigger := make(chan shutdownTrigger, 1)
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		handleSupervisorConn(server, func(mode supervisorShutdownMode, trigger shutdownTrigger) {
+			gotMode <- mode
+			gotTrigger <- trigger
+		}, nil, nil)
+	}()
+
+	if _, err := client.Write([]byte("stop\n")); err != nil {
+		t.Fatalf("Write(stop): %v", err)
+	}
+	select {
+	case mode := <-gotMode:
+		if mode != supervisorShutdownDestructive {
+			t.Fatalf("mode = %v, want destructive (socket stop is always destructive)", mode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for shutdown request after socket stop")
+	}
+	trigger := <-gotTrigger
+	if trigger.Source != "socket_stop" {
+		t.Errorf("trigger.Source = %q, want %q", trigger.Source, "socket_stop")
 	}
 }
 
