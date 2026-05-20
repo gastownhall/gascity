@@ -306,6 +306,15 @@ print_cell() {
   printf '| %%s |\n' "$1"
   printf '+-------+\n'
 }
+print_cells() {
+  printf '+-------+\n'
+  printf '| value |\n'
+  printf '+-------+\n'
+  for value in "$@"; do
+    printf '| %%s |\n' "$value"
+  done
+  printf '+-------+\n'
+}
 current_head() {
   if [ "$mode" = "head_changes_before_flatten" ]; then
     calls_file="$state_file.head-calls"
@@ -550,7 +559,42 @@ case "$query" in
       print_cell ""
       exit 0
     fi
+    # row_count_gain_with_stable_hashes models the narrow probe-ordering race
+    # where the preflight row count is stale but the preflight value hashes
+    # already match the post-flatten values.
     print_cell "$(current_hash)"
+    exit 0
+    ;;
+  *"DOLT_HASHOF_TABLE('beads')"*)
+    if [ "$mode" = "table_hash_empty" ]; then
+      print_cell ""
+      exit 0
+    fi
+    if [ "$mode" = "table_hash_empty_after_flatten" ] && [ "$(current_head)" = "compactcommit" ]; then
+      print_cell ""
+      exit 0
+    fi
+    if { [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+      print_cell hash-beads-after-writer
+      exit 0
+    fi
+    if [ "$mode" = "same_row_count_writer" ] && [ "$(current_head)" = "compactcommit" ]; then
+      print_cell hash-beads-after-writer
+      exit 0
+    fi
+    print_cell hash-beads-before
+    exit 0
+    ;;
+  *"DOLT_HASHOF_TABLE('notes')"*)
+    if { [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ] || [ "$mode" = "same_count_hash_drift_then_probe_failure" ] || [ "$mode" = "probe_failure_then_same_count_hash_drift" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+      print_cell hash-notes-after-writer
+      exit 0
+    fi
+    print_cell hash-notes-before
+    exit 0
+    ;;
+  *"DOLT_HASHOF_TABLE('blocked_issues')"*)
+    print_cell hash-blocked-issues
     exit 0
     ;;
   *"information_schema.tables"*)
@@ -566,6 +610,18 @@ case "$query" in
       print_cell blocked_issues
       exit 0
     fi
+    if [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ]; then
+      print_cells beads notes
+      exit 0
+    fi
+    if [ "$mode" = "same_count_hash_drift_then_probe_failure" ]; then
+      print_cells notes beads
+      exit 0
+    fi
+    if [ "$mode" = "probe_failure_then_same_count_hash_drift" ]; then
+      print_cells beads notes
+      exit 0
+    fi
     print_cell beads
     exit 0
     ;;
@@ -574,6 +630,10 @@ case "$query" in
       printf 'database not found: blocked_issues\n' >&2
       exit 1049
     fi
+    print_cell 10
+    exit 0
+    ;;
+  *"SELECT COUNT(*) FROM"*"notes"*)
     print_cell 10
     exit 0
     ;;
@@ -590,11 +650,11 @@ case "$query" in
     if [ -n "$count_file" ]; then
       printf '%%s\n' "$calls" > "$count_file"
     fi
-    if [ "$mode" = "row_count_failure_after_flatten" ] && [ "$calls" -gt 1 ]; then
+    if { [ "$mode" = "row_count_failure_after_flatten" ] || [ "$mode" = "same_count_hash_drift_then_probe_failure" ] || [ "$mode" = "probe_failure_then_same_count_hash_drift" ]; } && [ "$calls" -gt 1 ]; then
       printf 'row count exploded after flatten\n' >&2
       exit 47
     fi
-    if { [ "$mode" = "row_count_diverges" ] || [ "$mode" = "row_count_and_hash_diverges" ]; } && [ "$calls" -gt 1 ]; then
+    if { [ "$mode" = "row_count_gain_with_stable_hashes" ] || [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ]; } && [ "$calls" -gt 1 ]; then
       print_cell 11
     elif [ "$mode" = "row_count_decreases" ] && [ "$calls" -gt 1 ]; then
       print_cell 9
@@ -626,7 +686,7 @@ case "$query" in
     if [ "$mode" = "same_row_count_writer" ]; then
       set_hash hash-after-writer
     fi
-    if [ "$mode" = "row_count_and_hash_diverges" ]; then
+    if [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ]; then
       set_hash hash-after-writer
     fi
     exit 0
@@ -1645,15 +1705,16 @@ func TestCompactScriptFailsOnCommitCountProbeFailure(t *testing.T) {
 	}
 }
 
-func TestCompactScriptAllowsRowCountIncreaseDuringFlatten(t *testing.T) {
+func TestCompactScriptAllowsRowCountIncreaseWithStableValueHashes(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
-	out, err := fixture.run(t, "row_count_diverges", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	out, err := fixture.run(t, "row_count_gain_with_stable_hashes", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err != nil {
-		t.Fatalf("compact should allow concurrent row-count increase: %v\n%s", err, out)
+		t.Fatalf("compact should allow row-count increase with stable value hashes: %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "gained rows during flatten") ||
 		!strings.Contains(out, "pending value-hash verification") ||
-		!strings.Contains(out, "row-count increase passed value-hash verification") {
+		!strings.Contains(out, "row-count increase passed value-hash verification") ||
+		!strings.Contains(out, "full GC allowed") {
 		t.Fatalf("output missing row-count gain verification notices:\n%s", out)
 	}
 	data, err := os.ReadFile(fixture.doltLog)
@@ -1661,36 +1722,64 @@ func TestCompactScriptAllowsRowCountIncreaseDuringFlatten(t *testing.T) {
 		t.Fatalf("read dolt log: %v", err)
 	}
 	if !strings.Contains(string(data), "DOLT_GC") {
-		t.Fatalf("row-count increase should still run full GC:\n%s", data)
+		t.Fatalf("row-count increase with stable value hashes should still run full GC:\n%s", data)
 	}
 }
 
-func TestCompactScriptQuarantinesRowCountGainWithValueHashDriftBeforeFullGC(t *testing.T) {
+func TestCompactScriptQuarantinesSameTableRowGainWithValueHashDriftBeforeFullGC(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
-	out, err := fixture.run(t, "row_count_and_hash_diverges", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	out, err := fixture.run(t, "same_table_replacement_with_row_gain", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err == nil {
-		t.Fatalf("compact succeeded despite row-count gain with value-hash drift:\n%s", out)
+		t.Fatalf("compact succeeded despite same-table row-count gain with value-hash drift:\n%s", out)
 	}
-	if !strings.Contains(out, "value hash changed with row-count increase") {
-		t.Fatalf("output missing row-count-gain hash drift warning:\n%s", out)
+	if !strings.Contains(out, "table=beads gained rows during flatten") ||
+		!strings.Contains(out, "value hash changed with row-count increase") ||
+		!strings.Contains(out, "post-flatten INTEGRITY check failed") {
+		t.Fatalf("output missing same-table drift quarantine notices:\n%s", out)
 	}
-	if strings.Contains(out, "concurrent write preserved") {
-		t.Fatalf("hash-drifted row-count gain must not claim preservation before quarantine:\n%s", out)
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(data)
+	if !strings.Contains(log, "DOLT_HASHOF_TABLE('beads')") {
+		t.Fatalf("same-table row-count gain test should probe table value hash:\n%s", log)
+	}
+	if strings.Contains(log, "DOLT_GC") {
+		t.Fatalf("same-table row-count gain with value-hash drift must block full GC:\n%s", log)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten table value hash changed with row-count increase" {
+		t.Fatalf("quarantine reason should identify gained-table hash drift, got %q", reason)
+	}
+}
+
+func TestCompactScriptQuarantinesMixedRowGainAndSameCountHashDriftBeforeFullGC(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "mixed_row_count_gain_and_same_count_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite mixed row gain and same-count hash drift:\n%s", out)
+	}
+	if !strings.Contains(out, "table=beads gained rows during flatten") {
+		t.Fatalf("output missing row-count gain evidence:\n%s", out)
+	}
+	if !strings.Contains(out, "table=notes value hash changed after flatten without row-count increase") {
+		t.Fatalf("output missing same-count hash drift warning:\n%s", out)
 	}
 	logData, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
 		t.Fatalf("read dolt log: %v", err)
 	}
 	log := string(logData)
-	if !strings.Contains(log, "DOLT_HASHOF_DB") {
-		t.Fatalf("row-count-gain hash drift test should probe database value hash:\n%s", log)
+	if !strings.Contains(log, "DOLT_HASHOF_TABLE('beads')") || !strings.Contains(log, "DOLT_HASHOF_TABLE('notes')") {
+		t.Fatalf("mixed drift test should probe table value hashes:\n%s", log)
 	}
 	if strings.Contains(log, "DOLT_GC") {
-		t.Fatalf("row-count-gain value-hash drift must defer full GC:\n%s", log)
+		t.Fatalf("mixed row gain and same-count hash drift must block full GC:\n%s", log)
 	}
 	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("row-count-gain value-hash drift should write quarantine marker: %v", err)
+	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten table value hash changed with row-count increase" {
+		t.Fatalf("quarantine reason should identify first table hash drift, got %q", reason)
 	}
 }
 
@@ -1734,6 +1823,42 @@ func TestCompactScriptReportsPostFlattenRowCountProbeFailureSeparately(t *testin
 	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
 	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten row count probe failed" {
 		t.Fatalf("quarantine reason should identify probe failure, got %q", reason)
+	}
+}
+
+func TestCompactScriptPreservesPrimaryIntegrityReasonBeforeLaterProbeFailure(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "same_count_hash_drift_then_probe_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite same-count hash drift and later probe failure:\n%s", out)
+	}
+	if !strings.Contains(out, "table=notes value hash changed after flatten without row-count increase") {
+		t.Fatalf("output missing primary hash-drift warning:\n%s", out)
+	}
+	if !strings.Contains(out, "post-flatten row count failed for table=beads") {
+		t.Fatalf("output missing later probe failure:\n%s", out)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten table value hash changed without row-count increase" {
+		t.Fatalf("quarantine reason should preserve primary integrity failure, got %q", reason)
+	}
+}
+
+func TestCompactScriptIntegrityReasonOutranksEarlierProbeFailure(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "probe_failure_then_same_count_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite probe failure and later hash drift:\n%s", out)
+	}
+	if !strings.Contains(out, "post-flatten row count failed for table=beads") {
+		t.Fatalf("output missing initial probe failure:\n%s", out)
+	}
+	if !strings.Contains(out, "table=notes value hash changed after flatten without row-count increase") {
+		t.Fatalf("output missing later hash-drift warning:\n%s", out)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten table value hash changed without row-count increase" {
+		t.Fatalf("quarantine reason should prefer integrity failure over earlier probe failure, got %q", reason)
 	}
 }
 
@@ -1781,6 +1906,30 @@ func TestCompactScriptFailsOnEmptyPreflightValueHash(t *testing.T) {
 	}
 }
 
+func TestCompactScriptFailsOnEmptyPreflightTableValueHash(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "table_hash_empty", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite empty preflight table value hash:\n%s", out)
+	}
+	if !strings.Contains(out, "pre-flight table value hash returned empty value") {
+		t.Fatalf("output missing empty preflight table hash failure:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(logData), "DOLT_RESET") {
+		t.Fatalf("empty preflight table hash must fail before flatten:\n%s", logData)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("empty preflight table hash must not write quarantine marker")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat quarantine marker: %v", err)
+	}
+}
+
 func TestCompactScriptQuarantinesEmptyPostflightValueHashBeforeFullGC(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "db_hash_empty_after_flatten", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
@@ -1804,6 +1953,32 @@ func TestCompactScriptQuarantinesEmptyPostflightValueHashBeforeFullGC(t *testing
 	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("empty postflight hash should write quarantine marker: %v", err)
+	}
+}
+
+func TestCompactScriptQuarantinesEmptyPostflightTableValueHashBeforeFullGC(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "table_hash_empty_after_flatten", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite empty postflight table value hash:\n%s", out)
+	}
+	if !strings.Contains(out, "post-flatten table value hash returned empty value") {
+		t.Fatalf("output missing empty postflight table hash failure:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "DOLT_RESET") {
+		t.Fatalf("postflight table hash test should flatten before detecting empty hash:\n%s", log)
+	}
+	if strings.Contains(log, "DOLT_GC") {
+		t.Fatalf("empty postflight table hash must block full GC:\n%s", log)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten table value hash probe failed" {
+		t.Fatalf("quarantine reason should identify table hash probe failure, got %q", reason)
 	}
 }
 

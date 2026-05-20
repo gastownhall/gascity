@@ -190,6 +190,8 @@ TEST_ENV = env -i \
 	SHELL="$$SHELL" \
 	LANG="$$LANG" \
 	TMPDIR="$${TMPDIR:-/tmp}" \
+	OBSERVABLE_TEST_LOG="$${OBSERVABLE_TEST_LOG-}" \
+	OBSERVABLE_FAILURE_LINES="$${OBSERVABLE_FAILURE_LINES-}" \
 	XDG_RUNTIME_DIR="$$XDG_RUNTIME_DIR" \
 	GOPATH="$(GOPATH_VAL)" \
 	GOCACHE="$(GOCACHE_VAL)" \
@@ -235,7 +237,7 @@ LOCAL_TEST_JOBS ?= $(shell nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev
 
 ## test-fast-parallel: run the default fast suite with cmd/gc sharded locally
 test-fast-parallel:
-	LOCAL_TEST_JOBS=$(LOCAL_TEST_JOBS) CMD_GC_PROCESS_TOTAL=$(CMD_GC_PROCESS_TOTAL) ./scripts/test-local-parallel fast
+	$(TEST_ENV) LOCAL_TEST_JOBS=$(LOCAL_TEST_JOBS) CMD_GC_PROCESS_TOTAL=$(CMD_GC_PROCESS_TOTAL) ./scripts/test-local-parallel fast
 
 ## test-fsys-darwin-compile: cross-compile internal/fsys for macOS so
 ## unix.Stat_t field-type regressions fail in the default fast test path.

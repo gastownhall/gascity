@@ -1807,6 +1807,14 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		env = removeEnvKey(env, "GC_BIN")
 		env = append(env, "GC_BIN="+gcBin)
 	}
+	if managedDoltTestModeEnabled() {
+		env = removeEnvKey(env, managedDoltTestModeEnv)
+		env = removeEnvKey(env, managedDoltTestParentPIDEnv)
+		env = append(env,
+			managedDoltTestModeEnv+"=1",
+			managedDoltTestParentPIDEnv+"="+managedDoltTestParentPIDString(),
+		)
+	}
 	// Propagate archive_level from city config so the managed dolt
 	// server inherits it without shell-script changes.
 	if v, ok := cityDoltConfigs.Load(cityPath); ok {

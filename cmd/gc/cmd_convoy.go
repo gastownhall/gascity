@@ -23,9 +23,12 @@ func newConvoyCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Manage convoys — graphs of related work",
 		Long: `Manage convoys — graphs of related work beads.
 
-A convoy is a named graph of beads with dependencies. Simple convoys
-group related issues via parent-child relationships. Complex convoys
-use formula-compiled DAGs with control beads for orchestration.`,
+A convoy is a named graph of beads with dependencies. Convoys
+group related issues via parent-child relationships.
+
+Convoys are distinct from workflows (graph.v2 formula-compiled
+DAGs managed by the dispatch subsystem) — gc convoy commands do
+not operate on workflow roots.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {

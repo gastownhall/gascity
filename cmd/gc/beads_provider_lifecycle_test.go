@@ -113,6 +113,25 @@ func TestProviderLifecycleProcessEnvProjectsCanonicalDoltPaths(t *testing.T) {
 	}
 }
 
+func TestProviderLifecycleProcessEnvPropagatesManagedDoltTestMode(t *testing.T) {
+	cityPath := t.TempDir()
+	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	env := map[string]string{}
+	for _, entry := range envEntries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+
+	if got := env[managedDoltTestModeEnv]; got != "1" {
+		t.Fatalf("providerLifecycleProcessEnv()[%s] = %q, want 1", managedDoltTestModeEnv, got)
+	}
+	if got := env[managedDoltTestParentPIDEnv]; got == "" {
+		t.Fatalf("providerLifecycleProcessEnv()[%s] missing", managedDoltTestParentPIDEnv)
+	}
+}
+
 func TestProviderLifecycleProcessEnvCanonicalizesSymlinkedCityPath(t *testing.T) {
 	root := t.TempDir()
 	realParent := filepath.Join(root, "real")

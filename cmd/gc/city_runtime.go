@@ -29,6 +29,11 @@ import (
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
+// newCityRuntimeOpenSweepStore opens the city store used for the orphaned
+// order-tracking sweep in newCityRuntime. Test code can swap this to return
+// an in-memory store and skip spawning managed dolt.
+var newCityRuntimeOpenSweepStore = openStoreAtForCity
+
 // reloadOrderDrainTimeout bounds how long config reload will wait for
 // the outgoing order dispatcher's in-flight goroutines before replacing
 // it. Reload runs on the tick loop, so a larger budget would stall all
@@ -228,7 +233,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	// (goroutines killed on restart, or silent Close failures).
 	// Retry with backoff as defense-in-depth against transient store
 	// errors immediately after ensureBeadsProvider returns (#753).
-	if sweepStore, err := openStoreAtForCity(p.CityPath, p.CityPath); err != nil {
+	if sweepStore, err := newCityRuntimeOpenSweepStore(p.CityPath, p.CityPath); err != nil {
 		fmt.Fprintf(p.Stderr, "gc start: order tracking sweep: %v\n", err) //nolint:errcheck // best-effort stderr
 	} else if n, err := sweepOrphanedOrderTrackingRetry(sweepStore, 3, time.Second); err != nil {
 		fmt.Fprintf(p.Stderr, "gc start: order tracking sweep (closed %d): %v\n", n, err) //nolint:errcheck // best-effort stderr
@@ -482,6 +487,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		}()
 
 		cleanupDeadRuntimeSessionCorpses(sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
+		// Reap live runtimes still bound to a closed bead (e.g. a named-session
+		// identity re-minted as a pool slot) so the name's current owner can
+		// rebind it and attach lands on the right runtime.
+		reapRuntimesBoundToClosedBeads(cr.cityBeadStore(), sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
 		// Reap stale session beads from a previous run before building desired
 		// state, so desired state does not reference already-closed beads (#742).
 		if reapStaleSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
@@ -855,6 +864,10 @@ func (cr *CityRuntime) tick(
 	// Reap open session beads whose tmux session is dead before loading demand
 	// so stale names cannot block desired-state computation (#742).
 	cleanupDeadRuntimeSessionCorpses(sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
+	// Reap live runtimes still bound to a closed bead (e.g. a named-session
+	// identity re-minted as a pool slot) so the name's current owner can rebind
+	// it and attach lands on the right runtime.
+	reapRuntimesBoundToClosedBeads(cr.cityBeadStore(), sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
 	if reapStaleSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
 		sessionBeads = cr.loadSessionBeadSnapshot()
 	}

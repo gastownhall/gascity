@@ -5414,6 +5414,129 @@ func TestCleanupDeadRuntimeSessionCorpsesReportsStopErrors(t *testing.T) {
 	}
 }
 
+// TestReapRuntimesBoundToClosedBeadsStopsLiveRuntime reproduces the alias
+// hand-off corpse: a live runtime is still stamped with a closed bead's
+// GC_SESSION_ID while its session_name now belongs to a different, open bead.
+// The corpse must be reaped so the live owner can rebind the name.
+func TestReapRuntimesBoundToClosedBeadsStopsLiveRuntime(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["mayor"] = true
+	if err := sp.SetMeta("mayor", "GC_SESSION_ID", "gm-closed"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gm-closed", Status: "closed"}}, nil)
+	// The session_name "mayor" is now owned by a different, open bead.
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		ID:     "gm-open",
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name": "mayor",
+		},
+	}})
+
+	var stderr bytes.Buffer
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, &stderr)
+	if got != 1 {
+		t.Fatalf("reapRuntimesBoundToClosedBeads() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+	if len(sp.stopped) != 1 || sp.stopped[0] != "mayor" {
+		t.Fatalf("stopped = %v, want [mayor]", sp.stopped)
+	}
+	if !strings.Contains(stderr.String(), "reaped runtime \"mayor\" bound to closed session bead gm-closed") {
+		t.Fatalf("stderr = %q, want reap message", stderr.String())
+	}
+}
+
+// TestReapRuntimesBoundToClosedBeadsSkipsOpenBeadRuntime: a healthy runtime
+// whose bead is still open must never be reaped.
+func TestReapRuntimesBoundToClosedBeadsSkipsOpenBeadRuntime(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["worker"] = true
+	if err := sp.SetMeta("worker", "GC_SESSION_ID", "gm-open"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		ID:     "gm-open",
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name": "worker",
+		},
+	}})
+
+	var stderr bytes.Buffer
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, &stderr)
+	if got != 0 || sp.stopCalls["worker"] != 0 {
+		t.Fatalf("reaped open-bead runtime: got=%d stopCalls=%d stderr=%q", got, sp.stopCalls["worker"], stderr.String())
+	}
+}
+
+// TestReapRuntimesBoundToClosedBeadsSkipsRuntimeWithoutSessionID: a runtime we
+// cannot attribute to a bead (no GC_SESSION_ID) is left untouched.
+func TestReapRuntimesBoundToClosedBeadsSkipsRuntimeWithoutSessionID(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["mystery"] = true
+
+	store := beads.NewMemStore()
+	snapshot := newSessionBeadSnapshot(nil)
+
+	var stderr bytes.Buffer
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, &stderr)
+	if got != 0 || sp.stopCalls["mystery"] != 0 {
+		t.Fatalf("reaped unattributable runtime: got=%d stopCalls=%d", got, sp.stopCalls["mystery"])
+	}
+}
+
+// TestReapRuntimesBoundToClosedBeadsSkipsUnknownAndNonClosedBeads: a runtime
+// whose bead the store cannot return (e.g. another rig) or returns as not-closed
+// must not be reaped — only a confirmed-closed bead triggers a stop.
+func TestReapRuntimesBoundToClosedBeadsSkipsUnknownAndNonClosedBeads(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["foreign"] = true
+	sp.visible["still-open"] = true
+	if err := sp.SetMeta("foreign", "GC_SESSION_ID", "gm-elsewhere"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	if err := sp.SetMeta("still-open", "GC_SESSION_ID", "gm-open-not-in-snapshot"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+
+	// gm-elsewhere is absent from the store; gm-open-not-in-snapshot is present
+	// but open (a degraded snapshot that simply didn't list it).
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gm-open-not-in-snapshot", Status: "open"}}, nil)
+	snapshot := newSessionBeadSnapshot(nil)
+
+	var stderr bytes.Buffer
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, &stderr)
+	if got != 0 || sp.stopCalls["foreign"] != 0 || sp.stopCalls["still-open"] != 0 {
+		t.Fatalf("reaped a runtime that was not confirmed-closed: got=%d stderr=%q", got, stderr.String())
+	}
+}
+
+// TestReapRuntimesBoundToClosedBeadsSkipsActiveDrain: teardown ordering for a
+// draining bead belongs to the drainTracker, so the reaper must defer to it.
+func TestReapRuntimesBoundToClosedBeadsSkipsActiveDrain(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["mayor"] = true
+	if err := sp.SetMeta("mayor", "GC_SESSION_ID", "gm-closed"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gm-closed", Status: "closed"}}, nil)
+	snapshot := newSessionBeadSnapshot(nil)
+
+	dt := newDrainTracker()
+	dt.set("gm-closed", &drainState{reason: "user"})
+
+	var stderr bytes.Buffer
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, dt, sp, &stderr)
+	if got != 0 || sp.stopCalls["mayor"] != 0 {
+		t.Fatalf("reaped a draining runtime: got=%d stopCalls=%d", got, sp.stopCalls["mayor"])
+	}
+}
+
 // TestUnclaimResetsInProgressStatus verifies the Bug 2 fix: unclaiming a
 // retired session's in_progress work must reset status to "open" so a fresh
 // worker can re-claim via the routed queue (Tier 3: gc.routed_to +

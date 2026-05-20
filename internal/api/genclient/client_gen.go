@@ -3379,6 +3379,18 @@ type TypedEventStreamEnvelopeSessionWoke struct {
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionWorkQueryFailed defines model for TypedEventStreamEnvelopeSessionWorkQueryFailed.
+type TypedEventStreamEnvelopeSessionWorkQueryFailed struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  SessionLifecyclePayload  `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick defines model for TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick.
 type TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick struct {
 	Actor    string                                 `json:"actor"`
@@ -4038,6 +4050,19 @@ type TypedTaggedEventStreamEnvelopeSessionWoke struct {
 	City     string                   `json:"city"`
 	Message  *string                  `json:"message,omitempty"`
 	Payload  NoPayload                `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed defines model for TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed.
+type TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  SessionLifecyclePayload  `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -7287,6 +7312,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionWoke(v Ty
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionWorkQueryFailed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionWorkQueryFailed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionWorkQueryFailed() (TypedEventStreamEnvelopeSessionWorkQueryFailed, error) {
+	var body TypedEventStreamEnvelopeSessionWorkQueryFailed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionWorkQueryFailed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionWorkQueryFailed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionWorkQueryFailed(v TypedEventStreamEnvelopeSessionWorkQueryFailed) error {
+	v.Type = "session.work_query_failed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionWorkQueryFailed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionWorkQueryFailed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionWorkQueryFailed(v TypedEventStreamEnvelopeSessionWorkQueryFailed) error {
+	v.Type = "session.work_query_failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick() (TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick, error) {
 	var body TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick
@@ -7483,6 +7536,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionUpdated()
 	case "session.woke":
 		return t.AsTypedEventStreamEnvelopeSessionWoke()
+	case "session.work_query_failed":
+		return t.AsTypedEventStreamEnvelopeSessionWorkQueryFailed()
 	case "supervisor.fs_pressure.skipped_tick":
 		return t.AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
 	case "worker.operation":
@@ -8846,6 +8901,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSess
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionWorkQueryFailed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionWorkQueryFailed() (TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionWorkQueryFailed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionWorkQueryFailed(v TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed) error {
+	v.Type = "session.work_query_failed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionWorkQueryFailed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionWorkQueryFailed(v TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed) error {
+	v.Type = "session.work_query_failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick() (TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick, error) {
 	var body TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick
@@ -9042,6 +9125,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionUpdated()
 	case "session.woke":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionWoke()
+	case "session.work_query_failed":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionWorkQueryFailed()
 	case "supervisor.fs_pressure.skipped_tick":
 		return t.AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
 	case "worker.operation":

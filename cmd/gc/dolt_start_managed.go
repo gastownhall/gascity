@@ -1,14 +1,20 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 type managedDoltStartReport struct {
@@ -17,6 +23,36 @@ type managedDoltStartReport struct {
 	Port         int
 	AddressInUse bool
 	Attempts     int
+}
+
+type managedDoltStartedProcess struct {
+	CityPath    string
+	PID         int
+	WatchdogPID int
+	DisarmFile  string
+	DisarmReady bool
+}
+
+const (
+	managedDoltTestModeEnv      = "GC_MANAGED_DOLT_TEST_MODE"
+	managedDoltTestParentPIDEnv = "GC_MANAGED_DOLT_TEST_PARENT_PID"
+	managedDoltTestWatchdogArg  = "__gc-managed-dolt-test-watchdog"
+)
+
+var (
+	managedDoltTestMode               = isTestBinary
+	managedDoltTestExecutable         = os.Executable
+	managedDoltTestWatchdogPIDTimeout = 5 * time.Second
+	managedDoltTestProcessRegistry    sync.Map
+	managedDoltTestTerminateProcess   = terminateManagedDoltTestPID
+)
+
+func init() {
+	// Test watchdog re-exec runs before normal command dispatch.
+	if len(os.Args) < 2 || os.Args[1] != managedDoltTestWatchdogArg {
+		return
+	}
+	os.Exit(runManagedDoltTestWatchdog(os.Args[2:], os.Stdout, os.Stderr))
 }
 
 func startManagedDoltProcess(cityPath, host, port, user, logLevel string, timeout time.Duration) (managedDoltStartReport, error) {
@@ -69,41 +105,36 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 			return report, fmt.Errorf("open log file: %w", err)
 		}
 
-		cmd := exec.Command("dolt", "sql-server", "--config", layout.ConfigFile)
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
-		cmd.Stdin = nil
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Env = doltServerEnv(os.Environ())
-		if err := cmd.Start(); err != nil {
+		started, err := startManagedDoltSQLServer(cityPath, layout.ConfigFile, layout.LogFile, logFile)
+		if err != nil {
 			_ = logFile.Close()
-			return report, fmt.Errorf("start dolt sql-server: %w", err)
+			return report, err
 		}
 		_ = logFile.Close()
 
-		report.PID = cmd.Process.Pid
+		report.PID = started.PID
 		report.Port = currentPort
 		if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
-			_ = terminateManagedDoltPID(cityPath, cmd.Process.Pid)
+			terminateManagedDoltStartedProcess(started)
 			return report, fmt.Errorf("create pid dir: %w", err)
 		}
-		if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0o644); err != nil {
-			_ = terminateManagedDoltPID(cityPath, cmd.Process.Pid)
+		if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(started.PID)+"\n"), 0o644); err != nil {
+			terminateManagedDoltStartedProcess(started)
 			return report, fmt.Errorf("write pid file: %w", err)
 		}
 		if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
 			Running:   true,
-			PID:       cmd.Process.Pid,
+			PID:       started.PID,
 			Port:      currentPort,
 			DataDir:   layout.DataDir,
 			StartedAt: time.Now().UTC().Format(time.RFC3339),
 		}); err != nil {
-			_ = terminateManagedDoltPID(cityPath, cmd.Process.Pid)
+			terminateManagedDoltStartedProcess(started)
 			_ = os.Remove(layout.PIDFile)
 			return report, fmt.Errorf("write provider state: %w", err)
 		}
 
-		readyReport, readyErr := waitForManagedDoltReady(cityPath, host, strconv.Itoa(currentPort), user, cmd.Process.Pid, timeout, false)
+		readyReport, readyErr := waitForManagedDoltReady(cityPath, host, strconv.Itoa(currentPort), user, started.PID, timeout, false)
 		if readyErr == nil && readyReport.Ready {
 			report.Ready = true
 			if publish {
@@ -111,11 +142,12 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 					return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
 				}
 			}
+			disarmManagedDoltStartedProcess(started)
 			return report, nil
 		}
 
 		if readyReport.PIDAlive {
-			_ = terminateManagedDoltPID(cityPath, cmd.Process.Pid)
+			terminateManagedDoltStartedProcess(started)
 			_ = os.Remove(layout.PIDFile)
 			_ = writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
 				Running:   false,
@@ -124,7 +156,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 				DataDir:   layout.DataDir,
 				StartedAt: time.Now().UTC().Format(time.RFC3339),
 			})
-			return report, fmt.Errorf("dolt server started (pid %d) but did not become query-ready within %s (check %s)", cmd.Process.Pid, timeout, layout.LogFile)
+			return report, fmt.Errorf("dolt server started (pid %d) but did not become query-ready within %s (check %s)", started.PID, timeout, layout.LogFile)
 		}
 
 		_ = os.Remove(layout.PIDFile)
@@ -150,6 +182,237 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	}
 
 	return report, fmt.Errorf("dolt server could not find a free port after repeated address-in-use failures (last port %d)", report.Port)
+}
+
+func startManagedDoltSQLServer(cityPath, configFile, logFilePath string, logFile *os.File) (managedDoltStartedProcess, error) {
+	if managedDoltTestWatchdogEnabled() {
+		return startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath, logFile)
+	}
+	cmd := exec.Command("dolt", "sql-server", "--config", configFile)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.Stdin = nil
+	cmd.SysProcAttr = managedDoltSQLServerSysProcAttr()
+	cmd.Env = doltServerEnv(os.Environ())
+	if err := cmd.Start(); err != nil {
+		return managedDoltStartedProcess{}, fmt.Errorf("start dolt sql-server: %w", err)
+	}
+	return managedDoltStartedProcess{CityPath: cityPath, PID: cmd.Process.Pid}, nil
+}
+
+func startManagedDoltSQLServerWithTestWatchdog(cityPath, configFile, logFilePath string, logFile *os.File) (managedDoltStartedProcess, error) {
+	disarmFile, err := managedDoltTestWatchdogDisarmFile(logFilePath)
+	if err != nil {
+		return managedDoltStartedProcess{}, err
+	}
+	watchdogExecutable, err := managedDoltTestWatchdogExecutable()
+	if err != nil {
+		_ = os.Remove(disarmFile)
+		return managedDoltStartedProcess{}, err
+	}
+	cmd := exec.Command(watchdogExecutable, managedDoltTestWatchdogArg, managedDoltTestParentPIDString(), configFile, logFilePath, disarmFile)
+	cmd.Stderr = logFile
+	cmd.Stdin = nil
+	cmd.Env = doltServerEnv(os.Environ())
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = os.Remove(disarmFile)
+		return managedDoltStartedProcess{}, fmt.Errorf("prepare dolt test watchdog: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		_ = os.Remove(disarmFile)
+		return managedDoltStartedProcess{}, fmt.Errorf("start dolt test watchdog: %w", err)
+	}
+	pid, err := readManagedDoltTestWatchdogPID(stdout, cmd.Process.Pid)
+	if err != nil {
+		_ = terminateManagedDoltPID(cityPath, cmd.Process.Pid)
+		_ = cmd.Wait()
+		_ = os.Remove(disarmFile)
+		return managedDoltStartedProcess{}, err
+	}
+	go func() { _ = cmd.Wait() }()
+	started := managedDoltStartedProcess{
+		CityPath:    cityPath,
+		PID:         pid,
+		WatchdogPID: cmd.Process.Pid,
+		DisarmFile:  disarmFile,
+		DisarmReady: managedDoltTestDisarmOnReady(),
+	}
+	registerManagedDoltTestProcess(started)
+	return started, nil
+}
+
+func managedDoltTestWatchdogExecutable() (string, error) {
+	executable, executableErr := managedDoltTestExecutable()
+	if executableErr == nil && strings.TrimSpace(executable) != "" {
+		return executable, nil
+	}
+	fallback := strings.TrimSpace(os.Args[0])
+	if fallback == "" {
+		if executableErr != nil {
+			return "", fmt.Errorf("resolve dolt test watchdog executable: os.Executable: %w", executableErr)
+		}
+		return "", fmt.Errorf("resolve dolt test watchdog executable: os.Executable returned empty path")
+	}
+	if filepath.IsAbs(fallback) {
+		return fallback, nil
+	}
+	abs, err := filepath.Abs(fallback)
+	if err != nil {
+		return "", fmt.Errorf("resolve dolt test watchdog executable from argv %q: %w", fallback, err)
+	}
+	return abs, nil
+}
+
+func managedDoltTestWatchdogDisarmFile(logFilePath string) (string, error) {
+	dir := filepath.Dir(logFilePath)
+	file, err := os.CreateTemp(dir, ".dolt-watchdog-disarm-*")
+	if err != nil {
+		return "", fmt.Errorf("create dolt test watchdog disarm file: %w", err)
+	}
+	path := file.Name()
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("close dolt test watchdog disarm file: %w", err)
+	}
+	if err := os.Remove(path); err != nil {
+		return "", fmt.Errorf("remove dolt test watchdog disarm file: %w", err)
+	}
+	return path, nil
+}
+
+func readManagedDoltTestWatchdogPID(r io.Reader, watchdogPID int) (int, error) {
+	type result struct {
+		line string
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		line, err := bufio.NewReader(r).ReadString('\n')
+		ch <- result{line: line, err: err}
+	}()
+
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			return 0, fmt.Errorf("read dolt test watchdog pid: %w", res.err)
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(res.line))
+		if err != nil || pid <= 0 {
+			return 0, fmt.Errorf("read dolt test watchdog pid: invalid pid %q", strings.TrimSpace(res.line))
+		}
+		return pid, nil
+	case <-time.After(managedDoltTestWatchdogPIDTimeout):
+		return 0, fmt.Errorf("dolt test watchdog pid timed out (watchdog pid %d)", watchdogPID)
+	}
+}
+
+func managedDoltSQLServerSysProcAttr() *syscall.SysProcAttr {
+	if managedDoltTestModeEnabled() {
+		return nil
+	}
+	return &syscall.SysProcAttr{Setpgid: true}
+}
+
+func managedDoltTestWatchdogEnabled() bool {
+	return managedDoltTestModeEnabled() && os.Getenv("GC_MANAGED_DOLT_TEST_WATCHDOG") != "0"
+}
+
+func managedDoltTestModeEnabled() bool {
+	return managedDoltTestMode() || os.Getenv(managedDoltTestModeEnv) == "1"
+}
+
+func managedDoltTestModeFromEnvOnly() bool {
+	return !managedDoltTestMode() && os.Getenv(managedDoltTestModeEnv) == "1"
+}
+
+func managedDoltTestParentPID() int {
+	raw := strings.TrimSpace(os.Getenv(managedDoltTestParentPIDEnv))
+	if raw != "" {
+		if pid, err := strconv.Atoi(raw); err == nil && pid > 0 {
+			return pid
+		}
+	}
+	return os.Getpid()
+}
+
+func managedDoltTestParentPIDString() string {
+	return strconv.Itoa(managedDoltTestParentPID())
+}
+
+func managedDoltTestHasExternalParent() bool {
+	raw := strings.TrimSpace(os.Getenv(managedDoltTestParentPIDEnv))
+	if raw == "" {
+		return false
+	}
+	pid, err := strconv.Atoi(raw)
+	return err == nil && pid > 0 && pid != os.Getpid()
+}
+
+func managedDoltTestDisarmOnReady() bool {
+	return managedDoltTestModeFromEnvOnly() && !managedDoltTestHasExternalParent()
+}
+
+func terminateManagedDoltStartedProcess(started managedDoltStartedProcess) {
+	unregisterManagedDoltStartedProcess(started)
+	_ = terminateManagedDoltPID(started.CityPath, started.PID)
+	if started.WatchdogPID > 0 {
+		_ = terminateManagedDoltPID(started.CityPath, started.WatchdogPID)
+	}
+	if started.DisarmFile != "" {
+		_ = os.Remove(started.DisarmFile)
+	}
+}
+
+func unregisterManagedDoltStartedProcess(started managedDoltStartedProcess) {
+	unregisterManagedDoltTestProcess(started.PID)
+	unregisterManagedDoltTestProcess(started.WatchdogPID)
+}
+
+func terminateManagedDoltTestPID(pid int) error {
+	return terminateManagedDoltPID("", pid)
+}
+
+func disarmManagedDoltStartedProcess(started managedDoltStartedProcess) {
+	if started.DisarmFile == "" || !started.DisarmReady {
+		return
+	}
+	if err := os.WriteFile(started.DisarmFile, []byte("ready\n"), 0o644); err != nil {
+		return
+	}
+	unregisterManagedDoltTestProcess(started.PID)
+}
+
+func registerManagedDoltTestProcess(started managedDoltStartedProcess) {
+	if started.PID <= 0 || !managedDoltTestModeEnabled() {
+		return
+	}
+	managedDoltTestProcessRegistry.Store(started.PID, started)
+}
+
+func unregisterManagedDoltTestProcess(pid int) {
+	if pid <= 0 {
+		return
+	}
+	managedDoltTestProcessRegistry.Delete(pid)
+}
+
+func reapManagedDoltTestProcesses() {
+	managedDoltTestProcessRegistry.Range(func(key, value any) bool {
+		started, ok := value.(managedDoltStartedProcess)
+		if !ok {
+			managedDoltTestProcessRegistry.Delete(key)
+			return true
+		}
+		if started.PID > 0 && pidAlive(started.PID) {
+			_ = managedDoltTestTerminateProcess(started.PID)
+		}
+		if started.WatchdogPID > 0 && pidAlive(started.WatchdogPID) {
+			_ = managedDoltTestTerminateProcess(started.WatchdogPID)
+		}
+		managedDoltTestProcessRegistry.Delete(key)
+		return true
+	})
 }
 
 func managedDoltStartFields(report managedDoltStartReport) []string {
@@ -237,6 +500,76 @@ func terminateManagedDoltPID(cityPath string, pid int) error {
 	_ = process.Signal(syscall.SIGKILL)
 	time.Sleep(250 * time.Millisecond)
 	return nil
+}
+
+func runManagedDoltTestWatchdog(args []string, stdout, stderr *os.File) int {
+	if !managedDoltTestModeEnabled() {
+		fmt.Fprintln(stderr, "managed dolt test watchdog is only available in managed Dolt test mode") //nolint:errcheck
+		return 2
+	}
+	if len(args) != 4 {
+		fmt.Fprintf(stderr, "usage: %s <parent-pid> <config-file> <log-file> <disarm-file>\n", managedDoltTestWatchdogArg) //nolint:errcheck
+		return 2
+	}
+	parentPID, err := strconv.Atoi(args[0])
+	if err != nil || parentPID <= 0 {
+		fmt.Fprintf(stderr, "invalid parent pid %q\n", args[0]) //nolint:errcheck
+		return 2
+	}
+	configFile := args[1]
+	logFilePath := args[2]
+	disarmFile := args[3]
+	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		fmt.Fprintf(stderr, "open dolt log: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	defer logFile.Close() //nolint:errcheck
+
+	cmd := exec.Command("dolt", "sql-server", "--config", configFile)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.Stdin = nil
+	cmd.SysProcAttr = nil
+	cmd.Env = doltServerEnv(os.Environ())
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(stderr, "start dolt sql-server: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	fmt.Fprintf(stdout, "%d\n", cmd.Process.Pid) //nolint:errcheck
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(signals)
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-signals:
+			_ = terminateManagedDoltPID("", cmd.Process.Pid)
+			<-done
+			return 0
+		case <-ticker.C:
+			if _, err := os.Stat(disarmFile); err == nil {
+				_ = os.Remove(disarmFile)
+				return 0
+			}
+			if !pidutil.Alive(parentPID) {
+				_ = terminateManagedDoltPID("", cmd.Process.Pid)
+				<-done
+				return 0
+			}
+		case err := <-done:
+			if err != nil {
+				return 1
+			}
+			return 0
+		}
+	}
 }
 
 // doltServerEnv returns the environment applied to every managed dolt

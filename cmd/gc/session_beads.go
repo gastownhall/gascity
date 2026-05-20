@@ -1801,6 +1801,109 @@ func cleanupDeadRuntimeSessionCorpses(
 	return cleaned
 }
 
+// reapRuntimesBoundToClosedBeads stops live runtime sessions whose
+// GC_SESSION_ID identifies a session bead that has already been closed.
+//
+// This heals the case where a session_name (or its public alias) is reassigned
+// from one bead to another — e.g. a named session is retired and the same
+// identity is re-minted as a pool slot, or the two race over the alias and the
+// loser is archived. The losing bead is closed, but its tmux runtime can keep
+// running, still stamped with the closed bead's GC_SESSION_ID. The session_name
+// is now owned by a different, live bead, so:
+//   - `gc session attach <alias>` resolves to the live bead but lands on the
+//     stale runtime (matched by name), which exits on the next interaction
+//     because its own bead is gone; and
+//   - the live bead cannot (re)bind the name because the corpse still holds it.
+//
+// cleanupDeadRuntimeSessionCorpses does not catch this: it walks *open* beads
+// and only stops runtimes whose pane is already dead. Here the bead is *closed*
+// and the runtime is very much alive, so we walk the other direction — over
+// live runtimes — and reap any whose owning bead is confirmed closed.
+//
+// Safety: a runtime is only reaped when its GC_SESSION_ID names a bead the store
+// confirms is closed. A runtime without a readable GC_SESSION_ID, or one whose
+// bead is still open or cannot be fetched (e.g. another rig, or a transient
+// store error), is left untouched. Active drains are left to the drainTracker.
+func reapRuntimesBoundToClosedBeads(
+	store beads.Store,
+	sessionBeads *sessionBeadSnapshot,
+	dt *drainTracker,
+	sp runtime.Provider,
+	stderr io.Writer,
+) int {
+	if store == nil || sp == nil {
+		return 0
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	visible, err := sp.ListRunning("")
+	partialList := runtime.IsPartialListError(err)
+	if err != nil && !partialList {
+		fmt.Fprintf(stderr, "session reconciler: listing runtime sessions for closed-bead reap: %v\n", err) //nolint:errcheck
+		return 0
+	}
+	if partialList {
+		fmt.Fprintf(stderr, "session reconciler: listing runtime sessions partially failed for closed-bead reap; checking %d visible session(s): %v\n", len(visible), err) //nolint:errcheck
+	}
+	if len(visible) == 0 {
+		return 0
+	}
+
+	reaped := 0
+	seen := make(map[string]bool, len(visible))
+	for _, name := range visible {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+
+		// Attribute the runtime to a bead via GC_SESSION_ID. Without it we
+		// cannot tell which bead owns the runtime, so we leave it alone.
+		liveID, err := sp.GetMeta(name, "GC_SESSION_ID")
+		if err != nil {
+			continue
+		}
+		liveID = strings.TrimSpace(liveID)
+		if liveID == "" {
+			continue
+		}
+
+		// A runtime whose bead is still open is healthy (or is mid-wake and
+		// will be); the snapshot holds only open beads, so a hit means leave it.
+		if _, ok := sessionBeads.FindByID(liveID); ok {
+			continue
+		}
+
+		// The bead is not open. Confirm it is actually closed before reaping —
+		// a missing or unreadable record must not trigger a stop.
+		bead, err := store.Get(liveID)
+		if err != nil {
+			continue
+		}
+		if bead.Status != "closed" {
+			continue
+		}
+
+		// Teardown ordering for draining beads belongs to the drainTracker.
+		if dt != nil && dt.get(liveID) != nil {
+			continue
+		}
+
+		if err := sp.Stop(name); err != nil {
+			if runtime.IsSessionGone(err) {
+				continue
+			}
+			fmt.Fprintf(stderr, "session reconciler: reaping runtime %q bound to closed bead %s: %v\n", name, liveID, err) //nolint:errcheck
+			continue
+		}
+		fmt.Fprintf(stderr, "session reconciler: reaped runtime %q bound to closed session bead %s\n", name, liveID) //nolint:errcheck
+		reaped++
+	}
+	return reaped
+}
+
 func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	store beads.Store,
 	rigStores map[string]beads.Store,

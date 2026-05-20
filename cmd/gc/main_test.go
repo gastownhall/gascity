@@ -170,7 +170,13 @@ func TestMain(m *testing.M) {
 	if !isTestscriptCommandInvocation(os.Args[0]) {
 		clearProcessLiveEnvForTests()
 	}
-	testTempRoot, err := os.MkdirTemp("/tmp", "gctest-")
+	if err := os.Setenv(managedDoltTestModeEnv, "1"); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv(managedDoltTestParentPIDEnv, fmt.Sprintf("%d", os.Getpid())); err != nil {
+		panic(err)
+	}
+	testTempRoot, err := os.MkdirTemp("/tmp", pidPrefixedTempPattern(testCmdGCTempRootPrefix))
 	if err != nil {
 		panic(err)
 	}
