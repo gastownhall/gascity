@@ -318,8 +318,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
+	suppressStartupPrompt := suppressStartupPromptForAgent(cfgAgent)
 	switch {
-	case suppressStartupPromptForAgent(cfgAgent):
+	case suppressStartupPrompt:
 		prompt = ""
 	case prompt != "":
 		prompt = beacon + "\n\n" + prompt
@@ -518,13 +519,23 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 
 	// Step 12: Build startup hints.
+	nudge := cfgAgent.Nudge
+	acceptStartupDialogs := resolved.AcceptStartupDialogs
+	if suppressStartupPrompt {
+		// The control dispatcher is a deterministic gc subprocess, not an
+		// interactive model provider. Keep ProcessNames for liveness without
+		// routing startup through prompt, nudge, or trust-dialog handling.
+		nudge = ""
+		accept := false
+		acceptStartupDialogs = &accept
+	}
 	hints := agent.StartupHints{
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 		ReadyDelayMs:           resolved.ReadyDelayMs,
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
-		Nudge:                  cfgAgent.Nudge,
+		AcceptStartupDialogs:   acceptStartupDialogs,
+		Nudge:                  nudge,
 		PreStart:               expandedPreStart,
 		SessionSetup:           expandedSetup,
 		SessionSetupScript:     resolvedScript,
