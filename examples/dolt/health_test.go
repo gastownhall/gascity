@@ -878,6 +878,122 @@ func TestHealthScriptZombieScanExcludesRigLocalServers(t *testing.T) {
 	}
 }
 
+// TestHealthScriptZombieScanExcludesForeignConfigDolts verifies that
+// dolt sql-server processes whose `--config` argument resolves to a
+// path outside `$GC_CITY_PATH` are not flagged as zombies. This is the
+// multi-workspace case: on a developer machine running more than one
+// Gas City (or a Gas City alongside Gas Town / a faultline server),
+// each workspace's `gc dolt health` scan would previously flag every
+// sibling workspace's legitimately-running dolt as a "zombie." The
+// Gastown Deacon patrol formula then explicitly instructs killing
+// zombie PIDs, which would cross workspace boundaries and take down
+// unrelated cities.
+//
+// A dolt sql-server with no explicit `--config` falls through and is
+// still evaluated as a zombie, because its workspace is ambiguous.
+func TestHealthScriptZombieScanExcludesForeignConfigDolts(t *testing.T) {
+	cityPath := t.TempDir()
+	foreignPath := t.TempDir()
+	fakeBin := t.TempDir()
+
+	mainPort := "19911"
+
+	mainPID := "525201"
+	foreignPID := "525202"
+	noConfigPID := "525203"
+
+	// City .beads directory with metadata.
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake gc: fail so metadata_files() falls back to find.
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+
+	// Fake pgrep: returns main PID + a foreign dolt + a no-config dolt.
+	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
+		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\necho %s\n", mainPID, foreignPID, noConfigPID))
+
+	// Fake lsof: only the main port is listening.
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
+		fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    -iTCP:%s) echo %s; exit 0 ;;
+  esac
+done
+exit 1
+`, mainPort, mainPID))
+
+	// Fake ps: handles pid_is_running (-o pid=) and zombie scan (-o args=).
+	// The foreign PID's --config points outside cityPath; the no-config PID
+	// runs sql-server with no --config at all (treated as ambiguous and
+	// still flagged as zombie under the current contract).
+	foreignConfig := filepath.Join(foreignPath, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	writeExecutable(t, filepath.Join(fakeBin, "ps"), fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "-p" ] && [ "$3" = "-o" ]; then
+  case "$4" in
+    pid=) printf ' %%s\n' "$2"; exit 0 ;;
+    args=)
+      case "$2" in
+        %s) echo "dolt sql-server --config %s" ;;
+        %s) echo "dolt sql-server" ;;
+        *)  echo "dolt sql-server" ;;
+      esac
+      exit 0
+      ;;
+  esac
+fi
+exit 1
+`, foreignPID, foreignConfig, noConfigPID))
+
+	// Fake nc / dolt: unreachable (no real server).
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 1\n")
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(
+		filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+mainPort,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+
+	output := string(out)
+
+	// The no-config dolt (525203) is still ambiguous and should be the
+	// only zombie reported.
+	if !strings.Contains(output, `"zombie_count": 1`) {
+		t.Errorf("expected zombie_count 1; got:\n%s", output)
+	}
+
+	// The foreign-config PID (525202) must NOT appear in zombie_pids.
+	if strings.Contains(output, foreignPID) {
+		t.Errorf("foreign-config dolt PID %s should not be in zombie_pids; got:\n%s", foreignPID, output)
+	}
+
+	// The no-config PID (525203) should appear, since its workspace is
+	// ambiguous and the current contract still flags it.
+	if !strings.Contains(output, noConfigPID) {
+		t.Errorf("no-config dolt PID %s should be in zombie_pids; got:\n%s", noConfigPID, output)
+	}
+}
+
 // TestHealthScriptJSONAlwaysExitsZero guards the JSON-mode exit
 // contract. Automation consumers (notably the deacon patrol formula)
 // parse the JSON payload and key health decisions off `server.reachable`.
