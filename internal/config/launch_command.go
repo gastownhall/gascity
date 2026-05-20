@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -97,7 +98,7 @@ func providerOptionArgs(resolved *ResolvedProvider, optionOverrides map[string]s
 	if resolved == nil || len(resolved.OptionsSchema) == 0 {
 		return nil, nil
 	}
-	mergedOptions := make(map[string]string, len(resolved.EffectiveDefaults)+len(optionOverrides))
+	mergedOptions := make(map[string]string, providerOptionMapCapacity(len(resolved.EffectiveDefaults), len(optionOverrides)))
 	for key, value := range resolved.EffectiveDefaults {
 		mergedOptions[key] = value
 	}
@@ -111,6 +112,13 @@ func providerOptionArgs(resolved *ResolvedProvider, optionOverrides map[string]s
 		return nil, nil
 	}
 	return ResolveExplicitOptions(resolved.OptionsSchema, mergedOptions)
+}
+
+func providerOptionMapCapacity(defaultsLen, overridesLen int) int {
+	if overridesLen > 0 && defaultsLen <= math.MaxInt-overridesLen {
+		return defaultsLen + overridesLen
+	}
+	return defaultsLen
 }
 
 func hasProviderOptionValues(resolved *ResolvedProvider, optionOverrides map[string]string) bool {
