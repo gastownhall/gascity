@@ -284,9 +284,10 @@ func TestCreateHandler_DefaultGateMode(t *testing.T) {
 
 func TestCreateHandler_PersistsRig(t *testing.T) {
 	store := newFakeStore()
+	emitter := &fakeEmitter{}
 	handler := &Handler{
 		Store:   store,
-		Emitter: &fakeEmitter{},
+		Emitter: emitter,
 		Clock:   time.Now,
 	}
 
@@ -306,6 +307,16 @@ func TestCreateHandler_PersistsRig(t *testing.T) {
 	}
 	if meta[FieldRig] != "gascity-prod" {
 		t.Errorf("rig = %q, want %q", meta[FieldRig], "gascity-prod")
+	}
+	if len(emitter.events) != 1 {
+		t.Fatalf("emitted events = %d, want 1", len(emitter.events))
+	}
+	var payload CreatedPayload
+	if err := json.Unmarshal(emitter.events[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshaling event payload: %v", err)
+	}
+	if payload.Rig != "gascity-prod" {
+		t.Errorf("payload.Rig = %q, want %q", payload.Rig, "gascity-prod")
 	}
 }
 

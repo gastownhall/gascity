@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -130,7 +131,7 @@ func newConvergeStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			beadID := args[0]
-			store, _, code := openConvergeStore(stderr, "gc converge status")
+			store, _, _, code := openConvergeStore(stderr, "gc converge status")
 			if code != 0 {
 				return errExit
 			}
@@ -232,6 +233,7 @@ func newConvergeStopCmd(stdout, stderr io.Writer) *cobra.Command {
 func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 	var (
 		all         bool
+		allRigs     bool
 		stateFilter string
 		jsonOutput  bool
 	)
@@ -239,20 +241,6 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 		Use:   "list",
 		Short: "List convergence loops",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			store, _, code := openConvergeStore(stderr, "gc converge list")
-			if code != 0 {
-				return errExit
-			}
-			query := beads.ListQuery{Type: "convergence"}
-			if all {
-				query.IncludeClosed = true
-			}
-			beadList, err := store.List(query)
-			if err != nil {
-				fmt.Fprintf(stderr, "gc converge list: %v\n", err) //nolint:errcheck
-				return errExit
-			}
-
 			type convEntry struct {
 				ID        string `json:"id"`
 				State     string `json:"state"`
@@ -264,37 +252,113 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 				Title     string `json:"title"`
 			}
 			var entries []convEntry
-			for _, b := range beadList {
-				meta := b.Metadata
-				if meta == nil {
-					meta = map[string]string{}
+			appendEntries := func(scopeRig string, store beads.Store) error {
+				query := beads.ListQuery{Type: "convergence"}
+				if all {
+					query.IncludeClosed = true
 				}
-				state := meta[convergence.FieldState]
-				if stateFilter != "" && state != stateFilter {
-					continue
+				beadList, err := store.List(query)
+				if err != nil {
+					return err
 				}
-				iter, _ := convergence.DecodeInt(meta[convergence.FieldIteration])
-				maxIter, _ := convergence.DecodeInt(meta[convergence.FieldMaxIterations])
-				entries = append(entries, convEntry{
-					ID:        b.ID,
-					State:     state,
-					Iteration: fmt.Sprintf("%d/%d", iter, maxIter),
-					Gate:      meta[convergence.FieldGateMode],
-					Formula:   meta[convergence.FieldFormula],
-					Target:    meta[convergence.FieldTarget],
-					Rig:       meta[convergence.FieldRig],
-					Title:     b.Title,
-				})
+				for _, b := range beadList {
+					meta := b.Metadata
+					if meta == nil {
+						meta = map[string]string{}
+					}
+					state := meta[convergence.FieldState]
+					if stateFilter != "" && state != stateFilter {
+						continue
+					}
+					iter, _ := convergence.DecodeInt(meta[convergence.FieldIteration])
+					maxIter, _ := convergence.DecodeInt(meta[convergence.FieldMaxIterations])
+					rig := meta[convergence.FieldRig]
+					if rig == "" {
+						rig = scopeRig
+					}
+					entries = append(entries, convEntry{
+						ID:        b.ID,
+						State:     state,
+						Iteration: fmt.Sprintf("%d/%d", iter, maxIter),
+						Gate:      meta[convergence.FieldGateMode],
+						Formula:   meta[convergence.FieldFormula],
+						Target:    meta[convergence.FieldTarget],
+						Rig:       rig,
+						Title:     b.Title,
+					})
+				}
+				return nil
+			}
+
+			hadScopeError := false
+			if allRigs {
+				rctx, err := resolveContext()
+				if err != nil {
+					fmt.Fprintf(stderr, "gc converge list: %v\n", err) //nolint:errcheck
+					return errExit
+				}
+				store, err := openStoreAtForCity(rctx.CityPath, rctx.CityPath)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc converge list: %v\n", err) //nolint:errcheck
+					return errExit
+				}
+				if err := appendEntries("", store); err != nil {
+					fmt.Fprintf(stderr, "gc converge list: %v\n", err) //nolint:errcheck
+					return errExit
+				}
+				cfg, err := loadCityConfig(rctx.CityPath, io.Discard)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc converge list: loading city config: %v\n", err) //nolint:errcheck
+					return errExit
+				}
+				rigs := make([]string, 0, len(cfg.Rigs))
+				rigPathByName := make(map[string]string, len(cfg.Rigs))
+				for i := range cfg.Rigs {
+					if strings.TrimSpace(cfg.Rigs[i].Path) == "" {
+						continue
+					}
+					rigs = append(rigs, cfg.Rigs[i].Name)
+					rigPathByName[cfg.Rigs[i].Name] = resolveStoreScopeRoot(rctx.CityPath, cfg.Rigs[i].Path)
+				}
+				sort.Strings(rigs)
+				for _, rig := range rigs {
+					store, err := openStoreAtForCity(rigPathByName[rig], rctx.CityPath)
+					if err != nil {
+						fmt.Fprintf(stderr, "gc converge list: rig %q: %v\n", rig, err) //nolint:errcheck
+						hadScopeError = true
+						continue
+					}
+					if err := appendEntries(rig, store); err != nil {
+						fmt.Fprintf(stderr, "gc converge list: rig %q: %v\n", rig, err) //nolint:errcheck
+						hadScopeError = true
+						continue
+					}
+				}
+			} else {
+				store, _, _, code := openConvergeStore(stderr, "gc converge list")
+				if code != 0 {
+					return errExit
+				}
+				if err := appendEntries("", store); err != nil {
+					fmt.Fprintf(stderr, "gc converge list: %v\n", err) //nolint:errcheck
+					return errExit
+				}
 			}
 
 			if jsonOutput {
 				data, _ := json.MarshalIndent(entries, "", "  ")
 				fmt.Fprintln(stdout, string(data)) //nolint:errcheck
+				if hadScopeError {
+					return errExit
+				}
 				return nil
 			}
 
 			if len(entries) == 0 {
 				fmt.Fprintln(stdout, "No convergence loops found.") //nolint:errcheck
+				if hadScopeError {
+					return errExit
+				}
 				return nil
 			}
 
@@ -305,10 +369,14 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 				fmt.Fprintf(stdout, "%-14s %-10s %-10s %-10s %-26s %-16s %-16s %s\n", //nolint:errcheck
 					e.ID, e.State, e.Iteration, e.Gate, e.Formula, e.Target, e.Rig, e.Title)
 			}
+			if hadScopeError {
+				return errExit
+			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "Include closed/terminated loops")
+	cmd.Flags().BoolVar(&allRigs, "all-rigs", false, "List loops from city/HQ and every bound rig")
 	cmd.Flags().StringVar(&stateFilter, "state", "", "Filter by state (active, waiting_manual, terminated)")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON")
 	return cmd
@@ -321,7 +389,7 @@ func newConvergeTestGateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			beadID := args[0]
-			store, rctx, code := openConvergeStore(stderr, "gc converge test-gate")
+			store, rctx, storePath, code := openConvergeStore(stderr, "gc converge test-gate")
 			if code != 0 {
 				return errExit
 			}
@@ -363,6 +431,7 @@ func newConvergeTestGateCmd(stdout, stderr io.Writer) *cobra.Command {
 				MaxIterations: maxIter,
 				WispID:        meta[convergence.FieldActiveWisp],
 				CityPath:      cityPath,
+				StorePath:     storePath,
 				DocPath:       meta[convergence.VarPrefix+"doc_path"],
 			}
 
@@ -474,42 +543,43 @@ func convergeSocketCmd(beadID, command string, stdout, stderr io.Writer) error {
 // context it opens the city/HQ store; with a rig context it opens that
 // rig's store so rig-scoped convergence loops are visible. It also returns
 // the resolved context for callers that need the city path.
-func openConvergeStore(stderr io.Writer, cmdName string) (beads.Store, resolvedContext, int) {
+func openConvergeStore(stderr io.Writer, cmdName string) (beads.Store, resolvedContext, string, int) {
 	rctx, err := resolveContext()
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck
-		return nil, resolvedContext{}, 1
+		return nil, resolvedContext{}, "", 1
 	}
-	store, err := openContextStore(rctx)
+	storePath, err := convergeStorePathForContext(rctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck
-		return nil, resolvedContext{}, 1
+		return nil, resolvedContext{}, "", 1
 	}
-	return store, rctx, 0
+	store, err := openStoreAtForCity(storePath, rctx.CityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck
+		return nil, resolvedContext{}, "", 1
+	}
+	return store, rctx, storePath, 0
 }
 
-// openContextStore opens the bead store for a resolved city+rig context:
-// the city/HQ store when RigName is empty, otherwise the named rig's
-// store. An unbound or unknown rig is an error so that --rig fails loudly
-// rather than silently falling back to city/HQ.
-func openContextStore(rctx resolvedContext) (beads.Store, error) {
+func convergeStorePathForContext(rctx resolvedContext) (string, error) {
 	if rctx.RigName == "" {
-		return openCityStoreAt(rctx.CityPath)
+		return rctx.CityPath, nil
 	}
 	cfg, err := loadCityConfig(rctx.CityPath, io.Discard)
 	if err != nil {
-		return nil, fmt.Errorf("loading city config: %w", err)
+		return "", fmt.Errorf("loading city config: %w", err)
 	}
 	for i := range cfg.Rigs {
 		if cfg.Rigs[i].Name != rctx.RigName {
 			continue
 		}
 		if strings.TrimSpace(cfg.Rigs[i].Path) == "" {
-			return nil, fmt.Errorf("rig %q is registered but has no rig path; "+
-				"convergence loops require a bound rig", rctx.RigName)
+			return "", unboundRigConvergenceError(rctx.RigName)
 		}
-		return openStoreAtForCity(cfg.Rigs[i].Path, rctx.CityPath)
+		return resolveStoreScopeRoot(rctx.CityPath, cfg.Rigs[i].Path), nil
 	}
-	return nil, fmt.Errorf("rig %q is not registered in this city", rctx.RigName)
+	return "", fmt.Errorf("rig %q is not registered in this city", rctx.RigName)
 }

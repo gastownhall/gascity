@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -50,7 +52,7 @@ func setupConvergenceRuntime(t *testing.T) (*CityRuntime, *beads.MemStore) {
 
 	// Initialize the city/HQ convergence scope (mimics initConvergenceHandler).
 	cr.convScopes = map[string]*convergenceScope{
-		"": cr.newConvergenceScope("", store, []string{sharedTestFormulaDir}),
+		"": cr.newConvergenceScope("", store, cr.cityPath, []string{sharedTestFormulaDir}),
 	}
 
 	return cr, store
@@ -70,9 +72,42 @@ func hqScope(t *testing.T, cr *CityRuntime) *convergenceScope {
 // addConvergenceRigScope attaches a rig-scoped convergence scope backed by
 // the given store, mimicking initConvergenceHandler's per-rig wiring.
 func addConvergenceRigScope(cr *CityRuntime, rig string, store beads.Store) *convergenceScope {
-	scope := cr.newConvergenceScope(rig, store, []string{sharedTestFormulaDir})
+	return addConvergenceRigScopeAt(cr, rig, store, filepath.Join(cr.cityPath, "rigs", rig))
+}
+
+func addConvergenceRigScopeAt(cr *CityRuntime, rig string, store beads.Store, storePath string) *convergenceScope {
+	scope := cr.newConvergenceScope(rig, store, storePath, []string{sharedTestFormulaDir})
 	cr.convScopes[rig] = scope
+	if cr.cfg != nil {
+		found := false
+		for i := range cr.cfg.Rigs {
+			if cr.cfg.Rigs[i].Name == rig {
+				found = true
+				break
+			}
+		}
+		if !found {
+			cr.cfg.Rigs = append(cr.cfg.Rigs, config.Rig{Name: rig, Path: storePath})
+		}
+	}
 	return scope
+}
+
+type convergenceListErrorStore struct {
+	beads.Store
+	err error
+}
+
+func (s convergenceListErrorStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, s.err
+}
+
+type getPanicStore struct {
+	beads.Store
+}
+
+func (s getPanicStore) Get(string) (beads.Bead, error) {
+	panic("injected convergence store get panic")
 }
 
 // sendAndReceive sends a convergence request via handleConvergenceRequest
@@ -447,6 +482,400 @@ func TestConvergence_StartupReconcileCoversRigScopes(t *testing.T) {
 	}
 	if hqScope(t, cr).adapter.activeIndex == nil {
 		t.Error("city scope active index should be populated after startup reconcile")
+	}
+}
+
+func TestConvergence_GateConditionUsesRigStorePath(t *testing.T) {
+	cr, _ := setupConvergenceRuntime(t)
+	rigStore := beads.NewMemStore()
+	rigPath := filepath.Join(cr.cityPath, "rigs", "gascity-prod")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("creating rig path: %v", err)
+	}
+	rigScope := addConvergenceRigScopeAt(cr, "gascity-prod", rigStore, rigPath)
+
+	outputPath := filepath.Join(t.TempDir(), "beads-dir.txt")
+	scriptPath := filepath.Join(t.TempDir(), "gate.sh")
+	script := "#!/bin/sh\nprintf '%s' \"$BEADS_DIR\" > " + strconv.Quote(outputPath) + "\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing gate script: %v", err)
+	}
+
+	createReply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "create",
+		Params: map[string]string{
+			"formula":        "test-formula",
+			"target":         "test-agent",
+			"max_iterations": "2",
+			"gate_mode":      convergence.GateModeCondition,
+			"gate_condition": scriptPath,
+			"rig":            "gascity-prod",
+		},
+	})
+	if createReply.Error != "" {
+		t.Fatalf("create error: %s", createReply.Error)
+	}
+	var created convergence.CreateResult
+	if err := json.Unmarshal(createReply.Result, &created); err != nil {
+		t.Fatalf("unmarshaling: %v", err)
+	}
+	if err := rigScope.adapter.populateIndex(); err != nil {
+		t.Fatalf("populateIndex: %v", err)
+	}
+	if err := rigStore.Close(created.FirstWispID); err != nil {
+		t.Fatalf("closing wisp: %v", err)
+	}
+
+	cr.convergenceTick(context.Background())
+
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("reading gate output: %v", err)
+	}
+	if got, want := string(data), filepath.Join(rigPath, ".beads"); got != want {
+		t.Fatalf("BEADS_DIR = %q, want %q", got, want)
+	}
+}
+
+func TestConvergence_TickIsolatesPanickingScope(t *testing.T) {
+	cr, _ := setupConvergenceRuntime(t)
+	cr.convScopes[""] = cr.newConvergenceScope("", getPanicStore{Store: beads.NewMemStore()}, cr.cityPath, []string{sharedTestFormulaDir})
+	hqScope(t, cr).adapter.activeIndex = map[string]string{"panic-root": "test-agent"}
+
+	rigStore := beads.NewMemStore()
+	rigScope := addConvergenceRigScope(cr, "healthy-rig", rigStore)
+	createReply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "create",
+		Params: map[string]string{
+			"formula":        "test-formula",
+			"target":         "test-agent",
+			"max_iterations": "5",
+			"rig":            "healthy-rig",
+		},
+	})
+	if createReply.Error != "" {
+		t.Fatalf("create error: %s", createReply.Error)
+	}
+	var created convergence.CreateResult
+	if err := json.Unmarshal(createReply.Result, &created); err != nil {
+		t.Fatalf("unmarshaling: %v", err)
+	}
+	if err := rigScope.adapter.populateIndex(); err != nil {
+		t.Fatalf("populateIndex: %v", err)
+	}
+	if err := rigStore.Close(created.FirstWispID); err != nil {
+		t.Fatalf("closing wisp: %v", err)
+	}
+
+	cr.convergenceTick(context.Background())
+
+	bead, err := rigStore.Get(created.BeadID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if state := bead.Metadata[convergence.FieldState]; state != convergence.StateWaitingManual {
+		t.Fatalf("healthy rig state = %q, want %q", state, convergence.StateWaitingManual)
+	}
+}
+
+func TestConvergence_StartupReconcileMarksFailedScopeComplete(t *testing.T) {
+	cr, _ := setupConvergenceRuntime(t)
+	cr.convScopes[""] = cr.newConvergenceScope("", convergenceListErrorStore{
+		Store: beads.NewMemStore(),
+		err:   errors.New("injected list failure"),
+	}, cr.cityPath, []string{sharedTestFormulaDir})
+
+	rigStore := beads.NewMemStore()
+	rigScope := addConvergenceRigScope(cr, "healthy-rig", rigStore)
+	b, err := rigStore.Create(beads.Bead{Title: "interrupted", Type: "convergence", Status: "in_progress"})
+	if err != nil {
+		t.Fatalf("creating bead: %v", err)
+	}
+	if err := rigStore.SetMetadata(b.ID, convergence.FieldState, convergence.StateCreating); err != nil {
+		t.Fatalf("setting state: %v", err)
+	}
+
+	cr.convergenceStartupReconcile(context.Background())
+
+	if !convergenceStartupComplete(cr) {
+		t.Fatal("startup should be complete after isolating the failed scope")
+	}
+	if rigScope.adapter.activeIndex == nil {
+		t.Fatal("healthy rig active index should be populated")
+	}
+	updated, err := rigStore.Get(b.ID)
+	if err != nil {
+		t.Fatalf("getting bead: %v", err)
+	}
+	if updated.Status != "closed" {
+		t.Fatalf("healthy rig interrupted bead status = %q, want closed", updated.Status)
+	}
+}
+
+func TestConvergence_StartupReconcileRetriesFailedScopeOnTick(t *testing.T) {
+	cr, store := setupConvergenceRuntime(t)
+	hqScope(t, cr).store = convergenceListErrorStore{
+		Store: store,
+		err:   errors.New("injected list failure"),
+	}
+
+	b, err := store.Create(beads.Bead{Title: "active", Type: "convergence", Status: "in_progress"})
+	if err != nil {
+		t.Fatalf("creating bead: %v", err)
+	}
+	for key, value := range map[string]string{
+		convergence.FieldState:  convergence.StateActive,
+		convergence.FieldTarget: "test-agent",
+	} {
+		if err := store.SetMetadata(b.ID, key, value); err != nil {
+			t.Fatalf("setting %s: %v", key, err)
+		}
+	}
+
+	cr.convergenceStartupReconcile(context.Background())
+
+	if !convergenceStartupComplete(cr) {
+		t.Fatal("startup should complete after isolating the failed scope")
+	}
+	scope := hqScope(t, cr)
+	if !scope.needsStartupReconcile {
+		t.Fatal("failed scope should remain eligible for later startup reconcile retry")
+	}
+	if _, ok := scope.adapter.activeIndex[b.ID]; ok {
+		t.Fatal("failed startup reconcile should not make active bead visible until retry succeeds")
+	}
+
+	scope.store = store
+	cr.convergenceTick(context.Background())
+
+	if scope.needsStartupReconcile {
+		t.Fatal("successful tick retry should clear startup reconcile retry marker")
+	}
+	if got := scope.adapter.activeIndex[b.ID]; got != "test-agent" {
+		t.Fatalf("active index[%s] = %q, want test-agent", b.ID, got)
+	}
+}
+
+func TestConvergenceScopeForRigRejectsStaleCachedScope(t *testing.T) {
+	tests := []struct {
+		name      string
+		setup     func(t *testing.T, cr *CityRuntime)
+		wantError string
+	}{
+		{
+			name: "cached rig path changed",
+			setup: func(t *testing.T, cr *CityRuntime) {
+				t.Helper()
+				oldPath := filepath.Join(cr.cityPath, "rigs", "prod-old")
+				newPath := filepath.Join(cr.cityPath, "rigs", "prod-new")
+				cr.cfg.Rigs = []config.Rig{{Name: "prod", Path: oldPath}}
+				addConvergenceRigScopeAt(cr, "prod", beads.NewMemStore(), oldPath)
+				cr.cfg.Rigs = []config.Rig{{Name: "prod", Path: newPath}}
+			},
+			wantError: "changed after config reload",
+		},
+		{
+			name: "cached rig became unbound",
+			setup: func(t *testing.T, cr *CityRuntime) {
+				t.Helper()
+				oldPath := filepath.Join(cr.cityPath, "rigs", "prod")
+				cr.cfg.Rigs = []config.Rig{{Name: "prod", Path: oldPath}}
+				addConvergenceRigScopeAt(cr, "prod", beads.NewMemStore(), oldPath)
+				cr.cfg.Rigs = []config.Rig{{Name: "prod"}}
+			},
+			wantError: "became unbound after config reload",
+		},
+		{
+			name: "cached rig removed",
+			setup: func(t *testing.T, cr *CityRuntime) {
+				t.Helper()
+				oldPath := filepath.Join(cr.cityPath, "rigs", "prod")
+				cr.cfg.Rigs = []config.Rig{{Name: "prod", Path: oldPath}}
+				addConvergenceRigScopeAt(cr, "prod", beads.NewMemStore(), oldPath)
+				cr.cfg.Rigs = nil
+			},
+			wantError: "was removed from city config",
+		},
+		{
+			name: "bound rig lacks cached scope",
+			setup: func(t *testing.T, cr *CityRuntime) {
+				t.Helper()
+				path := filepath.Join(cr.cityPath, "rigs", "prod")
+				cr.cfg.Rigs = []config.Rig{{Name: "prod", Path: path}}
+			},
+			wantError: "is bound but convergence scopes were not rebuilt",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cr, _ := setupConvergenceRuntime(t)
+			tc.setup(t, cr)
+
+			scope, err := cr.convergenceScopeForRig("prod")
+			if err == nil {
+				t.Fatal("expected stale cached scope error")
+			}
+			if scope != nil {
+				t.Fatalf("scope = %#v, want nil", scope)
+			}
+			if !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("error = %q, want diagnostic containing %q", err, tc.wantError)
+			}
+		})
+	}
+}
+
+func TestConvergenceTickSkipsStaleCachedRigScope(t *testing.T) {
+	cr, _ := setupConvergenceRuntime(t)
+	rigStore := beads.NewMemStore()
+	oldPath := filepath.Join(cr.cityPath, "rigs", "prod-old")
+	newPath := filepath.Join(cr.cityPath, "rigs", "prod-new")
+	cr.cfg.Rigs = []config.Rig{{Name: "prod", Path: oldPath}}
+	rigScope := addConvergenceRigScopeAt(cr, "prod", rigStore, oldPath)
+
+	createReply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "create",
+		Params: map[string]string{
+			"formula":        "test-formula",
+			"target":         "test-agent",
+			"max_iterations": "5",
+			"rig":            "prod",
+		},
+	})
+	if createReply.Error != "" {
+		t.Fatalf("create error: %s", createReply.Error)
+	}
+	var created convergence.CreateResult
+	if err := json.Unmarshal(createReply.Result, &created); err != nil {
+		t.Fatalf("unmarshaling: %v", err)
+	}
+	if err := rigScope.adapter.populateIndex(); err != nil {
+		t.Fatalf("populateIndex: %v", err)
+	}
+	if err := rigStore.Close(created.FirstWispID); err != nil {
+		t.Fatalf("closing wisp: %v", err)
+	}
+	cr.cfg.Rigs = []config.Rig{{Name: "prod", Path: newPath}}
+
+	cr.convergenceTick(context.Background())
+
+	meta, err := rigScope.handler.Store.GetMetadata(created.BeadID)
+	if err != nil {
+		t.Fatalf("GetMetadata: %v", err)
+	}
+	if got := meta[convergence.FieldState]; got != convergence.StateActive {
+		t.Fatalf("state after stale-scope tick = %q, want %q", got, convergence.StateActive)
+	}
+	if !strings.Contains(cr.stderr.(*bytes.Buffer).String(), "changed after config reload") {
+		t.Fatalf("stderr = %q, want stale-scope diagnostic", cr.stderr.(*bytes.Buffer).String())
+	}
+}
+
+func TestConvergenceStartupReconcileSkipsRemovedRigScope(t *testing.T) {
+	cr, _ := setupConvergenceRuntime(t)
+	rigStore := beads.NewMemStore()
+	oldPath := filepath.Join(cr.cityPath, "rigs", "prod")
+	cr.cfg.Rigs = []config.Rig{{Name: "prod", Path: oldPath}}
+	addConvergenceRigScopeAt(cr, "prod", rigStore, oldPath)
+
+	b, err := rigStore.Create(beads.Bead{Title: "terminated", Type: "convergence", Status: "in_progress"})
+	if err != nil {
+		t.Fatalf("creating bead: %v", err)
+	}
+	for key, value := range map[string]string{
+		convergence.FieldState:          convergence.StateTerminated,
+		convergence.FieldTerminalReason: convergence.TerminalApproved,
+		convergence.FieldTerminalActor:  "controller",
+	} {
+		if err := rigStore.SetMetadata(b.ID, key, value); err != nil {
+			t.Fatalf("setting %s: %v", key, err)
+		}
+	}
+	cr.cfg.Rigs = nil
+
+	cr.convergenceStartupReconcile(context.Background())
+
+	got, err := rigStore.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("status after stale-scope startup reconcile = %q, want unclosed", got.Status)
+	}
+	if !strings.Contains(cr.stderr.(*bytes.Buffer).String(), "was removed from city config") {
+		t.Fatalf("stderr = %q, want removed-rig diagnostic", cr.stderr.(*bytes.Buffer).String())
+	}
+}
+
+func TestConvergence_LifecycleCommandsRouteToRigScope(t *testing.T) {
+	commands := []struct {
+		name      string
+		wantState string
+	}{
+		{name: "stop", wantState: convergence.StateTerminated},
+		{name: "approve", wantState: convergence.StateTerminated},
+		{name: "iterate", wantState: convergence.StateActive},
+	}
+
+	for _, tc := range commands {
+		t.Run(tc.name, func(t *testing.T) {
+			cr, _ := setupConvergenceRuntime(t)
+			rigStore := beads.NewMemStore()
+			rigScope := addConvergenceRigScope(cr, "gascity-prod", rigStore)
+
+			createReply := sendAndReceive(t, cr, convergenceRequest{
+				Command: "create",
+				Params: map[string]string{
+					"formula":        "test-formula",
+					"target":         "test-agent",
+					"max_iterations": "5",
+					"rig":            "gascity-prod",
+				},
+			})
+			if createReply.Error != "" {
+				t.Fatalf("create error: %s", createReply.Error)
+			}
+			var created convergence.CreateResult
+			if err := json.Unmarshal(createReply.Result, &created); err != nil {
+				t.Fatalf("unmarshaling: %v", err)
+			}
+			if tc.name == "approve" || tc.name == "iterate" {
+				if err := rigScope.adapter.populateIndex(); err != nil {
+					t.Fatalf("populateIndex: %v", err)
+				}
+				if err := rigStore.Close(created.FirstWispID); err != nil {
+					t.Fatalf("closing wisp: %v", err)
+				}
+				cr.convergenceTick(context.Background())
+			}
+
+			noRigReply := sendAndReceive(t, cr, convergenceRequest{
+				Command: tc.name,
+				BeadID:  created.BeadID,
+				User:    "test-operator",
+			})
+			if noRigReply.Error == "" {
+				t.Fatalf("%s without --rig should not find the rig-scoped loop", tc.name)
+			}
+
+			reply := sendAndReceive(t, cr, convergenceRequest{
+				Command: tc.name,
+				BeadID:  created.BeadID,
+				User:    "test-operator",
+				Params:  map[string]string{"rig": "gascity-prod"},
+			})
+			if reply.Error != "" {
+				t.Fatalf("%s error: %s", tc.name, reply.Error)
+			}
+			bead, err := rigStore.Get(created.BeadID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if state := bead.Metadata[convergence.FieldState]; state != tc.wantState {
+				t.Fatalf("state after %s = %q, want %q", tc.name, state, tc.wantState)
+			}
+		})
 	}
 }
 

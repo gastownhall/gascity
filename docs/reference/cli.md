@@ -639,6 +639,7 @@ gc converge list [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | Include closed/terminated loops |
+| `--all-rigs` | bool |  | List loops from city/HQ and every bound rig |
 | `--json` | bool |  | Output as JSON |
 | `--state` | string |  | Filter by state (active, waiting_manual, terminated) |
 
