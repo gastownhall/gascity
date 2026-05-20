@@ -1,0 +1,26 @@
+# Hourly sweep that surfaces stranded beads — open work-type beads with no
+# routing target, no assignee, and no recent activity — by labeling them
+# so UIs and queries that filter on the label (e.g. a TODO tab) surface
+# them to the operator.
+#
+# Acts as a backstop for any city that has no auto-route order for the
+# HQ rig (or any rig at all): unrouted beads would otherwise sit
+# invisible in the queue forever.
+#
+# A weekly digest mail (gated by a state file in $GC_PACK_STATE_DIR/maintenance)
+# surfaces the aggregate count to the digest recipient. The per-tick run
+# is silent; the human only sees a mail once per digest interval.
+#
+# Configuration (all env vars, optional):
+#   GC_STRANDED_AGE_HOURS       Hours since update before eligible (default 4)
+#   GC_STRANDED_SURFACE_LABEL   Label to add (default needs:human)
+#   GC_STRANDED_EXEMPT_LABELS   Extra exempt labels, comma-separated
+#                               (default skip:auto-route; surface label is
+#                               always exempt for idempotency)
+#   GC_STRANDED_DIGEST_DAYS     Days between digest mails (default 7)
+#   GC_STRANDED_DIGEST_TO       Digest recipient (default mayor)
+[order]
+description = "Label stranded unrouted+unassigned beads, mail recipient a periodic digest"
+trigger = "cooldown"
+interval = "1h"
+exec = "$PACK_DIR/assets/scripts/stranded-bead-sweep.py"

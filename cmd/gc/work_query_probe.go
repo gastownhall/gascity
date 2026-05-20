@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -46,6 +47,10 @@ func controllerQueryRuntimeEnv(cityPath string, cfg *config.City, agentCfg *conf
 	for key, value := range source {
 		env[key] = value
 	}
+	// GC_CITY_BEADS_DIR pins the HQ city bd for EffectiveWorkQuery /
+	// EffectiveScaleCheck federation (ga-xw6). The probe subprocess inherits
+	// this so a rig-scoped probe can also reach pe-* beads routed to the rig.
+	env["GC_CITY_BEADS_DIR"] = filepath.Join(cityPath, ".beads")
 	return env, nil
 }
 
@@ -59,6 +64,10 @@ func controllerWorkQueryEnv(cityPath string, cfg *config.City, agentCfg *config.
 	env["GC_BEADS_PREFIX"] = config.EffectiveHQPrefix(cfg)
 	env["GC_RIG"] = ""
 	env["GC_RIG_ROOT"] = ""
+	// GC_CITY_BEADS_DIR is the HQ city bd path used by EffectiveWorkQuery's
+	// federation tier (ga-xw6). Set unconditionally so rig-scoped probes can
+	// reach pe-* beads routed to the rig.
+	env["GC_CITY_BEADS_DIR"] = filepath.Join(cityPath, ".beads")
 	if rigName := configuredRigName(cityPath, agentCfg, cfg.Rigs); rigName != "" {
 		if rigRoot := rigRootForName(rigName, cfg.Rigs); rigRoot != "" {
 			env["GC_STORE_ROOT"] = rigRoot

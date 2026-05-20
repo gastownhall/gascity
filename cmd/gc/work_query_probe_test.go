@@ -278,6 +278,66 @@ provider = "file"
 	}
 }
 
+// TestControllerWorkQueryEnvSetsCityBeadsDir verifies that the controller's
+// work_query probe env carries GC_CITY_BEADS_DIR for both city- and
+// rig-scoped agents. The federation tier in EffectiveWorkQuery reads this
+// var to also probe HQ beads routed to rig agents (ga-xw6).
+func TestControllerWorkQueryEnvSetsCityBeadsDir(t *testing.T) {
+	cityPath, rigDir, _ := newControllerProbeFixture(t)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{{
+			Name:   "demo",
+			Path:   rigDir,
+			Prefix: "de",
+		}},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "demo"},
+			{Name: "mayor"},
+		},
+	}
+
+	wantCity := filepath.Join(cityPath, ".beads")
+	for i, agentCfg := range cfg.Agents {
+		env, err := controllerWorkQueryEnv(cityPath, cfg, &cfg.Agents[i])
+		if err != nil {
+			t.Fatalf("controllerWorkQueryEnv(%q) error = %v", agentCfg.Name, err)
+		}
+		if got := env["GC_CITY_BEADS_DIR"]; got != wantCity {
+			t.Fatalf("controllerWorkQueryEnv(%q): GC_CITY_BEADS_DIR = %q, want %q", agentCfg.Name, got, wantCity)
+		}
+	}
+}
+
+// TestControllerQueryRuntimeEnvSetsCityBeadsDir verifies that the
+// session-reconciler probe env (controllerQueryRuntimeEnv) also carries
+// GC_CITY_BEADS_DIR. The session reconciler uses this env for probes that
+// drive named-session lifecycle; without the var the federation block
+// would silently skip the city bd query.
+func TestControllerQueryRuntimeEnvSetsCityBeadsDir(t *testing.T) {
+	cityPath, rigDir, _ := newControllerProbeFixture(t)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{{
+			Name:   "demo",
+			Path:   rigDir,
+			Prefix: "de",
+		}},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "demo"},
+		},
+	}
+
+	wantCity := filepath.Join(cityPath, ".beads")
+	env, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[0])
+	if err != nil {
+		t.Fatalf("controllerQueryRuntimeEnv() error = %v", err)
+	}
+	if got := env["GC_CITY_BEADS_DIR"]; got != wantCity {
+		t.Fatalf("controllerQueryRuntimeEnv(): GC_CITY_BEADS_DIR = %q, want %q", got, wantCity)
+	}
+}
+
 func newControllerProbeFixture(t *testing.T) (string, string, *config.City) {
 	t.Helper()
 	t.Setenv("GC_BEADS", "bd")

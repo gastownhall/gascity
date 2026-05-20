@@ -179,38 +179,77 @@ BRANCH=$(gc bd show $WORK --json | jq -r '.[0].metadata.branch')
 TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_branch}}"')
 ```
 
-Fetch and attempt mechanical rebase:
+**SAFETY: Use the canonical `refinery-rebase.sh` helper. Do NOT inline a
+fresh `git rebase` and especially do NOT wrap rebase output in `| tail`,
+`| grep`, or any other pipe.** The earlier refinery wrapped the rebase
+in `git rebase origin/main 2>&1 | tail -15`; without `set -o pipefail`
+the pipe swallowed rebase's non-zero exit and the wrapper pushed the
+pre-rebase ancestor to main, silently dropping commits (ga-vnr;
+post-mortem pe-wisp-tj0bj5). The shipped script has `set -euo pipefail`
+baked in, captures rebase output to a tempfile, and uses explicit exit
+codes (0 success, 3 conflict, 4 pre-rebase failure, 2 usage). If you
+need to write a wrapper for any reason, the wrapper itself MUST start
+with `set -euo pipefail`.
+
+Locate and invoke the helper from the refinery worktree. The pack is
+installed under the city runtime directory; the fallback walks the
+current working tree for the dev-checkout layout used by the gascity
+SDK.
 ```bash
-git fetch --prune origin
-git checkout -b temp origin/$BRANCH
-git rebase origin/$TARGET
+PACK_DIR="${GC_CITY_RUNTIME_DIR:-${GC_CITY:-${GC_CITY_PATH:-.}}/.gc/runtime}/packs/gastown"
+SCRIPT="$PACK_DIR/assets/scripts/refinery-rebase.sh"
+if [ ! -x "$SCRIPT" ]; then
+  SCRIPT="$(find . -path '*/packs/gastown/assets/scripts/refinery-rebase.sh' -type f -perm -u+x -print -quit 2>/dev/null)"
+fi
+if [ -z "$SCRIPT" ] || [ ! -x "$SCRIPT" ]; then
+  echo "refinery-rebase.sh not found; cannot safely rebase $BRANCH. STOP." >&2
+  gc runtime drain-ack
+  exit 1
+fi
+REPORT="$(mktemp -t refinery-rebase-report.XXXXXX)"
+REFINERY_REBASE_REPORT="$REPORT" "$SCRIPT" "$BRANCH" "$TARGET"
+REBASE_EXIT=$?
+CONFLICT_FILES=""
+if [ -s "$REPORT" ]; then
+  CONFLICT_FILES="$(cat "$REPORT")"
+fi
 ```
 
-If rebase SUCCEEDED (exit 0): close this step, proceed to run-tests.
+If rebase SUCCEEDED (`REBASE_EXIT` = 0): close this step, proceed to
+run-tests. The working branch is now `temp` with the rebased history.
 
-If rebase FAILED (conflicts):
+If rebase FAILED (conflicts): `REBASE_EXIT` = 3, and the script has
+already aborted the rebase, removed the temp branch, and switched the
+worktree back to $TARGET. The conflict summary is in `$CONFLICT_FILES`.
 
-1. Abort: `git rebase --abort`
-2. Clean up the existing workflow and reopen the source bead:
+1. Clean up the existing workflow and reopen the source bead:
 ```bash
 gc workflow delete-source $WORK --apply && gc workflow reopen-source $WORK
 ```
-3. Put the work bead back in the pool with rejection metadata:
+2. Put the work bead back in the pool with rejection metadata naming the
+   conflict files (load-bearing — the next polecat reads
+   `rejection_reason` to know what to fix):
 ```bash
 gc bd update $WORK \
   --status=open \
   --assignee="" \
-  --set-metadata rejection_reason="Conflicts with $TARGET at $(git rev-parse origin/$TARGET)" \
+  --set-metadata rejection_reason="$CONFLICT_FILES (target $TARGET at $(git rev-parse origin/$TARGET))" \
   --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
 ```
-4. Do NOT delete the branch (new polecat needs it for conflict resolution).
-5. Clean up temp branch: `git checkout {{target_branch}} && git branch -D temp`
-6. Pour next patrol iteration before burning:
+3. Do NOT delete the branch (new polecat needs it for conflict resolution).
+4. Pour next patrol iteration before burning:
 ```bash
 NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id')
 gc bd update "$NEXT" --assignee=$GC_AGENT
 ```
-7. Burn this wisp: `gc bd mol burn <wisp-id> --force`
+5. Burn this wisp: `gc bd mol burn <wisp-id> --force`
+
+If `REBASE_EXIT` = 4 (pre-rebase failure — fetch or checkout failed):
+STOP. The repo state was not mutated. Investigate (network, branch
+deleted on origin, permission) and retry. Do NOT mutate the bead.
+
+If `REBASE_EXIT` = 2 (usage error): STOP. `metadata.branch` or
+`metadata.target` was missing or empty. Escalate to mayor.
 
 **A new polecat will pick up the bead, see the branch and rejection,
 rebase, and reassign to refinery.**"""
@@ -408,18 +447,37 @@ fi
 
 **If MERGE_STRATEGY = "direct" (default):**
 
-**1. Merge and push target branch:**
+**1. Push the rebased branch into `$TARGET`:**
+
+Do NOT `git checkout $TARGET` here. In gc worktrees the rig's `$TARGET`
+branch is checked out in the primary worktree, and `git checkout $TARGET`
+from the refinery worktree fails with `fatal: '$TARGET' is already used
+by worktree`. The earlier shape — `git checkout $TARGET; git merge --ff-only
+temp; git push origin $TARGET` — silently continued on `temp` when that
+checkout failed, and `git push origin $TARGET` then shipped the unchanged
+local `$TARGET` ref so the merge was silently dropped (di-jlv).
+
+Push `temp` directly into `origin/$TARGET` after verifying it is a
+fast-forward over the current remote tip:
+
 ```bash
-git checkout $TARGET
-git merge --ff-only temp
-git push origin $TARGET
+git fetch origin
+if ! git merge-base --is-ancestor "origin/$TARGET" temp; then
+  echo "temp is not a descendant of origin/$TARGET — refusing to push"
+  exit 1
+fi
+git push origin "temp:$TARGET"
 ```
+
+This updates `origin/$TARGET` to point at `temp`'s tip without touching
+the local `$TARGET` ref. Works in standalone clones and gc worktrees
+alike.
 
 **2. Verify push:**
 ```bash
 git fetch origin
-LOCAL=$(git rev-parse $TARGET)
-REMOTE=$(git rev-parse origin/$TARGET)
+LOCAL=$(git rev-parse temp)
+REMOTE=$(git rev-parse "origin/$TARGET")
 [ "$LOCAL" = "$REMOTE" ] || echo "PUSH FAILED — do not proceed"
 ```
 If SHAs differ: STOP. Debug and retry. Do NOT continue.
@@ -447,7 +505,10 @@ gc bd close $WORK --reason "Merged to $TARGET at $MERGED_SHORT"
 
 **4. Cleanup:**
 ```bash
-git branch -d temp
+# Detach HEAD off `temp` so we can delete it. We never checked out the
+# local `$TARGET` ref, so there is nothing to "leave" — just detach.
+git checkout --detach
+git branch -D temp
 ```
 If delete_merged_branches = "true": `git push origin --delete $BRANCH`
 

@@ -560,3 +560,39 @@ three-step formula wisp to the `worker` pool. Neither requires anyone to type
 
 Orders are formulas and scripts on autopilot, gated by time, schedule,
 conditions, or events, evaluated by the controller on every tick.
+
+## Convention: surfacing stranded beads
+
+`gc sling` routes work the moment you call it; auto-route orders can wire
+that up automatically when a bead is created. But work-type beads created
+outside that path — by humans typing `bd create`, by older orders before
+auto-route existed, or in rigs (like an HQ rig) that have no auto-route
+order — can sit in the queue with no `gc.routed_to` and no assignee, and
+no agent will ever pick them up. They are *stranded*.
+
+The maintenance pack ships an order that handles this case as a generic
+convention:
+
+```
+examples/gastown/packs/maintenance/orders/stranded-bead-sweep.toml
+```
+
+On a cooldown (default hourly), the sweep walks every initialized rig,
+finds open work-type beads with no `gc.routed_to`, no assignee, no exempt
+label, and no recent activity (default ≥ 4 hours since last update), and
+adds a surface label (default `needs:human`). UIs and queries that filter
+on that label then expose the strand to the operator. A periodic digest
+(default weekly) mails the recipient (default `mayor`) the aggregate
+count and the oldest few entries.
+
+Composability: the surface label, exempt labels, age threshold, digest
+interval, and digest recipient are all environment-configurable
+(`GC_STRANDED_SURFACE_LABEL`, `GC_STRANDED_EXEMPT_LABELS`,
+`GC_STRANDED_AGE_HOURS`, `GC_STRANDED_DIGEST_DAYS`,
+`GC_STRANDED_DIGEST_TO`) so the convention slots into cities that
+already have their own labeling vocabulary. See the script docstring for
+the full env-var contract.
+
+This is the counterpart to `gc sling`: sling routes intentional work
+forward; the stranded-bead sweep ensures unintentional work doesn't fall
+out the back.

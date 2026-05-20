@@ -117,6 +117,13 @@ func ensureQueuedNudgeBead(store beads.Store, item queuedNudge) (string, bool, e
 		"terminal_reason":    "",
 		"commit_boundary":    "",
 		"terminal_at":        "",
+		// gc.routed_to points the nudge bead at the delivery target so
+		// per-rig auto-route orders skip it. Without this stamp the chore-
+		// typed bead looks like ready unrouted work and gets slung into
+		// whichever rig's polecat pool owns the store the bead landed in
+		// (e.g. the city's HQ rig when the emitter is cross-rig). See
+		// ga-0qf for the phantom-work fallout that motivates this.
+		"gc.routed_to": item.Agent,
 	}
 	created, err := store.Create(beads.Bead{
 		Title: "nudge:" + item.ID,

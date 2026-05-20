@@ -2484,7 +2484,12 @@ func (a *Agent) AttachEnabled() bool {
 // was used when assigning.
 //
 // State priority: in_progress+assigned (crash recovery) >
-// ready+assigned (pre-assigned) > ready+unassigned+routed_to (pool).
+// ready+assigned (pre-assigned) > ready+routed_to (pool). Pool work matches
+// in two sub-tiers: --unassigned (the canonical "leave assignee empty"
+// pattern), then --assignee=<template> (callers that park work on the pool
+// template name as a placeholder, e.g. `bd update --assignee=<pool>
+// --set-metadata gc.routed_to=<pool>`). Without the placeholder sub-tier
+// the bead is invisible to every pool member and never claimed (ga-2pz).
 // Formula roots that are themselves executable must be represented as ready()
 // work (for example type=wisp); molecule containers are not routable demand.
 //
@@ -2498,6 +2503,14 @@ func (a *Agent) AttachEnabled() bool {
 // When the reconciler runs the query for demand detection (no session
 // context), all identity vars are empty → assignee tiers skip → only
 // the routed_to tier fires to detect new demand.
+//
+// City-bd federation (ga-xw6): rig-scoped agents (a.Dir != "") also probe
+// the city bd via $GC_CITY_BEADS_DIR after their rig-bd Tier 3 queries
+// return empty. Without this, beads filed in the HQ city bd with
+// gc.routed_to=<rig>/<role> are invisible to the rig's agents and become
+// dead-letter routing. The federation is a fallback — rig-bd work always
+// wins. Guarded by env so older runtimes that don't inject the env stay
+// on the rig-only path.
 func (a *Agent) EffectiveWorkQuery() string {
 	if a.WorkQuery != "" {
 		return a.WorkQuery
@@ -2521,15 +2534,23 @@ func (a *Agent) EffectiveWorkQuery() string {
 			`r=$(bd ready --assignee="$id" --exclude-type=epic --json --limit=1 2>/dev/null); ` +
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 			`done; ` +
-			// Tier 3: ready unassigned routed to this config (shared routed queue).
+			// Tier 3: ready routed to this config (shared routed queue).
 			// Only ephemeral sessions and controller probes consume generic config demand.
 			`case "$GC_SESSION_ORIGIN" in ` +
 			`ephemeral|"") ;; ` +
 			`*) exit 0 ;; ` +
 			`esac; ` +
+			// Tier 3a: assignee unset (canonical "leave assignee empty" pattern).
 			`r=$(bd ready --metadata-field gc.routed_to=` + target +
 			` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null); ` +
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+			// Tier 3b: assignee parked on the pool template as a placeholder.
+			// Rescues beads routed with `bd update --assignee=<pool>` (ga-2pz)
+			// where --unassigned would otherwise hide them from every member.
+			`r=$(bd ready --metadata-field gc.routed_to=` + target +
+			` --assignee=` + target + ` --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+			a.cityFederationTier3(target) +
 			`printf "[]"'`
 	}
 	return `sh -c '` +
@@ -2555,8 +2576,11 @@ func (a *Agent) EffectiveWorkQuery() string {
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`done; ` +
 		`done; ` +
-		// Tier 3: ready unassigned routed to this config (shared routed queue),
-		// then the legacy workflow-control route for pre-rename graphs.
+		// Tier 3: ready routed to this config (shared routed queue), with the
+		// legacy workflow-control route as a pre-rename fallback. Each route
+		// checks two assignee shapes: unassigned (canonical) and parked on the
+		// route name itself (placeholder pattern that hides beads from
+		// --unassigned, ga-2pz).
 		// Only ephemeral sessions and controller probes consume generic config demand.
 		`case "$GC_SESSION_ORIGIN" in ` +
 		`ephemeral|"") ;; ` +
@@ -2565,8 +2589,39 @@ func (a *Agent) EffectiveWorkQuery() string {
 		`r=$(bd ready --metadata-field gc.routed_to=` + target +
 		` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`bd ready --metadata-field gc.routed_to=` + legacyTarget +
-		` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null'`
+		`r=$(bd ready --metadata-field gc.routed_to=` + target +
+		` --assignee=` + target + ` --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`r=$(bd ready --metadata-field gc.routed_to=` + legacyTarget +
+		` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`r=$(bd ready --metadata-field gc.routed_to=` + legacyTarget +
+		` --assignee=` + legacyTarget + ` --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		a.cityFederationTier3(target) +
+		a.cityFederationTier3(legacyTarget) +
+		`printf "[]"'`
+}
+
+// cityFederationTier3 returns the shell fragment that re-runs Tier 3a and
+// Tier 3b against the HQ city bd via $GC_CITY_BEADS_DIR. Returns "" for
+// city-scoped agents (a.Dir == "") — the city bd is already their primary
+// store. The emitted fragment guards at runtime so older runtimes that have
+// not been updated to inject GC_CITY_BEADS_DIR fall through to the existing
+// printf "[]" exit. Designed to be concatenated AFTER the rig-bd Tier 3
+// clauses and BEFORE the final printf "[]". See ga-xw6.
+func (a *Agent) cityFederationTier3(target string) string {
+	if a.Dir == "" {
+		return ""
+	}
+	return `if [ -n "$GC_CITY_BEADS_DIR" ] && [ "$GC_CITY_BEADS_DIR" != "$BEADS_DIR" ]; then ` +
+		`r=$(BEADS_DIR="$GC_CITY_BEADS_DIR" bd ready --metadata-field gc.routed_to=` + target +
+		` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`r=$(BEADS_DIR="$GC_CITY_BEADS_DIR" bd ready --metadata-field gc.routed_to=` + target +
+		` --assignee=` + target + ` --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`fi; `
 }
 
 func legacyWorkflowControlQualifiedName(target string) string {
@@ -2632,13 +2687,33 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 // counts new unassigned work routed to this agent's template via ready().
 // Assigned in-progress work is resumed from session beads, so it must not
 // create additional generic pool demand here.
+//
+// City-bd federation (ga-xw6): rig-scoped agents (a.Dir != "") also count
+// demand in the HQ city bd via $GC_CITY_BEADS_DIR, summing the rig and city
+// counts. Without this, beads filed in the city bd routed to a rig agent
+// are invisible to the supervisor's demand counter — no polecats spawn.
+// Both probe paths fail loudly (no error masking) so a broken bd surfaces
+// as supervisor error rather than silent zero demand.
 func (a *Agent) EffectiveScaleCheck() string {
 	if a.ScaleCheck != "" {
 		return a.ScaleCheck
 	}
 	template := a.QualifiedName()
-	return `ready_json=$(bd ready --metadata-field gc.routed_to=` + template +
-		` --unassigned --limit 0 --json) && printf '%s\n' "$ready_json" | jq 'length'`
+	if a.Dir == "" {
+		return `ready_json=$(bd ready --metadata-field gc.routed_to=` + template +
+			` --unassigned --limit 0 --json) && printf '%s\n' "$ready_json" | jq 'length'`
+	}
+	// Rig-scoped: count rig and (when GC_CITY_BEADS_DIR is set) city demand.
+	// The && chain ensures any bd or jq failure aborts before printf — empty
+	// output triggers parseScaleCheckCount's "empty output" error so a broken
+	// scope surfaces rather than masquerading as zero demand.
+	return `rig_json=$(bd ready --metadata-field gc.routed_to=` + template +
+		` --unassigned --limit 0 --json) && rig=$(printf '%s\n' "$rig_json" | jq 'length') && ` +
+		`{ if [ -n "$GC_CITY_BEADS_DIR" ] && [ "$GC_CITY_BEADS_DIR" != "$BEADS_DIR" ]; then ` +
+		`city_json=$(BEADS_DIR="$GC_CITY_BEADS_DIR" bd ready --metadata-field gc.routed_to=` + template +
+		` --unassigned --limit 0 --json) && city=$(printf '%s\n' "$city_json" | jq 'length') && ` +
+		`printf '%d\n' "$((rig + city))"; ` +
+		`else printf '%s\n' "$rig"; fi; }`
 }
 
 // EffectiveMaxActiveSessions returns the agent's max active sessions.

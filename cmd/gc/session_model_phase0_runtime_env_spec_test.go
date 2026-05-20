@@ -48,6 +48,38 @@ func TestPhase0RuntimeEnv_TemplateResolutionSetsOriginAndPublicHandle(t *testing
 	}
 }
 
+// TestPhase0RuntimeEnv_TemplateResolutionSetsCityBeadsDir verifies that
+// agent sessions are spawned with GC_CITY_BEADS_DIR pointed at the HQ city
+// bd. EffectiveWorkQuery's federation tier reads this var to also probe
+// city-bd beads routed to rig-scoped agents (ga-xw6).
+func TestPhase0RuntimeEnv_TemplateResolutionSetsCityBeadsDir(t *testing.T) {
+	cityPath := t.TempDir()
+	params := &agentBuildParams{
+		cityName:   "phase0-city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test-agent"},
+		providers:  map[string]config.ProviderSpec{"test-agent": {DisplayName: "Test Agent", Command: "true"}},
+		lookPath:   func(string) (string, error) { return filepath.Join("/usr/bin", "true"), nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agentCfg := &config.Agent{
+		Name:     "worker",
+		Provider: "test-agent",
+	}
+
+	tp, err := resolveTemplate(params, agentCfg, agentCfg.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate(worker): %v", err)
+	}
+	want := filepath.Join(cityPath, ".beads")
+	if got := tp.Env["GC_CITY_BEADS_DIR"]; got != want {
+		t.Fatalf("GC_CITY_BEADS_DIR = %q, want %q", got, want)
+	}
+}
+
 func TestPhase0RuntimeEnv_TemplateResolutionDoesNotPublishLifecycleBeadsWrapper(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 

@@ -2857,6 +2857,316 @@ exit 0
 	}
 }
 
+// reaperAlertDoltStub returns a dolt-mock script body where the open-wisp count
+// query (no created_at filter) returns openWispCount. All other COUNT queries
+// return 0. Used by the alert-dedup tests below.
+func reaperAlertDoltStub(openWispCount int) string {
+	return fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*)
+    printf 'COUNT(*)\n%d\n'
+    ;;
+  *"DELETE FROM "*"wisps"*)
+    printf 'ROW_COUNT()\n0\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`, openWispCount)
+}
+
+// reaperAlertBaseEnv returns the common env vars used by the alert-dedup
+// tests. Threshold is hardcoded to 10 so the test stubs (which return modest
+// open-wisp counts) exercise the alert path without inflated counters.
+func reaperAlertBaseEnv(cityDir, binDir, doltLog, gcLog, stateDir string) map[string]string {
+	return map[string]string{
+		"DOLT_ARGS_LOG":             doltLog,
+		"GC_CALL_LOG":               gcLog,
+		"GC_CITY":                   cityDir,
+		"GC_CITY_PATH":              cityDir,
+		"GC_DOLT_HOST":              "127.0.0.1",
+		"GC_DOLT_PORT":              "3307",
+		"GC_DOLT_USER":              "root",
+		"GC_DOLT_PASSWORD":          "",
+		"GC_PACK_STATE_DIR":         stateDir,
+		"GC_REAPER_ALERT_THRESHOLD": "10",
+		"PATH":                      binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+}
+
+// TestReaperAlertEmitsOnFirstThresholdCross verifies that the threshold-crossed
+// anomaly is escalated when no prior alert state exists. Pin against ga-sh6
+// regression: without dedup state, the first crossing should always escalate.
+func TestReaperAlertEmitsOnFirstThresholdCross(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), reaperAlertDoltStub(50))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := reaperAlertBaseEnv(cityDir, binDir, doltLog, gcLog, stateDir)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
+		t.Fatalf("reaper did not escalate on first threshold cross:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "50 open wisps (threshold: 10)") {
+		t.Fatalf("reaper escalation body missing open-wisp count:\n%s", gcLogText)
+	}
+
+	statePath := filepath.Join(stateDir, "reaper-alert-state.txt")
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("reaper did not persist alert state file %s: %v", statePath, err)
+	}
+	stateData, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("ReadFile(state): %v", err)
+	}
+	stateText := string(stateData)
+	if !strings.Contains(stateText, "count=50") {
+		t.Fatalf("state file missing recorded count:\n%s", stateText)
+	}
+}
+
+// TestReaperAlertDedupSkipsWithinWindowAndSmallDelta verifies that a second
+// reaper run within the dedup window with a small open-wisp delta does NOT
+// emit a duplicate mail. Pin against ga-sh6 feedback loop.
+func TestReaperAlertDedupSkipsWithinWindowAndSmallDelta(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), reaperAlertDoltStub(52))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(stateDir): %v", err)
+	}
+	// Prior alert: count=50, 30 seconds ago. Within 3600s window, delta=2 < 10.
+	priorEpoch := time.Now().Add(-30 * time.Second).Unix()
+	priorState := fmt.Sprintf("epoch=%d\ncount=50\n", priorEpoch)
+	statePath := filepath.Join(stateDir, "reaper-alert-state.txt")
+	if err := os.WriteFile(statePath, []byte(priorState), 0o644); err != nil {
+		t.Fatalf("WriteFile(state): %v", err)
+	}
+
+	env := reaperAlertBaseEnv(cityDir, binDir, doltLog, gcLog, stateDir)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION") {
+		t.Fatalf("reaper escalated duplicate alert within dedup window (small delta):\n%s", gcLogText)
+	}
+
+	// State should not be updated when dedup applies.
+	stateData, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("ReadFile(state): %v", err)
+	}
+	if !strings.Contains(string(stateData), "count=50") {
+		t.Fatalf("dedup-skip path overwrote prior state:\n%s", stateData)
+	}
+}
+
+// TestReaperAlertDedupEmitsOnLargeDelta verifies that a count delta >= 10
+// re-emits an alert even within the dedup window.
+func TestReaperAlertDedupEmitsOnLargeDelta(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), reaperAlertDoltStub(65))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(stateDir): %v", err)
+	}
+	// Prior alert: count=50, 30 seconds ago. Within window but delta=15 >= 10.
+	priorEpoch := time.Now().Add(-30 * time.Second).Unix()
+	priorState := fmt.Sprintf("epoch=%d\ncount=50\n", priorEpoch)
+	statePath := filepath.Join(stateDir, "reaper-alert-state.txt")
+	if err := os.WriteFile(statePath, []byte(priorState), 0o644); err != nil {
+		t.Fatalf("WriteFile(state): %v", err)
+	}
+
+	env := reaperAlertBaseEnv(cityDir, binDir, doltLog, gcLog, stateDir)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION") {
+		t.Fatalf("reaper did not escalate on large count delta:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "65 open wisps") {
+		t.Fatalf("reaper escalation body missing updated count:\n%s", gcLogText)
+	}
+
+	// State should be updated.
+	stateData, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("ReadFile(state): %v", err)
+	}
+	if !strings.Contains(string(stateData), "count=65") {
+		t.Fatalf("state file did not record updated count after re-emit:\n%s", stateData)
+	}
+}
+
+// TestReaperAlertDedupEmitsAfterWindow verifies that an alert older than the
+// dedup window is re-emitted even when count delta is small.
+func TestReaperAlertDedupEmitsAfterWindow(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), reaperAlertDoltStub(52))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(stateDir): %v", err)
+	}
+	// Prior alert: count=50, narrow window of 1s. Backdate 2 seconds to escape.
+	priorEpoch := time.Now().Add(-2 * time.Second).Unix()
+	priorState := fmt.Sprintf("epoch=%d\ncount=50\n", priorEpoch)
+	statePath := filepath.Join(stateDir, "reaper-alert-state.txt")
+	if err := os.WriteFile(statePath, []byte(priorState), 0o644); err != nil {
+		t.Fatalf("WriteFile(state): %v", err)
+	}
+
+	env := reaperAlertBaseEnv(cityDir, binDir, doltLog, gcLog, stateDir)
+	env["GC_REAPER_ALERT_DEDUP_WINDOW_SEC"] = "1"
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION") {
+		t.Fatalf("reaper did not escalate after dedup window expired:\n%s", gcLogText)
+	}
+}
+
+// TestReaperAlertNonThresholdAnomalyBypassesDedup verifies that anomalies other
+// than the wisp-count threshold (e.g. Dolt commit failures) are escalated
+// without dedup, even when the threshold alert state is fresh.
+func TestReaperAlertNonThresholdAnomalyBypassesDedup(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	// open-wisp count = 5 (below threshold of 10). Inject commit failure to
+	// force a non-threshold anomaly.
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"CALL DOLT_COMMIT"*)
+    printf 'commit failed\n' >&2
+    exit 42
+    ;;
+  *"DELETE FROM "*"wisps"*)
+    printf 'ROW_COUNT()\n1\n'
+    ;;
+  *"status = 'closed'"*"closed_at <"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(stateDir): %v", err)
+	}
+	// Fresh prior alert state — would normally trigger dedup, but a non-
+	// threshold anomaly must still escalate.
+	priorEpoch := time.Now().Unix()
+	priorState := fmt.Sprintf("epoch=%d\ncount=0\n", priorEpoch)
+	statePath := filepath.Join(stateDir, "reaper-alert-state.txt")
+	if err := os.WriteFile(statePath, []byte(priorState), 0o644); err != nil {
+		t.Fatalf("WriteFile(state): %v", err)
+	}
+
+	env := reaperAlertBaseEnv(cityDir, binDir, doltLog, gcLog, stateDir)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION") {
+		t.Fatalf("reaper suppressed a non-threshold anomaly via threshold dedup:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "Dolt commit failed") {
+		t.Fatalf("reaper non-threshold escalation lost commit-failure context:\n%s", gcLogText)
+	}
+}
+
 func TestReaperFormulaMatchesScriptDefaults(t *testing.T) {
 	scriptPath := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh")
 	scriptData, err := os.ReadFile(scriptPath)
@@ -6198,7 +6508,7 @@ EOF
         ;;
     esac
     ;;
-  update|comment|delete)
+  update|comment|delete|close)
     printf '%%s\n' "$*" >> "$BD_LOG"
     exit 0
     ;;
@@ -6256,7 +6566,7 @@ func TestWispCompactReportsSummaryForActions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wisp-compact.sh failed: %v\n%s", err, out)
 	}
-	if got, want := strings.TrimSpace(string(out)), "wisp-compact: promoted=0 deleted=1 skipped=1"; got != want {
+	if got, want := strings.TrimSpace(string(out)), "wisp-compact: promoted=0 deleted=1 skipped=1 archived=0"; got != want {
 		t.Fatalf("summary = %q, want %q", got, want)
 	}
 }
@@ -6372,6 +6682,172 @@ func TestWispCompactSkipsNonEphemeralBeads(t *testing.T) {
 		if strings.Contains(s, banned) {
 			t.Fatalf("non-ephemeral bead must be ignored; saw %q in bd log:\n%s", banned, s)
 		}
+	}
+}
+
+// Pass 2 (mail archive) tests. These cover the read-mail TTL rule added for
+// ga-l17. Mail beads are non-ephemeral (issue_type=message), so they bypass
+// Pass 1; Pass 2 closes them with `bd close --reason "..."` once the
+// recipient has marked them read and the TTL has elapsed.
+
+func TestWispCompactArchivesAgedReadMessage(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-mail-aged","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["read","thread:abc"]}
+]`, pastTTL)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if !strings.Contains(s, "close ga-mail-aged") {
+		t.Fatalf("expected `bd close ga-mail-aged`; bd log:\n%s", s)
+	}
+	if !strings.Contains(s, "wisp-compact:") {
+		t.Fatalf("expected close reason to start with `wisp-compact:`; bd log:\n%s", s)
+	}
+	for _, banned := range []string{"delete ga-mail-aged", "update ga-mail-aged", "comment ga-mail-aged"} {
+		if strings.Contains(s, banned) {
+			t.Fatalf("aged read mail must be archived via close, not %q; bd log:\n%s", banned, s)
+		}
+	}
+}
+
+func TestWispCompactSkipsReadMessageWithinTTL(t *testing.T) {
+	withinTTL := time.Now().Add(-1 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-mail-fresh","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["read"]}
+]`, withinTTL)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if strings.Contains(s, "close ga-mail-fresh") {
+		t.Fatalf("within-TTL read mail must not be archived; bd log:\n%s", s)
+	}
+}
+
+func TestWispCompactSkipsUnreadMessage(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-mail-unread","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["thread:abc"]}
+]`, pastTTL)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if strings.Contains(s, "close ga-mail-unread") {
+		t.Fatalf("unread mail must never be archived even past TTL; bd log:\n%s", s)
+	}
+}
+
+func TestWispCompactSkipsReadMessageWithKeepLabel(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-mail-keep","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["read","keep"]}
+]`, pastTTL)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if strings.Contains(s, "close ga-mail-keep") {
+		t.Fatalf("read mail with `keep` label must not be archived; bd log:\n%s", s)
+	}
+}
+
+func TestWispCompactSkipsReadMessageWithComments(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-mail-discussed","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":2,"labels":["read"]}
+]`, pastTTL)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if strings.Contains(s, "close ga-mail-discussed") {
+		t.Fatalf("read mail with comments (proven value) must not be archived; bd log:\n%s", s)
+	}
+}
+
+func TestWispCompactSkipsClosedMessage(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-mail-closed","issue_type":"message","status":"closed","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["read"]}
+]`, pastTTL)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if strings.Contains(s, "close ga-mail-closed") {
+		t.Fatalf("already-closed message must not be re-closed; bd log:\n%s", s)
+	}
+}
+
+func TestWispCompactArchiveCountInSummary(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-mail-a","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["read"]},
+  {"id":"ga-mail-b","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["read"]}
+]`, pastTTL, pastTTL)
+
+	_, env := wispCompactEnv(t, beads)
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+	if err != nil {
+		t.Fatalf("wisp-compact.sh failed: %v\n%s", err, out)
+	}
+	want := "archived=2"
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("summary missing %q; got: %s", want, out)
+	}
+}
+
+func TestWispCompactMailArchiveAgeOverride(t *testing.T) {
+	// Override the default 24h TTL to 1h so a 2-hour-old read message archives.
+	twoHoursAgo := time.Now().Add(-2 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"ga-mail-overridden","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["read"]}
+]`, twoHoursAgo)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	env["GC_MAIL_ARCHIVE_AGE_HOURS"] = "1"
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	if !strings.Contains(s, "close ga-mail-overridden") {
+		t.Fatalf("GC_MAIL_ARCHIVE_AGE_HOURS=1 should archive a 2h-old read message; bd log:\n%s", s)
 	}
 }
 
@@ -6652,20 +7128,200 @@ exit 1
 		t.Fatalf("wisp-compact should parse BSD Z timestamps as UTC at the heartbeat TTL boundary\nwant substring: %q\ngot output:\n%s", want, out)
 	}
 
-	dateData, err := os.ReadFile(dateLog)
-	if err != nil {
-		t.Fatalf("ReadFile(date log): %v", err)
-	}
-	if !strings.Contains(string(dateData), "-ju -f %Y-%m-%dT%H:%M:%SZ "+nearBoundary+" +%s") {
-		t.Fatalf("BSD Z fallback did not force UTC:\n%s", dateData)
-	}
-
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil {
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
 	if !strings.Contains(string(bdData), "update ga-heartbeat --persistent") {
-		t.Fatalf("expected expired heartbeat to be promoted, got bd calls:\n%s", bdData)
+		t.Fatalf("expected expired heartbeat to be promoted under non-UTC TZ, got bd calls:\n%s", bdData)
+	}
+
+	// Per-bead timestamp parsing was hoisted into a single jq pass (ga-blt
+	// batching refactor). The remaining `date` call is the once-per-run
+	// `date +%s` for NOW — verify the stub was invoked for that and not for
+	// per-bead BSD/-ju fallbacks. The TZ correctness contract is now enforced
+	// by jq's fromdateiso8601 (always-UTC); this test pins that the script
+	// classifies the near-boundary heartbeat correctly under non-UTC TZ.
+	dateData, err := os.ReadFile(dateLog)
+	if err != nil {
+		t.Fatalf("ReadFile(date log): %v", err)
+	}
+	if !strings.Contains(string(dateData), "+%s") {
+		t.Fatalf("expected `date +%%s` for NOW; got date calls:\n%s", dateData)
+	}
+	for _, banned := range []string{"-ju -f", "-d ", "-j -f"} {
+		if strings.Contains(string(dateData), banned) {
+			t.Errorf("refactor should have hoisted per-bead %q date calls into jq; date log:\n%s", banned, dateData)
+		}
+	}
+}
+
+// TestWispCompactBatchesBdCalls pins the batching contract introduced for
+// ga-blt: bd write subcommands MUST be invoked at most once per category
+// (promote/delete/archive) per cooldown, even when many beads are eligible.
+// At ~4000 ephemerals/cooldown the per-bead loop spawned thousands of bd
+// subprocesses and saturated dolt's thread pool (pe-t07v). Regressing this
+// behavior would re-introduce the dolt server peg.
+func TestWispCompactBatchesBdCalls(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beadsJSON := fmt.Sprintf(`[
+  {"id":"ga-del-1","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]},
+  {"id":"ga-del-2","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]},
+  {"id":"ga-stuck-1","status":"open","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]},
+  {"id":"ga-stuck-2","status":"open","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]},
+  {"id":"ga-mail-1","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["read"]},
+  {"id":"ga-mail-2","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["read"]}
+]`, pastTTL, pastTTL, pastTTL, pastTTL, pastTTL, pastTTL)
+
+	bdLog, env := wispCompactEnv(t, beadsJSON)
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+	if err != nil {
+		t.Fatalf("wisp-compact.sh failed: %v\n%s", err, out)
+	}
+
+	logData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	log := string(logData)
+
+	var updateCalls, deleteCalls, closeCalls, commentCalls int
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		if line == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "update "):
+			updateCalls++
+		case strings.HasPrefix(line, "delete "):
+			deleteCalls++
+		case strings.HasPrefix(line, "close "):
+			closeCalls++
+		case strings.HasPrefix(line, "comment "):
+			commentCalls++
+		}
+	}
+
+	if updateCalls != 1 {
+		t.Errorf("want exactly 1 bd update call (batched promotion); got %d\nlog:\n%s", updateCalls, log)
+	}
+	if deleteCalls != 1 {
+		t.Errorf("want exactly 1 bd delete call (batched deletion); got %d\nlog:\n%s", deleteCalls, log)
+	}
+	if closeCalls != 1 {
+		t.Errorf("want exactly 1 bd close call (batched mail archive); got %d\nlog:\n%s", closeCalls, log)
+	}
+	if commentCalls != 0 {
+		t.Errorf("want 0 bd comment calls (auditing must be batched via --append-notes); got %d\nlog:\n%s", commentCalls, log)
+	}
+
+	// The single multi-ID bd update line must carry both stuck IDs and the
+	// "stuck detection" reason text — equivalent of the old per-bead comment.
+	var promoteLine string
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		if strings.HasPrefix(line, "update ") {
+			promoteLine = line
+			break
+		}
+	}
+	for _, id := range []string{"ga-stuck-1", "ga-stuck-2"} {
+		if !strings.Contains(promoteLine, id) {
+			t.Errorf("batched promote line missing %q: %q", id, promoteLine)
+		}
+	}
+	if !strings.Contains(promoteLine, "stuck detection") {
+		t.Errorf("batched promote line missing audit reason 'stuck detection': %q", promoteLine)
+	}
+
+	var deleteLine string
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		if strings.HasPrefix(line, "delete ") {
+			deleteLine = line
+			break
+		}
+	}
+	for _, id := range []string{"ga-del-1", "ga-del-2"} {
+		if !strings.Contains(deleteLine, id) {
+			t.Errorf("batched delete line missing %q: %q", id, deleteLine)
+		}
+	}
+
+	var closeLine string
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		if strings.HasPrefix(line, "close ") {
+			closeLine = line
+			break
+		}
+	}
+	for _, id := range []string{"ga-mail-1", "ga-mail-2"} {
+		if !strings.Contains(closeLine, id) {
+			t.Errorf("batched close line missing %q: %q", id, closeLine)
+		}
+	}
+}
+
+// TestWispCompactBatchesPromotionsByReason verifies that beads with different
+// promotion reasons (proven value vs stuck detection) are still grouped into
+// at-most-two bd update calls — never per-bead. This is the boundary case for
+// the batching contract: mixed reasons must not collapse the audit text.
+func TestWispCompactBatchesPromotionsByReason(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beadsJSON := fmt.Sprintf(`[
+  {"id":"ga-proven-1","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":3,"labels":[]},
+  {"id":"ga-proven-2","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":5,"labels":[]},
+  {"id":"ga-stuck-1","status":"open","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]},
+  {"id":"ga-stuck-2","status":"open","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]}
+]`, pastTTL, pastTTL, pastTTL, pastTTL)
+
+	bdLog, env := wispCompactEnv(t, beadsJSON)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	logData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	log := string(logData)
+
+	var updateLines []string
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		if strings.HasPrefix(line, "update ") {
+			updateLines = append(updateLines, line)
+		}
+	}
+	if len(updateLines) != 2 {
+		t.Fatalf("want exactly 2 bd update calls (one per reason group); got %d\nlog:\n%s", len(updateLines), log)
+	}
+
+	var provenLine, stuckLine string
+	for _, line := range updateLines {
+		switch {
+		case strings.Contains(line, "proven value"):
+			provenLine = line
+		case strings.Contains(line, "stuck detection"):
+			stuckLine = line
+		}
+	}
+	if provenLine == "" {
+		t.Fatalf("missing proven-value update line:\n%s", log)
+	}
+	if stuckLine == "" {
+		t.Fatalf("missing stuck-detection update line:\n%s", log)
+	}
+	for _, id := range []string{"ga-proven-1", "ga-proven-2"} {
+		if !strings.Contains(provenLine, id) {
+			t.Errorf("proven-value line missing %q: %q", id, provenLine)
+		}
+		if strings.Contains(stuckLine, id) {
+			t.Errorf("stuck-detection line accidentally contains proven id %q: %q", id, stuckLine)
+		}
+	}
+	for _, id := range []string{"ga-stuck-1", "ga-stuck-2"} {
+		if !strings.Contains(stuckLine, id) {
+			t.Errorf("stuck-detection line missing %q: %q", id, stuckLine)
+		}
+		if strings.Contains(provenLine, id) {
+			t.Errorf("proven-value line accidentally contains stuck id %q: %q", id, provenLine)
+		}
 	}
 }
 
@@ -6752,5 +7408,322 @@ exit 0
 	want := "cross-rig-deps: resolved 4 cross-rig dependencies"
 	if !strings.Contains(string(out), want) {
 		t.Fatalf("cross-rig-deps summary missing or wrong (subshell counter regression?)\nwant substring: %q\ngot output:\n%s\nbd log:\n%s", want, out, logData)
+	}
+}
+
+// strandedBeadSweepGCStub is a `gc` stub that:
+//   - logs every invocation to $GC_CALL_LOG;
+//   - serves a one-rig topology (rig=project, prefix=ga);
+//   - serves bd list responses driven by env vars
+//     (GC_TEST_CANDIDATES_JSON, GC_TEST_DIGEST_JSON);
+//   - records mail sends to $GC_MAIL_LOG.
+//
+// Sweep candidate queries carry --unassigned; digest still-stranded
+// queries carry --label= without --unassigned. We dispatch on those.
+const strandedBeadSweepGCStub = `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      cat <<'JSON'
+{"rigs":[{"name":"project","prefix":"ga","hq":false,"beads":"initialized","suspended":false}]}
+JSON
+      exit 0
+    fi
+    ;;
+  bd)
+    case "$2" in
+      --rig|-C) shift 2 ;;
+    esac
+    case "$2" in
+      list)
+        case "$*" in
+          *"--unassigned"*)
+            printf '%s\n' "${GC_TEST_CANDIDATES_JSON:-[]}"
+            ;;
+          *"--label="*)
+            printf '%s\n' "${GC_TEST_DIGEST_JSON:-[]}"
+            ;;
+          *)
+            printf '[]\n'
+            ;;
+        esac
+        exit 0
+        ;;
+      update)
+        exit 0
+        ;;
+    esac
+    ;;
+  mail)
+    if [ "$2" = "send" ]; then
+      printf '%s\n' "$*" >> "$GC_MAIL_LOG"
+      exit 0
+    fi
+    ;;
+esac
+exit 0
+`
+
+// runStrandedBeadSweep wires up the test environment and invokes the
+// stranded-bead-sweep.py script via python3 (bypassing the uv-run
+// shebang so tests don't require uv on PATH). Optional flags is the
+// "--dry-run" toggle.
+func runStrandedBeadSweep(
+	t *testing.T,
+	overrides map[string]string,
+	candidatesJSON, digestJSON string,
+	flags ...string,
+) (stdout []byte, gcCalls, mailLog string) {
+	t.Helper()
+
+	python3, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLogPath := filepath.Join(t.TempDir(), "mail.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), strandedBeadSweepGCStub)
+
+	env := map[string]string{
+		"GC_CALL_LOG":             gcLog,
+		"GC_MAIL_LOG":             mailLogPath,
+		"GC_PACK_STATE_DIR":       stateDir,
+		"GC_TEST_CANDIDATES_JSON": candidatesJSON,
+		"GC_TEST_DIGEST_JSON":     digestJSON,
+		"PATH":                    binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+	for k, v := range overrides {
+		env[k] = v
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "stranded-bead-sweep.py")
+	args := append([]string{script}, flags...)
+	cmd := exec.Command(python3, args...)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stranded-bead-sweep.py failed: %v\n%s", err, out)
+	}
+	gcData, _ := os.ReadFile(gcLog)
+	mailData, _ := os.ReadFile(mailLogPath)
+	return out, string(gcData), string(mailData)
+}
+
+func TestStrandedBeadSweepLabelsCandidates(t *testing.T) {
+	candidates := `[
+		{"id":"ga-stranded","issue_type":"task","status":"open","title":"unrouted","updated_at":"2026-05-01T00:00:00Z","priority":2,"metadata":{}},
+		{"id":"ga-routed","issue_type":"task","status":"open","title":"already routed","updated_at":"2026-05-01T00:00:00Z","metadata":{"gc.routed_to":"project/worker"}},
+		{"id":"ga-assigned","issue_type":"task","status":"open","title":"already assigned","updated_at":"2026-05-01T00:00:00Z","assignee":"alice","metadata":{}},
+		{"id":"ga-message","issue_type":"message","status":"open","title":"non-work-type","updated_at":"2026-05-01T00:00:00Z","metadata":{}},
+		{"id":"za-wrong-rig","issue_type":"task","status":"open","title":"wrong-rig","updated_at":"2026-05-01T00:00:00Z","metadata":{}}
+	]`
+
+	out, gcCalls, mailLog := runStrandedBeadSweep(t, nil, candidates, "[]")
+
+	if !strings.Contains(gcCalls, "bd --rig project update ga-stranded --add-label needs:human") {
+		t.Fatalf("expected ga-stranded to be labeled needs:human; gc calls:\n%s", gcCalls)
+	}
+	for _, skip := range []string{"ga-routed", "ga-assigned", "ga-message", "za-wrong-rig"} {
+		if strings.Contains(gcCalls, "bd --rig project update "+skip) {
+			t.Fatalf("expected %s to be skipped; gc calls:\n%s", skip, gcCalls)
+		}
+	}
+	if mailLog != "" {
+		t.Fatalf("did not expect digest mail (state file missing means first run advances quietly); mail log:\n%s", mailLog)
+	}
+	if !strings.Contains(string(out), "labeled 1") {
+		t.Fatalf("expected summary 'labeled 1'; got:\n%s", out)
+	}
+}
+
+func TestStrandedBeadSweepDryRunSkipsWrites(t *testing.T) {
+	candidates := `[
+		{"id":"ga-stranded","issue_type":"task","status":"open","title":"unrouted","updated_at":"2026-05-01T00:00:00Z","metadata":{}}
+	]`
+	digest := `[
+		{"id":"ga-stranded","issue_type":"task","status":"open","title":"unrouted","updated_at":"2026-05-01T00:00:00Z","priority":2,"metadata":{}}
+	]`
+
+	out, gcCalls, mailLog := runStrandedBeadSweep(t, nil, candidates, digest, "--dry-run")
+
+	if strings.Contains(gcCalls, " update ga-stranded ") {
+		t.Fatalf("dry-run should not call bd update; gc calls:\n%s", gcCalls)
+	}
+	if mailLog != "" {
+		t.Fatalf("dry-run should not send mail; mail log:\n%s", mailLog)
+	}
+	if !strings.Contains(string(out), "would label ga-stranded") {
+		t.Fatalf("expected dry-run preview line; got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "would send digest") {
+		t.Fatalf("expected dry-run digest preview; got:\n%s", out)
+	}
+}
+
+func TestStrandedBeadSweepCustomSurfaceLabel(t *testing.T) {
+	candidates := `[
+		{"id":"ga-stranded","issue_type":"task","status":"open","title":"unrouted","updated_at":"2026-05-01T00:00:00Z","metadata":{}}
+	]`
+
+	_, gcCalls, _ := runStrandedBeadSweep(t,
+		map[string]string{"GC_STRANDED_SURFACE_LABEL": "needs:operator"},
+		candidates, "[]")
+
+	if !strings.Contains(gcCalls, "update ga-stranded --add-label needs:operator") {
+		t.Fatalf("expected custom surface label needs:operator; gc calls:\n%s", gcCalls)
+	}
+	// The candidate-query exclude-label filter must include the configured
+	// surface label so already-labeled beads stay exempt across runs.
+	if !strings.Contains(gcCalls, "--exclude-label=needs:operator,skip:auto-route") {
+		t.Fatalf("expected exclude-label to lead with needs:operator; gc calls:\n%s", gcCalls)
+	}
+}
+
+func TestStrandedBeadSweepCustomExemptLabels(t *testing.T) {
+	candidates := `[
+		{"id":"ga-stranded","issue_type":"task","status":"open","title":"unrouted","updated_at":"2026-05-01T00:00:00Z","metadata":{}}
+	]`
+
+	_, gcCalls, _ := runStrandedBeadSweep(t,
+		map[string]string{"GC_STRANDED_EXEMPT_LABELS": "foo,bar"},
+		candidates, "[]")
+
+	if !strings.Contains(gcCalls, "--exclude-label=needs:human,foo,bar") {
+		t.Fatalf("expected configured exempt labels appended after surface; gc calls:\n%s", gcCalls)
+	}
+}
+
+func TestStrandedBeadSweepDigestSilentWithRecentState(t *testing.T) {
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	maintStateDir := filepath.Join(stateDir, "maintenance")
+	if err := os.MkdirAll(maintStateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(maintStateDir, "stranded-bead-digest-last")
+	recent := time.Now().UTC().Add(-1 * time.Hour).Format("2006-01-02T15:04:05Z")
+	if err := os.WriteFile(statePath, []byte(recent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "mail.log")
+	writeExecutable(t, filepath.Join(binDir, "gc"), strandedBeadSweepGCStub)
+
+	digest := `[
+		{"id":"ga-stranded","issue_type":"task","status":"open","title":"unrouted","updated_at":"2026-05-01T00:00:00Z","priority":2,"metadata":{}}
+	]`
+
+	python3, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	env := map[string]string{
+		"GC_CALL_LOG":             gcLog,
+		"GC_MAIL_LOG":             mailLog,
+		"GC_PACK_STATE_DIR":       maintStateDir,
+		"GC_TEST_CANDIDATES_JSON": "[]",
+		"GC_TEST_DIGEST_JSON":     digest,
+		"PATH":                    binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "stranded-bead-sweep.py")
+	cmd := exec.Command(python3, script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stranded-bead-sweep.py failed: %v\n%s", err, out)
+	}
+	mailData, _ := os.ReadFile(mailLog)
+	if len(mailData) != 0 {
+		t.Fatalf("digest mail sent within interval; mail log:\n%s", mailData)
+	}
+	// State file should be unchanged (not advanced) when interval hasn't elapsed.
+	stateBytes, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("ReadFile(state): %v", err)
+	}
+	if got := strings.TrimSpace(string(stateBytes)); got != recent {
+		t.Fatalf("state file should be unchanged within interval; got %q want %q", got, recent)
+	}
+}
+
+func TestStrandedBeadSweepDigestSendsWhenDue(t *testing.T) {
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "mail.log")
+	writeExecutable(t, filepath.Join(binDir, "gc"), strandedBeadSweepGCStub)
+
+	digest := `[
+		{"id":"ga-stranded","issue_type":"task","status":"open","title":"unrouted","updated_at":"2026-05-01T00:00:00Z","priority":2,"metadata":{}}
+	]`
+
+	python3, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	env := map[string]string{
+		"GC_CALL_LOG":             gcLog,
+		"GC_MAIL_LOG":             mailLog,
+		"GC_PACK_STATE_DIR":       stateDir,
+		"GC_TEST_CANDIDATES_JSON": "[]",
+		"GC_TEST_DIGEST_JSON":     digest,
+		"PATH":                    binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "stranded-bead-sweep.py")
+	cmd := exec.Command(python3, script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("stranded-bead-sweep.py failed: %v\n%s", err, out)
+	}
+	mailData, _ := os.ReadFile(mailLog)
+	if !strings.Contains(string(mailData), "send mayor") {
+		t.Fatalf("digest mail should go to mayor; mail log:\n%s\nstdout:\n%s", mailData, out)
+	}
+	if !strings.Contains(string(mailData), "Weekly stranded-bead digest") {
+		t.Fatalf("digest mail subject missing; mail log:\n%s", mailData)
+	}
+	// State file should now exist.
+	statePath := filepath.Join(stateDir, "stranded-bead-digest-last")
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("state file not advanced after digest send: %v", err)
+	}
+}
+
+func TestStrandedBeadSweepDigestRecipientConfigurable(t *testing.T) {
+	digest := `[
+		{"id":"ga-stranded","issue_type":"task","status":"open","title":"unrouted","updated_at":"2026-05-01T00:00:00Z","priority":2,"metadata":{}}
+	]`
+
+	_, _, mailLog := runStrandedBeadSweep(t,
+		map[string]string{"GC_STRANDED_DIGEST_TO": "watcher"},
+		"[]", digest)
+
+	if !strings.Contains(mailLog, "send watcher") {
+		t.Fatalf("digest should target configured recipient; mail log:\n%s", mailLog)
+	}
+}
+
+func TestStrandedBeadSweepSilentAdvanceWhenNoStranded(t *testing.T) {
+	stateDir := t.TempDir()
+	_, gcCalls, mailLog := runStrandedBeadSweep(t,
+		map[string]string{"GC_PACK_STATE_DIR": stateDir},
+		"[]", "[]")
+
+	if mailLog != "" {
+		t.Fatalf("should not send mail when no stranded beads; mail log:\n%s", mailLog)
+	}
+	if strings.Contains(gcCalls, "mail send") {
+		t.Fatalf("should not call mail send when no stranded beads; gc calls:\n%s", gcCalls)
+	}
+	// State file is advanced silently so the next due window stays an
+	// interval away rather than firing on every tick.
+	statePath := filepath.Join(stateDir, "stranded-bead-digest-last")
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("state file should be advanced silently when nothing to send: %v", err)
 	}
 }

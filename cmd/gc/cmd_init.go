@@ -656,6 +656,33 @@ func appendUniqueStrings(dst []string, items ...string) []string {
 	return dst
 }
 
+// resolveInitFormulas materializes formula symlinks for every pack layer
+// visible to the city. Loads the just-written city.toml via LoadWithIncludes
+// so pack-imported formula layers are included alongside the city-local
+// formulas dir, then delegates to ResolveFormulas.
+//
+// Best-effort: silently returns when the config cannot be loaded or yields no
+// formula layers. Resolution errors are reported to stderr but do not abort
+// init.
+//
+// History: an earlier version of cmd_init called ResolveFormulas with only
+// the city-local formulas dir. That caused cleanStaleFormulaSymlinks to treat
+// every pack-imported symlink in .beads/formulas/ as stale and delete it,
+// breaking pack-imported formulas city-wide until the next `gc start`. See
+// ga-kd2 / pe-mcpb.
+func resolveInitFormulas(cityPath string, stderr io.Writer) {
+	expandedCfg, _, loadErr := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if loadErr != nil {
+		return
+	}
+	if len(expandedCfg.FormulaLayers.City) == 0 {
+		return
+	}
+	if rfErr := ResolveFormulas(cityPath, expandedCfg.FormulaLayers.City); rfErr != nil {
+		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr
+	}
+}
+
 func cmdInitFromFileWithOptions(fileArg string, args []string, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool) int {
 	var cityPath string
 	if len(args) > 0 {
@@ -751,11 +778,6 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 		fmt.Fprintln(stdout, "Preserved existing pack.toml.") //nolint:errcheck // best-effort stdout
 	}
 
-	formulasInitDir := filepath.Join(cityPath, citylayout.FormulasRoot)
-	if rfErr := ResolveFormulas(cityPath, []string{formulasInitDir}); rfErr != nil {
-		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr
-	}
-
 	// Re-marshal so the name and rewritten prompt paths are updated.
 	content, err := cityCfg.Marshal()
 	if err != nil {
@@ -791,6 +813,8 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 			return 1
 		}
 	}
+
+	resolveInitFormulas(cityPath, stderr)
 
 	fmt.Fprintf(stdout, "Welcome to Gas City!\n")                                           //nolint:errcheck // best-effort stdout
 	fmt.Fprintf(stdout, "Initialized city %q from %s.\n", cityName, filepath.Base(tomlSrc)) //nolint:errcheck // best-effort stdout
@@ -872,11 +896,6 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		return code
 	}
 
-	formulasDir := filepath.Join(cityPath, citylayout.FormulasRoot)
-	if err := ResolveFormulas(cityPath, []string{formulasDir}); err != nil {
-		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", err) //nolint:errcheck // best-effort stderr
-	}
-
 	// Write city.toml — wizard path gets one agent + provider/startCommand;
 	// --provider path gets the same city shape non-interactively;
 	// custom path gets one mayor + no provider (user configures manually).
@@ -929,6 +948,8 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 			return 1
 		}
 	}
+
+	resolveInitFormulas(cityPath, stderr)
 
 	switch {
 	case wiz.interactive:

@@ -17943,22 +17943,22 @@
             }
           },
           {
-            "description": "Filter by agent name.",
+            "description": "Filter by recipient (mailbox).",
             "explode": false,
             "in": "query",
             "name": "agent",
             "schema": {
-              "description": "Filter by agent name.",
+              "description": "Filter by recipient (mailbox).",
               "type": "string"
             }
           },
           {
-            "description": "Filter by status (unread, all).",
+            "description": "Read-state filter: 'unread' (default) or 'all'. This is independent of the bead status; pass include_closed=true to surface legacy archived (status=closed) beads.",
             "explode": false,
             "in": "query",
             "name": "status",
             "schema": {
-              "description": "Filter by status (unread, all).",
+              "description": "Read-state filter: 'unread' (default) or 'all'. This is independent of the bead status; pass include_closed=true to surface legacy archived (status=closed) beads.",
               "type": "string"
             }
           },
@@ -17970,6 +17970,46 @@
             "schema": {
               "description": "Filter by rig name.",
               "type": "string"
+            }
+          },
+          {
+            "description": "Filter by sender (metadata.from / Bead.From). Empty = no sender constraint.",
+            "explode": false,
+            "in": "query",
+            "name": "from",
+            "schema": {
+              "description": "Filter by sender (metadata.from / Bead.From). Empty = no sender constraint.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by exact label match (e.g. 'archived:viewer/me'). Empty = no label constraint.",
+            "explode": false,
+            "in": "query",
+            "name": "label",
+            "schema": {
+              "description": "Filter by exact label match (e.g. 'archived:viewer/me'). Empty = no label constraint.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Convenience filter for the per-viewer archive model: equivalent to label='archived:\u003cviewer\u003e' with read messages included. Conflicts with 'label'.",
+            "explode": false,
+            "in": "query",
+            "name": "archived_for",
+            "schema": {
+              "description": "Convenience filter for the per-viewer archive model: equivalent to label='archived:\u003cviewer\u003e' with read messages included. Conflicts with 'label'.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Include status=closed message beads (legacy archived). Default false matches Inbox/All semantics.",
+            "explode": false,
+            "in": "query",
+            "name": "include_closed",
+            "schema": {
+              "description": "Include status=closed message beads (legacy archived). Default false matches Inbox/All semantics.",
+              "type": "boolean"
             }
           }
         ],

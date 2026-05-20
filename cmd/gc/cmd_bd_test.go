@@ -277,6 +277,47 @@ func TestResolveBdScopeTargetUsesRedirectedWorktreeRig(t *testing.T) {
 	}
 }
 
+// TestResolveBdScopeTargetUsesGitWorktreeFallbackForCreate verifies that
+// `gc bd create` (no --rig, no bead ID in args) routes to the rig scope when
+// cwd is a polecat-style worktree whose .beads/redirect is missing. Without
+// the git-based fallback, the call falls through to the city HQ target and
+// the bead lands in the wrong rig — the failure mode ga-cuk addresses.
+func TestResolveBdScopeTargetUsesGitWorktreeFallbackForCreate(t *testing.T) {
+	rigRoot := filepath.Join(t.TempDir(), "frontend-rig")
+	cityDir := t.TempDir()
+	worktreeDir := filepath.Join(cityDir, ".gc", "worktrees", "frontend", "polecats", "polecat-1")
+	if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktreeDir): %v", err)
+	}
+	// Deliberately no .beads/redirect — the worktree-setup hook's drift
+	// or a manually-cleaned worktree is the scenario we are fixing.
+
+	prev := gitCommonDirForDir
+	t.Cleanup(func() { gitCommonDirForDir = prev })
+	gitCommonDirForDir = func(string) (string, bool) {
+		return filepath.Join(rigRoot, ".git"), true
+	}
+
+	setCwd(t, worktreeDir)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gascity"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: rigRoot, Prefix: "fr"}},
+	}
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"create", "new bead title", "-t", "task"})
+	if err != nil {
+		t.Fatalf("resolveBdScopeTarget() error = %v", err)
+	}
+	want := execStoreTarget{
+		ScopeRoot: rigRoot,
+		ScopeKind: "rig",
+		Prefix:    "fr",
+		RigName:   "frontend",
+	}
+	if got != want {
+		t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
+	}
+}
+
 func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
 	cityDir := t.TempDir()
 	worktreeDir := filepath.Join(cityDir, ".gc", "worktrees", "frontend", "polecats", "polecat-1")

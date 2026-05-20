@@ -297,6 +297,51 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 	)
 }
 
+// TestRefineryFormulaDirectMergePushIsWorktreeSafe guards against the
+// regression observed in di-jlv: the formula's direct-merge path used to
+// run `git checkout $TARGET; git merge --ff-only temp; git push origin
+// $TARGET`. In gc worktrees the rig's $TARGET is checked out in the
+// primary worktree, so `git checkout $TARGET` fails from the refinery
+// worktree with "fatal: '$TARGET' is already used by worktree". The
+// shell wrapping did not check that exit, the agent stayed on `temp`,
+// `git merge --ff-only temp` reported "Already up to date", and
+// `git push origin $TARGET` shipped the unchanged local `$TARGET` ref
+// so the merge was silently dropped.
+//
+// The fix verifies temp is a fast-forward over origin/$TARGET, then
+// pushes `temp:$TARGET` directly so origin/$TARGET advances without
+// touching the local $TARGET ref. The verification step then compares
+// `git rev-parse temp` against `git rev-parse origin/$TARGET` instead
+// of the old apples-to-apples local-target-vs-origin-target compare,
+// which matched by accident when the push was a no-op.
+func TestRefineryFormulaDirectMergePushIsWorktreeSafe(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery formula: %v", err)
+	}
+	body := string(data)
+
+	// Positive: the worktree-safe shape must be present, in order, in the
+	// direct-merge path of the merge-push step.
+	assertContainsInOrder(t, body,
+		`**If MERGE_STRATEGY = "direct" (default):**`,
+		`git merge-base --is-ancestor "origin/$TARGET" temp`,
+		`git push origin "temp:$TARGET"`,
+		`LOCAL=$(git rev-parse temp)`,
+		`REMOTE=$(git rev-parse "origin/$TARGET")`,
+	)
+
+	// Positive: cleanup must detach off `temp` before deleting it. We
+	// stay on `temp` through the push (no local $TARGET checkout), so
+	// `git branch -d temp` without a prior detach would fail.
+	assertContainsInOrder(t, body,
+		`git checkout --detach`,
+		`git branch -D temp`,
+	)
+}
+
 // TestRefineryPromptRejectionFlowEnforcesClearOnMerge guards against
 // the regression observed in L5c (2026-05-10): the refinery agent
 // merged a previously-rejected work bead and closed it, but never ran
@@ -431,6 +476,56 @@ func TestPolecatPromptDoneSequenceSignalsRefinery(t *testing.T) {
 	)
 	if !strings.Contains(body, "Done sequence (push, set metadata, reassign, wake refinery, nudge refinery, `gc runtime drain-ack`, exit)") {
 		t.Fatalf("polecat quick reference must include the refinery wake+nudge handoff")
+	}
+}
+
+// TestPolecatPromptOpensWithImperativeFirstAction guards against the
+// regression observed 2026-05-18 (ga-2ph): freshly-spawned or reload-
+// survivor polecat sessions sometimes sat idle at the Claude Code prompt
+// instead of auto-claiming routed pool work. A manual nudge with
+// "Run bd ready..." was enough to wake them, so the failure was that the
+// existing prompt buried its startup imperative far enough down the page
+// that the LLM's first turn produced "Session started. Ready..." text
+// instead of a `gc hook` tool call.
+//
+// The fix puts an unconditional "START IMMEDIATELY" section at the top of
+// the polecat prompt so the first substantive content the LLM sees is the
+// imperative to run `gc hook` as its very first tool call. This test
+// pins the section in place — it must precede the "FINAL REMINDER" done
+// sequence and must name both the hook call and the escalation path for
+// the empty-hook case (which is always a bug, never a wait state).
+func TestPolecatPromptOpensWithImperativeFirstAction(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "polecat", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat prompt: %v", err)
+	}
+	body := string(data)
+
+	assertContainsInOrder(t, body,
+		"## START IMMEDIATELY",
+		"`gc hook`",
+		`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`,
+		`gc bd update <id> --claim`,
+		`ESCALATION: polecat spawned with empty hook`,
+		"## FINAL REMINDER: RUN THE DONE SEQUENCE",
+	)
+
+	// The imperative must be the first H2 in the file so it precedes every
+	// other section (Idle Polecat Heresy, Never Close Beads, etc.). If a
+	// future edit inserts another H2 above it, the LLM's first scan will
+	// hit that section first and the fix is silently undone.
+	firstH2 := strings.Index(body, "\n## ")
+	if firstH2 == -1 {
+		t.Fatalf("polecat prompt has no H2 sections")
+	}
+	firstH2Line := body[firstH2+1:]
+	if nl := strings.IndexByte(firstH2Line, '\n'); nl != -1 {
+		firstH2Line = firstH2Line[:nl]
+	}
+	if !strings.HasPrefix(firstH2Line, "## START IMMEDIATELY") {
+		t.Fatalf("first H2 in polecat prompt must be START IMMEDIATELY, got %q", firstH2Line)
 	}
 }
 

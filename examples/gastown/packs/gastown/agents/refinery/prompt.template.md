@@ -91,6 +91,46 @@ RIGHT (sequential rebase):
 
 **After every merge, main moves. Next branch MUST rebase on new baseline.**
 
+## Rebase Safety — `refinery-rebase.sh`
+
+**Always run the canonical helper, never an ad-hoc inline rebase.** The
+shipped script (`refinery-rebase.sh` in the gastown pack's `assets/scripts/`)
+is the only sanctioned way to rebase a polecat branch onto the merge target.
+
+**Anti-pattern to refuse on sight:**
+
+```bash
+# WRONG — silent data loss bug ga-vnr / post-mortem pe-wisp-tj0bj5.
+git rebase origin/main 2>&1 | tail -15
+```
+
+Without `set -o pipefail`, the pipe-to-`tail` swallows rebase's non-zero
+exit. A failed rebase looks successful, the caller force-pushes the
+pre-rebase ancestor, and commits silently disappear from `main`. The same
+trap applies to `git push | tee`, `git fetch | grep`, `gh pr create | tail`
+or any pipe that demotes a failable command's exit code through an always-
+succeeding filter.
+
+**Why a separate script (not just inline bash):**
+
+- `set -euo pipefail` is baked in, so future drift cannot reintroduce the
+  masking-pipe shape by accident.
+- Rebase output is redirected to a tempfile and only emitted on failure,
+  so the LLM never sees verbose output it might be tempted to `tail`.
+- Conflict cleanup (`git rebase --abort`, drop `temp`, restore `$TARGET`)
+  runs deterministically before exit, so the worktree contract the
+  rejection flow depends on (clean status, on `$TARGET`, no `temp`) holds
+  every time.
+- Exit codes are explicit: `0` success, `2` usage error, `3` rebase
+  conflict, `4` pre-rebase failure (fetch/checkout). Callers branch on
+  the numeric code, never on text-grep over output.
+
+**If you must wrap it** (e.g. structured logging): the wrapper itself
+MUST start with `set -euo pipefail`, MUST NOT pipe the script's output
+through `tail`/`grep`/`tee`, and MUST propagate the exit code verbatim.
+A wrapper that swallows the non-zero exit is the bug ga-vnr exists to
+forbid.
+
 ## Work Bead Metadata Contract
 
 Polecats set these metadata fields before assigning a work bead to you:
@@ -200,9 +240,8 @@ alert the witness, not `gc mail send`.
 | Set metadata field | `gc bd update $WORK --set-metadata key=value` |
 | Remove metadata field | `gc bd update $WORK --unset-metadata key` |
 | Fetch remote branches | `git fetch --prune origin` |
-| Rebase on target | `git rebase origin/$TARGET` |
-| Fast-forward merge | `git merge --ff-only temp` |
-| Push merged changes | `git push origin $TARGET` |
+| Rebase on target | `refinery-rebase.sh "$BRANCH" "$TARGET"` (see "Rebase Safety" above) |
+| Push merged changes | `git push origin "temp:$TARGET"` (after verifying `git merge-base --is-ancestor "origin/$TARGET" temp`) |
 
 Rig: {{ .RigName }}
 Working directory: {{ .WorkDir }}

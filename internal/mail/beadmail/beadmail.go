@@ -103,6 +103,14 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 		}
 	}
 
+	// Mirror the top-level From into metadata["from"] so stores that don't
+	// auto-mirror (MemStore in tests, exec backends) can still serve the
+	// metadata-indexed sender query that humaHandleMailList issues for
+	// ?from=. BdStore performs the same mirror inside Create — see
+	// bdstore.go where metadata["from"] is filled from b.From — so the
+	// production behavior is unchanged.
+	metadata = ensureSenderMetadata(metadata, from)
+
 	b, err := p.store.Create(beads.Bead{
 		Title:       title,
 		Description: body,
@@ -116,6 +124,25 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 		return mail.Message{}, fmt.Errorf("beadmail send: %w", err)
 	}
 	return beadToMessage(b), nil
+}
+
+// ensureSenderMetadata returns metadata with metadata["from"] populated from
+// the resolved sender when it is non-empty and not already set. The branch
+// without an existing entry mirrors the bd CLI store: callers that pass an
+// explicit metadata.from win, and the SDK always carries the canonical sender
+// in metadata so the API filter can index it.
+func ensureSenderMetadata(metadata map[string]string, from string) map[string]string {
+	from = strings.TrimSpace(from)
+	if from == "" {
+		return metadata
+	}
+	if metadata == nil {
+		metadata = make(map[string]string, 1)
+	}
+	if strings.TrimSpace(metadata["from"]) == "" {
+		metadata["from"] = from
+	}
+	return metadata
 }
 
 func (p *Provider) resolveSenderRoute(from string) (string, map[string]string, error) {
@@ -345,6 +372,7 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)
 	}
+	metadata = ensureSenderMetadata(metadata, from)
 	if metadata == nil {
 		metadata = make(map[string]string)
 	}
@@ -501,6 +529,161 @@ func (p *Provider) filterMessages(recipient string, includeRead bool) ([]mail.Me
 		msgs = append(msgs, beadToMessage(b))
 	}
 	return msgs, nil
+}
+
+// Filter implements [mail.Filterer]. The candidate set is chosen by the most
+// selective populated filter (recipient routes > sender > label > global), and
+// every populated [mail.FilterOptions] field is then enforced post-query so the
+// result respects the conjunctive contract documented on FilterOptions.
+//
+// The candidate selector keeps recipient-based queries fast (alias history is
+// expanded through [Provider.recipientRoutes] just like Inbox/All); when no
+// recipient is given but a sender or label is supplied, a single indexed query
+// avoids the global type=message scan.
+func (p *Provider) Filter(opts mail.FilterOptions) ([]mail.Message, error) {
+	recipient := strings.TrimSpace(opts.Recipient)
+	sender := strings.TrimSpace(opts.Sender)
+	label := strings.TrimSpace(opts.Label)
+
+	var routes []string
+	if recipient != "" {
+		routes = p.recipientRoutes(recipient)
+	}
+
+	candidates, err := p.filterCandidates(routes, sender, label, opts.IncludeClosed)
+	if err != nil {
+		return nil, fmt.Errorf("beadmail filter: %w", err)
+	}
+
+	msgs := make([]mail.Message, 0, len(candidates))
+	for _, b := range candidates {
+		if !isMessage(b) {
+			continue
+		}
+		if !opts.IncludeClosed && b.Status != "open" {
+			continue
+		}
+		if opts.IncludeClosed && b.Status != "open" && b.Status != "closed" {
+			continue
+		}
+		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
+			continue
+		}
+		if sender != "" && !messageMatchesSender(b, sender) {
+			continue
+		}
+		if label != "" && !hasLabel(b.Labels, label) {
+			continue
+		}
+		if !opts.IncludeRead && hasLabel(b.Labels, "read") {
+			continue
+		}
+		msgs = append(msgs, beadToMessage(b))
+	}
+	return msgs, nil
+}
+
+// filterCandidates collects message beads using the most selective populated
+// constraint as the indexed query, deduplicating across multiple recipient
+// routes. IncludeClosed flips on closed-status retrieval (issuing both
+// open and closed queries when no recipient route narrows the scan further).
+func (p *Provider) filterCandidates(routes []string, sender, label string, includeClosed bool) ([]beads.Bead, error) {
+	seen := make(map[string]beads.Bead)
+	order := make([]string, 0)
+	add := func(bs []beads.Bead) {
+		for _, b := range bs {
+			if !isMessage(b) {
+				continue
+			}
+			if _, ok := seen[b.ID]; !ok {
+				order = append(order, b.ID)
+			}
+			seen[b.ID] = b
+		}
+	}
+
+	statuses := []string{"open"}
+	if includeClosed {
+		statuses = []string{"open", "closed"}
+	}
+
+	switch {
+	case len(routes) > 0:
+		for _, route := range routes {
+			for _, status := range statuses {
+				items, err := p.store.List(beads.ListQuery{
+					Assignee: route,
+					Type:     "message",
+					Status:   status,
+					TierMode: beads.TierBoth,
+				})
+				if err != nil {
+					return nil, fmt.Errorf("listing by assignee %q: %w", route, err)
+				}
+				add(items)
+			}
+		}
+	case sender != "":
+		for _, status := range statuses {
+			items, err := p.store.List(beads.ListQuery{
+				Metadata: map[string]string{"from": sender},
+				Type:     "message",
+				Status:   status,
+				TierMode: beads.TierBoth,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("listing by sender %q: %w", sender, err)
+			}
+			add(items)
+		}
+	case label != "":
+		for _, status := range statuses {
+			items, err := p.store.List(beads.ListQuery{
+				Label:    label,
+				Type:     "message",
+				Status:   status,
+				TierMode: beads.TierBoth,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("listing by label %q: %w", label, err)
+			}
+			add(items)
+		}
+	default:
+		query := beads.ListQuery{Type: "message", TierMode: beads.TierBoth}
+		if includeClosed {
+			query.IncludeClosed = true
+		}
+		items, err := p.store.List(query)
+		if err != nil {
+			return nil, fmt.Errorf("listing message beads: %w", err)
+		}
+		add(items)
+	}
+
+	result := make([]beads.Bead, 0, len(order))
+	for _, id := range order {
+		result = append(result, seen[id])
+	}
+	return result, nil
+}
+
+// messageMatchesSender returns true when the bead's sender, taken from the
+// top-level From field with fall-through to metadata.from, equals want. The
+// fall-through mirrors [bdIssue.toBead] in the bd-backed store, which is the
+// canonical sender-resolution rule for message beads.
+func messageMatchesSender(b beads.Bead, want string) bool {
+	want = strings.TrimSpace(want)
+	if want == "" {
+		return true
+	}
+	if strings.TrimSpace(b.From) == want {
+		return true
+	}
+	if strings.TrimSpace(b.Metadata["from"]) == want {
+		return true
+	}
+	return false
 }
 
 // messageCandidates returns message beads relevant to a recipient using
