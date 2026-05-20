@@ -358,17 +358,23 @@ func TestCmdHandoffAutoJSONReportsCreatedMail(t *testing.T) {
 	}
 
 	var payload struct {
-		SchemaVersion string `json:"schema_version"`
-		Mode          string `json:"mode"`
-		Auto          bool   `json:"auto"`
-		Subject       string `json:"subject"`
-		MailBeadID    string `json:"mail_bead_id"`
+		SchemaVersion    string `json:"schema_version"`
+		OK               bool   `json:"ok"`
+		Mode             string `json:"mode"`
+		Auto             bool   `json:"auto"`
+		Subject          string `json:"subject"`
+		MailBeadID       string `json:"mail_bead_id"`
+		RestartRequested bool   `json:"restart_requested"`
+		Action           string `json:"action"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
 	}
-	if payload.SchemaVersion != "1" || payload.Mode != "auto" || !payload.Auto {
+	if payload.SchemaVersion != "1" || !payload.OK || payload.Mode != "auto" || !payload.Auto {
 		t.Fatalf("handoff JSON envelope = %+v", payload)
+	}
+	if payload.RestartRequested || payload.Action != "restart_skipped" {
+		t.Fatalf("handoff JSON restart fields = %+v", payload)
 	}
 	if payload.Subject != all[0].Title {
 		t.Fatalf("subject = %q, want actual mail title %q", payload.Subject, all[0].Title)
@@ -376,6 +382,68 @@ func TestCmdHandoffAutoJSONReportsCreatedMail(t *testing.T) {
 	if payload.MailBeadID != all[0].ID {
 		t.Fatalf("mail_bead_id = %q, want actual mail id %q", payload.MailBeadID, all[0].ID)
 	}
+}
+
+func TestHandoffJSONSelfReportsRestartRequest(t *testing.T) {
+	store := beads.NewMemStore()
+	rec := events.NewFake()
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+
+	outcome := doHandoffWithOutcome(store, rec, dops, nil, "worker-1", "worker-1",
+		[]string{"HANDOFF: context full"}, &stdout, &stderr)
+	if outcome.code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", outcome.code, stderr.String())
+	}
+	payload := encodeHandoffJSONForTest(t, outcome)
+	if !payload.OK || payload.Mode != "self" || payload.Recipient != "worker-1" {
+		t.Fatalf("handoff JSON envelope = %+v", payload)
+	}
+	if !payload.RestartRequested || payload.Action != "restart_requested" {
+		t.Fatalf("handoff JSON restart fields = %+v", payload)
+	}
+	if payload.MailBeadID == "" || payload.Subject != "HANDOFF: context full" {
+		t.Fatalf("handoff JSON mail fields = %+v", payload)
+	}
+}
+
+func TestHandoffJSONRemoteReportsKilledTarget(t *testing.T) {
+	store := beads.NewMemStore()
+	rec := events.NewFake()
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker-2", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+
+	outcome := doHandoffRemoteWithOutcome(store, rec, sp, "worker-2", "worker-2", "worker-1",
+		[]string{"Context refresh"}, &stdout, &stderr)
+	if outcome.code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", outcome.code, stderr.String())
+	}
+	payload := encodeHandoffJSONForTest(t, outcome)
+	if !payload.OK || payload.Mode != "remote" || payload.Target != "worker-2" || payload.Recipient != "worker-2" {
+		t.Fatalf("handoff JSON envelope = %+v", payload)
+	}
+	if payload.RestartRequested || payload.Action != "killed" {
+		t.Fatalf("handoff JSON remote action fields = %+v", payload)
+	}
+	if payload.MailBeadID == "" || payload.Subject != "Context refresh" {
+		t.Fatalf("handoff JSON mail fields = %+v", payload)
+	}
+}
+
+func encodeHandoffJSONForTest(t *testing.T, outcome handoffOutcome) handoffJSONResult {
+	t.Helper()
+	var stdout bytes.Buffer
+	if err := writeCLIJSONLine(&stdout, handoffJSONFromOutcome(outcome)); err != nil {
+		t.Fatalf("writeCLIJSONLine: %v", err)
+	}
+	var payload handoffJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not handoff JSON: %v\n%s", err, stdout.String())
+	}
+	return payload
 }
 
 func TestCmdHandoffJSONRejectsHookFormat(t *testing.T) {

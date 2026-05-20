@@ -112,6 +112,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workdir layouts, and `gc hook` defensively filters future-deferred or
   dependency-blocked candidates from JSON work-query output before surfacing
   work to agents.
+- CLI JSON errors now use the shared one-object-per-line writer on stdout,
+  preserving literal `<`, `>`, and `&` characters; stderr still receives a
+  machine-readable diagnostic.
 
 ### Fixed
 

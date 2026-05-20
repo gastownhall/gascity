@@ -244,7 +244,9 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 
 	output, err := runner(workQuery, dir)
 	if err != nil {
-		if normalized := normalizeWorkQueryOutput(strings.TrimSpace(output)); normalized != "" {
+		normalized := normalizeWorkQueryOutput(strings.TrimSpace(output))
+		normalized = filterUnreadyHookCandidatesWithDiagnostics(normalized, time.Now(), stderr)
+		if normalized != "" {
 			fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
 		}
 		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
