@@ -16,11 +16,11 @@ fi
 
 if [ -n "${OBSERVABLE_TEST_LOG:-}" ]; then
   log="$OBSERVABLE_TEST_LOG"
+  rm -f "$log"
 else
   safe_name="$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
   log="$(mktemp "${TMPDIR:-/tmp}/gascity-${safe_name}.jsonl.XXXXXX")"
 fi
-rm -f "$log"
 
 echo "observable go test: log=$log" >&2
 echo "observable go test: command=go test -json $*" >&2
