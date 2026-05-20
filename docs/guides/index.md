@@ -5,14 +5,14 @@ description: Practical guides for common Gas City workflows.
 
 These guides are task-oriented and current.
 
-- [Migrating to Pack/City v.next](/guides/migrating-to-pack-vnext)
-- [Shareable Packs](/guides/shareable-packs)
-- [Using JSON from the Gas City CLI (`gc`)](/guides/using-json-from-gc)
-- [Using Gas City as a Multi-Agent Engineering Environment](/guides/multi-agent-engineering-environment)
+- [Migrating to Pack/City v.next](migrating-to-pack-vnext.md)
+- [Shareable Packs](shareable-packs.md)
+- [Using JSON from the Gas City CLI (`gc`)](using-json-from-gc.md)
+- [Using Gas City as a Multi-Agent Engineering Environment](multi-agent-engineering-environment.md)
 
-See also the [Troubleshooting runbooks](/troubleshooting/dolt-bloat-recovery)
+See also the [Troubleshooting runbooks](../troubleshooting/dolt-bloat-recovery.md)
 for operational recovery procedures.
 
-Use the [Reference](/reference/index) section for exact command and
+Use the [Reference](../reference/index.md) section for exact command and
 config details. Older roadmaps and notes live in `engdocs/archive/`
 and should not be treated as the current workflow.

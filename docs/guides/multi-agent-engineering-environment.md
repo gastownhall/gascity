@@ -259,5 +259,5 @@ into something more coherent and more teachable.
 
 ## See also
 
-- [Migrating to Pack/City v.next](/guides/migrating-to-pack-vnext)
-- [Shareable Packs](/guides/shareable-packs)
+- [Migrating to Pack/City v.next](migrating-to-pack-vnext.md)
+- [Shareable Packs](shareable-packs.md)

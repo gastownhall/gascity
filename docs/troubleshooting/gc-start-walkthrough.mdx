@@ -11,13 +11,13 @@ expand its section for the cause and resolution.
 This page covers the seven failure modes encountered in the 2026-04-26
 selfhost UX bug haul (umbrella PRD `ga-r8hs`). For installation issues
 (`gc` not on PATH, missing prerequisites, version mismatches), see
-[Troubleshooting](/getting-started/troubleshooting). For Dolt store
-recovery, see [Dolt bloat recovery](/troubleshooting/dolt-bloat-recovery).
+[Troubleshooting](../getting-started/troubleshooting.md). For Dolt store
+recovery, see [Dolt bloat recovery](dolt-bloat-recovery.md).
 </Note>
 
 ## What a failed gc start looks like
 
-![Failed gc start showing the FATAL prefix, warning de-duplication, and walkthrough URL — left panel is the TTY render with bold-red FATAL, right panel is the non-TTY render with plain ASCII FATAL prefix.](/images/troubleshooting/gc-start-fatal.png)
+![Failed gc start showing the FATAL prefix, warning de-duplication, and walkthrough URL — left panel is the TTY render with bold-red FATAL, right panel is the non-TTY render with plain ASCII FATAL prefix.](../images/troubleshooting/gc-start-fatal.png)
 
 The `FATAL:` prefix is the stable marker — bold red on a TTY, plain
 `gc-fatal:` ASCII when piped or redirected. The same line ends with
@@ -42,7 +42,7 @@ grep -E '^(FATAL|gc-fatal):' gc-start.log
 
 <Tip>
 If your symptom does not match any of the above, run `gc doctor --verbose`
-and consult the [installation troubleshooting](/getting-started/troubleshooting)
+and consult the [installation troubleshooting](../getting-started/troubleshooting.md)
 page. If still stuck, file an issue (link at the bottom of this page).
 </Tip>
 
@@ -176,7 +176,7 @@ The recommended path is migration. The `fallback = true` escape hatch
 is for packs that intentionally wrap a system pack and need the local
 declaration to win when both are present.
 
-**Background**: [Pack v1 → v2 migration guide](/guides/migrating-to-pack-vnext) ·
+**Background**: [Pack v1 → v2 migration guide](../guides/migrating-to-pack-vnext.md) ·
 [PRD `ga-ytx2`](https://github.com/gastownhall/gascity/issues/ytx2) ·
 [PRD `ga-qpbe`](https://github.com/gastownhall/gascity/issues/qpbe).
 
@@ -217,7 +217,7 @@ max_active_sessions = 4
 ```
 
 For a full mapping of removed/renamed fields, see the
-[Pack v1 → v2 migration guide](/guides/migrating-to-pack-vnext).
+[Pack v1 → v2 migration guide](../guides/migrating-to-pack-vnext.md).
 
 ## 5. Rig path required {#rig-path-required}
 

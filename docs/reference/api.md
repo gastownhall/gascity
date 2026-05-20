@@ -237,7 +237,7 @@ truth.
 
 For the explicit CLI output contract, including JSONL framing, empty-output
 behavior, heartbeat suppression, and the `--seq` plain-text cursor format, see
-[gc events Formats](/reference/events).
+[gc events Formats](events.md).
 
 ### City Scope
 

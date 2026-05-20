@@ -28,8 +28,8 @@ The underlying DTOs come from the published OpenAPI document:
 - `HeartbeatEvent`
 
 Download the canonical supervisor spec and the `gc events` JSONL line schema
-from [Schemas](/schema), or read the broader event-bus notes in the
-[Supervisor REST API](/reference/api).
+from [Schemas](../schema/index.md), or read the broader event-bus notes in the
+[Supervisor REST API](api.md).
 
 ## Output Modes
 

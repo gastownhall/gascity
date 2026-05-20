@@ -278,5 +278,5 @@ command's normal human behavior is intentionally changed.
 
 ## Related Reference
 
-Use the generated [CLI Reference](/reference/cli) for exact command flags.
-Use [Events](/reference/events) for the `gc events` JSONL event contract.
+Use the generated [CLI Reference](../reference/cli.md) for exact command flags.
+Use [Events](../reference/events.md) for the `gc events` JSONL event contract.

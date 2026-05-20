@@ -5,7 +5,7 @@ description: Common installation and setup issues and how to fix them.
 
 <Note>
 If `gc start` fails after install, use the
-[`gc start` failure walkthrough](/troubleshooting/gc-start-walkthrough) to
+[`gc start` failure walkthrough](../troubleshooting/gc-start-walkthrough.mdx) to
 match the final `FATAL:` line to the likely cause and resolution.
 </Note>
 

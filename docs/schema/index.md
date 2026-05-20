@@ -23,7 +23,7 @@ go run ./cmd/genspec
 ```
 
 For the narrative API overview, endpoint families, and wire-level notes, see
-the [Supervisor REST API](/reference/api) page.
+the [Supervisor REST API](../reference/api.md) page.
 
 ## gc events JSONL Schema
 
@@ -39,7 +39,7 @@ not JSONL.
 
 For the explicit CLI output contract, including scope selection, empty-output
 behavior, heartbeat suppression, and cursor formats, see
-[gc events Formats](/reference/events).
+[gc events Formats](../reference/events.md).
 
 ## City Config JSON Schema
 

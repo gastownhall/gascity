@@ -6,7 +6,7 @@ description: Create a city, add a rig, and route work in a few minutes.
 <Note>
 This guide assumes you have already installed Gas City and its
 prerequisites. If you haven't, start with the
-[Installation](/getting-started/installation) page.
+[Installation](installation.md) page.
 </Note>
 
 You will need `gc`, `tmux`, `git`, `jq`, and a beads provider (`bd` + `dolt`
@@ -16,7 +16,7 @@ by default, or set `GC_BEADS=file` to skip them).
 Oh My Zsh's `git` plugin defines a `gc` alias for `git commit --verbose`. If
 `gc version` or `gc init` opens git commit instead of Gas City, use
 `command gc ...` temporarily and remove the alias after Oh My Zsh loads.
-See [Troubleshooting](/getting-started/troubleshooting#oh-my-zsh-git-plugin-hides-gc).
+See [Troubleshooting](troubleshooting.md#oh-my-zsh-git-plugin-hides-gc).
 </Tip>
 
 ## 1. Create a City
@@ -56,4 +56,4 @@ bd show <bead-id> --watch
 ```
 
 For a fuller walkthrough of the same path, continue to
-[Tutorial 01](/tutorials/01-cities-and-rigs).
+[Tutorial 01](../tutorials/01-cities-and-rigs.md).

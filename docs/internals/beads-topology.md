@@ -172,9 +172,9 @@ for that — its job is to enforce per-scope namespacing.
 - [`bd` CLI](https://github.com/gastownhall/beads) — upstream documentation for
   `bd create`, `bd list`, `bd ready`, and the rest of the surface `gc bd`
   forwards to.
-- [Tutorial 06: Beads](/tutorials/06-beads) — the user-model walkthrough of
+- [Tutorial 06: Beads](../tutorials/06-beads.md) — the user-model walkthrough of
   beads as Gas City's universal work primitive.
-- [Reference: Config](/reference/config) — every config key, including
+- [Reference: Config](../reference/config.md) — every config key, including
   `rig.dolt_port` for advanced topologies.
 - [Beads Dolt Contract Redesign](https://github.com/gastownhall/gascity/blob/main/engdocs/design/beads-dolt-contract-redesign.md)
   — the full contributor-side design doc covering all four endpoint origins,
