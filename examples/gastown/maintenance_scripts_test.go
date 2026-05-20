@@ -309,6 +309,89 @@ exit 1
 	}
 }
 
+func TestOrphanSweepPreservesLiveEphemeralSessionAssignees(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: project/worker
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      cat <<'EOF'
+{"sessions":[
+  {"id":"mc-live","session_name":"project__worker-gc-abc123","alias":"project/worker-1","agent_name":"project/worker","closed":false},
+  {"id":"mc-closed","session_name":"closed-session","closed":true}
+],"summary":{},"filters":{},"schema_version":"1"}
+EOF
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-live","status":"in_progress","assignee":"project__worker-gc-abc123"},
+  {"id":"ga-orphan","status":"in_progress","assignee":"missing-session"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "orphan-sweep: reset 1 orphaned beads") {
+		t.Fatalf("unexpected orphan-sweep output:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "bd update ga-orphan --status=open --assignee=") {
+		t.Fatalf("orphan bead was not reset:\n%s", log)
+	}
+	if strings.Contains(log, "bd update ga-live ") {
+		t.Fatalf("live ephemeral session assignee was reset:\n%s", log)
+	}
+}
+
 func TestMaintenanceDoltScriptsUseManagedRuntimePorts(t *testing.T) {
 	scripts := []struct {
 		name   string
