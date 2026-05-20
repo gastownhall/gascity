@@ -169,7 +169,18 @@ var dryRunMode bool
 // buildIdleTracker creates an idleTracker from the config, populating
 // timeouts for agents that have idle_timeout set. Returns nil if no
 // agents use idle timeout (disabled).
-func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider) idleTracker {
+//
+// Two registration paths:
+//   - Named sessions (and singletons whose name is the qualified template)
+//     register a per-session-name timeout — their runtime name is stable
+//     and known at startup.
+//   - Pool agents register a per-template timeout. Their runtime session
+//     names carry per-instance bead IDs that are minted later when work
+//     is slung; static slot enumeration (worker-1, worker-2, ...) does
+//     not match those names, so per-name registration silently misses
+//     every pool session. The reconciler's checkIdle call site supplies
+//     the template name and the tracker falls back to it.
+func buildIdleTracker(cfg *config.City, cityName, _ string, _ runtime.Provider) idleTracker {
 	var hasAny bool
 	st := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
@@ -197,18 +208,19 @@ func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider)
 				it.setTimeout(config.NamedSessionRuntimeName(cityName, cfg.Workspace, a.QualifiedName()), timeout)
 				registeredAny = true
 			}
-			if !a.SupportsInstanceExpansion() {
-				continue
-			}
+			// Named agents whose template also serves as a pool are an
+			// uncommon hybrid; skip pool-side template registration so the
+			// always-running named identity is not re-imposed with a
+			// timeout via the template fallback path.
+			continue
 		}
-		sp0 := scaleParamsFor(&a)
-		if a.SupportsInstanceExpansion() {
-			// Register each pool instance (worker-1, worker-2, ...).
-			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
-				sn := startupSessionName(cityName, qualifiedInstance, st)
-				it.setTimeout(sn, timeout)
-				registeredAny = true
-			}
+		if a.SupportsGenericEphemeralSessions() && a.SupportsInstanceExpansion() {
+			// Pool agents: runtime session names are bead-derived and minted
+			// at sling time. Register the timeout per-template so any
+			// bead-derived pool session belonging to this agent picks it up
+			// via the template fallback in checkIdle.
+			it.setTimeoutForTemplate(a.QualifiedName(), timeout)
+			registeredAny = true
 			continue
 		}
 		sn := startupSessionName(cityName, a.QualifiedName(), st)

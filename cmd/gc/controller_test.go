@@ -1247,7 +1247,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	if !ok || tracker == nil {
 		t.Fatal("buildIdleTracker(parsedCfg) = nil, want tracker")
 	}
-	if !tracker.checkIdle("mayor", sp, time.Now()) {
+	if !tracker.checkIdle("mayor", "", sp, time.Now()) {
 		t.Fatalf("fresh idle tracker did not consider mayor idle; activity=%v timeouts=%v", sp.Activity["mayor"], tracker.timeouts)
 	}
 

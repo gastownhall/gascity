@@ -30,11 +30,12 @@ func newFakeIdleTracker() *fakeIdleTracker {
 	return &fakeIdleTracker{idle: make(map[string]bool)}
 }
 
-func (f *fakeIdleTracker) checkIdle(sessionName string, _ runtime.Provider, _ time.Time) bool {
+func (f *fakeIdleTracker) checkIdle(sessionName, _ string, _ runtime.Provider, _ time.Time) bool {
 	return f.idle[sessionName]
 }
 
-func (f *fakeIdleTracker) setTimeout(_ string, _ time.Duration) {}
+func (f *fakeIdleTracker) setTimeout(_ string, _ time.Duration)            {}
+func (f *fakeIdleTracker) setTimeoutForTemplate(_ string, _ time.Duration) {}
 
 type lineLimitedPeekProvider struct {
 	*runtime.Fake

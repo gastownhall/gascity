@@ -1376,7 +1376,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 
 		// Idle timeout: restart sessions idle longer than configured threshold.
-		if it != nil && alive && it.checkIdle(name, sp, clk.Now()) {
+		// Pass the agent template so the tracker can fall back to a per-template
+		// timeout for pool sessions whose bead-derived runtime names are not
+		// registered directly.
+		if it != nil && alive && it.checkIdle(name, tp.TemplateName, sp, clk.Now()) {
 			if pendingInteractionKeepsAwake(*session, sp, name, clk) {
 				drainCancelled := false
 				if dt != nil {
