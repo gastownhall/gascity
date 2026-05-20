@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/rigstate"
 	"github.com/spf13/cobra"
 )
 
@@ -152,6 +153,7 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 			d.Register(newDoltDriftCheck(cityPath, cfg))
 		}
 		d.Register(doctor.NewConfigValidCheck(cfg))
+		d.Register(doctor.NewLegacySuspendedFieldCheck(cfg))
 		d.Register(doctor.NewConfigRefsCheck(cfg, cityPath))
 		d.Register(doctor.NewPreStartScriptsCheck(cfg))
 		d.Register(doctor.NewBuiltinPackFamilyCheck(cfg, cityPath))
@@ -243,11 +245,12 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 	// Custom types check — city store.
 	d.Register(doctor.NewCustomTypesCheck(cityPath, "city"))
 
-	// Per-rig checks. Skip suspended rigs — opening their bead store
-	// triggers bd auto-start of orphan Dolt servers (ga-wzk).
+	// Per-rig checks. Skip effectively-suspended rigs — opening their
+	// bead store triggers bd auto-start of orphan Dolt servers (ga-wzk).
 	if cfgErr == nil {
+		suspState, _ := loadRigSuspensionState(fsys.OSFS{}, cityPath)
 		for _, rig := range cfg.Rigs {
-			if rig.Suspended {
+			if rigstate.EffectiveSuspended(suspState, rig.Name, rig.SuspendedOnStart) {
 				continue
 			}
 			if strings.TrimSpace(rig.Path) == "" {

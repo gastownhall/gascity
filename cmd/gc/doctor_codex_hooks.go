@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/rigstate"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -28,10 +29,13 @@ func codexHookWorkDirs(cityPath string, cfg *config.City) []string {
 	if cfg == nil {
 		return dirs
 	}
+	suspState, _ := loadRigSuspensionState(fsys.OSFS{}, cityPath)
 	suspendedRigPaths := map[string]bool{}
-	for _, rig := range cfg.Rigs {
-		if rig.Suspended || strings.TrimSpace(rig.Path) == "" {
-			if rig.Suspended && strings.TrimSpace(rig.Path) != "" {
+	for i := range cfg.Rigs {
+		rig := &cfg.Rigs[i]
+		suspended := rigstate.EffectiveSuspended(suspState, rig.Name, rig.SuspendedOnStart)
+		if suspended || strings.TrimSpace(rig.Path) == "" {
+			if suspended && strings.TrimSpace(rig.Path) != "" {
 				suspendedRigPaths[filepath.Clean(rig.Path)] = true
 			}
 			continue

@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/rigstate"
 )
 
 var startDeprecatedOrderWarningDedup = logutil.NewDedup(logutil.DefaultDedupCapacity)
@@ -162,6 +163,7 @@ type memoryOrderDispatcher struct {
 	maxTimeout   time.Duration
 	cfg          *config.City
 	cityName     string
+	cityPath     string
 	cacheMu      sync.Mutex
 	lastRunCache map[string]time.Time
 
@@ -272,6 +274,7 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 		maxTimeout:     cfg.Orders.MaxTimeoutDuration(),
 		cfg:            cfg,
 		cityName:       loadedCityName(cfg, cityPath),
+		cityPath:       cityPath,
 		dispatchCtx:    dispatchCtx,
 		dispatchCancel: dispatchCancel,
 	}
@@ -885,9 +888,10 @@ func (m *memoryOrderDispatcher) rigSuspendedByName(rigName string) bool {
 	if rigName == "" {
 		return false
 	}
-	for _, r := range m.cfg.Rigs {
-		if r.Name == rigName {
-			return r.Suspended
+	suspState, _ := loadRigSuspensionState(fsys.OSFS{}, m.cityPath)
+	for i := range m.cfg.Rigs {
+		if m.cfg.Rigs[i].Name == rigName {
+			return rigstate.EffectiveSuspended(suspState, rigName, m.cfg.Rigs[i].SuspendedOnStart)
 		}
 	}
 	return false

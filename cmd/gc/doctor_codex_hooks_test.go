@@ -131,7 +131,7 @@ func TestCodexHookWorkDirsIncludesActiveRigPaths(t *testing.T) {
 		Rigs: []config.Rig{
 			{Name: "active", Path: "/rig/active"},
 			{Name: "blank", Path: " "},
-			{Name: "suspended", Path: "/rig/suspended", Suspended: true},
+			{Name: "suspended", Path: "/rig/suspended", SuspendedOnStart: true},
 		},
 	}
 
@@ -153,7 +153,7 @@ func TestCodexHookWorkDirsIncludesResolvedAgentWorkDirs(t *testing.T) {
 		Workspace: config.Workspace{InstallAgentHooks: []string{"codex"}},
 		Rigs: []config.Rig{
 			{Name: "active", Path: activeRig},
-			{Name: "suspended", Path: suspendedRig, Suspended: true},
+			{Name: "suspended", Path: suspendedRig, SuspendedOnStart: true},
 		},
 		Agents: []config.Agent{
 			{Name: "reviewer", Dir: "active", WorkDir: agentWorkDir},

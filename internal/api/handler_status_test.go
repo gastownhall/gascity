@@ -180,7 +180,7 @@ func TestHandleHealth(t *testing.T) {
 
 func TestHandleStatus_Suspended(t *testing.T) {
 	state := newFakeState(t)
-	state.cfg.Workspace.Suspended = true
+	state.cfg.Workspace.SuspendedOnStart = true
 	h := newTestCityHandler(t, state)
 
 	req := httptest.NewRequest("GET", cityURL(state, "/status"), nil)

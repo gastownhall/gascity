@@ -8,6 +8,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/rigstate"
 )
 
 type v2RoutedToNamespaceCheck struct {
@@ -36,8 +38,9 @@ func (c *v2RoutedToNamespaceCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 	var skipped []string
 	c.scanScope(&findings, &skipped, aliases, "city", c.cityPath)
 	if c.cfg != nil {
+		suspState, _ := loadRigSuspensionState(fsys.OSFS{}, c.cityPath)
 		for _, rig := range c.cfg.Rigs {
-			if rig.Suspended || strings.TrimSpace(rig.Path) == "" {
+			if rigstate.EffectiveSuspended(suspState, rig.Name, rig.SuspendedOnStart) || strings.TrimSpace(rig.Path) == "" {
 				continue
 			}
 			c.scanScope(&findings, &skipped, aliases, "rig "+rig.Name, rig.Path)

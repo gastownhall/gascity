@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/rigstate"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -101,6 +102,7 @@ func rigNameCandidates(toComplete string) []string {
 			return
 		}
 		resolveRigPaths(cityPath, cfg.Rigs)
+		suspState, _ := loadRigSuspensionState(fsys.OSFS{}, cityPath)
 		candidates = make([]string, 0, len(cfg.Rigs))
 		for i := range cfg.Rigs {
 			name := cfg.Rigs[i].Name
@@ -108,7 +110,7 @@ func rigNameCandidates(toComplete string) []string {
 				continue
 			}
 			desc := cfg.Rigs[i].Path
-			if cfg.Rigs[i].Suspended {
+			if rigstate.EffectiveSuspended(suspState, name, cfg.Rigs[i].SuspendedOnStart) {
 				desc += " (suspended)"
 			}
 			candidates = append(candidates, name+"\t"+desc)

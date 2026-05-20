@@ -5534,6 +5534,12 @@
               "boolean",
               "null"
             ]
+          },
+          "SuspendedOnStart": {
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
@@ -5542,6 +5548,7 @@
           "Prefix",
           "DefaultBranch",
           "Suspended",
+          "SuspendedOnStart",
           "FormulaVars"
         ],
         "type": "object"

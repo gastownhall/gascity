@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citystate"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
@@ -1644,22 +1645,24 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 		{
 			name: "resume rig",
 			initial: func(cfg *config.City) {
-				cfg.Rigs[0].Suspended = true
+				cfg.Rigs[0].SuspendedOnStart = true
 			},
 			mutate: func(cs *controllerState) error {
 				return cs.ResumeRig("rig1")
 			},
 			verify: func(t *testing.T, cfg *config.City, cityDir string) {
 				t.Helper()
-				if cfg.Rigs[0].Suspended {
-					t.Fatal("city.toml suspended should be cleared after ResumeRig")
+				// city.toml stays untouched; the explicit resume is
+				// recorded in runtime state.
+				if !cfg.Rigs[0].SuspendedOnStart {
+					t.Fatal("suspended_on_start should remain set in city.toml; ResumeRig records the override in runtime state")
 				}
 				st, err := rigstate.Load(fsys.OSFS{}, cityDir)
 				if err != nil {
 					t.Fatalf("load rig state: %v", err)
 				}
-				if rigstate.IsSuspended(st, "rig1") {
-					t.Fatal("rig should not be suspended in runtime state after ResumeRig")
+				if v, ok := rigstate.ExplicitSuspended(st, "rig1"); !ok || v {
+					t.Fatalf("rig should have explicit resume in runtime state; got (%v, %v)", v, ok)
 				}
 			},
 		},
@@ -1668,25 +1671,39 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			mutate: func(cs *controllerState) error {
 				return cs.SuspendCity()
 			},
-			verify: func(t *testing.T, cfg *config.City, _ string) {
+			verify: func(t *testing.T, cfg *config.City, cityDir string) {
 				t.Helper()
-				if !cfg.Workspace.Suspended {
-					t.Fatal("city should be suspended after SuspendCity")
+				if cfg.Workspace.Suspended || cfg.Workspace.SuspendedOnStart {
+					t.Fatal("city.toml workspace must remain untouched by SuspendCity (runtime state owns the change)")
+				}
+				st, err := citystate.Load(fsys.OSFS{}, cityDir)
+				if err != nil {
+					t.Fatalf("load city state: %v", err)
+				}
+				if !citystate.IsSuspended(st) {
+					t.Fatal("city should be explicit-suspended in runtime state after SuspendCity")
 				}
 			},
 		},
 		{
 			name: "resume city",
 			initial: func(cfg *config.City) {
-				cfg.Workspace.Suspended = true
+				cfg.Workspace.SuspendedOnStart = true
 			},
 			mutate: func(cs *controllerState) error {
 				return cs.ResumeCity()
 			},
-			verify: func(t *testing.T, cfg *config.City, _ string) {
+			verify: func(t *testing.T, cfg *config.City, cityDir string) {
 				t.Helper()
-				if cfg.Workspace.Suspended {
-					t.Fatal("city should not be suspended after ResumeCity")
+				if !cfg.Workspace.SuspendedOnStart {
+					t.Fatal("suspended_on_start should remain set in city.toml; ResumeCity records the override in runtime state")
+				}
+				st, err := citystate.Load(fsys.OSFS{}, cityDir)
+				if err != nil {
+					t.Fatalf("load city state: %v", err)
+				}
+				if v, ok := citystate.ExplicitSuspended(st); !ok || v {
+					t.Fatalf("city should have explicit resume in runtime state; got (%v, %v)", v, ok)
 				}
 			},
 		},
@@ -1778,8 +1795,14 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 			},
 			verify: func(t *testing.T, cfg *config.City, _ string) {
 				t.Helper()
-				if cfg.Rigs[0].Prefix != "rg" || !cfg.Rigs[0].Suspended {
-					t.Fatalf("updated rig = %+v, want prefix/suspended", cfg.Rigs[0])
+				// patch.Suspended is the back-compat alias that writes
+				// the rig's committable SuspendedOnStart default; the
+				// deprecated `suspended` field stays unset.
+				if cfg.Rigs[0].Prefix != "rg" || !cfg.Rigs[0].SuspendedOnStart {
+					t.Fatalf("updated rig = %+v, want prefix=rg + suspended_on_start=true", cfg.Rigs[0])
+				}
+				if cfg.Rigs[0].Suspended {
+					t.Fatalf("legacy suspended field must not be written by RigUpdate; got %+v", cfg.Rigs[0])
 				}
 			},
 		},

@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/citystate"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -53,21 +54,23 @@ func standaloneBuildAgentsFnWithSessionBeads(
 }
 
 // computeSuspendedNames builds a set of session names for agents marked
-// suspended in the config or runtime state, or belonging to suspended rigs.
-// Also includes all agents when the city itself is suspended
-// (workspace.suspended). Used by the reconciler to distinguish suspended
-// agents from true orphans during Phase 2 cleanup.
+// suspended in the config or runtime state, or belonging to suspended
+// rigs. Also includes all agents when the city itself is suspended.
+// Used by the reconciler to distinguish suspended agents from true
+// orphans during Phase 2 cleanup.
 func computeSuspendedNames(cfg *config.City, cityName, cityPath string) map[string]bool {
+	citySt, _ := loadCitySuspensionState(fsys.OSFS{}, cityPath)
 	suspState, _ := loadRigSuspensionState(fsys.OSFS{}, cityPath)
-	return computeSuspendedNamesWith(cfg, cityName, cityPath, suspState)
+	return computeSuspendedNamesWith(cfg, cityName, cityPath, citySt, suspState)
 }
 
-func computeSuspendedNamesWith(cfg *config.City, cityName, cityPath string, suspState rigstate.SuspensionState) map[string]bool {
+func computeSuspendedNamesWith(cfg *config.City, cityName, cityPath string, citySt citystate.State, suspState rigstate.SuspensionState) map[string]bool {
 	names := make(map[string]bool)
 	st := cfg.Workspace.SessionTemplate
 
-	// City-level suspend: all agents are suspended.
-	if cfg.Workspace.Suspended {
+	// City-level suspend (runtime override ∪ workspace.suspended_on_start):
+	// every agent is effectively suspended.
+	if effectiveCitySuspended(cfg, citySt) {
 		for _, a := range cfg.Agents {
 			names[startupSessionName(cityName, a.QualifiedName(), st)] = true
 		}
@@ -81,8 +84,8 @@ func computeSuspendedNamesWith(cfg *config.City, cityName, cityPath string, susp
 			names[startupSessionName(cityName, qn, st)] = true
 		}
 	}
-	// Agents in suspended rigs (config + runtime state).
-	suspNames := buildMergedSuspendedRigNames(cfg, suspState)
+	// Agents in effectively-suspended rigs.
+	suspNames := buildEffectiveSuspendedRigNames(cfg, suspState)
 	if len(suspNames) > 0 {
 		suspendedRigPaths := make(map[string]bool)
 		for _, r := range cfg.Rigs {

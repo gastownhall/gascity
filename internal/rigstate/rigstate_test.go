@@ -13,6 +13,8 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+func boolPtr(b bool) *bool { return &b }
+
 // TestLoad_MissingFileReturnsEmpty verifies that Load on a fresh city
 // (where rig-state.json does not yet exist) returns an empty state with
 // an initialized Rigs map rather than an error.
@@ -76,7 +78,7 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	cityDir := t.TempDir()
 	st := SuspensionState{
 		Rigs: map[string]RigOverride{
-			"foo": {Suspended: true},
+			"foo": {Suspended: boolPtr(true)},
 		},
 	}
 	before := time.Now().UTC()
@@ -89,7 +91,7 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !got.Rigs["foo"].Suspended {
+	if got.Rigs["foo"].Suspended == nil || !*got.Rigs["foo"].Suspended {
 		t.Error("round-tripped state should mark foo suspended")
 	}
 	if got.UpdatedAt.Before(before.Add(-time.Second)) {
@@ -114,7 +116,7 @@ func TestSave_CreatesRuntimeDirectory(t *testing.T) {
 // flag a missing-EOL diff.
 func TestSave_PersistsAtomicallyWithTrailingNewline(t *testing.T) {
 	cityDir := t.TempDir()
-	if err := Save(fsys.OSFS{}, cityDir, SuspensionState{Rigs: map[string]RigOverride{"a": {Suspended: true}}}); err != nil {
+	if err := Save(fsys.OSFS{}, cityDir, SuspensionState{Rigs: map[string]RigOverride{"a": {Suspended: boolPtr(true)}}}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	data, err := os.ReadFile(citylayout.RigStateFile(cityDir))
@@ -139,29 +141,95 @@ func TestIsSuspended_AbsentReturnsFalse(t *testing.T) {
 	}
 }
 
-// TestIsSuspended_PresentButNotSuspended covers the corner case where a
-// rig has an entry whose Suspended field is false (e.g. before deletion).
-func TestIsSuspended_PresentButNotSuspended(t *testing.T) {
-	st := SuspensionState{Rigs: map[string]RigOverride{"foo": {}}}
+// TestIsSuspended_ExplicitResumeReturnsFalse confirms that an explicit
+// resume (&false) is reported as not-suspended by IsSuspended even
+// though an entry exists.
+func TestIsSuspended_ExplicitResumeReturnsFalse(t *testing.T) {
+	st := SuspensionState{Rigs: map[string]RigOverride{"foo": {Suspended: boolPtr(false)}}}
 	if IsSuspended(st, "foo") {
-		t.Error("rig present but not suspended must report not suspended")
+		t.Error("explicit resume (&false) must report not suspended via IsSuspended")
+	}
+}
+
+// TestExplicitSuspended_TriState exercises the three states (nil,
+// &true, &false) that the runtime override can be in.
+func TestExplicitSuspended_TriState(t *testing.T) {
+	st := SuspensionState{
+		Rigs: map[string]RigOverride{
+			"suspended": {Suspended: boolPtr(true)},
+			"resumed":   {Suspended: boolPtr(false)},
+		},
+	}
+	if v, ok := ExplicitSuspended(st, "suspended"); !ok || !v {
+		t.Errorf("explicit suspended: got (%v, %v), want (true, true)", v, ok)
+	}
+	if v, ok := ExplicitSuspended(st, "resumed"); !ok || v {
+		t.Errorf("explicit resumed: got (%v, %v), want (false, true)", v, ok)
+	}
+	if _, ok := ExplicitSuspended(st, "missing"); ok {
+		t.Error("absent rig should report no explicit preference")
+	}
+}
+
+// TestEffectiveSuspended_RuntimeWinsOverConfig pins the merge rule:
+// when the runtime override is non-nil it overrides the rig's
+// SuspendedOnStart, regardless of direction.
+func TestEffectiveSuspended_RuntimeWinsOverConfig(t *testing.T) {
+	st := SuspensionState{
+		Rigs: map[string]RigOverride{
+			"resumed-but-config-says-suspended": {Suspended: boolPtr(false)},
+			"suspended-but-config-says-resumed": {Suspended: boolPtr(true)},
+		},
+	}
+	if EffectiveSuspended(st, "resumed-but-config-says-suspended", true) {
+		t.Error("explicit resume must defeat suspended_on_start = true")
+	}
+	if !EffectiveSuspended(st, "suspended-but-config-says-resumed", false) {
+		t.Error("explicit suspend must defeat suspended_on_start = false")
+	}
+}
+
+// TestEffectiveSuspended_DefaultsToSuspendedOnStart confirms that
+// without a runtime override the rig's SuspendedOnStart is the answer.
+func TestEffectiveSuspended_DefaultsToSuspendedOnStart(t *testing.T) {
+	st := SuspensionState{Rigs: map[string]RigOverride{}}
+	if !EffectiveSuspended(st, "missing", true) {
+		t.Error("no runtime override → SuspendedOnStart=true must yield suspended")
+	}
+	if EffectiveSuspended(st, "missing", false) {
+		t.Error("no runtime override → SuspendedOnStart=false must yield not suspended")
 	}
 }
 
 // TestSetSuspended_SetsAndRemoves drives the lifecycle: setting
-// Suspended=true creates an entry; clearing it deletes the entry so the
-// JSON file stays minimal.
+// Suspended=&true creates an entry; clearing it (nil) deletes the entry
+// so the JSON file stays minimal.
 func TestSetSuspended_SetsAndRemoves(t *testing.T) {
 	st := SuspensionState{Rigs: map[string]RigOverride{}}
 
-	SetSuspended(&st, "foo", true)
+	SetSuspended(&st, "foo", boolPtr(true))
 	if !IsSuspended(st, "foo") {
-		t.Fatal("expected foo suspended after SetSuspended(true)")
+		t.Fatal("expected foo suspended after SetSuspended(&true)")
 	}
 
-	SetSuspended(&st, "foo", false)
+	SetSuspended(&st, "foo", nil)
 	if _, ok := st.Rigs["foo"]; ok {
-		t.Error("clearing the only override should remove the rig entry entirely")
+		t.Error("clearing to nil should remove the rig entry entirely")
+	}
+}
+
+// TestSetSuspended_ExplicitResumeRetainsEntry confirms that an explicit
+// resume (&false) keeps the entry around so a later EffectiveSuspended
+// call sees the user's override instead of falling back to SuspendedOnStart.
+func TestSetSuspended_ExplicitResumeRetainsEntry(t *testing.T) {
+	st := SuspensionState{Rigs: map[string]RigOverride{}}
+
+	SetSuspended(&st, "foo", boolPtr(false))
+	if _, ok := st.Rigs["foo"]; !ok {
+		t.Fatal("explicit resume must keep the rig entry so it overrides SuspendedOnStart")
+	}
+	if v, ok := ExplicitSuspended(st, "foo"); !ok || v {
+		t.Errorf("explicit resume: got (%v, %v), want (false, true)", v, ok)
 	}
 }
 
@@ -170,7 +238,7 @@ func TestSetSuspended_SetsAndRemoves(t *testing.T) {
 // don't churn UpdatedAt or rewrite the file unnecessarily.
 func TestSetRigSuspended_NoOpWhenAlreadyDesired(t *testing.T) {
 	cityDir := t.TempDir()
-	if err := SetRigSuspended(fsys.OSFS{}, cityDir, "foo", true); err != nil {
+	if err := SetRigSuspended(fsys.OSFS{}, cityDir, "foo", boolPtr(true)); err != nil {
 		t.Fatalf("first call: %v", err)
 	}
 	first, err := os.Stat(citylayout.RigStateFile(cityDir))
@@ -180,7 +248,7 @@ func TestSetRigSuspended_NoOpWhenAlreadyDesired(t *testing.T) {
 
 	// Sleep just enough that a real Save would yield a newer mtime.
 	time.Sleep(20 * time.Millisecond)
-	if err := SetRigSuspended(fsys.OSFS{}, cityDir, "foo", true); err != nil {
+	if err := SetRigSuspended(fsys.OSFS{}, cityDir, "foo", boolPtr(true)); err != nil {
 		t.Fatalf("second call: %v", err)
 	}
 	second, err := os.Stat(citylayout.RigStateFile(cityDir))
@@ -193,13 +261,13 @@ func TestSetRigSuspended_NoOpWhenAlreadyDesired(t *testing.T) {
 	}
 }
 
-// TestSetRigSuspended_TogglesSuspension exercises the suspend → resume
-// path through the convenience function and confirms the entry is
-// removed once the rig is no longer suspended.
+// TestSetRigSuspended_TogglesSuspension exercises suspend → resume →
+// clear through the convenience function and confirms the entry is
+// removed only when the preference is cleared to nil.
 func TestSetRigSuspended_TogglesSuspension(t *testing.T) {
 	cityDir := t.TempDir()
 
-	if err := SetRigSuspended(fsys.OSFS{}, cityDir, "foo", true); err != nil {
+	if err := SetRigSuspended(fsys.OSFS{}, cityDir, "foo", boolPtr(true)); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
 	st, err := Load(fsys.OSFS{}, cityDir)
@@ -207,10 +275,11 @@ func TestSetRigSuspended_TogglesSuspension(t *testing.T) {
 		t.Fatalf("load after suspend: %v", err)
 	}
 	if !IsSuspended(st, "foo") {
-		t.Fatal("foo should be suspended after SetRigSuspended(true)")
+		t.Fatal("foo should be suspended after SetRigSuspended(&true)")
 	}
 
-	if err := SetRigSuspended(fsys.OSFS{}, cityDir, "foo", false); err != nil {
+	// Explicit resume keeps the entry so it sticks across restarts.
+	if err := SetRigSuspended(fsys.OSFS{}, cityDir, "foo", boolPtr(false)); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 	st, err = Load(fsys.OSFS{}, cityDir)
@@ -218,22 +287,34 @@ func TestSetRigSuspended_TogglesSuspension(t *testing.T) {
 		t.Fatalf("load after resume: %v", err)
 	}
 	if IsSuspended(st, "foo") {
-		t.Error("foo should not be suspended after SetRigSuspended(false)")
+		t.Error("foo should not be suspended after SetRigSuspended(&false)")
+	}
+	if _, ok := st.Rigs["foo"]; !ok {
+		t.Error("explicit resume must retain the rig entry so SuspendedOnStart can't reassert")
+	}
+
+	// Clearing to nil drops the entry entirely.
+	if err := SetRigSuspended(fsys.OSFS{}, cityDir, "foo", nil); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	st, err = Load(fsys.OSFS{}, cityDir)
+	if err != nil {
+		t.Fatalf("load after clear: %v", err)
 	}
 	if _, ok := st.Rigs["foo"]; ok {
-		t.Error("foo entry should be removed after resume")
+		t.Error("clearing to nil should remove the rig entry")
 	}
 }
 
-// TestSuspendedNames returns only the suspended rigs and ignores entries
-// that exist but have Suspended=false (a future override might keep the
-// entry around for other reasons).
+// TestSuspendedNames returns only the explicitly-suspended rigs (&true)
+// and ignores explicit-resume (&false) and absent entries.
 func TestSuspendedNames(t *testing.T) {
 	st := SuspensionState{
 		Rigs: map[string]RigOverride{
-			"alpha": {Suspended: true},
-			"beta":  {Suspended: false},
-			"gamma": {Suspended: true},
+			"alpha": {Suspended: boolPtr(true)},
+			"beta":  {Suspended: boolPtr(false)},
+			"gamma": {Suspended: boolPtr(true)},
+			"delta": {},
 		},
 	}
 	names := SuspendedNames(st)
@@ -244,7 +325,10 @@ func TestSuspendedNames(t *testing.T) {
 		t.Errorf("expected alpha and gamma suspended, got %v", names)
 	}
 	if names["beta"] {
-		t.Error("beta should not be in suspended names (Suspended=false)")
+		t.Error("beta should not be in suspended names (explicit resume)")
+	}
+	if names["delta"] {
+		t.Error("delta should not be in suspended names (no preference)")
 	}
 }
 
@@ -270,7 +354,7 @@ func TestLoad_PropagatesNonNotExistError(t *testing.T) {
 // silently break consumers (or downstream tooling) reading the file.
 func TestSave_JSONStructure(t *testing.T) {
 	cityDir := t.TempDir()
-	if err := Save(fsys.OSFS{}, cityDir, SuspensionState{Rigs: map[string]RigOverride{"foo": {Suspended: true}}}); err != nil {
+	if err := Save(fsys.OSFS{}, cityDir, SuspensionState{Rigs: map[string]RigOverride{"foo": {Suspended: boolPtr(true)}}}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	data, err := os.ReadFile(citylayout.RigStateFile(cityDir))

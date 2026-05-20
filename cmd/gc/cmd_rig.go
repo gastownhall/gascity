@@ -305,11 +305,11 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 			storedPrefix = strings.ToLower(prefixOverride)
 		}
 		rig := config.Rig{
-			Name:          name,
-			Path:          rigPath,
-			Prefix:        storedPrefix,
-			DefaultBranch: resolvedDefaultBranch,
-			Suspended:     startSuspended,
+			Name:             name,
+			Path:             rigPath,
+			Prefix:           storedPrefix,
+			DefaultBranch:    resolvedDefaultBranch,
+			SuspendedOnStart: startSuspended,
 		}
 		switch {
 		case len(explicitRigImports) > 0:
@@ -403,8 +403,8 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
 	if reAdd {
 		w(fmt.Sprintf("Re-initializing rig '%s'...", name))
-		if startSuspended && startSuspended != existingRig.Suspended {
-			fmt.Fprintf(stderr, "gc rig add: warning: --start-suspended ignored (existing: suspended=%v); edit city.toml to change\n", existingRig.Suspended) //nolint:errcheck // best-effort stderr
+		if startSuspended && startSuspended != existingRig.SuspendedOnStart {
+			fmt.Fprintf(stderr, "gc rig add: warning: --start-suspended ignored (existing: suspended_on_start=%v); edit city.toml to change\n", existingRig.SuspendedOnStart) //nolint:errcheck // best-effort stderr
 		}
 		if len(explicitRigImports) > 0 {
 			existingRigImports, err := effectiveRigBoundImports(existingRig, cfg.Packs)
@@ -1075,8 +1075,9 @@ func newRigResumeCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "resume [name]",
 		Short: "Resume a suspended rig",
-		Long: `Resume a suspended rig by removing it from the runtime state file
-(.gc/runtime/rig-state.json).
+		Long: `Resume a suspended rig by recording an explicit "resumed" preference
+in .gc/runtime/rig-state.json. The override sticks across city restarts
+even when the rig declares suspended_on_start = true.
 
 The reconciler will start the rig's agents on its next tick.`,
 		Args: cobra.ArbitraryArgs,
@@ -1122,7 +1123,10 @@ func cmdRigResume(args []string, stdout, stderr io.Writer) int {
 }
 
 // doRigResume removes rig suspension from the runtime state file.
-// Also clears legacy suspended=true from city.toml if present.
+// Records an explicit "resumed" preference in .gc/runtime/rig-state.json.
+// The legacy `suspended` field in city.toml is left untouched — `gc doctor`
+// flags it as a deprecated-field warning and users migrate by renaming
+// it to suspended_on_start (or removing it).
 // Accepts an injected FS for testability.
 func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer) int {
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -1150,35 +1154,14 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 		return 1
 	}
 
-	removedFromState := resumeRigInState(&st, rigName)
-
-	// Clear legacy suspended=true from city.toml if present.
-	removedFromConfig := false
-	for i := range cfg.Rigs {
-		if cfg.Rigs[i].Name == rigName && cfg.Rigs[i].Suspended {
-			cfg.Rigs[i].Suspended = false
-			removedFromConfig = true
-			break
-		}
-	}
-
-	if !removedFromState && !removedFromConfig {
+	if !resumeRigInState(&st, rigName) {
 		fmt.Fprintf(stdout, "Rig '%s' is not suspended\n", rigName) //nolint:errcheck // best-effort stdout
 		return 0
 	}
 
-	if removedFromState {
-		if err := saveRigSuspensionState(fs, cityPath, st); err != nil {
-			fmt.Fprintf(stderr, "gc rig resume: writing state: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-	}
-
-	if removedFromConfig {
-		if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
-			fmt.Fprintf(stderr, "gc rig resume: writing city.toml: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+	if err := saveRigSuspensionState(fs, cityPath, st); err != nil {
+		fmt.Fprintf(stderr, "gc rig resume: writing state: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	fmt.Fprintf(stdout, "Resumed rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout

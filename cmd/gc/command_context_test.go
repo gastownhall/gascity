@@ -62,7 +62,7 @@ name = %q
 path = %q
 `, rigName, rigPath)
 	if suspended {
-		toml += "suspended = true\n"
+		toml += "suspended_on_start = true\n"
 	}
 	writeRigAnywhereCityToml(t, cityPath, toml)
 
@@ -293,8 +293,17 @@ func TestRigAnywhere_CmdRigResumeFromRigDir(t *testing.T) {
 			if err != nil {
 				t.Fatalf("load city config: %v", err)
 			}
-			if len(cfg.Rigs) != 1 || cfg.Rigs[0].Suspended {
-				t.Fatalf("rig suspended = %v, want false", cfg.Rigs)
+			// city.toml's suspended_on_start stays as the committable
+			// default; the explicit resume is recorded in runtime state.
+			if len(cfg.Rigs) != 1 || !cfg.Rigs[0].SuspendedOnStart {
+				t.Fatalf("city.toml suspended_on_start should remain set, got %+v", cfg.Rigs)
+			}
+			st, err := rigstate.Load(fsys.OSFS{}, fx.cityPath)
+			if err != nil {
+				t.Fatalf("rigstate.Load: %v", err)
+			}
+			if v, ok := rigstate.ExplicitSuspended(st, fx.rigName); !ok || v {
+				t.Fatalf("rig should have explicit resume in runtime state; got (%v, %v)", v, ok)
 			}
 		})
 	}

@@ -1107,7 +1107,7 @@ func TestDoRigSuspendAlreadySuspended(t *testing.T) {
 
 func TestDoRigResume(t *testing.T) {
 	cityPath := t.TempDir()
-	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"frontend\"\npath = \"/some/path\"\nsuspended = true\n"
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"frontend\"\npath = \"/some/path\"\nsuspended_on_start = true\n"
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1121,13 +1121,24 @@ func TestDoRigResume(t *testing.T) {
 		t.Errorf("output = %q, want resume message", stdout.String())
 	}
 
-	// Verify config written with suspended=false.
+	// city.toml is intentionally NOT mutated; the explicit resume is
+	// recorded in .gc/runtime/rig-state.json and beats SuspendedOnStart.
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Rigs) != 1 || cfg.Rigs[0].Suspended {
-		t.Errorf("rig should not be suspended, got %+v", cfg.Rigs)
+	if len(cfg.Rigs) != 1 || !cfg.Rigs[0].SuspendedOnStart {
+		t.Errorf("city.toml suspended_on_start should remain set, got %+v", cfg.Rigs)
+	}
+	st, err := rigstate.Load(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("rigstate.Load: %v", err)
+	}
+	if v, ok := rigstate.ExplicitSuspended(st, "frontend"); !ok || v {
+		t.Errorf("frontend should have explicit resume in runtime state, got (%v, %v)", v, ok)
+	}
+	if rigstate.EffectiveSuspended(st, "frontend", cfg.Rigs[0].SuspendedOnStart) {
+		t.Error("explicit resume in runtime state must beat suspended_on_start=true")
 	}
 }
 
@@ -1167,7 +1178,7 @@ func TestDoRigListShowsSuspended(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"my-frontend\"\npath = \"" + rigPath + "\"\nsuspended = true\n"
+	cityToml := "[workspace]\nname = \"test-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"my-frontend\"\npath = \"" + rigPath + "\"\nsuspended_on_start = true\n"
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -233,7 +233,8 @@ func buildDesiredStateWithSessionBeads(
 	trace *sessionReconcilerTraceCycle,
 	stderr io.Writer,
 ) DesiredStateResult {
-	if cfg.Workspace.Suspended {
+	citySt, _ := loadCitySuspensionState(fsys.OSFS{}, cityPath)
+	if effectiveCitySuspended(cfg, citySt) {
 		return DesiredStateResult{}
 	}
 

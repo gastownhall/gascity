@@ -3,10 +3,10 @@ package main
 import (
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/citystate"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -19,7 +19,8 @@ func newSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "suspend [path]",
 		Short: "Suspend the city (all agents effectively suspended)",
-		Long: `Suspends the city by setting workspace.suspended = true in city.toml.
+		Long: `Suspends the city by recording an explicit "suspended" preference
+in .gc/runtime/city-state.json (per-clone runtime state, not committed).
 
 This inherits downward — when the city is suspended, all agents are
 effectively suspended regardless of their individual suspended fields.
@@ -41,7 +42,9 @@ func newResumeCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "resume [path]",
 		Short: "Resume a suspended city",
-		Long: `Resume a suspended city by clearing workspace.suspended in city.toml.
+		Long: `Resume a suspended city by recording an explicit "resumed" preference
+in .gc/runtime/city-state.json. The override sticks across city restarts
+even when [workspace] declares suspended_on_start = true.
 
 Restores normal operation: the reconciler will spawn agents again and
 gc hook/prime will return work. Use "gc agent resume" to resume
@@ -105,24 +108,26 @@ func resolveSuspendDir(args []string) (string, error) {
 	return resolveCommandCity(args)
 }
 
-// doSuspendCity sets or clears workspace.suspended in city.toml.
-// The flag inherits downward: when true, all agents are effectively
-// suspended via isAgentEffectivelySuspended and computeSuspendedNames.
+// doSuspendCity records the explicit city suspension preference in
+// .gc/runtime/city-state.json. The committable
+// workspace.suspended_on_start flag is left untouched: callers
+// explicit-suspend or explicit-resume via runtime state, and that
+// override beats the committed default at every read.
 func doSuspendCity(fs fsys.FS, cityPath string, suspend bool, stdout, stderr io.Writer) int {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cmd := "gc suspend"
 	if !suspend {
 		cmd = "gc resume"
 	}
-	cfg, err := loadCityConfigForEditFS(fs, tomlPath)
-	if err != nil {
+	// Validate city.toml parses so an unrelated config error surfaces
+	// clearly instead of being masked by the runtime-state write.
+	if _, err := loadCityConfigForEditFS(fs, tomlPath); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmd, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	cfg.Workspace.Suspended = suspend
-
-	if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
+	want := suspend
+	if err := citystate.SetCitySuspended(fs, cityPath, &want); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmd, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -144,27 +149,68 @@ func doSuspendCity(fs fsys.FS, cityPath string, suspend bool, stdout, stderr io.
 	return 0
 }
 
-// citySuspended checks whether the city is suspended. Returns true if
-// GC_SUSPENDED=1 is set or cfg.Workspace.Suspended is true.
+// citySuspended is the canonical predicate for "is the city suspended
+// right now?". It loads the runtime city state from the ambient city
+// (resolveCity) and merges it with workspace.suspended_on_start. The
+// deprecated [workspace] suspended field is intentionally NOT consulted
+// — `gc doctor` surfaces it as a deprecated-field warning.
+//
+// Callers that already have a pre-loaded [citystate.State] (e.g. the
+// reconciler or snapshot builder) should call [citySuspendedWithState]
+// instead to avoid the extra read.
 func citySuspended(cfg *config.City) bool {
-	if os.Getenv("GC_SUSPENDED") == "1" {
-		return true
+	cityPath, _ := resolveCity()
+	return citySuspendedWithState(cfg, loadCitySuspensionStateBestEffort(cityPath))
+}
+
+// citySuspendedWithState is the pure form for callers that already
+// loaded the runtime city state.
+func citySuspendedWithState(cfg *config.City, citySt citystate.State) bool {
+	return effectiveCitySuspended(cfg, citySt)
+}
+
+// loadCitySuspensionStateBestEffort reads runtime city state from disk
+// and silently returns a zero state on any error. Suitable for the
+// suspension predicates where misclassifying as "not suspended" is no
+// worse than the pre-existing behavior.
+func loadCitySuspensionStateBestEffort(cityPath string) citystate.State {
+	if cityPath == "" {
+		return citystate.State{}
 	}
-	return cfg.Workspace.Suspended
+	st, _ := loadCitySuspensionState(fsys.OSFS{}, cityPath)
+	return st
 }
 
 // isAgentEffectivelySuspended reports whether an agent is suspended.
 // True if any of: city is suspended, agent is individually suspended,
-// or the agent's rig is suspended (in config or runtime state).
-// Suspension inherits downward.
+// or the agent's rig is effectively suspended (runtime override or
+// SuspendedOnStart). Suspension inherits downward.
+//
+// Callers that already have pre-loaded runtime state should call
+// [isAgentEffectivelySuspendedWith] to avoid the per-call disk read.
 func isAgentEffectivelySuspended(cfg *config.City, a *config.Agent) bool {
-	return isAgentEffectivelySuspendedWith(cfg, a, rigstate.SuspensionState{})
+	cityPath, _ := resolveCity()
+	return isAgentEffectivelySuspendedWith(
+		cfg, a,
+		loadCitySuspensionStateBestEffort(cityPath),
+		loadRigSuspensionStateBestEffort(cityPath),
+	)
+}
+
+// loadRigSuspensionStateBestEffort mirrors loadCitySuspensionStateBestEffort.
+func loadRigSuspensionStateBestEffort(cityPath string) rigstate.SuspensionState {
+	if cityPath == "" {
+		return rigstate.SuspensionState{}
+	}
+	st, _ := loadRigSuspensionState(fsys.OSFS{}, cityPath)
+	return st
 }
 
 // isAgentEffectivelySuspendedWith is like isAgentEffectivelySuspended
-// but also checks the runtime suspension state.
-func isAgentEffectivelySuspendedWith(cfg *config.City, a *config.Agent, suspState rigstate.SuspensionState) bool {
-	if cfg.Workspace.Suspended {
+// but takes pre-loaded runtime state so callers in hot paths don't
+// re-read the same files.
+func isAgentEffectivelySuspendedWith(cfg *config.City, a *config.Agent, citySt citystate.State, suspState rigstate.SuspensionState) bool {
+	if effectiveCitySuspended(cfg, citySt) {
 		return true
 	}
 	if a.Suspended {
@@ -173,13 +219,14 @@ func isAgentEffectivelySuspendedWith(cfg *config.City, a *config.Agent, suspStat
 	if a.Dir == "" {
 		return false
 	}
-	if isRigSuspendedInState(suspState, a.Dir) {
-		return true
-	}
-	for _, r := range cfg.Rigs {
-		if r.Name == a.Dir && r.Suspended {
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name != a.Dir {
+			continue
+		}
+		if rigstate.EffectiveSuspended(suspState, cfg.Rigs[i].Name, cfg.Rigs[i].SuspendedOnStart) {
 			return true
 		}
+		break
 	}
 	return false
 }

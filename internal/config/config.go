@@ -469,8 +469,18 @@ type Rig struct {
 	// Captured by `gc rig add` from the rig's git config; set manually for
 	// rigs whose mainline isn't reachable via origin/HEAD.
 	DefaultBranch string `toml:"default_branch,omitempty"`
-	// Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume.
+	// Suspended is the deprecated, pre-runtime-state suspension flag. The
+	// field is still parsed so `gc doctor` can warn about it and recommend
+	// the rename, but it is no longer read by any behavioral code path —
+	// suspension state is owned by .gc/runtime/rig-state.json (explicit user
+	// preference) and SuspendedOnStart (default at city start).
 	Suspended bool `toml:"suspended,omitempty"`
+	// SuspendedOnStart is the rig's desired suspension state at city start.
+	// When true and no explicit entry exists for this rig in
+	// .gc/runtime/rig-state.json, the rig is treated as suspended. Once the
+	// user has explicitly suspended or resumed the rig via `gc rig
+	// suspend/resume`, the runtime state wins and this flag is informational.
+	SuspendedOnStart bool `toml:"suspended_on_start,omitempty"`
 	// FormulasDir is a rig-local formula directory (Layer 4). Overrides
 	// pack formulas for this rig by filename.
 	// Relative paths resolve against the city directory.
@@ -1057,11 +1067,19 @@ type Workspace struct {
 	Provider string `toml:"provider,omitempty"`
 	// StartCommand overrides the provider's command for all agents.
 	StartCommand string `toml:"start_command,omitempty"`
-	// Suspended controls whether the city is suspended. When true, all
-	// agents are effectively suspended: the reconciler won't spawn them,
-	// and gc hook/prime return empty. Inherits downward — individual
-	// agent/rig suspended fields are checked independently.
+	// Suspended is the deprecated, pre-runtime-state city suspension flag.
+	// The field is still parsed so `gc doctor` can warn about it and
+	// recommend the rename, but it is no longer read by any behavioral
+	// code path — city suspension is owned by
+	// .gc/runtime/city-state.json (explicit user preference) and
+	// SuspendedOnStart (default at city start).
 	Suspended bool `toml:"suspended,omitempty"`
+	// SuspendedOnStart is the city's desired suspension state at start.
+	// When true and no explicit entry exists in
+	// .gc/runtime/city-state.json, the city is treated as suspended. Once
+	// the user has explicitly suspended or resumed via `gc suspend/resume`,
+	// the runtime state wins and this flag is informational.
+	SuspendedOnStart bool `toml:"suspended_on_start,omitempty"`
 	// MaxActiveSessions is the workspace-level cap on total concurrent sessions.
 	// Nil means unlimited. Agents and rigs inherit this if they don't set their own.
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`

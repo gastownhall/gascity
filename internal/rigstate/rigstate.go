@@ -6,8 +6,18 @@
 // timeout overrides) out of city.toml so each clone can have its own
 // operational profile without merge conflicts.
 //
-// For backwards compatibility, callers should also check config.Rig
-// fields (e.g. Suspended) and merge both sources.
+// Suspension state is tri-state via [RigOverride.Suspended]:
+//
+//   - nil    → no explicit preference; the effective state defers to
+//     [config.Rig.SuspendedOnStart] (committed default).
+//   - &true  → explicit suspend (sticks across city restarts even if
+//     SuspendedOnStart is false).
+//   - &false → explicit resume (sticks across city restarts even if
+//     SuspendedOnStart is true).
+//
+// Use [EffectiveSuspended] at every read site to compute the final
+// suspension state by merging the runtime override with the rig's
+// SuspendedOnStart default.
 package rigstate
 
 import (
@@ -21,17 +31,23 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-// RigOverride holds per-rig runtime overrides. Only non-zero fields
-// are considered active. New fields can be added here as the system
-// grows (e.g. model, idle timeout, max sessions).
+// RigOverride holds per-rig runtime overrides. Only non-zero fields are
+// considered active. New fields can be added here as the system grows
+// (e.g. model, idle timeout, max sessions).
+//
+// Suspended is a tri-state pointer: nil means "no preference recorded"
+// (the rig's [config.Rig.SuspendedOnStart] applies); a non-nil pointer
+// records an explicit user choice that overrides SuspendedOnStart and
+// sticks across city restarts.
 type RigOverride struct {
-	Suspended bool `json:"suspended,omitempty"`
+	Suspended *bool `json:"suspended,omitempty"`
 }
 
-// SuspensionState is the runtime rig state persisted to disk.
-// This struct — and the rig-state.json file it lives in — is designed to
-// grow: future per-rig runtime overrides (model, idle timeout, max sessions)
-// can be added to RigOverride without changing the file format.
+// SuspensionState is the runtime rig state persisted to disk. This
+// struct — and the rig-state.json file it lives in — is designed to
+// grow: future per-rig runtime overrides (model, idle timeout, max
+// sessions) can be added to RigOverride without changing the file
+// format.
 type SuspensionState struct {
 	Rigs      map[string]RigOverride `json:"rigs"`
 	UpdatedAt time.Time              `json:"updated_at"`
@@ -73,46 +89,85 @@ func Save(fs fsys.FS, cityPath string, st SuspensionState) error {
 	return fsys.WriteFileAtomic(fs, p, data, 0o644)
 }
 
-// IsSuspended reports whether the given rig is suspended in the
-// runtime state.
+// IsSuspended reports whether the given rig is explicitly suspended in
+// the runtime state (i.e., Suspended is a non-nil &true). An explicit
+// resume (&false) and the no-preference state (nil) both return false.
+// Callers that want the effective state including SuspendedOnStart
+// should use [EffectiveSuspended].
 func IsSuspended(st SuspensionState, name string) bool {
 	r, ok := st.Rigs[name]
-	return ok && r.Suspended
+	return ok && r.Suspended != nil && *r.Suspended
 }
 
-// SetSuspended sets or clears the suspended flag for a rig. Removes
-// the rig entry entirely when all overrides return to zero values.
-func SetSuspended(st *SuspensionState, name string, suspended bool) {
+// ExplicitSuspended returns the explicit suspension preference for a
+// rig recorded in runtime state, if any. The second return value is
+// true iff an explicit preference exists (Suspended is non-nil).
+func ExplicitSuspended(st SuspensionState, name string) (suspended, ok bool) {
+	r, present := st.Rigs[name]
+	if !present || r.Suspended == nil {
+		return false, false
+	}
+	return *r.Suspended, true
+}
+
+// EffectiveSuspended computes the effective suspension state for a rig
+// by merging the runtime override with the rig's SuspendedOnStart
+// default. The runtime override wins when present.
+func EffectiveSuspended(st SuspensionState, name string, suspendedOnStart bool) bool {
+	if v, ok := ExplicitSuspended(st, name); ok {
+		return v
+	}
+	return suspendedOnStart
+}
+
+// SetSuspended records an explicit suspension preference for a rig.
+// Pass nil to clear the preference (effective state will then defer to
+// [config.Rig.SuspendedOnStart]); pass &true / &false to record the
+// explicit user choice. The rig entry is removed entirely when no
+// overrides remain so the JSON file stays minimal.
+func SetSuspended(st *SuspensionState, name string, suspended *bool) {
 	r := st.Rigs[name]
 	r.Suspended = suspended
 	if r == (RigOverride{}) {
 		delete(st.Rigs, name)
-	} else {
-		st.Rigs[name] = r
+		return
 	}
+	if st.Rigs == nil {
+		st.Rigs = make(map[string]RigOverride)
+	}
+	st.Rigs[name] = r
 }
 
-// SetRigSuspended is a convenience that loads state, sets or clears a
-// rig's suspension, and saves.
-func SetRigSuspended(fs fsys.FS, cityPath, name string, suspended bool) error {
+// SetRigSuspended is a convenience that loads state, records an
+// explicit suspension preference, and saves. Pass nil to clear the
+// preference, &true for explicit suspend, &false for explicit resume.
+// Returns without rewriting the file when on-disk state already
+// matches the requested value (preserves UpdatedAt + mtime).
+func SetRigSuspended(fs fsys.FS, cityPath, name string, suspended *bool) error {
 	st, err := Load(fs, cityPath)
 	if err != nil {
 		return err
 	}
-	before := IsSuspended(st, name)
-	if before == suspended {
+	before, hadBefore := ExplicitSuspended(st, name)
+	switch {
+	case suspended == nil && !hadBefore:
+		return nil
+	case suspended != nil && hadBefore && before == *suspended:
 		return nil
 	}
 	SetSuspended(&st, name, suspended)
 	return Save(fs, cityPath, st)
 }
 
-// SuspendedNames returns the set of rig names that are suspended in the
-// runtime state.
+// SuspendedNames returns the set of rig names that are explicitly
+// suspended in the runtime state (Suspended == &true). Rigs with an
+// explicit resume (&false) or no entry are not included. Callers that
+// want the effective merged-with-config set should also iterate the
+// config's Rigs and call [EffectiveSuspended] for each.
 func SuspendedNames(st SuspensionState) map[string]bool {
 	names := make(map[string]bool)
 	for name, r := range st.Rigs {
-		if r.Suspended {
+		if r.Suspended != nil && *r.Suspended {
 			names[name] = true
 		}
 	}

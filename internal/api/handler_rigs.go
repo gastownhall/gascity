@@ -75,14 +75,16 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 	return resp
 }
 
-// rigSuspended computes effective suspended state for a rig by merging config
-// and runtime session metadata. A rig is suspended if the config says so, or
-// if all its agents are runtime-suspended via session metadata.
+// rigSuspended computes the effective suspended state for a rig. A rig
+// is suspended if the runtime state file records an explicit "suspended"
+// preference, if the rig's SuspendedOnStart applies with no overriding
+// runtime entry, or if all its agents are runtime-suspended via session
+// metadata. The deprecated `[[rig]] suspended` field in city.toml is
+// intentionally NOT consulted — `gc doctor` surfaces it as a migration
+// target.
 func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provider, cityName, cityPath string) bool {
-	if rig.Suspended {
-		return true
-	}
-	if rs, err := rigstate.Load(fsys.OSFS{}, cityPath); err == nil && rigstate.IsSuspended(rs, rig.Name) {
+	if rs, err := rigstate.Load(fsys.OSFS{}, cityPath); err == nil &&
+		rigstate.EffectiveSuspended(rs, rig.Name, rig.SuspendedOnStart) {
 		return true
 	}
 	tmpl := cfg.Workspace.SessionTemplate

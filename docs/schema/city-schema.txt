@@ -1922,7 +1922,11 @@
         },
         "suspended": {
           "type": "boolean",
-          "description": "Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume."
+          "description": "Suspended is the deprecated, pre-runtime-state suspension flag. The\nfield is still parsed so `gc doctor` can warn about it and recommend\nthe rename, but it is no longer read by any behavioral code path —\nsuspension state is owned by .gc/runtime/rig-state.json (explicit user\npreference) and SuspendedOnStart (default at city start)."
+        },
+        "suspended_on_start": {
+          "type": "boolean",
+          "description": "SuspendedOnStart is the rig's desired suspension state at city start.\nWhen true and no explicit entry exists for this rig in\n.gc/runtime/rig-state.json, the rig is treated as suspended. Once the\nuser has explicitly suspended or resumed the rig via `gc rig\nsuspend/resume`, the runtime state wins and this flag is informational."
         },
         "formulas_dir": {
           "type": "string",
@@ -2011,7 +2015,11 @@
         },
         "suspended": {
           "type": "boolean",
-          "description": "Suspended overrides the rig's suspended state."
+          "description": "Suspended is the deprecated, pre-runtime-state suspension override.\nParsed for backwards compatibility; `gc doctor` surfaces it as a\nwarning and recommends the rename to SuspendedOnStart. No behavioral\ncode path reads it."
+        },
+        "suspended_on_start": {
+          "type": "boolean",
+          "description": "SuspendedOnStart overrides the rig's desired suspension state at\ncity start. Mirrors Rig.SuspendedOnStart."
         },
         "formula_vars": {
           "additionalProperties": {
@@ -2253,7 +2261,11 @@
         },
         "suspended": {
           "type": "boolean",
-          "description": "Suspended controls whether the city is suspended. When true, all\nagents are effectively suspended: the reconciler won't spawn them,\nand gc hook/prime return empty. Inherits downward — individual\nagent/rig suspended fields are checked independently."
+          "description": "Suspended is the deprecated, pre-runtime-state city suspension flag.\nThe field is still parsed so `gc doctor` can warn about it and\nrecommend the rename, but it is no longer read by any behavioral\ncode path — city suspension is owned by\n.gc/runtime/city-state.json (explicit user preference) and\nSuspendedOnStart (default at city start)."
+        },
+        "suspended_on_start": {
+          "type": "boolean",
+          "description": "SuspendedOnStart is the city's desired suspension state at start.\nWhen true and no explicit entry exists in\n.gc/runtime/city-state.json, the city is treated as suspended. Once\nthe user has explicitly suspended or resumed via `gc suspend/resume`,\nthe runtime state wins and this flag is informational."
         },
         "max_active_sessions": {
           "type": "integer",

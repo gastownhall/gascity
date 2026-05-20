@@ -107,6 +107,13 @@ func RigStateFile(cityRoot string) string {
 	return RuntimePath(cityRoot, "runtime", "rig-state.json")
 }
 
+// CityStateFile returns the path to the runtime city state file. This
+// mirrors RigStateFile and holds explicit city suspension preferences
+// that should not be committed to city.toml.
+func CityStateFile(cityRoot string) string {
+	return RuntimePath(cityRoot, "runtime", "city-state.json")
+}
+
 // CityRuntimeEnv returns city runtime env vars rooted at the canonical runtime
 // directory for cityRoot.
 func CityRuntimeEnv(cityRoot string) []string {

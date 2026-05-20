@@ -2252,6 +2252,7 @@ export type RigPatch = {
     Path: string | null;
     Prefix: string | null;
     Suspended: boolean | null;
+    SuspendedOnStart: boolean | null;
 };
 
 export type RigPatchSetInputBody = {

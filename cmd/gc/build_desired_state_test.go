@@ -6536,9 +6536,9 @@ func TestBuildDesiredState_ManualPoolSessionInSuspendedRigStaysStopped(t *testin
 	}
 	cfg := &config.City{
 		Rigs: []config.Rig{{
-			Name:      "payments",
-			Path:      rigPath,
-			Suspended: true,
+			Name:             "payments",
+			Path:             rigPath,
+			SuspendedOnStart: true,
 		}},
 		Agents: []config.Agent{
 			{
