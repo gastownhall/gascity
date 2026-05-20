@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -194,6 +195,46 @@ func TestTemplateParamsToConfigNoneModeUsesNudge(t *testing.T) {
 	}
 	if cfg.Nudge != "You are an agent. Do work." {
 		t.Errorf("Nudge = %q, want startup prompt", cfg.Nudge)
+	}
+}
+
+func TestResolveTemplateControlDispatcherSuppressesStartupPrompt(t *testing.T) {
+	cityPath := t.TempDir()
+	params := &agentBuildParams{
+		fs:              fsys.NewFake(),
+		cityName:        "maintainer-city",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "maintainer-city"},
+		providers:       map[string]config.ProviderSpec{},
+		lookPath:        func(string) (string, error) { return "", fmt.Errorf("not found") },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:         config.ControlDispatcherAgentName,
+		Dir:          "gascity",
+		StartCommand: config.ControlDispatcherStartCommandFor("gascity/" + config.ControlDispatcherAgentName),
+		ProcessNames: []string{"gc"},
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if tp.Prompt != "" {
+		t.Fatalf("Prompt = %q, want empty for deterministic control dispatcher", tp.Prompt)
+	}
+	cfg := templateParamsToConfig(tp)
+	if cfg.PromptSuffix != "" {
+		t.Fatalf("PromptSuffix = %q, want empty", cfg.PromptSuffix)
+	}
+	if cfg.Nudge != "" {
+		t.Fatalf("Nudge = %q, want empty", cfg.Nudge)
+	}
+	if !reflect.DeepEqual(cfg.ProcessNames, []string{"gc"}) {
+		t.Fatalf("ProcessNames = %v, want [gc]", cfg.ProcessNames)
 	}
 }
 

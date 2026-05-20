@@ -36,7 +36,7 @@ func lookPathOnly(bins ...string) LookPathFunc {
 // --- ResolveProvider tests ---
 
 func TestResolveProviderAgentStartCommand(t *testing.T) {
-	agent := &Agent{Name: "mayor", StartCommand: "my-custom-cli --flag"}
+	agent := &Agent{Name: "mayor", StartCommand: "my-custom-cli --flag", ProcessNames: []string{"my-custom-cli"}}
 	rp, err := ResolveProvider(agent, nil, nil, lookPathNone)
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
@@ -46,6 +46,9 @@ func TestResolveProviderAgentStartCommand(t *testing.T) {
 	}
 	if rp.PromptMode != "none" {
 		t.Errorf("PromptMode = %q, want %q", rp.PromptMode, "none")
+	}
+	if !reflect.DeepEqual(rp.ProcessNames, []string{"my-custom-cli"}) {
+		t.Errorf("ProcessNames = %v, want [my-custom-cli]", rp.ProcessNames)
 	}
 }
 

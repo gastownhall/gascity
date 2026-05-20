@@ -318,9 +318,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
-	if prompt != "" {
+	switch {
+	case suppressStartupPromptForAgent(cfgAgent):
+		prompt = ""
+	case prompt != "":
 		prompt = beacon + "\n\n" + prompt
-	} else {
+	default:
 		prompt = beacon
 	}
 
@@ -342,7 +345,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// subprocess with WorkDir ≠ scope root — because subprocess
 	// doesn't execute PreStart) get no appendix; we'd be lying to
 	// them. Discovered via the pass-1 Codex review.
-	if effectiveInjectAssignedSkills(cfgAgent) {
+	if prompt != "" && effectiveInjectAssignedSkills(cfgAgent) {
 		wsProvider := ""
 		if p.workspace != nil {
 			wsProvider = p.workspace.Provider
@@ -553,6 +556,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		HookEnabled:      hasHooks,
 		MCPServers:       mcpServers,
 	}, nil
+}
+
+func suppressStartupPromptForAgent(cfgAgent *config.Agent) bool {
+	return cfgAgent != nil &&
+		cfgAgent.Name == config.ControlDispatcherAgentName &&
+		strings.TrimSpace(cfgAgent.StartCommand) != ""
 }
 
 func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (map[string]string, error) {

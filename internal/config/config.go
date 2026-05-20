@@ -3078,6 +3078,7 @@ func newControlDispatcherAgent(dir string) Agent {
 		Dir:               dir,
 		Description:       "Built-in deterministic graph.v2 workflow control worker",
 		StartCommand:      ControlDispatcherStartCommandFor(qualifiedName),
+		ProcessNames:      []string{"gc"},
 		MaxActiveSessions: &one,
 		Implicit:          true,
 	}
