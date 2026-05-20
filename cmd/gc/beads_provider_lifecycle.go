@@ -336,8 +336,36 @@ func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.Conf
 	if err := ensureBeadsDir(fs, beadsDir); err != nil {
 		return err
 	}
-	_, err := contract.EnsureCanonicalConfig(fs, filepath.Join(beadsDir, "config.yaml"), state)
-	return err
+	changed, err := contract.EnsureCanonicalConfig(fs, filepath.Join(beadsDir, "config.yaml"), state)
+	if err != nil {
+		return err
+	}
+	if changed && state.EndpointOrigin != contract.EndpointOriginExplicit {
+		// PR 1965 made export.auto:false canonical, but a pre-existing
+		// .beads/issues.jsonl from before this normalization still triggers
+		// bd's auto-import-on-write trap (sa-41j3kp) — bd sees the file,
+		// detects a "stale DB", and stalls bd create for the full 2m
+		// subprocess timeout while it re-imports the JSONL. The file is a
+		// stale export from when auto-export was on; with the canonical
+		// config now suppressing auto-export, nothing will refresh it. Explicit
+		// opt-out scopes keep JSONL as load-bearing state.
+		removeStaleBdExportJSONL(fs, beadsDir)
+	}
+	return nil
+}
+
+// removeStaleBdExportJSONL removes .beads/issues.jsonl if present. Called after
+// EnsureCanonicalConfig writes export.auto:false, since the file is a stale
+// export that bd's auto-import path would otherwise re-load on every write,
+// stalling bd create for the full subprocess timeout on large datasets.
+// Best-effort: any error is non-fatal because the env-var BD_EXPORT_AUTO=false
+// path (bdRuntimeEnv) is a second line of defense for gc-initiated calls.
+func removeStaleBdExportJSONL(fs fsys.FS, beadsDir string) {
+	path := filepath.Join(beadsDir, "issues.jsonl")
+	if _, err := fs.Stat(path); err != nil {
+		return
+	}
+	_ = fs.Remove(path)
 }
 
 func seedDeferredManagedBeads(cityPath, dir, prefix, doltDatabase string) {

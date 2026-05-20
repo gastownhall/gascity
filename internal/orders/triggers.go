@@ -2,7 +2,9 @@ package orders
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -37,6 +39,13 @@ type TriggerOptions struct {
 	ConditionEnv     []string
 	ConditionTimeout time.Duration
 }
+
+var (
+	// conditionCheckPostCancelWaitDelay is os/exec's pipe-close wait after
+	// Cancel returns; the TERM and KILL waits each use conditionCheckSignalGrace.
+	conditionCheckPostCancelWaitDelay = 2 * time.Second
+	conditionCheckSignalGrace         = 2 * time.Second
+)
 
 // CheckTrigger evaluates an order's trigger condition and returns whether it's due.
 // ep is an events Provider used by event triggers to query events; may be nil for
@@ -163,13 +172,28 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", a.Check)
+	cleanupCommand := prepareConditionCommand(cmd, conditionCheckSignalGrace)
+	cmd.WaitDelay = conditionCheckPostCancelWaitDelay
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
 	if opts.ConditionDir != "" {
 		cmd.Dir = opts.ConditionDir
 	}
 	cmd.Env = mergeConditionEnv(os.Environ(), opts.ConditionEnv)
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return TriggerResult{Due: false, Reason: fmt.Sprintf("check command timed out after %s", timeout)}
+			reason := fmt.Sprintf("check command timed out after %s", timeout)
+			if cleanupErr := cleanupCommand(); cleanupErr != nil {
+				reason = fmt.Sprintf("%s; cleanup failed: %v", reason, cleanupErr)
+			}
+			return TriggerResult{Due: false, Reason: reason}
+		}
+		if errors.Is(err, exec.ErrWaitDelay) {
+			reason := "check command cleanup exceeded post-cancel wait delay"
+			if cleanupErr := cleanupCommand(); cleanupErr != nil {
+				reason = fmt.Sprintf("%s: %v", reason, cleanupErr)
+			}
+			return TriggerResult{Due: false, Reason: reason}
 		}
 		return TriggerResult{Due: false, Reason: fmt.Sprintf("check command failed: %v", err)}
 	}

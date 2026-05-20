@@ -81,6 +81,39 @@ func ValidateDurations(cfg *City, source string) []string {
 	return warnings
 }
 
+// ValidateNonNegativeDurations checks duration fields that must not be
+// negative and returns a hard error for the first violation. Unlike
+// ValidateDurations (which only warns on unparseable typos), a negative
+// duration that parses cleanly is silently destructive — e.g. a negative
+// dolt_stop_timeout collapses the managed-dolt SIGTERM→SIGKILL grace to an
+// immediate kill, risking journal corruption (gastownhall/gascity#2090).
+// Such values are rejected at config load rather than at runtime.
+//
+// Empty and unparseable values are left to ValidateDurations; this function
+// only rejects values that parse to a negative time.Duration.
+func ValidateNonNegativeDurations(cfg *City, source string) error {
+	if cfg == nil {
+		return nil
+	}
+	checkNonNegative := func(context, field, value string) error {
+		if value == "" {
+			return nil
+		}
+		dur, err := time.ParseDuration(value)
+		if err != nil {
+			// Parse errors are reported as warnings by ValidateDurations.
+			return nil
+		}
+		if dur < 0 {
+			return fmt.Errorf("%s: %s %s must not be negative: got %q",
+				source, context, field, value)
+		}
+		return nil
+	}
+
+	return checkNonNegative("[daemon]", "dolt_stop_timeout", cfg.Daemon.DoltStopTimeout)
+}
+
 // ValidateEventsRotation returns non-fatal warnings for risky but intentional
 // events rotation settings.
 func ValidateEventsRotation(cfg *City) []string {

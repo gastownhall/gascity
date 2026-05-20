@@ -112,12 +112,11 @@ func newControllerState(
 	return cs
 }
 
-// wrapWithCachingStore wraps a BdStore with a CachingStore that primes
-// and starts a background reconciler. Non-BdStore stores are returned as-is.
+// wrapWithCachingStore wraps a Store with a CachingStore that primes
+// and starts a background reconciler.
 func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider) beads.Store {
-	bdStore, ok := store.(*beads.BdStore)
-	if !ok {
-		return store
+	if store == nil {
+		return nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -136,7 +135,7 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 			})
 		}
 	}
-	cs := beads.NewCachingStore(bdStore, onChange)
+	cs := beads.NewCachingStore(store, onChange)
 	// Pre-prime active beads synchronously (~1-2s, indexed queries).
 	// Loads open + in_progress beads — enough for the startup path
 	// (adoption, session snapshot, desired state) so the city can
@@ -171,6 +170,7 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 	stores := make(map[string]beads.Store, len(cfg.Rigs))
 
 	var sharedLegacyFileStore beads.Store
+	var sharedLegacyCachedStore beads.Store
 	if cityProvider == "file" && !fileStoreUsesScopedRoots(cs.cityPath) {
 		store, err := openCompatibleFileStore(cs.cityPath, cs.cityPath)
 		if err == nil {
@@ -191,10 +191,15 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 		scopeProvider := rawBeadsProviderForScope(scopeRoot, cs.cityPath)
 		store := beads.Store(nil)
 		if sharedLegacyFileStore != nil && scopeProvider == "file" && !scopeUsesFileStoreContract(scopeRoot) {
-			store = sharedLegacyFileStore
-		} else {
-			store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix(), cfg)
+			// Legacy file mode aliases every rig to the same backing store, so
+			// the cache handle must be shared too for immediate cross-rig reads.
+			if sharedLegacyCachedStore == nil {
+				sharedLegacyCachedStore = wrapWithCachingStore(cs.cacheCtx, sharedLegacyFileStore, cs.eventProv)
+			}
+			stores[rig.Name] = sharedLegacyCachedStore
+			continue
 		}
+		store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix(), cfg)
 		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv)
 	}
 	return stores

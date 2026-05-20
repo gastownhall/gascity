@@ -40,19 +40,19 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 	}
 	if attempt.Status != "closed" {
 		if err := ensureBlockingDependency(store, bead.ID, attempt.ID); err != nil {
-			if controllerSpawnBoundaryPending(store, bead.ID, err) {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 				return ControlResult{}, ErrControlPending
 			}
 			return ControlResult{}, fmt.Errorf("%s: blocking on pending attempt %s: %w", bead.ID, attempt.ID, err)
 		}
 		if err := syncControlEpochToAttempt(store, bead, attempt); err != nil {
-			if controllerSpawnBoundaryPending(store, bead.ID, err) {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 				return ControlResult{}, ErrControlPending
 			}
 			return ControlResult{}, fmt.Errorf("%s: advancing recovered attempt epoch for %s: %w", bead.ID, attempt.ID, err)
 		}
 		if err := closeGeneratedSpecBeadsForAttempt(store, bead, attempt); err != nil {
-			if controllerSpawnBoundaryPending(store, bead.ID, err) {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 				return ControlResult{}, ErrControlPending
 			}
 			return ControlResult{}, fmt.Errorf("%s: closing generated spec beads for pending attempt %s: %w", bead.ID, attempt.ID, err)
@@ -81,7 +81,7 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
+		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
 		}
@@ -100,7 +100,7 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing hard-failed: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
+		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
 		}
@@ -112,7 +112,7 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 			if err != nil {
 				return ControlResult{}, err
 			}
-			scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
+			scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 			if err != nil {
 				return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
 			}
@@ -124,14 +124,14 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		spawnMetadata := map[string]string{"gc.attempt_log": attemptLog}
 		clearControllerSpawnErrorMetadata(spawnMetadata)
 		if err := store.SetMetadataBatch(bead.ID, spawnMetadata); err != nil {
-			if controllerSpawnBoundaryPending(store, bead.ID, err) {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 				return ControlResult{}, ErrControlPending
 			}
 			return ControlResult{}, fmt.Errorf("%s: recording attempt log: %w", bead.ID, err)
 		}
 		nextAttempt := attemptNum + 1
 		if err := spawnNextAttempt(context.Background(), store, bead, nextAttempt, opts); err != nil {
-			if markControllerSpawnError(store, bead.ID, err) {
+			if markControllerSpawnError(store, bead.ID, err, opts) {
 				return ControlResult{}, ErrControlPending
 			}
 			return ControlResult{}, fmt.Errorf("%s: spawning attempt %d: %w", bead.ID, nextAttempt, err)
@@ -161,19 +161,19 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 	}
 	if iteration.Status != "closed" {
 		if err := ensureBlockingDependency(store, bead.ID, iteration.ID); err != nil {
-			if controllerSpawnBoundaryPending(store, bead.ID, err) {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 				return ControlResult{}, ErrControlPending
 			}
 			return ControlResult{}, fmt.Errorf("%s: blocking on pending iteration %s: %w", bead.ID, iteration.ID, err)
 		}
 		if err := syncControlEpochToAttempt(store, bead, iteration); err != nil {
-			if controllerSpawnBoundaryPending(store, bead.ID, err) {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 				return ControlResult{}, ErrControlPending
 			}
 			return ControlResult{}, fmt.Errorf("%s: advancing recovered iteration epoch for %s: %w", bead.ID, iteration.ID, err)
 		}
 		if err := closeGeneratedSpecBeadsForAttempt(store, bead, iteration); err != nil {
-			if controllerSpawnBoundaryPending(store, bead.ID, err) {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 				return ControlResult{}, ErrControlPending
 			}
 			return ControlResult{}, fmt.Errorf("%s: closing generated spec beads for pending iteration %s: %w", bead.ID, iteration.ID, err)
@@ -220,7 +220,7 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
+		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
 		}
@@ -237,7 +237,7 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing exhausted: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
+		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
 		}
@@ -248,14 +248,14 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 	spawnMetadata := map[string]string{"gc.attempt_log": attemptLog}
 	clearControllerSpawnErrorMetadata(spawnMetadata)
 	if err := store.SetMetadataBatch(bead.ID, spawnMetadata); err != nil {
-		if controllerSpawnBoundaryPending(store, bead.ID, err) {
+		if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
 			return ControlResult{}, ErrControlPending
 		}
 		return ControlResult{}, fmt.Errorf("%s: recording attempt log: %w", bead.ID, err)
 	}
 	nextIteration := iterationNum + 1
 	if err := spawnNextAttempt(context.Background(), store, bead, nextIteration, opts); err != nil {
-		if markControllerSpawnError(store, bead.ID, err) {
+		if markControllerSpawnError(store, bead.ID, err, opts) {
 			return ControlResult{}, ErrControlPending
 		}
 		return ControlResult{}, fmt.Errorf("%s: spawning iteration %d: %w", bead.ID, nextIteration, err)
@@ -277,11 +277,11 @@ func ensureBlockingDependency(store beads.Store, issueID, dependsOnID string) er
 	return store.DepAdd(issueID, dependsOnID, "blocks")
 }
 
-func controllerSpawnBoundaryPending(store beads.Store, beadID string, err error) bool {
+func controllerSpawnBoundaryPending(store beads.Store, beadID string, err error, opts ProcessOptions) bool {
 	if err == nil {
 		return false
 	}
-	return markControllerSpawnError(store, beadID, err)
+	return markControllerSpawnError(store, beadID, err, opts)
 }
 
 func syncControlEpochToAttempt(store beads.Store, control, attempt beads.Bead) error {
@@ -296,7 +296,7 @@ func syncControlEpochToAttempt(store beads.Store, control, attempt beads.Bead) e
 	return store.SetMetadata(control.ID, "gc.control_epoch", strconv.Itoa(attemptNum))
 }
 
-func markControllerSpawnError(store beads.Store, beadID string, err error) bool {
+func markControllerSpawnError(store beads.Store, beadID string, err error, opts ProcessOptions) bool {
 	metadata := map[string]string{
 		"gc.controller_error": err.Error(),
 	}
@@ -314,7 +314,7 @@ func markControllerSpawnError(store beads.Store, beadID string, err error) bool 
 	_ = setOutcomeAndClose(store, beadID, "fail")
 	// Reconcile any enclosing scope so a controller_error terminal closure
 	// does not leave the scope body stalled.
-	_, _ = reconcileClosedScopeMember(store, beadID)
+	_, _ = reconcileClosedScopeMemberWithOptions(store, beadID, opts)
 	return false
 }
 

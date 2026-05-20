@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -690,10 +691,21 @@ func TestProcessRetryControlControllerError(t *testing.T) {
 			"gc.root_bead_id":     root.ID,
 			"gc.step_ref":         "mol-test.review",
 			"gc.step_id":          "review",
+			"gc.scope_ref":        "review-scope",
+			"gc.scope_role":       "member",
 			"gc.max_attempts":     "3",
 			"gc.on_exhausted":     "hard_fail",
 			"gc.source_step_spec": `{not valid json`,
 			"gc.control_epoch":    "1",
+		},
+	})
+	body := mustCreate(t, store, beads.Bead{
+		Title: "review scope",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.scope_ref":    "review-scope",
+			"gc.scope_role":   "body",
 		},
 	})
 	attempt1 := mustCreate(t, store, beads.Bead{
@@ -710,7 +722,14 @@ func TestProcessRetryControlControllerError(t *testing.T) {
 	mustClose(t, store, attempt1.ID)
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
-	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	sawTrace := false
+	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{
+		Tracef: func(format string, args ...any) {
+			if strings.Contains(fmt.Sprintf(format, args...), "resolve-body") {
+				sawTrace = true
+			}
+		},
+	})
 	if err == nil {
 		t.Fatal("expected error from bad source_step_spec")
 	}
@@ -731,6 +750,13 @@ func TestProcessRetryControlControllerError(t *testing.T) {
 	}
 	if after.Metadata["gc.controller_retryable"] == "true" {
 		t.Fatalf("gc.controller_retryable = %q, want not retryable", after.Metadata["gc.controller_retryable"])
+	}
+	bodyAfter := mustGet(t, store, body.ID)
+	if bodyAfter.Status != "closed" || bodyAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("scope body = status %q outcome %q, want closed/fail", bodyAfter.Status, bodyAfter.Metadata["gc.outcome"])
+	}
+	if !sawTrace {
+		t.Fatal("expected hard controller-error reconciliation to use ProcessOptions trace")
 	}
 }
 

@@ -862,6 +862,11 @@ func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	return nil
 }
 
+// Tx executes fn sequentially against the BdStore.
+func (s *BdStore) Tx(_ string, fn func(Tx) error) error {
+	return runSequentialTx(s, fn)
+}
+
 func (s *BdStore) runBDTransientWrite(args ...string) error {
 	var err error
 	for attempt := 1; attempt <= bdTransientWriteAttempts; attempt++ {

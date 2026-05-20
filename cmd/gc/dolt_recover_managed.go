@@ -161,7 +161,7 @@ func cleanupFailedManagedDoltRecovery(cityPath string, pid, port int, cause erro
 	}
 	cleanupErrs := make([]error, 0, 3)
 	if pid > 0 {
-		if err := terminateManagedDoltPID(pid); err != nil {
+		if err := terminateManagedDoltPID(cityPath, pid); err != nil {
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("cleanup failed: %w", err))
 		}
 	}

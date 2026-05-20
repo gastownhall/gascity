@@ -36,17 +36,13 @@ func loadSessionBeads(store beads.Store) ([]beads.Bead, error) {
 	if store == nil {
 		return nil, nil
 	}
-	all, err := store.List(beads.ListQuery{
-		Label: sessionBeadLabel,
-	})
+	all, err := session.ListAllSessionBeads(store, beads.ListQuery{})
 	if err != nil {
 		return nil, fmt.Errorf("listing session beads: %w", err)
 	}
 	var result []beads.Bead
 	for _, b := range all {
-		if !session.IsSessionBeadOrRepairable(b) {
-			continue
-		}
+		// ListAllSessionBeads already filters via IsSessionBeadOrRepairable.
 		if b.Status == "closed" {
 			continue
 		}

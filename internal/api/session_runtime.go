@@ -38,6 +38,13 @@ func sessionCreateHints(resolved *config.ResolvedProvider, mcpServers []runtime.
 	}
 }
 
+func legacySessionKind(metadata map[string]string) string {
+	if metadata == nil {
+		return ""
+	}
+	return strings.TrimSpace(metadata["real_world_app_session_kind"])
+}
+
 func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, mcpServers []runtime.MCPServerConfig) runtime.Config {
 	return runtime.Config{
 		WorkDir:                workDir,
@@ -70,7 +77,8 @@ func (s *Server) resumeSessionMCPServers(info session.Info, metadata map[string]
 		resumeSessionIdentity(info, metadata),
 		workDir,
 		transport,
-		s.sessionKind(info.ID),
+		"",
+		metadata,
 	)
 	if err == nil {
 		return mcpServers, nil
@@ -102,25 +110,24 @@ func (s *Server) providerSessionMCPServers(providerName, identity, workDir, tran
 	return materialize.RuntimeMCPServers(catalog.Servers), nil
 }
 
-func (s *Server) sessionMCPServers(template, providerName, identity, workDir, transport, sessionKind string) ([]runtime.MCPServerConfig, error) {
+func (s *Server) sessionMCPServers(template, providerName, identity, workDir, transport, sessionKind string, metadata map[string]string) ([]runtime.MCPServerConfig, error) {
 	cfg := s.state.Config()
 	if cfg == nil || strings.TrimSpace(workDir) == "" || strings.TrimSpace(transport) != "acp" {
 		return nil, nil
 	}
-	if sessionKind != "provider" {
-		if agentCfg, ok := resolveSessionTemplateAgent(cfg, template); ok {
-			catalog, err := materialize.EffectiveMCPForSession(
-				cfg,
-				s.state.CityPath(),
-				&agentCfg,
-				firstNonEmptyString(identity, template),
-				workDir,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("loading effective MCP: %w", err)
-			}
-			return materialize.RuntimeMCPServers(catalog.Servers), nil
+	agentCfg, agentFound := resolveSessionTemplateAgent(cfg, template)
+	if session.UseAgentTemplateForProviderResolution(sessionKind, metadata, providerName, agentCfg.Provider, agentFound) && agentFound {
+		catalog, err := materialize.EffectiveMCPForSession(
+			cfg,
+			s.state.CityPath(),
+			&agentCfg,
+			firstNonEmptyString(identity, template),
+			workDir,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("loading effective MCP: %w", err)
 		}
+		return materialize.RuntimeMCPServers(catalog.Servers), nil
 	}
 	return s.providerSessionMCPServers(firstNonEmptyString(providerName, template), identity, workDir, transport)
 }
@@ -252,11 +259,17 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 	} else {
 		resolvedInfo.Command = fallbackSessionRuntimeCommand(resolved, transport, info.Command, info.Provider)
 	}
+	resumeCommand := resolved.ResumeCommand
+	if overrides, err := session.ParseTemplateOverrides(metadata); err == nil {
+		if command, err := config.BuildProviderResumeCommand(resolved, overrides); err == nil && strings.TrimSpace(command) != "" {
+			resumeCommand = command
+		}
+	}
 	resolvedInfo.Provider = resolved.Name
 	resolvedInfo.Transport = transport
 	resolvedInfo.ResumeFlag = resolved.ResumeFlag
 	resolvedInfo.ResumeStyle = resolved.ResumeStyle
-	resolvedInfo.ResumeCommand = resolved.ResumeCommand
+	resolvedInfo.ResumeCommand = resumeCommand
 	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir, mcpServers), nil
 }
 
@@ -368,6 +381,12 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 	if err != nil {
 		command = fallbackSessionRuntimeCommand(resolved, transport, info.Command, info.Provider)
 	}
+	resumeCommand := firstNonEmptyString(resolved.ResumeCommand, info.ResumeCommand)
+	if overrides, err := session.ParseTemplateOverrides(metadata); err == nil {
+		if command, err := config.BuildProviderResumeCommand(resolved, overrides); err == nil && strings.TrimSpace(command) != "" {
+			resumeCommand = command
+		}
+	}
 	runtimeCfg, err := worker.NormalizeResolvedRuntime(worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    firstNonEmptyString(info.WorkDir, workDir),
@@ -377,7 +396,7 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 		Resume: session.ProviderResume{
 			ResumeFlag:    firstNonEmptyString(resolved.ResumeFlag, info.ResumeFlag),
 			ResumeStyle:   firstNonEmptyString(resolved.ResumeStyle, info.ResumeStyle),
-			ResumeCommand: firstNonEmptyString(resolved.ResumeCommand, info.ResumeCommand),
+			ResumeCommand: resumeCommand,
 			SessionIDFlag: resolved.SessionIDFlag,
 		},
 	})
@@ -463,6 +482,7 @@ func (s *Server) startedConfigHashProvesACPTransport(
 		firstNonEmptyString(workDir, info.WorkDir),
 		"acp",
 		sessionKind,
+		metadata,
 	)
 	if err != nil {
 		return false
@@ -502,31 +522,38 @@ func resolvedSessionTransport(info session.Info, resolved *config.ResolvedProvid
 }
 
 func (s *Server) resolveSessionRuntimeWithMetadata(info session.Info, metadata map[string]string) (*config.ResolvedProvider, string, string, bool) {
-	kind := s.sessionKind(info.ID)
 	cfg := s.state.Config()
 	var (
 		resolved            *config.ResolvedProvider
 		workDir             string
 		configuredTransport string
 	)
-	if kind != "provider" && cfg != nil {
-		if agentCfg, ok := resolveSessionTemplateAgent(cfg, info.Template); ok {
-			candidate, err := config.ResolveProvider(&agentCfg, &cfg.Workspace, cfg.Providers, exec.LookPath)
-			if err == nil {
-				candidateWorkDir, workDirErr := s.resolveSessionWorkDir(agentCfg, agentCfg.QualifiedName())
-				if workDirErr == nil {
-					resolved = candidate
-					workDir = candidateWorkDir
-					if info.WorkDir != "" {
-						workDir = info.WorkDir
+	if cfg != nil {
+		agentCfg, agentFound := resolveSessionTemplateAgent(cfg, info.Template)
+		sessionKind := legacySessionKind(metadata)
+		if session.UseAgentTemplateForProviderResolution(sessionKind, metadata, info.Provider, agentCfg.Provider, agentFound) {
+			if agentFound {
+				candidate, err := config.ResolveProvider(&agentCfg, &cfg.Workspace, cfg.Providers, exec.LookPath)
+				if err == nil {
+					candidateWorkDir, workDirErr := s.resolveSessionWorkDir(agentCfg, agentCfg.QualifiedName())
+					if workDirErr == nil {
+						resolved = candidate
+						workDir = candidateWorkDir
+						if info.WorkDir != "" {
+							workDir = info.WorkDir
+						}
+						configuredTransport = config.ResolveSessionCreateTransport(agentCfg.Session, resolved)
 					}
-					configuredTransport = config.ResolveSessionCreateTransport(agentCfg.Session, resolved)
 				}
 			}
 		}
 	}
 	if resolved == nil {
-		candidate, err := s.resolveBareProvider(info.Template)
+		providerName := strings.TrimSpace(info.Provider)
+		if providerName == "" {
+			providerName = info.Template
+		}
+		candidate, err := s.resolveBareProvider(providerName)
 		if err != nil {
 			return nil, "", "", false
 		}
@@ -538,23 +565,10 @@ func (s *Server) resolveSessionRuntimeWithMetadata(info session.Info, metadata m
 		configuredTransport = resolved.ProviderSessionCreateTransport()
 	}
 	transport := resolvedSessionTransport(info, resolved, configuredTransport, metadata, false)
-	if transport == "" && s.startedConfigHashProvesACPTransport(info, metadata, resolved, workDir, configuredTransport, kind) {
+	if transport == "" && s.startedConfigHashProvesACPTransport(info, metadata, resolved, workDir, configuredTransport, legacySessionKind(metadata)) {
 		transport = "acp"
 	}
 	return resolved, workDir, transport, transport == "" && legacyACPTransportAmbiguous(resolved, configuredTransport, info.Command, metadata)
-}
-
-// sessionKind reads the persisted real_world_app_session_kind from bead metadata.
-func (s *Server) sessionKind(sessionID string) string {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		return ""
-	}
-	b, err := store.Get(sessionID)
-	if err != nil {
-		return ""
-	}
-	return b.Metadata["real_world_app_session_kind"]
 }
 
 // resolveBareProvider resolves a provider by name without an agent template.

@@ -3197,6 +3197,118 @@ func TestSelectOrCreatePoolSessionBead_SerializesAliasCheckAndCreate(t *testing.
 	}
 }
 
+// delayingPoolCreateStore sleeps for `delay` on every session-bead create so
+// tests can measure whether realizePoolDesiredSessions runs distinct-alias
+// creates in parallel or serializes them. Wraps MemStore for all other ops.
+type delayingPoolCreateStore struct {
+	*beads.MemStore
+	delay                   time.Duration
+	mu                      sync.Mutex
+	activeSessionCreates    int
+	maxActiveSessionCreates int
+}
+
+func (s *delayingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
+	if bead.Type == sessionBeadType {
+		s.beginSessionCreate()
+		defer s.endSessionCreate()
+		time.Sleep(s.delay)
+	}
+	return s.MemStore.Create(bead)
+}
+
+func (s *delayingPoolCreateStore) beginSessionCreate() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activeSessionCreates++
+	if s.activeSessionCreates > s.maxActiveSessionCreates {
+		s.maxActiveSessionCreates = s.activeSessionCreates
+	}
+}
+
+func (s *delayingPoolCreateStore) endSessionCreate() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activeSessionCreates--
+}
+
+func (s *delayingPoolCreateStore) maxConcurrentSessionCreates() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxActiveSessionCreates
+}
+
+// TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates verifies
+// that the three-phase pipeline drives distinct-alias pool creates in parallel
+// rather than serializing them one-per-tick. Issue #2319 reported O(N) wall
+// time on pool fanouts because each create acquired a per-alias session lock
+// + dolt commit in a tight serial loop. With bounded-parallel phase B, wall
+// time should collapse to roughly ceil(N/poolRealizeParallelism) × delay.
+//
+// The store records in-flight session-bead creates directly so a regression
+// that re-serializes the loop (e.g., a future refactor that accidentally holds
+// a mutex across the create call) fails without depending on wall-clock
+// scheduler slack.
+func TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates(t *testing.T) {
+	const (
+		requestCount = 8
+		// Keep scheduler overhead small relative to the half-serial ceiling.
+		createDelay = 100 * time.Millisecond
+	)
+	store := &delayingPoolCreateStore{MemStore: beads.NewMemStore(), delay: createDelay}
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "claude",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(requestCount),
+		}},
+	}
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = &sessionBeadSnapshot{}
+	desired := map[string]TemplateParams{}
+
+	requests := make([]SessionRequest, 0, requestCount)
+	for i := 0; i < requestCount; i++ {
+		requests = append(requests, SessionRequest{Template: "claude", Tier: "new"})
+	}
+	state := PoolDesiredState{Template: "claude", Requests: requests}
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], state, desired, &stderr)
+
+	if got := len(desired); got != requestCount {
+		t.Fatalf("desired count = %d, want %d; stderr=%q", got, requestCount, stderr.String())
+	}
+
+	if got := store.maxConcurrentSessionCreates(); got < 2 {
+		t.Fatalf("session bead creates max concurrency = %d, want at least 2", got)
+	}
+
+	aliases := make(map[string]bool, requestCount)
+	sessionNames := make(map[string]bool, requestCount)
+	slots := make(map[int]bool, requestCount)
+	for name, tp := range desired {
+		if sessionNames[name] {
+			t.Fatalf("duplicate desired session name %q across pool entries", name)
+		}
+		sessionNames[name] = true
+		if tp.Alias == "" {
+			t.Fatalf("desired entry %q has empty alias; want unique per-slot alias", name)
+		}
+		if aliases[tp.Alias] {
+			t.Fatalf("duplicate alias %q across desired entries (session %q)", tp.Alias, name)
+		}
+		aliases[tp.Alias] = true
+		if slots[tp.PoolSlot] {
+			t.Fatalf("duplicate pool_slot %d across desired entries (session %q)", tp.PoolSlot, name)
+		}
+		slots[tp.PoolSlot] = true
+	}
+}
+
 func TestCreatePoolSessionBeadWithGuardedAlias_LogsAliasLockSetupFailure(t *testing.T) {
 	store := beads.NewMemStore()
 	cityPath := filepath.Join(t.TempDir(), "city-file")

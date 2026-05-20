@@ -319,8 +319,11 @@ provider = "codex"
 	foundUnsupported := false
 	foundAlias := false
 	for _, w := range warnings {
-		if strings.Contains(w, `keep using workspace.provider`) {
+		if strings.Contains(w, `keep setting provider per agent in agents/<name>/agent.toml`) {
 			foundUnsupported = true
+		}
+		if strings.Contains(w, `workspace.provider`) {
+			t.Fatalf("unsupported-key guidance should not point back to deprecated workspace.provider: %v", warnings)
 		}
 		if strings.Contains(w, agentsAliasWarning) {
 			foundAlias = true
@@ -349,7 +352,7 @@ name = "test"
 [agent_defaults]
 provider = "claude"
 `,
-			want: `keep using workspace.provider`,
+			want: `keep setting provider per agent in agents/<name>/agent.toml`,
 		},
 		{
 			name: "scope",
@@ -371,7 +374,7 @@ name = "test"
 [agent_defaults]
 install_agent_hooks = ["hooks/gascity.json"]
 `,
-			want: `keep using workspace.install_agent_hooks`,
+			want: `keep setting install_agent_hooks per agent in agents/<name>/agent.toml`,
 		},
 	}
 
@@ -388,6 +391,9 @@ install_agent_hooks = ["hooks/gascity.json"]
 			for _, w := range warnings {
 				if strings.Contains(w, tt.want) {
 					found = true
+				}
+				if strings.Contains(w, "workspace.provider") || strings.Contains(w, "workspace.install_agent_hooks") {
+					t.Fatalf("unsupported-key guidance should not point back to deprecated workspace fields for %s: %v", tt.name, warnings)
 				}
 				if strings.Contains(w, "unknown field") {
 					t.Fatalf("got generic unknown-field warning for %s: %v", tt.name, warnings)

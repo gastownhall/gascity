@@ -632,14 +632,14 @@ type mailIdentitySessionCache struct {
 
 func listMailIdentitySessions(store beads.Store, cache *mailIdentitySessionCache) ([]beads.Bead, error) {
 	if cache == nil {
-		return store.List(beads.ListQuery{Label: session.LabelSession})
+		return session.ListAllSessionBeads(store, beads.ListQuery{})
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	if cache.fetched {
 		return cache.list, nil
 	}
-	list, err := store.List(beads.ListQuery{Label: session.LabelSession})
+	list, err := session.ListAllSessionBeads(store, beads.ListQuery{})
 	if err != nil {
 		return nil, err
 	}

@@ -8,14 +8,18 @@ import (
 	"testing"
 )
 
-// stalePID starts a process, waits for it to exit, and returns the now-dead PID.
-func stalePID(t *testing.T) int {
+const testNonLivePID = 2147483647
+
+func nonLivePID(t *testing.T) int {
 	t.Helper()
-	cmd := exec.Command("true")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("start subprocess for stale PID: %v", err)
+	if pidAlive(testNonLivePID) {
+		t.Skipf("test PID %d is unexpectedly alive", testNonLivePID)
 	}
-	return cmd.ProcessState.Pid()
+	return testNonLivePID
+}
+
+func pidPrefixedTestDir(root, prefix string, pid int) string {
+	return filepath.Join(root, prefix+strconv.Itoa(pid)+"-fixture")
 }
 
 func TestSweepOrphanSkipsNonDirectories(t *testing.T) {
@@ -45,7 +49,7 @@ func TestSweepOrphanSkipsNonMatchingPrefix(t *testing.T) {
 
 func TestSweepOrphanSkipsNonNumericPIDSuffix(t *testing.T) {
 	root := t.TempDir()
-	// strconv.Atoi("abc") fails → skip.
+	// No leading PID digits means skip.
 	dir := filepath.Join(root, "pfxabc")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -56,9 +60,20 @@ func TestSweepOrphanSkipsNonNumericPIDSuffix(t *testing.T) {
 	}
 }
 
+func TestSweepOrphanSkipsNonDelimitedPIDSuffix(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "pfx123abc")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sweepOrphanPIDPrefixedDirs(root, "pfx")
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		t.Error("sweepOrphanPIDPrefixedDirs removed directory with non-delimited PID suffix")
+	}
+}
+
 func TestSweepOrphanSkipsZeroPID(t *testing.T) {
 	root := t.TempDir()
-	// pid == 0 → pid <= 0 → skip.
 	dir := filepath.Join(root, "pfx0")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -71,7 +86,6 @@ func TestSweepOrphanSkipsZeroPID(t *testing.T) {
 
 func TestSweepOrphanSkipsNegativePID(t *testing.T) {
 	root := t.TempDir()
-	// TrimPrefix("pfx-1", "pfx") → "-1"; Atoi("-1") = -1 → pid <= 0 → skip.
 	dir := filepath.Join(root, "pfx-1")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -85,7 +99,7 @@ func TestSweepOrphanSkipsNegativePID(t *testing.T) {
 func TestSweepOrphanSkipsCurrentPID(t *testing.T) {
 	root := t.TempDir()
 	self := os.Getpid()
-	dir := filepath.Join(root, "pfx"+strconv.Itoa(self))
+	dir := pidPrefixedTestDir(root, "pfx", self)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +118,7 @@ func TestSweepOrphanPreservesLivePID(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 
-	dir := filepath.Join(root, "pfx"+strconv.Itoa(cmd.Process.Pid))
+	dir := pidPrefixedTestDir(root, "pfx", cmd.Process.Pid)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -116,8 +130,8 @@ func TestSweepOrphanPreservesLivePID(t *testing.T) {
 
 func TestSweepOrphanRemovesStalePIDDirectory(t *testing.T) {
 	root := t.TempDir()
-	pid := stalePID(t)
-	dir := filepath.Join(root, "pfx"+strconv.Itoa(pid))
+	pid := nonLivePID(t)
+	dir := pidPrefixedTestDir(root, "pfx", pid)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -135,12 +149,12 @@ func TestSweepOrphanToleratesMissingRoot(t *testing.T) {
 func TestSweepOrphanIsIdempotent(t *testing.T) {
 	root := t.TempDir()
 
-	selfDir := filepath.Join(root, "pfx"+strconv.Itoa(os.Getpid()))
+	selfDir := pidPrefixedTestDir(root, "pfx", os.Getpid())
 	if err := os.MkdirAll(selfDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	pid := stalePID(t)
-	staleDir := filepath.Join(root, "pfx"+strconv.Itoa(pid))
+	pid := nonLivePID(t)
+	staleDir := pidPrefixedTestDir(root, "pfx", pid)
 	if err := os.MkdirAll(staleDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -156,26 +170,26 @@ func TestSweepOrphanIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestSweepOrphanAllFivePrefixesStabilize verifies that sweepOrphanPIDPrefixedDirs
-// removes stale dirs and preserves current-PID dirs for all five test-fixture
-// prefixes used across cmd/gc and internal/sling. This is the isolated TMPDIR
-// stability check described in the bead acceptance criteria.
-func TestSweepOrphanAllFivePrefixesStabilize(t *testing.T) {
+// TestSweepOrphanAllSixPrefixesStabilize verifies that sweepOrphanPIDPrefixedDirs
+// removes stale dirs and preserves current-PID dirs for all six test-fixture
+// prefixes used by cmd/gc's shared fixtures.
+func TestSweepOrphanAllSixPrefixesStabilize(t *testing.T) {
 	prefixes := []string{
-		"gc-test-binary-pid",
-		"gc-sling-test-formulas-pid",
-		"gc-sling-test-city-pid",
-		"gascity-gc-home-pid",
-		"gascity-runtime-pid",
+		testGCBinaryDirPrefix,
+		testSlingFormulaDirPrefix,
+		testSlingCityDirPrefix,
+		testGCHomeDirPrefix,
+		testRuntimeDirPrefix,
+		testProviderStubDirPrefix,
 	}
 	root := t.TempDir()
 	self := os.Getpid()
-	pid := stalePID(t)
+	pid := nonLivePID(t)
 
 	for _, pfx := range prefixes {
 		for _, d := range []string{
-			filepath.Join(root, pfx+strconv.Itoa(self)),
-			filepath.Join(root, pfx+strconv.Itoa(pid)),
+			pidPrefixedTestDir(root, pfx, self),
+			pidPrefixedTestDir(root, pfx, pid),
 		} {
 			if err := os.MkdirAll(d, 0o755); err != nil {
 				t.Fatalf("MkdirAll %s: %v", d, err)
@@ -188,8 +202,8 @@ func TestSweepOrphanAllFivePrefixesStabilize(t *testing.T) {
 	}
 
 	for _, pfx := range prefixes {
-		selfDir := filepath.Join(root, pfx+strconv.Itoa(self))
-		staleDir := filepath.Join(root, pfx+strconv.Itoa(pid))
+		selfDir := pidPrefixedTestDir(root, pfx, self)
+		staleDir := pidPrefixedTestDir(root, pfx, pid)
 		if _, err := os.Stat(selfDir); os.IsNotExist(err) {
 			t.Errorf("prefix %q: current-PID dir removed", pfx)
 		}
@@ -203,7 +217,7 @@ func TestSweepOrphanAllFivePrefixesStabilize(t *testing.T) {
 		sweepOrphanPIDPrefixedDirs(root, pfx)
 	}
 	for _, pfx := range prefixes {
-		selfDir := filepath.Join(root, pfx+strconv.Itoa(self))
+		selfDir := pidPrefixedTestDir(root, pfx, self)
 		if _, err := os.Stat(selfDir); os.IsNotExist(err) {
 			t.Errorf("prefix %q: current-PID dir removed on second sweep", pfx)
 		}

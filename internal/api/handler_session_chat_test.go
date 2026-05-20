@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,6 +88,53 @@ func TestBuildSessionResumeUsesResolvedProviderCommand(t *testing.T) {
 	}
 	if got, want := hints.Env["GC_HOME"], "/tmp/gc-accept-home"; got != want {
 		t.Fatalf("hints.Env[GC_HOME] = %q, want %q", got, want)
+	}
+}
+
+func TestBuildSessionResumeAppliesTemplateOverridesToExplicitResumeCommand(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Providers: map[string]config.ProviderSpec{
+			"codex-provider": {
+				Command:       "codex",
+				ResumeCommand: "codex resume {{.SessionKey}} --ask-for-approval on-request",
+				ResumeFlag:    "resume",
+				ResumeStyle:   "subcommand",
+				SessionIDFlag: "--session-id",
+				PathCheck:     "true",
+				OptionsSchema: []config.ProviderOption{{
+					Key: "permission_mode",
+					Choices: []config.OptionChoice{
+						{Value: "default", FlagArgs: []string{"--ask-for-approval", "on-request"}},
+						{Value: "plan", FlagArgs: []string{"--ask-for-approval", "never"}},
+					},
+				}},
+			},
+		},
+	}
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "codex-provider", "chat", "codex --ask-for-approval on-request", "/tmp/workdir", "codex-provider", nil, session.ProviderResume{
+		ResumeFlag:    "resume",
+		ResumeStyle:   "subcommand",
+		ResumeCommand: "codex resume {{.SessionKey}} --ask-for-approval on-request",
+		SessionIDFlag: "--session-id",
+	}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := fs.cityBeadStore.SetMetadata(info.ID, "template_overrides", `{"permission_mode":"plan"}`); err != nil {
+		t.Fatalf("SetMetadata(template_overrides): %v", err)
+	}
+
+	srv := New(fs)
+	cmd, _, err := srv.buildSessionResume(info)
+	if err != nil {
+		t.Fatalf("buildSessionResume: %v", err)
+	}
+	want := "codex resume --ask-for-approval never " + info.SessionKey
+	if cmd != want {
+		t.Fatalf("resume command = %q, want %q", cmd, want)
 	}
 }
 
@@ -493,7 +541,7 @@ args = ["{{.AgentName}}"]
 	if err != nil {
 		t.Fatalf("resolveBareProvider: %v", err)
 	}
-	mcpServers, err := srv.sessionMCPServers("custom-acp", "custom-acp", "custom-acp", fs.cityPath, "acp", "provider")
+	mcpServers, err := srv.sessionMCPServers("custom-acp", "custom-acp", "custom-acp", fs.cityPath, "acp", "provider", nil)
 	if err != nil {
 		t.Fatalf("sessionMCPServers: %v", err)
 	}

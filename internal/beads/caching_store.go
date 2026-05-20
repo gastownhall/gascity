@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// CachingStore wraps a BdStore with an in-memory cache.
+// CachingStore wraps a Store with an in-memory cache.
 // Reads are served from memory when the cache is live. Writes pass
 // through to the backing store and update the cache on success.
 //
@@ -23,9 +23,10 @@ import (
 // reconciler acts as a watchdog and only performs a full scan once the
 // cache has gone stale or degraded.
 //
-// Only wraps BdStore because the event hook path requires dolt/bd.
+// BdStore-backed caches can filter hook events by issue prefix. Other Store
+// implementations are valid backings, but run without foreign-event filtering.
 type CachingStore struct {
-	backing  Store // runtime: always *BdStore; tests may use MemStore
+	backing  Store // runtime: usually *BdStore; tests and projections may use any Store
 	idPrefix string
 
 	mu              sync.RWMutex
@@ -185,27 +186,40 @@ func computeAutoStagger(agentID string) time.Duration {
 	return time.Duration(int64(h.Sum32())%modMs) * time.Millisecond
 }
 
-// NewCachingStore wraps a BdStore with an in-memory read cache.
+// NewCachingStore wraps a Store with an in-memory read cache.
 // Call Prime() before serving reads, then StartReconciler() for
 // watchdog reconciliation. The onChange callback (optional) is called for
 // each detected external change with event type and bead JSON.
 //
-// Only BdStore is supported because the event hook path (bd hooks ->
-// gc event emit -> event bus -> ApplyEvent) requires dolt infrastructure.
-func NewCachingStore(backing *BdStore, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
+// BdStore backings provide an issue prefix for filtering event-hook payloads
+// from other stores. Other Store implementations are wrapped and delegated
+// normally, with foreign-event filtering disabled.
+func NewCachingStore(backing Store, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
 	prefix := ""
-	if backing != nil {
-		prefix = backing.IDPrefix()
+	bdBacking := false
+	nilBdBacking := false
+	if bd, ok := backing.(*BdStore); ok {
+		bdBacking = true
+		if bd == nil {
+			nilBdBacking = true
+		} else {
+			prefix = bd.IDPrefix()
+		}
 	}
 	cs := newCachingStore(backing, prefix, onChange)
-	if cs.idPrefix == "" {
+	switch {
+	case backing == nil:
+		cs.recordProblem("cache backing", errors.New("nil store backing; cache will panic on first use"))
+	case nilBdBacking:
+		cs.recordProblem("bd cache ownership", errors.New("nil *BdStore backing; cache will panic on first use"))
+	case bdBacking && cs.idPrefix == "":
 		cs.recordProblem("bd cache ownership", errors.New("missing issue prefix; foreign bead event filtering disabled"))
 	}
 	return cs
 }
 
-// NewCachingStoreForTest wraps any Store for testing. Production code
-// must use NewCachingStore with a *BdStore.
+// NewCachingStoreForTest wraps any Store for testing without production prefix
+// validation.
 func NewCachingStoreForTest(backing Store, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
 	return newCachingStore(backing, "", onChange)
 }

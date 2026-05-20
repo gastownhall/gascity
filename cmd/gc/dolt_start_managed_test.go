@@ -2,10 +2,12 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	bdpack "github.com/gastownhall/gascity/examples/bd"
 )
@@ -273,5 +275,57 @@ func TestResolveDoltArchiveLevel(t *testing.T) {
 				t.Errorf("resolveDoltArchiveLevel(%d) = %d, want %d", tt.explicit, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestTerminateManagedDoltPID_HonorsSubPollGrace asserts that terminate uses
+// the grace-clamped poll interval (managedDoltStopPollInterval) rather than a
+// fixed sleep: a SIGTERM-ignoring process with a tiny configured grace must be
+// SIGKILLed and the call must return quickly, not after a fixed ~100ms sleep
+// past the deadline (gastownhall/gascity#2090, finding 6).
+func TestTerminateManagedDoltPID_HonorsSubPollGrace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal semantics required")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+dolt_stop_timeout = "5ms"
+
+[[agent]]
+name = "mayor"
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	// A process that ignores SIGTERM forces the wait loop to run to the
+	// deadline and escalate to SIGKILL.
+	cmd := exec.Command("/bin/sh", "-c", "trap '' TERM; sleep 30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleeper: %v", err)
+	}
+	pid := cmd.Process.Pid
+	defer func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}()
+
+	start := time.Now()
+	if err := terminateManagedDoltPID(dir, pid); err != nil {
+		t.Fatalf("terminateManagedDoltPID: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// 5ms grace + the fixed 250ms post-SIGKILL settle. A fixed-100ms poll
+	// could overshoot the 5ms deadline; the clamp keeps the SIGTERM wait at
+	// ~5ms. Allow generous slack for scheduler jitter under CI load.
+	if elapsed > 2*time.Second {
+		t.Errorf("terminateManagedDoltPID took %v with a 5ms grace; sub-poll clamp not honored", elapsed)
+	}
+	if pidAlive(pid) {
+		t.Errorf("pid %d still alive after terminateManagedDoltPID; SIGKILL escalation did not fire", pid)
 	}
 }

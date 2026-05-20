@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -24,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/processgroup"
 )
 
 var startDeprecatedOrderWarningDedup = logutil.NewDedup(logutil.DefaultDedupCapacity)
@@ -62,6 +66,13 @@ const (
 	completedOrderTrackingCloseReason = "order dispatch completed: tracking bead lifecycle finished"
 )
 
+var (
+	// shellExecPostCancelWaitDelay is os/exec's pipe-close wait after
+	// Cancel returns; the TERM and KILL waits each use shellExecSignalGrace.
+	shellExecPostCancelWaitDelay = 2 * time.Second
+	shellExecSignalGrace         = 2 * time.Second
+)
+
 // orderDispatcher evaluates order trigger conditions and dispatches due
 // orders as wisps or exec scripts. Follows the nil-guard tracker pattern:
 // nil means no auto-dispatchable orders exist.
@@ -81,15 +92,95 @@ type orderDispatcher interface {
 }
 
 // ExecRunner runs a shell command with context, working directory, and
-// environment variables. Returns combined stdout or an error.
+// environment variables. Returns combined stdout or an error. When context
+// cancellation stops a command, the returned error is ctx.Err(), not an
+// *exec.ExitError, and the returned output may be partial.
 type ExecRunner func(ctx context.Context, command, dir string, env []string) ([]byte, error)
 
 // shellExecRunner is the production ExecRunner using os/exec.
 func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = dir
 	cmd.Env = mergeOrderExecEnv(cmd.Environ(), env)
-	return cmd.CombinedOutput()
+	processgroup.StartCommandInNewGroup(cmd)
+
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+
+	var cleanupMu sync.Mutex
+	var cleanupErr error
+	var cleanupOnce sync.Once
+	startedPGID := 0
+	canceled := false
+	cleanupProcess := func() error {
+		cleanupOnce.Do(func() {
+			cleanupMu.Lock()
+			pgid := startedPGID
+			cleanupMu.Unlock()
+			err := cancelShellExecProcessGroup(cmd, pgid)
+			cleanupMu.Lock()
+			cleanupErr = err
+			cleanupMu.Unlock()
+		})
+		cleanupMu.Lock()
+		defer cleanupMu.Unlock()
+		return cleanupErr
+	}
+	cmd.Cancel = func() error {
+		cleanupMu.Lock()
+		canceled = true
+		cleanupMu.Unlock()
+		_ = cleanupProcess()
+		return nil
+	}
+	cmd.WaitDelay = shellExecPostCancelWaitDelay
+
+	if err := cmd.Start(); err != nil {
+		return output.Bytes(), err
+	}
+	cleanupMu.Lock()
+	startedPGID = cmd.Process.Pid
+	if pgid, err := syscall.Getpgid(cmd.Process.Pid); err == nil {
+		startedPGID = pgid
+	}
+	cleanupMu.Unlock()
+
+	err := cmd.Wait()
+	cleanupMu.Lock()
+	wasCanceled := canceled
+	cleanupMu.Unlock()
+	if errors.Is(err, exec.ErrWaitDelay) || wasCanceled {
+		_ = cleanupProcess()
+	}
+
+	cleanupMu.Lock()
+	wasCanceled = canceled
+	errCleanup := cleanupErr
+	cleanupMu.Unlock()
+	if wasCanceled {
+		if err := ctx.Err(); err != nil {
+			if errCleanup != nil {
+				return output.Bytes(), errors.Join(err, errCleanup)
+			}
+			return output.Bytes(), err
+		}
+	}
+	if errCleanup != nil {
+		if err != nil {
+			return output.Bytes(), errors.Join(err, errCleanup)
+		}
+		return output.Bytes(), errCleanup
+	}
+	return output.Bytes(), err
+}
+
+func cancelShellExecProcessGroup(cmd *exec.Cmd, pgid int) error {
+	return processgroup.TerminateCommand(cmd, pgid, shellExecSignalGrace, processgroup.Options{})
 }
 
 func mergeOrderExecEnv(environ, env []string) []string {
@@ -458,9 +549,8 @@ func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store bea
 
 // cancel signals all in-flight dispatchOne goroutines to terminate. Safe
 // to call multiple times. Caller should follow with drain to wait for
-// goroutine completion (exec.CommandContext propagates the cancel as
-// SIGKILL; dispatchOne's deferred cleanup writes the tracking-bead
-// outcome before doneInflight signals drain).
+// goroutine completion; dispatchOne's deferred cleanup writes the
+// tracking-bead outcome before doneInflight signals drain.
 func (m *memoryOrderDispatcher) cancel() {
 	if m.dispatchCancel != nil {
 		m.dispatchCancel()

@@ -5,6 +5,13 @@ import (
 	"time"
 )
 
+var (
+	_ Tx = (*BdStore)(nil)
+	_ Tx = (*CachingStore)(nil)
+	_ Tx = (*FileStore)(nil)
+	_ Tx = (*MemStore)(nil)
+)
+
 func TestIsContainerType(t *testing.T) {
 	tests := []struct {
 		typ  string

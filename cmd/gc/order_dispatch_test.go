@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pgauth"
+	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
 
 func trackingBeads(t *testing.T, store beads.Store, label string) []beads.Bead {
@@ -2669,6 +2670,85 @@ func TestOrderDispatchExecTimeout(t *testing.T) {
 	}
 }
 
+func TestShellExecRunnerDoesNotStartWhenContextCanceled(t *testing.T) {
+	workDir := t.TempDir()
+	markerPath := filepath.Join(workDir, "started")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	command := fmt.Sprintf("printf started > %q; sleep 10", markerPath)
+	_, err := shellExecRunner(ctx, command, workDir, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("shellExecRunner() error = %v, want %v", err, context.Canceled)
+	}
+	if _, err := os.Stat(markerPath); err == nil {
+		t.Fatalf("shellExecRunner started command after context cancellation; marker exists at %s", markerPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat marker %s: %v", markerPath, err)
+	}
+}
+
+func TestShellExecRunnerKillsProcessGroupOnTimeout(t *testing.T) {
+	workDir := t.TempDir()
+	heartbeatPath := filepath.Join(workDir, "heartbeat")
+	childPIDPath := filepath.Join(workDir, "child.pid")
+	t.Cleanup(func() { processgrouptest.KillFromPIDFile(t, childPIDPath) })
+	oldSignalGrace := shellExecSignalGrace
+	shellExecSignalGrace = 100 * time.Millisecond
+	t.Cleanup(func() { shellExecSignalGrace = oldSignalGrace })
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	command := fmt.Sprintf("sh -c 'printf \"%%s\\n\" \"$$\" > %q; trap \"\" TERM; while :; do printf . >> %q; sleep 0.05; done' & wait", childPIDPath, heartbeatPath)
+	_, err := shellExecRunner(ctx, command, workDir, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shellExecRunner() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+
+	size := processgrouptest.WaitForFileSize(t, heartbeatPath)
+	processgrouptest.AssertFileSizeStable(t, heartbeatPath, size, 300*time.Millisecond)
+}
+
+func TestShellExecRunnerKillsProcessGroupAfterWaitDelay(t *testing.T) {
+	workDir := t.TempDir()
+	heartbeatPath := filepath.Join(workDir, "heartbeat")
+	childPIDPath := filepath.Join(workDir, "child.pid")
+	t.Cleanup(func() { processgrouptest.KillFromPIDFile(t, childPIDPath) })
+	oldWaitDelay := shellExecPostCancelWaitDelay
+	oldSignalGrace := shellExecSignalGrace
+	shellExecPostCancelWaitDelay = 100 * time.Millisecond
+	shellExecSignalGrace = 100 * time.Millisecond
+	t.Cleanup(func() {
+		shellExecPostCancelWaitDelay = oldWaitDelay
+		shellExecSignalGrace = oldSignalGrace
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	command := fmt.Sprintf("sh -c 'printf \"%%s\\n\" \"$$\" > %q; trap \"\" TERM; while :; do printf . >> %q; sleep 0.05; done' &", childPIDPath, heartbeatPath)
+	_, err := shellExecRunner(ctx, command, workDir, nil)
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("shellExecRunner() error = %v, want %v", err, exec.ErrWaitDelay)
+	}
+
+	size := processgrouptest.WaitForFileSize(t, heartbeatPath)
+	processgrouptest.AssertFileSizeStable(t, heartbeatPath, size, 300*time.Millisecond)
+}
+
+func TestShellExecRunnerReturnsPartialOutputOnTimeout(t *testing.T) {
+	workDir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	output, err := shellExecRunner(ctx, "while :; do printf .; sleep 0.01; done", workDir, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shellExecRunner() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+	if !bytes.Contains(output, []byte(".")) {
+		t.Fatalf("shellExecRunner() output = %q, want partial command output", string(output))
+	}
+}
+
 func TestEffectiveTimeout(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -5036,8 +5116,8 @@ func TestOrderDispatcherCancelTerminatesInFlight(t *testing.T) {
 	store := beads.NewMemStore()
 	execStarted := make(chan struct{})
 
-	// Exec respects ctx — returns when canceled. This mirrors what
-	// exec.CommandContext does in production: SIGKILL on ctx.Done.
+	// Exec respects ctx — returns when canceled. This mirrors the
+	// production runner's forced subprocess teardown on ctx.Done.
 	fakeExec := func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
 		close(execStarted)
 		<-ctx.Done()

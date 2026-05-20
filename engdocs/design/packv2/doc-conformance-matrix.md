@@ -17,7 +17,7 @@ Use the sources in this order when deciding what the suite should assert:
 
 1. [skew-analysis.md](skew-analysis.md) — release gating ledger for the
    current desired state
-2. [migrating-to-pack-vnext.md](../guides/migrating-to-pack-vnext.md) —
+2. [migrating-to-pack-vnext.md](../../../docs/guides/migrating-to-pack-vnext.md) —
    migration-target behavior, but only where `skew-analysis.md` does not
    mark the surface missing, deferred, or non-gating
 3. [doc-agent-v2.md](doc-agent-v2.md) — prompt, template, fragment, and
@@ -26,7 +26,7 @@ Use the sources in this order when deciding what the suite should assert:
    [doc-directory-conventions.md](doc-directory-conventions.md) —
    supporting design and directory guidance; useful, but not allowed to
    overrule `skew-analysis.md`
-5. [TESTING.md](../../TESTING.md) — which test tier to use
+5. [TESTING.md](../../../TESTING.md) — which test tier to use
 
 If a design doc describes an ideal v.next surface but
 `skew-analysis.md` marks it missing or deferred, keep it in the matrix as

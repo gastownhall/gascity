@@ -83,18 +83,18 @@ func runAdoptionBarrier(
 	}
 
 	// Step 2: Load existing open session beads, indexed by session_name.
-	existing, err := store.List(beads.ListQuery{
-		Label: sessionBeadLabel,
-	})
+	// The helper unions Type and Label queries so canonical beads that
+	// lost their gc:session label (after a crash or partial write) still
+	// participate in adoption dedup. Without the union, those beads would
+	// be invisible here and adoption would re-create duplicates.
+	existing, err := sessionpkg.ListAllSessionBeads(store, beads.ListQuery{})
 	if err != nil {
 		fmt.Fprintf(stderr, "adoption barrier: listing beads: %v\n", err) //nolint:errcheck
 		return result, false
 	}
 	bySessionName := make(map[string]bool, len(existing))
 	for _, b := range existing {
-		if !sessionpkg.IsSessionBeadOrRepairable(b) {
-			continue
-		}
+		// ListAllSessionBeads already filters via IsSessionBeadOrRepairable.
 		if b.Status == "closed" {
 			continue // closed beads don't count for dedup
 		}
@@ -270,8 +270,7 @@ func runAdoptionBarrier(
 }
 
 func openSessionBeadExists(store beads.Store, sessionName string) (bool, error) {
-	existing, err := store.List(beads.ListQuery{
-		Label:    sessionBeadLabel,
+	existing, err := sessionpkg.ListAllSessionBeads(store, beads.ListQuery{
 		Metadata: map[string]string{"session_name": sessionName},
 		Live:     true,
 	})
@@ -282,9 +281,8 @@ func openSessionBeadExists(store beads.Store, sessionName string) (bool, error) 
 		if b.Status == "closed" {
 			continue
 		}
-		if sessionpkg.IsSessionBeadOrRepairable(b) {
-			return true, nil
-		}
+		// ListAllSessionBeads already filters via IsSessionBeadOrRepairable.
+		return true, nil
 	}
 	return false, nil
 }

@@ -287,7 +287,7 @@
         },
         "fallback": {
           "type": "boolean",
-          "description": "Fallback marks this agent as a fallback definition. During pack\ncomposition, a non-fallback agent with the same name wins silently.\nWhen two fallbacks collide, the first loaded (depth-first) wins.\nSee docs/packv2/migration.mdx for migration guidance."
+          "description": "Fallback marks this agent as a fallback definition. During pack\ncomposition, a non-fallback agent with the same name wins silently.\nWhen two fallbacks collide, the first loaded (depth-first) wins.\nSee docs/guides/migrating-to-pack-vnext.md for migration guidance."
         },
         "depends_on": {
           "items": {
@@ -1102,6 +1102,11 @@
           "type": "string",
           "description": "ShutdownTimeout is the time to wait after sending Ctrl-C before force-killing\nagents during shutdown. Duration string (e.g., \"5s\", \"30s\"). Set to \"0s\"\nfor immediate kill. Defaults to \"5s\".",
           "default": "5s"
+        },
+        "dolt_stop_timeout": {
+          "type": "string",
+          "description": "DoltStopTimeout is the SIGTERM→SIGKILL grace period for the managed dolt\nsubprocess during stop, unregister, restart, and startup/recovery\ncleanup. Independent of ShutdownTimeout (which gates agent drain) so a\nslow session drain cannot steal dolt's flush window. Duration string\n(e.g., \"30s\", \"1m\"). A too-short value risks SIGKILL during a journal\nindex update or manifest rotation, which corrupts dolt's chunk journal\n(see gastownhall/gascity#2090). Defaults to \"30s\", which absorbs the\nlongest observed flush window on commodity SSDs without unduly delaying\nunregister. Set to \"0s\" for immediate SIGKILL with no grace. Negative\nvalues are rejected at config load. Note: when a city is stopped via the\ncontroller (`gc stop` while a controller is running), the standalone\ncontroller-stop wait budget is `shutdown_timeout` + 15s (20s at the\ndefault `shutdown_timeout` of \"5s\"); a `dolt_stop_timeout` larger than\nthat budget can be cut short on that path even though the direct\nstop/unregister path always honors the full grace.",
+          "default": "30s"
         },
         "wisp_gc_interval": {
           "type": "string",

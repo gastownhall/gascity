@@ -1711,6 +1711,22 @@ type DaemonConfig struct {
 	// agents during shutdown. Duration string (e.g., "5s", "30s"). Set to "0s"
 	// for immediate kill. Defaults to "5s".
 	ShutdownTimeout string `toml:"shutdown_timeout,omitempty" jsonschema:"default=5s"`
+	// DoltStopTimeout is the SIGTERM→SIGKILL grace period for the managed dolt
+	// subprocess during stop, unregister, restart, and startup/recovery
+	// cleanup. Independent of ShutdownTimeout (which gates agent drain) so a
+	// slow session drain cannot steal dolt's flush window. Duration string
+	// (e.g., "30s", "1m"). A too-short value risks SIGKILL during a journal
+	// index update or manifest rotation, which corrupts dolt's chunk journal
+	// (see gastownhall/gascity#2090). Defaults to "30s", which absorbs the
+	// longest observed flush window on commodity SSDs without unduly delaying
+	// unregister. Set to "0s" for immediate SIGKILL with no grace. Negative
+	// values are rejected at config load. Note: when a city is stopped via the
+	// controller (`gc stop` while a controller is running), the standalone
+	// controller-stop wait budget is `shutdown_timeout` + 15s (20s at the
+	// default `shutdown_timeout` of "5s"); a `dolt_stop_timeout` larger than
+	// that budget can be cut short on that path even though the direct
+	// stop/unregister path always honors the full grace.
+	DoltStopTimeout string `toml:"dolt_stop_timeout,omitempty" jsonschema:"default=30s"`
 	// WispGCInterval is how often wisp GC runs. Duration string (e.g., "5m", "1h").
 	// Wisp GC is disabled unless both WispGCInterval and WispTTL are set.
 	WispGCInterval string `toml:"wisp_gc_interval,omitempty"`
@@ -1857,6 +1873,28 @@ func (d *DaemonConfig) ShutdownTimeoutDuration() time.Duration {
 	dur, err := time.ParseDuration(d.ShutdownTimeout)
 	if err != nil {
 		return 5 * time.Second
+	}
+	return dur
+}
+
+// DefaultDoltStopTimeout is the SIGTERM→SIGKILL grace for the managed dolt
+// subprocess when no value is configured. 30s is long enough to ride out the
+// longest observed journal-index update on commodity SSDs (#2090) while still
+// guaranteeing forward progress on unregister/restart.
+const DefaultDoltStopTimeout = 30 * time.Second
+
+// DoltStopTimeoutDuration returns the managed-dolt stop grace as a
+// time.Duration. Defaults to DefaultDoltStopTimeout (30s) when empty or
+// unparseable. Zero is allowed and means immediate SIGKILL — callers that
+// must guarantee a flush window should treat zero as a misconfiguration
+// upstream rather than silently overriding it here.
+func (d *DaemonConfig) DoltStopTimeoutDuration() time.Duration {
+	if d.DoltStopTimeout == "" {
+		return DefaultDoltStopTimeout
+	}
+	dur, err := time.ParseDuration(d.DoltStopTimeout)
+	if err != nil {
+		return DefaultDoltStopTimeout
 	}
 	return dur
 }
@@ -2277,7 +2315,7 @@ type Agent struct {
 	// Fallback marks this agent as a fallback definition. During pack
 	// composition, a non-fallback agent with the same name wins silently.
 	// When two fallbacks collide, the first loaded (depth-first) wins.
-	// See docs/packv2/migration.mdx for migration guidance.
+	// See docs/guides/migrating-to-pack-vnext.md for migration guidance.
 	Fallback bool `toml:"fallback,omitempty"`
 	// DependsOn lists agent names that must be awake before this agent wakes.
 	// Used for dependency-ordered startup and shutdown. Validated for cycles

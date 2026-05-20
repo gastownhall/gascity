@@ -924,6 +924,37 @@ func TestControllerStateAppliesCacheReconcileBeadEventsToStores(t *testing.T) {
 	}
 }
 
+func TestWrapWithCachingStoreCachesNonBdStore(t *testing.T) {
+	backing := beads.NewMemStore()
+	created, err := backing.Create(beads.Bead{Title: "non-bd backing"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	store := wrapWithCachingStore(context.Background(), backing, nil)
+	cached, ok := store.(*beads.CachingStore)
+	if !ok {
+		t.Fatalf("store type = %T, want *beads.CachingStore", store)
+	}
+	if cached.Backing() != backing {
+		t.Fatalf("Backing = %#v, want original non-BdStore backing", cached.Backing())
+	}
+
+	items, err := cached.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != created.ID {
+		t.Fatalf("ListOpen = %#v, want only %s", items, created.ID)
+	}
+}
+
+func TestWrapWithCachingStoreReturnsNilStore(t *testing.T) {
+	if got := wrapWithCachingStore(context.Background(), nil, nil); got != nil {
+		t.Fatalf("wrapWithCachingStore(nil) = %#v, want nil", got)
+	}
+}
+
 func TestControllerStateBeadEventsRespectStorePrefixes(t *testing.T) {
 	cityBacking := beads.NewMemStore()
 	rigBacking := beads.NewMemStore()

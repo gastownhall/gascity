@@ -58,6 +58,12 @@
 #   GC_DOLT_COMPACT_ONLY_DBS              (optional) — comma-separated list of
 #                                         database names to compact. When set,
 #                                         all other databases are skipped.
+#   GC_DOLT_REFSPEC_<DB_UPPER>            (optional) — compact remote push
+#                                         refspec in <local>:<remote> form.
+#                                         DB name is uppercased with '-'
+#                                         replaced by '_' to derive the env
+#                                         key; DB names that differ only by
+#                                         '-' vs '_' share that key.
 set -eu
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
@@ -287,6 +293,53 @@ valid_remote_name() {
   esac
 }
 
+valid_branch_name() {
+  branch_candidate="$1"
+  case "$branch_candidate" in
+    -*|.*|*..*|*@{*) return 1 ;;
+    [A-Za-z0-9_.-]*)
+      case "$branch_candidate" in
+        *[!A-Za-z0-9_./-]*) return 1 ;;
+        *) return 0 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+refspec_env_value() {
+  db="$1"
+  valid_database_name "$db" || return 1
+  key=$(printf '%s' "$db" | tr 'a-z-' 'A-Z_')
+  case "$key" in
+    *[!A-Z0-9_]*) return 0 ;;
+  esac
+  eval "printf '%s' \"\${GC_DOLT_REFSPEC_$key:-}\""
+}
+
+refspec_parts() {
+  rs="$1"
+  case "$rs" in
+    *:*)
+      local_branch=${rs%%:*}
+      remote_branch=${rs#*:}
+      ;;
+    *)
+      local_branch="$rs"
+      remote_branch="$rs"
+      ;;
+  esac
+  [ -z "$local_branch" ] && return 1
+  [ -z "$remote_branch" ] && return 1
+  valid_branch_name "$local_branch" || return 1
+  valid_branch_name "$remote_branch" || return 1
+  printf '%s\n%s\n' "$local_branch" "$remote_branch"
+}
+
+warn_refspec_fallback() {
+  printf 'compact: db=%s WARN: active branch unresolved; falling back to main\n' "$1" >&2
+}
+
 is_system_database() {
   system_candidate=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
   case "$system_candidate" in
@@ -365,7 +418,49 @@ query_single_cell() {
   rm -f "$out_tmp" "$err_tmp"
 }
 
-# commit_count — count of commits reachable from main. Bounded scan
+resolve_refspec_sql() {
+  db="$1"
+  if ! valid_database_name "$db"; then
+    printf 'compact: db=%s invalid database name — fail\n' "$db" >&2
+    return 1
+  fi
+
+  active=$(query_single_cell "$db" "active branch probe failed" "SELECT active_branch()" 2>/dev/null || true)
+  active_resolved=0
+  if [ -n "$active" ] && valid_branch_name "$active"; then
+    active_resolved=1
+  fi
+
+  override=$(refspec_env_value "$db") || return 1
+  if [ -n "$override" ]; then
+    parts=$(refspec_parts "$override") || {
+      printf 'compact: db=%s invalid refspec override=%s\n' "$db" "$override" >&2
+      return 1
+    }
+    local_branch=$(printf '%s\n' "$parts" | sed -n '1p')
+    if [ "$active_resolved" != "1" ]; then
+      printf 'compact: db=%s refspec override requires resolved active branch — fail\n' "$db" >&2
+      return 1
+    fi
+    if [ "$local_branch" != "$active" ]; then
+      printf 'compact: db=%s refspec override local branch=%s does not match active branch=%s — fail\n' \
+        "$db" "$local_branch" "$active" >&2
+      return 1
+    fi
+    printf '%s\n' "$parts"
+    return 0
+  fi
+
+  if [ "$active_resolved" = "1" ]; then
+    printf '%s\n%s\n' "$active" "$active"
+    return 0
+  fi
+
+  warn_refspec_fallback "$db"
+  printf 'main\nmain\n'
+}
+
+# commit_count — count of commits reachable from the current branch. Bounded scan
 # (LIMIT 200000) so a runaway DB doesn't tie up the connection.
 commit_count() {
   db="$1"
@@ -373,7 +468,7 @@ commit_count() {
     "SELECT COUNT(*) FROM (SELECT 1 FROM dolt_log LIMIT 200000) AS t"
 }
 
-# root_commit — earliest commit hash on the main branch.
+# root_commit — earliest commit hash on the current branch.
 root_commit() {
   db="$1"
   query_single_cell "$db" "root commit probe failed" \
@@ -486,11 +581,13 @@ fetch_remote() {
   dolt_query "$db" "CALL DOLT_FETCH('$remote')"
 }
 
-remote_main_head() {
+remote_branch_head() {
   db="$1"
   remote="$2"
+  branch="$3"
+  valid_branch_name "$branch" || return 1
   query_single_cell "$db" "remote HEAD probe failed" \
-    "SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/$remote/main'"
+    "SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/$remote/$branch'"
 }
 
 commit_exists_in_local_log() {
@@ -500,15 +597,22 @@ commit_exists_in_local_log() {
     "SELECT COUNT(*) FROM dolt_log WHERE commit_hash = '$hash'"
 }
 
-push_remote_main() {
+push_remote_refspec() {
   db="$1"
   remote="$2"
+  local_branch="$3"
+  remote_branch="$4"
+  if [ "$local_branch" = "$remote_branch" ]; then
+    refspec_arg="$local_branch"
+  else
+    refspec_arg="$local_branch:$remote_branch"
+  fi
   export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
   run_bounded "$push_timeout" \
     dolt --host "$host" --port "$GC_DOLT_PORT" \
     --user "$GC_DOLT_USER" --no-tls \
     --use-db "$db" \
-    sql -r tabular -q "CALL DOLT_PUSH('--force', '--set-upstream', '$remote', 'main')"
+    sql -r tabular -q "CALL DOLT_PUSH('--force', '--set-upstream', '$remote', '$refspec_arg')"
 }
 
 # preflight_counts — write "<table> <count>" lines for all user tables.
@@ -713,12 +817,16 @@ write_pending_push_marker() {
   expected_remote_head_verified="${4:-0}"
   compacted_from_head="${5:-}"
   reason="$6"
+  local_branch="${7:-main}"
+  remote_branch="${8:-$local_branch}"
 
   write_compact_marker "$pending_push_dir" "$db" "$reason" \
     "remote=$remote" \
     "expected_remote_head=$expected_remote_head" \
     "expected_remote_head_verified=$expected_remote_head_verified" \
-    "compacted_from_head=$compacted_from_head"
+    "compacted_from_head=$compacted_from_head" \
+    "local_branch=$local_branch" \
+    "remote_branch=$remote_branch"
 }
 
 compact_marker_value() {
@@ -807,7 +915,17 @@ push_remote_after_compaction() {
   expected_remote_head_verified="${4:-0}"
   push_context="${5:-initial}"
   compacted_from_head="${6:-}"
+  local_branch="${7:-main}"
+  remote_branch="${8:-$local_branch}"
   [ -n "$remote" ] || return 0
+  valid_branch_name "$local_branch" || {
+    printf 'compact: db=%s invalid local branch=%s before remote push\n' "$db" "$local_branch" >&2
+    return 1
+  }
+  valid_branch_name "$remote_branch" || {
+    printf 'compact: db=%s invalid remote branch=%s before remote push\n' "$db" "$remote_branch" >&2
+    return 1
+  }
 
   fetch_rc=0
   fetch_err_tmp=$(mktemp)
@@ -818,16 +936,16 @@ push_remote_after_compaction() {
     emit_error_file "$db" "$fetch_err_tmp"
     rm -f "$fetch_err_tmp"
     write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
-      "flatten and full GC succeeded but remote fetch before push failed" || return 1
+      "flatten and full GC succeeded but remote fetch before push failed" "$local_branch" "$remote_branch" || return 1
     return 0
   fi
   rm -f "$fetch_err_tmp"
 
-  if ! latest_remote_head=$(remote_main_head "$db" "$remote"); then
+  if ! latest_remote_head=$(remote_branch_head "$db" "$remote" "$remote_branch"); then
     printf 'compact: db=%s remote=%s HEAD probe failed before push after local compaction\n' \
       "$db" "$remote" >&2
     write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
-      "flatten and full GC succeeded but remote HEAD probe before push failed" || return 1
+      "flatten and full GC succeeded but remote HEAD probe before push failed" "$local_branch" "$remote_branch" || return 1
     return 0
   fi
   if [ -n "$latest_remote_head" ]; then
@@ -836,7 +954,7 @@ push_remote_after_compaction() {
         printf 'compact: db=%s remote=%s returned invalid HEAD=%s before push — fail\n' \
           "$db" "$remote" "$latest_remote_head" >&2
         write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
-          "flatten and full GC succeeded but remote HEAD before push was invalid" || return 1
+          "flatten and full GC succeeded but remote HEAD before push was invalid" "$local_branch" "$remote_branch" || return 1
         return 0
         ;;
     esac
@@ -852,7 +970,7 @@ push_remote_after_compaction() {
         printf 'compact: db=%s remote=%s HEAD changed during pending push retry expected_HEAD=%s got_HEAD=<empty> — deferred for next run; manual reconciliation required if this persists\n' \
           "$db" "$remote" "${expected_remote_head:-<empty>}" >&2
         write_pending_push_marker "$db" "$remote" "" 0 "$compacted_from_head" \
-          "remote push retry deferred: remote HEAD changed during pending push retry" || return 1
+          "remote push retry deferred: remote HEAD changed during pending push retry" "$local_branch" "$remote_branch" || return 1
         return 1
       fi
       printf 'compact: db=%s remote=%s HEAD changed during pending push retry expected_HEAD=%s got_HEAD=%s — verifying latest remote HEAD\n' \
@@ -863,7 +981,7 @@ push_remote_after_compaction() {
       printf 'compact: db=%s remote=%s HEAD changed before push expected_HEAD=%s got_HEAD=%s — leaving local compaction pending remote repair\n' \
         "$db" "$remote" "${expected_remote_head:-<empty>}" "${latest_remote_head:-<empty>}" >&2
       write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
-        "flatten and full GC succeeded but remote HEAD changed before push" || return 1
+        "flatten and full GC succeeded but remote HEAD changed before push" "$local_branch" "$remote_branch" || return 1
       return 0
     fi
   fi
@@ -877,7 +995,7 @@ push_remote_after_compaction() {
         printf 'compact: db=%s remote=%s HEAD=%s ancestry probe failed before push after local compaction\n' \
           "$db" "$remote" "$latest_remote_head" >&2
         write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
-          "flatten and full GC succeeded but remote ancestry probe before push failed" || return 1
+          "flatten and full GC succeeded but remote ancestry probe before push failed" "$local_branch" "$remote_branch" || return 1
         return 0
       fi
       case "$in_local" in
@@ -891,20 +1009,20 @@ push_remote_after_compaction() {
             printf 'compact: db=%s remote=%s HEAD=%s remains absent from local history — deferred for next run; manual reconciliation required if this persists\n' \
               "$db" "$remote" "$latest_remote_head" >&2
             write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
-              "remote push retry deferred: remote has unique commits not in local history" || return 1
+              "remote push retry deferred: remote has unique commits not in local history" "$local_branch" "$remote_branch" || return 1
             return 1
           fi
           printf 'compact: db=%s remote=%s HEAD=%s was not verified in local history before flatten — leaving local compaction pending remote repair\n' \
             "$db" "$remote" "$latest_remote_head" >&2
           write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
-            "flatten and full GC succeeded but remote has unique commits not in local history" || return 1
+            "flatten and full GC succeeded but remote has unique commits not in local history" "$local_branch" "$remote_branch" || return 1
           return 0
           ;;
         *)
           printf 'compact: db=%s remote=%s ancestry probe returned invalid value=%s before push after local compaction\n' \
             "$db" "$remote" "$in_local" >&2
           write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
-            "flatten and full GC succeeded but remote ancestry probe returned invalid result" || return 1
+            "flatten and full GC succeeded but remote ancestry probe returned invalid result" "$local_branch" "$remote_branch" || return 1
           return 0
           ;;
       esac
@@ -913,19 +1031,19 @@ push_remote_after_compaction() {
 
   push_rc=0
   push_err_tmp=$(mktemp)
-  push_remote_main "$db" "$remote" >/dev/null 2>"$push_err_tmp" || push_rc=$?
+  push_remote_refspec "$db" "$remote" "$local_branch" "$remote_branch" >/dev/null 2>"$push_err_tmp" || push_rc=$?
   if [ "$push_rc" -ne 0 ]; then
     printf 'compact: db=%s remote=%s push failed rc=%s after local compaction\n' \
       "$db" "$remote" "$push_rc" >&2
     emit_error_file "$db" "$push_err_tmp"
     rm -f "$push_err_tmp"
     write_pending_push_marker "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "$compacted_from_head" \
-      "flatten and full GC succeeded but remote push failed" || return 1
+      "flatten and full GC succeeded but remote push failed" "$local_branch" "$remote_branch" || return 1
     return 0
   fi
   rm -f "$push_err_tmp"
   clear_compact_marker "$pending_push_dir" "$db"
-  printf 'compact: db=%s remote=%s pushed compacted main\n' "$db" "$remote"
+  printf 'compact: db=%s remote=%s pushed compacted %s\n' "$db" "$remote" "$remote_branch"
   return 0
 }
 
@@ -1018,9 +1136,23 @@ flatten_database() {
     pending_expected_remote_head=$(compact_marker_value "$pending_gc_dir" "$db" expected_remote_head || true)
     pending_expected_remote_head_verified=$(compact_marker_value "$pending_gc_dir" "$db" expected_remote_head_verified || true)
     pending_compacted_from_head=$(compact_marker_value "$pending_gc_dir" "$db" compacted_from_head || true)
+    pending_local_branch=$(compact_marker_value "$pending_gc_dir" "$db" local_branch || true)
+    pending_remote_branch=$(compact_marker_value "$pending_gc_dir" "$db" remote_branch || true)
+    [ -n "$pending_local_branch" ] || pending_local_branch="main"
+    [ -n "$pending_remote_branch" ] || pending_remote_branch="$pending_local_branch"
     if [ -n "$pending_remote" ] && ! valid_remote_name "$pending_remote"; then
       printf 'compact: db=%s pending_gc marker has invalid remote=%s — manual intervention required\n' \
         "$db" "$pending_remote" >&2
+      return 1
+    fi
+    if ! valid_branch_name "$pending_local_branch"; then
+      printf 'compact: db=%s pending_gc marker has invalid local_branch=%s — manual intervention required\n' \
+        "$db" "$pending_local_branch" >&2
+      return 1
+    fi
+    if ! valid_branch_name "$pending_remote_branch"; then
+      printf 'compact: db=%s pending_gc marker has invalid remote_branch=%s — manual intervention required\n' \
+        "$db" "$pending_remote_branch" >&2
       return 1
     fi
     if [ -n "$pending_expected_remote_head" ]; then
@@ -1057,7 +1189,7 @@ flatten_database() {
     start=$(date +%s)
     if run_full_gc "$db" "pending-GC retry" "pending-GC retry" "$start"; then
       push_rc=0
-      push_remote_after_compaction "$db" "$pending_remote" "$pending_expected_remote_head" "${pending_expected_remote_head_verified:-0}" "retry" "$pending_compacted_from_head" || push_rc=$?
+      push_remote_after_compaction "$db" "$pending_remote" "$pending_expected_remote_head" "${pending_expected_remote_head_verified:-0}" "retry" "$pending_compacted_from_head" "$pending_local_branch" "$pending_remote_branch" || push_rc=$?
       if [ "$push_rc" -eq 0 ] || { [ -n "$pending_remote" ] && has_compact_marker "$pending_push_dir" "$db"; }; then
         clear_compact_marker "$pending_gc_dir" "$db"
       fi
@@ -1075,9 +1207,23 @@ flatten_database() {
     pending_expected_remote_head=$(compact_marker_value "$pending_push_dir" "$db" expected_remote_head || true)
     pending_expected_remote_head_verified=$(compact_marker_value "$pending_push_dir" "$db" expected_remote_head_verified || true)
     pending_compacted_from_head=$(compact_marker_value "$pending_push_dir" "$db" compacted_from_head || true)
+    pending_local_branch=$(compact_marker_value "$pending_push_dir" "$db" local_branch || true)
+    pending_remote_branch=$(compact_marker_value "$pending_push_dir" "$db" remote_branch || true)
+    [ -n "$pending_local_branch" ] || pending_local_branch="main"
+    [ -n "$pending_remote_branch" ] || pending_remote_branch="$pending_local_branch"
     if [ -z "$pending_remote" ]; then
       printf 'compact: db=%s pending_push marker is missing remote — manual intervention required\n' \
         "$db" >&2
+      return 1
+    fi
+    if ! valid_branch_name "$pending_local_branch"; then
+      printf 'compact: db=%s pending_push marker has invalid local_branch=%s — manual intervention required\n' \
+        "$db" "$pending_local_branch" >&2
+      return 1
+    fi
+    if ! valid_branch_name "$pending_remote_branch"; then
+      printf 'compact: db=%s pending_push marker has invalid remote_branch=%s — manual intervention required\n' \
+        "$db" "$pending_remote_branch" >&2
       return 1
     fi
     if ! valid_remote_name "$pending_remote"; then
@@ -1114,7 +1260,7 @@ flatten_database() {
     fi
     ensure_remote_push_retry_fresh "$pending_push_dir" "$db" "pending_push" || return 1
     printf 'compact: db=%s pending_push=present — retrying remote push before threshold check\n' "$db"
-    push_remote_after_compaction "$db" "$pending_remote" "$pending_expected_remote_head" "${pending_expected_remote_head_verified:-0}" "retry" "$pending_compacted_from_head"
+    push_remote_after_compaction "$db" "$pending_remote" "$pending_expected_remote_head" "${pending_expected_remote_head_verified:-0}" "retry" "$pending_compacted_from_head" "$pending_local_branch" "$pending_remote_branch"
     return $?
   fi
 
@@ -1163,6 +1309,8 @@ flatten_database() {
   fi
 
   remote=""
+  local_branch="main"
+  remote_branch="main"
   expected_remote_head=""
   expected_remote_head_verified=0
   if probed_remote=$(select_remote "$db"); then
@@ -1177,6 +1325,10 @@ flatten_database() {
       return 1
     fi
 
+    refspec_pair=$(resolve_refspec_sql "$db") || return 1
+    local_branch=$(printf '%s\n' "$refspec_pair" | sed -n '1p')
+    remote_branch=$(printf '%s\n' "$refspec_pair" | sed -n '2p')
+
     printf 'compact: db=%s remote=%s — fetching before flatten...\n' "$db" "$remote"
     fetch_rc=0
     fetch_err_tmp=$(mktemp)
@@ -1186,7 +1338,7 @@ flatten_database() {
         "$db" "$remote" "$fetch_rc" >&2
       emit_error_file "$db" "$fetch_err_tmp"
     else
-      if ! remote_head=$(remote_main_head "$db" "$remote"); then
+      if ! remote_head=$(remote_branch_head "$db" "$remote" "$remote_branch"); then
         rm -f "$fetch_err_tmp"
         return 1
       fi
@@ -1362,13 +1514,15 @@ flatten_database() {
   if run_full_gc "$db" "flatten ok commits=$count->${after_count:-?} but" \
     "commits=$count->${after_count:-?}" "$start"; then
     clear_compact_marker "$pending_gc_dir" "$db"
-    push_remote_after_compaction "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "initial" "$compacted_from_head"
+    push_remote_after_compaction "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "initial" "$compacted_from_head" "$local_branch" "$remote_branch"
     return $?
   fi
   write_compact_marker "$pending_gc_dir" "$db" "flatten succeeded but full GC failed" \
     "remote=$remote" "expected_remote_head=$expected_remote_head" \
     "expected_remote_head_verified=$expected_remote_head_verified" \
-    "compacted_from_head=$compacted_from_head" || return 1
+    "compacted_from_head=$compacted_from_head" \
+    "local_branch=$local_branch" \
+    "remote_branch=$remote_branch" || return 1
   return 1
 }
 

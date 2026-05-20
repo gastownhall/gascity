@@ -291,6 +291,11 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 	return nil
 }
 
+// Tx executes fn sequentially against the CachingStore.
+func (c *CachingStore) Tx(_ string, fn func(Tx) error) error {
+	return runSequentialTx(c, fn)
+}
+
 // updateMatchesCached returns true when every non-nil field in opts already
 // reflects the cached bead's state AND the cache is primed. Returns false on
 // cache miss, uninitialized cache, or any field mismatch — in which case the

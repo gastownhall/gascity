@@ -64,6 +64,12 @@
   "metadata": {
     "timestamp": true
   },
+  "redirects": [
+    {
+      "source": "/packv2/migration",
+      "destination": "/guides/migrating-to-pack-vnext"
+    }
+  ],
   "navigation": {
     "groups": [
       {
@@ -95,7 +101,6 @@
         "pages": [
           "guides/index",
           "guides/migrating-to-pack-vnext",
-          "packv2/migration",
           "guides/shareable-packs",
           "guides/using-json-from-gc"
         ]

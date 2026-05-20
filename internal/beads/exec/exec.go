@@ -423,6 +423,14 @@ func (s *Store) SetMetadataBatch(id string, kvs map[string]string) error {
 	return nil
 }
 
+// Tx executes fn sequentially against the exec store.
+func (s *Store) Tx(_ string, fn func(beads.Tx) error) error {
+	if fn == nil {
+		return errors.New("beads tx: nil callback")
+	}
+	return fn(s)
+}
+
 // Delete permanently removes a bead by calling the "delete" subcommand.
 func (s *Store) Delete(id string) error {
 	_, err := s.run(nil, "delete", "--force", id)

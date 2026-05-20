@@ -426,7 +426,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		// silently shadow a **bootstrap** implicit-import pack, hard-stop
 		// with a diagnostic. Non-bootstrap implicit imports retain the
 		// pre-v0.15.1 "explicit wins over implicit" contract and are
-		// shadowed silently (see docs/packv2/doc-packman.md). See
+		// shadowed silently (see engdocs/design/packv2/doc-packman.md). See
 		// engdocs/proposals/skill-materialization.md — "Name-collision
 		// with a user-declared [imports.core]".
 		bootstrapNames := bootstrapImportNames(implicitImports)
@@ -601,9 +601,17 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	prov.Warnings = append(prov.Warnings, ValidateDurations(root, path)...)
 	prov.Warnings = append(prov.Warnings, ValidateEventsRotation(root)...)
 
+	// Reject negative durations that parse cleanly but are silently
+	// destructive at runtime (e.g. a negative dolt_stop_timeout collapses
+	// the managed-dolt SIGTERM→SIGKILL grace to an immediate kill).
+	if err := ValidateNonNegativeDurations(root, path); err != nil {
+		return nil, nil, err
+	}
+
 	// Validate cross-entity semantic constraints.
 	prov.Warnings = append(prov.Warnings, ValidateSemantics(root, path)...)
 	prov.Warnings = append(prov.Warnings, DetectLegacyProviderInheritance(root, path)...)
+	prov.Warnings = append(prov.Warnings, detectLegacyWorkspaceFields(root, path, prov.Workspace)...)
 
 	// Build the resolved provider cache now that compose + patch have
 	// populated the full provider table. Chain resolution errors
@@ -1390,7 +1398,7 @@ func trackRigs(prov *Provenance, rigs []Rig, source string) {
 }
 
 func trackWorkspace(prov *Provenance, meta toml.MetaData, source string) {
-	for _, f := range []string{"name", "provider", "start_command", "session_template", "install_agent_hooks"} {
+	for _, f := range []string{"name", "provider", "start_command", "session_template", "suspended", "install_agent_hooks", "global_fragments"} {
 		if meta.IsDefined("workspace", f) {
 			prov.Workspace[f] = source
 		}

@@ -574,6 +574,94 @@ func TestReadAutoStartDisabledFallsBackToLineScanOnMalformedYAML(t *testing.T) {
 	}
 }
 
+func TestReadExportAuto(t *testing.T) {
+	tests := []struct {
+		name      string
+		yaml      string
+		wantValue bool
+		wantOK    bool
+	}{
+		{
+			name:      "explicit false",
+			yaml:      "issue_prefix: zz\nexport.auto: false\n",
+			wantValue: false,
+			wantOK:    true,
+		},
+		{
+			name:      "explicit true",
+			yaml:      "issue_prefix: zz\nexport.auto: true\n",
+			wantValue: true,
+			wantOK:    true,
+		},
+		{
+			name:      "absent",
+			yaml:      "issue_prefix: zz\n",
+			wantValue: false,
+			wantOK:    false,
+		},
+		{
+			// Garbage value: strict parsing returns ok=false rather than
+			// silently treating it as "false". This matters because callers
+			// gate destructive cleanup on ok=true && value=false.
+			name:      "non-boolean string returns absent",
+			yaml:      "issue_prefix: zz\nexport.auto: yes\n",
+			wantValue: false,
+			wantOK:    false,
+		},
+		{
+			name:      "numeric one parses as true",
+			yaml:      "issue_prefix: zz\nexport.auto: 1\n",
+			wantValue: true,
+			wantOK:    true,
+		},
+		{
+			name:      "numeric zero parses as false",
+			yaml:      "issue_prefix: zz\nexport.auto: 0\n",
+			wantValue: false,
+			wantOK:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := fsys.OSFS{}
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := fs.WriteFile(path, []byte(tt.yaml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			gotValue, gotOK, err := ReadExportAuto(fs, path)
+			if err != nil {
+				t.Fatalf("ReadExportAuto() error = %v", err)
+			}
+			if gotOK != tt.wantOK {
+				t.Errorf("ReadExportAuto() ok = %v, want %v", gotOK, tt.wantOK)
+			}
+			if gotValue != tt.wantValue {
+				t.Errorf("ReadExportAuto() value = %v, want %v", gotValue, tt.wantValue)
+			}
+		})
+	}
+}
+
+func TestReadExportAutoOnMissingFileReturnsAbsent(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "missing.yaml")
+
+	gotValue, gotOK, err := ReadExportAuto(fs, path)
+	if err != nil {
+		t.Fatalf("ReadExportAuto() error = %v, want nil for missing file", err)
+	}
+	if gotOK {
+		t.Errorf("ReadExportAuto() ok = true, want false for missing file")
+	}
+	if gotValue {
+		t.Errorf("ReadExportAuto() value = true, want false for missing file")
+	}
+}
+
 func TestEnsureCanonicalMetadataPreservesUnknownKeysAndScrubsDeprecatedOnes(t *testing.T) {
 	fs := fsys.OSFS{}
 	dir := t.TempDir()

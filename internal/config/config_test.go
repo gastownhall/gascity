@@ -2591,6 +2591,122 @@ name = "mayor"
 	}
 }
 
+// --- DoltStopTimeout tests ---
+
+func TestDaemonDoltStopTimeoutDefault(t *testing.T) {
+	d := DaemonConfig{}
+	got := d.DoltStopTimeoutDuration()
+	if got != DefaultDoltStopTimeout {
+		t.Errorf("DoltStopTimeoutDuration() = %v, want %v", got, DefaultDoltStopTimeout)
+	}
+}
+
+func TestDaemonDoltStopTimeoutCustom(t *testing.T) {
+	d := DaemonConfig{DoltStopTimeout: "45s"}
+	got := d.DoltStopTimeoutDuration()
+	if got != 45*time.Second {
+		t.Errorf("DoltStopTimeoutDuration() = %v, want 45s", got)
+	}
+}
+
+func TestDaemonDoltStopTimeoutZero(t *testing.T) {
+	d := DaemonConfig{DoltStopTimeout: "0s"}
+	got := d.DoltStopTimeoutDuration()
+	if got != 0 {
+		t.Errorf("DoltStopTimeoutDuration() = %v, want 0", got)
+	}
+}
+
+func TestDaemonDoltStopTimeoutInvalid(t *testing.T) {
+	d := DaemonConfig{DoltStopTimeout: "not-a-duration"}
+	got := d.DoltStopTimeoutDuration()
+	if got != DefaultDoltStopTimeout {
+		t.Errorf("DoltStopTimeoutDuration() = %v, want %v (default for invalid)", got, DefaultDoltStopTimeout)
+	}
+}
+
+func TestParseDoltStopTimeout(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+dolt_stop_timeout = "1m"
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.DoltStopTimeout != "1m" {
+		t.Errorf("Daemon.DoltStopTimeout = %q, want %q", cfg.Daemon.DoltStopTimeout, "1m")
+	}
+	got := cfg.Daemon.DoltStopTimeoutDuration()
+	if got != time.Minute {
+		t.Errorf("DoltStopTimeoutDuration() = %v, want 1m", got)
+	}
+}
+
+func TestValidateNonNegativeDurationsRejectsNegativeDoltStopTimeout(t *testing.T) {
+	cfg := &City{}
+	cfg.Daemon.DoltStopTimeout = "-1s"
+	err := ValidateNonNegativeDurations(cfg, "city.toml")
+	if err == nil {
+		t.Fatal("ValidateNonNegativeDurations() = nil, want error for negative dolt_stop_timeout")
+	}
+	if !strings.Contains(err.Error(), "dolt_stop_timeout") ||
+		!strings.Contains(err.Error(), "must not be negative") ||
+		!strings.Contains(err.Error(), `"-1s"`) {
+		t.Errorf("ValidateNonNegativeDurations() error = %q, want it to name the field, the constraint, and the value", err)
+	}
+}
+
+func TestValidateNonNegativeDurationsAllowsZeroAndPositive(t *testing.T) {
+	for _, v := range []string{"", "0s", "30s", "1m"} {
+		cfg := &City{}
+		cfg.Daemon.DoltStopTimeout = v
+		if err := ValidateNonNegativeDurations(cfg, "city.toml"); err != nil {
+			t.Errorf("ValidateNonNegativeDurations(dolt_stop_timeout=%q) = %v, want nil", v, err)
+		}
+	}
+}
+
+func TestValidateNonNegativeDurationsIgnoresUnparseable(t *testing.T) {
+	// Parse errors are ValidateDurations' job (warning-only); the negative
+	// guard must not promote a typo to a hard error.
+	cfg := &City{}
+	cfg.Daemon.DoltStopTimeout = "not-a-duration"
+	if err := ValidateNonNegativeDurations(cfg, "city.toml"); err != nil {
+		t.Errorf("ValidateNonNegativeDurations(unparseable) = %v, want nil", err)
+	}
+}
+
+func TestLoadWithIncludesRejectsNegativeDoltStopTimeout(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(cityPath, []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+dolt_stop_timeout = "-5s"
+
+[[agent]]
+name = "mayor"
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	_, _, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err == nil {
+		t.Fatal("LoadWithIncludes() = nil error, want rejection of negative dolt_stop_timeout")
+	}
+	if !strings.Contains(err.Error(), "must not be negative") {
+		t.Errorf("LoadWithIncludes() error = %q, want negative-duration rejection", err)
+	}
+}
+
 // --- DriftDrainTimeout tests ---
 
 func TestDaemonDriftDrainTimeoutDefault(t *testing.T) {

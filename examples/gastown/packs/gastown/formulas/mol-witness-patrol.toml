@@ -58,7 +58,7 @@ the worktree. This makes the work schedulable again.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-witness-patrol"
-version = 9
+version = 10
 
 [vars]
 [vars.binding_prefix]
@@ -66,8 +66,8 @@ description = "Import binding prefix for gastown agent identities, including tra
 default = ""
 
 [vars.event_timeout]
-description = "Seconds to wait for events before re-checking (exponential backoff)"
-default = "30"
+description = "Seconds to sleep before re-checking. Replaces former event-watch loop which hot-spun on cache-reconcile firehose."
+default = "60"
 
 [[steps]]
 id = "check-inbox"
@@ -493,17 +493,12 @@ NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{bin
 gc bd update "$NEXT" --assignee=$GC_AGENT
 ```
 
-**3. Wait for activity (exponential backoff):**
+**3. Wait before next cycle:**
 ```bash
-SEQ=$(gc events --seq)
-gc events --watch --type=bead.updated \
-  --after=$SEQ --timeout {{event_timeout}}s
+sleep {{event_timeout}}
 ```
 
-`--timeout` makes this command self-terminating — it exits on its own when an event arrives or the timeout fires. Do not add `&`, pipe to another command, or wrap in a background process.
-
-On event: proceed immediately.
-On timeout: double the timeout (cap 300s) and proceed anyway.
+Previous implementation watched `gc events --type=bead.updated` for fast wake-up, but cache-reconcile fires that event constantly, turning the watch into a tight loop with no useful backoff. Fixed sleep gives predictable idle cost.
 
 **4. Burn this wisp:**
 ```bash

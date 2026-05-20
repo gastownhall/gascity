@@ -798,6 +798,32 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								Payload: api.SessionLifecyclePayloadJSON(session.ID, template, "drain acknowledged"),
 							})
 							if hasAssignedWork {
+								// gastownhall/gascity#2293: the session drain-acked but the
+								// bead it owned is still assigned to it. Emit a typed event
+								// so pack-side subscribers can decide recovery policy (commit-
+								// and-push, clear-assignee-and-respawn, escalate). The SDK
+								// reconciler intentionally stops at signal emission — it must
+								// not bake pack-specific recovery into core (ZFC + zero
+								// hardcoded roles per AGENTS.md).
+								strandedBead, found, beadLookupErr := firstOpenAssignedWorkBeadForReachableStore(cityPath, cfg, store, rigStores, *session)
+								if beadLookupErr != nil {
+									fmt.Fprintf(stderr, "session reconciler: locating stranded bead for drain-acked %s: %v\n", name, beadLookupErr) //nolint:errcheck
+								}
+								if found {
+									rec.Record(events.Event{
+										Type:    events.SessionDrainAckedWithAssignedWork,
+										Actor:   "gc",
+										Subject: template,
+										Message: "session drain-acked while still assigned to work bead",
+										Payload: api.SessionDrainAckedWithAssignedWorkPayloadJSON(
+											session.ID,
+											strandedBead.ID,
+											template,
+											strandedBead.Status,
+											"drain_acked_with_assigned_work",
+										),
+									})
+								}
 								batch := sessionpkg.CompleteDrainPatch(clk.Now().UTC(), "idle", session.Metadata["wake_mode"] == "fresh")
 								_ = store.SetMetadataBatch(session.ID, batch)
 								if session.Metadata == nil {
@@ -1045,6 +1071,33 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						if assignedErr != nil {
 							fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
 							hasAssignedWork = true
+						}
+						if hasAssignedWork {
+							// gastownhall/gascity#2293: cap-hit-shape drain-ack —
+							// the worker exited mid-task without nulling the
+							// bead's assignee. Emit a typed event so pack-side
+							// subscribers can apply recovery policy. SDK stays
+							// out of the commit/push/respawn decision (ZFC +
+							// zero hardcoded roles per AGENTS.md).
+							strandedBead, found, beadLookupErr := firstOpenAssignedWorkBeadForReachableStore(cityPath, cfg, store, rigStores, *session)
+							if beadLookupErr != nil {
+								fmt.Fprintf(stderr, "session reconciler: locating stranded bead for drain-acked %s: %v\n", name, beadLookupErr) //nolint:errcheck
+							}
+							if found {
+								rec.Record(events.Event{
+									Type:    events.SessionDrainAckedWithAssignedWork,
+									Actor:   "gc",
+									Subject: tp.DisplayName(),
+									Message: "session drain-acked while still assigned to work bead",
+									Payload: api.SessionDrainAckedWithAssignedWorkPayloadJSON(
+										session.ID,
+										strandedBead.ID,
+										tp.TemplateName,
+										strandedBead.Status,
+										"drain_acked_with_assigned_work",
+									),
+								})
+							}
 						}
 						batch := sessionpkg.AcknowledgeDrainPatch(session.Metadata["wake_mode"] == "fresh")
 						if hasAssignedWork {
@@ -1927,6 +1980,79 @@ func assignedWorkStoreRefForSession(cityPath string, cfg *config.City, session b
 		return "", false
 	}
 	return assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg), true
+}
+
+// firstOpenAssignedWorkBeadForReachableStore returns the first open or
+// in-progress work bead still assigned to the given session in the store the
+// session's configured agent can query, plus whether one was found. Uses the
+// same reachability resolution as sessionHasOpenAssignedWorkForReachableStore
+// (configured agent's store, with cross-store fallback when the agent
+// template isn't resolvable); emission sites that need the stranded bead's
+// ID (e.g., for the SessionDrainAckedWithAssignedWork event payload per
+// gastownhall/gascity#2293) call this instead of the bool-only helper.
+// Status iteration prefers "in_progress" over "open" so the bead returned is
+// the most-urgent stranded candidate — this is intentional and asymmetric
+// with the bool helpers, which short-circuit on any match and so iterate
+// in the historical "open" / "in_progress" order.
+// Returns (zero-bead, false, nil) when nothing matches.
+func firstOpenAssignedWorkBeadForReachableStore(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	session beads.Bead,
+) (beads.Bead, bool, error) {
+	storeRef, ok := assignedWorkStoreRefForSession(cityPath, cfg, session)
+	if !ok {
+		if bead, found, err := firstOpenAssignedWorkBeadInStore(store, session); err != nil || found {
+			return bead, found, err
+		}
+		for _, rs := range rigStores {
+			if bead, found, err := firstOpenAssignedWorkBeadInStore(rs, session); err != nil || found {
+				return bead, found, err
+			}
+		}
+		return beads.Bead{}, false, nil
+	}
+	if storeRef == "" {
+		return firstOpenAssignedWorkBeadInStore(store, session)
+	}
+	rigStore, ok := rigStores[storeRef]
+	if !ok || rigStore == nil {
+		return beads.Bead{}, false, fmt.Errorf("rig store %q unavailable for session %q", storeRef, session.Metadata["session_name"])
+	}
+	return firstOpenAssignedWorkBeadInStore(rigStore, session)
+}
+
+func firstOpenAssignedWorkBeadInStore(store beads.Store, session beads.Bead) (beads.Bead, bool, error) {
+	if store == nil {
+		return beads.Bead{}, false, nil
+	}
+	identifiers := sessionAssignmentIdentifiers(session)
+	seen := make(map[string]struct{}, len(identifiers))
+	for _, status := range []string{"in_progress", "open"} {
+		for _, assignee := range identifiers {
+			if assignee == "" {
+				continue
+			}
+			key := status + "\x00" + assignee
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			items, err := store.List(beads.ListQuery{Assignee: assignee, Status: status, Live: true})
+			if err != nil {
+				return beads.Bead{}, false, err
+			}
+			for _, item := range items {
+				if sessionpkg.IsSessionBeadOrRepairable(item) {
+					continue
+				}
+				return item, true, nil
+			}
+		}
+	}
+	return beads.Bead{}, false, nil
 }
 
 func sessionHasOpenAssignedWorkInStore(store beads.Store, session beads.Bead) (bool, error) {

@@ -41,9 +41,14 @@ count_jsonl_rows() {
     jq -s -r 'if length == 0 then 0 else ((.[0].rows // []) | length) end' || echo "0"
 }
 
-# Scrub test-only rows while preserving the JSON export structure and legitimate
-# rows in the same payload. The input is one JSON object with a .rows array, not
-# newline-delimited JSON, so row-level filtering must happen inside jq.
+# Scrub test-only rows and ephemeral system rows while preserving the JSON
+# export structure and legitimate rows in the same payload. The input is one
+# JSON object with a .rows array, not newline-delimited JSON, so row-level
+# filtering must happen inside jq.
+#
+# Mirrors the SQL SCRUB_FILTER built below so post-export validation matches
+# the pre-export filter — any system issue_type, system-task title pattern, or
+# scoped auto-convoy that slips past the SQL filter is still removed here.
 scrub_exported_issues() {
     jq -c '
         if (.rows? | type) == "array" then
@@ -56,7 +61,10 @@ scrub_exported_issues() {
                             (.id // "") == "bd-abc12" or
                             ((.id // "") | test("^(testdb_|beads_t)"))
                         ) | not
-                    )
+                    ) and
+                    ((.issue_type // "") | test("^(message|event|wisp|agent)$") | not) and
+                    ((.title // "") | test("^(gc:|order:)") | not) and
+                    ((((.issue_type // "") == "convoy") and ((.title // "") | test("^sling-"))) | not)
                 )
             )
         else
@@ -692,7 +700,7 @@ fi
 # Build scrub filter for the issues table.
 SCRUB_FILTER=""
 if [ "$SCRUB" = "true" ]; then
-    SCRUB_FILTER="WHERE issue_type NOT IN ('message', 'event', 'wisp', 'agent') AND title NOT LIKE 'gc:%'"
+    SCRUB_FILTER="WHERE issue_type NOT IN ('message', 'event', 'wisp', 'agent') AND title NOT LIKE 'gc:%' AND title NOT LIKE 'order:%' AND NOT (issue_type = 'convoy' AND title LIKE 'sling-%')"
 fi
 
 TOTAL_EXPORTED=0

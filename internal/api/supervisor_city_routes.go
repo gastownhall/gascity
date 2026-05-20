@@ -265,6 +265,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/session/{id}/transcript", (*Server).humaHandleSessionTranscript)
 	cityGet(sm, "/session/{id}/pending", (*Server).humaHandleSessionPending)
 	cityPatch(sm, "/session/{id}", (*Server).humaHandleSessionPatch)
+	cityPost(sm, "/session/{id}/permission-mode", (*Server).humaHandleSessionPermissionMode)
 	cityRegister(sm, huma.Operation{
 		OperationID:   "submit-session",
 		Method:        http.MethodPost,
