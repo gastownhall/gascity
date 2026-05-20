@@ -414,16 +414,12 @@ func lookupPoolSessionNameCandidates(store beads.Store, template string, cfg *co
 	if store == nil {
 		return result, nil
 	}
-	all, err := store.List(beads.ListQuery{
-		Label: sessionBeadLabel,
-	})
+	all, err := sessionpkg.ListAllSessionBeads(store, beads.ListQuery{})
 	if err != nil {
 		return result, err
 	}
 	for _, b := range all {
-		if !sessionpkg.IsSessionBeadOrRepairable(b) {
-			continue
-		}
+		// ListAllSessionBeads already filters via IsSessionBeadOrRepairable.
 		if b.Status == "closed" {
 			continue
 		}

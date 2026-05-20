@@ -129,14 +129,6 @@ func loadSessionModelDoctorBeads(store beads.Store) ([]beads.Bead, error) {
 	}
 	steps := []listStep{
 		{
-			name:  "session label",
-			query: beads.ListQuery{Label: session.LabelSession, IncludeClosed: true, Sort: beads.SortCreatedAsc},
-		},
-		{
-			name:  "session type",
-			query: beads.ListQuery{Type: session.BeadType, IncludeClosed: true, Sort: beads.SortCreatedAsc},
-		},
-		{
 			name:  "open work",
 			query: beads.ListQuery{Status: "open", Sort: beads.SortCreatedAsc},
 		},
@@ -148,6 +140,25 @@ func loadSessionModelDoctorBeads(store beads.Store) ([]beads.Bead, error) {
 
 	seen := make(map[string]bool)
 	var all []beads.Bead
+	// Union of Type=session and Label=gc:session beads, deduped by ID.
+	// Replaces two separate listStep entries that re-implemented the same
+	// union; ListAllSessionBeads is now the single source of truth so a
+	// future shape (e.g. typed but unlabeled production beads) is handled
+	// consistently across the CLI.
+	sessionBeads, err := session.ListAllSessionBeads(store, beads.ListQuery{
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedAsc,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("session beads: %w", err)
+	}
+	for _, item := range sessionBeads {
+		if seen[item.ID] {
+			continue
+		}
+		seen[item.ID] = true
+		all = append(all, item)
+	}
 	for _, step := range steps {
 		items, err := store.List(step.query)
 		if err != nil {

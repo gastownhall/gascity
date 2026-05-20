@@ -680,9 +680,8 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 		}()
 	}
 
-	allSessionBeads, err := store.List(beads.ListQuery{
-		Label: session.LabelSession,
-		Sort:  beads.SortCreatedDesc,
+	allSessionBeads, err := session.ListAllSessionBeads(store, beads.ListQuery{
+		Sort: beads.SortCreatedDesc,
 	})
 	if err != nil {
 		if jsonOutput {

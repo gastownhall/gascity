@@ -33,12 +33,14 @@ const (
 	// derived from the wake budget used for starts.
 	defaultMaxParallelStopsPerWave = 3
 	defaultMaxParallelInterrupts   = 16
-
-	// staleKeyDetectDelay is how long to wait after starting a session
-	// before checking if it died immediately (stale resume key detection).
-	// Matches the same constant in internal/session/chat.go.
-	staleKeyDetectDelay = 2 * time.Second
 )
+
+// staleKeyDetectDelay is how long to wait after starting a session before
+// checking if it died immediately (stale resume key detection). Matches the
+// same value in internal/session/chat.go. Made a var so tests driving the
+// start path through a fake runtime can shorten it via
+// setStaleKeyDetectDelayForTest (defined in the test file).
+var staleKeyDetectDelay = 2 * time.Second
 
 type asyncStartLimiter struct {
 	mu       sync.Mutex

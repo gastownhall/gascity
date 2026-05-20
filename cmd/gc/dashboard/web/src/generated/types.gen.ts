@@ -748,7 +748,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | SupervisorFsPressureSkippedTickPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | SupervisorFsPressureSkippedTickPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -2415,6 +2415,29 @@ export type SessionCreateSucceededPayload = {
     session: SessionResponse;
 };
 
+export type SessionDrainAckedWithAssignedWorkPayload = {
+    /**
+     * ID of the work bead still holding this session as its assignee.
+     */
+    bead_id: string;
+    /**
+     * Status of the stranded bead at emission time (typically 'in_progress' for cap-hit, 'open' if recovery races claim).
+     */
+    bead_status?: string;
+    /**
+     * Short diagnostic context. Today both emission sites pass 'drain_acked_with_assigned_work'; reserved for finer-grained shape discriminators if later Shape-N variants land.
+     */
+    reason?: string;
+    /**
+     * Canonical session bead ID for the session that drain-acked.
+     */
+    session_id: string;
+    /**
+     * Pool template name when known at the emission site.
+     */
+    template?: string;
+};
+
 export type SessionInfo = {
     attached: boolean;
     last_activity?: string;
@@ -3034,6 +3057,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeRequestResultSessionSubmit) | ({
     type: 'session.crashed';
 } & TypedEventStreamEnvelopeSessionCrashed) | ({
+    type: 'session.drain_acked_with_assigned_work';
+} & TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
     type: 'session.draining';
 } & TypedEventStreamEnvelopeSessionDraining) | ({
     type: 'session.idle_killed';
@@ -3606,6 +3631,20 @@ export type TypedEventStreamEnvelopeSessionCrashed = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.drain_acked_with_assigned_work
+ */
+export type TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork = {
+    actor: string;
+    message?: string;
+    payload: SessionDrainAckedWithAssignedWorkPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.drain_acked_with_assigned_work';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.draining
  */
 export type TypedEventStreamEnvelopeSessionDraining = {
@@ -3841,6 +3880,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit) | ({
     type: 'session.crashed';
 } & TypedTaggedEventStreamEnvelopeSessionCrashed) | ({
+    type: 'session.drain_acked_with_assigned_work';
+} & TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
     type: 'session.draining';
 } & TypedTaggedEventStreamEnvelopeSessionDraining) | ({
     type: 'session.idle_killed';
@@ -4448,6 +4489,21 @@ export type TypedTaggedEventStreamEnvelopeSessionCrashed = {
     subject?: string;
     ts: string;
     type: 'session.crashed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.drain_acked_with_assigned_work
+ */
+export type TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SessionDrainAckedWithAssignedWorkPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.drain_acked_with_assigned_work';
     workflow?: WorkflowEventProjection;
 };
 

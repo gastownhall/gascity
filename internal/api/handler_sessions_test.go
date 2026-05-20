@@ -238,7 +238,10 @@ func (s *partialPrimeSessionStore) List(query beads.ListQuery) ([]beads.Bead, er
 	if err != nil {
 		return nil, err
 	}
-	if query.AllowScan || query.Label == session.LabelSession {
+	// Mimic the bd list partial-result path on the session-bead read
+	// queries — both Type=session and Label=gc:session are issued by
+	// ListAllSessionBeads, and Prime drives an AllowScan over the cache.
+	if query.AllowScan || query.Label == session.LabelSession || query.Type == session.BeadType {
 		if query.Label == session.LabelSession {
 			s.labelListCalls++
 		}
@@ -257,8 +260,14 @@ func TestListSessionBeadsForReadModelFallsBackAfterPartialCachePrime(t *testing.
 	t.Parallel()
 
 	backing := &partialPrimeSessionStore{MemStore: beads.NewMemStore()}
+	// Real session beads carry Type=BeadType + LabelSession. Tests used
+	// to omit Type because the read-model only queried by Label; after
+	// the Type+Label union refactor, IsSessionBeadOrRepairable filters
+	// rows whose Type is neither "session" nor "" so the fixtures need
+	// to match production shape.
 	survivor, err := backing.Create(beads.Bead{
 		Title:  "session survivor",
+		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 	})
 	if err != nil {
@@ -266,6 +275,7 @@ func TestListSessionBeadsForReadModelFallsBackAfterPartialCachePrime(t *testing.
 	}
 	if _, err := backing.Create(beads.Bead{
 		Title:  "dropped session",
+		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 	}); err != nil {
 		t.Fatalf("Create(dropped): %v", err)

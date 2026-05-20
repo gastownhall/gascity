@@ -68,17 +68,23 @@ func loadSessionBeadSnapshot(store beads.Store) (*sessionBeadSnapshot, error) {
 	if store == nil {
 		return newSessionBeadSnapshot(nil), nil
 	}
-	all, err := store.List(beads.ListQuery{
-		Label: sessionBeadLabel,
-	})
+	// Type+Label union via the shared helper. The motivating bug:
+	// canonical configured_named_session beads can lose their gc:session
+	// label after crashes or schema migrations but retain
+	// issue_type=session; a label-only query strands them invisible to
+	// the reconciler, which then never heals their state=awake metadata
+	// after a runtime is lost. Their alias reservations live forever,
+	// blocking createPoolSessionBead from materializing replacements
+	// ("alias … already belongs to gm-XXXX") and preventing the pool
+	// from spawning for that template until manual intervention.
+	//
+	// Closed history is intentionally not loaded here — the reconciler
+	// calls this several times per tick and closed history grows
+	// without bound. Callers that need a closed record must fetch that
+	// one ID explicitly.
+	sessions, err := sessionpkg.ListAllSessionBeads(store, beads.ListQuery{})
 	if err != nil {
-		return nil, fmt.Errorf("listing session beads: %w", err)
-	}
-	sessions := make([]beads.Bead, 0, len(all))
-	for _, bead := range all {
-		if sessionpkg.IsSessionBeadOrRepairable(bead) {
-			sessions = append(sessions, bead)
-		}
+		return nil, err
 	}
 	return newSessionBeadSnapshot(sessions), nil
 }
