@@ -102,16 +102,12 @@ func PackStateDir(cityRoot, packName string) string {
 	return filepath.Join(RuntimePacksDir(cityRoot), packName)
 }
 
-// RigStateFile returns the path to the runtime rig state file.
-func RigStateFile(cityRoot string) string {
-	return RuntimePath(cityRoot, "runtime", "rig-state.json")
-}
-
-// CityStateFile returns the path to the runtime city state file. This
-// mirrors RigStateFile and holds explicit city suspension preferences
-// that should not be committed to city.toml.
-func CityStateFile(cityRoot string) string {
-	return RuntimePath(cityRoot, "runtime", "city-state.json")
+// SuspensionStateFile returns the path to the unified runtime
+// suspension-state file. It holds the live city, rig, and (in a
+// follow-up) agent suspension preferences that should not be
+// committed to city.toml — each clone gets its own copy.
+func SuspensionStateFile(cityRoot string) string {
+	return RuntimePath(cityRoot, "runtime", "suspension-state.json")
 }
 
 // CityRuntimeEnv returns city runtime env vars rooted at the canonical runtime

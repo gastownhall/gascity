@@ -97,8 +97,8 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 	// do the same immediately after loadCityConfig.
 	resolveRigPaths(cityPath, cfg.Rigs)
 
-	citySt, _ := loadCitySuspensionState(fsys.OSFS{}, cityPath)
-	if citySuspendedWithState(cfg, citySt) {
+	st, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
+	if citySuspendedWithState(cfg, st) {
 		fmt.Fprintln(stderr, "gc hook: city is suspended") //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -109,8 +109,7 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 		return 1
 	}
 
-	suspState, _ := loadRigSuspensionState(fsys.OSFS{}, cityPath)
-	if isAgentEffectivelySuspendedWith(cfg, &a, citySt, suspState) {
+	if isAgentEffectivelySuspendedWith(cfg, &a, st) {
 		fmt.Fprintf(stderr, "gc hook: agent %q is suspended\n", agentName) //nolint:errcheck // best-effort stderr
 		return 1
 	}

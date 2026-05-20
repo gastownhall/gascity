@@ -15,7 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/rigstate"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 type mkdirAllErrorFS struct {
@@ -1060,11 +1060,11 @@ func TestDoRigSuspend(t *testing.T) {
 	}
 
 	// Verify suspension recorded in runtime state, not city.toml.
-	st, err := rigstate.Load(fsys.OSFS{}, cityPath)
+	st, err := suspensionstate.Load(fsys.OSFS{}, cityPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !rigstate.IsSuspended(st, "frontend") {
+	if !suspensionstate.IsRigSuspended(st, "frontend") {
 		t.Errorf("rig should be suspended in runtime state, got %+v", st)
 	}
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
@@ -1130,14 +1130,14 @@ func TestDoRigResume(t *testing.T) {
 	if len(cfg.Rigs) != 1 || !cfg.Rigs[0].SuspendedOnStart {
 		t.Errorf("city.toml suspended_on_start should remain set, got %+v", cfg.Rigs)
 	}
-	st, err := rigstate.Load(fsys.OSFS{}, cityPath)
+	st, err := suspensionstate.Load(fsys.OSFS{}, cityPath)
 	if err != nil {
-		t.Fatalf("rigstate.Load: %v", err)
+		t.Fatalf("suspensionstate.Load: %v", err)
 	}
-	if v, ok := rigstate.ExplicitSuspended(st, "frontend"); !ok || v {
+	if v, ok := suspensionstate.ExplicitRig(st, "frontend"); !ok || v {
 		t.Errorf("frontend should have explicit resume in runtime state, got (%v, %v)", v, ok)
 	}
-	if rigstate.EffectiveSuspended(st, "frontend", cfg.Rigs[0].SuspendedOnStart) {
+	if suspensionstate.EffectiveRigSuspended(st, "frontend", cfg.Rigs[0].SuspendedOnStart) {
 		t.Error("explicit resume in runtime state must beat suspended_on_start=true")
 	}
 }

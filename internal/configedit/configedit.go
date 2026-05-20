@@ -16,10 +16,9 @@ import (
 	"sync"
 
 	"github.com/BurntSushi/toml"
-	"github.com/gastownhall/gascity/internal/citystate"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/rigstate"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -548,7 +547,7 @@ func (e *Editor) SuspendRig(name string) error {
 	}
 	cityPath := filepath.Dir(e.tomlPath)
 	t := true
-	return rigstate.SetRigSuspended(e.fs, cityPath, name, &t)
+	return suspensionstate.SetRigSuspended(e.fs, cityPath, name, &t)
 }
 
 // ResumeRig records an explicit "resumed" preference in the runtime
@@ -568,7 +567,7 @@ func (e *Editor) ResumeRig(name string) error {
 	}
 	cityPath := filepath.Dir(e.tomlPath)
 	f := false
-	return rigstate.SetRigSuspended(e.fs, cityPath, name, &f)
+	return suspensionstate.SetRigSuspended(e.fs, cityPath, name, &f)
 }
 
 // SuspendCity records an explicit "suspended" preference for the city
@@ -577,7 +576,7 @@ func (e *Editor) ResumeRig(name string) error {
 func (e *Editor) SuspendCity() error {
 	cityPath := filepath.Dir(e.tomlPath)
 	t := true
-	return citystate.SetCitySuspended(e.fs, cityPath, &t)
+	return suspensionstate.SetCitySuspended(e.fs, cityPath, &t)
 }
 
 // ResumeCity records an explicit "resumed" preference in the runtime
@@ -586,7 +585,7 @@ func (e *Editor) SuspendCity() error {
 func (e *Editor) ResumeCity() error {
 	cityPath := filepath.Dir(e.tomlPath)
 	f := false
-	return citystate.SetCitySuspended(e.fs, cityPath, &f)
+	return suspensionstate.SetCitySuspended(e.fs, cityPath, &f)
 }
 
 // rigDeclared reports whether a rig with the given name exists in cfg.

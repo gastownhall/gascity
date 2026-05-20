@@ -18,14 +18,13 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
-	"github.com/gastownhall/gascity/internal/citystate"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
-	"github.com/gastownhall/gascity/internal/rigstate"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -59,12 +58,12 @@ func standaloneBuildAgentsFnWithSessionBeads(
 // Used by the reconciler to distinguish suspended agents from true
 // orphans during Phase 2 cleanup.
 func computeSuspendedNames(cfg *config.City, cityName, cityPath string) map[string]bool {
-	citySt, _ := loadCitySuspensionState(fsys.OSFS{}, cityPath)
-	suspState, _ := loadRigSuspensionState(fsys.OSFS{}, cityPath)
+	citySt, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
+	suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	return computeSuspendedNamesWith(cfg, cityName, cityPath, citySt, suspState)
 }
 
-func computeSuspendedNamesWith(cfg *config.City, cityName, cityPath string, citySt citystate.State, suspState rigstate.SuspensionState) map[string]bool {
+func computeSuspendedNamesWith(cfg *config.City, cityName, cityPath string, citySt suspensionstate.State, suspState suspensionstate.State) map[string]bool {
 	names := make(map[string]bool)
 	st := cfg.Workspace.SessionTemplate
 

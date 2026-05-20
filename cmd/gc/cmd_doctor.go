@@ -13,7 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/rigstate"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
 
@@ -248,9 +248,9 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 	// Per-rig checks. Skip effectively-suspended rigs — opening their
 	// bead store triggers bd auto-start of orphan Dolt servers (ga-wzk).
 	if cfgErr == nil {
-		suspState, _ := loadRigSuspensionState(fsys.OSFS{}, cityPath)
+		suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 		for _, rig := range cfg.Rigs {
-			if rigstate.EffectiveSuspended(suspState, rig.Name, rig.SuspendedOnStart) {
+			if suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart()) {
 				continue
 			}
 			if strings.TrimSpace(rig.Path) == "" {

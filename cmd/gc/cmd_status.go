@@ -7,7 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/rigstate"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/spf13/cobra"
 )
@@ -103,9 +103,9 @@ func doRigStatusWithStoreAndSnapshot(
 ) int {
 	registerStatusProviderACPRoutes(sp, statusSnapshot, cityName, cfg)
 
-	suspState, _ := loadRigSuspensionState(fsys.OSFS{}, cityPath)
+	suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	suspStr := "no"
-	if rigstate.EffectiveSuspended(suspState, rig.Name, rig.SuspendedOnStart) {
+	if suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart()) {
 		suspStr = "yes"
 	}
 

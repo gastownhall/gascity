@@ -2010,8 +2010,8 @@ gc restart [path]
 ## gc resume
 
 Resume a suspended city by recording an explicit "resumed" preference
-in .gc/runtime/city-state.json. The override sticks across city restarts
-even when [workspace] declares suspended_on_start = true.
+in .gc/runtime/suspension-state.json. The override sticks across city
+restarts even when [workspace] declares suspended_on_start = true.
 
 Restores normal operation: the reconciler will spawn agents again and
 gc hook/prime will return work. Use "gc agent resume" to resume
@@ -2990,7 +2990,8 @@ gc supervisor uninstall
 ## gc suspend
 
 Suspends the city by recording an explicit "suspended" preference
-in .gc/runtime/city-state.json (per-clone runtime state, not committed).
+in .gc/runtime/suspension-state.json (per-clone runtime state, not
+committed).
 
 This inherits downward — when the city is suspended, all agents are
 effectively suspended regardless of their individual suspended fields.

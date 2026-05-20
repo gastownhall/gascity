@@ -15,13 +15,12 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/citystate"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/rigstate"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 func TestControllerStateReadAccess(t *testing.T) {
@@ -1633,11 +1632,11 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 				if cfg.Rigs[0].Suspended {
 					t.Fatal("city.toml should not have suspended=true after SuspendRig")
 				}
-				st, err := rigstate.Load(fsys.OSFS{}, cityDir)
+				st, err := suspensionstate.Load(fsys.OSFS{}, cityDir)
 				if err != nil {
 					t.Fatalf("load rig state: %v", err)
 				}
-				if !rigstate.IsSuspended(st, "rig1") {
+				if !suspensionstate.IsRigSuspended(st, "rig1") {
 					t.Fatal("rig should be suspended in runtime state after SuspendRig")
 				}
 			},
@@ -1657,11 +1656,11 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 				if !cfg.Rigs[0].SuspendedOnStart {
 					t.Fatal("suspended_on_start should remain set in city.toml; ResumeRig records the override in runtime state")
 				}
-				st, err := rigstate.Load(fsys.OSFS{}, cityDir)
+				st, err := suspensionstate.Load(fsys.OSFS{}, cityDir)
 				if err != nil {
 					t.Fatalf("load rig state: %v", err)
 				}
-				if v, ok := rigstate.ExplicitSuspended(st, "rig1"); !ok || v {
+				if v, ok := suspensionstate.ExplicitRig(st, "rig1"); !ok || v {
 					t.Fatalf("rig should have explicit resume in runtime state; got (%v, %v)", v, ok)
 				}
 			},
@@ -1676,11 +1675,11 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 				if cfg.Workspace.Suspended || cfg.Workspace.SuspendedOnStart {
 					t.Fatal("city.toml workspace must remain untouched by SuspendCity (runtime state owns the change)")
 				}
-				st, err := citystate.Load(fsys.OSFS{}, cityDir)
+				st, err := suspensionstate.Load(fsys.OSFS{}, cityDir)
 				if err != nil {
 					t.Fatalf("load city state: %v", err)
 				}
-				if !citystate.IsSuspended(st) {
+				if !suspensionstate.IsCitySuspended(st) {
 					t.Fatal("city should be explicit-suspended in runtime state after SuspendCity")
 				}
 			},
@@ -1698,11 +1697,11 @@ func TestControllerStateMutationsPokeController(t *testing.T) {
 				if !cfg.Workspace.SuspendedOnStart {
 					t.Fatal("suspended_on_start should remain set in city.toml; ResumeCity records the override in runtime state")
 				}
-				st, err := citystate.Load(fsys.OSFS{}, cityDir)
+				st, err := suspensionstate.Load(fsys.OSFS{}, cityDir)
 				if err != nil {
 					t.Fatalf("load city state: %v", err)
 				}
-				if v, ok := citystate.ExplicitSuspended(st); !ok || v {
+				if v, ok := suspensionstate.ExplicitCity(st); !ok || v {
 					t.Fatalf("city should have explicit resume in runtime state; got (%v, %v)", v, ok)
 				}
 			},

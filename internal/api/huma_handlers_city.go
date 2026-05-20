@@ -5,19 +5,19 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
-	"github.com/gastownhall/gascity/internal/citystate"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // humaHandleCityGet is the Huma-typed handler for GET /v0/city.
 func (s *Server) humaHandleCityGet(_ context.Context, _ *CityGetInput) (*struct{ Body cityGetResponse }, error) {
 	cfg := s.state.Config()
-	citySt, _ := citystate.Load(fsys.OSFS{}, s.state.CityPath())
+	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
 	resp := cityGetResponse{
 		Name:            s.state.CityName(),
 		Path:            s.state.CityPath(),
 		Version:         s.state.Version(),
-		Suspended:       citystate.EffectiveSuspended(citySt, cfg.Workspace.SuspendedOnStart),
+		Suspended:       suspensionstate.EffectiveCitySuspended(citySt, cfg.Workspace.EffectiveSuspendedOnStart()),
 		Provider:        cfg.Workspace.Provider,
 		SessionTemplate: cfg.Workspace.SessionTemplate,
 		UptimeSec:       int(time.Since(s.state.StartedAt()).Seconds()),

@@ -7,11 +7,10 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/citystate"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/rigstate"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -93,10 +92,10 @@ func (s *Server) buildStatusBody() StatusBody {
 	}
 
 	// Count rigs by state.
-	rigSuspState, _ := rigstate.Load(fsys.OSFS{}, s.state.CityPath())
+	rigSuspState, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
 	rc := rigCounts{Total: len(cfg.Rigs)}
 	for _, rig := range cfg.Rigs {
-		if rigstate.EffectiveSuspended(rigSuspState, rig.Name, rig.SuspendedOnStart) {
+		if suspensionstate.EffectiveRigSuspended(rigSuspState, rig.Name, rig.EffectiveSuspendedOnStart()) {
 			rc.Suspended++
 			continue
 		}
@@ -156,14 +155,14 @@ func (s *Server) buildStatusBody() StatusBody {
 
 	uptime := int(time.Since(s.state.StartedAt()).Seconds())
 
-	citySt, _ := citystate.Load(fsys.OSFS{}, s.state.CityPath())
+	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
 
 	return StatusBody{
 		Name:          cityName,
 		Path:          s.state.CityPath(),
 		Version:       s.state.Version(),
 		UptimeSec:     uptime,
-		Suspended:     citystate.EffectiveSuspended(citySt, cfg.Workspace.SuspendedOnStart),
+		Suspended:     suspensionstate.EffectiveCitySuspended(citySt, cfg.Workspace.EffectiveSuspendedOnStart()),
 		AgentCount:    ac.Total,
 		RigCount:      rc.Total,
 		Running:       rawRunning,

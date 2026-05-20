@@ -10,7 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	gitpkg "github.com/gastownhall/gascity/internal/git"
-	"github.com/gastownhall/gascity/internal/rigstate"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
@@ -83,8 +83,8 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 // intentionally NOT consulted — `gc doctor` surfaces it as a migration
 // target.
 func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provider, cityName, cityPath string) bool {
-	if rs, err := rigstate.Load(fsys.OSFS{}, cityPath); err == nil &&
-		rigstate.EffectiveSuspended(rs, rig.Name, rig.SuspendedOnStart) {
+	if rs, err := suspensionstate.Load(fsys.OSFS{}, cityPath); err == nil &&
+		suspensionstate.EffectiveRigSuspended(rs, rig.Name, rig.EffectiveSuspendedOnStart()) {
 		return true
 	}
 	tmpl := cfg.Workspace.SessionTemplate

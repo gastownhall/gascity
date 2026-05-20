@@ -28,7 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/processgroup"
-	"github.com/gastownhall/gascity/internal/rigstate"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 var startDeprecatedOrderWarningDedup = logutil.NewDedup(logutil.DefaultDedupCapacity)
@@ -978,10 +978,10 @@ func (m *memoryOrderDispatcher) rigSuspendedByName(rigName string) bool {
 	if rigName == "" {
 		return false
 	}
-	suspState, _ := loadRigSuspensionState(fsys.OSFS{}, m.cityPath)
+	suspState, _ := loadSuspensionState(fsys.OSFS{}, m.cityPath)
 	for i := range m.cfg.Rigs {
 		if m.cfg.Rigs[i].Name == rigName {
-			return rigstate.EffectiveSuspended(suspState, rigName, m.cfg.Rigs[i].SuspendedOnStart)
+			return suspensionstate.EffectiveRigSuspended(suspState, rigName, m.cfg.Rigs[i].EffectiveSuspendedOnStart())
 		}
 	}
 	return false

@@ -1922,11 +1922,11 @@
         },
         "suspended": {
           "type": "boolean",
-          "description": "Suspended is the deprecated, pre-runtime-state suspension flag. The\nfield is still parsed so `gc doctor` can warn about it and recommend\nthe rename, but it is no longer read by any behavioral code path —\nsuspension state is owned by .gc/runtime/rig-state.json (explicit user\npreference) and SuspendedOnStart (default at city start)."
+          "description": "Suspended is the deprecated pre-runtime-state suspension flag.\nParsed for backwards compatibility and treated as an alias for\nSuspendedOnStart by [Rig.EffectiveSuspendedOnStart], so existing\ncities with `suspended = true` continue to start their rigs\nsuspended after upgrade. Live suspend/resume commands no longer\nwrite this field. `gc doctor` flags it and offers `--fix` to\nrename to suspended_on_start."
         },
         "suspended_on_start": {
           "type": "boolean",
-          "description": "SuspendedOnStart is the rig's desired suspension state at city start.\nWhen true and no explicit entry exists for this rig in\n.gc/runtime/rig-state.json, the rig is treated as suspended. Once the\nuser has explicitly suspended or resumed the rig via `gc rig\nsuspend/resume`, the runtime state wins and this flag is informational."
+          "description": "SuspendedOnStart is the rig's desired suspension state at city\nstart. When true and no explicit entry exists for this rig in\n.gc/runtime/suspension-state.json, the rig is treated as\nsuspended. Once the user has explicitly suspended or resumed the\nrig via `gc rig suspend/resume`, the runtime state wins."
         },
         "formulas_dir": {
           "type": "string",
@@ -2261,11 +2261,11 @@
         },
         "suspended": {
           "type": "boolean",
-          "description": "Suspended is the deprecated, pre-runtime-state city suspension flag.\nThe field is still parsed so `gc doctor` can warn about it and\nrecommend the rename, but it is no longer read by any behavioral\ncode path — city suspension is owned by\n.gc/runtime/city-state.json (explicit user preference) and\nSuspendedOnStart (default at city start)."
+          "description": "Suspended is the deprecated pre-runtime-state city suspension\nflag. Parsed for backwards compatibility and treated as an alias\nfor SuspendedOnStart by [Workspace.EffectiveSuspendedOnStart], so\nexisting cities with `suspended = true` continue to start\nsuspended after upgrade. Live suspend/resume commands no longer\nwrite this field. `gc doctor` flags it and offers `--fix` to\nrename to suspended_on_start."
         },
         "suspended_on_start": {
           "type": "boolean",
-          "description": "SuspendedOnStart is the city's desired suspension state at start.\nWhen true and no explicit entry exists in\n.gc/runtime/city-state.json, the city is treated as suspended. Once\nthe user has explicitly suspended or resumed via `gc suspend/resume`,\nthe runtime state wins and this flag is informational."
+          "description": "SuspendedOnStart is the city's desired suspension state at start.\nWhen true and no explicit entry exists in\n.gc/runtime/suspension-state.json, the city is treated as\nsuspended. Once the user has explicitly suspended or resumed via\n`gc suspend/resume`, the runtime state wins."
         },
         "max_active_sessions": {
           "type": "integer",

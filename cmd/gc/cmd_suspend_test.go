@@ -6,17 +6,16 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/citystate"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/rigstate"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // --- doSuspendCity ---
 
 // TestSuspendResume exercises the canonical suspend → resume cycle.
-// Suspension state is recorded in .gc/runtime/city-state.json and
-// city.toml stays untouched.
+// Suspension state is recorded in .gc/runtime/suspension-state.json
+// and city.toml stays untouched.
 func TestSuspendResume(t *testing.T) {
 	f := fsys.NewFake()
 	cfg := config.DefaultCity("bright-lights")
@@ -40,17 +39,17 @@ func TestSuspendResume(t *testing.T) {
 	}
 
 	// city.toml must stay byte-for-byte identical: suspension lives in
-	// .gc/runtime/city-state.json, never in committed config.
+	// .gc/runtime/suspension-state.json, never in committed config.
 	if !bytes.Equal(f.Files[cityTOMLPath], originalTOML) {
 		t.Errorf("city.toml mutated by suspend; want byte-identical:\n got:  %s\n want: %s",
 			f.Files[cityTOMLPath], originalTOML)
 	}
-	st, err := citystate.Load(f, cityPath)
+	st, err := suspensionstate.Load(f, cityPath)
 	if err != nil {
-		t.Fatalf("citystate.Load: %v", err)
+		t.Fatalf("suspensionstate.Load: %v", err)
 	}
-	if !citystate.IsSuspended(st) {
-		t.Error("citystate should record explicit suspend after doSuspendCity(true)")
+	if !suspensionstate.IsCitySuspended(st) {
+		t.Error("runtime state should record explicit suspend after doSuspendCity(true)")
 	}
 
 	// Resume.
@@ -67,12 +66,12 @@ func TestSuspendResume(t *testing.T) {
 		t.Errorf("city.toml mutated by resume; want byte-identical:\n got:  %s\n want: %s",
 			f.Files[cityTOMLPath], originalTOML)
 	}
-	st, err = citystate.Load(f, cityPath)
+	st, err = suspensionstate.Load(f, cityPath)
 	if err != nil {
-		t.Fatalf("citystate.Load: %v", err)
+		t.Fatalf("suspensionstate.Load: %v", err)
 	}
-	if v, ok := citystate.ExplicitSuspended(st); !ok || v {
-		t.Errorf("citystate should record explicit resume after doSuspendCity(false); got (%v, %v)", v, ok)
+	if v, ok := suspensionstate.ExplicitCity(st); !ok || v {
+		t.Errorf("runtime state should record explicit resume after doSuspendCity(false); got (%v, %v)", v, ok)
 	}
 }
 
@@ -90,7 +89,7 @@ func TestSuspendAlreadySuspended(t *testing.T) {
 	}
 	f.Files[filepath.Join("/city", "city.toml")] = data
 	want := true
-	if err := citystate.SetCitySuspended(f, "/city", &want); err != nil {
+	if err := suspensionstate.SetCitySuspended(f, "/city", &want); err != nil {
 		t.Fatalf("pre-suspend: %v", err)
 	}
 
@@ -150,12 +149,12 @@ dir = "myrig"
 		t.Errorf("city.toml mutated by suspend:\n got:  %s\n want: %s",
 			f.Files["/city/city.toml"], original)
 	}
-	st, err := citystate.Load(f, "/city")
+	st, err := suspensionstate.Load(f, "/city")
 	if err != nil {
-		t.Fatalf("citystate.Load: %v", err)
+		t.Fatalf("suspensionstate.Load: %v", err)
 	}
-	if !citystate.IsSuspended(st) {
-		t.Error("citystate should record explicit suspend")
+	if !suspensionstate.IsCitySuspended(st) {
+		t.Error("runtime state should record explicit suspend")
 	}
 
 	// Resume should also preserve.
@@ -180,11 +179,11 @@ func TestCitySuspendedFromConfig(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test", SuspendedOnStart: true},
 	}
-	if !citySuspendedWithState(cfg, citystate.State{}) {
+	if !citySuspendedWithState(cfg, suspensionstate.State{}) {
 		t.Error("citySuspendedWithState = false, want true with workspace.suspended_on_start=true")
 	}
 	cfg.Workspace.SuspendedOnStart = false
-	if citySuspendedWithState(cfg, citystate.State{}) {
+	if citySuspendedWithState(cfg, suspensionstate.State{}) {
 		t.Error("citySuspendedWithState = true, want false when nothing flags the city as suspended")
 	}
 }
@@ -196,28 +195,30 @@ func TestCitySuspendedRuntimeOverridesConfig(t *testing.T) {
 		Workspace: config.Workspace{Name: "test", SuspendedOnStart: true},
 	}
 	resume := false
-	st := citystate.State{City: citystate.Override{Suspended: &resume}}
+	st := suspensionstate.State{City: suspensionstate.Override{Suspended: &resume}}
 	if citySuspendedWithState(cfg, st) {
 		t.Error("explicit runtime resume must beat workspace.suspended_on_start=true")
 	}
 
 	suspend := true
 	cfg.Workspace.SuspendedOnStart = false
-	st = citystate.State{City: citystate.Override{Suspended: &suspend}}
+	st = suspensionstate.State{City: suspensionstate.Override{Suspended: &suspend}}
 	if !citySuspendedWithState(cfg, st) {
 		t.Error("explicit runtime suspend must beat workspace.suspended_on_start=false")
 	}
 }
 
-// TestCitySuspended_LegacyFieldIgnored pins the migration contract:
-// the deprecated workspace.suspended field is never read for behavior.
-// Doctor surfaces it as a warning so users migrate.
-func TestCitySuspended_LegacyFieldIgnored(t *testing.T) {
+// TestCitySuspended_LegacyFieldIsAlias pins the migration contract:
+// the deprecated workspace.suspended field is honored as an alias for
+// suspended_on_start so existing cities with `suspended = true`
+// continue to start suspended after upgrade. Doctor warns and offers
+// `--fix` to rename.
+func TestCitySuspended_LegacyFieldIsAlias(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test", Suspended: true},
 	}
-	if citySuspendedWithState(cfg, citystate.State{}) {
-		t.Error("legacy [workspace] suspended = true must be ignored; only suspended_on_start and runtime state matter")
+	if !citySuspendedWithState(cfg, suspensionstate.State{}) {
+		t.Error("legacy [workspace] suspended = true must keep starting the city suspended after upgrade (alias for suspended_on_start)")
 	}
 }
 
@@ -240,7 +241,7 @@ func TestAgentEffectivelySuspendedDirect(t *testing.T) {
 		Workspace: config.Workspace{Name: "test"},
 		Agents:    []config.Agent{{Name: "worker", Suspended: true}},
 	}
-	if !isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], citystate.State{}, emptyRigState()) {
+	if !isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], suspensionstate.State{}) {
 		t.Error("agent with Suspended=true should be effectively suspended")
 	}
 }
@@ -251,7 +252,7 @@ func TestAgentEffectivelySuspendedViaRig(t *testing.T) {
 		Agents:    []config.Agent{{Name: "polecat", Dir: "myrig"}},
 		Rigs:      []config.Rig{{Name: "myrig", Path: "/tmp/myrig", SuspendedOnStart: true}},
 	}
-	if !isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], citystate.State{}, emptyRigState()) {
+	if !isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], suspensionstate.State{}) {
 		t.Error("agent in rig with suspended_on_start=true should be effectively suspended")
 	}
 }
@@ -261,7 +262,7 @@ func TestAgentEffectivelySuspendedViaCity(t *testing.T) {
 		Workspace: config.Workspace{Name: "test", SuspendedOnStart: true},
 		Agents:    []config.Agent{{Name: "worker"}},
 	}
-	if !isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], citystate.State{}, emptyRigState()) {
+	if !isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], suspensionstate.State{}) {
 		t.Error("agent in city with suspended_on_start=true should be effectively suspended")
 	}
 }
@@ -271,7 +272,7 @@ func TestAgentEffectivelySuspendedNot(t *testing.T) {
 		Workspace: config.Workspace{Name: "test"},
 		Agents:    []config.Agent{{Name: "worker"}},
 	}
-	if isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], citystate.State{}, emptyRigState()) {
+	if isAgentEffectivelySuspendedWith(cfg, &cfg.Agents[0], suspensionstate.State{}) {
 		t.Error("non-suspended agent should not be effectively suspended")
 	}
 }
@@ -292,11 +293,8 @@ func TestSuspendInheritance(t *testing.T) {
 	}
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
-		if !isAgentEffectivelySuspendedWith(cfg, a, citystate.State{}, emptyRigState()) {
+		if !isAgentEffectivelySuspendedWith(cfg, a, suspensionstate.State{}) {
 			t.Errorf("agent %q should be suspended when city has suspended_on_start=true", a.QualifiedName())
 		}
 	}
 }
-
-// emptyRigState returns a fresh rigstate.SuspensionState for tests.
-func emptyRigState() rigstate.SuspensionState { return rigstate.SuspensionState{} }

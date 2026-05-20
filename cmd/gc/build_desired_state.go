@@ -16,7 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
-	"github.com/gastownhall/gascity/internal/rigstate"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
@@ -233,7 +233,7 @@ func buildDesiredStateWithSessionBeads(
 	trace *sessionReconcilerTraceCycle,
 	stderr io.Writer,
 ) DesiredStateResult {
-	citySt, _ := loadCitySuspensionState(fsys.OSFS{}, cityPath)
+	citySt, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	if effectiveCitySuspended(cfg, citySt) {
 		return DesiredStateResult{}
 	}
@@ -512,11 +512,11 @@ func buildSuspendedRigPathsForCity(cfg *config.City, cityPath string) map[string
 	if cfg == nil || len(cfg.Rigs) == 0 {
 		return nil
 	}
-	var suspState rigstate.SuspensionState
+	var suspState suspensionstate.State
 	if cityPath != "" {
-		suspState, _ = loadRigSuspensionState(fsys.OSFS{}, cityPath)
+		suspState, _ = loadSuspensionState(fsys.OSFS{}, cityPath)
 	}
-	suspNames := buildMergedSuspendedRigNames(cfg, suspState)
+	suspNames := buildEffectiveSuspendedRigNames(cfg, suspState)
 	if len(suspNames) == 0 {
 		return nil
 	}

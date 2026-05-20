@@ -12,7 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/rigstate"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 func TestDoctorSkipsDoltChecksTreatsExecGcBeadsBdAsBdContract(t *testing.T) {
@@ -433,7 +433,7 @@ func TestDoctorSkipsSuspendedRigChecks(t *testing.T) {
 	// Mirror the per-rig registration logic from doDoctor.
 	d := &doctor.Doctor{}
 	for _, rig := range rigs {
-		if rigstate.EffectiveSuspended(rigstate.SuspensionState{}, rig.Name, rig.SuspendedOnStart) {
+		if suspensionstate.EffectiveRigSuspended(suspensionstate.State{}, rig.Name, rig.SuspendedOnStart) {
 			continue
 		}
 		d.Register(doctor.NewRigPathCheck(rig))

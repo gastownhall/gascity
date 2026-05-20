@@ -123,7 +123,7 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 	statusSnapshot *sessionBeadSnapshot,
 	stderr io.Writer,
 ) cityStatusSnapshot {
-	citySt, _ := loadCitySuspensionState(fsys.OSFS{}, cityPath)
+	citySt, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	suspended := os.Getenv("GC_SUSPENDED") == "1"
 	if cfg != nil {
 		suspended = citySuspendedWithState(cfg, citySt)
@@ -139,7 +139,7 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 		return snapshot
 	}
 
-	suspState, _ := loadRigSuspensionState(fsys.OSFS{}, cityPath)
+	suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	suspendedRigs := buildEffectiveSuspendedRigNames(cfg, suspState)
 
 	rigCounts := make(map[string]*rigStatusCounts, len(cfg.Rigs))

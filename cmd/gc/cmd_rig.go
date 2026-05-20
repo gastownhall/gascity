@@ -403,8 +403,8 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
 	if reAdd {
 		w(fmt.Sprintf("Re-initializing rig '%s'...", name))
-		if startSuspended && startSuspended != existingRig.SuspendedOnStart {
-			fmt.Fprintf(stderr, "gc rig add: warning: --start-suspended ignored (existing: suspended_on_start=%v); edit city.toml to change\n", existingRig.SuspendedOnStart) //nolint:errcheck // best-effort stderr
+		if startSuspended && startSuspended != existingRig.EffectiveSuspendedOnStart() {
+			fmt.Fprintf(stderr, "gc rig add: warning: --start-suspended ignored (existing: suspended_on_start=%v); edit city.toml to change\n", existingRig.EffectiveSuspendedOnStart()) //nolint:errcheck // best-effort stderr
 		}
 		if len(explicitRigImports) > 0 {
 			existingRigImports, err := effectiveRigBoundImports(existingRig, cfg.Packs)
@@ -854,8 +854,8 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
 
-	suspState, _ := loadRigSuspensionState(fs, cityPath)
-	suspNames := buildMergedSuspendedRigNames(cfg, suspState)
+	suspState, _ := loadSuspensionState(fs, cityPath)
+	suspNames := buildEffectiveSuspendedRigNames(cfg, suspState)
 
 	hqPrefix := config.EffectiveHQPrefix(cfg)
 	cityName := cfg.EffectiveCityName()
@@ -1051,7 +1051,7 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 		return 1
 	}
 
-	st, err := loadRigSuspensionState(fs, cityPath)
+	st, err := loadSuspensionState(fs, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig suspend: reading state: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1062,7 +1062,7 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 		return 0
 	}
 
-	if err := saveRigSuspensionState(fs, cityPath, st); err != nil {
+	if err := saveSuspensionState(fs, cityPath, st); err != nil {
 		fmt.Fprintf(stderr, "gc rig suspend: writing state: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1148,7 +1148,7 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 		return 1
 	}
 
-	st, err := loadRigSuspensionState(fs, cityPath)
+	st, err := loadSuspensionState(fs, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig resume: reading state: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1159,7 +1159,7 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 		return 0
 	}
 
-	if err := saveRigSuspensionState(fs, cityPath, st); err != nil {
+	if err := saveSuspensionState(fs, cityPath, st); err != nil {
 		fmt.Fprintf(stderr, "gc rig resume: writing state: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
