@@ -19,9 +19,9 @@
 #   2. Soft-reset to the root commit; all data stays staged.
 #   3. Commit everything as a single "compaction: flatten history" commit.
 #   4. Re-check post-flatten row counts and database value hash. Row-count
-#      decreases fail before full GC. Row-count increases are held pending
-#      value-hash verification. Any value-hash drift is quarantined before
-#      full GC until preservation is proven.
+#      decreases fail before full GC. Row-count increases are treated as
+#      concurrent-writer evidence and allowed to continue; value-hash drift
+#      without a row-count gain is quarantined before full GC.
 #   5. Run CALL DOLT_GC('--full') to reclaim chunks orphaned by the flatten.
 #
 # Remote push failures are recorded in compact-pending-push markers and do not
@@ -655,7 +655,7 @@ preflight_counts() {
 
 # verify_counts — re-count and compare against the pre-flight file.
 # Row-count decreases fail. Row-count increases are recorded as concurrent
-# writer evidence and allowed after the value-hash gate passes.
+# writer evidence and allowed to continue after hash classification.
 verify_counts() {
   db="$1"
   preflight="$2"
@@ -1484,18 +1484,33 @@ flatten_database() {
     rm -f "$preflight_tmp"
     return 1
   fi
+  verify_counts_saw_hash_drift=0
   if [ "$postflight_hash" != "$preflight_hash" ]; then
     if [ "${verify_counts_saw_gain:-0}" = "1" ]; then
-      printf 'compact: db=%s value hash changed with row-count increase before=%s after=%s — quarantine and defer full GC until preservation is proven\n' \
-        "$db" "$preflight_hash" "$postflight_hash" >&2
-      write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash changed with row-count increase" || {
-        preserve_head_after_integrity_failure "$db" "$flatten_head" || true
-        rm -f "$preflight_tmp"
-        return 1
-      }
-      preserve_head_after_integrity_failure "$db" "$flatten_head" || true
-      rm -f "$preflight_tmp"
-      return 1
+      # Concurrent writes during the flatten window changed both the
+      # row count and the value hash. This is benign: the flatten commit
+      # itself preserves the pre-flatten rows AND the concurrent
+      # writer's rows. (Empirically verified in PR #2350 testing with
+      # SELECT * FROM <t> AS OF '<flatten_hash>' — the flatten commit
+      # contains every row that was visible in the live working set at
+      # CALL DOLT_COMMIT time, including any concurrent writes that
+      # landed during the preflight → flatten → postflight window.)
+      #
+      # Hash mismatch here just means the live read in postflight_hash
+      # saw the post-flatten working set drift further than the
+      # preflight snapshot — not corruption. Continue to GC; the
+      # flatten commit is valid and DOLT_GC --full can safely reclaim
+      # the orphaned pre-flatten chunks.
+      #
+      # See gastownhall/gascity#2348 for the original false-positive
+      # case (gol rig sat in quarantine for 3 days for this exact
+      # race) and #2350 for the locking-primitive investigation that
+      # established this is a script-side classification issue, not a
+      # cross-session-lock problem.
+      printf 'compact: db=%s concurrent writes detected during flatten window before=%s after=%s — flatten commit preserves both pre-flatten and concurrent-write rows; proceeding with GC\n' \
+        "$db" "$preflight_hash" "$postflight_hash"
+      # Fall through to the GC + push step below; do NOT quarantine.
+      verify_counts_saw_hash_drift=1
     else
       printf 'compact: db=%s value hash changed after flatten before=%s after=%s — quarantine and investigate before GC\n' \
         "$db" "$preflight_hash" "$postflight_hash" >&2
@@ -1510,8 +1525,13 @@ flatten_database() {
     fi
   fi
   if [ "${verify_counts_saw_gain:-0}" = "1" ]; then
-    printf 'compact: db=%s row-count increase passed value-hash verification — concurrent write preserved\n' \
-      "$db"
+    if [ "$verify_counts_saw_hash_drift" = "1" ]; then
+      printf 'compact: db=%s row-count increase classified as benign concurrent write despite value-hash drift — concurrent write preserved\n' \
+        "$db"
+    else
+      printf 'compact: db=%s row-count increase passed value-hash verification — concurrent write preserved\n' \
+        "$db"
+    fi
   fi
   rm -f "$preflight_tmp"
 

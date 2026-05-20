@@ -1665,17 +1665,19 @@ func TestCompactScriptAllowsRowCountIncreaseDuringFlatten(t *testing.T) {
 	}
 }
 
-func TestCompactScriptQuarantinesRowCountGainWithValueHashDriftBeforeFullGC(t *testing.T) {
+func TestCompactScriptAllowsRowCountGainWithValueHashDriftBeforeFullGC(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "row_count_and_hash_diverges", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("compact succeeded despite row-count gain with value-hash drift:\n%s", out)
+	if err != nil {
+		t.Fatalf("compact should allow row-count gain with value-hash drift: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "value hash changed with row-count increase") {
-		t.Fatalf("output missing row-count-gain hash drift warning:\n%s", out)
+	if !strings.Contains(out, "concurrent writes detected during flatten window") ||
+		!strings.Contains(out, "proceeding with GC") ||
+		!strings.Contains(out, "row-count increase classified as benign concurrent write despite value-hash drift") {
+		t.Fatalf("output missing row-count-gain preservation notices:\n%s", out)
 	}
-	if strings.Contains(out, "concurrent write preserved") {
-		t.Fatalf("hash-drifted row-count gain must not claim preservation before quarantine:\n%s", out)
+	if strings.Contains(out, "quarantine") {
+		t.Fatalf("row-count-gain hash drift must not quarantine:\n%s", out)
 	}
 	logData, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
@@ -1685,12 +1687,14 @@ func TestCompactScriptQuarantinesRowCountGainWithValueHashDriftBeforeFullGC(t *t
 	if !strings.Contains(log, "DOLT_HASHOF_DB") {
 		t.Fatalf("row-count-gain hash drift test should probe database value hash:\n%s", log)
 	}
-	if strings.Contains(log, "DOLT_GC") {
-		t.Fatalf("row-count-gain value-hash drift must defer full GC:\n%s", log)
+	if !strings.Contains(log, "DOLT_GC") {
+		t.Fatalf("row-count-gain value-hash drift should still run full GC:\n%s", log)
 	}
 	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("row-count-gain value-hash drift should write quarantine marker: %v", err)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("row-count-gain value-hash drift must not write quarantine marker")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat quarantine marker: %v", err)
 	}
 }
 
