@@ -73,6 +73,15 @@ func resolveAgentMCPProjection(
 	qualifiedName, workDir string,
 	providerKind string,
 ) (materialize.MCPCatalog, materialize.MCPProjection, error) {
+	// Implicit infrastructure agents (control-dispatcher, provider-coverage
+	// stubs from config.InjectImplicitAgents) never invoke MCP — same
+	// reasoning as the peer-conflict loop in proposeAgentMCPTargets below.
+	// Skipping here avoids the provider-family check tripping on synthesized
+	// agents that have no Provider field set yet inherit the city pack's
+	// MCP catalog (gascity#2203).
+	if agent != nil && agent.Implicit {
+		return materialize.MCPCatalog{}, materialize.MCPProjection{}, nil
+	}
 	catalog, err := loadEffectiveMCPForAgent(cityPath, cfg, agent, qualifiedName, workDir)
 	if err != nil {
 		return materialize.MCPCatalog{}, materialize.MCPProjection{}, err

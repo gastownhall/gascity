@@ -362,3 +362,54 @@ url = "https://example.com/deputy"
 		t.Fatalf("stage2-only agents should not contribute stage1 targets, got %+v", targets)
 	}
 }
+
+func TestResolveAgentMCPProjectionSkipsImplicitAgents(t *testing.T) {
+	// Implicit infrastructure agents (control-dispatcher,
+	// provider-coverage stubs from config.InjectImplicitAgents) are
+	// synthesized without a Provider field but inherit the city pack's
+	// MCP catalog. They never invoke `gc internal project-mcp` (see the
+	// peer-conflict skip in proposeAgentMCPTargets), so MCP resolution
+	// should short-circuit for them rather than trip the provider-family
+	// validation. Regression for gascity#2203 — formula_v2 cities that
+	// register MCP servers used to fail city start with:
+	//   init: project MCP: agent "control-dispatcher": effective MCP
+	//   requires a supported provider family, got ""
+	cityPath := t.TempDir()
+	mcpFile := filepath.Join(cityPath, "mcp", "kb.toml")
+	writeMCPSource(t, mcpFile, `
+name = "kb"
+transport = "http"
+url = "http://localhost:3100/mcp/kb"
+`)
+
+	cfg := &config.City{
+		Workspace:  config.Workspace{Provider: "claude"},
+		Providers:  map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none"}},
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+	}
+
+	// Reproduce the shape of the implicit control-dispatcher agent
+	// emitted by config.injectControlDispatcherAgents: Implicit=true,
+	// empty Provider.
+	implicit := &config.Agent{
+		Name:     "control-dispatcher",
+		Scope:    "city",
+		Implicit: true,
+	}
+
+	catalog, projection, err := resolveAgentMCPProjection(
+		cityPath, cfg, implicit,
+		"control-dispatcher",
+		filepath.Join(cityPath, ".gc", "control-dispatcher"),
+		"", // empty providerKind matches the bug scenario
+	)
+	if err != nil {
+		t.Fatalf("resolveAgentMCPProjection(implicit) returned error: %v", err)
+	}
+	if len(catalog.Servers) != 0 {
+		t.Fatalf("implicit agent should return empty MCP catalog, got %d servers", len(catalog.Servers))
+	}
+	if projection.Provider != "" || len(projection.Servers) != 0 {
+		t.Fatalf("implicit agent should return zero MCPProjection, got %+v", projection)
+	}
+}
