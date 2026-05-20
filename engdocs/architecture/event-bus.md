@@ -282,8 +282,9 @@ API/SSE projection:
 | `MailDeleted` | `mail.deleted` | Mail delete command and API handler |
 | `ConvoyCreated` | `convoy.created` | Convoy creation |
 | `ConvoyClosed` | `convoy.closed` | Convoy close |
-| `ControllerStarted` | `controller.started` | Controller startup |
-| `ControllerStopped` | `controller.stopped` | Controller shutdown |
+| `ControllerStarted` | `controller.started` | Per-city controller startup |
+| `ControllerStopped` | `controller.stopped` | Per-city controller shutdown |
+| `SupervisorShutdownRequested` | `supervisor.shutdown_requested` | Machine-wide supervisor process: emitted once when shutdown is triggered (SIGINT/SIGTERM or socket `stop`), before the cascade of per-city `controller.stopped` events. Carries trigger attribution (source, signal, client addr, mode). |
 | `CitySuspended` | `city.suspended` | City suspend command |
 | `CityResumed` | `city.resumed` | City resume command |
 | `RequestResultCityCreate` | `request.result.city.create` | Supervisor/API city create completion |
