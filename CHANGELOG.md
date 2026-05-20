@@ -21,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolution as worker claim queries and exclude epic-routed beads, matching
   the default worker `work_query` behavior. Custom `scale_check` overrides are
   unchanged.
+- `gc start` now detects a bd-standalone dolt server running against the
+  same `.beads/dolt` database before invoking the managed-bd lifecycle
+  script, and refuses with a message naming `bd dolt stop` as the unblock.
+  Previously, running `bd dolt start` while a city was registered at the
+  same path would leave the standalone dolt holding the exclusive write
+  lock; the city-managed dolt could not acquire it and `gc start` failed
+  with a generic "dolt server could not start via gc helper" error that
+  did not point at the lock holder. Stale `.beads/dolt-server.pid` files
+  (PID no longer alive) are ignored so leftover files from previous
+  bd-standalone sessions do not block startup.
 - Empty JSON result collections for `gc mail thread`, `gc trace status`, and
   `gc trace show` now encode as `[]` instead of `null`; `gc trace show` also
   reports a concise no-records message in the default text mode.

@@ -157,6 +157,16 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 		skipLocalDolt = !owned
 	}
 	if !skipLocalDolt {
+		// Detect a bd-standalone dolt server running against the same
+		// .beads/dolt database before ensureBeadsProvider would hit a
+		// generic "dolt server could not start via gc helper" lock
+		// failure. The check names `bd dolt stop` as the unblock so the
+		// operator does not have to inspect dolt.log to find the cause.
+		if pid, alive, err := detectStandaloneBdDolt(cityPath); err != nil {
+			return fmt.Errorf("checking for standalone bd dolt: %w", err)
+		} else if alive {
+			return standaloneBdDoltConflictError(cityPath, pid)
+		}
 		if err := ensureBeadsProvider(cityPath); err != nil {
 			return fmt.Errorf("bead store: %w", err)
 		}
