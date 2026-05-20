@@ -156,20 +156,36 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 		overrides["GC_TEMPLATE"] = os.Getenv("GC_TEMPLATE")
 	}
 	queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
+	failureTemplate, emitFailureEvent := hookWorkQueryFailureTemplate(len(args) > 0, sessionTemplateContext, a.QualifiedName())
 	runner := func(command, dir string) (string, error) {
 		out, err := shellWorkQueryWithEnv(command, dir, queryEnv)
-		if err != nil {
+		if err != nil && emitFailureEvent {
 			// A killed/timed-out work query strands the session with no
 			// output and no cause on the event bus; emit one so the
 			// reconciler can escalate instead of skipping it forever
 			// (issues #1496/#1497). Ordinary command errors are ignored
 			// by emitWorkQueryFailure and stay on the stderr path below.
-			emitWorkQueryFailure(openCityRecorderAt(cityPath, stderr),
-				os.Getenv("GC_SESSION_ID"), a.QualifiedName(), command, err)
+			emitCityWorkQueryFailure(cityPath, stderr,
+				os.Getenv("GC_SESSION_ID"), failureTemplate, command, err)
 		}
 		return out, err
 	}
 	return doHook(workQuery, workDir, inject, runner, stdout, stderr)
+}
+
+func hookWorkQueryFailureTemplate(explicitTarget, sessionTemplateContext bool, resolvedAgentName string) (string, bool) {
+	currentTemplate := strings.TrimSpace(os.Getenv("GC_TEMPLATE"))
+	resolvedAgentName = strings.TrimSpace(resolvedAgentName)
+	if explicitTarget {
+		if currentTemplate == "" || currentTemplate != resolvedAgentName {
+			return "", false
+		}
+		return currentTemplate, true
+	}
+	if currentTemplate != "" && (sessionTemplateContext || strings.TrimSpace(os.Getenv("GC_SESSION_ID")) != "") {
+		return currentTemplate, true
+	}
+	return resolvedAgentName, true
 }
 
 // hookQueryEnv returns the full work-query environment for a hook subprocess.

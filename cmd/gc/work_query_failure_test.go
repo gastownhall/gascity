@@ -18,8 +18,10 @@ func TestClassifyWorkQueryKill(t *testing.T) {
 		{"signal terminated", errors.New("signal: terminated"), true},
 		{"exit 137 sigkill", errors.New("exit status 137"), true},
 		{"exit 143 sigterm", errors.New("exit status 143"), true},
+		{"exit 130 sigint", errors.New("exit status 130"), true},
 		{"runner timeout", errors.New(`running work query "x": timed out after 30s`), true},
 		{"ordinary command error", errors.New("exit status 1"), false},
+		{"non signal high exit", errors.New("exit status 200"), false},
 		{"config error", errors.New("agent not found"), false},
 	}
 	for _, tc := range cases {

@@ -441,7 +441,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			// Surface a killed/timed-out control work query on the event
 			// bus so the reconciler has a named cause to escalate on
 			// rather than the session dying silently (issues #1496/#1497).
-			emitWorkQueryFailure(openCityRecorderAt(cityPath, stderr),
+			emitCityWorkQueryFailure(cityPath, stderr,
 				os.Getenv("GC_SESSION_ID"), os.Getenv("GC_TEMPLATE"), serveQuery, err)
 			return result, fmt.Errorf("querying control work for %s: %w", agentCfg.QualifiedName(), err)
 		}

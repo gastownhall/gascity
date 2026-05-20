@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -34,8 +36,42 @@ func classifyWorkQueryKill(err error) (reason string, killed bool) {
 	case strings.Contains(msg, "timed out after"):
 		return "work query timed out", true
 	default:
+		if reason, ok := classifySignalExitStatus(msg); ok {
+			return reason, true
+		}
 		return "", false
 	}
+}
+
+func classifySignalExitStatus(msg string) (string, bool) {
+	const marker = "exit status "
+	idx := strings.LastIndex(msg, marker)
+	if idx < 0 {
+		return "", false
+	}
+	fields := strings.Fields(msg[idx+len(marker):])
+	if len(fields) == 0 {
+		return "", false
+	}
+	codeText := strings.Trim(fields[0], ".,:;)")
+	code, err := strconv.Atoi(codeText)
+	if err != nil {
+		return "", false
+	}
+	if code < 129 || code > 159 {
+		return "", false
+	}
+	return fmt.Sprintf("work query terminated by signal (exit status %d)", code), true
+}
+
+// emitCityWorkQueryFailure records a work-query failure against the city event
+// log and closes file-backed recorders after the best-effort write.
+func emitCityWorkQueryFailure(cityPath string, stderr io.Writer, sessionID, template, command string, err error) {
+	rec := openCityRecorderAt(cityPath, stderr)
+	if closer, ok := rec.(interface{ Close() error }); ok {
+		defer closer.Close() //nolint:errcheck // best-effort event recorder cleanup
+	}
+	emitWorkQueryFailure(rec, sessionID, template, command, err)
 }
 
 // emitWorkQueryFailure records a SessionWorkQueryFailed event when a
@@ -44,7 +80,7 @@ func classifyWorkQueryKill(err error) (reason string, killed bool) {
 // into unknown state (issue #1496, companion #1497). Best-effort: a nil
 // recorder is treated as a discard. Returns true when the failure was recorded,
 // false for ordinary errors or when no current session ID is available.
-func emitWorkQueryFailure(rec events.Recorder, sessionID, template, command string, err error) bool {
+func emitWorkQueryFailure(rec events.Recorder, sessionID, template, _ string, err error) bool {
 	reason, killed := classifyWorkQueryKill(err)
 	if !killed {
 		return false
@@ -65,7 +101,7 @@ func emitWorkQueryFailure(rec events.Recorder, sessionID, template, command stri
 		Type:    events.SessionWorkQueryFailed,
 		Actor:   eventActor(),
 		Subject: subject,
-		Message: fmt.Sprintf("%s while running %q: %v", reason, command, err),
+		Message: reason,
 		Payload: api.SessionLifecyclePayloadJSON(sessionID, template, reason),
 	})
 	return true

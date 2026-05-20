@@ -9,7 +9,109 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/events"
 )
+
+func TestCmdHookQueryKillEmitsCurrentSessionTemplate(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+work_query = "kill -9 $$"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_ID", "sess-hook-123")
+	t.Setenv("GC_SESSION_NAME", "worker-1")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithFormat(nil, false, "", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("cmdHookWithFormat() = %d, want 1 for killed work query; stderr=%s", code, stderr.String())
+	}
+	evts, err := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.SessionWorkQueryFailed})
+	if err != nil {
+		t.Fatalf("read work-query failure events: %v", err)
+	}
+	if len(evts) != 1 {
+		t.Fatalf("work-query failure events = %d, want 1: %+v", len(evts), evts)
+	}
+	if evts[0].Subject != "worker" {
+		t.Fatalf("event subject = %q, want current session template", evts[0].Subject)
+	}
+	if strings.Contains(evts[0].Message, "kill -9") {
+		t.Fatalf("event message leaked raw work query command: %q", evts[0].Message)
+	}
+	payload := decodeSessionLifecyclePayload(t, evts[0])
+	if payload.SessionID != "sess-hook-123" {
+		t.Fatalf("payload SessionID = %q, want sess-hook-123", payload.SessionID)
+	}
+	if payload.Template != "worker" {
+		t.Fatalf("payload Template = %q, want current session template", payload.Template)
+	}
+	if payload.Reason != "work query killed (signal: killed)" {
+		t.Fatalf("payload Reason = %q, want work query killed (signal: killed)", payload.Reason)
+	}
+}
+
+func TestCmdHookExplicitDifferentTargetSuppressesSessionFailureEvent(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+work_query = "printf '[]'"
+
+[[agent]]
+name = "other"
+work_query = "kill -9 $$"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_ID", "sess-hook-456")
+	t.Setenv("GC_SESSION_NAME", "worker-1")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithFormat([]string{"other"}, false, "", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("cmdHookWithFormat(explicit other) = %d, want 1 for killed work query; stderr=%s", code, stderr.String())
+	}
+	evts, err := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.SessionWorkQueryFailed})
+	if err != nil {
+		t.Fatalf("read work-query failure events: %v", err)
+	}
+	if len(evts) != 0 {
+		t.Fatalf("work-query failure events = %d, want 0 for explicit different target: %+v", len(evts), evts)
+	}
+}
 
 func TestHookNoWork(t *testing.T) {
 	runner := func(string, string) (string, error) { return "", nil }
