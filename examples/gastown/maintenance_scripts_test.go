@@ -6898,20 +6898,200 @@ exit 1
 		t.Fatalf("wisp-compact should parse BSD Z timestamps as UTC at the heartbeat TTL boundary\nwant substring: %q\ngot output:\n%s", want, out)
 	}
 
-	dateData, err := os.ReadFile(dateLog)
-	if err != nil {
-		t.Fatalf("ReadFile(date log): %v", err)
-	}
-	if !strings.Contains(string(dateData), "-ju -f %Y-%m-%dT%H:%M:%SZ "+nearBoundary+" +%s") {
-		t.Fatalf("BSD Z fallback did not force UTC:\n%s", dateData)
-	}
-
 	bdData, err := os.ReadFile(bdLog)
 	if err != nil {
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
 	if !strings.Contains(string(bdData), "update ga-heartbeat --persistent") {
-		t.Fatalf("expected expired heartbeat to be promoted, got bd calls:\n%s", bdData)
+		t.Fatalf("expected expired heartbeat to be promoted under non-UTC TZ, got bd calls:\n%s", bdData)
+	}
+
+	// Per-bead timestamp parsing was hoisted into a single jq pass (ga-blt
+	// batching refactor). The remaining `date` call is the once-per-run
+	// `date +%s` for NOW — verify the stub was invoked for that and not for
+	// per-bead BSD/-ju fallbacks. The TZ correctness contract is now enforced
+	// by jq's fromdateiso8601 (always-UTC); this test pins that the script
+	// classifies the near-boundary heartbeat correctly under non-UTC TZ.
+	dateData, err := os.ReadFile(dateLog)
+	if err != nil {
+		t.Fatalf("ReadFile(date log): %v", err)
+	}
+	if !strings.Contains(string(dateData), "+%s") {
+		t.Fatalf("expected `date +%%s` for NOW; got date calls:\n%s", dateData)
+	}
+	for _, banned := range []string{"-ju -f", "-d ", "-j -f"} {
+		if strings.Contains(string(dateData), banned) {
+			t.Errorf("refactor should have hoisted per-bead %q date calls into jq; date log:\n%s", banned, dateData)
+		}
+	}
+}
+
+// TestWispCompactBatchesBdCalls pins the batching contract introduced for
+// ga-blt: bd write subcommands MUST be invoked at most once per category
+// (promote/delete/archive) per cooldown, even when many beads are eligible.
+// At ~4000 ephemerals/cooldown the per-bead loop spawned thousands of bd
+// subprocesses and saturated dolt's thread pool (pe-t07v). Regressing this
+// behavior would re-introduce the dolt server peg.
+func TestWispCompactBatchesBdCalls(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beadsJSON := fmt.Sprintf(`[
+  {"id":"ga-del-1","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]},
+  {"id":"ga-del-2","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]},
+  {"id":"ga-stuck-1","status":"open","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]},
+  {"id":"ga-stuck-2","status":"open","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]},
+  {"id":"ga-mail-1","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["read"]},
+  {"id":"ga-mail-2","issue_type":"message","status":"open","ephemeral":false,"updated_at":%q,"comment_count":0,"labels":["read"]}
+]`, pastTTL, pastTTL, pastTTL, pastTTL, pastTTL, pastTTL)
+
+	bdLog, env := wispCompactEnv(t, beadsJSON)
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+	if err != nil {
+		t.Fatalf("wisp-compact.sh failed: %v\n%s", err, out)
+	}
+
+	logData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	log := string(logData)
+
+	var updateCalls, deleteCalls, closeCalls, commentCalls int
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		if line == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "update "):
+			updateCalls++
+		case strings.HasPrefix(line, "delete "):
+			deleteCalls++
+		case strings.HasPrefix(line, "close "):
+			closeCalls++
+		case strings.HasPrefix(line, "comment "):
+			commentCalls++
+		}
+	}
+
+	if updateCalls != 1 {
+		t.Errorf("want exactly 1 bd update call (batched promotion); got %d\nlog:\n%s", updateCalls, log)
+	}
+	if deleteCalls != 1 {
+		t.Errorf("want exactly 1 bd delete call (batched deletion); got %d\nlog:\n%s", deleteCalls, log)
+	}
+	if closeCalls != 1 {
+		t.Errorf("want exactly 1 bd close call (batched mail archive); got %d\nlog:\n%s", closeCalls, log)
+	}
+	if commentCalls != 0 {
+		t.Errorf("want 0 bd comment calls (auditing must be batched via --append-notes); got %d\nlog:\n%s", commentCalls, log)
+	}
+
+	// The single multi-ID bd update line must carry both stuck IDs and the
+	// "stuck detection" reason text — equivalent of the old per-bead comment.
+	var promoteLine string
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		if strings.HasPrefix(line, "update ") {
+			promoteLine = line
+			break
+		}
+	}
+	for _, id := range []string{"ga-stuck-1", "ga-stuck-2"} {
+		if !strings.Contains(promoteLine, id) {
+			t.Errorf("batched promote line missing %q: %q", id, promoteLine)
+		}
+	}
+	if !strings.Contains(promoteLine, "stuck detection") {
+		t.Errorf("batched promote line missing audit reason 'stuck detection': %q", promoteLine)
+	}
+
+	var deleteLine string
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		if strings.HasPrefix(line, "delete ") {
+			deleteLine = line
+			break
+		}
+	}
+	for _, id := range []string{"ga-del-1", "ga-del-2"} {
+		if !strings.Contains(deleteLine, id) {
+			t.Errorf("batched delete line missing %q: %q", id, deleteLine)
+		}
+	}
+
+	var closeLine string
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		if strings.HasPrefix(line, "close ") {
+			closeLine = line
+			break
+		}
+	}
+	for _, id := range []string{"ga-mail-1", "ga-mail-2"} {
+		if !strings.Contains(closeLine, id) {
+			t.Errorf("batched close line missing %q: %q", id, closeLine)
+		}
+	}
+}
+
+// TestWispCompactBatchesPromotionsByReason verifies that beads with different
+// promotion reasons (proven value vs stuck detection) are still grouped into
+// at-most-two bd update calls — never per-bead. This is the boundary case for
+// the batching contract: mixed reasons must not collapse the audit text.
+func TestWispCompactBatchesPromotionsByReason(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beadsJSON := fmt.Sprintf(`[
+  {"id":"ga-proven-1","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":3,"labels":[]},
+  {"id":"ga-proven-2","status":"closed","ephemeral":true,"updated_at":%q,"comment_count":5,"labels":[]},
+  {"id":"ga-stuck-1","status":"open","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]},
+  {"id":"ga-stuck-2","status":"open","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]}
+]`, pastTTL, pastTTL, pastTTL, pastTTL)
+
+	bdLog, env := wispCompactEnv(t, beadsJSON)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "wisp-compact.sh"), env)
+
+	logData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	log := string(logData)
+
+	var updateLines []string
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		if strings.HasPrefix(line, "update ") {
+			updateLines = append(updateLines, line)
+		}
+	}
+	if len(updateLines) != 2 {
+		t.Fatalf("want exactly 2 bd update calls (one per reason group); got %d\nlog:\n%s", len(updateLines), log)
+	}
+
+	var provenLine, stuckLine string
+	for _, line := range updateLines {
+		switch {
+		case strings.Contains(line, "proven value"):
+			provenLine = line
+		case strings.Contains(line, "stuck detection"):
+			stuckLine = line
+		}
+	}
+	if provenLine == "" {
+		t.Fatalf("missing proven-value update line:\n%s", log)
+	}
+	if stuckLine == "" {
+		t.Fatalf("missing stuck-detection update line:\n%s", log)
+	}
+	for _, id := range []string{"ga-proven-1", "ga-proven-2"} {
+		if !strings.Contains(provenLine, id) {
+			t.Errorf("proven-value line missing %q: %q", id, provenLine)
+		}
+		if strings.Contains(stuckLine, id) {
+			t.Errorf("stuck-detection line accidentally contains proven id %q: %q", id, stuckLine)
+		}
+	}
+	for _, id := range []string{"ga-stuck-1", "ga-stuck-2"} {
+		if !strings.Contains(stuckLine, id) {
+			t.Errorf("stuck-detection line missing %q: %q", id, stuckLine)
+		}
+		if strings.Contains(provenLine, id) {
+			t.Errorf("proven-value line accidentally contains stuck id %q: %q", id, provenLine)
+		}
 	}
 }
 
