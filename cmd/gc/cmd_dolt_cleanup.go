@@ -502,7 +502,10 @@ func revalidateReapTarget(report *CleanupReport, discover func() ([]DoltProcInfo
 }
 
 func sameReapProcessIdentity(target ReapTarget, proc DoltProcInfo) bool {
-	return target.StartTimeTicks != 0 && proc.StartTimeTicks == target.StartTimeTicks
+	if target.StartTimeTicks != 0 {
+		return proc.StartTimeTicks == target.StartTimeTicks
+	}
+	return target.StartIdentity != "" && proc.StartIdentity == target.StartIdentity
 }
 
 func recordReapRevalidationError(report *CleanupReport, signalName string, err error) {

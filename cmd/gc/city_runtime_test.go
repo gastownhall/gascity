@@ -71,6 +71,31 @@ func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 	}
 }
 
+// stubManagedDoltStoreOpeners replaces the two package-level store openers
+// used during newCityRuntime + newControllerState startup with in-memory
+// stubs. This prevents tests from spawning real managed dolt servers (~12s
+// each). The original openers are restored via t.Cleanup.
+//
+// Tests that verify the managed-dolt preflight ordering invariant still
+// install their own fake managedDoltHealth/Owned/Port hooks to record events;
+// this helper only handles the side-effects from sweepStore / city store
+// opening which otherwise force a real dolt spawn.
+func stubManagedDoltStoreOpeners(t *testing.T) {
+	t.Helper()
+	prevCityStore := newControllerStateOpenCityStore
+	prevSweepStore := newCityRuntimeOpenSweepStore
+	newControllerStateOpenCityStore = func(string) (beads.Store, error) {
+		return beads.NewMemStore(), nil
+	}
+	newCityRuntimeOpenSweepStore = func(string, string) (beads.Store, error) {
+		return beads.NewMemStore(), nil
+	}
+	t.Cleanup(func() {
+		newControllerStateOpenCityStore = prevCityStore
+		newCityRuntimeOpenSweepStore = prevSweepStore
+	})
+}
+
 // newTestCityRuntime builds a CityRuntime and registers a cleanup that
 // cancels in-flight dispatched orders before invoking shutdown. Do NOT
 // add a duplicate t.Cleanup(cr.shutdown) in callers — t.Cleanup is LIFO,
@@ -456,6 +481,10 @@ func TestCityRuntimeEnsureManagedDoltPublishedForTickLogsOwnershipError(t *testi
 func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "bd")
+	stubManagedDoltStoreOpeners(t)
+
+	cityPath := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityPath)
 
 	orderEvents := &orderedRuntimeEvents{}
 	store := &managedDoltPreflightOrderStore{
@@ -463,8 +492,6 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T)
 		events: orderEvents,
 	}
 	sp := runtime.NewFake()
-	cityPath := t.TempDir()
-	requireNoLeakedDoltAfterForPaths(t, cityPath)
 	cr := &CityRuntime{
 		cityPath: cityPath,
 		cityName: "test-city",
@@ -576,7 +603,7 @@ func TestCityRuntimeRunStartupPreflightsManagedDoltBeforeSessionSnapshot(t *test
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
-	// This preflight starts a managed Dolt sql-server; clean it up even if the test fails.
+	stubManagedDoltStoreOpeners(t)
 	cleanupManagedDoltTestCity(t, cityPath)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
@@ -641,6 +668,7 @@ func TestCityRuntimeRunStartupPreflightsManagedDoltBeforeSessionSnapshot(t *test
 func TestCityRuntimeControlDispatcherPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "bd")
+	stubManagedDoltStoreOpeners(t)
 
 	orderEvents := &orderedRuntimeEvents{}
 	store := &managedDoltPreflightOrderStore{
@@ -690,10 +718,11 @@ func TestCityRuntimeControlDispatcherPreflightsManagedDoltBeforeSessionSnapshot(
 func TestNewCityRuntimePreflightsManagedDoltPublicationBeforeStartupStoreWork(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "bd")
+	stubManagedDoltStoreOpeners(t)
 
 	healthCalls := 0
 	cityPath := t.TempDir()
-	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	cleanupManagedDoltTestCity(t, cityPath)
 	sp := runtime.NewFake()
 	_ = newCityRuntime(CityRuntimeParams{
 		CityPath: cityPath,

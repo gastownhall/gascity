@@ -66,6 +66,11 @@ type controllerState struct {
 
 var controllerStateInitRigDirIfReady = initDirIfReady
 
+// newControllerStateOpenCityStore opens the city-level bead store for
+// newControllerState. Test code can swap this to return an in-memory store
+// and skip spawning managed dolt (~12s per call).
+var newControllerStateOpenCityStore = openCityStoreAt
+
 type configMutationSnapshot struct {
 	cityPath   string
 	files      map[string][]byte
@@ -100,7 +105,7 @@ func newControllerState(
 	}
 	cs.beadStores = cs.buildStores(cfg)
 	// Open city-level store for session beads and mail (best-effort).
-	if store, err := openCityStoreAt(cityPath); err != nil {
+	if store, err := newControllerStateOpenCityStore(cityPath); err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
 	} else {
 		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep)

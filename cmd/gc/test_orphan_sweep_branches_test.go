@@ -22,6 +22,19 @@ func pidPrefixedTestDir(root, prefix string, pid int) string {
 	return filepath.Join(root, prefix+strconv.Itoa(pid)+"-fixture")
 }
 
+func TestCmdGCTempRootPrefixKeepsControllerSocketLegacy(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", pidPrefixedTempPattern(testCmdGCTempRootPrefix))
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+	sockPath := filepath.Join(root, "gc-testscript-1234567890", "script-controller", "ctrl-city", ".gc", "controller.sock")
+	if len(sockPath) > controllerSocketPathLimit {
+		t.Fatalf("controller test socket path length = %d, want <= %d: %s", len(sockPath), controllerSocketPathLimit, sockPath)
+	}
+}
+
 func TestSweepOrphanSkipsNonDirectories(t *testing.T) {
 	root := t.TempDir()
 	// A regular file whose name matches the prefix+PID pattern must not be removed.
@@ -170,12 +183,13 @@ func TestSweepOrphanIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestSweepOrphanAllSixPrefixesStabilize verifies that sweepOrphanPIDPrefixedDirs
-// removes stale dirs and preserves current-PID dirs for all six test-fixture
+// TestSweepOrphanAllPrefixesStabilize verifies that sweepOrphanPIDPrefixedDirs
+// removes stale dirs and preserves current-PID dirs for all test-fixture
 // prefixes used by cmd/gc's shared fixtures.
-func TestSweepOrphanAllSixPrefixesStabilize(t *testing.T) {
+func TestSweepOrphanAllPrefixesStabilize(t *testing.T) {
 	prefixes := []string{
 		testGCBinaryDirPrefix,
+		testCmdGCTempRootPrefix,
 		testSlingFormulaDirPrefix,
 		testSlingCityDirPrefix,
 		testGCHomeDirPrefix,

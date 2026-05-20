@@ -3084,6 +3084,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionUpdated) | ({
     type: 'session.woke';
 } & TypedEventStreamEnvelopeSessionWoke) | ({
+    type: 'session.work_query_failed';
+} & TypedEventStreamEnvelopeSessionWorkQueryFailed) | ({
     type: 'supervisor.fs_pressure.skipped_tick';
 } & TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
     type: 'worker.operation';
@@ -3778,6 +3780,20 @@ export type TypedEventStreamEnvelopeSessionWoke = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.work_query_failed
+ */
+export type TypedEventStreamEnvelopeSessionWorkQueryFailed = {
+    actor: string;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.work_query_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope supervisor.fs_pressure.skipped_tick
  */
 export type TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
@@ -3907,6 +3923,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionUpdated) | ({
     type: 'session.woke';
 } & TypedTaggedEventStreamEnvelopeSessionWoke) | ({
+    type: 'session.work_query_failed';
+} & TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed) | ({
     type: 'supervisor.fs_pressure.skipped_tick';
 } & TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
     type: 'worker.operation';
@@ -4646,6 +4664,21 @@ export type TypedTaggedEventStreamEnvelopeSessionWoke = {
     subject?: string;
     ts: string;
     type: 'session.woke';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.work_query_failed
+ */
+export type TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.work_query_failed';
     workflow?: WorkflowEventProjection;
 };
 

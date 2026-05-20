@@ -14,14 +14,16 @@
 # Running as an exec order gives us direct SQL access via the dolt CLI.
 #
 # Algorithm (flatten mode):
-#   1. Pre-flight: record row counts for all user tables and require HEAD to
-#      remain stable across a bounded retry loop.
+#   1. Pre-flight: record row counts and value hashes for all user tables and
+#      require HEAD to remain stable across a bounded retry loop.
 #   2. Soft-reset to the root commit; all data stays staged.
 #   3. Commit everything as a single "compaction: flatten history" commit.
-#   4. Re-check post-flatten row counts and database value hash. Row-count
-#      decreases fail before full GC. Row-count increases are held pending
-#      value-hash verification. Any value-hash drift is quarantined before
-#      full GC until preservation is proven.
+#   4. Re-check post-flatten row counts, table value hashes, and database
+#      value hash. Row-count decreases fail before full GC. Row-count
+#      increases are treated as concurrent-writer evidence and allowed to
+#      continue only when table and database value hashes stay stable. Any
+#      value-hash drift, table-list drift, or row-count decrease is
+#      quarantined before full GC.
 #   5. Run CALL DOLT_GC('--full') to reclaim chunks orphaned by the flatten.
 #
 # Remote push failures are recorded in compact-pending-push markers and do not
@@ -509,6 +511,13 @@ row_count() {
     "SELECT COUNT(*) FROM \`$table\`"
 }
 
+table_value_hash() {
+  db="$1"
+  table="$2"
+  query_single_cell "$db" "table value hash probe failed for table=$table" \
+    "SELECT DOLT_HASHOF_TABLE('$table')"
+}
+
 db_value_hash() {
   db="$1"
   query_single_cell "$db" "database value hash probe failed" \
@@ -616,7 +625,7 @@ push_remote_refspec() {
     sql -r tabular -q "CALL DOLT_PUSH('--force', '--set-upstream', '$remote', '$refspec_arg')"
 }
 
-# preflight_counts — write "<table> <count>" lines for all user tables.
+# preflight_counts — write "<table> <count> <value-hash>" lines for all user tables.
 preflight_counts() {
   db="$1"
   out="$2"
@@ -647,50 +656,154 @@ preflight_counts() {
         break
         ;;
     esac
-    printf '%s %s\n' "$t" "$cnt" >> "$out"
+    if ! table_hash=$(table_value_hash "$db" "$t"); then
+      printf 'compact: db=%s pre-flight table value hash failed for table=%s\n' "$db" "$t" >&2
+      preflight_failed=1
+      break
+    fi
+    if [ -z "$table_hash" ]; then
+      printf 'compact: db=%s pre-flight table value hash returned empty value for table=%s\n' "$db" "$t" >&2
+      preflight_failed=1
+      break
+    fi
+    printf '%s %s %s\n' "$t" "$cnt" "$table_hash" >> "$out"
   done < "$tables_tmp"
   rm -f "$tables_tmp"
   return "$preflight_failed"
 }
 
-# verify_counts — re-count and compare against the pre-flight file.
+# verify_counts — re-count/re-hash and compare against the pre-flight file.
 # Row-count decreases fail. Row-count increases are recorded as concurrent
-# writer evidence and allowed after the value-hash gate passes.
+# writer evidence only when the table value hash stays stable. Any table hash
+# drift is quarantined before full GC because row-count gain alone cannot prove
+# pre-flight rows remain reachable. Sets verify_counts_saw_gain,
+# verify_counts_failure_reason, and verify_counts_failure_guidance for callers.
 verify_counts() {
   db="$1"
   preflight="$2"
   fail=0
   verify_counts_saw_gain=0
+  verify_counts_failure_reason=""
+  verify_counts_failure_guidance=""
+  preflight_tables=""
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     t=${line%% *}
-    expected=${line##* }
+    preflight_tables="$preflight_tables $t"
+    rest=${line#* }
+    expected=${rest%% *}
+    expected_hash=${rest#* }
     if ! actual=$(row_count "$db" "$t"); then
       printf 'compact: db=%s post-flatten row count failed for table=%s\n' "$db" "$t" >&2
-      fail=2
+      if [ "$fail" -eq 0 ]; then
+        fail=2
+        verify_counts_failure_reason="post-flatten row count probe failed"
+        verify_counts_failure_guidance="post-flatten row count probe failed; investigate before re-running"
+      fi
       continue
     fi
     case "$actual" in
       ''|*[!0-9]*)
         printf 'compact: db=%s post-flatten row count failed for table=%s\n' "$db" "$t" >&2
-        fail=2
+        if [ "$fail" -eq 0 ]; then
+          fail=2
+          verify_counts_failure_reason="post-flatten row count probe failed"
+          verify_counts_failure_guidance="post-flatten row count probe failed; investigate before re-running"
+        fi
         continue
         ;;
     esac
+    if ! actual_hash=$(table_value_hash "$db" "$t"); then
+      printf 'compact: db=%s post-flatten table value hash failed for table=%s\n' "$db" "$t" >&2
+      if [ "$fail" -eq 0 ]; then
+        fail=2
+        verify_counts_failure_reason="post-flatten table value hash probe failed"
+        verify_counts_failure_guidance="post-flatten table value hash probe failed; investigate before re-running"
+      fi
+      continue
+    fi
+    if [ -z "$actual_hash" ]; then
+      printf 'compact: db=%s post-flatten table value hash returned empty value for table=%s\n' "$db" "$t" >&2
+      if [ "$fail" -eq 0 ]; then
+        fail=2
+        verify_counts_failure_reason="post-flatten table value hash probe failed"
+        verify_counts_failure_guidance="post-flatten table value hash probe failed; investigate before re-running"
+      fi
+      continue
+    fi
+    table_gained_rows=0
     if [ "$actual" != "$expected" ]; then
       if [ "$actual" -lt "$expected" ]; then
         printf 'compact: db=%s row count decreased after flatten table=%s before=%s after=%s\n' \
           "$db" "$t" "$expected" "$actual" >&2
-        if [ "$fail" -eq 0 ]; then
+        if [ "$fail" -ne 1 ]; then
           fail=1
+          verify_counts_failure_reason="post-flatten row count decreased"
+          verify_counts_failure_guidance="row counts decreased; investigate before re-running"
         fi
       else
         printf 'compact: db=%s table=%s gained rows during flatten before=%s after=%s — pending value-hash verification\n' \
           "$db" "$t" "$expected" "$actual"
         verify_counts_saw_gain=1
+        table_gained_rows=1
+      fi
+    fi
+    if [ "$actual_hash" != "$expected_hash" ]; then
+      if [ "$table_gained_rows" = "1" ]; then
+        printf 'compact: db=%s table=%s value hash changed with row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
+          "$db" "$t" "$expected_hash" "$actual_hash" >&2
+        if [ "$fail" -ne 1 ]; then
+          fail=1
+          verify_counts_failure_reason="post-flatten table value hash changed with row-count increase"
+          verify_counts_failure_guidance="row-count increase plus table value hash drift cannot prove row preservation; investigate before re-running"
+        fi
+      else
+        printf 'compact: db=%s table=%s value hash changed after flatten without row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
+          "$db" "$t" "$expected_hash" "$actual_hash" >&2
+        if [ "$fail" -ne 1 ]; then
+          fail=1
+          verify_counts_failure_reason="post-flatten table value hash changed without row-count increase"
+          verify_counts_failure_guidance="same-count table value hash changed; investigate before re-running"
+        fi
       fi
     fi
   done < "$preflight"
+  post_tables_tmp=$(mktemp)
+  if ! user_tables "$db" > "$post_tables_tmp"; then
+    if [ "$fail" -eq 0 ]; then
+      fail=2
+      verify_counts_failure_reason="post-flatten table list probe failed"
+      verify_counts_failure_guidance="post-flatten table list probe failed; investigate before re-running"
+    fi
+    rm -f "$post_tables_tmp"
+    return "$fail"
+  fi
+  while IFS= read -r post_table; do
+    [ -n "$post_table" ] || continue
+    if ! valid_database_name "$post_table"; then
+      printf 'compact: db=%s invalid table name after flatten table=%s — quarantine and investigate before GC\n' \
+        "$db" "$post_table" >&2
+      if [ "$fail" -ne 1 ]; then
+        fail=1
+        verify_counts_failure_reason="post-flatten table list changed"
+        verify_counts_failure_guidance="post-flatten table list changed; investigate before re-running"
+      fi
+      continue
+    fi
+    case " $preflight_tables " in
+      *" $post_table "*) ;;
+      *)
+        printf 'compact: db=%s table=%s appeared after pre-flight snapshot — quarantine and investigate before GC\n' \
+          "$db" "$post_table" >&2
+        if [ "$fail" -ne 1 ]; then
+          fail=1
+          verify_counts_failure_reason="post-flatten table list changed"
+          verify_counts_failure_guidance="post-flatten table list changed; investigate before re-running"
+        fi
+        ;;
+    esac
+  done < "$post_tables_tmp"
+  rm -f "$post_tables_tmp"
   return "$fail"
 }
 
@@ -1491,13 +1604,8 @@ flatten_database() {
   verify_counts_rc=0
   verify_counts "$db" "$preflight_tmp" || verify_counts_rc=$?
   if [ "$verify_counts_rc" -ne 0 ]; then
-    if [ "$verify_counts_rc" -eq 2 ]; then
-      integrity_reason="post-flatten row count probe failed"
-      integrity_guidance="post-flatten row count probe failed; investigate before re-running"
-    else
-      integrity_reason="post-flatten row count decreased"
-      integrity_guidance="row counts decreased; investigate before re-running"
-    fi
+    integrity_reason="${verify_counts_failure_reason:-post-flatten integrity check failed}"
+    integrity_guidance="${verify_counts_failure_guidance:-post-flatten integrity check failed; investigate before re-running}"
     printf 'compact: db=%s post-flatten INTEGRITY check failed — escalate (%s)\n' \
       "$db" "$integrity_guidance" >&2
     write_compact_marker "$quarantine_dir" "$db" "$integrity_reason" || {
@@ -1534,32 +1642,19 @@ flatten_database() {
     return 1
   fi
   if [ "$postflight_hash" != "$preflight_hash" ]; then
-    if [ "${verify_counts_saw_gain:-0}" = "1" ]; then
-      printf 'compact: db=%s value hash changed with row-count increase before=%s after=%s — quarantine and defer full GC until preservation is proven\n' \
-        "$db" "$preflight_hash" "$postflight_hash" >&2
-      write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash changed with row-count increase" || {
-        preserve_head_after_integrity_failure "$db" "$flatten_head" || true
-        rm -f "$preflight_tmp"
-        return 1
-      }
+    printf 'compact: db=%s value hash changed after flatten before=%s after=%s — quarantine and investigate before GC\n' \
+      "$db" "$preflight_hash" "$postflight_hash" >&2
+    write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash changed" || {
       preserve_head_after_integrity_failure "$db" "$flatten_head" || true
       rm -f "$preflight_tmp"
       return 1
-    else
-      printf 'compact: db=%s value hash changed after flatten before=%s after=%s — quarantine and investigate before GC\n' \
-        "$db" "$preflight_hash" "$postflight_hash" >&2
-      write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash changed without row-count increase" || {
-        preserve_head_after_integrity_failure "$db" "$flatten_head" || true
-        rm -f "$preflight_tmp"
-        return 1
-      }
-      preserve_head_after_integrity_failure "$db" "$flatten_head" || true
-      rm -f "$preflight_tmp"
-      return 1
-    fi
+    }
+    preserve_head_after_integrity_failure "$db" "$flatten_head" || true
+    rm -f "$preflight_tmp"
+    return 1
   fi
   if [ "${verify_counts_saw_gain:-0}" = "1" ]; then
-    printf 'compact: db=%s row-count increase passed value-hash verification — concurrent write preserved\n' \
+    printf 'compact: db=%s row-count increase passed value-hash verification — full GC allowed\n' \
       "$db"
   fi
   rm -f "$preflight_tmp"

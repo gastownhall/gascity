@@ -14,13 +14,15 @@ import (
 // dolt servers so the reaper never touches a production server. RSSBytes is
 // the best-effort resident set size used for operator cleanup summaries.
 // StartTimeTicks is /proc/<pid>/stat field 22 and lets force-mode revalidation
-// detect PID reuse before sending a signal.
+// detect PID reuse before sending a signal. StartIdentity is a portable
+// fallback populated by ps-based discovery on hosts without /proc.
 type DoltProcInfo struct {
 	PID            int
 	Argv           []string
 	Ports          []int
 	RSSBytes       int64
 	StartTimeTicks uint64
+	StartIdentity  string
 }
 
 // reapClassification is the per-process decision produced by classifyDoltProcess.
@@ -40,6 +42,7 @@ type ReapTarget struct {
 	ConfigPath     string
 	RSSBytes       int64
 	StartTimeTicks uint64
+	StartIdentity  string
 }
 
 // ProtectedProcess is a single PID that the reaper refused to kill, with the
@@ -98,6 +101,7 @@ func isTestConfigPath(p, homeDir, tempDir string) bool {
 func testConfigPathPrefixes() []string {
 	return []string{
 		"Test",
+		"gctest-",
 		"gc-state-runtime-builtin-",
 		"gc-state-mutation-builtin-",
 		"gc-supervisor-city-",
@@ -204,6 +208,7 @@ func planOrphanReap(procs []DoltProcInfo, rigPortByPort map[int]string, homeDir,
 				ConfigPath:     c.ConfigPath,
 				RSSBytes:       p.RSSBytes,
 				StartTimeTicks: p.StartTimeTicks,
+				StartIdentity:  p.StartIdentity,
 			})
 		default:
 			plan.Protected = append(plan.Protected, ProtectedProcess{PID: p.PID, Reason: c.Reason})

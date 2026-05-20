@@ -47,6 +47,12 @@ func TestIsTestConfigPath_TmpTestPrefix(t *testing.T) {
 	}
 }
 
+func TestIsTestConfigPath_CmdGCTestPrefix(t *testing.T) {
+	if !isTestConfigPath("/tmp/gctest-123/TestCase/001/.gc/runtime/packs/dolt/dolt-config.yaml", "/home/u", "") {
+		t.Error("expected /tmp/gctest-* to be a test path")
+	}
+}
+
 func TestIsTestConfigPath_HomeGotmpTestPrefix(t *testing.T) {
 	if !isTestConfigPath("/home/u/.gotmp/TestFuzz/config.yaml", "/home/u", "") {
 		t.Error("expected $HOME/.gotmp/Test* to be a test path")
