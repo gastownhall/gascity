@@ -39,9 +39,7 @@ func writeJSONError(stdout, stderr io.Writer, code, message string, exitCode int
 			ExitCode: exitCode,
 		},
 	}
-	enc := json.NewEncoder(stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(payload); err != nil {
+	if err := writeCLIJSONLine(stdout, payload); err != nil {
 		writeJSONDiagnostic(stderr, "error", "json_encode_failed", fmt.Sprintf("encoding JSON error: %v", err), exitCode)
 		return exitCode
 	}

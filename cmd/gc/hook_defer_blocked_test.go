@@ -72,3 +72,21 @@ func TestDoHookKeepsPastDeferredAndClosedBlockers(t *testing.T) {
 		}
 	}
 }
+
+func TestDoHookWarnsWhenJSONLikeOutputCannotBeFiltered(t *testing.T) {
+	runner := func(_, _ string) (string, error) {
+		return `[{"id":"ready-1"}`, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHook("bd ready", ".", false, runner, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHook() = %d, want 0 for legacy fail-open behavior; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "cannot filter work query JSON") {
+		t.Fatalf("stderr = %q, want filter diagnostic", stderr.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "ready-1") {
+		t.Fatalf("stdout = %q, want original output preserved", got)
+	}
+}

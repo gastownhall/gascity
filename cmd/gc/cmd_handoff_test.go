@@ -324,6 +324,75 @@ func TestCmdHandoffAutoUsesDefaultSubject(t *testing.T) {
 	}
 }
 
+func TestCmdHandoffAutoJSONReportsCreatedMail(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_ALIAS", "mayor")
+	t.Setenv("GC_SESSION_NAME", "mayor")
+
+	var stdout, stderr bytes.Buffer
+	cmd := newHandoffCmd(&stdout, &stderr)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--auto", "--json", "Reviewed handoff"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc handoff --auto --json failed: %v; stderr=%s", err, stderr.String())
+	}
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	all, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("open beads = %d, want handoff mail", len(all))
+	}
+
+	var payload struct {
+		SchemaVersion string `json:"schema_version"`
+		Mode          string `json:"mode"`
+		Auto          bool   `json:"auto"`
+		Subject       string `json:"subject"`
+		MailBeadID    string `json:"mail_bead_id"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.SchemaVersion != "1" || payload.Mode != "auto" || !payload.Auto {
+		t.Fatalf("handoff JSON envelope = %+v", payload)
+	}
+	if payload.Subject != all[0].Title {
+		t.Fatalf("subject = %q, want actual mail title %q", payload.Subject, all[0].Title)
+	}
+	if payload.MailBeadID != all[0].ID {
+		t.Fatalf("mail_bead_id = %q, want actual mail id %q", payload.MailBeadID, all[0].ID)
+	}
+}
+
+func TestCmdHandoffJSONRejectsHookFormat(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := newHandoffCmd(&stdout, &stderr)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--auto", "--json", "--hook-format", "codex"})
+
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("gc handoff --json --hook-format succeeded, want conflict")
+	}
+	if !strings.Contains(stderr.String(), "--json cannot be used with --hook-format") {
+		t.Fatalf("stderr = %q, want json/hook-format conflict", stderr.String())
+	}
+}
+
 type errWriter struct{}
 
 func (errWriter) Write([]byte) (int, error) {

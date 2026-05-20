@@ -106,6 +106,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The built-in Claude provider's `model = "opus"` option now emits
   `claude-opus-4-7`. Cities that rely on the `opus` alias should expect the
   new model target after upgrading.
+- Several CLI/operator behaviors landed with the JSON-summary work and are now
+  explicit release-note items: generated init configs may include the new JSON
+  root-command support, prime hooks can infer the agent from `.gc/agents`
+  workdir layouts, and `gc hook` defensively filters future-deferred or
+  dependency-blocked candidates from JSON work-query output before surfacing
+  work to agents.
 
 ### Fixed
 

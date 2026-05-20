@@ -69,21 +69,23 @@ or ID. Subject is required unless --auto is set.`,
 			return cobra.RangeArgs(1, 2)(cmd, args)
 		},
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOut && hookFormat != "" {
+				fmt.Fprintln(stderr, "gc handoff: --json cannot be used with --hook-format") //nolint:errcheck // best-effort stderr
+				return errExit
+			}
 			out := stdout
 			if jsonOut {
 				out = io.Discard
 			}
-			if cmdHandoff(args, target, auto, hookFormat, out, stderr) != 0 {
+			outcome := cmdHandoffWithOutcome(args, target, auto, hookFormat, out, stderr)
+			if outcome.code != 0 {
 				return errExit
 			}
 			if jsonOut {
-				_ = writeCLIJSONLine(stdout, handoffJSONResult{
-					SchemaVersion: "1",
-					Mode:          handoffJSONMode(target, auto),
-					Target:        target,
-					Auto:          auto,
-					Subject:       handoffJSONSubject(args, auto),
-				})
+				if err := writeCLIJSONLine(stdout, handoffJSONFromOutcome(outcome)); err != nil {
+					fmt.Fprintf(stderr, "gc handoff: encode JSON: %v\n", err) //nolint:errcheck // best-effort stderr
+					return errExit
+				}
 			}
 			return nil
 		},
@@ -96,57 +98,61 @@ or ID. Subject is required unless --auto is set.`,
 }
 
 type handoffJSONResult struct {
-	SchemaVersion string `json:"schema_version"`
-	Mode          string `json:"mode"`
-	Target        string `json:"target,omitempty"`
-	Auto          bool   `json:"auto"`
-	Subject       string `json:"subject,omitempty"`
+	SchemaVersion    string `json:"schema_version"`
+	OK               bool   `json:"ok"`
+	Mode             string `json:"mode"`
+	Target           string `json:"target,omitempty"`
+	Recipient        string `json:"recipient,omitempty"`
+	Auto             bool   `json:"auto"`
+	Subject          string `json:"subject,omitempty"`
+	MailBeadID       string `json:"mail_bead_id,omitempty"`
+	RestartRequested bool   `json:"restart_requested"`
+	Action           string `json:"action,omitempty"`
 }
 
-func handoffJSONMode(target string, auto bool) string {
-	if target != "" {
-		return "remote"
+func handoffJSONFromOutcome(outcome handoffOutcome) handoffJSONResult {
+	return handoffJSONResult{
+		SchemaVersion:    "1",
+		OK:               outcome.code == 0,
+		Mode:             outcome.mode,
+		Target:           outcome.target,
+		Recipient:        outcome.recipient,
+		Auto:             outcome.auto,
+		Subject:          outcome.subject,
+		MailBeadID:       outcome.mailBeadID,
+		RestartRequested: outcome.restartRequested,
+		Action:           outcome.action,
 	}
-	if auto {
-		return "auto"
-	}
-	return "self"
-}
-
-func handoffJSONSubject(args []string, auto bool) string {
-	if len(args) > 0 {
-		return args[0]
-	}
-	if auto {
-		return "context cycle"
-	}
-	return "HANDOFF: context cycle"
 }
 
 func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdout, stderr io.Writer) int {
+	return cmdHandoffWithOutcome(args, target, auto, hookFormat, stdout, stderr).code
+}
+
+func cmdHandoffWithOutcome(args []string, target string, auto bool, hookFormat string, stdout, stderr io.Writer) handoffOutcome {
 	if target != "" {
 		if auto {
 			fmt.Fprintln(stderr, "gc handoff: --auto cannot be used with --target") //nolint:errcheck // best-effort stderr
-			return 1
+			return handoffOutcome{code: 1}
 		}
-		return cmdHandoffRemote(args, target, stdout, stderr)
+		return cmdHandoffRemoteWithOutcome(args, target, stdout, stderr)
 	}
 
 	current, err := currentSessionRuntimeTarget()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return handoffOutcome{code: 1}
 	}
 
 	store, err := openCityStoreAt(current.cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: %v\n", err)                    //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
-		return 1
+		return handoffOutcome{code: 1}
 	}
 	rec := openCityRecorderAt(current.cityPath, stderr)
 	if auto {
-		return doHandoffAuto(store, rec, current.display, args, hookFormat, stdout, stderr)
+		return doHandoffAutoWithOutcome(store, rec, current.display, args, hookFormat, stdout, stderr)
 	}
 
 	sp := newSessionProvider()
@@ -156,45 +162,50 @@ func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdo
 
 	outcome := doHandoffWithOutcome(store, rec, dops, persistRestart, current.display, current.sessionName, args, stdout, stderr)
 	if outcome.code != 0 {
-		return outcome.code
+		return outcome
 	}
 	if !outcome.restartRequested {
-		return 0
+		return outcome
 	}
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	return waitForControllerRestart(sigCtx, dops, current.sessionName, "gc handoff",
+	outcome.code = waitForControllerRestart(sigCtx, dops, current.sessionName, "gc handoff",
 		controllerRestartPollInterval, controllerRestartTimeout(cfg), stderr)
+	return outcome
 }
 
 // cmdHandoffRemote sends handoff mail to a remote session and kills its runtime.
 // Returns immediately (non-blocking). The reconciler restarts the target.
 func cmdHandoffRemote(args []string, target string, stdout, stderr io.Writer) int {
+	return cmdHandoffRemoteWithOutcome(args, target, stdout, stderr).code
+}
+
+func cmdHandoffRemoteWithOutcome(args []string, target string, stdout, stderr io.Writer) handoffOutcome {
 	targetInfo, err := resolveSessionRuntimeTarget(target, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return handoffOutcome{code: 1, mode: "remote", target: target}
 	}
 
 	store, code := openCityStore(stderr, "gc handoff")
 	if store == nil {
-		return code
+		return handoffOutcome{code: code, mode: "remote", target: targetInfo.display}
 	}
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return handoffOutcome{code: 1, mode: "remote", target: targetInfo.display}
 	}
 	cfg, _ := loadCityConfig(cityPath, stderr)
 	sender, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, store, stderr, "gc handoff")
 	if !ok {
-		return 1
+		return handoffOutcome{code: 1, mode: "remote", target: targetInfo.display}
 	}
 
 	sp := newSessionProvider()
 	rec := openCityRecorder(stderr)
-	return doHandoffRemote(store, rec, sp, targetInfo.sessionName, targetInfo.display, sender, args, stdout, stderr)
+	return doHandoffRemoteWithOutcome(store, rec, sp, targetInfo.sessionName, targetInfo.display, sender, args, stdout, stderr)
 }
 
 func sessionRestartPersister(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) func() error {
@@ -213,6 +224,13 @@ func sessionRestartPersister(cityPath string, store beads.Store, sp runtime.Prov
 type handoffOutcome struct {
 	code             int
 	restartRequested bool
+	mode             string
+	target           string
+	recipient        string
+	auto             bool
+	subject          string
+	mailBeadID       string
+	action           string
 }
 
 // doHandoff sends a handoff mail to self and requests restart when the
@@ -228,26 +246,37 @@ func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps,
 ) handoffOutcome {
 	b, ok := createHandoffMail(store, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", stderr)
 	if !ok {
-		return handoffOutcome{code: 1}
+		return handoffOutcome{code: 1, mode: "self", recipient: sessionAddress}
+	}
+	outcome := handoffOutcome{
+		code:       0,
+		mode:       "self",
+		recipient:  sessionAddress,
+		subject:    b.Title,
+		mailBeadID: b.ID,
 	}
 
 	restartable, err := sessionRestartableByController(store, sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
-		return handoffOutcome{code: 1}
+		outcome.code = 1
+		return outcome
 	}
 	if !restartable {
 		if err := clearRestartRequest(store, dops, sessionName); err != nil {
 			fmt.Fprintf(stderr, "gc handoff: clearing stale restart request: %v\n", err) //nolint:errcheck // best-effort stderr
-			return handoffOutcome{code: 1}
+			outcome.code = 1
+			return outcome
 		}
 		fmt.Fprintf(stdout, "Handoff: sent mail %s (named session; restart skipped).\n", b.ID) //nolint:errcheck // best-effort stdout
-		return handoffOutcome{code: 0}
+		outcome.action = "restart_skipped"
+		return outcome
 	}
 
 	if err := dops.setRestartRequested(sessionName); err != nil {
 		fmt.Fprintf(stderr, "gc handoff: setting restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
-		return handoffOutcome{code: 1}
+		outcome.code = 1
+		return outcome
 	}
 	// Also persist the request through the worker boundary so it survives
 	// tmux session death. Non-fatal: the runtime flag above is primary.
@@ -264,21 +293,37 @@ func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps,
 	})
 
 	fmt.Fprintf(stdout, "Handoff: sent mail %s, requesting restart...\n", b.ID) //nolint:errcheck // best-effort stdout
-	return handoffOutcome{code: 0, restartRequested: true}
+	outcome.restartRequested = true
+	outcome.action = "restart_requested"
+	return outcome
 }
 
 // doHandoffAuto sends handoff mail to self without requesting restart.
 func doHandoffAuto(store beads.Store, rec events.Recorder, sessionAddress string, args []string, hookFormat string, stdout, stderr io.Writer) int {
+	return doHandoffAutoWithOutcome(store, rec, sessionAddress, args, hookFormat, stdout, stderr).code
+}
+
+func doHandoffAutoWithOutcome(store beads.Store, rec events.Recorder, sessionAddress string, args []string, hookFormat string, stdout, stderr io.Writer) handoffOutcome {
 	b, ok := createHandoffMail(store, rec, sessionAddress, sessionAddress, args, "context cycle", stderr)
 	if !ok {
-		return 1
+		return handoffOutcome{code: 1, mode: "auto", auto: true, recipient: sessionAddress}
+	}
+	outcome := handoffOutcome{
+		code:       0,
+		mode:       "auto",
+		recipient:  sessionAddress,
+		auto:       true,
+		subject:    b.Title,
+		mailBeadID: b.ID,
+		action:     "restart_skipped",
 	}
 	message := fmt.Sprintf("Handoff: sent auto mail %s (restart skipped).\n", b.ID)
 	if err := writeProviderHookContextForEvent(stdout, hookFormat, "PreCompact", message); err != nil {
 		fmt.Fprintf(stderr, "gc handoff: writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		outcome.code = 1
+		return outcome
 	}
-	return 0
+	return outcome
 }
 
 func createHandoffMail(store beads.Store, rec events.Recorder, senderAddress, recipientAddress string, args []string, defaultSubject string, stderr io.Writer) (beads.Bead, bool) {
@@ -376,38 +421,58 @@ func clearRestartRequest(store beads.Store, dops drainOps, sessionName string) e
 func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider,
 	sessionName, targetAddress, sender string, args []string, stdout, stderr io.Writer,
 ) int {
+	return doHandoffRemoteWithOutcome(store, rec, sp, sessionName, targetAddress, sender, args, stdout, stderr).code
+}
+
+func doHandoffRemoteWithOutcome(store beads.Store, rec events.Recorder, sp runtime.Provider,
+	sessionName, targetAddress, sender string, args []string, stdout, stderr io.Writer,
+) handoffOutcome {
 	b, ok := createHandoffMail(store, rec, sender, targetAddress, args, "HANDOFF: context cycle", stderr)
 	if !ok {
-		return 1
+		return handoffOutcome{code: 1, mode: "remote", target: targetAddress, recipient: targetAddress}
+	}
+	outcome := handoffOutcome{
+		code:       0,
+		mode:       "remote",
+		target:     targetAddress,
+		recipient:  targetAddress,
+		subject:    b.Title,
+		mailBeadID: b.ID,
 	}
 
 	restartable, err := sessionRestartableByController(store, sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		outcome.code = 1
+		return outcome
 	}
 	if !restartable {
 		if err := clearRestartRequest(store, newDrainOps(sp), sessionName); err != nil {
 			fmt.Fprintf(stderr, "gc handoff: clearing stale restart request: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+			outcome.code = 1
+			return outcome
 		}
 		fmt.Fprintf(stdout, "Handoff: sent mail %s to %s (named session; kill skipped because the controller cannot restart it)\n", b.ID, targetAddress) //nolint:errcheck // best-effort stdout
-		return 0
+		outcome.action = "kill_skipped"
+		return outcome
 	}
 
 	// Kill target session (reconciler restarts it).
 	running, err := workerSessionTargetRunningWithConfig("", store, sp, nil, sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: observing %s: %v\n", targetAddress, err) //nolint:errcheck // best-effort stderr
-		return 1
+		outcome.code = 1
+		return outcome
 	}
 	if !running {
 		fmt.Fprintf(stdout, "Handoff: sent mail %s to %s (session not running; will be delivered on next start)\n", b.ID, targetAddress) //nolint:errcheck // best-effort stdout
-		return 0
+		outcome.action = "delivery_pending"
+		return outcome
 	}
 	if err := workerKillSessionTargetWithConfig("", store, sp, nil, sessionName); err != nil {
 		fmt.Fprintf(stderr, "gc handoff: killing %s: %v\n", targetAddress, err) //nolint:errcheck // best-effort stderr
-		return 1
+		outcome.code = 1
+		return outcome
 	}
 	sessionID, resolveErr := resolveSessionID(store, sessionName)
 	if resolveErr != nil {
@@ -425,7 +490,8 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 	})
 
 	fmt.Fprintf(stdout, "Handoff: sent mail %s to %s, killed session (reconciler will restart)\n", b.ID, targetAddress) //nolint:errcheck // best-effort stdout
-	return 0
+	outcome.action = "killed"
+	return outcome
 }
 
 // handoffThreadID generates a unique thread ID for handoff messages.

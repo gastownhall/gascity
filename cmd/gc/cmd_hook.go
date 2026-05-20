@@ -253,7 +253,7 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 
 	trimmed := strings.TrimSpace(output)
 	normalized := normalizeWorkQueryOutput(trimmed)
-	normalized = filterUnreadyHookCandidates(normalized, time.Now())
+	normalized = filterUnreadyHookCandidatesWithDiagnostics(normalized, time.Now(), stderr)
 	hasWork := workQueryHasReadyWork(normalized)
 
 	// Non-inject mode: print normalized, ready-only output. Return 0 only when work exists.
@@ -290,18 +290,18 @@ func workQueryHasReadyWork(output string) bool {
 	return true
 }
 
-// filterUnreadyHookCandidates strips beads from work_query output that fail
-// bd ready semantics: future defer_until, or any open blocking dep in the
-// row's blocked_by array. The work_query is expected to gate these, but
-// defensive filtering here prevents a single broken query from cascading
-// into agent action on a bead it cannot progress.
-// Pure function over JSON; takes time.Time so tests stay deterministic.
-func filterUnreadyHookCandidates(output string, now time.Time) string {
+// filterUnreadyHookCandidatesWithDiagnostics strips beads from work_query
+// output that fail bd ready semantics: future defer_until, or any open
+// blocking dep in the row's blocked_by array. The work_query is expected to
+// gate these, but defensive filtering here prevents a single broken query from
+// cascading into agent action on a bead it cannot progress.
+func filterUnreadyHookCandidatesWithDiagnostics(output string, now time.Time, stderr io.Writer) string {
 	if output == "" {
 		return output
 	}
 	var decoded any
 	if err := json.Unmarshal([]byte(output), &decoded); err != nil {
+		warnUnfilteredHookJSON(output, err, stderr)
 		return output
 	}
 	arr, ok := decoded.([]any)
@@ -325,9 +325,21 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 	}
 	reencoded, err := json.Marshal(filtered)
 	if err != nil {
+		warnUnfilteredHookJSON(output, err, stderr)
 		return output
 	}
 	return string(reencoded)
+}
+
+func warnUnfilteredHookJSON(output string, err error, stderr io.Writer) {
+	if stderr == nil {
+		return
+	}
+	trimmed := strings.TrimSpace(output)
+	if !strings.HasPrefix(trimmed, "[") && !strings.HasPrefix(trimmed, "{") {
+		return
+	}
+	fmt.Fprintf(stderr, "gc hook: warning: cannot filter work query JSON: %v\n", err) //nolint:errcheck // best-effort stderr
 }
 
 func isFutureDeferredHookCandidate(item map[string]any, now time.Time) bool {

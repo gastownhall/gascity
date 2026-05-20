@@ -1,13 +1,27 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["schema_version", "mode", "auto"],
+  "required": ["schema_version", "ok", "mode", "auto", "restart_requested"],
   "properties": {
     "schema_version": { "type": "string" },
-    "mode": { "type": "string" },
+    "ok": { "type": "boolean" },
+    "mode": { "type": "string", "enum": ["self", "auto", "remote"] },
     "target": { "type": "string" },
+    "recipient": { "type": "string" },
     "auto": { "type": "boolean" },
-    "subject": { "type": "string" }
+    "subject": { "type": "string" },
+    "mail_bead_id": { "type": "string" },
+    "restart_requested": { "type": "boolean" },
+    "action": {
+      "type": "string",
+      "enum": [
+        "restart_requested",
+        "restart_skipped",
+        "kill_skipped",
+        "delivery_pending",
+        "killed"
+      ]
+    }
   },
   "additionalProperties": true
 }

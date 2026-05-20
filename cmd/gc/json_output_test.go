@@ -21,6 +21,9 @@ func TestWriteJSONErrorIncludesExitCodeOnStdoutAndStderr(t *testing.T) {
 	if out.SchemaVersion != "1" || out.OK || out.Error.Code != "config_load_failed" || out.Error.ExitCode != 7 {
 		t.Fatalf("stdout error payload = %+v", out)
 	}
+	if lines := strings.Split(strings.TrimSpace(stdout.String()), "\n"); len(lines) != 1 {
+		t.Fatalf("stdout lines = %d, want one JSON line; stdout=%q", len(lines), stdout.String())
+	}
 
 	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
 	if len(lines) != 1 {
