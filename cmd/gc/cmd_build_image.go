@@ -109,6 +109,7 @@ func doBuildImage(args []string, tag, baseImage string, rigPaths []string, push,
 		BaseImage: baseImage,
 		Tag:       tag,
 		RigPaths:  rigs,
+		Stderr:    stderr,
 	}
 	if err := buildimage.AssembleContext(opts); err != nil {
 		fmt.Fprintf(stderr, "gc build-image: %v\n", err) //nolint:errcheck // best-effort stderr
