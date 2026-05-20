@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -21,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -4517,6 +4519,76 @@ func TestSupervisorSignalLoopRecordsSignalAttribution(t *testing.T) {
 	}
 }
 
+func TestRequestSupervisorShutdownRecordsBreadcrumbAndEvent(t *testing.T) {
+	var stderr bytes.Buffer
+	rec := events.NewFake()
+	ctl := newSupervisorShutdownController()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	requestSupervisorShutdown(&stderr, rec, ctl, cancel, supervisorShutdownPreserveSessions, shutdownTrigger{
+		Source: "signal",
+		Signal: "terminated",
+	})
+
+	wantLine := "gc supervisor: shutdown requested: source=signal signal=\"terminated\" client=\"\" mode=preserve_sessions\n"
+	if got := stderr.String(); got != wantLine {
+		t.Fatalf("stderr = %q, want %q", got, wantLine)
+	}
+	if !ctl.preservesSessions() {
+		t.Fatal("shutdown controller did not record preserve-sessions mode")
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("shutdown cancel was not called")
+	}
+
+	if len(rec.Events) != 1 {
+		t.Fatalf("recorded events = %d, want 1", len(rec.Events))
+	}
+	event := rec.Events[0]
+	if event.Type != events.SupervisorShutdownRequested {
+		t.Fatalf("event.Type = %q, want %q", event.Type, events.SupervisorShutdownRequested)
+	}
+	if event.Actor != "supervisor" {
+		t.Fatalf("event.Actor = %q, want %q", event.Actor, "supervisor")
+	}
+	if event.Subject != "supervisor" {
+		t.Fatalf("event.Subject = %q, want %q", event.Subject, "supervisor")
+	}
+	var payload api.SupervisorShutdownPayload
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		t.Fatalf("Unmarshal payload: %v", err)
+	}
+	if payload.Source != "signal" || payload.Signal != "terminated" || payload.ClientAddr != "" || payload.Mode != "preserve_sessions" {
+		t.Fatalf("payload = %+v, want signal/terminated/empty/preserve_sessions", payload)
+	}
+}
+
+func TestRequestSupervisorShutdownWithoutRecorderStillLogsAndCancels(t *testing.T) {
+	var stderr bytes.Buffer
+	ctl := newSupervisorShutdownController()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	requestSupervisorShutdown(&stderr, nil, ctl, cancel, supervisorShutdownDestructive, shutdownTrigger{
+		Source:     "socket_stop",
+		ClientAddr: "pipe",
+	})
+
+	wantLine := "gc supervisor: shutdown requested: source=socket_stop signal=\"\" client=\"pipe\" mode=destructive\n"
+	if got := stderr.String(); got != wantLine {
+		t.Fatalf("stderr = %q, want %q", got, wantLine)
+	}
+	if ctl.preservesSessions() {
+		t.Fatal("shutdown controller recorded preserve-sessions mode for destructive shutdown")
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("shutdown cancel was not called")
+	}
+}
+
 // TestHandleSupervisorConnStopRecordsSocketAttribution ensures the
 // socket "stop" handler forwards a socket_stop trigger to
 // requestShutdown so future silent exits via the controller socket
@@ -4551,6 +4623,42 @@ func TestHandleSupervisorConnStopRecordsSocketAttribution(t *testing.T) {
 	trigger := <-gotTrigger
 	if trigger.Source != "socket_stop" {
 		t.Errorf("trigger.Source = %q, want %q", trigger.Source, "socket_stop")
+	}
+	if trigger.ClientAddr == "" {
+		t.Error("trigger.ClientAddr is empty; want non-empty peer address")
+	}
+	ack := make([]byte, len("ok\n"))
+	client.SetReadDeadline(time.Now().Add(time.Second)) //nolint:errcheck
+	if _, err := io.ReadFull(client, ack); err != nil {
+		t.Fatalf("ReadFull(ok): %v", err)
+	}
+	if string(ack) != "ok\n" {
+		t.Fatalf("ack = %q, want %q", string(ack), "ok\n")
+	}
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for socket handler to exit")
+	}
+}
+
+func TestSupervisorShutdownModeNameHandlesKnownAndUnknownModes(t *testing.T) {
+	tests := []struct {
+		name string
+		mode supervisorShutdownMode
+		want string
+	}{
+		{name: "preserve", mode: supervisorShutdownPreserveSessions, want: "preserve_sessions"},
+		{name: "destructive", mode: supervisorShutdownDestructive, want: "destructive"},
+		{name: "none", mode: supervisorShutdownNone, want: "unknown"},
+		{name: "future", mode: supervisorShutdownMode(99), want: "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := supervisorShutdownModeName(tt.mode); got != tt.want {
+				t.Fatalf("supervisorShutdownModeName(%v) = %q, want %q", tt.mode, got, tt.want)
+			}
+		})
 	}
 }
 

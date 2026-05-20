@@ -4173,7 +4173,7 @@ export interface components {
              * @description Resulting shutdown mode.
              * @enum {string}
              */
-            mode: "destructive" | "preserve_sessions";
+            mode: "destructive" | "preserve_sessions" | "unknown";
             /** @description For source=signal, the human-readable signal name (e.g. "terminated", "interrupt"). Empty for socket_stop. */
             signal?: string;
             /**

@@ -2953,7 +2953,7 @@ export type SupervisorShutdownPayload = {
     /**
      * Resulting shutdown mode.
      */
-    mode: 'destructive' | 'preserve_sessions';
+    mode: 'destructive' | 'preserve_sessions' | 'unknown';
     /**
      * For source=signal, the human-readable signal name (e.g. "terminated", "interrupt"). Empty for socket_stop.
      */

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -245,9 +246,41 @@ func supervisorShutdownModeName(mode supervisorShutdownMode) string {
 	switch mode {
 	case supervisorShutdownPreserveSessions:
 		return "preserve_sessions"
-	default:
+	case supervisorShutdownDestructive:
 		return "destructive"
+	default:
+		return "unknown"
 	}
+}
+
+func requestSupervisorShutdown(stderr io.Writer, rec events.Recorder, shutdownCtl *supervisorShutdownController, cancel context.CancelFunc, mode supervisorShutdownMode, trigger shutdownTrigger) {
+	modeName := supervisorShutdownModeName(mode)
+	// Plain-text breadcrumb to stderr -> ~/.gc/supervisor.log via the
+	// launchd/systemd-redirected stream. This is the canonical place
+	// operators look after an unexpected graceful exit.
+	fmt.Fprintf(stderr, "gc supervisor: shutdown requested: source=%s signal=%q client=%q mode=%s\n", //nolint:errcheck
+		trigger.Source, trigger.Signal, trigger.ClientAddr, modeName)
+	if rec != nil {
+		payload := api.SupervisorShutdownPayload{
+			Source:     trigger.Source,
+			Signal:     trigger.Signal,
+			ClientAddr: trigger.ClientAddr,
+			Mode:       modeName,
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc supervisor: marshal shutdown event: %v\n", err) //nolint:errcheck
+		} else {
+			rec.Record(events.Event{
+				Type:    events.SupervisorShutdownRequested,
+				Actor:   "supervisor",
+				Subject: "supervisor",
+				Payload: raw,
+			})
+		}
+	}
+	shutdownCtl.request(mode)
+	cancel()
 }
 
 func supervisorSignalLoop(sigCh <-chan os.Signal, done <-chan struct{}, requestShutdown func(supervisorShutdownMode, shutdownTrigger), requestReconcile func()) {
@@ -843,36 +876,16 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	shutdownCtl := newSupervisorShutdownController()
-	// supervisorEventRecorder is a late-binding accessor: the supervisor
-	// registry is constructed below, after this closure is declared. We
-	// resolve at emit time so requestShutdown can be wired into the
-	// signal loop and socket handler before the registry exists.
-	var supervisorEventRecorder func() events.Recorder
+	// Track managed cities via atomic-snapshot registry. API reads are
+	// lock-free (atomic pointer load); mutations go through citiesMu.
+	registry := newCityRegistry()
+	supEvPath := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
+	if supFR, supErr := events.NewFileRecorder(supEvPath, stderr); supErr == nil {
+		registry.SetSupervisorRecorder(supFR)
+		defer supFR.Close() //nolint:errcheck
+	}
 	requestShutdown := func(mode supervisorShutdownMode, trigger shutdownTrigger) {
-		modeName := supervisorShutdownModeName(mode)
-		// Plain-text breadcrumb to stderr → ~/.gc/supervisor.log via the
-		// launchd/systemd-redirected stream. This is the canonical place
-		// operators look after an unexpected exit; before this line, the
-		// supervisor exited silently and forensics required scraping the
-		// macOS unified log or launchd state. Cheap, no behavior change.
-		fmt.Fprintf(stderr, "gc supervisor: shutdown requested: source=%s signal=%q client=%q mode=%s\n", //nolint:errcheck
-			trigger.Source, trigger.Signal, trigger.ClientAddr, modeName)
-		// Structured event for consumers that subscribe to the supervisor
-		// event bus (dashboards, follow --json). Defensive: skip silently
-		// when the recorder isn't wired yet (early startup) or when the
-		// registry is nil.
-		if supervisorEventRecorder != nil {
-			if rec := supervisorEventRecorder(); rec != nil {
-				api.EmitTypedEvent(rec, events.SupervisorShutdownRequested, "supervisor", api.SupervisorShutdownPayload{
-					Source:     trigger.Source,
-					Signal:     trigger.Signal,
-					ClientAddr: trigger.ClientAddr,
-					Mode:       modeName,
-				})
-			}
-		}
-		shutdownCtl.request(mode)
-		cancel()
+		requestSupervisorShutdown(stderr, registry.SupervisorEventRecorder(), shutdownCtl, cancel, mode, trigger)
 	}
 
 	// Reconcile channel — triggers immediate reconciliation from SIGHUP
@@ -905,20 +918,6 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: workspace-service startup cleanup: %v\n", err) //nolint:errcheck
 		return 1
 	}
-
-	// Track managed cities via atomic-snapshot registry. API reads are
-	// lock-free (atomic pointer load); mutations go through citiesMu.
-	registry := newCityRegistry()
-	supEvPath := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
-	if supFR, supErr := events.NewFileRecorder(supEvPath, stderr); supErr == nil {
-		registry.SetSupervisorRecorder(supFR)
-		defer supFR.Close() //nolint:errcheck
-	}
-	// Late-bind the recorder accessor used by requestShutdown for the
-	// SupervisorShutdownRequested event. The closure was declared before
-	// the registry existed; binding here keeps the recorder lookup live
-	// for the lifetime of the supervisor.
-	supervisorEventRecorder = func() events.Recorder { return registry.SupervisorEventRecorder() }
 
 	// Start API server with city-namespaced routing (Phase 2).
 	startedAt := time.Now()

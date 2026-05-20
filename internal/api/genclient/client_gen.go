@@ -151,6 +151,7 @@ func (e SubmitIntent) Valid() bool {
 const (
 	Destructive      SupervisorShutdownPayloadMode = "destructive"
 	PreserveSessions SupervisorShutdownPayloadMode = "preserve_sessions"
+	Unknown          SupervisorShutdownPayloadMode = "unknown"
 )
 
 // Valid indicates whether the value is a known member of the SupervisorShutdownPayloadMode enum.
@@ -159,6 +160,8 @@ func (e SupervisorShutdownPayloadMode) Valid() bool {
 	case Destructive:
 		return true
 	case PreserveSessions:
+		return true
+	case Unknown:
 		return true
 	default:
 		return false

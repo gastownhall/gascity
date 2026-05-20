@@ -6900,7 +6900,8 @@
             "description": "Resulting shutdown mode.",
             "enum": [
               "destructive",
-              "preserve_sessions"
+              "preserve_sessions",
+              "unknown"
             ],
             "type": "string"
           },

@@ -127,7 +127,7 @@ type SupervisorShutdownPayload struct {
 	Source     string `json:"source" enum:"signal,socket_stop" doc:"Which path triggered the shutdown."`
 	Signal     string `json:"signal,omitempty" doc:"For source=signal, the human-readable signal name (e.g. \"terminated\", \"interrupt\"). Empty for socket_stop."`
 	ClientAddr string `json:"client_addr,omitempty" doc:"For source=socket_stop, the address reported by the connecting client. Typically empty for unix-socket peers."`
-	Mode       string `json:"mode" enum:"destructive,preserve_sessions" doc:"Resulting shutdown mode."`
+	Mode       string `json:"mode" enum:"destructive,preserve_sessions,unknown" doc:"Resulting shutdown mode."`
 }
 
 // IsEventPayload marks SupervisorShutdownPayload as an events.Payload variant.
