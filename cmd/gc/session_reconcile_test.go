@@ -902,8 +902,11 @@ func TestComputeWorkSet_SkipsSuspendedAgent(t *testing.T) {
 		},
 	}
 
+	var probedMu sync.Mutex
 	var probed []string
 	runner := func(command, _ string, _ map[string]string) (string, error) {
+		probedMu.Lock()
+		defer probedMu.Unlock()
 		probed = append(probed, command)
 		return `[{"id":"BL-1"}]`, nil
 	}
@@ -915,6 +918,8 @@ func TestComputeWorkSet_SkipsSuspendedAgent(t *testing.T) {
 	if work["parked"] {
 		t.Error("suspended agent should not appear in work set")
 	}
+	probedMu.Lock()
+	defer probedMu.Unlock()
 	for _, c := range probed {
 		if strings.Contains(c, "gc.routed_to=parked") {
 			t.Errorf("suspended agent was probed: %q", c)
@@ -938,8 +943,11 @@ func TestComputeWorkSet_SkipsAgentsOnSuspendedRig(t *testing.T) {
 		},
 	}
 
+	var probedMu sync.Mutex
 	var probed []string
 	runner := func(command, _ string, _ map[string]string) (string, error) {
+		probedMu.Lock()
+		defer probedMu.Unlock()
 		probed = append(probed, command)
 		return `[{"id":"BL-1"}]`, nil
 	}
@@ -951,6 +959,8 @@ func TestComputeWorkSet_SkipsAgentsOnSuspendedRig(t *testing.T) {
 	if work["parked-rig/beta"] {
 		t.Error("agent on suspended rig should not appear in work set")
 	}
+	probedMu.Lock()
+	defer probedMu.Unlock()
 	for _, c := range probed {
 		if strings.Contains(c, "gc.routed_to=beta") {
 			t.Errorf("agent on suspended rig was probed: %q", c)

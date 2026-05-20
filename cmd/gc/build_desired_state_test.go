@@ -4100,6 +4100,123 @@ func TestBuildDesiredState_SuspendedNamedSession_DoesNotMaterialize(t *testing.T
 	}
 }
 
+func TestBuildDesiredState_ProductionDemandSkipsSuspendedAgentScaleCheck(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	liveMarker := filepath.Join(cityPath, "live.probed")
+	parkedMarker := filepath.Join(cityPath, "parked.probed")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{
+				Name:       "live",
+				ScaleCheck: scaleCheckMarkerCommand(liveMarker, 0),
+			},
+			{
+				Name:       "parked",
+				Suspended:  true,
+				ScaleCheck: scaleCheckMarkerCommand(parkedMarker, 1),
+			},
+		},
+	}
+
+	var stderr strings.Builder
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	assertMarkerExists(t, liveMarker)
+	assertMarkerAbsent(t, parkedMarker)
+	if _, ok := dsResult.ScaleCheckCounts["parked"]; ok {
+		t.Fatalf("ScaleCheckCounts contains suspended agent: %#v", dsResult.ScaleCheckCounts)
+	}
+}
+
+func TestBuildDesiredState_ProductionDemandSkipsSuspendedRigScaleCheck(t *testing.T) {
+	cityPath := t.TempDir()
+	liveRigPath := filepath.Join(cityPath, "rigs", "live-rig")
+	parkedRigPath := filepath.Join(cityPath, "rigs", "parked-rig")
+	if err := os.MkdirAll(liveRigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(parkedRigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	liveMarker := filepath.Join(cityPath, "live-rig.probed")
+	parkedMarker := filepath.Join(cityPath, "parked-rig.probed")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "live-rig", Path: liveRigPath},
+			{Name: "parked-rig", Path: parkedRigPath, Suspended: true},
+		},
+		Agents: []config.Agent{
+			{
+				Name:       "alpha",
+				Dir:        "live-rig",
+				ScaleCheck: scaleCheckMarkerCommand(liveMarker, 0),
+			},
+			{
+				Name:       "beta",
+				Dir:        "parked-rig",
+				ScaleCheck: scaleCheckMarkerCommand(parkedMarker, 1),
+			},
+		},
+	}
+
+	var stderr strings.Builder
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	assertMarkerExists(t, liveMarker)
+	assertMarkerAbsent(t, parkedMarker)
+	if _, ok := dsResult.ScaleCheckCounts["parked-rig/beta"]; ok {
+		t.Fatalf("ScaleCheckCounts contains agent on suspended rig: %#v", dsResult.ScaleCheckCounts)
+	}
+}
+
+func TestBuildDesiredState_ProductionDemandSkipsAllScaleChecksWhenCitySuspended(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	marker := filepath.Join(cityPath, "worker.probed")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Suspended: true},
+		Agents: []config.Agent{{
+			Name:       "worker",
+			ScaleCheck: scaleCheckMarkerCommand(marker, 1),
+		}},
+	}
+
+	var stderr strings.Builder
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	assertMarkerAbsent(t, marker)
+	if len(dsResult.State) != 0 {
+		t.Fatalf("State = %#v, want empty for suspended city", dsResult.State)
+	}
+	if len(dsResult.ScaleCheckCounts) != 0 {
+		t.Fatalf("ScaleCheckCounts = %#v, want none for suspended city", dsResult.ScaleCheckCounts)
+	}
+}
+
+func scaleCheckMarkerCommand(marker string, count int) string {
+	return fmt.Sprintf("printf probed > %s; printf %d", strconv.Quote(marker), count)
+}
+
+func assertMarkerExists(t *testing.T, marker string) {
+	t.Helper()
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected scale_check marker %s: %v", marker, err)
+	}
+}
+
+func assertMarkerAbsent(t *testing.T, marker string) {
+	t.Helper()
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("scale_check marker %s exists; suspended agent was probed", marker)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat scale_check marker %s: %v", marker, err)
+	}
+}
+
 // TestBuildDesiredState_OnDemandNamedSession_NoPhantomPoolInstance verifies the
 // ga-fiw fix: when work is assigned to a max_active_sessions=1 named-session
 // agent (e.g. refinery), only ONE desired session entry exists — not the
