@@ -667,5 +667,5 @@ func (r *Reconciler) emitRecoveryEvent(eventType, eventID, beadID string, payloa
 	if r.Handler.Emitter == nil {
 		return
 	}
-	r.Handler.Emitter.Emit(eventType, eventID, beadID, MarshalPayload(payload), true)
+	r.Handler.Emitter.Emit(eventType, eventID, beadID, MarshalPayload(r.Handler.withEventRig(beadID, payload)), true)
 }

@@ -281,3 +281,65 @@ func TestCreateHandler_DefaultGateMode(t *testing.T) {
 		t.Errorf("gate_mode = %q, want %q", meta[FieldGateMode], GateModeManual)
 	}
 }
+
+func TestCreateHandler_PersistsRig(t *testing.T) {
+	store := newFakeStore()
+	emitter := &fakeEmitter{}
+	handler := &Handler{
+		Store:   store,
+		Emitter: emitter,
+		Clock:   time.Now,
+	}
+
+	result, err := handler.CreateHandler(context.Background(), CreateParams{
+		Formula:       "test-formula",
+		Target:        "test-agent",
+		MaxIterations: 3,
+		GateMode:      GateModeManual,
+		Rig:           "gascity-prod",
+	})
+	if err != nil {
+		t.Fatalf("CreateHandler returned error: %v", err)
+	}
+	meta, err := store.GetMetadata(result.BeadID)
+	if err != nil {
+		t.Fatalf("GetMetadata(%q): %v", result.BeadID, err)
+	}
+	if meta[FieldRig] != "gascity-prod" {
+		t.Errorf("rig = %q, want %q", meta[FieldRig], "gascity-prod")
+	}
+	if len(emitter.events) != 1 {
+		t.Fatalf("emitted events = %d, want 1", len(emitter.events))
+	}
+	var payload CreatedPayload
+	if err := json.Unmarshal(emitter.events[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshaling event payload: %v", err)
+	}
+	if payload.Rig != "gascity-prod" {
+		t.Errorf("payload.Rig = %q, want %q", payload.Rig, "gascity-prod")
+	}
+}
+
+func TestCreateHandler_EmptyRigForCityScope(t *testing.T) {
+	store := newFakeStore()
+	handler := &Handler{
+		Store:   store,
+		Emitter: &fakeEmitter{},
+		Clock:   time.Now,
+	}
+
+	result, err := handler.CreateHandler(context.Background(), CreateParams{
+		Formula:       "test-formula",
+		Target:        "test-agent",
+		MaxIterations: 3,
+		GateMode:      GateModeManual,
+		// Rig left empty — city/HQ scope.
+	})
+	if err != nil {
+		t.Fatalf("CreateHandler returned error: %v", err)
+	}
+	meta, _ := store.GetMetadata(result.BeadID)
+	if meta[FieldRig] != "" {
+		t.Errorf("rig = %q, want empty for city scope", meta[FieldRig])
+	}
+}
