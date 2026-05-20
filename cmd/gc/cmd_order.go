@@ -251,6 +251,8 @@ func loadActiveOrdersForCity(cityPath string, cfg *config.City, stderr io.Writer
 	return orders.FilterEnabled(allAA), 0
 }
 
+// scanAllOrders returns the shared post-override discovery view used by command
+// tests and compatibility call sites.
 func scanAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, error) {
 	return orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{
 		OnRigScanError: func(rigName string, err error) error {
