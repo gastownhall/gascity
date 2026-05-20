@@ -1198,8 +1198,8 @@ func rewriteAttemptSegment(ref, kind string, oldAttempt, nextAttempt int) (strin
 
 // traceCheckOutputCap bounds stderr/stdout in the ralph check-result trace
 // line so a noisy script does not produce an unreadable log entry.
-// GateResult already truncates each stream to MaxOutputBytes (~64 KiB);
-// this further clips for tracing.
+// GateResult already truncates each stream to convergence.MaxOutputBytes
+// (4 KiB); this further clips for tracing.
 const traceCheckOutputCap = 512
 
 // traceClipString returns s truncated to at most limit bytes, appending an
