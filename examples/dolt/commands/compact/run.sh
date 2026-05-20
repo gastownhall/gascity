@@ -616,143 +616,6 @@ push_remote_refspec() {
     sql -r tabular -q "CALL DOLT_PUSH('--force', '--set-upstream', '$remote', '$refspec_arg')"
 }
 
-# atomic_pre_flatten_post - performs the preflight per-table COUNT(*),
-# captures pre/post DOLT_HASHOF_DB(), executes the soft-reset+commit flatten,
-# and captures the postflight per-table COUNT(*) - all in a single dolt sql
-# session bracketed by LOCK TABLES WRITE / UNLOCK TABLES.
-#
-# Why: holding write-locks on every user table across the entire preflight ->
-# flatten -> postflight window makes the row-count and value-hash comparisons
-# atomic with the flatten itself. Without this, an agent writing concurrently
-# (the common case on a busy single-host city) shifts the row counts between
-# the snapshot and the verification and the script quarantines the database
-# for what is in fact a benign race. See gastownhall/gascity#2348.
-#
-# Args:
-#   $1 - database name
-#   $2 - target root commit for the soft reset
-#   $3 - path to write preflight counts ("tablename count" per line)
-#   $4 - path to write postflight counts ("tablename count" per line)
-# Side effects (shell globals set on success):
-#   atomic_preflight_hash    - DOLT_HASHOF_DB() value captured at preflight
-#   atomic_postflight_hash   - DOLT_HASHOF_DB() value captured at postflight
-#   atomic_postflight_head   - post-flatten HEAD commit hash
-# Returns:
-#   0 - success
-#   1 - flatten SQL failure (caller should restore HEAD)
-#   2 - probe/parse failure (caller should quarantine)
-atomic_pre_flatten_post() {
-  db="$1"
-  target_root="$2"
-  pre_out="$3"
-  post_out="$4"
-  atomic_preflight_hash=""
-  atomic_postflight_hash=""
-  atomic_postflight_head=""
-
-  tables_tmp=$(mktemp)
-  if ! user_tables "$db" > "$tables_tmp"; then
-    rm -f "$tables_tmp"
-    return 2
-  fi
-
-  lock_clause=""
-  preflight_stmts=""
-  postflight_stmts=""
-  while IFS= read -r t; do
-    [ -n "$t" ] || continue
-    if ! valid_database_name "$t"; then
-      printf 'compact: db=%s atomic flatten: invalid table name from information_schema table=%s - fail\n' "$db" "$t" >&2
-      rm -f "$tables_tmp"
-      return 2
-    fi
-    if [ -n "$lock_clause" ]; then
-      lock_clause="${lock_clause}, "
-    fi
-    lock_clause="${lock_clause}\`${t}\` WRITE"
-    preflight_stmts="${preflight_stmts}SELECT '__P_COUNT__' AS marker, '${t}' AS table_name, COUNT(*) AS value FROM \`${t}\`;
-"
-    postflight_stmts="${postflight_stmts}SELECT '__Q_COUNT__' AS marker, '${t}' AS table_name, COUNT(*) AS value FROM \`${t}\`;
-"
-  done < "$tables_tmp"
-  rm -f "$tables_tmp"
-
-  if [ -z "$lock_clause" ]; then
-    printf 'compact: db=%s atomic flatten: no user tables to lock - fail\n' "$db" >&2
-    return 2
-  fi
-
-  out_tmp=$(mktemp)
-  err_tmp=$(mktemp)
-  flatten_sql_rc=0
-  dolt_query "$db" "
-    LOCK TABLES ${lock_clause};
-    ${preflight_stmts}SELECT '__P_HASH__' AS marker, DOLT_HASHOF_DB() AS value;
-    CALL DOLT_RESET('--soft', '${target_root}');
-    CALL DOLT_COMMIT('-Am', 'compaction: flatten history');
-    SELECT '__Q_HEAD__' AS marker, commit_hash AS value FROM dolt_log ORDER BY date DESC LIMIT 1;
-    SELECT '__Q_HASH__' AS marker, DOLT_HASHOF_DB() AS value;
-    ${postflight_stmts}UNLOCK TABLES;
-  " > "$out_tmp" 2> "$err_tmp" || flatten_sql_rc=$?
-
-  if [ "$flatten_sql_rc" -ne 0 ]; then
-    emit_error_file "$db" "$err_tmp"
-    rm -f "$out_tmp" "$err_tmp"
-    return 1
-  fi
-
-  # Parse marker rows out of the tabular output.
-  : > "$pre_out"
-  : > "$post_out"
-  parse_rc=0
-  while IFS= read -r line; do
-    case "$line" in
-      *__P_COUNT__*)
-        t=$(printf '%s' "$line" | awk -F'|' '{gsub(/^ +| +$/, "", $3); print $3}')
-        v=$(printf '%s' "$line" | awk -F'|' '{gsub(/^ +| +$/, "", $4); print $4}')
-        case "$v" in
-          ""|*[!0-9]*) parse_rc=2 ;;
-          *) printf '%s %s\n' "$t" "$v" >> "$pre_out" ;;
-        esac
-        ;;
-      *__Q_COUNT__*)
-        t=$(printf '%s' "$line" | awk -F'|' '{gsub(/^ +| +$/, "", $3); print $3}')
-        v=$(printf '%s' "$line" | awk -F'|' '{gsub(/^ +| +$/, "", $4); print $4}')
-        case "$v" in
-          ""|*[!0-9]*) parse_rc=2 ;;
-          *) printf '%s %s\n' "$t" "$v" >> "$post_out" ;;
-        esac
-        ;;
-      *__P_HASH__*)
-        v=$(printf '%s' "$line" | awk -F'|' '{gsub(/^ +| +$/, "", $3); print $3}')
-        atomic_preflight_hash="$v"
-        ;;
-      *__Q_HASH__*)
-        v=$(printf '%s' "$line" | awk -F'|' '{gsub(/^ +| +$/, "", $3); print $3}')
-        atomic_postflight_hash="$v"
-        ;;
-      *__Q_HEAD__*)
-        v=$(printf '%s' "$line" | awk -F'|' '{gsub(/^ +| +$/, "", $3); print $3}')
-        atomic_postflight_head="$v"
-        ;;
-    esac
-  done < "$out_tmp"
-
-  rm -f "$out_tmp" "$err_tmp"
-
-  if [ "$parse_rc" -ne 0 ]; then
-    printf 'compact: db=%s atomic flatten: row count parse failure\n' "$db" >&2
-    return 2
-  fi
-
-  if [ -z "$atomic_preflight_hash" ] || [ -z "$atomic_postflight_hash" ] || [ -z "$atomic_postflight_head" ]; then
-    printf 'compact: db=%s atomic flatten: missing marker output\n' "$db" >&2
-    return 2
-  fi
-
-  return 0
-}
-
 # preflight_counts — write "<table> <count>" lines for all user tables.
 preflight_counts() {
   db="$1"
@@ -788,52 +651,6 @@ preflight_counts() {
   done < "$tables_tmp"
   rm -f "$tables_tmp"
   return "$preflight_failed"
-}
-
-# verify_counts_from_file - like verify_counts, but reads postflight counts
-# from a file produced by atomic_pre_flatten_post rather than doing a live
-# re-query. This keeps the row-count check consistent with the atomic-flatten
-# path: both pre and post snapshots are taken inside the same LOCK TABLES
-# session, so the comparison cannot be perturbed by a concurrent writer.
-verify_counts_from_file() {
-  db="$1"
-  preflight="$2"
-  postflight_file="$3"
-  fail=0
-  verify_counts_saw_gain=0
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    t=${line%% *}
-    expected=${line##* }
-    actual=$(awk -v want="$t" '$1==want {print $2; exit}' "$postflight_file")
-    if [ -z "$actual" ]; then
-      printf 'compact: db=%s post-flatten row count missing from atomic-flatten output table=%s\n' "$db" "$t" >&2
-      fail=2
-      continue
-    fi
-    case "$actual" in
-      ""|*[!0-9]*)
-        printf 'compact: db=%s post-flatten row count not numeric table=%s value=%s\n' "$db" "$t" "$actual" >&2
-        fail=2
-        continue
-        ;;
-    esac
-    if [ "$actual" != "$expected" ]; then
-      if [ "$actual" -lt "$expected" ]; then
-        printf 'compact: db=%s row count decreased after flatten table=%s before=%s after=%s\n' "$db" "$t" "$expected" "$actual" >&2
-        if [ "$fail" -eq 0 ]; then
-          fail=1
-        fi
-      else
-        # With atomic LOCK TABLES this should not happen; if it does it
-        # likely indicates a bug or unexpected dolt semantic. Surface for
-        # investigation but treat as benign concurrent-write evidence.
-        printf 'compact: db=%s table=%s gained rows during atomic flatten window before=%s after=%s - investigate\n' "$db" "$t" "$expected" "$actual" >&2
-        verify_counts_saw_gain=1
-      fi
-    fi
-  done < "$preflight"
-  return "$fail"
 }
 
 # verify_counts — re-count and compare against the pre-flight file.
@@ -1570,54 +1387,60 @@ flatten_database() {
   # in which case post-flatten quarantine catches the run and the next order can
   # retry.
   preflight_tmp=$(mktemp)
-  postflight_tmp=$(mktemp)
-  printf 'compact: db=%s commits=%s root=%s - atomically flattening (LOCK TABLES + flatten + postflight in one session)...\n' \
-    "$db" "$count" "$root"
+  if ! preflight_counts "$db" "$preflight_tmp"; then
+    rm -f "$preflight_tmp"
+    return 1
+  fi
+  if ! preflight_hash=$(db_value_hash "$db"); then
+    rm -f "$preflight_tmp"
+    return 1
+  fi
+  if [ -z "$preflight_hash" ]; then
+    printf 'compact: db=%s pre-flatten value hash probe returned empty value — fail\n' "$db" >&2
+    rm -f "$preflight_tmp"
+    return 1
+  fi
+  table_count=$(wc -l < "$preflight_tmp")
+  printf 'compact: db=%s commits=%s root=%s tables=%s — flattening...\n' \
+    "$db" "$count" "$root" "$table_count"
 
   start=$(date +%s)
 
-  atomic_rc=0
-  atomic_pre_flatten_post "$db" "$root" "$preflight_tmp" "$postflight_tmp" || atomic_rc=$?
-  table_count=$(wc -l < "$preflight_tmp" 2>/dev/null || echo 0)
+  # Soft-reset to root + commit-everything is the flatten transaction.
+  # Both run in a single dolt sql invocation so the session keeps the
+  # USE selection across the two CALLs.
+  reset_rc=0
+  reset_err_tmp=$(mktemp)
+  dolt_query "$db" "
+    CALL DOLT_RESET('--soft', '$root');
+    CALL DOLT_COMMIT('-Am', 'compaction: flatten history');
+  " >/dev/null 2>"$reset_err_tmp" || reset_rc=$?
 
-  if [ "$atomic_rc" -eq 1 ]; then
-    printf 'compact: db=%s flatten SQL failed - restoring pre-flatten HEAD=%s\n' "$db" "$head" >&2
-    rm -f "$preflight_tmp" "$postflight_tmp"
+  if [ "$reset_rc" -ne 0 ]; then
+    printf 'compact: db=%s flatten failed rc=%s — restoring pre-flatten HEAD=%s\n' \
+      "$db" "$reset_rc" "$head" >&2
+    emit_error_file "$db" "$reset_err_tmp"
+    rm -f "$preflight_tmp"
+    rm -f "$reset_err_tmp"
     restore_head_after_flatten_failure "$db" "$head" "$root" || true
     return 1
   fi
-  if [ "$atomic_rc" -ne 0 ]; then
-    printf 'compact: db=%s atomic flatten probe failed - quarantine and investigate before GC\n' "$db" >&2
-    write_compact_marker "$quarantine_dir" "$db" "atomic flatten probe failed" || {
-      rm -f "$preflight_tmp" "$postflight_tmp"
-      return 1
-    }
-    rm -f "$preflight_tmp" "$postflight_tmp"
-    return 1
-  fi
+  rm -f "$reset_err_tmp"
 
-  # Values captured atomically inside the LOCK TABLES session.
-  preflight_hash="$atomic_preflight_hash"
-  flatten_head="$atomic_postflight_head"
-
-  if [ -z "$preflight_hash" ]; then
-    printf 'compact: db=%s pre-flatten value hash probe returned empty value - fail\n' "$db" >&2
-    rm -f "$preflight_tmp" "$postflight_tmp"
-    return 1
-  fi
-
+  flatten_head=$(head_commit "$db" || true)
   if [ -z "$flatten_head" ]; then
-    printf 'compact: db=%s post-flatten HEAD probe failed - quarantine and investigate before GC\n' "$db" >&2
+    printf 'compact: db=%s post-flatten HEAD probe failed — quarantine and investigate before GC\n' \
+      "$db" >&2
     write_compact_marker "$quarantine_dir" "$db" "post-flatten HEAD probe failed" || {
-      rm -f "$preflight_tmp" "$postflight_tmp"
+      rm -f "$preflight_tmp"
       return 1
     }
-    rm -f "$preflight_tmp" "$postflight_tmp"
+    rm -f "$preflight_tmp"
     return 1
   fi
 
   verify_counts_rc=0
-  verify_counts_from_file "$db" "$preflight_tmp" "$postflight_tmp" || verify_counts_rc=$?
+  verify_counts "$db" "$preflight_tmp" || verify_counts_rc=$?
   if [ "$verify_counts_rc" -ne 0 ]; then
     if [ "$verify_counts_rc" -eq 2 ]; then
       integrity_reason="post-flatten row count probe failed"
@@ -1630,24 +1453,35 @@ flatten_database() {
       "$db" "$integrity_guidance" >&2
     write_compact_marker "$quarantine_dir" "$db" "$integrity_reason" || {
       preserve_head_after_integrity_failure "$db" "$flatten_head" || true
-      rm -f "$preflight_tmp" "$postflight_tmp"
+      rm -f "$preflight_tmp"
       return 1
     }
     preserve_head_after_integrity_failure "$db" "$flatten_head" || true
-    rm -f "$preflight_tmp" "$postflight_tmp"
+    rm -f "$preflight_tmp"
     return 1
   fi
-  postflight_hash="$atomic_postflight_hash"
+  if ! postflight_hash=$(db_value_hash "$db"); then
+    printf 'compact: db=%s post-flatten value hash probe failed — quarantine and investigate before GC\n' \
+      "$db" >&2
+    write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash probe failed" || {
+      preserve_head_after_integrity_failure "$db" "$flatten_head" || true
+      rm -f "$preflight_tmp"
+      return 1
+    }
+    preserve_head_after_integrity_failure "$db" "$flatten_head" || true
+    rm -f "$preflight_tmp"
+    return 1
+  fi
   if [ -z "$postflight_hash" ]; then
     printf 'compact: db=%s post-flatten value hash probe returned empty value — quarantine and investigate before GC\n' \
       "$db" >&2
     write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash probe returned empty value" || {
       preserve_head_after_integrity_failure "$db" "$flatten_head" || true
-      rm -f "$preflight_tmp" "$postflight_tmp"
+      rm -f "$preflight_tmp"
       return 1
     }
     preserve_head_after_integrity_failure "$db" "$flatten_head" || true
-    rm -f "$preflight_tmp" "$postflight_tmp"
+    rm -f "$preflight_tmp"
     return 1
   fi
   if [ "$postflight_hash" != "$preflight_hash" ]; then
@@ -1656,22 +1490,22 @@ flatten_database() {
         "$db" "$preflight_hash" "$postflight_hash" >&2
       write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash changed with row-count increase" || {
         preserve_head_after_integrity_failure "$db" "$flatten_head" || true
-        rm -f "$preflight_tmp" "$postflight_tmp"
+        rm -f "$preflight_tmp"
         return 1
       }
       preserve_head_after_integrity_failure "$db" "$flatten_head" || true
-      rm -f "$preflight_tmp" "$postflight_tmp"
+      rm -f "$preflight_tmp"
       return 1
     else
       printf 'compact: db=%s value hash changed after flatten before=%s after=%s — quarantine and investigate before GC\n' \
         "$db" "$preflight_hash" "$postflight_hash" >&2
       write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash changed without row-count increase" || {
         preserve_head_after_integrity_failure "$db" "$flatten_head" || true
-        rm -f "$preflight_tmp" "$postflight_tmp"
+        rm -f "$preflight_tmp"
         return 1
       }
       preserve_head_after_integrity_failure "$db" "$flatten_head" || true
-      rm -f "$preflight_tmp" "$postflight_tmp"
+      rm -f "$preflight_tmp"
       return 1
     fi
   fi
@@ -1679,7 +1513,7 @@ flatten_database() {
     printf 'compact: db=%s row-count increase passed value-hash verification — concurrent write preserved\n' \
       "$db"
   fi
-  rm -f "$preflight_tmp" "$postflight_tmp"
+  rm -f "$preflight_tmp"
 
   after_count=$(commit_count "$db" || true)
 
