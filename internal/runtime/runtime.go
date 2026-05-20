@@ -119,8 +119,9 @@ type Provider interface {
 	// exist. Used for graceful shutdown before Stop.
 	Interrupt(name string) error
 
-	// IsRunning reports whether the named session exists and has a
-	// live process.
+	// IsRunning reports whether the named provider runtime exists. It does not
+	// prove that the configured agent process is alive; callers that need that
+	// distinction should use ObserveLiveness or ProcessAlive.
 	IsRunning(name string) bool
 
 	// IsAttached reports whether a user terminal is currently connected
