@@ -283,6 +283,10 @@ valid_database_name() {
   esac
 }
 
+valid_table_name() {
+  valid_database_name "$1"
+}
+
 valid_remote_name() {
   remote_candidate="$1"
   case "$remote_candidate" in
@@ -780,7 +784,7 @@ verify_counts() {
   fi
   while IFS= read -r post_table; do
     [ -n "$post_table" ] || continue
-    if ! valid_database_name "$post_table"; then
+    if ! valid_table_name "$post_table"; then
       printf 'compact: db=%s invalid table name after flatten table=%s — quarantine and investigate before GC\n' \
         "$db" "$post_table" >&2
       if [ "$fail" -ne 1 ]; then
@@ -1224,6 +1228,8 @@ preserve_head_after_integrity_failure() {
 flatten_database() {
   db="$1"
   verify_counts_saw_gain=0
+  verify_counts_failure_reason=""
+  verify_counts_failure_guidance=""
 
   if [ -n "$only_dbs" ]; then
     case ",$only_dbs," in
@@ -1642,16 +1648,29 @@ flatten_database() {
     return 1
   fi
   if [ "$postflight_hash" != "$preflight_hash" ]; then
-    printf 'compact: db=%s value hash changed after flatten before=%s after=%s — quarantine and investigate before GC\n' \
-      "$db" "$preflight_hash" "$postflight_hash" >&2
-    write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash changed" || {
+    if [ "${verify_counts_saw_gain:-0}" = "1" ]; then
+      printf 'compact: db=%s value hash changed with row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
+        "$db" "$preflight_hash" "$postflight_hash" >&2
+      write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash changed with row-count increase" || {
+        preserve_head_after_integrity_failure "$db" "$flatten_head" || true
+        rm -f "$preflight_tmp"
+        return 1
+      }
       preserve_head_after_integrity_failure "$db" "$flatten_head" || true
       rm -f "$preflight_tmp"
       return 1
-    }
-    preserve_head_after_integrity_failure "$db" "$flatten_head" || true
-    rm -f "$preflight_tmp"
-    return 1
+    else
+      printf 'compact: db=%s value hash changed without row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
+        "$db" "$preflight_hash" "$postflight_hash" >&2
+      write_compact_marker "$quarantine_dir" "$db" "post-flatten value hash changed without row-count increase" || {
+        preserve_head_after_integrity_failure "$db" "$flatten_head" || true
+        rm -f "$preflight_tmp"
+        return 1
+      }
+      preserve_head_after_integrity_failure "$db" "$flatten_head" || true
+      rm -f "$preflight_tmp"
+      return 1
+    fi
   fi
   if [ "${verify_counts_saw_gain:-0}" = "1" ]; then
     printf 'compact: db=%s row-count increase passed value-hash verification — full GC allowed\n' \

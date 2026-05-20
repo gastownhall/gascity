@@ -602,8 +602,16 @@ case "$query" in
       printf 'information_schema unavailable\n' >&2
       exit 43
     fi
+    if [ "$mode" = "post_flatten_table_list_failure" ] && [ "$(current_head)" = "compactcommit" ]; then
+      printf 'information_schema unavailable after flatten\n' >&2
+      exit 43
+    fi
     if [ "$mode" = "invalid_table_name" ]; then
       print_cell 'bad/name'
+      exit 0
+    fi
+    if [ "$mode" = "post_flatten_table_appears" ] && [ "$(current_head)" = "compactcommit" ]; then
+      print_cells beads notes
       exit 0
     fi
     if [ "$mode" = "table_name_clobber" ]; then
@@ -654,7 +662,7 @@ case "$query" in
       printf 'row count exploded after flatten\n' >&2
       exit 47
     fi
-    if { [ "$mode" = "row_count_gain_with_stable_hashes" ] || [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ]; } && [ "$calls" -gt 1 ]; then
+    if { [ "$mode" = "row_count_gain_with_stable_hashes" ] || [ "$mode" = "row_count_gain_with_db_hash_drift" ] || [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ] || [ "$mode" = "mixed_row_count_gain_and_same_count_hash_drift" ]; } && [ "$calls" -gt 1 ]; then
       print_cell 11
     elif [ "$mode" = "row_count_decreases" ] && [ "$calls" -gt 1 ]; then
       print_cell 9
@@ -686,7 +694,7 @@ case "$query" in
     if [ "$mode" = "same_row_count_writer" ]; then
       set_hash hash-after-writer
     fi
-    if [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ]; then
+    if [ "$mode" = "row_count_gain_with_db_hash_drift" ] || [ "$mode" = "same_count_db_hash_drift" ] || [ "$mode" = "row_count_and_hash_diverges" ] || [ "$mode" = "same_table_replacement_with_row_gain" ]; then
       set_hash hash-after-writer
     fi
     exit 0
@@ -1823,6 +1831,97 @@ func TestCompactScriptReportsPostFlattenRowCountProbeFailureSeparately(t *testin
 	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
 	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten row count probe failed" {
 		t.Fatalf("quarantine reason should identify probe failure, got %q", reason)
+	}
+}
+
+func TestCompactScriptQuarantinesPostFlattenTableListDriftBeforeFullGC(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "post_flatten_table_appears", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite a new table appearing after preflight:\n%s", out)
+	}
+	if !strings.Contains(out, "table=notes appeared after pre-flight snapshot") ||
+		!strings.Contains(out, "post-flatten table list changed") {
+		t.Fatalf("output missing post-flatten table-list drift quarantine:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("post-flatten table-list drift must block full GC:\n%s", logData)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten table list changed" {
+		t.Fatalf("quarantine reason should identify table-list drift, got %q", reason)
+	}
+}
+
+func TestCompactScriptReportsPostFlattenTableListProbeFailureSeparately(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "post_flatten_table_list_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite post-flatten table-list probe failure:\n%s", out)
+	}
+	if !strings.Contains(out, "post-flatten table list probe failed") ||
+		!strings.Contains(out, "information_schema unavailable after flatten") {
+		t.Fatalf("output missing post-flatten table-list probe failure:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("post-flatten table-list probe failure must block full GC:\n%s", logData)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten table list probe failed" {
+		t.Fatalf("quarantine reason should identify table-list probe failure, got %q", reason)
+	}
+}
+
+func TestCompactScriptPreservesRowGainReasonForDatabaseHashDrift(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "row_count_gain_with_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite database value-hash drift after row-count gain:\n%s", out)
+	}
+	if !strings.Contains(out, "gained rows during flatten") ||
+		!strings.Contains(out, "value hash changed with row-count increase") {
+		t.Fatalf("output missing row-count-gain database hash drift reason:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("database hash drift after row-count gain must block full GC:\n%s", logData)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten value hash changed with row-count increase" {
+		t.Fatalf("quarantine reason should identify DB hash drift after row-count gain, got %q", reason)
+	}
+}
+
+func TestCompactScriptPreservesNoGainReasonForDatabaseHashDrift(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "same_count_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite database value-hash drift without row-count gain:\n%s", out)
+	}
+	if !strings.Contains(out, "value hash changed without row-count increase") {
+		t.Fatalf("output missing no-gain database hash drift reason:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("database hash drift without row-count gain must block full GC:\n%s", logData)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten value hash changed without row-count increase" {
+		t.Fatalf("quarantine reason should identify DB hash drift without row-count gain, got %q", reason)
 	}
 }
 
