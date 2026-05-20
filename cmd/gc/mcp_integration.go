@@ -73,20 +73,14 @@ func resolveAgentMCPProjection(
 	qualifiedName, workDir string,
 	providerKind string,
 ) (materialize.MCPCatalog, materialize.MCPProjection, error) {
-	// Implicit infrastructure agents (control-dispatcher, provider-coverage
-	// stubs from config.InjectImplicitAgents) never invoke MCP — same
-	// reasoning as the peer-conflict loop in proposeAgentMCPTargets below.
-	// Skipping here avoids the provider-family check tripping on synthesized
-	// agents that have no Provider field set yet inherit the city pack's
-	// MCP catalog (gascity#2203).
-	if agent != nil && agent.Implicit {
-		return materialize.MCPCatalog{}, materialize.MCPProjection{}, nil
-	}
 	catalog, err := loadEffectiveMCPForAgent(cityPath, cfg, agent, qualifiedName, workDir)
 	if err != nil {
 		return materialize.MCPCatalog{}, materialize.MCPProjection{}, err
 	}
 	if !supportsMCPProviderKind(providerKind) {
+		if shouldSkipImplicitStartCommandMCP(agent, providerKind) {
+			return materialize.MCPCatalog{}, materialize.MCPProjection{}, nil
+		}
 		if len(catalog.Servers) > 0 {
 			return materialize.MCPCatalog{}, materialize.MCPProjection{}, fmt.Errorf(
 				"effective MCP requires a supported provider family, got %q", providerKind)
@@ -98,6 +92,19 @@ func resolveAgentMCPProjection(
 		return materialize.MCPCatalog{}, materialize.MCPProjection{}, err
 	}
 	return catalog, projection, nil
+}
+
+// shouldSkipImplicitStartCommandMCP matches implicit infrastructure agents that
+// run from StartCommand without a provider family. Provider-backed implicit
+// agents injected for coverage set Provider and must still project inherited
+// MCP; validateStage2TargetClaimants can skip implicit peers more broadly
+// because it is only checking conflicts from other agents.
+func shouldSkipImplicitStartCommandMCP(agent *config.Agent, providerKind string) bool {
+	return agent != nil &&
+		agent.Implicit &&
+		strings.TrimSpace(agent.StartCommand) != "" &&
+		strings.TrimSpace(agent.Provider) == "" &&
+		strings.TrimSpace(providerKind) == ""
 }
 
 func mergeMCPFingerprintEntry(fpExtra map[string]string, projection materialize.MCPProjection) map[string]string {
