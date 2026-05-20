@@ -1775,17 +1775,29 @@ mode = "on_demand"
 	if cfg.Workspace.Name != "test-city" {
 		t.Fatalf("Workspace.Name = %q, want test-city", cfg.Workspace.Name)
 	}
-	if len(cfg.Agents) != 1 || cfg.Agents[0].Name != "worker" {
-		t.Fatalf("Agents = %+v, want restored worker", cfg.Agents)
+	var explicitAgents []config.Agent
+	for _, agent := range cfg.Agents {
+		if !agent.Implicit {
+			explicitAgents = append(explicitAgents, agent)
+		}
 	}
-	if got := cfg.Agents[0].StartCommand; got != "VERSION=v2 sleep 3600" {
+	if len(explicitAgents) != 1 || explicitAgents[0].Name != "worker" {
+		t.Fatalf("explicit agents = %+v, want restored worker; all agents = %+v", explicitAgents, cfg.Agents)
+	}
+	if got := explicitAgents[0].StartCommand; got != "VERSION=v2 sleep 3600" {
 		t.Fatalf("StartCommand = %q, want updated command", got)
 	}
-	if len(cfg.NamedSessions) != 2 {
-		t.Fatalf("len(NamedSessions) = %d, want 2\ncity.toml:\n%s\npack.toml:\n%s", len(cfg.NamedSessions), cityData, packData)
+	var userNamedSessions []config.NamedSession
+	for _, ns := range cfg.NamedSessions {
+		if ns.Template != config.ControlDispatcherAgentName {
+			userNamedSessions = append(userNamedSessions, ns)
+		}
+	}
+	if len(userNamedSessions) != 2 {
+		t.Fatalf("len(userNamedSessions) = %d, want 2; all named sessions = %+v\ncity.toml:\n%s\npack.toml:\n%s", len(userNamedSessions), cfg.NamedSessions, cityData, packData)
 	}
 	var workerSession config.NamedSession
-	for _, ns := range cfg.NamedSessions {
+	for _, ns := range userNamedSessions {
 		if ns.QualifiedName() == "worker" {
 			workerSession = ns
 			break

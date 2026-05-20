@@ -144,6 +144,9 @@ func AgentProcessNames(cfg *City, agent Agent, lookPath LookPathFunc) []string {
 // Agent-level overrides workspace-level (replace, not additive).
 // Returns nil if neither specifies hooks.
 func ResolveInstallHooks(agent *Agent, ws *Workspace) []string {
+	if agent != nil && agent.Implicit && agent.Name == ControlDispatcherAgentName {
+		return nil
+	}
 	if len(agent.InstallAgentHooks) > 0 {
 		return agent.InstallAgentHooks
 	}

@@ -128,16 +128,27 @@ func TestSessionDefaultNamedSession(t *testing.T) {
 		if err := json.Unmarshal([]byte(out), &got); err != nil {
 			t.Fatalf("gc session list --json output is not a session list envelope: %v\n%s", err, out)
 		}
-		if len(got.Sessions) != 1 {
-			t.Fatalf("session count = %d, want 1 default named session\n%s", len(got.Sessions), out)
+		var mayorSeen, controlDispatcherSeen bool
+		for _, sess := range got.Sessions {
+			if sess.Template == "mayor" {
+				mayorSeen = true
+			}
+			if sess.Template == "control-dispatcher" {
+				controlDispatcherSeen = true
+			}
 		}
-		if got.Sessions[0].Template != "mayor" {
-			t.Errorf("template = %q, want mayor\n%s", got.Sessions[0].Template, out)
+		if !mayorSeen {
+			t.Fatalf("default mayor named session missing\n%s", out)
 		}
-		switch got.Sessions[0].State {
-		case session.StateCreating, session.StateActive, session.StateAwake:
-		default:
-			t.Errorf("state = %q, want creating or running\n%s", got.Sessions[0].State, out)
+		if !controlDispatcherSeen {
+			t.Fatalf("default control-dispatcher named session missing\n%s", out)
+		}
+		for _, sess := range got.Sessions {
+			switch sess.State {
+			case session.StateCreating, session.StateActive, session.StateAwake:
+			default:
+				t.Errorf("session %q state = %q, want creating or running\n%s", sess.Template, sess.State, out)
+			}
 		}
 	})
 

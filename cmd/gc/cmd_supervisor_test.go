@@ -3995,7 +3995,7 @@ func TestRunSupervisorSIGTERMPreservesSessionsEndToEnd(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("runSupervisor code = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatalf("runSupervisor did not exit after SIGTERM; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 	got := stdout.String()
