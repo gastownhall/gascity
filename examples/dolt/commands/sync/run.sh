@@ -11,7 +11,8 @@
 # Refspec resolution (per database):
 #   1. GC_DOLT_REFSPEC_<DB_UPPER> env var override, in <local>:<remote> form
 #      (e.g. GC_DOLT_REFSPEC_GA=main:gascity-3). DB name is uppercased with
-#      '-' replaced by '_' to derive the env var key.
+#      '-' replaced by '_' to derive the env var key; database names that
+#      differ only by '-' vs '_' intentionally share the same env var key.
 #   2. Default: the database's active branch is pushed to a same-named branch
 #      on the remote (i.e. <active>:<active>). This works transparently for the
 #      common case where local and remote branch names match, including 'main'
@@ -113,6 +114,7 @@ valid_remote_name() {
 
 valid_branch_name() {
   case "$1" in
+    -*|.*|*..*|*@{*) return 1 ;;
     [A-Za-z0-9_.-]*)
       case "$1" in *[!A-Za-z0-9_./-]*) return 1 ;; *) return 0 ;; esac
       ;;
@@ -124,11 +126,16 @@ valid_branch_name() {
 # DB name is uppercased and '-' is replaced with '_' to form a valid env key.
 refspec_env_value() {
   db="$1"
+  valid_database_name "$db" || return 1
   key=$(printf '%s' "$db" | tr 'a-z-' 'A-Z_')
   case "$key" in
     *[!A-Z0-9_]*) return 0 ;;
   esac
   eval "printf '%s' \"\${GC_DOLT_REFSPEC_$key:-}\""
+}
+
+warn_refspec_fallback() {
+  printf '  %s: WARN: active branch unresolved; falling back to main\n' "$1" >&2
 }
 
 # refspec_parts <refspec> — split <local>:<remote> into two lines.
@@ -172,7 +179,11 @@ find_remote_sql() {
 # then to 'main' if both fail.
 resolve_refspec_sql() {
   db="$1"
-  override=$(refspec_env_value "$db")
+  if ! valid_database_name "$db"; then
+    echo "  $db: ERROR: invalid database name" >&2
+    return 1
+  fi
+  override=$(refspec_env_value "$db") || return 1
   if [ -n "$override" ]; then
     parts=$(refspec_parts "$override") || {
       echo "  $db: ERROR: invalid refspec override: $override" >&2
@@ -181,21 +192,53 @@ resolve_refspec_sql() {
     printf '%s\n' "$parts"
     return 0
   fi
-  active_csv=$(dolt_sql "USE \`$db\`; SELECT active_branch()" 2>/dev/null || true)
-  active=$(printf '%s\n' "$active_csv" | awk 'NR > 1 && $0 != "" {gsub(/^"|"$/, ""); print; exit}')
-  if [ -n "$active" ] && valid_branch_name "$active"; then
-    printf '%s\n%s\n' "$active" "$active"
-    return 0
+  if active_csv=$(dolt_sql "USE \`$db\`; SELECT active_branch()" 2>/dev/null); then
+    active=$(printf '%s\n' "$active_csv" | awk 'NR > 1 && $0 != "" {gsub(/^"|"$/, ""); print; exit}')
+    if [ -n "$active" ] && valid_branch_name "$active"; then
+      printf '%s\n%s\n' "$active" "$active"
+      return 0
+    fi
   fi
+  warn_refspec_fallback "$db"
   printf 'main\nmain\n'
 }
 
 # resolve_refspec_cli <db-dir> <db-name> — same as resolve_refspec_sql, but
 # resolves the active branch from repo_state.json when the SQL server is down.
+repo_state_active_branch() {
+  awk '
+    function emit(line) {
+      sub(/.*"head"[[:space:]]*:[[:space:]]*"refs\/heads\//, "", line)
+      sub(/".*/, "", line)
+      print line
+      exit
+    }
+    {
+      line = $0
+      if (depth == 1 && line ~ /^[[:space:]]*"head"[[:space:]]*:[[:space:]]*"refs\/heads\//) {
+        emit(line)
+      }
+      if (depth == 0 && line ~ /^[[:space:]]*\{[[:space:]]*"head"[[:space:]]*:[[:space:]]*"refs\/heads\//) {
+        emit(line)
+      }
+      opens = gsub(/\{/, "{", line)
+      closes = gsub(/\}/, "}", line)
+      depth += opens - closes
+      if (depth < 0) {
+        depth = 0
+      }
+    }
+  ' "$1"
+}
+
 resolve_refspec_cli() {
   d="$1"
   db="$2"
-  override=$(refspec_env_value "$db")
+  if ! valid_database_name "$db"; then
+    echo "  $db: ERROR: invalid database name" >&2
+    return 1
+  fi
+  override=$(refspec_env_value "$db") || return 1
   if [ -n "$override" ]; then
     parts=$(refspec_parts "$override") || {
       echo "  $db: ERROR: invalid refspec override: $override" >&2
@@ -206,12 +249,13 @@ resolve_refspec_cli() {
   fi
   state="$d/.dolt/repo_state.json"
   if [ -f "$state" ]; then
-    head=$(sed -n 's/.*"head"[[:space:]]*:[[:space:]]*"refs\/heads\/\([^"]*\)".*/\1/p' "$state" | head -1)
+    head=$(repo_state_active_branch "$state" | head -1)
     if [ -n "$head" ] && valid_branch_name "$head"; then
       printf '%s\n%s\n' "$head" "$head"
       return 0
     fi
   fi
+  warn_refspec_fallback "$db"
   printf 'main\nmain\n'
 }
 
