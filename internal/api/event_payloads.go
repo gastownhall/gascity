@@ -369,6 +369,36 @@ type WorkerOperationEventPayload struct {
 // IsEventPayload marks WorkerOperationEventPayload as an events.Payload variant.
 func (WorkerOperationEventPayload) IsEventPayload() {}
 
+// SessionDrainAckedWithAssignedWorkPayload carries the bead-side context for
+// a session that drain-acked while still holding the assignee on an open or
+// in-progress work bead. The reconciler emits this as a mechanism-only
+// signal (per gastownhall/gascity#2293) so pack-level subscribers can apply
+// recovery policy without baking pack-specific knowledge into the SDK.
+type SessionDrainAckedWithAssignedWorkPayload struct {
+	SessionID  string `json:"session_id" doc:"Canonical session bead ID for the session that drain-acked."`
+	BeadID     string `json:"bead_id" doc:"ID of the work bead still holding this session as its assignee."`
+	Template   string `json:"template,omitempty" doc:"Pool template name when known at the emission site."`
+	BeadStatus string `json:"bead_status,omitempty" doc:"Status of the stranded bead at emission time (typically 'in_progress' for cap-hit, 'open' if recovery races claim)."`
+	Reason     string `json:"reason,omitempty" doc:"Short diagnostic context. Today both emission sites pass 'drain_acked_with_assigned_work'; reserved for finer-grained shape discriminators if later Shape-N variants land."`
+}
+
+// IsEventPayload marks SessionDrainAckedWithAssignedWorkPayload as an events.Payload variant.
+func (SessionDrainAckedWithAssignedWorkPayload) IsEventPayload() {}
+
+// SessionDrainAckedWithAssignedWorkPayloadJSON builds the JSON wire form for
+// attachment to an events.Event.Payload field. Template, BeadStatus, and
+// Reason are emitted only when non-empty.
+func SessionDrainAckedWithAssignedWorkPayloadJSON(sessionID, beadID, template, beadStatus, reason string) json.RawMessage {
+	b, _ := json.Marshal(SessionDrainAckedWithAssignedWorkPayload{
+		SessionID:  sessionID,
+		BeadID:     beadID,
+		Template:   template,
+		BeadStatus: beadStatus,
+		Reason:     reason,
+	})
+	return b
+}
+
 func init() {
 	// mail.* — all seven types share one payload shape.
 	events.RegisterPayload(events.MailSent, MailEventPayload{})
@@ -400,6 +430,7 @@ func init() {
 	events.RegisterPayload(events.SessionMaxAgeKilled, events.NoPayload{})
 	events.RegisterPayload(events.SessionSuspended, events.NoPayload{})
 	events.RegisterPayload(events.SessionUpdated, events.NoPayload{})
+	events.RegisterPayload(events.SessionDrainAckedWithAssignedWork, SessionDrainAckedWithAssignedWorkPayload{})
 	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyClosed, events.NoPayload{})
 	events.RegisterPayload(events.ControllerStarted, events.NoPayload{})
