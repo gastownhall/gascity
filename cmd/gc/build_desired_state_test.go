@@ -3202,14 +3202,34 @@ func TestSelectOrCreatePoolSessionBead_SerializesAliasCheckAndCreate(t *testing.
 // creates in parallel or serializes them. Wraps MemStore for all other ops.
 type delayingPoolCreateStore struct {
 	*beads.MemStore
-	delay time.Duration
+	delay     time.Duration
+	mu        sync.Mutex
+	active    int
+	maxActive int
 }
 
 func (s *delayingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
 	if bead.Type == sessionBeadType {
+		s.mu.Lock()
+		s.active++
+		if s.active > s.maxActive {
+			s.maxActive = s.active
+		}
+		s.mu.Unlock()
+		defer func() {
+			s.mu.Lock()
+			s.active--
+			s.mu.Unlock()
+		}()
 		time.Sleep(s.delay)
 	}
 	return s.MemStore.Create(bead)
+}
+
+func (s *delayingPoolCreateStore) maxConcurrentCreates() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxActive
 }
 
 // TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates verifies
@@ -3219,10 +3239,8 @@ func (s *delayingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
 // + dolt commit in a tight serial loop. With bounded-parallel phase B, wall
 // time should collapse to roughly ceil(N/poolRealizeParallelism) × delay.
 //
-// The assertion bounds elapsed strictly below half the serial floor so a
-// regression that re-serializes the loop (e.g., a future refactor that
-// accidentally holds a mutex across the create call) fails this test before
-// it ships.
+// The assertion measures overlapping Create calls directly instead of relying
+// on a brittle wall-clock ceiling.
 func TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates(t *testing.T) {
 	const (
 		requestCount = 8
@@ -3259,9 +3277,11 @@ func TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates(t *testing.
 	}
 
 	serialFloor := time.Duration(requestCount) * createDelay
-	parallelCeiling := serialFloor / 2
-	if elapsed >= parallelCeiling {
-		t.Fatalf("realizePoolDesiredSessions ran in %s for %d creates × %s delay; serial floor = %s, parallel ceiling = %s — the refactor did not parallelize", elapsed, requestCount, createDelay, serialFloor, parallelCeiling)
+	if got := store.maxConcurrentCreates(); got < 2 {
+		t.Fatalf("max concurrent session-bead creates = %d, want at least 2", got)
+	}
+	if elapsed >= serialFloor {
+		t.Fatalf("realizePoolDesiredSessions ran in %s for %d creates × %s delay; serial floor = %s — expected parallel overlap", elapsed, requestCount, createDelay, serialFloor)
 	}
 
 	aliases := make(map[string]bool, requestCount)

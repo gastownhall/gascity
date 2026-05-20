@@ -340,9 +340,10 @@ func (h *RuntimeHandle) PendingStatus(ctx context.Context) (*PendingInteraction,
 // LiveObservation reports runtime presence metadata for a legacy runtime-only
 // worker target.
 func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, error) {
+	liveness := runtime.ObserveLiveness(h.provider, h.sessionName, h.processNames)
 	obs := LiveObservation{
-		Running:     h.provider.IsRunning(h.sessionName),
-		Alive:       false,
+		Running:     liveness.Running,
+		Alive:       liveness.Alive,
 		SessionName: h.sessionName,
 	}
 	if suspended, err := h.provider.GetMeta(h.sessionName, "suspended"); err == nil && strings.TrimSpace(suspended) == "true" {
@@ -350,14 +351,6 @@ func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, err
 	}
 	if sessionID, err := h.provider.GetMeta(h.sessionName, "GC_SESSION_ID"); err == nil {
 		obs.RuntimeSessionID = strings.TrimSpace(sessionID)
-	}
-	if len(h.processNames) > 0 {
-		obs.Alive = h.provider.ProcessAlive(h.sessionName, h.processNames)
-		if obs.Alive && !obs.Running {
-			obs.Running = true
-		}
-	} else {
-		obs.Alive = obs.Running
 	}
 	if obs.Running {
 		obs.Attached = h.provider.IsAttached(h.sessionName)
