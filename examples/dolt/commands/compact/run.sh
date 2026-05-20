@@ -14,7 +14,8 @@
 # Running as an exec order gives us direct SQL access via the dolt CLI.
 #
 # Algorithm (flatten mode):
-#   1. Pre-flight: record row counts for all user tables.
+#   1. Pre-flight: record row counts for all user tables and require HEAD to
+#      remain stable across a bounded retry loop.
 #   2. Soft-reset to the root commit; all data stays staged.
 #   3. Commit everything as a single "compaction: flatten history" commit.
 #   4. Re-check post-flatten row counts and database value hash. Row-count
@@ -1381,7 +1382,10 @@ flatten_database() {
   # may move HEAD. The post-flatten value-hash check then fails and the DB is
   # quarantined. Retry preflight up to 3 times with jittered 1-5s sleep,
   # refreshing HEAD between attempts; require HEAD to stay stable across a
-  # preflight gather before flattening.
+  # preflight gather before flattening. This narrows but does not eliminate the
+  # race: a writer can still commit between the final HEAD check and DOLT_RESET,
+  # in which case post-flatten quarantine catches the run and the next order can
+  # retry.
   preflight_tmp=$(mktemp)
   preflight_max_attempts=3
   preflight_attempt=1
@@ -1416,7 +1420,15 @@ flatten_database() {
       return 1
     fi
 
-    current_head=$(head_commit "$db" || true)
+    if ! current_head=$(head_commit "$db"); then
+      rm -f "$preflight_tmp"
+      return 1
+    fi
+    if [ -z "$current_head" ]; then
+      printf 'compact: db=%s HEAD commit probe returned empty value during preflight verify — fail\n' "$db" >&2
+      rm -f "$preflight_tmp"
+      return 1
+    fi
     if [ "$current_head" = "$head" ]; then
       preflight_succeeded=true
       break
@@ -1425,7 +1437,7 @@ flatten_database() {
     if [ "$preflight_attempt" -lt "$preflight_max_attempts" ]; then
       printf 'compact: db=%s HEAD moved during preflight attempt=%s/%s want_HEAD=%s got_HEAD=%s — retrying\n' \
         "$db" "$preflight_attempt" "$preflight_max_attempts" "$head" "${current_head:-<empty>}" >&2
-      sleep "$(awk 'BEGIN{srand(); printf "%.2f", 1 + rand() * 4}')"
+      sleep "$(awk 'BEGIN{srand(); printf "%d", 1 + rand() * 5}')"
     fi
     preflight_attempt=$((preflight_attempt + 1))
   done

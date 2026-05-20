@@ -320,6 +320,20 @@ current_head() {
       return 0
     fi
   fi
+  if [ "$mode" = "head_changes_once" ]; then
+    calls_file="$state_file.head-calls"
+    calls=0
+    if [ -f "$calls_file" ]; then
+      calls="$(cat "$calls_file")"
+    fi
+    calls=$((calls + 1))
+    printf '%%s\n' "$calls" > "$calls_file"
+    if [ "$calls" -eq 2 ]; then
+      printf 'writercommit\n' > "$state_file"
+      printf 'writercommit\n'
+      return 0
+    fi
+  fi
   if [ -n "$state_file" ] && [ -f "$state_file" ]; then
     sed -n '1p' "$state_file"
   else
@@ -496,6 +510,22 @@ case "$query" in
     exit 0
     ;;
   *"SELECT commit_hash FROM dolt_log ORDER BY date DESC LIMIT 1"*)
+    if [ "$mode" = "head_probe_failure_during_preflight_verify" ]; then
+      # The compact retry loop probes HEAD once before preflight and once
+      # after collecting counts/hash; fail the second probe to prove that
+      # verify-time probe errors are not reported as HEAD movement.
+      calls_file="$state_file.head-calls"
+      calls=0
+      if [ -f "$calls_file" ]; then
+        calls="$(cat "$calls_file")"
+      fi
+      calls=$((calls + 1))
+      printf '%%s\n' "$calls" > "$calls_file"
+      if [ "$calls" -eq 2 ]; then
+        printf 'head probe unavailable during preflight verify\n' >&2
+        exit 49
+      fi
+    fi
     print_cell "$(current_head)"
     exit 0
     ;;
@@ -1133,21 +1163,73 @@ func TestCompactScriptRetriesPendingPushWithRefspecRemoteBranch(t *testing.T) {
 	}
 }
 
-func TestCompactScriptCompactsWhenHeadChangesBeforeFlatten(t *testing.T) {
+func TestCompactScriptAbortsWhenHeadKeepsMovingAcrossPreflightRetries(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "head_changes_before_flatten", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err != nil {
-		t.Fatalf("compact should tolerate live-server moving HEAD before flatten: %v\n%s", err, out)
+	if err == nil {
+		t.Fatalf("compact succeeded despite HEAD moving across every preflight retry:\n%s", out)
+	}
+	if !strings.Contains(out, "HEAD kept moving across 3 preflight attempts") {
+		t.Fatalf("compact should explain the bounded preflight abort:\n%s", out)
 	}
 	data, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
 		t.Fatalf("read dolt log: %v", err)
 	}
 	log := string(data)
-	for _, want := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_GC"} {
-		if !strings.Contains(log, want) {
-			t.Fatalf("moving HEAD should not block local compaction; missing %s:\n%s", want, log)
+	for _, forbidden := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_GC"} {
+		if strings.Contains(log, forbidden) {
+			t.Fatalf("continuously moving HEAD should abort before flatten; found %s:\n%s", forbidden, log)
 		}
+	}
+}
+
+func TestCompactScriptRetriesPreflightWhenHeadStabilizes(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "head_changes_once", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("compact should retry and flatten once HEAD stabilizes: %v\n%s", err, out)
+	}
+	if got := strings.Count(out, "HEAD moved during preflight attempt=1/3"); got != 1 {
+		t.Fatalf("compact should log exactly one preflight retry, got %d:\n%s", got, out)
+	}
+	if strings.Contains(out, "HEAD moved during preflight attempt=2/3") ||
+		strings.Contains(out, "HEAD kept moving across") {
+		t.Fatalf("compact should stop retrying once HEAD stabilizes:\n%s", out)
+	}
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(data)
+	if got := strings.Count(log, "DOLT_RESET"); got != 1 {
+		t.Fatalf("stabilized HEAD should flatten exactly once; DOLT_RESET count=%d:\n%s", got, log)
+	}
+	for _, want := range []string{"DOLT_COMMIT", "DOLT_GC"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("stabilized HEAD should complete compaction; missing %s:\n%s", want, log)
+		}
+	}
+}
+
+func TestCompactScriptFailsWhenPreflightHeadVerifyProbeFails(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "head_probe_failure_during_preflight_verify", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite preflight HEAD verify probe failure:\n%s", out)
+	}
+	if strings.Contains(out, "HEAD kept moving") {
+		t.Fatalf("probe failure must not be reported as moving HEAD:\n%s", out)
+	}
+	if !strings.Contains(out, "head probe unavailable during preflight verify") {
+		t.Fatalf("compact should surface the underlying HEAD probe failure:\n%s", out)
+	}
+	data, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(data), "DOLT_RESET") || strings.Contains(string(data), "DOLT_COMMIT") {
+		t.Fatalf("failed HEAD verify probe should abort before flatten:\n%s", data)
 	}
 }
 
