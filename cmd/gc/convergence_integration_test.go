@@ -502,6 +502,63 @@ func TestConvergence_StopRoutesToRigScope(t *testing.T) {
 	}
 }
 
+func TestConvergence_RetryRoutesToRigScope(t *testing.T) {
+	cr, _ := setupConvergenceRuntime(t)
+	rigStore := beads.NewMemStore()
+	addConvergenceRigScope(cr, "gascity-prod", rigStore)
+
+	// Create a rig-scoped loop and stop it so it is terminated and retryable.
+	createReply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "create",
+		Params: map[string]string{
+			"formula": "test-formula", "target": "test-agent",
+			"max_iterations": "5", "rig": "gascity-prod",
+		},
+	})
+	if createReply.Error != "" {
+		t.Fatalf("create error: %s", createReply.Error)
+	}
+	var created convergence.CreateResult
+	if err := json.Unmarshal(createReply.Result, &created); err != nil {
+		t.Fatalf("unmarshaling: %v", err)
+	}
+	stopReply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "stop", BeadID: created.BeadID, User: "test-operator",
+		Params: map[string]string{"rig": "gascity-prod"},
+	})
+	if stopReply.Error != "" {
+		t.Fatalf("stop error: %s", stopReply.Error)
+	}
+
+	// Retry without --rig looks in city/HQ and cannot find the rig loop.
+	noRigReply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "retry", BeadID: created.BeadID,
+	})
+	if noRigReply.Error == "" {
+		t.Error("retry without --rig should not find the rig-scoped loop")
+	}
+
+	// Retry with --rig routes to the rig scope; the new loop lands there.
+	retryReply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "retry", BeadID: created.BeadID,
+		Params: map[string]string{"rig": "gascity-prod"},
+	})
+	if retryReply.Error != "" {
+		t.Fatalf("retry error: %s", retryReply.Error)
+	}
+	var retried convergence.RetryResult
+	if err := json.Unmarshal(retryReply.Result, &retried); err != nil {
+		t.Fatalf("unmarshaling retry result: %v", err)
+	}
+	bead, err := rigStore.Get(retried.NewBeadID)
+	if err != nil {
+		t.Fatalf("retry bead %q not found in rig store: %v", retried.NewBeadID, err)
+	}
+	if bead.Metadata[convergence.FieldRig] != "gascity-prod" {
+		t.Errorf("retry bead rig = %q, want %q", bead.Metadata[convergence.FieldRig], "gascity-prod")
+	}
+}
+
 func TestConvergence_EnqueueTimeout(t *testing.T) {
 	cr, _ := setupConvergenceRuntime(t)
 

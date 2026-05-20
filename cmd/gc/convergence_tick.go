@@ -52,9 +52,10 @@ func (s *convergenceScope) logSuffix() string {
 
 // initConvergenceHandler builds one convergence scope per available bead
 // store: the city/HQ store plus every bound rig store. Called once during
-// CityRuntime.run() initialization. Rigs added by a later config reload
-// are not picked up until the controller restarts — this matches how the
-// city-level handler has always been built once at startup.
+// CityRuntime.run() initialization.
+//
+// TODO(#2403): rigs added by a later config reload are not picked up until
+// the controller restarts — convScopes is not rebuilt on reload.
 func (cr *CityRuntime) initConvergenceHandler() {
 	cityStore := cr.cityBeadStore()
 	if cityStore == nil {
@@ -90,18 +91,24 @@ func (cr *CityRuntime) newConvergenceScope(rig string, store beads.Store, formul
 }
 
 // convergenceScopeForRig returns the convergence scope for a rig name. An
-// empty rig selects the city/HQ scope. An unknown rig is an error so a
-// mistyped or unbound --rig fails loudly instead of silently writing the
-// bead to HQ (the defect tracked in issue #2357).
+// empty rig selects the city/HQ scope. An unknown or unbound rig is an
+// error so a mistyped or unbound --rig fails loudly instead of silently
+// writing the bead to HQ (the defect tracked in issue #2357). The error
+// distinguishes a misspelled rig from a registered-but-unusable one.
 func (cr *CityRuntime) convergenceScopeForRig(rig string) (*convergenceScope, error) {
 	if cr.convScopes == nil {
 		return nil, fmt.Errorf("convergence not available (no bead store)")
 	}
-	scope, ok := cr.convScopes[rig]
-	if !ok {
-		return nil, fmt.Errorf("rig %q has no bead store; convergence loops require a registered, bound rig", rig)
+	if scope, ok := cr.convScopes[rig]; ok {
+		return scope, nil
 	}
-	return scope, nil
+	for i := range cr.cfg.Rigs {
+		if cr.cfg.Rigs[i].Name == rig {
+			return nil, fmt.Errorf("rig %q is registered but has no bead store; "+
+				"convergence loops require a bound rig", rig)
+		}
+	}
+	return nil, fmt.Errorf("rig %q is not registered in this city", rig)
 }
 
 // convergenceTick processes active convergence loops in every scope — the

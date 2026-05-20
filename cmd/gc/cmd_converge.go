@@ -260,6 +260,7 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 				Gate      string `json:"gate"`
 				Formula   string `json:"formula"`
 				Target    string `json:"target"`
+				Rig       string `json:"rig"`
 				Title     string `json:"title"`
 			}
 			var entries []convEntry
@@ -281,6 +282,7 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 					Gate:      meta[convergence.FieldGateMode],
 					Formula:   meta[convergence.FieldFormula],
 					Target:    meta[convergence.FieldTarget],
+					Rig:       meta[convergence.FieldRig],
 					Title:     b.Title,
 				})
 			}
@@ -296,12 +298,12 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 				return nil
 			}
 
-			// Table output.
-			fmt.Fprintf(stdout, "%-14s %-10s %-10s %-10s %-26s %-16s %s\n", //nolint:errcheck
-				"ID", "STATE", "ITERATION", "GATE", "FORMULA", "TARGET", "TITLE")
+			// Table output. The RIG column is empty for city/HQ-scoped loops.
+			fmt.Fprintf(stdout, "%-14s %-10s %-10s %-10s %-26s %-16s %-16s %s\n", //nolint:errcheck
+				"ID", "STATE", "ITERATION", "GATE", "FORMULA", "TARGET", "RIG", "TITLE")
 			for _, e := range entries {
-				fmt.Fprintf(stdout, "%-14s %-10s %-10s %-10s %-26s %-16s %s\n", //nolint:errcheck
-					e.ID, e.State, e.Iteration, e.Gate, e.Formula, e.Target, e.Title)
+				fmt.Fprintf(stdout, "%-14s %-10s %-10s %-10s %-26s %-16s %-16s %s\n", //nolint:errcheck
+					e.ID, e.State, e.Iteration, e.Gate, e.Formula, e.Target, e.Rig, e.Title)
 			}
 			return nil
 		},
@@ -504,10 +506,10 @@ func openContextStore(rctx resolvedContext) (beads.Store, error) {
 			continue
 		}
 		if strings.TrimSpace(cfg.Rigs[i].Path) == "" {
-			return nil, fmt.Errorf("rig %q is registered but unbound (no rig path); "+
+			return nil, fmt.Errorf("rig %q is registered but has no rig path; "+
 				"convergence loops require a bound rig", rctx.RigName)
 		}
 		return openStoreAtForCity(cfg.Rigs[i].Path, rctx.CityPath)
 	}
-	return nil, fmt.Errorf("rig %q not found in city configuration", rctx.RigName)
+	return nil, fmt.Errorf("rig %q is not registered in this city", rctx.RigName)
 }
