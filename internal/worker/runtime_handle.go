@@ -153,6 +153,15 @@ func (h *RuntimeHandle) Close(ctx context.Context) (err error) {
 	return err
 }
 
+// CloseDetailed asks the provider to close the live runtime session and
+// returns no bead cleanup artifacts for runtime-only handles.
+func (h *RuntimeHandle) CloseDetailed(ctx context.Context) (sessionpkg.CloseResult, error) {
+	if err := h.Close(ctx); err != nil {
+		return sessionpkg.CloseResult{}, err
+	}
+	return sessionpkg.CloseResult{}, nil
+}
+
 // Rename reports unsupported because runtime-only handles have no persisted name update.
 func (h *RuntimeHandle) Rename(ctx context.Context, _ string) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationRename)
@@ -342,8 +351,15 @@ func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, err
 	if sessionID, err := h.provider.GetMeta(h.sessionName, "GC_SESSION_ID"); err == nil {
 		obs.RuntimeSessionID = strings.TrimSpace(sessionID)
 	}
-	if obs.Running {
+	if len(h.processNames) > 0 {
 		obs.Alive = h.provider.ProcessAlive(h.sessionName, h.processNames)
+		if obs.Alive && !obs.Running {
+			obs.Running = true
+		}
+	} else {
+		obs.Alive = obs.Running
+	}
+	if obs.Running {
 		obs.Attached = h.provider.IsAttached(h.sessionName)
 		if last, err := h.provider.GetLastActivity(h.sessionName); err == nil && !last.IsZero() {
 			lastCopy := last

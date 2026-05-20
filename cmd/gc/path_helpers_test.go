@@ -79,6 +79,99 @@ func requireNoLeakedDoltAfterForPaths(t *testing.T, paths ...string) {
 	})
 }
 
+type doltLeakGuardedTestingM struct {
+	m            *testing.M
+	tempRoot     string
+	cleanupPaths []string
+}
+
+func newDoltLeakGuardedTestingM(m *testing.M, tempRoot string, cleanupPaths ...string) *doltLeakGuardedTestingM {
+	return &doltLeakGuardedTestingM{
+		m:            m,
+		tempRoot:     tempRoot,
+		cleanupPaths: cleanupPaths,
+	}
+}
+
+func (g *doltLeakGuardedTestingM) Run() int {
+	initial, initialErr := snapshotDoltProcessesForConfigRoot(discoverDoltProcesses, g.tempRoot)
+	if initialErr != nil {
+		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: initial scan failed: %v\n", initialErr) //nolint:errcheck
+	}
+
+	code := g.m.Run()
+
+	guardFailed := initialErr != nil
+	if initialErr == nil {
+		final, finalErr := snapshotDoltProcessesForConfigRoot(discoverDoltProcesses, g.tempRoot)
+		if finalErr != nil {
+			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: final scan failed: %v\n", finalErr) //nolint:errcheck
+			guardFailed = true
+		} else if leaked := diffDoltProcessSnapshots(initial, final); len(leaked) > 0 {
+			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: leaked %d dolt sql-server process(es) under %s\n", len(leaked), g.tempRoot) //nolint:errcheck
+			writeDoltLeakReport(os.Stderr, leaked)
+			reapDoltLeakProcesses(leaked)
+			guardFailed = true
+		}
+	}
+
+	for _, path := range g.cleanupPaths {
+		if path != "" {
+			_ = os.RemoveAll(path)
+		}
+	}
+	if guardFailed && code == 0 {
+		return 1
+	}
+	return code
+}
+
+func snapshotDoltProcessesForConfigRoot(enumerate func() ([]DoltProcInfo, error), root string) (map[int]DoltProcInfo, error) {
+	procs, err := enumerate()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int]DoltProcInfo, len(procs))
+	for _, p := range procs {
+		configPath := extractConfigPath(p.Argv)
+		if root == "" || !pathutil.PathWithin(root, configPath) {
+			continue
+		}
+		out[p.PID] = p
+	}
+	return out, nil
+}
+
+func diffDoltProcessSnapshots(initial, final map[int]DoltProcInfo) []DoltProcInfo {
+	leaked := make([]DoltProcInfo, 0, len(final))
+	for pid, proc := range final {
+		if _, ok := initial[pid]; ok {
+			continue
+		}
+		leaked = append(leaked, proc)
+	}
+	sort.Slice(leaked, func(i, j int) bool {
+		return leaked[i].PID < leaked[j].PID
+	})
+	return leaked
+}
+
+func writeDoltLeakReport(w io.Writer, leaked []DoltProcInfo) {
+	for _, proc := range leaked {
+		fmt.Fprintf(w, "  pid=%d argv=%q\n", proc.PID, strings.Join(proc.Argv, " ")) //nolint:errcheck
+	}
+}
+
+func reapDoltLeakProcesses(leaked []DoltProcInfo) {
+	for _, proc := range leaked {
+		_ = killProcess(proc.PID, syscall.SIGTERM)
+	}
+	time.Sleep(250 * time.Millisecond)
+	for _, proc := range leaked {
+		_ = killProcess(proc.PID, syscall.SIGKILL)
+	}
+}
+
 // requireNoLeakedDoltAfterWith is the testReporter+injectable-enumerator
 // form of requireNoLeakedDoltAfter. Production callers go through the
 // thin wrapper above; unit tests for the leak-detector itself pass a
@@ -151,6 +244,7 @@ func snapshotDoltProcessPIDsWithFilter(t testReporter, enumerate func() ([]DoltP
 
 func cleanupManagedDoltTestCity(t *testing.T, cityPath string) {
 	t.Helper()
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
 	t.Cleanup(func() {
 		tryStopController(cityPath, io.Discard)
 		deadline := time.Now().Add(5 * time.Second)

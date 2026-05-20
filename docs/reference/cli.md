@@ -7,6 +7,7 @@
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--city` | string |  | path to the city directory (default: walk up from cwd) |
+| `--json-schema` | string |  | emit JSON Schema for this command; optional value: result or failure |
 | `--rig` | string |  | rig name or path (default: discover from cwd) |
 
 ## gc
@@ -20,6 +21,7 @@ gc [flags]
 | Subcommand | Description |
 |------------|-------------|
 | [gc agent](#gc-agent) | Manage agent configuration |
+| [gc analyze](#gc-analyze) | Read-only analysis over events and beads |
 | [gc bd](#gc-bd) | Run bd in the correct rig directory |
 | [gc beads](#gc-beads) | Manage the beads provider |
 | [gc build-image](#gc-build-image) | Build a prebaked agent container image |
@@ -139,6 +141,54 @@ replaced if they exit. Use "gc agent resume" to restore.
 ```
 gc agent suspend <name>
 ```
+
+## gc analyze
+
+Analyze produces correlated reports over the events log and
+bead state. All subcommands are read-only and safe to run alongside a
+live controller.
+
+```
+gc analyze
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc analyze reliability](#gc-analyze-reliability) | Correlate session-lifecycle events with model/version/rig |
+
+## gc analyze reliability
+
+Reliability reports per-(model, prompt_version, rig) counts of
+the tracked session-lifecycle events:
+
+  session.crashed
+  session.quarantined (reserved; current production paths do not emit it)
+  session.idle_killed
+  session.draining
+
+Worker.operation events from #1252 supply the (model, prompt_version,
+agent_name) tuple per session. Lifecycle events get attributed via the
+session id or producer aliases from worker.operation payloads. Sessions
+with worker.operation events but no lifecycle events count toward the
+per-group total — they're the denominator side of crash-rate
+calculations. Model and prompt_version are best-effort dimensions; the
+report warns when the source event stream is missing them.
+
+Read-only: this command never writes events or beads.
+
+```
+gc analyze reliability [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--city` | string |  | city directory (default: discover from cwd) |
+| `--events` | string |  | explicit events.jsonl path (overrides city discovery) |
+| `--json` | bool |  | emit JSON instead of a table |
+| `--model` | string |  | filter to a specific model |
+| `--rig` | string |  | filter to a specific rig |
+| `--since` | string | `7d` | start of the analysis window — duration (1h, 7d) or RFC3339 timestamp |
+| `--until` | string |  | end of the analysis window — duration (0s = now, 30m = 30 minutes ago) or RFC3339 timestamp |
 
 ## gc bd
 
@@ -507,12 +557,14 @@ gc config show [flags]
 gc config show
   gc config show --validate
   gc config show --provenance
+  gc config show --json
   gc config show -f overlay.toml
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `-f`, `--file` | stringArray |  | additional config files to layer (can be repeated) |
+| `--json` | bool |  | emit JSON |
 | `--provenance` | bool |  | show where each config element originated |
 | `--validate` | bool |  | validate config and exit (0 = valid, 1 = errors) |
 
@@ -897,7 +949,9 @@ Run diagnostic health checks on the city workspace.
 Checks city structure, config validity, binary dependencies (tmux, git,
 bd, dolt), controller status, agent sessions, zombie/orphan sessions,
 bead stores, Dolt server health, event log integrity, and per-rig
-health. Use --fix to attempt automatic repairs.
+health. Use --fix for the canonical remediation path, including any
+safe mechanical PackV1-to-PackV2 rewrites that are available on this
+branch.
 
 ```
 gc doctor [flags]
@@ -909,11 +963,13 @@ gc doctor [flags]
 gc doctor
   gc doctor --fix
   gc doctor --verbose
+  gc doctor --json
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--fix` | bool |  | attempt to fix issues automatically |
+| `--fix` | bool |  | attempt automatic repairs and safe mechanical migrations |
+| `--json` | bool |  | emit structured JSON instead of human-readable output |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |
 
 ## gc dolt-cleanup
@@ -1036,6 +1092,33 @@ gc events
 | `--timeout` | string | `30s` | Max wait duration for --watch (e.g. 30s, 5m) |
 | `--type` | string |  | Filter by event type (e.g. bead.created) |
 | `--watch` | bool |  | Block until matching events arrive (exits after first match or buffered replay) |
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc events rotate](#gc-events-rotate) | Force rotate the city event log |
+
+## gc events rotate
+
+Force rotate the city event log through the running supervisor.
+
+Output is one JSON line. Empty active logs are successful no-ops.
+
+```
+gc events rotate [flags]
+```
+
+**Example:**
+
+```
+gc events rotate
+  gc events rotate --wait
+  gc --city /path/to/city events rotate --api http://127.0.0.1:8080
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--api` | string |  | GC API server URL override (auto-discovered by default) |
+| `--wait` | bool |  | Wait for archive compression to complete before returning |
 
 ## gc formula
 
@@ -1200,7 +1283,7 @@ gc help [command]
 
 Checks for available work using the agent's work_query config.
 
-Without --inject: prints raw output, exits 0 if work exists, 1 if empty.
+Without --inject: prints normalized ready-only output, exits 0 if work exists, 1 if empty.
 With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
 
 		The agent is determined from $GC_AGENT or a positional argument.
@@ -1227,7 +1310,6 @@ gc import
 | [gc import check](#gc-import-check) | Validate installed pack import state |
 | [gc import install](#gc-import-install) | Install imports from pack.toml and packs.lock |
 | [gc import list](#gc-import-list) | List imported packs |
-| [gc import migrate](#gc-import-migrate) | Migrate a V1 city layout to the V2 pack shape |
 | [gc import remove](#gc-import-remove) | Remove a pack import |
 | [gc import upgrade](#gc-import-upgrade) | Upgrade imported packs within their constraints |
 | [gc import why](#gc-import-why) | Explain why an import is present |
@@ -1272,22 +1354,6 @@ gc import list [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--tree` | bool |  | Show the import dependency tree |
-
-## gc import migrate
-
-Rewrite a legacy city into the V2 migration shape.
-
-Moves workspace.includes into pack imports, converts [[agent]] tables
-into agents/&lt;name&gt;/ directories, and stages prompt/overlay/namepool
-assets into their V2 locations.
-
-```
-gc import migrate [flags]
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--dry-run` | bool |  | print what would change without writing |
 
 ## gc import remove
 
@@ -1911,12 +1977,13 @@ config drift rules require them.
 With --soft, the controller accepts any detected per-session config
 drift instead of draining the drifted sessions: each open session's
 recorded config hash is updated to the hash the freshly reloaded
-config produces for it, so the immediately-following reconcile tick
-sees no drift and no config-drift drains fire. Useful when editing a
-running city's .gc/settings.json without disrupting in-flight work.
-Sessions whose template no longer maps to a configured agent are
-NOT updated; normal orphan/suspended drain handles them on the next
-tick.
+config produces for it, the matching hash breakdown is refreshed, and
+any already queued config-drift drain for that session is canceled. The
+immediately-following reconcile tick sees no drift and no config-drift
+drains fire. Useful when editing a running city's .gc/settings.json
+without disrupting in-flight work. Sessions whose template no longer
+maps to a configured agent are NOT updated; normal orphan/suspended
+drain handles them on the next tick.
 
 ```
 gc reload [path] [flags]
@@ -1982,8 +2049,9 @@ Register an external project directory as a rig.
 Initializes beads database, installs agent hooks if configured,
 generates cross-rig routes, and appends the rig to city.toml.
 If the target directory doesn't exist, it is created. Use --include
-to apply a pack directory that defines the rig's agent configuration;
-repeat the flag to compose multiple packs for one rig.
+to apply a pack source that defines the rig's agent configuration;
+repeat the flag to compose multiple packs for one rig. The flag is
+compatibility sugar: gc rig add writes canonical rig imports.
 
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
@@ -2019,7 +2087,7 @@ gc rig add /path/to/project
 |------|------|---------|-------------|
 | `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
 | `--default-branch` | string |  | mainline branch (default: auto-detect from origin/HEAD or current branch) |
-| `--include` | stringArray |  | pack directory for rig agents (repeatable) |
+| `--include` | stringArray |  | pack source for rig agents (repeatable; writes canonical rig imports) |
 | `--name` | string |  | rig name (default: directory basename) |
 | `--prefix` | string |  | bead ID prefix (default: derived from name) |
 | `--start-suspended` | bool |  | add rig in suspended state (dormant-by-default) |
@@ -2708,6 +2776,7 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 | `-n`, `--dry-run` | bool |  | show what would be done without executing |
 | `--force` | bool |  | suppress warnings, allow cross-rig routing, allow graph workflow replacement, and for direct bead routes dispatch even if the bead does not resolve in the local store |
 | `-f`, `--formula` | bool |  | treat argument as formula name |
+| `--json` | bool |  | Output dispatch result in JSON format |
 | `--merge` | string |  | merge strategy: direct, mr, or local |
 | `--no-convoy` | bool |  | skip auto-convoy creation |
 | `--no-formula` | bool |  | suppress default formula (route raw bead) |
@@ -2746,6 +2815,8 @@ gc start
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `-n`, `--dry-run` | bool |  | preview what agents would start without starting them |
+| `--no-auto-restart` | bool |  | detect supervisor binary drift but do not auto-restart; exits non-zero on drift |
+| `--verbose` | bool |  | disable warning deduplication and print every supervisor warning |
 
 ## gc status
 
@@ -2869,8 +2940,12 @@ gc supervisor start
 Check if the supervisor is running
 
 ```
-gc supervisor status
+gc supervisor status [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSON |
 
 ## gc supervisor stop
 
@@ -3084,8 +3159,12 @@ gc wait cancel <wait-id>
 Show details for a wait
 
 ```
-gc wait inspect <wait-id>
+gc wait inspect <wait-id> [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSON |
 
 ## gc wait list
 
@@ -3097,6 +3176,7 @@ gc wait list [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--json` | bool |  | emit JSON |
 | `--session` | string |  | filter by session ID |
 | `--state` | string |  | filter by wait state |
 

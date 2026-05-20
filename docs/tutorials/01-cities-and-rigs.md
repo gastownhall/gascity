@@ -142,10 +142,6 @@ $ cat pack.toml
 name = "my-city"
 schema = 2
 
-[[agent]]
-name = "mayor"
-prompt_template = "agents/mayor/prompt.template.md"
-
 [[named_session]]
 template = "mayor"
 mode = "always"
@@ -156,10 +152,10 @@ the provider. The machine-local workspace identity lives in `.gc/site.toml`
 instead, which is how `gc cities`, `gc status`, and other commands still know
 this city is named `my-city`.
 
-The `[[agent]]` entry in `pack.toml` defines the built-in `mayor`, and
+The built-in `mayor` comes from the scaffolded `agents/mayor/` content, and
 `[[named_session]]` keeps a `mayor` session running so you can talk to it at
-any time. When you add more agents later, Gas City creates `agents/<name>/`, with
-`prompt.template.md` for the prompt and `agent.toml` for any per-agent
+any time. When you add more agents later, Gas City creates `agents/<name>/`,
+with `prompt.template.md` for the prompt and `agent.toml` for any per-agent
 overrides.
 
 Gas City also gives you an implicit agent for each supported provider — so

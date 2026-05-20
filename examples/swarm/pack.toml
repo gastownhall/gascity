@@ -1,0 +1,11 @@
+# Swarm — city pack definition.
+#
+# Owns the portable configuration: imports and pack identity.
+# city.toml carries deployment-local settings (rigs, daemon, beads).
+
+[pack]
+name = "swarm"
+schema = 2
+
+[imports.swarm]
+source = "packs/swarm"

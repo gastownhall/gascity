@@ -32,14 +32,16 @@
     {
       "customType": "regex",
       "fileMatch": [
-        "/^\\.github/workflows/(ci|nightly|mac-regression|rc-gate|review-formulas)\\.yml$/",
+        "/^\\.github/workflows/(ci|nightly|mac-regression|ollama-acceptance-c|rc-gate|review-formulas)\\.yml$/",
         "/^deps\\.env$/",
         "/^Makefile$/",
-        "/^contrib/k8s/Dockerfile\\.base$/"
+        "/^contrib/k8s/Dockerfile\\.base$/",
+        "/^contrib/k8s/dolt-statefulset\\.yaml$/"
       ],
       "matchStrings": [
         "DOLT_VERSION:\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\"",
-        "DOLT_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+        "DOLT_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)",
+        "dolthub/dolt:(?<currentValue>\\d+\\.\\d+\\.\\d+)"
       ],
       "datasourceTemplate": "github-releases",
       "depNameTemplate": "dolthub/dolt",
@@ -48,7 +50,7 @@
     {
       "customType": "regex",
       "fileMatch": [
-        "/^\\.github/workflows/(ci|nightly|mac-regression|rc-gate|review-formulas)\\.yml$/",
+        "/^\\.github/workflows/(ci|nightly|mac-regression|ollama-acceptance-c|rc-gate|review-formulas)\\.yml$/",
         "/^deps\\.env$/"
       ],
       "matchStrings": [

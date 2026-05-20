@@ -6,12 +6,14 @@
 package gastown_test
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"text/template"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/config"
@@ -53,6 +55,67 @@ func assertContainsInOrder(t *testing.T, body string, wants ...string) {
 	}
 }
 
+func renderGastownPromptForPack(t *testing.T, rel, agentName, templateName, rigName, bindingName, bindingPrefix string) string {
+	t.Helper()
+	dir := exampleDir()
+	tmpl := template.New(filepath.Base(rel)).
+		Funcs(template.FuncMap{
+			"basename": func(qualifiedName string) string {
+				_, name := config.ParseQualifiedName(qualifiedName)
+				return name
+			},
+			"cmd": func() string {
+				return "gc"
+			},
+			"session": func(agentName string) string {
+				return agentName
+			},
+		}).
+		Option("missingkey=zero")
+
+	fragmentPaths, err := filepath.Glob(filepath.Join(dir, "packs", "gastown", "template-fragments", "*.template.md"))
+	if err != nil {
+		t.Fatalf("glob template fragments: %v", err)
+	}
+	for _, fragmentPath := range fragmentPaths {
+		data, err := os.ReadFile(fragmentPath)
+		if err != nil {
+			t.Fatalf("reading %s: %v", fragmentPath, err)
+		}
+		if _, err := tmpl.Parse(string(data)); err != nil {
+			t.Fatalf("parsing %s: %v", fragmentPath, err)
+		}
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, rel))
+	if err != nil {
+		t.Fatalf("reading %s: %v", rel, err)
+	}
+	if _, err := tmpl.Parse(string(data)); err != nil {
+		t.Fatalf("parsing %s: %v", rel, err)
+	}
+
+	ctx := map[string]string{
+		"AgentName":     agentName,
+		"BindingName":   bindingName,
+		"BindingPrefix": bindingPrefix,
+		"CityRoot":      "/city",
+		"DefaultBranch": "main",
+		"IssuePrefix":   "demo",
+		"RigName":       rigName,
+		"RigRoot":       "/repos/" + rigName,
+		"SlingQuery":    "bd ready --metadata-field gc.routed_to=<canonical> --unassigned",
+		"TemplateName":  templateName,
+		"WorkDir":       "/repos/" + rigName,
+		"WorkQuery":     "bd ready",
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, ctx); err != nil {
+		t.Fatalf("rendering %s: %v", rel, err)
+	}
+	return buf.String()
+}
+
 // loadExpanded loads city.toml with full pack expansion.
 func loadExpanded(t *testing.T) *config.City {
 	t.Helper()
@@ -73,8 +136,8 @@ func TestCityTomlParses(t *testing.T) {
 	if cfg.Workspace.Name != "gastown" {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "gastown")
 	}
-	if len(cfg.Workspace.Includes) != 0 {
-		t.Errorf("Workspace.Includes = %v, want empty (migrated to pack.toml)", cfg.Workspace.Includes)
+	if len(cfg.Workspace.LegacyIncludes()) != 0 {
+		t.Errorf("Workspace.Includes = %v, want empty (migrated to pack.toml)", cfg.Workspace.LegacyIncludes())
 	}
 	// Imports live in pack.toml (portable definition), not city.toml (deployment).
 	if len(cfg.Imports) != 0 {
@@ -206,12 +269,20 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 		t.Fatalf("reading refinery formula: %v", err)
 	}
 	body := string(data)
+	normalizedBody := strings.Join(strings.Fields(body), " ")
+	unsetRationale := "`--unset-metadata rejection_reason` clears any stale rejection field"
+	if count := strings.Count(normalizedBody, unsetRationale); count != 2 {
+		t.Fatalf("refinery formula should explain rejection_reason cleanup in both close paths, found %d occurrences", count)
+	}
 
 	// Direct-merge path: metadata write must be chained into the close.
+	// --unset-metadata rejection_reason follows merged_target; the &&
+	// that gates gc bd close must appear after --unset-metadata.
 	assertContainsInOrder(t, body,
 		"--set-metadata merge_result=merged",
 		"--set-metadata merged_sha=$MERGED_SHA",
-		"--set-metadata merged_target=$TARGET &&",
+		"--set-metadata merged_target=$TARGET",
+		"--unset-metadata rejection_reason &&",
 		`gc bd close $WORK --reason "Merged to $TARGET at $MERGED_SHORT"`,
 	)
 
@@ -220,8 +291,43 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 		"--set-metadata merge_result=pull_request",
 		`--set-metadata pr_url="$PR_URL"`,
 		`--set-metadata pr_number="$PR_NUMBER"`,
-		`--set-metadata merged_target="$TARGET" &&`,
+		`--set-metadata merged_target="$TARGET"`,
+		"--unset-metadata rejection_reason &&",
 		`gc bd close $WORK --reason "Pull request ready: $PR_URL"`,
+	)
+}
+
+// TestRefineryPromptRejectionFlowEnforcesClearOnMerge guards against
+// the regression observed in L5c (2026-05-10): the refinery agent
+// merged a previously-rejected work bead and closed it, but never ran
+// `gc bd update --unset-metadata rejection_reason`. The closed bead
+// retained the stale `rejection_reason` field, so downstream tooling
+// could not distinguish "rejected and resolved" from "rejected and
+// abandoned" by reading metadata.
+//
+// The formula's `merge-push` step chains `--unset-metadata
+// rejection_reason` into the terminal `gc bd update`, but the refinery
+// prompt's "Rejection Flow" section described only the set side of the
+// lifecycle — the LLM agent saw no closing-symmetry instruction in the
+// prompt and dropped the unset whenever it bypassed the formula's chained
+// command.
+//
+// The fix adds a closing-symmetry note to the Rejection Flow section
+// naming the obligation: on merging a previously-rejected bead, clear
+// `rejection_reason` before `gc bd close`.
+func TestRefineryPromptRejectionFlowEnforcesClearOnMerge(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "refinery", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery prompt: %v", err)
+	}
+	body := strings.Join(strings.Fields(string(data)), " ")
+
+	assertContainsInOrder(t, body,
+		"## Rejection Flow",
+		"clear `rejection_reason` before `gc bd close`",
+		"--unset-metadata rejection_reason",
 	)
 }
 
@@ -270,6 +376,61 @@ func TestPolecatFormulaRecordsExistingPRMetadataOnSubmit(t *testing.T) {
 	}
 	if strings.Contains(body, "gh pr create") {
 		t.Fatalf("polecat submit flow must not create pull requests directly")
+	}
+}
+
+func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat formula: %v", err)
+	}
+	body := string(data)
+	refineryTarget := `REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery"`
+	nudge := `gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true`
+
+	assertContainsInOrder(t, body,
+		"**5. Reassign to refinery:**",
+		refineryTarget,
+		`gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"`,
+		"**6. Signal refinery to check for work immediately",
+		refineryTarget,
+		`gc session wake "$REFINERY_TARGET" || true`,
+		nudge,
+		"**7. Signal reconciler and exit.**",
+	)
+
+	for _, bad := range []string{
+		`gc session wake "$REFINERY_TARGET" 2>/dev/null`,
+		`gc session nudge "$REFINERY_TARGET" 2>/dev/null`,
+		`gc session nudge "$REFINERY_TARGET" || true`,
+	} {
+		if strings.Contains(body, bad) {
+			t.Fatalf("polecat formula must preserve refinery handoff diagnostics and pass a nudge message; found %q", bad)
+		}
+	}
+}
+
+func TestPolecatPromptDoneSequenceSignalsRefinery(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "polecat", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat prompt: %v", err)
+	}
+	body := string(data)
+
+	assertContainsInOrder(t, body,
+		"## FINAL REMINDER: RUN THE DONE SEQUENCE",
+		`REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"`,
+		`gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"`,
+		`gc session wake "$REFINERY_TARGET" || true`,
+		`gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true`,
+		`gc runtime drain-ack`,
+	)
+	if !strings.Contains(body, "Done sequence (push, set metadata, reassign, wake refinery, nudge refinery, `gc runtime drain-ack`, exit)") {
+		t.Fatalf("polecat quick reference must include the refinery wake+nudge handoff")
 	}
 }
 
@@ -897,6 +1058,274 @@ func TestGastownRefineryPatrolRejectionCommandsReturnWorkToPolecatPool(t *testin
 	}
 }
 
+func TestGastownPromptPeerAddressesUseBindingPrefix(t *testing.T) {
+	checks := []struct {
+		rel          string
+		agentName    string
+		templateName string
+		rigName      string
+		unbound      bool
+		wants        []string
+		bads         []string
+	}{
+		{
+			rel:          "packs/gastown/agents/boot/prompt.template.md",
+			agentName:    "gastown.boot",
+			templateName: "boot",
+			wants: []string{
+				"gc session peek gastown.deacon --lines 1",
+				"gc bd list --assignee=gastown.deacon --status=in_progress --json --limit=5",
+				"gc mail count gastown.deacon",
+				"gc session nudge gastown.deacon",
+				`--title="Stuck: gastown.deacon"`,
+				`"target":"gastown.deacon"`,
+			},
+			bads: []string{
+				"gc session peek deacon",
+				"--assignee=deacon",
+				"gc mail count deacon",
+				"gc session nudge deacon",
+				`--title="Stuck: deacon"`,
+				`"target":"deacon"`,
+			},
+		},
+		{
+			rel:          "packs/gastown/agents/boot/prompt.template.md",
+			agentName:    "boot",
+			templateName: "boot",
+			unbound:      true,
+			wants: []string{
+				"gc session peek deacon --lines 1",
+				"gc bd list --assignee=deacon --status=in_progress --json --limit=5",
+				"gc mail count deacon",
+				"gc session nudge deacon",
+				`--title="Stuck: deacon"`,
+				`"target":"deacon"`,
+			},
+			bads: []string{
+				"gastown.deacon",
+			},
+		},
+		{
+			rel:          "packs/gastown/agents/mayor/prompt.template.md",
+			agentName:    "gastown.mayor",
+			templateName: "mayor",
+			wants: []string{
+				"gc sling <rig>/gastown.polecat <bead>",
+				"session nudge <rig>/gastown.refinery",
+			},
+			bads: []string{
+				"--label=pool:<rig>/polecat",
+				"gc nudge refinery",
+			},
+		},
+		{
+			rel:          "packs/gastown/agents/mayor/prompt.template.md",
+			agentName:    "mayor",
+			templateName: "mayor",
+			unbound:      true,
+			wants: []string{
+				"gc sling <rig>/polecat <bead>",
+				"session nudge <rig>/refinery",
+			},
+			bads: []string{
+				"gc sling <rig>/gastown.polecat <bead>",
+				"session nudge <rig>/gastown.refinery",
+			},
+		},
+		{
+			rel:          "packs/gastown/agents/deacon/prompt.template.md",
+			agentName:    "gastown.deacon",
+			templateName: "deacon",
+			wants: []string{
+				"gc mail send <rig>/gastown.witness",
+				"Your mail address: gastown.deacon",
+			},
+			bads: []string{
+				"gc mail send <rig>/witness",
+				"Your mail address: deacon/",
+			},
+		},
+		{
+			rel:          "packs/gastown/agents/deacon/prompt.template.md",
+			agentName:    "deacon",
+			templateName: "deacon",
+			unbound:      true,
+			wants: []string{
+				"gc mail send <rig>/witness",
+				"Your mail address: deacon",
+			},
+			bads: []string{
+				"gc mail send <rig>/gastown.witness",
+				"Your mail address: deacon/",
+			},
+		},
+		{
+			rel:          "packs/gastown/agents/polecat/prompt.template.md",
+			agentName:    "demo/gastown.furiosa",
+			templateName: "polecat",
+			rigName:      "demo",
+			wants: []string{
+				"gastown.witness",
+				"Mail identity: demo/gastown.furiosa",
+			},
+			bads: []string{
+				"${GC_RIG:+$GC_RIG/}witness",
+			},
+		},
+		{
+			rel:          "packs/gastown/agents/polecat/prompt.template.md",
+			agentName:    "demo/furiosa",
+			templateName: "polecat",
+			rigName:      "demo",
+			unbound:      true,
+			wants: []string{
+				"${GC_RIG:+$GC_RIG/}witness",
+				"Mail identity: demo/furiosa",
+			},
+			bads: []string{
+				"${GC_RIG:+$GC_RIG/}gastown.witness",
+				"Mail identity: demo/gastown.furiosa",
+			},
+		},
+		{
+			rel:          "packs/gastown/agents/refinery/prompt.template.md",
+			agentName:    "demo/gastown.refinery",
+			templateName: "refinery",
+			rigName:      "demo",
+			wants: []string{
+				"gc session nudge demo/gastown.<polecat-suffix>",
+				"Mail identity: demo/gastown.refinery",
+				"Use the bare polecat suffix",
+			},
+			bads: []string{
+				"gc session nudge demo/<polecat-name>",
+				"Mail identity: demo/refinery",
+				"demo/gastown.<polecat-name>",
+			},
+		},
+		{
+			rel:          "packs/gastown/agents/refinery/prompt.template.md",
+			agentName:    "demo/refinery",
+			templateName: "refinery",
+			rigName:      "demo",
+			unbound:      true,
+			wants: []string{
+				"gc session nudge demo/<polecat-suffix>",
+				"Mail identity: demo/refinery",
+				"Use the bare polecat suffix",
+			},
+			bads: []string{
+				"gc session nudge demo/gastown.<polecat-suffix>",
+				"Mail identity: demo/gastown.refinery",
+				"demo/gastown.<polecat-name>",
+			},
+		},
+		{
+			rel:          "packs/gastown/agents/witness/prompt.template.md",
+			agentName:    "demo/gastown.witness",
+			templateName: "witness",
+			rigName:      "demo",
+			wants: []string{
+				"demo/gastown.refinery",
+				"demo/gastown.<polecat-suffix>",
+				"Your mail address: demo/gastown.witness",
+				"Use the bare polecat suffix",
+			},
+			bads: []string{
+				"gc mail send demo/refinery",
+				"gc session nudge demo/<polecat-name>",
+				"gc session peek demo/<polecat-name>",
+				"Your mail address: demo/witness",
+				"demo/gastown.<polecat-name>",
+			},
+		},
+		{
+			rel:          "packs/gastown/agents/witness/prompt.template.md",
+			agentName:    "demo/witness",
+			templateName: "witness",
+			rigName:      "demo",
+			unbound:      true,
+			wants: []string{
+				"demo/refinery",
+				"demo/<polecat-suffix>",
+				"Your mail address: demo/witness",
+				"Use the bare polecat suffix",
+			},
+			bads: []string{
+				"gc mail send demo/gastown.refinery",
+				"gc session nudge demo/gastown.<polecat-suffix>",
+				"gc session peek demo/gastown.<polecat-suffix>",
+				"Your mail address: demo/gastown.witness",
+				"demo/gastown.<polecat-name>",
+			},
+		},
+		{
+			rel:          "packs/gastown/assets/prompts/crew.template.md",
+			agentName:    "demo/gastown.alice",
+			templateName: "crew",
+			rigName:      "demo",
+			wants: []string{
+				"demo/<binding>.<polecat-suffix>",
+				"gc sling <rig>/<binding>.polecat <bead>",
+				"e.g. `<rig>/gastown.witness`",
+				"Use the import binding plus the bare polecat suffix",
+			},
+			bads: []string{
+				"gc bd update --label=pool:<rig>/polecat",
+				"gc bd update <bead> --label=pool:<rig>/polecat",
+				"gc session nudge demo/<polecat-name>",
+				"`<rig>/<agent>` for rig agents",
+				"gc.routed_to=demo/polecat",
+				"gc session nudge demo/polecat",
+				"demo/<polecat-suffix>",
+				"demo/gastown.<polecat-name>",
+			},
+		},
+		{
+			rel:          "packs/gastown/assets/prompts/crew.template.md",
+			agentName:    "demo/alice",
+			templateName: "crew",
+			rigName:      "demo",
+			unbound:      true,
+			wants: []string{
+				"demo/<binding>.<polecat-suffix>",
+				"gc sling <rig>/<binding>.polecat <bead>",
+				"Use the import binding plus the bare polecat suffix",
+			},
+			bads: []string{
+				"gc bd update --label=pool:<rig>/polecat",
+				"gc bd update <bead> --label=pool:<rig>/polecat",
+				"gc session nudge demo/<polecat-name>",
+				"`<rig>/<agent>` for rig agents",
+				"gc.routed_to=demo/polecat",
+				"gc session nudge demo/polecat",
+				"demo/<polecat-suffix>",
+				"demo/gastown.<polecat-name>",
+			},
+		},
+	}
+	for _, check := range checks {
+		bindingName := "gastown"
+		bindingPrefix := "gastown."
+		if check.unbound {
+			bindingName = ""
+			bindingPrefix = ""
+		}
+		body := renderGastownPromptForPack(t, check.rel, check.agentName, check.templateName, check.rigName, bindingName, bindingPrefix)
+		for _, want := range check.wants {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s missing %q", check.rel, want)
+			}
+		}
+		for _, bad := range check.bads {
+			if strings.Contains(body, bad) {
+				t.Errorf("%s still contains binding-blind peer address %q", check.rel, bad)
+			}
+		}
+	}
+}
+
 func TestGastownPatrolWispCommandsPropagateRoutingNamespace(t *testing.T) {
 	dir := exampleDir()
 	checks := []struct {
@@ -920,14 +1349,14 @@ func TestGastownPatrolWispCommandsPropagateRoutingNamespace(t *testing.T) {
 			vars:    []string{"--var target_branch=", "--var rig_name=", "--var binding_prefix="},
 		},
 		{
-			rel:     "packs/gastown/formulas/mol-refinery-patrol.toml",
-			formula: "mol-refinery-patrol",
-			vars:    []string{"--var target_branch=", "--var rig_name=", "--var binding_prefix="},
-		},
-		{
 			rel:     "packs/gastown/agents/witness/prompt.template.md",
 			formula: "mol-witness-patrol",
 			vars:    []string{"--var binding_prefix="},
+		},
+		{
+			rel:     "packs/gastown/formulas/mol-refinery-patrol.toml",
+			formula: "mol-refinery-patrol",
+			vars:    []string{"--var target_branch=", "--var rig_name=", "--var binding_prefix="},
 		},
 		{
 			rel:     "packs/gastown/formulas/mol-witness-patrol.toml",
@@ -971,6 +1400,60 @@ func TestGastownPatrolWispCommandsPropagateRoutingNamespace(t *testing.T) {
 			if strings.Contains(rendered, bad) {
 				t.Errorf("%s rendered patrol formula still contains %q", rel, bad)
 			}
+		}
+		if rel == "packs/gastown/formulas/mol-witness-patrol.toml" {
+			for _, want := range []string{
+				"<rig>/gastown.<polecat-suffix>",
+				"--assignee=<rig>/gastown.refinery",
+				"gc session nudge <rig>/gastown.refinery",
+			} {
+				if !strings.Contains(rendered, want) {
+					t.Errorf("%s rendered witness patrol missing %q", rel, want)
+				}
+			}
+			for _, bad := range []string{
+				"<rig>/polecats/<name>",
+				"--assignee=<rig>/refinery",
+				"gc session nudge <rig>/refinery",
+			} {
+				if strings.Contains(rendered, bad) {
+					t.Errorf("%s rendered witness patrol still contains %q", rel, bad)
+				}
+			}
+		}
+	}
+}
+
+func TestGastownFormulasUsingBindingPrefixDefaultToUnbound(t *testing.T) {
+	dir := exampleDir()
+	paths, err := filepath.Glob(filepath.Join(dir, "packs", "gastown", "formulas", "*.toml"))
+	if err != nil {
+		t.Fatalf("glob gastown formulas: %v", err)
+	}
+	parser := formula.NewParser()
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		if !strings.Contains(string(data), "{{binding_prefix}}") {
+			continue
+		}
+		f, err := parser.ParseFile(path)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", path, err)
+		}
+		varDef, ok := f.Vars["binding_prefix"]
+		if !ok {
+			t.Errorf("%s uses {{binding_prefix}} without declaring [vars.binding_prefix]", filepath.Base(path))
+			continue
+		}
+		if varDef.Default == nil {
+			t.Errorf("%s binding_prefix var has no explicit default", filepath.Base(path))
+			continue
+		}
+		if *varDef.Default != "" {
+			t.Errorf("%s binding_prefix default = %q, want empty string", filepath.Base(path), *varDef.Default)
 		}
 	}
 }
@@ -1016,8 +1499,8 @@ func TestBootPromptMatchesNamedSessionLifecycle(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"{{ cmd }} session peek deacon --lines 1",
-		"{{ cmd }} session peek deacon --lines 30",
+		"{{ cmd }} session peek {{ .BindingPrefix }}deacon --lines 1",
+		"{{ cmd }} session peek {{ .BindingPrefix }}deacon --lines 30",
 		"configured `boot` named session",
 		"`mode = \"always\"` keeps the `boot` identity present",
 		"`wake_mode = \"fresh\"`",
@@ -1804,4 +2287,58 @@ func TestDeaconPatrolDetectsQueueStarvation(t *testing.T) {
 		`id = "queue-starvation-check"`,
 		`id = "utility-agent-health"`,
 	)
+}
+
+// TestRefineryPromptUsesCanonicalAgentIdentity verifies the refinery
+// prompt's wisp lookup and assignment commands use $GC_AGENT, which the
+// session harness guarantees (internal/session/lifecycle.go). $GC_ALIAS
+// can be empty or stale, which was the root cause of the stuck self-poll
+// reported in upstream #1833.
+func TestRefineryPromptUsesCanonicalAgentIdentity(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "refinery", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery prompt: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		`gc bd list --assignee="$GC_AGENT" --status=in_progress`,
+		`gc bd update "$WISP" --assignee="$GC_AGENT"`,
+		`| Find assigned work | ` + "`" + `gc bd list --assignee="$GC_AGENT" --status=open` + "`" + ` |`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("refinery prompt missing canonical $GC_AGENT usage %q", want)
+		}
+	}
+
+	// The refinery prompt must NOT rely on $GC_ALIAS for its own identity
+	// (it can be empty; the harness-guaranteed identity is $GC_AGENT).
+	if strings.Contains(body, `--assignee="$GC_ALIAS"`) {
+		t.Errorf("refinery prompt still uses $GC_ALIAS for its own identity; switch to $GC_AGENT")
+	}
+}
+
+// TestRefineryFormulaValidatesAgentIdentityAtStartup verifies the
+// refinery formula fails fast when $GC_AGENT is unset or empty, instead
+// of silently returning no results and looking healthy-idle.
+func TestRefineryFormulaValidatesAgentIdentityAtStartup(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery formula: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		`if [ -z "${GC_AGENT:-}" ]; then`,
+		`GC_AGENT is empty`,
+		`gc runtime drain-ack`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("refinery formula missing $GC_AGENT startup validation %q", want)
+		}
+	}
 }

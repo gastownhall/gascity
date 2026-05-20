@@ -41,12 +41,22 @@ const (
 	SessionMaxAgeKilled = "session.max_age_killed"
 	SessionSuspended    = "session.suspended"
 	SessionUpdated      = "session.updated"
-	ConvoyCreated       = "convoy.created"
-	ConvoyClosed        = "convoy.closed"
-	ControllerStarted   = "controller.started"
-	ControllerStopped   = "controller.stopped"
-	CitySuspended       = "city.suspended"
-	CityResumed         = "city.resumed"
+	// SessionDrainAckedWithAssignedWork fires when a session acknowledges
+	// drain (via `gc runtime drain-ack`) while still holding the assignee
+	// on an open or in-progress work bead. Distinguishes a worker that
+	// exited mid-task (e.g., per-turn cap, crash) from a worker that
+	// performed a clean phase handoff (the latter null the bead's
+	// assignee before drain-acking). The reconciler emits this as a
+	// mechanism-only signal; pack-level subscribers own the recovery
+	// policy (commit-and-push, clear-assignee-and-respawn, or escalate).
+	// See gastownhall/gascity#2293.
+	SessionDrainAckedWithAssignedWork = "session.drain_acked_with_assigned_work"
+	ConvoyCreated                     = "convoy.created"
+	ConvoyClosed                      = "convoy.closed"
+	ControllerStarted                 = "controller.started"
+	ControllerStopped                 = "controller.stopped"
+	CitySuspended                     = "city.suspended"
+	CityResumed                       = "city.resumed"
 	// Typed async request result events. 5 success types (one per
 	// operation, fully typed payload) + 1 shared failure type.
 	RequestResultCityCreate     = "request.result.city.create"
@@ -58,13 +68,15 @@ const (
 
 	// Non-terminal city lifecycle events recorded in the per-city
 	// event log during init/unregister for diagnostics.
-	CityCreated             = "city.created"
-	CityUnregisterRequested = "city.unregister_requested"
-	OrderFired              = "order.fired"
-	OrderCompleted          = "order.completed"
-	OrderFailed             = "order.failed"
-	ProviderSwapped         = "provider.swapped"
-	WorkerOperation         = "worker.operation"
+	CityCreated                     = "city.created"
+	CityUnregisterRequested         = "city.unregister_requested"
+	OrderFired                      = "order.fired"
+	OrderCompleted                  = "order.completed"
+	OrderFailed                     = "order.failed"
+	ProviderSwapped                 = "provider.swapped"
+	WorkerOperation                 = "worker.operation"
+	ProjectIdentityStamped          = "project.identity.stamped"
+	SupervisorFSPressureSkippedTick = "supervisor.fs_pressure.skipped_tick"
 
 	// External messaging events.
 	ExtMsgBound          = "extmsg.bound"
@@ -74,6 +86,12 @@ const (
 	ExtMsgAdapterRemoved = "extmsg.adapter_removed"
 	ExtMsgInbound        = "extmsg.inbound"
 	ExtMsgOutbound       = "extmsg.outbound"
+
+	// EventsRotated is the forensic anchor written as the first event in
+	// a freshly-rotated active log. Its payload carries the prior
+	// archive's filename and seq range so log readers can stitch back
+	// across rotations.
+	EventsRotated = "events.rotated"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -84,6 +102,7 @@ var KnownEventTypes = []string{
 	SessionWoke, SessionStopped, SessionCrashed,
 	SessionDraining, SessionUndrained, SessionQuarantined,
 	SessionIdleKilled, SessionMaxAgeKilled, SessionSuspended, SessionUpdated,
+	SessionDrainAckedWithAssignedWork,
 	BeadCreated, BeadClosed, BeadUpdated,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
@@ -95,10 +114,11 @@ var KnownEventTypes = []string{
 	RequestResultSessionSubmit, RequestFailed,
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed,
-	ProviderSwapped, WorkerOperation,
+	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,
+	EventsRotated,
 }
 
 // Event is a single recorded occurrence in the system.

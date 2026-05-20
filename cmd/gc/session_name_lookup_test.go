@@ -85,3 +85,52 @@ func TestResolvedTemplateForIdentity_DoesNotResolveOutOfBoundsQualifiedPoolIdent
 		t.Fatalf("resolvedTemplateForIdentity(frontend/worker-7) = %q, want unresolved out-of-bounds identity", got)
 	}
 }
+
+func TestExistingPoolSlotWithConfig_PrefersConcreteAgentIdentityOverStaleSlot(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(10)},
+			{Name: "worker", Dir: "backend", MaxActiveSessions: intPtr(10)},
+		},
+	}
+	cfgAgent := &cfg.Agents[0]
+	bead := beads.Bead{
+		Metadata: map[string]string{
+			"template":   "frontend/worker",
+			"agent_name": "frontend/worker-3",
+			"alias":      "backend/worker-4",
+			"pool_slot":  "4",
+		},
+	}
+
+	if got := existingPoolSlotWithConfig(cfg, cfgAgent, bead); got != 3 {
+		t.Fatalf("existingPoolSlotWithConfig = %d, want concrete agent slot 3 over stale slot/foreign alias", got)
+	}
+}
+
+func TestExistingPoolSlot_CanonicalSingletonReturnsZero(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "cashmaster",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "printf 1",
+		}},
+	}
+	cfgAgent := &cfg.Agents[0]
+	bead := beads.Bead{
+		Metadata: map[string]string{
+			"template":   "cashmaster/refinery",
+			"agent_name": "cashmaster/refinery-1",
+			"alias":      "cashmaster/refinery-1",
+			"pool_slot":  "1",
+		},
+	}
+
+	if got := existingPoolSlot(cfgAgent, bead); got != 0 {
+		t.Fatalf("existingPoolSlot(canonical singleton) = %d, want 0", got)
+	}
+	if got := existingPoolSlotWithConfig(cfg, cfgAgent, bead); got != 0 {
+		t.Fatalf("existingPoolSlotWithConfig(canonical singleton) = %d, want 0", got)
+	}
+}

@@ -165,6 +165,67 @@ func TestRetryLifecycleTransientThenPass(t *testing.T) {
 	}
 }
 
+func TestRetryLifecycleRequiredOutputMissingDoesNotPass(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	spec := &formula.Step{
+		ID:    "prepare-items",
+		Title: "Prepare Items",
+		Type:  "task",
+		Retry: &formula.RetrySpec{MaxAttempts: 2},
+	}
+	root, control := makeRetryControl(t, store, "mol-test.prepare-items", spec, 2)
+
+	attempt1 := makeAttemptBead(t, store, root.ID, "mol-test.prepare-items.attempt.1", 1, map[string]string{
+		"gc.outcome":              "pass",
+		"gc.output_json_required": "true",
+	})
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl attempt 1: %v", err)
+	}
+	if result.Action != "retry" {
+		t.Fatalf("attempt 1 action = %q, want retry", result.Action)
+	}
+
+	attempt2 := findAttemptByRef(t, store, root.ID, "mol-test.prepare-items.attempt.2")
+	if attempt2.ID == "" {
+		t.Fatal("attempt 2 was not created by Attach")
+	}
+	if err := store.SetMetadataBatch(attempt2.ID, map[string]string{
+		"gc.outcome":              "pass",
+		"gc.output_json_required": "true",
+	}); err != nil {
+		t.Fatalf("set attempt 2 metadata: %v", err)
+	}
+	mustClose(t, store, attempt2.ID)
+
+	result2, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl attempt 2: %v", err)
+	}
+	if result2.Action != "fail" {
+		t.Fatalf("attempt 2 action = %q, want fail", result2.Action)
+	}
+
+	controlFinal := mustGet(t, store, control.ID)
+	if controlFinal.Status != "closed" {
+		t.Fatalf("control final status = %q, want closed", controlFinal.Status)
+	}
+	if controlFinal.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("control outcome = %q, want fail", controlFinal.Metadata["gc.outcome"])
+	}
+	if controlFinal.Metadata["gc.failure_reason"] != "missing_required_output_json" {
+		t.Fatalf("control failure_reason = %q, want missing_required_output_json", controlFinal.Metadata["gc.failure_reason"])
+	}
+	if controlFinal.Metadata["gc.output_json"] != "" {
+		t.Fatalf("control output_json = %q, want empty", controlFinal.Metadata["gc.output_json"])
+	}
+}
+
 // TestRetryLifecycleExhaustion exercises: attempt 1 fails → retry →
 // attempt 2 fails → retry → attempt 3 fails → exhausted (hard_fail).
 func TestRetryLifecycleExhaustion(t *testing.T) {

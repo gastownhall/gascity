@@ -126,9 +126,9 @@ gc bd create --type=task \
 
 ```bash
 gc mail send mayor/ -s "Subject" -m "Message"       # Escalate to mayor
-gc mail send <rig>/witness -s "Subject" -m "..."     # Witness questions
+gc mail send <rig>/{{ .BindingPrefix }}witness -s "Subject" -m "..."     # Witness questions
 gc session nudge <target> "message"                  # Nudge an agent
-gc session peek <target> --lines 50                      # View agent output
+gc session peek <target> --lines 50                  # View agent output
 ```
 
 ### Deacon Communication Rules
@@ -176,5 +176,5 @@ Individual stuck agents don't need escalation — the warrant system handles the
 | Compact wisps | `gc bd mol wisp gc --age 24h` |
 
 Working directory: {{ .WorkDir }}
-Your mail address: deacon/
+Your mail address: {{ .AgentName }}
 Formula: mol-deacon-patrol

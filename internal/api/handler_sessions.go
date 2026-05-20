@@ -33,7 +33,10 @@ type sessionResponse struct {
 	SessionName string `json:"session_name"`
 	CreatedAt   string `json:"created_at"`
 	LastActive  string `json:"last_active,omitempty"`
-	Attached    bool   `json:"attached"`
+	// LastNudgeDeliveredAt is the most recent successful nudge delivery
+	// timestamp for this session.
+	LastNudgeDeliveredAt string `json:"last_nudge_delivered_at,omitempty"`
+	Attached             bool   `json:"attached"`
 
 	// Classification fields derived from config (for dashboard grouping).
 	Rig  string `json:"rig,omitempty"`
@@ -118,6 +121,9 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 	}
 	if !info.LastActive.IsZero() {
 		r.LastActive = info.LastActive.Format(time.RFC3339)
+	}
+	if !info.LastNudgeDeliveredAt.IsZero() {
+		r.LastNudgeDeliveredAt = info.LastNudgeDeliveredAt.Format(time.RFC3339)
 	}
 	return r
 }
@@ -340,16 +346,12 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	nudgeIDs, err := session.WaitNudgeIDs(store, id)
+	closeResult, err := handle.CloseDetailed(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	if err := handle.Close(r.Context()); err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
-	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), nudgeIDs); err != nil {
+	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), closeResult.WaitNudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after close %s: %v", id, err)
 	}
 

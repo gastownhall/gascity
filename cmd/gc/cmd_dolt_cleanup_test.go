@@ -77,6 +77,22 @@ func TestDoltCleanupCmdRejectsNegativeMaxOrphanDBsBeforeCityResolution(t *testin
 	}
 }
 
+func TestRunDoltCleanupJSONFailurePreservesCommandPayload(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-cleanup", "--json", "--max-orphan-dbs", "-1"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("run(dolt-cleanup --json --max-orphan-dbs -1) = 0, want nonzero")
+	}
+	if strings.Contains(stdout.String(), `"code":"command_failed"`) {
+		t.Fatalf("stdout used generic failure instead of command payload:\nstdout=%s\nstderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"kind":"invalid-max-orphan-dbs"`) {
+		t.Fatalf("stdout missing command-authored cleanup payload:\nstdout=%s\nstderr=%s", stdout.String(), stderr.String())
+	}
+}
+
 func TestRunDoltCleanupRejectsNegativeMaxOrphanDBs(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	opts := cleanupOptions{

@@ -89,7 +89,7 @@ lower_dolt_database_name() {
 
 is_system_dolt_database_name() {
     case "$(lower_dolt_database_name "$1")" in
-        information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) return 0 ;;
+        information_schema|mysql|dolt|dolt_cluster|performance_schema|sys|__gc_probe) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -217,9 +217,7 @@ path_under_data_dir() {
     return 1
 }
 
-# do_query_probe runs a SELECT active_branch() query against the dolt server.
-# active_branch() is lightweight and won't block behind queued queries,
-# unlike SELECT 1 which goes through the full query executor (per Tim Sehn, Dolt CEO).
+# do_query_probe runs a read-only information_schema query against the dolt server.
 do_query_probe() {
     local host gc_bin
     host=$(connect_host)
@@ -228,7 +226,7 @@ do_query_probe() {
         "$gc_bin" dolt-state query-probe --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" >/dev/null 2>&1
         return $?
     fi
-    dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls         sql -q "SELECT active_branch()" >/dev/null 2>&1
+    dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls         sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA" >/dev/null 2>&1
 }
 
 # server_sql runs a SQL query against the running dolt server.
@@ -380,22 +378,14 @@ read_existing_dolt_database() {
     grep -o '"dolt_database"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta_file" 2>/dev/null |         sed 's/.*"dolt_database"[[:space:]]*:[[:space:]]*"//;s/"//' || true
 }
 
-metadata_has_project_id() {
-    local meta_file="$1"
-    [ -f "$meta_file" ] || return 1
-    grep -q '"project_id"[[:space:]]*:' "$meta_file" 2>/dev/null
+identity_toml_present() {
+    local dir="$1"
+    [ -f "$dir/.beads/identity.toml" ]
 }
 
-backfill_project_id_if_missing() {
+ensure_project_identity() {
     local dir="$1" meta_file gc_bin dolt_database host
     meta_file="$dir/.beads/metadata.json"
-    if metadata_has_project_id "$meta_file"; then
-        return 0
-    fi
-    run_bd_pinned "$dir" migrate --update-repo-id 2>/dev/null || true
-    if metadata_has_project_id "$meta_file"; then
-        return 0
-    fi
     gc_bin=$(resolve_gc_helper_bin)
     if [ -z "$gc_bin" ]; then
         return 0
@@ -405,7 +395,14 @@ backfill_project_id_if_missing() {
         return 0
     fi
     host=$(connect_host)
-    "$gc_bin" dolt-state ensure-project-id         --metadata "$meta_file"         --host "$host"         --port "$DOLT_PORT"         --user "$DOLT_USER"         --database "$dolt_database" >/dev/null || die "failed to ensure project identity for $dir"
+    "$gc_bin" dolt-state ensure-project-id \
+        --city "$GC_CITY_PATH" \
+        --metadata "$meta_file" \
+        --host "$host" \
+        --port "$DOLT_PORT" \
+        --user "$DOLT_USER" \
+        --database "$dolt_database" >/dev/null \
+        || die "failed to ensure project identity for $dir"
 }
 
 ensure_bd_runtime_issue_prefix() {
@@ -489,25 +486,59 @@ wait_for_bd_runtime_schema() {
     return 1
 }
 
-# ensure_types_custom_in_yaml writes types.custom to .beads/config.yaml when
-# the key is absent. bd reads this YAML key as a fallback when the database
-# config table is unset (see beads internal/config: GetCustomTypesFromYAML),
-# so writing here registers the types without paying bd's per-command
-# auto-migrate cost (~50s on populated databases). Idempotent: re-running
-# never appends duplicates.
+# ensure_types_custom_in_yaml writes types.custom to .beads/config.yaml.
+# bd reads this YAML key as a fallback when the database config table is
+# unset (see beads internal/config: GetCustomTypesFromYAML), so writing
+# here registers the types without paying bd's per-command auto-migrate
+# cost (~50s on populated databases).
+#
+# Idempotent against the desired effective set: re-running with the SAME
+# baseline is a no-op. The rewrite NEVER narrows the type set: if the YAML
+# already contains pack-defined or user-defined custom types beyond $types
+# (the GC baseline), those extensions are preserved. This matches the
+# merge semantics of internal/doctor/checks_custom_types.go:mergeCustomTypes
+# and fixes the gascity-side failure surfaced in #2154 — a stale or partial
+# line is replaced with the union of existing and required entries, never
+# overwritten with just the baseline.
 ensure_types_custom_in_yaml() {
     local dir="$1"
     local types="$2"
     local config_yaml="$dir/.beads/config.yaml"
     [ -f "$config_yaml" ] || return 0
     [ -n "$types" ] || return 0
-    if grep -q "^types\.custom:" "$config_yaml" 2>/dev/null; then
+
+    local current
+    current=$(sed -n 's/^types\.custom: *//p' "$config_yaml" 2>/dev/null | head -1)
+
+    local merged
+    merged=$(printf '%s,%s' "$current" "$types" | awk -F, '
+        {
+            for (i = 1; i <= NF; i++) {
+                t = $i
+                sub(/^[ \t]+/, "", t)
+                sub(/[ \t]+$/, "", t)
+                if (t == "") continue
+                if (!(t in seen)) {
+                    seen[t] = 1
+                    out = (out == "" ? t : out "," t)
+                }
+            }
+            print out
+        }
+    ')
+
+    # Short-circuit when the merged set already equals what's on disk:
+    # avoids mtime churn that downstream watchers might misread as a real
+    # change. Includes the case where current is already a superset of
+    # the baseline (operator/pack types appended to the GC list).
+    if [ "$current" = "$merged" ]; then
         return 0
     fi
+
     local tmp
     tmp=$(mktemp "$config_yaml.tmp.XXXXXX") || return 0
-    cat "$config_yaml" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
-    printf 'types.custom: %s\n' "$types" >> "$tmp"
+    sed '/^types\.custom:/d' "$config_yaml" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    printf 'types.custom: %s\n' "$merged" >> "$tmp"
     mv -f "$tmp" "$config_yaml" || rm -f "$tmp"
 }
 
@@ -745,8 +776,6 @@ run_preflight_cleanup() {
         fi
     fi
     clean_stale_sockets
-    quarantine_phantom_dbs
-    cleanup_stale_locks
 }
 
 # find_port_holder returns the PID of the process listening on DOLT_PORT.
@@ -952,71 +981,6 @@ kill_imposter() {
     sleep 1
 }
 
-retired_replacement_db_name() {
-    case "$1" in
-        ?*.replaced-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z)
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-# quarantine_phantom_dbs moves unservable database dirs to quarantine.
-# This includes missing-manifest phantom dirs and Dolt-retired replacement
-# dirs that still have manifests but are no longer the active database.
-quarantine_phantom_dbs() {
-    [ -d "$DATA_DIR" ] || return 0
-    local dir
-    for dir in "$DATA_DIR"/*/; do
-        [ -d "$dir" ] || continue
-        [ -d "$dir/.dolt" ] || continue
-
-        local name reason
-        name=$(basename "$dir")
-        if retired_replacement_db_name "$name"; then
-            reason="retired replacement"
-        elif [ ! -f "$dir/.dolt/noms/manifest" ]; then
-            reason="missing noms/manifest"
-        else
-            continue
-        fi
-
-        local quarantine_dir="$DATA_DIR/.quarantine/$(date +%Y%m%dT%H%M%S)-$name"
-        mkdir -p "$DATA_DIR/.quarantine"
-        echo "quarantining unservable database: $name ($reason) -> $quarantine_dir" >&2
-        mv -f "$dir" "$quarantine_dir"
-    done
-}
-
-# cleanup_stale_locks removes .dolt/noms/LOCK files not held by any process.
-cleanup_stale_locks() {
-    [ -d "$DATA_DIR" ] || return 0
-    local dir
-    for dir in "$DATA_DIR"/*/; do
-        [ -d "$dir" ] || continue
-        local lock_file="$dir/.dolt/noms/LOCK"
-        if [ -f "$lock_file" ]; then
-            local open_status
-            set +e
-            lsof_reports_open "$lock_file"
-            open_status=$?
-            set -e
-            case "$open_status" in
-                0)
-                    ;;
-                1)
-                    echo "removing stale LOCK: $lock_file" >&2
-                    rm -f "$lock_file"
-                    ;;
-                *)
-                    echo "preserving LOCK with unknown open-file state: $lock_file" >&2
-                    ;;
-            esac
-        fi
-    done
-}
 
 # write_config_yaml generates a managed dolt-config.yaml with timeouts and GC settings.
 # Overwritten on each server start. Without read/write timeouts, CLOSE_WAIT connections
@@ -1080,6 +1044,8 @@ listener:
 
 data_dir: "$DATA_DIR"
 
+# auto_gc is disabled — dolt#10944 load-avg gating means upstream auto-GC effectively never fires.
+# Compaction-driven scheduled GC replaces it. See gastownhall/gascity#1918, #1200, #1977 for context.
 behavior:
   auto_gc_behavior:
     enable: false
@@ -1681,31 +1647,66 @@ ensure_beads_role() {
 }
 
 # ensure_dolt_identity ensures dolt has user.name and user.email configured.
+#
+# Resolution order per field, in order of precedence:
+#   1. dolt config --global (returned as-is if already set)
+#   2. git config --global  (copied into dolt config)
+#
+# If a field is missing from BOTH dolt and git, fail with an error that
+# names the specific field(s) the user must set — never instruct the user
+# to set a value they have already configured. Historically this function
+# would report "user.name not available" whenever EITHER field was missing
+# (because the dolt-side guard required both), which left users running
+# `dolt config --add user.name` over and over while the real culprit was
+# user.email.
 ensure_dolt_identity() {
-    # Check if already configured.
-    if dolt config --global --get user.name >/dev/null 2>&1 && \
-       dolt config --global --get user.email >/dev/null 2>&1; then
+    # Use dolt's exit code as the canonical "is this field configured?"
+    # signal. Real dolt returns 0 with the value on stdout when the field
+    # is set, non-zero otherwise; some tests stub dolt to return 0 with
+    # empty stdout for any `config` invocation, and we treat that as
+    # configured too (matches historical behavior of this helper).
+    local dolt_has_name=0 dolt_has_email=0
+    local dolt_name="" dolt_email="" git_name git_email
+    if dolt config --global --get user.name >/dev/null 2>&1; then
+        dolt_has_name=1
+        dolt_name=$(dolt config --global --get user.name 2>/dev/null || true)
+    fi
+    if dolt config --global --get user.email >/dev/null 2>&1; then
+        dolt_has_email=1
+        dolt_email=$(dolt config --global --get user.email 2>/dev/null || true)
+    fi
+    if [ "$dolt_has_name" -eq 1 ] && [ "$dolt_has_email" -eq 1 ]; then
         return 0
     fi
 
-    # Copy from git config.
-    local name email
-    name=$(git config --global user.name 2>/dev/null || true)
-    email=$(git config --global user.email 2>/dev/null || true)
+    git_name=$(git config --global user.name 2>/dev/null || true)
+    git_email=$(git config --global user.email 2>/dev/null || true)
 
-    if [ -z "$name" ]; then
-        die "dolt identity not configured and git user.name not available; run: dolt config --global --add user.name \"Your Name\""
+    # Accumulate missing-field hints in a semicolon-joined string rather
+    # than a bash array so this stays runnable under POSIX /bin/sh
+    # (matches the script's shebang). Each branch reports only the field
+    # that is truly missing from BOTH dolt and git — never instruct the
+    # user to set a value they have already configured.
+    local missing=""
+    if [ "$dolt_has_name" -ne 1 ] && [ -z "$git_name" ]; then
+        missing='dolt config --global --add user.name "Your Name"'
     fi
-    if [ -z "$email" ]; then
-        die "dolt identity not configured and git user.email not available; run: dolt config --global --add user.email \"you@example.com\""
+    if [ "$dolt_has_email" -ne 1 ] && [ -z "$git_email" ]; then
+        if [ -n "$missing" ]; then
+            missing="$missing; "
+        fi
+        missing="${missing}dolt config --global --add user.email \"you@example.com\""
+    fi
+    if [ -n "$missing" ]; then
+        die "dolt identity incomplete; run: $missing"
     fi
 
-    # Set missing fields.
-    if ! dolt config --global --get user.name >/dev/null 2>&1; then
-        dolt config --global --add user.name "$name" || die "failed to set dolt user.name"
+    # Backfill missing dolt fields from git.
+    if [ "$dolt_has_name" -ne 1 ]; then
+        dolt config --global --add user.name "$git_name" || die "failed to set dolt user.name"
     fi
-    if ! dolt config --global --get user.email >/dev/null 2>&1; then
-        dolt config --global --add user.email "$email" || die "failed to set dolt user.email"
+    if [ "$dolt_has_email" -ne 1 ]; then
+        dolt config --global --add user.email "$git_email" || die "failed to set dolt user.email"
     fi
 }
 
@@ -2149,7 +2150,7 @@ op_init() {
                 ensure_types_custom_in_yaml "$dir" "$custom_types"
                 ensure_bd_runtime_custom_types "$dolt_database" "$custom_types"
                 ensure_bd_runtime_issue_prefix "$dolt_database" "$prefix"
-                backfill_project_id_if_missing "$dir"
+                ensure_project_identity "$dir"
                 exit 0
             fi
             echo "warning: database '$dolt_database' missing bd schema; re-initializing" >&2
@@ -2167,7 +2168,15 @@ op_init() {
     # IF NOT EXISTS both creates the on-disk directory and registers it in
     # the server's catalog. This is the upstream gastown pattern — when the
     # server is running, always go through SQL rather than dolt init on disk.
-    ensure_database_registered "$dolt_database" || true
+    #
+    # Failure here is a hard stop: bd init in server mode requires the
+    # database to exist on the server. The previous `|| true` swallowed
+    # CREATE DATABASE failures and let bd init fail later with a cryptic
+    # "database not found" error — root cause of the gascity-3 reproducer
+    # where the city's hq database was never created on first start.
+    if ! ensure_database_registered "$dolt_database"; then
+        die "failed to register Dolt database '$dolt_database' on running server (CREATE DATABASE failed); see warnings above. cannot proceed with bd init."
+    fi
 
     # Run bd init in server mode through the pinned wrapper so the fallback
     # path uses the same authenticated Dolt target as the rest of init.
@@ -2179,7 +2188,14 @@ op_init() {
     # and leave the pinned database schema-less.
     run_bd_init_pinned "$dir" "$prefix" "$dolt_database" "$host" "${bd_init_force:+true}"
 
-    ensure_database_registered "$dolt_database" || true
+    # Re-register post-init: if bd init didn't catalog-register the DB
+    # (server-mode quirk), do it now. After a successful bd init this is a
+    # no-op via the USE check inside ensure_database_registered. Failure
+    # here means bd init claimed success but the server can't see the DB —
+    # equally a hard stop, equally previously swallowed by `|| true`.
+    if ! ensure_database_registered "$dolt_database"; then
+        die "Dolt database '$dolt_database' is unreachable on the server after bd init reported success; see warnings above. probable causes: server crashed mid-init, port collision, or stale catalog state."
+    fi
 
     # GC owns canonical metadata/config normalization after this backend
     # bridge returns. Keep bd-specific config/migration here only.
@@ -2208,10 +2224,7 @@ op_init() {
     # compatibility state for raw bd operations, not a second GC authority.
     ensure_bd_runtime_issue_prefix "$dolt_database" "$prefix"
 
-    # Ensure database has repository fingerprint (upstream GH #25).
-    # Fresh bd init already writes project_id on current upstream; only pay the
-    # migration cost when metadata still lacks it.
-    backfill_project_id_if_missing "$dir"
+    ensure_project_identity "$dir"
 
     # Drop orphan database created by bd init (upstream gt-sv1h) only after
     # the pinned database schema is visible. Some bd builds appear to stage
@@ -2257,7 +2270,7 @@ op_health() {
 
     if load_health_check_from_gc; then
         if [ "$GC_HEALTH_QUERY_READY" != "true" ]; then
-            die "dolt query probe failed (SELECT active_branch())"
+            die "dolt query probe failed (information_schema.SCHEMATA)"
         fi
         if ! is_remote && [ "$GC_HEALTH_READ_ONLY" = "true" ]; then
             die "dolt server is in read-only mode"
@@ -2269,7 +2282,7 @@ op_health() {
     else
         # Query probe.
         if ! do_query_probe; then
-            die "dolt query probe failed (SELECT active_branch())"
+            die "dolt query probe failed (information_schema.SCHEMATA)"
         fi
 
         # Imposter detection disabled: TCP + query probe passed, server is
@@ -2343,12 +2356,44 @@ op_probe() {
     exit 2
 }
 
+# recovery_should_skip_due_to_enospc returns 0 (true) when the recent
+# dolt server log shows disk-exhaustion (ENOSPC) signatures. Restarting
+# dolt under ENOSPC does not free disk space, and the recovery cycle
+# itself amplifies the failure: every restart triggers a fresh conjoin
+# that drops another partial nbs_table_* file in the backup remote,
+# accelerating the disk-full feedback loop. See gastownhall/gascity#2158.
+#
+# Returns 1 (false) when no ENOSPC signature is found in the recent log
+# tail, or when the log file cannot be read.
+recovery_should_skip_due_to_enospc() {
+    [ -n "$LOG_FILE" ] && [ -r "$LOG_FILE" ] || return 1
+    # Scan the recent log tail rather than the whole file; an old transient
+    # ENOSPC error from a since-resolved disk-pressure event should not
+    # block recovery indefinitely.
+    tail -n 1000 "$LOG_FILE" 2>/dev/null \
+        | grep -qE 'no space left on device|copy_file_range:.*no space|ENOSPC' \
+        || return 1
+    return 0
+}
+
 # op_recover stops the dolt server, restarts it, and verifies health.
 op_recover() {
     local read_only_status
 
     if is_remote; then
         die "recovery not supported for remote dolt servers"
+    fi
+
+    # Skip auto-recovery when dolt has been failing due to disk exhaustion.
+    # Restarting dolt does not free disk space, and the recovery cycle
+    # itself amplifies the failure: each restart triggers a conjoin/backup
+    # sync that writes another partial table file to the backup remote.
+    # Require manual intervention (free disk space) before recovery
+    # resumes. See gastownhall/gascity#2158.
+    if recovery_should_skip_due_to_enospc; then
+        echo "skipping dolt recovery: recent dolt log shows ENOSPC — manual intervention required" >&2
+        echo "  free disk space, then re-run health checks" >&2
+        die "dolt recovery skipped: ENOSPC detected"
     fi
 
     if load_recover_managed_from_gc; then

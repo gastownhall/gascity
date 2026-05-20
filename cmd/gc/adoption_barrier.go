@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os/exec"
 	"regexp"
 	"strconv"
 
@@ -51,6 +52,7 @@ var poolSlotPattern = regexp.MustCompile(`-(\d+)$`)
 // Returns the adoption result and whether the barrier passed (all running
 // sessions have beads).
 func runAdoptionBarrier(
+	cityPath string,
 	store beads.Store,
 	sp runtime.Provider,
 	cfg *config.City,
@@ -81,18 +83,18 @@ func runAdoptionBarrier(
 	}
 
 	// Step 2: Load existing open session beads, indexed by session_name.
-	existing, err := store.List(beads.ListQuery{
-		Label: sessionBeadLabel,
-	})
+	// The helper unions Type and Label queries so canonical beads that
+	// lost their gc:session label (after a crash or partial write) still
+	// participate in adoption dedup. Without the union, those beads would
+	// be invisible here and adoption would re-create duplicates.
+	existing, err := sessionpkg.ListAllSessionBeads(store, beads.ListQuery{})
 	if err != nil {
 		fmt.Fprintf(stderr, "adoption barrier: listing beads: %v\n", err) //nolint:errcheck
 		return result, false
 	}
 	bySessionName := make(map[string]bool, len(existing))
 	for _, b := range existing {
-		if !sessionpkg.IsSessionBeadOrRepairable(b) {
-			continue
-		}
+		// ListAllSessionBeads already filters via IsSessionBeadOrRepairable.
 		if b.Status == "closed" {
 			continue // closed beads don't count for dedup
 		}
@@ -107,7 +109,7 @@ func runAdoptionBarrier(
 	st := cfg.Workspace.SessionTemplate
 	snapshot := &sessionBeadSnapshot{}
 	for _, b := range existing {
-		if b.Status != "closed" {
+		if b.Status != "closed" && sessionpkg.IsSessionBeadOrRepairable(b) {
 			snapshot.add(b)
 		}
 	}
@@ -123,8 +125,6 @@ func runAdoptionBarrier(
 		agentByQN[a.QualifiedName()] = a
 	}
 
-	now := clk.Now().UTC()
-
 	// Step 3: For each running session, adopt if no open bead exists.
 	for _, sessionName := range running {
 		// Find matching config agent.
@@ -133,14 +133,20 @@ func runAdoptionBarrier(
 		// base template name (e.g., "city-worker-3" -> "worker").
 		cfgAgent, isConfigAgent := agentBySession[sessionName]
 		isPoolInstance := false
+		staleSingletonSuffix := false
 		if !isConfigAgent {
-			if base := resolvePoolBase(sessionName, store, cityName, st, agentByQN); base != nil {
+			if base := resolveCanonicalSingletonSuffixBase(sessionName, store, cityName, st, agentByQN); base != nil {
+				cfgAgent = base
+				isConfigAgent = true
+				staleSingletonSuffix = true
+			} else if base := resolvePoolBase(sessionName, store, cityName, st, agentByQN); base != nil {
 				cfgAgent = base
 				isConfigAgent = true
 				isPoolInstance = true
 			}
 		}
-		alive, err := workerSessionTargetAliveWithConfig(nil, sp, nil, sessionName, processHints(cfgAgent))
+		processNames := processHints(cfg, cfgAgent)
+		alive, err := workerSessionTargetAliveWithConfig(nil, sp, nil, sessionName, processNames)
 		if err != nil || !alive {
 			result.Total--
 			continue
@@ -162,7 +168,6 @@ func runAdoptionBarrier(
 			"generation":         strconv.Itoa(sessionpkg.DefaultGeneration),
 			"continuation_epoch": strconv.Itoa(sessionpkg.DefaultContinuationEpoch),
 			"instance_token":     sessionpkg.NewInstanceToken(),
-			"synced_at":          now.Format("2006-01-02T15:04:05Z07:00"),
 		}
 
 		detail := adoptionDetail{SessionName: sessionName}
@@ -188,7 +193,12 @@ func runAdoptionBarrier(
 		// Only set pool_slot metadata when the agent actually supports
 		// instance expansion, to avoid false positives on direct session
 		// names that end in numbers.
-		if slot := parsePoolSlot(sessionName); slot > 0 && isConfigAgent && cfgAgent.SupportsInstanceExpansion() {
+		slot := parsePoolSlot(sessionName)
+		switch {
+		case slot > 0 && staleSingletonSuffix:
+			fmt.Fprintf(stderr, "adoption barrier: adopting stale singleton suffix session %s as canonical agent %s without pool_slot metadata\n", //nolint:errcheck
+				sessionName, cfgAgent.QualifiedName())
+		case slot > 0 && isConfigAgent && cfgAgent.SupportsInstanceExpansion():
 			detail.PoolSlot = slot
 			meta["pool_slot"] = strconv.Itoa(slot)
 			if maxSess := cfgAgent.EffectiveMaxActiveSessions(); maxSess != nil && *maxSess >= 0 && slot > *maxSess {
@@ -196,6 +206,16 @@ func runAdoptionBarrier(
 				fmt.Fprintf(stderr, "adoption barrier: %s pool slot %d exceeds max %d (adopt-then-drain)\n", //nolint:errcheck
 					sessionName, slot, *maxSess)
 			}
+		case slot > 0 && !isConfigAgent:
+			// Defensive log (ga-fiw): a session ending in "-N" did not match
+			// any configured agent — either by exact session name or by pool
+			// base resolution. This is the orphan shape that produced the
+			// "cashmaster/gastown.refinery-1" phantom: the canonical refinery
+			// agent has max_active_sessions=1, so resolvePoolBase rejected the
+			// "-1" suffix, and adoption fell through to creating a bead with
+			// agent_name=session_name. The log makes that leak visible.
+			fmt.Fprintf(stderr, "adoption barrier: %s ends in -%d but no configured agent (after pool-base resolution) claims it; adopting under sessionName=agent_name (orphan?)\n", //nolint:errcheck
+				sessionName, slot)
 		}
 
 		if dryRun {
@@ -204,14 +224,39 @@ func runAdoptionBarrier(
 			continue
 		}
 
-		_, createErr := store.Create(beads.Bead{
-			Title:    detail.AgentName,
-			Type:     sessionBeadType,
-			Labels:   []string{sessionBeadLabel, "agent:" + detail.AgentName},
-			Metadata: meta,
+		alreadyHadBead := false
+		createSessionBead := func() error {
+			meta["synced_at"] = clk.Now().UTC().Format("2006-01-02T15:04:05Z07:00")
+			_, err := store.Create(beads.Bead{
+				Title:    detail.AgentName,
+				Type:     sessionBeadType,
+				Labels:   []string{sessionBeadLabel, "agent:" + detail.AgentName},
+				Metadata: meta,
+			})
+			if err != nil {
+				return fmt.Errorf("creating session bead for %q: %w", sessionName, err)
+			}
+			return nil
+		}
+		createErr := sessionpkg.WithCitySessionIdentifierLocks(cityPath, []string{sessionName, detail.AgentName}, func() error {
+			hasBead, err := openSessionBeadExists(store, sessionName)
+			if err != nil {
+				return err
+			}
+			if hasBead {
+				alreadyHadBead = true
+				return nil
+			}
+			return createSessionBead()
 		})
+		if alreadyHadBead {
+			result.AlreadyHadBead++
+			detail.HasBead = true
+			result.Details = append(result.Details, detail)
+			continue
+		}
 		if createErr != nil {
-			fmt.Fprintf(stderr, "adoption barrier: creating bead for %s: %v\n", sessionName, createErr) //nolint:errcheck
+			fmt.Fprintf(stderr, "adoption barrier: %v\n", createErr) //nolint:errcheck
 			result.Skipped++
 			continue
 		}
@@ -222,6 +267,24 @@ func runAdoptionBarrier(
 	// Step 4: Barrier gate — all running sessions must have beads.
 	passed := result.Skipped == 0 && !partialList
 	return result, passed
+}
+
+func openSessionBeadExists(store beads.Store, sessionName string) (bool, error) {
+	existing, err := sessionpkg.ListAllSessionBeads(store, beads.ListQuery{
+		Metadata: map[string]string{"session_name": sessionName},
+		Live:     true,
+	})
+	if err != nil {
+		return false, fmt.Errorf("listing session beads for %q: %w", sessionName, err)
+	}
+	for _, b := range existing {
+		if b.Status == "closed" {
+			continue
+		}
+		// ListAllSessionBeads already filters via IsSessionBeadOrRepairable.
+		return true, nil
+	}
+	return false, nil
 }
 
 // resolvePoolBase attempts to match a pool instance session name back to its
@@ -249,6 +312,25 @@ func resolvePoolBase(sessionName string, store beads.Store, cityName, sessionTem
 	return nil
 }
 
+func resolveCanonicalSingletonSuffixBase(sessionName string, store beads.Store, cityName, sessionTemplate string, agentByQN map[string]*config.Agent) *config.Agent {
+	slot := parsePoolSlot(sessionName)
+	if slot == 0 {
+		return nil
+	}
+	suffix := fmt.Sprintf("-%d", slot)
+	baseSessName := sessionName[:len(sessionName)-len(suffix)]
+	for _, a := range agentByQN {
+		if !a.UsesCanonicalSingletonPoolIdentity() {
+			continue
+		}
+		sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), sessionTemplate)
+		if sn == baseSessName {
+			return a
+		}
+	}
+	return nil
+}
+
 // parsePoolSlot extracts the numeric pool slot from a session name suffix.
 // Returns 0 if no slot suffix is found.
 func parsePoolSlot(sessionName string) int {
@@ -263,9 +345,9 @@ func parsePoolSlot(sessionName string) int {
 	return slot
 }
 
-func processHints(a *config.Agent) []string {
+func processHints(cfg *config.City, a *config.Agent) []string {
 	if a == nil {
 		return nil
 	}
-	return a.ProcessNames
+	return config.AgentProcessNames(cfg, *a, exec.LookPath)
 }

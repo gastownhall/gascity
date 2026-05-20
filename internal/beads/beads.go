@@ -33,6 +33,11 @@ type Bead struct {
 	Labels       []string          `json:"labels,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	Dependencies []Dep             `json:"dependencies,omitempty"`
+	// Ephemeral routes the bead to the wisps tier on Create. Wisps live in
+	// a separate Dolt table, are not git-synced, and are eligible for TTL
+	// garbage collection. Reads must opt in via ListQuery.TierMode (or the
+	// WithEphemeral/WithBothTiers QueryOpts on the legacy label helpers).
+	Ephemeral bool `json:"ephemeral,omitempty"`
 }
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.
@@ -47,6 +52,22 @@ type UpdateOpts struct {
 	Labels       []string // append these labels (nil = no change)
 	RemoveLabels []string // remove these labels (nil = no change)
 	Metadata     map[string]string
+}
+
+// Tx is the write surface available inside a Store.Tx callback.
+// Keep this interface limited to methods needed by current transactional
+// write pairs; do not add Store methods speculatively.
+type Tx interface {
+	Update(id string, opts UpdateOpts) error
+	SetMetadataBatch(id string, kvs map[string]string) error
+	Close(id string) error
+}
+
+func runSequentialTx(tx Tx, fn func(Tx) error) error {
+	if fn == nil {
+		return errors.New("beads tx: nil callback")
+	}
+	return fn(tx)
 }
 
 func cloneIntPtr(v *int) *int {
@@ -120,6 +141,13 @@ const (
 	// IncludeClosed extends the query to include closed beads.
 	// Without this, cached queries only return non-closed beads.
 	IncludeClosed QueryOpt = iota + 1
+	// WithEphemeral routes the legacy label helpers (ListByLabel,
+	// ListByMetadata) at the wisps tier instead of the default issues tier.
+	WithEphemeral
+	// WithBothTiers unions the issues and wisps tiers in a single query.
+	// Mutually exclusive with WithEphemeral; if both are passed,
+	// WithBothTiers wins.
+	WithBothTiers
 )
 
 // HasOpt returns true if opts contains the given option.
@@ -214,6 +242,12 @@ type Store interface {
 	// batch contents to be idempotent and tolerate partial writes.
 	// Returns ErrNotFound if the bead does not exist.
 	SetMetadataBatch(id string, kvs map[string]string) error
+
+	// Tx executes fn inside a single logical transaction identified by
+	// commitMsg. Stores without native transaction support execute fn
+	// sequentially against themselves, preserving their existing write
+	// semantics. fn must not retain the Tx after it returns.
+	Tx(commitMsg string, fn func(tx Tx) error) error
 
 	// Delete permanently removes a bead from the store. The bead should be
 	// closed first. Returns ErrNotFound if the bead does not exist.

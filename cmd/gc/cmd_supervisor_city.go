@@ -129,8 +129,25 @@ func cityUsesManagedReconciler(cityPath string) bool {
 	return supervisorAlive() != 0
 }
 
+// justRestartedSupervisorPID records the PID of a supervisor we just
+// auto-restarted in this invocation. Set by runStartDriftCheck after a
+// successful restart so that ensureNoStandaloneController can recognize
+// the new supervisor on the controller socket and not misclassify it as
+// a competing standalone during the brief window before the registry
+// reflects it managing the city. Zero when no restart has happened in
+// this process.
+var justRestartedSupervisorPID int
+
 func ensureNoStandaloneController(cityPath string) (int, error) {
 	if pid := controllerAlive(cityPath); pid != 0 {
+		// If we just auto-restarted the supervisor in this invocation,
+		// the new supervisor process is briefly visible on the controller
+		// socket before the registry catches up. Treat that as our own
+		// supervisor, not a competing standalone controller. Match by
+		// PID is deterministic — no polling or sleeping required.
+		if justRestartedSupervisorPID != 0 && pid == justRestartedSupervisorPID {
+			return 0, nil
+		}
 		return pid, errControllerAlreadyRunning
 	}
 	gcDir := filepath.Join(cityPath, ".gc")
@@ -434,11 +451,21 @@ func statusDisplayText(status string) string {
 	}
 }
 
+type supervisorUnregisterOptions struct {
+	Force bool
+}
+
 func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer) (bool, int) {
-	return unregisterCityFromSupervisorWithForce(cityPath, stdout, stderr, "gc unregister", false)
+	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, "gc unregister", supervisorUnregisterOptions{})
 }
 
 func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Writer, commandName string, force bool) (bool, int) {
+	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, commandName, supervisorUnregisterOptions{
+		Force: force,
+	})
+}
+
+func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.Writer, commandName string, opts supervisorUnregisterOptions) (bool, int) {
 	cityPath = normalizePathForCompare(cityPath)
 	entry, registered, err := registeredCityEntry(cityPath)
 	if err != nil {
@@ -450,7 +477,7 @@ func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Wr
 	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-	if force && supervisorAliveHook() != 0 {
+	if opts.Force && supervisorAliveHook() != 0 {
 		tryStopControllerWithForce(cityPath, io.Discard, true)
 	}
 	if err := reg.Unregister(cityPath); err != nil {

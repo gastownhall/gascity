@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,6 +94,153 @@ func TestComputePoolSessions_NamepoolMaxOneUsesPoolInstance(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Fatalf("computePoolSessions len = %d, want 1 (%v)", len(got), got)
+	}
+}
+
+func TestComputePoolSessions_CanonicalSingletonUsesCanonicalSessionName(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{},
+		Agents: []config.Agent{
+			{
+				Name:              "refinery",
+				Dir:               "cashmaster",
+				MaxActiveSessions: intPtr(1),
+				ScaleCheck:        "echo 1",
+				DrainTimeout:      "2m",
+			},
+		},
+	}
+
+	got := computePoolSessions(cfg, "city", "", runtime.NewFake())
+	want := startupSessionName("city", "cashmaster/refinery", cfg.Workspace.SessionTemplate)
+	if _, ok := got[want]; !ok {
+		t.Fatalf("computePoolSessions missing %q in %v", want, got)
+	}
+	if _, ok := got[startupSessionName("city", "cashmaster/refinery-1", cfg.Workspace.SessionTemplate)]; ok {
+		t.Fatalf("computePoolSessions registered phantom singleton instance in %v", got)
+	}
+	if len(got) != 1 {
+		t.Fatalf("computePoolSessions len = %d, want 1 (%v)", len(got), got)
+	}
+}
+
+func TestBuildLifecycleTrackers_CanonicalSingletonUsesCanonicalSessionName(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{},
+		Agents: []config.Agent{
+			{
+				Name:              "refinery",
+				Dir:               "cashmaster",
+				MaxActiveSessions: intPtr(1),
+				ScaleCheck:        "echo 1",
+				IdleTimeout:       "5m",
+				MaxSessionAge:     "1h",
+			},
+		},
+	}
+	canonical := startupSessionName("city", "cashmaster/refinery", cfg.Workspace.SessionTemplate)
+	phantom := startupSessionName("city", "cashmaster/refinery-1", cfg.Workspace.SessionTemplate)
+
+	idle, ok := buildIdleTracker(cfg, "city", "", runtime.NewFake()).(*memoryIdleTracker)
+	if !ok {
+		t.Fatalf("buildIdleTracker returned %T, want *memoryIdleTracker", idle)
+	}
+	if _, ok := idle.timeouts[canonical]; !ok {
+		t.Fatalf("idle tracker missing canonical session %q in %v", canonical, idle.timeouts)
+	}
+	if _, ok := idle.timeouts[phantom]; ok {
+		t.Fatalf("idle tracker registered phantom singleton instance %q in %v", phantom, idle.timeouts)
+	}
+
+	maxAge, ok := buildMaxSessionAgeTracker(cfg, "city", runtime.NewFake()).(*memoryMaxSessionAgeTracker)
+	if !ok {
+		t.Fatalf("buildMaxSessionAgeTracker returned %T, want *memoryMaxSessionAgeTracker", maxAge)
+	}
+	if _, ok := maxAge.configs[canonical]; !ok {
+		t.Fatalf("max-age tracker missing canonical session %q in %v", canonical, maxAge.configs)
+	}
+	if _, ok := maxAge.configs[phantom]; ok {
+		t.Fatalf("max-age tracker registered phantom singleton instance %q in %v", phantom, maxAge.configs)
+	}
+}
+
+func TestBuildLifecycleTrackers_CanonicalSingletonIncludesLiveStaleSuffix(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{},
+		Agents: []config.Agent{
+			{
+				Name:              "refinery",
+				Dir:               "cashmaster",
+				MaxActiveSessions: intPtr(1),
+				ScaleCheck:        "echo 1",
+				IdleTimeout:       "5m",
+				MaxSessionAge:     "1h",
+			},
+		},
+	}
+	stale := startupSessionName("city", "cashmaster/refinery-1", cfg.Workspace.SessionTemplate)
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), stale, runtime.Config{}); err != nil {
+		t.Fatalf("Start(%q): %v", stale, err)
+	}
+
+	idle, ok := buildIdleTracker(cfg, "city", "", sp).(*memoryIdleTracker)
+	if !ok {
+		t.Fatalf("buildIdleTracker returned %T, want *memoryIdleTracker", idle)
+	}
+	if _, ok := idle.timeouts[stale]; !ok {
+		t.Fatalf("idle tracker missing live stale singleton suffix %q in %v", stale, idle.timeouts)
+	}
+
+	maxAge, ok := buildMaxSessionAgeTracker(cfg, "city", sp).(*memoryMaxSessionAgeTracker)
+	if !ok {
+		t.Fatalf("buildMaxSessionAgeTracker returned %T, want *memoryMaxSessionAgeTracker", maxAge)
+	}
+	if _, ok := maxAge.configs[stale]; !ok {
+		t.Fatalf("max-age tracker missing live stale singleton suffix %q in %v", stale, maxAge.configs)
+	}
+}
+
+func TestBuildLifecycleTrackers_CanonicalSingletonNamedSessionOverlayOneKey(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{},
+		Agents: []config.Agent{
+			{
+				Name:              "refinery",
+				Dir:               "cashmaster",
+				MaxActiveSessions: intPtr(1),
+				ScaleCheck:        "echo 1",
+				IdleTimeout:       "5m",
+				MaxSessionAge:     "1h",
+			},
+		},
+		NamedSessions: []config.NamedSession{{
+			Template: "refinery",
+			Dir:      "cashmaster",
+		}},
+	}
+	canonical := startupSessionName("city", "cashmaster/refinery", cfg.Workspace.SessionTemplate)
+
+	idle, ok := buildIdleTracker(cfg, "city", "", runtime.NewFake()).(*memoryIdleTracker)
+	if !ok {
+		t.Fatalf("buildIdleTracker returned %T, want *memoryIdleTracker", idle)
+	}
+	if len(idle.timeouts) != 1 {
+		t.Fatalf("idle tracker registered %d keys, want 1: %v", len(idle.timeouts), idle.timeouts)
+	}
+	if _, ok := idle.timeouts[canonical]; !ok {
+		t.Fatalf("idle tracker missing canonical session %q in %v", canonical, idle.timeouts)
+	}
+
+	maxAge, ok := buildMaxSessionAgeTracker(cfg, "city", runtime.NewFake()).(*memoryMaxSessionAgeTracker)
+	if !ok {
+		t.Fatalf("buildMaxSessionAgeTracker returned %T, want *memoryMaxSessionAgeTracker", maxAge)
+	}
+	if len(maxAge.configs) != 1 {
+		t.Fatalf("max-age tracker registered %d keys, want 1: %v", len(maxAge.configs), maxAge.configs)
+	}
+	if _, ok := maxAge.configs[canonical]; !ok {
+		t.Fatalf("max-age tracker missing canonical session %q in %v", canonical, maxAge.configs)
 	}
 }
 
@@ -474,7 +624,7 @@ func TestStageHookFilesIncludesCanonicalClaudeHook(t *testing.T) {
 		t.Fatalf("WriteFile(%q): %v", settingsPath, err)
 	}
 
-	got := stageHookFiles(nil, cityDir, workDir)
+	got := stageHookFiles(nil, cityDir, workDir, []string{"claude"})
 	for _, entry := range got {
 		// City-root-relative hook: no workDir prefix in RelDst.
 		if entry.RelDst == path.Join(".gc", "settings.json") {
@@ -504,7 +654,7 @@ func TestStageHookFilesFallsBackToLegacyClaudeHook(t *testing.T) {
 		t.Fatalf("WriteFile(%q): %v", hookPath, err)
 	}
 
-	got := stageHookFiles(nil, cityDir, workDir)
+	got := stageHookFiles(nil, cityDir, workDir, []string{"claude"})
 	for _, entry := range got {
 		if entry.RelDst == path.Join("hooks", "claude.json") {
 			if entry.Src != hookPath {
@@ -534,11 +684,30 @@ func TestStageHookFilesDoesNotStageClaudeSkillsDir(t *testing.T) {
 		t.Fatalf("WriteFile(%q): %v", skillPath, err)
 	}
 
-	got := stageHookFiles(nil, cityDir, workDir)
+	got := stageHookFiles(nil, cityDir, workDir, []string{"claude"})
 	wantRelDst := path.Join("worker", ".claude", "skills")
 	for _, entry := range got {
 		if entry.RelDst == wantRelDst {
 			t.Fatalf("stageHookFiles() staged %q at %q; want skills drift tracked via FingerprintExtra only", entry.Src, entry.RelDst)
+		}
+	}
+}
+
+func TestStageHookFilesSkipsUnrequestedWorkDirHooks(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "city")
+	workDir := filepath.Join(cityDir, "worker")
+	hookPath := filepath.Join(workDir, ".gemini", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", hookPath, err)
+	}
+	if err := os.WriteFile(hookPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", hookPath, err)
+	}
+
+	got := stageHookFiles(nil, cityDir, workDir, []string{"claude"})
+	for _, entry := range got {
+		if entry.RelDst == path.Join("worker", ".gemini", "settings.json") {
+			t.Fatalf("stageHookFiles() staged unrequested hook %q", entry.Src)
 		}
 	}
 }
@@ -1188,5 +1357,62 @@ func TestResolveTemplateFPExtra_NotEmptyForPoolAgent(t *testing.T) {
 				t.Errorf("tp.FPExtra missing pool.min for pool agent (FPExtra=%v)", tp.FPExtra)
 			}
 		})
+	}
+}
+
+// TestDoStart_FlagValidationRunsBeforeDriftCheck pins the ordering:
+// the --file / --no-strict legacy-flag rejection must run before any
+// supervisor drift side effects. Otherwise a malformed invocation
+// (e.g. `gc start --file=foo <city>`) triggers a real supervisor
+// restart and then fails with the flag error, an avoidable footgun.
+func TestDoStart_FlagValidationRunsBeforeDriftCheck(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_DOLT", "skip")
+
+	// Bootstrap a minimal city directory so requireBootstrappedCity
+	// returns successfully and execution reaches the flag check.
+	cityDir := filepath.Join(t.TempDir(), "test-city")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("mkdir city .gc: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	// Set extraConfigFiles to a non-empty value so the legacy-flag
+	// rejection arm is selected.
+	oldExtra := extraConfigFiles
+	extraConfigFiles = []string{"some-extra.toml"}
+	t.Cleanup(func() { extraConfigFiles = oldExtra })
+
+	// Stub supervisorAliveHook to a non-zero PID so that, if drift
+	// detection runs, it would take the drift-check path. We track
+	// call count to confirm drift detection was NOT invoked.
+	oldAlive := supervisorAliveHook
+	aliveCalls := 0
+	supervisorAliveHook = func() int {
+		aliveCalls++
+		return 4242
+	}
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+
+	var stdout, stderr bytes.Buffer
+	code := doStartWithNameOverride([]string{cityDir}, false, &stdout, &stderr, "")
+
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "--file and --no-strict only apply") {
+		t.Errorf("stderr missing flag-rejection message:\n%s", stderr.String())
+	}
+	if aliveCalls != 0 {
+		t.Errorf("supervisorAliveHook called %d times; drift check ran before flag validation", aliveCalls)
+	}
+	if strings.Contains(stdout.String(), "Drift detected:") || strings.Contains(stderr.String(), "Drift detected:") {
+		t.Errorf("drift report printed despite flag rejection.\nstdout:\n%s\nstderr:\n%s",
+			stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Restarting supervisor") {
+		t.Errorf("supervisor restart attempted despite flag rejection:\n%s", stdout.String())
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -14,6 +15,7 @@ import (
 var gcEnvVars = []string{
 	"GC_ALIAS",
 	"GC_AGENT",
+	"GC_BEADS",
 	"GC_SESSION_ID",
 	"GC_SESSION_NAME",
 	"GC_SESSION_ORIGIN",
@@ -24,12 +26,118 @@ var gcEnvVars = []string{
 	"GC_DIR",
 }
 
-// clearGCEnv clears GC_* identity and session-routing variables for the
-// duration of the test, preventing host session state from leaking into
-// tests. Uses t.Setenv so values are automatically restored.
+var liveTestEnvVars = []string{
+	"BEADS_ACTOR",
+	"BEADS_CREDENTIALS_FILE",
+	"BEADS_DB_PATH",
+	"BEADS_DIR",
+	"BEADS_DOLT_PASSWORD",
+	"BEADS_DOLT_SERVER_DATABASE",
+	"BEADS_DOLT_SERVER_HOST",
+	"BEADS_DOLT_SERVER_PORT",
+	"BEADS_DOLT_SERVER_USER",
+	"DOLT_CONFIG_PATH",
+	"DOLT_ROOT_PATH",
+	"GC_BEADS_PREFIX",
+	"GC_CITY_RUNTIME_DIR",
+	"GC_CONTROL_DISPATCHER_TRACE_DEFAULT",
+	"GC_DOLT",
+	"GC_DOLT_HOST",
+	"GC_DOLT_PASSWORD",
+	"GC_DOLT_PORT",
+	"GC_DOLT_USER",
+	"GC_HOME",
+	"GC_INSTANCE_TOKEN",
+	"GC_PROVIDER",
+	"GC_READY_PROMPT_PREFIX",
+	"GC_STARTUP_PROMPT_DELIVERED",
+}
+
+// inheritedCityRoutingEnvVars lists GC_* variables that an outer gc-managed
+// shell injects to pin commands at a specific city or scope. Unit tests that
+// build a fresh temp city must clear them so cityForStoreDir/findCity and the
+// scope-aware bead provider resolution actually resolve to the tempdir rather
+// than the parent shell's city.
+var inheritedCityRoutingEnvVars = []string{
+	"GC_CITY_PATH",
+	"GC_CITY_ROOT",
+	"GC_BEADS_SCOPE_ROOT",
+	"GC_DIR",
+	"GC_BIN",
+	"GC_RIG",
+	"GC_RIG_ROOT",
+	"GC_CONTINUATION_EPOCH",
+	"GC_RUNTIME_EPOCH",
+}
+
+// clearGCEnv clears inherited GC, BEADS, and DOLT state for the duration of
+// the test, preventing host session state from redirecting temp fixtures into
+// live city, rig, or beads stores. GC_HOME is isolated to a temp dir because
+// supervisor registry code fails closed when tests leave it empty.
 func clearGCEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range gcEnvVars {
+	for _, k := range liveEnvKeysForTests() {
+		t.Setenv(k, "")
+	}
+	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
+}
+
+func clearProcessLiveEnvForTests() {
+	for _, k := range liveEnvKeysForTests() {
+		_ = os.Unsetenv(k)
+	}
+}
+
+func liveEnvKeysForTests() []string {
+	keys := make(map[string]struct{})
+	for _, group := range [][]string{gcEnvVars, inheritedCityRoutingEnvVars, liveTestEnvVars} {
+		for _, k := range group {
+			if !preserveTestControlEnv(k) {
+				keys[k] = struct{}{}
+			}
+		}
+	}
+	for _, env := range os.Environ() {
+		k, _, ok := strings.Cut(env, "=")
+		if !ok || preserveTestControlEnv(k) {
+			continue
+		}
+		if strings.HasPrefix(k, "GC_") || strings.HasPrefix(k, "BEADS_") || strings.HasPrefix(k, "DOLT_") {
+			keys[k] = struct{}{}
+		}
+	}
+	ordered := make([]string, 0, len(keys))
+	for k := range keys {
+		ordered = append(ordered, k)
+	}
+	sort.Strings(ordered)
+	return ordered
+}
+
+func preserveTestControlEnv(key string) bool {
+	return key == "GC_FAST_UNIT" ||
+		key == "GC_DOLT_REAL_BINARY" ||
+		strings.HasPrefix(key, "GC_LIVE_") ||
+		strings.HasPrefix(key, "GC_SESSION_CHAOS_") ||
+		strings.HasPrefix(key, "GC_TEST_")
+}
+
+// isTestscriptCommandInvocation reports whether this process is a
+// testscript-re-executed command (rogpeppe/go-internal/testscript dispatches
+// `exec gc` / `exec bd` by re-invoking the test binary with arg0 set to the
+// command name). TestMain must skip the live-env scrub in that case so the
+// env directives a testscript injects into its subprocess survive.
+func isTestscriptCommandInvocation(arg0 string) bool {
+	name := strings.TrimSuffix(filepath.Base(strings.ReplaceAll(arg0, "\\", "/")), ".exe")
+	return name == "gc" || name == "bd"
+}
+
+// clearInheritedCityRoutingEnv unsets only the city-routing env vars listed in
+// inheritedCityRoutingEnvVars for tests that need narrower cleanup than
+// clearGCEnv.
+func clearInheritedCityRoutingEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range inheritedCityRoutingEnvVars {
 		t.Setenv(k, "")
 	}
 }
@@ -57,7 +165,7 @@ var testProviderStubCommands = []string{
 }
 
 func installTestProviderStubs() (string, error) {
-	dir, err := os.MkdirTemp("", "gascity-provider-stubs-*")
+	dir, err := os.MkdirTemp("", pidPrefixedTempPattern(testProviderStubDirPrefix))
 	if err != nil {
 		return "", err
 	}
@@ -69,6 +177,22 @@ func installTestProviderStubs() (string, error) {
 		}
 	}
 	return dir, nil
+}
+
+func TestInstallTestProviderStubsUsesPIDPrefixedDir(t *testing.T) {
+	dir, err := installTestProviderStubs()
+	if err != nil {
+		t.Fatalf("installTestProviderStubs: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	pid, ok := pidFromPrefixedDirName(filepath.Base(dir), testProviderStubDirPrefix)
+	if !ok {
+		t.Fatalf("provider stubs dir %q does not use prefix %q", dir, testProviderStubDirPrefix)
+	}
+	if pid != os.Getpid() {
+		t.Fatalf("provider stubs dir PID = %d, want current PID %d", pid, os.Getpid())
+	}
 }
 
 func writeTestGitIdentity(homeDir string) error {

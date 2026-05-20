@@ -1832,6 +1832,85 @@ func TestEffectiveScalingExplicit(t *testing.T) {
 	}
 }
 
+func TestAgentUsesCanonicalSingletonPoolIdentity(t *testing.T) {
+	tests := []struct {
+		name string
+		a    Agent
+		want bool
+	}{
+		{
+			name: "max one pool flavor uses canonical identity",
+			a:    Agent{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(1)},
+			want: true,
+		},
+		{
+			name: "namepool max one keeps instance identity",
+			a:    Agent{Name: "worker", MaxActiveSessions: ptrInt(1), NamepoolNames: []string{"alpha"}},
+		},
+		{
+			name: "multi session pool keeps instance identity",
+			a:    Agent{Name: "worker", MaxActiveSessions: ptrInt(2)},
+		},
+		{
+			name: "unbounded pool keeps instance identity",
+			a:    Agent{Name: "worker"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.a.UsesCanonicalSingletonPoolIdentity(); got != tt.want {
+				t.Fatalf("UsesCanonicalSingletonPoolIdentity() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAgentSupportsExpandedSessionIdentities(t *testing.T) {
+	tests := []struct {
+		name string
+		a    *Agent
+		want bool
+	}{
+		{
+			name: "nil",
+		},
+		{
+			name: "disabled max zero",
+			a:    &Agent{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(0)},
+		},
+		{
+			name: "canonical singleton pool",
+			a:    &Agent{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(1)},
+		},
+		{
+			name: "fixed singleton",
+			a:    &Agent{Name: "worker", MaxActiveSessions: ptrInt(1)},
+		},
+		{
+			name: "bounded pool",
+			a:    &Agent{Name: "worker", MaxActiveSessions: ptrInt(2)},
+			want: true,
+		},
+		{
+			name: "unbounded pool",
+			a:    &Agent{Name: "worker"},
+			want: true,
+		},
+		{
+			name: "namepool max one",
+			a:    &Agent{Name: "worker", MaxActiveSessions: ptrInt(1), NamepoolNames: []string{"alpha", "beta"}},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.a.SupportsExpandedSessionIdentities(); got != tt.want {
+				t.Fatalf("SupportsExpandedSessionIdentities() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestEffectiveScaleCheckDefaults(t *testing.T) {
 	// Check empty → default uses qualified name.
 	a := Agent{
@@ -2303,6 +2382,29 @@ func TestDaemonMaxRestartsZero(t *testing.T) {
 	}
 }
 
+func TestDaemonAutoRestartOnDriftDefault(t *testing.T) {
+	d := DaemonConfig{}
+	if !d.AutoRestartOnDriftEnabled() {
+		t.Errorf("AutoRestartOnDriftEnabled() = false, want true (default)")
+	}
+}
+
+func TestDaemonAutoRestartOnDriftExplicitTrue(t *testing.T) {
+	v := true
+	d := DaemonConfig{AutoRestartOnDrift: &v}
+	if !d.AutoRestartOnDriftEnabled() {
+		t.Errorf("AutoRestartOnDriftEnabled() = false, want true")
+	}
+}
+
+func TestDaemonAutoRestartOnDriftExplicitFalse(t *testing.T) {
+	v := false
+	d := DaemonConfig{AutoRestartOnDrift: &v}
+	if d.AutoRestartOnDriftEnabled() {
+		t.Errorf("AutoRestartOnDriftEnabled() = true, want false (kill switch)")
+	}
+}
+
 func TestDaemonRestartWindowDefault(t *testing.T) {
 	d := DaemonConfig{}
 	got := d.RestartWindowDuration()
@@ -2486,6 +2588,122 @@ name = "mayor"
 	got := cfg.Daemon.ShutdownTimeoutDuration()
 	if got != 3*time.Second {
 		t.Errorf("ShutdownTimeoutDuration() = %v, want 3s", got)
+	}
+}
+
+// --- DoltStopTimeout tests ---
+
+func TestDaemonDoltStopTimeoutDefault(t *testing.T) {
+	d := DaemonConfig{}
+	got := d.DoltStopTimeoutDuration()
+	if got != DefaultDoltStopTimeout {
+		t.Errorf("DoltStopTimeoutDuration() = %v, want %v", got, DefaultDoltStopTimeout)
+	}
+}
+
+func TestDaemonDoltStopTimeoutCustom(t *testing.T) {
+	d := DaemonConfig{DoltStopTimeout: "45s"}
+	got := d.DoltStopTimeoutDuration()
+	if got != 45*time.Second {
+		t.Errorf("DoltStopTimeoutDuration() = %v, want 45s", got)
+	}
+}
+
+func TestDaemonDoltStopTimeoutZero(t *testing.T) {
+	d := DaemonConfig{DoltStopTimeout: "0s"}
+	got := d.DoltStopTimeoutDuration()
+	if got != 0 {
+		t.Errorf("DoltStopTimeoutDuration() = %v, want 0", got)
+	}
+}
+
+func TestDaemonDoltStopTimeoutInvalid(t *testing.T) {
+	d := DaemonConfig{DoltStopTimeout: "not-a-duration"}
+	got := d.DoltStopTimeoutDuration()
+	if got != DefaultDoltStopTimeout {
+		t.Errorf("DoltStopTimeoutDuration() = %v, want %v (default for invalid)", got, DefaultDoltStopTimeout)
+	}
+}
+
+func TestParseDoltStopTimeout(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+dolt_stop_timeout = "1m"
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.DoltStopTimeout != "1m" {
+		t.Errorf("Daemon.DoltStopTimeout = %q, want %q", cfg.Daemon.DoltStopTimeout, "1m")
+	}
+	got := cfg.Daemon.DoltStopTimeoutDuration()
+	if got != time.Minute {
+		t.Errorf("DoltStopTimeoutDuration() = %v, want 1m", got)
+	}
+}
+
+func TestValidateNonNegativeDurationsRejectsNegativeDoltStopTimeout(t *testing.T) {
+	cfg := &City{}
+	cfg.Daemon.DoltStopTimeout = "-1s"
+	err := ValidateNonNegativeDurations(cfg, "city.toml")
+	if err == nil {
+		t.Fatal("ValidateNonNegativeDurations() = nil, want error for negative dolt_stop_timeout")
+	}
+	if !strings.Contains(err.Error(), "dolt_stop_timeout") ||
+		!strings.Contains(err.Error(), "must not be negative") ||
+		!strings.Contains(err.Error(), `"-1s"`) {
+		t.Errorf("ValidateNonNegativeDurations() error = %q, want it to name the field, the constraint, and the value", err)
+	}
+}
+
+func TestValidateNonNegativeDurationsAllowsZeroAndPositive(t *testing.T) {
+	for _, v := range []string{"", "0s", "30s", "1m"} {
+		cfg := &City{}
+		cfg.Daemon.DoltStopTimeout = v
+		if err := ValidateNonNegativeDurations(cfg, "city.toml"); err != nil {
+			t.Errorf("ValidateNonNegativeDurations(dolt_stop_timeout=%q) = %v, want nil", v, err)
+		}
+	}
+}
+
+func TestValidateNonNegativeDurationsIgnoresUnparseable(t *testing.T) {
+	// Parse errors are ValidateDurations' job (warning-only); the negative
+	// guard must not promote a typo to a hard error.
+	cfg := &City{}
+	cfg.Daemon.DoltStopTimeout = "not-a-duration"
+	if err := ValidateNonNegativeDurations(cfg, "city.toml"); err != nil {
+		t.Errorf("ValidateNonNegativeDurations(unparseable) = %v, want nil", err)
+	}
+}
+
+func TestLoadWithIncludesRejectsNegativeDoltStopTimeout(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(cityPath, []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+dolt_stop_timeout = "-5s"
+
+[[agent]]
+name = "mayor"
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	_, _, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err == nil {
+		t.Fatal("LoadWithIncludes() = nil error, want rejection of negative dolt_stop_timeout")
+	}
+	if !strings.Contains(err.Error(), "must not be negative") {
+		t.Errorf("LoadWithIncludes() error = %q, want negative-duration rejection", err)
 	}
 }
 

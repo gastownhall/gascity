@@ -2,12 +2,14 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
@@ -19,6 +21,42 @@ type managedDoltStopReport struct {
 
 func stopManagedDoltProcess(cityPath, port string) (managedDoltStopReport, error) {
 	return stopManagedDoltProcessWithOptions(cityPath, port, true)
+}
+
+// resolveManagedDoltStopTimeout returns the SIGTERM→SIGKILL grace for the
+// managed dolt subprocess. It reads `[daemon].dolt_stop_timeout` from city.toml
+// when available, falling back to config.DefaultDoltStopTimeout if the config
+// cannot be loaded. Independent of `[daemon].shutdown_timeout` so a slow agent
+// drain cannot steal dolt's flush window (see gastownhall/gascity#2090).
+//
+// An empty cityPath returns the default without attempting a config load:
+// loadCityConfig("", …) would resolve "city.toml" relative to the current
+// working directory, materializing builtin packs under cwd and reading an
+// unrelated ./city.toml. Recovery/startup-cleanup callers may pass an empty
+// cityPath, so this guard keeps that path from loading a stray config.
+func resolveManagedDoltStopTimeout(cityPath string) time.Duration {
+	if strings.TrimSpace(cityPath) == "" {
+		return config.DefaultDoltStopTimeout
+	}
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil || cfg == nil {
+		return config.DefaultDoltStopTimeout
+	}
+	return cfg.Daemon.DoltStopTimeoutDuration()
+}
+
+// managedDoltStopPollInterval returns the liveness-poll interval for the
+// SIGTERM wait loop. It is normally 500ms, but is shrunk to the grace period
+// itself when the configured grace is shorter than one poll — otherwise a
+// sub-500ms grace would sleep clean past the deadline before the first check.
+// A non-positive grace keeps the 500ms default; the wait loop exits on the
+// already-past deadline before it ever sleeps.
+func managedDoltStopPollInterval(gracePeriod time.Duration) time.Duration {
+	pollInterval := 500 * time.Millisecond
+	if gracePeriod > 0 && gracePeriod < pollInterval {
+		pollInterval = gracePeriod
+	}
+	return pollInterval
 }
 
 func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedState bool) (managedDoltStopReport, error) {
@@ -56,9 +94,11 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 			return report, fmt.Errorf("signal %d with SIGTERM: %w", targetPID, err)
 		}
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	gracePeriod := resolveManagedDoltStopTimeout(cityPath)
+	deadline := time.Now().Add(gracePeriod)
+	pollInterval := managedDoltStopPollInterval(gracePeriod)
 	for managedStopPIDAlive(targetPID) && time.Now().Before(deadline) {
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(pollInterval)
 	}
 	if managedStopPIDAlive(targetPID) {
 		report.Forced = true

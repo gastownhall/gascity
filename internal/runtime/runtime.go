@@ -139,7 +139,11 @@ type Provider interface {
 
 	// Nudge sends structured content to the named session to wake or
 	// redirect the agent. Returns nil if the session does not exist
-	// (best-effort). Use [TextContent] to wrap a plain string.
+	// and the provider can safely treat that as a best-effort no-op.
+	// Providers that can observe a live session without owning the
+	// delivery channel return [ErrSessionNotFound] so callers do not
+	// mistake a no-op for delivery. Use [TextContent] to wrap a plain
+	// string.
 	Nudge(name string, content []ContentBlock) error
 
 	// SetMeta stores a key-value pair associated with the named session.
@@ -407,6 +411,10 @@ type Config struct {
 
 	// EmitsPermissionWarning is true if the agent shows a bypass-permissions dialog.
 	EmitsPermissionWarning bool
+
+	// AcceptStartupDialogs overrides automatic startup dialog handling.
+	// Nil keeps the runtime default derived from other startup hints.
+	AcceptStartupDialogs *bool
 
 	// Nudge is text typed into the session after the agent is ready.
 	// Used for CLI agents that don't accept command-line prompts.

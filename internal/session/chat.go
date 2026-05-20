@@ -18,8 +18,20 @@ import (
 )
 
 // staleKeyDetectDelay is how long to wait after starting a session before
-// checking if it died immediately (stale resume key detection).
-const staleKeyDetectDelay = 2 * time.Second
+// checking if it died immediately (stale resume key detection). Tests that
+// drive the start path through a fake runtime can shorten this via
+// SetStaleKeyDetectDelayForTest to keep their wall-clock down.
+var staleKeyDetectDelay = 2 * time.Second
+
+// SetStaleKeyDetectDelayForTest overrides the stale-key detection delay used
+// by ensureRunning/ensureRunningRuntimeOnly. The returned func restores the
+// previous value. Intended for tests only; production code should not call
+// this.
+func SetStaleKeyDetectDelayForTest(d time.Duration) func() {
+	prev := staleKeyDetectDelay
+	staleKeyDetectDelay = d
+	return func() { staleKeyDetectDelay = prev }
+}
 
 const waitIdleNudgeTimeout = 30 * time.Second
 

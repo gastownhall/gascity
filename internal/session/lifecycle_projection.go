@@ -548,7 +548,7 @@ func shouldResetContinuation(base BaseState, meta map[string]string, sleepReason
 		return false
 	}
 	switch strings.TrimSpace(sleepReason) {
-	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained", "city-stop", "user-hold", "wait-hold", "rate_limit":
+	case "idle", "idle-timeout", "no-wake-reason", "config-drift", "drained", "city-stop", "user-hold", "wait-hold", "rate_limit", "runtime-missing":
 		return false
 	}
 	return base == BaseStateActive || base == BaseStateCreating
@@ -561,6 +561,9 @@ func projectWakeCauses(input LifecycleInput, meta map[string]string) []WakeCause
 	}
 	if strings.TrimSpace(meta["pending_create_claim"]) == "true" {
 		causes = appendUniqueWakeCause(causes, WakeCausePendingCreate)
+	}
+	if strings.TrimSpace(meta["wake_request"]) == string(WakeCauseExplicit) {
+		causes = appendUniqueWakeCause(causes, WakeCauseExplicit)
 	}
 	if strings.TrimSpace(meta["pin_awake"]) == "true" {
 		causes = appendUniqueWakeCause(causes, WakeCausePinned)

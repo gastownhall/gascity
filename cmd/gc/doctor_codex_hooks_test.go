@@ -144,6 +144,58 @@ func TestCodexHookWorkDirsIncludesActiveRigPaths(t *testing.T) {
 	}
 }
 
+func TestCodexHookWorkDirsIncludesResolvedAgentWorkDirs(t *testing.T) {
+	cityDir := t.TempDir()
+	activeRig := filepath.Join(cityDir, "rigs", "active")
+	suspendedRig := filepath.Join(cityDir, "rigs", "suspended")
+	agentWorkDir := filepath.Join(cityDir, ".gc", "agents", "reviewer")
+	cfg := &config.City{
+		Workspace: config.Workspace{InstallAgentHooks: []string{"codex"}},
+		Rigs: []config.Rig{
+			{Name: "active", Path: activeRig},
+			{Name: "suspended", Path: suspendedRig, Suspended: true},
+		},
+		Agents: []config.Agent{
+			{Name: "reviewer", Dir: "active", WorkDir: agentWorkDir},
+			{Name: "gemini", Dir: "active", InstallAgentHooks: []string{"gemini"}, WorkDir: filepath.Join(cityDir, ".gc", "agents", "gemini")},
+			{Name: "parked", Dir: "active", WorkDir: filepath.Join(cityDir, ".gc", "agents", "parked"), Suspended: true},
+			{Name: "codex", Dir: "suspended", WorkDir: filepath.Join(cityDir, ".gc", "agents", "suspended")},
+		},
+	}
+
+	got := codexHookWorkDirs(cityDir, cfg)
+
+	assertDoctorPathPresent(t, got, cityDir)
+	assertDoctorPathPresent(t, got, activeRig)
+	assertDoctorPathPresent(t, got, agentWorkDir)
+	assertDoctorPathAbsent(t, got, suspendedRig)
+	assertDoctorPathAbsent(t, got, filepath.Join(cityDir, ".gc", "agents", "gemini"))
+	assertDoctorPathAbsent(t, got, filepath.Join(cityDir, ".gc", "agents", "parked"))
+	assertDoctorPathAbsent(t, got, filepath.Join(cityDir, ".gc", "agents", "suspended"))
+}
+
+func TestCodexHookWorkDirsIncludesBoundedPoolInstanceWorkDirs(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "active")
+	maxSessions := 2
+	cfg := &config.City{
+		Workspace: config.Workspace{InstallAgentHooks: []string{"codex"}},
+		Rigs:      []config.Rig{{Name: "active", Path: rigDir}},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "active",
+			WorkDir:           filepath.Join(".gc", "worktrees", "{{.Rig}}", "{{.AgentBase}}"),
+			MaxActiveSessions: &maxSessions,
+		}},
+	}
+
+	got := codexHookWorkDirs(cityDir, cfg)
+
+	assertDoctorPathPresent(t, got, filepath.Join(cityDir, ".gc", "worktrees", "active", "worker"))
+	assertDoctorPathPresent(t, got, filepath.Join(cityDir, ".gc", "worktrees", "active", "worker-1"))
+	assertDoctorPathPresent(t, got, filepath.Join(cityDir, ".gc", "worktrees", "active", "worker-2"))
+}
+
 func TestCodexHooksMissingPreCompactRejectsUnreadableAndMalformedFiles(t *testing.T) {
 	dir := t.TempDir()
 	missingPath := filepath.Join(dir, ".codex", "hooks.json")
@@ -179,8 +231,26 @@ func TestCodexHooksMissingPreCompactRequiresManagedCommand(t *testing.T) {
 	if codexHooksMissingPreCompact(path) {
 		t.Fatal("custom-only hooks reported as missing managed PreCompact")
 	}
-	if codexHookCommandLooksManaged("printf custom") {
-		t.Fatal("custom command detected as managed")
+}
+
+func assertDoctorPathPresent(t *testing.T, paths []string, want string) {
+	t.Helper()
+	want = filepath.Clean(want)
+	for _, path := range paths {
+		if filepath.Clean(path) == want {
+			return
+		}
+	}
+	t.Fatalf("paths = %#v, want %s present", paths, want)
+}
+
+func assertDoctorPathAbsent(t *testing.T, paths []string, want string) {
+	t.Helper()
+	want = filepath.Clean(want)
+	for _, path := range paths {
+		if filepath.Clean(path) == want {
+			t.Fatalf("paths = %#v, want %s absent", paths, want)
+		}
 	}
 }
 

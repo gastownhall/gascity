@@ -66,7 +66,7 @@ func TestManagedDoltFirstUserDatabaseSkipsSystemDatabases(t *testing.T) {
 		lines []string
 		want  string
 	}{
-		{"all system", []string{"Database", "information_schema", "mysql", "dolt_cluster", "performance_schema", "sys", "__gc_probe"}, ""},
+		{"all system", []string{"Database", "information_schema", "mysql", "dolt", "dolt_cluster", "performance_schema", "sys", "__gc_probe"}, ""},
 		{"first user wins", []string{"Database", "__gc_probe", "dolt_cluster", "performance_schema", "sys", "gascity", "be"}, "gascity"},
 		{"case-insensitive system match", []string{"Database", "Information_Schema", "MySQL", "DOLT_CLUSTER", "PERFORMANCE_SCHEMA", "SYS", "__GC_PROBE", "gm"}, "gm"},
 		{"empty", []string{}, ""},
@@ -108,7 +108,7 @@ set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
   *"sql -r csv -q SHOW DATABASES"*)
-    printf 'Database\ninformation_schema\nmysql\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
+    printf 'Database\ninformation_schema\nmysql\ndolt\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
     exit 0
     ;;
   *"CREATE TABLE IF NOT EXISTS"*"__gc_read_only_probe"*)
@@ -150,11 +150,11 @@ func TestManagedDoltHealthCheckNoUserDatabaseIsUnknown(t *testing.T) {
 set -eu
 printf '%s\n' "$*" >> "$INVOCATION_FILE"
 case "$*" in
-  *"sql -q SELECT active_branch()"*)
+  *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA"*)
     exit 0
     ;;
   *"sql -r csv -q SHOW DATABASES"*)
-    printf 'Database\ninformation_schema\nmysql\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
+    printf 'Database\ninformation_schema\nmysql\ndolt\ndolt_cluster\nperformance_schema\nsys\n__gc_probe\n'
     exit 0
     ;;
   *"sql -r csv -q SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST"*)
@@ -242,6 +242,7 @@ func TestManagedDoltSystemDatabasesIncludesManagedAndDoltSystemDatabases(t *test
 	for _, name := range []string{
 		"information_schema",
 		"mysql",
+		"dolt",
 		"dolt_cluster",
 		"performance_schema",
 		"sys",

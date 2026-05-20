@@ -170,7 +170,7 @@ func matchPoolInstanceBare(a config.Agent, input string) (config.Agent, bool) {
 // IsMultiSessionAgent reports whether a config agent supports multiple
 // concurrent sessions.
 func IsMultiSessionAgent(a *config.Agent) bool {
-	return a != nil && a.SupportsInstanceExpansion()
+	return a.SupportsExpandedSessionIdentities()
 }
 
 // DeepCopyAgent creates a deep copy of a config.Agent with a new name and dir.

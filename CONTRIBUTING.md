@@ -108,6 +108,8 @@ When updating docs:
 - Architecture docs describe current behavior
 - Design docs describe proposed behavior
 - Archive docs keep historical notes out of the main onboarding path
+- Updating `GastownCity()`'s `Imports` or `DefaultRigImports` map requires
+  updating the auto-import table in `docs/packv2/migration.mdx`
 
 ## Make Targets
 

@@ -566,7 +566,7 @@ func isNil(v any) bool {
 		return true
 	}
 	rv := reflect.ValueOf(v)
-	return rv.Kind() == reflect.Ptr && rv.IsNil()
+	return rv.Kind() == reflect.Pointer && rv.IsNil()
 }
 
 // pdOf extracts the generated client's decoded Problem Details pointer
@@ -585,7 +585,7 @@ func pdOf(resp any) *genclient.ErrorModel {
 		return nil
 	}
 	rv := reflect.ValueOf(resp)
-	if rv.Kind() == reflect.Ptr {
+	if rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
 			return nil
 		}

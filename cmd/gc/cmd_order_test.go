@@ -27,6 +27,16 @@ func readFileString(t *testing.T, path string) string {
 	return string(data)
 }
 
+type partialListStore struct {
+	beads.Store
+	rows []beads.Bead
+	err  error
+}
+
+func (s *partialListStore) List(_ beads.ListQuery) ([]beads.Bead, error) {
+	return s.rows, s.err
+}
+
 // --- gc order list ---
 
 func TestOrderListEmpty(t *testing.T) {
@@ -765,12 +775,15 @@ name = "test-city"
 		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed)
+	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed, beads.WithBothTiers)
 	if err != nil {
 		t.Fatalf("store.ListByLabel(): %v", err)
 	}
 	if len(results) != 1 {
 		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if !results[0].Ephemeral {
+		t.Fatalf("tracking bead Ephemeral = false, want true")
 	}
 	for _, want := range []string{"order:release-exec", fmt.Sprintf("seq:%d", headSeq), "exec"} {
 		if !slicesContain(results[0].Labels, want) {
@@ -826,12 +839,15 @@ on = "bead.closed"
 	if err != nil {
 		t.Fatalf("openStoreAtForCity(): %v", err)
 	}
-	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed)
+	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed, beads.WithBothTiers)
 	if err != nil {
 		t.Fatalf("store.ListByLabel(): %v", err)
 	}
 	if len(results) != 1 {
 		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	}
+	if !results[0].Ephemeral {
+		t.Fatalf("tracking bead Ephemeral = false, want true")
 	}
 	for _, want := range []string{"order:release-exec", fmt.Sprintf("seq:%d", headSeq), "exec"} {
 		if !slicesContain(results[0].Labels, want) {
@@ -1591,6 +1607,75 @@ func TestOrderRunExecHonorsOrdersMaxTimeout(t *testing.T) {
 	}
 }
 
+func TestOrderRunExecTrackedLabelsEnvBuildFailure(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	writePGScopeFixture(t, cityDir, "")
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := beads.NewMemStore()
+	eventLog := events.NewFake()
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	a := orders.Order{Name: "pg-env", Trigger: "event", On: events.BeadClosed, Exec: "true"}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunExecTracked(a, cityDir, nil, store, eventLog, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("doOrderRunExecTracked = 0, want env failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+
+	all := trackingBeads(t, store, "order-run:pg-env")
+	if len(all) != 1 {
+		t.Fatalf("tracking bead count = %d, want 1", len(all))
+	}
+	if !slicesContain(all[0].Labels, "exec-env-failed") {
+		t.Fatalf("tracking bead labels = %v, want exec-env-failed", all[0].Labels)
+	}
+	if slicesContain(all[0].Labels, "exec-failed") {
+		t.Fatalf("tracking bead labels = %v, want no exec-failed for env-build failure", all[0].Labels)
+	}
+}
+
+func TestOrderRunExecEnvBuildFailureRedactsProcessSecrets(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_ORDER_SECRET", "db.example.test")
+
+	cityDir := t.TempDir()
+	writePGScopeFixture(t, cityDir, "")
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := orders.Order{Name: "pg-env", Trigger: "cooldown", Interval: "1m", Exec: "true"}
+	var stdout, stderr bytes.Buffer
+	result := doOrderRunExecResult(a, cityDir, nil, &stdout, &stderr)
+	if result.code == 0 {
+		t.Fatalf("doOrderRunExecResult = 0, want env failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if result.failureLabel != "exec-env-failed" {
+		t.Fatalf("failureLabel = %q, want exec-env-failed", result.failureLabel)
+	}
+	if strings.Contains(stderr.String(), "db.example.test") {
+		t.Fatalf("stderr leaked process secret: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "[redacted]") {
+		t.Fatalf("stderr = %q, want redaction marker", stderr.String())
+	}
+}
+
 // --- gc order history ---
 
 func TestOrderHistory(t *testing.T) {
@@ -1797,6 +1882,25 @@ func TestOrderHistoryWithStoresResolverFailsUnreadablePrimaryStore(t *testing.T)
 	}
 	if !strings.Contains(stderr.String(), "list failed") {
 		t.Fatalf("stderr missing primary list error:\n%s", stderr.String())
+	}
+}
+
+func TestBdCursorUsesRowsFromPartialTierError(t *testing.T) {
+	store := &partialListStore{
+		Store: beads.NewMemStore(),
+		rows: []beads.Bead{{
+			ID:     "cursor-1",
+			Labels: []string{"order:digest", "seq:42"},
+		}},
+		err: fmt.Errorf("wisps tier unavailable"),
+	}
+
+	got, err := bdCursor(store, "digest")
+	if err != nil {
+		t.Fatalf("bdCursor: %v", err)
+	}
+	if got != 42 {
+		t.Fatalf("bdCursor() = %d, want 42 from surviving rows", got)
 	}
 }
 

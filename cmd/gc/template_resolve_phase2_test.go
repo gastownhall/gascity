@@ -27,6 +27,7 @@ type phase2ProviderCase struct {
 	wantReadyPromptPrefix string
 	wantProcessNames      []string
 	wantEmitsPermission   bool
+	wantAcceptDialogs     *bool
 	wantModelOverride     string
 	wantModelOverrideArgs []string
 }
@@ -87,6 +88,18 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 			wantEmitsPermission:   false,
 			wantModelOverride:     "gemini-2.5-pro",
 			wantModelOverrideArgs: []string{"--model", "gemini-2.5-pro"},
+		},
+		{
+			profileID:             "kimi/tmux-cli",
+			family:                "kimi",
+			wantCommand:           "kimi --yolo --no-thinking",
+			wantPromptMode:        "none",
+			wantReadyDelayMs:      5000,
+			wantReadyPromptPrefix: "",
+			wantProcessNames:      []string{"kimi", "python"},
+			wantAcceptDialogs:     phase2BoolPtr(false),
+			wantModelOverride:     "kimi-k2.6",
+			wantModelOverrideArgs: []string{"--model", "kimi-k2.6"},
 		},
 		{
 			profileID:        "opencode/tmux-cli",

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -10,6 +11,8 @@ import (
 	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/events"
 )
+
+const eventRotateWaitTimeout = 30 * time.Second
 
 // humaHandleEventList is the Huma-typed handler for GET /v0/events.
 func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput) (*ListOutput[WireEvent], error) {
@@ -170,6 +173,82 @@ func (s *Server) humaHandleEventEmit(_ context.Context, input *EventEmitInput) (
 	resp := &EventEmitOutput{}
 	resp.Body.Status = "recorded"
 	return resp, nil
+}
+
+// humaHandleEventRotate is the Huma-typed handler for POST
+// /v0/city/{cityName}/events/rotate.
+func (s *Server) humaHandleEventRotate(ctx context.Context, input *EventRotateInput) (*EventRotateOutput, error) {
+	ep := s.state.EventProvider()
+	rec, ok := ep.(*events.FileRecorder)
+	if !ok {
+		return nil, huma.Error405MethodNotAllowed(
+			fmt.Sprintf("rotation is only supported for the file-backed events provider; current provider is '%s'", eventProviderName(s.state, ep)),
+		)
+	}
+
+	result, err := rec.ForceRotate()
+	if err != nil {
+		return nil, huma.Error500InternalServerError("rotation failed: " + err.Error())
+	}
+
+	compressionStatus := "pending"
+	if input.Wait && result.Rotated && result.Done != nil {
+		timer := time.NewTimer(eventRotateWaitTimeout)
+		defer timer.Stop()
+		select {
+		case <-result.Done:
+			compressionStatus = "complete"
+		case <-timer.C:
+			compressionStatus = "pending"
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	return &EventRotateOutput{Body: eventRotateResponseFromResult(result, compressionStatus)}, nil
+}
+
+func eventProviderName(state State, ep events.Provider) string {
+	if state != nil {
+		if cfg := state.Config(); cfg != nil {
+			if provider := strings.TrimSpace(cfg.Events.Provider); provider != "" {
+				return provider
+			}
+		}
+	}
+	switch ep.(type) {
+	case nil:
+		return "none"
+	case *events.Fake:
+		return "fake"
+	case *events.FileRecorder:
+		return "file"
+	default:
+		return fmt.Sprintf("%T", ep)
+	}
+}
+
+func eventRotateResponseFromResult(result events.RotationResult, compressionStatus string) EventRotateResponse {
+	if !result.Rotated {
+		return EventRotateResponse{
+			Rotated: false,
+			Reason:  result.Reason,
+		}
+	}
+	return EventRotateResponse{
+		Rotated: true,
+		Archive: &EventRotateArchive{
+			Path:              result.ArchivePath,
+			FirstSeq:          result.FirstSeq,
+			LastSeq:           result.LastSeq,
+			CompressionStatus: compressionStatus,
+		},
+		AnchorEvent: &EventRotateAnchor{
+			Seq:  result.AnchorSeq,
+			Type: events.EventsRotated,
+			Ts:   result.AnchorTimestamp.UTC(),
+		},
+	}
 }
 
 // checkEventStream is the precheck for GET /v0/events/stream. It runs before

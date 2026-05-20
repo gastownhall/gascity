@@ -239,6 +239,23 @@ schema = 2
 	}
 }
 
+func TestResolveAgentIdentityRejectsCanonicalSingletonPoolSuffix(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1)},
+		},
+	}
+	if a, ok := resolveAgentIdentity(cfg, "frontend/worker", ""); !ok || a.QualifiedName() != "frontend/worker" {
+		t.Fatalf("resolveAgentIdentity(frontend/worker) = (%q, %v), want canonical template", a.QualifiedName(), ok)
+	}
+	if _, ok := resolveAgentIdentity(cfg, "frontend/worker-1", ""); ok {
+		t.Fatal("resolveAgentIdentity(frontend/worker-1) = true, want false for canonical singleton pool")
+	}
+	if _, ok := resolveAgentIdentity(cfg, "worker-1", ""); ok {
+		t.Fatal("resolveAgentIdentity(worker-1) = true, want false for canonical singleton pool")
+	}
+}
+
 func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 	var stderr bytes.Buffer
 	emitLoadCityConfigWarnings(&stderr, &config.Provenance{

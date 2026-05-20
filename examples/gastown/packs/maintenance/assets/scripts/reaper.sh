@@ -18,6 +18,7 @@ CITY_BEADS_DIR="$CITY_ABS/.beads"
 MAX_AGE="${GC_REAPER_MAX_AGE:-24h}"
 PURGE_AGE="${GC_REAPER_PURGE_AGE:-168h}"
 STALE_ISSUE_AGE="${GC_REAPER_STALE_ISSUE_AGE:-720h}"
+SESSION_PURGE_AGE="${GC_REAPER_SESSION_PURGE_AGE:-720h}"
 ALERT_THRESHOLD="${GC_REAPER_ALERT_THRESHOLD:-500}"
 DRY_RUN="${GC_REAPER_DRY_RUN:-}"
 
@@ -103,9 +104,11 @@ DATABASES=$(
         fi
     done < <(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2)
 )
+HAD_DATABASES=1
 if [ -z "$DATABASES" ]; then
-    # No databases accessible — nothing to do.
-    exit 0
+    # The Dolt-backed cleanup loop has no work, but the session-bead
+    # prune below still operates through bd's configured task store.
+    HAD_DATABASES=0
 fi
 
 TOTAL_STALE_WISPS=0
@@ -113,6 +116,8 @@ TOTAL_CLOSED_WISPS=0
 TOTAL_PURGED=0
 TOTAL_ISSUES_CLOSED=0
 TOTAL_STALE_ISSUES_SKIPPED=0
+TOTAL_SESSIONS_PRUNED=0
+SESSION_PRUNE_ATTEMPTED=0
 ANOMALIES=""
 
 sanitize_output() {
@@ -494,13 +499,41 @@ done <<EOF
 $DATABASES
 EOF
 
+# Step 6: prune closed gm session beads from the city's primary bead store.
+if [ -d "$CITY_BEADS_DIR" ] && command -v bd >/dev/null 2>&1; then
+    SESSION_PRUNE_ATTEMPTED=1
+    BD_PRUNE_ARGS=(prune --pattern 'gm-*' --older-than "$SESSION_PURGE_AGE")
+    if [ -z "$DRY_RUN" ]; then
+        BD_PRUNE_ARGS+=(--force)
+    fi
+    BD_PRUNE_ARGS+=(--json)
+
+    if PRUNE_JSON=$((
+        cd "$CITY_ABS" && BEADS_DIR="$CITY_BEADS_DIR" bd "${BD_PRUNE_ARGS[@]}"
+    ) 2>/dev/null); then
+        :
+    else
+        PRUNE_JSON='{"pruned_count":0}'
+    fi
+    PRUNE_COUNT=$(printf '%s' "$PRUNE_JSON" | sed -n 's/.*"pruned_count"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+    [ -z "$PRUNE_COUNT" ] && PRUNE_COUNT=0
+    TOTAL_SESSIONS_PRUNED=$PRUNE_COUNT
+    if [ "$PRUNE_COUNT" -gt 1000 ]; then
+        record_anomaly "gm" "$PRUNE_COUNT closed session beads pruned in one run (threshold: 1000)"
+    fi
+fi
+
+if [ "$HAD_DATABASES" -eq 0 ] && [ "$SESSION_PRUNE_ATTEMPTED" -eq 0 ]; then
+    exit 0
+fi
+
 # Report.
 if [ -n "$ANOMALIES" ]; then
     gc mail send mayor/ -s "ESCALATION: Reaper anomalies detected [MEDIUM]" \
         -m "$ANOMALIES" 2>/dev/null || true
 fi
 
-SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, purged:$TOTAL_PURGED, closed:$TOTAL_ISSUES_CLOSED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED"
+SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED"
 if [ -n "$DRY_RUN" ]; then
     SUMMARY="$SUMMARY (dry run)"
 fi

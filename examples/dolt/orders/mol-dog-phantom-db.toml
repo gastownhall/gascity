@@ -1,7 +1,7 @@
 # Converted from formula+pool to exec. Phantom-DB detection is a pure
 # filesystem scan: dirs with .dolt/ but no noms/manifest and retired
-# replacements are unservable and moved to quarantine. No LLM judgment
-# needed — runs inline in the controller.
+# replacements are unservable and escalated without moving or deleting
+# files. No LLM judgment needed — runs inline in the controller.
 [order]
 description = "Detect phantom database resurrection after cleanup"
 exec = "$PACK_DIR/assets/scripts/mol-dog-phantom-db.sh"

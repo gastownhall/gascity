@@ -315,3 +315,54 @@ func TestSnapshotDoltProcessPIDs_EnumeratorErrorIsFatal(t *testing.T) {
 			boom.Error(), inner.fatals[0])
 	}
 }
+
+func TestSnapshotDoltProcessesForConfigRootFiltersToPrivateTempRoot(t *testing.T) {
+	root := filepath.Join("/tmp", "gc-cmd-test-root")
+	owned := DoltProcInfo{
+		PID: 1001,
+		Argv: []string{
+			"dolt",
+			"sql-server",
+			"--config",
+			filepath.Join(root, "TestOwned", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml"),
+		},
+	}
+	unowned := DoltProcInfo{
+		PID: 1002,
+		Argv: []string{
+			"dolt",
+			"sql-server",
+			"--config",
+			filepath.Join("/tmp", "TestOther", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml"),
+		},
+	}
+	got, err := snapshotDoltProcessesForConfigRoot(func() ([]DoltProcInfo, error) {
+		return []DoltProcInfo{owned, unowned}, nil
+	}, root)
+	if err != nil {
+		t.Fatalf("snapshotDoltProcessesForConfigRoot: %v", err)
+	}
+	if len(got) != 1 || got[1001].PID != 1001 {
+		t.Fatalf("snapshot = %#v, want only owned PID 1001", got)
+	}
+}
+
+func TestDiffDoltProcessSnapshotsReportsOnlyNewPIDsSorted(t *testing.T) {
+	initial := map[int]DoltProcInfo{
+		1000: {PID: 1000},
+	}
+	final := map[int]DoltProcInfo{
+		1000: {PID: 1000},
+		1003: {PID: 1003},
+		1001: {PID: 1001},
+	}
+
+	got := diffDoltProcessSnapshots(initial, final)
+
+	if len(got) != 2 {
+		t.Fatalf("diff length = %d, want 2: %#v", len(got), got)
+	}
+	if got[0].PID != 1001 || got[1].PID != 1003 {
+		t.Fatalf("diff PIDs = [%d %d], want [1001 1003]", got[0].PID, got[1].PID)
+	}
+}

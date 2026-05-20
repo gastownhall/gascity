@@ -21,10 +21,6 @@ $ cat pack.toml
 name = "my-city"
 schema = 2
 
-[[agent]]
-name = "mayor"
-prompt_template = "agents/mayor/prompt.template.md"
-
 [[named_session]]
 template = "mayor"
 mode = "always"
@@ -171,15 +167,12 @@ City is up and idle. No pending work, no agents running besides me. What would
   you like to do?
 ```
 
-So the mayor is clearly idle, but has not been shutdown. Why not? If you take a
-look again at your `pack.toml` file, you'll see why:
+So the mayor is clearly idle, but has not been shutdown. Why not? If you look
+again at your `pack.toml` file, you'll see the named session that keeps it
+alive:
 
 ```toml
 ...
-[[agent]]
-name = "mayor"
-prompt_template = "agents/mayor/prompt.template.md"
-
 [[named_session]]
 template = "mayor"
 mode = "always"
@@ -187,7 +180,7 @@ mode = "always"
 ```
 
 The mayor has a specially named session called "mayor" that is always running.
-It's kept up but the system so that you can have quick access to it for a chat
+It's kept up by the system so that you can have quick access to it for a chat
 or some planning or whatever you'd like to do. A polecat is designed to be
 transient, but an agent is a member of your "crew" (whether city-wide or
 rig-specific) if it's always around and ready to chat interactively or receive

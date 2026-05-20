@@ -523,6 +523,58 @@ func TestControllerStateRuntimeUpdatePreservesCurrentStoresWithoutPendingMutatio
 	}
 }
 
+func TestControllerStateRuntimeUpdateRebuildsStoresWhenBackendMetadataChanges(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	writeBackendMetadata(t, cityDir, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`)
+
+	current := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+	}
+	oldStore := beads.NewMemStore()
+	cs := &controllerState{
+		cfg:                    current,
+		sp:                     runtime.NewFake(),
+		beadStores:             map[string]beads.Store{},
+		cityBeadStore:          oldStore,
+		cityName:               "city1",
+		cityPath:               cityDir,
+		storeMetadataSignature: storeMetadataSignature(cityDir, current),
+	}
+	oldSignature := cs.storeMetadataSignature
+
+	if !cs.runtimeUpdateCanReuseCurrentStores(current) {
+		t.Fatal("precondition: matching metadata should allow store reuse")
+	}
+
+	writeBackendMetadata(t, cityDir, `{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`)
+	nextProvider := runtime.NewFake()
+	cs.updateFromRuntime(current, nextProvider, "")
+
+	if got := cs.CityBeadStore(); got == oldStore {
+		t.Fatal("CityBeadStore() reused stale store after backend metadata changed")
+	}
+	if cs.SessionProvider() != nextProvider {
+		t.Fatal("SessionProvider() was not advanced after metadata-triggered update")
+	}
+	if cs.storeMetadataSignature == "" || cs.storeMetadataSignature == oldSignature {
+		t.Fatal("store metadata signature was not refreshed after backend metadata changed")
+	}
+}
+
+func writeBackendMetadata(t *testing.T, scopeRoot, data string) {
+	t.Helper()
+	dir := filepath.Join(scopeRoot, ".beads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(data+"\n"), 0o644); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
+	}
+}
+
 func TestControllerStateRuntimeUpdateIgnoresStaleRevisionWithoutPendingMutation(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 
@@ -584,6 +636,7 @@ provider = "bash"
 
 func TestControllerStateCreateRigPokesReconciler(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
@@ -691,6 +744,7 @@ func TestDetectRigDefaultBranchSkipsEmptyPath(t *testing.T) {
 
 func TestControllerStateCreateRigInitializesStoreBeforePublishing(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
@@ -867,6 +921,37 @@ func TestControllerStateAppliesCacheReconcileBeadEventsToStores(t *testing.T) {
 	}
 	if items[0].Status != "in_progress" {
 		t.Fatalf("status after cache-reconcile event = %q, want in_progress", items[0].Status)
+	}
+}
+
+func TestWrapWithCachingStoreCachesNonBdStore(t *testing.T) {
+	backing := beads.NewMemStore()
+	created, err := backing.Create(beads.Bead{Title: "non-bd backing"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	store := wrapWithCachingStore(context.Background(), backing, nil)
+	cached, ok := store.(*beads.CachingStore)
+	if !ok {
+		t.Fatalf("store type = %T, want *beads.CachingStore", store)
+	}
+	if cached.Backing() != backing {
+		t.Fatalf("Backing = %#v, want original non-BdStore backing", cached.Backing())
+	}
+
+	items, err := cached.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != created.ID {
+		t.Fatalf("ListOpen = %#v, want only %s", items, created.ID)
+	}
+}
+
+func TestWrapWithCachingStoreReturnsNilStore(t *testing.T) {
+	if got := wrapWithCachingStore(context.Background(), nil, nil); got != nil {
+		t.Fatalf("wrapWithCachingStore(nil) = %#v, want nil", got)
 	}
 }
 

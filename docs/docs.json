@@ -95,12 +95,15 @@
         "pages": [
           "guides/index",
           "guides/migrating-to-pack-vnext",
-          "guides/shareable-packs"
+          "packv2/migration",
+          "guides/shareable-packs",
+          "guides/using-json-from-gc"
         ]
       },
       {
         "group": "Troubleshooting",
         "pages": [
+          "troubleshooting/gc-start-walkthrough",
           "troubleshooting/dolt-bloat-recovery"
         ]
       },

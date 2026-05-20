@@ -363,6 +363,22 @@ func TestDiscoverPoolInstancesBoundedWithNamepool(t *testing.T) {
 	}
 }
 
+func TestDiscoverPoolInstancesCanonicalSingletonUsesBaseName(t *testing.T) {
+	sp := runtime.NewFake()
+	a := &config.Agent{
+		Name:              "refinery",
+		Dir:               "cashmaster",
+		MaxActiveSessions: intPtr(1),
+		ScaleCheck:        "echo 1",
+	}
+	pool := scaleParams{Min: 0, Max: 1}
+	instances := discoverPoolInstances("refinery", "cashmaster", pool, a, "city", "", sp)
+	want := []string{"cashmaster/refinery"}
+	if !reflect.DeepEqual(instances, want) {
+		t.Fatalf("instances = %v, want %v", instances, want)
+	}
+}
+
 func TestDiscoverPoolInstancesUnlimited(t *testing.T) {
 	sp := runtime.NewFake()
 	// Start some instances that look like pool members.
@@ -451,6 +467,139 @@ func TestPoolInstanceName_OverflowFallback(t *testing.T) {
 func TestPoolInstanceName_EmptyNamepool(t *testing.T) {
 	if got := poolInstanceName("polecat", 1, nil); got != "polecat-1" {
 		t.Errorf("slot 1 (no namepool): got %q, want %q", got, "polecat-1")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// poolInstanceIdentity tests
+// ---------------------------------------------------------------------------
+
+func TestPoolInstanceIdentity_NilAgent(t *testing.T) {
+	instance, qualified := poolInstanceIdentity(nil, 1, io.Discard)
+	if instance != "" || qualified != "" {
+		t.Errorf("nil agent: got (%q, %q), want (\"\", \"\")", instance, qualified)
+	}
+}
+
+func TestPoolInstanceIdentity_NonExpansionAgent_WarnsAndReturnsBase(t *testing.T) {
+	a := &config.Agent{
+		Name:              "refinery",
+		Dir:               "rig",
+		MaxActiveSessions: intPtr(1),
+	}
+	var stderr bytes.Buffer
+	instance, qualified := poolInstanceIdentity(a, 1, &stderr)
+	if instance != "refinery" {
+		t.Errorf("instance = %q, want %q (non-expansion uses base name)", instance, "refinery")
+	}
+	if qualified != "rig/refinery" {
+		t.Errorf("qualified = %q, want %q (non-expansion uses base qualified name)", qualified, "rig/refinery")
+	}
+	if !strings.Contains(stderr.String(), "does not support instance expansion") {
+		t.Errorf("expected warning about instance expansion, got: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "max_active_sessions=1") {
+		t.Errorf("expected warning to include max_active_sessions, got: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `"refinery"-1`) {
+		t.Errorf("expected warning to mention phantom name, got: %q", stderr.String())
+	}
+}
+
+func TestPoolInstanceIdentity_NonExpansionAgent_NilStderrNoPanic(t *testing.T) {
+	a := &config.Agent{
+		Name:              "refinery",
+		MaxActiveSessions: intPtr(1),
+	}
+	instance, qualified := poolInstanceIdentity(a, 1, nil)
+	if instance != "refinery" {
+		t.Errorf("instance = %q, want %q", instance, "refinery")
+	}
+	if qualified != "refinery" {
+		t.Errorf("qualified = %q, want %q", qualified, "refinery")
+	}
+}
+
+func TestPoolInstanceIdentity_NonExpansionAgent_ZeroSlotSuppressesWarning(t *testing.T) {
+	a := &config.Agent{
+		Name:              "refinery",
+		MaxActiveSessions: intPtr(1),
+	}
+	var stderr bytes.Buffer
+	instance, qualified := poolInstanceIdentity(a, 0, &stderr)
+	if instance != "refinery" {
+		t.Errorf("instance = %q, want %q", instance, "refinery")
+	}
+	if qualified != "refinery" {
+		t.Errorf("qualified = %q, want %q", qualified, "refinery")
+	}
+	if stderr.String() != "" {
+		t.Errorf("slot=0 should suppress warning, got: %q", stderr.String())
+	}
+}
+
+func TestPoolInstanceIdentity_ExpansionAgent_ReturnsSlotName(t *testing.T) {
+	a := &config.Agent{
+		Name:              "claude",
+		Dir:               "rig",
+		MaxActiveSessions: intPtr(3),
+	}
+	var stderr bytes.Buffer
+	instance, qualified := poolInstanceIdentity(a, 2, &stderr)
+	if instance != "claude-2" {
+		t.Errorf("instance = %q, want %q", instance, "claude-2")
+	}
+	if qualified != "rig/claude-2" {
+		t.Errorf("qualified = %q, want %q", qualified, "rig/claude-2")
+	}
+	if stderr.String() != "" {
+		t.Errorf("expansion agent should not warn, got: %q", stderr.String())
+	}
+}
+
+func TestPoolInstanceIdentity_ExpansionAgent_NamepoolThemedName(t *testing.T) {
+	a := &config.Agent{
+		Name:          "polecat",
+		Dir:           "rig",
+		NamepoolNames: []string{"furiosa", "nux"},
+	}
+	instance, qualified := poolInstanceIdentity(a, 1, io.Discard)
+	if instance != "furiosa" {
+		t.Errorf("instance = %q, want %q (namepool slot 1)", instance, "furiosa")
+	}
+	if qualified != "rig/furiosa" {
+		t.Errorf("qualified = %q, want %q", qualified, "rig/furiosa")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// formatMaxSessions tests
+// ---------------------------------------------------------------------------
+
+func TestFormatMaxSessions_NilAgent(t *testing.T) {
+	if got := formatMaxSessions(nil); got != "<nil>" {
+		t.Errorf("nil agent: got %q, want %q", got, "<nil>")
+	}
+}
+
+func TestFormatMaxSessions_UnlimitedWhenNil(t *testing.T) {
+	a := &config.Agent{Name: "claude"}
+	if got := formatMaxSessions(a); got != "unlimited" {
+		t.Errorf("nil max: got %q, want %q", got, "unlimited")
+	}
+}
+
+func TestFormatMaxSessions_ReturnsInt(t *testing.T) {
+	a := &config.Agent{Name: "claude", MaxActiveSessions: intPtr(5)}
+	if got := formatMaxSessions(a); got != "5" {
+		t.Errorf("max=5: got %q, want %q", got, "5")
+	}
+}
+
+func TestFormatMaxSessions_ZeroValue(t *testing.T) {
+	a := &config.Agent{Name: "claude", MaxActiveSessions: intPtr(0)}
+	if got := formatMaxSessions(a); got != "0" {
+		t.Errorf("max=0: got %q, want %q", got, "0")
 	}
 }
 
@@ -977,21 +1126,22 @@ func TestComputePoolDeathHandlers(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
 		Agents: []config.Agent{
-			{Name: "mayor", MaxActiveSessions: intPtr(1)}, // not a pool
+			{Name: "mayor", MaxActiveSessions: intPtr(1)}, // not a pool (no MinActiveSessions/ScaleCheck)
 			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), OnDeath: "echo death"},
-			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), OnDeath: "echo death"}, // max=1, skipped
+			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), OnDeath: "echo death"}, // max=1 canonical singleton pool
 		},
 	}
 
 	handlers := computePoolDeathHandlers(cfg, "test", t.TempDir(), runtime.NewFake(), nil)
 
 	// dog has max=3, so 3 handlers (dog-1, dog-2, dog-3).
-	// cat has max=1, skipped. mayor is not a pool.
-	if len(handlers) != 3 {
-		t.Fatalf("len(handlers) = %d, want 3", len(handlers))
+	// cat is a max=1 canonical singleton pool agent, so the handler uses cat.
+	// mayor is not a pool (neither MinActiveSessions nor ScaleCheck set).
+	if len(handlers) != 4 {
+		t.Fatalf("len(handlers) = %d, want 4", len(handlers))
 	}
 
-	// Default session template is empty → session name = sanitized agent name.
+	// dog-1, dog-2, dog-3 handlers
 	for i := 1; i <= 3; i++ {
 		sn := fmt.Sprintf("dog-%d", i)
 		info, ok := handlers[sn]
@@ -1002,6 +1152,12 @@ func TestComputePoolDeathHandlers(t *testing.T) {
 		if !strings.Contains(info.Command, "echo death") {
 			t.Errorf("handler[%s].Command = %q, want configured on_death command", sn, info.Command)
 		}
+	}
+
+	if info, ok := handlers["cat"]; !ok {
+		t.Errorf("missing handler for cat (have keys: %v)", handlerKeys(handlers))
+	} else if !strings.Contains(info.Command, "echo death") {
+		t.Errorf("handler[cat].Command = %q, want configured on_death command", info.Command)
 	}
 }
 

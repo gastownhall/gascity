@@ -250,6 +250,20 @@ func TestCmdHandoffAutoHookFormatCodex(t *testing.T) {
 	if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, "Handoff: sent auto mail") {
 		t.Fatalf("additionalContext = %q, want handoff confirmation", payload.HookSpecificOutput.AdditionalContext)
 	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	all, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("open beads = %d, want handoff mail", len(all))
+	}
+	if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, all[0].ID) {
+		t.Fatalf("additionalContext = %q, want handoff mail id %s", payload.HookSpecificOutput.AdditionalContext, all[0].ID)
+	}
 }
 
 func TestDoHandoffAutoReportsHookOutputWriteError(t *testing.T) {

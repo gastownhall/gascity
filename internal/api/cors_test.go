@@ -66,7 +66,7 @@ func TestCORSPreflightFromLocalhostDashboard(t *testing.T) {
 // acceptance to explicitly listed non-localhost origins.
 func TestCORSAllowsExtraOrigins(t *testing.T) {
 	state := newFakeState(t)
-	sm := NewSupervisorMux(&stateCityResolver{state: state}, nil, false, "test", time.Now())
+	sm := NewSupervisorMux(&stateCityResolver{state: state}, nil, false, "test", "", time.Now())
 	sm.WithAllowedOrigins([]string{"http://192.168.1.10:8080"})
 	h := wrapTestSupervisorMiddleware(sm)
 

@@ -55,7 +55,7 @@ attaching arbitrary JSON payloads.`,
 // cmdEventEmit records a single event to the city event log. Best-effort:
 // errors go to stderr but exit code is always 0 so bd hooks never fail.
 func cmdEventEmit(eventType, subject, message, actor, payload string, stderr io.Writer) int {
-	ep, code := openCityEventsProvider(stderr, "gc event emit")
+	ep, code := openCityEventEmitProvider(stderr, "gc event emit")
 	if ep == nil {
 		// Best-effort: if we can't open the provider, still exit 0.
 		_ = code

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 func TestCityStatusNamedSessionsUseProvidedStore(t *testing.T) {
@@ -71,10 +73,19 @@ func TestCityStatusSnapshotNilConfigUsesCityPathName(t *testing.T) {
 	}
 }
 
-func TestCityStatusJSONPreservesNilAgentsWhenEmpty(t *testing.T) {
+func TestCityStatusJSONUsesEmptyCollectionsWhenEmpty(t *testing.T) {
 	status := cityStatusJSONFromSnapshot(cityStatusSnapshot{CityName: "city"}, StatusSummaryJSON{})
-	if status.Agents != nil {
-		t.Fatalf("Agents = %#v, want nil slice", status.Agents)
+	if status.Agents == nil {
+		t.Fatal("Agents = nil, want empty slice")
+	}
+	if len(status.Agents) != 0 {
+		t.Fatalf("len(Agents) = %d, want 0", len(status.Agents))
+	}
+	if status.Rigs == nil {
+		t.Fatal("Rigs = nil, want empty slice")
+	}
+	if len(status.Rigs) != 0 {
+		t.Fatalf("len(Rigs) = %d, want 0", len(status.Rigs))
 	}
 }
 
@@ -162,6 +173,76 @@ func TestLoadStatusSessionSnapshotTimesOut(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "loading session snapshot timed out") {
 		t.Fatalf("stderr = %q, want timeout warning", stderr.String())
+	}
+	loadErr := snapshot.LoadError()
+	if loadErr == nil {
+		t.Fatal("snapshot.LoadError() = nil, want timeout error so downstream named-session lookup can surface it (gastownhall/gascity#2148)")
+	}
+	if !strings.Contains(loadErr.Error(), "timed out") {
+		t.Fatalf("snapshot.LoadError() = %v, want timeout text", loadErr)
+	}
+}
+
+// TestCityStatusNamedSessionSurfacesLookupErrorWhenSnapshotDegraded is the
+// regression test for gastownhall/gascity#2148. PR #2005 added a snapshot
+// fast path in namedSessionStatusForCity that returned the cfg-derived
+// status ("reserved-unmaterialized" / "degraded blocked") whenever a named
+// identity was absent from the snapshot — including the case where the
+// snapshot itself failed to load. That silently dropped the "lookup error:"
+// signal operators relied on when debugging.
+func TestCityStatusNamedSessionSurfacesLookupErrorWhenSnapshotDegraded(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{{
+			Name: "refinery",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "refinery",
+		}},
+	}
+
+	store := beads.NewMemStore()
+	degraded := newSessionBeadSnapshotWithError(nil, errors.New("loading session snapshot timed out after 20ms"))
+
+	status := namedSessionStatusForCity(
+		"/home/user/city", cfg, store, degraded,
+		"city", "refinery", "on_demand", nil,
+	)
+	if !strings.HasPrefix(status, "lookup error:") {
+		t.Fatalf("named session status = %q, want a 'lookup error: ...' prefix when snapshot is degraded", status)
+	}
+	if !strings.Contains(status, "timed out") {
+		t.Fatalf("named session status = %q, want underlying load-error text in the surfaced lookup error", status)
+	}
+}
+
+// TestCityStatusNamedSessionsCleanSnapshotStillSilent confirms the perf goal
+// from PR #2005 is preserved when the snapshot loaded cleanly: a missing
+// named identity returns the cfg-derived status (no "lookup error:" string,
+// no bead Get fallback).
+func TestCityStatusNamedSessionsCleanSnapshotStillSilent(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{{
+			Name: "refinery",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "refinery",
+		}},
+	}
+
+	store := beads.NewMemStore()
+	clean := newSessionBeadSnapshot(nil)
+	if clean.LoadError() != nil {
+		t.Fatalf("clean snapshot LoadError = %v, want nil", clean.LoadError())
+	}
+
+	status := namedSessionStatusForCity(
+		"/home/user/city", cfg, store, clean,
+		"city", "refinery", "on_demand", nil,
+	)
+	if strings.HasPrefix(status, "lookup error:") {
+		t.Fatalf("named session status = %q, want cfg-derived status (no lookup error) when snapshot loaded cleanly", status)
 	}
 }
 
@@ -499,5 +580,67 @@ func TestCityStatusNamedSessionsUseLoadedSnapshotWithoutGet(t *testing.T) {
 	out := stdout.String()
 	if strings.Contains(out, "lookup error:") || strings.Contains(out, "store offline") {
 		t.Fatalf("stdout = %q, want snapshot-backed named status without store lookup error", out)
+	}
+}
+
+// TestCityStatusObservationsRunInParallel guards against regression of the
+// serial per-agent observation loop that made `gc status` ~1.4s on multi-rig
+// cities. With N agents and an observer that blocks briefly, wall time should
+// be close to a single observation, not N times it.
+func TestCityStatusObservationsRunInParallel(t *testing.T) {
+	const observerDelay = 60 * time.Millisecond
+	const agentCount = 12
+
+	var mu sync.Mutex
+	inflight := 0
+	maxConcurrent := 0
+	totalCalls := 0
+
+	oldObserve := observeSessionTargetForStatus
+	observeSessionTargetForStatus = func(string, beads.Store, runtime.Provider, *config.City, string) (worker.LiveObservation, error) {
+		mu.Lock()
+		inflight++
+		totalCalls++
+		if inflight > maxConcurrent {
+			maxConcurrent = inflight
+		}
+		mu.Unlock()
+
+		time.Sleep(observerDelay)
+
+		mu.Lock()
+		inflight--
+		mu.Unlock()
+		return worker.LiveObservation{Running: true}, nil
+	}
+	t.Cleanup(func() { observeSessionTargetForStatus = oldObserve })
+
+	agents := make([]config.Agent, agentCount)
+	for i := range agents {
+		agents[i] = config.Agent{Name: fmt.Sprintf("a%d", i), MaxActiveSessions: intPtr(1)}
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents:    agents,
+	}
+
+	start := time.Now()
+	snapshot := collectCityStatusSnapshot(runtime.NewFake(), cfg, "/tmp/city", nil, io.Discard)
+	elapsed := time.Since(start)
+
+	if got := len(snapshot.Agents); got != agentCount {
+		t.Fatalf("agents = %d, want %d", got, agentCount)
+	}
+	if totalCalls != agentCount {
+		t.Fatalf("totalCalls = %d, want %d", totalCalls, agentCount)
+	}
+	if maxConcurrent < 2 {
+		t.Fatalf("maxConcurrent = %d, want >= 2 (observations ran serially)", maxConcurrent)
+	}
+	// Serial would be agentCount * observerDelay = 720ms. Allow generous
+	// slack for CI scheduling but well below the serial bound.
+	maxAllowed := time.Duration(agentCount) * observerDelay / 2
+	if elapsed > maxAllowed {
+		t.Fatalf("elapsed = %v, want < %v (likely serial); maxConcurrent = %d", elapsed, maxAllowed, maxConcurrent)
 	}
 }

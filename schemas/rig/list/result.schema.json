@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc rig list --json result",
+  "description": "One JSONL record listing the city and registered rigs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "city_path", "city_name", "rigs", "summary"],
+  "properties": {
+    "schema_version": { "type": "string", "description": "Schema version for this command output." },
+    "city_path": { "type": "string", "description": "Absolute city root path." },
+    "city_name": { "type": "string", "description": "Configured or inferred city name." },
+    "rigs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "path", "prefix", "hq", "suspended", "running", "beads"],
+        "properties": {
+          "name": { "type": "string" },
+          "path": { "type": "string" },
+          "prefix": { "type": "string" },
+          "default_branch": { "type": "string" },
+          "hq": { "type": "boolean" },
+          "suspended": { "type": "boolean" },
+          "running": { "type": "boolean" },
+          "default_sling_target": { "type": "string" },
+          "beads": { "type": "string" }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "suspended", "running"],
+      "properties": {
+        "total": { "type": "integer" },
+        "suspended": { "type": "integer" },
+        "running": { "type": "integer" }
+      }
+    }
+  }
+}

@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sling"
 )
 
 // sessionBeadAssigneeIdentities returns every identifier under which a work
@@ -251,9 +252,9 @@ func storeForPoolAssignment(cfg *config.City, cityStore beads.Store, rigStores m
 			}
 		}
 	}
-	idPrefix := beadIDPrefix(wb.ID)
+	idPrefix := sling.BeadPrefixForCity(cfg, wb.ID)
 	for _, rig := range cfg.Rigs {
-		if idPrefix == rig.EffectivePrefix() {
+		if strings.EqualFold(idPrefix, rig.EffectivePrefix()) {
 			if store := rigStores[rig.Name]; store != nil {
 				return store
 			}
@@ -272,14 +273,6 @@ func isRecoverableUnassignedInProgressPoolWork(cfg *config.City, wb beads.Bead) 
 	}
 	agentCfg := findAgentByTemplate(cfg, template)
 	return agentCfg != nil && agentCfg.SupportsGenericEphemeralSessions()
-}
-
-func beadIDPrefix(id string) string {
-	trimmed := strings.TrimSpace(id)
-	if dash := strings.IndexByte(trimmed, '-'); dash > 0 {
-		return trimmed[:dash]
-	}
-	return ""
 }
 
 func releaseOrphanedPoolAssignment(store beads.Store, id string) bool {
@@ -301,6 +294,19 @@ func liveOpenSessionAssignmentExists(store beads.Store, assignee string) bool {
 	if liveSessionBeadExistsByIdentity(store, assignee) {
 		return true
 	}
+	// NOTE: this call site intentionally keeps a label-only query — not
+	// the Type+Label union from session.ListAllSessionBeads. The
+	// orphan-release tests (TestReleaseOrphanedPoolAssignments_*) set up
+	// city session beads with Type=session but no gc:session label and
+	// assert that rig work pointing at a session_name only reachable via
+	// the typed bead IS released. Switching this query to the union
+	// would surface those typed beads as "live" and cause the work to
+	// be skipped instead of released, regressing
+	// ReopensRigStoreMissingPoolAssignee and
+	// ReleasesRigWorkAssignedToUnreachableOpenSession. The label-loss
+	// bug this PR is fixing manifests in the snapshot/list/reconciler
+	// paths; orphan release continues to treat the label as the
+	// authoritative liveness signal.
 	sessions, err := store.List(beads.ListQuery{
 		Label: sessionBeadLabel,
 		Live:  true,

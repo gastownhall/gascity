@@ -174,6 +174,7 @@ func TestDispatchAllQueuedNudgesSkipsNotYetDue(t *testing.T) {
 func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 
@@ -230,7 +231,116 @@ func TestDispatchAllQueuedNudgesDeliversAndAcks(t *testing.T) {
 	}
 }
 
-func TestDispatchAllQueuedNudgesSkipsACPSession(t *testing.T) {
+// TestDispatchAllQueuedNudgesDeliversToIdleACPSession verifies the
+// supervisor dispatcher delivers queued nudges to a running ACP session
+// once it has been idle longer than the quiescence window. Idle ACP
+// sessions used to depend exclusively on inject-on-hook drain, but a
+// pure-hook delivery path never fires for a warm session that is not
+// receiving fresh user prompts — queued reminders piled up
+// indefinitely against an alive but quiet agent. The dispatcher now
+// owns wake delivery; the hook still drains opportunistically when the
+// agent receives external prompts, and the atomic queue claim prevents
+// double delivery.
+func TestDispatchAllQueuedNudgesDeliversToIdleACPSession(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	if store == nil {
+		t.Fatal("openNudgeBeadStore returned nil")
+	}
+
+	if err := enqueueQueuedNudgeWithStore(dir, store, newQueuedNudge("worker", "wake-up nudge", "session", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+	}
+
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "worker-session", runtime.Config{}); err != nil {
+		t.Fatalf("fake.Start: %v", err)
+	}
+	// Mark last activity well past the quiescence window so the
+	// dispatcher considers the session idle enough to deliver.
+	fake.SetActivity("worker-session", time.Now().Add(-10*time.Second))
+
+	// Create a real session bead so worker.SessionByID can resolve the
+	// target without panicking on a missing-bead lookup.
+	created, err := store.Create(beads.Bead{
+		Title:  "Session: worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker-session",
+			"agent_name":   "worker",
+			"template":     "worker",
+			"transport":    "acp",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create session bead: %v", err)
+	}
+	snapshot := newSessionBeadSnapshot([]beads.Bead{created})
+
+	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), store, fake, snapshot)
+	if err != nil {
+		t.Fatalf("dispatchAllQueuedNudges: %v", err)
+	}
+	if delivered != 1 {
+		t.Fatalf("delivered = %d, want 1 (running idle ACP session must receive queued nudges)", delivered)
+	}
+
+	var nudgeMessages []string
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" {
+			nudgeMessages = append(nudgeMessages, call.Message)
+		}
+	}
+	if len(nudgeMessages) != 1 {
+		t.Fatalf("nudge calls = %d, want 1 (queued nudge should be delivered as a runtime prompt)", len(nudgeMessages))
+	}
+	if !strings.Contains(nudgeMessages[0], "wake-up nudge") {
+		t.Fatalf("nudge message = %q, want original reminder text", nudgeMessages[0])
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("queue not drained after ACP delivery: pending=%d inFlight=%d dead=%d", len(pending), len(inFlight), len(dead))
+	}
+
+	// Observability: a successful queued-nudge delivery must stamp
+	// metadata.last_nudge_delivered_at on the session bead so the
+	// "LAST NUDGE" column in `gc session list` reflects fresh activity.
+	// Operators rely on this column to spot warm sessions whose
+	// delivery loop has stalled (queued items piling up while the
+	// stamp stays old).
+	refetched, getErr := store.Get(created.ID)
+	if getErr != nil {
+		t.Fatalf("store.Get session bead: %v", getErr)
+	}
+	stamp := strings.TrimSpace(refetched.Metadata[session.MetadataLastNudgeDeliveredAt])
+	if stamp == "" {
+		t.Fatalf("session bead missing %s metadata after successful ACP delivery", session.MetadataLastNudgeDeliveredAt)
+	}
+	parsed, parseErr := time.Parse(time.RFC3339, stamp)
+	if parseErr != nil {
+		t.Fatalf("parse %s=%q: %v", session.MetadataLastNudgeDeliveredAt, stamp, parseErr)
+	}
+	if drift := time.Since(parsed); drift < 0 || drift > time.Minute {
+		t.Fatalf("%s timestamp drift %s is outside the 1-minute test window (raw=%q)", session.MetadataLastNudgeDeliveredAt, drift, stamp)
+	}
+}
+
+// TestDispatchAllQueuedNudgesSkipsACPSessionWhenNotRunning confirms the
+// dispatcher still respects the universal liveness check for ACP sessions —
+// a stopped or crashed ACP session must not absorb queued nudges, because
+// nothing on the other side would observe the delivered prompt.
+func TestDispatchAllQueuedNudgesSkipsACPSessionWhenNotRunning(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 
@@ -239,7 +349,7 @@ func TestDispatchAllQueuedNudgesSkipsACPSession(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 	bead := beads.Bead{
-		ID:     "session-1",
+		ID:     "worker-session",
 		Status: "open",
 		Metadata: map[string]string{
 			"session_name": "worker-session",
@@ -249,12 +359,13 @@ func TestDispatchAllQueuedNudgesSkipsACPSession(t *testing.T) {
 		},
 	}
 	snapshot := newSessionBeadSnapshot([]beads.Bead{bead})
+	// Fake has no started session, so IsRunning("worker-session") is false.
 	delivered, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, runtime.NewFake(), snapshot)
 	if err != nil {
 		t.Fatalf("dispatchAllQueuedNudges: %v", err)
 	}
 	if delivered != 0 {
-		t.Fatalf("delivered = %d, want 0 (ACP session owned by inject-on-hook)", delivered)
+		t.Fatalf("delivered = %d, want 0 (stopped ACP session must not receive delivery)", delivered)
 	}
 }
 
@@ -284,6 +395,31 @@ func TestDispatchAllQueuedNudgesNilCfg(t *testing.T) {
 	}
 	if delivered != 0 {
 		t.Fatalf("delivered = %d, want 0 with nil cfg", delivered)
+	}
+}
+
+// TestMaybeStartNudgePollerSkipsACPSessionInLegacyMode verifies the
+// legacy per-session poller still skips ACP sessions. A sidecar `gc
+// nudge poll` process can observe the ACP control socket, but it does
+// not own the in-memory ACP connection needed to send session/prompt.
+func TestMaybeStartNudgePollerSkipsACPSessionInLegacyMode(t *testing.T) {
+	prev := startNudgePoller
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	called := false
+	startNudgePoller = func(_, _, _ string) error {
+		called = true
+		return nil
+	}
+
+	maybeStartNudgePoller(nudgeTarget{
+		cityPath:    t.TempDir(),
+		sessionName: "worker-session",
+		transport:   "acp",
+		cfg:         &config.City{},
+	})
+	if called {
+		t.Fatal("startNudgePoller invoked for ACP session in legacy mode; sidecar ACP pollers cannot deliver without owning the connection")
 	}
 }
 

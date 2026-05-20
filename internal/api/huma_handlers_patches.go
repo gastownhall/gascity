@@ -221,15 +221,16 @@ func (s *Server) humaHandleProviderPatchSet(_ context.Context, input *ProviderPa
 	}
 
 	patch := config.ProviderPatch{
-		Name:         input.Body.Name,
-		Command:      input.Body.Command,
-		ACPCommand:   input.Body.ACPCommand,
-		Args:         input.Body.Args,
-		ACPArgs:      input.Body.ACPArgs,
-		PromptMode:   input.Body.PromptMode,
-		PromptFlag:   input.Body.PromptFlag,
-		ReadyDelayMs: input.Body.ReadyDelayMs,
-		Env:          input.Body.Env,
+		Name:                 input.Body.Name,
+		Command:              input.Body.Command,
+		ACPCommand:           input.Body.ACPCommand,
+		Args:                 input.Body.Args,
+		ACPArgs:              input.Body.ACPArgs,
+		PromptMode:           input.Body.PromptMode,
+		PromptFlag:           input.Body.PromptFlag,
+		ReadyDelayMs:         input.Body.ReadyDelayMs,
+		AcceptStartupDialogs: input.Body.AcceptStartupDialogs,
+		Env:                  input.Body.Env,
 	}
 
 	if patch.Name == "" {

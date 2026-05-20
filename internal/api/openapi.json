@@ -804,6 +804,9 @@
           "description": {
             "type": "string"
           },
+          "ephemeral": {
+            "type": "boolean"
+          },
           "from": {
             "type": "string"
           },
@@ -2031,10 +2034,19 @@
             "$ref": "#/components/schemas/OutboundEventPayload"
           },
           {
+            "$ref": "#/components/schemas/ProjectIdentityStampedPayload"
+          },
+          {
             "$ref": "#/components/schemas/RequestFailedPayload"
           },
           {
+            "$ref": "#/components/schemas/RotatedPayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionCreateSucceededPayload"
+          },
+          {
+            "$ref": "#/components/schemas/SessionDrainAckedWithAssignedWorkPayload"
           },
           {
             "$ref": "#/components/schemas/SessionLifecyclePayload"
@@ -2046,12 +2058,105 @@
             "$ref": "#/components/schemas/SessionSubmitSucceededPayload"
           },
           {
+            "$ref": "#/components/schemas/SupervisorFSPressureSkippedTickPayload"
+          },
+          {
             "$ref": "#/components/schemas/UnboundEventPayload"
           },
           {
             "$ref": "#/components/schemas/WorkerOperationEventPayload"
           }
         ]
+      },
+      "EventRotateAnchor": {
+        "additionalProperties": false,
+        "properties": {
+          "seq": {
+            "description": "Anchor event sequence.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "ts": {
+            "description": "Anchor event timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "description": "Anchor event type.",
+            "examples": [
+              "events.rotated"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts"
+        ],
+        "type": "object"
+      },
+      "EventRotateArchive": {
+        "additionalProperties": false,
+        "properties": {
+          "compression_status": {
+            "description": "Archive compression status.",
+            "enum": [
+              "pending",
+              "complete"
+            ],
+            "type": "string"
+          },
+          "first_seq": {
+            "description": "First event sequence included in the archive.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "last_seq": {
+            "description": "Last event sequence included in the archive.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Absolute path to the archive.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "first_seq",
+          "last_seq",
+          "compression_status"
+        ],
+        "type": "object"
+      },
+      "EventRotateResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "anchor_event": {
+            "$ref": "#/components/schemas/EventRotateAnchor",
+            "description": "Anchor event metadata when rotated is true."
+          },
+          "archive": {
+            "$ref": "#/components/schemas/EventRotateArchive",
+            "description": "Archive metadata when rotated is true."
+          },
+          "reason": {
+            "description": "No-op reason when rotated is false.",
+            "type": "string"
+          },
+          "rotated": {
+            "description": "Whether an archive was produced.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "rotated"
+        ],
+        "type": "object"
       },
       "EventStreamEnvelope": {
         "additionalProperties": false,
@@ -4555,6 +4660,33 @@
         ],
         "type": "object"
       },
+      "ProjectIdentityStampedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "layer": {
+            "type": "string"
+          },
+          "new_id": {
+            "type": "string"
+          },
+          "old_id": {
+            "type": "string"
+          },
+          "scope_root": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope_root",
+          "source",
+          "layer",
+          "new_id"
+        ],
+        "type": "object"
+      },
       "ProviderCreateInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -4712,6 +4844,12 @@
               "null"
             ]
           },
+          "AcceptStartupDialogs": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "Args": {
             "items": {
               "type": "string"
@@ -4801,6 +4939,7 @@
           "PromptMode",
           "PromptFlag",
           "ReadyDelayMs",
+          "AcceptStartupDialogs",
           "Env",
           "EnvRemove",
           "Replace"
@@ -4810,6 +4949,10 @@
       "ProviderPatchSetInputBody": {
         "additionalProperties": false,
         "properties": {
+          "accept_startup_dialogs": {
+            "description": "Override startup dialog acceptance behavior.",
+            "type": "boolean"
+          },
           "acp_args": {
             "description": "Override ACP transport command arguments.",
             "items": {
@@ -5494,6 +5637,30 @@
         },
         "type": "object"
       },
+      "RotatedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "prior_archive": {
+            "type": "string"
+          },
+          "prior_first_seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "prior_last_seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "prior_archive",
+          "prior_first_seq",
+          "prior_last_seq"
+        ],
+        "type": "object"
+      },
       "ScopeGroup": {
         "additionalProperties": false,
         "type": "object"
@@ -5694,6 +5861,36 @@
         "required": [
           "request_id",
           "session"
+        ],
+        "type": "object"
+      },
+      "SessionDrainAckedWithAssignedWorkPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "description": "ID of the work bead still holding this session as its assignee.",
+            "type": "string"
+          },
+          "bead_status": {
+            "description": "Status of the stranded bead at emission time (typically 'in_progress' for cap-hit, 'open' if recovery races claim).",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Short diagnostic context. Today both emission sites pass 'drain_acked_with_assigned_work'; reserved for finer-grained shape discriminators if later Shape-N variants land.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Canonical session bead ID for the session that drain-acked.",
+            "type": "string"
+          },
+          "template": {
+            "description": "Pool template name when known at the emission site.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "bead_id"
         ],
         "type": "object"
       },
@@ -5911,6 +6108,9 @@
             "type": "string"
           },
           "last_active": {
+            "type": "string"
+          },
+          "last_nudge_delivered_at": {
             "type": "string"
           },
           "last_output": {
@@ -6586,9 +6786,54 @@
         ],
         "type": "object"
       },
+      "SupervisorFSPressureSkippedTickPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "avg60": {
+            "description": "The Linux PSI some avg60 value observed for filesystem IO pressure.",
+            "format": "double",
+            "type": "number"
+          },
+          "consecutive_skips": {
+            "description": "Number of consecutive pressure skips including this tick.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "max_consecutive_skips": {
+            "description": "Maximum consecutive skips before the supervisor forces one reconciliation tick.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "outcome": {
+            "description": "The pressure decision outcome: skipped for a shed tick or forced for the bounded liveness tick.",
+            "type": "string"
+          },
+          "threshold": {
+            "description": "The configured avg60 threshold that triggered the skip.",
+            "format": "double",
+            "type": "number"
+          },
+          "trigger": {
+            "description": "The daemon tick trigger, such as patrol or poke.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "avg60",
+          "threshold",
+          "consecutive_skips",
+          "max_consecutive_skips",
+          "outcome"
+        ],
+        "type": "object"
+      },
       "SupervisorHealthOutputBody": {
         "additionalProperties": false,
         "properties": {
+          "build_id": {
+            "description": "Build identity (typically a short git commit hash, with \"-dirty\" suffix when built from an unclean tree). Empty when unavailable.",
+            "type": "string"
+          },
           "cities_running": {
             "description": "Cities currently running.",
             "format": "int64",
@@ -6727,6 +6972,7 @@
             "controller.stopped": "#/components/schemas/TypedEventStreamEnvelopeControllerStopped",
             "convoy.closed": "#/components/schemas/TypedEventStreamEnvelopeConvoyClosed",
             "convoy.created": "#/components/schemas/TypedEventStreamEnvelopeConvoyCreated",
+            "events.rotated": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated",
             "extmsg.adapter_added": "#/components/schemas/TypedEventStreamEnvelopeExtmsgAdapterAdded",
             "extmsg.adapter_removed": "#/components/schemas/TypedEventStreamEnvelopeExtmsgAdapterRemoved",
             "extmsg.bound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgBound",
@@ -6744,6 +6990,7 @@
             "order.completed": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedEventStreamEnvelopeOrderFired",
+            "project.identity.stamped": "#/components/schemas/TypedEventStreamEnvelopeProjectIdentityStamped",
             "provider.swapped": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped",
             "request.failed": "#/components/schemas/TypedEventStreamEnvelopeRequestFailed",
             "request.result.city.create": "#/components/schemas/TypedEventStreamEnvelopeRequestResultCityCreate",
@@ -6752,6 +6999,7 @@
             "request.result.session.message": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionMessage",
             "request.result.session.submit": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionSubmit",
             "session.crashed": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed",
+            "session.drain_acked_with_assigned_work": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled",
@@ -6761,6 +7009,7 @@
             "session.undrained": "#/components/schemas/TypedEventStreamEnvelopeSessionUndrained",
             "session.updated": "#/components/schemas/TypedEventStreamEnvelopeSessionUpdated",
             "session.woke": "#/components/schemas/TypedEventStreamEnvelopeSessionWoke",
+            "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
             "worker.operation": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -6798,6 +7047,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeConvoyCreated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgAdapterAdded"
@@ -6851,6 +7103,9 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderFired"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeProjectIdentityStamped"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped"
           },
           {
@@ -6873,6 +7128,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionCrashed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining"
@@ -6900,6 +7158,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionWoke"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
@@ -7407,6 +7668,7 @@
                 "session.max_age_killed",
                 "session.suspended",
                 "session.updated",
+                "session.drain_acked_with_assigned_work",
                 "bead.created",
                 "bead.closed",
                 "bead.updated",
@@ -7436,13 +7698,16 @@
                 "order.failed",
                 "provider.swapped",
                 "worker.operation",
+                "project.identity.stamped",
+                "supervisor.fs_pressure.skipped_tick",
                 "extmsg.bound",
                 "extmsg.unbound",
                 "extmsg.group_created",
                 "extmsg.adapter_added",
                 "extmsg.adapter_removed",
                 "extmsg.inbound",
-                "extmsg.outbound"
+                "extmsg.outbound",
+                "events.rotated"
               ]
             },
             "type": "string"
@@ -7459,6 +7724,48 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope custom",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeEventsRotated": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/RotatedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "events.rotated",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope events.rotated",
         "type": "object"
       },
       "TypedEventStreamEnvelopeExtmsgAdapterAdded": {
@@ -8175,6 +8482,48 @@
         "title": "TypedEventStreamEnvelope order.fired",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeProjectIdentityStamped": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ProjectIdentityStampedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "project.identity.stamped",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope project.identity.stamped",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeProviderSwapped": {
         "additionalProperties": false,
         "properties": {
@@ -8509,6 +8858,48 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope session.crashed",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionDrainAckedWithAssignedWorkPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.drain_acked_with_assigned_work",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.drain_acked_with_assigned_work",
         "type": "object"
       },
       "TypedEventStreamEnvelopeSessionDraining": {
@@ -8889,6 +9280,48 @@
         "title": "TypedEventStreamEnvelope session.woke",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SupervisorFSPressureSkippedTickPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "supervisor.fs_pressure.skipped_tick",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope supervisor.fs_pressure.skipped_tick",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeWorkerOperation": {
         "additionalProperties": false,
         "properties": {
@@ -8946,6 +9379,7 @@
             "controller.stopped": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerStopped",
             "convoy.closed": "#/components/schemas/TypedTaggedEventStreamEnvelopeConvoyClosed",
             "convoy.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeConvoyCreated",
+            "events.rotated": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated",
             "extmsg.adapter_added": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded",
             "extmsg.adapter_removed": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved",
             "extmsg.bound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgBound",
@@ -8963,6 +9397,7 @@
             "order.completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired",
+            "project.identity.stamped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProjectIdentityStamped",
             "provider.swapped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped",
             "request.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestFailed",
             "request.result.city.create": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultCityCreate",
@@ -8971,6 +9406,7 @@
             "request.result.session.message": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionMessage",
             "request.result.session.submit": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit",
             "session.crashed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed",
+            "session.drain_acked_with_assigned_work": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled",
@@ -8980,6 +9416,7 @@
             "session.undrained": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUndrained",
             "session.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUpdated",
             "session.woke": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWoke",
+            "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
             "worker.operation": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -9017,6 +9454,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeConvoyCreated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded"
@@ -9070,6 +9510,9 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProjectIdentityStamped"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped"
           },
           {
@@ -9092,6 +9535,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionCrashed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining"
@@ -9119,6 +9565,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWoke"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
@@ -9673,6 +10122,7 @@
                 "session.max_age_killed",
                 "session.suspended",
                 "session.updated",
+                "session.drain_acked_with_assigned_work",
                 "bead.created",
                 "bead.closed",
                 "bead.updated",
@@ -9702,13 +10152,16 @@
                 "order.failed",
                 "provider.swapped",
                 "worker.operation",
+                "project.identity.stamped",
+                "supervisor.fs_pressure.skipped_tick",
                 "extmsg.bound",
                 "extmsg.unbound",
                 "extmsg.group_created",
                 "extmsg.adapter_added",
                 "extmsg.adapter_removed",
                 "extmsg.inbound",
-                "extmsg.outbound"
+                "extmsg.outbound",
+                "events.rotated"
               ]
             },
             "type": "string"
@@ -9726,6 +10179,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope custom",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeEventsRotated": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/RotatedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "events.rotated",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope events.rotated",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded": {
@@ -10510,6 +11009,52 @@
         "title": "TypedTaggedEventStreamEnvelope order.fired",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeProjectIdentityStamped": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ProjectIdentityStampedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "project.identity.stamped",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope project.identity.stamped",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeProviderSwapped": {
         "additionalProperties": false,
         "properties": {
@@ -10876,6 +11421,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.crashed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionDrainAckedWithAssignedWorkPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.drain_acked_with_assigned_work",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.drain_acked_with_assigned_work",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionDraining": {
@@ -11290,6 +11881,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.woke",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SupervisorFSPressureSkippedTickPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "supervisor.fs_pressure.skipped_tick",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope supervisor.fs_pressure.skipped_tick",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeWorkerOperation": {
@@ -15380,6 +16017,79 @@
           }
         },
         "summary": "Emit an event"
+      }
+    },
+    "/v0/city/{cityName}/events/rotate": {
+      "post": {
+        "operationId": "rotate-events",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for archive compression to complete before returning.",
+            "explode": false,
+            "in": "query",
+            "name": "wait",
+            "schema": {
+              "description": "Wait for archive compression to complete before returning.",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventRotateResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Force rotate the city event log"
       }
     },
     "/v0/city/{cityName}/events/stream": {

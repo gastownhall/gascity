@@ -212,9 +212,8 @@ func loadSessionsForCompletion() []session.Info {
 			return
 		}
 		providerCtx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
-		allSessionBeads, err := store.List(beads.ListQuery{
-			Label: session.LabelSession,
-			Sort:  beads.SortCreatedDesc,
+		allSessionBeads, err := session.ListAllSessionBeads(store, beads.ListQuery{
+			Sort: beads.SortCreatedDesc,
 		})
 		if err != nil {
 			return

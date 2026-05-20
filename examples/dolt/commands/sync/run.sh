@@ -11,16 +11,10 @@
 # Environment: GC_CITY_PATH, GC_DOLT_PORT, GC_DOLT_USER, GC_DOLT_PASSWORD
 set -e
 
-: "${GC_DOLT_USER:=root}"
-PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
-. "$PACK_DIR/assets/scripts/runtime.sh"
-
 dry_run=false
 force=false
 do_gc=false
 db_filter=""
-beads_bd="$GC_BEADS_BD_SCRIPT"
-data_dir="$DOLT_DATA_DIR"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -50,6 +44,13 @@ case "$(printf '%s' "$db_filter" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | t
   exit 1
   ;;
 esac
+
+: "${GC_DOLT_USER:=root}"
+PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
+. "$PACK_DIR/assets/scripts/runtime.sh"
+
+beads_bd="$GC_BEADS_BD_SCRIPT"
+data_dir="$DOLT_DATA_DIR"
 
 # Check if server is running.
 is_running() {

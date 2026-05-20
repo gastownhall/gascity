@@ -84,11 +84,11 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 		report.PID = cmd.Process.Pid
 		report.Port = currentPort
 		if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
-			_ = terminateManagedDoltPID(cmd.Process.Pid)
+			_ = terminateManagedDoltPID(cityPath, cmd.Process.Pid)
 			return report, fmt.Errorf("create pid dir: %w", err)
 		}
 		if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0o644); err != nil {
-			_ = terminateManagedDoltPID(cmd.Process.Pid)
+			_ = terminateManagedDoltPID(cityPath, cmd.Process.Pid)
 			return report, fmt.Errorf("write pid file: %w", err)
 		}
 		if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
@@ -98,7 +98,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 			DataDir:   layout.DataDir,
 			StartedAt: time.Now().UTC().Format(time.RFC3339),
 		}); err != nil {
-			_ = terminateManagedDoltPID(cmd.Process.Pid)
+			_ = terminateManagedDoltPID(cityPath, cmd.Process.Pid)
 			_ = os.Remove(layout.PIDFile)
 			return report, fmt.Errorf("write provider state: %w", err)
 		}
@@ -115,7 +115,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 		}
 
 		if readyReport.PIDAlive {
-			_ = terminateManagedDoltPID(cmd.Process.Pid)
+			_ = terminateManagedDoltPID(cityPath, cmd.Process.Pid)
 			_ = os.Remove(layout.PIDFile)
 			_ = writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
 				Running:   false,
@@ -205,7 +205,18 @@ func resolveDoltArchiveLevel(explicit int) int {
 	return 0
 }
 
-func terminateManagedDoltPID(pid int) error {
+// terminateManagedDoltPID stops a managed dolt subprocess on startup-failure
+// and failed-recovery cleanup. It honors the same configurable SIGTERM→SIGKILL
+// grace as the stop/unregister/restart path (resolveManagedDoltStopTimeout) so
+// a too-short hardcoded grace cannot SIGKILL dolt mid-flush on these paths
+// either (gastownhall/gascity#2090). cityPath may be empty — the grace then
+// falls back to config.DefaultDoltStopTimeout.
+//
+// The liveness-poll interval is clamped to the grace via
+// managedDoltStopPollInterval, matching the stop/unregister path: without the
+// clamp a sub-100ms configured grace would still sleep a fixed ~100ms before
+// the first re-check, sending SIGKILL well past the intended deadline.
+func terminateManagedDoltPID(cityPath string, pid int) error {
 	if pid <= 0 {
 		return nil
 	}
@@ -214,12 +225,14 @@ func terminateManagedDoltPID(pid int) error {
 		return err
 	}
 	_ = process.Signal(syscall.SIGTERM)
-	deadline := time.Now().Add(5 * time.Second)
+	gracePeriod := resolveManagedDoltStopTimeout(cityPath)
+	deadline := time.Now().Add(gracePeriod)
+	pollInterval := managedDoltStopPollInterval(gracePeriod)
 	for time.Now().Before(deadline) {
 		if !pidAlive(pid) {
 			return nil
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(pollInterval)
 	}
 	_ = process.Signal(syscall.SIGKILL)
 	time.Sleep(250 * time.Millisecond)
