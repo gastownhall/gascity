@@ -448,18 +448,37 @@ fi
 
 **If MERGE_STRATEGY = "direct" (default):**
 
-**1. Merge and push target branch:**
+**1. Push the rebased branch into `$TARGET`:**
+
+Do NOT `git checkout $TARGET` here. In gc worktrees the rig's `$TARGET`
+branch is checked out in the primary worktree, and `git checkout $TARGET`
+from the refinery worktree fails with `fatal: '$TARGET' is already used
+by worktree`. The earlier shape — `git checkout $TARGET; git merge --ff-only
+temp; git push origin $TARGET` — silently continued on `temp` when that
+checkout failed, and `git push origin $TARGET` then shipped the unchanged
+local `$TARGET` ref so the merge was silently dropped (di-jlv).
+
+Push `temp` directly into `origin/$TARGET` after verifying it is a
+fast-forward over the current remote tip:
+
 ```bash
-git checkout $TARGET
-git merge --ff-only temp
-git push origin $TARGET
+git fetch origin
+if ! git merge-base --is-ancestor "origin/$TARGET" temp; then
+  echo "temp is not a descendant of origin/$TARGET — refusing to push"
+  exit 1
+fi
+git push origin "temp:$TARGET"
 ```
+
+This updates `origin/$TARGET` to point at `temp`'s tip without touching
+the local `$TARGET` ref. Works in standalone clones and gc worktrees
+alike.
 
 **2. Verify push:**
 ```bash
 git fetch origin
-LOCAL=$(git rev-parse $TARGET)
-REMOTE=$(git rev-parse origin/$TARGET)
+LOCAL=$(git rev-parse temp)
+REMOTE=$(git rev-parse "origin/$TARGET")
 [ "$LOCAL" = "$REMOTE" ] || echo "PUSH FAILED — do not proceed"
 ```
 If SHAs differ: STOP. Debug and retry. Do NOT continue.
@@ -487,7 +506,10 @@ gc bd close $WORK --reason "Merged to $TARGET at $MERGED_SHORT"
 
 **4. Cleanup:**
 ```bash
-git branch -d temp
+# Detach HEAD off `temp` so we can delete it. We never checked out the
+# local `$TARGET` ref, so there is nothing to "leave" — just detach.
+git checkout --detach
+git branch -D temp
 ```
 If delete_merged_branches = "true": `git push origin --delete $BRANCH`
 

@@ -297,6 +297,51 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 	)
 }
 
+// TestRefineryFormulaDirectMergePushIsWorktreeSafe guards against the
+// regression observed in di-jlv: the formula's direct-merge path used to
+// run `git checkout $TARGET; git merge --ff-only temp; git push origin
+// $TARGET`. In gc worktrees the rig's $TARGET is checked out in the
+// primary worktree, so `git checkout $TARGET` fails from the refinery
+// worktree with "fatal: '$TARGET' is already used by worktree". The
+// shell wrapping did not check that exit, the agent stayed on `temp`,
+// `git merge --ff-only temp` reported "Already up to date", and
+// `git push origin $TARGET` shipped the unchanged local `$TARGET` ref
+// so the merge was silently dropped.
+//
+// The fix verifies temp is a fast-forward over origin/$TARGET, then
+// pushes `temp:$TARGET` directly so origin/$TARGET advances without
+// touching the local $TARGET ref. The verification step then compares
+// `git rev-parse temp` against `git rev-parse origin/$TARGET` instead
+// of the old apples-to-apples local-target-vs-origin-target compare,
+// which matched by accident when the push was a no-op.
+func TestRefineryFormulaDirectMergePushIsWorktreeSafe(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery formula: %v", err)
+	}
+	body := string(data)
+
+	// Positive: the worktree-safe shape must be present, in order, in the
+	// direct-merge path of the merge-push step.
+	assertContainsInOrder(t, body,
+		`**If MERGE_STRATEGY = "direct" (default):**`,
+		`git merge-base --is-ancestor "origin/$TARGET" temp`,
+		`git push origin "temp:$TARGET"`,
+		`LOCAL=$(git rev-parse temp)`,
+		`REMOTE=$(git rev-parse "origin/$TARGET")`,
+	)
+
+	// Positive: cleanup must detach off `temp` before deleting it. We
+	// stay on `temp` through the push (no local $TARGET checkout), so
+	// `git branch -d temp` without a prior detach would fail.
+	assertContainsInOrder(t, body,
+		`git checkout --detach`,
+		`git branch -D temp`,
+	)
+}
+
 // TestRefineryPromptRejectionFlowEnforcesClearOnMerge guards against
 // the regression observed in L5c (2026-05-10): the refinery agent
 // merged a previously-rejected work bead and closed it, but never ran

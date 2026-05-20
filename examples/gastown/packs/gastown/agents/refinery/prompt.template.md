@@ -241,8 +241,7 @@ alert the witness, not `gc mail send`.
 | Remove metadata field | `gc bd update $WORK --unset-metadata key` |
 | Fetch remote branches | `git fetch --prune origin` |
 | Rebase on target | `refinery-rebase.sh "$BRANCH" "$TARGET"` (see "Rebase Safety" above) |
-| Fast-forward merge | `git merge --ff-only temp` |
-| Push merged changes | `git push origin $TARGET` |
+| Push merged changes | `git push origin "temp:$TARGET"` (after verifying `git merge-base --is-ancestor "origin/$TARGET" temp`) |
 
 Rig: {{ .RigName }}
 Working directory: {{ .WorkDir }}
