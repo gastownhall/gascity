@@ -36,6 +36,113 @@ func (c *countingBackingStore) Close(id string) error {
 	return c.Store.Close(id)
 }
 
+type txPreservingBackingStore struct {
+	Store
+	txCalls     int
+	updateCalls int
+}
+
+func (s *txPreservingBackingStore) Update(id string, opts UpdateOpts) error {
+	s.updateCalls++
+	if err := s.Store.Update(id, opts); err != nil {
+		return err
+	}
+	if opts.Title == nil {
+		clobbered := ""
+		return s.Store.Update(id, UpdateOpts{Title: &clobbered})
+	}
+	return nil
+}
+
+func (s *txPreservingBackingStore) Tx(commitMsg string, fn func(Tx) error) error {
+	s.txCalls++
+	return s.Store.Tx(commitMsg, fn)
+}
+
+func TestCachingStoreTxDelegatesToBackingTxAndRefreshesCache(t *testing.T) {
+	t.Parallel()
+
+	backing := &txPreservingBackingStore{Store: NewMemStore()}
+	bead, err := backing.Create(Bead{
+		Title:       "preserve title",
+		Description: "before",
+		Labels:      []string{"keep-label", "drop-label"},
+		Metadata:    map[string]string{"existing": "yes"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	description := "after"
+	if err := cache.Tx("preserve backing semantics", func(tx Tx) error {
+		if err := tx.Update(bead.ID, UpdateOpts{
+			Description:  &description,
+			Labels:       []string{"new-label"},
+			RemoveLabels: []string{"drop-label"},
+		}); err != nil {
+			return err
+		}
+		if err := tx.SetMetadataBatch(bead.ID, map[string]string{"tx": "applied"}); err != nil {
+			return err
+		}
+		return tx.Close(bead.ID)
+	}); err != nil {
+		t.Fatalf("Tx: %v", err)
+	}
+
+	if backing.txCalls != 1 {
+		t.Fatalf("backing.Tx calls = %d, want 1", backing.txCalls)
+	}
+	if backing.updateCalls != 0 {
+		t.Fatalf("backing.Update calls = %d, want 0 direct calls through CachingStore", backing.updateCalls)
+	}
+
+	got, err := backing.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("backing Get: %v", err)
+	}
+	assertTxPreservedBead(t, got)
+
+	cached, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("cache Get: %v", err)
+	}
+	assertTxPreservedBead(t, cached)
+}
+
+func assertTxPreservedBead(t *testing.T, got Bead) {
+	t.Helper()
+	if got.Title != "preserve title" {
+		t.Fatalf("Title = %q, want preserved title", got.Title)
+	}
+	if got.Description != "after" {
+		t.Fatalf("Description = %q, want after", got.Description)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("Status = %q, want closed", got.Status)
+	}
+	if got.Metadata["existing"] != "yes" || got.Metadata["tx"] != "applied" {
+		t.Fatalf("Metadata = %#v, want existing=yes and tx=applied", got.Metadata)
+	}
+	if !stringSliceContains(got.Labels, "keep-label") || !stringSliceContains(got.Labels, "new-label") || stringSliceContains(got.Labels, "drop-label") {
+		t.Fatalf("Labels = %#v, want keep-label and new-label without drop-label", got.Labels)
+	}
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 // TestCachingStoreSetMetadataSkipsBackingWhenCachedValueMatches verifies that
 // SetMetadata short-circuits before the backing call when the cached bead
 // already has metadata[key]==value. Without this guard, no-op writes still
