@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
@@ -125,10 +124,6 @@ func (c *doltTopologyCheck) Fix(_ *doctor.CheckContext) error { return nil }
 func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		if jsonOut {
-			_ = writeDoctorJSONError(stdout, err)
-			return 1
-		}
 		fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -365,16 +360,7 @@ func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
 			Fixed:        r.Fixed,
 		})
 	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(out)
-}
-
-func writeDoctorJSONError(w io.Writer, err error) error {
-	out := doctorJSONReport{Error: err.Error(), Results: []doctorJSONResult{}}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(out)
+	return writeCLIJSONLine(w, out)
 }
 
 // collectPackDirs returns all unique pack directories from the city

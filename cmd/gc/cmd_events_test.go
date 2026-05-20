@@ -994,7 +994,7 @@ func TestDoEventsRotateGoldenPathPrintsJSONL(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doEventsRotate = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	want := `{"rotated":true,"archive":{"path":"/tmp/events.jsonl.archive-20260505T035000Z-seq-1234-5678.gz","first_seq":1234,"last_seq":5678,"compression_status":"pending"},"anchor_event":{"seq":5679,"type":"events.rotated","ts":"2026-05-05T03:50:00.123456Z"}}` + "\n"
+	want := `{"rotated":true,"archive":{"path":"/tmp/events.jsonl.archive-20260505T035000Z-seq-1234-5678.gz","first_seq":1234,"last_seq":5678,"compression_status":"pending"},"anchor_event":{"seq":5679,"type":"events.rotated","ts":"2026-05-05T03:50:00.123456Z"},"ok":true}` + "\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 	}
@@ -1016,7 +1016,7 @@ func TestDoEventsRotateEmptyActiveLogNoOp(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doEventsRotate = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	want := `{"rotated":false,"reason":"active log is empty"}` + "\n"
+	want := `{"rotated":false,"reason":"active log is empty","ok":true}` + "\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 	}

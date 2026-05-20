@@ -97,11 +97,14 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	_ = pokeController(cityPath)
 
 	if asJSON {
-		writeSessionActionJSON(stdout, sessionActionResult{
+		if err := writeSessionActionJSON(stdout, sessionActionResult{
 			Action:    "reset",
 			SessionID: sessionID,
 			Identity:  identity,
-		})
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		return 0
 	}
 	fmt.Fprintf(stdout, "Session %s reset requested. Controller will restart it fresh.\n", sessionID) //nolint:errcheck // best-effort stdout

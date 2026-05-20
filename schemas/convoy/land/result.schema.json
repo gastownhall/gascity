@@ -16,5 +16,5 @@
     "forced": { "type": "boolean" },
     "notify": { "type": "string" }
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

@@ -3247,12 +3247,13 @@ func (s *delayingPoolCreateStore) maxConcurrentSessionCreates() int {
 //
 // The store records in-flight session-bead creates directly so a regression
 // that re-serializes the loop (e.g., a future refactor that accidentally holds
-// a mutex across the create call) fails without depending on wall-clock
-// scheduler slack.
+// a mutex across the create call) or collapses the worker fanout fails without
+// depending on wall-clock scheduler slack.
 func TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates(t *testing.T) {
 	const (
-		requestCount = 8
-		// Keep scheduler overhead small relative to the half-serial ceiling.
+		requestCount = 16
+		// Keep concurrent creates overlapping long enough to observe the full
+		// worker cap without using elapsed time as the assertion.
 		createDelay = 100 * time.Millisecond
 	)
 	store := &delayingPoolCreateStore{MemStore: beads.NewMemStore(), delay: createDelay}
@@ -3283,8 +3284,8 @@ func TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates(t *testing.
 		t.Fatalf("desired count = %d, want %d; stderr=%q", got, requestCount, stderr.String())
 	}
 
-	if got := store.maxConcurrentSessionCreates(); got < 2 {
-		t.Fatalf("session bead creates max concurrency = %d, want at least 2", got)
+	if got := store.maxConcurrentSessionCreates(); got < poolRealizeParallelism {
+		t.Fatalf("session bead creates max concurrency = %d, want at least %d", got, poolRealizeParallelism)
 	}
 
 	aliases := make(map[string]bool, requestCount)

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -933,9 +932,7 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 				result.Summary.Running++
 			}
 		}
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(result); err != nil {
+		if err := writeCLIJSONLine(stdout, result); err != nil {
 			fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}

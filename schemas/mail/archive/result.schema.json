@@ -12,5 +12,5 @@
     "count": { "type": "integer", "minimum": 0 },
     "already_done": { "type": "boolean" }
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

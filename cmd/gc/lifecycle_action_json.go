@@ -27,6 +27,12 @@ func writeLifecycleActionJSON(stdout io.Writer, payload lifecycleActionJSON) err
 	return writeCLIJSONLine(stdout, payload)
 }
 
+func writeLifecycleActionJSONOrExit(stdout, stderr io.Writer, context string, payload lifecycleActionJSON) int {
+	payload.SchemaVersion = "1"
+	payload.OK = true
+	return writeCLIJSONLineOrExit(stdout, stderr, context, payload)
+}
+
 func lifecycleBoolPtr(v bool) *bool {
 	return &v
 }

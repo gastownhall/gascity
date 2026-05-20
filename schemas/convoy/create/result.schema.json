@@ -11,5 +11,5 @@
     "title": { "type": "string" },
     "issue_ids": { "type": "array", "items": { "type": "string" } }
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

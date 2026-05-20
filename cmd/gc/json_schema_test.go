@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	gascity "github.com/gastownhall/gascity"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -48,6 +50,72 @@ func TestJSONSchemaManifestForSupportedCommand(t *testing.T) {
 	}
 	if !json.Valid(manifest.Schemas["failure"]) {
 		t.Fatalf("failure schema missing or invalid: %s", manifest.Schemas["failure"])
+	}
+}
+
+func TestJSONResultSchemasRequireSuccessDiscriminator(t *testing.T) {
+	var missing []string
+	var nonObject []string
+	err := fs.WalkDir(gascity.BuiltinSchemas, "schemas", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, "/result.schema.json") {
+			return nil
+		}
+		data, err := gascity.BuiltinSchemas.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var schema struct {
+			Type       string                     `json:"type"`
+			Required   []string                   `json:"required"`
+			Properties map[string]json.RawMessage `json:"properties"`
+		}
+		if err := json.Unmarshal(data, &schema); err != nil {
+			return err
+		}
+		if path == "schemas/bd/result.schema.json" {
+			// gc bd is an explicit passthrough: bd owns the payload shape.
+			return nil
+		}
+		if schema.Type != "object" {
+			nonObject = append(nonObject, path)
+			return nil
+		}
+		okSchema := schema.Properties["ok"]
+		var okProperty struct {
+			Const *bool `json:"const"`
+		}
+		if len(okSchema) > 0 {
+			if err := json.Unmarshal(okSchema, &okProperty); err != nil {
+				return err
+			}
+		}
+		if !slices.Contains(schema.Required, "ok") || okProperty.Const == nil || !*okProperty.Const {
+			missing = append(missing, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nonObject) > 0 {
+		t.Fatalf("result schemas must use an object root for the top-level ok:true discriminator:\n%s", strings.Join(nonObject, "\n"))
+	}
+	if len(missing) > 0 {
+		t.Fatalf("result schemas missing required top-level ok:true discriminator:\n%s", strings.Join(missing, "\n"))
+	}
+}
+
+func TestWithDefaultSuccessOKHandlesNilPayload(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("withDefaultSuccessOK(nil) panicked: %v", r)
+		}
+	}()
+	if got := withDefaultSuccessOK(nil); got != nil {
+		t.Fatalf("withDefaultSuccessOK(nil) = %#v, want nil", got)
 	}
 }
 
@@ -94,6 +162,61 @@ func TestJSONSchemaManifestForLifecycleActionCommands(t *testing.T) {
 				t.Fatalf("failure schema missing or invalid: %s", manifest.Schemas["failure"])
 			}
 		})
+	}
+}
+
+func TestActionResultSchemasAllowExtensionFields(t *testing.T) {
+	var checked []string
+	err := fs.WalkDir(gascity.BuiltinSchemas, "schemas", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, "/result.schema.json") {
+			return nil
+		}
+		data, err := gascity.BuiltinSchemas.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var schema struct {
+			Required             []string                   `json:"required"`
+			AdditionalProperties json.RawMessage            `json:"additionalProperties"`
+			Properties           map[string]json.RawMessage `json:"properties"`
+		}
+		if err := json.Unmarshal(data, &schema); err != nil {
+			return err
+		}
+		var commandProp, actionProp struct {
+			Const *string `json:"const"`
+		}
+		if raw := schema.Properties["command"]; len(raw) > 0 {
+			if err := json.Unmarshal(raw, &commandProp); err != nil {
+				return err
+			}
+		}
+		if raw := schema.Properties["action"]; len(raw) > 0 {
+			if err := json.Unmarshal(raw, &actionProp); err != nil {
+				return err
+			}
+		}
+		if commandProp.Const == nil || actionProp.Const == nil {
+			return nil
+		}
+		checked = append(checked, path)
+		if !slices.Contains(schema.Required, "command") || !slices.Contains(schema.Required, "action") {
+			t.Errorf("%s required = %v, want command and action", path, schema.Required)
+		}
+		var additionalProperties bool
+		if err := json.Unmarshal(schema.AdditionalProperties, &additionalProperties); err != nil || !additionalProperties {
+			t.Errorf("%s additionalProperties = %s, want true", path, string(schema.AdditionalProperties))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checked) == 0 {
+		t.Fatal("no action result schemas discovered")
 	}
 }
 
@@ -524,6 +647,36 @@ func TestJSONExecutionFailureIsStructured(t *testing.T) {
 		t.Fatalf("stderr empty, want command diagnostics")
 	}
 
+	var payload struct {
+		OK    bool `json:"ok"`
+		Error struct {
+			Code     string `json:"code"`
+			ExitCode int    `json:"exit_code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("failure payload is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.OK || payload.Error.Code != "command_failed" || payload.Error.ExitCode != code {
+		t.Fatalf("payload = %+v, code=%d", payload, code)
+	}
+}
+
+func TestJSONLExecutionFailureIsStructured(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	missingCity := filepath.Join(t.TempDir(), "missing-city")
+	code := run([]string{"--city", missingCity, "session", "pin", "missing-session", "--json"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("run(session pin --json) = 0, want nonzero")
+	}
+	if stderr.Len() == 0 {
+		t.Fatalf("stderr empty, want command diagnostics")
+	}
+
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stdout lines = %d, want 1 shared failure payload: %q", len(lines), stdout.String())
+	}
 	var payload struct {
 		OK    bool `json:"ok"`
 		Error struct {

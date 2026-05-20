@@ -99,7 +99,7 @@ to empty output from valid conditional logic, or on suspended states
 				return errExit
 			}
 			agentName, _ := primeInvocationAgentName(args)
-			_ = writeCLIJSONLine(stdout, primeJSONResult{
+			return writeCLIJSONLineOrErr(stdout, stderr, "gc prime", primeJSONResult{
 				SchemaVersion: "1",
 				Agent:         agentName,
 				Hook:          hookMode,
@@ -107,7 +107,6 @@ to empty output from valid conditional logic, or on suspended states
 				Content:       buf.String(),
 				Bytes:         buf.Len(),
 			})
-			return nil
 		}
 		if doPrimeWithHookFormat(args, stdout, stderr, hookMode, hookFormat, strictMode) != 0 {
 			return errExit

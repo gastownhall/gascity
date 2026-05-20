@@ -160,7 +160,7 @@ func cmdReload(args []string, async bool, soft bool, jsonOut bool, timeoutValue 
 	case reloadOutcomeAccepted, reloadOutcomeApplied, reloadOutcomeNoChange:
 		message := strings.TrimSpace(reply.Message)
 		if jsonOut {
-			_ = writeLifecycleActionJSON(stdout, lifecycleActionJSON{
+			return writeLifecycleActionJSONOrExit(stdout, stderr, "gc reload", lifecycleActionJSON{
 				Command:  "reload",
 				Action:   "reload",
 				Message:  message,

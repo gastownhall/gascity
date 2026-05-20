@@ -68,14 +68,16 @@ func newShellRemoveCmd(stdout, stderr io.Writer) *cobra.Command {
 	}
 }
 
-func newShellStatusCmd(stdout, _ io.Writer) *cobra.Command {
+func newShellStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show shell integration status",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			cmdShellStatus(jsonOutput, stdout)
+			if cmdShellStatus(jsonOutput, stdout, stderr) != 0 {
+				return errExit
+			}
 			return nil
 		},
 	}
@@ -338,7 +340,7 @@ type shellStatusShellJSON struct {
 	RCHookPresent          bool   `json:"rc_hook_present"`
 }
 
-func cmdShellStatus(jsonOutput bool, stdout io.Writer) {
+func cmdShellStatus(jsonOutput bool, stdout, stderr io.Writer) int {
 	found := false
 	statuses := make([]shellStatusShellJSON, 0, 3)
 	for _, sh := range []string{"bash", "zsh", "fish"} {
@@ -405,17 +407,17 @@ func cmdShellStatus(jsonOutput bool, stdout io.Writer) {
 		}
 	}
 	if jsonOutput {
-		_ = writeCLIJSONLine(stdout, shellStatusJSON{
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc shell status", shellStatusJSON{
 			SchemaVersion: "1",
 			Installed:     found,
 			Shells:        statuses,
 		})
-		return
 	}
 	if !found {
 		fmt.Fprintln(stdout, "Shell integration is not installed.") //nolint:errcheck // best-effort stdout
 		fmt.Fprintln(stdout, "Run: gc shell install")               //nolint:errcheck // best-effort stdout
 	}
+	return 0
 }
 
 // ── RC file manipulation ────────────────────────────────────────────────

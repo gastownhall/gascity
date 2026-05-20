@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
@@ -322,7 +321,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			_ = pokeController(cityPath)
 
 			if jsonOutput {
-				writeSessionNewJSON(stdout, sessionNewJSON{
+				if err := writeSessionNewJSON(stdout, stderr, sessionNewJSON{
 					SchemaVersion: "1",
 					OK:            true,
 					SessionID:     info.ID,
@@ -333,7 +332,9 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 					WorkDir:       info.WorkDir,
 					DeferredStart: true,
 					Attached:      false,
-				})
+				}); err != nil {
+					return 1
+				}
 			} else {
 				fmt.Fprintf(stdout, "Session %s created from template %q (reconciler will start it).\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
 			}
@@ -431,7 +432,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	defer func() { <-titleDone }() // ensure title goroutine completes on all exit paths
 
 	if jsonOutput {
-		writeSessionNewJSON(stdout, sessionNewJSON{
+		if err := writeSessionNewJSON(stdout, stderr, sessionNewJSON{
 			SchemaVersion: "1",
 			OK:            true,
 			SessionID:     info.ID,
@@ -442,7 +443,9 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			WorkDir:       info.WorkDir,
 			DeferredStart: false,
 			Attached:      false,
-		})
+		}); err != nil {
+			return 1
+		}
 	} else {
 		fmt.Fprintf(stdout, "Session %s created from template %q.\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
 	}
@@ -858,9 +861,7 @@ func writeSessionListJSON(sessions []session.Info, stateFilter, templateFilter s
 		Sessions:      rows,
 		Summary:       summarizeSessionList(rows),
 	}
-	enc := json.NewEncoder(stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(result); err != nil {
+	if err := writeCLIJSONLine(stdout, result); err != nil {
 		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -895,8 +896,8 @@ type sessionNewJSON struct {
 	Attached      bool   `json:"attached"`
 }
 
-func writeSessionNewJSON(stdout io.Writer, result sessionNewJSON) {
-	_ = writeCLIJSONLine(stdout, result) //nolint:errcheck // best-effort stdout
+func writeSessionNewJSON(stdout, stderr io.Writer, result sessionNewJSON) error {
+	return writeCLIJSONLineOrErr(stdout, stderr, "gc session new", result)
 }
 
 func sessionListJSONRows(sessions []session.Info) []sessionListJSONRow {
@@ -1424,12 +1425,15 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 			// Poke again to trigger immediate reconciler tick.
 			_ = pokeController(cityPath)
 			if asJSON {
-				writeSessionActionJSON(stdout, sessionActionResult{
+				if err := writeSessionActionJSON(stdout, sessionActionResult{
 					Action:    "suspend",
 					SessionID: sessionID,
 					Mode:      "managed",
 					State:     "suspended",
-				})
+				}); err != nil {
+					fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+					return 1
+				}
 				return 0
 			}
 			fmt.Fprintf(stdout, "Session %s suspended. Resume with: gc session wake %s\n", sessionID, sessionID) //nolint:errcheck // best-effort stdout
@@ -1451,12 +1455,15 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 	}
 
 	if asJSON {
-		writeSessionActionJSON(stdout, sessionActionResult{
+		if err := writeSessionActionJSON(stdout, sessionActionResult{
 			Action:    "suspend",
 			SessionID: sessionID,
 			Mode:      "direct",
 			State:     "suspended",
-		})
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		return 0
 	}
 	fmt.Fprintf(stdout, "Session %s suspended. Resume with: gc session attach %s\n", sessionID, sessionID) //nolint:errcheck // best-effort stdout
@@ -1522,12 +1529,15 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	}
 
 	if asJSON {
-		writeSessionActionJSON(stdout, sessionActionResult{
+		if err := writeSessionActionJSON(stdout, sessionActionResult{
 			Action:              "close",
 			SessionID:           sessionID,
 			State:               "closed",
 			WaitNudgesWithdrawn: len(closeResult.WaitNudgeIDs),
-		})
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		return 0
 	}
 	fmt.Fprintf(stdout, "Session %s closed.\n", sessionID) //nolint:errcheck // best-effort stdout
@@ -1586,11 +1596,14 @@ func cmdSessionRename(args []string, stdout, stderr io.Writer, jsonOutput ...boo
 	}
 
 	if asJSON {
-		writeSessionActionJSON(stdout, sessionActionResult{
+		if err := writeSessionActionJSON(stdout, sessionActionResult{
 			Action:    "rename",
 			SessionID: sessionID,
 			Title:     title,
-		})
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session rename: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		return 0
 	}
 	fmt.Fprintf(stdout, "Session %s renamed to %q.\n", sessionID, title) //nolint:errcheck // best-effort stdout
@@ -1655,12 +1668,15 @@ func cmdSessionPrune(beforeStr string, stdout, stderr io.Writer, jsonOutput ...b
 	}
 
 	if asJSON {
-		writeSessionActionJSON(stdout, sessionActionResult{
+		if err := writeSessionActionJSON(stdout, sessionActionResult{
 			Action: "prune",
 			Count:  &result.Count,
 			Before: beforeStr,
 			Cutoff: cutoff.UTC().Format(time.RFC3339),
-		})
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session prune: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		return 0
 	}
 	if result.Count == 0 {
@@ -1863,10 +1879,13 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	})
 
 	if asJSON {
-		writeSessionActionJSON(stdout, sessionActionResult{
+		if err := writeSessionActionJSON(stdout, sessionActionResult{
 			Action:    "kill",
 			SessionID: sessionID,
-		})
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		return 0
 	}
 	fmt.Fprintf(stdout, "Session %s killed.\n", sessionID) //nolint:errcheck // best-effort stdout
@@ -1941,8 +1960,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 	if c := apiClient(cityPath); c != nil {
 		resp, err := c.SubmitSession(target, message, intent)
 		if err == nil {
-			emitSessionSubmitResult(stdout, target, intent, resp.Queued, jsonOutput)
-			return 0
+			return emitSessionSubmitResult(stdout, stderr, target, intent, resp.Queued, jsonOutput)
 		}
 		if !api.ShouldFallback(err) {
 			fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1980,11 +1998,10 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	emitSessionSubmitResult(stdout, target, intent, outcome.Queued, jsonOutput)
-	return 0
+	return emitSessionSubmitResult(stdout, stderr, target, intent, outcome.Queued, jsonOutput)
 }
 
-func emitSessionSubmitResult(stdout io.Writer, target string, intent session.SubmitIntent, queued, jsonOutput bool) {
+func emitSessionSubmitResult(stdout, stderr io.Writer, target string, intent session.SubmitIntent, queued, jsonOutput bool) int {
 	if jsonOutput {
 		outcome := "submitted"
 		if queued {
@@ -1992,15 +2009,14 @@ func emitSessionSubmitResult(stdout io.Writer, target string, intent session.Sub
 		} else if intent == session.SubmitIntentInterruptNow {
 			outcome = "interrupted"
 		}
-		_ = writeCLIJSONLine(stdout, sessionSubmitJSON{
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc session submit", sessionSubmitJSON{
 			SchemaVersion: "1",
 			OK:            true,
 			Target:        target,
 			Intent:        string(intent),
 			Queued:        queued,
 			Outcome:       outcome,
-		}) //nolint:errcheck // best-effort stdout
-		return
+		})
 	}
 	switch {
 	case queued:
@@ -2012,6 +2028,7 @@ func emitSessionSubmitResult(stdout io.Writer, target string, intent session.Sub
 	default:
 		fmt.Fprintf(stdout, "Submitted to %s\n", target) //nolint:errcheck // best-effort stdout
 	}
+	return 0
 }
 
 type sessionNudgeJSON struct {

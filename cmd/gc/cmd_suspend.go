@@ -71,8 +71,7 @@ func cmdSuspend(args []string, jsonOut bool, stdout, stderr io.Writer) int {
 	if c := apiClient(cityPath); c != nil {
 		err := c.SuspendCity()
 		if err == nil {
-			writeCitySuspensionSuccess(stdout, cityPath, true, jsonOut)
-			return 0
+			return writeCitySuspensionSuccess(stdout, stderr, cityPath, true, jsonOut)
 		}
 		if !api.ShouldFallback(err) {
 			fmt.Fprintf(stderr, "gc suspend: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -93,8 +92,7 @@ func cmdResume(args []string, jsonOut bool, stdout, stderr io.Writer) int {
 	if c := apiClient(cityPath); c != nil {
 		err := c.ResumeCity()
 		if err == nil {
-			writeCitySuspensionSuccess(stdout, cityPath, false, jsonOut)
-			return 0
+			return writeCitySuspensionSuccess(stdout, stderr, cityPath, false, jsonOut)
 		}
 		if !api.ShouldFallback(err) {
 			fmt.Fprintf(stderr, "gc resume: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -144,11 +142,10 @@ func doSuspendCity(fs fsys.FS, cityPath string, suspend bool, jsonOut bool, stdo
 			Actor: eventActor(),
 		})
 	}
-	writeCitySuspensionSuccess(stdout, cityPath, suspend, jsonOut)
-	return 0
+	return writeCitySuspensionSuccess(stdout, stderr, cityPath, suspend, jsonOut)
 }
 
-func writeCitySuspensionSuccess(stdout io.Writer, cityPath string, suspend bool, jsonOut bool) {
+func writeCitySuspensionSuccess(stdout, stderr io.Writer, cityPath string, suspend bool, jsonOut bool) int {
 	if jsonOut {
 		action := "resume"
 		message := "City resumed."
@@ -156,19 +153,19 @@ func writeCitySuspensionSuccess(stdout io.Writer, cityPath string, suspend bool,
 			action = "suspend"
 			message = "City suspended."
 		}
-		_ = writeLifecycleActionJSON(stdout, lifecycleActionJSON{
+		return writeLifecycleActionJSONOrExit(stdout, stderr, "gc "+action, lifecycleActionJSON{
 			Command:  action,
 			Action:   action,
 			Message:  message,
 			CityPath: cityPath,
 		})
-		return
 	}
 	if suspend {
 		fmt.Fprintf(stdout, "City suspended (%s)\n", cityPath) //nolint:errcheck // best-effort stdout
-		return
+		return 0
 	}
 	fmt.Fprintf(stdout, "City resumed (%s)\n", cityPath) //nolint:errcheck // best-effort stdout
+	return 0
 }
 
 // citySuspended checks whether the city is suspended. Returns true if

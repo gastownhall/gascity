@@ -104,12 +104,15 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	}
 
 	if asJSON {
-		writeSessionActionJSON(stdout, sessionActionResult{
+		if err := writeSessionActionJSON(stdout, sessionActionResult{
 			Action:              "wake",
 			SessionID:           id,
 			State:               "wake_requested",
 			WaitNudgesWithdrawn: len(nudgeIDs),
-		})
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
+			return 1
+		}
 		return 0
 	}
 	fmt.Fprintf(stdout, "Session %s: wake requested.\n", id) //nolint:errcheck

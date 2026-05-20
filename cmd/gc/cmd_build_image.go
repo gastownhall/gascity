@@ -62,7 +62,7 @@ volume mounts at runtime.`,
 				return errExit
 			}
 			if jsonOut {
-				_ = writeCLIJSONLine(stdout, buildImageJSONResult{
+				return writeCLIJSONLineOrErr(stdout, stderr, "gc build-image", buildImageJSONResult{
 					SchemaVersion: "1",
 					CityPath:      result.CityPath,
 					Tag:           tag,

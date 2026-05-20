@@ -5,6 +5,7 @@ import "io"
 type sessionActionResult struct {
 	SchemaVersion       string `json:"schema_version"`
 	OK                  bool   `json:"ok"`
+	Command             string `json:"command"`
 	Action              string `json:"action"`
 	SessionID           string `json:"session_id,omitempty"`
 	State               string `json:"state,omitempty"`
@@ -23,8 +24,11 @@ func sessionJSONRequested(values []bool) bool {
 	return len(values) > 0 && values[0]
 }
 
-func writeSessionActionJSON(stdout io.Writer, result sessionActionResult) {
+func writeSessionActionJSON(stdout io.Writer, result sessionActionResult) error {
 	result.SchemaVersion = "1"
 	result.OK = true
-	_ = writeCLIJSONLine(stdout, result)
+	if result.Command == "" && result.Action != "" {
+		result.Command = commandName("session", result.Action)
+	}
+	return writeCLIJSONLine(stdout, result)
 }

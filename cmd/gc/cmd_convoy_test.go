@@ -857,6 +857,52 @@ func TestConvoyCheck(t *testing.T) {
 	}
 }
 
+func TestConvoyCheckJSONAutoCloseEmitsSingleResult(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"})    // gc-1
+	_, _ = store.Create(beads.Bead{Title: "task A", ParentID: "gc-1"}) // gc-2
+	_ = store.Close("gc-2")
+
+	var stdout, stderr bytes.Buffer
+	code := doConvoyCheckAcrossStoresJSON([]convoyStoreView{{store: store}}, events.Discard, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyCheckAcrossStoresJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Auto-closed convoy") {
+		t.Fatalf("stdout contains human auto-close text in JSON mode:\n%s", stdout.String())
+	}
+	if strings.Count(stdout.String(), "\n") != 1 {
+		t.Fatalf("stdout = %q, want exactly one JSONL result", stdout.String())
+	}
+
+	var got struct {
+		SchemaVersion string `json:"schema_version"`
+		OK            bool   `json:"ok"`
+		Command       string `json:"command"`
+		Action        string `json:"action"`
+		Closed        int    `json:"closed"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || !got.OK || got.Command != "convoy.check" || got.Action != "check" || got.Closed != 1 {
+		t.Fatalf("payload = %+v", got)
+	}
+}
+
+func TestConvoyCheckJSONReportsWriteError(t *testing.T) {
+	store := beads.NewMemStore()
+
+	var stderr bytes.Buffer
+	code := doConvoyCheckAcrossStoresJSON([]convoyStoreView{{store: store}}, events.Discard, true, errWriter{}, &stderr)
+	if code != 1 {
+		t.Fatalf("doConvoyCheckAcrossStoresJSON = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "writing JSON result") {
+		t.Fatalf("stderr = %q, want JSON write error", stderr.String())
+	}
+}
+
 func TestConvoyCheckPartial(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"})    // gc-1

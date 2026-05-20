@@ -87,7 +87,7 @@ func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.
 			}
 			warnInvalidConfigAfterSuccessfulStop(cityPath, stderr)
 			if jsonOut {
-				return writeCityStopSuccess(stdout, cityPath, force)
+				return writeCityStopSuccess(stdout, stderr, cityPath, force)
 			}
 			fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
 			return 0
@@ -98,7 +98,7 @@ func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.
 	if err != nil {
 		if handled, code := stopManagedRuntimeWithoutConfig(cityPath, err, stopStdout, stderr, force); handled {
 			if code == 0 && jsonOut {
-				return writeCityStopSuccess(stdout, cityPath, force)
+				return writeCityStopSuccess(stdout, stderr, cityPath, force)
 			}
 			return code
 		}
@@ -120,7 +120,7 @@ func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.
 	select {
 	case out := <-doneCh:
 		if out.code == 0 && jsonOut {
-			return writeCityStopSuccess(stdout, cityPath, force)
+			return writeCityStopSuccess(stdout, stderr, cityPath, force)
 		}
 		return out.code
 	case <-time.After(wallClockCap):
@@ -129,15 +129,14 @@ func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.
 	}
 }
 
-func writeCityStopSuccess(stdout io.Writer, cityPath string, force bool) int {
-	_ = writeLifecycleActionJSON(stdout, lifecycleActionJSON{
+func writeCityStopSuccess(stdout, stderr io.Writer, cityPath string, force bool) int {
+	return writeLifecycleActionJSONOrExit(stdout, stderr, "gc stop", lifecycleActionJSON{
 		Command:  "stop",
 		Action:   "stop",
 		Message:  "City stopped.",
 		CityPath: cityPath,
 		Force:    lifecycleBoolPtr(force),
 	})
-	return 0
 }
 
 func resolveStopCityPath(args []string) (string, error) {

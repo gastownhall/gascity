@@ -1,36 +1,83 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["schema_version", "thread_id", "messages"],
+  "required": [
+    "schema_version",
+    "ok",
+    "thread_id",
+    "messages"
+  ],
   "properties": {
-    "schema_version": { "const": "1" },
-    "thread_id": { "type": "string" },
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
+    "thread_id": {
+      "type": "string"
+    },
     "messages": {
       "type": "array",
-      "items": { "$ref": "#/$defs/mail_message" }
+      "items": {
+        "$ref": "#/$defs/mail_message"
+      }
     }
   },
-  "additionalProperties": false,
+  "additionalProperties": true,
   "$defs": {
     "mail_message": {
       "type": "object",
-      "required": ["id", "from", "to", "subject", "body", "created_at", "read"],
+      "required": [
+        "id",
+        "from",
+        "to",
+        "subject",
+        "body",
+        "created_at",
+        "read"
+      ],
       "properties": {
-        "id": { "type": "string" },
-        "from": { "type": "string" },
-        "to": { "type": "string" },
-        "subject": { "type": "string" },
-        "body": { "type": "string" },
-        "created_at": { "type": "string", "format": "date-time" },
-        "read": { "type": "boolean" },
-        "thread_id": { "type": "string" },
-        "reply_to": { "type": "string" },
-        "priority": { "type": "integer" },
+        "id": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "read": {
+          "type": "boolean"
+        },
+        "thread_id": {
+          "type": "string"
+        },
+        "reply_to": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "integer"
+        },
         "cc": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
-        "rig": { "type": "string" }
+        "rig": {
+          "type": "string"
+        }
       },
       "additionalProperties": false
     }

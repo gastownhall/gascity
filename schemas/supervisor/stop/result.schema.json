@@ -10,5 +10,5 @@
     "message": { "type": "string" },
     "wait": { "type": "boolean" }
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

@@ -10,5 +10,5 @@
     "convoy_id": { "type": "string", "minLength": 1 },
     "issue_ids": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

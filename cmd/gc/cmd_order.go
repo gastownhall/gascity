@@ -774,7 +774,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	}
 
 	if jsonOutput {
-		_ = writeCLIJSONLine(stdout, orderRunJSON{
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc order run", orderRunJSON{
 			SchemaVersion: "1",
 			OK:            true,
 			Order:         a.Name,
@@ -784,8 +784,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 			WispID:        rootID,
 			RoutedTo:      pool,
 			EventCursor:   headSeq,
-		}) //nolint:errcheck // best-effort stdout
-		return 0
+		})
 	}
 	fmt.Fprintf(stdout, "Order %q executed: wisp %s", name, rootID) //nolint:errcheck
 	if a.Pool != "" {
@@ -910,7 +909,7 @@ func orderLastRunFn(store beads.Store) orders.LastRunFunc {
 // doOrderCheck evaluates triggers for all orders and prints a table.
 // Returns 0 if any are due, 1 if none are due.
 func doOrderCheck(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc, stdout io.Writer) int {
-	return doOrderCheckJSON(aa, now, lastRunFn, false, stdout)
+	return doOrderCheckJSON(aa, now, lastRunFn, false, stdout, io.Discard)
 }
 
 type orderCheckJSON struct {
@@ -931,17 +930,19 @@ type orderCheckJSONRow struct {
 	Reason     string `json:"reason"`
 }
 
-func doOrderCheckJSON(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc, jsonOutput bool, stdout io.Writer) int {
+func doOrderCheckJSON(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc, jsonOutput bool, stdout, stderr io.Writer) int {
 	if len(aa) == 0 {
 		if jsonOutput {
-			_ = writeCLIJSONLine(stdout, orderCheckJSON{
+			if writeCLIJSONLineOrExit(stdout, stderr, "gc order check", orderCheckJSON{
 				SchemaVersion: "1",
 				OK:            true,
 				AnyDue:        false,
 				OrdersTotal:   0,
 				DueTotal:      0,
 				Orders:        []orderCheckJSONRow{},
-			}) //nolint:errcheck // best-effort stdout
+			}) != 0 {
+				return 1
+			}
 			return 1
 		}
 		fmt.Fprintln(stdout, "No orders found.") //nolint:errcheck // best-effort stdout
@@ -970,7 +971,9 @@ func doOrderCheckJSON(aa []orders.Order, now time.Time, lastRunFn orders.LastRun
 				Reason:     check.Reason,
 			})
 		}
-		_ = writeCLIJSONLine(stdout, result) //nolint:errcheck // best-effort stdout
+		if writeCLIJSONLineOrExit(stdout, stderr, "gc order check", result) != 0 {
+			return 1
+		}
 		if result.AnyDue {
 			return 0
 		}
@@ -1019,14 +1022,16 @@ func doOrderCheckWithStoresResolverScoped(cityPath string, cfg *config.City, aa 
 func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City, aa []orders.Order, now time.Time, ep events.Provider, resolveStores orderStoresResolver, jsonOutput bool, stdout, stderr io.Writer) int {
 	if len(aa) == 0 {
 		if jsonOutput {
-			_ = writeCLIJSONLine(stdout, orderCheckJSON{
+			if writeCLIJSONLineOrExit(stdout, stderr, "gc order check", orderCheckJSON{
 				SchemaVersion: "1",
 				OK:            true,
 				AnyDue:        false,
 				OrdersTotal:   0,
 				DueTotal:      0,
 				Orders:        []orderCheckJSONRow{},
-			}) //nolint:errcheck // best-effort stdout
+			}) != 0 {
+				return 1
+			}
 			return 1
 		}
 		fmt.Fprintln(stdout, "No orders found.") //nolint:errcheck // best-effort stdout
@@ -1089,7 +1094,9 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 				Reason:     check.Reason,
 			})
 		}
-		_ = writeCLIJSONLine(stdout, result) //nolint:errcheck // best-effort stdout
+		if writeCLIJSONLineOrExit(stdout, stderr, "gc order check", result) != 0 {
+			return 1
+		}
 		if result.AnyDue {
 			return 0
 		}
@@ -1267,7 +1274,7 @@ func doOrderHistoryWithStoresResolverJSON(name, rig string, aa []orders.Order, r
 
 	if len(entries) == 0 {
 		if jsonOutput {
-			_ = writeCLIJSONLine(stdout, orderHistoryJSONResult{
+			return writeCLIJSONLineOrExit(stdout, stderr, "gc order history", orderHistoryJSONResult{
 				SchemaVersion: "1",
 				OK:            true,
 				Name:          name,
@@ -1275,7 +1282,6 @@ func doOrderHistoryWithStoresResolverJSON(name, rig string, aa []orders.Order, r
 				Entries:       []orderHistoryJSONEntry{},
 				Summary:       orderHistoryJSONSummary{Total: 0},
 			})
-			return 0
 		}
 		if name != "" {
 			fmt.Fprintf(stdout, "No order history for %q.\n", name) //nolint:errcheck
@@ -1307,8 +1313,7 @@ func doOrderHistoryWithStoresResolverJSON(name, rig string, aa []orders.Order, r
 				CreatedAt: e.createdAt,
 			})
 		}
-		_ = writeCLIJSONLine(stdout, payload)
-		return 0
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc order history", payload)
 	}
 
 	hasRig := false

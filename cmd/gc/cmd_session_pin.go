@@ -130,12 +130,15 @@ func cmdSessionSetPin(args []string, pinned bool, stdout, stderr io.Writer, json
 	pokeSessionPinController(cityErr, cityPath)
 
 	if asJSON {
-		writeSessionActionJSON(stdout, sessionActionResult{
+		if err := writeSessionActionJSON(stdout, sessionActionResult{
 			Action:            action,
 			SessionID:         id,
 			Pinned:            &pinned,
 			MaterializedNamed: materializedForPin,
-		})
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session %s: %v\n", action, err) //nolint:errcheck
+			return 1
+		}
 		return 0
 	}
 	if pinned {

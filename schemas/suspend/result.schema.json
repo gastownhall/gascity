@@ -10,5 +10,5 @@
     "message": { "type": "string" },
     "city_path": { "type": "string" }
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

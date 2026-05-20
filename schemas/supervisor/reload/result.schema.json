@@ -9,5 +9,5 @@
     "action": { "const": "reload" },
     "message": { "type": "string" }
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

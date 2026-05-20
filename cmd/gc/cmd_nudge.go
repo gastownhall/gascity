@@ -580,7 +580,7 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, stdout, stderr)
 	}
 	if jsonOutput {
-		_ = writeCLIJSONLine(stdout, sessionNudgeJSON{
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc session nudge", sessionNudgeJSON{
 			SchemaVersion: "1",
 			OK:            true,
 			Target:        target.agentKey(),
@@ -589,8 +589,7 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 			Delivery:      string(mode),
 			Queued:        false,
 			Outcome:       "delivered",
-		}) //nolint:errcheck // best-effort stdout
-		return 0
+		})
 	}
 	fmt.Fprintf(stdout, "Nudged %s\n", target.agentKey()) //nolint:errcheck
 	return 0
@@ -632,7 +631,7 @@ func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runti
 		maybeStartNudgePoller(target)
 	}
 	if jsonOutput {
-		_ = writeCLIJSONLine(stdout, sessionNudgeJSON{
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc session nudge", sessionNudgeJSON{
 			SchemaVersion: "1",
 			OK:            true,
 			Target:        target.agentKey(),
@@ -641,8 +640,7 @@ func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runti
 			Delivery:      string(mode),
 			Queued:        true,
 			Outcome:       "queued",
-		}) //nolint:errcheck // best-effort stdout
-		return 0
+		})
 	}
 	fmt.Fprintf(stdout, "Queued nudge for %s\n", target.agentKey()) //nolint:errcheck
 	return 0

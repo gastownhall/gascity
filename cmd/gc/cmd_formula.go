@@ -520,7 +520,7 @@ bead into a sub-workflow at runtime.`,
 				}
 
 				if jsonOutput {
-					_ = writeCLIJSONLine(stdout, formulaCookJSONResult{
+					if err := writeCLIJSONLineOrErr(stdout, stderr, "gc formula cook", formulaCookJSONResult{
 						SchemaVersion:  "1",
 						OK:             true,
 						Formula:        args[0],
@@ -529,7 +529,9 @@ bead into a sub-workflow at runtime.`,
 						RootID:         result.RootID,
 						WorkflowRootID: result.WorkflowRootID,
 						Created:        result.Created,
-					})
+					}); err != nil {
+						return err
+					}
 					_ = pokeControlDispatch(cityPath)
 					return nil
 				}
@@ -561,7 +563,7 @@ bead into a sub-workflow at runtime.`,
 			}
 
 			if jsonOutput {
-				_ = writeCLIJSONLine(stdout, formulaCookJSONResult{
+				return writeCLIJSONLineOrErr(stdout, stderr, "gc formula cook", formulaCookJSONResult{
 					SchemaVersion: "1",
 					OK:            true,
 					Formula:       args[0],
@@ -570,7 +572,6 @@ bead into a sub-workflow at runtime.`,
 					Created:       result.Created,
 					IDMapping:     result.IDMapping,
 				})
-				return nil
 			}
 			_, _ = fmt.Fprintf(stdout, "Root: %s\n", result.RootID)
 			_, _ = fmt.Fprintf(stdout, "Created: %d\n", result.Created)

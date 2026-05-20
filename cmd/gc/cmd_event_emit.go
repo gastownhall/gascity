@@ -59,7 +59,7 @@ durable persistence.`,
 			submitted := false
 			if jsonOut {
 				submitted = cmdEventEmitSubmitted(args[0], subject, message, effectiveActor, payload, stderr)
-				_ = writeCLIJSONLine(stdout, eventEmitJSONResult{
+				return writeCLIJSONLineOrErr(stdout, stderr, "gc event emit", eventEmitJSONResult{
 					SchemaVersion: "1",
 					EventType:     args[0],
 					Actor:         effectiveActor,
@@ -68,7 +68,6 @@ durable persistence.`,
 					HasPayload:    payload != "",
 					Submitted:     submitted,
 				})
-				return nil
 			}
 			if cmdEventEmit(args[0], subject, message, effectiveActor, payload, stderr) != 0 {
 				return errExit

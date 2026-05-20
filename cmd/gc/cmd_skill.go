@@ -87,14 +87,13 @@ func newSkillListCmd(stdout, stderr io.Writer) *cobra.Command {
 				return errExit
 			}
 			if jsonOut {
-				_ = writeCLIJSONLine(stdout, skillListJSONResult{
+				return writeCLIJSONLineOrErr(stdout, stderr, "gc skill list", skillListJSONResult{
 					SchemaVersion: "1",
 					Agent:         strings.TrimSpace(agentName),
 					Session:       strings.TrimSpace(sessionID),
 					Count:         len(entries),
 					Entries:       entries,
 				})
-				return nil
 			}
 			writeVisibilityEntries(stdout, entries)
 			return nil

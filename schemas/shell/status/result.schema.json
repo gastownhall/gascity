@@ -2,10 +2,23 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "x-gc-jsonl": {},
   "type": "object",
-  "required": ["schema_version", "installed", "shells"],
+  "required": [
+    "schema_version",
+    "ok",
+    "installed",
+    "shells"
+  ],
   "properties": {
-    "schema_version": { "type": "string", "const": "1" },
-    "installed": { "type": "boolean" },
+    "schema_version": {
+      "type": "string",
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
+    "installed": {
+      "type": "boolean"
+    },
     "shells": {
       "type": "array",
       "items": {
@@ -20,13 +33,27 @@
           "rc_hook_present"
         ],
         "properties": {
-          "shell": { "type": "string" },
-          "status": { "type": "string" },
-          "installed": { "type": "boolean" },
-          "completion_script_path": { "type": "string" },
-          "completion_script_exists": { "type": "boolean" },
-          "rc_path": { "type": "string" },
-          "rc_hook_present": { "type": "boolean" }
+          "shell": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "installed": {
+            "type": "boolean"
+          },
+          "completion_script_path": {
+            "type": "string"
+          },
+          "completion_script_exists": {
+            "type": "boolean"
+          },
+          "rc_path": {
+            "type": "string"
+          },
+          "rc_hook_present": {
+            "type": "boolean"
+          }
         },
         "additionalProperties": true
       }

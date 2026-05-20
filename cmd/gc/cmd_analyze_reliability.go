@@ -111,7 +111,7 @@ func runAnalyzeReliability(opts reliabilityCmdOptions, stdout, _ io.Writer) erro
 		reliability.Filter{Model: opts.model, Rig: opts.rig})
 
 	if opts.jsonOut {
-		return reliability.FormatJSON(stdout, report)
+		return writeCLIJSONLine(stdout, report)
 	}
 	return reliability.FormatTable(stdout, report)
 }

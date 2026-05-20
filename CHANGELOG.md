@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `gc sling --json` now emits one JSONL result record, matching its checked-in
+  result schema; earlier JSON support emitted an indented multi-line object.
 - Pack import cache validation now requires commit abbreviations in
   `packs.lock` to be at least seven characters long. Shorter abbreviations
   should be refreshed with `gc import install`.

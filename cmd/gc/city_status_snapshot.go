@@ -408,6 +408,7 @@ func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSumma
 	running := snapshot.Controller.Running
 	return StatusJSON{
 		SchemaVersion: "1",
+		OK:            true,
 		CityName:      snapshot.CityName,
 		Workspace:     WorkspaceJSON{Name: snapshot.CityName, Path: snapshot.CityPath},
 		CityPath:      snapshot.CityPath,

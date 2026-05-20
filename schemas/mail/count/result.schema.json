@@ -1,16 +1,37 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["schema_version", "recipient", "total", "unread"],
+  "required": [
+    "schema_version",
+    "ok",
+    "recipient",
+    "total",
+    "unread"
+  ],
   "properties": {
-    "schema_version": { "const": "1" },
-    "recipient": { "type": "string" },
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
+    "recipient": {
+      "type": "string"
+    },
     "recipients": {
       "type": "array",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
     },
-    "total": { "type": "integer", "minimum": 0 },
-    "unread": { "type": "integer", "minimum": 0 }
+    "total": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "unread": {
+      "type": "integer",
+      "minimum": 0
+    }
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

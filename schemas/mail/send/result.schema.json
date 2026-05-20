@@ -28,5 +28,5 @@
     "count": { "type": "integer", "minimum": 0 },
     "notified": { "type": "boolean" }
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

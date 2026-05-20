@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -305,7 +306,7 @@ func TestShellStatusTracksBashProfileInstall(t *testing.T) {
 	shellTestWriteFile(t, filepath.Join(home, ".bashrc"), "# created later\n")
 
 	var stdout bytes.Buffer
-	cmdShellStatus(false, &stdout)
+	cmdShellStatus(false, &stdout, io.Discard)
 
 	out := stdout.String()
 	if !strings.Contains(out, "bash: installed") {
@@ -463,7 +464,7 @@ func TestShellStatus_NotInstalled(t *testing.T) {
 	shellTestWriteFile(t, filepath.Join(home, ".config", "fish", "config.fish"), "")
 
 	var stdout bytes.Buffer
-	cmdShellStatus(false, &stdout)
+	cmdShellStatus(false, &stdout, io.Discard)
 	if !strings.Contains(stdout.String(), "not installed") {
 		t.Errorf("expected 'not installed', got: %s", stdout.String())
 	}
@@ -481,7 +482,7 @@ func TestShellStatus_Installed(t *testing.T) {
 	shellTestWriteFile(t, rc, shellHookMarkerBegin+"\nsource foo\n"+shellHookMarkerEnd+"\n")
 
 	var stdout bytes.Buffer
-	cmdShellStatus(false, &stdout)
+	cmdShellStatus(false, &stdout, io.Discard)
 	out := stdout.String()
 	if !strings.Contains(out, "zsh: installed") {
 		t.Errorf("expected 'zsh: installed', got: %s", out)

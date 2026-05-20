@@ -9,5 +9,5 @@
     "action": { "const": "close" },
     "convoy_id": { "type": "string", "minLength": 1 }
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

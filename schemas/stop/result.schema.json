@@ -11,5 +11,5 @@
     "city_path": { "type": "string" },
     "force": { "type": "boolean" }
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

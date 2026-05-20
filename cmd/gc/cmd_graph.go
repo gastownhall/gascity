@@ -155,14 +155,13 @@ func doGraph(store beads.Store, args []string, opts graphOpts, stdout, stderr io
 	}
 	if len(resolved) == 0 {
 		if opts.JSON {
-			_ = writeCLIJSONLine(stdout, graphJSONResult{
+			return writeCLIJSONLineOrExit(stdout, stderr, "gc graph", graphJSONResult{
 				SchemaVersion: "1",
 				OK:            true,
 				Input:         append([]string(nil), args...),
 				Nodes:         []graphJSONNode{},
 				Summary:       graphJSONSummary{},
 			})
-			return 0
 		}
 		fmt.Fprintln(stdout, "No beads to graph") //nolint:errcheck // best-effort stdout
 		return 0
@@ -209,7 +208,7 @@ func doGraph(store beads.Store, args []string, opts graphOpts, stdout, stderr io
 
 	switch {
 	case opts.JSON:
-		_ = writeCLIJSONLine(stdout, buildGraphJSONResult(args, nodes))
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc graph", buildGraphJSONResult(args, nodes))
 	case opts.Mermaid:
 		printMermaid(nodes, stdout)
 	case opts.Tree:

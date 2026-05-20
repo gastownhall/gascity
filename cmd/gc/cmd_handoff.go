@@ -77,7 +77,7 @@ or ID. Subject is required unless --auto is set.`,
 				return errExit
 			}
 			if jsonOut {
-				_ = writeCLIJSONLine(stdout, handoffJSONResult{
+				return writeCLIJSONLineOrErr(stdout, stderr, "gc handoff", handoffJSONResult{
 					SchemaVersion: "1",
 					Mode:          handoffJSONMode(target, auto),
 					Target:        target,

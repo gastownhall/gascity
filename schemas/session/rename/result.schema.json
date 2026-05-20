@@ -5,10 +5,11 @@
   "properties": {
     "schema_version": { "const": "1" },
     "ok": { "const": true },
+    "command": { "const": "session rename" },
     "action": { "const": "rename" },
     "session_id": { "type": "string", "minLength": 1 },
     "title": { "type": "string" }
   },
-  "required": ["schema_version", "ok", "action", "session_id", "title"],
-  "additionalProperties": false
+  "required": ["schema_version", "ok", "command", "action", "session_id", "title"],
+  "additionalProperties": true
 }

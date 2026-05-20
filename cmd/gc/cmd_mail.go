@@ -211,10 +211,9 @@ func doMailArchiveSingleJSON(mp mail.Provider, rec events.Recorder, id string, j
 	if err := mp.Archive(id); err != nil {
 		if errors.Is(err, mail.ErrAlreadyArchived) {
 			if jsonOut {
-				_ = writeCLIJSONLine(stdout, mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.archive", Action: "archive", ID: id, IDs: []string{id}, Count: intRef(0), AlreadyDone: true})
-			} else {
-				fmt.Fprintf(stdout, "Already archived %s\n", id) //nolint:errcheck // best-effort stdout
+				return writeCLIJSONLineOrExit(stdout, stderr, "gc mail archive", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.archive", Action: "archive", ID: id, IDs: []string{id}, Count: intRef(0), AlreadyDone: true})
 			}
+			fmt.Fprintf(stdout, "Already archived %s\n", id) //nolint:errcheck // best-effort stdout
 			return 0
 		}
 		telemetry.RecordMailOp(context.Background(), "archive", err)
@@ -229,10 +228,9 @@ func doMailArchiveSingleJSON(mp mail.Provider, rec events.Recorder, id string, j
 		Payload: mailEventPayload(nil),
 	})
 	if jsonOut {
-		_ = writeCLIJSONLine(stdout, mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.archive", Action: "archive", ID: id, IDs: []string{id}, Count: intRef(1)})
-	} else {
-		fmt.Fprintf(stdout, "Archived message %s\n", id) //nolint:errcheck // best-effort stdout
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail archive", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.archive", Action: "archive", ID: id, IDs: []string{id}, Count: intRef(1)})
 	}
+	fmt.Fprintf(stdout, "Archived message %s\n", id) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
@@ -276,7 +274,7 @@ func doMailArchiveManyJSON(mp mail.Provider, rec events.Recorder, ids []string, 
 		}
 	}
 	if jsonOut && exit == 0 {
-		_ = writeCLIJSONLine(stdout, mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.archive", Action: "archive", IDs: ids, Count: intRef(archived), AlreadyDone: already == len(ids)})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail archive", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.archive", Action: "archive", IDs: ids, Count: intRef(archived), AlreadyDone: already == len(ids)})
 	}
 	return exit
 }
@@ -1437,7 +1435,7 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 	}
 	if jsonOut {
 		summary := summarizeMailMessage(m)
-		_ = writeCLIJSONLine(stdout, mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", ID: m.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", ID: m.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified})
 	}
 	return 0
 }
@@ -1506,7 +1504,7 @@ func doMailSendAllJSON(mp mail.Provider, rec events.Recorder, validRecipients ma
 		}
 	}
 	if jsonOut {
-		_ = writeCLIJSONLine(stdout, mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", Messages: sent, Count: intRef(len(sent)), Notified: notified})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", Messages: sent, Count: intRef(len(sent)), Notified: notified})
 	}
 	return 0
 }
@@ -1774,7 +1772,7 @@ func doMailReplyJSON(mp mail.Provider, rec events.Recorder, id, sender, subject,
 	}
 	if jsonOut {
 		summary := summarizeMailMessage(reply)
-		_ = writeCLIJSONLine(stdout, mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.reply", Action: "reply", ID: reply.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail reply", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.reply", Action: "reply", ID: reply.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified})
 	}
 	return 0
 }
@@ -1817,10 +1815,9 @@ func doMailMarkReadJSON(mp mail.Provider, rec events.Recorder, args []string, js
 		Payload: mailEventPayload(nil),
 	})
 	if jsonOut {
-		_ = writeCLIJSONLine(stdout, mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.mark-read", Action: "mark-read", ID: id, IDs: []string{id}, Count: intRef(1)})
-	} else {
-		fmt.Fprintf(stdout, "Marked %s as read\n", id) //nolint:errcheck // best-effort stdout
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail mark-read", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.mark-read", Action: "mark-read", ID: id, IDs: []string{id}, Count: intRef(1)})
 	}
+	fmt.Fprintf(stdout, "Marked %s as read\n", id) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
@@ -1862,10 +1859,9 @@ func doMailMarkUnreadJSON(mp mail.Provider, rec events.Recorder, args []string, 
 		Payload: mailEventPayload(nil),
 	})
 	if jsonOut {
-		_ = writeCLIJSONLine(stdout, mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.mark-unread", Action: "mark-unread", ID: id, IDs: []string{id}, Count: intRef(1)})
-	} else {
-		fmt.Fprintf(stdout, "Marked %s as unread\n", id) //nolint:errcheck // best-effort stdout
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail mark-unread", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.mark-unread", Action: "mark-unread", ID: id, IDs: []string{id}, Count: intRef(1)})
 	}
+	fmt.Fprintf(stdout, "Marked %s as unread\n", id) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
@@ -1916,10 +1912,9 @@ func doMailDeleteSingleJSON(mp mail.Provider, rec events.Recorder, id string, js
 	if err := mp.Delete(id); err != nil {
 		if errors.Is(err, mail.ErrAlreadyArchived) {
 			if jsonOut {
-				_ = writeCLIJSONLine(stdout, mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.delete", Action: "delete", ID: id, IDs: []string{id}, Count: intRef(0), AlreadyDone: true})
-			} else {
-				fmt.Fprintf(stdout, "Already deleted %s\n", id) //nolint:errcheck // best-effort stdout
+				return writeCLIJSONLineOrExit(stdout, stderr, "gc mail delete", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.delete", Action: "delete", ID: id, IDs: []string{id}, Count: intRef(0), AlreadyDone: true})
 			}
+			fmt.Fprintf(stdout, "Already deleted %s\n", id) //nolint:errcheck // best-effort stdout
 			return 0
 		}
 		telemetry.RecordMailOp(context.Background(), "delete", err)
@@ -1934,10 +1929,9 @@ func doMailDeleteSingleJSON(mp mail.Provider, rec events.Recorder, id string, js
 		Payload: mailEventPayload(nil),
 	})
 	if jsonOut {
-		_ = writeCLIJSONLine(stdout, mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.delete", Action: "delete", ID: id, IDs: []string{id}, Count: intRef(1)})
-	} else {
-		fmt.Fprintf(stdout, "Deleted message %s\n", id) //nolint:errcheck // best-effort stdout
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail delete", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.delete", Action: "delete", ID: id, IDs: []string{id}, Count: intRef(1)})
 	}
+	fmt.Fprintf(stdout, "Deleted message %s\n", id) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
@@ -1981,7 +1975,7 @@ func doMailDeleteManyJSON(mp mail.Provider, rec events.Recorder, ids []string, j
 		}
 	}
 	if jsonOut && exit == 0 {
-		_ = writeCLIJSONLine(stdout, mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.delete", Action: "delete", IDs: ids, Count: intRef(deleted), AlreadyDone: already == len(ids)})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail delete", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.delete", Action: "delete", IDs: ids, Count: intRef(deleted), AlreadyDone: already == len(ids)})
 	}
 	return exit
 }

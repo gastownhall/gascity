@@ -379,16 +379,34 @@ type sessionLogsJSONResult struct {
 }
 
 type sessionLogEntryJSON struct {
-	UUID            string                          `json:"uuid,omitempty"`
-	ParentUUID      string                          `json:"parent_uuid,omitempty"`
-	Type            string                          `json:"type"`
-	Subtype         string                          `json:"subtype,omitempty"`
-	Role            string                          `json:"role,omitempty"`
-	Timestamp       string                          `json:"timestamp,omitempty"`
-	CompactBoundary bool                            `json:"compact_boundary,omitempty"`
-	Text            string                          `json:"text,omitempty"`
-	Blocks          []worker.TranscriptContentBlock `json:"blocks,omitempty"`
-	Message         json.RawMessage                 `json:"message,omitempty"`
+	UUID            string                       `json:"uuid,omitempty"`
+	ParentUUID      string                       `json:"parent_uuid,omitempty"`
+	Type            string                       `json:"type"`
+	Subtype         string                       `json:"subtype,omitempty"`
+	Role            string                       `json:"role,omitempty"`
+	Timestamp       string                       `json:"timestamp,omitempty"`
+	CompactBoundary bool                         `json:"compact_boundary,omitempty"`
+	Text            string                       `json:"text,omitempty"`
+	Blocks          []transcriptContentBlockJSON `json:"blocks,omitempty"`
+	Message         json.RawMessage              `json:"message,omitempty"`
+}
+
+type transcriptContentBlockJSON struct {
+	Type      string          `json:"type"`
+	ID        string          `json:"id,omitempty"`
+	RequestID string          `json:"request_id,omitempty"`
+	Kind      string          `json:"kind,omitempty"`
+	State     string          `json:"state,omitempty"`
+	Text      string          `json:"text,omitempty"`
+	Prompt    string          `json:"prompt,omitempty"`
+	Options   []string        `json:"options,omitempty"`
+	Action    string          `json:"action,omitempty"`
+	Metadata  json.RawMessage `json:"metadata,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   json.RawMessage `json:"content,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
 }
 
 func doSessionLogsJSON(path, provider, target string, follow bool, tail int, stdout, stderr io.Writer) int {
@@ -464,9 +482,33 @@ func sessionLogEntryToJSON(e *worker.TranscriptEntry) sessionLogEntryJSON {
 	}
 	var blocks []worker.TranscriptContentBlock
 	if json.Unmarshal(mc.Content, &blocks) == nil && len(blocks) > 0 {
-		entry.Blocks = blocks
+		entry.Blocks = transcriptContentBlocksToJSON(blocks)
 	}
 	return entry
+}
+
+func transcriptContentBlocksToJSON(blocks []worker.TranscriptContentBlock) []transcriptContentBlockJSON {
+	out := make([]transcriptContentBlockJSON, 0, len(blocks))
+	for _, block := range blocks {
+		out = append(out, transcriptContentBlockJSON{
+			Type:      block.Type,
+			ID:        block.ID,
+			RequestID: block.RequestID,
+			Kind:      block.Kind,
+			State:     block.State,
+			Text:      block.Text,
+			Prompt:    block.Prompt,
+			Options:   block.Options,
+			Action:    block.Action,
+			Metadata:  block.Metadata,
+			Name:      block.Name,
+			Input:     block.Input,
+			ToolUseID: block.ToolUseID,
+			Content:   block.Content,
+			IsError:   block.IsError,
+		})
+	}
+	return out
 }
 
 func runSessionLogs(factory *worker.Factory, provider, path string, follow bool, tail int, stdout, stderr io.Writer, sleep func(time.Duration), read sessionLogsReader) int {

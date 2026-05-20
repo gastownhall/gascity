@@ -102,12 +102,11 @@ func newConvergeCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 				return errExit
 			}
 			if jsonOutput {
-				_ = writeCLIJSONLine(stdout, convergeCreateJSONResult{
+				return writeCLIJSONLineOrErr(stdout, stderr, "gc converge create", convergeCreateJSONResult{
 					SchemaVersion: "1",
 					OK:            true,
 					BeadID:        result.BeadID,
 				})
-				return nil
 			}
 			fmt.Fprintln(stdout, result.BeadID) //nolint:errcheck
 			return nil
@@ -157,9 +156,7 @@ func newConvergeStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 
 			if jsonOutput {
-				data, _ := json.MarshalIndent(meta, "", "  ")
-				fmt.Fprintln(stdout, string(data)) //nolint:errcheck
-				return nil
+				return writeCLIJSONLineOrErr(stdout, stderr, "gc converge status", meta)
 			}
 
 			state := meta[convergence.FieldState]
@@ -274,7 +271,7 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 				Target    string `json:"target"`
 				Title     string `json:"title"`
 			}
-			var entries []convEntry
+			entries := make([]convEntry, 0, len(beadList))
 			for _, b := range beadList {
 				meta := b.Metadata
 				if meta == nil {
@@ -298,9 +295,9 @@ func newConvergeListCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 
 			if jsonOutput {
-				data, _ := json.MarshalIndent(entries, "", "  ")
-				fmt.Fprintln(stdout, string(data)) //nolint:errcheck
-				return nil
+				return writeCLIJSONLineOrErr(stdout, stderr, "gc converge list", struct {
+					Entries []convEntry `json:"entries"`
+				}{Entries: entries})
 			}
 
 			if len(entries) == 0 {
@@ -358,7 +355,7 @@ func newConvergeTestGateCmd(stdout, stderr io.Writer) *cobra.Command {
 
 			if gateConfig.Mode == convergence.GateModeManual {
 				if jsonOutput {
-					_ = writeCLIJSONLine(stdout, convergeTestGateJSONResult{
+					return writeCLIJSONLineOrErr(stdout, stderr, "gc converge test-gate", convergeTestGateJSONResult{
 						SchemaVersion: "1",
 						OK:            true,
 						BeadID:        beadID,
@@ -366,14 +363,13 @@ func newConvergeTestGateCmd(stdout, stderr io.Writer) *cobra.Command {
 						Skipped:       true,
 						Reason:        "manual_gate",
 					})
-					return nil
 				}
 				fmt.Fprintln(stdout, "Gate mode is manual — no condition to test.") //nolint:errcheck
 				return nil
 			}
 			if gateConfig.Condition == "" {
 				if jsonOutput {
-					_ = writeCLIJSONLine(stdout, convergeTestGateJSONResult{
+					return writeCLIJSONLineOrErr(stdout, stderr, "gc converge test-gate", convergeTestGateJSONResult{
 						SchemaVersion: "1",
 						OK:            true,
 						BeadID:        beadID,
@@ -381,7 +377,6 @@ func newConvergeTestGateCmd(stdout, stderr io.Writer) *cobra.Command {
 						Skipped:       true,
 						Reason:        "missing_condition",
 					})
-					return nil
 				}
 				fmt.Fprintln(stdout, "No gate condition configured.") //nolint:errcheck
 				return nil
@@ -399,7 +394,9 @@ func newConvergeTestGateCmd(stdout, stderr io.Writer) *cobra.Command {
 				DocPath:       meta[convergence.VarPrefix+"doc_path"],
 			}
 
-			fmt.Fprintf(stdout, "Testing gate: %s\n", gateConfig.Condition) //nolint:errcheck
+			if !jsonOutput {
+				fmt.Fprintf(stdout, "Testing gate: %s\n", gateConfig.Condition) //nolint:errcheck
+			}
 			result := convergence.RunCondition(
 				context.TODO(),
 				gateConfig.Condition, env, gateConfig.Timeout, 0,
@@ -416,8 +413,7 @@ func newConvergeTestGateCmd(stdout, stderr io.Writer) *cobra.Command {
 					Stdout:        result.Stdout,
 					Stderr:        result.Stderr,
 				}
-				_ = writeCLIJSONLine(stdout, payload)
-				return nil
+				return writeCLIJSONLineOrErr(stdout, stderr, "gc converge test-gate", payload)
 			}
 			fmt.Fprintf(stdout, "Outcome:  %s\n", result.Outcome) //nolint:errcheck
 			if result.ExitCode != nil {
@@ -477,13 +473,12 @@ func newConvergeRetryCmd(stdout, stderr io.Writer) *cobra.Command {
 				return errExit
 			}
 			if jsonOutput {
-				_ = writeCLIJSONLine(stdout, convergeRetryJSONResult{
+				return writeCLIJSONLineOrErr(stdout, stderr, "gc converge retry", convergeRetryJSONResult{
 					SchemaVersion: "1",
 					OK:            true,
 					SourceBeadID:  args[0],
 					NewBeadID:     result.NewBeadID,
 				})
-				return nil
 			}
 			fmt.Fprintln(stdout, result.NewBeadID) //nolint:errcheck
 			return nil
@@ -528,13 +523,12 @@ func convergeSocketCmd(beadID, command string, params map[string]string, jsonOut
 		return nil
 	}
 	if jsonOutput {
-		_ = writeCLIJSONLine(stdout, convergeActionJSONResult{
+		return writeCLIJSONLineOrErr(stdout, stderr, "gc converge "+command, convergeActionJSONResult{
 			SchemaVersion: "1",
 			OK:            true,
 			BeadID:        beadID,
 			Action:        string(result.Action),
 		})
-		return nil
 	}
 	fmt.Fprintf(stdout, "%s: %s\n", beadID, result.Action) //nolint:errcheck
 	return nil

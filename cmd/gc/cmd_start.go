@@ -424,7 +424,11 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 	// Drift detection runs against any already-running supervisor before
 	// we hand work to it. When no supervisor is running the check is a
 	// no-op (registration spawns a fresh one).
-	if exitCode, cont := runStartDriftCheck(cityPath, stdout, stderr); !cont {
+	driftStdout := stdout
+	if jsonOut {
+		driftStdout = stderr
+	}
+	if exitCode, cont := runStartDriftCheck(cityPath, driftStdout, stderr); !cont {
 		return exitCode
 	}
 
@@ -468,13 +472,16 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 		if entry, registered, err := registeredCityEntry(cityPath); err == nil && registered {
 			cityName = entry.EffectiveName()
 		}
-		_ = writeLifecycleActionJSON(stdout, lifecycleActionJSON{
+		if err := writeLifecycleActionJSON(stdout, lifecycleActionJSON{
 			Command:  "start",
 			Action:   "start",
 			Message:  "City started under supervisor.",
 			CityName: cityName,
 			CityPath: cityPath,
-		})
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc start: writing JSON result: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		return 0
 	}
 	fmt.Fprintln(stdout, "City started under supervisor.") //nolint:errcheck // best-effort stdout

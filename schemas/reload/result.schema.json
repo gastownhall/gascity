@@ -14,5 +14,5 @@
     "outcome": { "enum": ["accepted", "applied", "no_change"] },
     "revision": { "type": "string" }
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

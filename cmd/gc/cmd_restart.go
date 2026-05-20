@@ -57,14 +57,13 @@ func cmdRestartJSON(args []string, stdout, stderr io.Writer, jsonOut bool) int {
 			cityPath = resolved
 		}
 	}
-	_ = writeLifecycleActionJSON(stdout, lifecycleActionJSON{
+	return writeLifecycleActionJSONOrExit(stdout, stderr, "gc restart", lifecycleActionJSON{
 		Command:  "restart",
 		Action:   "restart",
 		Message:  "City restarted under supervisor.",
 		CityName: nameOverride,
 		CityPath: cityPath,
 	})
-	return 0
 }
 
 func restartRegistrationName(args []string) (string, error) {

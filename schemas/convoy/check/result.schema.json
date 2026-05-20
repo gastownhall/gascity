@@ -9,5 +9,5 @@
     "action": { "const": "check" },
     "closed": { "type": "integer", "minimum": 0 }
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

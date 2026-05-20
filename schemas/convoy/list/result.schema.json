@@ -1,41 +1,82 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["schema_version", "convoys", "summary"],
+  "required": [
+    "schema_version",
+    "ok",
+    "convoys",
+    "summary"
+  ],
   "properties": {
-    "schema_version": { "const": "1" },
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
     "convoys": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "title", "status", "progress", "owned"],
+        "required": [
+          "id",
+          "title",
+          "status",
+          "progress",
+          "owned"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "title": { "type": "string" },
-          "status": { "type": "string" },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
           "progress": {
             "type": "object",
-            "required": ["closed", "total"],
+            "required": [
+              "closed",
+              "total"
+            ],
             "properties": {
-              "closed": { "type": "integer" },
-              "total": { "type": "integer" }
+              "closed": {
+                "type": "integer"
+              },
+              "total": {
+                "type": "integer"
+              }
             },
             "additionalProperties": true
           },
-          "owned": { "type": "boolean" },
+          "owned": {
+            "type": "boolean"
+          },
           "fields": {
             "type": "object",
             "properties": {
-              "owner": { "type": "string" },
-              "notify": { "type": "string" },
-              "merge": { "type": "string" },
-              "target": { "type": "string" }
+              "owner": {
+                "type": "string"
+              },
+              "notify": {
+                "type": "string"
+              },
+              "merge": {
+                "type": "string"
+              },
+              "target": {
+                "type": "string"
+              }
             },
             "additionalProperties": true
           },
           "child_ids": {
             "type": "array",
-            "items": { "type": "string" }
+            "items": {
+              "type": "string"
+            }
           }
         },
         "additionalProperties": true
@@ -43,9 +84,13 @@
     },
     "summary": {
       "type": "object",
-      "required": ["total"],
+      "required": [
+        "total"
+      ],
       "properties": {
-        "total": { "type": "integer" }
+        "total": {
+          "type": "integer"
+        }
       },
       "additionalProperties": true
     }

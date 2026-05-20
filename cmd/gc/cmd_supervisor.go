@@ -602,7 +602,7 @@ func stopSupervisorWithWaitJSON(stdout, stderr io.Writer, wait bool, waitTimeout
 	unloadSupervisorService()
 	if !wait {
 		if jsonOut {
-			return writeSupervisorStopSuccess(stdout, wait)
+			return writeSupervisorStopSuccess(stdout, stderr, wait)
 		}
 		return 0
 	}
@@ -628,7 +628,7 @@ func stopSupervisorWithWaitJSON(stdout, stderr io.Writer, wait bool, waitTimeout
 				return 1
 			}
 			if jsonOut {
-				return writeSupervisorStopSuccess(stdout, wait)
+				return writeSupervisorStopSuccess(stdout, stderr, wait)
 			}
 			fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
 			return 0
@@ -658,20 +658,19 @@ func stopSupervisorWithWaitJSON(stdout, stderr io.Writer, wait bool, waitTimeout
 		return 1
 	}
 	if jsonOut {
-		return writeSupervisorStopSuccess(stdout, wait)
+		return writeSupervisorStopSuccess(stdout, stderr, wait)
 	}
 	fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
 	return 0
 }
 
-func writeSupervisorStopSuccess(stdout io.Writer, wait bool) int {
-	_ = writeLifecycleActionJSON(stdout, lifecycleActionJSON{
+func writeSupervisorStopSuccess(stdout, stderr io.Writer, wait bool) int {
+	return writeLifecycleActionJSONOrExit(stdout, stderr, "gc supervisor stop", lifecycleActionJSON{
 		Command: "supervisor stop",
 		Action:  "stop",
 		Message: "Supervisor stopped.",
 		Wait:    lifecycleBoolPtr(wait),
 	})
-	return 0
 }
 
 // waitForSupervisorExitUntil polls the supervisor socket until it stops
@@ -770,12 +769,11 @@ func reloadSupervisorJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	switch resp {
 	case "ok":
 		if jsonOut {
-			_ = writeLifecycleActionJSON(stdout, lifecycleActionJSON{
+			return writeLifecycleActionJSONOrExit(stdout, stderr, "gc supervisor reload", lifecycleActionJSON{
 				Command: "supervisor reload",
 				Action:  "reload",
 				Message: "Reconciliation triggered.",
 			})
-			return 0
 		}
 		fmt.Fprintln(stdout, "Reconciliation triggered.") //nolint:errcheck
 		return 0

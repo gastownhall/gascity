@@ -444,13 +444,12 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	for time.Now().Before(deadline) {
 		if pid := supervisorAliveHook(); pid != 0 {
 			if jsonOut {
-				_ = writeLifecycleActionJSON(stdout, lifecycleActionJSON{
+				return writeLifecycleActionJSONOrExit(stdout, stderr, "gc supervisor start", lifecycleActionJSON{
 					Command:       "supervisor start",
 					Action:        "start",
 					Message:       "Supervisor started.",
 					SupervisorPID: pid,
 				})
-				return 0
 			}
 			fmt.Fprintf(stdout, "Supervisor started (PID %d)\n", pid) //nolint:errcheck // best-effort stdout
 			return 0

@@ -82,14 +82,13 @@ func doRegisterWithOptionsJSON(args []string, nameOverride string, jsonOut bool,
 	if code != 0 || !jsonOut {
 		return code
 	}
-	_ = writeLifecycleActionJSON(stdout, lifecycleActionJSON{
+	return writeLifecycleActionJSONOrExit(stdout, stderr, "gc register", lifecycleActionJSON{
 		Command:  "register",
 		Action:   "register",
 		Message:  "City registered.",
 		CityName: registerName,
 		CityPath: cityPath,
 	})
-	return 0
 }
 
 // resolveRegistrationName returns the machine-local alias to store in the
@@ -160,14 +159,13 @@ func doUnregisterJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int
 	if registered {
 		cityName = entry.EffectiveName()
 	}
-	_ = writeLifecycleActionJSON(stdout, lifecycleActionJSON{
+	return writeLifecycleActionJSONOrExit(stdout, stderr, "gc unregister", lifecycleActionJSON{
 		Command:  "unregister",
 		Action:   "unregister",
 		Message:  "City unregistered.",
 		CityName: cityName,
 		CityPath: cityPath,
 	})
-	return code
 }
 
 func newCitiesCmd(stdout, stderr io.Writer) *cobra.Command {

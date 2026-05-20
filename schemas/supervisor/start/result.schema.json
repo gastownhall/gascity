@@ -10,5 +10,5 @@
     "message": { "type": "string" },
     "supervisor_pid": { "type": "integer" }
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

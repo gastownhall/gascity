@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -594,7 +595,7 @@ func TestOrderCheckJSONNoneDuePreservesSemanticExit(t *testing.T) {
 	neverRan := func(_ string) (time.Time, error) { return time.Time{}, nil }
 
 	var stdout bytes.Buffer
-	code := doOrderCheckJSON(aa, now, neverRan, true, &stdout)
+	code := doOrderCheckJSON(aa, now, neverRan, true, &stdout, io.Discard)
 	if code != 1 {
 		t.Fatalf("doOrderCheckJSON = %d, want 1 (none due)", code)
 	}

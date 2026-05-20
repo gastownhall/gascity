@@ -269,7 +269,7 @@ func doConvoyCreateWithOptionsJSON(store beads.Store, cfg *config.City, cityPath
 
 	switch {
 	case jsonOut:
-		_ = writeCLIJSONLine(stdout, convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.create", Action: "create", ConvoyID: convoy.ID, Title: name, IssueIDs: issueIDs})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy create", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.create", Action: "create", ConvoyID: convoy.ID, Title: name, IssueIDs: issueIDs})
 	case len(issueIDs) > 0:
 		fmt.Fprintf(stdout, "Created convoy %s %q tracking %d issue(s)\n", convoy.ID, name, len(issueIDs)) //nolint:errcheck // best-effort stdout
 	default:
@@ -865,10 +865,9 @@ func doConvoyTargetJSON(store beads.Store, args []string, jsonOut bool, stdout, 
 	}
 
 	if jsonOut {
-		_ = writeCLIJSONLine(stdout, convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.target", Action: "target", ConvoyID: id, Target: target})
-	} else {
-		fmt.Fprintf(stdout, "Set target of convoy %s to %s\n", id, target) //nolint:errcheck // best-effort stdout
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy target", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.target", Action: "target", ConvoyID: id, Target: target})
 	}
+	fmt.Fprintf(stdout, "Set target of convoy %s to %s\n", id, target) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
@@ -953,10 +952,9 @@ func doConvoyAddJSON(store beads.Store, args []string, jsonOut bool, stdout, std
 	}
 
 	if jsonOut {
-		_ = writeCLIJSONLine(stdout, convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.add", Action: "add", ConvoyID: convoyID, IssueIDs: []string{issueID}})
-	} else {
-		fmt.Fprintf(stdout, "Added %s to convoy %s\n", issueID, convoyID) //nolint:errcheck // best-effort stdout
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy add", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.add", Action: "add", ConvoyID: convoyID, IssueIDs: []string{issueID}})
 	}
+	fmt.Fprintf(stdout, "Added %s to convoy %s\n", issueID, convoyID) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
@@ -1042,10 +1040,9 @@ func doConvoyCloseJSON(store beads.Store, rec events.Recorder, args []string, js
 	})
 
 	if jsonOut {
-		_ = writeCLIJSONLine(stdout, convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.close", Action: "close", ConvoyID: id})
-	} else {
-		fmt.Fprintf(stdout, "Closed convoy %s\n", id) //nolint:errcheck // best-effort stdout
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy close", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.close", Action: "close", ConvoyID: id})
 	}
+	fmt.Fprintf(stdout, "Closed convoy %s\n", id) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
@@ -1184,13 +1181,18 @@ func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, rec events.Recorder
 				Actor:   eventActor(),
 				Subject: item.bead.ID,
 			})
-			fmt.Fprintf(stdout, "Auto-closed convoy %s %q\n", item.bead.ID, item.bead.Title) //nolint:errcheck // best-effort stdout
+			if !jsonOut {
+				fmt.Fprintf(stdout, "Auto-closed convoy %s %q\n", item.bead.ID, item.bead.Title) //nolint:errcheck // best-effort stdout
+			}
 			closed++
 		}
 	}
 
 	if jsonOut {
-		_ = writeCLIJSONLine(stdout, convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.check", Action: "check", Closed: intRef(closed)})
+		if err := writeCLIJSONLine(stdout, convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.check", Action: "check", Closed: intRef(closed)}); err != nil {
+			fmt.Fprintf(stderr, "gc convoy check: writing JSON result: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	} else {
 		fmt.Fprintf(stdout, "%d convoy(s) auto-closed\n", closed) //nolint:errcheck // best-effort stdout
 	}
@@ -1274,15 +1276,13 @@ func doConvoyStrandedAcrossStoresJSON(stores []convoyStoreView, jsonOut bool, st
 
 	if len(items) == 0 {
 		if jsonOut {
-			_ = writeCLIJSONLine(stdout, convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.stranded", Action: "stranded", Stranded: intRef(0)})
-		} else {
-			fmt.Fprintln(stdout, "No stranded work") //nolint:errcheck // best-effort stdout
+			return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy stranded", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.stranded", Action: "stranded", Stranded: intRef(0)})
 		}
+		fmt.Fprintln(stdout, "No stranded work") //nolint:errcheck // best-effort stdout
 		return 0
 	}
 	if jsonOut {
-		_ = writeCLIJSONLine(stdout, convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.stranded", Action: "stranded", Stranded: intRef(len(items))})
-		return 0
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy stranded", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.stranded", Action: "stranded", Stranded: intRef(len(items))})
 	}
 
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
@@ -1390,10 +1390,9 @@ func doConvoyLandJSON(store beads.Store, rec events.Recorder, args []string, opt
 	// Already closed → idempotent success.
 	if convoy.Status == "closed" {
 		if jsonOut {
-			_ = writeCLIJSONLine(stdout, convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.land", Action: "land", ConvoyID: convoyID, Title: convoy.Title, AlreadyClosed: true, DryRun: opts.DryRun, Forced: opts.Force})
-		} else {
-			fmt.Fprintf(stdout, "Convoy %s already closed\n", convoyID) //nolint:errcheck // best-effort stdout
+			return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy land", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.land", Action: "land", ConvoyID: convoyID, Title: convoy.Title, AlreadyClosed: true, DryRun: opts.DryRun, Forced: opts.Force})
 		}
+		fmt.Fprintf(stdout, "Convoy %s already closed\n", convoyID) //nolint:errcheck // best-effort stdout
 		return 0
 	}
 
@@ -1423,11 +1422,10 @@ func doConvoyLandJSON(store beads.Store, rec events.Recorder, args []string, opt
 	// Dry-run: preview what would happen.
 	if opts.DryRun {
 		if jsonOut {
-			_ = writeCLIJSONLine(stdout, convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.land", Action: "land", ConvoyID: convoyID, Title: convoy.Title, TotalChildren: intRef(len(children)), OpenChildren: intRef(len(openChildren)), DryRun: true, Forced: opts.Force})
-		} else {
-			fmt.Fprintf(stdout, "Would land convoy %s %q\n", convoyID, convoy.Title)                 //nolint:errcheck // best-effort stdout
-			fmt.Fprintf(stdout, "  Children: %d total, %d open\n", len(children), len(openChildren)) //nolint:errcheck // best-effort stdout
+			return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy land", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.land", Action: "land", ConvoyID: convoyID, Title: convoy.Title, TotalChildren: intRef(len(children)), OpenChildren: intRef(len(openChildren)), DryRun: true, Forced: opts.Force})
 		}
+		fmt.Fprintf(stdout, "Would land convoy %s %q\n", convoyID, convoy.Title)                 //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "  Children: %d total, %d open\n", len(children), len(openChildren)) //nolint:errcheck // best-effort stdout
 		return 0
 	}
 
@@ -1447,7 +1445,7 @@ func doConvoyLandJSON(store beads.Store, rec events.Recorder, args []string, opt
 	fields := getConvoyFields(convoy)
 	switch {
 	case jsonOut:
-		_ = writeCLIJSONLine(stdout, convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.land", Action: "land", ConvoyID: convoyID, Title: convoy.Title, TotalChildren: intRef(len(children)), OpenChildren: intRef(len(openChildren)), Forced: opts.Force, Notify: fields.Notify})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy land", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.land", Action: "land", ConvoyID: convoyID, Title: convoy.Title, TotalChildren: intRef(len(children)), OpenChildren: intRef(len(openChildren)), Forced: opts.Force, Notify: fields.Notify})
 	case fields.Notify != "":
 		fmt.Fprintf(stdout, "Landed convoy %s %q (notify: %s)\n", convoyID, convoy.Title, fields.Notify) //nolint:errcheck // best-effort stdout
 	default:
