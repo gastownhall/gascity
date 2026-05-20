@@ -2823,7 +2823,6 @@ export interface components {
             preview: components["schemas"]["FormulaPreviewResponse"];
             steps: components["schemas"]["FormulaStepResponse"][] | null;
             var_defs: components["schemas"]["FormulaVarDefResponse"][] | null;
-            version: string;
         };
         FormulaFeedBody: {
             items: components["schemas"]["MonitorFeedItemResponse"][] | null;
@@ -2901,7 +2900,6 @@ export interface components {
             /** Format: int64 */
             run_count: number;
             var_defs: components["schemas"]["FormulaVarDefResponse"][] | null;
-            version: string;
         };
         FormulaVarDefResponse: {
             default?: unknown;

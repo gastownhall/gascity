@@ -30,8 +30,9 @@ The digest is mailed to the mayor and archived as a digest bead.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-digest-generate"
-version = 2
-contract = "graph.v2"
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [vars]
 [vars.period]

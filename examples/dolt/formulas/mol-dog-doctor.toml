@@ -29,7 +29,6 @@ It only observes and reports.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-dog-doctor"
-version = 1
 
 [vars]
 [vars.port]

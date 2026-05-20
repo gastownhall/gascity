@@ -1,7 +1,7 @@
 description = """
 Gas City-owned review quorum formula scaffold.
 
-This graph.v2 workflow fans out two read-only reviewer lanes whose lane IDs,
+This graph-first workflow fans out two read-only reviewer lanes whose lane IDs,
 providers, models, and dispatch targets are supplied by formula variables, then
 routes a configured synthesis agent to synthesize their durable structured
 outputs. Lifecycle owners decide when to invoke it, and future dx-review
@@ -11,8 +11,9 @@ finalizer, but this formula's synthesis step is currently agent-executed rather
 than directly wired to that Go finalizer.
 """
 formula = "mol-review-quorum"
-version = 2
-contract = "graph.v2"
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [vars]
 [vars.subject]

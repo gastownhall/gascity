@@ -15,7 +15,6 @@ This keeps review findings durable in beads instead of transient pane output
 or per-worktree scratch files.
 """
 formula = "mol-review-leg"
-version = 1
 
 [vars]
 [vars.issue]

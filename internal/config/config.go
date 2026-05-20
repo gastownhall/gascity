@@ -1812,15 +1812,17 @@ func (d DoltMaintenance) GCTimeoutOrDefault() time.Duration {
 
 // DaemonConfig holds controller daemon settings.
 type DaemonConfig struct {
-	// FormulaV2 enables formula v2 graph workflow infrastructure:
-	// the control-dispatcher implicit agent, graph.v2 formula compilation,
+	// formulaV2Set keeps DaemonConfig non-zero when a file explicitly sets
+	// formula_v2=false, so the TOML encoder preserves that operator choice.
+	formulaV2Set bool `toml:"-" json:"-" jsonschema:"-"`
+
+	// FormulaV2 enables formula compiler v2 workflow infrastructure:
+	// the control-dispatcher implicit agent, compiler-v2 workflow compilation,
 	// and batch graph-apply bead creation. Requires bd with --graph support.
-	// Default: false (opt-in while the feature stabilizes).
-	FormulaV2 bool `toml:"formula_v2,omitempty"`
+	// Default: true. Set false only for cities pinned to formula compiler v1.
+	FormulaV2 bool `toml:"formula_v2" jsonschema:"default=true"`
 	// GraphWorkflows is the deprecated predecessor of FormulaV2. Retained
-	// for backwards compatibility: if graph_workflows is true in TOML and
-	// formula_v2 is not set, FormulaV2 is promoted automatically during
-	// parsing.
+	// for backwards compatibility as an alias. Explicit formula_v2 wins.
 	GraphWorkflows bool `toml:"graph_workflows,omitempty"`
 	// PatrolInterval is the health patrol interval. Duration string (e.g., "30s", "5m", "1h"). Defaults to "30s".
 	PatrolInterval string `toml:"patrol_interval,omitempty" jsonschema:"default=30s"`
@@ -3501,9 +3503,10 @@ func newControlDispatcherAgent(dir string) Agent {
 	a := Agent{
 		Name:              ControlDispatcherAgentName,
 		Dir:               dir,
-		Description:       "Built-in deterministic graph.v2 workflow control worker",
+		Description:       "Built-in deterministic compiler-v2 workflow control worker",
 		StartCommand:      ControlDispatcherStartCommandFor(qualifiedName),
 		ProcessNames:      []string{"gc"},
+		SleepAfterIdle:    SessionSleepOff,
 		MaxActiveSessions: &one,
 		Implicit:          true,
 	}
@@ -3836,6 +3839,7 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 func DefaultCity(name string) City {
 	return City{
 		Workspace:     Workspace{Name: name},
+		Daemon:        DaemonConfig{FormulaV2: true},
 		Agents:        []Agent{{Name: "mayor", PromptTemplate: "prompts/mayor.md"}},
 		NamedSessions: []NamedSession{{Template: "mayor", Mode: "always"}},
 	}
@@ -3864,6 +3868,7 @@ func WizardCity(name, provider, startCommand string) City {
 	}
 	return City{
 		Workspace: ws,
+		Daemon:    DaemonConfig{FormulaV2: true},
 		Agents: []Agent{
 			{Name: "mayor", PromptTemplate: "prompts/mayor.md"},
 		},
@@ -3905,6 +3910,7 @@ func GastownCity(name, provider, startCommand string) City {
 		},
 		DefaultRigImportOrder: []string{"gastown"},
 		Daemon: DaemonConfig{
+			FormulaV2:       true,
 			PatrolInterval:  "30s",
 			MaxRestarts:     &maxRestarts,
 			RestartWindow:   "1h",
@@ -3974,12 +3980,9 @@ func Parse(data []byte) (*City, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	normalizeAgentDefaultsAlias(&cfg, md)
+	applyDaemonFormulaV2Default(&cfg, md)
 	normalizeLegacyOrderOverrideAliases(&cfg)
 	NormalizeSessionSleepFields(&cfg)
-	// Backwards compat: promote deprecated graph_workflows → formula_v2.
-	if cfg.Daemon.GraphWorkflows && !cfg.Daemon.FormulaV2 {
-		cfg.Daemon.FormulaV2 = true
-	}
 	// Stamp source=sourceInline on agents declared via [[agent]] in
 	// the parsed TOML. These are city.toml inline agents (or test
 	// fixtures using Parse directly); pack agents go through a
@@ -3989,4 +3992,22 @@ func Parse(data []byte) (*City, error) {
 		cfg.Agents[i].source = sourceInline
 	}
 	return &cfg, nil
+}
+
+func applyDaemonFormulaV2Default(cfg *City, md toml.MetaData) {
+	if cfg == nil {
+		return
+	}
+	if md.IsDefined("daemon", "formula_v2") {
+		cfg.Daemon.formulaV2Set = true
+		return
+	}
+	if md.IsDefined("daemon", "graph_workflows") {
+		cfg.Daemon.FormulaV2 = cfg.Daemon.GraphWorkflows
+		if !cfg.Daemon.FormulaV2 {
+			cfg.Daemon.formulaV2Set = true
+		}
+		return
+	}
+	cfg.Daemon.FormulaV2 = true
 }

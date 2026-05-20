@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Proposed |
+| Status | Implemented |
 | Date | 2026-05-20 |
 | Issue | [gastownhall/gascity#1760](https://github.com/gastownhall/gascity/issues/1760) |
 | Replaces | Formula `contract = "graph.v2"` as the user-facing compiler requirement |
@@ -45,23 +45,25 @@ constant. The active host capability is:
 min(binary formula compiler capability, city enabled formula compiler capability)
 ```
 
-In practice, a city with `[daemon] formula_v2 = false` is saying it only has
-compiler capability `1.x`, even if the binary can compile v2 formulas. A formula
-that requires `formula_compiler = ">=2.0.0"` must fail before any durable work is
-written in that city.
+`daemon.formula_v2` defaults to true. A city that explicitly sets
+`[daemon] formula_v2 = false` is saying it only has compiler capability `1.x`,
+even if the binary can compile v2 formulas. A formula that requires
+`formula_compiler = ">=2.0.0"` must fail before any durable work is written in
+that city.
 
 ## Semantics
 
 ### Accepted default
 
-If `[requires]` is omitted, the formula requires only the default compiler
-capability.
+If `[requires]` is omitted, the formula declares no host capability
+requirements.
 
 ```toml
 formula = "simple-review"
 ```
 
-This is equivalent to requiring compiler capability `1.x`.
+This is vacuously satisfied. The formula stays on the legacy compiler contract
+unless it also uses the legacy `contract = "graph.v2"` alias.
 
 ### Accepted v2 requirement
 
@@ -166,6 +168,10 @@ formula_compiler = ">=2.0.0"
 
 No pack-level minimum version mechanism is required by this design. Add one
 later only if real compatibility pressure proves it is needed.
+
+Formula `version = ...` is not part of the compiler-capability contract and is
+no longer a supported syntax switch. Author new formulas with `[requires]`
+instead.
 
 ## Non-Goals
 

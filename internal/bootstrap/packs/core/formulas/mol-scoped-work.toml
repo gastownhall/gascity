@@ -12,8 +12,9 @@ explicit DAG with:
 Use this as the opt-in replacement for hierarchy-first single-session formulas.
 """
 formula = "mol-scoped-work"
-version = 2
-contract = "graph.v2"
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [vars]
 [vars.issue]

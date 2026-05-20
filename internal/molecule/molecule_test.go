@@ -1939,6 +1939,44 @@ timeout = "2m"
 	}
 }
 
+func TestCookFormulaCompilerRequirementFailsBeforeDurableWrites(t *testing.T) {
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(false)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+
+	dir := t.TempDir()
+	toml := `
+formula = "needs-graph-compiler"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "work"
+title = "Work"
+`
+	if err := os.WriteFile(filepath.Join(dir, "needs-graph-compiler.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("writing formula: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	_, err := Cook(context.Background(), store, "needs-graph-compiler", []string{dir}, Options{})
+	if err == nil {
+		t.Fatal("Cook succeeded, want formula compiler requirement error")
+	}
+	if !strings.Contains(err.Error(), "formula.compiler_requirement_unsatisfied") {
+		t.Fatalf("Cook error = %v, want compiler requirement error", err)
+	}
+
+	got, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("store has %d beads after failed Cook, want none: %+v", len(got), got)
+	}
+}
+
 func TestCookEndToEndScopedWorkflowStampsRootAndScopeMetadata(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()

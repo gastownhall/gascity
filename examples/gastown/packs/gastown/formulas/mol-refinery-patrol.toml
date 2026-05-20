@@ -29,8 +29,9 @@ closes the bead once the PR is verified.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-refinery-patrol"
-version = 4
-contract = "graph.v2"
+
+[requires]
+formula_compiler = ">=2.0.0"
 
 [vars]
 [vars.binding_prefix]

@@ -164,7 +164,12 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 	}
 	resolved.Steps = ralphSteps
 
-	graphWorkflow, err := isGraphWorkflow(resolved, IsFormulaV2Enabled())
+	v2Enabled := IsFormulaV2Enabled()
+	if err := ValidateHostRequirements(resolved, v2Enabled); err != nil {
+		return nil, err
+	}
+
+	graphWorkflow, err := isGraphWorkflow(resolved, v2Enabled)
 	if err != nil {
 		return nil, err
 	}
@@ -477,9 +482,8 @@ func flattenSteps(steps []*Step, parentID string, idMapping map[string]string, o
 	}
 }
 
-// formulaV2Enabled controls whether graph.v2 formula compilation is allowed.
-// When false, isGraphWorkflow returns an error for formulas that explicitly
-// declare the graph.v2 contract.
+// formulaV2Enabled controls whether formula compiler capability v2 is allowed.
+// When false, requirement validation rejects formulas that need compiler v2.
 // Set by the daemon config loader from [daemon] formula_v2.
 //
 // Stored as atomic.Bool so config reload can race safely with in-flight
@@ -488,14 +492,18 @@ func flattenSteps(steps []*Step, parentID string, idMapping map[string]string, o
 // of toRecipe.
 var formulaV2Enabled atomic.Bool
 
-// SetFormulaV2Enabled sets the graph.v2 formula compilation flag. Safe for
+func init() {
+	formulaV2Enabled.Store(true)
+}
+
+// SetFormulaV2Enabled sets the formula compiler v2 flag. Safe for
 // concurrent use with IsFormulaV2Enabled; intended for the daemon config
 // loader and tests.
 func SetFormulaV2Enabled(v bool) {
 	formulaV2Enabled.Store(v)
 }
 
-// IsFormulaV2Enabled reports whether graph.v2 formula compilation is
+// IsFormulaV2Enabled reports whether formula compiler v2 is
 // allowed. Safe for concurrent use.
 func IsFormulaV2Enabled() bool {
 	return formulaV2Enabled.Load()
@@ -505,12 +513,12 @@ func isGraphWorkflow(f *Formula, v2Enabled bool) (bool, error) {
 	if f == nil {
 		return false, nil
 	}
-	graphWorkflow := declaresGraphV2Contract(f)
+	graphWorkflow := declaresGraphCompilerRequirement(f)
 	if !graphWorkflow {
 		return false, nil
 	}
 	if !v2Enabled {
-		return false, fmt.Errorf("formula %q declares contract graph.v2 but formula_v2 is disabled; enable [daemon] formula_v2 or remove the graph.v2 contract", f.Formula)
+		return false, fmt.Errorf("formula %q requires formula compiler v2 but formula_v2 is disabled; enable [daemon] formula_v2 or lower the formula requirements", f.Formula)
 	}
 	return true, nil
 }

@@ -2728,6 +2728,9 @@ func TestDoInitWritesExpectedTOML(t *testing.T) {
 	// default mayor-only path). workspace.name lives in .gc/site.toml.
 	got := string(f.Files[filepath.Join("/bright-lights", "city.toml")])
 	want := `[workspace]
+
+[daemon]
+formula_v2 = true
 `
 	if got != want {
 		t.Errorf("city.toml content:\ngot:\n%s\nwant:\n%s", got, want)
@@ -6038,9 +6041,12 @@ func TestDoPrimeStrictAgentWithEmptyPromptTemplate(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Agent is in the config but has no prompt_template and isn't a pool
-	// or formula_v2 agent. Non-strict today emits defaultPrimePrompt.
+	// or compiler-v2 agent. Non-strict emits defaultPrimePrompt.
 	toml := `[workspace]
 name = "test-city"
+
+[daemon]
+formula_v2 = false
 
 [[agent]]
 name = "mayor"
@@ -6505,6 +6511,9 @@ func TestDoPrimeBareName(t *testing.T) {
 	tomlContent := `[workspace]
 name = "test-city"
 
+[daemon]
+formula_v2 = false
+
 [[agent]]
 name = "polecat"
 dir = "myrig"
@@ -6543,6 +6552,9 @@ func TestDoPrimePoolAgentFallback(t *testing.T) {
 	}
 	tomlContent := `[workspace]
 name = "test-city"
+
+[daemon]
+formula_v2 = false
 
 [[agent]]
 name = "polecat"

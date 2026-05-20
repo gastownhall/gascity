@@ -1155,9 +1155,6 @@ func TestLoadCityConfigFSAppliesFeatureFlags(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`[workspace]
 name = "test-city"
-
-[daemon]
-formula_v2 = true
 `)
 
 	cfg, err := loadCityConfigFS(fs, "/city/city.toml")

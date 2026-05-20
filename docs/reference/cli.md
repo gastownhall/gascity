@@ -819,7 +819,7 @@ Manage convoys — graphs of related work beads.
 A convoy is a named graph of beads with dependencies. Convoys
 group related issues via tracks dependencies.
 
-Convoys are distinct from workflows (graph.v2 formula-compiled
+Convoys are distinct from workflows (compiler-v2 formula-compiled
 DAGs managed by the dispatch subsystem) — gc convoy commands do
 not operate on workflow roots.
 
@@ -3369,8 +3369,8 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 | `--on` | string |  | attach wisp from formula to bead before routing |
 | `--owned` | bool |  | mark auto-convoy as owned (skip auto-close) |
 | `--reassign` | bool |  | clear any existing human assignee before routing (for human→pool handoff) |
-| `--scope-kind` | string |  | logical workflow scope kind for graph.v2 launches |
-| `--scope-ref` | string |  | logical workflow scope ref for graph.v2 launches |
+| `--scope-kind` | string |  | logical workflow scope kind for compiler-v2 launches |
+| `--scope-ref` | string |  | logical workflow scope ref for compiler-v2 launches |
 | `--stdin` | bool |  | read bead text from stdin (first line = title, rest = description) |
 | `-t`, `--title` | string |  | wisp root bead title (with --formula or --on) |
 | `--var` | stringArray |  | variable substitution for formula (key=value, repeatable) |

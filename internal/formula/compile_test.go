@@ -1458,16 +1458,15 @@ max_attempts = 3
 	}
 }
 
-func TestCompileGraphRetryWorkflowRequiresExplicitGraphContract(t *testing.T) {
+func TestCompileRetryWorkflowWithoutRequirementUsesMoleculeContract(t *testing.T) {
 	prev := IsFormulaV2Enabled()
 	SetFormulaV2Enabled(true)
 	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
 
 	dir := t.TempDir()
 	formulaText := `
-formula = "implicit-v2"
+formula = "legacy-retry"
 phase = "liquid"
-version = 2
 
 [[steps]]
 id = "work"
@@ -1476,20 +1475,27 @@ title = "Do the work"
 [steps.retry]
 max_attempts = 2
 `
-	if err := os.WriteFile(filepath.Join(dir, "implicit-v2.toml"), []byte(formulaText), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "legacy-retry.toml"), []byte(formulaText), 0o644); err != nil {
 		t.Fatalf("write formula: %v", err)
 	}
 
-	_, err := Compile(context.Background(), "implicit-v2", []string{dir}, nil)
-	if err == nil {
-		t.Fatal("Compile succeeded, want explicit contract error")
+	recipe, err := Compile(context.Background(), "legacy-retry", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
 	}
-	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
-		t.Fatalf("Compile error = %v, want graph.v2 contract guidance", err)
+	root := recipe.RootStep()
+	if root == nil {
+		t.Fatal("root step missing")
+	}
+	if root.Type != "molecule" {
+		t.Fatalf("root type = %q, want molecule", root.Type)
+	}
+	if got := root.Metadata["gc.formula_contract"]; got != "" {
+		t.Fatalf("root gc.formula_contract = %q, want empty", got)
 	}
 }
 
-func TestCompileVersion1DetachedGraphMetadataRequiresExplicitGraphContract(t *testing.T) {
+func TestCompileDetachedGraphMetadataRequiresExplicitGraphContract(t *testing.T) {
 	prev := IsFormulaV2Enabled()
 	SetFormulaV2Enabled(true)
 	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
@@ -1498,7 +1504,6 @@ func TestCompileVersion1DetachedGraphMetadataRequiresExplicitGraphContract(t *te
 	formulaText := `
 formula = "implicit-v1-detached"
 phase = "liquid"
-version = 1
 
 [[steps]]
 id = "work"
@@ -1518,16 +1523,15 @@ metadata = { "gc.kind" = "retry" }
 	}
 }
 
-func TestCompileGraphOnCompleteWorkflowRequiresExplicitGraphContract(t *testing.T) {
+func TestCompileOnCompleteWithoutRequirementUsesMoleculeContract(t *testing.T) {
 	prev := IsFormulaV2Enabled()
 	SetFormulaV2Enabled(true)
 	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
 
 	dir := t.TempDir()
 	formulaText := `
-formula = "implicit-v2-fanout"
+formula = "legacy-fanout"
 phase = "liquid"
-version = 2
 
 [[steps]]
 id = "survey"
@@ -1537,16 +1541,23 @@ title = "Survey"
 for_each = "output.items"
 bond = "mol-item"
 `
-	if err := os.WriteFile(filepath.Join(dir, "implicit-v2-fanout.toml"), []byte(formulaText), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "legacy-fanout.toml"), []byte(formulaText), 0o644); err != nil {
 		t.Fatalf("write formula: %v", err)
 	}
 
-	_, err := Compile(context.Background(), "implicit-v2-fanout", []string{dir}, nil)
-	if err == nil {
-		t.Fatal("Compile succeeded, want explicit contract error")
+	recipe, err := Compile(context.Background(), "legacy-fanout", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
 	}
-	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
-		t.Fatalf("Compile error = %v, want graph.v2 contract guidance", err)
+	root := recipe.RootStep()
+	if root == nil {
+		t.Fatal("root step missing")
+	}
+	if root.Type != "molecule" {
+		t.Fatalf("root type = %q, want molecule", root.Type)
+	}
+	if got := root.Metadata["gc.formula_contract"]; got != "" {
+		t.Fatalf("root gc.formula_contract = %q, want empty", got)
 	}
 }
 

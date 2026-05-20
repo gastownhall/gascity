@@ -39,7 +39,6 @@ the main codebase.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-dog-jsonl"
-version = 1
 
 [vars]
 [vars.databases]

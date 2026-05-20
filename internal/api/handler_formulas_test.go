@@ -67,9 +67,6 @@ title = "Review PR"
 	if item.Description != "Review and fix a PR with a retry loop." {
 		t.Fatalf("description = %q", item.Description)
 	}
-	if item.Version != "2" {
-		t.Fatalf("version = %q, want 2", item.Version)
-	}
 	if len(item.VarDefs) != 1 || item.VarDefs[0].Name != "pr_url" || !item.VarDefs[0].Required {
 		t.Fatalf("var_defs = %+v, want required pr_url", item.VarDefs)
 	}

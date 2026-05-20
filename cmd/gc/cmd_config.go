@@ -397,7 +397,7 @@ func validateLegacyFormulaConfigRoutes(cfg *config.City) []string {
 			errs = append(errs, fmt.Sprintf("formula %q: %v", name, err))
 			continue
 		}
-		if resolved.Version < 2 || resolved.Type != formula.TypeWorkflow {
+		if resolved.Type != formula.TypeWorkflow {
 			continue
 		}
 		collectLegacyGraphAssigneeErrors(name, resolved.Steps, agentTargets, namedTargets, &errs)

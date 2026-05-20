@@ -18,7 +18,6 @@ review).
 | issue | caller | The work bead ID assigned to this agent |
 """
 formula = "mol-do-work"
-version = 1
 
 [vars]
 [vars.issue]

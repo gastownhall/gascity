@@ -1120,11 +1120,12 @@
       "properties": {
         "formula_v2": {
           "type": "boolean",
-          "description": "FormulaV2 enables formula v2 graph workflow infrastructure:\nthe control-dispatcher implicit agent, graph.v2 formula compilation,\nand batch graph-apply bead creation. Requires bd with --graph support.\nDefault: false (opt-in while the feature stabilizes)."
+          "description": "FormulaV2 enables formula compiler v2 workflow infrastructure:\nthe control-dispatcher implicit agent, compiler-v2 workflow compilation,\nand batch graph-apply bead creation. Requires bd with --graph support.\nDefault: true. Set false only for cities pinned to formula compiler v1.",
+          "default": true
         },
         "graph_workflows": {
           "type": "boolean",
-          "description": "GraphWorkflows is the deprecated predecessor of FormulaV2. Retained\nfor backwards compatibility: if graph_workflows is true in TOML and\nformula_v2 is not set, FormulaV2 is promoted automatically during\nparsing."
+          "description": "GraphWorkflows is the deprecated predecessor of FormulaV2. Retained\nfor backwards compatibility as an alias. Explicit formula_v2 wins."
         },
         "patrol_interval": {
           "type": "string",

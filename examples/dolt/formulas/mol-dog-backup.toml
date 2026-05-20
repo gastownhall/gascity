@@ -27,7 +27,6 @@ overwrites the backup destination, but that is the intended behavior.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-dog-backup"
-version = 2
 
 [vars]
 [vars.databases]

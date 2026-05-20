@@ -168,9 +168,6 @@ func (p *Parser) Parse(data []byte) (*Formula, error) {
 	}
 
 	// Set defaults
-	if formula.Version == 0 {
-		formula.Version = 1
-	}
 	if formula.Type == "" {
 		formula.Type = TypeWorkflow
 	}
@@ -186,9 +183,6 @@ func (p *Parser) ParseTOML(data []byte) (*Formula, error) {
 	}
 
 	// Set defaults
-	if formula.Version == 0 {
-		formula.Version = 1
-	}
 	if formula.Type == "" {
 		formula.Type = TypeWorkflow
 	}
@@ -225,8 +219,8 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		Formula:     formula.Formula,
 		Description: formula.Description,
 		Catalog:     formula.Catalog,
-		Version:     formula.Version,
 		Contract:    formula.Contract,
+		Requires:    cloneRequirements(formula.Requires),
 		Type:        formula.Type,
 		Source:      formula.Source,
 		Phase:       formula.Phase,
@@ -252,6 +246,9 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 
 		if merged.Contract == "" {
 			merged.Contract = parent.Contract
+		}
+		if merged.Requires == nil {
+			merged.Requires = cloneRequirements(parent.Requires)
 		}
 
 		// Phase cascades from the first parent that declares one; child

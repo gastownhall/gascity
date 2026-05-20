@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -70,7 +69,6 @@ func buildFormulaCatalog(paths []string) ([]formulaSummaryResponse, error) {
 		items = append(items, formulaSummaryResponse{
 			Name:        resolved.Formula,
 			Description: resolved.Description,
-			Version:     formulaVersionString(resolved),
 			VarDefs:     formulaVarDefs(resolved.Vars),
 			RunCount:    0,
 			RecentRuns:  []formulaRecentRunResponse{},
@@ -248,7 +246,6 @@ func buildFormulaDetail(ctx context.Context, name string, paths []string, _ stri
 	resp := &formulaDetailResponse{
 		Name:        resolved.Formula,
 		Description: formula.Substitute(resolved.Description, displayVars),
-		Version:     formulaVersionString(resolved),
 		VarDefs:     formulaVarDefs(resolved.Vars),
 		Steps:       steps,
 		Deps:        edges,
@@ -304,13 +301,6 @@ func loadResolvedWorkflowFormula(parser *formula.Parser, name string) (*formula.
 		return nil, fmt.Errorf("%q: %w", name, errFormulaNotWorkflow)
 	}
 	return resolved, nil
-}
-
-func formulaVersionString(f *formula.Formula) string {
-	if f == nil || f.Version <= 0 {
-		return "1"
-	}
-	return strconv.Itoa(f.Version)
 }
 
 func formulaVarDefs(vars map[string]*formula.VarDef) []formulaVarDefResponse {

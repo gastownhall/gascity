@@ -83,9 +83,85 @@ func TestMarshalDefaultCityFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	want := "[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n\n[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"\n"
+	want := "[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n\n[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"\n\n[daemon]\nformula_v2 = true\n"
 	if string(data) != want {
 		t.Errorf("Marshal output:\ngot:\n%s\nwant:\n%s", data, want)
+	}
+}
+
+func TestParseDefaultsFormulaV2Enabled(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "bright-lights"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !cfg.Daemon.FormulaV2 {
+		t.Fatal("Daemon.FormulaV2 = false, want true when formula_v2 is omitted")
+	}
+}
+
+func TestParsePreservesExplicitFormulaV2False(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "bright-lights"
+
+[daemon]
+formula_v2 = false
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.FormulaV2 {
+		t.Fatal("Daemon.FormulaV2 = true, want explicit false")
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(data), "formula_v2 = false") {
+		t.Fatalf("Marshal output should preserve explicit formula_v2=false:\n%s", data)
+	}
+}
+
+func TestParseGraphWorkflowsDoesNotOverrideExplicitFormulaV2False(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "bright-lights"
+
+[daemon]
+graph_workflows = true
+formula_v2 = false
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.FormulaV2 {
+		t.Fatal("Daemon.FormulaV2 = true, want explicit formula_v2=false to win")
+	}
+}
+
+func TestParseGraphWorkflowsFalseAliasesFormulaV2False(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "bright-lights"
+
+[daemon]
+graph_workflows = false
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.FormulaV2 {
+		t.Fatal("Daemon.FormulaV2 = true, want legacy graph_workflows=false alias to disable formula_v2")
+	}
+	data, err := cfg.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(data), "formula_v2 = false") {
+		t.Fatalf("Marshal output should preserve canonical formula_v2=false:\n%s", data)
 	}
 }
 
@@ -2994,14 +3070,14 @@ name = "worker"
 	}
 }
 
-func TestMarshalOmitsEmptyDaemonSection(t *testing.T) {
+func TestMarshalDefaultCityIncludesFormulaV2Default(t *testing.T) {
 	c := DefaultCity("test")
 	data, err := c.Marshal()
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	if strings.Contains(string(data), "[daemon]") {
-		t.Errorf("Marshal output should not contain '[daemon]' when empty:\n%s", data)
+	if !strings.Contains(string(data), "[daemon]") || !strings.Contains(string(data), "formula_v2 = true") {
+		t.Errorf("Marshal output should include formula_v2 default:\n%s", data)
 	}
 }
 

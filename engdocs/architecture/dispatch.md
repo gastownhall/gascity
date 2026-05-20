@@ -53,7 +53,7 @@ expanded to their open children before routing.
   files are cleaned up. Implemented in `cmd/gc/system_formulas.go`.
 
 - **Review Quorum Formula**: `mol-review-quorum` is a core pack
-  `graph.v2` formula that dispatches exactly two read-only reviewer
+  compiler-v2 formula that dispatches exactly two read-only reviewer
   lanes using formula-supplied lane IDs, providers, models, and targets,
   and then routes a synthesis step. Dispatch treats it like any other
   formula-backed wisp; it does not give

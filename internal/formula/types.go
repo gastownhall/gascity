@@ -12,7 +12,6 @@
 //	{
 //	  "formula": "mol-feature",
 //	  "description": "Standard feature workflow",
-//	  "version": 1,
 //	  "type": "workflow",
 //	  "vars": {
 //	    "component": {
@@ -71,16 +70,12 @@ type Formula struct {
 	// Catalog opts the formula into user-facing workflow discovery.
 	Catalog *CatalogMetadata `json:"catalog,omitempty" toml:"catalog,omitempty"`
 
-	// Version is the formula revision.
-	// It is intentionally not a graph.v2 opt-in: legacy molecule formulas use
-	// this field for their own revisions and must keep hierarchy-first
-	// molecule semantics unless they explicitly declare a graph contract or use
-	// graph-only step constructs.
-	Version int `json:"version"`
-
 	// Contract opts the formula into a specific runtime contract.
 	// "graph.v2" enables graph-first workflow compilation when formula_v2 is enabled.
 	Contract string `json:"contract,omitempty" toml:"contract,omitempty"`
+
+	// Requires declares minimum host capabilities needed to compile this formula.
+	Requires *Requirements `json:"requires,omitempty" toml:"requires,omitempty"`
 
 	// Type categorizes the formula: workflow, expansion, or aspect.
 	Type Type `json:"type"`
@@ -892,19 +887,13 @@ type AroundAdvice struct {
 }
 
 func requiresExplicitGraphContract(f *Formula) bool {
-	if f == nil || strings.TrimSpace(f.Contract) != "" {
+	if f == nil || declaresGraphCompilerRequirement(f) {
 		return false
 	}
-	if f.Version < 2 {
-		if stepsRequireDetachedGraphContract(f.Steps) {
-			return true
-		}
-		return stepsRequireDetachedGraphContract(f.Template)
-	}
-	if stepsRequireGraphContract(f.Steps) {
+	if stepsRequireDetachedGraphContract(f.Steps) {
 		return true
 	}
-	return stepsRequireGraphContract(f.Template)
+	return stepsRequireDetachedGraphContract(f.Template)
 }
 
 func stepsRequireDetachedGraphContract(steps []*Step) bool {
@@ -927,28 +916,6 @@ func stepRequiresDetachedGraphContract(step *Step) bool {
 		return true
 	}
 	return stepsRequireDetachedGraphContract(step.Children)
-}
-
-func stepsRequireGraphContract(steps []*Step) bool {
-	for _, step := range steps {
-		if stepRequiresGraphContract(step) {
-			return true
-		}
-	}
-	return false
-}
-
-func stepRequiresGraphContract(step *Step) bool {
-	if step == nil {
-		return false
-	}
-	if step.Ralph != nil || step.Retry != nil || step.OnComplete != nil || metadataRequiresGraphContract(step.Metadata) {
-		return true
-	}
-	if step.Loop != nil && stepsRequireGraphContract(step.Loop.Body) {
-		return true
-	}
-	return stepsRequireGraphContract(step.Children)
 }
 
 func metadataRequiresGraphContract(metadata map[string]string) bool {
@@ -976,15 +943,12 @@ func (f *Formula) Validate() error {
 		errs = append(errs, "formula: name is required")
 	}
 
-	if f.Version < 1 {
-		errs = append(errs, "version: must be >= 1")
-	}
-
 	if contract := strings.TrimSpace(f.Contract); contract != "" && !strings.EqualFold(contract, "graph.v2") {
 		errs = append(errs, fmt.Sprintf("contract: invalid value %q (must be graph.v2)", f.Contract))
 	}
+	errs = append(errs, validateRequirementDeclarations(f)...)
 	if requiresExplicitGraphContract(f) {
-		errs = append(errs, `contract: formulas that use graph-only constructs must declare contract = "graph.v2" explicitly`)
+		errs = append(errs, `requires: formulas that use graph-only constructs must declare [requires] formula_compiler = ">=2.0.0" or legacy contract = "graph.v2" explicitly`)
 	}
 
 	if f.Type != "" && !f.Type.IsValid() {

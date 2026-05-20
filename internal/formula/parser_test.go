@@ -45,9 +45,6 @@ func TestParse_BasicFormula(t *testing.T) {
 	if formula.Description != "Test workflow" {
 		t.Errorf("Description = %q, want 'Test workflow'", formula.Description)
 	}
-	if formula.Version != 1 {
-		t.Errorf("Version = %d, want 1", formula.Version)
-	}
 	if formula.Type != TypeWorkflow {
 		t.Errorf("Type = %q, want workflow", formula.Type)
 	}
@@ -368,7 +365,6 @@ func TestDescriptionAssetRelPath(t *testing.T) {
 func TestValidate_ValidFormula(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-valid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1"},
@@ -383,9 +379,8 @@ func TestValidate_ValidFormula(t *testing.T) {
 
 func TestValidate_MissingName(t *testing.T) {
 	formula := &Formula{
-		Version: 1,
-		Type:    TypeWorkflow,
-		Steps:   []*Step{{ID: "step1", Title: "Step 1"}},
+		Type:  TypeWorkflow,
+		Steps: []*Step{{ID: "step1", Title: "Step 1"}},
 	}
 
 	err := formula.Validate()
@@ -397,7 +392,6 @@ func TestValidate_MissingName(t *testing.T) {
 func TestValidate_DuplicateStepID(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-dup",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1"},
@@ -414,7 +408,6 @@ func TestValidate_DuplicateStepID(t *testing.T) {
 func TestValidate_InvalidDependency(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-dep",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", DependsOn: []string{"nonexistent"}},
@@ -430,7 +423,6 @@ func TestValidate_InvalidDependency(t *testing.T) {
 func TestValidate_RequiredWithDefault(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-var",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Vars: map[string]*VarDef{
 			"bad": {Required: true, Default: StringPtr("value")}, // can't have both
@@ -448,7 +440,6 @@ func TestValidate_InvalidPriority(t *testing.T) {
 	p := 10 // invalid: must be 0-4
 	formula := &Formula{
 		Formula: "mol-bad-priority",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", Priority: &p},
@@ -461,10 +452,9 @@ func TestValidate_InvalidPriority(t *testing.T) {
 	}
 }
 
-func TestValidate_GraphRetryWorkflowRequiresContract(t *testing.T) {
+func TestValidateRetryWorkflowWithoutRequirementUsesLegacySyntax(t *testing.T) {
 	formula := &Formula{
-		Formula: "mol-implicit-v2",
-		Version: 2,
+		Formula: "mol-legacy-retry",
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -475,19 +465,14 @@ func TestValidate_GraphRetryWorkflowRequiresContract(t *testing.T) {
 		},
 	}
 
-	err := formula.Validate()
-	if err == nil {
-		t.Fatal("Validate should reject graph-only v2 workflow without contract")
-	}
-	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
-		t.Fatalf("Validate error = %v, want explicit graph.v2 contract guidance", err)
+	if err := formula.Validate(); err != nil {
+		t.Fatalf("Validate failed for legacy retry syntax without compiler requirement: %v", err)
 	}
 }
 
-func TestValidate_GraphOnCompleteWorkflowRequiresContract(t *testing.T) {
+func TestValidateOnCompleteWithoutRequirementUsesLegacySyntax(t *testing.T) {
 	formula := &Formula{
-		Formula: "mol-implicit-fanout",
-		Version: 2,
+		Formula: "mol-legacy-fanout",
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -501,19 +486,14 @@ func TestValidate_GraphOnCompleteWorkflowRequiresContract(t *testing.T) {
 		},
 	}
 
-	err := formula.Validate()
-	if err == nil {
-		t.Fatal("Validate should reject graph-only on_complete workflow without contract")
-	}
-	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
-		t.Fatalf("Validate error = %v, want explicit graph.v2 contract guidance", err)
+	if err := formula.Validate(); err != nil {
+		t.Fatalf("Validate failed for legacy on_complete syntax without compiler requirement: %v", err)
 	}
 }
 
-func TestValidate_Version1DetachedGraphMetadataRequiresContract(t *testing.T) {
+func TestValidate_DetachedGraphMetadataRequiresContract(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-detached-v1",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -536,7 +516,6 @@ func TestValidate_Version1DetachedGraphMetadataRequiresContract(t *testing.T) {
 func TestValidate_ValidTimeout(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-timeout",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "build", Title: "Build", Timeout: "5m", Ralph: validTestRalphSpec()},
@@ -555,7 +534,6 @@ func TestValidate_AllowsUnresolvedTimeoutPlaceholders(t *testing.T) {
 	check.Check.Timeout = "{{check_timeout}}"
 	formula := &Formula{
 		Formula: "mol-placeholder-timeout",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", Timeout: "{step_timeout}", Ralph: check},
@@ -580,7 +558,6 @@ func validTestRalphSpec() *RalphSpec {
 func TestValidate_TimeoutRequiresRalph(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-timeout-without-ralph",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", Timeout: "5m"},
@@ -610,7 +587,6 @@ func TestValidate_InvalidTimeout(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			formula := &Formula{
 				Formula: "mol-bad-timeout",
-				Version: 1,
 				Type:    TypeWorkflow,
 				Steps: []*Step{
 					{ID: "step1", Title: "Step 1", Timeout: tt.timeout, Ralph: validTestRalphSpec()},
@@ -641,7 +617,6 @@ func TestValidate_InvalidRalphCheckTimeout(t *testing.T) {
 			check.Check.Timeout = tt.timeout
 			formula := &Formula{
 				Formula: "mol-bad-check-timeout",
-				Version: 1,
 				Type:    TypeWorkflow,
 				Steps: []*Step{
 					{ID: "step1", Title: "Step 1", Ralph: check},
@@ -673,7 +648,6 @@ func TestValidate_InvalidTimeoutInChild(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			formula := &Formula{
 				Formula: "mol-bad-child-timeout",
-				Version: 1,
 				Type:    TypeWorkflow,
 				Steps: []*Step{
 					{
@@ -697,7 +671,6 @@ func TestValidate_InvalidTimeoutInChild(t *testing.T) {
 func TestValidate_InvalidTimeoutInLoopBody(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-loop-timeout",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -730,7 +703,6 @@ func TestValidate_InvalidTimeoutInLoopBody(t *testing.T) {
 func TestValidate_LoopBodyTimeoutAllowsLoopVariable(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-loop-timeout-var",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -760,7 +732,6 @@ func TestValidate_LoopBodyTimeoutAllowsLoopVariable(t *testing.T) {
 func TestValidate_ChildSteps(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-children",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -782,7 +753,6 @@ func TestValidate_ChildSteps(t *testing.T) {
 func TestValidate_ChildStepsInvalidDependsOn(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-child-dep",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -806,7 +776,6 @@ func TestValidate_ChildStepsInvalidPriority(t *testing.T) {
 	p := 10 // invalid
 	formula := &Formula{
 		Formula: "mol-bad-child-priority",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -828,7 +797,6 @@ func TestValidate_ChildStepsInvalidPriority(t *testing.T) {
 func TestValidate_BondPoints(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-compose",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1"},
@@ -850,7 +818,6 @@ func TestValidate_BondPoints(t *testing.T) {
 func TestValidate_BondPointBothAnchors(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-bond",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps:   []*Step{{ID: "step1", Title: "Step 1"}},
 		Compose: &ComposeRules{
@@ -1517,7 +1484,6 @@ func TestValidate_NeedsField(t *testing.T) {
 	// Valid needs reference
 	formula := &Formula{
 		Formula: "mol-needs",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1"},
@@ -1532,7 +1498,6 @@ func TestValidate_NeedsField(t *testing.T) {
 	// Invalid needs reference
 	formulaBad := &Formula{
 		Formula: "mol-bad-needs",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1"},
@@ -1551,7 +1516,6 @@ func TestValidate_WaitsForField(t *testing.T) {
 	// Valid waits_for value
 	formula := &Formula{
 		Formula: "mol-waits-for",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "fanout", Title: "Fanout"},
@@ -1566,7 +1530,6 @@ func TestValidate_WaitsForField(t *testing.T) {
 	// Invalid waits_for value
 	formulaBad := &Formula{
 		Formula: "mol-bad-waits-for",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", WaitsFor: "invalid-gate"},
@@ -1584,7 +1547,6 @@ func TestValidate_WaitsForChildrenOf(t *testing.T) {
 	// Valid children-of() syntax
 	formula := &Formula{
 		Formula: "mol-children-of",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "survey-workers", Title: "Survey Workers"},
@@ -1599,7 +1561,6 @@ func TestValidate_WaitsForChildrenOf(t *testing.T) {
 	// Invalid: reference to unknown step
 	formulaBad := &Formula{
 		Formula: "mol-bad-children-of",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", WaitsFor: "children-of(unknown-step)"},
@@ -1613,7 +1574,6 @@ func TestValidate_WaitsForChildrenOf(t *testing.T) {
 	// Invalid: empty step ID
 	formulaEmpty := &Formula{
 		Formula: "mol-empty-children-of",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{ID: "step1", Title: "Step 1", WaitsFor: "children-of()"},
@@ -1667,7 +1627,6 @@ func TestParseWaitsFor(t *testing.T) {
 func TestValidate_ChildNeedsAndWaitsFor(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-child-fields",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1688,7 +1647,6 @@ func TestValidate_ChildNeedsAndWaitsFor(t *testing.T) {
 	// Invalid child needs
 	formulaBadNeeds := &Formula{
 		Formula: "mol-bad-child-needs",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1708,7 +1666,6 @@ func TestValidate_ChildNeedsAndWaitsFor(t *testing.T) {
 	// Invalid child waits_for
 	formulaBadWaitsFor := &Formula{
 		Formula: "mol-bad-child-waits-for",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1825,7 +1782,6 @@ func TestParse_OnComplete(t *testing.T) {
 func TestValidate_OnComplete_Valid(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-valid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1847,7 +1803,6 @@ func TestValidate_OnComplete_Valid(t *testing.T) {
 func TestValidate_OnComplete_MissingBond(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-invalid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1873,7 +1828,6 @@ func TestValidate_OnComplete_MissingBond(t *testing.T) {
 func TestValidate_OnComplete_MissingForEach(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-invalid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1899,7 +1853,6 @@ func TestValidate_OnComplete_MissingForEach(t *testing.T) {
 func TestValidate_OnComplete_InvalidForEachPath(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-invalid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1925,7 +1878,6 @@ func TestValidate_OnComplete_InvalidForEachPath(t *testing.T) {
 func TestValidate_OnComplete_ParallelAndSequential(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-invalid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1953,7 +1905,6 @@ func TestValidate_OnComplete_ParallelAndSequential(t *testing.T) {
 func TestValidate_OnComplete_Sequential(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-valid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -1976,7 +1927,6 @@ func TestValidate_OnComplete_Sequential(t *testing.T) {
 func TestValidate_OnComplete_InChildren(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-valid",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
@@ -2644,7 +2594,6 @@ path = "scripts/verify.sh"
 func TestValidateRalphUsesCheckTerminology(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-check",
-		Version: 1,
 		Type:    TypeWorkflow,
 		Steps: []*Step{
 			{
