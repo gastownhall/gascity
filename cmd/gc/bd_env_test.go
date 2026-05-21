@@ -2406,15 +2406,10 @@ func TestCityForStoreDirHonoursGCCity(t *testing.T) {
 	}
 }
 
-func TestCityForStoreDirPrefersDiscoveredCityOverGCCity(t *testing.T) {
-	// Regression: when an explicit dir resolves via findCity to a city
-	// AND GC_CITY env points to a different city, the dir-discovered
-	// city wins. Otherwise an explicit --city flag whose value differs
-	// from an inherited GC_CITY env gets silently swapped at the bd
-	// runtime env layer, producing
-	// "managed_city endpoint origin is invalid for rig scope" because
-	// downstream resolution pairs the dir's config with the env city's
-	// scope.
+func TestCityForStoreDirHonoursGCCityOverDiscoveredCity(t *testing.T) {
+	// Ambient store resolution honors an explicit city env before
+	// filesystem discovery. Callers that have already resolved --city must
+	// pass that city through directly instead of using this helper.
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
@@ -2437,8 +2432,44 @@ func TestCityForStoreDirPrefersDiscoveredCityOverGCCity(t *testing.T) {
 	}
 
 	got := cityForStoreDir(dirCity)
-	if canonicalTestPath(got) != canonicalTestPath(dirCity) {
-		t.Errorf("cityForStoreDir(%q) = %q, want %q (dir-discovered city must win over GC_CITY=%q)", dirCity, got, dirCity, envCity)
+	if canonicalTestPath(got) != canonicalTestPath(envCity) {
+		t.Errorf("cityForStoreDir(%q) = %q, want %q (GC_CITY should win over discovered city %q)", dirCity, got, envCity, dirCity)
+	}
+}
+
+func TestOpenCityStoreAtUsesExplicitCityOverGCCity(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("GC_BEADS", "bd")
+
+	envCity := filepath.Join(homeDir, "envcity")
+	if err := os.MkdirAll(filepath.Join(envCity, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(envCity, "city.toml"), []byte("[workspace]\nname = \"env\"\nprefix = \"env\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", envCity)
+
+	explicitCity := filepath.Join(homeDir, "explicit")
+	if err := os.MkdirAll(filepath.Join(explicitCity, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(explicitCity, "city.toml"), []byte("[workspace]\nname = \"explicit\"\nprefix = \"ex\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := openCityStoreAt(explicitCity)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", explicitCity, err)
+	}
+	bdStore, ok := store.(*beads.BdStore)
+	if !ok {
+		t.Fatalf("openCityStoreAt(%q) returned %T, want *beads.BdStore", explicitCity, store)
+	}
+	if got := bdStore.IDPrefix(); got != "ex" {
+		t.Fatalf("IDPrefix() = %q, want explicit city prefix %q", got, "ex")
 	}
 }
 

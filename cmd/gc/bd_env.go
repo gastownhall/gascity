@@ -1122,17 +1122,11 @@ func mirrorBeadsDoltEnv(env map[string]string) {
 }
 
 func cityForStoreDir(dir string) string {
-	// Walk up from the explicit dir first. When the caller knows the
-	// store path (e.g. an --city flag), a dir-discovered city is more
-	// authoritative than an inherited GC_CITY env. Env-first was
-	// silently swapping cityRoot/scopeRoot when an agent inherited
-	// GC_CITY from a different city, producing "managed_city endpoint
-	// origin is invalid for rig scope".
-	if p, err := findCity(dir); err == nil {
-		return p
-	}
 	if cityPath, ok := resolveExplicitCityPathEnv(); ok {
 		return cityPath
+	}
+	if p, err := findCity(dir); err == nil {
+		return p
 	}
 	return dir
 }

@@ -935,7 +935,7 @@ func openCityStoreWithPath(stderr io.Writer, cmdName string) (beads.Store, strin
 // Used by the controller (which already knows the city path) and by
 // openCityStore (which resolves the path first).
 func openCityStoreAt(cityPath string) (beads.Store, error) {
-	return openStoreAtForCity(cityPath, cityForStoreDir(cityPath))
+	return openStoreAtForCity(cityPath, cityPath)
 }
 
 const fileStoreLayoutScopedV1 = "scope-local-v1"
