@@ -11,6 +11,14 @@ import (
 // TrackingDepType is the dependency type used for convoy membership edges.
 const TrackingDepType = "tracks"
 
+const trackedStatusUnknown = "unknown"
+
+// IsTerminalStatus reports whether a tracked item should count as complete for
+// convoy progress and auto-close decisions.
+func IsTerminalStatus(status string) bool {
+	return status == "closed" || status == "tombstone"
+}
+
 // TrackItem records that convoyID tracks itemID without changing itemID's
 // parent-child relationship.
 func TrackItem(store beads.Store, convoyID, itemID string) error {
@@ -33,6 +41,8 @@ func UntrackItem(store beads.Store, convoyID, itemID string) error {
 
 // Members returns beads tracked by a convoy. It supports both the current
 // tracks dependency relation and legacy parent-child convoy membership.
+// Unresolved tracks dependencies are returned with unknown status so completion
+// paths never mistake missing dependency details for completed work.
 func Members(store beads.Store, convoyID string, includeClosed bool) ([]beads.Bead, error) {
 	legacyChildren, err := store.List(beads.ListQuery{
 		ParentID:      convoyID,
@@ -49,7 +59,7 @@ func Members(store beads.Store, convoyID string, includeClosed bool) ([]beads.Be
 		if seen[b.ID] {
 			return
 		}
-		if !includeClosed && b.Status == "closed" {
+		if !includeClosed && IsTerminalStatus(b.Status) {
 			return
 		}
 		seen[b.ID] = true
@@ -70,6 +80,7 @@ func Members(store beads.Store, convoyID string, includeClosed bool) ([]beads.Be
 		item, err := store.Get(dep.DependsOnID)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
+				add(unresolvedTrackedItem(dep.DependsOnID))
 				continue
 			}
 			return nil, fmt.Errorf("getting tracked item %s: %w", dep.DependsOnID, err)
@@ -79,6 +90,15 @@ func Members(store beads.Store, convoyID string, includeClosed bool) ([]beads.Be
 
 	sortMembers(members)
 	return members, nil
+}
+
+func unresolvedTrackedItem(id string) beads.Bead {
+	return beads.Bead{
+		ID:     id,
+		Title:  id,
+		Type:   "task",
+		Status: trackedStatusUnknown,
+	}
 }
 
 // HasTrack reports whether convoyID has a tracks dependency to itemID.

@@ -90,7 +90,7 @@ func ConvoyProgress(_ ConvoyDeps, store beads.Store, id string) (ConvoyProgressR
 	total := len(children)
 	closed := 0
 	for _, c := range children {
-		if c.Status == "closed" {
+		if IsTerminalStatus(c.Status) {
 			closed++
 		}
 	}

@@ -578,7 +578,7 @@ func doConvoyListAcrossStores(stores []convoyStoreView, jsonOut bool, stdout, st
 		}
 		closed := 0
 		for _, ch := range children {
-			if ch.Status == "closed" {
+			if convoycore.IsTerminalStatus(ch.Status) {
 				closed++
 			}
 		}
@@ -615,7 +615,7 @@ func convoySummaryFromBead(convoy beads.Bead, children []beads.Bead) convoySumma
 	closed := 0
 	for _, ch := range children {
 		childIDs = append(childIDs, ch.ID)
-		if ch.Status == "closed" {
+		if convoycore.IsTerminalStatus(ch.Status) {
 			closed++
 		}
 	}
@@ -707,7 +707,7 @@ func doConvoyStatusWithJSON(store beads.Store, args []string, jsonOut bool, stdo
 
 	closed := 0
 	for _, ch := range children {
-		if ch.Status == "closed" {
+		if convoycore.IsTerminalStatus(ch.Status) {
 			closed++
 		}
 	}
@@ -1162,7 +1162,7 @@ func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, rec events.Recorder
 		}
 		allClosed := true
 		for _, ch := range children {
-			if ch.Status != "closed" {
+			if !convoycore.IsTerminalStatus(ch.Status) {
 				allClosed = false
 				break
 			}
@@ -1264,7 +1264,7 @@ func doConvoyStrandedAcrossStoresJSON(stores []convoyStoreView, jsonOut bool, st
 			return 1
 		}
 		for _, ch := range children {
-			if ch.Status != "closed" && ch.Assignee == "" {
+			if !convoycore.IsTerminalStatus(ch.Status) && ch.Assignee == "" {
 				items = append(items, strandedItem{convoyID: item.bead.ID, issue: ch})
 			}
 		}
@@ -1384,7 +1384,7 @@ func doConvoyLandJSON(store beads.Store, rec events.Recorder, args []string, opt
 	}
 
 	// Already closed → idempotent success.
-	if convoy.Status == "closed" {
+	if convoycore.IsTerminalStatus(convoy.Status) {
 		if jsonOut {
 			return writeCLIJSONLineOrExit(stdout, stderr, "gc convoy land", convoyActionResult{SchemaVersion: "1", OK: true, Command: "convoy.land", Action: "land", ConvoyID: convoyID, Title: convoy.Title, AlreadyClosed: true, DryRun: opts.DryRun, Forced: opts.Force})
 		}
@@ -1401,7 +1401,7 @@ func doConvoyLandJSON(store beads.Store, rec events.Recorder, args []string, opt
 
 	var openChildren []beads.Bead
 	for _, ch := range children {
-		if ch.Status != "closed" {
+		if !convoycore.IsTerminalStatus(ch.Status) {
 			openChildren = append(openChildren, ch)
 		}
 	}
@@ -1543,7 +1543,7 @@ func doConvoyAutocloseWith(store beads.Store, rec events.Recorder, beadID string
 }
 
 func autocloseConvoyIfComplete(store beads.Store, rec events.Recorder, convoy beads.Bead, stdout io.Writer) {
-	if convoy.Type != "convoy" || convoy.Status == "closed" || hasLabel(convoy.Labels, "owned") {
+	if convoy.Type != "convoy" || convoycore.IsTerminalStatus(convoy.Status) || hasLabel(convoy.Labels, "owned") {
 		return
 	}
 
@@ -1552,7 +1552,7 @@ func autocloseConvoyIfComplete(store beads.Store, rec events.Recorder, convoy be
 		return
 	}
 	for _, ch := range children {
-		if ch.Status != "closed" {
+		if !convoycore.IsTerminalStatus(ch.Status) {
 			return
 		}
 	}

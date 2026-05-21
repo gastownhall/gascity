@@ -929,6 +929,58 @@ func TestConvoyCheckTracksDeps(t *testing.T) {
 	}
 }
 
+func TestConvoyCheckTreatsTombstoneTrackAsComplete(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"}) // gc-1
+	_, _ = store.Create(beads.Bead{Title: "task A"})                // gc-2
+	requireNoError(t, store.DepAdd("gc-1", "gc-2", "tracks"))
+	tombstone := "tombstone"
+	requireNoError(t, store.Update("gc-2", beads.UpdateOpts{Status: &tombstone}))
+
+	var stdout, stderr bytes.Buffer
+	code := doConvoyCheck(store, events.Discard, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyCheck = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `Auto-closed convoy gc-1 "batch"`) {
+		t.Errorf("stdout missing auto-close message:\n%s", stdout.String())
+	}
+
+	b, err := store.Get("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead Status = %q, want closed", b.Status)
+	}
+}
+
+func TestConvoyCheckDanglingTrackDoesNotAutoClose(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"}) // gc-1
+	_, _ = store.Create(beads.Bead{Title: "task A"})                // gc-2
+	requireNoError(t, store.DepAdd("gc-1", "gc-2", "tracks"))
+	requireNoError(t, store.DepAdd("gc-1", "gc-missing", "tracks"))
+	_ = store.Close("gc-2")
+
+	var stdout, stderr bytes.Buffer
+	code := doConvoyCheck(store, events.Discard, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyCheck = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Auto-closed") {
+		t.Errorf("stdout should not contain Auto-closed for unresolved tracked item:\n%s", stdout.String())
+	}
+
+	b, err := store.Get("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Status != "open" {
+		t.Errorf("bead Status = %q, want open", b.Status)
+	}
+}
+
 func TestConvoyCheckJSONAutoCloseEmitsSingleResult(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"})    // gc-1

@@ -175,7 +175,7 @@ func (s *Server) humaHandleConvoyGet(_ context.Context, input *ConvoyGetInput) (
 		total := len(children)
 		closed := 0
 		for _, c := range children {
-			if c.Status == "closed" {
+			if convoycore.IsTerminalStatus(c.Status) {
 				closed++
 			}
 		}
@@ -402,7 +402,7 @@ func (s *Server) humaHandleConvoyCheck(_ context.Context, input *ConvoyCheckInpu
 		total := len(children)
 		closed := 0
 		for _, c := range children {
-			if c.Status == "closed" {
+			if convoycore.IsTerminalStatus(c.Status) {
 				closed++
 			}
 		}

@@ -274,6 +274,66 @@ func TestConvoyCheckTracksItems(t *testing.T) {
 	}
 }
 
+func TestConvoyCheckTracksTombstoneItemsAsComplete(t *testing.T) {
+	state := newFakeMutatorState(t)
+	h := newTestCityHandler(t, state)
+
+	store := state.stores["myrig"]
+	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	item, _ := store.Create(beads.Bead{Title: "task"})
+	if err := store.DepAdd(convoy.ID, item.ID, "tracks"); err != nil {
+		t.Fatal(err)
+	}
+	tombstone := "tombstone"
+	if err := store.Update(item.ID, beads.UpdateOpts{Status: &tombstone}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/convoy/")+convoy.ID+"/check", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("check: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	var resp convoyCheckResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode check: %v", err)
+	}
+	if resp.Total != 1 || resp.Closed != 1 || !resp.Complete {
+		t.Fatalf("resp = %+v, want total=1 closed=1 complete=true", resp)
+	}
+}
+
+func TestConvoyCheckDanglingTracksAreIncomplete(t *testing.T) {
+	state := newFakeMutatorState(t)
+	h := newTestCityHandler(t, state)
+
+	store := state.stores["myrig"]
+	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	item, _ := store.Create(beads.Bead{Title: "task"})
+	if err := store.DepAdd(convoy.ID, item.ID, "tracks"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DepAdd(convoy.ID, "gc-missing", "tracks"); err != nil {
+		t.Fatal(err)
+	}
+	store.Close(item.ID) //nolint:errcheck
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/convoy/")+convoy.ID+"/check", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("check: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	var resp convoyCheckResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode check: %v", err)
+	}
+	if resp.Total != 2 || resp.Closed != 1 || resp.Complete {
+		t.Fatalf("resp = %+v, want total=2 closed=1 complete=false", resp)
+	}
+}
+
 func TestConvoyCheckComplete(t *testing.T) {
 	state := newFakeMutatorState(t)
 	h := newTestCityHandler(t, state)

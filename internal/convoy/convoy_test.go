@@ -165,6 +165,58 @@ func TestConvoyProgressTracksDepsOps(t *testing.T) {
 	}
 }
 
+func TestConvoyProgressTreatsTombstoneAsCompleteOps(t *testing.T) {
+	store := beads.NewMemStore()
+	deps := testConvoyDeps(store)
+
+	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
+	b1, _ := store.Create(beads.Bead{Title: "task 1"})
+	if err := store.DepAdd(convoy.ID, b1.ID, "tracks"); err != nil {
+		t.Fatal(err)
+	}
+	tombstone := "tombstone"
+	if err := store.Update(b1.ID, beads.UpdateOpts{Status: &tombstone}); err != nil {
+		t.Fatal(err)
+	}
+
+	progress, err := ConvoyProgress(deps, store, convoy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress.Total != 1 {
+		t.Errorf("total = %d, want 1", progress.Total)
+	}
+	if progress.Closed != 1 {
+		t.Errorf("closed = %d, want 1", progress.Closed)
+	}
+	if !progress.Complete {
+		t.Error("expected tombstone tracked item to complete convoy")
+	}
+}
+
+func TestConvoyMembersKeepsDanglingTracksUnknownOps(t *testing.T) {
+	store := beads.NewMemStore()
+
+	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
+	if err := store.DepAdd(convoy.ID, "gc-missing", "tracks"); err != nil {
+		t.Fatal(err)
+	}
+
+	members, err := Members(store, convoy.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(members) != 1 {
+		t.Fatalf("members = %d, want 1", len(members))
+	}
+	if members[0].ID != "gc-missing" {
+		t.Errorf("member ID = %q, want gc-missing", members[0].ID)
+	}
+	if members[0].Status != "unknown" {
+		t.Errorf("member status = %q, want unknown", members[0].Status)
+	}
+}
+
 func TestConvoyAddItemsOps(t *testing.T) {
 	store := beads.NewMemStore()
 	deps := testConvoyDeps(store)
