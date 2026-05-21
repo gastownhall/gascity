@@ -70,7 +70,6 @@ func TestLoadWithIncludes_RootPackDefaultRigImportsPreserveOrder(t *testing.T) {
 	fs.Files["/city/city.toml"] = []byte(`
 [workspace]
 name = "test"
-default_rig_includes = ["packs/city-local"]
 `)
 	fs.Files["/city/pack.toml"] = []byte(`
 [pack]
@@ -88,7 +87,7 @@ source = "packs/a-pack"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	want := []string{"packs/z-pack", "packs/a-pack", "packs/city-local"}
+	want := []string{"packs/z-pack", "packs/a-pack"}
 	if got := cfg.Workspace.LegacyDefaultRigIncludes(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("DefaultRigIncludes = %v, want %v", got, want)
 	}

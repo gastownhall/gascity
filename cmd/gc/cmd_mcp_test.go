@@ -46,10 +46,7 @@ func TestMcpListAgentProjectedSummary(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
-	writeProjectedMCPCity(t, cityDir, `[workspace]
-name = "test-city"
-
-[beads]
+	writeProjectedMCPCity(t, cityDir, `[beads]
 provider = "file"
 
 [session]
@@ -98,10 +95,7 @@ func TestMcpListAgentJSON(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
-	writeProjectedMCPCity(t, cityDir, `[workspace]
-name = "test-city"
-
-[beads]
+	writeProjectedMCPCity(t, cityDir, `[beads]
 provider = "file"
 
 [session]
