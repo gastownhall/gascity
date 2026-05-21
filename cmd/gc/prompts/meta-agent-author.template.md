@@ -19,27 +19,77 @@ provider-aware fragment pattern documented at the end of this brief.
 # Context type: [[ .ContextType ]]
 
 [[ if eq .ContextType "rig" -]]
-This agent is attached to a registered rig (project repository):
+This agent is attached to a rig (project repository).
 
-- Rig name:        [[ .RigName ]]
-- Rig path:        [[ .RigPath ]]
-- Default branch:  [[ if .RigDefaultBranch ]][[ .RigDefaultBranch ]][[ else ]](unknown — probe at runtime)[[ end ]]
-- City name:       [[ .CityName ]]
-- City path:       [[ .CityPath ]]
+## Situational awareness for THIS synth run
+
+The values below are what the rig-bound runtime placeholders resolve to
+*for this particular synth invocation*. They are shown so you understand
+what kind of project you are designing for — **do not paste them into the
+output as literal strings.**
+
+- Rig name (`{{ .RigName }}`):       [[ .RigName ]]
+- Rig path (`{{ .RigRoot }}`):       [[ .RigPath ]]
+- Default branch (`{{ .DefaultBranch }}`): [[ if .RigDefaultBranch ]][[ .RigDefaultBranch ]][[ else ]](unknown — probe at runtime)[[ end ]]
+- City root (`{{ .CityRoot }}`):     [[ .CityPath ]]
+- City name (no runtime placeholder): [[ .CityName ]]
+
+## Portability rule — read carefully
+
+The template you generate will be used across **multiple rigs**. To stay
+portable, any reference to a rig-bound value must go through the
+corresponding runtime placeholder, NOT the resolved string above:
+
+| Use in output       | NOT this resolved literal      |
+|---------------------|--------------------------------|
+| `{{ .RigName }}`    | [[ .RigName ]]                 |
+| `{{ .RigRoot }}`    | [[ .RigPath ]]                 |
+| `{{ .DefaultBranch }}` | [[ if .RigDefaultBranch ]][[ .RigDefaultBranch ]][[ else ]](probed at runtime)[[ end ]] |
+| `{{ .CityRoot }}`   | [[ .CityPath ]]                |
+| `{{ .WorkDir }}`    | (the agent's working directory) |
+
+If your generated template hard-codes a rig name, rig path, or branch
+where a `{{ ... }}` placeholder belongs, it is **not portable** — re-author
+those lines to use the placeholder so the same template body works for
+every rig the role is attached to.
+
+The city name has no runtime placeholder; either substitute it verbatim
+or omit it from the body — but treat that as the exception, not the rule.
+
+## Role expectations
 
 The agent works **inside the rig's repository**. Its prompt should:
-- Mention the rig name and project context where it helps the agent
-  orient itself.
-- Cover git operations relevant to its role (branch management,
-  commits, push targets) — `{{ .DefaultBranch }}` is the merge base.
+- Mention the rig context using `{{ .RigName }}` (the placeholder, not the
+  resolved name) where the agent needs to orient itself within its project.
+- Cover git operations relevant to its role (branch management, commits,
+  push targets) — `{{ .DefaultBranch }}` is the merge base.
 - Reference `{{ .WorkDir }}` and `{{ .RigRoot }}` for path-anchored
   instructions.
 [[ else -]]
 This agent is **HQ-only** — it operates at the city level, not inside
-any rig:
+any rig.
 
-- City name:  [[ .CityName ]]
-- City path:  [[ .CityPath ]]
+## Situational awareness for THIS synth run
+
+The value below is what the city-bound runtime placeholder resolves to
+*for this particular synth invocation*. It is shown so you understand
+which city you are designing for — **do not paste it into the output as a
+literal string.**
+
+- City root (`{{ .CityRoot }}`): [[ .CityPath ]]
+- City name (no runtime placeholder): [[ .CityName ]]
+
+## Portability rule — read carefully
+
+The template you generate will be used by HQ agents across **different
+cities**. To stay portable, any reference to a city-bound path must go
+through `{{ .CityRoot }}` (or `{{ .WorkDir }}` for the agent's working
+directory), NOT the resolved literal above.
+
+The city name has no runtime placeholder; either substitute it verbatim
+or omit it from the body — but treat that as the exception, not the rule.
+
+## Role expectations
 
 The agent does not work inside a project repository. Its prompt should:
 - Focus on coordination, dispatch, monitoring, and city-wide concerns.

@@ -2104,6 +2104,183 @@ func TestDoRigAdd_ExistingBeadsRequiresAdopt(t *testing.T) {
 	}
 }
 
+// A rig directory that ships a gc-flavored .beads/config.yaml but no store
+// (no metadata.json, no dolt/) is the common shape of a freshly-cloned
+// team-shared rig: the gc config travels in git, the Dolt data does not.
+// gc rig add must honor the shipped config (using its issue_prefix) and
+// initialize the store in place, rather than refusing or pointing the user
+// at --adopt (which itself requires metadata.json, not shipped here).
+func TestDoRigAdd_ShippedGCConfigNoStoreInitsInPlace(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"my-city\"\n\n[[agent]]\nname = \"mayor\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "service-inventory")
+	beadsDir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	shippedConfig := "issue_prefix: si\ngc.endpoint_origin: inherited_city\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte(shippedConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "bd")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd returned %d; stderr: %s", code, stderr.String())
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "Adding rig 'service-inventory'") {
+		t.Errorf("output missing rig name: %s", output)
+	}
+	if !strings.Contains(output, "Prefix: si") {
+		t.Errorf("output missing prefix from shipped config: %s", output)
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "service-inventory") {
+		t.Errorf("city.toml should list rig:\n%s", data)
+	}
+
+	preserved, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preservedStr := string(preserved)
+	if !strings.Contains(preservedStr, "issue_prefix: si") {
+		t.Errorf("shipped issue_prefix not preserved:\n%s", preservedStr)
+	}
+	if !strings.Contains(preservedStr, "gc.endpoint_origin: inherited_city") {
+		t.Errorf("shipped endpoint_origin not preserved:\n%s", preservedStr)
+	}
+}
+
+// State 4 must use the shipped config.yaml's issue_prefix even when the
+// rig directory name would derive a different prefix. The team's chosen
+// prefix wins over local name-derivation.
+func TestDoRigAdd_ShippedGCConfigPrefersShippedPrefixOverDerived(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"my-city\"\n\n[[agent]]\nname = \"mayor\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "alpha-beta")
+	beadsDir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: zz\ngc.endpoint_origin: inherited_city\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "bd")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd returned %d; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Prefix: zz") {
+		t.Errorf("expected shipped prefix 'zz', got stdout: %s", stdout.String())
+	}
+}
+
+// Explicit --prefix that conflicts with the shipped config.yaml must still
+// be rejected. State 4 does not silently override a shipped prefix when the
+// operator asked for something different.
+func TestDoRigAdd_ShippedGCConfigPrefixOverrideConflictRejected(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"my-city\"\n\n[[agent]]\nname = \"mayor\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "service-inventory")
+	beadsDir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: si\ngc.endpoint_origin: inherited_city\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "bd")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "xx", "", false, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected --prefix conflict to fail, got code %d; stdout: %s", code, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "already has bead prefix") {
+		t.Errorf("stderr should explain prefix conflict: %s", stderr.String())
+	}
+}
+
+// State 5 (gc-flavored config + metadata.json present = canonical adopted
+// store) must continue to require --adopt. The state-4 relaxation must not
+// bleed into state 5 — adopting a populated store is a different intent.
+func TestDoRigAdd_GCFlavoredConfigWithMetadataStillRequiresAdopt(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"my-city\"\n\n[[agent]]\nname = \"mayor\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "service-inventory")
+	beadsDir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("issue_prefix: si\ngc.endpoint_origin: inherited_city\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+		[]byte(`{"project_id":"deadbeef"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "bd")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected adopt-required failure, got code %d; stdout: %s", code, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--adopt") {
+		t.Errorf("stderr should hint at --adopt: %s", stderr.String())
+	}
+}
+
 func TestDoRigAdd_ExistingBeadsStatErrorFailsClosed(t *testing.T) {
 	f := fsys.NewFake()
 	cityPath := "/city"

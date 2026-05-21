@@ -88,7 +88,13 @@ The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
 Use --adopt to register a directory that already has a fully initialized
 .beads/ directory (must include both metadata.json and config.yaml).
-Skips beads init; the git repo check remains informational.`,
+Skips beads init; the git repo check remains informational.
+
+A rig directory that ships a gc-flavored .beads/config.yaml but no store
+(no metadata.json, no dolt/) is auto-detected: gc rig add will honor the
+shipped config and initialize the store in place, without requiring
+--adopt. This matches the common shape of a team-shared rig that commits
+its gc config but gitignores the Dolt data.`,
 		Example: `  gc rig add /path/to/project
   gc rig add /path/to/project --name myrig
   gc rig add /path/to/project --prefix r1
@@ -286,12 +292,28 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		break
 	}
 
+	// State 4 of the .beads/ matrix (see gascity#2110): the rig directory
+	// ships a gc-flavored config.yaml but no store (no metadata.json, no
+	// dolt/). This is the shape of a freshly-cloned team-shared rig where
+	// the gc config travels in git and the Dolt data does not.
+	shippedConfigOnly := !reAdd && !adopt && isShippedGCRigConfigOnly(fs, rigPath)
+
 	var prefix string
 	switch {
 	case reAdd:
 		prefix = existingRig.EffectivePrefix()
 	case prefixOverride != "":
 		prefix = strings.ToLower(prefixOverride)
+	case shippedConfigOnly:
+		// Honor the team's chosen prefix from the shipped config rather
+		// than re-deriving from the local rig-name choice. Falls back to
+		// the name derivation if the shipped config has no parseable
+		// issue_prefix.
+		if shipped, ok := readBeadsPrefix(fs, rigPath); ok {
+			prefix = shipped
+		} else {
+			prefix = config.DeriveBeadsPrefix(name)
+		}
 	default:
 		prefix = config.DeriveBeadsPrefix(name)
 	}
@@ -410,7 +432,11 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	// to bd init against an existing Dolt store and typically dies with
 	// "bd init: signal: killed" after the probe times out — an unhelpful
 	// failure mode for the common "register existing store" workflow.
-	if !reAdd && !adopt {
+	//
+	// Exception: state 4 (shipped gc config, no store) — bd init against
+	// just a config.yaml is exactly the right thing to do, so let it
+	// through and honor the shipped config.
+	if !reAdd && !adopt && !shippedConfigOnly {
 		beadsPath := filepath.Join(rigPath, ".beads")
 		fi, err := fs.Stat(beadsPath)
 		if err != nil && !os.IsNotExist(err) {
@@ -1337,6 +1363,30 @@ func writeBeadsEnvGTRoot(fs fsys.FS, rigPath, cityPath string) error {
 		return fmt.Errorf("creating .beads dir: %w", err)
 	}
 	return fs.WriteFile(envPath, []byte(content), 0o644)
+}
+
+// isShippedGCRigConfigOnly reports whether the rig directory has the shape
+// of state 4 from the .beads/ matrix (gascity#2110): a gc-flavored
+// .beads/config.yaml (identified by a non-empty endpoint_origin, which is
+// gc-specific and not produced by plain bd workspaces) and no store yet —
+// neither metadata.json nor a dolt/ directory.
+//
+// This matches the common shape of a freshly-cloned team-shared rig where
+// the gc config travels in git and the Dolt data does not. The right action
+// is to honor the shipped config and run bd init in place.
+func isShippedGCRigConfigOnly(fs fsys.FS, rigPath string) bool {
+	cfgPath := filepath.Join(rigPath, ".beads", "config.yaml")
+	cfg, ok, err := contract.ReadConfigState(fs, cfgPath)
+	if err != nil || !ok || cfg.EndpointOrigin == "" {
+		return false
+	}
+	if _, err := fs.Stat(filepath.Join(rigPath, ".beads", "metadata.json")); !os.IsNotExist(err) {
+		return false
+	}
+	if _, err := fs.Stat(filepath.Join(rigPath, ".beads", "dolt")); !os.IsNotExist(err) {
+		return false
+	}
+	return true
 }
 
 // readBeadsPrefix reads the issue_prefix from an existing .beads/config.yaml
