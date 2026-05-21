@@ -768,7 +768,7 @@ gc converge test-gate <bead-id> [flags]
 Manage convoys — graphs of related work beads.
 
 A convoy is a named graph of beads with dependencies. Convoys
-group related issues via parent-child relationships.
+group related issues via tracks dependencies.
 
 Convoys are distinct from workflows (graph.v2 formula-compiled
 DAGs managed by the dispatch subsystem) — gc convoy commands do
@@ -798,8 +798,8 @@ gc convoy
 
 Link an existing issue bead to a convoy.
 
-Sets the issue's parent to the convoy ID, making it appear in the
-convoy's progress tracking.
+Adds a tracks dependency from the convoy to the issue, making it appear
+in the convoy's progress tracking without changing the issue parent.
 
 ```
 gc convoy add <convoy-id> <issue-id> [flags]
@@ -858,8 +858,8 @@ gc convoy control [bead-id] [flags]
 
 Create a convoy and optionally link existing issues to it.
 
-Creates a convoy bead and sets the parent of any provided issue IDs to
-the new convoy. Issues can also be added later with "gc convoy add".
+Creates a convoy bead and tracks any provided issue IDs. Issues can
+also be added later with "gc convoy add".
 
 ```
 gc convoy create <name> [issue-ids...] [flags]

@@ -1434,6 +1434,39 @@ func TestDoSlingBatchUsesCallerQuerierChildrenWhenContainerExistsThere(t *testin
 	}
 }
 
+func TestDoSlingBatchExpandsTracksConvoy(t *testing.T) {
+	runner := newFakeRunner()
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	store := deps.Store
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	epic, err := store.Create(beads.Bead{Title: "epic", Type: "epic"})
+	if err != nil {
+		t.Fatalf("create epic: %v", err)
+	}
+	child, err := store.Create(beads.Bead{Title: "child", Type: "task", Status: "open", ParentID: epic.ID})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, child.ID, "tracks"); err != nil {
+		t.Fatalf("track child: %v", err)
+	}
+
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := DoSlingBatch(SlingOpts{Target: a, BeadOrFormula: convoy.ID}, deps, store)
+	if err != nil {
+		t.Fatalf("DoSlingBatch: %v", err)
+	}
+	if result.Routed != 1 {
+		t.Fatalf("Routed = %d, want 1", result.Routed)
+	}
+	if len(result.Children) != 1 || result.Children[0].BeadID != child.ID {
+		t.Fatalf("children = %#v, want tracked child %s", result.Children, child.ID)
+	}
+}
+
 func TestDoSlingBatchRoutesNonContainerFoundInQuerierStore(t *testing.T) {
 	runner := newFakeRunner()
 	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)

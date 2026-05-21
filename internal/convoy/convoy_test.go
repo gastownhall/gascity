@@ -62,7 +62,8 @@ func TestConvoyCreateWithItemsOps(t *testing.T) {
 	deps := testConvoyDeps(store)
 
 	// Create child beads first.
-	b1, _ := store.Create(beads.Bead{Title: "task 1"})
+	epic, _ := store.Create(beads.Bead{Title: "epic", Type: "epic"})
+	b1, _ := store.Create(beads.Bead{Title: "task 1", ParentID: epic.ID})
 	b2, _ := store.Create(beads.Bead{Title: "task 2"})
 
 	result, err := ConvoyCreate(deps, store, ConvoyCreateInput{
@@ -76,11 +77,13 @@ func TestConvoyCreateWithItemsOps(t *testing.T) {
 		t.Errorf("linked = %d, want 2", result.LinkedCount)
 	}
 
-	// Verify children are linked.
+	// Verify children are tracked without evicting their existing parent.
 	child1, _ := store.Get(b1.ID)
-	if child1.ParentID != result.Convoy.ID {
-		t.Errorf("child1 parent = %q, want %q", child1.ParentID, result.Convoy.ID)
+	if child1.ParentID != epic.ID {
+		t.Errorf("child1 parent = %q, want preserved epic parent %q", child1.ParentID, epic.ID)
 	}
+	requireTracksDep(t, store, result.Convoy.ID, b1.ID)
+	requireTracksDep(t, store, result.Convoy.ID, b2.ID)
 }
 
 func TestConvoyProgressOps(t *testing.T) {
@@ -130,12 +133,45 @@ func TestConvoyProgressCompleteOps(t *testing.T) {
 	}
 }
 
-func TestConvoyAddItemsOps(t *testing.T) {
+func TestConvoyProgressTracksDepsOps(t *testing.T) {
 	store := beads.NewMemStore()
 	deps := testConvoyDeps(store)
 
 	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
 	b1, _ := store.Create(beads.Bead{Title: "task 1"})
+	b2, _ := store.Create(beads.Bead{Title: "task 2"})
+	if err := store.DepAdd(convoy.ID, b1.ID, "tracks"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DepAdd(convoy.ID, b2.ID, "tracks"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(b1.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	progress, err := ConvoyProgress(deps, store, convoy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress.Total != 2 {
+		t.Errorf("total = %d, want 2", progress.Total)
+	}
+	if progress.Closed != 1 {
+		t.Errorf("closed = %d, want 1", progress.Closed)
+	}
+	if progress.Complete {
+		t.Error("expected not complete")
+	}
+}
+
+func TestConvoyAddItemsOps(t *testing.T) {
+	store := beads.NewMemStore()
+	deps := testConvoyDeps(store)
+
+	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
+	epic, _ := store.Create(beads.Bead{Title: "epic", Type: "epic"})
+	b1, _ := store.Create(beads.Bead{Title: "task 1", ParentID: epic.ID})
 
 	err := ConvoyAddItems(deps, store, convoy.ID, []string{b1.ID})
 	if err != nil {
@@ -143,9 +179,10 @@ func TestConvoyAddItemsOps(t *testing.T) {
 	}
 
 	child, _ := store.Get(b1.ID)
-	if child.ParentID != convoy.ID {
-		t.Errorf("parent = %q, want %q", child.ParentID, convoy.ID)
+	if child.ParentID != epic.ID {
+		t.Errorf("parent = %q, want preserved epic parent %q", child.ParentID, epic.ID)
 	}
+	requireTracksDep(t, store, convoy.ID, b1.ID)
 }
 
 func TestConvoyCloseOps(t *testing.T) {
@@ -185,4 +222,18 @@ func TestConvoyCloseNotFoundOps(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for nonexistent convoy")
 	}
+}
+
+func requireTracksDep(t *testing.T, store beads.Store, convoyID, itemID string) {
+	t.Helper()
+	deps, err := store.DepList(convoyID, "down")
+	if err != nil {
+		t.Fatalf("DepList(%s): %v", convoyID, err)
+	}
+	for _, dep := range deps {
+		if dep.IssueID == convoyID && dep.DependsOnID == itemID && dep.Type == "tracks" {
+			return
+		}
+	}
+	t.Fatalf("missing tracks dep %s -> %s; deps=%v", convoyID, itemID, deps)
 }

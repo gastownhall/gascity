@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -422,7 +423,7 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 				// bd update --parent evicts any prior parent-child edge; the
 				// tracks dep is additive and does not disturb the epic
 				// rollup.
-				if err := deps.Store.DepAdd(convoy.ID, beadID, "tracks"); err != nil {
+				if err := convoycore.TrackItem(deps.Store, convoy.ID, beadID); err != nil {
 					result.MetadataErrors = append(result.MetadataErrors,
 						fmt.Sprintf("linking bead to convoy: %v", err))
 				} else {
@@ -956,6 +957,17 @@ func sourceWorkflowLockScope(deps SlingDeps) string {
 	})
 }
 
+func listContainerChildren(querier BeadChildQuerier, containerID string, includeClosed bool) ([]beads.Bead, error) {
+	if store, ok := querier.(beads.Store); ok {
+		return convoycore.Members(store, containerID, includeClosed)
+	}
+	return querier.List(beads.ListQuery{
+		ParentID:      containerID,
+		IncludeClosed: includeClosed,
+		Sort:          beads.SortCreatedAsc,
+	})
+}
+
 // DoSlingBatch handles convoy expansion before delegating to DoSling.
 func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (SlingResult, error) {
 	a := opts.Target
@@ -1006,11 +1018,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		return DoSling(singleOpts, singleDeps, querier)
 	}
 
-	children, err := querier.List(beads.ListQuery{
-		ParentID:      b.ID,
-		IncludeClosed: true,
-		Sort:          beads.SortCreatedAsc,
-	})
+	children, err := listContainerChildren(querier, b.ID, true)
 	if err != nil {
 		return SlingResult{}, fmt.Errorf("listing children of %s: %w", b.ID, err)
 	}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
@@ -47,7 +48,7 @@ func newConvoyCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Manage convoys — graphs of related work beads.
 
 A convoy is a named graph of beads with dependencies. Convoys
-group related issues via parent-child relationships.
+group related issues via tracks dependencies.
 
 Convoys are distinct from workflows (graph.v2 formula-compiled
 DAGs managed by the dispatch subsystem) — gc convoy commands do
@@ -91,8 +92,8 @@ func newConvoyCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Create a convoy and optionally track issues",
 		Long: `Create a convoy and optionally link existing issues to it.
 
-Creates a convoy bead and sets the parent of any provided issue IDs to
-the new convoy. Issues can also be added later with "gc convoy add".`,
+Creates a convoy bead and tracks any provided issue IDs. Issues can
+also be added later with "gc convoy add".`,
 		Example: `  gc convoy create sprint-42
   gc convoy create sprint-42 issue-1 issue-2 issue-3
   gc convoy create deploy --owner mayor --notify mayor --merge mr
@@ -253,9 +254,8 @@ func doConvoyCreateWithOptionsJSON(store beads.Store, cfg *config.City, cityPath
 			fmt.Fprintf(stderr, "gc convoy create: issue %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		parentID := convoy.ID
-		if err := childStore.Update(id, beads.UpdateOpts{ParentID: &parentID}); err != nil {
-			fmt.Fprintf(stderr, "gc convoy create: setting parent on %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
+		if err := convoycore.TrackItem(childStore, convoy.ID, id); err != nil {
+			fmt.Fprintf(stderr, "gc convoy create: tracking %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
@@ -548,12 +548,8 @@ func doConvoyList(store beads.Store, stdout, stderr io.Writer) int {
 	return doConvoyListAcrossStores([]convoyStoreView{{store: store}}, false, stdout, stderr)
 }
 
-func listConvoyChildren(store beads.Store, parentID string, includeClosed bool) ([]beads.Bead, error) {
-	return store.List(beads.ListQuery{
-		ParentID:      parentID,
-		IncludeClosed: includeClosed,
-		Sort:          beads.SortCreatedAsc,
-	})
+func listConvoyChildren(store beads.Store, convoyID string, includeClosed bool) ([]beads.Bead, error) {
+	return convoycore.Members(store, convoyID, includeClosed)
 }
 
 func doConvoyListAcrossStores(stores []convoyStoreView, jsonOut bool, stdout, stderr io.Writer) int {
@@ -878,8 +874,8 @@ func newConvoyAddCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Add an issue to a convoy",
 		Long: `Link an existing issue bead to a convoy.
 
-Sets the issue's parent to the convoy ID, making it appear in the
-convoy's progress tracking.`,
+Adds a tracks dependency from the convoy to the issue, making it appear
+in the convoy's progress tracking without changing the issue parent.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			code := 0
@@ -918,7 +914,7 @@ func cmdConvoyAddJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int
 	return doConvoyAddJSON(store, args, jsonOut, stdout, stderr)
 }
 
-// doConvoyAdd adds an issue to a convoy by setting the issue's ParentID.
+// doConvoyAdd adds an issue to a convoy by recording a tracks dependency.
 func doConvoyAdd(store beads.Store, args []string, stdout, stderr io.Writer) int {
 	return doConvoyAddJSON(store, args, false, stdout, stderr)
 }
@@ -946,7 +942,7 @@ func doConvoyAddJSON(store beads.Store, args []string, jsonOut bool, stdout, std
 		return 1
 	}
 
-	if err := store.Update(issueID, beads.UpdateOpts{ParentID: &convoyID}); err != nil {
+	if err := convoycore.TrackItem(store, convoyID, issueID); err != nil {
 		fmt.Fprintf(stderr, "gc convoy add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1459,7 +1455,7 @@ func doConvoyLandJSON(store beads.Store, rec events.Recorder, args []string, opt
 func newConvoyAutocloseCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:    "autoclose <bead-id>",
-		Short:  "Auto-close parent convoy if all siblings are closed",
+		Short:  "Auto-close completed convoys for a closed bead",
 		Hidden: true,
 		Args:   cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -1514,25 +1510,44 @@ func autocloseCityPathForStoreRoot(storeRoot string) string {
 	return cityForStoreDir(storeRoot)
 }
 
-// doConvoyAutocloseWith checks whether the closed bead's parent is a
-// convoy with all children closed, and if so closes it. All errors are
-// silently swallowed — this is best-effort infrastructure called from
-// a bd hook script.
+// doConvoyAutocloseWith checks whether the closed bead's legacy parent or
+// tracks dependents are convoys with all children closed, and if so closes
+// them. All errors are silently swallowed — this is best-effort
+// infrastructure called from a bd hook script.
 func doConvoyAutocloseWith(store beads.Store, rec events.Recorder, beadID string, stdout, _ io.Writer) {
 	bead, err := store.Get(beadID)
-	if err != nil || bead.ParentID == "" {
+	if err != nil {
 		return
 	}
 
-	parent, err := store.Get(bead.ParentID)
-	if err != nil || parent.Type != "convoy" || parent.Status == "closed" {
+	seen := make(map[string]bool)
+	if bead.ParentID != "" {
+		parent, err := store.Get(bead.ParentID)
+		if err == nil {
+			seen[parent.ID] = true
+			autocloseConvoyIfComplete(store, rec, parent, stdout)
+		}
+	}
+
+	trackingConvoys, err := convoycore.TrackingConvoysForItem(store, beadID)
+	if err != nil {
 		return
 	}
-	if hasLabel(parent.Labels, "owned") {
+	for _, convoy := range trackingConvoys {
+		if seen[convoy.ID] {
+			continue
+		}
+		seen[convoy.ID] = true
+		autocloseConvoyIfComplete(store, rec, convoy, stdout)
+	}
+}
+
+func autocloseConvoyIfComplete(store beads.Store, rec events.Recorder, convoy beads.Bead, stdout io.Writer) {
+	if convoy.Type != "convoy" || convoy.Status == "closed" || hasLabel(convoy.Labels, "owned") {
 		return
 	}
 
-	children, err := listConvoyChildren(store, parent.ID, true)
+	children, err := listConvoyChildren(store, convoy.ID, true)
 	if err != nil || len(children) == 0 {
 		return
 	}
@@ -1542,15 +1557,15 @@ func doConvoyAutocloseWith(store beads.Store, rec events.Recorder, beadID string
 		}
 	}
 
-	if err := closeConvoyWithReason(store, parent.ID, convoyAutocloseReason); err != nil {
+	if err := closeConvoyWithReason(store, convoy.ID, convoyAutocloseReason); err != nil {
 		return
 	}
 
 	rec.Record(events.Event{
 		Type:    events.ConvoyClosed,
 		Actor:   eventActor(),
-		Subject: parent.ID,
+		Subject: convoy.ID,
 	})
 
-	fmt.Fprintf(stdout, "Auto-closed convoy %s %q\n", parent.ID, parent.Title) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "Auto-closed convoy %s %q\n", convoy.ID, convoy.Title) //nolint:errcheck // best-effort stdout
 }
