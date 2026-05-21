@@ -465,6 +465,28 @@ func TestConvoyStatusTracksDeps(t *testing.T) {
 	}
 }
 
+func TestConvoyStatusReportsDanglingTracks(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "deploy", Type: "convoy"}) // gc-1
+	_, _ = store.Create(beads.Bead{Title: "task A"})                 // gc-2
+	requireNoError(t, store.DepAdd("gc-1", "gc-2", "tracks"))
+	requireNoError(t, store.DepAdd("gc-1", "gc-missing", "tracks"))
+	_ = store.Close("gc-2")
+
+	var stdout, stderr bytes.Buffer
+	code := doConvoyStatus(store, []string{"gc-1"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyStatus = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	for _, want := range []string{"Progress: 1/2 closed (1 dangling track)", "gc-missing", "unknown"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestConvoyStatusJSON(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{
@@ -508,6 +530,29 @@ func TestConvoyStatusJSON(t *testing.T) {
 	}
 	if len(result.Children) != 2 || result.Children[1].Assignee != "worker" {
 		t.Fatalf("children = %+v, want two children with second assigned", result.Children)
+	}
+}
+
+func TestConvoyStatusJSONReportsDanglingTracks(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "deploy", Type: "convoy"}) // gc-1
+	_, _ = store.Create(beads.Bead{Title: "task A"})                 // gc-2
+	requireNoError(t, store.DepAdd("gc-1", "gc-2", "tracks"))
+	requireNoError(t, store.DepAdd("gc-1", "gc-missing", "tracks"))
+	_ = store.Close("gc-2")
+
+	var stdout, stderr bytes.Buffer
+	code := doConvoyStatusWithJSON(store, []string{"gc-1"}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyStatus --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	var result convoyStatusResultJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if result.Progress.Closed != 1 || result.Progress.Total != 2 || result.Progress.DanglingTracks != 1 {
+		t.Fatalf("progress = %+v, want 1/2 with 1 dangling track", result.Progress)
 	}
 }
 
@@ -1155,6 +1200,25 @@ func TestConvoyStrandedClosedExcluded(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "No stranded work") {
 		t.Errorf("stdout = %q, want no stranded (closed issues excluded)", stdout.String())
+	}
+}
+
+func TestConvoyListReportsDanglingTracks(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"}) // gc-1
+	_, _ = store.Create(beads.Bead{Title: "task A"})                // gc-2
+	requireNoError(t, store.DepAdd("gc-1", "gc-2", "tracks"))
+	requireNoError(t, store.DepAdd("gc-1", "gc-missing", "tracks"))
+	_ = store.Close("gc-2")
+
+	var stdout, stderr bytes.Buffer
+	code := doConvoyList(store, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doConvoyList = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), "1/2 closed (1 dangling track)") {
+		t.Errorf("stdout = %q, want dangling track progress", stdout.String())
 	}
 }
 

@@ -445,8 +445,9 @@ type convoyWithStore struct {
 }
 
 type convoyProgressJSON struct {
-	Closed int `json:"closed"`
-	Total  int `json:"total"`
+	Closed         int `json:"closed"`
+	Total          int `json:"total"`
+	DanglingTracks int `json:"dangling_tracks,omitempty"`
 }
 
 type convoyFieldsJSON struct {
@@ -477,11 +478,12 @@ type convoyListResultJSON struct {
 }
 
 type convoyChildJSON struct {
-	ID       string `json:"id"`
-	Title    string `json:"title"`
-	Status   string `json:"status"`
-	Type     string `json:"type"`
-	Assignee string `json:"assignee,omitempty"`
+	ID            string `json:"id"`
+	Title         string `json:"title"`
+	Status        string `json:"status"`
+	Type          string `json:"type"`
+	Assignee      string `json:"assignee,omitempty"`
+	DanglingTrack bool   `json:"dangling_track,omitempty"`
 }
 
 type convoyDetailJSON struct {
@@ -518,6 +520,31 @@ func collectOpenConvoys(stores []convoyStoreView) ([]convoyWithStore, error) {
 		return convoys[i].bead.ID < convoys[j].bead.ID
 	})
 	return convoys, nil
+}
+
+func convoyProgressFromChildren(children []beads.Bead) convoyProgressJSON {
+	progress := convoyProgressJSON{Total: len(children)}
+	for _, ch := range children {
+		if convoycore.IsTerminalStatus(ch.Status) {
+			progress.Closed++
+		}
+		if convoycore.IsUnresolvedTrackedItem(ch) {
+			progress.DanglingTracks++
+		}
+	}
+	return progress
+}
+
+func formatConvoyProgress(progress convoyProgressJSON) string {
+	text := fmt.Sprintf("%d/%d closed", progress.Closed, progress.Total)
+	if progress.DanglingTracks > 0 {
+		suffix := "tracks"
+		if progress.DanglingTracks == 1 {
+			suffix = "track"
+		}
+		text += fmt.Sprintf(" (%d dangling %s)", progress.DanglingTracks, suffix)
+	}
+	return text
 }
 
 func openConvoyStoreByID(convoyID string, stderr io.Writer, cmdName string) (beads.Store, int) {
@@ -576,13 +603,8 @@ func doConvoyListAcrossStores(stores []convoyStoreView, jsonOut bool, stdout, st
 			fmt.Fprintf(stderr, "gc convoy list: children of %s: %v\n", c.bead.ID, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		closed := 0
-		for _, ch := range children {
-			if convoycore.IsTerminalStatus(ch.Status) {
-				closed++
-			}
-		}
-		fmt.Fprintf(tw, "%s\t%s\t%d/%d closed\n", c.bead.ID, c.bead.Title, closed, len(children)) //nolint:errcheck // best-effort stdout
+		progress := convoyProgressFromChildren(children)
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", c.bead.ID, c.bead.Title, formatConvoyProgress(progress)) //nolint:errcheck // best-effort stdout
 	}
 	tw.Flush() //nolint:errcheck // best-effort stdout
 	return 0
@@ -612,18 +634,14 @@ func writeConvoyListJSON(convoys []convoyWithStore, stdout, stderr io.Writer) in
 
 func convoySummaryFromBead(convoy beads.Bead, children []beads.Bead) convoySummaryJSON {
 	childIDs := make([]string, 0, len(children))
-	closed := 0
 	for _, ch := range children {
 		childIDs = append(childIDs, ch.ID)
-		if convoycore.IsTerminalStatus(ch.Status) {
-			closed++
-		}
 	}
 	return convoySummaryJSON{
 		ID:       convoy.ID,
 		Title:    convoy.Title,
 		Status:   convoy.Status,
-		Progress: convoyProgressJSON{Closed: closed, Total: len(children)},
+		Progress: convoyProgressFromChildren(children),
 		Owned:    hasLabel(convoy.Labels, "owned"),
 		Fields:   convoyFieldsFromBead(convoy),
 		ChildIDs: childIDs,
@@ -705,22 +723,17 @@ func doConvoyStatusWithJSON(store beads.Store, args []string, jsonOut bool, stdo
 		return 1
 	}
 
-	closed := 0
-	for _, ch := range children {
-		if convoycore.IsTerminalStatus(ch.Status) {
-			closed++
-		}
-	}
+	progress := convoyProgressFromChildren(children)
 
 	if jsonOut {
-		return writeConvoyStatusJSON(convoy, children, closed, stdout, stderr)
+		return writeConvoyStatusJSON(convoy, children, progress, stdout, stderr)
 	}
 
 	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
 	w(fmt.Sprintf("Convoy:   %s", convoy.ID))
 	w(fmt.Sprintf("Title:    %s", convoy.Title))
 	w(fmt.Sprintf("Status:   %s", convoy.Status))
-	w(fmt.Sprintf("Progress: %d/%d closed", closed, len(children)))
+	w(fmt.Sprintf("Progress: %s", formatConvoyProgress(progress)))
 	fields := getConvoyFields(convoy)
 	if hasLabel(convoy.Labels, "owned") {
 		w("Lifecycle: owned")
@@ -754,15 +767,16 @@ func doConvoyStatusWithJSON(store beads.Store, args []string, jsonOut bool, stdo
 	return 0
 }
 
-func writeConvoyStatusJSON(convoy beads.Bead, children []beads.Bead, closed int, stdout, stderr io.Writer) int {
+func writeConvoyStatusJSON(convoy beads.Bead, children []beads.Bead, progress convoyProgressJSON, stdout, stderr io.Writer) int {
 	childItems := make([]convoyChildJSON, 0, len(children))
 	for _, ch := range children {
 		childItems = append(childItems, convoyChildJSON{
-			ID:       ch.ID,
-			Title:    ch.Title,
-			Status:   ch.Status,
-			Type:     ch.Type,
-			Assignee: ch.Assignee,
+			ID:            ch.ID,
+			Title:         ch.Title,
+			Status:        ch.Status,
+			Type:          ch.Type,
+			Assignee:      ch.Assignee,
+			DanglingTrack: convoycore.IsUnresolvedTrackedItem(ch),
 		})
 	}
 	if err := writeCLIJSONLine(stdout, convoyStatusResultJSON{
@@ -775,7 +789,7 @@ func writeConvoyStatusJSON(convoy beads.Bead, children []beads.Bead, closed int,
 			Fields: convoyFieldsFromBead(convoy),
 			Labels: convoy.Labels,
 		},
-		Progress: convoyProgressJSON{Closed: closed, Total: len(children)},
+		Progress: progress,
 		Children: childItems,
 	}); err != nil {
 		fmt.Fprintf(stderr, "gc convoy status: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr

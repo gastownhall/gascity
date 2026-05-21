@@ -535,33 +535,60 @@ func TestCheckBeadStateRoutedWithClosedConvoyIsNotIdempotent(t *testing.T) {
 }
 
 func TestCheckBeadStateRoutedWithWorkflowParentIsIdempotent(t *testing.T) {
-	store := beads.NewMemStore()
-	parent, err := store.Create(beads.Bead{
-		Title:  "workflow",
-		Type:   "workflow",
-		Status: "in_progress",
-		Metadata: map[string]string{
-			"gc.kind": "workflow",
+	tests := []struct {
+		name     string
+		metadata map[string]string
+	}{
+		{
+			name: "workflow kind",
+			metadata: map[string]string{
+				"gc.kind": "workflow",
+			},
 		},
-	})
-	if err != nil {
-		t.Fatalf("store.Create(parent): %v", err)
-	}
-	bead, err := store.Create(beads.Bead{
-		Title:    "workflow step",
-		Type:     "task",
-		Status:   "open",
-		ParentID: parent.ID,
-		Metadata: map[string]string{"gc.routed_to": "mayor"},
-	})
-	if err != nil {
-		t.Fatalf("store.Create(bead): %v", err)
+		{
+			name: "graph v2 contract",
+			metadata: map[string]string{
+				"gc.formula_contract": "graph.v2",
+			},
+		},
+		{
+			name: "workflow kind and graph v2 contract",
+			metadata: map[string]string{
+				"gc.kind":             "workflow",
+				"gc.formula_contract": "graph.v2",
+			},
+		},
 	}
 
-	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			parent, err := store.Create(beads.Bead{
+				Title:    "workflow",
+				Type:     "workflow",
+				Status:   "in_progress",
+				Metadata: tt.metadata,
+			})
+			if err != nil {
+				t.Fatalf("store.Create(parent): %v", err)
+			}
+			bead, err := store.Create(beads.Bead{
+				Title:    "workflow step",
+				Type:     "task",
+				Status:   "open",
+				ParentID: parent.ID,
+				Metadata: map[string]string{"gc.routed_to": "mayor"},
+			})
+			if err != nil {
+				t.Fatalf("store.Create(bead): %v", err)
+			}
 
-	if !result.Idempotent {
-		t.Fatalf("expected Idempotent=true for routed bead under workflow parent, got %+v", result)
+			result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+
+			if !result.Idempotent {
+				t.Fatalf("expected Idempotent=true for routed bead under workflow parent, got %+v", result)
+			}
+		})
 	}
 }
 
