@@ -2025,12 +2025,8 @@ func TestSendKeysLiteralWithRetryFallsBackToPasteBufferOnCommandTooLong(t *testi
 	if !strings.Contains(first, "send-keys") || !strings.Contains(first, "-l") {
 		t.Fatalf("first call = %v, want literal send-keys", fe.calls[0])
 	}
-	if got := fe.calls[1][2]; got != "load-buffer" {
-		t.Fatalf("second call = %v, want load-buffer", fe.calls[1])
-	}
-	if got := fe.calls[2][2]; got != "paste-buffer" {
-		t.Fatalf("third call = %v, want paste-buffer", fe.calls[2])
-	}
+	assertTmuxCommand(t, fe.calls[1], "load-buffer")
+	assertTmuxCommand(t, fe.calls[2], "paste-buffer")
 	third := strings.Join(fe.calls[2], "\x00")
 	for _, want := range []string{"\x00-p\x00", "\x00-d\x00", "\x00-t\x00%1"} {
 		if !strings.Contains(third, want) {
@@ -2052,11 +2048,16 @@ func TestSendKeysLiteralWithRetryUsesPasteBufferForLargeText(t *testing.T) {
 	if len(fe.calls) != 2 {
 		t.Fatalf("tmux calls = %d, want 2: %#v", len(fe.calls), fe.calls)
 	}
-	if got := fe.calls[0][2]; got != "load-buffer" {
-		t.Fatalf("first call = %v, want load-buffer", fe.calls[0])
-	}
-	if got := fe.calls[1][2]; got != "paste-buffer" {
-		t.Fatalf("second call = %v, want paste-buffer", fe.calls[1])
+	assertTmuxCommand(t, fe.calls[0], "load-buffer")
+	assertTmuxCommand(t, fe.calls[1], "paste-buffer")
+}
+
+func assertTmuxCommand(t *testing.T, args []string, want string) {
+	t.Helper()
+
+	joined := "\x00" + strings.Join(args, "\x00") + "\x00"
+	if !strings.Contains(joined, "\x00"+want+"\x00") {
+		t.Fatalf("tmux call = %v, want command %q", args, want)
 	}
 }
 

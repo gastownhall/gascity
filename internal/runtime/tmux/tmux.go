@@ -1458,6 +1458,8 @@ func (t *Tmux) pasteLiteralText(target, text string) error {
 		}
 	}()
 
+	// Force bracketed paste so multiline nudges arrive as one paste operation
+	// instead of being interpreted as individual keypresses by provider TUIs.
 	if _, err := t.run("paste-buffer", "-p", "-d", "-b", bufferName, "-t", target); err != nil {
 		return fmt.Errorf("pasting tmux buffer: %w", err)
 	}
