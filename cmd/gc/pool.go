@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -213,46 +212,6 @@ func expandSessionSetup(cmds []string, ctx SessionSetupContext) []string {
 		result[i] = buf.String()
 	}
 	return result
-}
-
-// resolveSetupScript resolves a session_setup_script path for runtime use.
-// Absolute paths pass through unchanged. "//" paths resolve against cityPath.
-// Other relative paths resolve against sourceDir when present; otherwise they
-// resolve against cityPath. City-root-relative strings produced by older
-// composition code remain supported during the transition.
-func resolveSetupScript(script, sourceDir, cityPath string) string {
-	if strings.HasPrefix(script, "//") {
-		return filepath.Join(cityPath, strings.TrimPrefix(script, "//"))
-	}
-	if script == "" || filepath.IsAbs(script) {
-		return script
-	}
-	if sourceDir != "" {
-		relSource, err := filepath.Rel(cityPath, sourceDir)
-		if err == nil {
-			relSource = filepath.Clean(relSource)
-			cleanScript := filepath.Clean(script)
-			if relSource != "." && relSource != "" && !strings.HasPrefix(relSource, "..") &&
-				(cleanScript == relSource || strings.HasPrefix(cleanScript, relSource+string(os.PathSeparator))) {
-				return filepath.Join(cityPath, cleanScript)
-			}
-		}
-		sourceCandidate := filepath.Join(sourceDir, script)
-		cityCandidate := filepath.Join(cityPath, filepath.Clean(script))
-		if fileExists(cityCandidate) && !fileExists(sourceCandidate) {
-			return cityCandidate
-		}
-		return sourceCandidate
-	}
-	return filepath.Join(cityPath, script)
-}
-
-func fileExists(path string) bool {
-	if path == "" {
-		return false
-	}
-	_, err := os.Stat(path)
-	return err == nil
 }
 
 // deepCopyAgent creates a deep copy of a config.Agent with a new name and dir.

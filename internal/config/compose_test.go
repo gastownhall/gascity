@@ -1326,6 +1326,58 @@ session_setup_script = "scripts/theme.sh"
 	}
 }
 
+func TestLoadWithIncludes_FragmentPatchPromptTemplateAndOverlayDirResolvedFromFragmentDir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	writeFile("city.toml", `
+include = ["fragments/patch.toml"]
+
+[workspace]
+name = "test"
+includes = ["packs/base"]
+`)
+	writeFile("packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+	writeFile("fragments/patch.toml", `
+[[patches.agent]]
+name = "worker"
+prompt_template = "prompts/theme.md"
+overlay_dir = "overlays/theme"
+`)
+	writeFile("fragments/prompts/theme.md", "fragment prompt\n")
+	writeFile("fragments/overlays/theme/.keep", "")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("len(cfg.Agents) = %d, want 1", len(cfg.Agents))
+	}
+	if cfg.Agents[0].PromptTemplate != "fragments/prompts/theme.md" {
+		t.Fatalf("PromptTemplate = %q, want fragments/prompts/theme.md", cfg.Agents[0].PromptTemplate)
+	}
+	if cfg.Agents[0].OverlayDir != "fragments/overlays/theme" {
+		t.Fatalf("OverlayDir = %q, want fragments/overlays/theme", cfg.Agents[0].OverlayDir)
+	}
+}
+
 func TestLoadWithIncludes_RootPatchSessionSetupScriptResolvedFromCityDir(t *testing.T) {
 	dir := t.TempDir()
 	writeFile := func(rel, data string) {
@@ -1368,6 +1420,113 @@ scope = "city"
 	want := filepath.Join(dir, "scripts/local.sh")
 	if cfg.Agents[0].SessionSetupScript != want {
 		t.Fatalf("SessionSetupScript = %q, want %q", cfg.Agents[0].SessionSetupScript, want)
+	}
+}
+
+func TestLoadWithIncludes_RootPatchPromptTemplateAndOverlayDirResolvedFromCityDir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	writeFile("city.toml", `
+[workspace]
+name = "test"
+includes = ["packs/base"]
+
+[[patches.agent]]
+name = "worker"
+prompt_template = "prompts/local.md"
+overlay_dir = "overlays/local"
+`)
+	writeFile("packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+	writeFile("prompts/local.md", "city prompt\n")
+	writeFile("overlays/local/.keep", "")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("len(cfg.Agents) = %d, want 1", len(cfg.Agents))
+	}
+	if cfg.Agents[0].PromptTemplate != "prompts/local.md" {
+		t.Fatalf("PromptTemplate = %q, want prompts/local.md", cfg.Agents[0].PromptTemplate)
+	}
+	if cfg.Agents[0].OverlayDir != "overlays/local" {
+		t.Fatalf("OverlayDir = %q, want overlays/local", cfg.Agents[0].OverlayDir)
+	}
+}
+
+func TestLoadWithIncludes_FragmentRigOverridePromptTemplateAndOverlayDirApplyEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	writeFile("city.toml", `
+include = ["fragments/rig.toml"]
+
+[workspace]
+name = "test"
+`)
+	writeFile("fragments/rig.toml", `
+[[rigs]]
+name = "hw"
+path = "rig"
+includes = ["packs/base"]
+
+  [[rigs.overrides]]
+  agent = "worker"
+  prompt_template = "prompts/rig-worker.md"
+  overlay_dir = "overlays/rig-worker"
+`)
+	writeFile("packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "rig"
+prompt_template = "prompts/base-worker.md"
+overlay_dir = "overlays/base-worker"
+`)
+	writeFile("fragments/prompts/rig-worker.md", "rig override prompt\n")
+	writeFile("fragments/overlays/rig-worker/.keep", "")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("len(cfg.Agents) = %d, want 1", len(cfg.Agents))
+	}
+	if cfg.Agents[0].PromptTemplate != "fragments/prompts/rig-worker.md" {
+		t.Fatalf("PromptTemplate = %q, want fragments/prompts/rig-worker.md", cfg.Agents[0].PromptTemplate)
+	}
+	if cfg.Agents[0].OverlayDir != "fragments/overlays/rig-worker" {
+		t.Fatalf("OverlayDir = %q, want fragments/overlays/rig-worker", cfg.Agents[0].OverlayDir)
 	}
 }
 

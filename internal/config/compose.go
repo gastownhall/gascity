@@ -698,19 +698,25 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	return root, prov, nil
 }
 
-// adjustPatchPaths resolves patch session_setup_script values to absolute
-// paths rooted at the declaring config directory. Patches do not retain
-// independent source provenance after merge, so runtime cannot otherwise
-// distinguish whether a relative override came from the target agent's source
-// or from the patch file itself.
+// adjustPatchPaths resolves patch path fields rooted at the declaring config
+// directory. Patches do not retain independent source provenance after merge,
+// so runtime cannot otherwise distinguish whether a relative override came
+// from the target agent's source or from the patch file itself.
 func adjustPatchPaths(patches *Patches, declDir, cityRoot string) {
 	for i := range patches.Agents {
 		p := &patches.Agents[i]
-		if p.SessionSetupScript == nil || *p.SessionSetupScript == "" {
-			continue
+		if p.SessionSetupScript != nil && *p.SessionSetupScript != "" {
+			v := resolveConfigPath(*p.SessionSetupScript, declDir, cityRoot)
+			p.SessionSetupScript = &v
 		}
-		v := resolveConfigPath(*p.SessionSetupScript, declDir, cityRoot)
-		p.SessionSetupScript = &v
+		if p.PromptTemplate != nil && *p.PromptTemplate != "" {
+			v := adjustFragmentPath(*p.PromptTemplate, declDir, cityRoot)
+			p.PromptTemplate = &v
+		}
+		if p.OverlayDir != nil && *p.OverlayDir != "" {
+			v := adjustFragmentPath(*p.OverlayDir, declDir, cityRoot)
+			p.OverlayDir = &v
+		}
 	}
 }
 

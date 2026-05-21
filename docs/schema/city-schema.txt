@@ -430,7 +430,7 @@
         },
         "prompt_template": {
           "type": "string",
-          "description": "PromptTemplate overrides the prompt template path.\nRelative paths resolve against the city directory."
+          "description": "PromptTemplate overrides the prompt template path.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root."
         },
         "session": {
           "type": "string",
@@ -520,7 +520,7 @@
         },
         "overlay_dir": {
           "type": "string",
-          "description": "OverlayDir overrides the agent's overlay_dir path. Copies contents\nadditively into the agent's working directory at startup.\nRelative paths resolve against the city directory."
+          "description": "OverlayDir overrides the agent's overlay_dir path. Copies contents\nadditively into the agent's working directory at startup.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root."
         },
         "default_sling_formula": {
           "type": "string",
@@ -688,7 +688,7 @@
         },
         "prompt_template": {
           "type": "string",
-          "description": "PromptTemplate overrides the prompt template path.\nRelative paths resolve against the city directory."
+          "description": "PromptTemplate overrides the prompt template path.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root."
         },
         "session": {
           "type": "string",
@@ -792,7 +792,7 @@
         },
         "overlay_dir": {
           "type": "string",
-          "description": "OverlayDir overrides the agent's overlay_dir path. Copies contents\nadditively into the agent's working directory at startup.\nRelative paths resolve against the city directory."
+          "description": "OverlayDir overrides the agent's overlay_dir path. Copies contents\nadditively into the agent's working directory at startup.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root."
         },
         "default_sling_formula": {
           "type": "string",
