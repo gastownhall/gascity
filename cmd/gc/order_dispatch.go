@@ -1301,6 +1301,9 @@ func sweepStaleOrderTrackingWithOptions(store beads.Store, now time.Time, staleA
 	result := orderTrackingSweepResult{}
 	var ids []string
 	for _, b := range all {
+		if beadLabelsContain(b.Labels, labelTriggerEnvFailed) {
+			continue
+		}
 		if len(onlyOrders) > 0 {
 			name, ok := orderNameFromTrackingBead(b)
 			if !ok {

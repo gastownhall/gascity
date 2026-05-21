@@ -31,9 +31,9 @@ import (
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
-// newCityRuntimeOpenSweepStore opens the city store used for the orphaned
-// order-tracking sweep in newCityRuntime. Test code can swap this to return
-// an in-memory store and skip spawning managed dolt.
+// newCityRuntimeOpenSweepStore opens stores used by order-tracking sweeps.
+// Test code can swap this to return in-memory stores and skip spawning
+// managed dolt.
 var newCityRuntimeOpenSweepStore = openStoreAtForCity
 
 // reloadOrderDrainTimeout bounds how long config reload will wait for
@@ -1202,9 +1202,7 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 		}
 		return
 	}
-	onlyOrders := map[string]struct{}{
-		orderTrackingSweepOrder: {},
-	}
+	onlyOrders := orderTrackingSweepOrderFilterForConfig(cr.cityPath, cr.cfg)
 	result, sweepErr := sweepStaleOrderTrackingAcrossStores(stores, now, orderTrackingSweepWatchdogStaleAfter, onlyOrders, orderTrackingWatchdogMetadataInitiator, false)
 	if err := errors.Join(storeErr, sweepErr); err != nil {
 		if cr.stderr != nil {
@@ -1237,12 +1235,30 @@ func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, error) {
 			store = rigStores[sweepTarget.target.RigName]
 		}
 		if store == nil {
-			errs = append(errs, fmt.Errorf("%s order store is not initialized", sweepTarget.label))
-			continue
+			opened, err := newCityRuntimeOpenSweepStore(sweepTarget.target.ScopeRoot, cr.cityPath)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("opening %s order store: %w", sweepTarget.label, err))
+				continue
+			}
+			store = opened
 		}
 		stores = append(stores, orderTrackingSweepScopedStore{Store: store, label: sweepTarget.label})
 	}
 	return stores, errors.Join(errs...)
+}
+
+func orderTrackingSweepOrderFilterForConfig(cityPath string, cfg *config.City) map[string]struct{} {
+	onlyOrders := map[string]struct{}{
+		orderTrackingSweepOrder: {},
+	}
+	for _, sweepTarget := range orderTrackingSweepTargetsForConfig(cityPath, cfg) {
+		if sweepTarget.target.ScopeKind != "rig" || strings.TrimSpace(sweepTarget.target.RigName) == "" {
+			continue
+		}
+		scoped := (&orders.Order{Name: orderTrackingSweepOrder, Rig: sweepTarget.target.RigName}).ScopedName()
+		onlyOrders[scoped] = struct{}{}
+	}
+	return onlyOrders
 }
 
 func (cr *CityRuntime) handleReloadRequest(req *reloadRequest) {

@@ -1579,7 +1579,7 @@ func TestOrderTrackingSweepWatchdogClosesRigStoreSweepTracking(t *testing.T) {
 	rigStore := beads.NewMemStore()
 	rigSweepTracking, err := rigStore.Create(beads.Bead{
 		Title:     "order:" + orderTrackingSweepOrder + ":rig:frontend",
-		Labels:    []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
+		Labels:    []string{"order-run:" + orderTrackingSweepOrder + ":rig:frontend", labelOrderTracking},
 		Ephemeral: true,
 	})
 	if err != nil {
@@ -1588,7 +1588,7 @@ func TestOrderTrackingSweepWatchdogClosesRigStoreSweepTracking(t *testing.T) {
 	time.Sleep(2 * time.Millisecond)
 	freshRigSweepTracking, err := rigStore.Create(beads.Bead{
 		Title:     "order:" + orderTrackingSweepOrder + ":rig:frontend",
-		Labels:    []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
+		Labels:    []string{"order-run:" + orderTrackingSweepOrder + ":rig:frontend", labelOrderTracking},
 		Ephemeral: true,
 	})
 	if err != nil {
@@ -1637,6 +1637,58 @@ func TestOrderTrackingSweepWatchdogClosesRigStoreSweepTracking(t *testing.T) {
 	}
 	if gotCity.Status != "open" {
 		t.Fatalf("city unrelated tracking status = %s, want open", gotCity.Status)
+	}
+}
+
+func TestOrderTrackingSweepWatchdogFallsBackToConfiguredRigStore(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	rigSweepTracking, err := rigStore.Create(beads.Bead{
+		Title:     "order:" + orderTrackingSweepOrder + ":rig:frontend",
+		Labels:    []string{"order-run:" + orderTrackingSweepOrder + ":rig:frontend", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(rig sweep): %v", err)
+	}
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "frontend")
+	prevOpenSweepStore := newCityRuntimeOpenSweepStore
+	newCityRuntimeOpenSweepStore = func(scopeRoot, gotCityPath string) (beads.Store, error) {
+		if gotCityPath != cityPath {
+			return nil, fmt.Errorf("city path = %q, want %q", gotCityPath, cityPath)
+		}
+		switch filepath.Clean(scopeRoot) {
+		case filepath.Clean(cityPath):
+			return cityStore, nil
+		case filepath.Clean(rigPath):
+			return rigStore, nil
+		default:
+			return nil, fmt.Errorf("unexpected store path %q", scopeRoot)
+		}
+	}
+	t.Cleanup(func() {
+		newCityRuntimeOpenSweepStore = prevOpenSweepStore
+	})
+
+	cr := &CityRuntime{
+		cityPath:            cityPath,
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}, Rigs: []config.Rig{{Name: "frontend", Path: rigPath}}},
+		standaloneCityStore: cityStore,
+		standaloneRigStores: map[string]beads.Store{},
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingSweepWatchdog(rigSweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Millisecond))
+
+	gotRig, err := rigStore.Get(rigSweepTracking.ID)
+	if err != nil {
+		t.Fatalf("Get(rig sweep): %v", err)
+	}
+	if gotRig.Status != "closed" {
+		t.Fatalf("rig sweep tracking status = %s, want closed", gotRig.Status)
 	}
 }
 

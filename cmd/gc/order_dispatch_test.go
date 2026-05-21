@@ -3367,6 +3367,9 @@ func TestSweepStaleOrderTrackingAcrossStoresContinuesAfterStoreError(t *testing.
 	if result.trackingClosed != 2 {
 		t.Fatalf("trackingClosed = %d, want 2", result.trackingClosed)
 	}
+	if result.storesSwept != 2 {
+		t.Fatalf("storesSwept = %d, want 2", result.storesSwept)
+	}
 	for _, tc := range []struct {
 		name  string
 		store beads.Store
@@ -3382,6 +3385,56 @@ func TestSweepStaleOrderTrackingAcrossStoresContinuesAfterStoreError(t *testing.
 		if got.Status != "closed" {
 			t.Fatalf("%s stale tracking status = %q, want closed", tc.name, got.Status)
 		}
+	}
+}
+
+func TestSweepStaleOrderTrackingPreservesTriggerEnvFailedBeads(t *testing.T) {
+	store := beads.NewMemStore()
+	failed, err := store.Create(beads.Bead{
+		Title:     "order:pg-cooldown",
+		Labels:    []string{"order-run:pg-cooldown", labelOrderTracking, labelTriggerEnvFailed},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(trigger-env failed): %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	normal, err := store.Create(beads.Bead{
+		Title:     "order:pg-cooldown",
+		Labels:    []string{"order-run:pg-cooldown", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(normal tracking): %v", err)
+	}
+
+	result, err := sweepStaleOrderTrackingWithOptions(
+		store,
+		normal.CreatedAt.Add(time.Hour),
+		time.Minute,
+		nil,
+		orderTrackingSweepMetadataInitiator,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingWithOptions: %v", err)
+	}
+	if result.trackingClosed != 1 {
+		t.Fatalf("trackingClosed = %d, want 1", result.trackingClosed)
+	}
+	gotFailed, err := store.Get(failed.ID)
+	if err != nil {
+		t.Fatalf("Get(trigger-env failed): %v", err)
+	}
+	if gotFailed.Status != "open" {
+		t.Fatalf("trigger-env failed status = %s, want open", gotFailed.Status)
+	}
+	gotNormal, err := store.Get(normal.ID)
+	if err != nil {
+		t.Fatalf("Get(normal tracking): %v", err)
+	}
+	if gotNormal.Status != "closed" {
+		t.Fatalf("normal tracking status = %s, want closed", gotNormal.Status)
 	}
 }
 
