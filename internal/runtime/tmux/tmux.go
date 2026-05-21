@@ -2013,12 +2013,9 @@ func (t *Tmux) CheckSessionHealth(session string, maxInactivity time.Duration) Z
 // Uses ps to get the actual command name from the process's executable path.
 // This handles cases where argv[0] is modified (e.g., Claude showing version "2.1.30").
 func processMatchesNames(pid string, names []string) bool {
-	if len(names) == 0 {
+	nameSet := processNameSet(names)
+	if len(nameSet) == 0 {
 		return false
-	}
-	nameSet := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		nameSet[name] = struct{}{}
 	}
 
 	// Use ps to get the command name (COMM column gives the executable name)
@@ -2027,12 +2024,7 @@ func processMatchesNames(pid string, names []string) bool {
 	if err != nil {
 		return false
 	}
-	// Get just the base name (in case it's a full path like /Users/.../claude)
 	commPath := strings.TrimSpace(string(out))
-	comm := filepath.Base(commPath)
-	if _, ok := nameSet[comm]; ok {
-		return true
-	}
 
 	// Fall back to argv[0] from the full command line. This catches wrapper
 	// scripts launched as "/path/to/codex" where COMM may report "bash" or
@@ -2042,57 +2034,14 @@ func processMatchesNames(pid string, names []string) bool {
 	if err != nil {
 		return false
 	}
-	args := strings.Fields(strings.TrimSpace(string(out)))
-	if len(args) == 0 {
-		return false
-	}
-	argv0 := filepath.Base(args[0])
-	if _, ok := nameSet[argv0]; ok {
-		return true
-	}
-
-	// Wrapper runtimes often execute providers through interpreters such as bun,
-	// node, or npx, leaving the actual provider name only in the first positional
-	// argument. Only check the first non-flag argument after a known interpreter
-	// to avoid false positives (e.g., "vim claude.txt" or "tail -f gemini.log").
-	knownInterpreters := map[string]struct{}{
-		"node": {}, "bun": {}, "npx": {}, "deno": {},
-	}
-	// Runner subcommands (e.g., "bun run gemini") that should be skipped
-	// when scanning for the provider name in positional args.
-	runnerSubcommands := map[string]struct{}{
-		"run": {}, "exec": {}, "x": {},
-	}
-	if _, isInterpreter := knownInterpreters[argv0]; isInterpreter {
-		for _, token := range args[1:] {
-			token = strings.TrimSpace(token)
-			if token == "" || strings.HasPrefix(token, "-") {
-				continue
-			}
-			// Skip known runner subcommands like "run" in "bun run gemini".
-			if _, isRunner := runnerSubcommands[token]; isRunner {
-				continue
-			}
-			base := filepath.Base(token)
-			if _, ok := nameSet[base]; ok {
-				return true
-			}
-			baseNoExt := strings.TrimSuffix(base, filepath.Ext(base))
-			if _, ok := nameSet[baseNoExt]; ok {
-				return true
-			}
-			break // only check the first positional argument
-		}
-	}
-	return false
+	return processMatchesNameSet(commPath, string(out), nameSet)
 }
 
 // hasDescendantWithNames checks if a process has any descendant (child, grandchild, etc.)
 // matching any of the given names. Recursively traverses the process tree up to maxDepth.
 // Used when the pane command is a shell (bash, zsh) that launched an agent.
 func hasDescendantWithNames(pid string, names []string, depth int) bool {
-	const maxDepth = 10 // Prevent infinite loops in case of circular references
-	if len(names) == 0 || depth > maxDepth {
+	if len(names) == 0 || depth > maxProcessDescendantDepth {
 		return false
 	}
 	// Use pgrep to find child processes.

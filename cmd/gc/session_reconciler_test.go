@@ -353,7 +353,7 @@ func TestReconcileSessionBeads_DrainAckKeepsBeadOpen(t *testing.T) {
 func TestReconcileSessionBeads_DesiredFastPathSkipsAttachmentActivityObservation(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
-		Agents: []config.Agent{{Name: "worker"}},
+		Agents: []config.Agent{{Name: "worker", SleepAfterIdle: config.SessionSleepOff}},
 	}
 	env.desiredState["worker"] = TemplateParams{
 		Command:      "test-cmd",
@@ -366,6 +366,11 @@ func TestReconcileSessionBeads_DesiredFastPathSkipsAttachmentActivityObservation
 	}
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
+	agentCfg := sessionCoreConfigForHash(env.desiredState["worker"], session)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(agentCfg),
+		"started_live_hash":   runtime.LiveFingerprint(agentCfg),
+	})
 	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
 		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
 	}
@@ -374,11 +379,11 @@ func TestReconcileSessionBeads_DesiredFastPathSkipsAttachmentActivityObservation
 	if woken != 0 {
 		t.Fatalf("woken = %d, want 0", woken)
 	}
-	if got := env.sp.CountCalls("IsAttached", "worker"); got > 1 {
-		t.Fatalf("IsAttached calls = %d, want at most 1 downstream sleep/activity probe", got)
+	if got := env.sp.CountCalls("IsAttached", "worker"); got != 0 {
+		t.Fatalf("IsAttached calls = %d, want 0 on desired fast path", got)
 	}
-	if got := env.sp.CountCalls("GetLastActivity", "worker"); got > 1 {
-		t.Fatalf("GetLastActivity calls = %d, want at most 1 downstream sleep/activity probe", got)
+	if got := env.sp.CountCalls("GetLastActivity", "worker"); got != 0 {
+		t.Fatalf("GetLastActivity calls = %d, want 0 on desired fast path", got)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -20,24 +21,6 @@ type mockFetcher struct {
 	state    runtimeStateSnapshot
 	err      error
 	delay    time.Duration
-}
-
-func (m *mockFetcher) FetchRunning(ctx context.Context) (map[string]bool, error) {
-	m.mu.Lock()
-	m.calls++
-	sessions := m.sessions
-	err := m.err
-	delay := m.delay
-	m.mu.Unlock()
-
-	if delay > 0 {
-		select {
-		case <-time.After(delay):
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
-	return sessions, err
 }
 
 func (m *mockFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, error) {
@@ -77,6 +60,39 @@ func (m *mockFetcher) setResult(sessions map[string]bool, err error) {
 	m.sessions = sessions
 	m.state = runtimeStateSnapshot{}
 	m.err = err
+}
+
+type controlledRefreshFetcher struct {
+	mu        sync.Mutex
+	calls     int
+	state     runtimeStateSnapshot
+	blockCall int
+	entered   chan struct{}
+	release   chan struct{}
+}
+
+func (f *controlledRefreshFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, error) {
+	f.mu.Lock()
+	f.calls++
+	call := f.calls
+	state := f.state
+	f.mu.Unlock()
+
+	if call == f.blockCall {
+		close(f.entered)
+		select {
+		case <-f.release:
+		case <-ctx.Done():
+			return runtimeStateSnapshot{}, ctx.Err()
+		}
+	}
+	return state, nil
+}
+
+func (f *controlledRefreshFetcher) getCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 func TestStateCache_FreshCacheReturnsCorrectState(t *testing.T) {
@@ -225,6 +241,39 @@ func TestStateCache_ProcessAliveMatchesShellDescendantFromSnapshot(t *testing.T)
 	}
 }
 
+func TestProviderObserveLivenessUsesCacheProcessSnapshot(t *testing.T) {
+	f := &mockFetcher{
+		state: runtimeStateSnapshot{
+			Sessions: map[string]sessionRuntimeState{
+				"agent-1": {
+					Running: true,
+					Panes: []paneRuntimeState{{
+						Command: "bash",
+						PID:     "101",
+					}},
+				},
+			},
+			Processes: newProcessSnapshot([]processRuntimeState{
+				{PID: "101", PPID: "1", Command: "bash", Args: "bash -lc codex"},
+				{PID: "102", PPID: "101", Command: "node", Args: "node /usr/local/bin/codex"},
+			}),
+		},
+	}
+	provider := &Provider{cache: NewStateCache(f, time.Hour)}
+
+	got := provider.ObserveLiveness("agent-1", []string{"codex"})
+	if !got.Running || !got.Alive {
+		t.Fatalf("ObserveLiveness = %+v, want running and alive from cache", got)
+	}
+	got = provider.ObserveLiveness("agent-1", []string{"codex"})
+	if !got.Running || !got.Alive {
+		t.Fatalf("second ObserveLiveness = %+v, want running and alive from cache", got)
+	}
+	if calls := f.getCalls(); calls != 1 {
+		t.Fatalf("fetch calls = %d, want 1 across repeated ObserveLiveness calls", calls)
+	}
+}
+
 func TestStateCache_RefreshFailurePreservesLastKnownGood(t *testing.T) {
 	f := &mockFetcher{
 		sessions: map[string]bool{"agent-1": true},
@@ -252,6 +301,51 @@ func TestStateCache_RefreshFailurePreservesLastKnownGood(t *testing.T) {
 	cache.mu.RUnlock()
 	if lastErr == nil {
 		t.Error("expected lastError to be set after refresh failure")
+	}
+}
+
+func TestStateCache_DiscardRefreshAfterEvictSession(t *testing.T) {
+	state := runtimeStateSnapshot{
+		Sessions: map[string]sessionRuntimeState{
+			"agent-1": {Running: true},
+		},
+	}
+	f := &controlledRefreshFetcher{
+		state:     state,
+		blockCall: 2,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	cache := NewStateCache(f, time.Nanosecond)
+
+	if !cache.IsRunning("agent-1") {
+		t.Fatal("expected agent-1 running after prime")
+	}
+	time.Sleep(time.Millisecond)
+
+	result := make(chan bool, 1)
+	go func() {
+		result <- cache.IsRunning("agent-1")
+	}()
+
+	select {
+	case <-f.entered:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for refresh to start")
+	}
+	cache.EvictSession("agent-1")
+	close(f.release)
+
+	select {
+	case got := <-result:
+		if got {
+			t.Fatal("IsRunning(agent-1) = true after concurrent eviction, want false")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for IsRunning result")
+	}
+	if calls := f.getCalls(); calls != 2 {
+		t.Fatalf("fetch calls = %d, want 2", calls)
 	}
 }
 
@@ -318,6 +412,27 @@ func TestStateCache_EmptySessionsMap(t *testing.T) {
 
 	if cache.IsRunning("anything") {
 		t.Error("expected false for any session when tmux has no sessions")
+	}
+}
+
+func TestFetchProcessSnapshotCanceledContextReturnsError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := fetchProcessSnapshot(ctx)
+	if err == nil {
+		t.Fatal("fetchProcessSnapshot canceled context returned nil error")
+	}
+}
+
+func TestParseProcessSnapshotLineFixedColumns(t *testing.T) {
+	line := fmt.Sprintf("%10s %10s %-64s %s", "123", "1", "claude code", "claude code --print")
+	got, ok := parseProcessSnapshotLine(line)
+	if !ok {
+		t.Fatal("parseProcessSnapshotLine returned ok=false")
+	}
+	if got.PID != "123" || got.PPID != "1" || got.Command != "claude code" || got.Args != "claude code --print" {
+		t.Fatalf("parseProcessSnapshotLine = %+v, want fixed-column fields preserved", got)
 	}
 }
 

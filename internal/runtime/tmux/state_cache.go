@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -64,15 +65,16 @@ type runtimeStateSnapshot struct {
 // status check or reconciler pass. Concurrent callers are coalesced via
 // singleflight so at most one tmux/process snapshot refresh runs at a time.
 type StateCache struct {
-	mu        sync.RWMutex
-	state     runtimeStateSnapshot
-	fetchedAt time.Time
-	lastError error
-	dirty     bool // set by Invalidate(); cleared on successful refresh
-	ttl       time.Duration
-	staleTTL  time.Duration
-	sf        singleflight.Group
-	fetcher   StateFetcher
+	mu         sync.RWMutex
+	state      runtimeStateSnapshot
+	fetchedAt  time.Time
+	lastError  error
+	dirty      bool   // set by Invalidate(); cleared on successful refresh
+	generation uint64 // advanced by invalidation/eviction to reject stale refreshes
+	ttl        time.Duration
+	staleTTL   time.Duration
+	sf         singleflight.Group
+	fetcher    StateFetcher
 }
 
 // NewStateCache creates a new cache with the given fetcher and TTL.
@@ -145,6 +147,7 @@ func (c *StateCache) currentState() runtimeStateSnapshot {
 func (c *StateCache) Invalidate() {
 	c.mu.Lock()
 	c.dirty = true
+	c.generation++
 	c.mu.Unlock()
 }
 
@@ -155,6 +158,7 @@ func (c *StateCache) EvictSession(name string) {
 	c.mu.Lock()
 	delete(c.state.Sessions, name)
 	c.dirty = true
+	c.generation++
 	c.mu.Unlock()
 }
 
@@ -164,6 +168,10 @@ func (c *StateCache) refresh() {
 	_, _, _ = c.sf.Do("refresh", func() (interface{}, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 		defer cancel()
+
+		c.mu.RLock()
+		startGeneration := c.generation
+		c.mu.RUnlock()
 
 		start := time.Now()
 		state, err := c.fetcher.FetchState(ctx)
@@ -178,13 +186,20 @@ func (c *StateCache) refresh() {
 			return nil, err
 		}
 
+		c.mu.Lock()
+		if c.generation != startGeneration {
+			c.mu.Unlock()
+			if os.Getenv("GC_LOG_TMUX_CACHE") == "true" {
+				log.Printf("tmux state cache: discarded refresh from generation %d after %v", startGeneration, elapsed)
+			}
+			return nil, nil
+		}
 		// Successful refresh is noisy on the session loop; opt-in via env var
 		// keeps it available for diagnostics without polluting normal CLI use.
 		if os.Getenv("GC_LOG_TMUX_CACHE") == "true" {
 			log.Printf("tmux state cache: refreshed %d sessions in %v", len(state.Sessions), elapsed)
 		}
 
-		c.mu.Lock()
 		c.state = state
 		c.fetchedAt = time.Now()
 		c.lastError = nil
@@ -240,7 +255,11 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 		}
 		state.Sessions[name] = session
 	}
-	state.Processes = fetchProcessSnapshot(ctx)
+	processes, err := fetchProcessSnapshot(ctx)
+	if err != nil {
+		return runtimeStateSnapshot{}, err
+	}
+	state.Processes = processes
 	return state, nil
 }
 
@@ -287,6 +306,56 @@ func processNameSet(names []string) map[string]struct{} {
 	return set
 }
 
+func processMatchesNameSet(command, args string, names map[string]struct{}) bool {
+	if len(names) == 0 {
+		return false
+	}
+	command = filepath.Base(strings.TrimSpace(command))
+	if _, ok := names[command]; ok && command != "" {
+		return true
+	}
+	argv := strings.Fields(strings.TrimSpace(args))
+	if len(argv) == 0 {
+		return false
+	}
+	argv0 := filepath.Base(argv[0])
+	if _, ok := names[argv0]; ok {
+		return true
+	}
+	if _, isInterpreter := knownInterpreters[argv0]; !isInterpreter {
+		return false
+	}
+	for _, token := range argv[1:] {
+		token = strings.TrimSpace(token)
+		if token == "" || strings.HasPrefix(token, "-") {
+			continue
+		}
+		if _, isRunner := runnerSubcommands[token]; isRunner {
+			continue
+		}
+		base := filepath.Base(token)
+		if _, ok := names[base]; ok {
+			return true
+		}
+		baseNoExt := strings.TrimSuffix(base, filepath.Ext(base))
+		if _, ok := names[baseNoExt]; ok {
+			return true
+		}
+		break
+	}
+	return false
+}
+
+var knownInterpreters = map[string]struct{}{
+	"node": {}, "bun": {}, "npx": {}, "deno": {},
+}
+
+var runnerSubcommands = map[string]struct{}{
+	"run": {}, "exec": {}, "x": {},
+}
+
+const maxProcessDescendantDepth = 10
+
 func isSupportedShell(command string) bool {
 	for _, shell := range supportedShells {
 		if command == shell {
@@ -317,86 +386,62 @@ func newProcessSnapshot(processes []processRuntimeState) processSnapshot {
 	return snapshot
 }
 
-func fetchProcessSnapshot(ctx context.Context) processSnapshot {
-	out, err := exec.CommandContext(ctx, "ps", "-eo", "pid=,ppid=,comm=,args=").Output()
+func fetchProcessSnapshot(ctx context.Context) (processSnapshot, error) {
+	out, err := exec.CommandContext(ctx, "ps", "-eo", "pid:10=,ppid:10=,comm:64=,args=").Output()
 	if err != nil {
-		return processSnapshot{}
+		return processSnapshot{}, fmt.Errorf("fetching process snapshot: %w", err)
 	}
-	return parseProcessSnapshot(string(out))
+	return parseProcessSnapshot(string(out)), nil
 }
 
 func parseProcessSnapshot(out string) processSnapshot {
 	processes := make([]processRuntimeState, 0)
 	for _, line := range strings.Split(out, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
+		process, ok := parseProcessSnapshotLine(line)
+		if !ok {
 			continue
-		}
-		process := processRuntimeState{
-			PID:     fields[0],
-			PPID:    fields[1],
-			Command: fields[2],
-		}
-		if len(fields) > 3 {
-			process.Args = strings.Join(fields[3:], " ")
 		}
 		processes = append(processes, process)
 	}
 	return newProcessSnapshot(processes)
 }
 
-func (s processSnapshot) processMatchesNames(pid string, names map[string]struct{}) bool {
-	if len(names) == 0 {
-		return false
+func parseProcessSnapshotLine(line string) (processRuntimeState, bool) {
+	const (
+		pidWidth     = 10
+		ppidStart    = pidWidth + 1
+		ppidWidth    = 10
+		commandStart = ppidStart + ppidWidth + 1
+		commandWidth = 64
+		argsStart    = commandStart + commandWidth + 1
+	)
+	if len(line) < commandStart+commandWidth {
+		return processRuntimeState{}, false
 	}
+	process := processRuntimeState{
+		PID:     strings.TrimSpace(line[:pidWidth]),
+		PPID:    strings.TrimSpace(line[ppidStart : ppidStart+ppidWidth]),
+		Command: strings.TrimSpace(line[commandStart : commandStart+commandWidth]),
+	}
+	if len(line) > argsStart {
+		process.Args = strings.TrimSpace(line[argsStart:])
+	}
+	if process.PID == "" || process.PPID == "" || process.Command == "" {
+		return processRuntimeState{}, false
+	}
+	return process, true
+}
+
+func (s processSnapshot) processMatchesNames(pid string, names map[string]struct{}) bool {
 	process, ok := s.byPID[pid]
 	if !ok {
 		return false
 	}
-	if _, ok := names[filepath.Base(process.Command)]; ok {
-		return true
-	}
-	args := strings.Fields(process.Args)
-	if len(args) == 0 {
-		return false
-	}
-	argv0 := filepath.Base(args[0])
-	if _, ok := names[argv0]; ok {
-		return true
-	}
-	knownInterpreters := map[string]struct{}{
-		"node": {}, "bun": {}, "npx": {}, "deno": {},
-	}
-	runnerSubcommands := map[string]struct{}{
-		"run": {}, "exec": {}, "x": {},
-	}
-	if _, isInterpreter := knownInterpreters[argv0]; !isInterpreter {
-		return false
-	}
-	for _, token := range args[1:] {
-		token = strings.TrimSpace(token)
-		if token == "" || strings.HasPrefix(token, "-") {
-			continue
-		}
-		if _, isRunner := runnerSubcommands[token]; isRunner {
-			continue
-		}
-		base := filepath.Base(token)
-		if _, ok := names[base]; ok {
-			return true
-		}
-		baseNoExt := strings.TrimSuffix(base, filepath.Ext(base))
-		if _, ok := names[baseNoExt]; ok {
-			return true
-		}
-		break
-	}
-	return false
+	return processMatchesNameSet(process.Command, process.Args, names)
 }
 
 func (s processSnapshot) hasDescendantWithNames(pid string, names map[string]struct{}, depth int) bool {
-	const maxDepth = 10
-	if len(names) == 0 || depth > maxDepth {
+	if len(names) == 0 || depth > maxProcessDescendantDepth {
 		return false
 	}
 	for _, childPID := range s.children[pid] {
