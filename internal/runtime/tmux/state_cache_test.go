@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -427,12 +428,85 @@ func TestFetchProcessSnapshotCanceledContextReturnsError(t *testing.T) {
 
 func TestParseProcessSnapshotLineFixedColumns(t *testing.T) {
 	line := fmt.Sprintf("%10s %10s %-64s %s", "123", "1", "claude code", "claude code --print")
-	got, ok := parseProcessSnapshotLine(line)
+	got, ok := parseProcessSnapshotLineFixedColumns(line)
 	if !ok {
-		t.Fatal("parseProcessSnapshotLine returned ok=false")
+		t.Fatal("parseProcessSnapshotLineFixedColumns returned ok=false")
 	}
 	if got.PID != "123" || got.PPID != "1" || got.Command != "claude code" || got.Args != "claude code --print" {
-		t.Fatalf("parseProcessSnapshotLine = %+v, want fixed-column fields preserved", got)
+		t.Fatalf("parseProcessSnapshotLineFixedColumns = %+v, want fixed-column fields preserved", got)
+	}
+}
+
+func TestParseProcessSnapshotLineWhitespace(t *testing.T) {
+	// macOS `ps -eo pid=,ppid=,comm=,args=` output: right-aligned numeric
+	// columns, comm separated from args by whitespace.
+	cases := []struct {
+		name     string
+		line     string
+		wantPID  string
+		wantPPID string
+		wantCmd  string
+		wantArgs string
+	}{
+		{
+			name:     "typical 4-token line",
+			line:     "  123     1 /sbin/launchd    /sbin/launchd --boot",
+			wantPID:  "123",
+			wantPPID: "1",
+			wantCmd:  "/sbin/launchd",
+			wantArgs: "/sbin/launchd --boot",
+		},
+		{
+			name:     "args has multiple spaces preserved",
+			line:     "456 1 claude claude code --print --json",
+			wantPID:  "456",
+			wantPPID: "1",
+			wantCmd:  "claude",
+			wantArgs: "claude code --print --json",
+		},
+		{
+			name:     "no args (3-token line)",
+			line:     "789 1 kernel_task",
+			wantPID:  "789",
+			wantPPID: "1",
+			wantCmd:  "kernel_task",
+			wantArgs: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseProcessSnapshotLineWhitespace(tc.line)
+			if !ok {
+				t.Fatalf("returned ok=false for %q", tc.line)
+			}
+			if got.PID != tc.wantPID {
+				t.Errorf("PID = %q, want %q", got.PID, tc.wantPID)
+			}
+			if got.PPID != tc.wantPPID {
+				t.Errorf("PPID = %q, want %q", got.PPID, tc.wantPPID)
+			}
+			if got.Command != tc.wantCmd {
+				t.Errorf("Command = %q, want %q", got.Command, tc.wantCmd)
+			}
+			if got.Args != tc.wantArgs {
+				t.Errorf("Args = %q, want %q", got.Args, tc.wantArgs)
+			}
+		})
+	}
+}
+
+func TestProcessSnapshotPSArgsRejectsLinuxSyntaxOnDarwin(t *testing.T) {
+	// Regression: macOS ps rejects the BSD `:N=` column-width form. Confirm
+	// we don't emit it on Darwin. Skip elsewhere — Linux ps accepts both
+	// forms so verifying the wide form there is just a tautology.
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin-specific syntax guard")
+	}
+	args := processSnapshotPSArgs()
+	for _, a := range args {
+		if strings.Contains(a, ":") {
+			t.Fatalf("processSnapshotPSArgs returned %v on darwin; contains Linux-only `:N=` width specifier", args)
+		}
 	}
 }
 

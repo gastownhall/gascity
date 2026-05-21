@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -387,11 +388,23 @@ func newProcessSnapshot(processes []processRuntimeState) processSnapshot {
 }
 
 func fetchProcessSnapshot(ctx context.Context) (processSnapshot, error) {
-	out, err := exec.CommandContext(ctx, "ps", "-eo", "pid:10=,ppid:10=,comm:64=,args=").Output()
+	out, err := exec.CommandContext(ctx, "ps", processSnapshotPSArgs()...).Output()
 	if err != nil {
 		return processSnapshot{}, fmt.Errorf("fetching process snapshot: %w", err)
 	}
 	return parseProcessSnapshot(string(out)), nil
+}
+
+// processSnapshotPSArgs returns the platform-appropriate `ps` arguments for
+// the process snapshot. macOS's ps does not accept the BSD column-width
+// suffix (e.g. `pid:10=`) that Linux ps supports; on Darwin we omit the
+// widths and parse with whitespace splitting. On Linux we keep the
+// wide-column form so the fast fixed-column parser is exercised.
+func processSnapshotPSArgs() []string {
+	if goruntime.GOOS == "darwin" {
+		return []string{"-eo", "pid=,ppid=,comm=,args="}
+	}
+	return []string{"-eo", "pid:10=,ppid:10=,comm:64=,args="}
 }
 
 func parseProcessSnapshot(out string) processSnapshot {
@@ -407,6 +420,13 @@ func parseProcessSnapshot(out string) processSnapshot {
 }
 
 func parseProcessSnapshotLine(line string) (processRuntimeState, bool) {
+	if goruntime.GOOS == "darwin" {
+		return parseProcessSnapshotLineWhitespace(line)
+	}
+	return parseProcessSnapshotLineFixedColumns(line)
+}
+
+func parseProcessSnapshotLineFixedColumns(line string) (processRuntimeState, bool) {
 	const (
 		pidWidth     = 10
 		ppidStart    = pidWidth + 1
@@ -428,6 +448,45 @@ func parseProcessSnapshotLine(line string) (processRuntimeState, bool) {
 	}
 	if process.PID == "" || process.PPID == "" || process.Command == "" {
 		return processRuntimeState{}, false
+	}
+	return process, true
+}
+
+// parseProcessSnapshotLineWhitespace parses a single line of
+// `ps -eo pid=,ppid=,comm=,args=` output. Format: 3 whitespace-separated
+// fixed tokens (pid, ppid, comm) followed by args. comm is the command
+// name without path/args, typically a single token. Anything from the
+// fourth-token boundary onward is treated as args verbatim (preserving
+// internal whitespace) so callers can match against the full command line.
+func parseProcessSnapshotLineWhitespace(line string) (processRuntimeState, bool) {
+	trimmed := strings.TrimLeft(line, " \t")
+	remaining := trimmed
+	for i := 0; i < 3; i++ {
+		end := strings.IndexAny(remaining, " \t")
+		if end < 0 {
+			// Not enough fields on this line. Lines with fewer than 4
+			// tokens (e.g. kernel threads with no args) still need to
+			// match pid/ppid/comm — fall through to the Fields parse.
+			break
+		}
+		remaining = strings.TrimLeft(remaining[end:], " \t")
+	}
+	fields := strings.Fields(trimmed)
+	if len(fields) < 3 {
+		return processRuntimeState{}, false
+	}
+	process := processRuntimeState{
+		PID:     fields[0],
+		PPID:    fields[1],
+		Command: fields[2],
+	}
+	if process.PID == "" || process.PPID == "" || process.Command == "" {
+		return processRuntimeState{}, false
+	}
+	if len(fields) > 3 {
+		// `remaining` now points past the third token boundary; args
+		// preserves the original spacing between tokens 4..N.
+		process.Args = strings.TrimSpace(remaining)
 	}
 	return process, true
 }
