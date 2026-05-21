@@ -1436,12 +1436,17 @@ func cmdOrderSweepTracking(staleAfter time.Duration, includeWisps, quiet bool, o
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	store, err := openStoreAtForCity(cityPath, cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	result, err := sweepStaleOrderTrackingWithOptions(store, time.Now(), staleAfter, orderNameFilter(orderNames), orderTrackingSweepMetadataInitiator, includeWisps)
+	stores, err := orderTrackingSweepStoresForConfig(cityPath, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	result, err := sweepStaleOrderTrackingAcrossStores(stores, time.Now(), staleAfter, orderNameFilter(orderNames), orderTrackingSweepMetadataInitiator, includeWisps)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

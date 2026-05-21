@@ -1198,16 +1198,23 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	if store == nil {
 		return
 	}
+	stores := []beads.Store{store}
+	for _, rigStore := range cr.rigBeadStores() {
+		if rigStore != nil {
+			stores = append(stores, rigStore)
+		}
+	}
 	onlyOrders := map[string]struct{}{
 		orderTrackingSweepOrder: {},
 	}
-	n, err := sweepStaleOrderTracking(store, now, orderTrackingSweepWatchdogStaleAfter, onlyOrders, orderTrackingWatchdogMetadataInitiator)
+	result, err := sweepStaleOrderTrackingAcrossStores(stores, now, orderTrackingSweepWatchdogStaleAfter, onlyOrders, orderTrackingWatchdogMetadataInitiator, false)
 	if err != nil {
 		if cr.stderr != nil {
 			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		}
 		return
 	}
+	n := result.trackingClosed
 	if n > 0 && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog closed %d stale tracking bead(s)\n", cr.logPrefix, n) //nolint:errcheck // best-effort stderr
 	}

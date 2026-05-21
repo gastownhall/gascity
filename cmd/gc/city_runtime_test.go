@@ -1487,6 +1487,93 @@ func TestOrderTrackingSweepWatchdogOnlyClosesSweepOrderTracking(t *testing.T) {
 	}
 }
 
+func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testing.T) {
+	store := beads.NewMemStore()
+	sweepTracking, err := store.Create(beads.Bead{
+		Title:     "order:" + orderTrackingSweepOrder,
+		Labels:    []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(sweep): %v", err)
+	}
+	staleMerge, err := store.Create(beads.Bead{
+		Title:     "order:pr-merge-queue",
+		Labels:    []string{"order-run:pr-merge-queue", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(stale merge): %v", err)
+	}
+
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingSweepWatchdog(sweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Second))
+
+	if got, err := store.Get(sweepTracking.ID); err != nil {
+		t.Fatalf("Get(sweep): %v", err)
+	} else if got.Status != "closed" {
+		t.Fatalf("sweep tracking status = %s, want closed before dispatch", got.Status)
+	}
+
+	time.Sleep(75 * time.Millisecond)
+	freshMerge, err := store.Create(beads.Bead{
+		Title:     "order:pr-merge-queue",
+		Labels:    []string{"order-run:pr-merge-queue", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(fresh merge): %v", err)
+	}
+
+	execRan := false
+	fakeExec := func(context.Context, string, string, []string) ([]byte, error) {
+		execRan = true
+		_, err := sweepStaleOrderTrackingAcrossStores(
+			[]beads.Store{store},
+			time.Now(),
+			50*time.Millisecond,
+			nil,
+			orderTrackingSweepMetadataInitiator,
+			false,
+		)
+		return nil, err
+	}
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:     orderTrackingSweepOrder,
+		Trigger:  "cooldown",
+		Interval: "1ms",
+		Exec:     "gc order sweep-tracking",
+	}}, store, nil, fakeExec, nil)
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now().Add(time.Hour))
+	ad.drain(context.Background())
+	if !execRan {
+		t.Fatal("sweep order did not dispatch after watchdog closed its stale tracking bead")
+	}
+
+	gotStale, err := store.Get(staleMerge.ID)
+	if err != nil {
+		t.Fatalf("Get(stale merge): %v", err)
+	}
+	if gotStale.Status != "closed" {
+		t.Fatalf("stale merge tracking status = %s, want closed", gotStale.Status)
+	}
+	gotFresh, err := store.Get(freshMerge.ID)
+	if err != nil {
+		t.Fatalf("Get(fresh merge): %v", err)
+	}
+	if gotFresh.Status != "open" {
+		t.Fatalf("fresh merge tracking status = %s, want open", gotFresh.Status)
+	}
+}
+
 func TestCityRuntimeDemandSnapshotRefreshesWhenDemandCommandsAreCustom(t *testing.T) {
 	cases := []struct {
 		name       string

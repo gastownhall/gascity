@@ -460,6 +460,43 @@ func cachedOrderStoresResolver(cityPath string, cfg *config.City) orderStoresRes
 	}
 }
 
+func orderTrackingSweepStoresForConfig(cityPath string, cfg *config.City) ([]beads.Store, error) {
+	targets := []execStoreTarget{legacyOrderCityTarget(cityPath, cfg)}
+	if cfg != nil {
+		resolveRigPaths(cityPath, cfg.Rigs)
+		for _, rig := range cfg.Rigs {
+			if strings.TrimSpace(rig.Path) == "" {
+				continue
+			}
+			targets = append(targets, execStoreTarget{
+				ScopeRoot: rig.Path,
+				ScopeKind: "rig",
+				Prefix:    rig.EffectivePrefix(),
+				RigName:   rig.Name,
+			})
+		}
+	}
+
+	stores := make([]beads.Store, 0, len(targets))
+	seen := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		key := orderStoreTargetKey(target)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
+		if err != nil {
+			if target.ScopeKind == "rig" {
+				return stores, fmt.Errorf("opening rig %q order store: %w", target.RigName, err)
+			}
+			return stores, fmt.Errorf("opening city order store: %w", err)
+		}
+		stores = append(stores, store)
+	}
+	return stores, nil
+}
+
 func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr io.Writer) orderStoresResolver {
 	stores := make(map[string]beads.Store)
 	openCached := func(target execStoreTarget) (beads.Store, error) {

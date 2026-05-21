@@ -45,6 +45,8 @@ const (
 	orderTrackingSweepMetadataReason       = "stale-order-tracking"
 	orderTrackingSweepMetadataInitiator    = "order-tracking-sweep"
 	orderTrackingWatchdogMetadataInitiator = "controller-watchdog"
+	orderTrackingCloseVerifyAttempts       = 3
+	orderTrackingCloseVerifyRetryDelay     = 25 * time.Millisecond
 
 	// orphanedOrderTrackingCloseReason is the canonical close_reason
 	// stamped on orphan-sweep closes. It satisfies bd's
@@ -682,7 +684,11 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	// Defer order matters: doneInflight runs last, after Close makes the
 	// tracking bead outcome observable to a waiting drain.
 	defer m.doneInflight()
-	defer closeOrderTrackingBead(store, trackingID) //nolint:errcheck // best-effort close
+	defer func() {
+		if err := closeOrderTrackingBead(store, trackingID); err != nil {
+			logDispatchError(m.stderr, "gc: order %s: closing tracking bead %s: %v", a.ScopedName(), trackingID, err)
+		}
+	}()
 
 	timeout := effectiveTimeout(a, m.maxTimeout)
 	childCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -703,10 +709,87 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 }
 
 func closeOrderTrackingBead(store beads.Store, trackingID string) error {
-	_, err := store.CloseAll([]string{trackingID}, map[string]string{
+	_, err := closeAndVerifyOrderTrackingBeads(store, []string{trackingID}, map[string]string{
 		"close_reason": completedOrderTrackingCloseReason,
 	})
 	return err
+}
+
+func closeAndVerifyOrderTrackingBeads(store beads.Store, ids []string, metadata map[string]string) (int, error) {
+	ids = uniqueNonEmptyOrderTrackingIDs(ids)
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	if store == nil {
+		return 0, fmt.Errorf("order-tracking close: nil store")
+	}
+
+	closed := 0
+	var lastErr error
+	for attempt := 1; attempt <= orderTrackingCloseVerifyAttempts; attempt++ {
+		n, err := store.CloseAll(ids, metadata)
+		closed += n
+		if closed > len(ids) {
+			closed = len(ids)
+		}
+		if err != nil {
+			lastErr = fmt.Errorf("closing order-tracking beads %s: %w", strings.Join(ids, ", "), err)
+			if attempt < orderTrackingCloseVerifyAttempts {
+				time.Sleep(orderTrackingCloseVerifyRetryDelay)
+			}
+			continue
+		}
+		openIDs, err := openOrderTrackingIDs(store, ids)
+		if err != nil {
+			lastErr = fmt.Errorf("verifying order-tracking close for %s: %w", strings.Join(ids, ", "), err)
+			if attempt < orderTrackingCloseVerifyAttempts {
+				time.Sleep(orderTrackingCloseVerifyRetryDelay)
+			}
+			continue
+		}
+		if len(openIDs) == 0 {
+			return closed, nil
+		}
+		lastErr = fmt.Errorf("verifying order-tracking close: still open: %s", strings.Join(openIDs, ", "))
+		if attempt < orderTrackingCloseVerifyAttempts {
+			time.Sleep(orderTrackingCloseVerifyRetryDelay)
+		}
+	}
+	return closed, lastErr
+}
+
+func uniqueNonEmptyOrderTrackingIDs(ids []string) []string {
+	out := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func openOrderTrackingIDs(store beads.Store, ids []string) ([]string, error) {
+	var openIDs []string
+	for _, id := range ids {
+		b, err := store.Get(id)
+		if errors.Is(err, beads.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return openIDs, err
+		}
+		if b.Status != "closed" {
+			openIDs = append(openIDs, id)
+		}
+	}
+	return openIDs, nil
 }
 
 // dispatchExec runs an exec order's shell command.
@@ -1133,7 +1216,7 @@ func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	n, err := store.CloseAll(ids, map[string]string{
+	n, err := closeAndVerifyOrderTrackingBeads(store, ids, map[string]string{
 		"close_reason": orphanedOrderTrackingCloseReason,
 	})
 	if err != nil {
@@ -1162,6 +1245,28 @@ type orderTrackingSweepResult struct {
 func sweepStaleOrderTracking(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string) (int, error) {
 	result, err := sweepStaleOrderTrackingWithOptions(store, now, staleAfter, onlyOrders, initiator, false)
 	return result.trackingClosed, err
+}
+
+func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
+	if staleAfter <= 0 {
+		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
+	}
+	if includeWispSubtrees && len(onlyOrders) == 0 {
+		return orderTrackingSweepResult{}, fmt.Errorf("include-wisps requires at least one order name")
+	}
+	result := orderTrackingSweepResult{}
+	for i, store := range stores {
+		if store == nil {
+			continue
+		}
+		partial, err := sweepStaleOrderTrackingWithOptions(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees)
+		result.trackingClosed += partial.trackingClosed
+		result.wispClosed += partial.wispClosed
+		if err != nil {
+			return result, fmt.Errorf("sweeping order-tracking store %d: %w", i+1, err)
+		}
+	}
+	return result, nil
 }
 
 func sweepStaleOrderTrackingWithOptions(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
@@ -1206,7 +1311,7 @@ func sweepStaleOrderTrackingWithOptions(store beads.Store, now time.Time, staleA
 		if initiator != "" {
 			metadata["order_tracking_sweep_by"] = initiator
 		}
-		n, err := store.CloseAll(ids, metadata)
+		n, err := closeAndVerifyOrderTrackingBeads(store, ids, metadata)
 		result.trackingClosed = n
 		if err != nil {
 			return result, fmt.Errorf("closing stale order-tracking beads: %w", err)
