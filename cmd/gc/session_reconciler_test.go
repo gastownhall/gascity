@@ -310,6 +310,77 @@ func (e *reconcilerTestEnv) reconcileWithPoolDesiredAndDrainOps(sessions []beads
 	)
 }
 
+func TestReconcileSessionBeads_UsesAssignedWorkSnapshotForTaskWorkDir(t *testing.T) {
+	env := newReconcilerTestEnv()
+	base := beads.NewMemStore()
+	store := &taskWorkDirLiveListCountingStore{Store: base}
+	env.store = store
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionCreating(&session)
+
+	workDir := t.TempDir()
+	task, err := env.store.Create(beads.Bead{
+		Title: "assigned task",
+		Type:  "task",
+		Metadata: map[string]string{
+			"work_dir": workDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(task): %v", err)
+	}
+	status := "in_progress"
+	assignee := session.ID
+	if err := env.store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("Update(task): %v", err)
+	}
+	task, err = env.store.Get(task.ID)
+	if err != nil {
+		t.Fatalf("Get(task): %v", err)
+	}
+
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		cfgNames,
+		env.cfg,
+		env.sp,
+		env.store,
+		nil,
+		[]beads.Bead{task},
+		nil,
+		env.dt,
+		map[string]int{"worker": 1},
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1; stderr=%s", woken, env.stderr.String())
+	}
+	startCfg := env.sp.LastStartConfig("worker")
+	if startCfg == nil {
+		t.Fatal("worker was not started")
+	}
+	if startCfg.WorkDir != workDir {
+		t.Fatalf("started WorkDir = %q, want %q", startCfg.WorkDir, workDir)
+	}
+	if store.liveInProgressAssigneeLists != 0 {
+		t.Fatalf("live in-progress assignee List calls = %d, want 0 with complete assigned-work snapshot", store.liveInProgressAssigneeLists)
+	}
+}
+
 func TestReconcileSessionBeads_DrainAckKeepsBeadOpen(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{

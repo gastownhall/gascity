@@ -64,6 +64,18 @@ func (s *failSetMetadataStore) SetMetadata(id, key, value string) error {
 	return s.MemStore.SetMetadata(id, key, value)
 }
 
+type taskWorkDirLiveListCountingStore struct {
+	beads.Store
+	liveInProgressAssigneeLists int
+}
+
+func (s *taskWorkDirLiveListCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Live && query.Status == "in_progress" && query.Assignee != "" {
+		s.liveInProgressAssigneeLists++
+	}
+	return s.Store.List(query)
+}
+
 type panicMetadataBatchStore struct {
 	*beads.MemStore
 }
@@ -732,6 +744,65 @@ func TestPrepareStartCandidate_UsesSessionIDForTaskWorkDir(t *testing.T) {
 	}
 	if prepared.cfg.WorkDir != workDir {
 		t.Fatalf("prepared.cfg.WorkDir = %q, want %q", prepared.cfg.WorkDir, workDir)
+	}
+}
+
+func TestPrepareStartCandidate_UsesAssignedWorkSnapshotForTaskWorkDir(t *testing.T) {
+	base := beads.NewMemStore()
+	store := &taskWorkDirLiveListCountingStore{Store: base}
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:frontend/worker-1"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "custom-worker-1",
+			"pool_slot":    "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	task, err := store.Create(beads.Bead{
+		Title: "task",
+		Metadata: map[string]string{
+			"work_dir": workDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := "in_progress"
+	assignee := session.ID
+	if err := store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatal(err)
+	}
+	task, err = store.Get(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := prepareStartCandidateForCity(startCandidate{
+		session: &session,
+		tp: TemplateParams{
+			TemplateName: "frontend/worker",
+			SessionName:  "custom-worker-1",
+		},
+		order: 0,
+	}, "", "", &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+		},
+	}, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, nil, newAssignedTaskWorkDirResolver([]beads.Bead{task}))
+	if err != nil {
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
+	}
+	if prepared.cfg.WorkDir != workDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want %q", prepared.cfg.WorkDir, workDir)
+	}
+	if store.liveInProgressAssigneeLists != 0 {
+		t.Fatalf("live in-progress assignee List calls = %d, want 0 with snapshot resolver", store.liveInProgressAssigneeLists)
 	}
 }
 

@@ -491,6 +491,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			apply(&reconcileOpts)
 		}
 	}
+	effectiveStartOptions := startOptions
+	if !storeQueryPartial && reconcileOpts.workDirResolver == nil {
+		effectiveStartOptions = append(append([]startExecutionOption(nil), startOptions...), withTaskWorkDirResolver(newAssignedTaskWorkDirResolver(assignedWorkBeads)))
+	}
 	if startupTimeout <= 0 && cfg != nil {
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
 	}
@@ -1911,7 +1915,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		ctx, startCandidates, cfg, desiredState, sp, store, cityName,
 		cityPath,
 		clk, rec, startupTimeout, stdout, stderr, trace,
-		startOptions...,
+		effectiveStartOptions...,
 	)
 
 	if ctx != nil && ctx.Err() != nil {
@@ -2743,6 +2747,45 @@ func resolveTaskWorkDir(store beads.Store, assignees ...string) string {
 		}
 	}
 	return ""
+}
+
+type assignedTaskWorkDir struct {
+	path      string
+	createdAt time.Time
+}
+
+func newAssignedTaskWorkDirResolver(assignedWorkBeads []beads.Bead) taskWorkDirResolver {
+	index := make(map[string]assignedTaskWorkDir)
+	for _, bead := range assignedWorkBeads {
+		if bead.Status != "in_progress" {
+			continue
+		}
+		assignee := strings.TrimSpace(bead.Assignee)
+		if assignee == "" {
+			continue
+		}
+		workDir := strings.TrimSpace(bead.Metadata["work_dir"])
+		if workDir == "" {
+			continue
+		}
+		info, err := os.Stat(workDir)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		current, ok := index[assignee]
+		if ok && !bead.CreatedAt.After(current.createdAt) {
+			continue
+		}
+		index[assignee] = assignedTaskWorkDir{path: workDir, createdAt: bead.CreatedAt}
+	}
+	return func(candidate startCandidate, cfg *config.City) string {
+		for _, assignee := range taskWorkDirAssignees(candidate, cfg) {
+			if workDir := index[strings.TrimSpace(assignee)].path; workDir != "" {
+				return workDir
+			}
+		}
+		return ""
+	}
 }
 
 // truncateHashForLog returns a short representation of a fingerprint hash
