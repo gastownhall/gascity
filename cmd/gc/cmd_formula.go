@@ -41,6 +41,7 @@ configured via packs and formulas_dir settings.`,
 			if jsonOutput {
 				return writeCLIJSONLine(stdout, formulaListJSON{
 					SchemaVersion: "1",
+					OK:            true,
 					CityPath:      cityPath,
 					SearchPaths:   paths,
 					Formulas:      rows,
@@ -257,6 +258,7 @@ Examples:
 
 type formulaListJSON struct {
 	SchemaVersion string                 `json:"schema_version"`
+	OK            bool                   `json:"ok"`
 	CityPath      string                 `json:"city_path,omitempty"`
 	SearchPaths   []string               `json:"search_paths"`
 	Formulas      []formulaListRowJSON   `json:"formulas"`
@@ -275,6 +277,7 @@ type formulaListSummaryJSON struct {
 
 type formulaShowJSON struct {
 	SchemaVersion string                `json:"schema_version"`
+	OK            bool                  `json:"ok"`
 	CityPath      string                `json:"city_path,omitempty"`
 	Name          string                `json:"name"`
 	Description   string                `json:"description,omitempty"`
@@ -394,6 +397,7 @@ func formulaSearchPathsForList(cfg *config.City) []string {
 func formulaShowJSONFromRecipe(recipe *formula.Recipe, cityPath string, scope formulaScope, rigVars, providedVars, displayVars map[string]string) formulaShowJSON {
 	out := formulaShowJSON{
 		SchemaVersion: "1",
+		OK:            true,
 		CityPath:      cityPath,
 		Name:          recipe.Name,
 		Description:   recipe.Description,

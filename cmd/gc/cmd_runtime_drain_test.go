@@ -408,6 +408,27 @@ func TestDoRuntimeDrainCheckJSON(t *testing.T) {
 	}
 }
 
+func TestDoRuntimeDrainCheckJSONNotDrainingWritesFalseResult(t *testing.T) {
+	dops := newFakeDrainOps()
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainCheck(dops, "worker", "worker", true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 for shell-condition false; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var result runtimeDrainCheckJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" || result.Command != "runtime drain-check" || result.Draining || result.Session != "worker" {
+		t.Fatalf("unexpected JSON result: %+v", result)
+	}
+	validateJSONAgainstResultSchema(t, []string{"runtime", "drain-check"}, stdout.Bytes())
+}
+
 // ---------------------------------------------------------------------------
 // doRuntimeDrainAck tests
 // ---------------------------------------------------------------------------

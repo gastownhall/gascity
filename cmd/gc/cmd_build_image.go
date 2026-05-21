@@ -64,6 +64,7 @@ volume mounts at runtime.`,
 			if jsonOut {
 				return writeCLIJSONLineOrErr(stdout, stderr, "gc build-image", buildImageJSONResult{
 					SchemaVersion: "1",
+					OK:            true,
 					CityPath:      result.CityPath,
 					Tag:           tag,
 					BaseImage:     baseImage,
@@ -89,6 +90,7 @@ volume mounts at runtime.`,
 
 type buildImageJSONResult struct {
 	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
 	CityPath      string `json:"city_path,omitempty"`
 	Tag           string `json:"tag,omitempty"`
 	BaseImage     string `json:"base_image"`

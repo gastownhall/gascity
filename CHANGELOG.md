@@ -70,6 +70,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `gc converge status --json` and `gc converge list --json` now emit
+  schema-versioned envelope objects. `gc converge status --json` previously
+  returned the raw convergence metadata map; it now returns an object with
+  `schema_version`, `ok`, `bead_id`, `state`, `iteration`,
+  `max_iterations`, `gate_mode`, `formula`, and `target`. `gc converge list
+  --json` previously returned a raw array; it now returns an object with
+  `schema_version`, `ok`, and `entries`.
 - `gc sling --json` now emits one JSONL result record, matching its checked-in
   result schema; earlier JSON support emitted an indented multi-line object.
 - `gc trace status` and `gc trace show` now default to human-readable output;

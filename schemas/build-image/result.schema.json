@@ -11,7 +11,7 @@
   ],
   "properties": {
     "schema_version": {
-      "type": "string"
+      "const": "1"
     },
     "ok": {
       "const": true

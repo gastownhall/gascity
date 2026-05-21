@@ -79,6 +79,7 @@ or ID. Subject is required unless --auto is set.`,
 			if jsonOut {
 				return writeCLIJSONLineOrErr(stdout, stderr, "gc handoff", handoffJSONResult{
 					SchemaVersion: "1",
+					OK:            true,
 					Mode:          handoffJSONMode(target, auto),
 					Target:        target,
 					Auto:          auto,
@@ -97,6 +98,7 @@ or ID. Subject is required unless --auto is set.`,
 
 type handoffJSONResult struct {
 	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
 	Mode          string `json:"mode"`
 	Target        string `json:"target,omitempty"`
 	Auto          bool   `json:"auto"`

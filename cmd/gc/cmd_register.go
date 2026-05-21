@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -75,11 +76,16 @@ func doRegisterWithOptionsJSON(args []string, nameOverride string, jsonOut bool,
 		return 1
 	}
 	registerStdout := stdout
+	var registerProgress bytes.Buffer
 	if jsonOut {
-		registerStdout = io.Discard
+		registerStdout = &registerProgress
 	}
 	code := registerCityWithSupervisorNamed(cityPath, registerName, registerStdout, stderr, "gc register", true)
-	if code != 0 || !jsonOut {
+	if code != 0 {
+		replayJSONModeProgress(stderr, &registerProgress)
+		return code
+	}
+	if !jsonOut {
 		return code
 	}
 	return writeLifecycleActionJSONOrExit(stdout, stderr, "gc register", lifecycleActionJSON{
@@ -148,11 +154,16 @@ func doUnregisterJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int
 	}
 	entry, registered, _ := registeredCityEntry(cityPath)
 	unregisterStdout := stdout
+	var unregisterProgress bytes.Buffer
 	if jsonOut {
-		unregisterStdout = io.Discard
+		unregisterStdout = &unregisterProgress
 	}
 	_, code := unregisterCityFromSupervisor(cityPath, unregisterStdout, stderr)
-	if code != 0 || !jsonOut {
+	if code != 0 {
+		replayJSONModeProgress(stderr, &unregisterProgress)
+		return code
+	}
+	if !jsonOut {
 		return code
 	}
 	cityName := ""
@@ -166,6 +177,13 @@ func doUnregisterJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int
 		CityName: cityName,
 		CityPath: cityPath,
 	})
+}
+
+func replayJSONModeProgress(stderr io.Writer, progress *bytes.Buffer) {
+	if progress == nil || progress.Len() == 0 {
+		return
+	}
+	_, _ = io.Copy(stderr, progress)
 }
 
 func newCitiesCmd(stdout, stderr io.Writer) *cobra.Command {

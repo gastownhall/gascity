@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -116,6 +117,69 @@ func TestDirectJSONWriterPayloadsValidateDeclaredSchemas(t *testing.T) {
 			}
 			assertTopLevelOKTrue(t, stdout.Bytes())
 			validateJSONAgainstResultSchema(t, tc.command, stdout.Bytes())
+		})
+	}
+}
+
+func TestJSONResultStructsExposeExplicitOKField(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+	}{
+		{name: "runtime drain-check", value: runtimeDrainCheckJSON{}},
+		{name: "runtime action", value: runtimeActionJSON{}},
+		{name: "handoff", value: handoffJSONResult{}},
+		{name: "build-image", value: buildImageJSONResult{}},
+		{name: "mcp list", value: projectedMCPJSON{}},
+		{name: "formula list", value: formulaListJSON{}},
+		{name: "formula show", value: formulaShowJSON{}},
+		{name: "event emit", value: eventEmitJSONResult{}},
+		{name: "init", value: initJSONResult{}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			field, ok := reflect.TypeOf(tc.value).FieldByName("OK")
+			if !ok {
+				t.Fatalf("%s JSON result does not expose explicit OK field", tc.name)
+			}
+			if field.Type.Kind() != reflect.Bool {
+				t.Fatalf("%s OK field kind = %s, want bool", tc.name, field.Type.Kind())
+			}
+			if got := field.Tag.Get("json"); got != "ok" {
+				t.Fatalf("%s OK json tag = %q, want ok", tc.name, got)
+			}
+		})
+	}
+}
+
+func TestFixedResultSchemasPinSchemaVersion(t *testing.T) {
+	for _, command := range [][]string{
+		{"handoff"},
+		{"build-image"},
+		{"formula", "list"},
+		{"formula", "show"},
+		{"event", "emit"},
+		{"init"},
+	} {
+		t.Run(strings.Join(command, " "), func(t *testing.T) {
+			rawSchema, err := readBuiltinSchema(command, jsonSchemaResultRole)
+			if err != nil {
+				t.Fatalf("read schema for %v: %v", command, err)
+			}
+			var schema struct {
+				Properties map[string]map[string]any `json:"properties"`
+			}
+			if err := json.Unmarshal(rawSchema, &schema); err != nil {
+				t.Fatalf("parse schema for %v: %v", command, err)
+			}
+			version, ok := schema.Properties["schema_version"]
+			if !ok {
+				t.Fatalf("schema for %v lacks schema_version property", command)
+			}
+			if got := version["const"]; got != "1" {
+				t.Fatalf("schema_version const = %#v, want %q", got, "1")
+			}
 		})
 	}
 }

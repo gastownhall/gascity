@@ -29,6 +29,7 @@ func newEventCmd(stdout, stderr io.Writer) *cobra.Command {
 
 type eventEmitJSONResult struct {
 	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
 	EventType     string `json:"event_type"`
 	Actor         string `json:"actor"`
 	Subject       string `json:"subject,omitempty"`
@@ -61,6 +62,7 @@ durable persistence.`,
 				submitted = cmdEventEmitSubmitted(args[0], subject, message, effectiveActor, payload, stderr)
 				return writeCLIJSONLineOrErr(stdout, stderr, "gc event emit", eventEmitJSONResult{
 					SchemaVersion: "1",
+					OK:            true,
 					EventType:     args[0],
 					Actor:         effectiveActor,
 					Subject:       subject,
