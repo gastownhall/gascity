@@ -41,21 +41,28 @@ type idleTracker interface {
 	// runtime session names carry per-instance bead IDs and cannot be
 	// enumerated up front. Duration of 0 clears the entry.
 	setTimeoutForTemplate(template string, timeout time.Duration)
+
+	// exemptTemplateFallbackForSession prevents one stable session from
+	// inheriting the template timeout. Used for mode="always" named sessions
+	// that share a template with pool siblings.
+	exemptTemplateFallbackForSession(sessionName string)
 }
 
 // memoryIdleTracker is the production implementation of idleTracker.
 type memoryIdleTracker struct {
-	mu               sync.Mutex
-	timeouts         map[string]time.Duration // session name → idle timeout
-	templateTimeouts map[string]time.Duration // agent template → idle timeout
+	mu                         sync.Mutex
+	timeouts                   map[string]time.Duration // session name → idle timeout
+	templateTimeouts           map[string]time.Duration // agent template → idle timeout
+	templateFallbackExemptions map[string]bool          // session name → skip template fallback
 }
 
 // newIdleTracker creates an idle tracker. Returns nil if disabled.
 // Callers check for nil before using.
 func newIdleTracker() *memoryIdleTracker {
 	return &memoryIdleTracker{
-		timeouts:         make(map[string]time.Duration),
-		templateTimeouts: make(map[string]time.Duration),
+		timeouts:                   make(map[string]time.Duration),
+		templateTimeouts:           make(map[string]time.Duration),
+		templateFallbackExemptions: make(map[string]bool),
 	}
 }
 
@@ -70,6 +77,9 @@ func (m *memoryIdleTracker) setTimeout(sessionName string, timeout time.Duration
 }
 
 func (m *memoryIdleTracker) setTimeoutForTemplate(template string, timeout time.Duration) {
+	if template == "" {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if timeout <= 0 {
@@ -79,10 +89,20 @@ func (m *memoryIdleTracker) setTimeoutForTemplate(template string, timeout time.
 	m.templateTimeouts[template] = timeout
 }
 
+func (m *memoryIdleTracker) exemptTemplateFallbackForSession(sessionName string) {
+	if sessionName == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.templateFallbackExemptions[sessionName] = true
+}
+
 func (m *memoryIdleTracker) checkIdle(sessionName, template string, sp runtime.Provider, now time.Time) bool {
 	m.mu.Lock()
 	timeout, ok := m.timeouts[sessionName]
-	if !ok && template != "" {
+	exempt := m.templateFallbackExemptions[sessionName]
+	if !ok && !exempt && template != "" {
 		timeout, ok = m.templateTimeouts[template]
 	}
 	m.mu.Unlock()

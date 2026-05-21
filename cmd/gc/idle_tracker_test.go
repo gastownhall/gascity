@@ -52,16 +52,16 @@ func TestIdleTracker_TemplateFallbackResolvesPoolSession(t *testing.T) {
 	t.Parallel()
 
 	it := newIdleTracker()
-	it.setTimeoutForTemplate("local-core.builder", 1*time.Hour)
+	template := "local-core/builder"
+	it.setTimeoutForTemplate(template, 1*time.Hour)
 
 	sp := runtime.NewFake()
-	// Bead-derived runtime name — not the static "local-core__builder-1" form.
-	sessionName := "local-core__builder-fm-miv1io"
+	sessionName := sessionNameFromBeadID("fm-miv1io")
 	startFakeSession(t, sp, sessionName)
 	now := time.Now()
 	sp.SetActivity(sessionName, now.Add(-90*time.Minute))
 
-	if !it.checkIdle(sessionName, "local-core.builder", sp, now) {
+	if !it.checkIdle(sessionName, template, sp, now) {
 		t.Fatalf("checkIdle did not fire for pool session via template fallback (90m idle vs 1h timeout)")
 	}
 }
@@ -75,10 +75,10 @@ func TestIdleTracker_TemplateFallbackDoesNotApplyWithoutTemplate(t *testing.T) {
 	t.Parallel()
 
 	it := newIdleTracker()
-	it.setTimeoutForTemplate("local-core.builder", 1*time.Hour)
+	it.setTimeoutForTemplate("local-core/builder", 1*time.Hour)
 
 	sp := runtime.NewFake()
-	sessionName := "local-core__builder-fm-anonymous"
+	sessionName := sessionNameFromBeadID("fm-anonymous")
 	startFakeSession(t, sp, sessionName)
 	now := time.Now()
 	sp.SetActivity(sessionName, now.Add(-90*time.Minute))
@@ -118,16 +118,28 @@ func TestIdleTracker_SetTimeoutForTemplateZeroClears(t *testing.T) {
 	t.Parallel()
 
 	it := newIdleTracker()
-	it.setTimeoutForTemplate("local-core.builder", 1*time.Hour)
-	it.setTimeoutForTemplate("local-core.builder", 0)
+	template := "local-core/builder"
+	it.setTimeoutForTemplate(template, 1*time.Hour)
+	it.setTimeoutForTemplate(template, 0)
 
 	sp := runtime.NewFake()
-	sessionName := "local-core__builder-fm-x"
+	sessionName := sessionNameFromBeadID("fm-x")
 	startFakeSession(t, sp, sessionName)
 	now := time.Now()
 	sp.SetActivity(sessionName, now.Add(-2*time.Hour))
 
-	if it.checkIdle(sessionName, "local-core.builder", sp, now) {
+	if it.checkIdle(sessionName, template, sp, now) {
 		t.Fatalf("checkIdle fired after template timeout was cleared")
+	}
+}
+
+func TestIdleTracker_SetTimeoutForTemplateIgnoresEmptyTemplate(t *testing.T) {
+	t.Parallel()
+
+	it := newIdleTracker()
+	it.setTimeoutForTemplate("", 1*time.Hour)
+
+	if len(it.templateTimeouts) != 0 {
+		t.Fatalf("templateTimeouts = %v, want empty after empty-template config", it.templateTimeouts)
 	}
 }

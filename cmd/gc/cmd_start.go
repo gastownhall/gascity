@@ -222,9 +222,12 @@ func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider)
 			// Configured named sessions own the canonical runtime session for
 			// direct configured identities. mode="always" must never be subject
 			// to idle timeout.
+			namedSessionName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, named.QualifiedName())
 			if !namedAlways {
-				it.setTimeout(config.NamedSessionRuntimeName(cityName, cfg.Workspace, a.QualifiedName()), timeout)
+				it.setTimeout(namedSessionName, timeout)
 				registeredAny = true
+			} else {
+				it.exemptTemplateFallbackForSession(namedSessionName)
 			}
 			if !a.SupportsInstanceExpansion() {
 				continue
@@ -248,14 +251,14 @@ func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider)
 				registeredAny = true
 			}
 			// Per-template fallback so bead-derived runtime names for pool
-			// agents (e.g. "local-core__builder-fm-abc123") still pick up
-			// this timeout via checkIdle's template lookup. Skip when an
-			// always-mode named overlay claims the agent — that overlay
-			// exempts the canonical identity from idle timeout entirely, and
-			// without it we'd silently re-impose a timeout via the template
-			// fallback for any session belonging to the agent.
-			if a.SupportsGenericEphemeralSessions() && !namedAlways {
-				it.setTimeoutForTemplate(a.QualifiedName(), timeout)
+			// agents still pick up this timeout via checkIdle's template
+			// lookup. Always-mode named sessions sharing this template are
+			// exempted per runtime name below; they must not suppress idle
+			// timeout for unnamed pool siblings.
+			if a.SupportsGenericEphemeralSessions() {
+				template := lifecycleTemplateFallbackKey(a)
+				it.setTimeoutForTemplate(template, timeout)
+				exemptAlwaysNamedTemplateFallbacks(cfg, cityName, template, it.exemptTemplateFallbackForSession)
 				registeredAny = true
 			}
 			continue
@@ -296,20 +299,30 @@ func buildMaxSessionAgeTracker(cfg *config.City, cityName string, sp runtime.Pro
 		}
 		jitter := a.MaxSessionAgeJitterDuration()
 		named := config.FindNamedSession(cfg, a.QualifiedName())
+		namedAlways := named != nil && named.ModeOrDefault() == "always"
 		if named != nil {
-			if named.ModeOrDefault() != "always" {
-				tr.setConfig(config.NamedSessionRuntimeName(cityName, cfg.Workspace, a.QualifiedName()), maxAge, jitter)
+			namedSessionName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, named.QualifiedName())
+			if !namedAlways {
+				tr.setConfig(namedSessionName, maxAge, jitter)
 				registeredAny = true
+			} else {
+				tr.exemptTemplateFallbackForSession(namedSessionName)
 			}
 			if !a.SupportsInstanceExpansion() {
 				continue
 			}
 		}
-		sp0 := scaleParamsFor(&a)
 		if a.SupportsInstanceExpansion() {
+			sp0 := scaleParamsFor(&a)
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 				sn := startupSessionName(cityName, qualifiedInstance, st)
 				tr.setConfig(sn, maxAge, jitter)
+				registeredAny = true
+			}
+			if a.SupportsGenericEphemeralSessions() {
+				template := lifecycleTemplateFallbackKey(a)
+				tr.setConfigForTemplate(template, maxAge, jitter)
+				exemptAlwaysNamedTemplateFallbacks(cfg, cityName, template, tr.exemptTemplateFallbackForSession)
 				registeredAny = true
 			}
 			continue
@@ -322,6 +335,23 @@ func buildMaxSessionAgeTracker(cfg *config.City, cityName string, sp runtime.Pro
 		return nil
 	}
 	return tr
+}
+
+func lifecycleTemplateFallbackKey(a config.Agent) string {
+	return a.QualifiedName()
+}
+
+func exemptAlwaysNamedTemplateFallbacks(cfg *config.City, cityName, template string, exempt func(string)) {
+	if cfg == nil || template == "" || exempt == nil {
+		return
+	}
+	for i := range cfg.NamedSessions {
+		named := &cfg.NamedSessions[i]
+		if named.ModeOrDefault() != "always" || named.TemplateQualifiedName() != template {
+			continue
+		}
+		exempt(config.NamedSessionRuntimeName(cityName, cfg.Workspace, named.QualifiedName()))
+	}
 }
 
 func newStartCmd(stdout, stderr io.Writer) *cobra.Command {

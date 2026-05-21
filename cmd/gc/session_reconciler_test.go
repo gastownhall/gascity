@@ -23,19 +23,44 @@ import (
 
 // fakeIdleTracker is a test double for idleTracker.
 type fakeIdleTracker struct {
-	idle map[string]bool
+	idle       map[string]bool
+	templates  map[string]bool
+	exemptions map[string]bool
 }
 
 func newFakeIdleTracker() *fakeIdleTracker {
-	return &fakeIdleTracker{idle: make(map[string]bool)}
+	return &fakeIdleTracker{
+		idle:       make(map[string]bool),
+		templates:  make(map[string]bool),
+		exemptions: make(map[string]bool),
+	}
 }
 
-func (f *fakeIdleTracker) checkIdle(sessionName, _ string, _ runtime.Provider, _ time.Time) bool {
-	return f.idle[sessionName]
+func (f *fakeIdleTracker) checkIdle(sessionName, template string, _ runtime.Provider, _ time.Time) bool {
+	if f.idle[sessionName] {
+		return true
+	}
+	if template == "" || f.exemptions[sessionName] {
+		return false
+	}
+	return f.templates[template]
 }
 
-func (f *fakeIdleTracker) setTimeout(_ string, _ time.Duration)            {}
-func (f *fakeIdleTracker) setTimeoutForTemplate(_ string, _ time.Duration) {}
+func (f *fakeIdleTracker) setTimeout(sessionName string, _ time.Duration) {
+	f.idle[sessionName] = true
+}
+
+func (f *fakeIdleTracker) setTimeoutForTemplate(template string, _ time.Duration) {
+	if template != "" {
+		f.templates[template] = true
+	}
+}
+
+func (f *fakeIdleTracker) exemptTemplateFallbackForSession(sessionName string) {
+	if sessionName != "" {
+		f.exemptions[sessionName] = true
+	}
+}
 
 type lineLimitedPeekProvider struct {
 	*runtime.Fake
@@ -5622,6 +5647,69 @@ func TestReconcileSessionBeads_IdleTimeoutStopsAndStaysAsleep(t *testing.T) {
 	}
 	if b.Metadata["slept_at"] != env.clk.Now().UTC().Format(time.RFC3339) {
 		t.Errorf("slept_at = %q, want idle stop timestamp", b.Metadata["slept_at"])
+	}
+}
+
+func TestReconcileSessionBeads_IdleTimeoutUsesTemplateFallbackForPoolSession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{
+			Name: "builder",
+			Dir:  "local-core",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "primary",
+			Template: "builder",
+			Dir:      "local-core",
+			Mode:     "always",
+		}},
+	}
+	template := env.cfg.Agents[0].QualifiedName()
+	poolSessionName := sessionNameFromBeadID("fm-r56l0x")
+	namedSessionName := config.NamedSessionRuntimeName("", env.cfg.Workspace, "local-core/primary")
+
+	env.addDesired(poolSessionName, template, true)
+	env.addDesired(namedSessionName, template, true)
+	poolSession := env.createSessionBead(poolSessionName, template)
+	namedSession := env.createSessionBead(namedSessionName, template)
+	env.markSessionActive(&poolSession)
+	env.markSessionActive(&namedSession)
+	if err := env.sp.SetMeta(poolSessionName, "GC_SESSION_ID", poolSession.ID); err != nil {
+		t.Fatalf("SetMeta(%s, GC_SESSION_ID): %v", poolSessionName, err)
+	}
+	if err := env.sp.SetMeta(namedSessionName, "GC_SESSION_ID", namedSession.ID); err != nil {
+		t.Fatalf("SetMeta(%s, GC_SESSION_ID): %v", namedSessionName, err)
+	}
+
+	it := newFakeIdleTracker()
+	it.setTimeoutForTemplate(template, time.Hour)
+	exemptAlwaysNamedTemplateFallbacks(env.cfg, "", template, it.exemptTemplateFallbackForSession)
+
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{poolSession, namedSession}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{template: 2}, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if env.sp.IsRunning(poolSessionName) {
+		t.Fatalf("pool session %q should idle via template fallback %q", poolSessionName, template)
+	}
+	if !env.sp.IsRunning(namedSessionName) {
+		t.Fatalf("always named session %q must be exempt from template fallback %q", namedSessionName, template)
+	}
+	poolBead, err := env.store.Get(poolSession.ID)
+	if err != nil {
+		t.Fatalf("Get pool session: %v", err)
+	}
+	if poolBead.Metadata["sleep_reason"] != "idle-timeout" {
+		t.Fatalf("pool sleep_reason = %q, want idle-timeout", poolBead.Metadata["sleep_reason"])
+	}
+	namedBead, err := env.store.Get(namedSession.ID)
+	if err != nil {
+		t.Fatalf("Get named session: %v", err)
+	}
+	if namedBead.Metadata["sleep_reason"] == "idle-timeout" {
+		t.Fatalf("always named sleep_reason = %q, must not be idle-timeout", namedBead.Metadata["sleep_reason"])
 	}
 }
 
