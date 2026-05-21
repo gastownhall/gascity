@@ -1302,6 +1302,15 @@ func discoverSessionBeadsWithRoots(
 			creating := b.Metadata["state"] == "creating"
 			pendingCreate := isPendingPoolCreate(b)
 			templateDesired := desiredHasTemplate(desired, template)
+			// A pool session that currently owns open/in-progress assigned
+			// work must stay in desired state even when templateDesired is
+			// false. A min_active_sessions=0 pool worker produces zero
+			// scale_check demand once it claims its bead, so templateDesired
+			// flips false while the session is actively working. Dropping it
+			// here routes a live worker to the orphan drain (GH#1029). An
+			// idle bead with no assigned work still drops below, so
+			// scale-to-zero is preserved.
+			hasAssignedWork := sessionBeadHasAssignedWork(bp.assignedWorkBeads, b)
 			// Pool-managed beads are controller-created capacity. A pending
 			// or creating bead that the pool pass did not select is stale
 			// capacity, not a reason to spawn a worker with an empty hook.
@@ -1316,10 +1325,10 @@ func discoverSessionBeadsWithRoots(
 				continue
 			}
 			if controllerManagedPool && !manualSession && !isNamedSessionBead(b) &&
-				!sessionAlreadyDesired && !templateDesired && !scaleCheckPartial {
+				!sessionAlreadyDesired && !templateDesired && !scaleCheckPartial && !hasAssignedWork {
 				continue
 			}
-			if !manualSession && (!creating || isStaleCreating(b)) && !templateDesired && !pendingCreate && !scaleCheckPartial {
+			if !manualSession && (!creating || isStaleCreating(b)) && !templateDesired && !pendingCreate && !scaleCheckPartial && !hasAssignedWork {
 				continue
 			}
 		}

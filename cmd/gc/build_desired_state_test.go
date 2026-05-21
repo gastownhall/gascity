@@ -2905,6 +2905,123 @@ func TestDiscoverSessionBeadsSkipsStaleMaxOneWhenDependencyFloorDesired(t *testi
 	}
 }
 
+// TestDiscoverSessionBeadsKeepsPoolSessionWithAssignedWorkWhenTemplateUndesired
+// reproduces GH#1029: a live pool worker with min_active_sessions=0 produces
+// zero scale_check demand once it claims its bead, so templateDesired flips
+// false even though the session is actively working its assigned bead. The
+// rediscovery overlay must keep that session bead in desired state so the
+// reconciler does not classify it as orphaned and drain it mid-work.
+func TestDiscoverSessionBeadsKeepsPoolSessionWithAssignedWorkWhenTemplateUndesired(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "gascity/worker-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:gascity/worker-1", "template:gascity/worker"},
+		Metadata: map[string]string{
+			"template":             "gascity/worker",
+			"agent_name":           "gascity/worker-1",
+			"alias":                "gascity/worker-1",
+			"session_name":         "s-worker-busy",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot":            "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workBead, err := store.Create(beads.Bead{
+		Title:    "in-progress task",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: sessionBead.Metadata["session_name"],
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.add(sessionBead)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "gascity",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(5),
+		}},
+	}
+	// templateDesired is false: the pool pass produced zero requests for this
+	// template (no scale_check demand, min_active_sessions=0).
+	desired := map[string]TemplateParams{}
+	bp := &agentBuildParams{
+		cityPath:          t.TempDir(),
+		city:              cfg,
+		beadStore:         store,
+		sessionBeads:      snapshot,
+		agents:            cfg.Agents,
+		assignedWorkBeads: []beads.Bead{workBead},
+	}
+
+	discoverSessionBeadsWithRoots(bp, cfg, desired, nil, nil, nil, io.Discard)
+
+	if _, ok := desired[sessionBead.Metadata["session_name"]]; !ok {
+		t.Fatalf("desired state dropped a pool session that still owns assigned work; keys=%v", mapKeys(desired))
+	}
+}
+
+// TestDiscoverSessionBeadsDropsIdlePoolSessionWhenTemplateUndesired guards the
+// scale-to-zero invariant: an idle pool-managed session bead with no assigned
+// work and templateDesired false must still be dropped from desired state so
+// the pool can scale down. The GH#1029 fix only retains busy sessions.
+func TestDiscoverSessionBeadsDropsIdlePoolSessionWhenTemplateUndesired(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "gascity/worker-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:gascity/worker-1", "template:gascity/worker"},
+		Metadata: map[string]string{
+			"template":             "gascity/worker",
+			"agent_name":           "gascity/worker-1",
+			"alias":                "gascity/worker-1",
+			"session_name":         "s-worker-idle",
+			"state":                "awake",
+			poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot":            "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.add(sessionBead)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "gascity",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(5),
+		}},
+	}
+	desired := map[string]TemplateParams{}
+	bp := &agentBuildParams{
+		cityPath:          t.TempDir(),
+		city:              cfg,
+		beadStore:         store,
+		sessionBeads:      snapshot,
+		agents:            cfg.Agents,
+		assignedWorkBeads: nil,
+	}
+
+	discoverSessionBeadsWithRoots(bp, cfg, desired, nil, nil, nil, io.Discard)
+
+	if _, ok := desired[sessionBead.Metadata["session_name"]]; ok {
+		t.Fatalf("desired state revived an idle pool session with no work; keys=%v", mapKeys(desired))
+	}
+}
+
 func TestNonExpandingPoolIdentitySlotRecognizesOutOfRangeNumericSuffix(t *testing.T) {
 	cfgAgent := &config.Agent{
 		Name:              "refinery",
