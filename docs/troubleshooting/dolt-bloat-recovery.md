@@ -113,6 +113,8 @@ should treat these strings as the current vocabulary:
 
 | Reason | Meaning |
 |--------|---------|
+| `post-flatten HEAD probe failed` | The compactor could not read the database HEAD after flatten. |
+| `post-flatten integrity check failed` | A post-flatten integrity check failed before recording a more specific reason. |
 | `post-flatten row count decreased` | A table lost rows after flatten. |
 | `post-flatten row count probe failed` | The post-flatten row-count query failed or returned a non-number. |
 | `post-flatten table value hash probe failed` | A post-flatten table hash query failed or returned empty. |

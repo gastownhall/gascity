@@ -642,7 +642,7 @@ preflight_counts() {
   preflight_failed=0
   while IFS= read -r t; do
     [ -n "$t" ] || continue
-    if ! valid_database_name "$t"; then
+    if ! valid_table_name "$t"; then
       printf 'compact: db=%s invalid table name from information_schema table=%s — fail\n' \
         "$db" "$t" >&2
       preflight_failed=1

@@ -614,6 +614,10 @@ case "$query" in
       print_cells beads notes
       exit 0
     fi
+    if [ "$mode" = "post_flatten_invalid_table_name" ] && [ "$(current_head)" = "compactcommit" ]; then
+      print_cells beads 'bad/name'
+      exit 0
+    fi
     if [ "$mode" = "table_name_clobber" ]; then
       print_cell blocked_issues
       exit 0
@@ -1877,6 +1881,29 @@ func TestCompactScriptReportsPostFlattenTableListProbeFailureSeparately(t *testi
 	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
 	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten table list probe failed" {
 		t.Fatalf("quarantine reason should identify table-list probe failure, got %q", reason)
+	}
+}
+
+func TestCompactScriptQuarantinesPostFlattenInvalidTableNameBeforeFullGC(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "post_flatten_invalid_table_name", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite an invalid table name after preflight:\n%s", out)
+	}
+	if !strings.Contains(out, "invalid table name after flatten table=bad/name") ||
+		!strings.Contains(out, "post-flatten table list changed") {
+		t.Fatalf("output missing post-flatten invalid-table-name quarantine:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("post-flatten invalid table name must block full GC:\n%s", logData)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten table list changed" {
+		t.Fatalf("quarantine reason should identify table-list drift, got %q", reason)
 	}
 }
 
