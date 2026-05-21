@@ -33,14 +33,14 @@ func TestJSONSchemaManifestForSupportedCommand(t *testing.T) {
 	var manifest struct {
 		SchemaVersion string                     `json:"schema_version"`
 		Command       []string                   `json:"command"`
-		Transport     string                     `json:"transport"`
 		JSONSupported bool                       `json:"json_supported"`
 		Schemas       map[string]json.RawMessage `json:"schemas"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
 		t.Fatalf("manifest is not JSON: %v\n%s", err, stdout.String())
 	}
-	if manifest.SchemaVersion != "1" || manifest.Transport != "jsonl" || !manifest.JSONSupported {
+	assertManifestOmitsTransport(t, stdout.Bytes())
+	if manifest.SchemaVersion != "1" || !manifest.JSONSupported {
 		t.Fatalf("manifest metadata = %+v", manifest)
 	}
 	if got := strings.Join(manifest.Command, " "); got != "events" {
@@ -153,6 +153,7 @@ func TestJSONSchemaManifestForLifecycleActionCommands(t *testing.T) {
 			if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
 				t.Fatalf("manifest is not JSON: %v\n%s", err, stdout.String())
 			}
+			assertManifestOmitsTransport(t, stdout.Bytes())
 			if manifest.SchemaVersion != "1" || !manifest.JSONSupported {
 				t.Fatalf("manifest metadata = %+v", manifest)
 			}
@@ -245,6 +246,7 @@ func TestJSONSchemaManifestForActionSummaryCommands(t *testing.T) {
 			if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
 				t.Fatalf("manifest is not JSON: %v\n%s", err, stdout.String())
 			}
+			assertManifestOmitsTransport(t, stdout.Bytes())
 			if manifest.SchemaVersion != "1" || !manifest.JSONSupported {
 				t.Fatalf("manifest metadata = %+v", manifest)
 			}
@@ -276,6 +278,7 @@ func TestJSONSchemaManifestForUnsupportedCommand(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
 		t.Fatalf("manifest is not JSON: %v\n%s", err, stdout.String())
 	}
+	assertManifestOmitsTransport(t, stdout.Bytes())
 	if got := strings.Join(manifest.Command, " "); got != "dashboard" {
 		t.Fatalf("command = %q, want dashboard", got)
 	}
@@ -570,21 +573,32 @@ func TestJSONSchemaManifestForBdPassthrough(t *testing.T) {
 
 	var manifest struct {
 		Command       []string                   `json:"command"`
-		Transport     string                     `json:"transport"`
 		JSONSupported bool                       `json:"json_supported"`
 		Schemas       map[string]json.RawMessage `json:"schemas"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
 		t.Fatalf("manifest is not JSON: %v\n%s", err, stdout.String())
 	}
+	assertManifestOmitsTransport(t, stdout.Bytes())
 	if got := strings.Join(manifest.Command, " "); got != "bd" {
 		t.Fatalf("command = %q, want bd", got)
 	}
-	if !manifest.JSONSupported || manifest.Transport != "jsonl" {
+	if !manifest.JSONSupported {
 		t.Fatalf("manifest metadata = %+v", manifest)
 	}
 	if !json.Valid(manifest.Schemas["result"]) || !json.Valid(manifest.Schemas["failure"]) {
 		t.Fatalf("manifest schemas = %+v", manifest.Schemas)
+	}
+}
+
+func assertManifestOmitsTransport(t *testing.T, data []byte) {
+	t.Helper()
+	var manifest map[string]json.RawMessage
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("manifest is not JSON: %v\n%s", err, string(data))
+	}
+	if _, ok := manifest["transport"]; ok {
+		t.Fatalf("manifest exposes deprecated transport field: %s", string(data))
 	}
 }
 
@@ -762,6 +776,7 @@ func TestJSONSchemaManifestForDiscoveredPackCommand(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &manifest); err != nil {
 		t.Fatalf("manifest is not JSON: %v\n%s", err, stdout.String())
 	}
+	assertManifestOmitsTransport(t, stdout.Bytes())
 	if got := strings.Join(manifest.Command, " "); got != "tools review pr" {
 		t.Fatalf("command = %q, want tools review pr", got)
 	}

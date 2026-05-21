@@ -276,6 +276,7 @@ func TestOddballRootJSONSchemaManifests(t *testing.T) {
 			t.Fatalf("run %v = %d; stderr=%q stdout=%q", args, code, stderr.String(), stdout.String())
 		}
 		got := requireSingleJSONLine(t, &stdout)
+		assertManifestOmitsTransport(t, stdout.Bytes())
 		if got["json_supported"] != true {
 			t.Fatalf("%v json_supported = %v, want true: %+v", args, got["json_supported"], got)
 		}

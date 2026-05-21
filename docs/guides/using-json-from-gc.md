@@ -1,15 +1,15 @@
 ---
 title: "Using JSON from the Gas City CLI (`gc`)"
-description: Use `gc --json` from scripts, agents, tests, and other software.
+description: Use `gc --json` and `gc --json-schema` from scripts, agents, tests, and other software.
 ---
 
 Gas City's CLI is human-readable by default. When software calls `gc`, use
 `--json` on commands that support it so callers do not have to parse tables,
 status text, or progress messages.
 
-The standardized JSON contract is being rolled out across the CLI. This guide
-separates what works today from conventions that new and newly standardized
-commands should follow.
+The JSON surface is intended for automation: agents, shell scripts, dashboard
+tools, smoke tests, and CI checks. Human-readable output is still the default
+for interactive use.
 
 ## Quick Start
 
@@ -19,16 +19,18 @@ Use `--json` on supported commands:
 gc status --json
 gc session list --json
 gc rig list --json
+gc mail inbox --json
 ```
 
-Most bounded commands emit one JSON value. Ordinary JSON parsers can read the
-whole stdout body after trimming the trailing newline.
+Most bounded commands emit one JSON value followed by a newline. Ordinary JSON
+parsers can read the whole stdout body:
 
 ```sh
 gc status --json | jq .
 ```
 
-Shell scripts should continue to use the process exit code for control flow:
+Shell scripts should use the process exit code for control flow, then parse
+stdout only after a successful exit:
 
 ```sh
 if out="$(gc status --json)"; then
@@ -52,51 +54,117 @@ Stderr remains available for operational diagnostics. A caller should not need
 stderr to understand the successful result shape, but stderr may still contain
 human-readable details that help debug failures.
 
-## Failure Output Today
+## Common Result Shape
 
-Current `gc --json` commands use the process exit code for shell
-success/failure logic. On failure, commands may write human-readable diagnostics
-to stderr and may write no JSON to stdout.
+Newer JSON commands use a common success envelope:
 
-Agents and scripts should:
+```json
+{
+  "schema_version": "1",
+  "ok": true
+}
+```
+
+Command-specific fields sit alongside that envelope. For example, a city status
+result includes fields such as `city_name`, `city_path`, `controller`,
+`agents`, `rigs`, and `summary`.
+
+Action commands usually include a `command` field and an `action` field:
+
+```json
+{
+  "schema_version": "1",
+  "ok": true,
+  "command": "session pin",
+  "action": "pin",
+  "session_id": "gc-1"
+}
+```
+
+Use each command's JSON Schema as the authoritative shape. Do not assume every
+command has exactly the same fields beyond the shared success indicators.
+
+## Failure Handling
+
+For normal command execution, continue to use the process exit code as the first
+success/failure signal.
+
+Many command failures still write diagnostics to stderr and may not produce a
+command-specific JSON failure record. Automation should:
 
 - use the process exit code for shell success/failure logic.
-- parse stdout as JSON only after a successful exit.
-- capture stderr separately when they need diagnostic text.
-- not assume every command emits a structured JSON failure payload yet.
+- parse stdout as a command result only after a successful exit.
+- capture stderr separately when it needs diagnostic text.
+- avoid assuming every `--json` command emits a structured failure payload.
+
+JSON Schema requests are different: if a requested schema is unavailable, `gc`
+returns a structured failure payload on stdout and exits nonzero:
+
+```sh
+gc dashboard --json-schema=result
+```
+
+```json
+{
+  "schema_version": "1",
+  "ok": false,
+  "error": {
+    "code": "json_schema_unavailable",
+    "message": "command \"dashboard\" does not declare JSON support",
+    "exit_code": 1
+  }
+}
+```
 
 ## JSONL Framing
 
-For the common bounded-command case, stdout is one complete JSON value. That
-value may be pretty-printed across multiple physical lines, so do not treat each
-line as a standalone JSON record for bounded commands.
+`gc` writes complete JSON records followed by newlines. For most bounded
+commands, stdout has exactly one record.
 
-Streaming commands may emit multiple records when their schema says so. For
-example, event streams naturally use one JSON value per event.
+Some streaming commands can emit multiple records. Their result schema may use
+the `x-gc-jsonl` extension to describe record counts:
 
-## Planned Schema Discovery
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gc-jsonl": {},
+  "type": "object"
+}
+```
 
-The `--json-schema` flag is planned but is not implemented by the current `gc`
-binary. Until it ships, use command help, generated reference docs, and command
-source/tests to confirm exact JSON shapes.
+When `x-gc-jsonl` is absent, treat the command as a single-record command.
+When it is present:
 
-The planned discovery contract is:
+- `minRecords` is the minimum number of records. If omitted, the minimum is `0`.
+- `maxRecords` is the maximum number of records. If omitted, there is no maximum.
+- `{}` means zero or more records.
+- `{ "minRecords": 1 }` means one or more records.
+- `{ "minRecords": 0, "maxRecords": 1 }` means zero or one record.
+- `{ "minRecords": 1, "maxRecords": 1 }` means exactly one record, explicitly.
+
+For bounded commands, parse stdout as a whole JSON value. For streaming commands,
+parse one JSON value per line.
+
+## Discover Schemas
+
+Use `--json-schema` to discover a command's JSON contract without running the
+command's normal behavior:
 
 ```sh
 gc status --json-schema
 ```
 
-It will print one manifest record:
+That prints a manifest record:
 
 ```json
 {
   "schema_version": "1",
   "command": ["status"],
-  "transport": "jsonl",
   "json_supported": true,
   "schemas": {
     "result": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "gc status --json result",
       "type": "object"
     },
     "failure": {
@@ -107,151 +175,82 @@ It will print one manifest record:
 }
 ```
 
-Role-specific schema requests are also planned:
+Use role-specific schema requests when a caller only needs one schema:
 
 ```sh
 gc status --json-schema=result
 gc status --json-schema=failure
 ```
 
-When implemented, if a known command does not declare JSON support,
-`--json-schema` should return a
-manifest with `json_supported: false` and an empty `schemas` object:
+The role may be passed with `=` or as the next argument:
+
+```sh
+gc status --json-schema result
+```
+
+If a known command does not declare JSON support, the manifest still succeeds
+and reports `json_supported: false`:
+
+```sh
+gc dashboard --json-schema
+```
 
 ```json
 {
   "schema_version": "1",
-  "command": ["version"],
-  "transport": "jsonl",
+  "command": ["dashboard"],
   "json_supported": false,
   "schemas": {}
 }
 ```
 
-Role-specific requests for unavailable schemas should fail with the standardized
-failure shape once that failure shape exists.
+Role-specific requests for unavailable schemas fail with the structured failure
+shape shown above.
 
-## Planned Failure Shape
+## Validate Output
 
-New or newly standardized JSON commands should eventually return one structured
-JSON failure record on stdout when `--json` is passed and the command fails:
+Tools can combine `--json` and `--json-schema=result` to validate command
+output. Start by fetching the schema and command result:
 
-```json
-{
-  "schema_version": "1",
-  "ok": false,
-  "error": {
-    "code": "command_failed",
-    "message": "command failed; see stderr for diagnostics",
-    "exit_code": 1
-  }
-}
+```sh
+schema="$(gc status --json-schema=result)"
+result="$(gc status --json)"
+printf '%s\n' "$result" | jq .
 ```
 
-That failure shape is not universal today. Compatibility notes for any PR that
-adopts it should call out which command changed and how existing callers should
-migrate.
+The `jq` command only confirms that stdout is parseable JSON. Use a JSON Schema
+validator when you need contract enforcement. Keep validation at command
+boundaries rather than writing ad hoc field checks throughout an agent or
+script.
 
-## Planned Record Counts
+For streaming commands, validate each JSONL record against the result schema:
 
-JSON Schema describes one JSON value. The planned schema-discovery contract may
-use an optional extension keyword to describe the record stream around that
-schema:
-
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "x-gc-jsonl": {
-    "minRecords": 0
-  },
-  "type": "object"
-}
+```sh
+gc events --json-schema=result > /tmp/gc-events.schema.json
+gc events --follow | while IFS= read -r line; do
+  printf '%s\n' "$line" | jq .
+done
 ```
 
-This `x-gc-jsonl` vocabulary is planned; no current CLI tooling enforces it.
-When it is implemented, absence should mean the command emits exactly one
-record. When present:
+The example above only parses records with `jq`; use a schema validator when
+you need full schema checking.
 
-- `minRecords` is the minimum number of records. If omitted, the minimum is `0`.
-- `maxRecords` is the maximum number of records. If omitted, there is no maximum.
-- `{}` means zero or more records.
-- `{ "minRecords": 1 }` means one or more records.
-- `{ "minRecords": 0, "maxRecords": 1 }` means zero or one record.
-- `{ "minRecords": 1, "maxRecords": 1 }` means exactly one record, explicitly.
+## Supported Surface
 
-## Field Conventions
+The JSON rollup added or standardized coverage across the main automation
+surface, including:
 
-New or newly standardized JSON commands should use stable field names:
+- city lifecycle and status commands.
+- agent and rig inspection/routing commands.
+- session list, action, log, and mutation commands.
+- mail and trace inspection commands.
+- convoy, converge, formula, order, graph, service, and skill commands.
+- runtime drain/nudge commands.
+- schema discovery for supported commands.
 
-| Concept | Preferred field |
-| --- | --- |
-| Schema version | `schema_version` |
-| Identifier | `id` |
-| Display name | `name` |
-| Fully scoped name | `qualified_name` or `scoped_name` |
-| Filesystem path | `path` |
-| Source of data | `source` |
-| Durable reference | `ref` |
-| Lifecycle value | `status` or `state` |
-| Type discriminator | `type` |
-| Dispatch target | `target` |
-| Creation time | `created_at` |
-| Update time | `updated_at` |
-| Warnings | `warnings` |
-| Summary counts | `summary` |
-
-Timestamps should be RFC3339 strings.
-
-Current commands do not all match these conventions. For example,
-`gc session list --json` currently emits Go struct field names such as `ID`,
-`State`, `CreatedAt`, and `SessionName`. Treat each existing command's actual
-output as authoritative until that command is explicitly standardized.
-
-Warnings that matter to software consumers should appear in structured JSON,
-for example:
-
-```json
-{
-  "warnings": [
-    {
-      "code": "partial_data",
-      "message": "session provider was unavailable",
-      "path": "sessions"
-    }
-  ]
-}
-```
-
-Commands may also write human-readable diagnostics to stderr for compatibility
-and troubleshooting.
-
-## Pack-Defined Commands
-
-Pack-defined commands can be scripts or external programs, so Gas City does not
-automatically make arbitrary pack command output JSON-safe.
-
-Planned schema discovery for pack-defined commands may use schemas next to the
-command implementation:
-
-```text
-commands/
-  review/
-    pr/
-      run.sh
-      schemas/
-        result.schema.json
-```
-
-Nested command directories would imply nested command paths. In the example
-above, the schema belongs to the pack command leaf represented by
-`commands/review/pr/`.
-
-`schemas/failure.schema.json` is optional. Use it only when the command has
-meaningful command-specific failure fields beyond the shared default failure
-shape.
-
-This convention is not loaded by current `gc` runtime code. Treat it as a design
-direction until pack command schema discovery is implemented.
+Use the generated [CLI Reference](/reference/cli) for exact flags on each
+command. Use `gc <command> --json-schema` to confirm whether a command declares
+JSON support.
 
 ## Passthrough Commands
 
@@ -262,10 +261,39 @@ Passthrough commands are not native `gc` JSON contracts. If the downstream tool
 supports JSON, it owns that output shape. Gas City should not represent
 passthrough output with a fake "anything is valid" schema.
 
+For compatibility, local pack-defined commands can still pass their own `--json`
+handling through when they do not declare schemas. Set
+`GC_JSON_CONTRACT_STRICT=1` in tests or CI when you want missing local command
+schemas to fail instead of passing through.
+
+## Pack-Defined Commands
+
+Pack-defined commands can be scripts or external programs, so Gas City does not
+automatically make arbitrary pack command output JSON-safe.
+
+Pack command schemas live next to the command implementation:
+
+```text
+commands/
+  review/
+    pr/
+      run.sh
+      schemas/
+        result.schema.json
+```
+
+Nested command directories imply nested command paths. In the example above,
+the result schema belongs to the pack command leaf represented by
+`commands/review/pr/`.
+
+`schemas/failure.schema.json` is optional. Use it only when the command has
+meaningful command-specific failure fields beyond the shared default failure
+shape.
+
 ## Compatibility Notes
 
-Existing JSON commands may be standardized over time. A PR that changes an
-existing JSON output shape should call that out explicitly, including:
+JSON output is an automation contract. A PR that changes an existing JSON output
+shape should call that out explicitly, including:
 
 - the command and invocation.
 - the old shape.
@@ -280,3 +308,5 @@ command's normal human behavior is intentionally changed.
 
 Use the generated [CLI Reference](/reference/cli) for exact command flags.
 Use [Events](/reference/events) for the `gc events` JSONL event contract.
+Use [Schemas](/schema) for published non-CLI schema artifacts such as OpenAPI,
+events, and city config.
