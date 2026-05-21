@@ -1480,11 +1480,13 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	opencodeHooks := string(fs.Files["/work/.opencode/plugins/gascity.js"])
 	for _, want := range []string{
+		"const GC_OPENCODE_HOOK_VERSION = 2",
 		`process.env.GC_BIN || "gc"`,
-		`/opt/homebrew/bin:/usr/local/bin`,
+		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		`"experimental.session.compacting"`,
-		`run(directory, "handoff", "--auto", "context cycle")`,
+		`runWithWarning(directory, "handoff", "--auto", "context cycle")`,
 		"output.context.push(handoff)",
+		"logRunFailure",
 		"mirrorTranscript(directory, client",
 	} {
 		if !strings.Contains(opencodeHooks, want) {
@@ -1647,6 +1649,92 @@ let mirrorTempCounter = 0;
 	}
 	if piHookNeedsUpgrade(future) {
 		t.Fatal("newer Pi hook version requested downgrade")
+	}
+}
+
+func TestInstallOpenCodeHookUpgradesStaleManagedPlugin(t *testing.T) {
+	fs := fsys.NewFake()
+	legacy := []byte(`// Gas City hooks for OpenCode.
+import { execFile } from "node:child_process";
+async function run(directory, ...args) {
+  const { stdout } = await execFileAsync("gc", args, { cwd: directory });
+  return stdout.trim();
+}
+export default async function gascityPlugin() {
+  return {
+    "experimental.chat.system.transform": async () => {},
+  };
+}
+`)
+	fs.Files["/work/.opencode/plugins/gascity.js"] = legacy
+
+	if err := Install(fs, "/city", "/work", []string{"opencode"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	data := string(fs.Files["/work/.opencode/plugins/gascity.js"])
+	if data == string(legacy) {
+		t.Fatal("stale OpenCode managed plugin was preserved; expected managed upgrade")
+	}
+	for _, want := range []string{
+		"const GC_OPENCODE_HOOK_VERSION = 2",
+		`process.env.GC_BIN || "gc"`,
+		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
+		`"experimental.session.compacting"`,
+		`runWithWarning(directory, "handoff", "--auto", "context cycle")`,
+		"logRunFailure",
+	} {
+		if !strings.Contains(data, want) {
+			t.Errorf("upgraded OpenCode plugin missing marker %q:\n%s", want, data)
+		}
+	}
+	backup := string(fs.Files["/work/.opencode/plugins/gascity.js.bak"])
+	if backup != string(legacy) {
+		t.Fatalf("legacy OpenCode plugin backup = %q, want original legacy content", backup)
+	}
+}
+
+func TestOpenCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
+	current := []byte(`// Gas City hooks for OpenCode.
+const GC_OPENCODE_HOOK_VERSION = 2;
+const GC_BIN = process.env.GC_BIN || "gc";
+const PATH_PREFIX =
+  "/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:";
+function logRunFailure(args, directory, err) {}
+async function runWithWarning(directory, ...args) {}
+"experimental.session.compacting";
+runWithWarning(directory, "handoff", "--auto", "context cycle");
+output.context.push(handoff);
+`)
+	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 2"), []byte("GC_OPENCODE_HOOK_VERSION = 1"), 1)
+	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 2"), []byte("GC_OPENCODE_HOOK_VERSION = 3"), 1)
+
+	if !opencodeHookNeedsUpgrade(stale) {
+		t.Fatal("stale OpenCode hook version did not request upgrade")
+	}
+	if opencodeHookNeedsUpgrade(current) {
+		t.Fatal("current OpenCode hook version requested upgrade")
+	}
+	if opencodeHookNeedsUpgrade(future) {
+		t.Fatal("newer OpenCode hook version requested downgrade")
+	}
+}
+
+func TestInstallOpenCodeHookPreservesUserAuthoredPlugin(t *testing.T) {
+	fs := fsys.NewFake()
+	custom := []byte(`export default async function customPlugin() {
+  return {
+    "experimental.chat.system.transform": async () => {},
+  };
+}
+`)
+	fs.Files["/work/.opencode/plugins/gascity.js"] = custom
+
+	if err := Install(fs, "/city", "/work", []string{"opencode"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := string(fs.Files["/work/.opencode/plugins/gascity.js"]); got != string(custom) {
+		t.Fatalf("user-authored OpenCode plugin was overwritten:\n%s", got)
 	}
 }
 

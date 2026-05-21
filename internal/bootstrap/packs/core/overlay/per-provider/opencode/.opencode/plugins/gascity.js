@@ -20,11 +20,14 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+const GC_OPENCODE_HOOK_VERSION = 2;
 const GC_BIN = process.env.GC_BIN || "gc";
+// GC_BIN is the explicit override. The fallback order matches Pi hooks so
+// sibling providers resolve the same installed gc before developer-local bins.
 const PATH_PREFIX =
-  `${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:`;
+  `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
 
-async function run(directory, ...args) {
+async function runCommand(directory, args, warnOnFailure) {
   try {
     const { stdout } = await execFileAsync(GC_BIN, args, {
       cwd: directory,
@@ -33,8 +36,36 @@ async function run(directory, ...args) {
       env: { ...process.env, PATH: PATH_PREFIX + (process.env.PATH || "") },
     });
     return stdout.trim();
-  } catch {
+  } catch (err) {
+    if (warnOnFailure) {
+      logRunFailure(args, directory, err);
+    }
     return "";
+  }
+}
+
+async function run(directory, ...args) {
+  return runCommand(directory, args, false);
+}
+
+async function runWithWarning(directory, ...args) {
+  return runCommand(directory, args, true);
+}
+
+function logRunFailure(args, directory, err) {
+  try {
+    const detail =
+      (err && (err.code || err.signal || err.message)) || "unknown error";
+    console.warn(
+      "gascity opencode plugin:",
+      `${GC_BIN} ${args.join(" ")}`,
+      "cwd",
+      directory,
+      "failed:",
+      detail,
+    );
+  } catch {
+    return;
   }
 }
 
@@ -142,9 +173,20 @@ export default async function gascityPlugin({ directory, client }) {
     },
 
     "experimental.session.compacting": async (_input, output) => {
-      const handoff = await run(directory, "handoff", "--auto", "context cycle");
-      if (handoff && Array.isArray(output?.context)) {
+      const handoff = await runWithWarning(directory, "handoff", "--auto", "context cycle");
+      if (!handoff) {
+        return;
+      }
+      if (Array.isArray(output?.context)) {
         output.context.push(handoff);
+        return;
+      }
+      try {
+        console.warn(
+          "gascity opencode plugin: compacting output.context is not an array; skipped handoff injection",
+        );
+      } catch {
+        return;
       }
     },
   };

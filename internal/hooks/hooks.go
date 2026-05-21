@@ -31,9 +31,15 @@ var configFS embed.FS
 // Gas Town's installer.
 var supported = []string{"claude", "codex", "gemini", "kiro", "opencode", "copilot", "cursor", "pi", "omp"}
 
-const managedPiHookVersion = 4
+const (
+	managedPiHookVersion       = 4
+	managedOpenCodeHookVersion = 2
+)
 
-var piHookVersionPattern = regexp.MustCompile(`\bGC_PI_HOOK_VERSION\s*=\s*([0-9]+)\b`)
+var (
+	piHookVersionPattern       = regexp.MustCompile(`\bGC_PI_HOOK_VERSION\s*=\s*([0-9]+)\b`)
+	opencodeHookVersionPattern = regexp.MustCompile(`\bGC_OPENCODE_HOOK_VERSION\s*=\s*([0-9]+)\b`)
+)
 
 // unwiredHookProviders lists provider names whose own CLIs do expose a
 // hook mechanism (per upstream documentation) but for which Gas Town
@@ -195,6 +201,9 @@ func overlayManagedNeedsUpgrade(provider, rel string) func([]byte) bool {
 	if provider == "pi" && rel == path.Join(".pi", "extensions", "gc-hooks.js") {
 		return piHookNeedsUpgrade
 	}
+	if provider == "opencode" && rel == path.Join(".opencode", "plugins", "gascity.js") {
+		return opencodeHookNeedsUpgrade
+	}
 	return nil
 }
 
@@ -226,6 +235,44 @@ func piHookNeedsUpgrade(existing []byte) bool {
 
 func piHookVersion(content string) int {
 	match := piHookVersionPattern.FindStringSubmatch(content)
+	if len(match) != 2 {
+		return 0
+	}
+	version, err := strconv.Atoi(match[1])
+	if err != nil {
+		return 0
+	}
+	return version
+}
+
+func opencodeHookNeedsUpgrade(existing []byte) bool {
+	content := string(existing)
+	if !strings.Contains(content, "Gas City hooks for OpenCode.") {
+		return false
+	}
+	if opencodeHookVersion(content) < managedOpenCodeHookVersion ||
+		!strings.Contains(content, `process.env.GC_BIN || "gc"`) ||
+		!strings.Contains(content, `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`) ||
+		!strings.Contains(content, `"experimental.session.compacting"`) ||
+		!strings.Contains(content, `runWithWarning(directory, "handoff", "--auto", "context cycle")`) ||
+		!strings.Contains(content, "output.context.push(handoff)") ||
+		!strings.Contains(content, "logRunFailure") {
+		return true
+	}
+	for _, marker := range []string{
+		`run(directory, "handoff", "context cycle")`,
+		`"session", "reset"`,
+		`"session.deleted"`,
+	} {
+		if strings.Contains(content, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func opencodeHookVersion(content string) int {
+	match := opencodeHookVersionPattern.FindStringSubmatch(content)
 	if len(match) != 2 {
 		return 0
 	}

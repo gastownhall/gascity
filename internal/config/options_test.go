@@ -1146,30 +1146,48 @@ func TestBuiltinProviders_OpenCodeHasModelOptions(t *testing.T) {
 	builtins := BuiltinProviders()
 	opencode := builtins["opencode"]
 
-	if !schemaHasChoice(opencode.OptionsSchema, "model", "opencode/deepseek-v4-flash-free") {
-		t.Fatal("opencode OptionsSchema missing hosted model choice")
-	}
-	args, metadata, err := ResolveOptions(opencode.OptionsSchema, map[string]string{
-		"model": "opencode/deepseek-v4-flash-free",
-	}, nil)
-	if err != nil {
-		t.Fatalf("ResolveOptions(opencode model): %v", err)
-	}
-	if !reflect.DeepEqual(args, []string{"--model", "opencode/deepseek-v4-flash-free"}) {
-		t.Fatalf("model args = %v, want --model opencode/deepseek-v4-flash-free", args)
-	}
-	if metadata["opt_model"] != "opencode/deepseek-v4-flash-free" {
-		t.Fatalf("metadata[opt_model] = %q, want opencode/deepseek-v4-flash-free", metadata["opt_model"])
+	tests := []struct {
+		name  string
+		model string
+		args  []string
+	}{
+		{name: "Default"},
+		{name: "DeepSeek V4 Flash Free", model: "opencode/deepseek-v4-flash-free", args: []string{"--model", "opencode/deepseek-v4-flash-free"}},
+		{name: "Nemotron 3 Super Free", model: "opencode/nemotron-3-super-free", args: []string{"--model", "opencode/nemotron-3-super-free"}},
+		{name: "Big Pickle", model: "opencode/big-pickle", args: []string{"--model", "opencode/big-pickle"}},
 	}
 
-	legacy := normalizeProviderLayerArgsForSchema(ProviderSpec{
-		Args: []string{"-m", "opencode/deepseek-v4-flash-free"},
-	}, opencode.OptionsSchema)
-	if len(legacy.Args) != 0 {
-		t.Fatalf("normalized legacy args = %v, want empty", legacy.Args)
-	}
-	if legacy.OptionDefaults["model"] != "opencode/deepseek-v4-flash-free" {
-		t.Fatalf("inferred model = %q, want opencode/deepseek-v4-flash-free", legacy.OptionDefaults["model"])
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !schemaHasChoice(opencode.OptionsSchema, "model", tt.model) {
+				t.Fatalf("opencode OptionsSchema missing model choice %q", tt.model)
+			}
+			args, metadata, err := ResolveOptions(opencode.OptionsSchema, map[string]string{
+				"model": tt.model,
+			}, nil)
+			if err != nil {
+				t.Fatalf("ResolveOptions(opencode model %q): %v", tt.model, err)
+			}
+			if !reflect.DeepEqual(args, tt.args) {
+				t.Fatalf("model args = %v, want %v", args, tt.args)
+			}
+			if metadata["opt_model"] != tt.model {
+				t.Fatalf("metadata[opt_model] = %q, want %q", metadata["opt_model"], tt.model)
+			}
+
+			if tt.model == "" {
+				return
+			}
+			legacy := normalizeProviderLayerArgsForSchema(ProviderSpec{
+				Args: []string{"-m", tt.model},
+			}, opencode.OptionsSchema)
+			if len(legacy.Args) != 0 {
+				t.Fatalf("normalized legacy args = %v, want empty", legacy.Args)
+			}
+			if legacy.OptionDefaults["model"] != tt.model {
+				t.Fatalf("inferred model = %q, want %q", legacy.OptionDefaults["model"], tt.model)
+			}
+		})
 	}
 }
 
