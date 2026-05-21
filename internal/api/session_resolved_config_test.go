@@ -1,6 +1,7 @@
 package api
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -34,6 +35,7 @@ func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
 	}
 
 	cfg, err := resolvedSessionConfigForProvider(
+		"/tmp/test-city",
 		"worker",
 		"worker-named",
 		"myrig/worker",
@@ -92,6 +94,7 @@ func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
 
 func TestResolvedSessionConfigForProviderRejectsNilProvider(t *testing.T) {
 	if _, err := resolvedSessionConfigForProvider(
+		"/tmp/test-city",
 		"worker",
 		"",
 		"myrig/worker",
@@ -107,8 +110,127 @@ func TestResolvedSessionConfigForProviderRejectsNilProvider(t *testing.T) {
 	}
 }
 
+// TestResolvedSessionConfigForProviderSeedsCityRuntimeEnv is a
+// regression test for upstream gastownhall/gascity#101 (re-opened):
+// session-create paths through the API resolver dropped the
+// city-anchored env vars (GC_CITY, GC_CITY_PATH, GC_CITY_RUNTIME_DIR)
+// because they only forwarded resolved.Env (provider-only). The
+// spawned shell then could not locate the city, so bd, mailboxes, and
+// related tooling failed. Non-conflicting provider env vars are
+// preserved; this test documents the merge contract.
+func TestResolvedSessionConfigForProviderSeedsCityRuntimeEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg, err := resolvedSessionConfigForProvider(
+		cityPath,
+		"worker",
+		"",
+		"myrig/worker",
+		"Worker",
+		"",
+		nil,
+		&config.ResolvedProvider{
+			Name:    "stub",
+			Command: "/bin/echo",
+			Env:     map[string]string{"PROVIDER_TOKEN": "ok"},
+		},
+		"",
+		cityPath,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("resolvedSessionConfigForProvider: %v", err)
+	}
+	if got := cfg.Runtime.SessionEnv["GC_CITY"]; got != cityPath {
+		t.Errorf("SessionEnv[GC_CITY] = %q, want %q", got, cityPath)
+	}
+	if got := cfg.Runtime.SessionEnv["GC_CITY_PATH"]; got != cityPath {
+		t.Errorf("SessionEnv[GC_CITY_PATH] = %q, want %q", got, cityPath)
+	}
+	wantRuntimeDir := filepath.Join(cityPath, ".gc", "runtime")
+	if got := cfg.Runtime.SessionEnv["GC_CITY_RUNTIME_DIR"]; got != wantRuntimeDir {
+		t.Errorf("SessionEnv[GC_CITY_RUNTIME_DIR] = %q, want %q", got, wantRuntimeDir)
+	}
+	if got := cfg.Runtime.SessionEnv["PROVIDER_TOKEN"]; got != "ok" {
+		t.Errorf("SessionEnv[PROVIDER_TOKEN] = %q, want %q (provider env preserved)", got, "ok")
+	}
+	// Identity-only contract (per Copilot review): GC_CONTROL_DISPATCHER_TRACE_DEFAULT
+	// must NOT be seeded by the city-anchor reseed because it has to stay
+	// per-dispatcher-qualified. template_resolve.go owns the qualified
+	// override on the CLI create path; the API resume/create path must
+	// not clobber it with the city-uniform default.
+	if got, present := cfg.Runtime.SessionEnv["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]; present {
+		t.Errorf("SessionEnv[GC_CONTROL_DISPATCHER_TRACE_DEFAULT] = %q present, want absent (identity-only)", got)
+	}
+}
+
+// TestResolvedSessionConfigForProviderCityAnchorsBeatConflictingProviderEnv
+// locks in the precedence contract: when the resolved provider env
+// carries its own GC_CITY (e.g. left over from a stale config), the
+// city-anchored reseed must win. Future refactors that reverse the
+// merge order would re-introduce upstream #101 from the other side;
+// this test fails fast on that regression.
+func TestResolvedSessionConfigForProviderCityAnchorsBeatConflictingProviderEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg, err := resolvedSessionConfigForProvider(
+		cityPath,
+		"worker",
+		"",
+		"myrig/worker",
+		"Worker",
+		"",
+		nil,
+		&config.ResolvedProvider{
+			Name:    "stub",
+			Command: "/bin/echo",
+			Env: map[string]string{
+				"GC_CITY":      "/wrong/city",
+				"GC_CITY_PATH": "/wrong/city",
+			},
+		},
+		"",
+		cityPath,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("resolvedSessionConfigForProvider: %v", err)
+	}
+	if got := cfg.Runtime.SessionEnv["GC_CITY"]; got != cityPath {
+		t.Errorf("SessionEnv[GC_CITY] = %q, want %q (city anchor must win over provider env)", got, cityPath)
+	}
+	if got := cfg.Runtime.SessionEnv["GC_CITY_PATH"]; got != cityPath {
+		t.Errorf("SessionEnv[GC_CITY_PATH] = %q, want %q (city anchor must win over provider env)", got, cityPath)
+	}
+}
+
+func TestCityAnchoredSessionEnvSkipsCityAnchorsWhenCityPathEmpty(t *testing.T) {
+	providerEnv := map[string]string{
+		"GC_CITY":        "/provider/city",
+		"PROVIDER_TOKEN": "ok",
+	}
+
+	got := cityAnchoredSessionEnv(" \t\n ", providerEnv)
+	if got["GC_CITY"] != "/provider/city" {
+		t.Fatalf("GC_CITY = %q, want provider value", got["GC_CITY"])
+	}
+	if got["PROVIDER_TOKEN"] != "ok" {
+		t.Fatalf("PROVIDER_TOKEN = %q, want ok", got["PROVIDER_TOKEN"])
+	}
+	if _, ok := got["GC_CITY_PATH"]; ok {
+		t.Fatalf("GC_CITY_PATH = %q, want absent when city path is empty", got["GC_CITY_PATH"])
+	}
+	if _, ok := got["GC_CITY_RUNTIME_DIR"]; ok {
+		t.Fatalf("GC_CITY_RUNTIME_DIR = %q, want absent when city path is empty", got["GC_CITY_RUNTIME_DIR"])
+	}
+
+	providerEnv["PROVIDER_TOKEN"] = "mutated"
+	if got["PROVIDER_TOKEN"] != "ok" {
+		t.Fatalf("result env aliases provider env: PROVIDER_TOKEN = %q, want ok", got["PROVIDER_TOKEN"])
+	}
+}
+
 func TestResolvedSessionConfigForProviderSkipsStoredMCPMetadataForTmuxTransport(t *testing.T) {
 	cfg, err := resolvedSessionConfigForProvider(
+		"/tmp/test-city",
 		"worker",
 		"",
 		"myrig/worker",

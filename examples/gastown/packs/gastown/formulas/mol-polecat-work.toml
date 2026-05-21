@@ -23,6 +23,13 @@ only the refinery verifies merges and closes beads.
 `{{base_branch}}` may come from the work bead's own `metadata.target` or
 be inherited from a parent convoy with `metadata.target` set.
 
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| binding_prefix | import binding | Agent identity prefix for bound Gas Town imports. |
+| affected_tests_command | rig `formula_vars` | Shell-safe command that reads `git diff --name-only origin/{{base_branch}}...HEAD` and runs the matching test subset. Empty = run full `test_command`. |
+
 **Rejection-aware.** If the work bead has `metadata.branch` and
 `metadata.rejection_reason`, a previous attempt was rejected by the
 refinery. Resume the existing branch — don't redo all the work.
@@ -37,11 +44,15 @@ refinery. Resume the existing branch — don't redo all the work.
 | Unsure what to do | Mail Witness, don't guess |"""
 formula = "mol-polecat-work"
 extends = ["mol-polecat-base"]
-version = 9
+version = 10
 
 [vars]
 [vars.binding_prefix]
 description = "Import binding prefix for gastown agent identities, including trailing dot when bound."
+default = ""
+
+[vars.affected_tests_command]
+description = "Shell-safe affected-tests command. Must read `git diff --name-only origin/{{base_branch}}...HEAD` and run the matching test subset. From rig `formula_vars` or empty to run full test_command."
 default = ""
 
 [[steps]]
@@ -177,6 +188,80 @@ Empty setup_command → skip.
 **Exit criteria:** In your worktree, on a clean feature branch, rebased
 on latest {{base_branch}}, deps installed, worktree and branch recorded
 on the bead."""
+
+[[steps]]
+id = "self-review"
+title = "Self-review and run tests (affected-aware)"
+needs = ["implement"]
+description = """
+Review your changes and verify they work. Override of mol-polecat-base
+`self-review` to support affected-test detection — when the rig configures
+`affected_tests_command`, only the tests touched by your diff run, instead
+of the full suite. Saves polecat time and reduces CI clog from PRs whose
+locally-runnable failures should have been caught before push.
+
+**Config: setup_command = {{setup_command}}**
+**Config: typecheck_command = {{typecheck_command}}**
+**Config: lint_command = {{lint_command}}**
+**Config: build_command = {{build_command}}**
+**Config: test_command = {{test_command}}**
+**Config: affected_tests_command = {{affected_tests_command}}**
+
+**1. Review the diff:**
+```bash
+git diff origin/{{base_branch}}...HEAD
+git log --oneline origin/{{base_branch}}..HEAD
+git diff --stat origin/{{base_branch}}...HEAD
+```
+
+Check for: bugs, security issues, style violations, missing error handling,
+debug cruft, unintended file changes. Fix anything you find.
+
+**2. Run quality checks (skip empty commands):**
+```bash
+{{setup_command}}
+{{typecheck_command}}
+{{lint_command}}
+{{build_command}}
+```
+
+**3. Run tests — affected subset if rig provides one, full suite otherwise:**
+```bash
+if [ -n "{{affected_tests_command}}" ]; then
+    # Rig has an affected-tests detector. Run only the tests our diff
+    # touches — same logic the rig's CI uses to dispatch test workflows.
+    # The command must read `git diff --name-only origin/{{base_branch}}...HEAD`
+    # internally and execute the relevant test subset.
+    {{affected_tests_command}}
+else
+    # No affected detector — run the full suite (legacy behavior).
+    {{test_command}}
+fi
+```
+
+**ALL CHECKS MUST PASS.** If your change caused the failure, fix it.
+If pre-existing, file a bead.
+
+Refusing to push on local failure is a feature: the rig's CI will run the
+same affected subset (and more), and a PR that already fails locally will
+fail in CI too — wasting reviewer attention and CI minutes. Fix before
+submitting.
+
+**4. Ensure everything is committed:**
+```bash
+git status                  # Must be clean
+git log origin/{{base_branch}}..HEAD --oneline  # Must show your commits
+```
+
+If uncommitted changes exist:
+```bash
+git add -A && git commit -m "<type>: <description> ({{issue}})"
+```
+
+NEVER discard implementation changes with `git checkout -- .`
+
+**Exit criteria:** All checks pass (affected subset OR full suite), all
+changes committed, working tree clean."""
 
 [[steps]]
 id = "submit-and-exit"

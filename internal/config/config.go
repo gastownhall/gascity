@@ -174,8 +174,10 @@ type City struct {
 	// binding name; the value specifies the source and optional version,
 	// export, and transitive controls. Processed during ExpandCityPacks.
 	Imports map[string]Import `toml:"imports,omitempty"`
-	// Agents lists all configured agents in this city.
-	Agents []Agent `toml:"agent"`
+	// Agents lists all configured agents in this city. Optional: PackV2
+	// cities compose agents through [imports.*] and ship without any
+	// [[agent]] block.
+	Agents []Agent `toml:"agent,omitempty"`
 	// NamedSessions lists canonical alias-backed sessions built from
 	// reusable agent templates.
 	NamedSessions []NamedSession `toml:"named_session,omitempty"`
@@ -538,6 +540,9 @@ type AgentOverride struct {
 	// WorkDir overrides the agent's working directory without changing
 	// its qualified identity or rig association.
 	WorkDir *string `toml:"work_dir,omitempty"`
+	// TmuxAlias overrides the tmux session name template
+	// (see Agent.TmuxAlias for semantics).
+	TmuxAlias *string `toml:"tmux_alias,omitempty"`
 	// Scope overrides the agent's scope ("city" or "rig").
 	Scope *string `toml:"scope,omitempty"`
 	// Suspended sets the agent's suspended state.
@@ -551,7 +556,8 @@ type AgentOverride struct {
 	// PreStart overrides the agent's pre_start commands.
 	PreStart []string `toml:"pre_start,omitempty"`
 	// PromptTemplate overrides the prompt template path.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the declaring config file's directory
+	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	PromptTemplate *string `toml:"prompt_template,omitempty"`
 	// Session overrides the session transport ("acp").
 	Session *string `toml:"session,omitempty"`
@@ -599,7 +605,8 @@ type AgentOverride struct {
 	SessionLive []string `toml:"session_live,omitempty"`
 	// OverlayDir overrides the agent's overlay_dir path. Copies contents
 	// additively into the agent's working directory at startup.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the declaring config file's directory
+	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	OverlayDir *string `toml:"overlay_dir,omitempty"`
 	// DefaultSlingFormula overrides the default sling formula.
 	DefaultSlingFormula *string `toml:"default_sling_formula,omitempty"`
@@ -1127,6 +1134,11 @@ type Workspace struct {
 	// Run gc doctor to inspect; gc doctor --fix handles the safe mechanical
 	// rewrites available in this release wave.
 	DefaultRigIncludes []string `toml:"default_rig_includes,omitempty"`
+	// Env defines workspace-wide environment variables applied to every
+	// managed session. Lowest config-precedence — overridden by provider,
+	// agent, and patch env. Use for cross-cutting variables like
+	// GC_TARGET_BRANCH that every agent should inherit.
+	Env map[string]string `toml:"env,omitempty"`
 }
 
 // LegacyIncludes returns the compatibility-only city.toml include list.
@@ -1813,6 +1825,17 @@ type DaemonConfig struct {
 	// false as a global kill switch (e.g., for production cities where a
 	// rebuild on the host should not auto-restart the supervisor).
 	AutoRestartOnDrift *bool `toml:"auto_restart_on_drift,omitempty" jsonschema:"default=true"`
+	// StartReadyTimeout is how long `gc start` and `gc register` wait for
+	// the supervisor to report the city as Running. Cities with many
+	// registered or adopted sessions take longer to start because the
+	// per-tick wake budget (max_wakes_per_tick) throttles startup: wall
+	// time to wake N sessions is roughly ceil(N / max_wakes_per_tick) *
+	// patrol_interval. At the defaults (5 wakes / 30s), ~40 sessions
+	// need ~4 minutes. Duration string (e.g., "5m", "10m"). Defaults to
+	// DefaultStartReadyTimeout (5m). When set, this value replaces the
+	// default start/register budget; [session].startup_timeout may still
+	// extend the effective wait for a slow single session.
+	StartReadyTimeout string `toml:"start_ready_timeout,omitempty" jsonschema:"default=5m"`
 }
 
 // AutoRestartOnDriftEnabled reports whether the supervisor should be
@@ -1989,6 +2012,27 @@ func (d *DaemonConfig) DriftDrainTimeoutDuration() time.Duration {
 	return dur
 }
 
+// DefaultStartReadyTimeout is the default wall-clock budget `gc start` and
+// `gc register` allow for the supervisor to report a city as Running.
+// Sized to cover cities with up to ~40 sessions at the default per-tick
+// wake budget; operators with larger cities override via
+// [daemon].start_ready_timeout.
+const DefaultStartReadyTimeout = 5 * time.Minute
+
+// StartReadyTimeoutDuration returns the start-ready wait budget as a
+// time.Duration. Defaults to DefaultStartReadyTimeout when empty or
+// unparseable.
+func (d *DaemonConfig) StartReadyTimeoutDuration() time.Duration {
+	if d.StartReadyTimeout == "" {
+		return DefaultStartReadyTimeout
+	}
+	dur, err := time.ParseDuration(d.StartReadyTimeout)
+	if err != nil {
+		return DefaultStartReadyTimeout
+	}
+	return dur
+}
+
 // WispGCIntervalDuration returns the wisp GC interval as a time.Duration.
 // Returns 0 if empty or unparseable.
 func (d *DaemonConfig) WispGCIntervalDuration() time.Duration {
@@ -2130,6 +2174,21 @@ type Agent struct {
 	// agent's qualified identity. Relative paths resolve against city root
 	// and may use the same template placeholders as session_setup.
 	WorkDir string `toml:"work_dir,omitempty"`
+	// TmuxAlias overrides the tmux session_name for pool and factory-created
+	// manual sessions of this agent. When unset, sessions fall back to the
+	// universal derivation ("s-<beadID>" for ad-hoc sessions,
+	// "<basename>-<beadID>" for pool sessions). When set, it is expanded as a
+	// Go text/template using the same PathContext fields as work_dir /
+	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName),
+	// sanitized for tmux, and validated as an explicit session name. For pool
+	// sessions, a live-name collision appends the bead ID as a deterministic
+	// suffix. For manual `gc session new` sessions, tmux_alias becomes the
+	// explicit session_name and takes precedence over --alias, which remains the
+	// command/mail alias; duplicate explicit names fail closed. Configured named
+	// sessions keep their named-session runtime name instead of using
+	// tmux_alias. When no --alias is supplied, work_dir templates that use
+	// {{.Agent}} see the resolved tmux_alias as the concrete session identity.
+	TmuxAlias string `toml:"tmux_alias,omitempty"`
 	// Scope defines where this agent is instantiated: "city" (one per city)
 	// or "rig" (one per rig, the default). Only meaningful for pack-defined
 	// agents; inline agents in city.toml use Dir directly.
@@ -2529,6 +2588,28 @@ func (a *Agent) AttachEnabled() bool {
 	return a.Attach == nil || *a.Attach
 }
 
+// bdReadyPoolDemandShell returns the bd ready predicate for unassigned,
+// non-epic pool demand routed to target. This is the one-source-of-truth for the
+// "is there work on this routed queue?" question that both the worker (via
+// EffectiveWorkQuery Tier 3) and the reconciler (via EffectivePoolDemandQuery,
+// count-form) ask. Diverging the two re-introduces the protocol-mismatch class;
+// see the "scale_check ↔ work_query correspondence" note in
+// engdocs/architecture/dispatch.md.
+//
+// Callers append their own bd flags (--limit=1 for first-row work_query;
+// piped to jq 'length' for the count-form) and shell handling.
+func bdReadyPoolDemandShell(target string) string {
+	return `bd ready --metadata-field gc.routed_to=` + target + ` --unassigned --exclude-type=epic --json`
+}
+
+func (a *Agent) poolDemandTarget() string {
+	target := a.QualifiedName()
+	if a.PoolName != "" {
+		target = a.PoolName
+	}
+	return target
+}
+
 // EffectiveWorkQuery returns the work query command for this agent.
 // If WorkQuery is set, returns it as-is. Otherwise returns the default
 // three-tier query with multi-identifier assignee resolution.
@@ -2553,14 +2634,15 @@ func (a *Agent) AttachEnabled() bool {
 // When the reconciler runs the query for demand detection (no session
 // context), all identity vars are empty → assignee tiers skip → only
 // the routed_to tier fires to detect new demand.
+//
+// Tier 3's predicate is shared with EffectivePoolDemandQuery via
+// bdReadyPoolDemandShell so reconciler spawn decisions and worker claim
+// decisions stay symmetric.
 func (a *Agent) EffectiveWorkQuery() string {
 	if a.WorkQuery != "" {
 		return a.WorkQuery
 	}
-	target := a.QualifiedName()
-	if a.PoolName != "" {
-		target = a.PoolName
-	}
+	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
 		return `sh -c '` +
@@ -2582,8 +2664,7 @@ func (a *Agent) EffectiveWorkQuery() string {
 			`ephemeral|"") ;; ` +
 			`*) exit 0 ;; ` +
 			`esac; ` +
-			`r=$(bd ready --metadata-field gc.routed_to=` + target +
-			` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+			`r=$(` + bdReadyPoolDemandShell(target) + ` --limit=1 2>/dev/null); ` +
 			`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 			`printf "[]"'`
 	}
@@ -2617,11 +2698,9 @@ func (a *Agent) EffectiveWorkQuery() string {
 		`ephemeral|"") ;; ` +
 		`*) exit 0 ;; ` +
 		`esac; ` +
-		`r=$(bd ready --metadata-field gc.routed_to=` + target +
-		` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null); ` +
+		`r=$(` + bdReadyPoolDemandShell(target) + ` --limit=1 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`bd ready --metadata-field gc.routed_to=` + legacyTarget +
-		` --unassigned --exclude-type=epic --json --limit=1 2>/dev/null'`
+		bdReadyPoolDemandShell(legacyTarget) + ` --limit=1 2>/dev/null'`
 }
 
 func legacyWorkflowControlQualifiedName(target string) string {
@@ -2682,18 +2761,38 @@ func (a *Agent) DrainTimeoutDuration() time.Duration {
 	return dur
 }
 
-// EffectiveScaleCheck returns the scale check command for this agent.
-// If ScaleCheck is set, returns it. Otherwise returns a default that
-// counts new unassigned work routed to this agent's template via ready().
-// Assigned in-progress work is resumed from session beads, so it must not
-// create additional generic pool demand here.
-func (a *Agent) EffectiveScaleCheck() string {
+// EffectivePoolDemandQuery returns the count-form pool-demand query the
+// reconciler runs to detect new unassigned routed work. It is the
+// reconciler-side counterpart to EffectiveWorkQuery's Tier 3 (the worker
+// claim path): both derive their predicate from bdReadyPoolDemandShell so
+// any future change to the pool-demand shape flows to both paths
+// simultaneously.
+//
+// If ScaleCheck is set (user override), it takes precedence and is
+// returned as-is. Otherwise the default count-form is returned.
+//
+// Assigned in-progress work is resumed from session beads, so it must
+// not create additional generic pool demand here.
+//
+// See engdocs/architecture/dispatch.md "scale_check ↔ work_query
+// correspondence" and the protocol-mismatch class regression addressed
+// by PR #1516.
+func (a *Agent) EffectivePoolDemandQuery() string {
 	if a.ScaleCheck != "" {
 		return a.ScaleCheck
 	}
-	template := a.QualifiedName()
-	return `ready_json=$(bd ready --metadata-field gc.routed_to=` + template +
-		` --unassigned --limit 0 --json) && printf '%s\n' "$ready_json" | jq 'length'`
+	target := a.poolDemandTarget()
+	return `ready_json=$(` + bdReadyPoolDemandShell(target) +
+		` --limit 0) && printf '%s\n' "$ready_json" | jq 'length'`
+}
+
+// EffectiveScaleCheck returns the scale check command for this agent.
+// Pass-through to EffectivePoolDemandQuery for back-compat with code and
+// configs that name the predicate "scale_check"; new call sites should
+// prefer EffectivePoolDemandQuery to make the dependency on the
+// work_query predicate explicit.
+func (a *Agent) EffectiveScaleCheck() string {
+	return a.EffectivePoolDemandQuery()
 }
 
 // EffectiveMaxActiveSessions returns the agent's max active sessions.

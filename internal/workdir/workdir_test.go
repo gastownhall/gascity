@@ -130,6 +130,16 @@ func TestSessionQualifiedNameKeepsSingletonTemplateIdentity(t *testing.T) {
 	}
 }
 
+func TestSessionQualifiedNameUsesSingletonExplicitNameWhenAliasEmpty(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
+	agent := config.Agent{Name: "witness", Dir: "demo", MaxActiveSessions: intPtr(1)}
+
+	if got := SessionQualifiedName(cityPath, agent, rigs, "", "crew--gastown"); got != "demo/crew--gastown" {
+		t.Fatalf("SessionQualifiedName() = %q, want singleton tmux_alias explicit name in work_dir identity", got)
+	}
+}
+
 func TestSessionQualifiedNamePreservesRigQualifiedBindingIdentity(t *testing.T) {
 	cityPath := t.TempDir()
 	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
@@ -396,5 +406,58 @@ func TestValidateAncestorWorktreesNotStale_GitdirTargetNotDirectory(t *testing.T
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q missing reference %q", err.Error(), want)
 		}
+	}
+}
+
+func TestResolveTmuxAlias_EmptyWhenUnset(t *testing.T) {
+	cityPath := t.TempDir()
+	got, err := ResolveTmuxAlias(cityPath, "gastown", config.Agent{Name: "worker", Dir: "demo"}, nil)
+	if err != nil {
+		t.Fatalf("ResolveTmuxAlias: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("ResolveTmuxAlias() = %q, want empty (no template configured)", got)
+	}
+}
+
+func TestResolveTmuxAlias_ExpandsRigTemplate(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
+	got, err := ResolveTmuxAlias(cityPath, "gastown", config.Agent{
+		Name:      "crew-demo",
+		Dir:       "demo",
+		TmuxAlias: "crew--{{.Rig}}",
+	}, rigs)
+	if err != nil {
+		t.Fatalf("ResolveTmuxAlias: %v", err)
+	}
+	if got != "crew--demo" {
+		t.Fatalf("ResolveTmuxAlias() = %q, want %q", got, "crew--demo")
+	}
+}
+
+func TestResolveTmuxAlias_SanitizesQualifiedAgentName(t *testing.T) {
+	cityPath := t.TempDir()
+	got, err := ResolveTmuxAlias(cityPath, "gastown", config.Agent{
+		Name:        "mayor",
+		BindingName: "gastown",
+		TmuxAlias:   "{{.Agent}}",
+	}, nil)
+	if err != nil {
+		t.Fatalf("ResolveTmuxAlias: %v", err)
+	}
+	// "gastown.mayor" must be sanitized to "gastown__mayor" for tmux.
+	if got != "gastown__mayor" {
+		t.Fatalf("ResolveTmuxAlias() = %q, want %q", got, "gastown__mayor")
+	}
+}
+
+func TestResolveTmuxAlias_ReturnsErrorOnBadTemplate(t *testing.T) {
+	_, err := ResolveTmuxAlias("", "", config.Agent{
+		Name:      "worker",
+		TmuxAlias: "{{.NotAField}}",
+	}, nil)
+	if err == nil {
+		t.Fatal("ResolveTmuxAlias: want error on unknown template field, got nil")
 	}
 }

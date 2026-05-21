@@ -247,6 +247,21 @@ func BeginDrainPatch(now time.Time, reason string) MetadataPatch {
 	}
 }
 
+// DrainAckStopPendingReason marks a drain-acked runtime whose provider stop is
+// running asynchronously and waiting for controller finalization.
+const DrainAckStopPendingReason = "drain-ack-stop-pending"
+
+// DrainAckStopPendingPatch records that a drain-acked session has moved into
+// durable stop-pending state. The provider stop itself is asynchronous; the
+// controller finalizes the bead with the normal drain completion patches after
+// observing the runtime stopped.
+func DrainAckStopPendingPatch(now time.Time) MetadataPatch {
+	patch := BeginDrainPatch(now, DrainAckStopPendingReason)
+	patch["pending_create_claim"] = ""
+	patch["pending_create_started_at"] = ""
+	return patch
+}
+
 // SleepPatch records a non-terminal sleep/drain result.
 func SleepPatch(now time.Time, reason string) MetadataPatch {
 	return MetadataPatch{
@@ -266,6 +281,7 @@ func SleepPatch(now time.Time, reason string) MetadataPatch {
 func AcknowledgeDrainPatch(freshWake bool) MetadataPatch {
 	patch := MetadataPatch{
 		"state":                     string(StateDrained),
+		"state_reason":              "",
 		"last_woke_at":              "",
 		"pending_create_claim":      "",
 		"pending_create_started_at": "",
@@ -281,6 +297,7 @@ func AcknowledgeDrainPatch(freshWake bool) MetadataPatch {
 // CompleteDrainPatch records a completed controller drain as ordinary asleep.
 func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPatch {
 	patch := SleepPatch(now, reason)
+	patch["state_reason"] = ""
 	if freshWake {
 		patch["session_key"] = ""
 		applyFreshWakeConversationReset(patch)

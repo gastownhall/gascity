@@ -24,6 +24,19 @@ import (
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 )
 
+type sweepLivenessProvider struct {
+	*runtime.Fake
+	running map[string]bool
+}
+
+func (p *sweepLivenessProvider) IsRunning(string) bool {
+	return false
+}
+
+func (p *sweepLivenessProvider) ObserveLiveness(name string, _ []string) runtime.Liveness {
+	return runtime.Liveness{Running: p.running[name]}
+}
+
 func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
@@ -68,6 +81,146 @@ func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 	}
 	if got.Status == "closed" {
 		t.Fatalf("running pool bead was closed: %+v", got)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_RunningProbeAvoidsFullObservation(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-running",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "active",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker-bd-running", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.SetAttached("worker-bd-running", true)
+	sp.SetActivity("worker-bd-running", time.Now())
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		nil,
+		sessionBeads,
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		sp,
+		false,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+	if got := sp.CountCalls("IsAttached", "worker-bd-running"); got != 0 {
+		t.Fatalf("IsAttached calls = %d, want 0; sweep only needs running state", got)
+	}
+	if got := sp.CountCalls("GetLastActivity", "worker-bd-running"); got != 0 {
+		t.Fatalf("GetLastActivity calls = %d, want 0; sweep only needs running state", got)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_UsesRuntimeLivenessObservation(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-observed",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "active",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		nil,
+		newSessionBeadSnapshot([]beads.Bead{bead}),
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		&sweepLivenessProvider{Fake: runtime.NewFake(), running: map[string]bool{"worker-bd-observed": true}},
+		false,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0 when runtime liveness reports the pool session as running", closed)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("liveness-observed running pool bead was closed: %+v", got)
+	}
+}
+
+func TestPoolSessionBeadRuntimeRunningUsesRuntimeNotFoundSentinel(t *testing.T) {
+	if _, err := poolSessionBeadRuntimeRunning(beads.Bead{}, nil); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("nil provider error = %v, want runtime.ErrSessionNotFound", err)
+	}
+	if _, err := poolSessionBeadRuntimeRunning(beads.Bead{Metadata: map[string]string{}}, runtime.NewFake()); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("missing session name error = %v, want runtime.ErrSessionNotFound", err)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_SkipsProtectedCreateBeforeRuntimeProbe(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":              "worker-bd-fresh-create",
+			"template":                  "worker",
+			"agent_name":                "worker",
+			"pool_slot":                 "1",
+			poolManagedMetadataKey:      boolMetadata(true),
+			"state":                     "creating",
+			"pending_create_started_at": pendingCreateStartedAtNow(time.Now().UTC()),
+			"continuation_epoch":        "1",
+			"generation":                "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+	sp := runtime.NewFake()
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		nil,
+		sessionBeads,
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		sp,
+		false,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+	if got := sp.CountCalls("IsRunning", "worker-bd-fresh-create"); got != 0 {
+		t.Fatalf("IsRunning calls = %d, want 0; fresh pending create is protected by metadata", got)
 	}
 }
 
@@ -2022,6 +2175,59 @@ func TestSweepUndesiredPoolSessionBeads_ClosesStoppedSessions(t *testing.T) {
 	}
 	if got.Status != "closed" {
 		t.Fatalf("stopped pool bead status = %q, want closed", got.Status)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_ClosesMissingOrStaleSessionName(t *testing.T) {
+	tests := []struct {
+		name        string
+		sessionName string
+		liveName    string
+	}{
+		{name: "missing", sessionName: "", liveName: ""},
+		{name: "stale", sessionName: "worker-bd-stale", liveName: "worker-bd-current"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			bead, err := store.Create(beads.Bead{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel, "agent:worker"},
+				Metadata: map[string]string{
+					"session_name":         tt.sessionName,
+					"template":             "worker",
+					"agent_name":           "worker",
+					"pool_slot":            "1",
+					poolManagedMetadataKey: boolMetadata(true),
+					"state":                "drained",
+					"continuation_epoch":   "1",
+					"generation":           "1",
+				},
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			sp := runtime.NewFake()
+			if tt.liveName != "" {
+				if err := sp.Start(context.Background(), tt.liveName, runtime.Config{}); err != nil {
+					t.Fatalf("Start(%s): %v", tt.liveName, err)
+				}
+			}
+
+			closed := sweepUndesiredPoolSessionBeads(
+				store,
+				nil,
+				newSessionBeadSnapshot([]beads.Bead{bead}),
+				nil,
+				&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+				sp,
+				false,
+			)
+			if closed != 1 {
+				t.Fatalf("closed = %d, want 1 for unrecoverable pool session name", closed)
+			}
+		})
 	}
 }
 

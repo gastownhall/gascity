@@ -1108,6 +1108,26 @@ func TestLoadCityConfigRevalidatesRequiredBuiltinPackContentsAfterReadyCacheSucc
 	}
 }
 
+func TestMaterializeBuiltinPacksIncludesWorkerFilesystemSearchGuidance(t *testing.T) {
+	dir := t.TempDir()
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	for _, name := range []string{"pool-worker.md", "graph-worker.md"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(dir, citylayout.SystemPacksRoot, "core", "assets", "prompts", name)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("ReadFile(%s): %v", path, err)
+			}
+			if !strings.Contains(string(data), formulaFilesystemSearchGuidance) {
+				t.Fatalf("materialized %s missing filesystem search guidance", name)
+			}
+		})
+	}
+}
+
 func writeBuiltinPackLoadTestCity(dir string) error {
 	return os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o644)
 }

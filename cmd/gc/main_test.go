@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/rogpeppe/go-internal/testscript"
 )
 
@@ -840,6 +841,62 @@ func TestResolveCityFlag(t *testing.T) {
 			t.Errorf("resolveCity() = %q, want %q", got, cityDir)
 		}
 	})
+}
+
+// TestResolveCityRigSiblingWithLegacyGCDir covers the case where GC_DIR
+// points at a registered rig directory that happens to have a stale ".gc/"
+// runtime root left over from earlier supervisor activity. Without the rig
+// registry check, findCity's legacy ".gc/" fallback would return the rig
+// dir itself as the "city" — the subsequent loadCityConfig then fails with
+// `open .../city.toml: no such file or directory`, draining the agent
+// session on first wake. The fix consults the registered rig binding for
+// GC_DIR before falling back to walkup so the rig sibling resolves to its
+// city instead of a missing city.toml.
+func TestResolveCityRigSiblingWithLegacyGCDir(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+
+	root := shortSocketTempDir(t, "gc-rig-sibling-")
+	cityDir := filepath.Join(root, "samtown")
+	rigDir := filepath.Join(root, "drops-of-jupyter")
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"),
+		[]byte("[workspace]\nname = \"samtown\"\n\n[[rigs]]\nname = \"drops-of-jupyter\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityDir, "samtown"); err != nil {
+		t.Fatalf("register city: %v", err)
+	}
+	if err := config.PersistRigSiteBindings(fsys.OSFS{}, cityDir, []config.Rig{
+		{Name: "drops-of-jupyter", Path: rigDir},
+	}); err != nil {
+		t.Fatalf("persist rig binding: %v", err)
+	}
+
+	// Save & restore BOTH cityFlag and rigFlag. resolveContext prioritizes
+	// --rig at step 3, so a leftover rigFlag from another parallel-safe
+	// test would short-circuit the GC_DIR-based path under exercise here
+	// and silently invalidate the assertion.
+	oldCity, oldRig := cityFlag, rigFlag
+	cityFlag = ""
+	rigFlag = ""
+	t.Cleanup(func() { cityFlag, rigFlag = oldCity, oldRig })
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_DIR", rigDir)
+
+	got, err := resolveCity()
+	if err != nil {
+		t.Fatalf("resolveCity() error: %v", err)
+	}
+	if canonicalTestPath(got) != canonicalTestPath(cityDir) {
+		t.Errorf("resolveCity() = %q, want %q (registered rig binding should win over rig's stale .gc/ legacy fallback)", got, cityDir)
+	}
 }
 
 // --- doRigAdd (with fsys.Fake) ---

@@ -24,6 +24,7 @@ import (
 func closeSessionBeadIfUnassigned(
 	store beads.Store,
 	rigStores map[string]beads.Store,
+	cfg *config.City,
 	session beads.Bead,
 	reason string,
 	now time.Time,
@@ -32,7 +33,7 @@ func closeSessionBeadIfUnassigned(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	hasAssignedWork, err := sessionHasOpenAssignedWork(store, rigStores, session)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, session, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", session.ID, err) //nolint:errcheck
 		return false

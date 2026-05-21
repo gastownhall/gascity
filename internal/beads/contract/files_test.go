@@ -373,6 +373,111 @@ func TestEnsureCanonicalConfigIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestEnsureCanonicalConfigRepairsGluedSyncRemoteLine guards against the
+// ga-um7 reproducer: `bd init` against a git repo with a remote can leave
+// `.beads/config.yaml` with the `sync.remote:` line lacking a trailing
+// newline, so the next emitted key gets glued onto its value. The next
+// EnsureCanonicalConfig call must restructure the file into valid YAML
+// rather than silently passing the corrupt line through.
+func TestEnsureCanonicalConfigRepairsGluedSyncRemoteLine(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"issue_prefix: si",
+		"issue-prefix: si",
+		"dolt.auto-start: false",
+		"export.auto: false",
+		"gc.endpoint_origin: inherited_city",
+		"gc.endpoint_status: verified",
+		"",
+		`sync.remote: "git+ssh://git@example.com/foo/service-inventory.git"types.custom: molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step`,
+		"types.custom: molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "si",
+		EndpointOrigin: EndpointOriginInheritedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalConfig() should report changes when repairing glued line")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+
+	// The repaired file must parse as YAML.
+	if _, err := readConfigDoc(fs, path); err != nil {
+		t.Fatalf("repaired config must parse as YAML, got error %v\n%s", err, text)
+	}
+
+	// sync.remote line must be a standalone key/value, not glued to anything.
+	if !strings.Contains(text, `sync.remote: "git+ssh://git@example.com/foo/service-inventory.git"`+"\n") &&
+		!strings.Contains(text, "sync.remote: git+ssh://git@example.com/foo/service-inventory.git\n") {
+		t.Fatalf("sync.remote line must be standalone, got:\n%s", text)
+	}
+	if strings.Contains(text, `"types.custom`) {
+		t.Fatalf("types.custom must not be glued to a quoted value:\n%s", text)
+	}
+
+	// types.custom must appear at most once.
+	if got := countLineOccurrences(text, "types.custom: molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step"); got != 1 {
+		t.Fatalf("types.custom should appear exactly once, found %d:\n%s", got, text)
+	}
+}
+
+// TestEnsureCanonicalConfigDedupsUnmanagedKeysOnMalformedRepair ensures
+// that when fallback repairs are needed, duplicate top-level keys are
+// collapsed even when they aren't in the managed set. YAML semantics say
+// last-write-wins; the canonical writer should match.
+func TestEnsureCanonicalConfigDedupsUnmanagedKeysOnMalformedRepair(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	// Include a malformed marker so the fallback path runs.
+	input := strings.Join([]string{
+		"issue_prefix: gc",
+		"types.custom: first-value",
+		"types.custom: second-value",
+		": not yaml",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	}); err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Contains(text, "types.custom: first-value") {
+		t.Fatalf("first duplicate value should be dropped:\n%s", text)
+	}
+	if count := countLineOccurrences(text, "types.custom: second-value"); count != 1 {
+		t.Fatalf("expected exactly one types.custom line, found %d:\n%s", count, text)
+	}
+}
+
 func TestEnsureCanonicalConfigFallsBackToLineRewriteOnMalformedYAML(t *testing.T) {
 	fs := fsys.OSFS{}
 	dir := t.TempDir()

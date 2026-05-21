@@ -7,6 +7,7 @@ package gastown_test
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,15 +17,25 @@ import (
 	"text/template"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
 func exampleDir() string {
 	_, filename, _, _ := runtime.Caller(0)
 	return filepath.Dir(filename)
+}
+
+func gastownFormulaSearchPaths() []string {
+	dir := exampleDir()
+	return []string{
+		filepath.Join(dir, "packs", "gastown", "formulas"),
+		filepath.Clean(filepath.Join(dir, "..", "..", "internal", "bootstrap", "packs", "core", "formulas")),
+	}
 }
 
 func runCmd(t *testing.T, dir, name string, args ...string) string {
@@ -53,6 +64,68 @@ func assertContainsInOrder(t *testing.T, body string, wants ...string) {
 		}
 		offset += idx + len(want)
 	}
+}
+
+func assertCurrentWispBurnsGuarded(t *testing.T, name, body string) {
+	t.Helper()
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) != `gc bd mol burn "$CURRENT_WISP" --force` {
+			continue
+		}
+		prev := ""
+		for j := i - 1; j >= 0; j-- {
+			prev = strings.TrimSpace(lines[j])
+			if prev != "" {
+				break
+			}
+		}
+		if prev != `if [ -n "$CURRENT_WISP" ]; then` {
+			t.Fatalf("%s burns CURRENT_WISP without a non-empty guard near line %d", name, i+1)
+		}
+	}
+}
+
+func assertCurrentWispBurnsRequireSuccessor(t *testing.T, name, body string) {
+	t.Helper()
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) != `gc bd mol burn "$CURRENT_WISP" --force` {
+			continue
+		}
+		start := i - 16
+		if start < 0 {
+			start = 0
+		}
+		block := strings.Join(lines[start:i], "\n")
+		for _, want := range []string{
+			`jq -r '.new_epic_id // empty'`,
+			`if [ -z "$NEXT" ]; then`,
+			`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
+			`if [ -n "$CURRENT_WISP" ]; then`,
+		} {
+			if !strings.Contains(block, want) {
+				t.Fatalf("%s burns CURRENT_WISP without successor gate %q near line %d", name, want, i+1)
+			}
+		}
+	}
+}
+
+func sectionBetween(t *testing.T, body, start, end string) string {
+	t.Helper()
+	startIdx := strings.Index(body, start)
+	if startIdx == -1 {
+		t.Fatalf("missing section start %q", start)
+	}
+	section := body[startIdx:]
+	if end == "" {
+		return section
+	}
+	endIdx := strings.Index(section[len(start):], end)
+	if endIdx == -1 {
+		t.Fatalf("missing section end %q after %q", end, start)
+	}
+	return section[:len(start)+endIdx]
 }
 
 func renderGastownPromptForPack(t *testing.T, rel, agentName, templateName, rigName, bindingName, bindingPrefix string) string {
@@ -412,6 +485,59 @@ func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
 	}
 }
 
+func TestPolecatFormulaSelfReviewRendersAffectedTestModes(t *testing.T) {
+	fallback := cookPolecatSelfReviewDescription(t, map[string]string{
+		"issue":        "HW-42",
+		"test_command": "make test",
+	})
+	if strings.Contains(fallback, "{{affected_tests_command}}") {
+		t.Fatalf("fallback self-review retained affected_tests_command placeholder:\n%s", fallback)
+	}
+	assertContainsInOrder(t, fallback,
+		`if [ -n "" ]; then`,
+		`else`,
+		`make test`,
+	)
+
+	configured := cookPolecatSelfReviewDescription(t, map[string]string{
+		"issue":                  "HW-42",
+		"test_command":           "make test",
+		"affected_tests_command": "scripts/affected-tests.sh",
+	})
+	if strings.Contains(configured, "{{affected_tests_command}}") {
+		t.Fatalf("configured self-review retained affected_tests_command placeholder:\n%s", configured)
+	}
+	assertContainsInOrder(t, configured,
+		`if [ -n "scripts/affected-tests.sh" ]; then`,
+		`scripts/affected-tests.sh`,
+		`else`,
+		`make test`,
+	)
+}
+
+func cookPolecatSelfReviewDescription(t *testing.T, vars map[string]string) string {
+	t.Helper()
+
+	store := beads.NewMemStore()
+	result, err := molecule.Cook(context.Background(), store, "mol-polecat-work", gastownFormulaSearchPaths(), molecule.Options{
+		Title: "HW-42",
+		Vars:  vars,
+	})
+	if err != nil {
+		t.Fatalf("Cook mol-polecat-work: %v", err)
+	}
+
+	selfReviewID := result.IDMapping["mol-polecat-work.self-review"]
+	if selfReviewID == "" {
+		t.Fatalf("cooked formula missing self-review step: %#v", result.IDMapping)
+	}
+	selfReview, err := store.Get(selfReviewID)
+	if err != nil {
+		t.Fatalf("get self-review bead: %v", err)
+	}
+	return selfReview.Description
+}
+
 func TestPolecatPromptDoneSequenceSignalsRefinery(t *testing.T) {
 	dir := exampleDir()
 	path := filepath.Join(dir, "packs", "gastown", "agents", "polecat", "prompt.template.md")
@@ -451,9 +577,10 @@ func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 		`--set-metadata gc.routed_to=human`,
 		`--set-metadata blocked_reason="$reason"`,
 		`gc mail send mayor/ -s "ESCALATION: invalid existing_pr for $WORK"`,
-		`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id')`,
-		`gc bd update "$NEXT" --assignee=$GC_AGENT`,
+		`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')`,
+		`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
 		`CURRENT_WISP=${GC_BEAD_ID:-}`,
+		`if [ -n "$CURRENT_WISP" ]; then`,
 		`gc bd mol burn "$CURRENT_WISP" --force`,
 		`pr_lookup_missing()`,
 		`EXISTING_PR_ERR=$(mktemp)`,
@@ -1422,6 +1549,130 @@ func TestGastownPatrolWispCommandsPropagateRoutingNamespace(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestRefineryPatrolRestartGuidanceAssignsSuccessor(t *testing.T) {
+	dir := exampleDir()
+	promptPath := filepath.Join(dir, "packs", "gastown", "agents", "refinery", "prompt.template.md")
+	promptData, err := os.ReadFile(promptPath)
+	if err != nil {
+		t.Fatalf("reading refinery prompt: %v", err)
+	}
+	formulaPath := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	formulaData, err := os.ReadFile(formulaPath)
+	if err != nil {
+		t.Fatalf("reading refinery formula: %v", err)
+	}
+
+	promptBody := string(promptData)
+	formulaBody := string(formulaData)
+	promptRestart := sectionBetween(t, promptBody, "### 2. Request restart on heavy context", "\n---\n\n## Startup")
+	formulaRestart := sectionBetween(t, formulaBody, `id = "check-inbox"`, "[[steps]]\nid = \"find-work\"")
+
+	checks := []struct {
+		name      string
+		body      string
+		wantOrder []string
+	}{
+		{
+			name: "prompt",
+			body: promptRestart,
+			wantOrder: []string{
+				`CURRENT_WISP=${GC_BEAD_ID:-}`,
+				`if [ -z "$CURRENT_WISP" ]; then`,
+				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+				`fi`,
+				`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')`,
+				`if [ -z "$NEXT" ]; then`,
+				`echo "Could not pour next refinery wisp; not requesting restart."`,
+				`exit 1`,
+				`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
+				`echo "Could not assign next refinery wisp; not requesting restart."`,
+				`exit 1`,
+				`if [ -n "$CURRENT_WISP" ]; then`,
+				`gc bd mol burn "$CURRENT_WISP" --force`,
+				`else`,
+				`echo "Could not resolve current wisp; not requesting restart."`,
+				`exit 1`,
+				`fi`,
+				`gc runtime request-restart`,
+				`RESTART_STATUS=$?`,
+				`exit "$RESTART_STATUS"`,
+			},
+		},
+		{
+			name: "formula",
+			body: formulaRestart,
+			wantOrder: []string{
+				`CURRENT_WISP=${GC_BEAD_ID:-}`,
+				`if [ -z "$CURRENT_WISP" ]; then`,
+				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+				`fi`,
+				`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')`,
+				`if [ -z "$NEXT" ]; then`,
+				`echo "Could not pour next refinery wisp; not requesting restart."`,
+				`exit 1`,
+				`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
+				`echo "Could not assign next refinery wisp; not requesting restart."`,
+				`exit 1`,
+				`if [ -n "$CURRENT_WISP" ]; then`,
+				`gc bd mol burn "$CURRENT_WISP" --force`,
+				`else`,
+				`echo "Could not resolve current wisp; not requesting restart."`,
+				`exit 1`,
+				`fi`,
+				`gc runtime request-restart`,
+				`RESTART_STATUS=$?`,
+				`exit "$RESTART_STATUS"`,
+			},
+		},
+	}
+	for _, check := range checks {
+		assertContainsInOrder(t, check.body, check.wantOrder...)
+		for _, bad := range []string{
+			`ps -o rss= -p $$`,
+			`RSS_MB > 1500`,
+			`blocks forever`,
+			`<wisp-id>`,
+			`<this-wisp-id>`,
+		} {
+			if strings.Contains(check.body, bad) {
+				t.Errorf("%s restart guidance still contains %q", check.name, bad)
+			}
+		}
+	}
+
+	patrolLifecycle := sectionBetween(t, promptBody, "### 1. ALWAYS pour the next wisp before burning the current one", "### 2. Request restart on heavy context")
+	assertContainsInOrder(t, patrolLifecycle,
+		`CURRENT_WISP=${GC_BEAD_ID:-}`,
+		`if [ -z "$CURRENT_WISP" ]; then`,
+		`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+		`fi`,
+		`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')`,
+		`if [ -z "$NEXT" ]; then`,
+		`echo "Could not pour next refinery wisp; not burning."`,
+		`exit 1`,
+		`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
+		`echo "Could not assign next refinery wisp; not burning."`,
+		`exit 1`,
+		`if [ -n "$CURRENT_WISP" ]; then`,
+		`gc bd mol burn "$CURRENT_WISP" --force`,
+		`else`,
+		`echo "Could not resolve current wisp; not burning."`,
+		`exit 1`,
+		`fi`,
+	)
+	assertContainsInOrder(t, patrolLifecycle,
+		"The next wisp re-scans after `event_timeout` and stays assigned until branch",
+		"work exists",
+	)
+	if strings.Contains(patrolLifecycle, "returns early after a brief check") {
+		t.Fatal("refinery prompt still tells an empty successor wisp to return early")
+	}
+	assertCurrentWispBurnsGuarded(t, "refinery prompt", promptBody)
+	assertCurrentWispBurnsGuarded(t, "refinery formula", formulaBody)
+	assertCurrentWispBurnsRequireSuccessor(t, "refinery prompt", promptBody)
+	assertCurrentWispBurnsRequireSuccessor(t, "refinery formula", formulaBody)
 }
 
 // TestGastownPromptRoutedToHandoffIsFullyQualifiedUnderBinding renders the

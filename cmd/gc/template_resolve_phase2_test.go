@@ -102,13 +102,15 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 			wantModelOverrideArgs: []string{"--model", "kimi-k2.6"},
 		},
 		{
-			profileID:        "opencode/tmux-cli",
-			family:           "opencode",
-			wantCommand:      "opencode",
-			wantPromptMode:   "flag",
-			wantPromptFlag:   "--prompt",
-			wantReadyDelayMs: 8000,
-			wantProcessNames: []string{"opencode", "node", "bun"},
+			profileID:             "opencode/tmux-cli",
+			family:                "opencode",
+			wantCommand:           "opencode",
+			wantPromptMode:        "flag",
+			wantPromptFlag:        "--prompt",
+			wantReadyDelayMs:      8000,
+			wantProcessNames:      []string{"opencode", "node", "bun"},
+			wantModelOverride:     "opencode/deepseek-v4-flash-free",
+			wantModelOverrideArgs: []string{"--model", "opencode/deepseek-v4-flash-free"},
 		},
 	}
 

@@ -166,3 +166,116 @@ func TestSessionHasOpenAssignedWorkUsesOnlyReachableStore(t *testing.T) {
 		t.Fatal("rig-store assigned work should count for a rig-scoped session")
 	}
 }
+
+func TestSessionHasOpenAssignedWorkMatchesConfiguredNamedSessionRuntimeFallback(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:        "worker",
+			BindingName: "pack",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template:    "worker",
+			BindingName: "pack",
+			Mode:        "on_demand",
+		}},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "pack.worker")
+	store := beads.NewMemStore()
+	session := beads.Bead{
+		ID:     "session-1",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"template":                   "pack.worker",
+			"session_name":               sessionName,
+			namedSessionMetadataKey:      "true",
+			namedSessionModeMetadata:     "on_demand",
+			namedSessionIdentityMetadata: "",
+		},
+	}
+	if _, err := store.Create(beads.Bead{
+		ID:       "named-work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "pack.worker",
+	}); err != nil {
+		t.Fatalf("Create named work: %v", err)
+	}
+
+	has, err := sessionHasOpenAssignedWorkForReachableStore("", cfg, store, nil, session)
+	if err != nil {
+		t.Fatalf("sessionHasOpenAssignedWorkForReachableStore: %v", err)
+	}
+	if !has {
+		t.Fatal("configured named-session runtime-name fallback assignment should count as open assigned work")
+	}
+}
+
+func TestSessionAssignmentIdentifiersForConfigConfiguredNamedSessionFallbackIsConservative(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:        "worker",
+			BindingName: "pack",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template:    "worker",
+			BindingName: "pack",
+			Mode:        "on_demand",
+		}},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "pack.worker")
+
+	tests := []struct {
+		name    string
+		session beads.Bead
+	}{
+		{
+			name: "identity metadata already present",
+			session: beads.Bead{
+				ID: "session-with-identity",
+				Metadata: map[string]string{
+					"template":                   "pack.worker",
+					"session_name":               sessionName,
+					namedSessionMetadataKey:      "true",
+					namedSessionIdentityMetadata: "pack.other",
+				},
+			},
+		},
+		{
+			name: "template mismatch",
+			session: beads.Bead{
+				ID: "session-template-mismatch",
+				Metadata: map[string]string{
+					"template":                   "pack.other",
+					"session_name":               sessionName,
+					namedSessionMetadataKey:      "true",
+					namedSessionIdentityMetadata: "",
+				},
+			},
+		},
+		{
+			name: "runtime name mismatch",
+			session: beads.Bead{
+				ID: "session-runtime-mismatch",
+				Metadata: map[string]string{
+					"template":                   "pack.worker",
+					"session_name":               "different-session",
+					namedSessionMetadataKey:      "true",
+					namedSessionIdentityMetadata: "",
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, identifier := range sessionAssignmentIdentifiersForConfig(tt.session, cfg) {
+				if identifier == "pack.worker" {
+					t.Fatalf("identifiers include configured identity %q for conservative mismatch case: %v", identifier, sessionAssignmentIdentifiersForConfig(tt.session, cfg))
+				}
+			}
+		})
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/spf13/cobra"
 )
 
@@ -272,10 +273,7 @@ func resolveGraphInput(store beads.Store, args []string, stderr io.Writer) ([]be
 			fmt.Fprintf(stderr, "gc graph: epic %s is treated as an ordinary bead; convoy expansion is first-class\n", b.ID) //nolint:errcheck // best-effort stderr
 		}
 		if beads.IsContainerType(b.Type) {
-			children, err := store.List(beads.ListQuery{
-				ParentID: b.ID,
-				Sort:     beads.SortCreatedAsc,
-			})
+			children, err := convoycore.Members(store, b.ID, false)
 			if err != nil {
 				return nil, fmt.Errorf("expanding %s %s: %w", b.Type, b.ID, err)
 			}

@@ -95,6 +95,11 @@ type LoadOptions struct {
 	// SuppressDeprecatedOrderWarnings suppresses only legacy order-path
 	// migration warnings produced while discovering pack orders.
 	SuppressDeprecatedOrderWarnings bool
+	// AllowRootDefaultRigImports permits [defaults.rig.imports] only on the
+	// root pack.toml being loaded. Normal pack imports still reject it.
+	AllowRootDefaultRigImports bool
+	deferRigPatches            bool
+	deferredRigPatches         *[]deferredRigPatches
 }
 
 // LoadWithIncludes loads a city.toml and merges all included fragments.
@@ -199,11 +204,19 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 				}
 			}
 		}
-		defaultRigIncludes, err := defaultRigIncludesFromPackDefaults(pc.Defaults, md)
+		defaultRigImports, err := defaultRigImportsFromPackDefaults(pc.Defaults, md)
 		if err != nil {
 			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
 		}
-		if len(defaultRigIncludes) > 0 {
+		if len(defaultRigImports) > 0 {
+			root.DefaultRigImports = make(map[string]Import, len(defaultRigImports))
+			root.DefaultRigImportOrder = make([]string, 0, len(defaultRigImports))
+			defaultRigIncludes := make([]string, 0, len(defaultRigImports))
+			for _, bound := range defaultRigImports {
+				root.DefaultRigImports[bound.Binding] = bound.Import
+				root.DefaultRigImportOrder = append(root.DefaultRigImportOrder, bound.Binding)
+				defaultRigIncludes = append(defaultRigIncludes, bound.Import.Source)
+			}
 			root.Workspace.SetLegacyDefaultRigIncludes(append(defaultRigIncludes, root.Workspace.LegacyDefaultRigIncludes()...))
 		}
 		if len(pc.Defaults.Rig.Imports) > 0 {
@@ -498,36 +511,40 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 	}
 
-	// Apply patches after all fragments are merged + city packs expanded.
+	// Expand rig packs so the merged agent list (city- and rig-scope) is
+	// complete before city-level patches are applied. Per-rig patches are
+	// deferred so they still run after city-level [[patches.agent]].
+	rigFormulaDirs := make(map[string][]string)
+	var deferredRigPatches []deferredRigPatches
+	if HasPackRigs(root.Rigs) {
+		rigPackOpts := opts
+		rigPackOpts.deferRigPatches = true
+		rigPackOpts.deferredRigPatches = &deferredRigPatches
+		if err := expandPacks(root, fs, cityRoot, rigFormulaDirs, rigPackOpts); err != nil {
+			return nil, nil, fmt.Errorf("expanding packs: %w", err)
+		}
+		if len(root.LoadWarnings) > 0 {
+			prov.Warnings = appendUnique(prov.Warnings, root.LoadWarnings...)
+		}
+	}
+
+	// Apply patches after all packs (city and rig) are expanded so that
+	// [[patches.agent]] blocks in city.toml can target pack-derived
+	// rig-scope agents (e.g., dir="rig" name="gastown.refinery"), not
+	// just city-scope agents.
 	if !root.Patches.IsEmpty() {
 		if err := ApplyPatches(root, root.Patches); err != nil {
 			return nil, nil, fmt.Errorf("applying patches: %w", err)
 		}
 		root.Patches = Patches{} // clear after application
 	}
-
-	// Expand rig packs after patches (pack agents get rig overrides).
-	rigFormulaDirs := make(map[string][]string)
+	if err := applyDeferredRigPatches(root, deferredRigPatches); err != nil {
+		return nil, nil, fmt.Errorf("applying rig patches: %w", err)
+	}
 	if HasPackRigs(root.Rigs) {
-		if err := expandPacks(root, fs, cityRoot, rigFormulaDirs, opts); err != nil {
-			return nil, nil, fmt.Errorf("expanding packs: %w", err)
-		}
-		if len(root.LoadWarnings) > 0 {
-			prov.Warnings = appendUnique(prov.Warnings, root.LoadWarnings...)
-		}
-		// Track pack-expanded agents in provenance.
-		for _, r := range root.Rigs {
-			topoRefs := r.Includes
-			for _, ref := range topoRefs {
-				topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
-				topoPath := filepath.Join(topoDir, packFile)
-				for _, a := range root.Agents {
-					if a.Dir == r.Name {
-						prov.Agents[a.QualifiedName()] = topoPath
-					}
-				}
-			}
-		}
+		// Track pack-expanded agents in provenance after deferred rig patches so
+		// Dir overrides are keyed by the agent's final qualified identity.
+		trackPackExpandedAgents(prov, root.Agents)
 	}
 
 	// Apply [global] sections from packs to agents in scope.
@@ -681,26 +698,32 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	return root, prov, nil
 }
 
-// adjustPatchPaths resolves patch session_setup_script values to absolute
-// paths rooted at the declaring config directory. Patches do not retain
-// independent source provenance after merge, so runtime cannot otherwise
-// distinguish whether a relative override came from the target agent's source
-// or from the patch file itself.
+// adjustPatchPaths resolves patch path fields rooted at the declaring config
+// directory. Patches do not retain independent source provenance after merge,
+// so runtime cannot otherwise distinguish whether a relative override came
+// from the target agent's source or from the patch file itself.
 func adjustPatchPaths(patches *Patches, declDir, cityRoot string) {
 	for i := range patches.Agents {
 		p := &patches.Agents[i]
-		if p.SessionSetupScript == nil || *p.SessionSetupScript == "" {
-			continue
+		if p.SessionSetupScript != nil && *p.SessionSetupScript != "" {
+			v := resolveConfigPath(*p.SessionSetupScript, declDir, cityRoot)
+			p.SessionSetupScript = &v
 		}
-		v := resolveConfigPath(*p.SessionSetupScript, declDir, cityRoot)
-		p.SessionSetupScript = &v
+		if p.PromptTemplate != nil && *p.PromptTemplate != "" {
+			v := adjustFragmentPath(*p.PromptTemplate, declDir, cityRoot)
+			p.PromptTemplate = &v
+		}
+		if p.OverlayDir != nil && *p.OverlayDir != "" {
+			v := adjustFragmentPath(*p.OverlayDir, declDir, cityRoot)
+			p.OverlayDir = &v
+		}
 	}
 }
 
-// adjustRigOverridePaths resolves rig override session_setup_script values to
-// absolute paths rooted at the declaring config directory. Once overrides are
-// applied to pack-stamped agents, runtime only sees the target agent's
-// SourceDir, so relative override paths must be normalized during composition.
+// adjustRigOverridePaths resolves rig override path fields to stable forms
+// rooted at the declaring config directory. Once overrides are applied to
+// pack-stamped agents, runtime only sees the target agent's SourceDir, so
+// relative override paths must be normalized during composition.
 func adjustRigOverridePaths(rigs []Rig, declDir, cityRoot string) {
 	for i := range rigs {
 		adjustAgentOverridePaths(rigs[i].Overrides, declDir, cityRoot)
@@ -711,11 +734,18 @@ func adjustRigOverridePaths(rigs []Rig, declDir, cityRoot string) {
 func adjustAgentOverridePaths(overrides []AgentOverride, declDir, cityRoot string) {
 	for i := range overrides {
 		ov := &overrides[i]
-		if ov.SessionSetupScript == nil || *ov.SessionSetupScript == "" {
-			continue
+		if ov.SessionSetupScript != nil && *ov.SessionSetupScript != "" {
+			v := resolveConfigPath(*ov.SessionSetupScript, declDir, cityRoot)
+			ov.SessionSetupScript = &v
 		}
-		v := resolveConfigPath(*ov.SessionSetupScript, declDir, cityRoot)
-		ov.SessionSetupScript = &v
+		if ov.PromptTemplate != nil && *ov.PromptTemplate != "" {
+			v := adjustFragmentPath(*ov.PromptTemplate, declDir, cityRoot)
+			ov.PromptTemplate = &v
+		}
+		if ov.OverlayDir != nil && *ov.OverlayDir != "" {
+			v := adjustFragmentPath(*ov.OverlayDir, declDir, cityRoot)
+			ov.OverlayDir = &v
+		}
 	}
 }
 
@@ -1304,7 +1334,7 @@ func LoadRootPackDefaultRigImports(fs fsys.FS, cityRoot string) ([]BoundImport, 
 		}
 		return nil, fmt.Errorf("loading city pack.toml: %w", err)
 	}
-	var pc packConfig
+	var pc PackConfig
 	md, err := toml.Decode(string(packData), &pc)
 	if err != nil {
 		return nil, fmt.Errorf("parsing city pack.toml: %w", err)
@@ -1315,7 +1345,7 @@ func LoadRootPackDefaultRigImports(fs fsys.FS, cityRoot string) ([]BoundImport, 
 	return defaultRigImportsFromPackDefaults(pc.Defaults, md)
 }
 
-func defaultRigImportsFromPackDefaults(defaults packDefaults, md toml.MetaData) ([]BoundImport, error) {
+func defaultRigImportsFromPackDefaults(defaults PackDefaults, md toml.MetaData) ([]BoundImport, error) {
 	if len(defaults.Rig.Imports) == 0 {
 		return nil, nil
 	}
@@ -1330,18 +1360,6 @@ func defaultRigImportsFromPackDefaults(defaults packDefaults, md toml.MetaData) 
 		imports = append(imports, BoundImport{Binding: name, Import: imp})
 	}
 	return imports, nil
-}
-
-func defaultRigIncludesFromPackDefaults(defaults packDefaults, md toml.MetaData) ([]string, error) {
-	imports, err := defaultRigImportsFromPackDefaults(defaults, md)
-	if err != nil {
-		return nil, err
-	}
-	includes := make([]string, 0, len(imports))
-	for _, bound := range imports {
-		includes = append(includes, bound.Import.Source)
-	}
-	return includes, nil
 }
 
 func orderedDefaultRigImportNames(imports map[string]Import, md toml.MetaData) []string {
@@ -1396,6 +1414,15 @@ func (p *Provenance) recordSource(path string, data []byte) {
 func trackAgents(prov *Provenance, agents []Agent, source string) {
 	for _, a := range agents {
 		prov.Agents[a.QualifiedName()] = source
+	}
+}
+
+func trackPackExpandedAgents(prov *Provenance, agents []Agent) {
+	for _, a := range agents {
+		if a.SourceDir == "" || (a.source != sourcePack && a.source != sourceAutoImport) {
+			continue
+		}
+		prov.Agents[a.QualifiedName()] = filepath.Join(a.SourceDir, packFile)
 	}
 }
 

@@ -304,4 +304,73 @@ func TestReconcileSessionBeads_RestartRequestPreservesIntentWhenKillFails(t *tes
 	}
 }
 
+// TestReconcileSessionBeads_RestartRequestNamedAlwaysWakesSameTick guards the
+// fix for gastownhall/gascity#2345. A `mode = "always"` named session whose
+// tmux was killed out of band (for example, by `gc handoff --target`) before
+// the bead's restart_requested flag was processed must wake on the SAME
+// reconciler tick, not on the next patrol interval. Before this fix the
+// restart_requested branch unconditionally continued past the wake decision,
+// imposing a patrol_interval-sized post-handoff wake delay (and, combined
+// with watchdog-driven `gc session reset` calls during the gap, sometimes
+// multiple patrol cycles).
+func TestReconcileSessionBeads_RestartRequestNamedAlwaysWakesSameTick(t *testing.T) {
+	env := newRestartRequestTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "worker",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"restart_requested":          "true",
+		"session_key":                "original-key",
+		"started_config_hash":        "hash-before-restart",
+	})
+
+	// Runtime is NOT started — the tmux session was killed externally
+	// (e.g., gc handoff --target) before this reconciler tick. The bead's
+	// restart_requested flag was set by `gc session reset` afterwards.
+	if env.sp.IsRunning(sessionName) {
+		t.Fatal("test fixture wrong: session should not be running")
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	// Same-tick wake: the wake decision must have fired and started the
+	// runtime on this same reconcile pass. Before the #2345 fix the
+	// restart_requested branch continued past the wake loop, so the fake
+	// provider would NOT be running here.
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q did not wake on the same reconciler tick; restart_requested branch skipped the wake decision", sessionName)
+	}
+
+	got, _ := env.store.Get(session.ID)
+	// The RestartRequestPatch must still run: session_key rotates,
+	// restart_requested clears. PreWakePatch (applied by the same-tick wake)
+	// subsequently writes last_woke_at and clears continuation_reset_pending,
+	// so we assert on the post-wake observable state.
+	if got.Metadata["session_key"] == "" || got.Metadata["session_key"] == "original-key" {
+		t.Fatalf("session_key = %q, want rotated key", got.Metadata["session_key"])
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want cleared after patch applied", got.Metadata["restart_requested"])
+	}
+	if got.Metadata["last_woke_at"] == "" {
+		t.Fatal("last_woke_at = empty, want timestamp from same-tick wake")
+	}
+}
+
 func restartRequestTestIntPtr(n int) *int { return &n }

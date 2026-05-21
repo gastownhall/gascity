@@ -32,6 +32,7 @@ func withSupervisorTestHooks(t *testing.T, ensure func(stdout, stderr io.Writer)
 	oldRunning := supervisorCityRunningHook
 	oldError := supervisorCityErrorHook
 	oldWaitForStop := waitForSupervisorControllerStopHook
+	oldWaitForCity := waitForSupervisorCityHook
 	oldRegister := registerCityWithSupervisorTestHook
 	oldTimeout := supervisorCityReadyTimeout
 	oldPoll := supervisorCityPollInterval
@@ -42,6 +43,7 @@ func withSupervisorTestHooks(t *testing.T, ensure func(stdout, stderr io.Writer)
 	supervisorCityRunningHook = running
 	supervisorCityErrorHook = supervisorCityError
 	waitForSupervisorControllerStopHook = waitForStandaloneControllerStop
+	waitForSupervisorCityHook = waitForSupervisorCity
 	registerCityWithSupervisorTestHook = nil
 	supervisorCityReadyTimeout = timeout
 	supervisorCityPollInterval = poll
@@ -53,6 +55,7 @@ func withSupervisorTestHooks(t *testing.T, ensure func(stdout, stderr io.Writer)
 		supervisorCityRunningHook = oldRunning
 		supervisorCityErrorHook = oldError
 		waitForSupervisorControllerStopHook = oldWaitForStop
+		waitForSupervisorCityHook = oldWaitForCity
 		registerCityWithSupervisorTestHook = oldRegister
 		supervisorCityReadyTimeout = oldTimeout
 		supervisorCityPollInterval = oldPoll
@@ -526,6 +529,37 @@ func TestLoadStartCityConfigMaterializesBuiltinPackImportsBeforeLoad(t *testing.
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, citylayout.SystemPacksRoot, "gastown", "pack.toml")); err != nil {
 		t.Fatalf("expected gastown builtin pack to be materialized before start config load: %v", err)
+	}
+}
+
+func TestLoadStartCityConfigBuiltinGastownMayorHasNoStartupNudge(t *testing.T) {
+	cityPath := writeCityWithUnmaterializedGastownImport(t)
+
+	cfg, _, err := loadStartCityConfig(cityPath)
+	if err != nil {
+		t.Fatalf("loadStartCityConfig returned error: %v", err)
+	}
+
+	var mayor *config.Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "mayor" {
+			mayor = &cfg.Agents[i]
+			break
+		}
+	}
+	if mayor == nil {
+		t.Fatal("expected builtin gastown mayor agent to be present")
+	}
+	if mayor.Nudge != "" {
+		t.Fatalf("builtin gastown mayor nudge = %q, want empty for always-on resident coordinator", mayor.Nudge)
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, citylayout.SystemPacksRoot, "gastown", "agents", "mayor", "agent.toml"))
+	if err != nil {
+		t.Fatalf("read materialized mayor agent.toml: %v", err)
+	}
+	if strings.Contains(string(data), "nudge =") {
+		t.Fatalf("materialized builtin mayor agent.toml should not contain a startup nudge:\n%s", string(data))
 	}
 }
 
@@ -1013,6 +1047,65 @@ func TestUnregisterCityFromSupervisorWaitsForControllerStop(t *testing.T) {
 	}
 	if canonicalTestPath(waitedPath) != canonicalTestPath(cityPath) {
 		t.Fatalf("waited for %q, want %q", waitedPath, cityPath)
+	}
+	if waitedTimeout != supervisorCityStopTimeout(cityPath) {
+		t.Fatalf("wait timeout = %s, want %s", waitedTimeout, supervisorCityStopTimeout(cityPath))
+	}
+}
+
+func TestUnregisterCityFromSupervisorUsesStopTimeoutForSupervisorCityStopWait(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "bright-lights"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "bright-lights"); err != nil {
+		t.Fatal(err)
+	}
+
+	withSupervisorTestHooks(
+		t,
+		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int { return 0 },
+		func() int { return 4242 },
+		func(string) (bool, string, bool) { return false, "", false },
+		20*time.Millisecond,
+		time.Millisecond,
+	)
+
+	var waitedPath string
+	var waitedWantRunning bool
+	var waitedTimeout time.Duration
+	waitForSupervisorCityHook = func(path string, wantRunning bool, timeout time.Duration, _ io.Writer) error {
+		waitedPath = path
+		waitedWantRunning = wantRunning
+		waitedTimeout = timeout
+		return nil
+	}
+	waitForSupervisorControllerStopHook = func(string, time.Duration) error {
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	handled, code := unregisterCityFromSupervisor(cityPath, &stdout, &stderr)
+	if !handled || code != 0 {
+		t.Fatalf("unregisterCityFromSupervisor = (%t, %d), want (true, 0); stderr=%q", handled, code, stderr.String())
+	}
+	if canonicalTestPath(waitedPath) != canonicalTestPath(cityPath) {
+		t.Fatalf("waited for %q, want %q", waitedPath, cityPath)
+	}
+	if waitedWantRunning {
+		t.Fatalf("waitForSupervisorCityHook wantRunning = true, want false")
 	}
 	if waitedTimeout != supervisorCityStopTimeout(cityPath) {
 		t.Fatalf("wait timeout = %s, want %s", waitedTimeout, supervisorCityStopTimeout(cityPath))
@@ -2063,6 +2156,169 @@ func TestPublishManagedCityWaitsForInitialReconcileBeforeRunning(t *testing.T) {
 			t.Fatalf("initFailures[%s] still present after publish", cityPath)
 		}
 	})
+}
+
+func TestSupervisorCityStartTimeoutHonorsDaemonStartReadyTimeout(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "big-city"
+
+[daemon]
+start_ready_timeout = "9m"
+
+[[agent]]
+name = "mayor"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldTimeout := supervisorCityReadyTimeout
+	supervisorCityReadyTimeout = 60 * time.Second
+	t.Cleanup(func() { supervisorCityReadyTimeout = oldTimeout })
+
+	got := supervisorCityStartTimeout(cityPath)
+	if got != 9*time.Minute {
+		t.Errorf("supervisorCityStartTimeout = %v, want 9m (daemon.start_ready_timeout override)", got)
+	}
+}
+
+func TestSupervisorCityStartTimeoutSessionTimeoutCanExtend(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "patient-city"
+
+[session]
+startup_timeout = "12m"
+
+[[agent]]
+name = "mayor"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldTimeout := supervisorCityReadyTimeout
+	supervisorCityReadyTimeout = 60 * time.Second
+	t.Cleanup(func() { supervisorCityReadyTimeout = oldTimeout })
+
+	got := supervisorCityStartTimeout(cityPath)
+	if got != 12*time.Minute {
+		t.Errorf("supervisorCityStartTimeout = %v, want 12m (session.startup_timeout override)", got)
+	}
+}
+
+func TestSupervisorCityStartTimeoutHonorsExplicitDaemonTimeoutBelowPackageDefault(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "small-ci-city"
+
+[daemon]
+start_ready_timeout = "30s"
+
+[session]
+startup_timeout = "1s"
+
+[[agent]]
+name = "worker"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldTimeout := supervisorCityReadyTimeout
+	supervisorCityReadyTimeout = 5 * time.Minute
+	t.Cleanup(func() { supervisorCityReadyTimeout = oldTimeout })
+
+	got := supervisorCityStartTimeout(cityPath)
+	if got != 30*time.Second {
+		t.Errorf("supervisorCityStartTimeout = %v, want 30s (explicit daemon.start_ready_timeout)", got)
+	}
+}
+
+func TestSupervisorCityStartTimeoutSessionTimeoutExtendsDaemonTimeout(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "patient-big-city"
+
+[daemon]
+start_ready_timeout = "6m"
+
+[session]
+startup_timeout = "12m"
+
+[[agent]]
+name = "worker"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldTimeout := supervisorCityReadyTimeout
+	supervisorCityReadyTimeout = 60 * time.Second
+	t.Cleanup(func() { supervisorCityReadyTimeout = oldTimeout })
+
+	got := supervisorCityStartTimeout(cityPath)
+	if got != 12*time.Minute {
+		t.Errorf("supervisorCityStartTimeout = %v, want 12m (session.startup_timeout extends daemon.start_ready_timeout)", got)
+	}
+}
+
+func TestSupervisorCityStartTimeoutWithoutExplicitKnobUsesPackageDefault(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "default-city"
+
+[session]
+startup_timeout = "1s"
+
+[[agent]]
+name = "mayor"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldTimeout := supervisorCityReadyTimeout
+	supervisorCityReadyTimeout = 4 * time.Minute
+	t.Cleanup(func() { supervisorCityReadyTimeout = oldTimeout })
+
+	got := supervisorCityStartTimeout(cityPath)
+	if got != 4*time.Minute {
+		t.Errorf("supervisorCityStartTimeout = %v, want 4m (package default, no daemon override)", got)
+	}
+}
+
+func TestSupervisorCityStopTimeoutUsesStopFloorIndependentOfStartReadyDefault(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "stop-city"
+
+[[agent]]
+name = "worker"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldTimeout := supervisorCityReadyTimeout
+	supervisorCityReadyTimeout = 5 * time.Minute
+	t.Cleanup(func() { supervisorCityReadyTimeout = oldTimeout })
+
+	got := supervisorCityStopTimeout(cityPath)
+	if got != supervisorCityStopTimeoutFloor {
+		t.Errorf("supervisorCityStopTimeout = %v, want stop floor %v", got, supervisorCityStopTimeoutFloor)
+	}
+}
+
+func TestSupervisorCityReadyTimeoutDefaultMatchesConfigDefault(t *testing.T) {
+	// The package-level default must track config.DefaultStartReadyTimeout
+	// so production cities get the configured budget when no explicit
+	// override is set.
+	if supervisorCityReadyTimeout != config.DefaultStartReadyTimeout {
+		t.Errorf("supervisorCityReadyTimeout = %v, want %v (config.DefaultStartReadyTimeout)",
+			supervisorCityReadyTimeout, config.DefaultStartReadyTimeout)
+	}
 }
 
 func TestStartupSessionComputationsDoNotQueryBeadStore(t *testing.T) {

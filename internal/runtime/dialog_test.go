@@ -287,10 +287,90 @@ func TestAcceptStartupDialogsSkipsUpdateThenHandlesTrustDialog(t *testing.T) {
 	}
 }
 
+func TestAcceptStartupDialogsTrustsCodexHookReviewDialog(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			if len(sent) == 0 {
+				return codexHookReviewDialogFixture(), nil
+			}
+			return "› Implement {feature}", nil
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs returned error: %v", err)
+	}
+	if got, want := strings.Join(sent, ","), "Down,Enter"; got != want {
+		t.Fatalf("sent keys = %q, want %q", got, want)
+	}
+}
+
+func TestAcceptStartupDialogsHandlesTrustThenCodexHookReview(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollTimeout = time.Second
+
+	var sent []string
+	err := AcceptStartupDialogs(
+		context.Background(),
+		func(_ int) (string, error) {
+			switch len(sent) {
+			case 0:
+				return "Do you trust the contents of this directory?", nil
+			case 1:
+				return codexHookReviewDialogFixture(), nil
+			default:
+				return "› Implement {feature}", nil
+			}
+		},
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogs returned error: %v", err)
+	}
+	if got, want := strings.Join(sent, ","), "Enter,Down,Enter"; got != want {
+		t.Fatalf("sent keys = %q, want %q", got, want)
+	}
+}
+
 func TestAcceptStartupDialogsFromStreamSkipsCodexUpdateDialog(t *testing.T) {
 	var sent []string
 	snapshots := make(chan string, 2)
 	snapshots <- codexUpdateDialogFixture()
+	snapshots <- "› Implement {feature}"
+	close(snapshots)
+
+	err := AcceptStartupDialogsFromStream(
+		context.Background(),
+		time.Second,
+		snapshots,
+		func(keys ...string) error {
+			sent = append(sent, keys...)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
+	}
+	if got, want := strings.Join(sent, ","), "Down,Enter"; got != want {
+		t.Fatalf("sent keys = %q, want %q", got, want)
+	}
+}
+
+func TestAcceptStartupDialogsFromStreamTrustsCodexHookReviewDialog(t *testing.T) {
+	var sent []string
+	snapshots := make(chan string, 2)
+	snapshots <- codexHookReviewDialogFixture()
 	snapshots <- "› Implement {feature}"
 	close(snapshots)
 
@@ -667,6 +747,16 @@ func codexUpdateDialogFixture() string {
 		"  2. Skip\n" +
 		"  3. Skip until next version\n" +
 		"Press enter to continue"
+}
+
+func codexHookReviewDialogFixture() string {
+	return "Hooks need review\n" +
+		"  4 hooks are new or changed.\n" +
+		"  Hooks can run outside the sandbox after you trust them.\n\n" +
+		"› 1. Review hooks\n" +
+		"  2. Trust all and continue\n" +
+		"  3. Continue without trusting (hooks won't run)\n\n" +
+		"  Press enter to confirm or esc to go back"
 }
 
 func TestExitsEarlyOnPrompt(t *testing.T) {

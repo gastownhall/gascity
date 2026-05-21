@@ -129,6 +129,33 @@ func TestGraphConvoyExpansion(t *testing.T) {
 	}
 }
 
+func TestGraphConvoyExpansionUsesTracksDependencies(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "my convoy", Type: "convoy"}) // gc-1
+	_, _ = store.Create(beads.Bead{Title: "child A"})                   // gc-2
+	_, _ = store.Create(beads.Bead{Title: "child B"})                   // gc-3
+	if err := store.DepAdd("gc-1", "gc-2", "tracks"); err != nil {
+		t.Fatalf("DepAdd child A: %v", err)
+	}
+	if err := store.DepAdd("gc-1", "gc-3", "tracks"); err != nil {
+		t.Fatalf("DepAdd child B: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doGraph(store, []string{"gc-1"}, graphOpts{}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doGraph convoy = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+
+	if strings.Contains(out, "my convoy") {
+		t.Errorf("convoy bead should be expanded, not shown:\n%s", out)
+	}
+	if !strings.Contains(out, "child A") || !strings.Contains(out, "child B") {
+		t.Errorf("should show tracks-based convoy children:\n%s", out)
+	}
+}
+
 func TestGraphEpicIsTreatedAsOrdinaryBead(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{Title: "my epic", Type: "epic"})     // gc-1

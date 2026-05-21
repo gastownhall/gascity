@@ -178,7 +178,7 @@ func (c *ConfigRefsCheck) Run(_ *CheckContext) *CheckResult {
 			}
 		}
 		if a.SessionSetupScript != "" {
-			path := resolveConfigRefPath(c.cityPath, a.SessionSetupScript)
+			path := config.ResolveSessionSetupScriptPath(c.cityPath, a.SourceDir, a.SessionSetupScript)
 			if _, err := os.Stat(path); err != nil {
 				issues = append(issues, fmt.Sprintf("agent %q: session_setup_script %q not found", qn, path))
 			}

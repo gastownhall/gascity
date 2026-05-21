@@ -76,7 +76,7 @@ func TestResetConfiguredNamedSessionForConfigDrift_PreservesSessionKeyOnContinua
 
 	prepared, err := prepareStartCandidateForCity(
 		startCandidate{session: &got, tp: tp, order: 0},
-		"", "", cfg, env.sp, env.store, clk, io.Discard,
+		"", "", cfg, env.sp, env.store, clk, io.Discard, nil,
 	)
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)

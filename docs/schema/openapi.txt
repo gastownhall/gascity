@@ -458,6 +458,12 @@
               "null"
             ]
           },
+          "TmuxAlias": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "WakeMode": {
             "type": [
               "string",
@@ -475,6 +481,7 @@
           "Dir",
           "Name",
           "WorkDir",
+          "TmuxAlias",
           "Scope",
           "Suspended",
           "Pool",
@@ -546,6 +553,10 @@
           "suspended": {
             "description": "Override suspended state.",
             "type": "boolean"
+          },
+          "tmux_alias": {
+            "description": "Override tmux session name template.",
+            "type": "string"
           },
           "work_dir": {
             "description": "Override session working directory.",

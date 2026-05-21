@@ -95,7 +95,7 @@ func newBlockingPoolCreateStore(alias string) *blockingPoolCreateStore {
 }
 
 func (s *blockingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
-	if bead.Type == sessionBeadType && bead.Metadata["agent_name"] == s.alias {
+	if bead.Type == sessionBeadType && (s.alias == "" || bead.Metadata["agent_name"] == s.alias) {
 		s.mu.Lock()
 		s.createCount++
 		createNumber := s.createCount
@@ -3197,6 +3197,119 @@ func TestSelectOrCreatePoolSessionBead_SerializesAliasCheckAndCreate(t *testing.
 	}
 }
 
+func TestCreatePoolSessionBeadWithGuardedAliasSerializesResolvedTmuxAlias(t *testing.T) {
+	store := newBlockingPoolCreateStore("")
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+			TmuxAlias:         "crew--{{.CityName}}",
+		}},
+	}
+	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, io.Discard)
+	bp.sessionBeads = newSessionBeadSnapshot(nil)
+	cfgAgent := &cfg.Agents[0]
+
+	results := make(chan struct {
+		bead beads.Bead
+		err  error
+	}, 2)
+	create := func(qualifiedInstance string, slot int) {
+		bead, err := createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, "worker", qualifiedInstance, slot)
+		results <- struct {
+			bead beads.Bead
+			err  error
+		}{bead: bead, err: err}
+	}
+	go create("worker-1", 1)
+	go create("worker-2", 2)
+
+	select {
+	case <-store.firstCreateStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first pool create did not start")
+	}
+
+	select {
+	case <-store.secondCreateStarted:
+		close(store.releaseFirstCreate)
+		close(store.releaseSecondCreate)
+		t.Fatal("second pool create reached the store before first tmux_alias create finished")
+	case <-time.After(150 * time.Millisecond):
+		close(store.releaseFirstCreate)
+		select {
+		case <-store.secondCreateStarted:
+			close(store.releaseSecondCreate)
+		case <-time.After(time.Second):
+			t.Fatal("second pool create did not start after first create completed")
+		}
+	}
+
+	seen := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("create result %d: %v", i+1, result.err)
+		}
+		sessionName := result.bead.Metadata["session_name"]
+		if sessionName == "" {
+			t.Fatalf("create result %d has empty session_name: %#v", i+1, result.bead)
+		}
+		if seen[sessionName] {
+			t.Fatalf("duplicate session_name %q across tmux_alias pool creates", sessionName)
+		}
+		stored, err := store.Get(result.bead.ID)
+		if err != nil {
+			t.Fatalf("store.Get(%s): %v", result.bead.ID, err)
+		}
+		if got := stored.Metadata["session_name"]; got != sessionName {
+			t.Fatalf("stored session_name for %s = %q, want %q", result.bead.ID, got, sessionName)
+		}
+		seen[sessionName] = true
+	}
+	if !seen["crew--test-city"] {
+		t.Fatalf("created names = %#v, want one unsuffixed tmux_alias name", seen)
+	}
+}
+
+func TestCreatePoolSessionBeadWithGuardedAliasDropsTmuxAliasWhenIdentifierLockFails(t *testing.T) {
+	store := beads.NewMemStore()
+	cityPath := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(cityPath, []byte("city path blocks lock dir creation"), 0o600); err != nil {
+		t.Fatalf("write cityPath file: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+			TmuxAlias:         "crew--{{.CityName}}",
+		}},
+	}
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = newSessionBeadSnapshot(nil)
+
+	bead, err := createPoolSessionBeadWithGuardedAlias(bp, &cfg.Agents[0], "worker", "worker-1", 1)
+	if err != nil {
+		t.Fatalf("createPoolSessionBeadWithGuardedAlias: %v", err)
+	}
+
+	want := PoolSessionName("worker", bead.ID)
+	if got := bead.Metadata["session_name"]; got != want {
+		t.Fatalf("session_name = %q, want unique pool fallback %q when tmux_alias lock fails", got, want)
+	}
+	if strings.Contains(stderr.String(), "creating without alias") && strings.Contains(bead.Metadata["session_name"], "crew--test-city") {
+		t.Fatalf("lock failure warning emitted but session_name still used tmux_alias: %q", bead.Metadata["session_name"])
+	}
+}
+
 // delayingPoolCreateStore sleeps for `delay` on every session-bead create so
 // tests can measure whether realizePoolDesiredSessions runs distinct-alias
 // creates in parallel or serializes them. Wraps MemStore for all other ops.
@@ -3470,7 +3583,7 @@ func TestBuildDesiredState_GH1654PoolReadyWorkGrowsPastMinActiveSessions(t *test
 	existingSessionNames := make(map[string]bool)
 	for slot := 1; slot <= 3; slot++ {
 		_, qualifiedInstance := poolInstanceIdentity(cfgAgent, slot, io.Discard)
-		session, err := createPoolSessionBead(store, cfgAgent.QualifiedName(), nil, time.Now().UTC(), poolSessionCreateIdentity{
+		session, err := createPoolSessionBead(store, cfgAgent.QualifiedName(), time.Now().UTC(), poolSessionCreateIdentity{
 			AgentName: qualifiedInstance,
 			Alias:     qualifiedInstance,
 			Slot:      slot,

@@ -455,8 +455,10 @@ func TestSessionLifecycleChaosPendingInteractionDoesNotCancelAgentDrainAck(t *te
 	h.record("pending interaction after agent drain ack")
 	h.reconcileTickWithDrainOps()
 
+	h.assertDrainAckStopPending()
+	h.finalizeAsyncDrainAckStop()
 	if h.env.sp.IsRunning(h.sessionName) {
-		h.failf("pending interaction canceled agent-authored drain ack for %q", h.sessionName)
+		h.failf("agent-authored drain ack left runtime %q running after async stop", h.sessionName)
 	}
 }
 
@@ -491,8 +493,10 @@ func TestSessionLifecycleChaosAgentDrainAckClearsRecoveredReconcilerProvenance(t
 	h.record("pending interaction after agent drain ack overwrote provenance")
 	h.reconcileTickWithDrainOps()
 
+	h.assertDrainAckStopPending()
+	h.finalizeAsyncDrainAckStop()
 	if h.env.sp.IsRunning(h.sessionName) {
-		h.failf("pending interaction canceled agent-authored drain ack after provenance overwrite for %q", h.sessionName)
+		h.failf("agent-authored drain ack after provenance overwrite left runtime %q running after async stop", h.sessionName)
 	}
 }
 
@@ -519,9 +523,11 @@ func TestSessionLifecycleChaosAgentDrainAckClearsLiveControllerDrain(t *testing.
 	h.record("agent drain ack while controller drain remains in memory")
 	h.reconcileTickWithDrainOps()
 
-	if h.env.sp.IsRunning(h.sessionName) {
-		h.failf("agent-authored drain ack left runtime %q running", h.sessionName)
+	h.assertDrainAckStopPending()
+	if ds := h.env.dt.get(h.sessionID); ds != nil {
+		h.failf("agent-authored drain ack left controller drain active while stop pending: %+v", *ds)
 	}
+	h.finalizeAsyncDrainAckStop()
 	if ds := h.env.dt.get(h.sessionID); ds != nil {
 		h.failf("agent-authored drain ack left controller drain active: %+v", *ds)
 	}
@@ -552,8 +558,10 @@ func TestSessionLifecycleChaosAgentDrainAckStopFailurePreservesRetry(t *testing.
 	}
 	h.env.sp.StopErrors[h.sessionName] = errors.New("chaos stop failure")
 
+	stopsBefore := h.countRuntimeCalls("Stop")
 	h.record("agent drain ack with transient stop failure")
 	h.reconcileTickWithDrainOps()
+	h.waitForRuntimeCallCount("Stop", stopsBefore+1)
 
 	if !h.env.sp.IsRunning(h.sessionName) {
 		h.failf("stop failure removed runtime %q", h.sessionName)
@@ -564,10 +572,14 @@ func TestSessionLifecycleChaosAgentDrainAckStopFailurePreservesRetry(t *testing.
 	if ds := h.env.dt.get(h.sessionID); ds != nil {
 		h.failf("stop failure left cancelable controller drain active after agent ack: %+v", *ds)
 	}
+	h.assertDrainAckStopPending()
 
 	delete(h.env.sp.StopErrors, h.sessionName)
+	stopsBefore = h.countRuntimeCalls("Stop")
 	h.record("agent drain ack retry after stop recovers")
 	h.reconcileTickWithDrainOps()
+	h.waitForRuntimeCallCount("Stop", stopsBefore+1)
+	h.finalizeAsyncDrainAckStop()
 
 	if h.env.sp.IsRunning(h.sessionName) {
 		h.failf("retried agent drain ack left runtime %q running", h.sessionName)
@@ -1616,13 +1628,36 @@ func (h *sessionChaosHarness) record(format string, args ...any) {
 }
 
 func (h *sessionChaosHarness) countRuntimeCalls(method string) int {
-	count := 0
-	for _, call := range h.env.sp.Calls {
-		if call.Method == method && call.Name == h.sessionName {
-			count++
+	return h.env.sp.CountCalls(method, h.sessionName)
+}
+
+func (h *sessionChaosHarness) waitForRuntimeCallCount(method string, want int) {
+	h.t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := h.countRuntimeCalls(method); got >= want {
+			return
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	return count
+	h.failf("%s calls for %q = %d, want at least %d", method, h.sessionName, h.countRuntimeCalls(method), want)
+}
+
+func (h *sessionChaosHarness) assertDrainAckStopPending() {
+	h.t.Helper()
+	b := h.mustBead()
+	if got := b.Metadata["state"]; got != string(sessionpkg.StateDraining) {
+		h.failf("state = %q, want %q while drain ack stop is pending", got, sessionpkg.StateDraining)
+	}
+	if got := b.Metadata["state_reason"]; got != sessionpkg.DrainAckStopPendingReason {
+		h.failf("state_reason = %q, want %q", got, sessionpkg.DrainAckStopPendingReason)
+	}
+}
+
+func (h *sessionChaosHarness) finalizeAsyncDrainAckStop() {
+	h.t.Helper()
+	waitForProviderStopped(h.t, h.env.sp, h.sessionName)
+	h.reconcileTickWithDrainOps()
 }
 
 func (h *sessionChaosHarness) failf(format string, args ...any) {

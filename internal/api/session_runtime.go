@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -13,6 +14,39 @@ import (
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
 )
+
+// cityAnchoredSessionEnv returns the provider env merged with the three
+// city-anchored env vars (GC_CITY, GC_CITY_PATH, GC_CITY_RUNTIME_DIR).
+// City anchors win on conflicts to mirror the canonical create-time
+// layering in cmd/gc/template_resolve.go where the per-agent env (which
+// carries the same anchors) is applied after the resolved provider env.
+//
+// Without these anchors, sessions spawned or restarted via the API code
+// paths cannot locate their city. Rig-scoped env remains a separate
+// create-time contract owned by template_resolve.go. Regression for upstream
+// gastownhall/gascity#101 (re-opened).
+//
+// NOTE: This intentionally seeds only the three identity anchors and
+// *not* GC_CONTROL_DISPATCHER_TRACE_DEFAULT. The dispatcher trace path
+// must be qualified per-dispatcher (template_resolve.go does this for
+// the CLI create path); seeding the city-uniform default here would
+// regress per-dispatcher trace files for control-dispatcher sessions
+// restarted through the API. Dispatcher-trace handling stays the
+// responsibility of the caller that knows the qualified agent name.
+func cityAnchoredSessionEnv(cityPath string, providerEnv map[string]string) map[string]string {
+	anchors := citylayout.CityIdentityEnvMap(cityPath)
+	if len(providerEnv) == 0 && len(anchors) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(providerEnv)+len(anchors))
+	for k, v := range providerEnv {
+		out[k] = v
+	}
+	for k, v := range anchors {
+		out[k] = v
+	}
+	return out
+}
 
 var errAmbiguousLegacyACPTransport = errors.New("legacy session transport is ambiguous")
 
@@ -46,7 +80,7 @@ func legacySessionKind(metadata map[string]string) string {
 	return strings.TrimSpace(metadata["real_world_app_session_kind"])
 }
 
-func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, mcpServers []runtime.MCPServerConfig) runtime.Config {
+func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, sessionEnv map[string]string, mcpServers []runtime.MCPServerConfig) runtime.Config {
 	return runtime.Config{
 		WorkDir:                workDir,
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
@@ -55,7 +89,7 @@ func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, mcpSe
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
-		Env:                    resolved.Env,
+		Env:                    sessionEnv,
 		MCPServers:             mcpServers,
 	}
 }
@@ -272,7 +306,8 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 	resolvedInfo.ResumeFlag = resolved.ResumeFlag
 	resolvedInfo.ResumeStyle = resolved.ResumeStyle
 	resolvedInfo.ResumeCommand = resumeCommand
-	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir, mcpServers), nil
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), resolved.Env)
+	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir, sessionEnv, mcpServers), nil
 }
 
 func (s *Server) resolvedSessionRuntimeCommand(resolved *config.ResolvedProvider, transport, storedCommand string, metadata map[string]string) (string, error) {
@@ -389,12 +424,13 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 			resumeCommand = command
 		}
 	}
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), resolved.Env)
 	runtimeCfg, err := worker.NormalizeResolvedRuntime(worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    firstNonEmptyString(info.WorkDir, workDir),
 		Provider:   firstNonEmptyString(info.Provider, resolved.Name),
-		SessionEnv: resolved.Env,
-		Hints:      sessionResumeHints(resolved, firstNonEmptyString(workDir, info.WorkDir), mcpServers),
+		SessionEnv: sessionEnv,
+		Hints:      sessionResumeHints(resolved, firstNonEmptyString(workDir, info.WorkDir), sessionEnv, mcpServers),
 		Resume: session.ProviderResume{
 			ResumeFlag:    firstNonEmptyString(resolved.ResumeFlag, info.ResumeFlag),
 			ResumeStyle:   firstNonEmptyString(resolved.ResumeStyle, info.ResumeStyle),

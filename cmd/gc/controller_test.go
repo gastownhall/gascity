@@ -610,10 +610,22 @@ func TestBuildIdleTracker_SkipsAlwaysNamedSessionIdleTimeout(t *testing.T) {
 	}
 
 	sp := runtime.NewFake()
-	sp.SetActivity("mayor", time.Now().Add(-10*time.Minute))
+	startFakeSession(t, sp, "mayor")
+	now := time.Now()
+	sp.SetActivity("mayor", now.Add(-10*time.Minute))
 
-	if tracker := buildIdleTracker(cfg, "test", dir, sp); tracker != nil {
-		t.Fatalf("buildIdleTracker(cfg) = %#v, want nil for always-named singleton", tracker)
+	tracker, ok := buildIdleTracker(cfg, "test", dir, sp).(*memoryIdleTracker)
+	if !ok {
+		t.Fatalf("buildIdleTracker(cfg) = %T, want *memoryIdleTracker with named fallback exemption", tracker)
+	}
+	if _, ok := tracker.templateTimeouts["mayor"]; !ok {
+		t.Fatalf("templateTimeouts = %v, want mayor fallback registered", tracker.templateTimeouts)
+	}
+	if !tracker.templateFallbackExemptions["mayor"] {
+		t.Fatalf("templateFallbackExemptions = %v, want mayor exempt", tracker.templateFallbackExemptions)
+	}
+	if tracker.checkIdle("mayor", "mayor", sp, now) {
+		t.Fatalf("always-named session inherited template idle timeout")
 	}
 }
 
@@ -1249,7 +1261,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	if !ok || tracker == nil {
 		t.Fatal("buildIdleTracker(parsedCfg) = nil, want tracker")
 	}
-	if !tracker.checkIdle("mayor", sp, time.Now()) {
+	if !tracker.checkIdle("mayor", "", sp, time.Now()) {
 		t.Fatalf("fresh idle tracker did not consider mayor idle; activity=%v timeouts=%v", sp.Activity["mayor"], tracker.timeouts)
 	}
 

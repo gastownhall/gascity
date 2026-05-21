@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -113,6 +114,8 @@ type RuntimeTmuxConfig struct {
 // timed lock acquisition — preventing permanent lockout if a nudge hangs.
 var sessionNudgeLocks sync.Map // map[string]chan struct{}
 
+var pasteBufferSeq uint64
+
 // validSessionNameRe validates session names to prevent shell injection
 var validSessionNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
@@ -137,6 +140,7 @@ const (
 	hiddenAttachReadyTimeout = 2 * time.Second
 	hiddenAttachMaxLifetime  = 20 * time.Second
 	hiddenAttachPollInterval = 50 * time.Millisecond
+	maxSendKeysLiteralLen    = 4096
 )
 
 // tmuxSubprocessTimeout caps the wall-clock time any single tmux subprocess
@@ -1403,6 +1407,66 @@ func isTransientSendKeysError(err error) bool {
 	return strings.Contains(msg, "not in a mode")
 }
 
+func isCommandTooLongError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "command too long")
+}
+
+func nextPasteBufferName() string {
+	seq := atomic.AddUint64(&pasteBufferSeq, 1)
+	return fmt.Sprintf("gc-nudge-%d-%d", os.Getpid(), seq)
+}
+
+func (t *Tmux) sendLiteralText(target, text string) error {
+	if len(text) > maxSendKeysLiteralLen {
+		return t.pasteLiteralText(target, text)
+	}
+	_, err := t.run("send-keys", "-t", target, "-l", text)
+	if isCommandTooLongError(err) {
+		return t.pasteLiteralText(target, text)
+	}
+	return err
+}
+
+func (t *Tmux) pasteLiteralText(target, text string) error {
+	tmp, err := os.CreateTemp("", "gc-tmux-paste-*")
+	if err != nil {
+		return fmt.Errorf("creating tmux paste buffer file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if _, err := tmp.WriteString(text); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("writing tmux paste buffer file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing tmux paste buffer file: %w", err)
+	}
+
+	bufferName := nextPasteBufferName()
+	loaded := false
+	if _, err := t.run("load-buffer", "-b", bufferName, tmpName); err != nil {
+		return fmt.Errorf("loading tmux paste buffer: %w", err)
+	}
+	loaded = true
+	defer func() {
+		if loaded {
+			_, _ = t.run("delete-buffer", "-b", bufferName)
+		}
+	}()
+
+	// Force bracketed paste so multiline nudges arrive as one paste operation
+	// instead of being interpreted as individual keypresses by provider TUIs.
+	if _, err := t.run("paste-buffer", "-p", "-d", "-b", bufferName, "-t", target); err != nil {
+		return fmt.Errorf("pasting tmux buffer: %w", err)
+	}
+	loaded = false
+	return nil
+}
+
 // sendKeysLiteralWithRetry sends literal text to a tmux target, retrying on
 // transient errors (e.g., "not in a mode" during agent TUI startup).
 // This is the core retry loop used by both NudgeSession and NudgePane.
@@ -1422,7 +1486,7 @@ func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Durati
 	var lastErr error
 
 	for time.Now().Before(deadline) {
-		_, err := t.run("send-keys", "-t", target, "-l", text)
+		err := t.sendLiteralText(target, text)
 		if err == nil {
 			return nil
 		}
@@ -1949,12 +2013,9 @@ func (t *Tmux) CheckSessionHealth(session string, maxInactivity time.Duration) Z
 // Uses ps to get the actual command name from the process's executable path.
 // This handles cases where argv[0] is modified (e.g., Claude showing version "2.1.30").
 func processMatchesNames(pid string, names []string) bool {
-	if len(names) == 0 {
+	nameSet := processNameSet(names)
+	if len(nameSet) == 0 {
 		return false
-	}
-	nameSet := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		nameSet[name] = struct{}{}
 	}
 
 	// Use ps to get the command name (COMM column gives the executable name)
@@ -1963,12 +2024,7 @@ func processMatchesNames(pid string, names []string) bool {
 	if err != nil {
 		return false
 	}
-	// Get just the base name (in case it's a full path like /Users/.../claude)
 	commPath := strings.TrimSpace(string(out))
-	comm := filepath.Base(commPath)
-	if _, ok := nameSet[comm]; ok {
-		return true
-	}
 
 	// Fall back to argv[0] from the full command line. This catches wrapper
 	// scripts launched as "/path/to/codex" where COMM may report "bash" or
@@ -1978,57 +2034,14 @@ func processMatchesNames(pid string, names []string) bool {
 	if err != nil {
 		return false
 	}
-	args := strings.Fields(strings.TrimSpace(string(out)))
-	if len(args) == 0 {
-		return false
-	}
-	argv0 := filepath.Base(args[0])
-	if _, ok := nameSet[argv0]; ok {
-		return true
-	}
-
-	// Wrapper runtimes often execute providers through interpreters such as bun,
-	// node, or npx, leaving the actual provider name only in the first positional
-	// argument. Only check the first non-flag argument after a known interpreter
-	// to avoid false positives (e.g., "vim claude.txt" or "tail -f gemini.log").
-	knownInterpreters := map[string]struct{}{
-		"node": {}, "bun": {}, "npx": {}, "deno": {},
-	}
-	// Runner subcommands (e.g., "bun run gemini") that should be skipped
-	// when scanning for the provider name in positional args.
-	runnerSubcommands := map[string]struct{}{
-		"run": {}, "exec": {}, "x": {},
-	}
-	if _, isInterpreter := knownInterpreters[argv0]; isInterpreter {
-		for _, token := range args[1:] {
-			token = strings.TrimSpace(token)
-			if token == "" || strings.HasPrefix(token, "-") {
-				continue
-			}
-			// Skip known runner subcommands like "run" in "bun run gemini".
-			if _, isRunner := runnerSubcommands[token]; isRunner {
-				continue
-			}
-			base := filepath.Base(token)
-			if _, ok := nameSet[base]; ok {
-				return true
-			}
-			baseNoExt := strings.TrimSuffix(base, filepath.Ext(base))
-			if _, ok := nameSet[baseNoExt]; ok {
-				return true
-			}
-			break // only check the first positional argument
-		}
-	}
-	return false
+	return processMatchesNameSet(commPath, string(out), nameSet)
 }
 
 // hasDescendantWithNames checks if a process has any descendant (child, grandchild, etc.)
 // matching any of the given names. Recursively traverses the process tree up to maxDepth.
 // Used when the pane command is a shell (bash, zsh) that launched an agent.
 func hasDescendantWithNames(pid string, names []string, depth int) bool {
-	const maxDepth = 10 // Prevent infinite loops in case of circular references
-	if len(names) == 0 || depth > maxDepth {
+	if len(names) == 0 || depth > maxProcessDescendantDepth {
 		return false
 	}
 	// Use pgrep to find child processes.

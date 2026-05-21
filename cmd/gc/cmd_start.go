@@ -191,6 +191,21 @@ var startVerboseMode bool
 // buildIdleTracker creates an idleTracker from the config, populating
 // timeouts for agents that have idle_timeout set. Returns nil if no
 // agents use idle timeout (disabled).
+//
+// Two registration paths, complementary rather than exclusive:
+//   - Per-session-name registration via discoverPoolInstances covers stable
+//     identities known at startup: configured named sessions, canonical
+//     singleton pool members, namepool members ("furiosa"), and any
+//     currently-running stale "{name}-N" suffixes a previous pool layout
+//     left behind. Tests assert these exact keys, and the reconciler still
+//     hits them via the per-name lookup.
+//   - Per-template registration covers ephemeral pool agents whose runtime
+//     session names are minted from bead IDs at sling time
+//     (e.g. "local-core__builder-fm-abc123") and never match anything a
+//     static enumeration could produce. checkIdle falls back to the
+//     template lookup when the per-name lookup misses, so canonical and
+//     namepool members keep their per-name hit while bead-derived names
+//     pick up the template's timeout.
 func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider) idleTracker {
 	var hasAny bool
 	st := cfg.Workspace.SessionTemplate
@@ -211,24 +226,48 @@ func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider)
 			continue
 		}
 		named := config.FindNamedSession(cfg, a.QualifiedName())
+		namedAlways := named != nil && named.ModeOrDefault() == "always"
 		if named != nil {
 			// Configured named sessions own the canonical runtime session for
 			// direct configured identities. mode="always" must never be subject
 			// to idle timeout.
-			if named.ModeOrDefault() != "always" {
-				it.setTimeout(config.NamedSessionRuntimeName(cityName, cfg.Workspace, a.QualifiedName()), timeout)
+			namedSessionName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, named.QualifiedName())
+			if !namedAlways {
+				it.setTimeout(namedSessionName, timeout)
 				registeredAny = true
+			} else {
+				it.exemptTemplateFallbackForSession(namedSessionName)
 			}
 			if !a.SupportsInstanceExpansion() {
 				continue
 			}
+			// Hybrid named-and-pool: fall through to the pool registrations
+			// below so any non-named members of the pool still pick up a
+			// timeout. The named identity's registration above takes
+			// precedence in checkIdle's per-name lookup.
 		}
-		sp0 := scaleParamsFor(&a)
 		if a.SupportsInstanceExpansion() {
-			// Register each pool instance (worker-1, worker-2, ...).
+			// Per-name registration for stable instance identities.
+			// discoverPoolInstances returns canonical / namepool / live-stale
+			// names. For bounded non-namepool pools it also returns static
+			// "{name}-N" slot names — those won't match runtime bead-derived
+			// names, but registering them is harmless and keeps the existing
+			// canonical-singleton and namepool tests asserting the right keys.
+			sp0 := scaleParamsFor(&a)
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 				sn := startupSessionName(cityName, qualifiedInstance, st)
 				it.setTimeout(sn, timeout)
+				registeredAny = true
+			}
+			// Per-template fallback so bead-derived runtime names for pool
+			// agents still pick up this timeout via checkIdle's template
+			// lookup. Always-mode named sessions sharing this template are
+			// exempted per runtime name below; they must not suppress idle
+			// timeout for unnamed pool siblings.
+			if a.SupportsGenericEphemeralSessions() {
+				template := lifecycleTemplateFallbackKey(a)
+				it.setTimeoutForTemplate(template, timeout)
+				exemptAlwaysNamedTemplateFallbacks(cfg, cityName, template, it.exemptTemplateFallbackForSession)
 				registeredAny = true
 			}
 			continue
@@ -269,20 +308,30 @@ func buildMaxSessionAgeTracker(cfg *config.City, cityName string, sp runtime.Pro
 		}
 		jitter := a.MaxSessionAgeJitterDuration()
 		named := config.FindNamedSession(cfg, a.QualifiedName())
+		namedAlways := named != nil && named.ModeOrDefault() == "always"
 		if named != nil {
-			if named.ModeOrDefault() != "always" {
-				tr.setConfig(config.NamedSessionRuntimeName(cityName, cfg.Workspace, a.QualifiedName()), maxAge, jitter)
+			namedSessionName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, named.QualifiedName())
+			if !namedAlways {
+				tr.setConfig(namedSessionName, maxAge, jitter)
 				registeredAny = true
+			} else {
+				tr.exemptTemplateFallbackForSession(namedSessionName)
 			}
 			if !a.SupportsInstanceExpansion() {
 				continue
 			}
 		}
-		sp0 := scaleParamsFor(&a)
 		if a.SupportsInstanceExpansion() {
+			sp0 := scaleParamsFor(&a)
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 				sn := startupSessionName(cityName, qualifiedInstance, st)
 				tr.setConfig(sn, maxAge, jitter)
+				registeredAny = true
+			}
+			if a.SupportsGenericEphemeralSessions() {
+				template := lifecycleTemplateFallbackKey(a)
+				tr.setConfigForTemplate(template, maxAge, jitter)
+				exemptAlwaysNamedTemplateFallbacks(cfg, cityName, template, tr.exemptTemplateFallbackForSession)
 				registeredAny = true
 			}
 			continue
@@ -295,6 +344,23 @@ func buildMaxSessionAgeTracker(cfg *config.City, cityName string, sp runtime.Pro
 		return nil
 	}
 	return tr
+}
+
+func lifecycleTemplateFallbackKey(a config.Agent) string {
+	return a.QualifiedName()
+}
+
+func exemptAlwaysNamedTemplateFallbacks(cfg *config.City, cityName, template string, exempt func(string)) {
+	if cfg == nil || template == "" || exempt == nil {
+		return
+	}
+	for i := range cfg.NamedSessions {
+		named := &cfg.NamedSessions[i]
+		if named.ModeOrDefault() != "always" || named.TemplateQualifiedName() != template {
+			continue
+		}
+		exempt(config.NamedSessionRuntimeName(cityName, cfg.Workspace, named.QualifiedName()))
+	}
 }
 
 func newStartCmd(stdout, stderr io.Writer) *cobra.Command {

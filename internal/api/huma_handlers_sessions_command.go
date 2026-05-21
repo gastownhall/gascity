@@ -142,6 +142,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 			}
 		}
 		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(
+			s.state.CityPath(),
 			alias,
 			explicitName,
 			template,
@@ -321,7 +322,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Store,
 	}
 	go func() {
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionCreate)
-		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
+		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(s.state.CityPath(), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
 		if cfgErr != nil {
 			s.emitSessionCreateFailed(reqID, "create_failed", cfgErr.Error())
 			return

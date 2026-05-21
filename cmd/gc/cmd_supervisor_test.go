@@ -491,6 +491,10 @@ func TestBuildSupervisorServiceDataIncludesProviderEnv(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "sk-openai-123")
 	t.Setenv("GEMINI_API_KEY", "gemini-123")
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "gc-project")
+	t.Setenv("DEEPSEEK_API_KEY", "ds-123")
+	t.Setenv("OLLAMA_HOST", "http://localhost:11434")
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIA123")
+	t.Setenv("AWS_PAGER", "less")
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(homeDir, ".claude"))
 	t.Setenv("GC_SUPERVISOR_ENV", "CUSTOM_PROVIDER_TOKEN,IGNORED_EMPTY")
 	t.Setenv("CUSTOM_PROVIDER_TOKEN", "custom-token")
@@ -509,6 +513,9 @@ func TestBuildSupervisorServiceDataIncludesProviderEnv(t *testing.T) {
 		"OPENAI_API_KEY":        "sk-openai-123",
 		"GEMINI_API_KEY":        "gemini-123",
 		"GOOGLE_CLOUD_PROJECT":  "gc-project",
+		"DEEPSEEK_API_KEY":      "ds-123",
+		"OLLAMA_HOST":           "http://localhost:11434",
+		"AWS_ACCESS_KEY_ID":     "AKIA123",
 		"CLAUDE_CONFIG_DIR":     filepath.Join(homeDir, ".claude"),
 		"CUSTOM_PROVIDER_TOKEN": "custom-token",
 	} {
@@ -516,7 +523,7 @@ func TestBuildSupervisorServiceDataIncludesProviderEnv(t *testing.T) {
 			t.Fatalf("ExtraEnv[%s] = %q, want %q (all env: %#v)", key, got[key], want, got)
 		}
 	}
-	for _, key := range []string{"GC_HOME", "PATH", "XDG_RUNTIME_DIR", "IGNORED_EMPTY", "UNRELATED_SECRET"} {
+	for _, key := range []string{"GC_HOME", "PATH", "XDG_RUNTIME_DIR", "IGNORED_EMPTY", "UNRELATED_SECRET", "AWS_PAGER"} {
 		if _, ok := got[key]; ok {
 			t.Fatalf("ExtraEnv should not include %s: %#v", key, got)
 		}
@@ -534,6 +541,9 @@ func TestBuildSupervisorServiceDataOmitsProviderEnvWhenOptedOut(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "sk-openai-123")
 	t.Setenv("GEMINI_API_KEY", "gemini-123")
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "gc-project")
+	t.Setenv("DEEPSEEK_API_KEY", "ds-123")
+	t.Setenv("OLLAMA_HOST", "http://localhost:11434")
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIA123")
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(homeDir, ".claude"))
 	t.Setenv("GC_SUPERVISOR_ENV", "CUSTOM_PROVIDER_TOKEN")
 	t.Setenv("CUSTOM_PROVIDER_TOKEN", "custom-token")
@@ -551,6 +561,9 @@ func TestBuildSupervisorServiceDataOmitsProviderEnvWhenOptedOut(t *testing.T) {
 		"OPENAI_API_KEY",
 		"GEMINI_API_KEY",
 		"GOOGLE_CLOUD_PROJECT",
+		"DEEPSEEK_API_KEY",
+		"OLLAMA_HOST",
+		"AWS_ACCESS_KEY_ID",
 	} {
 		if _, ok := got[key]; ok {
 			t.Fatalf("ExtraEnv should not include provider key %s when %s=1: %#v",
@@ -573,6 +586,115 @@ func supervisorServiceEnvMap(vars []supervisorServiceEnvVar) map[string]string {
 		m[item.Name] = item.Value
 	}
 	return m
+}
+
+// TestBuildSupervisorServiceDataForwardsAllKnownProviderPrefixes asserts that
+// a canonical env var for every prefix in providerCredentialEnvPrefixes is
+// forwarded into the supervisor's persistent env. This is the regression
+// protection for the curated provider-prefix list: if a prefix is removed,
+// the corresponding probe key here fails and surfaces the omission.
+func TestBuildSupervisorServiceDataForwardsAllKnownProviderPrefixes(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/gc-run")
+
+	// One canonical probe key per documented prefix.
+	probes := map[string]string{
+		"ANTHROPIC_API_KEY":    "sk-ant-probe",
+		"AZURE_OPENAI_API_KEY": "azure-openai-probe",
+		"CEREBRAS_API_KEY":     "cb-probe",
+		"COHERE_API_KEY":       "cohere-probe",
+		"DEEPSEEK_API_KEY":     "ds-probe",
+		"FIREWORKS_API_KEY":    "fw-probe",
+		"GEMINI_API_KEY":       "gemini-probe",
+		"GOOGLE_CLOUD_PROJECT": "google-probe-project",
+		"GROQ_API_KEY":         "groq-probe",
+		"MISTRAL_API_KEY":      "mistral-probe",
+		"OLLAMA_HOST":          "http://localhost:11434",
+		"OPENAI_API_KEY":       "sk-openai-probe",
+		"OPENROUTER_API_KEY":   "or-probe",
+		"TOGETHER_API_KEY":     "together-probe",
+		"VERTEX_PROJECT_ID":    "vertex-probe-project",
+		"XAI_API_KEY":          "xai-probe",
+	}
+	if len(probes) != len(providerCredentialEnvPrefixes) {
+		t.Fatalf("probe set size %d does not match prefix list size %d; update the test when prefixes change",
+			len(probes), len(providerCredentialEnvPrefixes))
+	}
+	for k, v := range probes {
+		t.Setenv(k, v)
+	}
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	for k, want := range probes {
+		if got[k] != want {
+			t.Errorf("ExtraEnv[%s] = %q, want %q — prefix may be missing from providerCredentialEnvPrefixes", k, got[k], want)
+		}
+	}
+}
+
+func TestBuildSupervisorServiceDataForwardsCuratedProviderCredentialEnvKeys(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/gc-run")
+
+	probes := map[string]string{
+		"AWS_ACCESS_KEY_ID":                      "AKIA-probe",
+		"AWS_BEARER_TOKEN_BEDROCK":               "bedrock-bearer-probe",
+		"AWS_CA_BUNDLE":                          "/tmp/aws-ca-bundle.pem",
+		"AWS_CONFIG_FILE":                        "/tmp/aws-config",
+		"AWS_CONTAINER_AUTHORIZATION_TOKEN":      "container-auth-probe",
+		"AWS_CONTAINER_CREDENTIALS_FULL_URI":     "http://127.0.0.1/credentials",
+		"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI": "/v2/credentials/probe",
+		"AWS_DEFAULT_REGION":                     "us-west-2",
+		"AWS_EC2_METADATA_DISABLED":              "true",
+		"AWS_ENDPOINT_URL":                       "https://aws.example.test",
+		"AWS_ENDPOINT_URL_BEDROCK":               "https://bedrock.example.test",
+		"AWS_PROFILE":                            "gascity",
+		"AWS_REGION":                             "us-east-1",
+		"AWS_ROLE_ARN":                           "arn:aws:iam::123456789012:role/gascity",
+		"AWS_SDK_LOAD_CONFIG":                    "1",
+		"AWS_SECRET_ACCESS_KEY":                  "aws-secret-probe",
+		"AWS_SESSION_TOKEN":                      "aws-session-probe",
+		"AWS_SHARED_CREDENTIALS_FILE":            "/tmp/aws-credentials",
+		"AWS_USE_DUALSTACK_ENDPOINT":             "true",
+		"AWS_USE_FIPS_ENDPOINT":                  "true",
+		"AWS_WEB_IDENTITY_TOKEN_FILE":            "/tmp/aws-web-identity-token",
+	}
+	if len(probes) != len(providerCredentialEnvKeys) {
+		t.Fatalf("probe set size %d does not match exact provider key set size %d; update the test when exact keys change",
+			len(probes), len(providerCredentialEnvKeys))
+	}
+	for k, v := range probes {
+		t.Setenv(k, v)
+	}
+	for _, key := range []string{"AWS_EXECUTION_ENV", "AWS_PAGER", "AWS_VAULT"} {
+		t.Setenv(key, "not-provider-auth")
+	}
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	for k, want := range probes {
+		if got[k] != want {
+			t.Errorf("ExtraEnv[%s] = %q, want %q - exact provider key may be missing", k, got[k], want)
+		}
+	}
+	for _, key := range []string{"AWS_EXECUTION_ENV", "AWS_PAGER", "AWS_VAULT"} {
+		if _, ok := got[key]; ok {
+			t.Errorf("ExtraEnv should not include broad AWS runtime state %s", key)
+		}
+	}
 }
 
 func TestBuildSupervisorServiceDataReadsAllowlistedDoltCredentialKeysFromLaunchctl(t *testing.T) {

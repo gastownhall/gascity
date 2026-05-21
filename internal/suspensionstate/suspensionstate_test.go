@@ -482,10 +482,10 @@ func TestSetRigSuspended_FullLifecycle(t *testing.T) {
 func TestSuspendedRigNames(t *testing.T) {
 	st := State{
 		Rigs: map[string]Override{
-			"alpha":   {Suspended: boolPtr(true)},
-			"beta":    {Suspended: boolPtr(false)},
-			"gamma":   {Suspended: boolPtr(true)},
-			"delta":   {},
+			"alpha": {Suspended: boolPtr(true)},
+			"beta":  {Suspended: boolPtr(false)},
+			"gamma": {Suspended: boolPtr(true)},
+			"delta": {},
 		},
 	}
 	names := SuspendedRigNames(st)

@@ -2810,13 +2810,22 @@ func TestNewSlingCmdArgs(t *testing.T) {
 }
 
 // fakeQuerier implements BeadQuerier for testing pre-flight checks.
+// Callers may wire a parent bead for hasLiveConvoyParent lookups by
+// setting bead.ParentID and parent.ID to the same value.
 type fakeQuerier struct {
-	bead beads.Bead
-	err  error
+	bead   beads.Bead
+	parent *beads.Bead
+	err    error
 }
 
-func (q *fakeQuerier) Get(_ string) (beads.Bead, error) {
-	return q.bead, q.err
+func (q *fakeQuerier) Get(id string) (beads.Bead, error) {
+	if q.err != nil {
+		return beads.Bead{}, q.err
+	}
+	if q.parent != nil && id == q.bead.ParentID {
+		return *q.parent, nil
+	}
+	return q.bead, nil
 }
 
 // fakeChildQuerier implements BeadChildQuerier for testing batch dispatch.
@@ -5538,6 +5547,52 @@ func TestDryRunConvoy(t *testing.T) {
 	}
 }
 
+func TestDryRunConvoyUsesTracksMembers(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "CVY-1", Type: "convoy", Status: "open", Title: "Sprint 12 tasks"},
+		{ID: "EPIC-1", Type: "epic", Status: "open", Title: "Product work"},
+		{ID: "BL-1", Type: "task", Status: "open", Title: "Login page", ParentID: "EPIC-1"},
+		{ID: "BL-2", Type: "task", Status: "closed", Title: "Auth backend", ParentID: "EPIC-1"},
+	}, []beads.Dep{
+		{IssueID: "CVY-1", DependsOnID: "BL-1", Type: "tracks"},
+		{IssueID: "CVY-1", DependsOnID: "BL-2", Type: "tracks"},
+	})
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = store
+	opts := testOpts(a, "CVY-1")
+	opts.DryRun = true
+	code := doSlingBatch(opts, deps, store, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("dry-run returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Children (2 total, 1 open)") {
+		t.Fatalf("stdout missing tracks children summary: %s", out)
+	}
+	if !strings.Contains(out, "BL-1") || !strings.Contains(out, "would route") {
+		t.Errorf("stdout missing tracked open child route preview: %s", out)
+	}
+	if !strings.Contains(out, "BL-2") || !strings.Contains(out, "skip") {
+		t.Errorf("stdout missing tracked closed child skip preview: %s", out)
+	}
+	if !strings.Contains(out, "bd update 'BL-1' --set-metadata gc.routed_to=mayor") {
+		t.Errorf("stdout missing tracked BL-1 route command: %s", out)
+	}
+	if strings.Contains(out, "bd update 'BL-2' --set-metadata gc.routed_to=mayor") {
+		t.Errorf("stdout should not route closed tracked BL-2: %s", out)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
 func TestDryRunBatchOnFormula(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -5748,7 +5803,10 @@ func TestDryRunNilQuerier(t *testing.T) {
 // --- Idempotency detection (checkBeadState + integration) tests ---
 
 func TestCheckBeadStateIdempotentFixedAgent(t *testing.T) {
-	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Metadata: map[string]string{"gc.routed_to": "mayor"}}}
+	q := &fakeQuerier{
+		bead:   beads.Bead{ID: "BL-42", ParentID: "CVY-1", Metadata: map[string]string{"gc.routed_to": "mayor"}},
+		parent: &beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"},
+	}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	result := checkBeadState(q, "BL-42", a)
@@ -5761,7 +5819,10 @@ func TestCheckBeadStateIdempotentFixedAgent(t *testing.T) {
 }
 
 func TestCheckBeadStateIdempotentPool(t *testing.T) {
-	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Metadata: map[string]string{"gc.routed_to": "hw/polecat"}}}
+	q := &fakeQuerier{
+		bead:   beads.Bead{ID: "BL-42", ParentID: "CVY-1", Metadata: map[string]string{"gc.routed_to": "hw/polecat"}},
+		parent: &beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"},
+	}
 	a := config.Agent{Name: "polecat", Dir: "hw", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)}
 
 	result := checkBeadState(q, "BL-42", a)
@@ -5774,11 +5835,15 @@ func TestCheckBeadStateIdempotentPool(t *testing.T) {
 }
 
 func TestCheckBeadStateIdempotentPoolMultiLabels(t *testing.T) {
-	q := &fakeQuerier{bead: beads.Bead{
-		ID:       "BL-42",
-		Labels:   []string{"priority:high", "sprint:3"},
-		Metadata: map[string]string{"gc.routed_to": "hw/polecat"},
-	}}
+	q := &fakeQuerier{
+		bead: beads.Bead{
+			ID:       "BL-42",
+			ParentID: "CVY-1",
+			Labels:   []string{"priority:high", "sprint:3"},
+			Metadata: map[string]string{"gc.routed_to": "hw/polecat"},
+		},
+		parent: &beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"},
+	}
 	a := config.Agent{Name: "polecat", Dir: "hw", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)}
 
 	result := checkBeadState(q, "BL-42", a)
@@ -5840,7 +5905,10 @@ func TestDoSlingIdempotentSkipsRouting(t *testing.T) {
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
-	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Metadata: map[string]string{"gc.routed_to": "mayor"}}}
+	q := &fakeQuerier{
+		bead:   beads.Bead{ID: "BL-42", ParentID: "CVY-1", Metadata: map[string]string{"gc.routed_to": "mayor"}},
+		parent: &beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"},
+	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-42")
@@ -5857,6 +5925,205 @@ func TestDoSlingIdempotentSkipsRouting(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "skipping (idempotent)") {
 		t.Errorf("stdout = %q, want idempotent label", stdout.String())
+	}
+}
+
+// TestDoSlingRecoversMissingConvoyOnPreRoutedBead covers the case where a
+// bead has gc.routed_to set (e.g., declared via bd create --metadata) but
+// no auto-convoy membership — a prior sling never finished, or the route came
+// from outside gc sling. A subsequent sling must re-run finalize() to create
+// the auto-convoy tracking dependency and poke the controller, instead of
+// skipping as idempotent and leaving the work orphaned.
+func TestDoSlingRecoversMissingConvoyOnPreRoutedBead(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	// Override the package-level poke hook so we can count controller pokes
+	// without spinning up IPC.
+	var pokeCount int
+	oldPoke := slingPokeController
+	slingPokeController = func(string) error {
+		pokeCount++
+		return nil
+	}
+	t.Cleanup(func() { slingPokeController = oldPoke })
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	existingConvoy, err := deps.Store.Create(beads.Bead{Title: "existing convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("seed existing convoy: %v", err)
+	}
+	// Pre-set gc.routed_to on the bead via the store, without ever creating
+	// a convoy. Mirrors `bd create --metadata '{"gc.routed_to":"mayor"}'`.
+	if err := deps.Store.SetMetadata("BL-42", "gc.routed_to", "mayor"); err != nil {
+		t.Fatalf("seed routed_to: %v", err)
+	}
+
+	opts := testOpts(a, "BL-42")
+	code := doSling(opts, deps, deps.Store, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	bead, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42): %v", err)
+	}
+	if got := bead.Metadata["gc.routed_to"]; got != "mayor" {
+		t.Errorf("gc.routed_to = %q, want %q (should be unchanged)", got, "mayor")
+	}
+	if bead.ParentID != "" {
+		t.Fatalf("ParentID = %q, want empty because auto-convoy membership uses tracks deps", bead.ParentID)
+	}
+	trackDeps, err := deps.Store.DepList(bead.ID, "up")
+	if err != nil {
+		t.Fatalf("DepList(%s, up): %v", bead.ID, err)
+	}
+	var recoveredConvoyID string
+	for _, dep := range trackDeps {
+		if dep.Type == "tracks" && dep.DependsOnID == bead.ID {
+			recoveredConvoyID = dep.IssueID
+		}
+	}
+	if recoveredConvoyID == "" {
+		t.Fatalf("expected recovered bead to have a tracks dependency, got deps=%v", trackDeps)
+	}
+	if recoveredConvoyID == existingConvoy.ID {
+		t.Fatalf("recovered convoy = pre-existing convoy %s, want a fresh convoy", existingConvoy.ID)
+	}
+	parent, err := deps.Store.Get(recoveredConvoyID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", recoveredConvoyID, err)
+	}
+	if parent.Type != "convoy" {
+		t.Errorf("parent.Type = %q, want %q", parent.Type, "convoy")
+	}
+	if parent.Status == "closed" {
+		t.Errorf("parent convoy should not be closed immediately after recovery")
+	}
+	if pokeCount < 1 {
+		t.Errorf("expected slingPokeController to fire at least once, got %d", pokeCount)
+	}
+	if !strings.Contains(stdout.String(), "Auto-convoy") {
+		t.Errorf("stdout should mention Auto-convoy: %s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "skipping (idempotent)") {
+		t.Errorf("stdout should not report idempotent skip: %s", stdout.String())
+	}
+}
+
+func TestDoSlingNoConvoyRepeatIsIdempotent(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	var pokeCount int
+	oldPoke := slingPokeController
+	slingPokeController = func(string) error {
+		pokeCount++
+		return nil
+	}
+	t.Cleanup(func() { slingPokeController = oldPoke })
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
+
+	opts := testOpts(a, "BL-42")
+	opts.NoConvoy = true
+	code := doSling(opts, deps, deps.Store, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("first doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	first, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42): %v", err)
+	}
+	if first.ParentID != "" {
+		t.Fatalf("first no-convoy sling set ParentID = %q, want empty", first.ParentID)
+	}
+	if pokeCount != 1 {
+		t.Fatalf("first no-convoy sling poke count = %d, want 1", pokeCount)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = doSling(opts, deps, deps.Store, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("second doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	second, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42) after second sling: %v", err)
+	}
+	if second.ParentID != "" {
+		t.Fatalf("second no-convoy sling set ParentID = %q, want empty", second.ParentID)
+	}
+	if pokeCount != 1 {
+		t.Fatalf("second no-convoy sling poked controller; count = %d, want 1", pokeCount)
+	}
+	if !strings.Contains(stdout.String(), "skipping (idempotent)") {
+		t.Fatalf("stdout = %q, want idempotent skip", stdout.String())
+	}
+
+	all, err := deps.Store.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("list beads: %v", err)
+	}
+	for _, b := range all {
+		if b.Type == "convoy" {
+			t.Fatalf("unexpected convoy bead after no-convoy repeat: %+v", b)
+		}
+	}
+}
+
+func TestDoSlingKeepsWorkflowParentIdempotent(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	var pokeCount int
+	oldPoke := slingPokeController
+	slingPokeController = func(string) error {
+		pokeCount++
+		return nil
+	}
+	t.Cleanup(func() { slingPokeController = oldPoke })
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "WF-1", Title: "workflow", Type: "workflow", Status: "in_progress", Metadata: map[string]string{"gc.kind": "workflow"}},
+		{
+			ID:       "BL-42",
+			Title:    "workflow step",
+			Type:     "task",
+			Status:   "open",
+			ParentID: "WF-1",
+			Metadata: map[string]string{"gc.routed_to": "mayor"},
+		},
+	}, nil)
+
+	opts := testOpts(a, "BL-42")
+	code := doSling(opts, deps, deps.Store, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	bead, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42): %v", err)
+	}
+	if bead.ParentID != "WF-1" {
+		t.Fatalf("ParentID = %q, want original workflow parent WF-1", bead.ParentID)
+	}
+	if pokeCount != 0 {
+		t.Fatalf("idempotent workflow parent sling poked controller; count = %d, want 0", pokeCount)
+	}
+	if !strings.Contains(stdout.String(), "skipping (idempotent)") {
+		t.Fatalf("stdout = %q, want idempotent skip", stdout.String())
 	}
 }
 
@@ -5897,8 +6164,11 @@ func TestDoSlingIdempotentWithOnFormula(t *testing.T) {
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
-	// Bead is already assigned to mayor — idempotent.
-	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Assignee: "mayor"}}
+	// Bead is already assigned to mayor with a live convoy parent — idempotent.
+	q := &fakeQuerier{
+		bead:   beads.Bead{ID: "BL-42", ParentID: "CVY-1", Assignee: "mayor"},
+		parent: &beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"},
+	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-42")
@@ -5925,11 +6195,11 @@ func TestDoSlingBatchIdempotentChildSkipped(t *testing.T) {
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
-	q.beadsByID["BL-1"] = beads.Bead{ID: "BL-1", Status: "open", Assignee: "mayor"}
-	q.beadsByID["BL-2"] = beads.Bead{ID: "BL-2", Status: "open"}
+	q.beadsByID["BL-1"] = beads.Bead{ID: "BL-1", Status: "open", Assignee: "mayor", ParentID: "CVY-1"}
+	q.beadsByID["BL-2"] = beads.Bead{ID: "BL-2", Status: "open", ParentID: "CVY-1"}
 	q.childrenOf["CVY-1"] = []beads.Bead{
-		{ID: "BL-1", Status: "open", Assignee: "mayor"},
-		{ID: "BL-2", Status: "open"},
+		{ID: "BL-1", Status: "open", Assignee: "mayor", ParentID: "CVY-1"},
+		{ID: "BL-2", Status: "open", ParentID: "CVY-1"},
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
@@ -5966,11 +6236,11 @@ func TestDoSlingBatchAllIdempotent(t *testing.T) {
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
-	q.beadsByID["BL-1"] = beads.Bead{ID: "BL-1", Status: "open", Assignee: "mayor"}
-	q.beadsByID["BL-2"] = beads.Bead{ID: "BL-2", Status: "open", Assignee: "mayor"}
+	q.beadsByID["BL-1"] = beads.Bead{ID: "BL-1", Status: "open", Assignee: "mayor", ParentID: "CVY-1"}
+	q.beadsByID["BL-2"] = beads.Bead{ID: "BL-2", Status: "open", Assignee: "mayor", ParentID: "CVY-1"}
 	q.childrenOf["CVY-1"] = []beads.Bead{
-		{ID: "BL-1", Status: "open", Assignee: "mayor"},
-		{ID: "BL-2", Status: "open", Assignee: "mayor"},
+		{ID: "BL-1", Status: "open", Assignee: "mayor", ParentID: "CVY-1"},
+		{ID: "BL-2", Status: "open", Assignee: "mayor", ParentID: "CVY-1"},
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
@@ -5997,7 +6267,10 @@ func TestDryRunIdempotentBead(t *testing.T) {
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
-	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Title: "Login page", Assignee: "mayor", Status: "open"}}
+	q := &fakeQuerier{
+		bead:   beads.Bead{ID: "BL-42", Title: "Login page", ParentID: "CVY-1", Assignee: "mayor", Status: "open"},
+		parent: &beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"},
+	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.Store = seededStore("BL-42")
@@ -6418,11 +6691,11 @@ func TestDoSlingBatchAllIdempotentNoNudge(t *testing.T) {
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
-	q.beadsByID["BL-1"] = beads.Bead{ID: "BL-1", Status: "open", Assignee: "mayor"}
-	q.beadsByID["BL-2"] = beads.Bead{ID: "BL-2", Status: "open", Assignee: "mayor"}
+	q.beadsByID["BL-1"] = beads.Bead{ID: "BL-1", Status: "open", Assignee: "mayor", ParentID: "CVY-1"}
+	q.beadsByID["BL-2"] = beads.Bead{ID: "BL-2", Status: "open", Assignee: "mayor", ParentID: "CVY-1"}
 	q.childrenOf["CVY-1"] = []beads.Bead{
-		{ID: "BL-1", Status: "open", Assignee: "mayor"},
-		{ID: "BL-2", Status: "open", Assignee: "mayor"},
+		{ID: "BL-1", Status: "open", Assignee: "mayor", ParentID: "CVY-1"},
+		{ID: "BL-2", Status: "open", Assignee: "mayor", ParentID: "CVY-1"},
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)

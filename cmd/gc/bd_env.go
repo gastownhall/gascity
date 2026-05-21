@@ -1062,6 +1062,14 @@ func cityRuntimeEnvMapForCity(cityPath string) map[string]string {
 	return citylayout.CityRuntimeEnvMapForRuntimeDir(cityPath, citylayout.TrustedAmbientCityRuntimeDir(cityPath))
 }
 
+// cityIdentityAnchorsForCity returns only the three identity anchors
+// (GC_CITY, GC_CITY_PATH, GC_CITY_RUNTIME_DIR) for cityPath. The shared
+// projection lives in internal/citylayout so CLI and API session resolvers
+// keep the identity-only contract in sync.
+func cityIdentityAnchorsForCity(cityPath string) map[string]string {
+	return citylayout.CityIdentityEnvMap(cityPath)
+}
+
 func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 	cityPath = normalizePathForCompare(cityPath)
 	overrides := cityRuntimeEnvMapForCity(cityPath)
@@ -1121,6 +1129,9 @@ func mirrorBeadsDoltEnv(env map[string]string) {
 	}
 }
 
+// cityForStoreDir resolves ambient store contexts. GC_CITY intentionally wins
+// over filesystem discovery here; callers with an authoritative city path or
+// hook-projected store root must pass that city directly.
 func cityForStoreDir(dir string) string {
 	if cityPath, ok := resolveExplicitCityPathEnv(); ok {
 		return cityPath

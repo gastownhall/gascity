@@ -664,6 +664,11 @@ func ensureBeadsProvider(cityPath string) error {
 
 		script := strings.TrimPrefix(provider, "exec:")
 		managedBDProvider := samePath(script, gcBeadsBdScriptPath(cityPath))
+		if managedBDProvider {
+			if err := standaloneBdDoltConflictIfPresent(cityPath); err != nil {
+				return err
+			}
+		}
 		providerEnv, envErr := providerLifecycleProcessEnvWithError(cityPath, provider)
 		if envErr != nil {
 			return envErr

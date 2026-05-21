@@ -116,14 +116,16 @@ func TestRigLifecycle(t *testing.T) {
 			t.Fatalf("gc rig suspend %s: %v\n%s", rigName, err, out)
 		}
 
-		// Suspension is recorded in the runtime state file, not city.toml,
-		// so each clone can have its own suspended-rig profile.
-		if !c.HasFile(filepath.Join(".gc", "runtime", "rig-state.json")) {
-			t.Error(".gc/runtime/rig-state.json should exist after rig suspend")
+		// Suspension is recorded in the unified runtime state file, not
+		// city.toml, so each clone can have its own suspended-rig
+		// profile. City, rig, and (future) agent overrides share one
+		// .gc/runtime/suspension-state.json.
+		if !c.HasFile(filepath.Join(".gc", "runtime", "suspension-state.json")) {
+			t.Error(".gc/runtime/suspension-state.json should exist after rig suspend")
 		} else {
-			state := c.ReadFile(filepath.Join(".gc", "runtime", "rig-state.json"))
+			state := c.ReadFile(filepath.Join(".gc", "runtime", "suspension-state.json"))
 			if !strings.Contains(state, rigName) || !strings.Contains(state, "\"suspended\": true") {
-				t.Errorf("rig-state.json should mark %q suspended, got:\n%s", rigName, state)
+				t.Errorf("suspension-state.json should mark %q suspended, got:\n%s", rigName, state)
 			}
 		}
 

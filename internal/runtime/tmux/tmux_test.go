@@ -2006,6 +2006,61 @@ func TestSendKeysLiteralWithRetry_NonTransientFailsFast(t *testing.T) {
 	}
 }
 
+func TestSendKeysLiteralWithRetryFallsBackToPasteBufferOnCommandTooLong(t *testing.T) {
+	fe := &fakeExecutor{
+		errs: []error{errors.New("command too long")},
+	}
+	tm := NewTmuxWithConfig(DefaultConfig())
+	tm.exec = fe
+
+	err := tm.sendKeysLiteralWithRetry("%1", "large startup prompt", time.Second)
+	if err != nil {
+		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
+	}
+
+	if len(fe.calls) != 3 {
+		t.Fatalf("tmux calls = %d, want 3: %#v", len(fe.calls), fe.calls)
+	}
+	first := strings.Join(fe.calls[0], " ")
+	if !strings.Contains(first, "send-keys") || !strings.Contains(first, "-l") {
+		t.Fatalf("first call = %v, want literal send-keys", fe.calls[0])
+	}
+	assertTmuxCommand(t, fe.calls[1], "load-buffer")
+	assertTmuxCommand(t, fe.calls[2], "paste-buffer")
+	third := strings.Join(fe.calls[2], "\x00")
+	for _, want := range []string{"\x00-p\x00", "\x00-d\x00", "\x00-t\x00%1"} {
+		if !strings.Contains(third, want) {
+			t.Fatalf("paste-buffer call = %v, missing %q", fe.calls[2], want)
+		}
+	}
+}
+
+func TestSendKeysLiteralWithRetryUsesPasteBufferForLargeText(t *testing.T) {
+	fe := &fakeExecutor{}
+	tm := NewTmuxWithConfig(DefaultConfig())
+	tm.exec = fe
+
+	err := tm.sendKeysLiteralWithRetry("%1", strings.Repeat("x", maxSendKeysLiteralLen+1), time.Second)
+	if err != nil {
+		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
+	}
+
+	if len(fe.calls) != 2 {
+		t.Fatalf("tmux calls = %d, want 2: %#v", len(fe.calls), fe.calls)
+	}
+	assertTmuxCommand(t, fe.calls[0], "load-buffer")
+	assertTmuxCommand(t, fe.calls[1], "paste-buffer")
+}
+
+func assertTmuxCommand(t *testing.T, args []string, want string) {
+	t.Helper()
+
+	joined := "\x00" + strings.Join(args, "\x00") + "\x00"
+	if !strings.Contains(joined, "\x00"+want+"\x00") {
+		t.Fatalf("tmux call = %v, want command %q", args, want)
+	}
+}
+
 func TestNudgeSession_WithRetry(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")

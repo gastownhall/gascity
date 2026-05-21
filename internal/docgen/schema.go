@@ -76,3 +76,19 @@ func GenerateCitySchema() (*jsonschema.Schema, error) {
 		"Use [imports.*] for PackV2 composition; legacy includes, [packs.*], and [[agent]] fields remain visible for migration compatibility."
 	return s, nil
 }
+
+// GeneratePackSchema produces a JSON Schema for the pack.toml manifest
+// format (PackV2). It reflects the config.PackConfig struct using TOML
+// field names and extracts doc comments as descriptions.
+func GeneratePackSchema() (*jsonschema.Schema, error) {
+	r, err := newReflector()
+	if err != nil {
+		return nil, err
+	}
+	s := r.Reflect(&config.PackConfig{})
+	s.Title = "Gas City Pack Manifest"
+	s.Description = "Schema for pack.toml — the PackV2 manifest that declares " +
+		"a pack's metadata, agents, providers, services, commands, and import surface. " +
+		"Cities and rigs compose packs via [imports.*]."
+	return s, nil
+}

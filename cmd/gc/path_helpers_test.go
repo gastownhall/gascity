@@ -38,20 +38,10 @@ func shortSocketTempDir(t *testing.T, prefix string) string {
 // shutdownBeadsProvider.
 func clearInheritedBeadsEnv(t *testing.T) {
 	t.Helper()
-	for _, key := range []string{
-		"GC_BEADS",
-		"GC_BIN",
-		"GC_DOLT",
-		"GC_DOLT_HOST",
-		"GC_DOLT_PORT",
-		"GC_DOLT_USER",
-		"GC_DOLT_PASSWORD",
-		"BEADS_DOLT_SERVER_HOST",
-		"BEADS_DOLT_SERVER_PORT",
-		"BEADS_DOLT_SERVER_USER",
-		"BEADS_DOLT_PASSWORD",
-		"GC_BEADS_SCOPE_ROOT",
-	} {
+	for _, key := range liveEnvKeysForTests() {
+		if key == "GC_HOME" {
+			continue
+		}
 		t.Setenv(key, "")
 	}
 }

@@ -189,7 +189,7 @@ func knownTOMLKeys() []string {
 		reflect.TypeOf(ServiceWorkflowConfig{}),
 		reflect.TypeOf(ServiceProcessConfig{}),
 		reflect.TypeOf(AgentDefaults{}),
-		reflect.TypeOf(packConfig{}),
+		reflect.TypeOf(PackConfig{}),
 		reflect.TypeOf(PackMeta{}),
 		reflect.TypeOf(Import{}),
 		reflect.TypeOf(NamedSession{}),
@@ -197,8 +197,8 @@ func knownTOMLKeys() []string {
 		reflect.TypeOf(PackDoctorEntry{}),
 		reflect.TypeOf(PackCommandEntry{}),
 		reflect.TypeOf(PackGlobal{}),
-		reflect.TypeOf(packDefaults{}),
-		reflect.TypeOf(packRigDefaults{}),
+		reflect.TypeOf(PackDefaults{}),
+		reflect.TypeOf(PackRigDefaults{}),
 	}
 	for _, t := range types {
 		collectTOMLTags(t, seen)

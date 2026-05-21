@@ -2043,6 +2043,7 @@ export interface components {
             SleepAfterIdle: string | null;
             StartCommand: string | null;
             Suspended: boolean | null;
+            TmuxAlias: string | null;
             WakeMode: string | null;
             WorkDir: string | null;
         };
@@ -2059,6 +2060,8 @@ export interface components {
             scope?: string;
             /** @description Override suspended state. */
             suspended?: boolean;
+            /** @description Override tmux session name template. */
+            tmux_alias?: string;
             /** @description Override session working directory. */
             work_dir?: string;
         };

@@ -130,6 +130,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			patch: AcknowledgeDrainPatch(false),
 			want: MetadataPatch{
 				"state":                     "drained",
+				"state_reason":              "",
 				"last_woke_at":              "",
 				"pending_create_claim":      "",
 				"pending_create_started_at": "",
@@ -140,6 +141,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			patch: AcknowledgeDrainPatch(true),
 			want: MetadataPatch{
 				"state":                      "drained",
+				"state_reason":               "",
 				"last_woke_at":               "",
 				"pending_create_claim":       "",
 				"pending_create_started_at":  "",
@@ -156,6 +158,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			patch: CompleteDrainPatch(now, "idle", true),
 			want: MetadataPatch{
 				"state":                      string(StateAsleep),
+				"state_reason":               "",
 				"sleep_reason":               "idle",
 				"last_woke_at":               "",
 				"pending_create_claim":       "",
@@ -495,6 +498,40 @@ func TestCommitStartedPatchCanPersistHashesWithoutRestampingState(t *testing.T) 
 	}
 	if !reflect.DeepEqual(patch, want) {
 		t.Fatalf("patch = %#v, want %#v", patch, want)
+	}
+}
+
+func TestDrainAckStopPendingPatchOwnsDurableStopPendingMetadata(t *testing.T) {
+	now := time.Date(2026, 5, 18, 4, 15, 0, 0, time.UTC)
+	patch := DrainAckStopPendingPatch(now)
+
+	want := MetadataPatch{
+		"state":                     string(StateDraining),
+		"state_reason":              DrainAckStopPendingReason,
+		"drain_at":                  now.Format(time.RFC3339),
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+	}
+	if !reflect.DeepEqual(patch, want) {
+		t.Fatalf("patch = %#v, want %#v", patch, want)
+	}
+}
+
+func TestDrainCompletionPatchesClearStopPendingReason(t *testing.T) {
+	now := time.Date(2026, 5, 18, 4, 15, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		patch MetadataPatch
+	}{
+		{name: "acknowledge", patch: AcknowledgeDrainPatch(false)},
+		{name: "complete", patch: CompleteDrainPatch(now, "idle", false)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, ok := tt.patch["state_reason"]; !ok || got != "" {
+				t.Fatalf("state_reason = %q, present=%v; want explicit clear", got, ok)
+			}
+		})
 	}
 }
 

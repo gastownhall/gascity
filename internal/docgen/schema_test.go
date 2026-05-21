@@ -187,6 +187,108 @@ func TestCitySchemaOrderOverrideIncludesLegacyGateAlias(t *testing.T) {
 	}
 }
 
+// TestCitySchemaCityAgentNotRequired guards against the regression where
+// City.Agents was reflected as a required property because its TOML tag
+// lacked omitempty. Real cities use [imports.*] (PackV2) and ship without
+// any [[agent]] block; the schema must reflect that.
+func TestCitySchemaCityAgentNotRequired(t *testing.T) {
+	s, err := GenerateCitySchema()
+	if err != nil {
+		t.Fatalf("GenerateCitySchema: %v", err)
+	}
+
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	defs := raw["$defs"].(map[string]interface{})
+	city := defs["City"].(map[string]interface{})
+	required, _ := city["required"].([]interface{})
+	for _, r := range required {
+		if r == "agent" {
+			t.Errorf("City.required includes %q; PackV2 cities ship without [[agent]] blocks — Agents needs omitempty", "agent")
+		}
+	}
+}
+
+func TestGeneratePackSchema(t *testing.T) {
+	s, err := GeneratePackSchema()
+	if err != nil {
+		t.Fatalf("GeneratePackSchema: %v", err)
+	}
+
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	props := defProperties(t, raw, "PackConfig")
+	for _, expected := range []string{"pack", "imports", "agent", "providers", "service", "commands"} {
+		if _, ok := props[expected]; !ok {
+			t.Errorf("missing PackConfig property %q", expected)
+		}
+	}
+}
+
+func TestPackSchemaPackMetaRequired(t *testing.T) {
+	s, err := GeneratePackSchema()
+	if err != nil {
+		t.Fatalf("GeneratePackSchema: %v", err)
+	}
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	defs := raw["$defs"].(map[string]interface{})
+	pack := defs["PackConfig"].(map[string]interface{})
+	required, _ := pack["required"].([]interface{})
+	found := false
+	for _, r := range required {
+		if r == "pack" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("PackConfig.required = %v, want to include %q ([pack] block is mandatory in pack.toml)", required, "pack")
+	}
+}
+
+func TestPackSchemaAliasFieldHidden(t *testing.T) {
+	s, err := GeneratePackSchema()
+	if err != nil {
+		t.Fatalf("GeneratePackSchema: %v", err)
+	}
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	props := defProperties(t, raw, "PackConfig")
+	if _, ok := props["agents"]; ok {
+		t.Errorf("PackConfig should hide the legacy %q alias (jsonschema:\"-\") for agent_defaults", "agents")
+	}
+}
+
 func TestCitySchemaAgentDefinition(t *testing.T) {
 	s, err := GenerateCitySchema()
 	if err != nil {

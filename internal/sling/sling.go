@@ -1265,3 +1265,8 @@ type BeadCheckResult struct {
 	Idempotent bool
 	Warnings   []string
 }
+
+// BeadCheckOptions configures pre-flight bead state checks for a route.
+type BeadCheckOptions struct {
+	NoConvoy bool
+}

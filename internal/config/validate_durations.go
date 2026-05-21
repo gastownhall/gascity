@@ -48,6 +48,7 @@ func ValidateDurations(cfg *City, source string) []string {
 	check("[daemon]", "wisp_gc_interval", cfg.Daemon.WispGCInterval)
 	check("[daemon]", "wisp_ttl", cfg.Daemon.WispTTL)
 	check("[daemon]", "drift_drain_timeout", cfg.Daemon.DriftDrainTimeout)
+	check("[daemon]", "start_ready_timeout", cfg.Daemon.StartReadyTimeout)
 
 	// Orders config durations.
 	check("[orders]", "max_timeout", cfg.Orders.MaxTimeout)
