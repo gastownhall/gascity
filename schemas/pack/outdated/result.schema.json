@@ -8,6 +8,10 @@
       "description": "Version of this JSON result shape.",
       "const": "1"
     },
+    "ok": {
+      "const": true,
+      "description": "Whether the command completed successfully."
+    },
     "refreshed": {
       "type": "boolean",
       "description": "Whether registry catalogs were refreshed before checking."
@@ -32,6 +36,6 @@
       }
     }
   },
-  "required": ["schema_version", "refreshed", "items"],
+  "required": ["schema_version", "ok", "refreshed", "items"],
   "additionalProperties": false
 }

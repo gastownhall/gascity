@@ -2,11 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "description": "Result payload for gc pack registry search.",
-  "required": ["schema_version", "query", "refreshed", "limit", "all", "truncated", "count", "results", "failures"],
+  "required": ["schema_version", "ok", "query", "refreshed", "limit", "all", "truncated", "count", "results", "failures"],
   "properties": {
     "schema_version": {
       "const": "1",
       "description": "Version of this command result schema."
+    },
+    "ok": {
+      "const": true,
+      "description": "Whether the command completed successfully."
     },
     "query": {
       "type": "string",

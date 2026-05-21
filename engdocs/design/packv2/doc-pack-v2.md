@@ -3,7 +3,7 @@
 > **Successor CLI marker:** PackV2 originally launched with `gc import` as the
 > import-management command surface. The planned successor is `gc pack` /
 > `gc pack registry`; see
-> [`engdocs/design/pack-and-registry-cli-surface.md`](../../engdocs/design/pack-and-registry-cli-surface.md).
+> [`engdocs/design/pack-and-registry-cli-surface.md`](../pack-and-registry-cli-surface.md).
 > Current command guidance should prefer `gc pack` for new pack dependency and
 > registry workflows. `gc import` remains compatibility surface until doctor
 > remediation parity is available and the deprecation train explicitly advances.

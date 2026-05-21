@@ -8,6 +8,10 @@
       "description": "Version of this JSON result shape.",
       "const": "1"
     },
+    "ok": {
+      "const": true,
+      "description": "Whether the command completed successfully."
+    },
     "import": {
       "type": "object",
       "description": "The selected pack dependency.",
@@ -30,6 +34,6 @@
       "additionalProperties": false
     }
   },
-  "required": ["schema_version", "import"],
+  "required": ["schema_version", "ok", "import"],
   "additionalProperties": false
 }

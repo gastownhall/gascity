@@ -8,6 +8,10 @@
       "description": "Version of this JSON result shape.",
       "const": "1"
     },
+    "ok": {
+      "const": true,
+      "description": "Whether the command completed successfully."
+    },
     "transitive": {
       "type": "boolean",
       "description": "Whether transitive pack dependencies were included."
@@ -20,7 +24,7 @@
       }
     }
   },
-  "required": ["schema_version", "transitive", "imports"],
+  "required": ["schema_version", "ok", "transitive", "imports"],
   "additionalProperties": false,
   "$defs": {
     "packDependency": {

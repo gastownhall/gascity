@@ -3,7 +3,7 @@
 > **Successor CLI marker:** Loader semantics remain reader-only, but command
 > remediation is moving from the original `gc import` surface to canonical
 > `gc pack` verbs. See
-> [`engdocs/design/pack-and-registry-cli-surface.md`](../../engdocs/design/pack-and-registry-cli-surface.md)
+> [`engdocs/design/pack-and-registry-cli-surface.md`](../pack-and-registry-cli-surface.md)
 > and treat `gc import` mentions below as launch-era compatibility/history
 > unless explicitly updated.
 

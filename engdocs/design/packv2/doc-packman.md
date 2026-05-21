@@ -3,7 +3,7 @@
 > **Successor surface marker:** This document records the PackV2
 > `gc import` launch contract. The proposed successor surface is
 > `gc pack` / `gc pack registry`; see
-> [`engdocs/design/pack-and-registry-cli-surface.md`](../../engdocs/design/pack-and-registry-cli-surface.md).
+> [`engdocs/design/pack-and-registry-cli-surface.md`](../pack-and-registry-cli-surface.md).
 > Current implementation work is adding `gc pack` as the pack-facing surface
 > while preserving `gc import` compatibility through shared handlers. Deprecation
 > warnings/removal remain gated on `gc doctor` / `gc doctor --fix` parity.
