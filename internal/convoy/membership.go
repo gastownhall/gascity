@@ -33,6 +33,28 @@ func TrackItem(store beads.Store, convoyID, itemID string) error {
 
 // UntrackItem removes a convoy membership edge from convoyID to itemID.
 func UntrackItem(store beads.Store, convoyID, itemID string) error {
+	deps, err := store.DepList(convoyID, "down")
+	if err != nil {
+		return fmt.Errorf("listing convoy %s dependencies: %w", convoyID, err)
+	}
+	hasTrack := false
+	var mixedTypes []string
+	for _, dep := range deps {
+		if dep.IssueID != convoyID || dep.DependsOnID != itemID {
+			continue
+		}
+		if dep.Type == TrackingDepType {
+			hasTrack = true
+			continue
+		}
+		mixedTypes = append(mixedTypes, dep.Type)
+	}
+	if !hasTrack {
+		return nil
+	}
+	if len(mixedTypes) > 0 {
+		return fmt.Errorf("not removing ambiguous %s dependency %s -> %s with other dependency types: %v", TrackingDepType, convoyID, itemID, mixedTypes)
+	}
 	if err := store.DepRemove(convoyID, itemID); err != nil {
 		return fmt.Errorf("removing %s dependency %s -> %s: %w", TrackingDepType, convoyID, itemID, err)
 	}
@@ -99,6 +121,12 @@ func unresolvedTrackedItem(id string) beads.Bead {
 		Type:   "task",
 		Status: trackedStatusUnknown,
 	}
+}
+
+// IsUnresolvedTrackedItem reports whether b is a synthetic placeholder for a
+// dangling tracks dependency whose target bead is unavailable.
+func IsUnresolvedTrackedItem(b beads.Bead) bool {
+	return b.Status == trackedStatusUnknown && b.Type == "task" && b.Title == b.ID
 }
 
 // HasTrack reports whether convoyID has a tracks dependency to itemID.

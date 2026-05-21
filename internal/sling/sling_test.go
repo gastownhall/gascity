@@ -534,9 +534,16 @@ func TestCheckBeadStateRoutedWithClosedConvoyIsNotIdempotent(t *testing.T) {
 	}
 }
 
-func TestCheckBeadStateRoutedWithLiveNonConvoyParentIsIdempotent(t *testing.T) {
+func TestCheckBeadStateRoutedWithWorkflowParentIsIdempotent(t *testing.T) {
 	store := beads.NewMemStore()
-	parent, err := store.Create(beads.Bead{Title: "workflow", Type: "workflow", Status: "in_progress"})
+	parent, err := store.Create(beads.Bead{
+		Title:  "workflow",
+		Type:   "workflow",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
 	if err != nil {
 		t.Fatalf("store.Create(parent): %v", err)
 	}
@@ -554,7 +561,31 @@ func TestCheckBeadStateRoutedWithLiveNonConvoyParentIsIdempotent(t *testing.T) {
 	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
 
 	if !result.Idempotent {
-		t.Fatalf("expected Idempotent=true for routed bead under live non-convoy parent, got %+v", result)
+		t.Fatalf("expected Idempotent=true for routed bead under workflow parent, got %+v", result)
+	}
+}
+
+func TestCheckBeadStateRoutedWithNormalParentWithoutTrackingConvoyRecovers(t *testing.T) {
+	store := beads.NewMemStore()
+	parent, err := store.Create(beads.Bead{Title: "epic", Type: "epic", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(parent): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "epic child",
+		Type:     "task",
+		Status:   "open",
+		ParentID: parent.ID,
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false for routed bead under normal parent with no tracking convoy, got %+v", result)
 	}
 }
 

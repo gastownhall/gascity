@@ -340,7 +340,13 @@ func needsConvoyRecovery(q BeadQuerier, b beads.Bead, deps SlingDeps, opts BeadC
 	if err != nil {
 		return true
 	}
-	return parent.Type == "convoy" && parent.Status == "closed"
+	if parent.Type == "convoy" {
+		return convoycore.IsTerminalStatus(parent.Status)
+	}
+	if sourceworkflow.IsWorkflowRoot(parent) {
+		return false
+	}
+	return true
 }
 
 func hasLiveTrackingConvoy(store beads.Store, itemID string) bool {

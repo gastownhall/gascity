@@ -1264,6 +1264,9 @@ func doConvoyStrandedAcrossStoresJSON(stores []convoyStoreView, jsonOut bool, st
 			return 1
 		}
 		for _, ch := range children {
+			if convoycore.IsUnresolvedTrackedItem(ch) {
+				continue
+			}
 			if !convoycore.IsTerminalStatus(ch.Status) && ch.Assignee == "" {
 				items = append(items, strandedItem{convoyID: item.bead.ID, issue: ch})
 			}

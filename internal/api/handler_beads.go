@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
 )
@@ -327,6 +328,16 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 	}
 	for _, child := range metadataChildren {
 		upsert(child)
+	}
+
+	if root.Type == "convoy" {
+		members, err := convoycore.Members(store, root.ID, true)
+		if err != nil {
+			return nil, nil, fmt.Errorf("listing convoy members for bead %q: %w", root.ID, err)
+		}
+		for _, member := range members {
+			upsert(member)
+		}
 	}
 
 	parentEdges := make([]workflowDepResponse, 0)

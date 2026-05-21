@@ -6080,7 +6080,7 @@ func TestDoSlingNoConvoyRepeatIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestDoSlingKeepsLiveNonConvoyParentIdempotent(t *testing.T) {
+func TestDoSlingKeepsWorkflowParentIdempotent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
@@ -6096,7 +6096,7 @@ func TestDoSlingKeepsLiveNonConvoyParentIdempotent(t *testing.T) {
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.Store = beads.NewMemStoreFrom(0, []beads.Bead{
-		{ID: "WF-1", Title: "workflow", Type: "workflow", Status: "in_progress", Metadata: map[string]string{}},
+		{ID: "WF-1", Title: "workflow", Type: "workflow", Status: "in_progress", Metadata: map[string]string{"gc.kind": "workflow"}},
 		{
 			ID:       "BL-42",
 			Title:    "workflow step",
@@ -6117,10 +6117,10 @@ func TestDoSlingKeepsLiveNonConvoyParentIdempotent(t *testing.T) {
 		t.Fatalf("store.Get(BL-42): %v", err)
 	}
 	if bead.ParentID != "WF-1" {
-		t.Fatalf("ParentID = %q, want original non-convoy parent WF-1", bead.ParentID)
+		t.Fatalf("ParentID = %q, want original workflow parent WF-1", bead.ParentID)
 	}
 	if pokeCount != 0 {
-		t.Fatalf("idempotent live non-convoy parent sling poked controller; count = %d, want 0", pokeCount)
+		t.Fatalf("idempotent workflow parent sling poked controller; count = %d, want 0", pokeCount)
 	}
 	if !strings.Contains(stdout.String(), "skipping (idempotent)") {
 		t.Fatalf("stdout = %q, want idempotent skip", stdout.String())

@@ -1158,6 +1158,21 @@ func TestConvoyStrandedClosedExcluded(t *testing.T) {
 	}
 }
 
+func TestConvoyStrandedIgnoresDanglingTracks(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "batch", Type: "convoy"}) // gc-1
+	requireNoError(t, store.DepAdd("gc-1", "gc-missing", "tracks"))
+
+	var stdout bytes.Buffer
+	code := doConvoyStranded(store, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doConvoyStranded = %d, want 0", code)
+	}
+	if !strings.Contains(stdout.String(), "No stranded work") {
+		t.Errorf("stdout = %q, want no stranded message for dangling tracks", stdout.String())
+	}
+}
+
 func TestConvoyStrandedAcrossStores(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()

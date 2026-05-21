@@ -237,6 +237,23 @@ func TestConvoyAddItemsOps(t *testing.T) {
 	requireTracksDep(t, store, convoy.ID, b1.ID)
 }
 
+func TestUntrackItemFailsOnAmbiguousMixedDependencyTypes(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, _ := store.Create(beads.Bead{Title: "test", Type: "convoy"})
+	item, _ := store.Create(beads.Bead{Title: "task"})
+	if err := store.DepAdd(convoy.ID, item.ID, "parent-child"); err != nil {
+		t.Fatalf("DepAdd(parent-child): %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, item.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(tracks): %v", err)
+	}
+
+	if err := UntrackItem(store, convoy.ID, item.ID); err == nil {
+		t.Fatal("UntrackItem succeeded for mixed dependency types, want error")
+	}
+	requireTracksDep(t, store, convoy.ID, item.ID)
+}
+
 func TestConvoyCloseOps(t *testing.T) {
 	store := beads.NewMemStore()
 	deps := testConvoyDeps(store)
