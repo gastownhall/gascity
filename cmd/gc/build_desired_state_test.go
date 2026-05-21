@@ -3226,7 +3226,10 @@ func (s *delayingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
 func TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates(t *testing.T) {
 	const (
 		requestCount = 8
-		createDelay  = 50 * time.Millisecond
+		// createDelay must be large enough that scheduler jitter on loaded
+		// hosts stays small relative to the per-create cost; otherwise the
+		// parallel-vs-serial wall-clock comparison below loses signal.
+		createDelay = 200 * time.Millisecond
 	)
 	store := &delayingPoolCreateStore{MemStore: beads.NewMemStore(), delay: createDelay}
 	cityPath := t.TempDir()
