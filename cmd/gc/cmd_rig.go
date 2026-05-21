@@ -413,8 +413,8 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 	// We treat .beads/ as a store only when metadata.json or config.yaml is
 	// present. A directory that happens to be named .beads/ but contains
 	// only unrelated content (e.g. the beads project's own .beads/formulas/
-	// convention for formula source files) is not a store; bd init will
-	// add the missing files alongside without disturbing the existing ones.
+	// convention for formula source files) is not a store, so the init path
+	// decides how to create the missing store files in place.
 	if !reAdd && !adopt {
 		beadsPath := filepath.Join(rigPath, ".beads")
 		fi, err := fs.Stat(beadsPath)
@@ -422,11 +422,18 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 			fmt.Fprintf(stderr, "gc rig add: checking %s: %v\n", beadsPath, err) //nolint:errcheck // best-effort stderr
 			return config.Rig{}, 1
 		}
-		if err == nil && fi.IsDir() && beadsDirContainsStore(fs, beadsPath) {
-			fmt.Fprintf(stderr, "gc rig add: %s/.beads already contains a beads store; "+ //nolint:errcheck // best-effort stderr
-				"use --adopt to register it, or remove %s/.beads to reinitialize\n",
-				rigPath, rigPath)
-			return config.Rig{}, 1
+		if err == nil && fi.IsDir() {
+			containsStore, containsErr := beadsDirContainsStore(fs, beadsPath)
+			if containsErr != nil {
+				fmt.Fprintf(stderr, "gc rig add: %v\n", containsErr) //nolint:errcheck // best-effort stderr
+				return config.Rig{}, 1
+			}
+			if containsStore {
+				fmt.Fprintf(stderr, "gc rig add: %s/.beads already contains a beads store; "+ //nolint:errcheck // best-effort stderr
+					"use --adopt to register it, or remove %s/.beads to reinitialize\n",
+					rigPath, rigPath)
+				return config.Rig{}, 1
+			}
 		}
 	}
 
@@ -1004,6 +1011,8 @@ func rigHasRunningAgent(cfg *config.City, rigName string) bool {
 }
 
 // rigBeadsStatus returns a human-readable beads status for a directory.
+// It reports only fully initialized stores; the rig-add guard below uses a
+// broader "dangerous to initialize over" check for partial store evidence.
 func rigBeadsStatus(fs fsys.FS, dir string) string {
 	metaPath := filepath.Join(dir, ".beads", "metadata.json")
 	if _, err := fs.Stat(metaPath); err == nil {
@@ -1344,19 +1353,20 @@ func writeBeadsEnvGTRoot(fs fsys.FS, rigPath, cityPath string) error {
 	return fs.WriteFile(envPath, []byte(content), 0o644)
 }
 
-// beadsDirContainsStore reports whether beadsPath looks like an existing
-// beads store. A directory is treated as a store when it contains either
-// metadata.json or config.yaml — the two files bd init always writes.
-// Other contents (e.g. the beads project's own .beads/formulas/ convention
-// for formula source files) are not treated as a store, so gc rig add can
-// safely initialize alongside them.
-func beadsDirContainsStore(fs fsys.FS, beadsPath string) bool {
+// beadsDirContainsStore reports whether beadsPath contains evidence that it
+// would be dangerous to initialize over. Either canonical marker is enough to
+// stop fresh initialization because partial stores should fail closed; only
+// missing marker files are ignored.
+func beadsDirContainsStore(fs fsys.FS, beadsPath string) (bool, error) {
 	for _, name := range [...]string{"metadata.json", "config.yaml"} {
-		if _, err := fs.Stat(filepath.Join(beadsPath, name)); err == nil {
-			return true
+		path := filepath.Join(beadsPath, name)
+		if _, err := fs.Stat(path); err == nil {
+			return true, nil
+		} else if !os.IsNotExist(err) {
+			return false, fmt.Errorf("checking %s: %w", path, err)
 		}
 	}
-	return false
+	return false, nil
 }
 
 // readBeadsPrefix reads the issue_prefix from an existing .beads/config.yaml

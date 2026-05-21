@@ -2221,6 +2221,36 @@ func TestDoRigAdd_ExistingBeadsStatErrorFailsClosed(t *testing.T) {
 	}
 }
 
+func TestDoRigAdd_ExistingBeadsMarkerStatErrorFailsClosed(t *testing.T) {
+	f := fsys.NewFake()
+	cityPath := "/city"
+	rigPath := "/alpha-beta"
+	beadsPath := filepath.Join(rigPath, ".beads")
+	markerPath := filepath.Join(beadsPath, "metadata.json")
+
+	f.Dirs[filepath.Join(cityPath, ".gc")] = true
+	f.Dirs[rigPath] = true
+	f.Dirs[beadsPath] = true
+	f.Files[filepath.Join(cityPath, "city.toml")] = []byte("[workspace]\nname = \"my-city\"\n\n[[agent]]\nname = \"mayor\"\n")
+	f.Errors[markerPath] = os.ErrPermission
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(f, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected failure for .beads marker stat error, got code %d; stdout: %s", code, stdout.String())
+	}
+	errMsg := stderr.String()
+	if !strings.Contains(errMsg, "checking "+markerPath) {
+		t.Fatalf("stderr should identify the marker stat failure, got: %s", errMsg)
+	}
+	if _, ok := f.Files[filepath.Join(cityPath, "city.toml")]; !ok {
+		t.Fatal("city.toml missing from fake filesystem")
+	}
+}
+
 func TestReadBeadsPrefix(t *testing.T) {
 	tests := []struct {
 		name    string
