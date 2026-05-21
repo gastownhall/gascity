@@ -3317,6 +3317,74 @@ func TestSweepStaleOrderTrackingAcrossStoresClosesRigStoreAndUnblocksDispatch(t 
 	}
 }
 
+type failingListOrderTrackingStore struct {
+	beads.Store
+	err error
+}
+
+func (s *failingListOrderTrackingStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	if label == labelOrderTracking {
+		return nil, s.err
+	}
+	return s.Store.ListByLabel(label, limit, opts...)
+}
+
+func TestSweepStaleOrderTrackingAcrossStoresContinuesAfterStoreError(t *testing.T) {
+	failingStore := &failingListOrderTrackingStore{
+		Store: beads.NewMemStore(),
+		err:   fmt.Errorf("store unavailable"),
+	}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	cityStale, err := cityStore.Create(beads.Bead{
+		Title:     "order:cleanup",
+		Labels:    []string{"order-run:cleanup", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(city stale): %v", err)
+	}
+	rigStale, err := rigStore.Create(beads.Bead{
+		Title:     "order:cleanup:rig:frontend",
+		Labels:    []string{"order-run:cleanup:rig:frontend", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(rig stale): %v", err)
+	}
+
+	result, err := sweepStaleOrderTrackingAcrossStores(
+		[]beads.Store{failingStore, cityStore, rigStore},
+		cityStale.CreatedAt.Add(time.Hour),
+		time.Minute,
+		nil,
+		orderTrackingSweepMetadataInitiator,
+		false,
+	)
+	if err == nil {
+		t.Fatal("sweepStaleOrderTrackingAcrossStores err = nil, want aggregate store error")
+	}
+	if result.trackingClosed != 2 {
+		t.Fatalf("trackingClosed = %d, want 2", result.trackingClosed)
+	}
+	for _, tc := range []struct {
+		name  string
+		store beads.Store
+		id    string
+	}{
+		{name: "city", store: cityStore, id: cityStale.ID},
+		{name: "rig", store: rigStore, id: rigStale.ID},
+	} {
+		got, err := tc.store.Get(tc.id)
+		if err != nil {
+			t.Fatalf("%s Get(%s): %v", tc.name, tc.id, err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("%s stale tracking status = %q, want closed", tc.name, got.Status)
+		}
+	}
+}
+
 func orderFilterForTest(names ...string) map[string]struct{} {
 	out := make(map[string]struct{}, len(names))
 	for _, name := range names {

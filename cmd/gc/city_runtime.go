@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -1194,30 +1195,54 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	}
 	cr.orderSweepWatchdogLast = now
 
-	store := cr.cityBeadStore()
-	if store == nil {
-		return
-	}
-	stores := []beads.Store{store}
-	for _, rigStore := range cr.rigBeadStores() {
-		if rigStore != nil {
-			stores = append(stores, rigStore)
+	stores, storeErr := cr.orderTrackingSweepStores()
+	if len(stores) == 0 {
+		if storeErr != nil && cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, storeErr) //nolint:errcheck // best-effort stderr
 		}
+		return
 	}
 	onlyOrders := map[string]struct{}{
 		orderTrackingSweepOrder: {},
 	}
-	result, err := sweepStaleOrderTrackingAcrossStores(stores, now, orderTrackingSweepWatchdogStaleAfter, onlyOrders, orderTrackingWatchdogMetadataInitiator, false)
-	if err != nil {
+	result, sweepErr := sweepStaleOrderTrackingAcrossStores(stores, now, orderTrackingSweepWatchdogStaleAfter, onlyOrders, orderTrackingWatchdogMetadataInitiator, false)
+	if err := errors.Join(storeErr, sweepErr); err != nil {
 		if cr.stderr != nil {
 			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		}
-		return
 	}
 	n := result.trackingClosed
 	if n > 0 && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog closed %d stale tracking bead(s)\n", cr.logPrefix, n) //nolint:errcheck // best-effort stderr
 	}
+}
+
+func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, error) {
+	targets := orderTrackingSweepTargetsForConfig(cr.cityPath, cr.cfg)
+	stores := make([]beads.Store, 0, len(targets))
+	seen := make(map[string]struct{}, len(targets))
+	rigStores := cr.rigBeadStores()
+	var errs []error
+	for _, sweepTarget := range targets {
+		key := orderStoreTargetKey(sweepTarget.target)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		var store beads.Store
+		switch sweepTarget.target.ScopeKind {
+		case "city":
+			store = cr.cityBeadStore()
+		case "rig":
+			store = rigStores[sweepTarget.target.RigName]
+		}
+		if store == nil {
+			errs = append(errs, fmt.Errorf("%s order store is not initialized", sweepTarget.label))
+			continue
+		}
+		stores = append(stores, orderTrackingSweepScopedStore{Store: store, label: sweepTarget.label})
+	}
+	return stores, errors.Join(errs...)
 }
 
 func (cr *CityRuntime) handleReloadRequest(req *reloadRequest) {

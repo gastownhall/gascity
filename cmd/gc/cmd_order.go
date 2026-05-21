@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -1441,15 +1442,21 @@ func cmdOrderSweepTracking(staleAfter time.Duration, includeWisps, quiet bool, o
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	stores, err := orderTrackingSweepStoresForConfig(cityPath, cfg)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
+	stores, openErr := orderTrackingSweepStoresForConfig(cityPath, cfg)
+	if len(stores) == 0 {
+		if openErr != nil {
+			fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", openErr) //nolint:errcheck // best-effort stderr
+		} else {
+			fmt.Fprintln(stderr, "gc order sweep-tracking: no order stores available") //nolint:errcheck // best-effort stderr
+		}
 		return 1
 	}
-	result, err := sweepStaleOrderTrackingAcrossStores(stores, time.Now(), staleAfter, orderNameFilter(orderNames), orderTrackingSweepMetadataInitiator, includeWisps)
-	if err != nil {
+	result, sweepErr := sweepStaleOrderTrackingAcrossStores(stores, time.Now(), staleAfter, orderNameFilter(orderNames), orderTrackingSweepMetadataInitiator, includeWisps)
+	if err := errors.Join(openErr, sweepErr); err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		if result.storesSwept == 0 {
+			return 1
+		}
 	}
 	if !quiet {
 		if includeWisps {

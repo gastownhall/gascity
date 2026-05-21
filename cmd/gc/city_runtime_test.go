@@ -1574,6 +1574,72 @@ func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testi
 	}
 }
 
+func TestOrderTrackingSweepWatchdogClosesRigStoreSweepTracking(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	rigSweepTracking, err := rigStore.Create(beads.Bead{
+		Title:     "order:" + orderTrackingSweepOrder + ":rig:frontend",
+		Labels:    []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(rig sweep): %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	freshRigSweepTracking, err := rigStore.Create(beads.Bead{
+		Title:     "order:" + orderTrackingSweepOrder + ":rig:frontend",
+		Labels:    []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(fresh rig sweep): %v", err)
+	}
+	cityTracking, err := cityStore.Create(beads.Bead{
+		Title:     "order:pr-merge-queue",
+		Labels:    []string{"order-run:pr-merge-queue", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(city unrelated): %v", err)
+	}
+
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "frontend")
+	cr := &CityRuntime{
+		cityPath:            cityPath,
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}, Rigs: []config.Rig{{Name: "frontend", Path: rigPath}}},
+		standaloneCityStore: cityStore,
+		standaloneRigStores: map[string]beads.Store{"frontend": rigStore},
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingSweepWatchdog(rigSweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Millisecond))
+
+	gotRig, err := rigStore.Get(rigSweepTracking.ID)
+	if err != nil {
+		t.Fatalf("Get(rig sweep): %v", err)
+	}
+	if gotRig.Status != "closed" {
+		t.Fatalf("rig sweep tracking status = %s, want closed", gotRig.Status)
+	}
+	gotFresh, err := rigStore.Get(freshRigSweepTracking.ID)
+	if err != nil {
+		t.Fatalf("Get(fresh rig sweep): %v", err)
+	}
+	if gotFresh.Status != "open" {
+		t.Fatalf("fresh rig sweep tracking status = %s, want open", gotFresh.Status)
+	}
+	gotCity, err := cityStore.Get(cityTracking.ID)
+	if err != nil {
+		t.Fatalf("Get(city unrelated): %v", err)
+	}
+	if gotCity.Status != "open" {
+		t.Fatalf("city unrelated tracking status = %s, want open", gotCity.Status)
+	}
+}
+
 func TestCityRuntimeDemandSnapshotRefreshesWhenDemandCommandsAreCustom(t *testing.T) {
 	cases := []struct {
 		name       string

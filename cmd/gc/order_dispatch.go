@@ -1237,6 +1237,7 @@ func beadLabelsContain(labels []string, want string) bool {
 type orderTrackingSweepResult struct {
 	trackingClosed int
 	wispClosed     int
+	storesSwept    int
 }
 
 // sweepStaleOrderTracking closes open order-tracking beads whose creation
@@ -1255,6 +1256,7 @@ func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, now time.Time, st
 		return orderTrackingSweepResult{}, fmt.Errorf("include-wisps requires at least one order name")
 	}
 	result := orderTrackingSweepResult{}
+	var errs []error
 	for i, store := range stores {
 		if store == nil {
 			continue
@@ -1263,10 +1265,24 @@ func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, now time.Time, st
 		result.trackingClosed += partial.trackingClosed
 		result.wispClosed += partial.wispClosed
 		if err != nil {
-			return result, fmt.Errorf("sweeping order-tracking store %d: %w", i+1, err)
+			errs = append(errs, fmt.Errorf("sweeping order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
+			continue
+		}
+		result.storesSwept++
+	}
+	return result, errors.Join(errs...)
+}
+
+func orderTrackingSweepStoreLabel(store beads.Store, index int) string {
+	type labeled interface {
+		orderTrackingSweepLabel() string
+	}
+	if labeledStore, ok := store.(labeled); ok {
+		if label := strings.TrimSpace(labeledStore.orderTrackingSweepLabel()); label != "" {
+			return label
 		}
 	}
-	return result, nil
+	return fmt.Sprintf("store %d", index+1)
 }
 
 func sweepStaleOrderTrackingWithOptions(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
