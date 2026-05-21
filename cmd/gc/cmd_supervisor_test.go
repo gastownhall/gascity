@@ -575,6 +575,58 @@ func supervisorServiceEnvMap(vars []supervisorServiceEnvVar) map[string]string {
 	return m
 }
 
+// TestBuildSupervisorServiceDataForwardsAllKnownProviderPrefixes asserts that
+// a canonical env var for every prefix in providerCredentialEnvPrefixes is
+// forwarded into the supervisor's persistent env. This is the regression
+// protection for the curated provider-prefix list: if a prefix is removed,
+// the corresponding probe key here fails and surfaces the omission.
+func TestBuildSupervisorServiceDataForwardsAllKnownProviderPrefixes(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/gc-run")
+
+	// One canonical probe key per documented prefix.
+	probes := map[string]string{
+		"ANTHROPIC_API_KEY":    "sk-ant-probe",
+		"AWS_ACCESS_KEY_ID":    "AKIA-probe",
+		"AZURE_OPENAI_API_KEY": "azure-openai-probe",
+		"CEREBRAS_API_KEY":     "cb-probe",
+		"COHERE_API_KEY":       "cohere-probe",
+		"DEEPSEEK_API_KEY":     "ds-probe",
+		"FIREWORKS_API_KEY":    "fw-probe",
+		"GEMINI_API_KEY":       "gemini-probe",
+		"GOOGLE_CLOUD_PROJECT": "google-probe-project",
+		"GROQ_API_KEY":         "groq-probe",
+		"MISTRAL_API_KEY":      "mistral-probe",
+		"OLLAMA_HOST":          "http://localhost:11434",
+		"OPENAI_API_KEY":       "sk-openai-probe",
+		"OPENROUTER_API_KEY":   "or-probe",
+		"TOGETHER_API_KEY":     "together-probe",
+		"VERTEX_PROJECT_ID":    "vertex-probe-project",
+		"XAI_API_KEY":          "xai-probe",
+	}
+	if len(probes) != len(providerCredentialEnvPrefixes) {
+		t.Fatalf("probe set size %d does not match prefix list size %d; update the test when prefixes change",
+			len(probes), len(providerCredentialEnvPrefixes))
+	}
+	for k, v := range probes {
+		t.Setenv(k, v)
+	}
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	for k, want := range probes {
+		if got[k] != want {
+			t.Errorf("ExtraEnv[%s] = %q, want %q — prefix may be missing from providerCredentialEnvPrefixes", k, got[k], want)
+		}
+	}
+}
+
 func TestBuildSupervisorServiceDataReadsAllowlistedDoltCredentialKeysFromLaunchctl(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)

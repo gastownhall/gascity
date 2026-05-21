@@ -800,11 +800,61 @@ var supervisorServiceEnvKeys = map[string]bool{
 	"XDG_STATE_HOME":                           true,
 }
 
+// providerCredentialEnvPrefixes lists env-var name prefixes whose values are
+// treated as agent-provider credentials and forwarded into the supervisor's
+// persistent env (launchd plist / systemd unit) and into spawned agent
+// processes. The same predicate gates the global baseline in cmd_start.go:
+// the SDK cannot know which agent uses which provider (zero hardcoded
+// roles), so credentials for any known provider are passed through, and the
+// trust boundary is the managed session itself.
+//
+// The list is curated, not auto-discovered: the supervisor's persistent env
+// has a bounded size (launchd plists in particular), so we only forward
+// prefixes belonging to well-known LLM provider auth schemes. Users with
+// niche or in-house providers can opt in via GC_SUPERVISOR_ENV.
+//
+// Keep alphabetised. Documented providers (with the env vars they typically
+// use):
+//
+//	ANTHROPIC_   Anthropic / Claude (ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, ...)
+//	AWS_         AWS Bedrock auth (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+//	             AWS_REGION, AWS_PROFILE, AWS_SESSION_TOKEN,
+//	             AWS_BEARER_TOKEN_BEDROCK, ...)
+//	AZURE_       Azure OpenAI (AZURE_OPENAI_API_KEY, AZURE_OPENAI_BASE_URL,
+//	             AZURE_OPENAI_API_VERSION, AZURE_OPENAI_ENDPOINT, ...)
+//	CEREBRAS_    Cerebras (CEREBRAS_API_KEY)
+//	COHERE_      Cohere (COHERE_API_KEY)
+//	DEEPSEEK_    DeepSeek (DEEPSEEK_API_KEY)
+//	FIREWORKS_   Fireworks AI (FIREWORKS_API_KEY)
+//	GEMINI_      Google Gemini direct API (GEMINI_API_KEY)
+//	GOOGLE_      Google Cloud / Vertex (GOOGLE_API_KEY,
+//	             GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_CLOUD_PROJECT, ...)
+//	GROQ_        Groq (GROQ_API_KEY)
+//	MISTRAL_     Mistral (MISTRAL_API_KEY)
+//	OLLAMA_      Ollama local (OLLAMA_API_KEY, OLLAMA_HOST, OLLAMA_BASE_URL)
+//	OPENAI_      OpenAI (OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_API_VERSION)
+//	OPENROUTER_  OpenRouter (OPENROUTER_API_KEY)
+//	TOGETHER_    Together AI (TOGETHER_API_KEY)
+//	VERTEX_      Vertex AI direct (VERTEX_PROJECT_ID, VERTEX_LOCATION, ...)
+//	XAI_         xAI / Grok (XAI_API_KEY)
 var providerCredentialEnvPrefixes = []string{
 	"ANTHROPIC_",
+	"AWS_",
+	"AZURE_",
+	"CEREBRAS_",
+	"COHERE_",
+	"DEEPSEEK_",
+	"FIREWORKS_",
 	"GEMINI_",
 	"GOOGLE_",
+	"GROQ_",
+	"MISTRAL_",
+	"OLLAMA_",
 	"OPENAI_",
+	"OPENROUTER_",
+	"TOGETHER_",
+	"VERTEX_",
+	"XAI_",
 }
 
 var supervisorServiceFixedEnvKeys = map[string]bool{
