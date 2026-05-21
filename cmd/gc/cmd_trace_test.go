@@ -99,6 +99,49 @@ func TestTraceStatusJSONEmptyArmsConformsToSchema(t *testing.T) {
 	validateJSONResultSchema(t, []string{"trace", "status"}, stdout.Bytes())
 }
 
+func TestTraceStatusHeadSeqPrefersStatusSnapshot(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityTOML(t, cityDir, "trace-town", "mayor")
+
+	store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("newSessionReconcilerTraceStore: %v", err)
+	}
+	rec := newTraceRecord(TraceRecordDecision)
+	rec.TraceID = "cycle-1"
+	rec.TickID = "tick-1"
+	rec.RecordID = "record-1"
+	rec.Ts = time.Now().UTC()
+	if err := store.AppendBatch([]SessionReconcilerTraceRecord{rec}, TraceDurabilityMetadata); err != nil {
+		t.Fatalf("AppendBatch: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close trace store: %v", err)
+	}
+	storedHead, err := traceHeadSeq(traceCityRuntimeDir(cityDir))
+	if err != nil {
+		t.Fatalf("traceHeadSeq: %v", err)
+	}
+	if storedHead == 42 {
+		t.Fatal("stored head unexpectedly matches socket snapshot fixture")
+	}
+
+	head, err := traceStatusHeadSeq(traceStatusJSON{HeadSeq: 42}, cityDir)
+	if err != nil {
+		t.Fatalf("traceStatusHeadSeq with snapshot head: %v", err)
+	}
+	if head != 42 {
+		t.Fatalf("head seq = %d, want socket snapshot 42", head)
+	}
+	head, err = traceStatusHeadSeq(traceStatusJSON{}, cityDir)
+	if err != nil {
+		t.Fatalf("traceStatusHeadSeq fallback: %v", err)
+	}
+	if head != storedHead {
+		t.Fatalf("fallback head seq = %d, want stored head %d", head, storedHead)
+	}
+}
+
 func TestTraceControllerSocketCommands(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime"), 0o755); err != nil {
@@ -167,6 +210,13 @@ func TestTraceControllerSocketCommands(t *testing.T) {
 	if stopReply.Status == nil || len(stopReply.Status.ActiveArms) != 0 {
 		t.Fatalf("stop reply status = %#v", stopReply.Status)
 	}
+	stopPayload, err := json.Marshal(stopReply.Status)
+	if err != nil {
+		t.Fatalf("marshal stop status reply: %v", err)
+	}
+	if !bytes.Contains(stopPayload, []byte(`"arms":[]`)) {
+		t.Fatalf("stop status reply JSON = %s, want empty legacy arms alias", stopPayload)
+	}
 	select {
 	case <-pokeCh3:
 	default:
@@ -182,7 +232,6 @@ func TestTraceStatusJSONAcceptsLegacySocketArms(t *testing.T) {
 			"as_of": "2026-05-21T00:00:00Z",
 			"controller_running": true,
 			"controller_pid": 123,
-			"head_seq": 42,
 			"arms": [{
 				"scope_type": "template",
 				"scope_value": "repo/polecat",
@@ -203,8 +252,8 @@ func TestTraceStatusJSONAcceptsLegacySocketArms(t *testing.T) {
 	if reply.Status == nil {
 		t.Fatal("status is nil")
 	}
-	if reply.Status.HeadSeq != 42 {
-		t.Fatalf("head_seq = %d, want 42", reply.Status.HeadSeq)
+	if reply.Status.HeadSeq != 0 {
+		t.Fatalf("head_seq = %d, want old-controller default 0", reply.Status.HeadSeq)
 	}
 	if len(reply.Status.ActiveArms) != 1 {
 		t.Fatalf("active arms = %#v, want one legacy arm", reply.Status.ActiveArms)
@@ -296,6 +345,9 @@ func TestTraceShowAndReasonsWithoutTemplateFilter(t *testing.T) {
 	if showJSON.SchemaVersion != "1" || showJSON.Count != len(showJSON.Records) || !foundTemplate {
 		t.Fatalf("trace show JSON = %+v, want repo/polecat", showJSON)
 	}
+	validateJSONResultSchema(t, []string{"trace", "show"}, stdout.Bytes())
+	assertTraceShowSchemaRecordProperty(t, "template")
+	assertTraceShowSchemaRecordProperty(t, "session_name")
 
 	stdout.Reset()
 	stderr.Reset()
@@ -446,4 +498,27 @@ func readTraceSocketReply(t *testing.T, conn net.Conn) traceControlReply {
 		t.Fatalf("decode reply: %v", err)
 	}
 	return reply
+}
+
+func assertTraceShowSchemaRecordProperty(t *testing.T, name string) {
+	t.Helper()
+	rawSchema, err := readBuiltinSchema([]string{"trace", "show"}, jsonSchemaResultRole)
+	if err != nil {
+		t.Fatalf("read trace show result schema: %v", err)
+	}
+	var schema struct {
+		Properties struct {
+			Records struct {
+				Items struct {
+					Properties map[string]json.RawMessage `json:"properties"`
+				} `json:"items"`
+			} `json:"records"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(rawSchema, &schema); err != nil {
+		t.Fatalf("unmarshal trace show result schema: %v", err)
+	}
+	if _, ok := schema.Properties.Records.Items.Properties[name]; !ok {
+		t.Fatalf("trace show result schema missing record property %q", name)
+	}
 }

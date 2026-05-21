@@ -1281,6 +1281,29 @@ func TestMailInboxJSON(t *testing.T) {
 	validateJSONResultSchema(t, []string{"mail", "inbox"}, stdout.Bytes())
 }
 
+func TestMailInboxJSONIncludesEmptyRecipientsArray(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+
+	var stdout, stderr bytes.Buffer
+	code := doMailInboxTargetWithJSON(mp, resolvedMailTarget{display: "nobody"}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailInboxTargetWithJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
+	}
+	recipients, ok := got["recipients"].([]any)
+	if !ok {
+		t.Fatalf("recipients = %#v, want empty array", got["recipients"])
+	}
+	if len(recipients) != 0 {
+		t.Fatalf("recipients = %#v, want empty array", recipients)
+	}
+	validateJSONResultSchema(t, []string{"mail", "inbox"}, stdout.Bytes())
+}
+
 func TestMailInboxFiltersCorrectly(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
@@ -2178,6 +2201,26 @@ func TestMailCountJSON(t *testing.T) {
 	}
 	if len(got.Recipients) != 1 || got.Recipients[0] != "bob" {
 		t.Fatalf("recipients = %#v, want [bob]", got.Recipients)
+	}
+	validateJSONResultSchema(t, []string{"mail", "count"}, stdout.Bytes())
+}
+
+func TestMailCountJSONIncludesEmptyRecipientsArray(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := doMailCountTargetWithJSON(countOnlyMailProvider{}, resolvedMailTarget{display: "nobody"}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailCountTargetWithJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("unmarshal stdout: %v; output=%s", err, stdout.String())
+	}
+	recipients, ok := got["recipients"].([]any)
+	if !ok {
+		t.Fatalf("recipients = %#v, want empty array", got["recipients"])
+	}
+	if len(recipients) != 0 {
+		t.Fatalf("recipients = %#v, want empty array", recipients)
 	}
 	validateJSONResultSchema(t, []string{"mail", "count"}, stdout.Bytes())
 }
