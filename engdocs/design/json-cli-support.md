@@ -238,6 +238,18 @@ If `result.schema.json` is absent, the command does not declare JSON support and
 output. If `failure.schema.json` is absent, nonzero JSON-mode stdout uses the
 shared Gas City default failure schema.
 
+Action-result envelopes are intentionally extensible at the top level. Schemas
+for commands that return `schema_version`, `ok`, `command`, and `action` should
+set top-level `additionalProperties: true` so additive result fields do not
+break consumers. Nested domain objects may stay stricter when their own shape is
+the contract being modeled.
+
+`gc dolt-cleanup --json` is the explicit exception to the usual
+`ok`-means-operation-succeeded convention. Its `ok: true` means the cleanup
+report was produced successfully; cleanup-stage failures are represented inside
+the typed `errors`, `dropped.failed`, `purge`, and `reaped.errors` fields and
+may still accompany a nonzero exit.
+
 Schema exposure should happen at three levels:
 
 - `gc <command> --help` should say whether `--json` is supported and summarize

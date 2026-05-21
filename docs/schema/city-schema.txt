@@ -1042,7 +1042,7 @@
       "properties": {
         "max_per_agent": {
           "type": "integer",
-          "description": "MaxPerAgent is the maximum number of active convergence loops per agent.\n0 means use default (2).",
+          "description": "MaxPerAgent is the maximum number of active convergence loops per agent\nin each bead store scope. City/HQ and each bound rig enforce the limit\nindependently. 0 means use default (2).",
           "default": 2
         },
         "max_total": {

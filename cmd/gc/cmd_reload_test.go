@@ -53,7 +53,7 @@ func TestCmdReloadApplied(t *testing.T) {
 	reloadUnavailableMessageHook = func(string) string { return "" }
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, false, false, "30s", true, &stdout, &stderr); code != 0 {
+	if code := cmdReload([]string{dir}, false, false, false, "30s", true, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdReload = %d; stderr=%s", code, stderr.String())
 	}
 	if got := strings.TrimSpace(stdout.String()); got != "Config reloaded: 1 agents, 0 rigs (rev abc123def456)" {
@@ -61,6 +61,45 @@ func TestCmdReloadApplied(t *testing.T) {
 	}
 	if got := strings.TrimSpace(stderr.String()); got != "gc reload: warning: service reload: boom" {
 		t.Fatalf("stderr = %q", got)
+	}
+}
+
+func TestCmdReloadJSONApplied(t *testing.T) {
+	dir := shortSocketTempDir(t, "gc-reload-json-cli-")
+	writeCityTOML(t, dir, "test", "mayor")
+
+	oldSend := sendReloadControlRequestHook
+	oldUnavailable := reloadUnavailableMessageHook
+	t.Cleanup(func() {
+		sendReloadControlRequestHook = oldSend
+		reloadUnavailableMessageHook = oldUnavailable
+	})
+
+	sendReloadControlRequestHook = func(_ string, _ reloadControlRequest) (reloadControlReply, error) {
+		return reloadControlReply{
+			Outcome:  reloadOutcomeApplied,
+			Message:  "Config reloaded",
+			Revision: "abc123def4567890",
+		}, nil
+	}
+	reloadUnavailableMessageHook = func(string) string { return "" }
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdReload([]string{dir}, false, false, true, "30s", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdReload = %d; stderr=%s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	var got lifecycleActionJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || !got.OK || got.Command != "reload" || got.Outcome != "applied" || got.Revision != "abc123def4567890" {
+		t.Fatalf("payload = %+v", got)
+	}
+	if got.Async == nil || *got.Async || got.Soft == nil || *got.Soft {
+		t.Fatalf("async/soft = %v/%v, want false/false", got.Async, got.Soft)
 	}
 }
 
@@ -93,7 +132,7 @@ func TestCmdReloadSoftPrintsAcceptedDriftCount(t *testing.T) {
 	reloadUnavailableMessageHook = func(string) string { return "" }
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, false, true, "30s", true, &stdout, &stderr); code != 0 {
+	if code := cmdReload([]string{dir}, false, true, false, "30s", true, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdReload = %d; stderr=%s", code, stderr.String())
 	}
 	wantStdout := "Config reloaded: 1 agents, 0 rigs (rev abc123def456)\nsoft reload: accepted config drift on 2 session(s)"
@@ -120,7 +159,7 @@ func TestCmdReloadAsyncExplicitTimeoutInvalid(t *testing.T) {
 	writeCityTOML(t, dir, "test", "mayor")
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, true, false, "30s", true, &stdout, &stderr); code != 1 {
+	if code := cmdReload([]string{dir}, true, false, false, "30s", true, &stdout, &stderr); code != 1 {
 		t.Fatalf("cmdReload = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "--async and --timeout cannot be used together") {
@@ -152,7 +191,7 @@ func TestCmdReloadControllerUnavailableUsesRicherMessage(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, false, false, "5s", true, &stdout, &stderr); code != 1 {
+	if code := cmdReload([]string{dir}, false, false, false, "5s", true, &stdout, &stderr); code != 1 {
 		t.Fatalf("cmdReload = %d, want 1", code)
 	}
 	if got := strings.TrimSpace(stderr.String()); got != "gc reload: city failed to start under supervisor: fetching packs: auth denied: connecting to controller: dial failed" {
@@ -183,7 +222,7 @@ func TestCmdReloadControllerUnresponsiveUsesRicherMessage(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, false, false, "5s", true, &stdout, &stderr); code != 1 {
+	if code := cmdReload([]string{dir}, false, false, false, "5s", true, &stdout, &stderr); code != 1 {
 		t.Fatalf("cmdReload = %d, want 1", code)
 	}
 	if got := strings.TrimSpace(stderr.String()); got != "gc reload: controller is running but not responding: reading response: i/o timeout" {
@@ -210,7 +249,7 @@ func TestCmdReloadPreservesProtocolErrors(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, false, false, "5s", true, &stdout, &stderr); code != 1 {
+	if code := cmdReload([]string{dir}, false, false, false, "5s", true, &stdout, &stderr); code != 1 {
 		t.Fatalf("cmdReload = %d, want 1", code)
 	}
 	if got := strings.TrimSpace(stderr.String()); got != "gc reload: parsing response: invalid character 'o' in literal null" {
@@ -241,7 +280,7 @@ func TestCmdReloadFailedReplyPrintsWarnings(t *testing.T) {
 	reloadUnavailableMessageHook = func(string) string { return "" }
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReload([]string{dir}, false, false, "5s", true, &stdout, &stderr); code != 1 {
+	if code := cmdReload([]string{dir}, false, false, false, "5s", true, &stdout, &stderr); code != 1 {
 		t.Fatalf("cmdReload = %d, want 1", code)
 	}
 	got := stderr.String()

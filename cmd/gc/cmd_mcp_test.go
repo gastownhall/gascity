@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,12 +60,14 @@ provider = "tmux"
 [providers.gemini]
 command = "echo"
 prompt_mode = "none"
-
-[[agent]]
-name = "mayor"
-provider = "gemini"
-scope = "city"
 `)
+	agentDir := filepath.Join(cityDir, "agents", "mayor")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(agentDir): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte("provider = \"gemini\"\nscope = \"city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(agent.toml): %v", err)
+	}
 	writeCatalogFile(t, cityDir, "mcp/notes.toml", `
 name = "notes"
 command = "npx"
@@ -94,6 +97,72 @@ API_TOKEN = "super-secret"
 	}
 	if strings.Contains(out, "super-secret") {
 		t.Fatalf("mcp list output leaked env value:\n%s", out)
+	}
+}
+
+func TestMcpListAgentJSON(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeProjectedMCPCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.gemini]
+command = "echo"
+prompt_mode = "none"
+`)
+	agentDir := filepath.Join(cityDir, "agents", "mayor")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(agentDir): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte("provider = \"gemini\"\nscope = \"city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(agent.toml): %v", err)
+	}
+	writeCatalogFile(t, cityDir, "mcp/notes.toml", `
+name = "notes"
+command = "npx"
+args = ["@acme/notes"]
+
+[env]
+API_TOKEN = "super-secret"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"mcp", "list", "--agent", "mayor", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc mcp list --agent --json exited %d: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stdout lines = %d, want 1: %q", len(lines), stdout.String())
+	}
+	var got projectedMCPJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || got.CityPath != cityDir || got.Query.Agent != "mayor" {
+		t.Fatalf("metadata = %+v", got)
+	}
+	if got.Projection.Provider != "gemini" || got.Projection.Target == "" {
+		t.Fatalf("projection = %+v", got.Projection)
+	}
+	if len(got.Servers) != 1 {
+		t.Fatalf("servers len = %d, want 1: %+v", len(got.Servers), got.Servers)
+	}
+	if got.Servers[0].Name != "notes" || strings.Join(got.Servers[0].EnvKeys, ",") != "API_TOKEN" {
+		t.Fatalf("server = %+v", got.Servers[0])
+	}
+	if strings.Contains(stdout.String(), "super-secret") {
+		t.Fatalf("mcp list JSON leaked env value:\n%s", stdout.String())
 	}
 }
 

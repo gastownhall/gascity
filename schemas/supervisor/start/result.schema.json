@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "message", "supervisor_pid"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "supervisor start" },
+    "action": { "const": "start" },
+    "message": { "type": "string" },
+    "supervisor_pid": { "type": "integer" }
+  },
+  "additionalProperties": true
+}

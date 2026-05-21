@@ -390,6 +390,10 @@ func defaultSupervisorBeadsActor() {
 }
 
 func doSupervisorStart(stdout, stderr io.Writer) int {
+	return doSupervisorStartJSON(stdout, stderr, false)
+}
+
+func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
 		fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
 		return 1
@@ -439,6 +443,14 @@ func doSupervisorStart(stdout, stderr io.Writer) int {
 	deadline := time.Now().Add(supervisorReadyTimeout)
 	for time.Now().Before(deadline) {
 		if pid := supervisorAliveHook(); pid != 0 {
+			if jsonOut {
+				return writeLifecycleActionJSONOrExit(stdout, stderr, "gc supervisor start", lifecycleActionJSON{
+					Command:       "supervisor start",
+					Action:        "start",
+					Message:       "Supervisor started.",
+					SupervisorPID: pid,
+				})
+			}
 			fmt.Fprintf(stdout, "Supervisor started (PID %d)\n", pid) //nolint:errcheck // best-effort stdout
 			return 0
 		}

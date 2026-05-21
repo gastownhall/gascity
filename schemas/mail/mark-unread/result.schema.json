@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "id", "ids", "count"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "mail.mark-unread" },
+    "action": { "const": "mark-unread" },
+    "id": { "type": "string", "minLength": 1 },
+    "ids": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "count": { "type": "integer", "minimum": 1 }
+  },
+  "additionalProperties": true
+}

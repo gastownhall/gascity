@@ -3,6 +3,9 @@
   "x-gc-jsonl": {},
   "type": "object",
   "properties": {
+    "ok": {
+      "const": true
+    },
     "actor": {
       "type": "string"
     },
@@ -27,6 +30,12 @@
       "type": "string"
     }
   },
-  "required": ["actor", "seq", "ts", "type"],
+  "required": [
+    "ok",
+    "actor",
+    "seq",
+    "ts",
+    "type"
+  ],
   "additionalProperties": true
 }

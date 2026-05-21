@@ -147,6 +147,45 @@ func (e SubmitIntent) Valid() bool {
 	}
 }
 
+// Defines values for SupervisorShutdownPayloadMode.
+const (
+	Destructive      SupervisorShutdownPayloadMode = "destructive"
+	PreserveSessions SupervisorShutdownPayloadMode = "preserve_sessions"
+	Unknown          SupervisorShutdownPayloadMode = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the SupervisorShutdownPayloadMode enum.
+func (e SupervisorShutdownPayloadMode) Valid() bool {
+	switch e {
+	case Destructive:
+		return true
+	case PreserveSessions:
+		return true
+	case Unknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SupervisorShutdownPayloadSource.
+const (
+	Signal     SupervisorShutdownPayloadSource = "signal"
+	SocketStop SupervisorShutdownPayloadSource = "socket_stop"
+)
+
+// Valid indicates whether the value is a known member of the SupervisorShutdownPayloadSource enum.
+func (e SupervisorShutdownPayloadSource) Valid() bool {
+	switch e {
+	case Signal:
+		return true
+	case SocketStop:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for TranscriptMessageKind.
 const (
 	Inbound  TranscriptMessageKind = "inbound"
@@ -2755,6 +2794,27 @@ type SupervisorHealthOutputBody struct {
 	Version string `json:"version"`
 }
 
+// SupervisorShutdownPayload defines model for SupervisorShutdownPayload.
+type SupervisorShutdownPayload struct {
+	// ClientAddr For source=socket_stop, the address reported by the connecting client. Typically empty for unix-socket peers.
+	ClientAddr *string `json:"client_addr,omitempty"`
+
+	// Mode Resulting shutdown mode.
+	Mode SupervisorShutdownPayloadMode `json:"mode"`
+
+	// Signal For source=signal, the human-readable signal name (e.g. "terminated", "interrupt"). Empty for socket_stop.
+	Signal *string `json:"signal,omitempty"`
+
+	// Source Which path triggered the shutdown.
+	Source SupervisorShutdownPayloadSource `json:"source"`
+}
+
+// SupervisorShutdownPayloadMode Resulting shutdown mode.
+type SupervisorShutdownPayloadMode string
+
+// SupervisorShutdownPayloadSource Which path triggered the shutdown.
+type SupervisorShutdownPayloadSource string
+
 // SupervisorStartup defines model for SupervisorStartup.
 type SupervisorStartup struct {
 	// Phase Current phase (when not ready).
@@ -3401,6 +3461,18 @@ type TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick struct {
 	Ts       time.Time                              `json:"ts"`
 	Type     string                                 `json:"type"`
 	Workflow *WorkflowEventProjection               `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSupervisorShutdownRequested defines model for TypedEventStreamEnvelopeSupervisorShutdownRequested.
+type TypedEventStreamEnvelopeSupervisorShutdownRequested struct {
+	Actor    string                    `json:"actor"`
+	Message  *string                   `json:"message,omitempty"`
+	Payload  SupervisorShutdownPayload `json:"payload"`
+	Seq      int64                     `json:"seq"`
+	Subject  *string                   `json:"subject,omitempty"`
+	Ts       time.Time                 `json:"ts"`
+	Type     string                    `json:"type"`
+	Workflow *WorkflowEventProjection  `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeWorkerOperation defines model for TypedEventStreamEnvelopeWorkerOperation.
@@ -4081,6 +4153,19 @@ type TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick struct {
 	Ts       time.Time                              `json:"ts"`
 	Type     string                                 `json:"type"`
 	Workflow *WorkflowEventProjection               `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested defines model for TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested.
+type TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested struct {
+	Actor    string                    `json:"actor"`
+	City     string                    `json:"city"`
+	Message  *string                   `json:"message,omitempty"`
+	Payload  SupervisorShutdownPayload `json:"payload"`
+	Seq      int64                     `json:"seq"`
+	Subject  *string                   `json:"subject,omitempty"`
+	Ts       time.Time                 `json:"ts"`
+	Type     string                    `json:"type"`
+	Workflow *WorkflowEventProjection  `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeWorkerOperation defines model for TypedTaggedEventStreamEnvelopeWorkerOperation.
@@ -5818,6 +5903,32 @@ func (t *EventPayload) MergeSupervisorFSPressureSkippedTickPayload(v SupervisorF
 	return err
 }
 
+// AsSupervisorShutdownPayload returns the union data inside the EventPayload as a SupervisorShutdownPayload
+func (t EventPayload) AsSupervisorShutdownPayload() (SupervisorShutdownPayload, error) {
+	var body SupervisorShutdownPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSupervisorShutdownPayload overwrites any union data inside the EventPayload as the provided SupervisorShutdownPayload
+func (t *EventPayload) FromSupervisorShutdownPayload(v SupervisorShutdownPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSupervisorShutdownPayload performs a merge with any union data inside the EventPayload, using the provided SupervisorShutdownPayload
+func (t *EventPayload) MergeSupervisorShutdownPayload(v SupervisorShutdownPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsUnboundEventPayload returns the union data inside the EventPayload as a UnboundEventPayload
 func (t EventPayload) AsUnboundEventPayload() (UnboundEventPayload, error) {
 	var body UnboundEventPayload
@@ -7368,6 +7479,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSupervisorFsPres
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSupervisorShutdownRequested returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSupervisorShutdownRequested
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSupervisorShutdownRequested() (TypedEventStreamEnvelopeSupervisorShutdownRequested, error) {
+	var body TypedEventStreamEnvelopeSupervisorShutdownRequested
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSupervisorShutdownRequested overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSupervisorShutdownRequested
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSupervisorShutdownRequested(v TypedEventStreamEnvelopeSupervisorShutdownRequested) error {
+	v.Type = "supervisor.shutdown_requested"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSupervisorShutdownRequested performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSupervisorShutdownRequested
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSupervisorShutdownRequested(v TypedEventStreamEnvelopeSupervisorShutdownRequested) error {
+	v.Type = "supervisor.shutdown_requested"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeWorkerOperation returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkerOperation
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkerOperation() (TypedEventStreamEnvelopeWorkerOperation, error) {
 	var body TypedEventStreamEnvelopeWorkerOperation
@@ -7540,6 +7679,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionWorkQueryFailed()
 	case "supervisor.fs_pressure.skipped_tick":
 		return t.AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
+	case "supervisor.shutdown_requested":
+		return t.AsTypedEventStreamEnvelopeSupervisorShutdownRequested()
 	case "worker.operation":
 		return t.AsTypedEventStreamEnvelopeWorkerOperation()
 	default:
@@ -8957,6 +9098,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSupe
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSupervisorShutdownRequested returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSupervisorShutdownRequested() (TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested, error) {
+	var body TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSupervisorShutdownRequested overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSupervisorShutdownRequested(v TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested) error {
+	v.Type = "supervisor.shutdown_requested"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSupervisorShutdownRequested performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSupervisorShutdownRequested(v TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested) error {
+	v.Type = "supervisor.shutdown_requested"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeWorkerOperation returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkerOperation
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkerOperation() (TypedTaggedEventStreamEnvelopeWorkerOperation, error) {
 	var body TypedTaggedEventStreamEnvelopeWorkerOperation
@@ -9129,6 +9298,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionWorkQueryFailed()
 	case "supervisor.fs_pressure.skipped_tick":
 		return t.AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
+	case "supervisor.shutdown_requested":
+		return t.AsTypedTaggedEventStreamEnvelopeSupervisorShutdownRequested()
 	case "worker.operation":
 		return t.AsTypedTaggedEventStreamEnvelopeWorkerOperation()
 	default:

@@ -50,8 +50,24 @@ func TestTraceStartStopStatusOfflineFallback(t *testing.T) {
 	if code := cmdTraceStatus(&stdout, &stderr); code != 0 {
 		t.Fatalf("cmdTraceStatus = %d; stderr=%s", code, stderr.String())
 	}
-	if got := stdout.String(); !strings.Contains(got, `"head_seq": 0`) || !strings.Contains(got, "repo/polecat") {
+	if got := stdout.String(); !strings.Contains(got, "Head seq: 0") || !strings.Contains(got, "repo/polecat") {
 		t.Fatalf("status output = %q, want head_seq and arm info", got)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdTraceStatusWithJSON(true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdTraceStatusWithJSON = %d; stderr=%s", code, stderr.String())
+	}
+	if stderr.Len() > 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var statusJSON traceStatusResultJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &statusJSON); err != nil {
+		t.Fatalf("unmarshal trace status JSON: %v; output=%s", err, stdout.String())
+	}
+	if statusJSON.SchemaVersion != "1" || statusJSON.HeadSeq != 0 || len(statusJSON.ActiveArms) != 1 {
+		t.Fatalf("trace status JSON = %+v, want schema version, head seq, active arm", statusJSON)
 	}
 
 	stdout.Reset()
@@ -69,6 +85,18 @@ func TestTraceStartStopStatusOfflineFallback(t *testing.T) {
 	if len(status.ActiveArms) != 0 {
 		t.Fatalf("active arms after stop = %d, want 0", len(status.ActiveArms))
 	}
+}
+
+func TestTraceStatusJSONEmptyArmsConformsToSchema(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityTOML(t, cityDir, "trace-town", "mayor")
+	t.Setenv("GC_CITY", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdTraceStatusWithJSON(true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdTraceStatusWithJSON = %d; stderr=%s", code, stderr.String())
+	}
+	validateJSONResultSchema(t, []string{"trace", "status"}, stdout.Bytes())
 }
 
 func TestTraceControllerSocketCommands(t *testing.T) {
@@ -204,8 +232,22 @@ func TestTraceShowAndReasonsWithoutTemplateFilter(t *testing.T) {
 	if code := cmdTraceShow("", "", "", "", "", "", true, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdTraceShow = %d; stderr=%s", code, stderr.String())
 	}
-	if got := stdout.String(); !strings.Contains(got, "repo/polecat") {
-		t.Fatalf("trace show output = %q, want repo/polecat", got)
+	if stderr.Len() > 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var showJSON traceShowResultJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &showJSON); err != nil {
+		t.Fatalf("unmarshal trace show JSON: %v; output=%s", err, stdout.String())
+	}
+	foundTemplate := false
+	for _, record := range showJSON.Records {
+		if record.Template == "repo/polecat" {
+			foundTemplate = true
+			break
+		}
+	}
+	if showJSON.SchemaVersion != "1" || showJSON.Count != len(showJSON.Records) || !foundTemplate {
+		t.Fatalf("trace show JSON = %+v, want repo/polecat", showJSON)
 	}
 
 	stdout.Reset()
@@ -215,6 +257,32 @@ func TestTraceShowAndReasonsWithoutTemplateFilter(t *testing.T) {
 	}
 	if got := stdout.String(); !strings.Contains(got, string(TraceReasonIdle)) {
 		t.Fatalf("trace reasons output = %q, want idle reason", got)
+	}
+}
+
+func TestTraceShowJSONEmptyRecordsConformsToSchema(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityTOML(t, cityDir, "trace-town", "mayor")
+	t.Setenv("GC_CITY", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdTraceShow("", "", "", "", "", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdTraceShow = %d; stderr=%s", code, stderr.String())
+	}
+	validateJSONResultSchema(t, []string{"trace", "show"}, stdout.Bytes())
+}
+
+func TestTraceShowEmptyTextReportsNoRecords(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityTOML(t, cityDir, "trace-town", "mayor")
+	t.Setenv("GC_CITY", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdTraceShow("", "", "", "", "", "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdTraceShow = %d; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No trace records found") {
+		t.Fatalf("stdout = %q, want empty trace message", stdout.String())
 	}
 }
 

@@ -42,33 +42,39 @@ func newServiceCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 func newServiceListCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List workspace services",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdServiceList(stdout, stderr) != 0 {
+			if cmdServiceList(jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON")
+	return cmd
 }
 
 func newServiceDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "doctor <name>",
 		Short: "Show detailed workspace service status",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdServiceDoctor(args[0], stdout, stderr) != 0 {
+			if cmdServiceDoctor(args[0], jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON")
+	return cmd
 }
 
-func cmdServiceList(stdout, stderr io.Writer) int {
+func cmdServiceList(jsonOutput bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc service list: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -79,10 +85,10 @@ func cmdServiceList(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc service list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return doServiceList(cfg, serviceReadClient(cityPath, cfg), stdout, stderr)
+	return doServiceList(cityPath, cfg, serviceReadClient(cityPath, cfg), jsonOutput, stdout, stderr)
 }
 
-func cmdServiceDoctor(name string, stdout, stderr io.Writer) int {
+func cmdServiceDoctor(name string, jsonOutput bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc service doctor: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -93,11 +99,12 @@ func cmdServiceDoctor(name string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc service doctor: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return doServiceDoctor(cfg, serviceReadClient(cityPath, cfg), name, stdout, stderr)
+	return doServiceDoctor(cityPath, cfg, serviceReadClient(cityPath, cfg), name, jsonOutput, stdout, stderr)
 }
 
 func newServiceRestartCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "restart <name>",
 		Short: "Restart a workspace service",
 		Long: `Stop and restart a workspace service by name.
@@ -106,12 +113,24 @@ The controller closes the current service process and starts a fresh one.
 Useful after updating pack scripts without a full city restart.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				if cmdServiceRestart(args[0], io.Discard, stderr) != 0 {
+					return errExit
+				}
+				return writeManagementActionJSON(stdout, managementActionResult{
+					Command: commandName("service", "restart"),
+					Action:  "restart",
+					Name:    args[0],
+				})
+			}
 			if cmdServiceRestart(args[0], stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
+	return cmd
 }
 
 func cmdServiceRestart(name string, stdout, stderr io.Writer) int {
@@ -156,9 +175,9 @@ func serviceRestartClient(cityPath string, cfg *config.City) *api.Client {
 	return nil
 }
 
-func doServiceList(cfg *config.City, reader serviceStatusReader, stdout, stderr io.Writer) int {
+func doServiceList(cityPath string, cfg *config.City, reader serviceStatusReader, jsonOutput bool, stdout, stderr io.Writer) int {
 	statuses, live := serviceStatuses(cfg, reader, stderr)
-	if len(statuses) == 0 {
+	if len(statuses) == 0 && !jsonOutput {
 		fmt.Fprintln(stdout, "No services configured.") //nolint:errcheck // best-effort stdout
 		return 0
 	}
@@ -166,6 +185,19 @@ func doServiceList(cfg *config.City, reader serviceStatusReader, stdout, stderr 
 	sort.Slice(statuses, func(i, j int) bool {
 		return statuses[i].ServiceName < statuses[j].ServiceName
 	})
+
+	if jsonOutput {
+		payload := map[string]any{
+			"schema_version": "1",
+			"city_path":      cityPath,
+			"live":           live,
+			"services":       statuses,
+		}
+		if err := writeCLIJSONLine(stdout, payload); err != nil {
+			return 1
+		}
+		return 0
+	}
 
 	fmt.Fprintf(stdout, "%-18s %-13s %-10s %-10s %-12s %s\n", "NAME", "KIND", "SERVICE", "LOCAL", "PUBLISH", "URL") //nolint:errcheck
 	for _, status := range statuses {
@@ -191,7 +223,7 @@ func doServiceList(cfg *config.City, reader serviceStatusReader, stdout, stderr 
 	return 0
 }
 
-func doServiceDoctor(cfg *config.City, reader serviceStatusReader, name string, stdout, stderr io.Writer) int {
+func doServiceDoctor(cityPath string, cfg *config.City, reader serviceStatusReader, name string, jsonOutput bool, stdout, stderr io.Writer) int {
 	svc, ok := lookupService(cfg, name)
 	if !ok {
 		fmt.Fprintf(stderr, "gc service doctor: service %q not found\n", name) //nolint:errcheck // best-effort stderr
@@ -208,6 +240,22 @@ func doServiceDoctor(cfg *config.City, reader serviceStatusReader, name string, 
 		} else {
 			fmt.Fprintf(stderr, "gc service doctor: warning: %v (showing config view)\n", err) //nolint:errcheck // best-effort stderr
 		}
+	}
+
+	if jsonOutput {
+		payload := map[string]any{
+			"schema_version": "1",
+			"city_path":      cityPath,
+			"live":           live,
+			"service":        status,
+		}
+		if !live {
+			payload["observed_state"] = "controller_unavailable"
+		}
+		if err := writeCLIJSONLine(stdout, payload); err != nil {
+			return 1
+		}
+		return 0
 	}
 
 	fmt.Fprintf(stdout, "Name:              %s\n", status.ServiceName) //nolint:errcheck

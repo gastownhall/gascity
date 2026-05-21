@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "event_type",
+    "actor",
+    "has_payload",
+    "submitted"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "ok": {
+      "const": true
+    },
+    "event_type": {
+      "type": "string"
+    },
+    "actor": {
+      "type": "string"
+    },
+    "subject": {
+      "type": "string"
+    },
+    "message": {
+      "type": "string"
+    },
+    "has_payload": {
+      "type": "boolean"
+    },
+    "submitted": {
+      "type": "boolean",
+      "description": "True when the event was submitted to the configured provider; this is not a durable persistence acknowledgement."
+    }
+  },
+  "additionalProperties": true
+}

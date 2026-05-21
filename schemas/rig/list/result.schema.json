@@ -4,38 +4,93 @@
   "description": "One JSONL record listing the city and registered rigs.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "city_path", "city_name", "rigs", "summary"],
+  "required": [
+    "schema_version",
+    "ok",
+    "city_path",
+    "city_name",
+    "rigs",
+    "summary"
+  ],
   "properties": {
-    "schema_version": { "type": "string", "description": "Schema version for this command output." },
-    "city_path": { "type": "string", "description": "Absolute city root path." },
-    "city_name": { "type": "string", "description": "Configured or inferred city name." },
+    "schema_version": {
+      "type": "string",
+      "description": "Schema version for this command output."
+    },
+    "ok": {
+      "const": true
+    },
+    "city_path": {
+      "type": "string",
+      "description": "Absolute city root path."
+    },
+    "city_name": {
+      "type": "string",
+      "description": "Configured or inferred city name."
+    },
     "rigs": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "path", "prefix", "hq", "suspended", "running", "beads"],
+        "required": [
+          "name",
+          "path",
+          "prefix",
+          "hq",
+          "suspended",
+          "running",
+          "beads"
+        ],
         "properties": {
-          "name": { "type": "string" },
-          "path": { "type": "string" },
-          "prefix": { "type": "string" },
-          "default_branch": { "type": "string" },
-          "hq": { "type": "boolean" },
-          "suspended": { "type": "boolean" },
-          "running": { "type": "boolean" },
-          "default_sling_target": { "type": "string" },
-          "beads": { "type": "string" }
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "default_branch": {
+            "type": "string"
+          },
+          "hq": {
+            "type": "boolean"
+          },
+          "suspended": {
+            "type": "boolean"
+          },
+          "running": {
+            "type": "boolean"
+          },
+          "default_sling_target": {
+            "type": "string"
+          },
+          "beads": {
+            "type": "string"
+          }
         }
       }
     },
     "summary": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["total", "suspended", "running"],
+      "required": [
+        "total",
+        "suspended",
+        "running"
+      ],
       "properties": {
-        "total": { "type": "integer" },
-        "suspended": { "type": "integer" },
-        "running": { "type": "integer" }
+        "total": {
+          "type": "integer"
+        },
+        "suspended": {
+          "type": "integer"
+        },
+        "running": {
+          "type": "integer"
+        }
       }
     }
   }

@@ -261,7 +261,7 @@ trigger = "manual"
 	chdirProviderAwareTest(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderRun("poll", "", &stdout, &stderr)
+	code := cmdOrderRun("poll", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderRun(exec) = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -307,7 +307,7 @@ pool = "dog"
 	chdirProviderAwareTest(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderRun("digest", "", &stdout, &stderr)
+	code := cmdOrderRun("digest", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderRun(formula) = %d, want 0; stderr: %s", code, stderr.String())
 	}

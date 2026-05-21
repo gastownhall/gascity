@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -65,6 +64,7 @@ func newRigAddCmd(stdout, stderr io.Writer) *cobra.Command {
 	var prefixFlag string
 	var defaultBranchFlag string
 	var adoptFlag bool
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "add <path>",
 		Short: "Register a project as a rig",
@@ -99,6 +99,27 @@ Skips beads init; the git repo check remains informational.`,
   gc rig add /path/to/existing --adopt`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				cityPath, err := resolveCity()
+				if err != nil {
+					fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
+					return errExit
+				}
+				if len(args) < 1 {
+					fmt.Fprintln(stderr, "gc rig add: missing path") //nolint:errcheck // best-effort stderr
+					return errExit
+				}
+				rigPath, err := resolveRigAddPath(cityPath, args[0])
+				if err != nil {
+					fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
+					return errExit
+				}
+				rig, code := doRigAddWithResult(fsys.OSFS{}, cityPath, rigPath, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, io.Discard, stderr)
+				if code != 0 {
+					return errExit
+				}
+				return writeManagementActionJSON(stdout, rigAddJSONSummary(rigPath, rig))
+			}
 			if cmdRigAdd(args, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -111,6 +132,7 @@ Skips beads init; the git repo check remains informational.`,
 	cmd.Flags().StringVar(&defaultBranchFlag, "default-branch", "", "mainline branch (default: auto-detect from origin/HEAD or current branch)")
 	cmd.Flags().BoolVar(&startSuspended, "start-suspended", false, "add rig in suspended state (dormant-by-default)")
 	cmd.Flags().BoolVar(&adoptFlag, "adopt", false, "adopt existing .beads/ directory (skip init)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
 	return cmd
 }
 
@@ -180,6 +202,11 @@ func resolveRigAddPath(cityPath, rigArg string) (string, error) {
 // This prevents partial-state bugs where city.toml lists a rig but the rig's
 // infrastructure (beads, routes) was never created.
 func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverride, prefixOverride, defaultBranchOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) int {
+	_, code := doRigAddWithResult(fs, cityPath, rigPath, includes, nameOverride, prefixOverride, defaultBranchOverride, startSuspended, adopt, stdout, stderr)
+	return code
+}
+
+func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverride, prefixOverride, defaultBranchOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) (config.Rig, int) {
 	// Trim and drop empty --include entries so `--include=` or `--include " "`
 	// doesn't persist a blank pack path that downstream resolution reads
 	// as the city root.
@@ -195,15 +222,15 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	if fi, err := fs.Stat(rigPath); err != nil {
 		if adopt {
 			fmt.Fprintf(stderr, "gc rig add: --adopt requires an existing directory: %s\n", rigPath) //nolint:errcheck // best-effort stderr
-			return 1
+			return config.Rig{}, 1
 		}
 		if !os.IsNotExist(err) {
 			fmt.Fprintf(stderr, "gc rig add: checking %s: %v\n", rigPath, err) //nolint:errcheck // best-effort stderr
-			return 1
+			return config.Rig{}, 1
 		}
 	} else if !fi.IsDir() {
 		fmt.Fprintf(stderr, "gc rig add: %s is not a directory\n", rigPath) //nolint:errcheck // best-effort stderr
-		return 1
+		return config.Rig{}, 1
 	} else {
 		rigPathExists = true
 	}
@@ -225,7 +252,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	cfg, err := loadCityConfigForEditFS(fs, tomlPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return config.Rig{}, 1
 	}
 	explicitRigImports := boundImportsFromLegacySources(includes, cfg.Packs)
 	if cityUsesBdStoreContract(cityPath) && cityDoltConfigHasLifecycleFields(cfg.Dolt) {
@@ -253,7 +280,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		}
 		if filepath.Clean(existPath) != filepath.Clean(rigPath) {
 			fmt.Fprintf(stderr, "gc rig add: rig %q already registered at %s (not %s)\n", name, r.Path, rigPath) //nolint:errcheck // best-effort stderr
-			return 1
+			return config.Rig{}, 1
 		}
 		reAdd = true
 		break
@@ -273,12 +300,12 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		prefixKey := strings.ToLower(prefix)
 		if prefixKey == strings.ToLower(config.EffectiveHQPrefix(cfg)) {
 			fmt.Fprintf(stderr, "gc rig add: rig %q: prefix %q collides with HQ. Use --prefix to specify a different prefix.\n", name, prefixKey) //nolint:errcheck // best-effort stderr
-			return 1
+			return config.Rig{}, 1
 		}
 		for _, rig := range cfg.Rigs {
 			if prefixKey == strings.ToLower(rig.EffectivePrefix()) {
 				fmt.Fprintf(stderr, "gc rig add: rig %q: prefix %q collides with %s. Use --prefix to specify a different prefix.\n", name, prefixKey, rig.Name) //nolint:errcheck // best-effort stderr
-				return 1
+				return config.Rig{}, 1
 			}
 		}
 	}
@@ -318,7 +345,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 			rootDefaultRigImports, err := config.LoadRootPackDefaultRigImports(fs, cityPath)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc rig add: loading root pack defaults: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1
+				return config.Rig{}, 1
 			}
 			defaultRigImports = composeDefaultRigImports(rootDefaultRigImports, cfg.Workspace.LegacyDefaultRigIncludes(), cfg.Packs)
 			if len(defaultRigImports) > 0 {
@@ -332,14 +359,14 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	if needsValidation {
 		if err := config.ValidateRigs(nextCfg.Rigs, config.EffectiveHQPrefix(nextCfg)); err != nil {
 			fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+			return config.Rig{}, 1
 		}
 	}
 
 	if !rigPathExists {
 		if err := fs.MkdirAll(rigPath, 0o755); err != nil {
 			fmt.Fprintf(stderr, "gc rig add: creating %s: %v\n", rigPath, err) //nolint:errcheck // best-effort stderr
-			return 1
+			return config.Rig{}, 1
 		}
 	}
 
@@ -347,11 +374,11 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		metaPath := filepath.Join(rigPath, ".beads", "metadata.json")
 		if _, err := fs.Stat(metaPath); err != nil {
 			fmt.Fprintf(stderr, "gc rig add: --adopt requires .beads/metadata.json in %s\n", rigPath) //nolint:errcheck // best-effort stderr
-			return 1
+			return config.Rig{}, 1
 		}
 		if _, ok := readBeadsPrefix(fs, rigPath); !ok {
 			fmt.Fprintf(stderr, "gc rig add: --adopt requires a valid issue_prefix in .beads/config.yaml in %s\n", rigPath) //nolint:errcheck // best-effort stderr
-			return 1
+			return config.Rig{}, 1
 		}
 	}
 
@@ -375,7 +402,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 				"use --prefix %s to match, or remove %s/.beads to reinitialize\n",
 				name, existingPrefix, prefix, existingPrefix, rigPath)
 		}
-		return 1
+		return config.Rig{}, 1
 	}
 
 	// Guard: on a fresh add (not a re-add) without --adopt, refuse to run
@@ -388,13 +415,13 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		fi, err := fs.Stat(beadsPath)
 		if err != nil && !os.IsNotExist(err) {
 			fmt.Fprintf(stderr, "gc rig add: checking %s: %v\n", beadsPath, err) //nolint:errcheck // best-effort stderr
-			return 1
+			return config.Rig{}, 1
 		}
 		if err == nil && fi.IsDir() {
 			fmt.Fprintf(stderr, "gc rig add: %s/.beads already exists; "+ //nolint:errcheck // best-effort stderr
 				"use --adopt to register the existing store, or remove %s/.beads to reinitialize\n",
 				rigPath, rigPath)
-			return 1
+			return config.Rig{}, 1
 		}
 	}
 
@@ -446,7 +473,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	if adopt {
 		if err := prepareRigAdoptProviderState(cityPath, rigPath); err != nil {
 			fmt.Fprintf(stderr, "gc rig add: prepare adopted rig store: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+			return config.Rig{}, 1
 		}
 		w("  Adopted existing beads database")
 	}
@@ -456,7 +483,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 		deferred, err = initDirIfReady(cityPath, rigPath, prefix)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+			return config.Rig{}, 1
 		}
 		if deferred {
 			if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
@@ -474,17 +501,17 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	snapshots, err := snapshotRigAddTopologyFiles(fs, cityPath, nextCfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: snapshot canonical files: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return config.Rig{}, 1
 	}
 	if !reAdd || reAddNeedsConfigWrite {
 		if err := normalizeCanonicalBdScopeFiles(cityPath, nextCfg, io.Discard); err != nil {
 			writeRigAddRollbackError(fs, stderr, snapshots, "canonicalizing rig topology", err)
-			return 1
+			return config.Rig{}, 1
 		}
 
 		if err := writeCityConfigForEditFS(fs, tomlPath, nextCfg); err != nil {
 			writeRigAddRollbackError(fs, stderr, snapshots, "writing config", err)
-			return 1
+			return config.Rig{}, 1
 		}
 	}
 	cfg = nextCfg
@@ -492,7 +519,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	allRigs := collectRigRoutes(cityPath, cfg)
 	if err := writeAllRigRoutes(allRigs); err != nil {
 		writeRigAddRollbackError(fs, stderr, snapshots, "writing routes", err)
-		return 1
+		return config.Rig{}, 1
 	}
 	w("  Generated routes.jsonl for cross-rig routing")
 
@@ -543,7 +570,18 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverr
 	default:
 		w("Rig added.")
 	}
-	return 0
+	for _, rig := range cfg.Rigs {
+		if rig.Name == name {
+			return rig, 0
+		}
+	}
+	return config.Rig{
+		Name:          name,
+		Path:          rigPath,
+		Prefix:        strings.ToLower(prefixOverride),
+		DefaultBranch: resolvedDefaultBranch,
+		Suspended:     startSuspended,
+	}, 0
 }
 
 func formatBoundImports(imports []config.BoundImport) string {
@@ -894,9 +932,7 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 				result.Summary.Running++
 			}
 		}
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(result); err != nil {
+		if err := writeCLIJSONLine(stdout, result); err != nil {
 			fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -972,7 +1008,8 @@ func rigBeadsStatus(fs fsys.FS, dir string) string {
 }
 
 func newRigSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "suspend [name]",
 		Short: "Suspend a rig (reconciler will skip its agents)",
 		Long: `Suspend a rig by setting suspended=true in city.toml.
@@ -982,6 +1019,24 @@ the reconciler skips them and gc hook returns empty. The rig's beads
 database remains accessible. Use "gc rig resume" to restore.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				rigName := ""
+				if len(args) > 0 {
+					rigName = args[0]
+				} else if ctx, err := resolveContext(); err == nil {
+					rigName = ctx.RigName
+				}
+				if cmdRigSuspend(args, io.Discard, stderr) != 0 {
+					return errExit
+				}
+				return writeManagementActionJSON(stdout, managementActionResult{
+					Command:   commandName("rig", "suspend"),
+					Action:    "suspend",
+					Name:      rigName,
+					Rig:       rigName,
+					Suspended: managementBoolPtr(true),
+				})
+			}
 			if cmdRigSuspend(args, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -989,6 +1044,8 @@ database remains accessible. Use "gc rig resume" to restore.`,
 		},
 		ValidArgsFunction: completeRigNames,
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
+	return cmd
 }
 
 // cmdRigSuspend is the CLI entry point for suspending a rig.
@@ -1055,7 +1112,8 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 }
 
 func newRigResumeCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "resume [name]",
 		Short: "Resume a suspended rig",
 		Long: `Resume a suspended rig by clearing suspended in city.toml.
@@ -1063,6 +1121,24 @@ func newRigResumeCmd(stdout, stderr io.Writer) *cobra.Command {
 The reconciler will start the rig's agents on its next tick.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				rigName := ""
+				if len(args) > 0 {
+					rigName = args[0]
+				} else if ctx, err := resolveContext(); err == nil {
+					rigName = ctx.RigName
+				}
+				if cmdRigResume(args, io.Discard, stderr) != 0 {
+					return errExit
+				}
+				return writeManagementActionJSON(stdout, managementActionResult{
+					Command:   commandName("rig", "resume"),
+					Action:    "resume",
+					Name:      rigName,
+					Rig:       rigName,
+					Suspended: managementBoolPtr(false),
+				})
+			}
 			if cmdRigResume(args, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -1070,6 +1146,8 @@ The reconciler will start the rig's agents on its next tick.`,
 		},
 		ValidArgsFunction: completeRigNames,
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
+	return cmd
 }
 
 // cmdRigResume is the CLI entry point for resuming a suspended rig.
@@ -1136,7 +1214,8 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 }
 
 func newRigRemoveCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "remove <name>",
 		Short: "Remove a rig from the city",
 		Long: `Remove a rig from the current city's configuration.
@@ -1146,6 +1225,17 @@ binding from .gc/site.toml.`,
 		Example: `  gc rig remove myrig`,
 		Args:    cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				if cmdRigRemove(args[0], io.Discard, stderr) != 0 {
+					return errExit
+				}
+				return writeManagementActionJSON(stdout, managementActionResult{
+					Command: commandName("rig", "remove"),
+					Action:  "remove",
+					Name:    args[0],
+					Rig:     args[0],
+				})
+			}
 			if cmdRigRemove(args[0], stdout, stderr) != 0 {
 				return errExit
 			}
@@ -1153,6 +1243,8 @@ binding from .gc/site.toml.`,
 		},
 		ValidArgsFunction: completeRigNames,
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
+	return cmd
 }
 
 // cmdRigRemove removes a rig from the current city and its local site binding.

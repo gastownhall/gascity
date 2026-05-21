@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "order"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "ok": {
+      "const": true
+    },
+    "city_path": {
+      "type": "string"
+    },
+    "city_name": {
+      "type": "string"
+    },
+    "order": {
+      "type": "object",
+      "required": [
+        "name",
+        "scoped_name",
+        "type",
+        "trigger",
+        "enabled"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "scoped_name": {
+          "type": "string"
+        },
+        "rig": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "formula",
+            "exec"
+          ]
+        },
+        "formula": {
+          "type": "string"
+        },
+        "exec": {
+          "type": "string"
+        },
+        "trigger": {
+          "type": "string"
+        },
+        "interval": {
+          "type": "string"
+        },
+        "schedule": {
+          "type": "string"
+        },
+        "check": {
+          "type": "string"
+        },
+        "on": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "timeout": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "source": {
+          "type": "string"
+        },
+        "formula_layer": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

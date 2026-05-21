@@ -18,6 +18,11 @@ type CreateParams struct {
 	Vars              map[string]string
 	CityPath          string
 	EvaluatePrompt    string
+	// Rig names the rig whose bead store owns this convergence loop.
+	// Empty means the city/HQ store. The loop physically lives in
+	// whichever store the handler is bound to; Rig is persisted as
+	// metadata so status/list and audit can report the owning scope.
+	Rig string
 }
 
 // CreateResult holds the outcome of creating a convergence loop.
@@ -89,6 +94,7 @@ func (h *Handler) CreateHandler(_ context.Context, params CreateParams) (CreateR
 		{FieldGateTimeout, params.GateTimeout},
 		{FieldGateTimeoutAction, params.GateTimeoutAction},
 		{FieldCityPath, params.CityPath},
+		{FieldRig, params.Rig},
 		{FieldEvaluatePrompt, params.EvaluatePrompt},
 		{FieldState, StateActive},
 	}

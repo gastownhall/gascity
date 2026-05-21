@@ -20,6 +20,7 @@ import (
 func newStopCmd(stdout, stderr io.Writer) *cobra.Command {
 	var wallClockTimeout time.Duration
 	var force bool
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "stop [path]",
 		Short: "Stop all agent sessions in the city",
@@ -37,7 +38,7 @@ cleanup pass. Use --force to skip the interrupt grace period and go
 straight to kill.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdStop(args, stdout, stderr, wallClockTimeout, force) != 0 {
+			if cmdStopJSON(args, stdout, stderr, wallClockTimeout, force, jsonOut) != 0 {
 				return errExit
 			}
 			return nil
@@ -45,6 +46,7 @@ straight to kill.`,
 	}
 	cmd.Flags().DurationVar(&wallClockTimeout, "timeout", 0, "wall-clock cap for the stop sequence (0 = derive from city config)")
 	cmd.Flags().BoolVar(&force, "force", false, "skip the interrupt grace period and force-kill all sessions immediately")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
 	return cmd
 }
 
@@ -60,13 +62,22 @@ const sleepReasonCityStop = "city-stop"
 // is used. force=true skips the interrupt grace period (gracefulStopAll
 // runs with timeout=0, going straight to kill).
 func cmdStop(args []string, stdout, stderr io.Writer, wallClockTimeout time.Duration, force bool) int {
+	return cmdStopJSON(args, stdout, stderr, wallClockTimeout, force, false)
+}
+
+func cmdStopJSON(args []string, stdout, stderr io.Writer, wallClockTimeout time.Duration, force bool, jsonOut bool) int {
 	cityPath, err := resolveStopCityPath(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stdout, stderr, "gc stop", force); handled {
+	stopStdout := stdout
+	if jsonOut {
+		stopStdout = io.Discard
+	}
+
+	if handled, code := unregisterCityFromSupervisorWithForce(cityPath, stopStdout, stderr, "gc stop", force); handled {
 		if code != 0 {
 			return code
 		}
@@ -75,6 +86,9 @@ func cmdStop(args []string, stdout, stderr io.Writer, wallClockTimeout time.Dura
 				return 1
 			}
 			warnInvalidConfigAfterSuccessfulStop(cityPath, stderr)
+			if jsonOut {
+				return writeCityStopSuccess(stdout, stderr, cityPath, force)
+			}
 			fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
 			return 0
 		}
@@ -82,7 +96,10 @@ func cmdStop(args []string, stdout, stderr io.Writer, wallClockTimeout time.Dura
 
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		if handled, code := stopManagedRuntimeWithoutConfig(cityPath, err, stdout, stderr, force); handled {
+		if handled, code := stopManagedRuntimeWithoutConfig(cityPath, err, stopStdout, stderr, force); handled {
+			if code == 0 && jsonOut {
+				return writeCityStopSuccess(stdout, stderr, cityPath, force)
+			}
 			return code
 		}
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -97,16 +114,29 @@ func cmdStop(args []string, stdout, stderr io.Writer, wallClockTimeout time.Dura
 	type stopOutcome struct{ code int }
 	doneCh := make(chan stopOutcome, 1)
 	go func() {
-		doneCh <- stopOutcome{code: cmdStopBody(cityPath, cfg, force, stdout, stderr)}
+		doneCh <- stopOutcome{code: cmdStopBody(cityPath, cfg, force, stopStdout, stderr)}
 	}()
 
 	select {
 	case out := <-doneCh:
+		if out.code == 0 && jsonOut {
+			return writeCityStopSuccess(stdout, stderr, cityPath, force)
+		}
 		return out.code
 	case <-time.After(wallClockCap):
 		fmt.Fprintf(stderr, "gc stop: timed out after %s; some sessions may not have stopped — retry with --force if stop is wedged, or raise --timeout for large stop sets\n", wallClockCap) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+}
+
+func writeCityStopSuccess(stdout, stderr io.Writer, cityPath string, force bool) int {
+	return writeLifecycleActionJSONOrExit(stdout, stderr, "gc stop", lifecycleActionJSON{
+		Command:  "stop",
+		Action:   "stop",
+		Message:  "City stopped.",
+		CityPath: cityPath,
+		Force:    lifecycleBoolPtr(force),
+	})
 }
 
 func resolveStopCityPath(args []string) (string, error) {

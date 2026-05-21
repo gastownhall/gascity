@@ -891,6 +891,108 @@ func TestComputeWorkSet_IgnoresNoReadyMessage(t *testing.T) {
 	}
 }
 
+// TestComputeWorkSet_SkipsSuspendedAgent verifies that an agent flagged
+// `suspended = true` is excluded from the work_query probe set, so dolt
+// does not get shelled out to on its behalf every reconcile tick.
+func TestComputeWorkSet_SkipsSuspendedAgent(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "live"},
+			{Name: "parked", Suspended: true},
+		},
+	}
+
+	var probedMu sync.Mutex
+	var probed []string
+	runner := func(command, _ string, _ map[string]string) (string, error) {
+		probedMu.Lock()
+		defer probedMu.Unlock()
+		probed = append(probed, command)
+		return `[{"id":"BL-1"}]`, nil
+	}
+
+	work := computeWorkSet(cfg, runner, "test-city", "/tmp", nil, nil, nil)
+	if !work["live"] {
+		t.Error("expected live agent to be probed")
+	}
+	if work["parked"] {
+		t.Error("suspended agent should not appear in work set")
+	}
+	probedMu.Lock()
+	defer probedMu.Unlock()
+	for _, c := range probed {
+		if strings.Contains(c, "gc.routed_to=parked") {
+			t.Errorf("suspended agent was probed: %q", c)
+		}
+	}
+}
+
+// TestComputeWorkSet_SkipsAgentsOnSuspendedRig verifies that every agent
+// scoped to a suspended rig is excluded from work_query probing.
+// Regression for the trace evidence in ch-68rm: 40+ work_query calls/tick
+// fanning out to agents on rigs the operator had suspended via `gc rig suspend`.
+func TestComputeWorkSet_SkipsAgentsOnSuspendedRig(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "live-rig"},
+			{Name: "parked-rig", Suspended: true},
+		},
+		Agents: []config.Agent{
+			{Name: "alpha", Dir: "live-rig"},
+			{Name: "beta", Dir: "parked-rig"},
+		},
+	}
+
+	var probedMu sync.Mutex
+	var probed []string
+	runner := func(command, _ string, _ map[string]string) (string, error) {
+		probedMu.Lock()
+		defer probedMu.Unlock()
+		probed = append(probed, command)
+		return `[{"id":"BL-1"}]`, nil
+	}
+
+	work := computeWorkSet(cfg, runner, "test-city", "/tmp", nil, nil, nil)
+	if !work["live-rig/alpha"] {
+		t.Error("agent on live rig should be probed")
+	}
+	if work["parked-rig/beta"] {
+		t.Error("agent on suspended rig should not appear in work set")
+	}
+	probedMu.Lock()
+	defer probedMu.Unlock()
+	for _, c := range probed {
+		if strings.Contains(c, "gc.routed_to=beta") {
+			t.Errorf("agent on suspended rig was probed: %q", c)
+		}
+	}
+}
+
+// TestComputeWorkSet_SkipsAllWhenCitySuspended verifies that no agent is
+// probed when the whole city is suspended — suspension inherits downward.
+func TestComputeWorkSet_SkipsAllWhenCitySuspended(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Suspended: true},
+		Agents: []config.Agent{
+			{Name: "worker"},
+		},
+	}
+
+	probed := false
+	runner := func(_, _ string, _ map[string]string) (string, error) {
+		probed = true
+		return `[{"id":"BL-1"}]`, nil
+	}
+
+	work := computeWorkSet(cfg, runner, "test-city", "/tmp", nil, nil, nil)
+	if probed {
+		t.Error("no agent should be probed when city is suspended")
+	}
+	if len(work) != 0 {
+		t.Errorf("expected empty work set, got %v", work)
+	}
+}
+
 func TestHealExpiredTimers_ClearsExpiredHold(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}

@@ -154,8 +154,28 @@ func injectSessionRuntimeHintsEnv(env map[string]string, cfg runtime.Config) map
 	} else {
 		delete(cloned, sessionReadyPromptEnvKey)
 	}
+	// Publish ProcessNames into the session env so later liveness observation
+	// can distinguish a live pane shell from a live agent process. Sessions
+	// without ProcessNames keep pane-only liveness for conformance tests and
+	// ad-hoc invocations.
+	if names := joinNonEmpty(cfg.ProcessNames, ","); names != "" && strings.TrimSpace(cloned[gtProcessNamesEnvKey]) == "" {
+		cloned[gtProcessNamesEnvKey] = names
+	}
 	return cloned
 }
+
+// joinNonEmpty joins trimmed non-empty entries with sep; returns "" if none.
+func joinNonEmpty(parts []string, sep string) string {
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return strings.Join(out, sep)
+}
+
+const gtProcessNamesEnvKey = "GT_PROCESS_NAMES"
 
 func newInstanceToken() (string, error) {
 	b := make([]byte, 16)
@@ -234,7 +254,8 @@ func (p *Provider) Interrupt(name string) error {
 // Uses a short-lived cache (default 2s TTL) backed by a single
 // `tmux list-panes -a` call instead of per-session HasSession + IsPaneDead
 // subprocess calls. Sessions with remain-on-exit corpses (pane_dead=1)
-// are correctly excluded — only sessions with live panes are "running".
+// are correctly excluded. A live pane can still be a zombie shell; use
+// ObserveLiveness or ProcessAlive when agent-process liveness matters.
 func (p *Provider) IsRunning(name string) bool {
 	return p.cache.IsRunning(name)
 }
@@ -265,10 +286,54 @@ func (p *Provider) IsAttached(name string) bool {
 // process matching one of the given names in its process tree.
 // Returns true if processNames is empty (no check possible).
 func (p *Provider) ProcessAlive(name string, processNames []string) bool {
+	processNames = nonEmptyProcessNames(processNames)
 	if len(processNames) == 0 {
 		return true
 	}
 	return p.tm.IsRuntimeRunning(name, processNames)
+}
+
+// ObserveLiveness reports both pane presence and agent-process presence for a
+// tmux session. If processNames is empty, it strictly consults GT_PROCESS_NAMES
+// from the session environment; it never falls back to Claude defaults.
+func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.Liveness {
+	if strings.TrimSpace(name) == "" {
+		return runtime.Liveness{}
+	}
+	running := p.cache.IsRunning(name)
+	processNames = nonEmptyProcessNames(processNames)
+	if len(processNames) == 0 {
+		processNames = p.sessionProcessNames(name)
+	}
+	if len(processNames) == 0 {
+		return runtime.Liveness{Running: running, Alive: running}
+	}
+	alive := p.tm.IsRuntimeRunning(name, processNames)
+	if alive && !running {
+		running = true
+	}
+	return runtime.Liveness{
+		Running: running,
+		Alive:   alive,
+	}
+}
+
+func (p *Provider) sessionProcessNames(name string) []string {
+	namesRaw, err := p.tm.GetEnvironment(name, gtProcessNamesEnvKey)
+	if err != nil {
+		return nil
+	}
+	return nonEmptyProcessNames(strings.Split(namesRaw, ","))
+}
+
+func nonEmptyProcessNames(processNames []string) []string {
+	out := make([]string, 0, len(processNames))
+	for _, name := range processNames {
+		if name = strings.TrimSpace(name); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // Capabilities reports tmux provider capabilities.

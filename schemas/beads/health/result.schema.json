@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gc-jsonl": {},
+  "type": "object",
+  "required": ["schema_version", "ok", "city_path", "provider", "status"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "city_path": { "type": "string" },
+    "provider": { "type": "string" },
+    "status": { "const": "healthy" }
+  },
+  "additionalProperties": true
+}

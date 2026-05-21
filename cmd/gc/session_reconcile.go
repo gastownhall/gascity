@@ -1,14 +1,13 @@
 // session_reconcile.go contains pure functions for the bead-driven session
 // reconciler. Functions in this file assume single-threaded execution
 // within one reconciler tick, with one intentional exception:
-// computeWorkSet parallelizes its per-agent scale_check runner calls
-// under a bounded semaphore (see bdProbeConcurrency in pool.go) so bd
-// subprocess latency doesn't serialize the whole cycle. Any ScaleCheckRunner
-// passed to computeWorkSet must therefore be safe to invoke from multiple
-// goroutines concurrently — shellScaleCheck (the production implementation)
-// is safe because it only reads its arguments and spawns an independent
-// subprocess. Map mutations on beads.Bead.Metadata are visible to callers
-// by design (maps are reference types).
+// computeWorkSet is the legacy controller-side work_query helper. It
+// parallelizes runner calls under a bounded semaphore (see bdProbeConcurrency
+// in pool.go), so any ScaleCheckRunner passed to it must be safe to invoke
+// from multiple goroutines concurrently. shellScaleCheck is safe because it
+// only reads its arguments and spawns an independent subprocess. Map mutations
+// on beads.Bead.Metadata are visible to callers by design (maps are reference
+// types).
 package main
 
 import (
@@ -387,12 +386,15 @@ func hasDependencyWakeRoot(reasons []WakeReason) bool {
 		containsWakeReason(reasons, WakePin)
 }
 
-// computeWorkSet runs each agent's work_query command and returns the set
-// of template names that have pending work. Called once per reconciler tick.
-// Controller-side queries run from the canonical city/rig root so pack
-// commands continue to operate on the real repo even when agent sessions use
-// isolated work_dir sandboxes. Non-empty output means work exists. Agents
-// without a work_query produce no WakeWork reason.
+// computeWorkSet runs legacy controller-side work_query commands and returns
+// the set of template names that have pending work. The current CityRuntime
+// demand snapshot keeps WorkSet empty and uses assigned-work scans plus
+// scale_check for controller wake demand; keep this helper suspension-aware
+// until the legacy WakeWork fallback is removed. Controller-side queries run
+// from the canonical city/rig root so pack commands continue to operate on the
+// real repo even when agent sessions use isolated work_dir sandboxes. Non-empty
+// output means work exists. Agents without a work_query produce no WakeWork
+// reason.
 func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir string, store beads.Store, sessionBeads *sessionBeadSnapshot, stderr io.Writer) map[string]bool { //nolint:unparam // cityName varies at runtime; tests use a fixed value
 	if cfg == nil || runner == nil {
 		return nil
@@ -418,6 +420,9 @@ func computeWorkSet(cfg *config.City, runner ScaleCheckRunner, cityName, cityDir
 			continue
 		}
 		seen[qn] = true
+		if isAgentEffectivelySuspended(cfg, a) {
+			continue
+		}
 		probeEnv, err := controllerQueryRuntimeEnv(cityDir, cfg, a)
 		if err != nil {
 			fmt.Fprintf(stderr, "session reconcile: building probe env for %s: %v\n", qn, err) //nolint:errcheck

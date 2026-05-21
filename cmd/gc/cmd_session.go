@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
@@ -74,6 +73,7 @@ continuity.`,
 
 func newSessionSubmitCmd(stdout, stderr io.Writer) *cobra.Command {
 	var intent string
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "submit <id-or-alias> <message...>",
 		Short: "Submit a message with semantic delivery intent",
@@ -91,7 +91,7 @@ according to the selected semantic intent.`,
 				fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			if cmdSessionSubmit(args, parsedIntent, stdout, stderr) != 0 {
+			if cmdSessionSubmit(args, parsedIntent, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -99,6 +99,7 @@ according to the selected semantic intent.`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().StringVar(&intent, "intent", string(session.SubmitIntentDefault), "submit intent: default, follow_up, or interrupt_now")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
 	return cmd
 }
 
@@ -108,6 +109,7 @@ func newSessionNewCmd(stdout, stderr io.Writer) *cobra.Command {
 	var alias string
 	var titleHint string
 	var noAttach bool
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "new <template>",
 		Short: "Create a new chat session from an agent template",
@@ -125,7 +127,7 @@ and refined by the title model in the background.`,
   gc session new helper --no-attach`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionNew(args, alias, title, titleHint, noAttach, stdout, stderr) != 0 {
+			if cmdSessionNew(args, alias, title, titleHint, noAttach, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -135,6 +137,7 @@ and refined by the title model in the background.`,
 	cmd.Flags().StringVar(&title, "title", "", "human-readable session title")
 	cmd.Flags().StringVar(&titleHint, "title-hint", "", "text to auto-generate a session title from")
 	cmd.Flags().BoolVar(&noAttach, "no-attach", false, "create session without attaching")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
 	return cmd
 }
 
@@ -143,8 +146,12 @@ and refined by the title model in the background.`,
 // Phase 2: creates a session bead and pokes the controller. The reconciler
 // handles process lifecycle (start). If the controller is not running,
 // falls back to direct process start via the session manager.
-func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool, stdout, stderr io.Writer) int {
+func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, jsonOutput bool, stdout, stderr io.Writer) int {
 	templateName := args[0]
+	if jsonOutput && !noAttach {
+		fmt.Fprintln(stderr, "gc session new: --json requires --no-attach because attaching is interactive") //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	cityPath, err := resolveCity()
 	if err != nil {
@@ -313,10 +320,27 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 			// Poke again after bead creation to trigger immediate reconciler tick.
 			_ = pokeController(cityPath)
 
-			fmt.Fprintf(stdout, "Session %s created from template %q (reconciler will start it).\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
+			if jsonOutput {
+				if err := writeSessionNewJSON(stdout, stderr, sessionNewJSON{
+					SchemaVersion: "1",
+					OK:            true,
+					SessionID:     info.ID,
+					SessionName:   info.SessionName,
+					Alias:         info.Alias,
+					Template:      canonicalTemplate,
+					Transport:     sessionTransport,
+					WorkDir:       info.WorkDir,
+					DeferredStart: true,
+					Attached:      false,
+				}); err != nil {
+					return 1
+				}
+			} else {
+				fmt.Fprintf(stdout, "Session %s created from template %q (reconciler will start it).\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
+			}
 
 			if !shouldAttachNewSession(noAttach, sessionTransport) {
-				if sessionTransport == config.SessionTransportACP && !noAttach {
+				if sessionTransport == config.SessionTransportACP && !noAttach && !jsonOutput {
 					fmt.Fprintln(stdout, "Session uses ACP transport; not attaching.") //nolint:errcheck // best-effort stdout
 				}
 				return 0
@@ -407,10 +431,27 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	titleDone := maybeAutoTitle(store, info.ID, title, titleHint, titleProvider, info.WorkDir, stderr)
 	defer func() { <-titleDone }() // ensure title goroutine completes on all exit paths
 
-	fmt.Fprintf(stdout, "Session %s created from template %q.\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
+	if jsonOutput {
+		if err := writeSessionNewJSON(stdout, stderr, sessionNewJSON{
+			SchemaVersion: "1",
+			OK:            true,
+			SessionID:     info.ID,
+			SessionName:   info.SessionName,
+			Alias:         info.Alias,
+			Template:      canonicalTemplate,
+			Transport:     sessionTransport,
+			WorkDir:       info.WorkDir,
+			DeferredStart: false,
+			Attached:      false,
+		}); err != nil {
+			return 1
+		}
+	} else {
+		fmt.Fprintf(stdout, "Session %s created from template %q.\n", info.ID, canonicalTemplate) //nolint:errcheck // best-effort stdout
+	}
 
 	if !shouldAttachNewSession(noAttach, sessionTransport) {
-		if sessionTransport == config.SessionTransportACP && !noAttach {
+		if sessionTransport == config.SessionTransportACP && !noAttach && !jsonOutput {
 			fmt.Fprintln(stdout, "Session uses ACP transport; not attaching.") //nolint:errcheck // best-effort stdout
 		}
 		return 0
@@ -820,9 +861,7 @@ func writeSessionListJSON(sessions []session.Info, stateFilter, templateFilter s
 		Sessions:      rows,
 		Summary:       summarizeSessionList(rows),
 	}
-	enc := json.NewEncoder(stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(result); err != nil {
+	if err := writeCLIJSONLine(stdout, result); err != nil {
 		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -842,6 +881,23 @@ func summarizeSessionList(rows []sessionListJSONRow) sessionListSummary {
 		}
 	}
 	return summary
+}
+
+type sessionNewJSON struct {
+	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
+	SessionID     string `json:"session_id"`
+	SessionName   string `json:"session_name"`
+	Alias         string `json:"alias,omitempty"`
+	Template      string `json:"template"`
+	Transport     string `json:"transport"`
+	WorkDir       string `json:"work_dir"`
+	DeferredStart bool   `json:"deferred_start"`
+	Attached      bool   `json:"attached"`
+}
+
+func writeSessionNewJSON(stdout, stderr io.Writer, result sessionNewJSON) error {
+	return writeCLIJSONLineOrErr(stdout, stderr, "gc session new", result)
 }
 
 func sessionListJSONRows(sessions []session.Info) []sessionListJSONRow {
@@ -1306,7 +1362,8 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 
 // newSessionSuspendCmd creates the "gc session suspend <id-or-alias>" command.
 func newSessionSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "suspend <session-id-or-alias>",
 		Short: "Suspend a session (save state, free resources)",
 		Long: `Suspend an active session by stopping its runtime process.
@@ -1315,13 +1372,15 @@ The session bead persists and can be resumed later.
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionSuspend(args, stdout, stderr) != 0 {
+			if cmdSessionSuspend(args, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
 		},
 		ValidArgsFunction: completeSessionIDs,
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
+	return cmd
 }
 
 // cmdSessionSuspend is the CLI entry point for "gc session suspend".
@@ -1329,7 +1388,8 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 // Phase 2: sets held_until metadata on the session bead and pokes the
 // controller. The reconciler handles the actual process stop. Falls back
 // to direct suspend via the session manager if the controller isn't running.
-func cmdSessionSuspend(args []string, stdout, stderr io.Writer) int {
+func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
+	asJSON := sessionJSONRequested(jsonOutput)
 	store, code := openCityStore(stderr, "gc session suspend")
 	if store == nil {
 		return code
@@ -1364,6 +1424,18 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer) int {
 			}
 			// Poke again to trigger immediate reconciler tick.
 			_ = pokeController(cityPath)
+			if asJSON {
+				if err := writeSessionActionJSON(stdout, sessionActionResult{
+					Action:    "suspend",
+					SessionID: sessionID,
+					Mode:      "managed",
+					State:     "suspended",
+				}); err != nil {
+					fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+					return 1
+				}
+				return 0
+			}
 			fmt.Fprintf(stdout, "Session %s suspended. Resume with: gc session wake %s\n", sessionID, sessionID) //nolint:errcheck // best-effort stdout
 			return 0
 		}
@@ -1382,13 +1454,26 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	if asJSON {
+		if err := writeSessionActionJSON(stdout, sessionActionResult{
+			Action:    "suspend",
+			SessionID: sessionID,
+			Mode:      "direct",
+			State:     "suspended",
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	}
 	fmt.Fprintf(stdout, "Session %s suspended. Resume with: gc session attach %s\n", sessionID, sessionID) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
 // newSessionCloseCmd creates the "gc session close <id-or-alias>" command.
 func newSessionCloseCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "close <session-id-or-alias>",
 		Short: "Close a session permanently",
 		Long: `End a conversation. Stops the runtime if active and closes the bead.
@@ -1396,17 +1481,20 @@ func newSessionCloseCmd(stdout, stderr io.Writer) *cobra.Command {
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionClose(args, stdout, stderr) != 0 {
+			if cmdSessionClose(args, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
 		},
 		ValidArgsFunction: completeSessionIDs,
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
+	return cmd
 }
 
 // cmdSessionClose is the CLI entry point for "gc session close".
-func cmdSessionClose(args []string, stdout, stderr io.Writer) int {
+func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
+	asJSON := sessionJSONRequested(jsonOutput)
 	store, code := openCityStore(stderr, "gc session close")
 	if store == nil {
 		return code
@@ -1440,28 +1528,44 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	if asJSON {
+		if err := writeSessionActionJSON(stdout, sessionActionResult{
+			Action:              "close",
+			SessionID:           sessionID,
+			State:               "closed",
+			WaitNudgesWithdrawn: len(closeResult.WaitNudgeIDs),
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	}
 	fmt.Fprintf(stdout, "Session %s closed.\n", sessionID) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
 // newSessionRenameCmd creates the "gc session rename <id-or-alias> <title>" command.
 func newSessionRenameCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "rename <session-id-or-alias> <title>",
 		Short: "Rename a session",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionRename(args, stdout, stderr) != 0 {
+			if cmdSessionRename(args, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
 		},
 		ValidArgsFunction: completeSessionIDs,
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
+	return cmd
 }
 
 // cmdSessionRename is the CLI entry point for "gc session rename".
-func cmdSessionRename(args []string, stdout, stderr io.Writer) int {
+func cmdSessionRename(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
+	asJSON := sessionJSONRequested(jsonOutput)
 	title := args[1]
 
 	store, code := openCityStore(stderr, "gc session rename")
@@ -1491,6 +1595,17 @@ func cmdSessionRename(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	if asJSON {
+		if err := writeSessionActionJSON(stdout, sessionActionResult{
+			Action:    "rename",
+			SessionID: sessionID,
+			Title:     title,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session rename: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	}
 	fmt.Fprintf(stdout, "Session %s renamed to %q.\n", sessionID, title) //nolint:errcheck // best-effort stdout
 	return 0
 }
@@ -1498,6 +1613,7 @@ func cmdSessionRename(args []string, stdout, stderr io.Writer) int {
 // newSessionPruneCmd creates the "gc session prune" command.
 func newSessionPruneCmd(stdout, stderr io.Writer) *cobra.Command {
 	var beforeStr string
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "prune",
 		Short: "Close old suspended sessions",
@@ -1507,18 +1623,20 @@ sessions are affected — active sessions are never pruned.`,
   gc session prune --before 24h`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdSessionPrune(beforeStr, stdout, stderr) != 0 {
+			if cmdSessionPrune(beforeStr, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&beforeStr, "before", "7d", "prune sessions older than this duration (e.g., 7d, 24h)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
 	return cmd
 }
 
 // cmdSessionPrune is the CLI entry point for "gc session prune".
-func cmdSessionPrune(beforeStr string, stdout, stderr io.Writer) int {
+func cmdSessionPrune(beforeStr string, stdout, stderr io.Writer, jsonOutput ...bool) int {
+	asJSON := sessionJSONRequested(jsonOutput)
 	dur, err := parsePruneDuration(beforeStr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session prune: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1549,6 +1667,18 @@ func cmdSessionPrune(beforeStr string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	if asJSON {
+		if err := writeSessionActionJSON(stdout, sessionActionResult{
+			Action: "prune",
+			Count:  &result.Count,
+			Before: beforeStr,
+			Cutoff: cutoff.UTC().Format(time.RFC3339),
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session prune: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	}
 	if result.Count == 0 {
 		fmt.Fprintln(stdout, "No sessions to prune.") //nolint:errcheck // best-effort stdout
 	} else {
@@ -1588,12 +1718,13 @@ func parsePruneDuration(s string) (time.Duration, error) {
 // newSessionPeekCmd creates the "gc session peek <id-or-alias>" command.
 func newSessionPeekCmd(stdout, stderr io.Writer) *cobra.Command {
 	var lines int
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "peek <session-id-or-alias>",
 		Short: "View session output without attaching",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionPeek(args, lines, stdout, stderr) != 0 {
+			if cmdSessionPeek(args, lines, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -1601,11 +1732,21 @@ func newSessionPeekCmd(stdout, stderr io.Writer) *cobra.Command {
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().IntVar(&lines, "lines", 50, "number of lines to capture")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL result")
 	return cmd
 }
 
+type sessionPeekJSONResult struct {
+	SchemaVersion string `json:"schema_version"`
+	SessionID     string `json:"session_id"`
+	Target        string `json:"target"`
+	Lines         int    `json:"lines"`
+	LineCount     int    `json:"line_count"`
+	Output        string `json:"output"`
+}
+
 // cmdSessionPeek is the CLI entry point for "gc session peek".
-func cmdSessionPeek(args []string, lines int, stdout, stderr io.Writer) int {
+func cmdSessionPeek(args []string, lines int, jsonOutput bool, stdout, stderr io.Writer) int {
 	store, code := openCityStore(stderr, "gc session peek")
 	if store == nil {
 		return code
@@ -1635,6 +1776,21 @@ func cmdSessionPeek(args []string, lines int, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	if jsonOutput {
+		if err := writeCLIJSONLine(stdout, sessionPeekJSONResult{
+			SchemaVersion: "1",
+			SessionID:     sessionID,
+			Target:        args[0],
+			Lines:         lines,
+			LineCount:     outputLineCount(output),
+			Output:        output,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	}
+
 	fmt.Fprint(stdout, output) //nolint:errcheck // best-effort stdout
 	if !strings.HasSuffix(output, "\n") {
 		fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
@@ -1642,9 +1798,21 @@ func cmdSessionPeek(args []string, lines int, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func outputLineCount(output string) int {
+	if output == "" {
+		return 0
+	}
+	count := strings.Count(output, "\n")
+	if !strings.HasSuffix(output, "\n") {
+		count++
+	}
+	return count
+}
+
 // newSessionKillCmd creates the "gc session kill <id-or-alias>" command.
 func newSessionKillCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "kill <session-id-or-alias>",
 		Short: "Force-kill session runtime (reconciler restarts)",
 		Long: `Force-kill the runtime process for a session without changing its bead state.
@@ -1656,17 +1824,20 @@ useful for unsticking a session without losing its conversation history.
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionKill(args, stdout, stderr) != 0 {
+			if cmdSessionKill(args, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
 		},
 		ValidArgsFunction: completeSessionIDs,
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
+	return cmd
 }
 
 // cmdSessionKill is the CLI entry point for "gc session kill".
-func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
+func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
+	asJSON := sessionJSONRequested(jsonOutput)
 	store, code := openCityStore(stderr, "gc session kill")
 	if store == nil {
 		return code
@@ -1707,6 +1878,16 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
 		Payload: api.SessionLifecyclePayloadJSON(sessionID, "", "killed"),
 	})
 
+	if asJSON {
+		if err := writeSessionActionJSON(stdout, sessionActionResult{
+			Action:    "kill",
+			SessionID: sessionID,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	}
 	fmt.Fprintf(stdout, "Session %s killed.\n", sessionID) //nolint:errcheck // best-effort stdout
 	return 0
 }
@@ -1714,6 +1895,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
 // newSessionNudgeCmd creates the "gc session nudge <id-or-alias> <message>" command.
 func newSessionNudgeCmd(stdout, stderr io.Writer) *cobra.Command {
 	var delivery string
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "nudge <id-or-alias> <message...>",
 		Short: "Send a text message to a running session",
@@ -1731,7 +1913,7 @@ joined automatically.`,
 				fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			if cmdSessionNudge(args, mode, stdout, stderr) != 0 {
+			if cmdSessionNudge(args, mode, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -1739,6 +1921,7 @@ joined automatically.`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().StringVar(&delivery, "delivery", string(nudgeDeliveryWaitIdle), "delivery mode: immediate, wait-idle, or queue")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
 	return cmd
 }
 
@@ -1755,7 +1938,16 @@ func parseSessionSubmitIntent(raw string) (session.SubmitIntent, error) {
 	}
 }
 
-func cmdSessionSubmit(args []string, intent session.SubmitIntent, stdout, stderr io.Writer) int {
+type sessionSubmitJSON struct {
+	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
+	Target        string `json:"target"`
+	Intent        string `json:"intent"`
+	Queued        bool   `json:"queued"`
+	Outcome       string `json:"outcome"`
+}
+
+func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput bool, stdout, stderr io.Writer) int {
 	target := args[0]
 	message := strings.Join(args[1:], " ")
 
@@ -1768,8 +1960,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, stdout, stderr
 	if c := apiClient(cityPath); c != nil {
 		resp, err := c.SubmitSession(target, message, intent)
 		if err == nil {
-			emitSessionSubmitResult(stdout, target, intent, resp.Queued)
-			return 0
+			return emitSessionSubmitResult(stdout, stderr, target, intent, resp.Queued, jsonOutput)
 		}
 		if !api.ShouldFallback(err) {
 			fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1807,11 +1998,26 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, stdout, stderr
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	emitSessionSubmitResult(stdout, target, intent, outcome.Queued)
-	return 0
+	return emitSessionSubmitResult(stdout, stderr, target, intent, outcome.Queued, jsonOutput)
 }
 
-func emitSessionSubmitResult(stdout io.Writer, target string, intent session.SubmitIntent, queued bool) {
+func emitSessionSubmitResult(stdout, stderr io.Writer, target string, intent session.SubmitIntent, queued, jsonOutput bool) int {
+	if jsonOutput {
+		outcome := "submitted"
+		if queued {
+			outcome = "queued"
+		} else if intent == session.SubmitIntentInterruptNow {
+			outcome = "interrupted"
+		}
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc session submit", sessionSubmitJSON{
+			SchemaVersion: "1",
+			OK:            true,
+			Target:        target,
+			Intent:        string(intent),
+			Queued:        queued,
+			Outcome:       outcome,
+		})
+	}
 	switch {
 	case queued:
 		fmt.Fprintf(stdout, "Queued follow-up for %s\n", target) //nolint:errcheck // best-effort stdout
@@ -1822,10 +2028,22 @@ func emitSessionSubmitResult(stdout io.Writer, target string, intent session.Sub
 	default:
 		fmt.Fprintf(stdout, "Submitted to %s\n", target) //nolint:errcheck // best-effort stdout
 	}
+	return 0
+}
+
+type sessionNudgeJSON struct {
+	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
+	Target        string `json:"target"`
+	SessionID     string `json:"session_id,omitempty"`
+	SessionName   string `json:"session_name,omitempty"`
+	Delivery      string `json:"delivery"`
+	Queued        bool   `json:"queued"`
+	Outcome       string `json:"outcome"`
 }
 
 // cmdSessionNudge is the CLI entry point for "gc session nudge".
-func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, stdout, stderr io.Writer) int {
+func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
 	target := args[0]
 	message := strings.Join(args[1:], " ")
 
@@ -1834,7 +2052,7 @@ func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, stdout, stderr i
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return deliverSessionNudge(targetInfo, message, delivery, stdout, stderr)
+	return deliverSessionNudge(targetInfo, message, delivery, jsonOutput, stdout, stderr)
 }
 
 // resolveWorkDir determines the working directory for a session based on the
