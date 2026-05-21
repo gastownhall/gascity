@@ -2925,7 +2925,7 @@ func TestSyncSessionBeads_StalePoolSnapshotReusesVisibleOwner(t *testing.T) {
 	sp := runtime.NewFake()
 	template := "pack/worker"
 
-	owner, err := createPoolSessionBead(store, template, nil, clk.Now(), poolSessionCreateIdentity{})
+	owner, err := createPoolSessionBead(store, template, clk.Now(), poolSessionCreateIdentity{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3617,7 +3617,7 @@ func TestCreatePoolSessionBead_MetadataFailureLeavesReachablePlaceholder(t *test
 	store := &failingPoolSessionNameStore{MemStore: beads.NewMemStore()}
 	template := "pack/worker"
 
-	if _, err := createPoolSessionBead(store, template, nil, time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC), poolSessionCreateIdentity{}); err == nil {
+	if _, err := createPoolSessionBead(store, template, time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC), poolSessionCreateIdentity{}); err == nil {
 		t.Fatal("createPoolSessionBead returned nil error, want session_name metadata failure")
 	}
 

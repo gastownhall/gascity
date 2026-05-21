@@ -240,19 +240,16 @@ func templateNameFor(cfgAgent *config.Agent, qualifiedName string) string {
 }
 
 // resolveTmuxAliasForAgent expands the agent's tmux_alias template using the
-// build params' city/rig context. Returns "" when the agent is nil, the
-// template is empty, or expansion fails — pool session creation falls back to
-// the universal PoolSessionName derivation in those cases.
-func (p *agentBuildParams) resolveTmuxAliasForAgent(agent *config.Agent) string {
+// build params' city/rig context. Returns "" when the agent is nil or the
+// template is empty. Template errors fail closed so pool reconciliation does
+// not silently spawn sessions under unintended fallback names.
+func (p *agentBuildParams) resolveTmuxAliasForAgent(agent *config.Agent) (string, error) {
 	if p == nil || agent == nil {
-		return ""
+		return "", nil
 	}
 	resolved, err := workdirutil.ResolveTmuxAlias(p.cityPath, p.cityName, *agent, p.rigs)
 	if err != nil {
-		if p.stderr != nil {
-			fmt.Fprintf(p.stderr, "tmux_alias for %q: %v (using default session name)\n", agent.QualifiedName(), err) //nolint:errcheck // best-effort stderr
-		}
-		return ""
+		return "", fmt.Errorf("resolving tmux_alias for %q: %w", agent.QualifiedName(), err)
 	}
-	return resolved
+	return resolved, nil
 }

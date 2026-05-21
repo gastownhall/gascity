@@ -373,6 +373,7 @@ type AgentPatch struct {
 	SleepAfterIdle          *string           `json:"SleepAfterIdle"`
 	StartCommand            *string           `json:"StartCommand"`
 	Suspended               *bool             `json:"Suspended"`
+	TmuxAlias               *string           `json:"TmuxAlias"`
 	WakeMode                *string           `json:"WakeMode"`
 	WorkDir                 *string           `json:"WorkDir"`
 }
@@ -393,6 +394,9 @@ type AgentPatchSetInputBody struct {
 
 	// Suspended Override suspended state.
 	Suspended *bool `json:"suspended,omitempty"`
+
+	// TmuxAlias Override tmux session name template.
+	TmuxAlias *string `json:"tmux_alias,omitempty"`
 
 	// WorkDir Override session working directory.
 	WorkDir *string `json:"work_dir,omitempty"`

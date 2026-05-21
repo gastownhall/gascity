@@ -130,6 +130,16 @@ func TestSessionQualifiedNameKeepsSingletonTemplateIdentity(t *testing.T) {
 	}
 }
 
+func TestSessionQualifiedNameUsesSingletonExplicitNameWhenAliasEmpty(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
+	agent := config.Agent{Name: "witness", Dir: "demo", MaxActiveSessions: intPtr(1)}
+
+	if got := SessionQualifiedName(cityPath, agent, rigs, "", "crew--gastown"); got != "demo/crew--gastown" {
+		t.Fatalf("SessionQualifiedName() = %q, want singleton tmux_alias explicit name in work_dir identity", got)
+	}
+}
+
 func TestSessionQualifiedNamePreservesRigQualifiedBindingIdentity(t *testing.T) {
 	cityPath := t.TempDir()
 	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}

@@ -2131,14 +2131,20 @@ type Agent struct {
 	// agent's qualified identity. Relative paths resolve against city root
 	// and may use the same template placeholders as session_setup.
 	WorkDir string `toml:"work_dir,omitempty"`
-	// TmuxAlias overrides the tmux session name for pool / ephemeral / ad-hoc
-	// sessions of this agent. When unset, sessions fall back to the universal
-	// derivation ("s-<beadID>" for ad-hoc sessions, "<basename>-<beadID>" for
-	// pool sessions). When set, it is expanded as a Go text/template using the
-	// same PathContext fields as work_dir / session_setup (Agent, AgentBase,
-	// Rig, RigRoot, CityRoot, CityName) and sanitized for tmux. If the
-	// resolved name collides with another live session, the bead ID is
-	// appended as a deterministic suffix.
+	// TmuxAlias overrides the tmux session_name for pool and factory-created
+	// manual sessions of this agent. When unset, sessions fall back to the
+	// universal derivation ("s-<beadID>" for ad-hoc sessions,
+	// "<basename>-<beadID>" for pool sessions). When set, it is expanded as a
+	// Go text/template using the same PathContext fields as work_dir /
+	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName),
+	// sanitized for tmux, and validated as an explicit session name. For pool
+	// sessions, a live-name collision appends the bead ID as a deterministic
+	// suffix. For manual `gc session new` sessions, tmux_alias becomes the
+	// explicit session_name and takes precedence over --alias, which remains the
+	// command/mail alias; duplicate explicit names fail closed. Configured named
+	// sessions keep their named-session runtime name instead of using
+	// tmux_alias. When no --alias is supplied, work_dir templates that use
+	// {{.Agent}} see the resolved tmux_alias as the concrete session identity.
 	TmuxAlias string `toml:"tmux_alias,omitempty"`
 	// Scope defines where this agent is instantiated: "city" (one per city)
 	// or "rig" (one per rig, the default). Only meaningful for pack-defined

@@ -66,6 +66,7 @@ Agent defines a configured agent in the city.
 | `description` | string |  |  | Description is a human-readable description shown in MC's session creation UI. |
 | `dir` | string |  |  | Dir is the identity prefix for rig-scoped agents and the default working directory when WorkDir is not set. |
 | `work_dir` | string |  |  | WorkDir overrides the session working directory without changing the agent's qualified identity. Relative paths resolve against city root and may use the same template placeholders as session_setup. |
+| `tmux_alias` | string |  |  | TmuxAlias overrides the tmux session_name for pool and factory-created manual sessions of this agent. When unset, sessions fall back to the universal derivation ("s-&lt;beadID&gt;" for ad-hoc sessions, "&lt;basename&gt;-&lt;beadID&gt;" for pool sessions). When set, it is expanded as a Go text/template using the same PathContext fields as work_dir / session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName), sanitized for tmux, and validated as an explicit session name. For pool sessions, a live-name collision appends the bead ID as a deterministic suffix. For manual `gc session new` sessions, tmux_alias becomes the explicit session_name and takes precedence over --alias, which remains the command/mail alias; duplicate explicit names fail closed. Configured named sessions keep their named-session runtime name instead of using tmux_alias. When no --alias is supplied, work_dir templates that use &#123;&#123;.Agent&#125;&#125; see the resolved tmux_alias as the concrete session identity. |
 | `scope` | string |  |  | Scope defines where this agent is instantiated: "city" (one per city) or "rig" (one per rig, the default). Only meaningful for pack-defined agents; inline agents in city.toml use Dir directly. Enum: `city`, `rig` |
 | `suspended` | boolean |  |  | Suspended prevents the reconciler from spawning this agent. Toggle with gc agent suspend/resume. |
 | `pre_start` | []string |  |  | PreStart is a list of shell commands run before session creation. Commands run on the target filesystem: locally for tmux, inside the pod/container for exec providers. Template variables same as session_setup. |
@@ -139,6 +140,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `agent` | string | **yes** |  | Agent is the name of the pack agent to override (required). |
 | `dir` | string |  |  | Dir overrides the stamped dir (default: rig name). |
 | `work_dir` | string |  |  | WorkDir overrides the agent's working directory without changing its qualified identity or rig association. |
+| `tmux_alias` | string |  |  | TmuxAlias overrides the tmux session name template (see Agent.TmuxAlias for semantics). |
 | `scope` | string |  |  | Scope overrides the agent's scope ("city" or "rig"). |
 | `suspended` | boolean |  |  | Suspended sets the agent's suspended state. |
 | `pool` | PoolOverride |  |  | Pool overrides legacy [pool] fields that map to session scaling. |
@@ -192,6 +194,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `dir` | string | **yes** |  | Dir is the targeting key (required with Name). Identifies the agent's working directory scope. Empty for city-scoped agents. |
 | `name` | string | **yes** |  | Name is the targeting key (required). Must match an existing agent's name. |
 | `work_dir` | string |  |  | WorkDir overrides the agent's session working directory. |
+| `tmux_alias` | string |  |  | TmuxAlias overrides the tmux session name template (see Agent.TmuxAlias for semantics). |
 | `scope` | string |  |  | Scope overrides the agent's scope ("city" or "rig"). |
 | `suspended` | boolean |  |  | Suspended overrides the agent's suspended state. |
 | `pool` | PoolOverride |  |  | Pool overrides legacy [pool] fields that map to session scaling. |

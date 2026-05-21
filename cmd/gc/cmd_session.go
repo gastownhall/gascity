@@ -119,7 +119,10 @@ after creation.
 
 When --title-hint is provided without --title, the session title is
 auto-generated from the hint text: a short version is set immediately
-and refined by the title model in the background.`,
+and refined by the title model in the background.
+
+If the template config sets tmux_alias, it controls the runtime tmux
+session_name. --alias still sets the public command and mail alias.`,
 		Example: `  gc session new helper
   gc session new helper --alias sky
   gc session new helper --title "debugging auth"

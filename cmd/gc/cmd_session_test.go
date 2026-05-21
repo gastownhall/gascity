@@ -89,6 +89,69 @@ func TestFormatDuration(t *testing.T) {
 	}
 }
 
+func TestSessionExplicitNameForNewSessionTmuxAliasPrecedence(t *testing.T) {
+	agent := &config.Agent{
+		Name:              "worker",
+		MaxActiveSessions: intPtr(3),
+		TmuxAlias:         "crew--{{.CityName}}",
+	}
+
+	got, err := sessionExplicitNameForNewSession(t.TempDir(), "test-city", nil, agent, "operator")
+	if err != nil {
+		t.Fatalf("sessionExplicitNameForNewSession: %v", err)
+	}
+	if got != "crew--test-city" {
+		t.Fatalf("explicit name = %q, want tmux_alias to take precedence over --alias", got)
+	}
+}
+
+func TestSessionExplicitNameForNewSessionRejectsInvalidTmuxAlias(t *testing.T) {
+	agent := &config.Agent{
+		Name:              "worker",
+		MaxActiveSessions: intPtr(3),
+		TmuxAlias:         "s-worker",
+	}
+
+	_, err := sessionExplicitNameForNewSession(t.TempDir(), "test-city", nil, agent, "")
+	if err == nil {
+		t.Fatal("sessionExplicitNameForNewSession: want invalid tmux_alias error")
+	}
+	if !strings.Contains(err.Error(), "reserved prefix") {
+		t.Fatalf("sessionExplicitNameForNewSession error = %v, want reserved prefix context", err)
+	}
+}
+
+func TestSessionExplicitNameForNewSessionReturnsTemplateError(t *testing.T) {
+	agent := &config.Agent{
+		Name:              "worker",
+		MaxActiveSessions: intPtr(3),
+		TmuxAlias:         "{{.NotAField}}",
+	}
+
+	_, err := sessionExplicitNameForNewSession(t.TempDir(), "test-city", nil, agent, "")
+	if err == nil {
+		t.Fatal("sessionExplicitNameForNewSession: want template resolution error")
+	}
+	if !strings.Contains(err.Error(), "resolving tmux_alias") {
+		t.Fatalf("sessionExplicitNameForNewSession error = %v, want tmux_alias context", err)
+	}
+}
+
+func TestSessionExplicitNameForNewSessionAliasKeepsGeneratedNameOff(t *testing.T) {
+	agent := &config.Agent{
+		Name:              "worker",
+		MaxActiveSessions: intPtr(3),
+	}
+
+	got, err := sessionExplicitNameForNewSession(t.TempDir(), "test-city", nil, agent, "operator")
+	if err != nil {
+		t.Fatalf("sessionExplicitNameForNewSession: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("explicit name = %q, want empty when --alias owns the manual identity", got)
+	}
+}
+
 func TestCmdSessionList_ManagedExecLifecycleProviderReadsSessions(t *testing.T) {
 	cityDir, _ := setupManagedBdWaitTestCity(t)
 

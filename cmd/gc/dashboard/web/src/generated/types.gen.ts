@@ -106,6 +106,7 @@ export type AgentPatch = {
     SleepAfterIdle: string | null;
     StartCommand: string | null;
     Suspended: boolean | null;
+    TmuxAlias: string | null;
     WakeMode: string | null;
     WorkDir: string | null;
 };
@@ -133,6 +134,10 @@ export type AgentPatchSetInputBody = {
      * Override suspended state.
      */
     suspended?: boolean;
+    /**
+     * Override tmux session name template.
+     */
+    tmux_alias?: string;
     /**
      * Override session working directory.
      */

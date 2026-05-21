@@ -100,18 +100,32 @@ func ExpandCommandTemplate(command, cityPath, cityName string, a config.Agent, r
 }
 
 // SessionQualifiedName returns the canonical work_dir identity for a concrete
-// session instance. Single-session agents keep their template identity; pooled
-// agents use the alias or generated explicit name.
+// session instance. Single-session agents keep their template identity unless
+// an explicit name, such as a resolved tmux_alias, supplies the concrete
+// session identity; pooled agents use the alias or generated explicit name.
 func SessionQualifiedName(cityPath string, a config.Agent, rigs []config.Rig, alias, explicitName string) string {
 	if !a.SupportsMultipleSessions() {
+		if strings.TrimSpace(alias) == "" {
+			if qualified := sessionQualifiedNameFromIdentity(cityPath, a, rigs, explicitName); qualified != "" {
+				return qualified
+			}
+		}
 		return a.QualifiedName()
 	}
 	identity := strings.TrimSpace(alias)
 	if identity == "" {
 		identity = strings.TrimSpace(explicitName)
 	}
+	if qualified := sessionQualifiedNameFromIdentity(cityPath, a, rigs, identity); qualified != "" {
+		return qualified
+	}
+	return a.QualifiedName()
+}
+
+func sessionQualifiedNameFromIdentity(cityPath string, a config.Agent, rigs []config.Rig, identity string) string {
+	identity = strings.TrimSpace(identity)
 	if identity == "" {
-		return a.QualifiedName()
+		return ""
 	}
 
 	_, instanceName := config.ParseQualifiedName(identity)

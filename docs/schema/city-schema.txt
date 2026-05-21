@@ -62,6 +62,10 @@
           "type": "string",
           "description": "WorkDir overrides the session working directory without changing the\nagent's qualified identity. Relative paths resolve against city root\nand may use the same template placeholders as session_setup."
         },
+        "tmux_alias": {
+          "type": "string",
+          "description": "TmuxAlias overrides the tmux session_name for pool and factory-created\nmanual sessions of this agent. When unset, sessions fall back to the\nuniversal derivation (\"s-\u003cbeadID\u003e\" for ad-hoc sessions,\n\"\u003cbasename\u003e-\u003cbeadID\u003e\" for pool sessions). When set, it is expanded as a\nGo text/template using the same PathContext fields as work_dir /\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName),\nsanitized for tmux, and validated as an explicit session name. For pool\nsessions, a live-name collision appends the bead ID as a deterministic\nsuffix. For manual `gc session new` sessions, tmux_alias becomes the\nexplicit session_name and takes precedence over --alias, which remains the\ncommand/mail alias; duplicate explicit names fail closed. Configured named\nsessions keep their named-session runtime name instead of using\ntmux_alias. When no --alias is supplied, work_dir templates that use\n{{.Agent}} see the resolved tmux_alias as the concrete session identity."
+        },
         "scope": {
           "type": "string",
           "enum": [
@@ -395,6 +399,10 @@
           "type": "string",
           "description": "WorkDir overrides the agent's working directory without changing\nits qualified identity or rig association."
         },
+        "tmux_alias": {
+          "type": "string",
+          "description": "TmuxAlias overrides the tmux session name template\n(see Agent.TmuxAlias for semantics)."
+        },
         "scope": {
           "type": "string",
           "description": "Scope overrides the agent's scope (\"city\" or \"rig\")."
@@ -652,6 +660,10 @@
         "work_dir": {
           "type": "string",
           "description": "WorkDir overrides the agent's session working directory."
+        },
+        "tmux_alias": {
+          "type": "string",
+          "description": "TmuxAlias overrides the tmux session name template\n(see Agent.TmuxAlias for semantics)."
         },
         "scope": {
           "type": "string",

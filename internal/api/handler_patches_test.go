@@ -88,7 +88,7 @@ func TestHandleAgentPatchSet(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	h := newTestCityHandler(t, fs)
 
-	body := `{"dir":"rig1","name":"worker","suspended":true}`
+	body := `{"dir":"rig1","name":"worker","tmux_alias":"worker--{{.CityName}}","suspended":true}`
 	req := httptest.NewRequest("PUT", cityURL(fs, "/patches/agents"), strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
@@ -103,6 +103,9 @@ func TestHandleAgentPatchSet(t *testing.T) {
 	}
 	if fs.cfg.Patches.Agents[0].Name != "worker" {
 		t.Errorf("name = %q, want %q", fs.cfg.Patches.Agents[0].Name, "worker")
+	}
+	if fs.cfg.Patches.Agents[0].TmuxAlias == nil || *fs.cfg.Patches.Agents[0].TmuxAlias != "worker--{{.CityName}}" {
+		t.Errorf("tmux alias = %v, want %q", fs.cfg.Patches.Agents[0].TmuxAlias, "worker--{{.CityName}}")
 	}
 }
 
