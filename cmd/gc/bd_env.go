@@ -1121,6 +1121,9 @@ func mirrorBeadsDoltEnv(env map[string]string) {
 	}
 }
 
+// cityForStoreDir resolves ambient store contexts. GC_CITY intentionally wins
+// over filesystem discovery here; callers with an authoritative city path or
+// hook-projected store root must pass that city directly.
 func cityForStoreDir(dir string) string {
 	if cityPath, ok := resolveExplicitCityPathEnv(); ok {
 		return cityPath

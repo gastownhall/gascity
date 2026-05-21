@@ -933,7 +933,9 @@ func openCityStoreWithPath(stderr io.Writer, cmdName string) (beads.Store, strin
 
 // openCityStoreAt opens a bead store at the given city path.
 // Used by the controller (which already knows the city path) and by
-// openCityStore (which resolves the path first).
+// openCityStore (which resolves the path first). Keep the passed city path
+// authoritative; rerouting through cityForStoreDir would let inherited
+// GC_CITY override an explicit --city resolution.
 func openCityStoreAt(cityPath string) (beads.Store, error) {
 	return openStoreAtForCity(cityPath, cityPath)
 }

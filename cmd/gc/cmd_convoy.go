@@ -1478,7 +1478,7 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 		return
 	}
 	storeRoot := convoyAutocloseStoreRoot(cwd)
-	cityPath := cityForStoreDir(storeRoot)
+	cityPath := autocloseCityPathForStoreRoot(storeRoot)
 	store, err := openStoreAtForCity(storeRoot, cityPath)
 	if err != nil {
 		return
@@ -1501,6 +1501,17 @@ func convoyAutocloseStoreRoot(cwd string) string {
 		return filepath.Clean(filepath.Dir(beadsDir))
 	}
 	return cwd
+}
+
+// autocloseCityPathForStoreRoot resolves the runtime city for bd hook cleanup.
+// The hook-projected store root identifies the bead that just closed, so prefer
+// filesystem discovery from that root over an inherited GC_CITY from the
+// supervising process.
+func autocloseCityPathForStoreRoot(storeRoot string) string {
+	if cityPath, err := findCity(storeRoot); err == nil {
+		return cityPath
+	}
+	return cityForStoreDir(storeRoot)
 }
 
 // doConvoyAutocloseWith checks whether the closed bead's parent is a

@@ -332,6 +332,15 @@ func TestDoConvoyAutocloseUsesBeadsDirStoreRoot(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("GC_BEADS", "file")
 
+	envCityDir := t.TempDir()
+	if err := ensureScopedFileStoreLayout(envCityDir); err != nil {
+		t.Fatal(err)
+	}
+	writeProviderAwareTestCity(t, envCityDir, `[workspace]
+name = "ambient"
+`)
+	t.Setenv("GC_CITY", envCityDir)
+
 	cityDir := t.TempDir()
 	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
 		t.Fatal(err)
@@ -390,9 +399,44 @@ name = "demo"
 	}
 }
 
+func TestAutocloseCityPathForStoreRootPrefersStoreRootCityOverInheritedGCCity(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+
+	envCityDir := t.TempDir()
+	if err := ensureScopedFileStoreLayout(envCityDir); err != nil {
+		t.Fatal(err)
+	}
+	writeProviderAwareTestCity(t, envCityDir, `[workspace]
+name = "ambient"
+`)
+	t.Setenv("GC_CITY", envCityDir)
+
+	storeCityDir := t.TempDir()
+	if err := ensureScopedFileStoreLayout(storeCityDir); err != nil {
+		t.Fatal(err)
+	}
+	writeProviderAwareTestCity(t, storeCityDir, `[workspace]
+name = "store"
+`)
+
+	got := autocloseCityPathForStoreRoot(storeCityDir)
+	if canonicalTestPath(got) != canonicalTestPath(storeCityDir) {
+		t.Fatalf("autocloseCityPathForStoreRoot(%q) = %q, want store-root city %q", storeCityDir, got, storeCityDir)
+	}
+}
+
 func TestDoWispAutocloseUsesBeadsDirStoreRoot(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("GC_BEADS", "file")
+
+	envCityDir := t.TempDir()
+	if err := ensureScopedFileStoreLayout(envCityDir); err != nil {
+		t.Fatal(err)
+	}
+	writeProviderAwareTestCity(t, envCityDir, `[workspace]
+name = "ambient"
+`)
+	t.Setenv("GC_CITY", envCityDir)
 
 	cityDir := t.TempDir()
 	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
