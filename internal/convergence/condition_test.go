@@ -313,11 +313,9 @@ func TestResolveConditionPath(t *testing.T) {
 		testutil.AssertSamePath(t, got, script)
 	})
 
-	// Pins the security contract: when envelope and base diverge, traversal
-	// validation must use the envelope. A relative path that resolves
-	// (under the larger base) to a location outside the envelope must be
-	// rejected even though it stays inside base.
-	t.Run("rig-scoped: traversal still rejected against envelope", func(t *testing.T) {
+	// Pins the security contract: when envelope and base diverge, a
+	// relative path that escapes both declared roots must still be rejected.
+	t.Run("rig-scoped: traversal outside envelope and base rejected", func(t *testing.T) {
 		cityDir := t.TempDir()
 		rigDir := filepath.Join(cityDir, "frontend")
 		if err := os.MkdirAll(rigDir, 0o755); err != nil {
