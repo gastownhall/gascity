@@ -271,7 +271,7 @@ func TestGastownSmoke_WithRig(t *testing.T) {
 	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	// Create a minimal git repo to serve as a rig.
-	rigDir := filepath.Join(t.TempDir(), "myrig")
+	rigDir := filepath.Join(helpers.TempDir(t), "myrig")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("creating rig dir: %v", err)
 	}

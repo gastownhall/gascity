@@ -1,0 +1,180 @@
+// Package orderdiscovery scans configured city and rig order roots.
+package orderdiscovery
+
+import (
+	"fmt"
+	"path/filepath"
+	"sort"
+
+	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/orders"
+)
+
+// RigScanErrorHandler handles a failed rig-exclusive order scan.
+// Returning nil skips that rig and continues scanning remaining rigs.
+type RigScanErrorHandler func(rigName string, err error) error
+
+// OverrideErrorHandler handles a failed [orders.ApplyOverrides] call.
+// Returning nil preserves the scanned orders without applying the invalid
+// override set.
+type OverrideErrorHandler func(err error) error
+
+// ScanOptions controls shared order discovery behavior.
+type ScanOptions struct {
+	FS               fsys.FS
+	OrderScanOptions orders.ScanOptions
+	OnRigScanError   RigScanErrorHandler
+	OnOverrideError  OverrideErrorHandler
+}
+
+// ScanAll scans city-level and rig-exclusive order roots, stamps rig orders,
+// and applies configured order overrides. The returned slice includes orders
+// disabled by overrides; callers choose whether to filter them.
+func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Order, error) {
+	if cfg == nil {
+		cfg = &config.City{}
+	}
+	fsysImpl := opts.FS
+	if fsysImpl == nil {
+		fsysImpl = fsys.OSFS{}
+	}
+
+	cityLayers := cityFormulaLayers(cityPath, cfg)
+	cityOrders, err := orders.ScanRootsWithOptions(fsysImpl, CityOrderRoots(cityPath, cfg), cfg.Orders.Skip, opts.OrderScanOptions)
+	if err != nil {
+		return nil, err
+	}
+
+	var rigOrders []orders.Order
+	for _, rigName := range sortedRigNames(cfg.FormulaLayers.Rigs) {
+		exclusive := RigExclusiveLayers(cfg.FormulaLayers.Rigs[rigName], cityLayers)
+		if len(exclusive) == 0 {
+			continue
+		}
+		aa, err := orders.ScanRootsWithOptions(fsysImpl, rigOrderRoots(exclusive), cfg.Orders.Skip, opts.OrderScanOptions)
+		if err != nil {
+			if opts.OnRigScanError != nil {
+				if handlerErr := opts.OnRigScanError(rigName, err); handlerErr != nil {
+					return nil, handlerErr
+				}
+				continue
+			}
+			return nil, fmt.Errorf("rig %s: %w", rigName, err)
+		}
+		for i := range aa {
+			aa[i].Rig = rigName
+		}
+		rigOrders = append(rigOrders, aa...)
+	}
+
+	allOrders := make([]orders.Order, 0, len(cityOrders)+len(rigOrders))
+	allOrders = append(allOrders, cityOrders...)
+	allOrders = append(allOrders, rigOrders...)
+	if len(cfg.Orders.Overrides) > 0 {
+		if err := orders.ApplyOverrides(allOrders, overridesFromConfig(cfg.Orders.Overrides)); err != nil {
+			if opts.OnOverrideError != nil {
+				if handlerErr := opts.OnOverrideError(err); handlerErr != nil {
+					return nil, handlerErr
+				}
+				return allOrders, nil
+			}
+			return nil, err
+		}
+	}
+	return allOrders, nil
+}
+
+// cityFormulaLayers returns the formula directory layers for city-level order
+// scanning.
+func cityFormulaLayers(cityPath string, cfg *config.City) []string {
+	if len(cfg.FormulaLayers.City) > 0 {
+		return cfg.FormulaLayers.City
+	}
+	return []string{citylayout.ResolveFormulasDir(cityPath, cfg.FormulasDir())}
+}
+
+// CityOrderRoots returns the order roots used for city-level discovery.
+func CityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
+	formulaLayers := cityFormulaLayers(cityPath, cfg)
+	localFormulas := citylayout.ResolveFormulasDir(cityPath, cfg.FormulasDir())
+	roots := make([]orders.ScanRoot, 0, len(formulaLayers)+len(cfg.PackDirs)+2)
+	seen := make(map[string]bool, len(formulaLayers)+len(cfg.PackDirs)+2)
+	appendRoot := func(root orders.ScanRoot) {
+		key := filepath.Clean(root.Dir) + "\n" + filepath.Clean(root.FormulaLayer)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		roots = append(roots, root)
+	}
+
+	// Formula layers include system packs (via LoadWithIncludes extraIncludes)
+	// and user packs (via workspace.includes). City-local formulas are highest
+	// priority and override pack formulas when order names collide.
+	for _, layer := range formulaLayers {
+		if layer == localFormulas {
+			for _, root := range []string{citylayout.OrdersPath(cityPath)} {
+				appendRoot(orders.ScanRoot{
+					Dir:          root,
+					FormulaLayer: localFormulas,
+				})
+			}
+			continue
+		}
+		appendRoot(orders.ScanRoot{
+			Dir:          filepath.Join(filepath.Dir(layer), "orders"),
+			FormulaLayer: layer,
+		})
+	}
+	return roots
+}
+
+func rigOrderRoots(formulaLayers []string) []orders.ScanRoot {
+	roots := make([]orders.ScanRoot, 0, len(formulaLayers))
+	for _, layer := range formulaLayers {
+		roots = append(roots, orders.ScanRoot{
+			Dir:          filepath.Join(filepath.Dir(layer), "orders"),
+			FormulaLayer: layer,
+		})
+	}
+	return roots
+}
+
+// RigExclusiveLayers returns the suffix of rig layers that is not inherited
+// from the city formula layers.
+func RigExclusiveLayers(rigLayers, cityLayers []string) []string {
+	if len(rigLayers) <= len(cityLayers) {
+		return nil
+	}
+	return rigLayers[len(cityLayers):]
+}
+
+func sortedRigNames(rigs map[string][]string) []string {
+	names := make([]string, 0, len(rigs))
+	for name := range rigs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func overridesFromConfig(cfgOverrides []config.OrderOverride) []orders.Override {
+	out := make([]orders.Override, len(cfgOverrides))
+	for i, override := range cfgOverrides {
+		out[i] = orders.Override{
+			Name:     override.Name,
+			Rig:      override.Rig,
+			Enabled:  override.Enabled,
+			Trigger:  override.Trigger,
+			Interval: override.Interval,
+			Schedule: override.Schedule,
+			Check:    override.Check,
+			On:       override.On,
+			Pool:     override.Pool,
+			Timeout:  override.Timeout,
+		}
+	}
+	return out
+}

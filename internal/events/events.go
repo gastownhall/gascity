@@ -62,8 +62,14 @@ const (
 	ConvoyClosed           = "convoy.closed"
 	ControllerStarted      = "controller.started"
 	ControllerStopped      = "controller.stopped"
-	CitySuspended          = "city.suspended"
-	CityResumed            = "city.resumed"
+	// SupervisorShutdownRequested fires when the supervisor's main loop
+	// observes a shutdown trigger (signal or socket stop) and is about to
+	// cancel the supervisor context. Carries attribution so operators can
+	// answer "why did the supervisor exit" without scraping macOS/launchd
+	// logs.
+	SupervisorShutdownRequested = "supervisor.shutdown_requested"
+	CitySuspended               = "city.suspended"
+	CityResumed                 = "city.resumed"
 	// Typed async request result events. 5 success types (one per
 	// operation, fully typed payload) + 1 shared failure type.
 	RequestResultCityCreate     = "request.result.city.create"
@@ -123,6 +129,7 @@ var KnownEventTypes = []string{
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
+	SupervisorShutdownRequested,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,

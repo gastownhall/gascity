@@ -95,6 +95,8 @@ func isTerminal(f *os.File) bool {
 	return fi.Mode()&os.ModeCharDevice != 0
 }
 
+var isTerminalFunc = isTerminal
+
 // readLine reads a single line from br and returns it trimmed.
 // Returns empty string on EOF or error.
 func readLine(br *bufio.Reader) string {
@@ -237,6 +239,7 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 	var bootstrapProfileFlag string
 	var skipProviderReadiness bool
 	var preserveExisting bool
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "init [path]",
 		Short: "Initialize a new city",
@@ -261,13 +264,26 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
   gc init --file city.toml --preserve-existing .`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			out := stdout
+			if jsonOut {
+				out = io.Discard
+			}
+			mode := "default"
 			if fromFlag != "" {
-				return exitForCode(cmdInitFromDirWithOptions(fromFlag, args, nameFlag, stdout, stderr, skipProviderReadiness))
+				mode = "from"
+				code := cmdInitFromDirWithOptions(fromFlag, args, nameFlag, out, stderr, skipProviderReadiness)
+				return writeInitJSONOrExit(code, jsonOut, args, nameFlag, providerFlag, bootstrapProfileFlag, mode, stdout)
 			}
 			if fileFlag != "" {
-				return exitForCode(cmdInitFromFileWithOptions(fileFlag, args, nameFlag, stdout, stderr, skipProviderReadiness, preserveExisting))
+				mode = "file"
+				code := cmdInitFromFileWithOptions(fileFlag, args, nameFlag, out, stderr, skipProviderReadiness, preserveExisting)
+				return writeInitJSONOrExit(code, jsonOut, args, nameFlag, providerFlag, bootstrapProfileFlag, mode, stdout)
 			}
-			return exitForCode(cmdInitWithOptions(args, providerFlag, bootstrapProfileFlag, nameFlag, stdout, stderr, skipProviderReadiness, preserveExisting))
+			if providerFlag != "" || bootstrapProfileFlag != "" {
+				mode = "provider"
+			}
+			code := cmdInitWithOptionsInternal(args, providerFlag, bootstrapProfileFlag, nameFlag, out, stderr, skipProviderReadiness, preserveExisting, jsonOut)
+			return writeInitJSONOrExit(code, jsonOut, args, nameFlag, providerFlag, bootstrapProfileFlag, mode, stdout)
 		},
 	}
 	cmd.Flags().StringVar(&fileFlag, "file", "", "path to a TOML file to use as city.toml")
@@ -277,12 +293,50 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().StringVar(&bootstrapProfileFlag, "bootstrap-profile", "", "bootstrap profile to apply for hosted/container defaults")
 	cmd.Flags().BoolVar(&skipProviderReadiness, "skip-provider-readiness", false, "skip provider login/readiness checks during init and continue startup")
 	cmd.Flags().BoolVar(&preserveExisting, "preserve-existing", false, "keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	cmd.MarkFlagsMutuallyExclusive("file", "from")
 	cmd.MarkFlagsMutuallyExclusive("provider", "file")
 	cmd.MarkFlagsMutuallyExclusive("provider", "from")
 	cmd.MarkFlagsMutuallyExclusive("bootstrap-profile", "file")
 	cmd.MarkFlagsMutuallyExclusive("bootstrap-profile", "from")
 	return cmd
+}
+
+type initJSONResult struct {
+	SchemaVersion    string `json:"schema_version"`
+	CityPath         string `json:"city_path"`
+	CityName         string `json:"city_name"`
+	Mode             string `json:"mode"`
+	Provider         string `json:"provider,omitempty"`
+	BootstrapProfile string `json:"bootstrap_profile,omitempty"`
+}
+
+func writeInitJSONOrExit(code int, jsonOut bool, args []string, nameOverride, provider, bootstrapProfile, mode string, stdout io.Writer) error {
+	if code != 0 {
+		return exitForCode(code)
+	}
+	if !jsonOut {
+		return nil
+	}
+	cityPath, err := initTargetPath(args)
+	if err != nil {
+		return err
+	}
+	return writeCLIJSONLine(stdout, initJSONResult{
+		SchemaVersion:    "1",
+		CityPath:         cityPath,
+		CityName:         resolveCityName(nameOverride, "", cityPath),
+		Mode:             mode,
+		Provider:         strings.TrimSpace(provider),
+		BootstrapProfile: strings.TrimSpace(bootstrapProfile),
+	})
+}
+
+func initTargetPath(args []string) (string, error) {
+	if len(args) > 0 {
+		return filepath.Abs(args[0])
+	}
+	return os.Getwd()
 }
 
 // cmdInit initializes a new city at the given path (or cwd if no path given).
@@ -294,6 +348,10 @@ func cmdInit(args []string, providerFlag, bootstrapProfileFlag string, stdout, s
 }
 
 func cmdInitWithOptions(args []string, providerFlag, bootstrapProfileFlag, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool) int {
+	return cmdInitWithOptionsInternal(args, providerFlag, bootstrapProfileFlag, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, false)
+}
+
+func cmdInitWithOptionsInternal(args []string, providerFlag, bootstrapProfileFlag, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, forceDefaultWizard bool) int {
 	var cityPath string
 	if len(args) > 0 {
 		var err error
@@ -322,7 +380,9 @@ func cmdInitWithOptions(args []string, providerFlag, bootstrapProfileFlag, nameO
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-	case isTerminal(os.Stdin):
+	case forceDefaultWizard:
+		wiz = defaultWizardConfig()
+	case isTerminalFunc(os.Stdin):
 		wiz = runWizard(os.Stdin, stdout)
 		maybePrintWizardProviderGuidance(wiz, stdout)
 	default:

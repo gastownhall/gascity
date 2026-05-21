@@ -255,7 +255,7 @@ ConvergenceConfig holds convergence loop limits.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `max_per_agent` | integer |  | `2` | MaxPerAgent is the maximum number of active convergence loops per agent. 0 means use default (2). |
+| `max_per_agent` | integer |  | `2` | MaxPerAgent is the maximum number of active convergence loops per agent in each bead store scope. City/HQ and each bound rig enforce the limit independently. 0 means use default (2). |
 | `max_total` | integer |  | `10` | MaxTotal is the maximum total number of active convergence loops. 0 means use default (10). |
 
 ## DaemonConfig

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -617,6 +618,149 @@ func TestDoSessionLogsFollowTailShowsOnlyNewMessagesOnReadErrorExit(t *testing.T
 	}
 	if !strings.Contains(stderr.String(), "5 consecutive read errors") {
 		t.Fatalf("stderr should report the injected termination condition, got: %s", stderr.String())
+	}
+}
+
+func TestCmdSessionLogsJSONSuccessIsJSONOnly(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(fmt.Sprintf(`[workspace]
+name = "test"
+
+[daemon]
+observe_paths = [%q]
+`, searchBase)), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
+	}
+	b, err := store.Create(beads.Bead{
+		Title:  "json logs session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "runtime-session",
+			"session_key":  "known-session",
+			"provider":     "claude",
+			"template":     "worker",
+			"state":        "asleep",
+			"work_dir":     workDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session): %v", err)
+	}
+	writeNamedTestSession(t, searchBase, workDir, "known-session.jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":{"role":"user","content":"older"},"timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":{"role":"assistant","content":"newer"},"timestamp":"2025-01-01T00:00:01Z"}`,
+	)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionLogs([]string{b.ID}, false, 1, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionLogs(--json) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stdout lines = %d, want 1 JSONL record: %q", len(lines), stdout.String())
+	}
+	var got sessionLogsJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not parseable JSON: %v\n%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || got.Target != b.ID || got.Tail != 1 || got.EntryCount != 1 {
+		t.Fatalf("logs JSON metadata = %+v", got)
+	}
+	if len(got.Entries) != 1 || got.Entries[0].Text != "newer" || got.Entries[0].Role != "assistant" {
+		t.Fatalf("logs JSON entries = %+v", got.Entries)
+	}
+	validateJSONAgainstResultSchema(t, []string{"session", "logs"}, stdout.Bytes())
+}
+
+func TestCmdSessionLogsJSONBlocksValidateDeclaredSchema(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(fmt.Sprintf(`[workspace]
+name = "test"
+
+[daemon]
+observe_paths = [%q]
+`, searchBase)), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
+	}
+	b, err := store.Create(beads.Bead{
+		Title:  "json block logs session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "runtime-session",
+			"session_key":  "known-session",
+			"provider":     "claude",
+			"template":     "worker",
+			"state":        "asleep",
+			"work_dir":     workDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session): %v", err)
+	}
+	writeNamedTestSession(t, searchBase, workDir, "known-session.jsonl",
+		`{"uuid":"1","parentUuid":"","type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"shell","input":{"cmd":"date"}}]},"timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionLogs([]string{b.ID}, false, 1, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionLogs(--json) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var got sessionLogsJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not parseable JSON: %v\n%s", err, stdout.String())
+	}
+	if len(got.Entries) != 1 || len(got.Entries[0].Blocks) != 1 {
+		t.Fatalf("logs JSON blocks = %+v", got.Entries)
+	}
+	block := got.Entries[0].Blocks[0]
+	if block.Type != "tool_use" || block.ID != "tool-1" || block.Name != "shell" {
+		t.Fatalf("block = %+v, want tool_use shell block", block)
+	}
+	validateJSONAgainstResultSchema(t, []string{"session", "logs"}, stdout.Bytes())
+}
+
+func TestDoSessionLogsJSONRejectsFollow(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := doSessionLogsJSON("/ignored", "claude", "worker", true, 10, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doSessionLogsJSON(follow) = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--json is only supported for bounded snapshots") {
+		t.Fatalf("stderr = %q, want bounded snapshot diagnostic", stderr.String())
 	}
 }
 

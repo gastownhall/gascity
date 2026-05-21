@@ -131,6 +131,24 @@ func shouldBufferJSONExecution(root *cobra.Command, args []string) bool {
 	return !schemaDeclaresJSONL(schema)
 }
 
+func shouldReportJSONExecutionError(root *cobra.Command, args []string) bool {
+	request, ok := resolveJSONRequest(root, args)
+	if !ok {
+		return false
+	}
+	if request.findErr != nil || request.cmd == nil {
+		return true
+	}
+	commandPath := commandPathWords(request.cmd)
+	if isBDCommandPath(commandPath) {
+		return false
+	}
+	if _, err := readCommandSchema(request.cmd, commandPath, jsonSchemaResultRole); err != nil {
+		return !allowMissingLocalJSONSchemaPassthrough(request.cmd, err)
+	}
+	return true
+}
+
 type jsonSchemaRequest struct {
 	role        string
 	commandArgs []string
@@ -384,7 +402,22 @@ func writeJSONFailure(stdout io.Writer, code, message string, exitCode int) erro
 func writeCLIJSONLine(stdout io.Writer, value any) error {
 	enc := json.NewEncoder(stdout)
 	enc.SetEscapeHTML(false)
-	return enc.Encode(value)
+	return enc.Encode(withDefaultSuccessOK(value))
+}
+
+func writeCLIJSONLineOrExit(stdout, stderr io.Writer, context string, value any) int {
+	if err := writeCLIJSONLine(stdout, value); err != nil {
+		fmt.Fprintf(stderr, "%s: writing JSON result: %v\n", context, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return 0
+}
+
+func writeCLIJSONLineOrErr(stdout, stderr io.Writer, context string, value any) error {
+	if writeCLIJSONLineOrExit(stdout, stderr, context, value) != 0 {
+		return errExit
+	}
+	return nil
 }
 
 func writeRawJSONLine(stdout io.Writer, raw json.RawMessage) error {
@@ -394,4 +427,28 @@ func writeRawJSONLine(stdout io.Writer, raw json.RawMessage) error {
 	}
 	_, err = io.WriteString(stdout, "\n")
 	return err
+}
+
+func withDefaultSuccessOK(value any) any {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return value
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		return value
+	}
+	if object == nil {
+		return value
+	}
+	if _, ok := object["ok"]; ok {
+		return value
+	}
+	if _, hasSchemas := object["schemas"]; hasSchemas {
+		if _, hasJSONSupported := object["json_supported"]; hasJSONSupported {
+			return value
+		}
+	}
+	object["ok"] = json.RawMessage("true")
+	return object
 }

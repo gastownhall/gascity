@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "input", "nodes", "summary"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "input": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "status", "blocked_by", "open_blockers", "ready"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "status": { "type": "string" },
+          "type": { "type": "string" },
+          "parent_id": { "type": "string" },
+          "blocked_by": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "open_blockers": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "ready": { "type": "boolean" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["total", "closed", "ready", "blocked"],
+      "properties": {
+        "total": { "type": "integer" },
+        "closed": { "type": "integer" },
+        "ready": { "type": "integer" },
+        "blocked": { "type": "integer" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

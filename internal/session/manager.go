@@ -1301,15 +1301,9 @@ func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) Runtim
 	if strings.TrimSpace(info.SessionName) == "" || m.sp == nil {
 		return obs
 	}
-	obs.Running = m.sp.IsRunning(info.SessionName)
-	if len(processNames) > 0 {
-		obs.Alive = m.sp.ProcessAlive(info.SessionName, processNames)
-		if obs.Alive && !obs.Running {
-			obs.Running = true
-		}
-	} else {
-		obs.Alive = obs.Running
-	}
+	liveness := runtime.ObserveLiveness(m.sp, info.SessionName, processNames)
+	obs.Running = liveness.Running
+	obs.Alive = liveness.Alive
 	if obs.Running {
 		obs.Attached = m.sp.IsAttached(info.SessionName)
 		if lastActive, err := m.sp.GetLastActivity(info.SessionName); err == nil {

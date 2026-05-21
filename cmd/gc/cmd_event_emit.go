@@ -27,8 +27,19 @@ func newEventCmd(stdout, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
-func newEventEmitCmd(_, stderr io.Writer) *cobra.Command {
+type eventEmitJSONResult struct {
+	SchemaVersion string `json:"schema_version"`
+	EventType     string `json:"event_type"`
+	Actor         string `json:"actor"`
+	Subject       string `json:"subject,omitempty"`
+	Message       string `json:"message,omitempty"`
+	HasPayload    bool   `json:"has_payload"`
+	Submitted     bool   `json:"submitted"`
+}
+
+func newEventEmitCmd(stdout, stderr io.Writer) *cobra.Command {
 	var subject, message, actor, payload string
+	var jsonOut bool
 
 	cmd := &cobra.Command{
 		Use:   "emit <type>",
@@ -36,10 +47,29 @@ func newEventEmitCmd(_, stderr io.Writer) *cobra.Command {
 		Long: `Record a custom event to the city event log.
 
 Best-effort: always exits 0 so bead hooks never fail. Supports
-attaching arbitrary JSON payloads.`,
+attaching arbitrary JSON payloads. JSON summaries report whether submission to
+the configured provider was attempted; the event bus does not acknowledge
+durable persistence.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdEventEmit(args[0], subject, message, actor, payload, stderr) != 0 {
+			effectiveActor := actor
+			if effectiveActor == "" {
+				effectiveActor = eventActor()
+			}
+			submitted := false
+			if jsonOut {
+				submitted = cmdEventEmitSubmitted(args[0], subject, message, effectiveActor, payload, stderr)
+				return writeCLIJSONLineOrErr(stdout, stderr, "gc event emit", eventEmitJSONResult{
+					SchemaVersion: "1",
+					EventType:     args[0],
+					Actor:         effectiveActor,
+					Subject:       subject,
+					Message:       message,
+					HasPayload:    payload != "",
+					Submitted:     submitted,
+				})
+			}
+			if cmdEventEmit(args[0], subject, message, effectiveActor, payload, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -49,26 +79,31 @@ attaching arbitrary JSON payloads.`,
 	cmd.Flags().StringVar(&message, "message", "", "Event message")
 	cmd.Flags().StringVar(&actor, "actor", "", "Actor name (default: $GC_ALIAS, else $GC_AGENT, else $GC_SESSION_ID, else \"human\")")
 	cmd.Flags().StringVar(&payload, "payload", "", "JSON payload to attach to the event")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	return cmd
 }
 
 // cmdEventEmit records a single event to the city event log. Best-effort:
 // errors go to stderr but exit code is always 0 so bd hooks never fail.
 func cmdEventEmit(eventType, subject, message, actor, payload string, stderr io.Writer) int {
+	cmdEventEmitSubmitted(eventType, subject, message, actor, payload, stderr)
+	return 0
+}
+
+func cmdEventEmitSubmitted(eventType, subject, message, actor, payload string, stderr io.Writer) bool {
 	ep, code := openCityEventEmitProvider(stderr, "gc event emit")
 	if ep == nil {
 		// Best-effort: if we can't open the provider, still exit 0.
 		_ = code
-		return 0
+		return false
 	}
 	defer ep.Close() //nolint:errcheck // best-effort
-	doEventEmit(ep, eventType, subject, message, actor, payload, stderr)
-	return 0
+	return doEventEmit(ep, eventType, subject, message, actor, payload, stderr)
 }
 
 // doEventEmit is the pure logic for "gc event emit". Accepts the provider
 // directly for testability. Best-effort: never fails.
-func doEventEmit(ep events.Provider, eventType, subject, message, actor, payload string, stderr io.Writer) {
+func doEventEmit(ep events.Provider, eventType, subject, message, actor, payload string, stderr io.Writer) bool {
 	if actor == "" {
 		actor = eventActor()
 	}
@@ -82,10 +117,11 @@ func doEventEmit(ep events.Provider, eventType, subject, message, actor, payload
 	if payload != "" {
 		if !json.Valid([]byte(payload)) {
 			fmt.Fprintf(stderr, "gc event emit: --payload is not valid JSON\n") //nolint:errcheck // best-effort stderr
-			return                                                              // best-effort — never fail
+			return false                                                        // best-effort — never fail
 		}
 		e.Payload = json.RawMessage(payload)
 	}
 
 	ep.Record(e)
+	return true
 }

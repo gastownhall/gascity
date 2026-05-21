@@ -123,6 +123,14 @@ var (
 	ErrSessionNotFound    = errors.New("session not found")
 	ErrInvalidSessionName = errors.New("invalid session name")
 	ErrIdleTimeout        = errors.New("agent not idle before timeout")
+	// ErrServerDegraded indicates the tmux server bound to SocketName is
+	// reachable on the filesystem but unresponsive. Creating a new session
+	// in this state would let tmux's own (very short) liveness probe time
+	// out and fall through to unlink+bind, spawning a parallel server on
+	// the same socket path and orphaning every existing session on the
+	// original server. Callers should surface this to the user instead of
+	// proceeding — see issue ga-h9z.
+	ErrServerDegraded = errors.New("tmux server degraded: refusing new-session to avoid socket clobber")
 )
 
 const (
@@ -136,6 +144,19 @@ const (
 // against wedged tmux servers and FD/inode-exhausted hosts where fork()
 // blocks. Test-overridable; production value is 30s.
 var tmuxSubprocessTimeout = 30 * time.Second
+
+// newSessionProbeTimeout bounds the pre-flight has-session probe used by
+// NewSession variants to detect a degraded server before tmux's own short
+// liveness check fires. Must be short enough that a wedged server fails fast
+// and BAILs (preventing socket clobber per ga-h9z), but long enough that a
+// healthy-but-slow server still responds. Test-overridable.
+var newSessionProbeTimeout = 2 * time.Second
+
+// probeSessionName is the bogus target used by probeServerAlive's has-session
+// call. A healthy server replies "session not found"; a dead server replies
+// "no server running" / "error connecting to"; a degraded server hangs or
+// returns something else. The name is deliberately unrouteable.
+const probeSessionName = "__gascity_probe__"
 
 // validateSessionName checks that a session name contains only safe characters.
 // Returns ErrInvalidSessionName if the name contains dots, colons, or other
@@ -264,9 +285,55 @@ func wrapError(err error, stderr string, args []string) error {
 	return fmt.Errorf("tmux %s: %w", args[0], err)
 }
 
+// probeServerAlive verifies the tmux server bound to SocketName is responsive
+// before invoking new-session. This prevents the socket-clobber failure
+// described in ga-h9z: when tmux is asked to create a session against a
+// socket whose server is alive-but-slow, tmux's internal liveness probe can
+// time out and tmux falls through to unlink+bind, spawning a parallel server
+// on the same path and orphaning every session on the original.
+//
+// Returns:
+//   - nil when SocketName is empty (default-server case is out of scope) or
+//     when the server replies (alive — including the expected "session not
+//     found" for the bogus probe target).
+//   - nil with ErrNoServer semantics absorbed (no server bound is safe; tmux
+//     will create a fresh server cleanly).
+//   - ErrServerDegraded when the probe times out or returns any other error,
+//     indicating the server is in a state where new-session would risk
+//     clobbering. Callers MUST surface this and refuse to proceed.
+func (t *Tmux) probeServerAlive() error {
+	if t.cfg.SocketName == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), newSessionProbeTimeout)
+	defer cancel()
+	_, err := t.runCtx(ctx, "has-session", "-t", "="+probeSessionName)
+	if err == nil {
+		// Server is alive and (improbably) actually has a session with the
+		// probe name. Still safe — server responded.
+		return nil
+	}
+	if errors.Is(err, ErrSessionNotFound) {
+		// Healthy server, just doesn't have the probe session. Safe.
+		return nil
+	}
+	if errors.Is(err, ErrNoServer) {
+		// No server bound (stale socket or never existed). Safe — tmux will
+		// unlink any stale socket and bind a fresh server.
+		return nil
+	}
+	// Timeout, fork failure, or any other unrecognized error: server is in
+	// an indeterminate state. Refuse to proceed rather than let tmux silently
+	// fork into a parallel server.
+	return fmt.Errorf("%w (socket=%s): %w", ErrServerDegraded, t.cfg.SocketName, err)
+}
+
 // NewSession creates a new detached tmux session.
 func (t *Tmux) NewSession(name, workDir string) error {
 	if err := validateSessionName(name); err != nil {
+		return err
+	}
+	if err := t.probeServerAlive(); err != nil {
 		return err
 	}
 	args := []string{"new-session", "-d", "-s", name}
@@ -291,6 +358,9 @@ func (t *Tmux) NewSession(name, workDir string) error {
 // See: https://github.com/anthropics/gastown/issues/280
 func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 	if err := validateSessionName(name); err != nil {
+		return err
+	}
+	if err := t.probeServerAlive(); err != nil {
 		return err
 	}
 	args := []string{"new-session", "-d", "-s", name}
@@ -320,6 +390,9 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 // Requires tmux >= 3.2.
 func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env map[string]string) error {
 	if err := validateSessionName(name); err != nil {
+		return err
+	}
+	if err := t.probeServerAlive(); err != nil {
 		return err
 	}
 	// Disable mouse mode and monitor-activity before creating the session.

@@ -18,7 +18,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -102,14 +101,13 @@ type CityRuntime struct {
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
 
-	convHandler         *convergence.Handler     // nil until bead store available
-	convStoreAdapter    *convergenceStoreAdapter // typed reference; avoids type assertions in tick/reconcile
-	convergenceReqCh    chan convergenceRequest  // receives CLI commands from controller.sock
-	reloadReqCh         chan reloadRequest       // receives structured reload requests from controller.sock
-	pokeCh              chan struct{}            // non-blocking signal to trigger immediate reconciler tick
-	controlDispatcherCh chan struct{}            // non-blocking signal for control-dispatcher-only reconcile
-	nudgeWakeCh         chan struct{}            // signal to dispatch queued nudges; fed by wake socket listener
-	reloadMu            sync.Mutex               // guards activeReload
+	convScopes          map[string]*convergenceScope // nil until bead store available; keyed by rig name ("" = city/HQ)
+	convergenceReqCh    chan convergenceRequest      // receives CLI commands from controller.sock
+	reloadReqCh         chan reloadRequest           // receives structured reload requests from controller.sock
+	pokeCh              chan struct{}                // non-blocking signal to trigger immediate reconciler tick
+	controlDispatcherCh chan struct{}                // non-blocking signal for control-dispatcher-only reconcile
+	nudgeWakeCh         chan struct{}                // signal to dispatch queued nudges; fed by wake socket listener
+	reloadMu            sync.Mutex                   // guards activeReload
 	activeReload        *reloadRequest
 	onStarted           func()
 	onStatus            func(string)
@@ -701,10 +699,16 @@ func (cr *CityRuntime) safeTick(fn func(), trigger string) (panicked bool) {
 }
 
 func convergenceStartupComplete(cr *CityRuntime) bool {
-	return cr.convHandler == nil ||
-		cr.convergenceReqCh == nil ||
-		cr.convStoreAdapter == nil ||
-		cr.convStoreAdapter.activeIndex != nil
+	if cr.convScopes == nil || cr.convergenceReqCh == nil {
+		return true
+	}
+	// Startup is complete once every scope's active index is populated.
+	for _, scope := range cr.convScopes {
+		if scope.adapter.activeIndex == nil {
+			return false
+		}
+	}
+	return true
 }
 
 // tick performs one reconciliation tick: pool death detection, config

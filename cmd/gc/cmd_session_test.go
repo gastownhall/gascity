@@ -155,6 +155,20 @@ func TestParsePruneDuration(t *testing.T) {
 	}
 }
 
+func TestSessionNewJSONRequiresNoAttach(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cmdSessionNew([]string{"worker"}, "", "", "", false, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("cmdSessionNew --json without --no-attach = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty stdout", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--json requires --no-attach") {
+		t.Fatalf("stderr = %q, want --no-attach rationale", stderr.String())
+	}
+}
+
 func TestResolveWorkDir(t *testing.T) {
 	cityPath := t.TempDir()
 	rigRoot := filepath.Join(t.TempDir(), "my-rig")
@@ -230,7 +244,7 @@ func TestCmdSessionNew_PoolTemplateUsesAliasBackedWorkDirIdentity(t *testing.T) 
 	for _, alias := range []string{"demo/ant-fenrir", "demo/ant-grendel"} {
 		stdout.Reset()
 		stderr.Reset()
-		if code := cmdSessionNew([]string{"demo/ant"}, alias, "", "", true, &stdout, &stderr); code != 0 {
+		if code := cmdSessionNew([]string{"demo/ant"}, alias, "", "", true, false, &stdout, &stderr); code != 0 {
 			t.Fatalf("cmdSessionNew(%q) = %d, want 0; stderr=%s", alias, code, stderr.String())
 		}
 	}
@@ -270,13 +284,13 @@ func TestCmdSessionNew_PoolTemplateCanonicalizesQualifiedAliasCollisions(t *test
 	writePoolSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"demo/ant"}, "ant-fenrir", "", "", true, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "ant-fenrir", "", "", true, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(first) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := cmdSessionNew([]string{"demo/ant"}, "demo/ant-fenrir", "", "", true, &stdout, &stderr); code == 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "demo/ant-fenrir", "", "", true, false, &stdout, &stderr); code == 0 {
 		t.Fatal("cmdSessionNew(second) = 0, want alias conflict")
 	}
 	if !strings.Contains(stderr.String(), session.ErrSessionAliasExists.Error()) {
@@ -301,7 +315,7 @@ func TestCmdSessionNew_PoolTemplateBareAliasStillResolves(t *testing.T) {
 	writePoolSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"demo/ant"}, "ant-fenrir", "", "", true, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "ant-fenrir", "", "", true, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -339,7 +353,7 @@ func TestCmdSessionNew_PoolTemplateWithoutAliasUsesGeneratedWorkDirIdentity(t *t
 	for i := 0; i < 2; i++ {
 		stdout.Reset()
 		stderr.Reset()
-		if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, &stdout, &stderr); code != 0 {
+		if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, &stdout, &stderr); code != 0 {
 			t.Fatalf("cmdSessionNew(aliasless #%d) = %d, want 0; stderr=%s", i+1, code, stderr.String())
 		}
 	}
@@ -443,7 +457,7 @@ args = ["{{.AgentName}}", "{{.WorkDir}}", "{{.TemplateName}}"]
 	}()
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(acp) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -520,7 +534,7 @@ args = ["{{.AgentName}}", "{{.WorkDir}}", "{{.TemplateName}}"]
 `)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(custom provider acp default) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -550,7 +564,7 @@ func TestCmdSessionNewRejectsExplicitTmuxAgentWhenCitySessionProviderIsACP(t *te
 	writePoolACPCityExplicitTmuxAgentTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, &stdout, &stderr); code == 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, &stdout, &stderr); code == 0 {
 		t.Fatalf("cmdSessionNew(explicit tmux on ACP city) = %d, want failure", code)
 	}
 	if !strings.Contains(stderr.String(), "requires tmux transport") {
@@ -570,7 +584,7 @@ func TestCmdSessionNew_PoolTemplateRejectsAliasMatchingConcreteIdentity(t *testi
 	writePoolSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(aliasless) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -585,7 +599,7 @@ func TestCmdSessionNew_PoolTemplateRejectsAliasMatchingConcreteIdentity(t *testi
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := cmdSessionNew([]string{"demo/ant"}, "demo/"+sessionName, "", "", true, &stdout, &stderr); code == 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "demo/"+sessionName, "", "", true, false, &stdout, &stderr); code == 0 {
 		t.Fatal("cmdSessionNew(alias collision) = 0, want conflict")
 	}
 	if !strings.Contains(stderr.String(), session.ErrSessionAliasExists.Error()) {
@@ -1497,6 +1511,63 @@ func TestCmdSessionListJSONOmitZeroLastNudgeDeliveredAt(t *testing.T) {
 	}
 }
 
+func TestCmdSessionPeekJSONSuccessIsJSONOnly(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+
+	fakeProvider := runtime.NewFake()
+	fakeProvider.SetPeekOutput("runtime-session", "hello\nworld\n")
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return fakeProvider, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%q): %v", cityDir, err)
+	}
+	b, err := store.Create(beads.Bead{
+		Title:  "json peek session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "runtime-session",
+			"template":     "worker",
+			"state":        "awake",
+			"work_dir":     cityDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionPeek([]string{b.ID}, 2, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionPeek(--json) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stdout lines = %d, want 1 JSONL record: %q", len(lines), stdout.String())
+	}
+	var got sessionPeekJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not parseable JSON: %v\n%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || got.SessionID != b.ID || got.Output != "hello\nworld\n" || got.LineCount != 2 {
+		t.Fatalf("peek JSON = %+v", got)
+	}
+}
+
 func sessionListJSONRowBySessionName(rows []sessionListJSONRow, name string) *sessionListJSONRow {
 	for _, row := range rows {
 		if row.SessionName == name {
@@ -1581,7 +1652,7 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 	}()
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(controller) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -1630,7 +1701,7 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithoutController(t *testing.T) {
 	writeNamedSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(fallback) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -1681,7 +1752,7 @@ func TestCmdSessionNew_IgnoresUnmanagedSupervisorSocket(t *testing.T) {
 	}()
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(unmanaged supervisor) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -1912,7 +1983,7 @@ func TestCmdSessionNew_AutoTitleFromMessage(t *testing.T) {
 	writeNamedSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdSessionNew([]string{"mayor"}, "mayor", "", "fix the login redirect loop", true, &stdout, &stderr)
+	code := cmdSessionNew([]string{"mayor"}, "mayor", "", "fix the login redirect loop", true, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -1937,7 +2008,7 @@ func TestCmdSessionNew_ExplicitTitlePreserved(t *testing.T) {
 	writeNamedSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdSessionNew([]string{"mayor"}, "mayor", "my explicit title", "some message", true, &stdout, &stderr)
+	code := cmdSessionNew([]string{"mayor"}, "mayor", "my explicit title", "some message", true, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -1958,7 +2029,7 @@ func TestCmdSessionNew_NoMessageKeepsTemplateName(t *testing.T) {
 	writeNamedSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, &stdout, &stderr)
+	code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
 	}

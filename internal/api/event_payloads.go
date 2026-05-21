@@ -119,6 +119,20 @@ type RequestFailedPayload struct {
 // IsEventPayload marks RequestFailedPayload as an events.Payload variant.
 func (RequestFailedPayload) IsEventPayload() {}
 
+// SupervisorShutdownPayload attributes a supervisor shutdown trigger so
+// operators can diagnose why the supervisor exited without scraping
+// macOS unified log or launchd state. Recorded immediately before the
+// supervisor cancels its context and begins the city-stop cascade.
+type SupervisorShutdownPayload struct {
+	Source     string `json:"source" enum:"signal,socket_stop" doc:"Which path triggered the shutdown."`
+	Signal     string `json:"signal,omitempty" doc:"For source=signal, the human-readable signal name (e.g. \"terminated\", \"interrupt\"). Empty for socket_stop."`
+	ClientAddr string `json:"client_addr,omitempty" doc:"For source=socket_stop, the address reported by the connecting client. Typically empty for unix-socket peers."`
+	Mode       string `json:"mode" enum:"destructive,preserve_sessions,unknown" doc:"Resulting shutdown mode."`
+}
+
+// IsEventPayload marks SupervisorShutdownPayload as an events.Payload variant.
+func (SupervisorShutdownPayload) IsEventPayload() {}
+
 // CityLifecyclePayload is the shape of non-terminal city.created and
 // city.unregister_requested events recorded in the per-city event log
 // during init/unregister for diagnostics.
@@ -436,6 +450,7 @@ func init() {
 	events.RegisterPayload(events.ConvoyClosed, events.NoPayload{})
 	events.RegisterPayload(events.ControllerStarted, events.NoPayload{})
 	events.RegisterPayload(events.ControllerStopped, events.NoPayload{})
+	events.RegisterPayload(events.SupervisorShutdownRequested, SupervisorShutdownPayload{})
 	events.RegisterPayload(events.CitySuspended, events.NoPayload{})
 	events.RegisterPayload(events.CityResumed, events.NoPayload{})
 	// Typed async request result events.

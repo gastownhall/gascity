@@ -12,7 +12,7 @@ import (
 )
 
 func newGraphCmd(stdout, stderr io.Writer) *cobra.Command {
-	var mermaid, tree bool
+	var mermaid, tree, jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "graph <bead-ids|convoy-id...>",
 		Short: "Show dependency graph for beads",
@@ -30,7 +30,7 @@ By default prints a table. Use --tree for a Unicode tree view or
   gc graph gc-42 --mermaid     # Mermaid.js diagram`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			opts := graphOpts{Mermaid: mermaid, Tree: tree}
+			opts := graphOpts{Mermaid: mermaid, Tree: tree, JSON: jsonOutput}
 			if cmdGraph(args, opts, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -39,7 +39,8 @@ By default prints a table. Use --tree for a Unicode tree view or
 	}
 	cmd.Flags().BoolVar(&mermaid, "mermaid", false, "output Mermaid.js flowchart")
 	cmd.Flags().BoolVar(&tree, "tree", false, "output Unicode dependency tree")
-	cmd.MarkFlagsMutuallyExclusive("mermaid", "tree")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output JSONL summary")
+	cmd.MarkFlagsMutuallyExclusive("mermaid", "tree", "json")
 	return cmd
 }
 
@@ -47,6 +48,33 @@ By default prints a table. Use --tree for a Unicode tree view or
 type graphOpts struct {
 	Mermaid bool
 	Tree    bool
+	JSON    bool
+}
+
+type graphJSONResult struct {
+	SchemaVersion string           `json:"schema_version"`
+	OK            bool             `json:"ok"`
+	Input         []string         `json:"input"`
+	Nodes         []graphJSONNode  `json:"nodes"`
+	Summary       graphJSONSummary `json:"summary"`
+}
+
+type graphJSONNode struct {
+	ID           string   `json:"id"`
+	Title        string   `json:"title"`
+	Status       string   `json:"status"`
+	Type         string   `json:"type,omitempty"`
+	ParentID     string   `json:"parent_id,omitempty"`
+	BlockedBy    []string `json:"blocked_by"`
+	OpenBlockers []string `json:"open_blockers"`
+	Ready        bool     `json:"ready"`
+}
+
+type graphJSONSummary struct {
+	Total   int `json:"total"`
+	Closed  int `json:"closed"`
+	Ready   int `json:"ready"`
+	Blocked int `json:"blocked"`
 }
 
 // cmdGraph is the CLI entry point.
@@ -126,6 +154,15 @@ func doGraph(store beads.Store, args []string, opts graphOpts, stdout, stderr io
 		return 1
 	}
 	if len(resolved) == 0 {
+		if opts.JSON {
+			return writeCLIJSONLineOrExit(stdout, stderr, "gc graph", graphJSONResult{
+				SchemaVersion: "1",
+				OK:            true,
+				Input:         append([]string(nil), args...),
+				Nodes:         []graphJSONNode{},
+				Summary:       graphJSONSummary{},
+			})
+		}
 		fmt.Fprintln(stdout, "No beads to graph") //nolint:errcheck // best-effort stdout
 		return 0
 	}
@@ -170,6 +207,8 @@ func doGraph(store beads.Store, args []string, opts graphOpts, stdout, stderr io
 	}
 
 	switch {
+	case opts.JSON:
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc graph", buildGraphJSONResult(args, nodes))
 	case opts.Mermaid:
 		printMermaid(nodes, stdout)
 	case opts.Tree:
@@ -178,6 +217,38 @@ func doGraph(store beads.Store, args []string, opts graphOpts, stdout, stderr io
 		printTable(nodes, stdout)
 	}
 	return 0
+}
+
+func buildGraphJSONResult(args []string, nodes []graphNode) graphJSONResult {
+	result := graphJSONResult{
+		SchemaVersion: "1",
+		OK:            true,
+		Input:         append([]string(nil), args...),
+		Nodes:         make([]graphJSONNode, 0, len(nodes)),
+	}
+	for _, n := range nodes {
+		ready := isBeadReady(n)
+		switch {
+		case n.bead.Status == "closed":
+			result.Summary.Closed++
+		case ready:
+			result.Summary.Ready++
+		default:
+			result.Summary.Blocked++
+		}
+		result.Nodes = append(result.Nodes, graphJSONNode{
+			ID:           n.bead.ID,
+			Title:        n.bead.Title,
+			Status:       n.bead.Status,
+			Type:         n.bead.Type,
+			ParentID:     n.bead.ParentID,
+			BlockedBy:    append([]string(nil), n.blockedBy...),
+			OpenBlockers: append([]string(nil), n.openBlocker...),
+			Ready:        ready,
+		})
+	}
+	result.Summary.Total = len(nodes)
+	return result
 }
 
 // resolveGraphInput expands convoy inputs to their children.

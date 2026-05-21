@@ -30,6 +30,7 @@ const CleanupSchemaVersion = "gc.dolt.cleanup.v1"
 // stable from day one — empty arrays and zero structs render as `[]` /
 // `{...}` so callers can rely on the schema across versions.
 type CleanupReport struct {
+	OK            bool                   `json:"ok"`
 	Schema        string                 `json:"schema"`
 	Port          CleanupPortReport      `json:"port"`
 	RigsProtected []CleanupRigProtection `json:"rigs_protected"`
@@ -142,6 +143,7 @@ const (
 // values. The JSON contract documents these as always-present arrays.
 func (r CleanupReport) MarshalJSON() ([]byte, error) {
 	type alias CleanupReport
+	r.OK = true
 	if r.RigsProtected == nil {
 		r.RigsProtected = []CleanupRigProtection{}
 	}

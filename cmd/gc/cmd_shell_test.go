@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -303,11 +305,8 @@ func TestShellStatusTracksBashProfileInstall(t *testing.T) {
 	// Simulate a later shell session creating .bashrc after install.
 	shellTestWriteFile(t, filepath.Join(home, ".bashrc"), "# created later\n")
 
-	var stdout, stderr bytes.Buffer
-	code = cmdShellStatus(&stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("status exit %d: %s", code, stderr.String())
-	}
+	var stdout bytes.Buffer
+	cmdShellStatus(false, &stdout, io.Discard)
 
 	out := stdout.String()
 	if !strings.Contains(out, "bash: installed") {
@@ -464,11 +463,8 @@ func TestShellStatus_NotInstalled(t *testing.T) {
 	shellTestMkdirAll(t, filepath.Join(home, ".config", "fish"))
 	shellTestWriteFile(t, filepath.Join(home, ".config", "fish", "config.fish"), "")
 
-	var stdout, stderr bytes.Buffer
-	code := cmdShellStatus(&stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("exit %d: %s", code, stderr.String())
-	}
+	var stdout bytes.Buffer
+	cmdShellStatus(false, &stdout, io.Discard)
 	if !strings.Contains(stdout.String(), "not installed") {
 		t.Errorf("expected 'not installed', got: %s", stdout.String())
 	}
@@ -485,14 +481,46 @@ func TestShellStatus_Installed(t *testing.T) {
 	rc := filepath.Join(home, ".zshrc")
 	shellTestWriteFile(t, rc, shellHookMarkerBegin+"\nsource foo\n"+shellHookMarkerEnd+"\n")
 
-	var stdout, stderr bytes.Buffer
-	code := cmdShellStatus(&stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("exit %d: %s", code, stderr.String())
-	}
+	var stdout bytes.Buffer
+	cmdShellStatus(false, &stdout, io.Discard)
 	out := stdout.String()
 	if !strings.Contains(out, "zsh: installed") {
 		t.Errorf("expected 'zsh: installed', got: %s", out)
+	}
+}
+
+func TestShellStatusJSON(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	shellTestWriteFile(t, filepath.Join(home, ".bashrc"), "")
+	shellTestWriteFile(t, filepath.Join(home, ".zshrc"), "")
+	shellTestMkdirAll(t, filepath.Join(home, ".config", "fish"))
+	shellTestWriteFile(t, filepath.Join(home, ".config", "fish", "config.fish"), "")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"shell", "status", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stdout lines = %d, want 1: %q", len(lines), stdout.String())
+	}
+	var got shellStatusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" {
+		t.Fatalf("schema_version = %q, want 1", got.SchemaVersion)
+	}
+	if got.Installed {
+		t.Fatalf("installed = true, want false")
+	}
+	if len(got.Shells) != 3 {
+		t.Fatalf("shells len = %d, want 3", len(got.Shells))
 	}
 }
 

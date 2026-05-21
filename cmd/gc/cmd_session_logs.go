@@ -21,6 +21,7 @@ import (
 func newSessionLogsCmd(stdout, stderr io.Writer) *cobra.Command {
 	var follow bool
 	var tail int
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "logs <session>",
 		Short: "Show session logs for a session",
@@ -48,7 +49,7 @@ Use -f to follow new messages as they arrive.`,
   gc session logs s-gc-123 -f`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionLogs(args, follow, tail, stdout, stderr) != 0 {
+			if cmdSessionLogs(args, follow, tail, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -57,11 +58,12 @@ Use -f to follow new messages as they arrive.`,
 	}
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow new messages as they arrive")
 	cmd.Flags().IntVar(&tail, "tail", 10, "Number of most recent transcript entries to show (0 = all; compact dividers count as entries)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL result for the bounded snapshot")
 	return cmd
 }
 
 // cmdSessionLogs is the CLI entry point for viewing session logs.
-func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writer) int {
+func cmdSessionLogs(args []string, follow bool, tail int, jsonOutput bool, stdout, stderr io.Writer) int {
 	identifier := args[0]
 
 	cityPath, err := resolveCity()
@@ -104,6 +106,9 @@ func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writ
 		return 1
 	}
 
+	if jsonOutput {
+		return doSessionLogsJSON(path, provider, identifier, follow, tail, stdout, stderr)
+	}
 	return doSessionLogs(path, provider, follow, tail, stdout, stderr)
 }
 
@@ -362,6 +367,149 @@ func doSessionLogs(path, provider string, follow bool, tail int, stdout, stderr 
 }
 
 type sessionLogsReader func(factory *worker.Factory, provider, path string) (*worker.TranscriptSession, error)
+
+type sessionLogsJSONResult struct {
+	SchemaVersion  string                `json:"schema_version"`
+	Target         string                `json:"target"`
+	Provider       string                `json:"provider,omitempty"`
+	TranscriptPath string                `json:"transcript_path"`
+	Tail           int                   `json:"tail"`
+	EntryCount     int                   `json:"entry_count"`
+	Entries        []sessionLogEntryJSON `json:"entries"`
+}
+
+type sessionLogEntryJSON struct {
+	UUID            string                       `json:"uuid,omitempty"`
+	ParentUUID      string                       `json:"parent_uuid,omitempty"`
+	Type            string                       `json:"type"`
+	Subtype         string                       `json:"subtype,omitempty"`
+	Role            string                       `json:"role,omitempty"`
+	Timestamp       string                       `json:"timestamp,omitempty"`
+	CompactBoundary bool                         `json:"compact_boundary,omitempty"`
+	Text            string                       `json:"text,omitempty"`
+	Blocks          []transcriptContentBlockJSON `json:"blocks,omitempty"`
+	Message         json.RawMessage              `json:"message,omitempty"`
+}
+
+type transcriptContentBlockJSON struct {
+	Type      string          `json:"type"`
+	ID        string          `json:"id,omitempty"`
+	RequestID string          `json:"request_id,omitempty"`
+	Kind      string          `json:"kind,omitempty"`
+	State     string          `json:"state,omitempty"`
+	Text      string          `json:"text,omitempty"`
+	Prompt    string          `json:"prompt,omitempty"`
+	Options   []string        `json:"options,omitempty"`
+	Action    string          `json:"action,omitempty"`
+	Metadata  json.RawMessage `json:"metadata,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   json.RawMessage `json:"content,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
+}
+
+func doSessionLogsJSON(path, provider, target string, follow bool, tail int, stdout, stderr io.Writer) int {
+	if follow {
+		fmt.Fprintln(stderr, "gc session logs: --json is only supported for bounded snapshots; omit --follow") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if tail < 0 {
+		fmt.Fprintln(stderr, "gc session logs: --tail must be >= 0") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	factory, err := worker.NewFactory(worker.FactoryConfig{})
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session logs: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return runSessionLogsJSON(factory, provider, path, target, tail, stdout, stderr, readSessionFile)
+}
+
+func runSessionLogsJSON(factory *worker.Factory, provider, path, target string, tail int, stdout, stderr io.Writer, read sessionLogsReader) int {
+	sess, readErr := read(factory, provider, path)
+	if readErr != nil {
+		fmt.Fprintf(stderr, "gc session logs: %v\n", readErr) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	messages := tailMessages(sess.Messages, tail)
+	entries := make([]sessionLogEntryJSON, 0, len(messages))
+	for _, msg := range messages {
+		entries = append(entries, sessionLogEntryToJSON(msg))
+	}
+	if err := writeCLIJSONLine(stdout, sessionLogsJSONResult{
+		SchemaVersion:  "1",
+		Target:         target,
+		Provider:       provider,
+		TranscriptPath: path,
+		Tail:           tail,
+		EntryCount:     len(entries),
+		Entries:        entries,
+	}); err != nil {
+		fmt.Fprintf(stderr, "gc session logs: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return 0
+}
+
+func sessionLogEntryToJSON(e *worker.TranscriptEntry) sessionLogEntryJSON {
+	if e == nil {
+		return sessionLogEntryJSON{}
+	}
+	entry := sessionLogEntryJSON{
+		UUID:            e.UUID,
+		ParentUUID:      e.ParentUUID,
+		Type:            e.Type,
+		Subtype:         e.Subtype,
+		CompactBoundary: e.IsCompactBoundary(),
+	}
+	if !e.Timestamp.IsZero() {
+		entry.Timestamp = e.Timestamp.Format(time.RFC3339Nano)
+	}
+	if len(e.Message) > 0 {
+		entry.Message = e.Message
+	}
+	mc := resolveMessage(e.Message)
+	if mc == nil {
+		return entry
+	}
+	entry.Role = mc.Role
+	var text string
+	if json.Unmarshal(mc.Content, &text) == nil {
+		entry.Text = text
+		return entry
+	}
+	var blocks []worker.TranscriptContentBlock
+	if json.Unmarshal(mc.Content, &blocks) == nil && len(blocks) > 0 {
+		entry.Blocks = transcriptContentBlocksToJSON(blocks)
+	}
+	return entry
+}
+
+func transcriptContentBlocksToJSON(blocks []worker.TranscriptContentBlock) []transcriptContentBlockJSON {
+	out := make([]transcriptContentBlockJSON, 0, len(blocks))
+	for _, block := range blocks {
+		out = append(out, transcriptContentBlockJSON{
+			Type:      block.Type,
+			ID:        block.ID,
+			RequestID: block.RequestID,
+			Kind:      block.Kind,
+			State:     block.State,
+			Text:      block.Text,
+			Prompt:    block.Prompt,
+			Options:   block.Options,
+			Action:    block.Action,
+			Metadata:  block.Metadata,
+			Name:      block.Name,
+			Input:     block.Input,
+			ToolUseID: block.ToolUseID,
+			Content:   block.Content,
+			IsError:   block.IsError,
+		})
+	}
+	return out
+}
 
 func runSessionLogs(factory *worker.Factory, provider, path string, follow bool, tail int, stdout, stderr io.Writer, sleep func(time.Duration), read sessionLogsReader) int {
 	// Always read the full session; apply tail trimming locally so semantics

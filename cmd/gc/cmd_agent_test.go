@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,56 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
+
+func TestDoAgentListJSON(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+max_active_sessions = 1
+
+[[agent]]
+name = "worker"
+dir = "frontend"
+suspended = true
+work_query = "bd ready --label=frontend"
+sling_query = "bd update {} --set-metadata gc.routed_to=frontend/worker"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentList(fs, "/city", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doAgentList --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stdout lines = %d, want 1; stdout=%q", len(lines), stdout.String())
+	}
+	var result AgentListJSON
+	if err := json.Unmarshal([]byte(lines[0]), &result); err != nil {
+		t.Fatalf("invalid JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" || result.CityName != "test-city" || len(result.Agents) != 2 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	var worker AgentListItem
+	for _, item := range result.Agents {
+		if item.QualifiedName == "frontend/worker" {
+			worker = item
+		}
+	}
+	if worker.QualifiedName != "frontend/worker" || !worker.Suspended {
+		t.Fatalf("worker item = %+v, want suspended frontend/worker", worker)
+	}
+	if worker.WorkQuery != "bd ready --label=frontend" || worker.SlingQuery == "" {
+		t.Fatalf("worker routing fields = %+v", worker)
+	}
+}
 
 // ---------------------------------------------------------------------------
 // doAgentSuspend/Resume — bad config error path (no existing coverage)

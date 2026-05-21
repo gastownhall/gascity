@@ -49,6 +49,32 @@ func (w *switchableWriter) Write(p []byte) (int, error) {
 	return w.target.Write(p)
 }
 
+type countingWriter struct {
+	target io.Writer
+	mu     sync.Mutex
+	n      int64
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	if w == nil || w.target == nil {
+		return 0, io.ErrClosedPipe
+	}
+	n, err := w.target.Write(p)
+	w.mu.Lock()
+	w.n += int64(n)
+	w.mu.Unlock()
+	return n, err
+}
+
+func (w *countingWriter) BytesWritten() int64 {
+	if w == nil {
+		return 0
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.n
+}
+
 func (e *commandExitError) Error() string {
 	if e == nil {
 		return "exit"
@@ -121,13 +147,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	execStdout := &switchableWriter{target: stdout}
 	var jsonStdout bytes.Buffer
+	var observedStdout *countingWriter
 	root := newRootCmd(execStdout, stderr)
 	if args == nil {
 		args = []string{}
 	}
-	jsonExecution := shouldBufferJSONExecution(root, args)
-	if jsonExecution {
+	bufferJSONExecution := shouldBufferJSONExecution(root, args)
+	reportJSONFailure := shouldReportJSONExecutionError(root, args)
+	if bufferJSONExecution {
 		execStdout.target = &jsonStdout
+	} else if reportJSONFailure {
+		observedStdout = &countingWriter{target: stdout}
+		execStdout.target = observedStdout
 	}
 	root.SetArgs(args)
 	root.SetOut(execStdout)
@@ -140,7 +171,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if err := root.Execute(); err != nil {
 		code := commandExitCode(err)
-		if jsonExecution {
+		if bufferJSONExecution {
 			if len(bytes.TrimSpace(jsonStdout.Bytes())) > 0 {
 				if _, copyErr := io.Copy(stdout, &jsonStdout); copyErr != nil {
 					return 1
@@ -148,10 +179,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 			} else {
 				_ = writeJSONFailure(stdout, "command_failed", commandFailureMessage(err), code)
 			}
+		} else if reportJSONFailure && observedStdout.BytesWritten() == 0 {
+			_ = writeJSONFailure(stdout, "command_failed", commandFailureMessage(err), code)
 		}
 		return code
 	}
-	if jsonExecution {
+	if bufferJSONExecution {
 		if _, err := io.Copy(stdout, &jsonStdout); err != nil {
 			return 1
 		}
@@ -237,7 +270,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newSkillCmd(stdout, stderr),
 		newMcpCmd(stdout, stderr),
 		newInternalCmd(stdout, stderr),
-		newVersionCmd(stdout),
+		newVersionCmd(stdout, stderr),
 		newDashboardCmd(stdout, stderr),
 		newGraphCmd(stdout, stderr),
 		newRegisterCmd(stdout, stderr),
