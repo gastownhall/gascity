@@ -338,6 +338,103 @@ func TestResolveConditionPath(t *testing.T) {
 		}
 	})
 
+	// Pins gastownhall/gascity#2354: when the rig store is a sibling of
+	// the city (neither a subtree of the other), a relative conditionPath
+	// that resolves under `base` must succeed even though it lands
+	// outside `envelope`. Passing storePath as `base` is the dispatcher's
+	// explicit declaration that storePath is an operator-controlled root
+	// (callers are expected to validate base — see
+	// internal/dispatch/ralph.go).
+	t.Run("sibling layout: relative path under base stays inside base", func(t *testing.T) {
+		parent := t.TempDir()
+		cityDir := filepath.Join(parent, "city")
+		rigDir := filepath.Join(parent, "rig")
+		if err := os.MkdirAll(cityDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		scriptDir := filepath.Join(rigDir, "assets", "pack", "scripts")
+		if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		script := filepath.Join(scriptDir, "check.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := ResolveConditionPath(cityDir, rigDir, "assets/pack/scripts/check.sh")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		testutil.AssertSamePath(t, got, script)
+	})
+
+	// Pins the security contract for the sibling layout: a relative path
+	// that escapes BOTH envelope and base must still be rejected.
+	t.Run("sibling layout: traversal outside both envelope and base rejected", func(t *testing.T) {
+		parent := t.TempDir()
+		cityDir := filepath.Join(parent, "city")
+		rigDir := filepath.Join(parent, "rig")
+		if err := os.MkdirAll(cityDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		script := filepath.Join(parent, "evil.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := ResolveConditionPath(cityDir, rigDir, "../evil.sh")
+		if err == nil {
+			t.Fatal("expected traversal rejection, got nil")
+		}
+		if !strings.Contains(err.Error(), "traversal") {
+			t.Errorf("expected path traversal error, got: %v", err)
+		}
+	})
+
+	// Symlink-escape contract: a script that lives under base (so the
+	// pre-resolution containment check passes) but points via symlink to
+	// a file outside both envelope and base must be rejected by the
+	// post-EvalSymlinks containment check. Pre-fix, the lexical check on
+	// absPath accepted such a path and the resolved target was returned
+	// verbatim. This is the regression test for the symlink half of the
+	// gastownhall/gascity#2354 review.
+	t.Run("symlink under base targeting outside both roots is rejected", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("symlink semantics differ on Windows")
+		}
+		parent := t.TempDir()
+		cityDir := filepath.Join(parent, "city")
+		rigDir := filepath.Join(parent, "rig")
+		if err := os.MkdirAll(cityDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		scriptDir := filepath.Join(rigDir, "scripts")
+		if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Real target lives in the common parent, outside both roots.
+		outsideScript := filepath.Join(parent, "outside.sh")
+		if err := os.WriteFile(outsideScript, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Symlink under base points to the outside target.
+		link := filepath.Join(scriptDir, "check.sh")
+		if err := os.Symlink(outsideScript, link); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := ResolveConditionPath(cityDir, rigDir, "scripts/check.sh")
+		if err == nil {
+			t.Fatal("expected symlink-escape rejection, got nil")
+		}
+		if !strings.Contains(err.Error(), "symlink target outside containment") {
+			t.Errorf("expected symlink-escape error, got: %v", err)
+		}
+	})
+
 	// Empty base falls back to envelope for backward compatibility with
 	// callers that have no rig/city distinction to make.
 	t.Run("empty base falls back to envelope", func(t *testing.T) {

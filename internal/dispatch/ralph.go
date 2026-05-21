@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
@@ -152,6 +153,15 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	if checkPath == "" {
 		return convergence.GateResult{}, fmt.Errorf("%s: missing gc.check_path", bead.ID)
 	}
+	// gc.check_path comes from formula metadata after variable substitution
+	// (internal/formula/expand.go), and sling API `vars` can flow into that
+	// substitution. Enforce the relative-path contract at this boundary so
+	// an absolute string synthesized via vars cannot bypass containment in
+	// convergence.ResolveConditionPath (which intentionally trusts callers
+	// to vouch for absolute inputs).
+	if filepath.IsAbs(checkPath) {
+		return convergence.GateResult{}, fmt.Errorf("%s: gc.check_path must be relative, got absolute %q", bead.ID, checkPath)
+	}
 	cityPath := opts.CityPath
 	if cityPath == "" {
 		cityPath = resolveInheritedMetadata(store, bead, "gc.city_path")
@@ -168,9 +178,22 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	resolvedWorkDir := ""
 	if workDir != "" {
 		if filepath.IsAbs(workDir) {
-			resolvedWorkDir = workDir
+			resolvedWorkDir = filepath.Clean(workDir)
 		} else {
-			resolvedWorkDir = filepath.Join(storePath, workDir)
+			resolvedWorkDir = filepath.Clean(filepath.Join(storePath, workDir))
+		}
+		// work_dir flows from bead metadata, which can be populated via
+		// sling API vars (internal/api/handler_sling.go →
+		// internal/sling/sling.go → internal/molecule/molecule.go → bead
+		// metadata). cityPath and storePath are operator-controlled by the
+		// dispatcher; work_dir is the only path input on this hot path that
+		// originates outside that surface. Require it to stay inside the
+		// city OR store roots so the OR-containment relaxation in
+		// convergence.ResolveConditionPath (gastownhall/gascity#2354) cannot
+		// be weaponised by a caller-supplied work_dir that escapes both
+		// operator-controlled trees.
+		if !pathutil.PathWithin(cityPath, resolvedWorkDir) && !pathutil.PathWithin(storePath, resolvedWorkDir) {
+			return convergence.GateResult{}, fmt.Errorf("%s: work_dir %q escapes both city and store roots", bead.ID, workDir)
 		}
 	}
 	scriptBase := storePath

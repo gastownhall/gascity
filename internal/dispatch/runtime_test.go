@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -6963,6 +6964,205 @@ func TestRunRalphCheckRejectsPathTraversalAboveCityPath(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "traversal") {
 		t.Errorf("expected traversal error, got: %v", err)
+	}
+}
+
+// TestRunRalphCheckRejectsAbsoluteCheckPath pins the contract that
+// gc.check_path must be relative. Sling API vars
+// (internal/api/handler_sling.go → internal/molecule → bead metadata)
+// can flow through formula variable substitution
+// (internal/formula/expand.go) and synthesize an absolute string into
+// gc.check_path. convergence.ResolveConditionPath intentionally skips
+// containment for absolute conditionPath values (callers vouch), so
+// ralph.go must reject the absolute form at the metadata boundary or
+// the OR-containment relaxation in gastownhall/gascity#2354 becomes a
+// full bypass for callers who can influence vars.
+func TestRunRalphCheckRejectsAbsoluteCheckPath(t *testing.T) {
+	parent := t.TempDir()
+	cityPath := filepath.Join(parent, "city")
+	storePath := filepath.Join(parent, "rig")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(storePath, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	outside := filepath.Join(parent, "outside.sh")
+	if err := os.WriteFile(outside, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write outside: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	check := beads.Bead{
+		ID:   "check-abs",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":    outside,
+			"gc.check_timeout": "30s",
+		},
+	}
+	subject := beads.Bead{ID: "run-abs", Type: "task"}
+
+	_, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+		CityPath:  cityPath,
+		StorePath: storePath,
+	})
+	if err == nil {
+		t.Fatal("expected absolute-path rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "must be relative") {
+		t.Errorf("expected absolute-path error, got: %v", err)
+	}
+}
+
+// TestRunRalphCheckRejectsAbsoluteWorkDirOutsideRoots pins the
+// gastownhall/gascity#2354 review fix: work_dir is the only path on
+// runRalphCheck's hot path that comes from caller-influenceable
+// metadata (sling API vars → bead metadata). If work_dir resolves
+// outside both cityPath and storePath, it must be rejected before it
+// becomes the `base` argument to convergence.ResolveConditionPath —
+// otherwise the OR-containment relaxation lets a relative gc.check_path
+// land anywhere the caller controls.
+func TestRunRalphCheckRejectsAbsoluteWorkDirOutsideRoots(t *testing.T) {
+	parent := t.TempDir()
+	cityPath := filepath.Join(parent, "city")
+	storePath := filepath.Join(parent, "rig")
+	attackerDir := filepath.Join(parent, "attacker")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(storePath, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(attackerDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Plant a real script in attackerDir so the rejection cannot be
+	// blamed on a missing file — the failure must be the work_dir guard.
+	if err := os.WriteFile(filepath.Join(attackerDir, "check.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write attacker script: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	check := beads.Bead{
+		ID:   "check-abs-workdir",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":    "check.sh",
+			"gc.work_dir":      attackerDir, // absolute, outside both roots
+			"gc.check_timeout": "30s",
+		},
+	}
+	subject := beads.Bead{ID: "run-abs-workdir", Type: "task"}
+
+	_, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+		CityPath:  cityPath,
+		StorePath: storePath,
+	})
+	if err == nil {
+		t.Fatal("expected work_dir escape rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "work_dir") || !strings.Contains(err.Error(), "escapes") {
+		t.Errorf("expected work_dir escape error, got: %v", err)
+	}
+}
+
+// TestRunRalphCheckRejectsRelativeWorkDirOutsideRoots pins the
+// companion case for relative work_dir values that traverse upward
+// out of storePath. The pre-2354 envelope-only check would still
+// reject because the resolved path escaped envelope; with the
+// OR-containment relaxation, the new ralph.go guard is what closes
+// this vector.
+func TestRunRalphCheckRejectsRelativeWorkDirOutsideRoots(t *testing.T) {
+	parent := t.TempDir()
+	cityPath := filepath.Join(parent, "city")
+	storePath := filepath.Join(parent, "rig")
+	attackerDir := filepath.Join(parent, "attacker")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(storePath, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(attackerDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(attackerDir, "check.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write attacker script: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	check := beads.Bead{
+		ID:   "check-rel-workdir",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":    "check.sh",
+			"gc.work_dir":      "../attacker", // joins under storePath, escapes both roots
+			"gc.check_timeout": "30s",
+		},
+	}
+	subject := beads.Bead{ID: "run-rel-workdir", Type: "task"}
+
+	_, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+		CityPath:  cityPath,
+		StorePath: storePath,
+	})
+	if err == nil {
+		t.Fatal("expected work_dir traversal rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "work_dir") || !strings.Contains(err.Error(), "escapes") {
+		t.Errorf("expected work_dir escape error, got: %v", err)
+	}
+}
+
+// TestRunRalphCheckRejectsSymlinkEscapeViaStore pins the symlink half
+// of the gastownhall/gascity#2354 review: a script that lives under
+// storePath (so the pre-resolution containment check passes) but
+// symlinks to a location outside both roots must be rejected by the
+// post-EvalSymlinks containment check in convergence.ResolveConditionPath.
+func TestRunRalphCheckRejectsSymlinkEscapeViaStore(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on Windows")
+	}
+	parent := t.TempDir()
+	cityPath := filepath.Join(parent, "city")
+	storePath := filepath.Join(parent, "rig")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatalf("mkdir city: %v", err)
+	}
+	scriptDir := filepath.Join(storePath, "scripts")
+	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	outside := filepath.Join(parent, "outside.sh")
+	if err := os.WriteFile(outside, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write outside: %v", err)
+	}
+	link := filepath.Join(scriptDir, "check.sh")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	check := beads.Bead{
+		ID:   "check-symlink-escape",
+		Type: "task",
+		Metadata: map[string]string{
+			"gc.check_path":    "scripts/check.sh",
+			"gc.check_timeout": "30s",
+		},
+	}
+	subject := beads.Bead{ID: "run-symlink-escape", Type: "task"}
+
+	_, err := runRalphCheck(store, check, subject, 1, ProcessOptions{
+		CityPath:  cityPath,
+		StorePath: storePath,
+	})
+	if err == nil {
+		t.Fatal("expected symlink-escape rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "symlink target outside containment") {
+		t.Errorf("expected symlink-escape error, got: %v", err)
 	}
 }
 
