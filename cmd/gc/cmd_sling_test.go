@@ -5930,10 +5930,10 @@ func TestDoSlingIdempotentSkipsRouting(t *testing.T) {
 
 // TestDoSlingRecoversMissingConvoyOnPreRoutedBead covers the case where a
 // bead has gc.routed_to set (e.g., declared via bd create --metadata) but
-// no convoy parent — a prior sling never finished, or the route came from
-// outside gc sling. A subsequent sling must re-run finalize() to create
-// the auto-convoy and poke the controller, instead of skipping as
-// idempotent and leaving the work orphaned.
+// no auto-convoy membership — a prior sling never finished, or the route came
+// from outside gc sling. A subsequent sling must re-run finalize() to create
+// the auto-convoy tracking dependency and poke the controller, instead of
+// skipping as idempotent and leaving the work orphaned.
 func TestDoSlingRecoversMissingConvoyOnPreRoutedBead(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -5975,15 +5975,28 @@ func TestDoSlingRecoversMissingConvoyOnPreRoutedBead(t *testing.T) {
 	if got := bead.Metadata["gc.routed_to"]; got != "mayor" {
 		t.Errorf("gc.routed_to = %q, want %q (should be unchanged)", got, "mayor")
 	}
-	if bead.ParentID == "" {
-		t.Fatalf("expected recovered bead to have a convoy parent, got empty ParentID")
+	if bead.ParentID != "" {
+		t.Fatalf("ParentID = %q, want empty because auto-convoy membership uses tracks deps", bead.ParentID)
 	}
-	if bead.ParentID == existingConvoy.ID {
-		t.Fatalf("recovered bead parent = pre-existing convoy %s, want a fresh convoy", existingConvoy.ID)
-	}
-	parent, err := deps.Store.Get(bead.ParentID)
+	trackDeps, err := deps.Store.DepList(bead.ID, "up")
 	if err != nil {
-		t.Fatalf("store.Get(%s): %v", bead.ParentID, err)
+		t.Fatalf("DepList(%s, up): %v", bead.ID, err)
+	}
+	var recoveredConvoyID string
+	for _, dep := range trackDeps {
+		if dep.Type == "tracks" && dep.DependsOnID == bead.ID {
+			recoveredConvoyID = dep.IssueID
+		}
+	}
+	if recoveredConvoyID == "" {
+		t.Fatalf("expected recovered bead to have a tracks dependency, got deps=%v", trackDeps)
+	}
+	if recoveredConvoyID == existingConvoy.ID {
+		t.Fatalf("recovered convoy = pre-existing convoy %s, want a fresh convoy", existingConvoy.ID)
+	}
+	parent, err := deps.Store.Get(recoveredConvoyID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", recoveredConvoyID, err)
 	}
 	if parent.Type != "convoy" {
 		t.Errorf("parent.Type = %q, want %q", parent.Type, "convoy")

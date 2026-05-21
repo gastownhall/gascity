@@ -449,6 +449,61 @@ func TestCheckBeadStateRoutedWithoutConvoyIsNotIdempotent(t *testing.T) {
 	}
 }
 
+func TestCheckBeadStateRoutedWithLiveTrackingConvoyIsIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "auto convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, bead.ID, "tracks"); err != nil {
+		t.Fatalf("store.DepAdd(tracks): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+
+	if !result.Idempotent {
+		t.Fatalf("expected Idempotent=true when routed bead has live tracking convoy, got %+v", result)
+	}
+}
+
+func TestCheckBeadStateRoutedWithClosedTrackingConvoyIsNotIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "old convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, bead.ID, "tracks"); err != nil {
+		t.Fatalf("store.DepAdd(tracks): %v", err)
+	}
+	if err := store.Close(convoy.ID); err != nil {
+		t.Fatalf("store.Close(convoy): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false when routed bead has only closed tracking convoy, got %+v", result)
+	}
+}
+
 // TestCheckBeadStateRoutedWithClosedConvoyIsNotIdempotent ensures a prior
 // convoy whose run has finished does not count as a live attachment — the
 // next sling should still create a fresh convoy and poke the controller.
