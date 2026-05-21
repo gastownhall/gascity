@@ -19,6 +19,11 @@ import (
 // SafePATH is the fallback PATH for gate script execution.
 const SafePATH = "/usr/local/bin:/usr/bin:/bin"
 
+const (
+	textFileBusyRetryAttempts = 5
+	textFileBusyRetryDelay    = 25 * time.Millisecond
+)
+
 // conditionPATH resolves the tool directories gate scripts actually need.
 // This keeps the env narrow while ensuring gate scripts use the same bd/gc
 // binaries as the running city instead of whatever older copy happens to live
@@ -244,6 +249,31 @@ func RunCondition(ctx context.Context, scriptPath string, env ConditionEnv, time
 
 // runOnce executes a single attempt of the gate condition script.
 func runOnce(ctx context.Context, scriptPath string, env ConditionEnv, timeout time.Duration) GateResult {
+	var result GateResult
+	for attempt := 0; attempt <= textFileBusyRetryAttempts; attempt++ {
+		result = runOnceNoPreExecRetry(ctx, scriptPath, env, timeout)
+		if !isTextFileBusyPreExecError(result) || attempt == textFileBusyRetryAttempts {
+			return result
+		}
+
+		timer := time.NewTimer(textFileBusyRetryDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return result
+		case <-timer.C:
+		}
+	}
+	return result
+}
+
+func isTextFileBusyPreExecError(result GateResult) bool {
+	return result.Outcome == GateError && strings.Contains(strings.ToLower(result.Stderr), "text file busy")
+}
+
+func runOnceNoPreExecRetry(ctx context.Context, scriptPath string, env ConditionEnv, timeout time.Duration) GateResult {
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 

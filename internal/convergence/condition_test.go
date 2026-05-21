@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -412,6 +413,41 @@ func TestRunConditionFail(t *testing.T) {
 	}
 	if !strings.Contains(result.Stderr, "failing") {
 		t.Errorf("Stderr = %q, want to contain 'failing'", result.Stderr)
+	}
+}
+
+func TestRunConditionRetriesTextFileBusy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not return text-file-busy for executing an open script")
+	}
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "busy.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	hold, err := os.OpenFile(script, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan struct{})
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		_ = hold.Close()
+		close(closed)
+	}()
+	defer func() {
+		_ = hold.Close()
+		<-closed
+	}()
+
+	result := RunCondition(context.Background(), script, ConditionEnv{CityPath: dir}, 5*time.Second, 0)
+	if result.Outcome != GatePass {
+		t.Fatalf("Outcome = %q, stderr = %q, want pass after text-file-busy retry", result.Outcome, result.Stderr)
+	}
+	if strings.TrimSpace(result.Stdout) != "ok" {
+		t.Fatalf("Stdout = %q, want ok", result.Stdout)
 	}
 }
 
