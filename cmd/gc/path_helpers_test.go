@@ -87,7 +87,7 @@ func newDoltLeakGuardedTestingM(m *testing.M, tempRoot string, cleanupPaths ...s
 }
 
 func (g *doltLeakGuardedTestingM) Run() int {
-	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, reapManagedDoltTestProcesses)
+	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, reapManagedDoltTestProcesses, reapDoltLeakProcesses)
 }
 
 func (g *doltLeakGuardedTestingM) runWith(
@@ -95,6 +95,7 @@ func (g *doltLeakGuardedTestingM) runWith(
 	enumerate func() ([]DoltProcInfo, error),
 	sweepStale func(string) bool,
 	reapRegistered func(),
+	reapLeaks func([]DoltProcInfo),
 ) int {
 	_ = sweepStale("startup")
 	stopSignalHandler := g.installSignalHandler()
@@ -116,7 +117,7 @@ func (g *doltLeakGuardedTestingM) runWith(
 		} else if leaked := diffDoltProcessSnapshots(initial, final); len(leaked) > 0 {
 			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: leaked %d dolt sql-server process(es) under %s\n", len(leaked), g.tempRoot) //nolint:errcheck
 			writeDoltLeakReport(os.Stderr, leaked)
-			reapDoltLeakProcesses(leaked)
+			reapLeaks(leaked)
 			guardFailed = true
 		}
 	}

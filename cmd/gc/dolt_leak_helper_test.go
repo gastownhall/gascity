@@ -546,6 +546,7 @@ func TestDoltLeakGuardedTestingMFinalSnapshotRunsBeforeRegistryReap(t *testing.T
 	}
 	var scan int
 	registeredReaped := false
+	var reapedLeaks []DoltProcInfo
 	enumerate := func() ([]DoltProcInfo, error) {
 		scan++
 		if scan == 1 {
@@ -563,10 +564,14 @@ func TestDoltLeakGuardedTestingMFinalSnapshotRunsBeforeRegistryReap(t *testing.T
 		enumerate,
 		func(string) bool { return false },
 		func() { registeredReaped = true },
+		func(leaked []DoltProcInfo) { reapedLeaks = append(reapedLeaks, leaked...) },
 	)
 
 	if code != 1 {
 		t.Fatalf("guard returned code %d, want 1 for leaked registered process", code)
+	}
+	if len(reapedLeaks) != 1 || reapedLeaks[0].PID != leaked.PID {
+		t.Fatalf("reaped leaks = %#v, want only PID %d through injected reaper", reapedLeaks, leaked.PID)
 	}
 	if !registeredReaped {
 		t.Fatal("registered process reaper was not called after leak detection")
