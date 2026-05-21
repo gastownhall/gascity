@@ -489,6 +489,177 @@ source = "https://github.com/gastownhall/gc-actual-packs"
 	}
 }
 
+func TestDoDoctorRegistersStaleLocalPackDirCheckForRemoteImport(t *testing.T) {
+	cityDir := t.TempDir()
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	source := "https://github.com/gastownhall/gc-actual-packs"
+	commit := writeDoctorRemotePackFixture(t, homeDir, source)
+
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, "packs", "actual"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[imports.actual]
+source = "https://github.com/gastownhall/gc-actual-packs"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeDoctorPackLock(t, cityDir, source, commit)
+
+	out := runDoctorForStaleLocalPackDirTest(t, cityDir)
+	if !strings.Contains(out, "stale-local-pack-dirs") {
+		t.Fatalf("doctor output missing stale-local-pack-dirs check:\n%s", out)
+	}
+	if !strings.Contains(out, "packs/actual exists while [imports.actual] points at https://github.com/gastownhall/gc-actual-packs") {
+		t.Fatalf("doctor output missing remote import stale pack detail:\n%s", out)
+	}
+}
+
+func TestDoDoctorRegistersStaleLocalPackDirCheckForRigRemoteImport(t *testing.T) {
+	cityDir := t.TempDir()
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	source := "https://github.com/gastownhall/gc-actual-packs"
+	commit := writeDoctorRemotePackFixture(t, homeDir, source)
+
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, "rig"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, "packs", "actual"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "demo-rig"
+path = "rig"
+
+[rigs.imports.actual]
+source = "https://github.com/gastownhall/gc-actual-packs"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeDoctorPackLock(t, cityDir, source, commit)
+
+	out := runDoctorForStaleLocalPackDirTest(t, cityDir)
+	if !strings.Contains(out, "stale-local-pack-dirs") {
+		t.Fatalf("doctor output missing stale-local-pack-dirs check:\n%s", out)
+	}
+	if !strings.Contains(out, "packs/actual exists while [rigs.demo-rig.imports.actual] points at https://github.com/gastownhall/gc-actual-packs") {
+		t.Fatalf("doctor output missing rig remote import stale pack detail:\n%s", out)
+	}
+}
+
+func TestDoDoctorRegistersStaleLocalPackDirCheckForDefaultRigRemoteImport(t *testing.T) {
+	cityDir := t.TempDir()
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	source := "https://github.com/gastownhall/gc-actual-packs"
+	commit := writeDoctorRemotePackFixture(t, homeDir, source)
+
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, "packs", "actual"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte(`[pack]
+name = "demo"
+schema = 2
+
+[defaults.rig.imports.actual]
+source = "https://github.com/gastownhall/gc-actual-packs"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeDoctorPackLock(t, cityDir, source, commit)
+
+	out := runDoctorForStaleLocalPackDirTest(t, cityDir)
+	if !strings.Contains(out, "stale-local-pack-dirs") {
+		t.Fatalf("doctor output missing stale-local-pack-dirs check:\n%s", out)
+	}
+	if !strings.Contains(out, "packs/actual exists while [defaults.rig.imports.actual] points at https://github.com/gastownhall/gc-actual-packs") {
+		t.Fatalf("doctor output missing default rig remote import stale pack detail:\n%s", out)
+	}
+}
+
+func writeDoctorRemotePackFixture(t *testing.T, homeDir, source string) string {
+	t.Helper()
+
+	repoDir := filepath.Join(t.TempDir(), "remote-pack")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "pack.toml"), []byte(`[pack]
+name = "actual"
+schema = 1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGitImport(t, repoDir, "init")
+	mustGitImport(t, repoDir, "add", ".")
+	mustGitImport(t, repoDir, "commit", "-m", "initial")
+	commit := gitOutputImport(t, repoDir, "rev-parse", "HEAD")
+	cacheDir := filepath.Join(homeDir, ".gc", "cache", "repos", config.RepoCacheKey(source, commit))
+	if err := os.MkdirAll(filepath.Dir(cacheDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(repoDir, cacheDir); err != nil {
+		t.Fatal(err)
+	}
+	return commit
+}
+
+func writeDoctorPackLock(t *testing.T, cityDir, source, commit string) {
+	t.Helper()
+
+	if err := os.WriteFile(filepath.Join(cityDir, "packs.lock"), []byte(`schema = 1
+
+[packs."`+source+`"]
+version = "1.0.0"
+commit = "`+commit+`"
+fetched = "2026-05-20T00:00:00Z"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func runDoctorForStaleLocalPackDirTest(t *testing.T, cityDir string) string {
+	t.Helper()
+
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_DOLT", "skip")
+	cleanupManagedDoltTestCity(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, true, false, &stdout, &stderr)
+	return stdout.String() + stderr.String()
+}
+
 func TestDoDoctorReportsLegacyBDSplitStore(t *testing.T) {
 	cityDir := t.TempDir()
 	writeMinimalCityToml(t, cityDir)

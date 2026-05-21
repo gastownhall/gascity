@@ -8,19 +8,23 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/remotesource"
 )
 
 // StaleLocalPackDirCheck warns when a remote pack binding has a same-named
 // local packs/<binding>/ directory that can mislead operators into editing a
 // stale copy instead of the configured remote pack source.
 type StaleLocalPackDirCheck struct {
-	packs    map[string]config.PackSource
+	bindings []staleLocalPackBinding
 	cityPath string
 }
 
 // NewStaleLocalPackDirCheck creates a stale local pack directory check.
-func NewStaleLocalPackDirCheck(packs map[string]config.PackSource, cityPath string) *StaleLocalPackDirCheck {
-	return &StaleLocalPackDirCheck{packs: packs, cityPath: cityPath}
+func NewStaleLocalPackDirCheck(packs map[string]config.PackSource, imports map[string]config.Import, defaultRigImports map[string]config.Import, cityPath string, rigs ...config.Rig) *StaleLocalPackDirCheck {
+	return &StaleLocalPackDirCheck{
+		bindings: staleLocalPackBindings(packs, imports, defaultRigImports, rigs),
+		cityPath: cityPath,
+	}
 }
 
 // Name returns the check identifier.
@@ -29,15 +33,17 @@ func (c *StaleLocalPackDirCheck) Name() string { return "stale-local-pack-dirs" 
 // Run checks for local packs/<binding>/ directories alongside remote bindings.
 func (c *StaleLocalPackDirCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
-	if len(c.packs) == 0 {
+	if len(c.bindings) == 0 {
 		r.Status = StatusOK
 		r.Message = "no remote pack bindings configured"
 		return r
 	}
 
 	var stale []staleLocalPackDir
-	for _, name := range sortedPackBindingNames(c.packs) {
-		rel, path, ok := localPackBindingPath(c.cityPath, name)
+	staleByRel := make(map[string]int)
+	var inspectErrors []string
+	for _, binding := range c.bindings {
+		rel, path, ok := localPackBindingPath(c.cityPath, binding.name)
 		if !ok {
 			continue
 		}
@@ -46,33 +52,40 @@ func (c *StaleLocalPackDirCheck) Run(_ *CheckContext) *CheckResult {
 			if os.IsNotExist(err) {
 				continue
 			}
-			r.Status = StatusWarning
-			r.Message = fmt.Sprintf("could not inspect local pack directory %s", rel)
-			r.Details = []string{err.Error()}
-			return r
+			inspectErrors = append(inspectErrors, fmt.Sprintf("could not inspect %s at %s: %v", binding.configRef, filepath.ToSlash(rel), err))
+			continue
 		}
 		if !info.IsDir() {
 			continue
 		}
+		if idx, ok := staleByRel[rel]; ok {
+			stale[idx].bindings = append(stale[idx].bindings, binding)
+			continue
+		}
+		staleByRel[rel] = len(stale)
 		stale = append(stale, staleLocalPackDir{
-			binding: name,
-			rel:     rel,
-			source:  c.packs[name],
+			bindings: []staleLocalPackBinding{binding},
+			rel:      rel,
 		})
 	}
 
-	if len(stale) == 0 {
+	if len(stale) == 0 && len(inspectErrors) == 0 {
 		r.Status = StatusOK
 		r.Message = "no stale local pack directories"
 		return r
 	}
 
 	r.Status = StatusWarning
+	r.Details = append(r.Details, inspectErrors...)
 	for _, hit := range stale {
-		r.Details = append(r.Details, fmt.Sprintf("%s exists while [packs.%s] points at %s", hit.rel, hit.binding, hit.source.Source))
+		r.Details = append(r.Details, hit.detail())
+	}
+	if len(stale) == 0 {
+		r.Message = fmt.Sprintf("could not inspect %d local pack %s", len(inspectErrors), localPackDirectoryNoun(len(inspectErrors)))
+		return r
 	}
 	if len(stale) == 1 {
-		r.Message = stale[0].operatorAction()
+		r.Message = fmt.Sprintf("stale local pack directory: %s", filepath.ToSlash(stale[0].rel))
 		r.FixHint = stale[0].operatorAction()
 		return r
 	}
@@ -92,22 +105,80 @@ func (c *StaleLocalPackDirCheck) Fix(_ *CheckContext) error { return nil }
 func (c *StaleLocalPackDirCheck) WarmupEligible() bool { return false }
 
 type staleLocalPackDir struct {
-	binding string
-	rel     string
-	source  config.PackSource
+	bindings []staleLocalPackBinding
+	rel      string
 }
 
 func (d staleLocalPackDir) operatorAction() string {
-	return fmt.Sprintf("delete `%s/` (it's stale); edits go via PR on %s", filepath.ToSlash(d.rel), packSourceRepoName(d.source))
+	source := ""
+	if len(d.bindings) > 0 {
+		source = d.bindings[0].source
+	}
+	return fmt.Sprintf("delete `%s/` (it's stale); edits go via PR on %s", filepath.ToSlash(d.rel), packSourceRepoName(source))
 }
 
-func sortedPackBindingNames(packs map[string]config.PackSource) []string {
-	names := make([]string, 0, len(packs))
-	for name := range packs {
-		names = append(names, name)
+func (d staleLocalPackDir) detail() string {
+	refs := make([]string, 0, len(d.bindings))
+	for _, binding := range d.bindings {
+		refs = append(refs, fmt.Sprintf("%s points at %s", binding.configRef, binding.source))
 	}
-	sort.Strings(names)
-	return names
+	return fmt.Sprintf("%s exists while %s", filepath.ToSlash(d.rel), strings.Join(refs, "; "))
+}
+
+type staleLocalPackBinding struct {
+	name      string
+	source    string
+	configRef string
+}
+
+func staleLocalPackBindings(packs map[string]config.PackSource, imports map[string]config.Import, defaultRigImports map[string]config.Import, rigs []config.Rig) []staleLocalPackBinding {
+	bindings := make([]staleLocalPackBinding, 0, len(packs)+len(imports)+len(defaultRigImports))
+	for name, src := range packs {
+		bindings = append(bindings, staleLocalPackBinding{
+			name:      name,
+			source:    src.Source,
+			configRef: fmt.Sprintf("[packs.%s]", name),
+		})
+	}
+	for name, imp := range imports {
+		if !remotesource.IsRemote(imp.Source) {
+			continue
+		}
+		bindings = append(bindings, staleLocalPackBinding{
+			name:      name,
+			source:    imp.Source,
+			configRef: fmt.Sprintf("[imports.%s]", name),
+		})
+	}
+	for name, imp := range defaultRigImports {
+		if !remotesource.IsRemote(imp.Source) {
+			continue
+		}
+		bindings = append(bindings, staleLocalPackBinding{
+			name:      name,
+			source:    imp.Source,
+			configRef: fmt.Sprintf("[defaults.rig.imports.%s]", name),
+		})
+	}
+	for _, rig := range rigs {
+		for name, imp := range rig.Imports {
+			if !remotesource.IsRemote(imp.Source) {
+				continue
+			}
+			bindings = append(bindings, staleLocalPackBinding{
+				name:      name,
+				source:    imp.Source,
+				configRef: fmt.Sprintf("[rigs.%s.imports.%s]", rig.Name, name),
+			})
+		}
+	}
+	sort.Slice(bindings, func(i, j int) bool {
+		if bindings[i].name == bindings[j].name {
+			return bindings[i].configRef < bindings[j].configRef
+		}
+		return bindings[i].name < bindings[j].name
+	})
+	return bindings
 }
 
 func localPackBindingPath(cityPath, binding string) (rel string, path string, ok bool) {
@@ -122,8 +193,8 @@ func localPackBindingPath(cityPath, binding string) (rel string, path string, ok
 	return rel, filepath.Join(cityPath, rel), true
 }
 
-func packSourceRepoName(src config.PackSource) string {
-	source := strings.TrimSuffix(strings.TrimRight(src.Source, "/"), ".git")
+func packSourceRepoName(src string) string {
+	source := strings.TrimSuffix(strings.TrimRight(src, "/"), ".git")
 	if source == "" {
 		return "the remote pack repository"
 	}
@@ -131,4 +202,11 @@ func packSourceRepoName(src config.PackSource) string {
 		return source[i+1:]
 	}
 	return source
+}
+
+func localPackDirectoryNoun(n int) string {
+	if n == 1 {
+		return "directory"
+	}
+	return "directories"
 }

@@ -204,11 +204,19 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 				}
 			}
 		}
-		defaultRigIncludes, err := defaultRigIncludesFromPackDefaults(pc.Defaults, md)
+		defaultRigImports, err := defaultRigImportsFromPackDefaults(pc.Defaults, md)
 		if err != nil {
 			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
 		}
-		if len(defaultRigIncludes) > 0 {
+		if len(defaultRigImports) > 0 {
+			root.DefaultRigImports = make(map[string]Import, len(defaultRigImports))
+			root.DefaultRigImportOrder = make([]string, 0, len(defaultRigImports))
+			defaultRigIncludes := make([]string, 0, len(defaultRigImports))
+			for _, bound := range defaultRigImports {
+				root.DefaultRigImports[bound.Binding] = bound.Import
+				root.DefaultRigImportOrder = append(root.DefaultRigImportOrder, bound.Binding)
+				defaultRigIncludes = append(defaultRigIncludes, bound.Import.Source)
+			}
 			root.Workspace.SetLegacyDefaultRigIncludes(append(defaultRigIncludes, root.Workspace.LegacyDefaultRigIncludes()...))
 		}
 		if len(pc.Defaults.Rig.Imports) > 0 {
@@ -1339,18 +1347,6 @@ func defaultRigImportsFromPackDefaults(defaults PackDefaults, md toml.MetaData) 
 		imports = append(imports, BoundImport{Binding: name, Import: imp})
 	}
 	return imports, nil
-}
-
-func defaultRigIncludesFromPackDefaults(defaults PackDefaults, md toml.MetaData) ([]string, error) {
-	imports, err := defaultRigImportsFromPackDefaults(defaults, md)
-	if err != nil {
-		return nil, err
-	}
-	includes := make([]string, 0, len(imports))
-	for _, bound := range imports {
-		includes = append(includes, bound.Import.Source)
-	}
-	return includes, nil
 }
 
 func orderedDefaultRigImportNames(imports map[string]Import, md toml.MetaData) []string {
