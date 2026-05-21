@@ -319,26 +319,35 @@ func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store b
 	return errors.Join(joined...)
 }
 
-// hasLiveConvoyParent reports whether the bead is parented under an
-// open convoy bead. A missing parent, unreadable parent, non-convoy
-// parent, or closed convoy all return false. Defensively treats a
-// nil querier as "no convoy" so CheckBeadState callers without a
-// querier fall through to the non-idempotent path and let finalize
-// create the convoy on the normal path.
-func hasLiveConvoyParent(q BeadQuerier, b beads.Bead) bool {
-	if q == nil || strings.TrimSpace(b.ParentID) == "" {
+// needsConvoyRecovery reports whether an already-routed bead should re-enter
+// finalize to repair a missing or closed convoy parent.
+func needsConvoyRecovery(q BeadQuerier, b beads.Bead, opts BeadCheckOptions) bool {
+	if opts.NoConvoy {
 		return false
 	}
-	parent, err := q.Get(b.ParentID)
+	parentID := strings.TrimSpace(b.ParentID)
+	if parentID == "" {
+		return true
+	}
+	if q == nil {
+		return false
+	}
+	parent, err := q.Get(parentID)
 	if err != nil {
-		return false
+		return true
 	}
-	return parent.Type == "convoy" && parent.Status != "closed"
+	return parent.Type == "convoy" && parent.Status == "closed"
 }
 
 // CheckBeadState checks whether a bead is already routed and returns a
 // structured result. Best-effort: nil querier or query failure → empty result.
-func CheckBeadState(q BeadQuerier, beadID string, a config.Agent, _ SlingDeps) BeadCheckResult {
+func CheckBeadState(q BeadQuerier, beadID string, a config.Agent, deps SlingDeps) BeadCheckResult {
+	return CheckBeadStateWithOptions(q, beadID, a, deps, BeadCheckOptions{})
+}
+
+// CheckBeadStateWithOptions checks whether a bead is already routed for the
+// requested route options and returns a structured result.
+func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, _ SlingDeps, opts BeadCheckOptions) BeadCheckResult {
 	if q == nil {
 		return BeadCheckResult{}
 	}
@@ -366,7 +375,7 @@ func CheckBeadState(q BeadQuerier, beadID string, a config.Agent, _ SlingDeps) B
 	target := a.QualifiedName()
 	if strings.TrimSpace(b.Metadata["gc.routed_to"]) == target {
 		if b.Assignee == "" || b.Assignee == target {
-			if !hasLiveConvoyParent(q, b) {
+			if needsConvoyRecovery(q, b, opts) {
 				// Prior sling set gc.routed_to but left no convoy — let
 				// finalize re-run to create it and poke the controller.
 				return BeadCheckResult{}
@@ -381,7 +390,7 @@ func CheckBeadState(q BeadQuerier, beadID string, a config.Agent, _ SlingDeps) B
 	isMulti := agentutil.IsMultiSessionAgent(&a)
 	if !isMulti {
 		if b.Assignee == target {
-			if !hasLiveConvoyParent(q, b) {
+			if needsConvoyRecovery(q, b, opts) {
 				return BeadCheckResult{}
 			}
 			return BeadCheckResult{Idempotent: true}
@@ -405,7 +414,7 @@ func CheckBeadState(q BeadQuerier, beadID string, a config.Agent, _ SlingDeps) B
 		poolLabel := "pool:" + target
 		for _, l := range b.Labels {
 			if l == poolLabel {
-				if !hasLiveConvoyParent(q, b) {
+				if needsConvoyRecovery(q, b, opts) {
 					return BeadCheckResult{}
 				}
 				return BeadCheckResult{Idempotent: true}

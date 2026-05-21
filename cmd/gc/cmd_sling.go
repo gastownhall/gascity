@@ -1624,7 +1624,9 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			printBeadInfo(w, querier, opts.BeadOrFormula)
 			printCrossRigSection(w, opts.BeadOrFormula, a, deps.Cfg)
 
-			check := sling.CheckBeadState(querier, opts.BeadOrFormula, a, deps)
+			check := sling.CheckBeadStateWithOptions(querier, opts.BeadOrFormula, a, deps, sling.BeadCheckOptions{
+				NoConvoy: opts.NoConvoy,
+			})
 			if check.Idempotent {
 				w("Idempotency:")
 				w("  Bead " + opts.BeadOrFormula + " is already routed to " + a.QualifiedName() + ".")
@@ -1743,7 +1745,9 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 	for _, c := range children {
 		clabel := sling.FormatBeadLabel(c.ID, c.Title)
 		if c.Status == "open" {
-			check := sling.CheckBeadState(querier, c.ID, a, deps)
+			check := sling.CheckBeadStateWithOptions(querier, c.ID, a, deps, sling.BeadCheckOptions{
+				NoConvoy: opts.NoConvoy,
+			})
 			if check.Idempotent {
 				w("    " + clabel + " (open) → already routed (skip)")
 			} else {

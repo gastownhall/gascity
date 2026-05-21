@@ -104,7 +104,9 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 
 	// Pre-flight idempotency check.
 	if shouldCheckBeadState(opts) {
-		check := CheckBeadState(querier, opts.BeadOrFormula, a, deps)
+		check := CheckBeadStateWithOptions(querier, opts.BeadOrFormula, a, deps, BeadCheckOptions{
+			NoConvoy: opts.NoConvoy,
+		})
 		if check.Idempotent {
 			result.Idempotent = true
 			result.DryRun = opts.DryRun
@@ -1098,7 +1100,9 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		childResult := SlingChildResult{BeadID: child.ID}
 
 		if !opts.Force {
-			check := CheckBeadState(querier, child.ID, a, deps)
+			check := CheckBeadStateWithOptions(querier, child.ID, a, deps, BeadCheckOptions{
+				NoConvoy: opts.NoConvoy,
+			})
 			if check.Idempotent {
 				childResult.Skipped = true
 				batchResult.Children = append(batchResult.Children, childResult)

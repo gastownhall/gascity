@@ -479,6 +479,55 @@ func TestCheckBeadStateRoutedWithClosedConvoyIsNotIdempotent(t *testing.T) {
 	}
 }
 
+func TestCheckBeadStateRoutedWithLiveNonConvoyParentIsIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	parent, err := store.Create(beads.Bead{Title: "workflow", Type: "workflow", Status: "in_progress"})
+	if err != nil {
+		t.Fatalf("store.Create(parent): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "workflow step",
+		Type:     "task",
+		Status:   "open",
+		ParentID: parent.ID,
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
+
+	if !result.Idempotent {
+		t.Fatalf("expected Idempotent=true for routed bead under live non-convoy parent, got %+v", result)
+	}
+}
+
+func TestCheckBeadStatePoolLabelWithoutConvoyIsNotIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "pool work",
+		Type:   "task",
+		Status: "open",
+		Labels: []string{"pool:hw/polecat"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	a := config.Agent{
+		Name:              "polecat",
+		Dir:               "hw",
+		MinActiveSessions: intPtr(1),
+		MaxActiveSessions: intPtr(3),
+	}
+
+	result := CheckBeadState(store, bead.ID, a, SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false for pool label without convoy parent, got %+v", result)
+	}
+}
+
 func TestBeadPrefixSling(t *testing.T) {
 	tests := []struct {
 		id   string

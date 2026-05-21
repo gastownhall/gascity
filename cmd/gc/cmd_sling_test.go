@@ -5905,6 +5905,10 @@ func TestDoSlingRecoversMissingConvoyOnPreRoutedBead(t *testing.T) {
 	t.Cleanup(func() { slingPokeController = oldPoke })
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	existingConvoy, err := deps.Store.Create(beads.Bead{Title: "existing convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("seed existing convoy: %v", err)
+	}
 	// Pre-set gc.routed_to on the bead via the store, without ever creating
 	// a convoy. Mirrors `bd create --metadata '{"gc.routed_to":"mayor"}'`.
 	if err := deps.Store.SetMetadata("BL-42", "gc.routed_to", "mayor"); err != nil {
@@ -5928,6 +5932,9 @@ func TestDoSlingRecoversMissingConvoyOnPreRoutedBead(t *testing.T) {
 	if bead.ParentID == "" {
 		t.Fatalf("expected recovered bead to have a convoy parent, got empty ParentID")
 	}
+	if bead.ParentID == existingConvoy.ID {
+		t.Fatalf("recovered bead parent = pre-existing convoy %s, want a fresh convoy", existingConvoy.ID)
+	}
 	parent, err := deps.Store.Get(bead.ParentID)
 	if err != nil {
 		t.Fatalf("store.Get(%s): %v", bead.ParentID, err)
@@ -5946,6 +5953,118 @@ func TestDoSlingRecoversMissingConvoyOnPreRoutedBead(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "skipping (idempotent)") {
 		t.Errorf("stdout should not report idempotent skip: %s", stdout.String())
+	}
+}
+
+func TestDoSlingNoConvoyRepeatIsIdempotent(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	var pokeCount int
+	oldPoke := slingPokeController
+	slingPokeController = func(string) error {
+		pokeCount++
+		return nil
+	}
+	t.Cleanup(func() { slingPokeController = oldPoke })
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
+
+	opts := testOpts(a, "BL-42")
+	opts.NoConvoy = true
+	code := doSling(opts, deps, deps.Store, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("first doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	first, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42): %v", err)
+	}
+	if first.ParentID != "" {
+		t.Fatalf("first no-convoy sling set ParentID = %q, want empty", first.ParentID)
+	}
+	if pokeCount != 1 {
+		t.Fatalf("first no-convoy sling poke count = %d, want 1", pokeCount)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = doSling(opts, deps, deps.Store, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("second doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	second, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42) after second sling: %v", err)
+	}
+	if second.ParentID != "" {
+		t.Fatalf("second no-convoy sling set ParentID = %q, want empty", second.ParentID)
+	}
+	if pokeCount != 1 {
+		t.Fatalf("second no-convoy sling poked controller; count = %d, want 1", pokeCount)
+	}
+	if !strings.Contains(stdout.String(), "skipping (idempotent)") {
+		t.Fatalf("stdout = %q, want idempotent skip", stdout.String())
+	}
+
+	all, err := deps.Store.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("list beads: %v", err)
+	}
+	for _, b := range all {
+		if b.Type == "convoy" {
+			t.Fatalf("unexpected convoy bead after no-convoy repeat: %+v", b)
+		}
+	}
+}
+
+func TestDoSlingKeepsLiveNonConvoyParentIdempotent(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	var pokeCount int
+	oldPoke := slingPokeController
+	slingPokeController = func(string) error {
+		pokeCount++
+		return nil
+	}
+	t.Cleanup(func() { slingPokeController = oldPoke })
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "WF-1", Title: "workflow", Type: "workflow", Status: "in_progress", Metadata: map[string]string{}},
+		{
+			ID:       "BL-42",
+			Title:    "workflow step",
+			Type:     "task",
+			Status:   "open",
+			ParentID: "WF-1",
+			Metadata: map[string]string{"gc.routed_to": "mayor"},
+		},
+	}, nil)
+
+	opts := testOpts(a, "BL-42")
+	code := doSling(opts, deps, deps.Store, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	bead, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42): %v", err)
+	}
+	if bead.ParentID != "WF-1" {
+		t.Fatalf("ParentID = %q, want original non-convoy parent WF-1", bead.ParentID)
+	}
+	if pokeCount != 0 {
+		t.Fatalf("idempotent live non-convoy parent sling poked controller; count = %d, want 0", pokeCount)
+	}
+	if !strings.Contains(stdout.String(), "skipping (idempotent)") {
+		t.Fatalf("stdout = %q, want idempotent skip", stdout.String())
 	}
 }
 
