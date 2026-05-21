@@ -33,10 +33,13 @@ endif
 ## install: build and install gc to GOPATH/bin (same location as go install)
 install: build
 	@mkdir -p $(INSTALL_DIR)
-	@tmp="$(INSTALL_DIR)/.$(BINARY).tmp.$$$$"; \
+	@set -e; \
+		tmp="$(INSTALL_DIR)/.$(BINARY).tmp.$$$$"; \
+		trap 'rm -f "$$tmp"' EXIT INT TERM HUP; \
 		cp -f "$(BUILD_DIR)/$(BINARY)" "$$tmp"; \
 		chmod 0755 "$$tmp"; \
-		mv -f "$$tmp" "$(INSTALL_DIR)/$(BINARY)"
+		mv -f "$$tmp" "$(INSTALL_DIR)/$(BINARY)"; \
+		trap - EXIT INT TERM HUP
 	@# Migrate from old install location: replace stale binary with symlink
 	@if [ "$(INSTALL_DIR)" != "$(HOME)/.local/bin" ]; then \
 		if [ -f "$(HOME)/.local/bin/$(BINARY)" ] || [ -L "$(HOME)/.local/bin/$(BINARY)" ]; then \

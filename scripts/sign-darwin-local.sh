@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -u
+set -euo pipefail
 
 if [ "$#" -ne 1 ]; then
 	echo "usage: scripts/sign-darwin-local.sh <binary>" >&2
@@ -49,6 +49,21 @@ sign_with_stable_identity() {
 	return 0
 }
 
+find_stable_identity() {
+	local candidates=$1
+	local pattern
+	local candidate
+
+	for pattern in 'Apple Development:' 'Developer ID Application:' 'GasCity Dev'; do
+		candidate=$(printf '%s\n' "$candidates" | awk -F '"' -v pattern="$pattern" 'index($0, pattern) {print $2; exit}')
+		if [ -n "$candidate" ]; then
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+	done
+	return 0
+}
+
 if [ -n "${GC_SIGN_IDENTITY:-}" ]; then
 	sign_with_stable_identity "$GC_SIGN_IDENTITY" "explicit"
 	exit $?
@@ -56,10 +71,8 @@ fi
 
 identity=""
 if command -v security >/dev/null 2>&1; then
-	identity=$(
-		security find-identity -p codesigning -v 2>/dev/null |
-			awk -F '"' '/Apple Development:|Developer ID Application:|GasCity Dev/{print $2; exit}'
-	)
+	candidates=$(security find-identity -p codesigning -v 2>/dev/null || true)
+	identity=$(find_stable_identity "$candidates")
 fi
 
 if [ -n "$identity" ]; then

@@ -196,8 +196,10 @@ On macOS, `make build` signs the binary with a stable local codesigning
 identity when one is available, which helps macOS remember local permission
 grants across rebuilds. Without a stable identity, the build leaves Go's
 linker-produced signature unchanged. Set `GC_SIGN_IDENTITY=<certificate name>`
-to choose a specific certificate, or `GC_ADHOC_SIGN=1` to opt into ad-hoc
-signing for a local experiment.
+to choose a specific certificate, `GC_SIGN_IDENTIFIER=<identifier>` to use a
+separate local TCC identity, or `GC_ADHOC_SIGN=1` to opt into ad-hoc signing
+for a local experiment. Successful local signing also removes stale
+`com.apple.provenance` metadata when present.
 
 ### Contributor setup
 

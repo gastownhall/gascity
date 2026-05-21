@@ -40,6 +40,26 @@ func TestSignDarwinLocalAutoDetectsStableIdentity(t *testing.T) {
 	}
 }
 
+func TestSignDarwinLocalAutoDetectsStableIdentityByDocumentedPriority(t *testing.T) {
+	env := newSignTestEnv(t, "Darwin")
+	env.securityOutput = strings.Join([]string{
+		"  1) 1234567890ABCDEF \"GasCity Dev\"",
+		"  2) 1234567890ABCDEF \"Developer ID Application: Gas City (TEAMID)\"",
+		"  3) 1234567890ABCDEF \"Apple Development: Example (TEAMID)\"",
+		"",
+	}, "\n")
+
+	result := env.run(t)
+	if result.err != nil {
+		t.Fatalf("sign-darwin-local.sh failed: %v\nstdout:\n%s\nstderr:\n%s", result.err, result.stdout, result.stderr)
+	}
+
+	log := env.readLog(t)
+	if !strings.Contains(log, "codesign\t--force\t--sign\tApple Development: Example (TEAMID)\t--identifier\tcom.gascity.gc\t"+env.binary) {
+		t.Fatalf("expected Apple Development to win documented priority, got log:\n%s", log)
+	}
+}
+
 func TestSignDarwinLocalLeavesGoSignatureWhenNoIdentity(t *testing.T) {
 	env := newSignTestEnv(t, "Darwin")
 
@@ -74,6 +94,23 @@ func TestSignDarwinLocalDoesNotFallbackToAdhocWhenAutoSignFails(t *testing.T) {
 	}
 	if !strings.Contains(result.stderr, "leaving Go linker signature unchanged") {
 		t.Fatalf("expected fallback guidance, got stderr:\n%s", result.stderr)
+	}
+}
+
+func TestSignDarwinLocalExplicitIdentityFailureExitsNonZero(t *testing.T) {
+	env := newSignTestEnv(t, "Darwin")
+
+	result := env.run(t, "GC_SIGN_IDENTITY=Apple Development: Missing (TEAMID)", "CODESIGN_EXIT=1")
+	if result.err == nil {
+		t.Fatalf("expected explicit signing failure to exit non-zero\nstdout:\n%s\nstderr:\n%s", result.stdout, result.stderr)
+	}
+
+	log := env.readLog(t)
+	if strings.Count(log, "codesign") != 1 {
+		t.Fatalf("expected exactly one stable codesign attempt, got log:\n%s", log)
+	}
+	if !strings.Contains(result.stderr, "failed to sign") {
+		t.Fatalf("expected explicit signing failure message, got stderr:\n%s", result.stderr)
 	}
 }
 

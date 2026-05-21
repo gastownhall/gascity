@@ -140,6 +140,11 @@ permission grants, such as App Management and Apple Events, across rebuilds.
 The build auto-detects the first valid certificate in your keychain, in this
 order: `Apple Development:`, `Developer ID Application:`, then `GasCity Dev`.
 Override the selection with `GC_SIGN_IDENTITY=<certificate name>`.
+The signing identifier defaults to `com.gascity.gc`; override it with
+`GC_SIGN_IDENTIFIER=<identifier>` only when you intentionally want a separate
+local TCC identity. After a successful stable or opt-in ad-hoc signing pass,
+the script removes the `com.apple.provenance` extended attribute when present
+so macOS does not retain stale local-build provenance metadata.
 
 If no stable identity is available, the build leaves Go's linker-produced
 macOS signature unchanged. It does not automatically ad-hoc re-sign the
