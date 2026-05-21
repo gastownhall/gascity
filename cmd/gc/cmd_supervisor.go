@@ -201,9 +201,11 @@ const (
 const supervisorPreserveSessionsOnSignalEnv = "GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL"
 
 // supervisorOmitProviderCredsEnv, when set to "1" at the time the supervisor
-// service file is generated, causes provider-credential env vars
-// (ANTHROPIC_*, GEMINI_*, GOOGLE_*, OPENAI_*) to be excluded from the
-// generated launchd plist or systemd unit. Default behavior is unchanged.
+// service file is generated, causes env vars matched by the shared
+// provider-credential predicate to be excluded from the generated launchd
+// plist or systemd unit. The source of truth is providerCredentialEnvPrefixes
+// and providerCredentialEnvKeys in cmd_supervisor_lifecycle.go. Default
+// behavior is unchanged.
 // When opted out, the user is responsible for delivering provider creds to
 // the supervisor's environment via some other mechanism (e.g. a wrapper
 // around `gc supervisor run` that sources a credentials file).

@@ -458,6 +458,10 @@ func TestPassthroughEnvIncludesProviderCredentialEnv(t *testing.T) {
 	t.Setenv("GOOGLE_API_KEY", "google-123")
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/google-credentials.json")
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "gc-project")
+	t.Setenv("DEEPSEEK_API_KEY", "ds-123")
+	t.Setenv("OLLAMA_HOST", "http://localhost:11434")
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIA123")
+	t.Setenv("AWS_PAGER", "less")
 
 	got := passthroughEnv()
 
@@ -469,10 +473,16 @@ func TestPassthroughEnvIncludesProviderCredentialEnv(t *testing.T) {
 		"GOOGLE_API_KEY":                 "google-123",
 		"GOOGLE_APPLICATION_CREDENTIALS": "/tmp/google-credentials.json",
 		"GOOGLE_CLOUD_PROJECT":           "gc-project",
+		"DEEPSEEK_API_KEY":               "ds-123",
+		"OLLAMA_HOST":                    "http://localhost:11434",
+		"AWS_ACCESS_KEY_ID":              "AKIA123",
 	} {
 		if got[key] != want {
 			t.Errorf("passthroughEnv()[%s] = %q, want %q", key, got[key], want)
 		}
+	}
+	if _, ok := got["AWS_PAGER"]; ok {
+		t.Errorf("passthroughEnv() should not include broad AWS runtime state")
 	}
 }
 
