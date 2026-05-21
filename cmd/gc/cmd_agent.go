@@ -721,15 +721,15 @@ replaced if they exit. Use "gc agent resume" to restore.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if jsonOutput {
-				if cmdAgentSuspend(args, io.Discard, stderr) != 0 {
-					return errExit
-				}
 				cityPath, err := resolveCity()
 				if err != nil {
 					fmt.Fprintf(stderr, "gc agent suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 					return errExit
 				}
 				name, qualifiedName := agentJSONIdentity(cityPath, args[0])
+				if cmdAgentSuspend(args, io.Discard, stderr) != 0 {
+					return errExit
+				}
 				return writeManagementActionJSON(stdout, managementActionResult{
 					Command:       commandName("agent", "suspend"),
 					Action:        "suspend",
@@ -795,15 +795,15 @@ names (resolved via rig context) and qualified names (e.g. "myrig/worker").`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if jsonOutput {
-				if cmdAgentResume(args, io.Discard, stderr) != 0 {
-					return errExit
-				}
 				cityPath, err := resolveCity()
 				if err != nil {
 					fmt.Fprintf(stderr, "gc agent resume: %v\n", err) //nolint:errcheck // best-effort stderr
 					return errExit
 				}
 				name, qualifiedName := agentJSONIdentity(cityPath, args[0])
+				if cmdAgentResume(args, io.Discard, stderr) != 0 {
+					return errExit
+				}
 				return writeManagementActionJSON(stdout, managementActionResult{
 					Command:       commandName("agent", "resume"),
 					Action:        "resume",

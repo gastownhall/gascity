@@ -34,7 +34,9 @@ func (v2AgentFormatCheck) Fix(ctx *doctor.CheckContext) error {
 }
 
 func (v2AgentFormatCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
-	cityHasLegacy, packHasLegacy := legacyAgentFiles(ctx.CityPath)
+	cityLegacy, packLegacy := legacyAgentFiles(ctx.CityPath)
+	cityHasLegacy := len(cityLegacy) > 0
+	packHasLegacy := len(packLegacy) > 0
 	switch {
 	case !cityHasLegacy && !packHasLegacy:
 		return okCheck("v2-agent-format", "no legacy [[agent]] tables found")
@@ -42,17 +44,17 @@ func (v2AgentFormatCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 		return errorCheck("v2-agent-format",
 			"unsupported PackV1 [[agent]] tables found in city.toml; pack.toml also still uses deferred legacy [[agent]] tables",
 			"move each city.toml [[agent]] definition into agents/<name>/agent.toml; pack.toml [[agent]] enforcement remains deferred until doctor/remediation support exists",
-			[]string{"city.toml", "pack.toml"})
+			append(cityLegacy, packLegacy...))
 	case cityHasLegacy:
 		return errorCheck("v2-agent-format",
 			"unsupported PackV1 [[agent]] tables found in city.toml",
 			"move each city.toml [[agent]] definition into agents/<name>/agent.toml; gc doctor does not rewrite inline agents automatically in this wave",
-			[]string{"city.toml"})
+			cityLegacy)
 	default:
 		return warnCheck("v2-agent-format",
 			"legacy [[agent]] tables still present in pack.toml; enforcement is deferred until doctor/remediation support exists",
 			"leave this as-is for now or migrate to agents/<name>/agent.toml ahead of the follow-on enforcement pass",
-			[]string{"pack.toml"})
+			packLegacy)
 	}
 }
 
@@ -65,14 +67,15 @@ func (v2ImportFormatCheck) Fix(ctx *doctor.CheckContext) error {
 }
 
 func (v2ImportFormatCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
-	cfg, ok := parseCityConfig(filepath.Join(ctx.CityPath, "city.toml"))
+	cityTomlPath := filepath.Join(ctx.CityPath, "city.toml")
+	cfg, ok := parseCityConfig(cityTomlPath)
 	if !ok || len(cfg.Workspace.LegacyIncludes()) == 0 {
 		return okCheck("v2-import-format", "workspace.includes already migrated")
 	}
 	return errorCheck("v2-import-format",
 		"unsupported PackV1 workspace.includes found; migrate this city to [imports] before gc can load it",
 		"replace workspace.includes with [imports.<binding>] entries; gc doctor does not rewrite import bindings automatically in this wave",
-		cfg.Workspace.LegacyIncludes())
+		doctorKeyDetails(cityTomlPath, "workspace", "includes", "workspace.includes", cfg.Workspace.LegacyIncludes()))
 }
 
 type v2DefaultRigImportFormatCheck struct{}
@@ -84,14 +87,15 @@ func (v2DefaultRigImportFormatCheck) Fix(ctx *doctor.CheckContext) error {
 }
 
 func (v2DefaultRigImportFormatCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
-	cfg, ok := parseCityConfig(filepath.Join(ctx.CityPath, "city.toml"))
+	cityTomlPath := filepath.Join(ctx.CityPath, "city.toml")
+	cfg, ok := parseCityConfig(cityTomlPath)
 	if !ok || len(cfg.Workspace.LegacyDefaultRigIncludes()) == 0 {
 		return okCheck("v2-default-rig-import-format", "workspace.default_rig_includes already migrated")
 	}
 	return errorCheck("v2-default-rig-import-format",
 		"unsupported PackV1 workspace.default_rig_includes found; migrate to root pack.toml [defaults.rig.imports.<binding>]",
 		`move each entry into root pack.toml [defaults.rig.imports.<binding>]`,
-		cfg.Workspace.LegacyDefaultRigIncludes())
+		doctorKeyDetails(cityTomlPath, "workspace", "default_rig_includes", "workspace.default_rig_includes", cfg.Workspace.LegacyDefaultRigIncludes()))
 }
 
 type v2RigPathSiteBindingCheck struct{}
@@ -180,15 +184,17 @@ func sameRigPath(cityPath, a, b string) bool {
 }
 
 func (v2RigPathSiteBindingCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
-	cfg, ok := parseCityConfig(filepath.Join(ctx.CityPath, "city.toml"))
+	cityTomlPath := filepath.Join(ctx.CityPath, "city.toml")
+	cfg, ok := parseCityConfig(cityTomlPath)
 	if !ok {
 		return okCheck("v2-rig-path-site-binding", "rig path migration skipped until city.toml parses")
 	}
+	locator := newDoctorConfigLocator(cityTomlPath)
 
 	var legacy []string
 	for _, rig := range cfg.Rigs {
 		if strings.TrimSpace(rig.Path) != "" {
-			legacy = append(legacy, rig.Name)
+			legacy = append(legacy, doctorRigPathDetail(locator, rig.Name))
 		}
 	}
 
@@ -415,7 +421,8 @@ func (v2WorkspaceNameCheck) Fix(ctx *doctor.CheckContext) error {
 }
 
 func (v2WorkspaceNameCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
-	cfg, ok := parseCityConfig(filepath.Join(ctx.CityPath, "city.toml"))
+	cityTomlPath := filepath.Join(ctx.CityPath, "city.toml")
+	cfg, ok := parseCityConfig(cityTomlPath)
 	if !ok {
 		return okCheck("v2-workspace-name", "workspace identity migration skipped until city.toml parses")
 	}
@@ -425,11 +432,12 @@ func (v2WorkspaceNameCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 		return okCheck("v2-workspace-name", "workspace identity already absent from city.toml")
 	}
 	var details []string
+	locator := newDoctorConfigLocator(cityTomlPath)
 	if rawName != "" {
-		details = append(details, "workspace.name="+rawName)
+		details = append(details, doctorKeyDetail(locator, "workspace", "name", "workspace.name="+rawName))
 	}
 	if rawPrefix != "" {
-		details = append(details, "workspace.prefix="+rawPrefix)
+		details = append(details, doctorKeyDetail(locator, "workspace", "prefix", "workspace.prefix="+rawPrefix))
 	}
 	return errorCheck("v2-workspace-name",
 		"workspace identity still lives in city.toml",
@@ -527,9 +535,169 @@ func parseCityConfig(path string) (*config.City, bool) {
 	return cfg, true
 }
 
-func legacyAgentFiles(cityPath string) (cityHasLegacy, packHasLegacy bool) {
-	if cfg, ok := parseCityConfig(filepath.Join(cityPath, "city.toml")); ok && len(cfg.Agents) > 0 {
-		cityHasLegacy = true
+type doctorConfigLocator struct {
+	path  string
+	lines []string
+}
+
+func newDoctorConfigLocator(path string) doctorConfigLocator {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return doctorConfigLocator{path: path}
+	}
+	return doctorConfigLocator{path: path, lines: strings.Split(string(data), "\n")}
+}
+
+func (l doctorConfigLocator) source(line int) string {
+	source := filepath.Base(l.path)
+	if line <= 0 {
+		return source
+	}
+	return fmt.Sprintf("%s:%d", source, line)
+}
+
+func (l doctorConfigLocator) lineForTable(table string) int {
+	for i, line := range l.lines {
+		name, ok := parseDoctorTOMLTableHeader(line)
+		if ok && name == table {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+func (l doctorConfigLocator) lineForKey(table, key string) int {
+	var currentTable string
+	for i, line := range l.lines {
+		trimmed := trimDoctorTOMLLine(line)
+		if trimmed == "" {
+			continue
+		}
+		if name, ok := parseDoctorTOMLTableHeader(trimmed); ok {
+			currentTable = name
+			continue
+		}
+		if currentTable != table {
+			continue
+		}
+		gotKey, _, ok := strings.Cut(trimmed, "=")
+		if ok && strings.TrimSpace(gotKey) == key {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+func (l doctorConfigLocator) lineForRigPath(rigName string) int {
+	var inRig bool
+	var currentRigName string
+	var currentPathLine int
+
+	flushRig := func() int {
+		if !inRig || currentPathLine == 0 {
+			return 0
+		}
+		if rigName == "" || currentRigName == rigName {
+			return currentPathLine
+		}
+		return 0
+	}
+
+	for i, line := range l.lines {
+		trimmed := trimDoctorTOMLLine(line)
+		if trimmed == "" {
+			continue
+		}
+		if name, ok := parseDoctorTOMLTableHeader(trimmed); ok {
+			if line := flushRig(); line > 0 {
+				return line
+			}
+			inRig = name == "rigs"
+			currentRigName = ""
+			currentPathLine = 0
+			continue
+		}
+		if !inRig {
+			continue
+		}
+		key, value, ok := strings.Cut(trimmed, "=")
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(key) {
+		case "name":
+			currentRigName = unquoteDoctorTOMLValue(value)
+		case "path":
+			currentPathLine = i + 1
+		}
+	}
+	return flushRig()
+}
+
+func doctorTableDetail(locator doctorConfigLocator, table, label string) string {
+	return fmt.Sprintf("%s: %s", locator.source(locator.lineForTable(table)), label)
+}
+
+func doctorKeyDetail(locator doctorConfigLocator, table, key, detail string) string {
+	return fmt.Sprintf("%s: %s", locator.source(locator.lineForKey(table, key)), detail)
+}
+
+func doctorKeyDetails(path, table, key, label string, values []string) []string {
+	locator := newDoctorConfigLocator(path)
+	if len(values) == 0 {
+		return []string{doctorKeyDetail(locator, table, key, label)}
+	}
+	details := make([]string, 0, len(values))
+	for _, value := range values {
+		details = append(details, doctorKeyDetail(locator, table, key, fmt.Sprintf("%s includes %q", label, value)))
+	}
+	return details
+}
+
+func doctorRigPathDetail(locator doctorConfigLocator, rigName string) string {
+	if strings.TrimSpace(rigName) == "" {
+		rigName = "<unnamed>"
+	}
+	return fmt.Sprintf("%s: rig %q path", locator.source(locator.lineForRigPath(rigName)), rigName)
+}
+
+func parseDoctorTOMLTableHeader(line string) (string, bool) {
+	trimmed := trimDoctorTOMLLine(line)
+	if strings.HasPrefix(trimmed, "[[") && strings.HasSuffix(trimmed, "]]") {
+		return strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "[["), "]]")), true
+	}
+	if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+		return strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]")), true
+	}
+	return "", false
+}
+
+func trimDoctorTOMLLine(line string) string {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return ""
+	}
+	if before, _, ok := strings.Cut(trimmed, "#"); ok {
+		trimmed = strings.TrimSpace(before)
+	}
+	return trimmed
+}
+
+func unquoteDoctorTOMLValue(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) < 2 {
+		return value
+	}
+	if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
+		return value[1 : len(value)-1]
+	}
+	return value
+}
+
+func legacyAgentFiles(cityPath string) (cityLegacy, packLegacy []string) {
+	cityTomlPath := filepath.Join(cityPath, "city.toml")
+	if cfg, ok := parseCityConfig(cityTomlPath); ok && len(cfg.Agents) > 0 {
+		cityLegacy = append(cityLegacy, doctorTableDetail(newDoctorConfigLocator(cityTomlPath), "agent", "city.toml [[agent]]"))
 	}
 	type rawPack struct {
 		Agents []config.Agent `toml:"agent"`
@@ -538,10 +706,10 @@ func legacyAgentFiles(cityPath string) (cityHasLegacy, packHasLegacy bool) {
 	if data, err := os.ReadFile(packPath); err == nil {
 		var pack rawPack
 		if _, err := toml.Decode(string(data), &pack); err == nil && len(pack.Agents) > 0 {
-			packHasLegacy = true
+			packLegacy = append(packLegacy, doctorTableDetail(newDoctorConfigLocator(packPath), "agent", "pack.toml [[agent]]"))
 		}
 	}
-	return cityHasLegacy, packHasLegacy
+	return cityLegacy, packLegacy
 }
 
 func templatedMarkdownPrompts(cityPath string) []string {

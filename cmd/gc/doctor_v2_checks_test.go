@@ -70,6 +70,16 @@ scope = "city"
 	if !strings.Contains(out, ".template.md") {
 		t.Fatalf("doctor output missing .template.md guidance:\n%s", out)
 	}
+	for _, want := range []string{
+		"city.toml:3: workspace.includes includes",
+		"city.toml:4: workspace.default_rig_includes includes",
+		"city.toml:6: city.toml [[agent]]",
+		"pack.toml:5: pack.toml [[agent]]",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("doctor output missing source coordinate %q:\n%s", want, out)
+		}
+	}
 }
 
 func TestV2ScriptsLayoutWarnsForSymlinkOnlyDir(t *testing.T) {
@@ -298,6 +308,9 @@ path = "`+rigPath+`"
 	if !strings.Contains(out, ".gc/site.toml") {
 		t.Fatalf("doctor output missing site binding guidance:\n%s", out)
 	}
+	if !strings.Contains(out, "city.toml:6: rig \"frontend\" path") {
+		t.Fatalf("doctor output missing rig path source coordinate:\n%s", out)
+	}
 
 	buf.Reset()
 	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, true)
@@ -412,6 +425,14 @@ prefix = "lc"
 	}
 	if !strings.Contains(out, ".gc/site.toml") {
 		t.Fatalf("doctor output missing site binding guidance:\n%s", out)
+	}
+	for _, want := range []string{
+		"city.toml:2: workspace.name=legacy-city",
+		"city.toml:3: workspace.prefix=lc",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("doctor output missing source coordinate %q:\n%s", want, out)
+		}
 	}
 
 	buf.Reset()
