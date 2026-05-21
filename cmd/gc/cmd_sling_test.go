@@ -5547,6 +5547,52 @@ func TestDryRunConvoy(t *testing.T) {
 	}
 }
 
+func TestDryRunConvoyUsesTracksMembers(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "CVY-1", Type: "convoy", Status: "open", Title: "Sprint 12 tasks"},
+		{ID: "EPIC-1", Type: "epic", Status: "open", Title: "Product work"},
+		{ID: "BL-1", Type: "task", Status: "open", Title: "Login page", ParentID: "EPIC-1"},
+		{ID: "BL-2", Type: "task", Status: "closed", Title: "Auth backend", ParentID: "EPIC-1"},
+	}, []beads.Dep{
+		{IssueID: "CVY-1", DependsOnID: "BL-1", Type: "tracks"},
+		{IssueID: "CVY-1", DependsOnID: "BL-2", Type: "tracks"},
+	})
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = store
+	opts := testOpts(a, "CVY-1")
+	opts.DryRun = true
+	code := doSlingBatch(opts, deps, store, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("dry-run returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Children (2 total, 1 open)") {
+		t.Fatalf("stdout missing tracks children summary: %s", out)
+	}
+	if !strings.Contains(out, "BL-1") || !strings.Contains(out, "would route") {
+		t.Errorf("stdout missing tracked open child route preview: %s", out)
+	}
+	if !strings.Contains(out, "BL-2") || !strings.Contains(out, "skip") {
+		t.Errorf("stdout missing tracked closed child skip preview: %s", out)
+	}
+	if !strings.Contains(out, "bd update 'BL-1' --set-metadata gc.routed_to=mayor") {
+		t.Errorf("stdout missing tracked BL-1 route command: %s", out)
+	}
+	if strings.Contains(out, "bd update 'BL-2' --set-metadata gc.routed_to=mayor") {
+		t.Errorf("stdout should not route closed tracked BL-2: %s", out)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
 func TestDryRunBatchOnFormula(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
