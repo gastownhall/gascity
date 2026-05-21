@@ -304,6 +304,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 
 type initJSONResult struct {
 	SchemaVersion    string `json:"schema_version"`
+	OK               bool   `json:"ok"`
 	CityPath         string `json:"city_path"`
 	CityName         string `json:"city_name"`
 	Mode             string `json:"mode"`
@@ -324,6 +325,7 @@ func writeInitJSONOrExit(code int, jsonOut bool, args []string, nameOverride, pr
 	}
 	return writeCLIJSONLine(stdout, initJSONResult{
 		SchemaVersion:    "1",
+		OK:               true,
 		CityPath:         cityPath,
 		CityName:         resolveCityName(nameOverride, "", cityPath),
 		Mode:             mode,

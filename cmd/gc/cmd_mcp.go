@@ -118,6 +118,7 @@ func newMcpListCmd(stdout, stderr io.Writer) *cobra.Command {
 
 type projectedMCPJSON struct {
 	SchemaVersion string                   `json:"schema_version"`
+	OK            bool                     `json:"ok"`
 	CityPath      string                   `json:"city_path"`
 	Query         projectedMCPQueryJSON    `json:"query"`
 	Projection    projectedMCPTargetJSON   `json:"projection"`
@@ -193,6 +194,7 @@ func projectedMCPJSONFromView(cityPath string, view resolvedMCPProjection, agent
 	}
 	return projectedMCPJSON{
 		SchemaVersion: "1",
+		OK:            true,
 		CityPath:      cityPath,
 		Query: projectedMCPQueryJSON{
 			Agent:   agentName,

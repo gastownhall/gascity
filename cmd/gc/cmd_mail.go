@@ -38,7 +38,7 @@ const (
 type mailInboxJSONResult struct {
 	SchemaVersion string         `json:"schema_version"`
 	Recipient     string         `json:"recipient"`
-	Recipients    []string       `json:"recipients,omitempty"`
+	Recipients    []string       `json:"recipients"`
 	Messages      []mail.Message `json:"messages"`
 }
 
@@ -56,7 +56,7 @@ type mailMessageJSONResult struct {
 type mailCountJSONResult struct {
 	SchemaVersion string   `json:"schema_version"`
 	Recipient     string   `json:"recipient"`
-	Recipients    []string `json:"recipients,omitempty"`
+	Recipients    []string `json:"recipients"`
 	Total         int      `json:"total"`
 	Unread        int      `json:"unread"`
 }
@@ -2112,8 +2112,8 @@ func doMailCountTargetWithJSON(mp mail.Provider, target resolvedMailTarget, json
 }
 
 func jsonRecipients(target resolvedMailTarget) []string {
-	if len(target.recipients) <= 1 {
-		return nil
+	if len(target.recipients) == 0 {
+		return []string{}
 	}
 	return append([]string(nil), target.recipients...)
 }

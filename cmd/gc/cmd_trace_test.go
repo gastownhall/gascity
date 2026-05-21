@@ -99,6 +99,49 @@ func TestTraceStatusJSONEmptyArmsConformsToSchema(t *testing.T) {
 	validateJSONResultSchema(t, []string{"trace", "status"}, stdout.Bytes())
 }
 
+func TestTraceStatusHeadSeqPrefersStatusSnapshot(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityTOML(t, cityDir, "trace-town", "mayor")
+
+	store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("newSessionReconcilerTraceStore: %v", err)
+	}
+	rec := newTraceRecord(TraceRecordDecision)
+	rec.TraceID = "cycle-1"
+	rec.TickID = "tick-1"
+	rec.RecordID = "record-1"
+	rec.Ts = time.Now().UTC()
+	if err := store.AppendBatch([]SessionReconcilerTraceRecord{rec}, TraceDurabilityMetadata); err != nil {
+		t.Fatalf("AppendBatch: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close trace store: %v", err)
+	}
+	storedHead, err := traceHeadSeq(traceCityRuntimeDir(cityDir))
+	if err != nil {
+		t.Fatalf("traceHeadSeq: %v", err)
+	}
+	if storedHead == 42 {
+		t.Fatal("stored head unexpectedly matches socket snapshot fixture")
+	}
+
+	head, err := traceStatusHeadSeq(traceStatusJSON{HeadSeq: 42}, cityDir)
+	if err != nil {
+		t.Fatalf("traceStatusHeadSeq with snapshot head: %v", err)
+	}
+	if head != 42 {
+		t.Fatalf("head seq = %d, want socket snapshot 42", head)
+	}
+	head, err = traceStatusHeadSeq(traceStatusJSON{}, cityDir)
+	if err != nil {
+		t.Fatalf("traceStatusHeadSeq fallback: %v", err)
+	}
+	if head != storedHead {
+		t.Fatalf("fallback head seq = %d, want stored head %d", head, storedHead)
+	}
+}
+
 func TestTraceControllerSocketCommands(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime"), 0o755); err != nil {
@@ -137,6 +180,13 @@ func TestTraceControllerSocketCommands(t *testing.T) {
 	if statusReply.Status == nil || len(statusReply.Status.ActiveArms) != 1 {
 		t.Fatalf("status reply = %#v", statusReply.Status)
 	}
+	statusPayload, err := json.Marshal(statusReply.Status)
+	if err != nil {
+		t.Fatalf("marshal status reply: %v", err)
+	}
+	if !bytes.Contains(statusPayload, []byte(`"arms"`)) {
+		t.Fatalf("status reply JSON = %s, want legacy arms alias", statusPayload)
+	}
 	select {
 	case <-pokeCh2:
 		t.Fatal("did not expect pokeCh to be signaled on status")
@@ -160,10 +210,56 @@ func TestTraceControllerSocketCommands(t *testing.T) {
 	if stopReply.Status == nil || len(stopReply.Status.ActiveArms) != 0 {
 		t.Fatalf("stop reply status = %#v", stopReply.Status)
 	}
+	stopPayload, err := json.Marshal(stopReply.Status)
+	if err != nil {
+		t.Fatalf("marshal stop status reply: %v", err)
+	}
+	if !bytes.Contains(stopPayload, []byte(`"arms":[]`)) {
+		t.Fatalf("stop status reply JSON = %s, want empty legacy arms alias", stopPayload)
+	}
 	select {
 	case <-pokeCh3:
 	default:
 		t.Fatal("expected pokeCh to be signaled on stop")
+	}
+}
+
+func TestTraceStatusJSONAcceptsLegacySocketArms(t *testing.T) {
+	payload := []byte(`{
+		"ok": true,
+		"status": {
+			"city_path": "/tmp/trace-town",
+			"as_of": "2026-05-21T00:00:00Z",
+			"controller_running": true,
+			"controller_pid": 123,
+			"arms": [{
+				"scope_type": "template",
+				"scope_value": "repo/polecat",
+				"source": "manual",
+				"level": "detail",
+				"armed_at": "2026-05-21T00:00:00Z",
+				"expires_at": "2026-05-21T00:15:00Z",
+				"last_extended_at": "2026-05-21T00:00:00Z",
+				"updated_at": "2026-05-21T00:00:00Z"
+			}]
+		}
+	}`)
+
+	var reply traceControlReply
+	if err := json.Unmarshal(payload, &reply); err != nil {
+		t.Fatalf("unmarshal legacy trace status reply: %v", err)
+	}
+	if reply.Status == nil {
+		t.Fatal("status is nil")
+	}
+	if reply.Status.HeadSeq != 0 {
+		t.Fatalf("head_seq = %d, want old-controller default 0", reply.Status.HeadSeq)
+	}
+	if len(reply.Status.ActiveArms) != 1 {
+		t.Fatalf("active arms = %#v, want one legacy arm", reply.Status.ActiveArms)
+	}
+	if reply.Status.ActiveArms[0].ScopeValue != "repo/polecat" {
+		t.Fatalf("scope_value = %q, want repo/polecat", reply.Status.ActiveArms[0].ScopeValue)
 	}
 }
 
@@ -249,6 +345,9 @@ func TestTraceShowAndReasonsWithoutTemplateFilter(t *testing.T) {
 	if showJSON.SchemaVersion != "1" || showJSON.Count != len(showJSON.Records) || !foundTemplate {
 		t.Fatalf("trace show JSON = %+v, want repo/polecat", showJSON)
 	}
+	validateJSONResultSchema(t, []string{"trace", "show"}, stdout.Bytes())
+	assertTraceShowSchemaRecordProperty(t, "template")
+	assertTraceShowSchemaRecordProperty(t, "session_name")
 
 	stdout.Reset()
 	stderr.Reset()
@@ -257,6 +356,46 @@ func TestTraceShowAndReasonsWithoutTemplateFilter(t *testing.T) {
 	}
 	if got := stdout.String(); !strings.Contains(got, string(TraceReasonIdle)) {
 		t.Fatalf("trace reasons output = %q, want idle reason", got)
+	}
+}
+
+func TestTraceShowTextIncludesPopulatedRecordSummary(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityTOML(t, cityDir, "trace-town", "mayor")
+	t.Setenv("GC_CITY", cityDir)
+
+	store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("newSessionReconcilerTraceStore: %v", err)
+	}
+	defer store.Close() //nolint:errcheck
+
+	rec := newTraceRecord(TraceRecordDecision)
+	rec.TraceID = "cycle-1"
+	rec.TickID = "tick-1"
+	rec.RecordID = "record-1"
+	rec.Template = "repo/polecat"
+	rec.SessionName = "polecat-1"
+	rec.SiteCode = TraceSiteReconcilerWakeDecision
+	rec.ReasonCode = TraceReasonIdle
+	rec.OutcomeCode = TraceOutcomeApplied
+	rec.Ts = time.Now().UTC()
+	if err := store.AppendBatch([]SessionReconcilerTraceRecord{rec}, TraceDurabilityMetadata); err != nil {
+		t.Fatalf("AppendBatch: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdTraceShow("", "", "", "", "", "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdTraceShow = %d; stderr=%s", code, stderr.String())
+	}
+	if stderr.Len() > 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"template=repo/polecat", "session=polecat-1", string(TraceReasonIdle)} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout = %q, want %q", out, want)
+		}
 	}
 }
 
@@ -359,4 +498,27 @@ func readTraceSocketReply(t *testing.T, conn net.Conn) traceControlReply {
 		t.Fatalf("decode reply: %v", err)
 	}
 	return reply
+}
+
+func assertTraceShowSchemaRecordProperty(t *testing.T, name string) {
+	t.Helper()
+	rawSchema, err := readBuiltinSchema([]string{"trace", "show"}, jsonSchemaResultRole)
+	if err != nil {
+		t.Fatalf("read trace show result schema: %v", err)
+	}
+	var schema struct {
+		Properties struct {
+			Records struct {
+				Items struct {
+					Properties map[string]json.RawMessage `json:"properties"`
+				} `json:"items"`
+			} `json:"records"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(rawSchema, &schema); err != nil {
+		t.Fatalf("unmarshal trace show result schema: %v", err)
+	}
+	if _, ok := schema.Properties.Records.Items.Properties[name]; !ok {
+		t.Fatalf("trace show result schema missing record property %q", name)
+	}
 }

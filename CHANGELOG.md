@@ -11,7 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `gc mail inbox`, `gc mail read`, `gc mail peek`, `gc mail thread`,
   and `gc mail count` now accept `--json` and emit schema-versioned result
-  envelopes for script and dashboard consumers.
+  envelopes for script and dashboard consumers. `gc mail inbox --json` and
+  `gc mail count --json` always include the resolved `recipients` array,
+  including single-recipient targets.
 
 ### Fixed
 
@@ -70,6 +72,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `gc converge status --json` returns the convergence metadata object with
+  `ok: true` injected. `gc converge list --json` returns an object with
+  `ok: true` and `entries`. These converge JSON outputs do not include a
+  `schema_version` field.
+- `gc runtime drain-check --json` now emits a JSON result when the target
+  session is not draining, with `ok: true`, `draining: false`, and the
+  existing shell-condition exit code of 1.
 - `gc sling --json` now emits one JSONL result record, matching its checked-in
   result schema; earlier JSON support emitted an indented multi-line object.
 - `gc trace status` and `gc trace show` now default to human-readable output;
@@ -81,6 +90,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `records` instead of a bare record array. See
   `schemas/trace/status/result.schema.json` and
   `schemas/trace/show/result.schema.json` for the exact contracts.
+  During rolling upgrades, trace controller socket status replies include the
+  legacy `arms` alias and upgraded CLIs still accept `arms` from older
+  controllers.
 - Pack import cache validation now requires commit abbreviations in
   `packs.lock` to be at least seven characters long. Shorter abbreviations
   should be refreshed with `gc import install`.

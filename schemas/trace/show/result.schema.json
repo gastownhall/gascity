@@ -46,6 +46,12 @@
           "record_type": {
             "type": "string"
           },
+          "template": {
+            "type": "string"
+          },
+          "session_name": {
+            "type": "string"
+          },
           "reason_code": {
             "type": "string"
           },

@@ -5,6 +5,7 @@
     "schema_version",
     "ok",
     "recipient",
+    "recipients",
     "total",
     "unread"
   ],

@@ -39,6 +39,7 @@ type providerDrainOps struct {
 
 type runtimeDrainCheckJSON struct {
 	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
 	Command       string `json:"command"`
 	Session       string `json:"session"`
 	Target        string `json:"target,omitempty"`
@@ -47,6 +48,7 @@ type runtimeDrainCheckJSON struct {
 
 type runtimeActionJSON struct {
 	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
 	Command       string `json:"command"`
 	Action        string `json:"action"`
 	Session       string `json:"session"`
@@ -220,6 +222,7 @@ func doRuntimeDrain(dops drainOps, sp runtime.Provider, rec events.Recorder,
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, runtimeActionJSON{
 			SchemaVersion: "1",
+			OK:            true,
 			Command:       "runtime drain",
 			Action:        "drain",
 			Session:       sn,
@@ -301,6 +304,7 @@ func doRuntimeUndrain(dops drainOps, sp runtime.Provider, rec events.Recorder,
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, runtimeActionJSON{
 			SchemaVersion: "1",
+			OK:            true,
 			Command:       "runtime undrain",
 			Action:        "undrain",
 			Session:       sn,
@@ -367,12 +371,29 @@ func cmdRuntimeDrainCheck(args []string, jsonOutput bool, stdout, stderr io.Writ
 // Silent on stdout — designed for `if gc runtime drain-check; then ...`.
 func doRuntimeDrainCheck(dops drainOps, targetName, sn string, jsonOutput bool, stdout, stderr io.Writer) int {
 	draining, err := dops.isDraining(sn)
-	if err != nil || !draining {
+	if err != nil {
+		return 1
+	}
+	if !draining {
+		if jsonOutput {
+			if err := writeCLIJSONLine(stdout, runtimeDrainCheckJSON{
+				SchemaVersion: "1",
+				OK:            true,
+				Command:       "runtime drain-check",
+				Session:       sn,
+				Target:        targetName,
+				Draining:      false,
+			}); err != nil {
+				fmt.Fprintf(stderr, "gc runtime drain-check: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+		}
 		return 1
 	}
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, runtimeDrainCheckJSON{
 			SchemaVersion: "1",
+			OK:            true,
 			Command:       "runtime drain-check",
 			Session:       sn,
 			Target:        targetName,
@@ -612,6 +633,7 @@ func doRuntimeDrainAck(dops drainOps, targetName, sn string, jsonOutput bool, st
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, runtimeActionJSON{
 			SchemaVersion: "1",
+			OK:            true,
 			Command:       "runtime drain-ack",
 			Action:        "drain-ack",
 			Session:       sn,

@@ -2135,10 +2135,17 @@ op_init() {
     # beads (#1039). Must match doctor.RequiredCustomTypes.
     local custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step}"
 
-    # If already initialized on disk and the server has a bd schema, ensure the
-    # database is also registered with the running server. Local metadata can be
-    # written before bd init seeds tables, so require the server-side schema
-    # before taking the fast path.
+    # If already initialized on disk, ensure the database is also registered
+    # with the running server. gc's normalizeCanonicalBdScopeFilesForInit
+    # writes metadata.json (dolt_database/dolt_mode) BEFORE invoking us, so a
+    # fresh init also reaches this branch — that is intentional. The branch
+    # does NOT blindly skip init: it only exits early when the server already
+    # has a live bd schema (bd_runtime_schema_ready). Otherwise it sets
+    # bd_init_force="--force" so the fall-through bd init reinitializes over
+    # the gc-pre-seeded metadata stub instead of aborting with bd's "This
+    # workspace is already initialized" guard. Gating this branch on project_id
+    # instead breaks fresh init: gc-pre-seeded metadata has no project_id, so
+    # --force is never set and bd init aborts.
     if [ -f "$dir/.beads/metadata.json" ]; then
         if ensure_database_registered "$dolt_database"; then
             if bd_runtime_schema_ready "$dolt_database"; then
