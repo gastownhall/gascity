@@ -346,7 +346,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// subprocess with WorkDir ≠ scope root — because subprocess
 	// doesn't execute PreStart) get no appendix; we'd be lying to
 	// them. Discovered via the pass-1 Codex review.
-	if prompt != "" && effectiveInjectAssignedSkills(cfgAgent) {
+	if !suppressStartupPrompt && effectiveInjectAssignedSkills(cfgAgent) {
 		wsProvider := ""
 		if p.workspace != nil {
 			wsProvider = p.workspace.Provider
@@ -522,9 +522,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	nudge := cfgAgent.Nudge
 	acceptStartupDialogs := resolved.AcceptStartupDialogs
 	if suppressStartupPrompt {
-		// The control dispatcher is a deterministic gc subprocess, not an
-		// interactive model provider. Keep ProcessNames for liveness without
-		// routing startup through prompt, nudge, or trust-dialog handling.
+		// Implicit start-command infrastructure agents are deterministic
+		// subprocesses, not interactive model providers. Keep ProcessNames for
+		// liveness without routing startup through prompt, nudge, or
+		// trust-dialog handling.
 		nudge = ""
 		accept := false
 		acceptStartupDialogs = &accept
@@ -572,8 +573,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 func suppressStartupPromptForAgent(cfgAgent *config.Agent) bool {
 	return cfgAgent != nil &&
-		cfgAgent.Name == config.ControlDispatcherAgentName &&
-		strings.TrimSpace(cfgAgent.StartCommand) != ""
+		cfgAgent.Implicit &&
+		strings.TrimSpace(cfgAgent.StartCommand) != "" &&
+		strings.TrimSpace(cfgAgent.Provider) == ""
 }
 
 func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (map[string]string, error) {
