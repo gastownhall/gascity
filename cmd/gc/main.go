@@ -629,30 +629,41 @@ func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
 
 	// Fallback: a city declared locally but not yet handed to the
 	// supervisor (cities.toml does not list it) is invisible to the
-	// registry walks above. Honor --rig/$GC_RIG by checking the
-	// cwd-walked city for a site-bound rig of this name. Site binding
-	// is required: legacy city.toml-only paths remain rejected so the
-	// existing legacy_city_toml_path_is_not_registered_binding test
-	// continues to pass.
+	// registry walks above. Honor explicit local city resolution by checking
+	// the resolved city for a site-bound rig of this name. Site binding is
+	// required: legacy city.toml-only paths remain rejected so the existing
+	// legacy_city_toml_path_is_not_registered_binding test continues to pass.
 	if ctx, ok := lookupRigFromLocalCity(nameOrPath); ok {
 		return ctx, nil
 	}
 	return resolvedContext{}, fmt.Errorf("rig %q is not registered in any city", nameOrPath)
 }
 
-// lookupRigFromLocalCity walks up from cwd to find a city.toml. If
-// found, it loads the city's .gc/site.toml binding and looks for a rig
-// whose name (or bound path) matches nameOrPath. Returns the resolved
-// context only when a site binding produced a non-empty rig.Path —
-// legacy city.toml-only paths are still rejected so this fallback
-// preserves the invariant pinned by
-// legacy_city_toml_path_is_not_registered_binding.
-func lookupRigFromLocalCity(nameOrPath string) (resolvedContext, bool) {
+func resolveLocalCityForRigFallback() (string, error) {
+	if cityFlag != "" {
+		return validateCityPath(cityFlag)
+	}
+	if gcCity, ok := resolveExplicitCityPathEnv(); ok {
+		return gcCity, nil
+	}
+	if gcDirCity, ok := resolveCityPathFromGCDir(); ok {
+		return gcDirCity, nil
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return resolvedContext{}, false
+		return "", err
 	}
-	cityPath, err := findCity(cwd)
+	return findCity(cwd)
+}
+
+// lookupRigFromLocalCity resolves the local city without consulting --rig or
+// GC_RIG, then loads the city's .gc/site.toml binding and looks for a rig
+// whose name (or bound path) matches nameOrPath. Returns the resolved context
+// only when a site binding produced a non-empty rig.Path — legacy
+// city.toml-only paths are still rejected so this fallback preserves the
+// invariant pinned by legacy_city_toml_path_is_not_registered_binding.
+func lookupRigFromLocalCity(nameOrPath string) (resolvedContext, bool) {
+	cityPath, err := resolveLocalCityForRigFallback()
 	if err != nil {
 		return resolvedContext{}, false
 	}

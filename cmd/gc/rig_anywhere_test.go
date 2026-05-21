@@ -1319,6 +1319,33 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		}
 	})
 
+	t.Run("local_unregistered_city_uses_explicit_city_flag", func(t *testing.T) {
+		resetFlags(t)
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+
+		cityPath := setupCity(t, "local-flag-city")
+		rigDir := filepath.Join(t.TempDir(), "local-flag-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		toml := fmt.Sprintf("[workspace]\nname = \"local-flag-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"local-flag-rig\"\npath = %q\n", rigDir)
+		writeRigAnywhereCityToml(t, cityPath, toml)
+		setCwd(t, t.TempDir())
+		cityFlag = cityPath
+
+		ctx, err := resolveRigToContext("local-flag-rig")
+		if err != nil {
+			t.Fatalf("resolveRigToContext: %v", err)
+		}
+		if ctx.CityPath != cityPath {
+			t.Errorf("CityPath = %q, want %q", ctx.CityPath, cityPath)
+		}
+		if ctx.RigName != "local-flag-rig" {
+			t.Errorf("RigName = %q, want %q", ctx.RigName, "local-flag-rig")
+		}
+	})
+
 	// Companion to the previous test: the local-city fallback only fires
 	// when a real .gc/site.toml binding exists. A legacy city.toml with
 	// an inline `path = ...` (no site binding) must still be rejected so
