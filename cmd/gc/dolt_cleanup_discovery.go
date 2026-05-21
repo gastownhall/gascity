@@ -329,18 +329,39 @@ func consumeLeadingFields(s string, n int) ([]string, string) {
 }
 
 func parseDoltPSCommandLine(command string) []string {
-	fields := strings.Fields(command)
-	if len(fields) == 0 {
+	command = strings.TrimSpace(command)
+	if command == "" {
 		return nil
 	}
-	if len(fields) < 2 || filepath.Base(fields[0]) != "dolt" || fields[1] != "sql-server" {
+	tail, ok := doltSQLServerPSTail(command)
+	if !ok {
+		return strings.Fields(command)
+	}
+	fields := strings.Fields(tail)
+	if len(fields) < 2 {
 		return fields
 	}
 	argv := []string{fields[0], fields[1]}
-	if cfg, ok := configPathFromPSCommandLine(command); ok {
+	if cfg, ok := configPathFromPSCommandLine(tail); ok {
 		argv = append(argv, "--config", cfg)
 	}
 	return argv
+}
+
+func doltSQLServerPSTail(command string) (string, bool) {
+	const marker = "dolt sql-server"
+	for start := 0; start < len(command); {
+		i := strings.Index(command[start:], marker)
+		if i < 0 {
+			return "", false
+		}
+		i += start
+		if i == 0 || command[i-1] == filepath.Separator || command[i-1] == '/' || command[i-1] == '\\' {
+			return command[i:], true
+		}
+		start = i + len("dolt")
+	}
+	return "", false
 }
 
 func configPathFromPSCommandLine(command string) (string, bool) {
