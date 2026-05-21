@@ -33,6 +33,7 @@ type wakeEvaluation struct {
 	Reason           string
 	Policy           resolvedSessionSleepPolicy
 	ConfigSuppressed bool
+	HasAssignedWork  bool
 }
 
 const sleepReasonRuntimeMissing = "runtime-missing"

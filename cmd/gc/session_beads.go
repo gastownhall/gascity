@@ -505,11 +505,56 @@ func retiredSessionFallbackRoute(b beads.Bead) string {
 }
 
 func sessionAssignmentIdentifiers(sessionBead beads.Bead) []string {
-	raw := []string{
+	return compactSessionAssignmentIdentifiers(sessionAssignmentIdentifierRaw(sessionBead))
+}
+
+// sessionAssignmentIdentifiersForConfig extends the persisted session-bead
+// identifiers with the configured named-session identity when a recovered bead
+// is missing identity metadata. Keep this fallback aligned with
+// sessionAssigneeMatches and compute_awake_bridge's AwakeNamedSession fields.
+func sessionAssignmentIdentifiersForConfig(sessionBead beads.Bead, cfg *config.City) []string {
+	raw := sessionAssignmentIdentifierRaw(sessionBead)
+	if cfg == nil ||
+		strings.TrimSpace(sessionBead.Metadata[namedSessionMetadataKey]) != "true" ||
+		strings.TrimSpace(sessionBead.Metadata[namedSessionIdentityMetadata]) != "" {
+		return compactSessionAssignmentIdentifiers(raw)
+	}
+
+	sessionName := strings.TrimSpace(sessionBead.Metadata["session_name"])
+	if sessionName == "" {
+		return compactSessionAssignmentIdentifiers(raw)
+	}
+	template := normalizedSessionTemplate(sessionBead, cfg)
+	if template == "" {
+		template = strings.TrimSpace(sessionBead.Metadata["template"])
+	}
+	cityName := config.EffectiveCityName(cfg, "")
+	for i := range cfg.NamedSessions {
+		identity := cfg.NamedSessions[i].QualifiedName()
+		if identity == "" {
+			continue
+		}
+		if config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity) != sessionName {
+			continue
+		}
+		backingTemplate := cfg.NamedSessions[i].TemplateQualifiedName()
+		if template != "" && backingTemplate != "" && template != backingTemplate {
+			continue
+		}
+		raw = append(raw, identity)
+	}
+	return compactSessionAssignmentIdentifiers(raw)
+}
+
+func sessionAssignmentIdentifierRaw(sessionBead beads.Bead) []string {
+	return []string{
 		strings.TrimSpace(sessionBead.ID),
 		strings.TrimSpace(sessionBead.Metadata["session_name"]),
 		strings.TrimSpace(sessionBead.Metadata[namedSessionIdentityMetadata]),
 	}
+}
+
+func compactSessionAssignmentIdentifiers(raw []string) []string {
 	seen := make(map[string]struct{}, len(raw))
 	identifiers := make([]string, 0, len(raw))
 	for _, id := range raw {
@@ -816,7 +861,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 		canonical, ok := bySessionName[sn]
 		if ok && canonical.ID != b.ID {
-			if closeSessionBeadIfUnassigned(store, rigStores, b, "duplicate", clk.Now().UTC(), stderr) {
+			if closeSessionBeadIfUnassigned(store, rigStores, cfg, b, "duplicate", clk.Now().UTC(), stderr) {
 				openBeads[i].Status = "closed"
 			}
 		}
@@ -917,7 +962,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 					if strings.TrimSpace(open.Metadata["session_name"]) != sn {
 						continue
 					}
-					if closeSessionBeadIfUnassigned(store, rigStores, open, "duplicate", now, stderr) {
+					if closeSessionBeadIfUnassigned(store, rigStores, cfg, open, "duplicate", now, stderr) {
 						openBeads[i].Status = "closed"
 					}
 				}
@@ -1918,7 +1963,7 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	hasAssignedWork, err := sessionHasOpenAssignedWork(store, rigStores, b)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, b, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", b.ID, err) //nolint:errcheck
 		return false
@@ -1929,7 +1974,7 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	if !stopRuntimeBeforeSessionBeadMutation(store, sp, cfg, b, stopReason, stderr) {
 		return false
 	}
-	hasAssignedWork, err = sessionHasOpenAssignedWork(store, rigStores, b)
+	hasAssignedWork, err = sessionHasOpenAssignedWorkForConfig(store, rigStores, b, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", b.ID, err) //nolint:errcheck
 		return false

@@ -291,7 +291,7 @@ func TestNamedOnDemand_ExactNamedIdentityAssigneeWakes(t *testing.T) {
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
 		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
 		SessionBeads:  []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "asleep", NamedIdentity: "hello-world/refinery"}},
-		WorkBeads:     []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "open"}},
+		WorkBeads:     []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "open", Ready: true}},
 		Now:           now,
 	})
 	assertAwake(t, result, "hello-world--refinery")
@@ -432,7 +432,7 @@ func TestNamedOnDemand_AgentSuspended_WithWork(t *testing.T) {
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery", Suspended: true}},
 		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
 		SessionBeads:  []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "asleep", NamedIdentity: "hello-world/refinery"}},
-		WorkBeads:     []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "open"}},
+		WorkBeads:     []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "open", Ready: true}},
 		Now:           now,
 	})
 	assertAsleep(t, result, "hello-world--refinery")
@@ -1048,9 +1048,10 @@ func TestIdleSleep_OnDemandNamedReadyAssignedWorkStaysAwake(t *testing.T) {
 				NamedIdentity: "hello-world/refinery", IdleSince: now.Add(-1 * time.Hour),
 			},
 		},
-		// WorkBeads contains ready open assigned work. Blocked open assigned
-		// work is filtered out before ComputeAwakeSet.
-		WorkBeads:       []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "open"}},
+		// Ready open assigned work is actionable demand for the assignee,
+		// not queued template backlog to defer until a later on-demand wake.
+		// Blocked open assigned work is filtered out before ComputeAwakeSet.
+		WorkBeads:       []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "open", Ready: true}},
 		RunningSessions: map[string]bool{"hello-world--refinery": true},
 		Now:             now,
 	})
@@ -1058,7 +1059,7 @@ func TestIdleSleep_OnDemandNamedReadyAssignedWorkStaysAwake(t *testing.T) {
 	assertReason(t, result, "hello-world--refinery", "assigned-work")
 }
 
-func TestIdleSleep_OnDemandNamedBlockedAssignedWorkIsNotDemand(t *testing.T) {
+func TestIdleSleep_OnDemandNamedNoDemandWorkSleeps(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery", SleepAfterIdle: 30 * time.Minute}},
 		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
@@ -1108,7 +1109,7 @@ func TestRegression_OnDemandRefineryExactNamedIdentityAssigneeWakes(t *testing.T
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
 		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
 		SessionBeads:  []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "asleep", NamedIdentity: "hello-world/refinery"}},
-		WorkBeads:     []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "open"}},
+		WorkBeads:     []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "open", Ready: true}},
 		Now:           now,
 	})
 	assertAwake(t, result, "hello-world--refinery")
@@ -1134,12 +1135,43 @@ func TestRegression_SessionWithOpenWorkByBeadID_StaysAwake(t *testing.T) {
 		SessionBeads: []AwakeSessionBead{
 			{ID: "mc-p1", SessionName: "polecat-mc-p1", Template: "hello-world/polecat", State: "active"},
 		},
-		WorkBeads:        []AwakeWorkBead{{ID: "hw-1", Assignee: "mc-p1", Status: "open"}},
+		WorkBeads:        []AwakeWorkBead{{ID: "hw-1", Assignee: "mc-p1", Status: "open", Ready: true}},
 		ScaleCheckCounts: map[string]int{"hello-world/polecat": 0},
 		RunningSessions:  map[string]bool{"polecat-mc-p1": true},
 		Now:              now,
 	})
 	assertAwake(t, result, "polecat-mc-p1")
+}
+
+func TestRegression_PoolReadyOpenWorkVetoesIdleSleep(t *testing.T) {
+	idleTimeout := 10 * time.Minute
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat", SleepAfterIdle: idleTimeout}},
+		SessionBeads: []AwakeSessionBead{
+			{
+				ID: "mc-p1", SessionName: "polecat-mc-p1", Template: "hello-world/polecat", State: "active",
+				IdleSince: now.Add(-(idleTimeout + time.Minute)),
+			},
+		},
+		WorkBeads:        []AwakeWorkBead{{ID: "hw-1", Assignee: "mc-p1", Status: "open", Ready: true}},
+		ScaleCheckCounts: map[string]int{"hello-world/polecat": 0},
+		RunningSessions:  map[string]bool{"polecat-mc-p1": true},
+		Now:              now,
+	})
+	assertAwake(t, result, "polecat-mc-p1")
+	assertReason(t, result, "polecat-mc-p1", "assigned-work")
+}
+
+func TestRegression_OpenAssignedWorkWithoutReadySignalDoesNotWake(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat"}},
+		SessionBeads: []AwakeSessionBead{
+			{ID: "mc-p1", SessionName: "polecat-mc-p1", Template: "hello-world/polecat", State: "asleep"},
+		},
+		WorkBeads: []AwakeWorkBead{{ID: "hw-1", Assignee: "mc-p1", Status: "open", Ready: false}},
+		Now:       now,
+	})
+	assertAsleep(t, result, "polecat-mc-p1")
 }
 
 func TestRegression_SessionWithWorkByAlias_DoesNotWake(t *testing.T) {
@@ -1227,7 +1259,7 @@ func TestRegression_AsleepEphemeralWithAssignedWork_WakesViaAssignedWork(t *test
 	}
 }
 
-func TestRegression_ConcreteAssignedWorkSuppressesIdleSleep(t *testing.T) {
+func TestRegression_SessionNameAssignedWorkSuppressesIdleSleep(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat", SleepAfterIdle: 2 * time.Hour}},
 		SessionBeads: []AwakeSessionBead{
@@ -1245,7 +1277,46 @@ func TestRegression_ConcreteAssignedWorkSuppressesIdleSleep(t *testing.T) {
 	assertReason(t, result, "polecat-mc-sctve", "assigned-work")
 }
 
-func TestSessionHasConcreteAssignedWorkMatchesNamedIdentity(t *testing.T) {
+func TestRegression_BeadIDAssignedWorkSuppressesIdleSleep(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat", SleepAfterIdle: 2 * time.Hour}},
+		SessionBeads: []AwakeSessionBead{
+			{
+				ID: "mc-sctve", SessionName: "polecat-mc-sctve", Template: "hello-world/polecat", State: "active",
+				IdleSince: now.Add(-3 * time.Hour),
+			},
+		},
+		WorkBeads:        []AwakeWorkBead{{ID: "hw-8lb", Assignee: "mc-sctve", Status: "in_progress"}},
+		ScaleCheckCounts: map[string]int{"hello-world/polecat": 1},
+		RunningSessions:  map[string]bool{"polecat-mc-sctve": true},
+		Now:              now,
+	})
+	assertAwake(t, result, "polecat-mc-sctve")
+	assertReason(t, result, "polecat-mc-sctve", "assigned-work")
+}
+
+func TestIdleSleep_SuspendedTemplateAssignedWorkDoesNotVetoWaitReadySleep(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "hello-world/polecat", Suspended: true, SleepAfterIdle: 2 * time.Hour}},
+		SessionBeads: []AwakeSessionBead{
+			{
+				ID: "mc-sctve", SessionName: "polecat-mc-sctve", Template: "hello-world/polecat", State: "active",
+				IdleSince: now.Add(-3 * time.Hour),
+			},
+		},
+		WorkBeads:       []AwakeWorkBead{{ID: "hw-8lb", Assignee: "mc-sctve", Status: "in_progress"}},
+		RunningSessions: map[string]bool{"polecat-mc-sctve": true},
+		ReadyWaitSet:    map[string]bool{"mc-sctve": true},
+		Now:             now,
+	})
+	assertAsleep(t, result, "polecat-mc-sctve")
+	assertReason(t, result, "polecat-mc-sctve", "idle-sleep")
+	if result["polecat-mc-sctve"].HasAssignedWork {
+		t.Fatal("suspended-template work must not set HasAssignedWork")
+	}
+}
+
+func TestSessionHasAssignedWorkMatchesNamedIdentity(t *testing.T) {
 	bead := AwakeSessionBead{
 		ID:            "mc-named",
 		SessionName:   "hello-world--refinery",
@@ -1253,12 +1324,12 @@ func TestSessionHasConcreteAssignedWorkMatchesNamedIdentity(t *testing.T) {
 		NamedIdentity: "hello-world/refinery",
 	}
 	work := []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "in_progress"}}
-	if !sessionHasConcreteAssignedWork(work, nil, bead) {
-		t.Fatal("expected named-identity assignment to count as concrete assigned work")
+	if !sessionHasAssignedWork(work, nil, bead) {
+		t.Fatal("expected named-identity assignment to count as assigned work")
 	}
 }
 
-func TestSessionHasConcreteAssignedWorkMatchesConfiguredNamedSessionFallback(t *testing.T) {
+func TestSessionHasAssignedWorkMatchesConfiguredNamedSessionFallback(t *testing.T) {
 	named := []AwakeNamedSession{{
 		Identity:    "hello-world/refinery",
 		Template:    "hello-world/worker",
@@ -1271,9 +1342,9 @@ func TestSessionHasConcreteAssignedWorkMatchesConfiguredNamedSessionFallback(t *
 		Template:               "hello-world/worker",
 		ConfiguredNamedSession: true,
 	}
-	work := []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "open"}}
-	if !sessionHasConcreteAssignedWork(work, named, bead) {
-		t.Fatal("expected configured named-session fallback assignment to count as concrete assigned work")
+	work := []AwakeWorkBead{{ID: "hw-1", Assignee: "hello-world/refinery", Status: "open", Ready: true}}
+	if !sessionHasAssignedWork(work, named, bead) {
+		t.Fatal("expected configured named-session fallback assignment to count as assigned work")
 	}
 }
 

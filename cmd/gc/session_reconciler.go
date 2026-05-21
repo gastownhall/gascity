@@ -898,7 +898,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if configuredNames[name] {
 						reason = "suspended"
 					}
-					hasAssignedWork, assignedErr := sessionHasOpenAssignedWork(store, rigStores, *session)
+					hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForConfig(store, rigStores, *session, cfg)
 					if assignedErr != nil {
 						fmt.Fprintf(stderr, "session reconciler: checking assigned work before %s drain for %s: %v\n", reason, name, assignedErr) //nolint:errcheck
 						continue
@@ -1703,15 +1703,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		name := target.session.Metadata["session_name"]
 		decision := awakeDecisions[name]
 		if decision.ShouldWake && !pendingInteractionReady(sp, name) && target.session.Metadata["pin_awake"] != "true" && configWakeSuppressed(*target.session, policy, sp, clk) {
-			// Active demand (poolDesired > 0) overrides sleep suppression
-			// for non-interactive sessions (matching the old
-			// evaluateWakeReasons behavior). Interactive sessions honor
-			// their idle window regardless of demand — an idle chat
-			// session should still sleep to release resources.
+			// Active demand (poolDesired > 0 or direct assigned work)
+			// overrides sleep suppression for non-interactive sessions
+			// (matching the old evaluateWakeReasons behavior). Interactive
+			// sessions honor their idle window regardless of demand — an
+			// idle chat session should still sleep to release resources.
 			// Explicit sleep_intent always wins — if the session has
 			// signaled it wants to sleep, honor that regardless of demand.
 			template := normalizedSessionTemplate(*target.session, cfg)
-			hasDemand := poolDesired[template] > 0
+			hasDemand := poolDesired[template] > 0 || eval.HasAssignedWork
 			hasExplicitSleepIntent := target.session.Metadata["sleep_intent"] != ""
 			demandOverrides := hasDemand && policy.Class == config.SessionSleepNonInteractive && !hasExplicitSleepIntent
 			if !demandOverrides {
@@ -1985,23 +1985,14 @@ func resolvePreservedConfiguredNamedSessionTemplate(
 	return tp, nil
 }
 
-// sessionHasOpenAssignedWork reports whether any open or in-progress work bead
-// is assigned to the given session across all known stores. Use this
-// cross-store query for cleanup-of-record paths that must not orphan work in
-// any attached store; callers preserve fail-closed behavior by refusing close
-// decisions on query errors. Reconciler close paths that should honor the
-// session's configured store reachability must use
-// sessionHasOpenAssignedWorkForReachableStore instead.
-func sessionHasOpenAssignedWork(store beads.Store, rigStores map[string]beads.Store, session beads.Bead) (bool, error) {
-	if has, err := sessionHasOpenAssignedWorkInStore(store, session); err != nil || has {
-		return has, err
-	}
-	for _, rs := range rigStores {
-		if has, err := sessionHasOpenAssignedWorkInStore(rs, session); err != nil || has {
-			return has, err
-		}
-	}
-	return false, nil
+// sessionHasOpenAssignedWorkForConfig uses the same configured-named-session
+// fallback identity strategy as sessionAssigneeMatches, but queries all known
+// stores instead of a single configured reachable store. Use this cross-store
+// query for cleanup-of-record paths that must not orphan work in any attached
+// store; callers preserve fail-closed behavior by refusing close decisions on
+// query errors.
+func sessionHasOpenAssignedWorkForConfig(store beads.Store, rigStores map[string]beads.Store, session beads.Bead, cfg *config.City) (bool, error) {
+	return sessionHasOpenAssignedWorkInStores(store, rigStores, sessionAssignmentIdentifiersForConfig(session, cfg))
 }
 
 // sessionHasOpenAssignedWorkForReachableStore reports whether any open or
@@ -2014,18 +2005,19 @@ func sessionHasOpenAssignedWorkForReachableStore(
 	rigStores map[string]beads.Store,
 	session beads.Bead,
 ) (bool, error) {
+	identifiers := sessionAssignmentIdentifiersForConfig(session, cfg)
 	storeRef, ok := assignedWorkStoreRefForSession(cityPath, cfg, session)
 	if !ok {
-		return sessionHasOpenAssignedWork(store, rigStores, session)
+		return sessionHasOpenAssignedWorkInStores(store, rigStores, identifiers)
 	}
 	if storeRef == "" {
-		return sessionHasOpenAssignedWorkInStore(store, session)
+		return sessionHasOpenAssignedWorkInStoreByIdentifiers(store, identifiers)
 	}
 	rigStore, ok := rigStores[storeRef]
 	if !ok || rigStore == nil {
 		return false, fmt.Errorf("rig store %q unavailable for session %q", storeRef, session.Metadata["session_name"])
 	}
-	return sessionHasOpenAssignedWorkInStore(rigStore, session)
+	return sessionHasOpenAssignedWorkInStoreByIdentifiers(rigStore, identifiers)
 }
 
 func assignedWorkStoreRefForSession(cityPath string, cfg *config.City, session beads.Bead) (string, bool) {
@@ -2069,33 +2061,33 @@ func firstOpenAssignedWorkBeadForReachableStore(
 	rigStores map[string]beads.Store,
 	session beads.Bead,
 ) (beads.Bead, bool, error) {
+	identifiers := sessionAssignmentIdentifiersForConfig(session, cfg)
 	storeRef, ok := assignedWorkStoreRefForSession(cityPath, cfg, session)
 	if !ok {
-		if bead, found, err := firstOpenAssignedWorkBeadInStore(store, session); err != nil || found {
+		if bead, found, err := firstOpenAssignedWorkBeadInStoreByIdentifiers(store, identifiers); err != nil || found {
 			return bead, found, err
 		}
 		for _, rs := range rigStores {
-			if bead, found, err := firstOpenAssignedWorkBeadInStore(rs, session); err != nil || found {
+			if bead, found, err := firstOpenAssignedWorkBeadInStoreByIdentifiers(rs, identifiers); err != nil || found {
 				return bead, found, err
 			}
 		}
 		return beads.Bead{}, false, nil
 	}
 	if storeRef == "" {
-		return firstOpenAssignedWorkBeadInStore(store, session)
+		return firstOpenAssignedWorkBeadInStoreByIdentifiers(store, identifiers)
 	}
 	rigStore, ok := rigStores[storeRef]
 	if !ok || rigStore == nil {
 		return beads.Bead{}, false, fmt.Errorf("rig store %q unavailable for session %q", storeRef, session.Metadata["session_name"])
 	}
-	return firstOpenAssignedWorkBeadInStore(rigStore, session)
+	return firstOpenAssignedWorkBeadInStoreByIdentifiers(rigStore, identifiers)
 }
 
-func firstOpenAssignedWorkBeadInStore(store beads.Store, session beads.Bead) (beads.Bead, bool, error) {
+func firstOpenAssignedWorkBeadInStoreByIdentifiers(store beads.Store, identifiers []string) (beads.Bead, bool, error) {
 	if store == nil {
 		return beads.Bead{}, false, nil
 	}
-	identifiers := sessionAssignmentIdentifiers(session)
 	seen := make(map[string]struct{}, len(identifiers))
 	for _, status := range []string{"in_progress", "open"} {
 		for _, assignee := range identifiers {
@@ -2123,10 +2115,25 @@ func firstOpenAssignedWorkBeadInStore(store beads.Store, session beads.Bead) (be
 }
 
 func sessionHasOpenAssignedWorkInStore(store beads.Store, session beads.Bead) (bool, error) {
+	return sessionHasOpenAssignedWorkInStoreByIdentifiers(store, sessionAssignmentIdentifiers(session))
+}
+
+func sessionHasOpenAssignedWorkInStores(store beads.Store, rigStores map[string]beads.Store, identifiers []string) (bool, error) {
+	if has, err := sessionHasOpenAssignedWorkInStoreByIdentifiers(store, identifiers); err != nil || has {
+		return has, err
+	}
+	for _, rs := range rigStores {
+		if has, err := sessionHasOpenAssignedWorkInStoreByIdentifiers(rs, identifiers); err != nil || has {
+			return has, err
+		}
+	}
+	return false, nil
+}
+
+func sessionHasOpenAssignedWorkInStoreByIdentifiers(store beads.Store, identifiers []string) (bool, error) {
 	if store == nil {
 		return false, nil
 	}
-	identifiers := sessionAssignmentIdentifiers(session)
 	seen := make(map[string]struct{}, len(identifiers))
 	for _, status := range []string{"open", "in_progress"} {
 		for _, assignee := range identifiers {

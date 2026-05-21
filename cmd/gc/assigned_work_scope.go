@@ -24,6 +24,8 @@ func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agen
 	return storeRefs[index] == assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
 }
 
+// filterAssignedWorkBeadsForPoolDemand resolves work through the routed
+// backing template because pool scale decisions are per agent template.
 func filterAssignedWorkBeadsForPoolDemand(
 	cfg *config.City,
 	cityPath string,
@@ -79,6 +81,8 @@ func filterAssignedWorkBeadsForPoolDemand(
 	return filtered
 }
 
+// filterAssignedWorkBeadsForSessionWake resolves work through assignment
+// identities because session wake decisions are per concrete session owner.
 func filterAssignedWorkBeadsForSessionWake(
 	cfg *config.City,
 	cityPath string,

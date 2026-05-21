@@ -268,6 +268,182 @@ func TestReconcileSessionBeads_StartsIdleDrainAfterGrace(t *testing.T) {
 	}
 }
 
+func TestReconcileSessionBeads_AssignedNamedSessionByBeadIDOverridesNonInteractiveSleepPolicy(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		SessionSleep: config.SessionSleepConfig{
+			NonInteractive: "60s",
+		},
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "worker",
+			StartCommand: "true",
+			Attach:       boolPtr(false),
+		}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:                 "test-cmd",
+		SessionName:             sessionName,
+		TemplateName:            "worker",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "on_demand",
+	}
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"detached_at":                env.clk.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339),
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	env.sp.SetActivity(sessionName, env.clk.Now().Add(-2*time.Minute))
+	work, err := env.store.Create(beads.Bead{
+		Title:    "assigned work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("create assigned work: %v", err)
+	}
+	cfgNames := configuredSessionNames(env.cfg, env.cfg.EffectiveCityName(), env.store)
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		cfgNames,
+		env.cfg,
+		env.sp,
+		env.store,
+		nil,
+		[]beads.Bead{work},
+		nil,
+		env.dt,
+		map[string]int{},
+		false,
+		nil,
+		env.cfg.EffectiveCityName(),
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0 for already-running assigned session", woken)
+	}
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatal("assigned named session should stay running")
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("unexpected drain for assigned named session: %+v", ds)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got.Metadata["config_wake_suppressed"] == "true" {
+		t.Fatal("assigned-work wake was suppressed by noninteractive sleep policy")
+	}
+}
+
+func TestReconcileSessionBeads_AssignedWorkWithReadyWaitOverridesNonInteractiveSleepPolicy(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		SessionSleep: config.SessionSleepConfig{
+			NonInteractive: "60s",
+		},
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "worker",
+			StartCommand: "true",
+			Attach:       boolPtr(false),
+		}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:                 "test-cmd",
+		SessionName:             sessionName,
+		TemplateName:            "worker",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "on_demand",
+	}
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"detached_at":                env.clk.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339),
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	env.sp.SetActivity(sessionName, env.clk.Now().Add(-2*time.Minute))
+	work, err := env.store.Create(beads.Bead{
+		Title:    "assigned work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("create assigned work: %v", err)
+	}
+	cfgNames := configuredSessionNames(env.cfg, env.cfg.EffectiveCityName(), env.store)
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		cfgNames,
+		env.cfg,
+		env.sp,
+		env.store,
+		nil,
+		[]beads.Bead{work},
+		map[string]bool{session.ID: true},
+		env.dt,
+		map[string]int{},
+		false,
+		nil,
+		env.cfg.EffectiveCityName(),
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0 for already-running assigned session", woken)
+	}
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatal("assigned named session should stay running")
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("unexpected drain for assigned named session with ready wait: %+v", ds)
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got.Metadata["config_wake_suppressed"] == "true" {
+		t.Fatal("ready-wait wake with assigned work was suppressed by noninteractive sleep policy")
+	}
+}
+
 func TestReconcileSessionBeads_WaitHoldBypassesIdleProbe(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
