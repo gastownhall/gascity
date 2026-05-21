@@ -1807,9 +1807,16 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 		env = removeEnvKey(env, "GC_BIN")
 		env = append(env, "GC_BIN="+gcBin)
 	}
-	if managedDoltTestModeEnabled() {
-		env = removeEnvKey(env, managedDoltTestModeEnv)
-		env = removeEnvKey(env, managedDoltTestParentPIDEnv)
+	// Strip any inherited test-mode env unconditionally so a stray
+	// GC_MANAGED_DOLT_TEST_MODE=1 in a production parent shell can never
+	// reach child managed-dolt processes. Only Go test binaries
+	// (managedDoltTestMode()) get the variable re-injected. Gating on
+	// managedDoltTestModeEnabled() — which also honors the env var itself —
+	// would have re-injected the stray value, defeating the guard
+	// (gastownhall/gascity#2313 follow-up M1).
+	env = removeEnvKey(env, managedDoltTestModeEnv)
+	env = removeEnvKey(env, managedDoltTestParentPIDEnv)
+	if managedDoltTestMode() {
 		env = append(env,
 			managedDoltTestModeEnv+"=1",
 			managedDoltTestParentPIDEnv+"="+managedDoltTestParentPIDString(),

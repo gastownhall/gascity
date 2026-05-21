@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -652,5 +653,221 @@ name = "mayor"
 	}
 	if pidAlive(pid) {
 		t.Errorf("pid %d still alive after terminateManagedDoltPID; SIGKILL escalation did not fire", pid)
+	}
+}
+
+// TestReapManagedDoltTestProcessesSkipsReusedPID is the #2313 follow-up M2
+// regression: when the snapshotted StartTimeTicks at registration differs from
+// the value re-read at reap time, the PID has been reused — we must NOT
+// signal it. Validated against the un-patched reap (no identity check) by
+// flipping the seam and asserting terminate was not invoked.
+func TestReapManagedDoltTestProcessesSkipsReusedPID(t *testing.T) {
+	withManagedDoltTestMode(t, true)
+	clearManagedDoltTestProcessRegistry(t)
+	t.Cleanup(func() { clearManagedDoltTestProcessRegistry(t) })
+
+	oldTerminate := managedDoltTestTerminateProcess
+	var terminated []int
+	managedDoltTestTerminateProcess = func(pid int) error {
+		terminated = append(terminated, pid)
+		return nil
+	}
+	t.Cleanup(func() { managedDoltTestTerminateProcess = oldTerminate })
+
+	oldTicks := managedDoltTestReadStartTimeTicks
+	oldIdent := managedDoltTestReadStartIdentity
+	managedDoltTestReadStartTimeTicks = func(int) uint64 { return 2222 }
+	managedDoltTestReadStartIdentity = func(int) string { return "" }
+	t.Cleanup(func() {
+		managedDoltTestReadStartTimeTicks = oldTicks
+		managedDoltTestReadStartIdentity = oldIdent
+	})
+
+	// Snapshot is 1111 at registration (set explicitly so we bypass the
+	// real-time reader at register-time too); the reap seam reports 2222
+	// — different process, must be skipped.
+	livePID := os.Getpid()
+	registerManagedDoltTestProcess(managedDoltStartedProcess{PID: livePID, StartTimeTicks: 1111})
+
+	reapManagedDoltTestProcesses()
+
+	for _, pid := range terminated {
+		if pid == livePID {
+			t.Fatalf("reap signaled PID %d with mismatched start-time ticks; identity guard not enforced", livePID)
+		}
+	}
+}
+
+// TestReapManagedDoltTestProcessesTerminatesWhenTicksMatch asserts the
+// happy-path side of the M2 identity guard: when snapshotted ticks equal
+// re-read ticks, the reap proceeds as before.
+func TestReapManagedDoltTestProcessesTerminatesWhenTicksMatch(t *testing.T) {
+	withManagedDoltTestMode(t, true)
+	clearManagedDoltTestProcessRegistry(t)
+	t.Cleanup(func() { clearManagedDoltTestProcessRegistry(t) })
+
+	oldTerminate := managedDoltTestTerminateProcess
+	var terminated []int
+	managedDoltTestTerminateProcess = func(pid int) error {
+		terminated = append(terminated, pid)
+		return nil
+	}
+	t.Cleanup(func() { managedDoltTestTerminateProcess = oldTerminate })
+
+	oldTicks := managedDoltTestReadStartTimeTicks
+	managedDoltTestReadStartTimeTicks = func(int) uint64 { return 5555 }
+	t.Cleanup(func() { managedDoltTestReadStartTimeTicks = oldTicks })
+
+	livePID := os.Getpid()
+	registerManagedDoltTestProcess(managedDoltStartedProcess{PID: livePID, StartTimeTicks: 5555})
+
+	reapManagedDoltTestProcesses()
+
+	if len(terminated) == 0 || terminated[0] != livePID {
+		t.Fatalf("terminated = %v, want [%d]+; identity guard wrongly skipped matching PID", terminated, livePID)
+	}
+}
+
+// TestTerminateManagedDoltTestPIDKillsProcessGroup is the #2313 follow-up M3
+// regression: when the target is a process-group leader, terminate must
+// signal the whole group so descendant dolt workers do not survive.
+// Demonstration: spawn a shell as group leader, fork a backgrounded sleep
+// child, call terminateManagedDoltTestPID on the shell. Both must die.
+// Without the M3 fix (leader-only kill), the child outlives the shell.
+func TestTerminateManagedDoltTestPIDKillsProcessGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX process-group signal semantics required")
+	}
+	dir := t.TempDir()
+	childFile := filepath.Join(dir, "child.pid")
+	// Shell becomes the new process group leader (Setpgid:true). It forks
+	// a backgrounded sleep that inherits that group, records the child's
+	// PID, then waits.
+	cmd := exec.Command("/bin/sh", "-c", `sleep 90 & echo $! > "$1"; wait`, "sh", childFile)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start shell: %v", err)
+	}
+	shellPID := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	// Wait for the child PID to be recorded.
+	var childPID int
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		data, err := os.ReadFile(childFile)
+		if err == nil {
+			if pid, perr := strconv.Atoi(strings.TrimSpace(string(data))); perr == nil && pid > 0 {
+				childPID = pid
+				break
+			}
+		}
+	}
+	if childPID == 0 {
+		t.Fatalf("child sleep never recorded its PID at %s", childFile)
+	}
+
+	if err := terminateManagedDoltTestPID(shellPID); err != nil {
+		t.Fatalf("terminateManagedDoltTestPID(%d): %v", shellPID, err)
+	}
+
+	// Allow a short window for the kernel to mark both pids dead.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !pidAlive(shellPID) && !pidAlive(childPID) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if pidAlive(shellPID) {
+		t.Errorf("shell pid %d still alive after pgid terminate", shellPID)
+	}
+	if pidAlive(childPID) {
+		t.Errorf("child pid %d still alive after pgid terminate; M3 pgid-kill regression", childPID)
+	}
+}
+
+// TestTerminateManagedDoltTestPIDLeaderOnlyForNonGroupLeader asserts the
+// safety guard added in M3: when the target is NOT its own pgid leader (e.g.
+// the watchdog inheriting the test binary's group), terminate must NOT
+// signal the whole group — that would take down the test binary. We pick a
+// child of the test binary that did NOT call Setpgid; it inherits the test
+// binary's group. Terminate must only kill the child.
+func TestTerminateManagedDoltTestPIDLeaderOnlyForNonGroupLeader(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX process-group signal semantics required")
+	}
+	// Spawn a sleep WITHOUT Setpgid — it inherits the test binary's pgid.
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	pgid, err := syscall.Getpgid(pid)
+	if err != nil {
+		t.Fatalf("getpgid(%d): %v", pid, err)
+	}
+	if pgid == pid {
+		t.Skip("sleep happens to be its own group leader; cannot exercise leader-only fallback")
+	}
+
+	if err := terminateManagedDoltTestPID(pid); err != nil {
+		t.Fatalf("terminateManagedDoltTestPID(%d): %v", pid, err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for pidAlive(pid) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if pidAlive(pid) {
+		t.Errorf("sleep pid %d still alive after terminate", pid)
+	}
+	// Sanity: the test binary itself is still alive (we did not pgid-kill
+	// our own group). If we had, the test process would have died and this
+	// assertion would never run — but if it did, this guards against a
+	// future regression where the fallback path forgets the leader check.
+	if !pidAlive(os.Getpid()) {
+		t.Fatalf("test binary signaled by terminate fallback; pgid safety check failed")
+	}
+}
+
+// TestRegisterManagedDoltTestProcessSnapshotsIdentity ensures the M2
+// snapshot happens at registration when caller leaves identity fields zero.
+func TestRegisterManagedDoltTestProcessSnapshotsIdentity(t *testing.T) {
+	withManagedDoltTestMode(t, true)
+	clearManagedDoltTestProcessRegistry(t)
+	t.Cleanup(func() { clearManagedDoltTestProcessRegistry(t) })
+
+	oldTicks := managedDoltTestReadStartTimeTicks
+	oldIdent := managedDoltTestReadStartIdentity
+	managedDoltTestReadStartTimeTicks = func(int) uint64 { return 9876 }
+	managedDoltTestReadStartIdentity = func(int) string { return "Mon Jan 1 12:34:56 2026" }
+	t.Cleanup(func() {
+		managedDoltTestReadStartTimeTicks = oldTicks
+		managedDoltTestReadStartIdentity = oldIdent
+	})
+
+	registerManagedDoltTestProcess(managedDoltStartedProcess{PID: os.Getpid()})
+
+	v, ok := managedDoltTestProcessRegistry.Load(os.Getpid())
+	if !ok {
+		t.Fatalf("registry missing entry for pid %d", os.Getpid())
+	}
+	got, ok := v.(managedDoltStartedProcess)
+	if !ok {
+		t.Fatalf("registry value type = %T, want managedDoltStartedProcess", v)
+	}
+	if got.StartTimeTicks != 9876 {
+		t.Errorf("StartTimeTicks = %d, want 9876", got.StartTimeTicks)
+	}
+	if got.StartIdentity != "Mon Jan 1 12:34:56 2026" {
+		t.Errorf("StartIdentity = %q, want non-empty snapshot", got.StartIdentity)
 	}
 }
