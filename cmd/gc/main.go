@@ -605,7 +605,8 @@ func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
 	var allStale []staleRegisteredCity
 	defer func() { emitStaleRegisteredCityWarnings(os.Stderr, allStale) }()
 
-	matches, stale, err := registeredRigBindingsByName(nameOrPath, true)
+	var deferredRegisteredLoadErr error
+	matches, stale, err, loadErr := registeredRigBindingsByNameWithDeferredLoadError(nameOrPath, false)
 	allStale = append(allStale, stale...)
 	if err != nil {
 		return resolvedContext{}, err
@@ -613,12 +614,13 @@ func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
 	if len(matches) > 0 {
 		return resolveRigBindingMatches(nameOrPath, matches)
 	}
+	deferredRegisteredLoadErr = loadErr
 
 	abs, err := filepath.Abs(nameOrPath)
 	if err != nil {
 		return resolvedContext{}, fmt.Errorf("rig %q: %w", nameOrPath, err)
 	}
-	matches, stale, err = registeredRigBindingsByPath(abs, true)
+	matches, stale, err, loadErr = registeredRigBindingsByPathWithDeferredLoadError(abs, false)
 	allStale = append(allStale, stale...)
 	if err != nil {
 		return resolvedContext{}, err
@@ -626,8 +628,151 @@ func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
 	if len(matches) > 0 {
 		return resolveRigBindingMatches(abs, matches)
 	}
+	if deferredRegisteredLoadErr == nil {
+		deferredRegisteredLoadErr = loadErr
+	}
 
+	// Fallback: a city declared locally but not yet handed to the
+	// supervisor (cities.toml does not list it) is invisible to the
+	// registry walks above. Honor explicit local city resolution by checking
+	// the resolved city for a site-bound rig of this name. Site binding is
+	// required: legacy city.toml-only paths remain rejected so the existing
+	// legacy_city_toml_path_is_not_registered_binding test continues to pass.
+	if ctx, ok, err := lookupRigFromLocalCity(nameOrPath); err != nil {
+		return resolvedContext{}, err
+	} else if ok {
+		return ctx, nil
+	}
+	if deferredRegisteredLoadErr != nil {
+		return resolvedContext{}, deferredRegisteredLoadErr
+	}
 	return resolvedContext{}, fmt.Errorf("rig %q is not registered in any city", nameOrPath)
+}
+
+func resolveLocalCityForRigFallback() (string, error) {
+	if cityFlag != "" {
+		return validateCityPath(cityFlag)
+	}
+	if gcCity, ok := resolveExplicitCityPathEnv(); ok {
+		return gcCity, nil
+	}
+	if gcDir := strings.TrimSpace(os.Getenv("GC_DIR")); gcDir != "" {
+		gcDirCity, err := findCity(gcDir)
+		if err != nil {
+			if !isCityDiscoveryNotFound(err) {
+				return "", err
+			}
+		} else {
+			return gcDirCity, nil
+		}
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	cityPath, err := findCity(cwd)
+	if err != nil {
+		if isCityDiscoveryNotFound(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return cityPath, nil
+}
+
+func isCityDiscoveryNotFound(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "not in a city directory")
+}
+
+// lookupRigFromLocalCity resolves the local city without consulting --rig or
+// GC_RIG, then builds declared rig candidates from city.toml plus
+// .gc/site.toml, matching the registered resolver's binding semantics.
+// Legacy city.toml-only paths are still rejected so this fallback preserves
+// the invariant pinned by legacy_city_toml_path_is_not_registered_binding.
+func lookupRigFromLocalCity(nameOrPath string) (resolvedContext, bool, error) {
+	cityPath, err := resolveLocalCityForRigFallback()
+	if err != nil {
+		return resolvedContext{}, false, err
+	}
+	if cityPath == "" {
+		return resolvedContext{}, false, nil
+	}
+	bindings, err := localCityRigBindings(cityPath)
+	if err != nil {
+		return resolvedContext{}, false, err
+	}
+
+	var nameMatches []registeredRigBinding
+	for _, binding := range bindings {
+		if binding.Rig.Name == nameOrPath {
+			nameMatches = append(nameMatches, binding)
+		}
+	}
+	if len(nameMatches) > 0 {
+		ctx, err := resolveRigBindingMatches(nameOrPath, nameMatches)
+		return ctx, true, err
+	}
+
+	requestPath := normalizePathForCompare(nameOrPath)
+	var pathMatches []registeredRigBinding
+	for _, binding := range bindings {
+		if pathWithinScope(requestPath, normalizePathForCompare(binding.Path)) {
+			pathMatches = append(pathMatches, binding)
+		}
+	}
+	pathMatches = keepDeepestRigBindings(pathMatches)
+	if len(pathMatches) > 0 {
+		ctx, err := resolveRigBindingMatches(requestPath, pathMatches)
+		return ctx, true, err
+	}
+
+	return resolvedContext{}, false, nil
+}
+
+func localCityRigBindings(cityPath string) ([]registeredRigBinding, error) {
+	cfg, err := loadCityConfigSuppressDeprecatedOrderWarnings(cityPath, io.Discard)
+	if err != nil {
+		if _, ok := missingRootCityTOML(err, cityPath); ok {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("loading local city rig bindings: %s: %w", cityPath, err)
+	}
+	siteBinding, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading local city rig bindings: %s: %w", cityPath, err)
+	}
+	city := supervisor.CityEntry{Path: cityPath, Name: cfg.ResolvedWorkspaceName}
+	return siteBoundRigBindings(city, cfg, siteBinding), nil
+}
+
+func siteBoundRigBindings(city supervisor.CityEntry, cfg *config.City, siteBinding *config.SiteBinding) []registeredRigBinding {
+	siteRigPaths := make(map[string]string, len(siteBinding.Rigs))
+	for _, rig := range siteBinding.Rigs {
+		name := strings.TrimSpace(rig.Name)
+		path := strings.TrimSpace(rig.Path)
+		if name == "" || path == "" {
+			continue
+		}
+		siteRigPaths[name] = path
+	}
+
+	var bindings []registeredRigBinding
+	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Name) == "" {
+			continue
+		}
+		sitePath := strings.TrimSpace(siteRigPaths[rig.Name])
+		if sitePath == "" {
+			continue
+		}
+		rig.Path = sitePath
+		bindings = append(bindings, registeredRigBinding{
+			City: city,
+			Rig:  rig,
+			Path: resolveStoreScopeRoot(city.Path, sitePath),
+		})
+	}
+	return bindings
 }
 
 // resolveRigPathToContext resolves an explicit path argument to a registered
@@ -690,21 +835,31 @@ type registeredRigBinding struct {
 }
 
 func registeredRigBindingsByName(name string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error) {
+	matches, stale, err, _ = registeredRigBindingsByNameWithDeferredLoadError(name, failOnLoadError)
+	return matches, stale, err
+}
+
+func registeredRigBindingsByNameWithDeferredLoadError(name string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
 	return registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
 		return binding.Rig.Name == name
 	})
 }
 
 func registeredRigBindingsByPath(dir string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error) {
+	matches, stale, err, _ = registeredRigBindingsByPathWithDeferredLoadError(dir, failOnLoadError)
+	return matches, stale, err
+}
+
+func registeredRigBindingsByPathWithDeferredLoadError(dir string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
 	dir = normalizePathForCompare(dir)
-	matches, stale, err = registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
+	matches, stale, err, deferredLoadErr = registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
 		rigPath := normalizePathForCompare(binding.Path)
 		return pathWithinScope(dir, rigPath)
 	})
 	if err != nil {
-		return nil, stale, err
+		return nil, stale, err, nil
 	}
-	return keepDeepestRigBindings(matches), stale, nil
+	return keepDeepestRigBindings(matches), stale, nil, deferredLoadErr
 }
 
 // staleRegisteredCity identifies a registered city whose city.toml is
@@ -735,11 +890,11 @@ func emitStaleRegisteredCityWarnings(w io.Writer, stale []staleRegisteredCity) {
 	}
 }
 
-func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding) bool) (_ []registeredRigBinding, stale []staleRegisteredCity, _ error) {
+func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding) bool) (_ []registeredRigBinding, stale []staleRegisteredCity, _ error, deferredLoadErr error) {
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	cities, err := reg.List()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, err, nil
 	}
 	var matched []registeredRigBinding
 	var loadErrors []string
@@ -761,38 +916,19 @@ func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding
 			loadErrors = append(loadErrors, fmt.Sprintf("%s: %v", registeredCityLabel(c), err))
 			continue
 		}
-		siteRigPaths := make(map[string]string, len(siteBinding.Rigs))
-		for _, siteRig := range siteBinding.Rigs {
-			name := strings.TrimSpace(siteRig.Name)
-			path := strings.TrimSpace(siteRig.Path)
-			if name == "" || path == "" {
-				continue
-			}
-			siteRigPaths[name] = path
-		}
-		for _, rig := range cfg.Rigs {
-			if strings.TrimSpace(rig.Name) == "" {
-				continue
-			}
-			sitePath := strings.TrimSpace(siteRigPaths[rig.Name])
-			if sitePath == "" {
-				continue
-			}
-			rig.Path = sitePath
-			binding := registeredRigBinding{
-				City: c,
-				Rig:  rig,
-				Path: resolveStoreScopeRoot(c.Path, sitePath),
-			}
+		for _, binding := range siteBoundRigBindings(c, cfg, siteBinding) {
 			if match(binding) {
 				matched = append(matched, binding)
 			}
 		}
 	}
 	if len(loadErrors) > 0 && (failOnLoadError || len(matched) > 0) {
-		return nil, stale, fmt.Errorf("loading registered city rig bindings: %s", strings.Join(loadErrors, "; "))
+		return nil, stale, fmt.Errorf("loading registered city rig bindings: %s", strings.Join(loadErrors, "; ")), nil
 	}
-	return matched, stale, nil
+	if len(loadErrors) > 0 {
+		return matched, stale, nil, fmt.Errorf("loading registered city rig bindings: %s", strings.Join(loadErrors, "; "))
+	}
+	return matched, stale, nil, nil
 }
 
 func missingRootCityTOML(err error, cityPath string) (string, bool) {
