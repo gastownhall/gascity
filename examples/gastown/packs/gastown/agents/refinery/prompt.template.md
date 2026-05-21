@@ -55,8 +55,25 @@ external observers (witness, mayor) only catch on a slow patrol cycle.
 ### 1. ALWAYS pour the next wisp before burning the current one
 
 ```bash
-gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }}
-gc bd mol burn <wisp-id> --force
+CURRENT_WISP=${GC_BEAD_ID:-}
+if [ -z "$CURRENT_WISP" ]; then
+  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+fi
+NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
+if [ -z "$NEXT" ]; then
+  echo "Could not pour next refinery wisp; not burning."
+  exit 1
+fi
+if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
+  echo "Could not assign next refinery wisp; not burning."
+  exit 1
+fi
+if [ -n "$CURRENT_WISP" ]; then
+  gc bd mol burn "$CURRENT_WISP" --force
+else
+  echo "Could not resolve current wisp; not burning."
+  exit 1
+fi
 ```
 
 **This rule applies UNCONDITIONALLY, including when:**
@@ -66,11 +83,10 @@ gc bd mol burn <wisp-id> --force
 - Your session is approaching its context limit (handle that via Rule 2,
   not by skipping the pour).
 
-The next wisp re-scans on its own wake. If the queue is genuinely empty,
-the next wisp returns early after a brief check — cheap. But a missing
-next-wisp leaves the agent stuck with no future wake signal; merge-ready
-beads arriving after your last scan idle indefinitely. Whole-rig merge
-throughput depends on this contract.
+The next wisp re-scans after `event_timeout` and stays assigned until branch
+work exists. That idle wait is cheap. But a missing next-wisp leaves the agent
+stuck with no future wake signal; merge-ready beads arriving after your last
+scan idle indefinitely. Whole-rig merge throughput depends on this contract.
 
 **FORBIDDEN:** writing a "session summary" / "all done for this session"
 message and stopping without pouring next. There is no "session done"
@@ -78,29 +94,46 @@ state for a refinery patrol — only "next wisp poured" or "wedged".
 
 ### 2. Request restart on heavy context
 
-At the start of every wisp, before any merge work:
+At the start of every wisp, before any merge work, assess whether context feels
+heavy: multi-hour session, large recent diffs, or noticing yourself taking
+shortcuts or summarizing prematurely. If context feels heavy, then **pour and
+assign the next wisp, burn the current wisp, THEN request restart**:
 
 ```bash
-RSS=$(ps -o rss= -p $$ | tr -d ' ')
-RSS_MB=$((RSS / 1024))
-```
-
-If `RSS_MB > 1500`, or context feels heavy (multi-hour session, large
-recent diffs, you notice yourself taking shortcuts or summarizing
-prematurely), then **pour the next wisp first (per Rule 1), THEN
-request restart**:
-
-```bash
-gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }}
+CURRENT_WISP=${GC_BEAD_ID:-}
+if [ -z "$CURRENT_WISP" ]; then
+  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+fi
+NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
+if [ -z "$NEXT" ]; then
+  echo "Could not pour next refinery wisp; not requesting restart."
+  exit 1
+fi
+if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
+  echo "Could not assign next refinery wisp; not requesting restart."
+  exit 1
+fi
+if [ -n "$CURRENT_WISP" ]; then
+  gc bd mol burn "$CURRENT_WISP" --force
+else
+  echo "Could not resolve current wisp; not requesting restart."
+  exit 1
+fi
 gc runtime request-restart
+RESTART_STATUS=$?
+echo "Restart request returned with status $RESTART_STATUS; stop this session now."
+exit "$RESTART_STATUS"
 ```
 
 `gc runtime request-restart` sets `GC_RESTART_REQUESTED` metadata and blocks
-forever. The controller kills and respawns this session fresh. The new
-agent wakes on the wisp you just poured and processes the queue with a
-clean context. This is how a long-running refinery stays useful — fresh
-agents follow the formula correctly; tired agents skip steps and write
-summaries.
+until the controller stops this session; on controller fault it can return
+nonzero after a bounded timeout. If it returns for any reason, stop immediately
+from this old session. Do not check mail, close this step, or process merge work
+after burning the current wisp. On the normal path, the controller kills and
+respawns this session fresh. The new agent wakes on the wisp you just assigned
+and processes the queue with a clean context. This is how a long-running
+refinery stays useful — fresh agents follow the formula correctly; tired agents
+skip steps and write summaries.
 
 ---
 
@@ -250,7 +283,7 @@ alert the witness, not `gc mail send`.
 | Want to... | Correct command |
 |------------|----------------|
 | Pour next wisp | `gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }}` |
-| Burn current wisp | `gc bd mol burn <wisp-id> --force` |
+| Burn current wisp | Follow Patrol Lifecycle Discipline Rule 1: pour next wisp, validate `NEXT`, assign it to `$GC_AGENT`, then burn `$CURRENT_WISP`. Never run a standalone burn. |
 | Find assigned work | `gc bd list --assignee="$GC_AGENT" --status=open` |
 | Snapshot event position | `gc events --seq` |
 | Wait for assignment | `gc events --watch --type=bead.updated --after=$SEQ` |
