@@ -3189,7 +3189,7 @@ func TestCloseOrderTrackingBeadErrorsWhenVerificationStillOpen(t *testing.T) {
 	}
 	store := &noopCloseAllStore{Store: base}
 
-	err = closeOrderTrackingBead(store, tracking.ID)
+	err = closeOrderTrackingBead(context.Background(), store, tracking.ID)
 	if err == nil {
 		t.Fatal("closeOrderTrackingBead err = nil, want read-after-close verification error")
 	}
@@ -3228,7 +3228,7 @@ func TestCloseOrderTrackingBeadRetriesTransientCloseConflict(t *testing.T) {
 	}
 	store := &flakyCloseAllStore{Store: base, failuresRemaining: 1}
 
-	if err := closeOrderTrackingBead(store, tracking.ID); err != nil {
+	if err := closeOrderTrackingBead(context.Background(), store, tracking.ID); err != nil {
 		t.Fatalf("closeOrderTrackingBead: %v", err)
 	}
 	if store.closeCalls != 2 {
@@ -3388,7 +3388,7 @@ func TestSweepStaleOrderTrackingAcrossStoresContinuesAfterStoreError(t *testing.
 	}
 }
 
-func TestSweepStaleOrderTrackingPreservesTriggerEnvFailedBeads(t *testing.T) {
+func TestSweepStaleOrderTrackingClosesTriggerEnvFailedBeadsAndUnblocksDispatch(t *testing.T) {
 	store := beads.NewMemStore()
 	failed, err := store.Create(beads.Bead{
 		Title:     "order:pg-cooldown",
@@ -3419,15 +3419,15 @@ func TestSweepStaleOrderTrackingPreservesTriggerEnvFailedBeads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sweepStaleOrderTrackingWithOptions: %v", err)
 	}
-	if result.trackingClosed != 1 {
-		t.Fatalf("trackingClosed = %d, want 1", result.trackingClosed)
+	if result.trackingClosed != 2 {
+		t.Fatalf("trackingClosed = %d, want 2", result.trackingClosed)
 	}
 	gotFailed, err := store.Get(failed.ID)
 	if err != nil {
 		t.Fatalf("Get(trigger-env failed): %v", err)
 	}
-	if gotFailed.Status != "open" {
-		t.Fatalf("trigger-env failed status = %s, want open", gotFailed.Status)
+	if gotFailed.Status != "closed" {
+		t.Fatalf("trigger-env failed status = %s, want closed", gotFailed.Status)
 	}
 	gotNormal, err := store.Get(normal.ID)
 	if err != nil {
@@ -3435,6 +3435,50 @@ func TestSweepStaleOrderTrackingPreservesTriggerEnvFailedBeads(t *testing.T) {
 	}
 	if gotNormal.Status != "closed" {
 		t.Fatalf("normal tracking status = %s, want closed", gotNormal.Status)
+	}
+
+	ran := false
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:     "pg-cooldown",
+		Trigger:  "cooldown",
+		Interval: "1s",
+		Exec:     "true",
+	}}, store, nil, func(context.Context, string, string, []string) ([]byte, error) {
+		ran = true
+		return nil, nil
+	}, nil)
+	ad.dispatch(context.Background(), t.TempDir(), normal.CreatedAt.Add(2*time.Hour))
+	ad.drain(context.Background())
+	if !ran {
+		t.Fatal("dispatch did not run after stale trigger-env marker was closed")
+	}
+}
+
+func TestCloseAndVerifyOrderTrackingBeadsStopsRetryOnContextCancel(t *testing.T) {
+	base := beads.NewMemStore()
+	tracking, err := base.Create(beads.Bead{
+		Title:     "order:canceled",
+		Labels:    []string{"order-run:canceled", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(tracking): %v", err)
+	}
+	store := &noopCloseAllStore{Store: base}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = closeAndVerifyOrderTrackingBeads(ctx, store, []string{tracking.ID}, map[string]string{
+		"close_reason": completedOrderTrackingCloseReason,
+	})
+	if err == nil {
+		t.Fatal("closeAndVerifyOrderTrackingBeads err = nil, want context cancellation")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if store.closeCalls != 1 {
+		t.Fatalf("CloseAll calls = %d, want 1", store.closeCalls)
 	}
 }
 

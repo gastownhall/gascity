@@ -1643,6 +1643,15 @@ func TestOrderTrackingSweepWatchdogClosesRigStoreSweepTracking(t *testing.T) {
 func TestOrderTrackingSweepWatchdogFallsBackToConfiguredRigStore(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
+	citySweepTracking, err := cityStore.Create(beads.Bead{
+		Title:     "order:" + orderTrackingSweepOrder,
+		Labels:    []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(city sweep): %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
 	rigSweepTracking, err := rigStore.Create(beads.Bead{
 		Title:     "order:" + orderTrackingSweepOrder + ":rig:frontend",
 		Labels:    []string{"order-run:" + orderTrackingSweepOrder + ":rig:frontend", labelOrderTracking},
@@ -1689,6 +1698,13 @@ func TestOrderTrackingSweepWatchdogFallsBackToConfiguredRigStore(t *testing.T) {
 	}
 	if gotRig.Status != "closed" {
 		t.Fatalf("rig sweep tracking status = %s, want closed", gotRig.Status)
+	}
+	gotCity, err := cityStore.Get(citySweepTracking.ID)
+	if err != nil {
+		t.Fatalf("Get(city sweep): %v", err)
+	}
+	if gotCity.Status != "closed" {
+		t.Fatalf("city sweep tracking status = %s, want closed", gotCity.Status)
 	}
 }
 

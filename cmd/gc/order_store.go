@@ -502,6 +502,12 @@ func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []ord
 
 func orderTrackingSweepStoresForConfig(cityPath string, cfg *config.City) ([]beads.Store, error) {
 	targets := orderTrackingSweepTargetsForConfig(cityPath, cfg)
+	return orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {
+		return openStoreAtForCity(sweepTarget.target.ScopeRoot, cityPath)
+	})
+}
+
+func orderTrackingSweepStoresFromTargets(targets []orderTrackingSweepTarget, openStore func(orderTrackingSweepTarget) (beads.Store, error)) ([]beads.Store, error) {
 	stores := make([]beads.Store, 0, len(targets))
 	seen := make(map[string]struct{}, len(targets))
 	var errs []error
@@ -511,7 +517,7 @@ func orderTrackingSweepStoresForConfig(cityPath string, cfg *config.City) ([]bea
 			continue
 		}
 		seen[key] = struct{}{}
-		store, err := openStoreAtForCity(sweepTarget.target.ScopeRoot, cityPath)
+		store, err := openStore(sweepTarget)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("opening %s order store: %w", sweepTarget.label, err))
 			continue

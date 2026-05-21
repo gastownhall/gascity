@@ -1195,14 +1195,14 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	}
 	cr.orderSweepWatchdogLast = now
 
-	stores, storeErr := cr.orderTrackingSweepStores()
+	stores, targets, storeErr := cr.orderTrackingSweepStores()
 	if len(stores) == 0 {
 		if storeErr != nil && cr.stderr != nil {
 			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, storeErr) //nolint:errcheck // best-effort stderr
 		}
 		return
 	}
-	onlyOrders := orderTrackingSweepOrderFilterForConfig(cr.cityPath, cr.cfg)
+	onlyOrders := orderTrackingSweepOrderFilterForTargets(targets)
 	result, sweepErr := sweepStaleOrderTrackingAcrossStores(stores, now, orderTrackingSweepWatchdogStaleAfter, onlyOrders, orderTrackingWatchdogMetadataInitiator, false)
 	if err := errors.Join(storeErr, sweepErr); err != nil {
 		if cr.stderr != nil {
@@ -1215,18 +1215,10 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	}
 }
 
-func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, error) {
+func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackingSweepTarget, error) {
 	targets := orderTrackingSweepTargetsForConfig(cr.cityPath, cr.cfg)
-	stores := make([]beads.Store, 0, len(targets))
-	seen := make(map[string]struct{}, len(targets))
 	rigStores := cr.rigBeadStores()
-	var errs []error
-	for _, sweepTarget := range targets {
-		key := orderStoreTargetKey(sweepTarget.target)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
+	stores, err := orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {
 		var store beads.Store
 		switch sweepTarget.target.ScopeKind {
 		case "city":
@@ -1235,23 +1227,18 @@ func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, error) {
 			store = rigStores[sweepTarget.target.RigName]
 		}
 		if store == nil {
-			opened, err := newCityRuntimeOpenSweepStore(sweepTarget.target.ScopeRoot, cr.cityPath)
-			if err != nil {
-				errs = append(errs, fmt.Errorf("opening %s order store: %w", sweepTarget.label, err))
-				continue
-			}
-			store = opened
+			return newCityRuntimeOpenSweepStore(sweepTarget.target.ScopeRoot, cr.cityPath)
 		}
-		stores = append(stores, orderTrackingSweepScopedStore{Store: store, label: sweepTarget.label})
-	}
-	return stores, errors.Join(errs...)
+		return store, nil
+	})
+	return stores, targets, err
 }
 
-func orderTrackingSweepOrderFilterForConfig(cityPath string, cfg *config.City) map[string]struct{} {
+func orderTrackingSweepOrderFilterForTargets(targets []orderTrackingSweepTarget) map[string]struct{} {
 	onlyOrders := map[string]struct{}{
 		orderTrackingSweepOrder: {},
 	}
-	for _, sweepTarget := range orderTrackingSweepTargetsForConfig(cityPath, cfg) {
+	for _, sweepTarget := range targets {
 		if sweepTarget.target.ScopeKind != "rig" || strings.TrimSpace(sweepTarget.target.RigName) == "" {
 			continue
 		}

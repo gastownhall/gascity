@@ -685,7 +685,7 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	// tracking bead outcome observable to a waiting drain.
 	defer m.doneInflight()
 	defer func() {
-		if err := closeOrderTrackingBead(store, trackingID); err != nil {
+		if err := closeOrderTrackingBead(ctx, store, trackingID); err != nil {
 			logDispatchError(m.stderr, "gc: order %s: closing tracking bead %s: %v", a.ScopedName(), trackingID, err)
 		}
 	}()
@@ -708,17 +708,20 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	}
 }
 
-func closeOrderTrackingBead(store beads.Store, trackingID string) error {
-	_, err := closeAndVerifyOrderTrackingBeads(store, []string{trackingID}, map[string]string{
+func closeOrderTrackingBead(ctx context.Context, store beads.Store, trackingID string) error {
+	_, err := closeAndVerifyOrderTrackingBeads(ctx, store, []string{trackingID}, map[string]string{
 		"close_reason": completedOrderTrackingCloseReason,
 	})
 	return err
 }
 
-func closeAndVerifyOrderTrackingBeads(store beads.Store, ids []string, metadata map[string]string) (int, error) {
+func closeAndVerifyOrderTrackingBeads(ctx context.Context, store beads.Store, ids []string, metadata map[string]string) (int, error) {
 	ids = uniqueNonEmptyOrderTrackingIDs(ids)
 	if len(ids) == 0 {
 		return 0, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	if store == nil {
 		return 0, fmt.Errorf("order-tracking close: nil store")
@@ -735,7 +738,9 @@ func closeAndVerifyOrderTrackingBeads(store beads.Store, ids []string, metadata 
 		if err != nil {
 			lastErr = fmt.Errorf("closing order-tracking beads %s: %w", strings.Join(ids, ", "), err)
 			if attempt < orderTrackingCloseVerifyAttempts {
-				time.Sleep(orderTrackingCloseVerifyRetryDelay)
+				if waitErr := waitOrderTrackingCloseRetry(ctx); waitErr != nil {
+					return closed, errors.Join(lastErr, waitErr)
+				}
 			}
 			continue
 		}
@@ -743,7 +748,9 @@ func closeAndVerifyOrderTrackingBeads(store beads.Store, ids []string, metadata 
 		if err != nil {
 			lastErr = fmt.Errorf("verifying order-tracking close for %s: %w", strings.Join(ids, ", "), err)
 			if attempt < orderTrackingCloseVerifyAttempts {
-				time.Sleep(orderTrackingCloseVerifyRetryDelay)
+				if waitErr := waitOrderTrackingCloseRetry(ctx); waitErr != nil {
+					return closed, errors.Join(lastErr, waitErr)
+				}
 			}
 			continue
 		}
@@ -752,10 +759,23 @@ func closeAndVerifyOrderTrackingBeads(store beads.Store, ids []string, metadata 
 		}
 		lastErr = fmt.Errorf("verifying order-tracking close: still open: %s", strings.Join(openIDs, ", "))
 		if attempt < orderTrackingCloseVerifyAttempts {
-			time.Sleep(orderTrackingCloseVerifyRetryDelay)
+			if waitErr := waitOrderTrackingCloseRetry(ctx); waitErr != nil {
+				return closed, errors.Join(lastErr, waitErr)
+			}
 		}
 	}
 	return closed, lastErr
+}
+
+func waitOrderTrackingCloseRetry(ctx context.Context) error {
+	timer := time.NewTimer(orderTrackingCloseVerifyRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func uniqueNonEmptyOrderTrackingIDs(ids []string) []string {
@@ -1216,7 +1236,7 @@ func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	n, err := closeAndVerifyOrderTrackingBeads(store, ids, map[string]string{
+	n, err := closeAndVerifyOrderTrackingBeads(context.Background(), store, ids, map[string]string{
 		"close_reason": orphanedOrderTrackingCloseReason,
 	})
 	if err != nil {
@@ -1301,9 +1321,6 @@ func sweepStaleOrderTrackingWithOptions(store beads.Store, now time.Time, staleA
 	result := orderTrackingSweepResult{}
 	var ids []string
 	for _, b := range all {
-		if beadLabelsContain(b.Labels, labelTriggerEnvFailed) {
-			continue
-		}
 		if len(onlyOrders) > 0 {
 			name, ok := orderNameFromTrackingBead(b)
 			if !ok {
@@ -1330,7 +1347,7 @@ func sweepStaleOrderTrackingWithOptions(store beads.Store, now time.Time, staleA
 		if initiator != "" {
 			metadata["order_tracking_sweep_by"] = initiator
 		}
-		n, err := closeAndVerifyOrderTrackingBeads(store, ids, metadata)
+		n, err := closeAndVerifyOrderTrackingBeads(context.Background(), store, ids, metadata)
 		result.trackingClosed = n
 		if err != nil {
 			return result, fmt.Errorf("closing stale order-tracking beads: %w", err)
