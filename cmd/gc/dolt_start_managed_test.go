@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -385,6 +386,27 @@ func TestManagedDoltTestDisarmOnReadyForEnvOnlyHelperWithoutParent(t *testing.T)
 	}
 }
 
+func TestManagedDoltTestParentDoneClosesOnPipeEOF(t *testing.T) {
+	parentPipeRead, parentPipeWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	done, closeDone, err := managedDoltTestParentDone(strconv.Itoa(int(parentPipeRead.Fd())))
+	if err != nil {
+		t.Fatalf("managedDoltTestParentDone: %v", err)
+	}
+	defer closeDone()
+
+	if err := parentPipeWrite.Close(); err != nil {
+		t.Fatalf("close parent pipe writer: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("parent pipe EOF did not close done channel")
+	}
+}
+
 func TestDisarmManagedDoltStartedProcessUnregistersReadyProcess(t *testing.T) {
 	withManagedDoltTestMode(t, true)
 	clearManagedDoltTestProcessRegistry(t)
@@ -485,12 +507,29 @@ func TestReapManagedDoltTestProcessesTerminatesRegisteredChildren(t *testing.T) 
 	}
 	t.Cleanup(func() { managedDoltTestTerminateProcess = oldTerminate })
 
-	pid := os.Getpid()
-	registerManagedDoltTestProcess(managedDoltStartedProcess{PID: pid, WatchdogPID: pid})
+	startChild := func(name string) *exec.Cmd {
+		t.Helper()
+		cmd := exec.Command("sleep", "60")
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start %s child: %v", name, err)
+		}
+		t.Cleanup(func() {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			_ = cmd.Wait()
+		})
+		return cmd
+	}
+	dolt := startChild("dolt")
+	watchdog := startChild("watchdog")
+	started := managedDoltStartedProcess{PID: dolt.Process.Pid, WatchdogPID: watchdog.Process.Pid}
+	registerManagedDoltTestProcess(started)
 	reapManagedDoltTestProcesses()
 
-	if len(terminated) != 2 || terminated[0] != pid || terminated[1] != pid {
-		t.Fatalf("terminated = %v, want child and watchdog pid %d", terminated, pid)
+	want := []int{started.PID, started.WatchdogPID}
+	if fmt.Sprint(terminated) != fmt.Sprint(want) {
+		t.Fatalf("terminated = %v, want %v", terminated, want)
 	}
 	var remaining int
 	managedDoltTestProcessRegistry.Range(func(_, _ any) bool {
