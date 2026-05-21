@@ -120,6 +120,7 @@ func (ce ConditionEnv) Environ() []string {
 	}
 	for _, key := range []string{
 		"BEADS_DOLT_AUTO_START",
+		"BEADS_DOLT_PORT",
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
 		"BEADS_DOLT_SERVER_USER",

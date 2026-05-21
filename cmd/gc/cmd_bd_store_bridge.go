@@ -306,6 +306,7 @@ func bdStoreBridgeEnv(dir, host, port, user, password string) map[string]string 
 		"BEADS_DOLT_AUTO_START",
 		"BEADS_DOLT_DATABASE",
 		"BEADS_DOLT_PASSWORD",
+		"BEADS_DOLT_PORT",
 		"BEADS_DOLT_SERVER_DATABASE",
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
@@ -326,6 +327,7 @@ func bdStoreBridgeEnv(dir, host, port, user, password string) map[string]string 
 	env["BEADS_DOLT_SERVER_HOST"] = host
 	env["GC_DOLT_PORT"] = port
 	env["BEADS_DOLT_SERVER_PORT"] = port
+	env["BEADS_DOLT_PORT"] = port
 	env["GC_DOLT_USER"] = user
 	env["BEADS_DOLT_SERVER_USER"] = user
 	env["GC_DOLT_PASSWORD"] = password

@@ -522,6 +522,7 @@ var projectedDoltEnvKeys = []string{
 	"GC_DOLT_USER",
 	"GC_DOLT_PASSWORD",
 	"BEADS_CREDENTIALS_FILE",
+	"BEADS_DOLT_PORT",
 	"BEADS_DOLT_SERVER_HOST",
 	"BEADS_DOLT_SERVER_PORT",
 	"BEADS_DOLT_SERVER_USER",
@@ -1101,10 +1102,16 @@ func mirrorBeadsDoltEnv(env map[string]string) {
 	}
 	if port := strings.TrimSpace(env["GC_DOLT_PORT"]); port != "" {
 		env["BEADS_DOLT_SERVER_PORT"] = port
+		// bd accepts both BEADS_DOLT_SERVER_PORT and BEADS_DOLT_PORT;
+		// projecting both keeps agents bd-version-independent so they
+		// can run `bd list` without manually bridging the env var
+		// (Wasteland w-7492f67452).
+		env["BEADS_DOLT_PORT"] = port
 	} else {
-		// Keep the key present so child bd processes cannot inherit a stale
-		// BEADS_DOLT_SERVER_PORT from an ambient parent environment.
+		// Keep both keys present so child bd processes cannot inherit a
+		// stale port from an ambient parent environment.
 		env["BEADS_DOLT_SERVER_PORT"] = ""
+		env["BEADS_DOLT_PORT"] = ""
 	}
 	if user := strings.TrimSpace(env["GC_DOLT_USER"]); user != "" {
 		env["BEADS_DOLT_SERVER_USER"] = user
@@ -1154,6 +1161,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"BEADS_DIR",
 		"BEADS_DOLT_AUTO_START",
 		"BEADS_DOLT_PASSWORD",
+		"BEADS_DOLT_PORT",
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
 		"BEADS_DOLT_SERVER_USER",

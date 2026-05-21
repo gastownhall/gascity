@@ -151,6 +151,10 @@ func projectedPodDoltEnv(cfgEnv map[string]string, managedHost, managedPort stri
 		"GC_DOLT_PORT":           port,
 		"BEADS_DOLT_SERVER_HOST": host,
 		"BEADS_DOLT_SERVER_PORT": port,
+		// Mirror the port to BEADS_DOLT_PORT so bd versions that read the
+		// non-_SERVER_ form connect without manual bridging
+		// (Wasteland w-7492f67452).
+		"BEADS_DOLT_PORT": port,
 	}
 	return projected, nil
 }
@@ -395,6 +399,7 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 		"GC_K8S_DOLT_PORT":       true,
 		"GC_DOLT_HOST":           true,
 		"GC_DOLT_PORT":           true,
+		"BEADS_DOLT_PORT":        true,
 		"BEADS_DOLT_SERVER_HOST": true,
 		"BEADS_DOLT_SERVER_PORT": true,
 	}

@@ -180,6 +180,9 @@ func TestBdRuntimeEnvIncludesDoltHost(t *testing.T) {
 	if got := env["BEADS_DOLT_SERVER_PORT"]; got != "3307" {
 		t.Errorf("BEADS_DOLT_SERVER_PORT = %q, want %q", got, "3307")
 	}
+	if got := env["BEADS_DOLT_PORT"]; got != "3307" {
+		t.Errorf("BEADS_DOLT_PORT = %q, want %q (bd reads this var name without the _SERVER_ infix)", got, "3307")
+	}
 	if got := env["BEADS_DOLT_SERVER_USER"]; got != "agent" {
 		t.Errorf("BEADS_DOLT_SERVER_USER = %q, want %q", got, "agent")
 	}
@@ -188,6 +191,28 @@ func TestBdRuntimeEnvIncludesDoltHost(t *testing.T) {
 	}
 	if got := env["BEADS_DOLT_AUTO_START"]; got != "0" {
 		t.Errorf("BEADS_DOLT_AUTO_START = %q, want %q", got, "0")
+	}
+}
+
+// TestBdRuntimeEnvMirrorsBeadsDoltPort pins the parallel injection of
+// BEADS_DOLT_PORT alongside BEADS_DOLT_SERVER_PORT. Some bd versions and
+// downstream tooling read BEADS_DOLT_PORT (no _SERVER_ infix). Without
+// this mirror, agents inside gascity sessions cannot run bd without
+// manually bridging the env var — see Wasteland w-7492f67452.
+func TestBdRuntimeEnvMirrorsBeadsDoltPort(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT_HOST", "remote.example.com")
+	t.Setenv("GC_DOLT_PORT", "36826")
+	t.Setenv("GC_DOLT", "skip")
+
+	cityPath := t.TempDir()
+	env := mustBdRuntimeEnv(t, cityPath)
+
+	if got := env["BEADS_DOLT_SERVER_PORT"]; got != "36826" {
+		t.Errorf("BEADS_DOLT_SERVER_PORT = %q, want %q", got, "36826")
+	}
+	if got := env["BEADS_DOLT_PORT"]; got != "36826" {
+		t.Errorf("BEADS_DOLT_PORT = %q, want %q (bd-version-independent fallback)", got, "36826")
 	}
 }
 
