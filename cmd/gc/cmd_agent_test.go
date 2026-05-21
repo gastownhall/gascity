@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,56 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
+
+func TestDoAgentListJSON(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+max_active_sessions = 1
+
+[[agent]]
+name = "worker"
+dir = "frontend"
+suspended = true
+work_query = "bd ready --label=frontend"
+sling_query = "bd update {} --set-metadata gc.routed_to=frontend/worker"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentList(fs, "/city", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doAgentList --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stdout lines = %d, want 1; stdout=%q", len(lines), stdout.String())
+	}
+	var result AgentListJSON
+	if err := json.Unmarshal([]byte(lines[0]), &result); err != nil {
+		t.Fatalf("invalid JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" || result.CityName != "test-city" || len(result.Agents) != 2 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	var worker AgentListItem
+	for _, item := range result.Agents {
+		if item.QualifiedName == "frontend/worker" {
+			worker = item
+		}
+	}
+	if worker.QualifiedName != "frontend/worker" || !worker.Suspended {
+		t.Fatalf("worker item = %+v, want suspended frontend/worker", worker)
+	}
+	if worker.WorkQuery != "bd ready --label=frontend" || worker.SlingQuery == "" {
+		t.Fatalf("worker routing fields = %+v", worker)
+	}
+}
 
 // ---------------------------------------------------------------------------
 // doAgentSuspend/Resume — bad config error path (no existing coverage)
@@ -263,7 +314,8 @@ func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 			`workspace.name redefined by "/city/defaults.toml"`,
 			`/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`,
 			`/city/pack.toml: both [agent_defaults] and [agents] are present; [agent_defaults] wins on overlapping keys and [agents] only fills gaps`,
-			`/city/pack.toml: "agent_defaults.provider" is not supported in [agent_defaults]; keep using workspace.provider or set provider per agent in agents/<name>/agent.toml`,
+			`/city/pack.toml: "agent_defaults.provider" is not supported in this release wave; keep setting provider per agent in agents/<name>/agent.toml`,
+			`/city/city.toml: workspace.provider is deprecated: Set provider per agent in agents/<name>/agent.toml.`,
 			`gc: warning: attachment-list fields (` + "`skills`, `mcp`, `skills_append`, `mcp_append`, `shared_skills`" + `) are deprecated as of v0.15.1 and ignored.`,
 		},
 	})
@@ -280,6 +332,9 @@ func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 	}
 	if !strings.Contains(output, `"agent_defaults.provider" is not supported`) {
 		t.Fatalf("expected unsupported-key warning, got %q", output)
+	}
+	if strings.Contains(output, `workspace.provider is deprecated`) {
+		t.Fatalf("legacy workspace warnings should stay out of generic command stderr, got %q", output)
 	}
 	if !strings.Contains(output, "attachment-list fields") {
 		t.Fatalf("expected attachment deprecation warning, got %q", output)
@@ -467,7 +522,8 @@ func TestStrictFatalLoadConfigWarningsKeepsMixedTableWarningsFatal(t *testing.T)
 	warnings := []string{
 		`/city/pack.toml: [agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]`,
 		`/city/pack.toml: both [agent_defaults] and [agents] are present; [agent_defaults] wins on overlapping keys and [agents] only fills gaps`,
-		`/city/pack.toml: "agent_defaults.provider" is not supported in [agent_defaults]; keep using workspace.provider or set provider per agent in agents/<name>/agent.toml`,
+		`/city/pack.toml: "agent_defaults.provider" is not supported in this release wave; keep setting provider per agent in agents/<name>/agent.toml`,
+		`/city/city.toml: workspace.provider is deprecated: Set provider per agent in agents/<name>/agent.toml.`,
 		`workspace.name redefined by "/city/defaults.toml"`,
 	}
 

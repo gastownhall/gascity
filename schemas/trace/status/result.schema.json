@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "city_path",
+    "as_of",
+    "controller_running",
+    "head_seq",
+    "active_arms"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
+    "city_path": {
+      "type": "string"
+    },
+    "as_of": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "controller_running": {
+      "type": "boolean"
+    },
+    "controller_pid": {
+      "type": "integer"
+    },
+    "head_seq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "active_arms": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -34,6 +34,13 @@ const (
 	waitStateFailed   = "failed"
 )
 
+type waitSetStateResult struct {
+	WaitID      string
+	ReadyWaitID string
+	Retried     bool
+	RetriedFrom string
+}
+
 func newWaitCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "wait",
@@ -110,31 +117,67 @@ func newWaitInspectCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 func newWaitCancelCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "cancel <wait-id>",
 		Short: "Cancel a wait",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				result, code := cmdWaitSetStateResult(args[0], waitStateCanceled, io.Discard, stderr)
+				if code != 0 {
+					return errExit
+				}
+				return writeManagementActionJSON(stdout, managementActionResult{
+					Command: commandName("wait", "cancel"),
+					Action:  "cancel",
+					Name:    result.WaitID,
+					State:   waitStateCanceled,
+				})
+			}
 			if cmdWaitSetState(args[0], waitStateCanceled, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
+	return cmd
 }
 
 func newWaitReadyCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "ready <wait-id>",
 		Short: "Manually mark a wait ready",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				result, code := cmdWaitSetStateResult(args[0], waitStateReady, io.Discard, stderr)
+				if code != 0 {
+					return errExit
+				}
+				payload := managementActionResult{
+					Command: commandName("wait", "ready"),
+					Action:  "ready",
+					Name:    result.WaitID,
+					State:   waitStateReady,
+				}
+				if result.Retried {
+					payload.Retried = managementBoolPtr(true)
+					payload.RetriedFrom = result.RetriedFrom
+					payload.ReadyWaitID = result.ReadyWaitID
+				}
+				return writeManagementActionJSON(stdout, payload)
+			}
 			if cmdWaitSetState(args[0], waitStateReady, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
+	return cmd
 }
 
 func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep bool, stdout, stderr io.Writer) int {
@@ -430,23 +473,29 @@ func writeWaitInspectJSON(stdout, stderr io.Writer, cityPath string, wait beads.
 }
 
 func cmdWaitSetState(waitID, state string, stdout, stderr io.Writer) int {
+	_, code := cmdWaitSetStateResult(waitID, state, stdout, stderr)
+	return code
+}
+
+func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (waitSetStateResult, int) {
+	result := waitSetStateResult{WaitID: waitID}
 	store, code := openCityStore(stderr, "gc wait")
 	if store == nil {
-		return code
+		return result, code
 	}
 	b, err := store.Get(waitID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
-		return 1
+		return result, 1
 	}
 	if !sessionpkg.IsWaitBead(b) {
 		fmt.Fprintf(stderr, "gc wait: %s is not a wait\n", waitID) //nolint:errcheck
-		return 1
+		return result, 1
 	}
 	if state == waitStateReady {
 		if err := waitLifecycleEnabled(); err != nil {
 			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
-			return 1
+			return result, 1
 		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -454,10 +503,14 @@ func cmdWaitSetState(waitID, state string, stdout, stderr io.Writer) int {
 		retried, err := retryClosedWait(store, b, now)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
-			return 1
+			return result, 1
 		}
 		fmt.Fprintf(stdout, "Retried wait %s as %s.\n", waitID, retried.ID) //nolint:errcheck
-		return 0
+		result.WaitID = retried.ID
+		result.ReadyWaitID = retried.ID
+		result.Retried = true
+		result.RetriedFrom = waitID
+		return result, 0
 	}
 	batch := map[string]string{"state": state}
 	switch state {
@@ -466,7 +519,7 @@ func cmdWaitSetState(waitID, state string, stdout, stderr io.Writer) int {
 		nextAttempt, err := nextWaitDeliveryAttempt(store, b)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
-			return 1
+			return result, 1
 		}
 		if nextAttempt != "" {
 			batch["delivery_attempt"] = nextAttempt
@@ -489,22 +542,22 @@ func cmdWaitSetState(waitID, state string, stdout, stderr io.Writer) int {
 	}
 	if err := apply(waitID, batch); err != nil {
 		fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
-		return 1
+		return result, 1
 	}
 	if state == waitStateCanceled {
 		if cityPath, err := resolveCity(); err == nil {
 			if err := withdrawQueuedWaitNudges(cityPath, []string{b.Metadata["nudge_id"]}); err != nil {
 				fmt.Fprintf(stderr, "gc wait: withdrawing queued nudge: %v\n", err) //nolint:errcheck
-				return 1
+				return result, 1
 			}
 		}
 		if err := clearSessionWaitHoldIfIdle(store, b.Metadata["session_id"]); err != nil {
 			fmt.Fprintf(stderr, "gc wait: clearing session wait hold: %v\n", err) //nolint:errcheck
-			return 1
+			return result, 1
 		}
 	}
 	fmt.Fprintf(stdout, "Updated wait %s to %s.\n", waitID, state) //nolint:errcheck
-	return 0
+	return result, 0
 }
 
 func loadWaitBeads(store beads.Store) ([]beads.Bead, error) {

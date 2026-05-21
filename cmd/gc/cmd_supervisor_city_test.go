@@ -314,7 +314,18 @@ func TestRegisterCityWithSupervisorFailsFastWhenSupervisorStopsDuringWait(t *tes
 	if waitStarted.IsZero() {
 		t.Fatal("supervisor wait path was not reached")
 	}
-	if elapsed := time.Since(waitStarted); elapsed > 250*time.Millisecond {
+	// The fast-failure budget is intentionally generous (well under the test's
+	// 5s startup_timeout but well above the wait-loop's logical exit time).
+	// waitStarted is captured inside the first alive-hook callback, so the
+	// elapsed window measures everything from that point onward: the
+	// remaining ensureLegacyNamedPacksCached / MaterializeBuiltinPacks work,
+	// the wait-loop's first iteration, the error formatting, the
+	// keepRegisteredCity stderr writes, and the assertion itself. Under CPU
+	// contention or a GC pause these can balloon to several hundred ms on
+	// CI hosts (ga-q42 flake observations: up to 715ms). 2s preserves the
+	// "fails fast vs. polls until 5s startup_timeout" regression guard while
+	// no longer flaking on slow hosts.
+	if elapsed := time.Since(waitStarted); elapsed > 2*time.Second {
 		t.Fatalf("registerCityWithSupervisor took %v, want fast failure when supervisor stops", elapsed)
 	}
 	if !strings.Contains(stderr.String(), "keeping registration") {

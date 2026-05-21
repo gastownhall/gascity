@@ -354,6 +354,12 @@ func acceptanceTempDir(t *testing.T) string {
 	return dir
 }
 
+// TempDir creates a retry-cleaned temp directory for acceptance test artifacts.
+func TempDir(t *testing.T) string {
+	t.Helper()
+	return acceptanceTempDir(t)
+}
+
 func removeAllWithRetry(t *testing.T, dir string, timeout, interval time.Duration) {
 	t.Helper()
 	if err := removeAllWithRetryFunc(dir, timeout, interval, os.RemoveAll); err != nil {

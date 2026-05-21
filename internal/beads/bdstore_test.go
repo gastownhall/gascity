@@ -32,6 +32,15 @@ func fakeRunner(responses map[string]struct {
 	}
 }
 
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
 // --- Create ---
 
 func TestBdStoreCreate(t *testing.T) {
@@ -597,6 +606,189 @@ func TestBdStoreUpdatePassesPriority(t *testing.T) {
 	args := strings.Join(gotArgs, " ")
 	if !strings.Contains(args, "--priority 0") {
 		t.Fatalf("args = %q, want priority flag", args)
+	}
+}
+
+func TestBdStoreTxCombinesWritesForSameBead(t *testing.T) {
+	var commands []string
+	closed := false
+	description := "seed"
+	metadata := map[string]string{"existing": "kept"}
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		commands = append(commands, name+" "+strings.Join(args, " "))
+		switch strings.Join(args, " ") {
+		case "show --json bd-42":
+			status := "open"
+			if closed {
+				status = "closed"
+			}
+			payload := fmt.Sprintf(
+				`[{"id":"bd-42","title":"before","status":%q,"issue_type":"task","priority":2,"created_at":"2025-01-15T10:30:00Z","description":%q,"metadata":%s}]`,
+				status,
+				description,
+				mustJSON(t, metadata),
+			)
+			return []byte(payload), nil
+		case "close --force --json --reason completed during transaction bd-42":
+			closed = true
+			description = ""
+			metadata = map[string]string{}
+			return []byte(`[{"id":"bd-42","title":"before","status":"closed","issue_type":"task","priority":2,"created_at":"2025-01-15T10:30:00Z","description":"","metadata":{}}]`), nil
+		case "update --json bd-42 --title before --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied":
+			description = "after"
+			metadata["close_reason"] = "completed during transaction"
+			metadata["existing"] = "kept"
+			metadata["tx"] = "applied"
+			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","priority":2,"created_at":"2025-01-15T10:30:00Z","description":"after","metadata":{"close_reason":"completed during transaction","existing":"kept","tx":"applied"}}]`), nil
+		case "update --json bd-42 --title before --status closed --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied":
+			closed = true
+			description = "after"
+			metadata["close_reason"] = "completed during transaction"
+			metadata["existing"] = "kept"
+			metadata["tx"] = "applied"
+			return []byte(`[{"id":"bd-42","title":"before","status":"closed","issue_type":"task","priority":2,"created_at":"2025-01-15T10:30:00Z","description":"after","metadata":{"close_reason":"completed during transaction","existing":"kept","tx":"applied"}}]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
+		}
+	}
+	s := beads.NewBdStore("/city", runner)
+
+	desc := "after"
+	err := s.Tx("combine", func(tx beads.Tx) error {
+		if err := tx.Update("bd-42", beads.UpdateOpts{Description: &desc}); err != nil {
+			return err
+		}
+		if err := tx.SetMetadataBatch("bd-42", map[string]string{"tx": "applied"}); err != nil {
+			return err
+		}
+		if err := tx.SetMetadataBatch("bd-42", map[string]string{"close_reason": "completed during transaction"}); err != nil {
+			return err
+		}
+		return tx.Close("bd-42")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get("bd-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("Status after Tx = %q, want closed", got.Status)
+	}
+	if got.Description != "after" {
+		t.Fatalf("Description after Tx = %q, want after", got.Description)
+	}
+	if got.Metadata["tx"] != "applied" {
+		t.Fatalf("Metadata[tx] after Tx = %q, want applied", got.Metadata["tx"])
+	}
+	if got.Metadata["close_reason"] != "completed during transaction" {
+		t.Fatalf("Metadata[close_reason] after Tx = %q, want completed during transaction", got.Metadata["close_reason"])
+	}
+
+	want := []string{
+		"bd show --json bd-42",
+		"bd update --json bd-42 --title before --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied",
+		"bd show --json bd-42",
+		"bd close --force --json --reason completed during transaction bd-42",
+		"bd update --json bd-42 --title before --status closed --type task --priority 2 --description after --set-metadata close_reason=completed during transaction --set-metadata existing=kept --set-metadata tx=applied",
+		"bd show --json bd-42",
+		"bd show --json bd-42",
+	}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands = %#v, want %#v", commands, want)
+	}
+}
+
+func TestBdStoreTxCloseOnlyUsesCloseCommand(t *testing.T) {
+	var commands []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		commands = append(commands, name+" "+strings.Join(args, " "))
+		switch strings.Join(args, " ") {
+		case "show --json bd-42":
+			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":{"close_reason":"completed during transaction"}}]`), nil
+		case "close --force --json --reason completed during transaction bd-42":
+			return []byte(`[{"id":"bd-42","title":"before","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
+		}
+	}
+	s := beads.NewBdStore("/city", runner)
+
+	if err := s.Tx("close", func(tx beads.Tx) error {
+		return tx.Close("bd-42")
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		"bd show --json bd-42",
+		"bd close --force --json --reason completed during transaction bd-42",
+	}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands = %#v, want %#v", commands, want)
+	}
+}
+
+func TestBdStoreTxRetriesTransientUpdateApply(t *testing.T) {
+	updateCalls := 0
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		switch strings.Join(args, " ") {
+		case "show --json bd-42":
+			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+		case "update --json bd-42 --title before --status open --type task --set-metadata tx=applied":
+			updateCalls++
+			if updateCalls == 1 {
+				return nil, fmt.Errorf("exit status 1: Error updating bd-42: dolt commit: Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction from another client, try restarting transaction")
+			}
+			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":{"tx":"applied"}}]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
+		}
+	}
+	s := beads.NewBdStore("/city", runner)
+
+	err := s.Tx("retry", func(tx beads.Tx) error {
+		return tx.SetMetadataBatch("bd-42", map[string]string{"tx": "applied"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updateCalls != 2 {
+		t.Fatalf("updateCalls = %d, want 2", updateCalls)
+	}
+}
+
+func TestBdStoreTxPreservesAddsAndRemovesLabels(t *testing.T) {
+	var commands []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		commands = append(commands, name+" "+strings.Join(args, " "))
+		switch strings.Join(args, " ") {
+		case "show --json bd-42":
+			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","labels":["a","b"]}]`), nil
+		case "update --json bd-42 --title before --status open --type task --add-label b --add-label c --remove-label a":
+			return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","labels":["b","c"]}]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
+		}
+	}
+	s := beads.NewBdStore("/city", runner)
+
+	if err := s.Tx("labels", func(tx beads.Tx) error {
+		return tx.Update("bd-42", beads.UpdateOpts{
+			Labels:       []string{"c"},
+			RemoveLabels: []string{"a"},
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		"bd show --json bd-42",
+		"bd update --json bd-42 --title before --status open --type task --add-label b --add-label c --remove-label a",
+	}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands = %#v, want %#v", commands, want)
 	}
 }
 

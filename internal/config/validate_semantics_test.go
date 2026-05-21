@@ -227,6 +227,21 @@ func TestValidateAgentsPromptModeValidValues(t *testing.T) {
 	}
 }
 
+func TestValidateAgentsLifecycleValues(t *testing.T) {
+	for _, lifecycle := range []string{"", AgentLifecycleOneShot} {
+		if err := ValidateAgents([]Agent{{Name: "ok", Lifecycle: lifecycle}}); err != nil {
+			t.Errorf("lifecycle %q should be valid, got: %v", lifecycle, err)
+		}
+	}
+	err := ValidateAgents([]Agent{{Name: "bad", Lifecycle: "short_lived"}})
+	if err == nil {
+		t.Fatal("expected error for bad lifecycle")
+	}
+	if !strings.Contains(err.Error(), "short_lived") {
+		t.Errorf("error should mention bad value: %v", err)
+	}
+}
+
 func TestValidateAgentsPromptFlagRequiredForFlagMode(t *testing.T) {
 	agents := []Agent{
 		{Name: "bad", PromptMode: "flag"},

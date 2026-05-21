@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -15,12 +14,6 @@ import (
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
 )
-
-func jsonEncoder(w io.Writer) *json.Encoder {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc
-}
 
 func loadConfigCommandCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
 	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
@@ -589,6 +582,9 @@ func explainAgent(w io.Writer, a *config.Agent, prov *config.Provenance) {
 	if a.StartCommand != "" {
 		explainField(w, "start_command", a.StartCommand, source)
 	}
+	if a.Lifecycle != "" {
+		explainField(w, "lifecycle", a.Lifecycle, source)
+	}
 	if a.Nudge != "" {
 		explainField(w, "nudge", a.Nudge, source)
 	}
@@ -817,8 +813,7 @@ func renderProviderExplainJSON(r config.ResolvedProvider, name string, stdout, s
 			"map_key_layer": r.Provenance.MapKeyLayer,
 		},
 	}
-	enc := jsonEncoder(stdout)
-	if err := enc.Encode(payload); err != nil {
+	if err := writeCLIJSONLine(stdout, payload); err != nil {
 		fmt.Fprintf(stderr, "gc config explain: json encode: %v\n", err) //nolint:errcheck
 		return 1
 	}

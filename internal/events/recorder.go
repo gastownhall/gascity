@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -20,10 +21,24 @@ const (
 	defaultRotationMaxSize       = 256 * 1024 * 1024 // 256 MiB
 	defaultRotationCheckRecords  = 1024
 	defaultRotationCheckInterval = 60 * time.Second
+
+	// recordFlockTimeout caps cross-process flock acquisition in Record.
+	// Local-FS flock release latency is sub-millisecond on darwin/linux;
+	// 250 ms is well above any reasonable single-write critical section
+	// yet far below a user-perceptible stall. A dead writer that held the
+	// lock is reaped by the kernel asynchronously — blocking on it can
+	// pile up hundreds of stuck "gc event emit" processes.
+	recordFlockTimeout = 250 * time.Millisecond
+	// recordFlockRetryInterval is the fixed cadence between non-blocking
+	// flock attempts. Fixed over exponential because contention is short
+	// and uniform timing simplifies test assertions; 5 ms guarantees the
+	// loop sees a freed lock within one cadence after a healthy release.
+	recordFlockRetryInterval = 5 * time.Millisecond
 )
 
 // FileRecorder appends events to a JSONL file. It uses O_APPEND for
-// cross-process safety and a mutex for in-process serialization.
+// cross-process safety, a mutex for in-process serialization, and a
+// bounded-wait advisory file lock (flock) for cross-process serialization.
 // Recording errors are written to stderr and never returned.
 //
 // FileRecorder implements [Provider] — it can both record and read events.
@@ -194,12 +209,29 @@ func (r *FileRecorder) Record(e Event) {
 
 	r.maybeAutoRotateLocked()
 
-	if err := syscall.Flock(int(r.file.Fd()), syscall.LOCK_EX); err != nil {
-		fmt.Fprintf(r.stderr, "events: lock: %v\n", err) //nolint:errcheck // best-effort stderr
-		return
+	// Cross-process flock contention only — r.mu already serializes
+	// in-process callers, so this loop never spins for an in-process peer.
+	// The bounded wait drops the recorder if a dead writer is holding the
+	// lock instead of blocking forever and piling up processes.
+	fd := int(r.file.Fd())
+	deadline := time.Now().Add(recordFlockTimeout)
+	for {
+		err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			fmt.Fprintf(r.stderr, "events: lock: %v\n", err) //nolint:errcheck // best-effort stderr
+			return
+		}
+		if time.Now().After(deadline) {
+			fmt.Fprintf(r.stderr, "events: lock: timed out after %dms waiting on flock at %s\n", recordFlockTimeout.Milliseconds(), r.path) //nolint:errcheck // best-effort stderr
+			return
+		}
+		time.Sleep(recordFlockRetryInterval)
 	}
 	defer func() {
-		if err := syscall.Flock(int(r.file.Fd()), syscall.LOCK_UN); err != nil {
+		if err := syscall.Flock(fd, syscall.LOCK_UN); err != nil {
 			fmt.Fprintf(r.stderr, "events: unlock: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 	}()

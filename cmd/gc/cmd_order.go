@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -15,8 +16,8 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
-	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/spf13/cobra"
 )
@@ -55,7 +56,8 @@ tick and dispatches work when a trigger opens.`,
 }
 
 func newOrderListCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List available orders",
 		Long: `List all available orders with their trigger type, schedule, and target.
@@ -64,16 +66,19 @@ Scans orders/ directories for flat .toml files defining trigger conditions,
 scheduling parameters, and target pools.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdOrderList(stdout, stderr) != 0 {
+			if cmdOrderListWithOptions(stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON")
+	return cmd
 }
 
 func newOrderShowCmd(stdout, stderr io.Writer) *cobra.Command {
 	var rig string
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "show <name>",
 		Short: "Show details of an order",
@@ -84,7 +89,7 @@ scheduling parameters, check command, target, and source file.
 Use --rig to disambiguate same-name orders in different rigs.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdOrderShow(args[0], rig, stdout, stderr) != 0 {
+			if cmdOrderShowWithOptions(args[0], rig, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
@@ -92,12 +97,14 @@ Use --rig to disambiguate same-name orders in different rigs.`,
 		ValidArgsFunction: completeOrderNames,
 	}
 	cmd.Flags().StringVar(&rig, "rig", "", "rig name to disambiguate same-name orders")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON")
 	_ = cmd.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	return cmd
 }
 
 func newOrderRunCmd(stdout, stderr io.Writer) *cobra.Command {
 	var rig string
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "run <name>",
 		Short: "Execute an order manually",
@@ -109,7 +116,7 @@ them outside their normal schedule.
 Use --rig to disambiguate same-name orders in different rigs.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdOrderRun(args[0], rig, stdout, stderr) != 0 {
+			if cmdOrderRun(args[0], rig, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -117,12 +124,14 @@ Use --rig to disambiguate same-name orders in different rigs.`,
 		ValidArgsFunction: completeOrderNames,
 	}
 	cmd.Flags().StringVar(&rig, "rig", "", "rig name to disambiguate same-name orders")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
 	_ = cmd.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	return cmd
 }
 
 func newOrderCheckCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "check",
 		Short: "Check which orders are due to run",
 		Long: `Evaluate trigger conditions for all orders and show which are due.
@@ -131,16 +140,19 @@ Prints a table with each order's trigger, due status, and reason. Returns
 exit code 0 if any order is due, 1 if none are due.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdOrderCheck(stdout, stderr) != 0 {
+			if cmdOrderCheck(jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
+	return cmd
 }
 
 func newOrderHistoryCmd(stdout, stderr io.Writer) *cobra.Command {
 	var rig string
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "history [name]",
 		Short: "Show order execution history",
@@ -154,7 +166,7 @@ name. Use --rig to filter by rig.`,
 			if len(args) > 0 {
 				name = args[0]
 			}
-			if cmdOrderHistory(name, rig, stdout, stderr) != 0 {
+			if cmdOrderHistoryJSON(name, rig, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -162,29 +174,38 @@ name. Use --rig to filter by rig.`,
 		ValidArgsFunction: completeOrderNames,
 	}
 	cmd.Flags().StringVar(&rig, "rig", "", "rig name to filter order history")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output JSONL summary")
 	_ = cmd.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	return cmd
 }
 
 func newOrderSweepTrackingCmd(stdout, stderr io.Writer) *cobra.Command {
 	staleAfter := defaultOrderTrackingSweepStaleAfter
+	includeWisps := false
 	quiet := false
 	cmd := &cobra.Command{
-		Use:   "sweep-tracking",
+		Use:   "sweep-tracking [order ...]",
 		Short: "Close stale order-tracking beads",
 		Long: `Close stale open order-tracking beads.
 
 This is intended for maintenance exec orders. It only closes tracking beads
-older than --stale-after so a fresh in-flight order is not interrupted.`,
-		Args: cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdOrderSweepTracking(staleAfter, quiet, stdout, stderr) != 0 {
+older than --stale-after so a fresh in-flight order is not interrupted.
+
+Use --include-wisps for operator recovery of abandoned order-run wisp
+subtrees whose open descendants are also older than --stale-after. Pass one
+or more scoped order names when --include-wisps is set; wisp recovery is
+order-scoped to avoid scanning unrelated beads.`,
+		Args: cobra.ArbitraryArgs,
+		RunE: func(_ *cobra.Command, args []string) error {
+			if cmdOrderSweepTracking(staleAfter, includeWisps, quiet, args, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
+		ValidArgsFunction: completeOrderNames,
 	}
 	cmd.Flags().DurationVar(&staleAfter, "stale-after", defaultOrderTrackingSweepStaleAfter, "minimum age for an open tracking bead to be closed")
+	cmd.Flags().BoolVar(&includeWisps, "include-wisps", false, "also close stale order-run wisp subtrees with open descendants")
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress success output")
 	return cmd
 }
@@ -227,24 +248,19 @@ func loadAllOrdersWithCity(stderr io.Writer, cmdName string) (string, *config.Ci
 	return cityPath, cfg, aa, code
 }
 
-// loadAllOrders scans city layers + per-rig exclusive layers for all orders
-// and applies configured overrides. Callers that execute or list active work
-// should use loadActiveOrders instead. Rig orders get their Rig field stamped.
+// loadAllOrders scans all configured orders and applies configured overrides.
+// Callers that execute or list active work should use loadActiveOrders instead.
 func loadAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, int) {
-	allAA, err := scanAllOrders(cityPath, cfg, stderr, cmdName)
+	allAA, err := orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{
+		OnRigScanError: func(rigName string, err error) error {
+			fmt.Fprintf(stderr, "%s: rig %s: %v\n", cmdName, rigName, err) //nolint:errcheck // best-effort stderr
+			return nil
+		},
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
-
-	// Apply order overrides from city config.
-	if len(cfg.Orders.Overrides) > 0 {
-		if err := orders.ApplyOverrides(allAA, convertOverrides(cfg.Orders.Overrides)); err != nil {
-			fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-			return nil, 1
-		}
-	}
-
 	return allAA, 0
 }
 
@@ -256,110 +272,29 @@ func loadActiveOrdersForCity(cityPath string, cfg *config.City, stderr io.Writer
 	return orders.FilterEnabled(allAA), 0
 }
 
+// scanAllOrders returns the shared post-override discovery view used by command
+// tests and compatibility call sites.
 func scanAllOrders(cityPath string, cfg *config.City, stderr io.Writer, cmdName string) ([]orders.Order, error) {
-	return scanAllOrdersWithOptions(cityPath, cfg, stderr, cmdName, orders.ScanOptions{})
-}
-
-func scanAllOrdersWithOptions(cityPath string, cfg *config.City, stderr io.Writer, cmdName string, opts orders.ScanOptions) ([]orders.Order, error) {
-	return scanAllOrdersFSWithOptions(fsys.OSFS{}, cityPath, cfg, stderr, cmdName, opts)
-}
-
-func scanAllOrdersFSWithOptions(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string, opts orders.ScanOptions) ([]orders.Order, error) {
-	if cfg == nil {
-		cfg = &config.City{}
-	}
-	// City-level orders.
-	cRoots := cityOrderRoots(cityPath, cfg)
-	cLayers := cityFormulaLayers(cityPath, cfg)
-	cityAA, err := orders.ScanRootsWithOptions(fs, cRoots, cfg.Orders.Skip, opts)
-	if err != nil {
-		return nil, err
-	}
-
-	// Per-rig orders from rig-exclusive layers.
-	var rigAA []orders.Order
-	for rigName, layers := range cfg.FormulaLayers.Rigs {
-		exclusive := rigExclusiveLayers(layers, cLayers)
-		if len(exclusive) == 0 {
-			continue
-		}
-		ra, err := orders.ScanRootsWithOptions(fs, rigOrderRoots(cityPath, cfg, exclusive), cfg.Orders.Skip, opts)
-		if err != nil {
+	return orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{
+		OnRigScanError: func(rigName string, err error) error {
 			fmt.Fprintf(stderr, "%s: rig %s: %v\n", cmdName, rigName, err) //nolint:errcheck // best-effort stderr
-			continue
-		}
-		for i := range ra {
-			ra[i].Rig = rigName
-		}
-		rigAA = append(rigAA, ra...)
-	}
-
-	allAA := make([]orders.Order, 0, len(cityAA)+len(rigAA))
-	allAA = append(allAA, cityAA...)
-	allAA = append(allAA, rigAA...)
-	return allAA, nil
-}
-
-// cityFormulaLayers returns the formula directory layers for city-level order
-// scanning. Uses FormulaLayers.City if populated (from LoadWithIncludes),
-// otherwise falls back to the single formulas dir.
-func cityFormulaLayers(cityPath string, cfg *config.City) []string {
-	if len(cfg.FormulaLayers.City) > 0 {
-		return cfg.FormulaLayers.City
-	}
-	return []string{citylayout.ResolveFormulasDir(cityPath, cfg.FormulasDir())}
+			return nil
+		},
+	})
 }
 
 func cityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
-	formulaLayers := cityFormulaLayers(cityPath, cfg)
-	localFormulas := citylayout.ResolveFormulasDir(cityPath, cfg.FormulasDir())
-	roots := make([]orders.ScanRoot, 0, len(formulaLayers)+len(cfg.PackDirs)+2)
-	seen := make(map[string]bool, len(formulaLayers)+len(cfg.PackDirs)+2)
-	appendRoot := func(root orders.ScanRoot) {
-		key := filepath.Clean(root.Dir) + "\n" + filepath.Clean(root.FormulaLayer)
-		if seen[key] {
-			return
-		}
-		seen[key] = true
-		roots = append(roots, root)
-	}
-
-	// Formula layers include system packs (via LoadWithIncludes extraIncludes)
-	// and user packs (via workspace.includes). City-local formulas are highest
-	// priority and override pack formulas when order names collide.
-	for _, layer := range formulaLayers {
-		if layer == localFormulas {
-			for _, root := range []string{citylayout.OrdersPath(cityPath)} {
-				appendRoot(orders.ScanRoot{
-					Dir:          root,
-					FormulaLayer: localFormulas,
-				})
-			}
-			continue
-		}
-		appendRoot(orders.ScanRoot{
-			Dir:          filepath.Join(filepath.Dir(layer), "orders"),
-			FormulaLayer: layer,
-		})
-	}
-
-	return roots
+	return orderdiscovery.CityOrderRoots(cityPath, cfg)
 }
 
-func rigOrderRoots(_ string, _ *config.City, formulaLayers []string) []orders.ScanRoot {
-	roots := make([]orders.ScanRoot, 0, len(formulaLayers))
-	for _, layer := range formulaLayers {
-		roots = append(roots, orders.ScanRoot{
-			Dir:          filepath.Join(filepath.Dir(layer), "orders"),
-			FormulaLayer: layer,
-		})
+func cmdOrderListWithOptions(stdout, stderr io.Writer, jsonOutput bool) int {
+	if jsonOutput {
+		cityPath, cfg, aa, code := loadOrdersWithCity(stderr, "gc order list")
+		if code != 0 {
+			return code
+		}
+		return doOrderListJSON(cityPath, cfg, aa, stdout)
 	}
-	return roots
-}
-
-// --- gc order list ---
-
-func cmdOrderList(stdout, stderr io.Writer) int {
 	aa, code := loadOrders(stderr, "gc order list")
 	if code != 0 {
 		return code
@@ -412,6 +347,116 @@ func doOrderList(aa []orders.Order, stdout io.Writer) int {
 	return 0
 }
 
+type orderListJSON struct {
+	SchemaVersion string                `json:"schema_version"`
+	CityPath      string                `json:"city_path,omitempty"`
+	CityName      string                `json:"city_name,omitempty"`
+	Orders        []orderJSON           `json:"orders"`
+	Summary       orderListSummaryJSON  `json:"summary"`
+	Warnings      []jsonContractWarning `json:"warnings,omitempty"`
+}
+
+type orderListSummaryJSON struct {
+	Count int `json:"count"`
+}
+
+type orderShowJSON struct {
+	SchemaVersion string                `json:"schema_version"`
+	CityPath      string                `json:"city_path,omitempty"`
+	CityName      string                `json:"city_name,omitempty"`
+	Order         orderJSON             `json:"order"`
+	Warnings      []jsonContractWarning `json:"warnings,omitempty"`
+}
+
+type orderJSON struct {
+	Name         string `json:"name"`
+	ScopedName   string `json:"scoped_name"`
+	Rig          string `json:"rig,omitempty"`
+	Description  string `json:"description,omitempty"`
+	Type         string `json:"type"`
+	Formula      string `json:"formula,omitempty"`
+	Exec         string `json:"exec,omitempty"`
+	Trigger      string `json:"trigger"`
+	Interval     string `json:"interval,omitempty"`
+	Schedule     string `json:"schedule,omitempty"`
+	Check        string `json:"check,omitempty"`
+	On           string `json:"on,omitempty"`
+	Target       string `json:"target,omitempty"`
+	Timeout      string `json:"timeout,omitempty"`
+	Enabled      bool   `json:"enabled"`
+	Source       string `json:"source,omitempty"`
+	FormulaLayer string `json:"formula_layer,omitempty"`
+}
+
+func doOrderListJSON(cityPath string, cfg *config.City, aa []orders.Order, stdout io.Writer) int {
+	rows := make([]orderJSON, 0, len(aa))
+	for _, a := range aa {
+		rows = append(rows, orderToJSON(a))
+	}
+	payload := orderListJSON{
+		SchemaVersion: "1",
+		CityPath:      cityPath,
+		CityName:      effectiveJSONCityName(cfg, cityPath),
+		Orders:        rows,
+		Summary:       orderListSummaryJSON{Count: len(rows)},
+	}
+	if err := writeCLIJSONLine(stdout, payload); err != nil {
+		return 1
+	}
+	return 0
+}
+
+func doOrderShowJSON(cityPath string, cfg *config.City, aa []orders.Order, name, rig string, stdout, stderr io.Writer) int {
+	a, ok := findOrder(aa, name, rig)
+	if !ok {
+		fmt.Fprintf(stderr, "gc order show: order %q not found\n", name) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	payload := orderShowJSON{
+		SchemaVersion: "1",
+		CityPath:      cityPath,
+		CityName:      effectiveJSONCityName(cfg, cityPath),
+		Order:         orderToJSON(a),
+	}
+	if err := writeCLIJSONLine(stdout, payload); err != nil {
+		return 1
+	}
+	return 0
+}
+
+func effectiveJSONCityName(cfg *config.City, cityPath string) string {
+	if cfg == nil {
+		return ""
+	}
+	return config.EffectiveCityName(cfg, filepath.Base(cityPath))
+}
+
+func orderToJSON(a orders.Order) orderJSON {
+	typ := "formula"
+	if a.IsExec() {
+		typ = "exec"
+	}
+	return orderJSON{
+		Name:         a.Name,
+		ScopedName:   a.ScopedName(),
+		Rig:          a.Rig,
+		Description:  a.Description,
+		Type:         typ,
+		Formula:      a.Formula,
+		Exec:         a.Exec,
+		Trigger:      a.Trigger,
+		Interval:     a.Interval,
+		Schedule:     a.Schedule,
+		Check:        a.Check,
+		On:           a.On,
+		Target:       a.Pool,
+		Timeout:      a.Timeout,
+		Enabled:      a.IsEnabled(),
+		Source:       a.Source,
+		FormulaLayer: a.FormulaLayer,
+	}
+}
+
 // anyOrderHasRig returns true if any order in the list has a non-empty Rig.
 func anyOrderHasRig(aa []orders.Order) bool {
 	for _, a := range aa {
@@ -425,9 +470,16 @@ func anyOrderHasRig(aa []orders.Order) bool {
 // --- gc order show ---
 
 func cmdOrderShow(name, rig string, stdout, stderr io.Writer) int {
-	_, _, aa, code := loadAllOrdersWithCity(stderr, "gc order show")
+	return cmdOrderShowWithOptions(name, rig, stdout, stderr, false)
+}
+
+func cmdOrderShowWithOptions(name, rig string, stdout, stderr io.Writer, jsonOutput bool) int {
+	cityPath, cfg, aa, code := loadAllOrdersWithCity(stderr, "gc order show")
 	if code != 0 {
 		return code
+	}
+	if jsonOutput {
+		return doOrderShowJSON(cityPath, cfg, aa, name, rig, stdout, stderr)
 	}
 	return doOrderShow(aa, name, rig, stdout, stderr)
 }
@@ -475,7 +527,7 @@ func doOrderShow(aa []orders.Order, name, rig string, stdout, stderr io.Writer) 
 
 // --- gc order run ---
 
-func cmdOrderRun(name, rig string, stdout, stderr io.Writer) int {
+func cmdOrderRun(name, rig string, jsonOutput bool, stdout, stderr io.Writer) int {
 	cityPath, cfg, aa, code := loadOrdersWithCity(stderr, "gc order run")
 	if code != 0 {
 		return code
@@ -486,6 +538,10 @@ func cmdOrderRun(name, rig string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if a.IsExec() {
+		if jsonOutput {
+			fmt.Fprintln(stderr, "gc order run: --json is not supported for exec orders because the exec body may write arbitrary stdout") //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		if a.Trigger == "event" {
 			store, storeCode := openOrderStoreForOrder(cityPath, cfg, a, stderr, "gc order run")
 			if store == nil {
@@ -510,13 +566,29 @@ func cmdOrderRun(name, rig string, stdout, stderr io.Writer) int {
 		return epCode
 	}
 	defer ep.Close() //nolint:errcheck // best-effort
-	return doOrderRun(aa, name, rig, cityPath, store, ep, stdout, stderr)
+	return doOrderRunWithJSON(aa, name, rig, cityPath, store, ep, jsonOutput, stdout, stderr)
 }
 
 // doOrderRun executes an order manually: instantiates a wisp from the
 // order's formula (or runs exec script directly) and routes it to the
 // configured target.
 func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store, ep events.Provider, stdout, stderr io.Writer) int {
+	return doOrderRunWithJSON(aa, name, rig, cityPath, store, ep, false, stdout, stderr)
+}
+
+type orderRunJSON struct {
+	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
+	Order         string `json:"order"`
+	Rig           string `json:"rig,omitempty"`
+	ScopedName    string `json:"scoped_name"`
+	Action        string `json:"action"`
+	WispID        string `json:"wisp_id"`
+	RoutedTo      string `json:"routed_to,omitempty"`
+	EventCursor   uint64 `json:"event_cursor,omitempty"`
+}
+
+func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store beads.Store, ep events.Provider, jsonOutput bool, stdout, stderr io.Writer) int {
 	a, ok := findOrder(aa, name, rig)
 	if !ok {
 		fmt.Fprintf(stderr, "gc order run: order %q not found\n", name) //nolint:errcheck // best-effort stderr
@@ -525,6 +597,10 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 
 	// Exec orders: run the script directly.
 	if a.IsExec() {
+		if jsonOutput {
+			fmt.Fprintln(stderr, "gc order run: --json is not supported for exec orders because the exec body may write arbitrary stdout") //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		cfg, cfgErr := loadCityConfig(cityPath, stderr)
 		if cfgErr != nil {
 			fmt.Fprintf(stderr, "gc order run: %v\n", cfgErr) //nolint:errcheck // best-effort stderr
@@ -615,6 +691,19 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 		return 1
 	}
 
+	if jsonOutput {
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc order run", orderRunJSON{
+			SchemaVersion: "1",
+			OK:            true,
+			Order:         a.Name,
+			Rig:           a.Rig,
+			ScopedName:    scoped,
+			Action:        "formula",
+			WispID:        rootID,
+			RoutedTo:      pool,
+			EventCursor:   headSeq,
+		})
+	}
 	fmt.Fprintf(stdout, "Order %q executed: wisp %s", name, rootID) //nolint:errcheck
 	if a.Pool != "" {
 		fmt.Fprintf(stdout, " → gc.routed_to=%s", pool) //nolint:errcheck
@@ -715,7 +804,7 @@ func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, std
 
 // --- gc order check ---
 
-func cmdOrderCheck(stdout, stderr io.Writer) int {
+func cmdOrderCheck(jsonOutput bool, stdout, stderr io.Writer) int {
 	cityPath, cfg, aa, code := loadOrdersWithCity(stderr, "gc order check")
 	if code != 0 {
 		return code
@@ -726,7 +815,7 @@ func cmdOrderCheck(stdout, stderr io.Writer) int {
 		return epCode
 	}
 	defer ep.Close() //nolint:errcheck // best-effort
-	return doOrderCheckWithStoresResolverScoped(cityPath, cfg, aa, time.Now(), ep, cachedOrderStoresResolver(cityPath, cfg), stdout, stderr)
+	return doOrderCheckWithStoresResolverScopedJSON(cityPath, cfg, aa, time.Now(), ep, cachedOrderStoresResolver(cityPath, cfg), jsonOutput, stdout, stderr)
 }
 
 // orderLastRunFn returns a LastRunFunc that queries BdStore for the most
@@ -738,8 +827,74 @@ func orderLastRunFn(store beads.Store) orders.LastRunFunc {
 // doOrderCheck evaluates triggers for all orders and prints a table.
 // Returns 0 if any are due, 1 if none are due.
 func doOrderCheck(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc, stdout io.Writer) int {
+	return doOrderCheckJSON(aa, now, lastRunFn, false, stdout, io.Discard)
+}
+
+type orderCheckJSON struct {
+	SchemaVersion string              `json:"schema_version"`
+	OK            bool                `json:"ok"`
+	AnyDue        bool                `json:"any_due"`
+	OrdersTotal   int                 `json:"orders_total"`
+	DueTotal      int                 `json:"due_total"`
+	Orders        []orderCheckJSONRow `json:"orders"`
+}
+
+type orderCheckJSONRow struct {
+	Name       string `json:"name"`
+	Rig        string `json:"rig,omitempty"`
+	ScopedName string `json:"scoped_name"`
+	Trigger    string `json:"trigger"`
+	Due        bool   `json:"due"`
+	Reason     string `json:"reason"`
+}
+
+func doOrderCheckJSON(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc, jsonOutput bool, stdout, stderr io.Writer) int {
 	if len(aa) == 0 {
+		if jsonOutput {
+			if writeCLIJSONLineOrExit(stdout, stderr, "gc order check", orderCheckJSON{
+				SchemaVersion: "1",
+				OK:            true,
+				AnyDue:        false,
+				OrdersTotal:   0,
+				DueTotal:      0,
+				Orders:        []orderCheckJSONRow{},
+			}) != 0 {
+				return 1
+			}
+			return 1
+		}
 		fmt.Fprintln(stdout, "No orders found.") //nolint:errcheck // best-effort stdout
+		return 1
+	}
+
+	if jsonOutput {
+		result := orderCheckJSON{
+			SchemaVersion: "1",
+			OK:            true,
+			OrdersTotal:   len(aa),
+			Orders:        make([]orderCheckJSONRow, 0, len(aa)),
+		}
+		for _, a := range aa {
+			check := orders.CheckTrigger(a, now, lastRunFn, nil, nil)
+			if check.Due {
+				result.AnyDue = true
+				result.DueTotal++
+			}
+			result.Orders = append(result.Orders, orderCheckJSONRow{
+				Name:       a.Name,
+				Rig:        a.Rig,
+				ScopedName: a.ScopedName(),
+				Trigger:    a.Trigger,
+				Due:        check.Due,
+				Reason:     check.Reason,
+			})
+		}
+		if writeCLIJSONLineOrExit(stdout, stderr, "gc order check", result) != 0 {
+			return 1
+		}
+		if result.AnyDue {
+			return 0
+		}
 		return 1
 	}
 
@@ -779,8 +934,90 @@ func doOrderCheckWithStoresResolver(aa []orders.Order, now time.Time, ep events.
 }
 
 func doOrderCheckWithStoresResolverScoped(cityPath string, cfg *config.City, aa []orders.Order, now time.Time, ep events.Provider, resolveStores orderStoresResolver, stdout, stderr io.Writer) int {
+	return doOrderCheckWithStoresResolverScopedJSON(cityPath, cfg, aa, now, ep, resolveStores, false, stdout, stderr)
+}
+
+func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City, aa []orders.Order, now time.Time, ep events.Provider, resolveStores orderStoresResolver, jsonOutput bool, stdout, stderr io.Writer) int {
 	if len(aa) == 0 {
+		if jsonOutput {
+			if writeCLIJSONLineOrExit(stdout, stderr, "gc order check", orderCheckJSON{
+				SchemaVersion: "1",
+				OK:            true,
+				AnyDue:        false,
+				OrdersTotal:   0,
+				DueTotal:      0,
+				Orders:        []orderCheckJSONRow{},
+			}) != 0 {
+				return 1
+			}
+			return 1
+		}
 		fmt.Fprintln(stdout, "No orders found.") //nolint:errcheck // best-effort stdout
+		return 1
+	}
+
+	if jsonOutput {
+		result := orderCheckJSON{
+			SchemaVersion: "1",
+			OK:            true,
+			OrdersTotal:   len(aa),
+			Orders:        make([]orderCheckJSONRow, 0, len(aa)),
+		}
+		for _, a := range aa {
+			stores, err := resolveStores(a)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			baseLastRunFn := orders.LastRunAcrossStores(stores...)
+			var lastRunErr error
+			lastRunFn := func(orderName string) (time.Time, error) {
+				last, err := baseLastRunFn(orderName)
+				if err != nil {
+					lastRunErr = err
+				}
+				return last, err
+			}
+			cursorFn := orders.CursorAcrossStores(stores...)
+			if a.Trigger == "event" {
+				cursor, err := bdCursorAcrossStores(a.ScopedName(), stores...)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
+					return 1
+				}
+				cursorFn = func(string) uint64 {
+					return cursor
+				}
+			}
+			triggerOpts, err := orderTriggerOptions(cityPath, cfg, a)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			check := orders.CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, triggerOpts)
+			if lastRunErr != nil {
+				fmt.Fprintf(stderr, "gc order check: reading last run for %s: %v\n", a.ScopedName(), lastRunErr) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			if check.Due {
+				result.AnyDue = true
+				result.DueTotal++
+			}
+			result.Orders = append(result.Orders, orderCheckJSONRow{
+				Name:       a.Name,
+				Rig:        a.Rig,
+				ScopedName: a.ScopedName(),
+				Trigger:    a.Trigger,
+				Due:        check.Due,
+				Reason:     check.Reason,
+			})
+		}
+		if writeCLIJSONLineOrExit(stdout, stderr, "gc order check", result) != 0 {
+			return 1
+		}
+		if result.AnyDue {
+			return 0
+		}
 		return 1
 	}
 
@@ -852,11 +1089,15 @@ func doOrderCheckWithStoresResolverScoped(cityPath string, cfg *config.City, aa 
 // --- gc order history ---
 
 func cmdOrderHistory(name, rig string, stdout, stderr io.Writer) int {
+	return cmdOrderHistoryJSON(name, rig, false, stdout, stderr)
+}
+
+func cmdOrderHistoryJSON(name, rig string, jsonOutput bool, stdout, stderr io.Writer) int {
 	cityPath, cfg, aa, code := loadAllOrdersWithCity(stderr, "gc order history")
 	if code != 0 {
 		return code
 	}
-	return doOrderHistoryWithStoresResolver(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), stdout, stderr)
+	return doOrderHistoryWithStoresResolverJSON(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), jsonOutput, stdout, stderr)
 }
 
 // doOrderHistory queries bead history for order runs and prints a table.
@@ -879,6 +1120,10 @@ func doOrderHistoryWithStoreResolver(name, rig string, aa []orders.Order, resolv
 }
 
 func doOrderHistoryWithStoresResolver(name, rig string, aa []orders.Order, resolveStores orderStoresResolver, stdout, stderr io.Writer) int {
+	return doOrderHistoryWithStoresResolverJSON(name, rig, aa, resolveStores, false, stdout, stderr)
+}
+
+func doOrderHistoryWithStoresResolverJSON(name, rig string, aa []orders.Order, resolveStores orderStoresResolver, jsonOutput bool, stdout, stderr io.Writer) int {
 	// Filter orders if name or rig specified.
 	targets := aa
 	if name != "" || rig != "" {
@@ -946,6 +1191,16 @@ func doOrderHistoryWithStoresResolver(name, rig string, aa []orders.Order, resol
 	}
 
 	if len(entries) == 0 {
+		if jsonOutput {
+			return writeCLIJSONLineOrExit(stdout, stderr, "gc order history", orderHistoryJSONResult{
+				SchemaVersion: "1",
+				OK:            true,
+				Name:          name,
+				Rig:           rig,
+				Entries:       []orderHistoryJSONEntry{},
+				Summary:       orderHistoryJSONSummary{Total: 0},
+			})
+		}
 		if name != "" {
 			fmt.Fprintf(stdout, "No order history for %q.\n", name) //nolint:errcheck
 		} else {
@@ -957,6 +1212,27 @@ func doOrderHistoryWithStoresResolver(name, rig string, aa []orders.Order, resol
 	sort.SliceStable(entries, func(i, j int) bool {
 		return entries[i].createdAt.After(entries[j].createdAt)
 	})
+
+	if jsonOutput {
+		payload := orderHistoryJSONResult{
+			SchemaVersion: "1",
+			OK:            true,
+			Name:          name,
+			Rig:           rig,
+			Entries:       make([]orderHistoryJSONEntry, 0, len(entries)),
+			Summary:       orderHistoryJSONSummary{Total: len(entries)},
+		}
+		for _, e := range entries {
+			payload.Entries = append(payload.Entries, orderHistoryJSONEntry{
+				Order:     e.order,
+				Rig:       e.rig,
+				BeadID:    e.id,
+				Executed:  e.createdAt.Format(time.RFC3339),
+				CreatedAt: e.createdAt,
+			})
+		}
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc order history", payload)
+	}
 
 	hasRig := false
 	for _, e := range entries {
@@ -984,9 +1260,30 @@ func doOrderHistoryWithStoresResolver(name, rig string, aa []orders.Order, resol
 	return 0
 }
 
+type orderHistoryJSONResult struct {
+	SchemaVersion string                  `json:"schema_version"`
+	OK            bool                    `json:"ok"`
+	Name          string                  `json:"name,omitempty"`
+	Rig           string                  `json:"rig,omitempty"`
+	Entries       []orderHistoryJSONEntry `json:"entries"`
+	Summary       orderHistoryJSONSummary `json:"summary"`
+}
+
+type orderHistoryJSONEntry struct {
+	Order     string    `json:"order"`
+	Rig       string    `json:"rig,omitempty"`
+	BeadID    string    `json:"bead_id"`
+	Executed  string    `json:"executed"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type orderHistoryJSONSummary struct {
+	Total int `json:"total"`
+}
+
 // --- gc order sweep-tracking ---
 
-func cmdOrderSweepTracking(staleAfter time.Duration, quiet bool, stdout, stderr io.Writer) int {
+func cmdOrderSweepTracking(staleAfter time.Duration, includeWisps, quiet bool, orderNames []string, stdout, stderr io.Writer) int {
 	if staleAfter <= 0 {
 		fmt.Fprintln(stderr, "gc order sweep-tracking: --stale-after must be positive") //nolint:errcheck // best-effort stderr
 		return 1
@@ -1001,15 +1298,37 @@ func cmdOrderSweepTracking(staleAfter time.Duration, quiet bool, stdout, stderr 
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	closed, err := sweepStaleOrderTracking(store, time.Now(), staleAfter, nil, orderTrackingSweepMetadataInitiator)
+	result, err := sweepStaleOrderTrackingWithOptions(store, time.Now(), staleAfter, orderNameFilter(orderNames), orderTrackingSweepMetadataInitiator, includeWisps)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !quiet {
-		fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s)\n", closed) //nolint:errcheck // best-effort stdout
+		if includeWisps {
+			fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s), %d stale order wisp bead(s)\n", result.trackingClosed, result.wispClosed) //nolint:errcheck // best-effort stdout
+		} else {
+			fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s)\n", result.trackingClosed) //nolint:errcheck // best-effort stdout
+		}
 	}
 	return 0
+}
+
+func orderNameFilter(orderNames []string) map[string]struct{} {
+	if len(orderNames) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(orderNames))
+	for _, name := range orderNames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		out[name] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // findOrder looks up an order by name and optional rig.

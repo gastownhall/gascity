@@ -252,6 +252,12 @@
               "null"
             ]
           },
+          "Lifecycle": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "MCP": {
             "items": {
               "type": "string"
@@ -479,6 +485,7 @@
           "Session",
           "Provider",
           "StartCommand",
+          "Lifecycle",
           "Nudge",
           "IdleTimeout",
           "MaxSessionAge",
@@ -2059,6 +2066,9 @@
           },
           {
             "$ref": "#/components/schemas/SupervisorFSPressureSkippedTickPayload"
+          },
+          {
+            "$ref": "#/components/schemas/SupervisorShutdownPayload"
           },
           {
             "$ref": "#/components/schemas/UnboundEventPayload"
@@ -6893,6 +6903,41 @@
         ],
         "type": "object"
       },
+      "SupervisorShutdownPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "client_addr": {
+            "description": "For source=socket_stop, the address reported by the connecting client. Typically empty for unix-socket peers.",
+            "type": "string"
+          },
+          "mode": {
+            "description": "Resulting shutdown mode.",
+            "enum": [
+              "destructive",
+              "preserve_sessions",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "signal": {
+            "description": "For source=signal, the human-readable signal name (e.g. \"terminated\", \"interrupt\"). Empty for socket_stop.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Which path triggered the shutdown.",
+            "enum": [
+              "signal",
+              "socket_stop"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "mode"
+        ],
+        "type": "object"
+      },
       "SupervisorStartup": {
         "additionalProperties": false,
         "properties": {
@@ -7031,7 +7076,9 @@
             "session.undrained": "#/components/schemas/TypedEventStreamEnvelopeSessionUndrained",
             "session.updated": "#/components/schemas/TypedEventStreamEnvelopeSessionUpdated",
             "session.woke": "#/components/schemas/TypedEventStreamEnvelopeSessionWoke",
+            "session.work_query_failed": "#/components/schemas/TypedEventStreamEnvelopeSessionWorkQueryFailed",
             "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
+            "supervisor.shutdown_requested": "#/components/schemas/TypedEventStreamEnvelopeSupervisorShutdownRequested",
             "worker.operation": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -7182,7 +7229,13 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionWoke"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionWorkQueryFailed"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSupervisorShutdownRequested"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
@@ -7691,6 +7744,7 @@
                 "session.suspended",
                 "session.updated",
                 "session.drain_acked_with_assigned_work",
+                "session.work_query_failed",
                 "bead.created",
                 "bead.closed",
                 "bead.updated",
@@ -7722,6 +7776,7 @@
                 "worker.operation",
                 "project.identity.stamped",
                 "supervisor.fs_pressure.skipped_tick",
+                "supervisor.shutdown_requested",
                 "extmsg.bound",
                 "extmsg.unbound",
                 "extmsg.group_created",
@@ -9302,6 +9357,48 @@
         "title": "TypedEventStreamEnvelope session.woke",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionWorkQueryFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.work_query_failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.work_query_failed",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {
         "additionalProperties": false,
         "properties": {
@@ -9342,6 +9439,48 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope supervisor.fs_pressure.skipped_tick",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeSupervisorShutdownRequested": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SupervisorShutdownPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "supervisor.shutdown_requested",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope supervisor.shutdown_requested",
         "type": "object"
       },
       "TypedEventStreamEnvelopeWorkerOperation": {
@@ -9438,7 +9577,9 @@
             "session.undrained": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUndrained",
             "session.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUpdated",
             "session.woke": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWoke",
+            "session.work_query_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed",
             "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
+            "supervisor.shutdown_requested": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested",
             "worker.operation": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -9589,7 +9730,13 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWoke"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
@@ -10145,6 +10292,7 @@
                 "session.suspended",
                 "session.updated",
                 "session.drain_acked_with_assigned_work",
+                "session.work_query_failed",
                 "bead.created",
                 "bead.closed",
                 "bead.updated",
@@ -10176,6 +10324,7 @@
                 "worker.operation",
                 "project.identity.stamped",
                 "supervisor.fs_pressure.skipped_tick",
+                "supervisor.shutdown_requested",
                 "extmsg.bound",
                 "extmsg.unbound",
                 "extmsg.group_created",
@@ -11905,6 +12054,52 @@
         "title": "TypedTaggedEventStreamEnvelope session.woke",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.work_query_failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.work_query_failed",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {
         "additionalProperties": false,
         "properties": {
@@ -11949,6 +12144,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope supervisor.fs_pressure.skipped_tick",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SupervisorShutdownPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "supervisor.shutdown_requested",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope supervisor.shutdown_requested",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeWorkerOperation": {

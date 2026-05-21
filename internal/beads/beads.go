@@ -244,9 +244,10 @@ type Store interface {
 	SetMetadataBatch(id string, kvs map[string]string) error
 
 	// Tx executes fn inside a single logical transaction identified by
-	// commitMsg. Stores without native transaction support execute fn
-	// sequentially against themselves, preserving their existing write
-	// semantics. fn must not retain the Tx after it returns.
+	// commitMsg. Implementations without native transaction support may execute
+	// writes sequentially or stage them until fn returns; outside observers
+	// should not depend on seeing partial writes before Tx returns. fn must not
+	// retain the Tx after it returns.
 	Tx(commitMsg string, fn func(tx Tx) error) error
 
 	// Delete permanently removes a bead from the store. The bead should be

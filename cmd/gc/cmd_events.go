@@ -48,6 +48,7 @@ type cliWireEvent struct {
 	Subject string          `json:"subject,omitempty"`
 	Ts      time.Time       `json:"ts"`
 	Type    string          `json:"type"`
+	OK      bool            `json:"ok"`
 }
 
 type cliWireTaggedEvent struct {
@@ -59,6 +60,7 @@ type cliWireTaggedEvent struct {
 	Subject string          `json:"subject,omitempty"`
 	Ts      time.Time       `json:"ts"`
 	Type    string          `json:"type"`
+	OK      bool            `json:"ok"`
 }
 
 type cliEventsRotateResponse struct {
@@ -66,6 +68,7 @@ type cliEventsRotateResponse struct {
 	Reason      string                  `json:"reason,omitempty"`
 	Archive     *cliEventsRotateArchive `json:"archive,omitempty"`
 	AnchorEvent *cliEventsRotateAnchor  `json:"anchor_event,omitempty"`
+	OK          bool                    `json:"ok"`
 }
 
 type cliEventsRotateArchive struct {
@@ -689,6 +692,7 @@ func localWireEvent(e events.Event, _ io.Writer) cliWireEvent {
 		Seq:   int64(e.Seq),
 		Ts:    e.Ts,
 		Type:  e.Type,
+		OK:    true,
 	}
 	if e.Subject != "" {
 		item.Subject = e.Subject
@@ -711,6 +715,7 @@ func cityWireEventFromTyped(item genclient.TypedEventStreamEnvelope) (cliWireEve
 	if err := json.Unmarshal(data, &out); err != nil {
 		return cliWireEvent{}, err
 	}
+	out.OK = true
 	return out, nil
 }
 
@@ -723,6 +728,7 @@ func supervisorWireEventFromTyped(item genclient.TypedTaggedEventStreamEnvelope)
 	if err := json.Unmarshal(data, &out); err != nil {
 		return cliWireTaggedEvent{}, err
 	}
+	out.OK = true
 	return out, nil
 }
 
@@ -897,6 +903,7 @@ func cliRotateResponseFromGen(item genclient.EventRotateResponse) (cliEventsRota
 	if err := json.Unmarshal(data, &out); err != nil {
 		return cliEventsRotateResponse{}, err
 	}
+	out.OK = true
 	return out, nil
 }
 
@@ -1126,7 +1133,7 @@ func printJSONLines(items any, stdout, stderr io.Writer) int {
 }
 
 func writeJSONLValue(stdout io.Writer, value any) error {
-	data, err := json.Marshal(value)
+	data, err := json.Marshal(withDefaultSuccessOK(value))
 	if err != nil {
 		return err
 	}

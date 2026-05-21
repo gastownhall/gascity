@@ -116,6 +116,8 @@ func liveEnvKeysForTests() []string {
 
 func preserveTestControlEnv(key string) bool {
 	return key == "GC_FAST_UNIT" ||
+		key == managedDoltTestModeEnv ||
+		key == managedDoltTestParentPIDEnv ||
 		key == "GC_DOLT_REAL_BINARY" ||
 		strings.HasPrefix(key, "GC_LIVE_") ||
 		strings.HasPrefix(key, "GC_SESSION_CHAOS_") ||

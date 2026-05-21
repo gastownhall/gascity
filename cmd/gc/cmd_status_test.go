@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -33,7 +34,17 @@ func runDoRigStatus(
 		}
 	}
 	statusSnapshot := loadStatusSessionSnapshot(store, stderr)
-	return doRigStatusWithStoreAndSnapshot(sp, dops, rig, agents, cityPath, "city", "", nil, store, statusSnapshot, stdout, stderr)
+	return doRigStatusWithStoreAndSnapshot(sp, dops, rig, agents, cityPath, "city", "", nil, store, statusSnapshot, false, stdout, stderr)
+}
+
+func runDoRigStatusJSON(
+	sp runtime.Provider,
+	dops drainOps,
+	rig config.Rig,
+	agents []config.Agent,
+	stdout, stderr io.Writer,
+) int {
+	return doRigStatusWithStoreAndSnapshot(sp, dops, rig, agents, "", "city", "", nil, nil, newSessionBeadSnapshot(nil), true, stdout, stderr)
 }
 
 func TestDoRigStatus(t *testing.T) {
@@ -74,6 +85,52 @@ func TestDoRigStatus(t *testing.T) {
 	}
 	if !strings.Contains(out, "worker") && !strings.Contains(out, "stopped") {
 		t.Errorf("stdout missing worker stopped status, got:\n%s", out)
+	}
+}
+
+func TestDoRigStatusJSON(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "frontend--worker-1", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+	dops := newFakeDrainOps()
+	dops.draining["frontend--worker-1"] = true
+	rig := config.Rig{Name: "frontend", Path: "/tmp/frontend", Prefix: "fe", DefaultBranch: "main"}
+	agents := []config.Agent{
+		{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1), ScaleCheck: "echo 1"},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runDoRigStatusJSON(sp, dops, rig, agents, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigStatusWithStoreAndSnapshot --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stdout lines = %d, want 1; stdout=%q", len(lines), stdout.String())
+	}
+	var result RigStatusJSON
+	if err := json.Unmarshal([]byte(lines[0]), &result); err != nil {
+		t.Fatalf("invalid JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" || result.Rig.Name != "frontend" || result.Rig.Prefix != "fe" {
+		t.Fatalf("unexpected rig status result: %+v", result)
+	}
+	if len(result.Agents) != 2 {
+		t.Fatalf("agents = %+v, want canonical worker plus stale numbered worker instance", result.Agents)
+	}
+	byName := map[string]RigStatusAgent{}
+	for _, agent := range result.Agents {
+		byName[agent.QualifiedName] = agent
+	}
+	if agent := byName["frontend/worker"]; agent.QualifiedName != "frontend/worker" || agent.Running || agent.Status != "stopped" {
+		t.Fatalf("canonical agent = %+v, want stopped frontend/worker", agent)
+	}
+	if agent := byName["frontend/worker-1"]; agent.QualifiedName != "frontend/worker-1" || !agent.Running || !agent.Draining || agent.Status != "draining" {
+		t.Fatalf("numbered agent = %+v, want running draining frontend/worker-1", agent)
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 
 const (
 	bdParentProjectionPollInterval = 50 * time.Millisecond
+	bdTxProjectionTimeout          = 5 * time.Second
 )
 
 // CommandRunner executes a command in the given directory and returns stdout bytes.
@@ -742,7 +743,7 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 	if len(args) == 3 {
 		return nil
 	}
-	_, err := s.runner(s.dir, "bd", args...)
+	err := s.runBDTransientWrite(args...)
 	if err != nil {
 		if isBdNotFound(err) {
 			return fmt.Errorf("updating bead %q: %w", id, ErrNotFound)
@@ -862,9 +863,301 @@ func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	return nil
 }
 
-// Tx executes fn sequentially against the BdStore.
+// Tx executes fn against a staged BdStore transaction. BdStore reads each bead
+// on first touch, applies callback writes to that snapshot, and reasserts the
+// staged fields when fn returns; concurrent edits to the same bead fields made
+// during the callback may be overwritten.
 func (s *BdStore) Tx(_ string, fn func(Tx) error) error {
-	return runSequentialTx(s, fn)
+	if fn == nil {
+		return errors.New("beads tx: nil callback")
+	}
+	tx := newBdStoreTx(s)
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.apply()
+}
+
+type bdStoreTx struct {
+	store *BdStore
+	items map[string]*bdStoreTxItem
+	order []string
+}
+
+type bdStoreTxItem struct {
+	original Bead
+	current  Bead
+	touched  bdStoreTxTouched
+	updated  bool
+	closed   bool
+}
+
+type bdStoreTxTouched struct {
+	title       bool
+	status      bool
+	beadType    bool
+	priority    bool
+	description bool
+	parentID    bool
+	assignee    bool
+}
+
+func newBdStoreTx(store *BdStore) *bdStoreTx {
+	return &bdStoreTx{
+		store: store,
+		items: make(map[string]*bdStoreTxItem),
+	}
+}
+
+func (tx *bdStoreTx) item(id string) (*bdStoreTxItem, error) {
+	if item, ok := tx.items[id]; ok {
+		return item, nil
+	}
+	bead, err := tx.store.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	item := &bdStoreTxItem{
+		original: snapshotBdStoreTxBead(bead),
+		current:  bead,
+	}
+	tx.items[id] = item
+	tx.order = append(tx.order, id)
+	return item, nil
+}
+
+func (tx *bdStoreTx) Update(id string, opts UpdateOpts) error {
+	if !hasUpdateOpts(opts) {
+		return nil
+	}
+	item, err := tx.item(id)
+	if err != nil {
+		return err
+	}
+	item.current = applyUpdateOptsToBead(item.current, opts)
+	item.touched.note(opts)
+	item.updated = true
+	return nil
+}
+
+func (tx *bdStoreTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	if len(kvs) == 0 {
+		return nil
+	}
+	return tx.Update(id, UpdateOpts{Metadata: kvs})
+}
+
+func (tx *bdStoreTx) Close(id string) error {
+	item, err := tx.item(id)
+	if err != nil {
+		return err
+	}
+	item.current.Status = "closed"
+	item.closed = true
+	return nil
+}
+
+func (tx *bdStoreTx) apply() error {
+	for _, id := range tx.order {
+		item := tx.items[id]
+		if item.closed {
+			if item.updated {
+				opts := item.preservedUpdateOpts(false)
+				if hasUpdateOpts(opts) {
+					if err := tx.store.Update(id, opts); err != nil {
+						return err
+					}
+					if err := tx.store.waitForUpdateProjection(id, opts); err != nil {
+						return err
+					}
+				}
+			}
+			if err := tx.store.close(id, strings.TrimSpace(item.current.Metadata["close_reason"])); err != nil {
+				return err
+			}
+			if !item.updated {
+				continue
+			}
+			opts := item.preservedUpdateOpts(true)
+			if hasUpdateOpts(opts) {
+				if err := tx.store.Update(id, opts); err != nil {
+					return err
+				}
+				if err := tx.store.waitForUpdateProjection(id, opts); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		opts := item.preservedUpdateOpts(true)
+		if !hasUpdateOpts(opts) {
+			continue
+		}
+		if err := tx.store.Update(id, opts); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *BdStore) waitForUpdateProjection(id string, opts UpdateOpts) error {
+	ctx, cancel := context.WithTimeout(context.Background(), bdTxProjectionTimeout)
+	defer cancel()
+
+	ticker := time.NewTicker(bdParentProjectionPollInterval)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		current, err := s.Get(id)
+		if err == nil {
+			if updateProjectionMatches(current, opts) {
+				return nil
+			}
+			lastErr = nil
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			if lastErr != nil {
+				return fmt.Errorf("updating bead %q: waiting for tx update projection: %w (last check error: %w)", id, ctx.Err(), lastErr)
+			}
+			return fmt.Errorf("updating bead %q: waiting for tx update projection: %w", id, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func updateProjectionMatches(current Bead, opts UpdateOpts) bool {
+	if opts.Title != nil && current.Title != *opts.Title {
+		return false
+	}
+	if opts.Status != nil && current.Status != *opts.Status {
+		return false
+	}
+	if opts.Type != nil && current.Type != *opts.Type {
+		return false
+	}
+	if opts.Priority != nil {
+		if current.Priority == nil || *current.Priority != *opts.Priority {
+			return false
+		}
+	}
+	if opts.Description != nil && current.Description != *opts.Description {
+		return false
+	}
+	if opts.ParentID != nil && current.ParentID != *opts.ParentID {
+		return false
+	}
+	if opts.Assignee != nil && current.Assignee != *opts.Assignee {
+		return false
+	}
+	for key, value := range opts.Metadata {
+		if current.Metadata[key] != value {
+			return false
+		}
+	}
+	for _, label := range opts.Labels {
+		if !bdStoreStringSliceContains(current.Labels, label) {
+			return false
+		}
+	}
+	for _, label := range opts.RemoveLabels {
+		if bdStoreStringSliceContains(current.Labels, label) {
+			return false
+		}
+	}
+	return true
+}
+
+func bdStoreStringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func (item *bdStoreTxItem) preservedUpdateOpts(includeStatus bool) UpdateOpts {
+	current := item.current
+	opts := UpdateOpts{}
+	if current.Title != "" || item.touched.title {
+		opts.Title = &current.Title
+	}
+	if includeStatus && (current.Status != "" || item.touched.status) {
+		opts.Status = &current.Status
+	}
+	if current.Type != "" || item.touched.beadType {
+		opts.Type = &current.Type
+	}
+	if current.Priority != nil || item.touched.priority {
+		opts.Priority = cloneIntPtr(current.Priority)
+	}
+	if current.Description != "" || item.touched.description {
+		opts.Description = &current.Description
+	}
+	if current.ParentID != "" || item.touched.parentID {
+		opts.ParentID = &current.ParentID
+	}
+	if current.Assignee != "" || item.touched.assignee {
+		opts.Assignee = &current.Assignee
+	}
+	if len(current.Metadata) > 0 {
+		opts.Metadata = maps.Clone(current.Metadata)
+	}
+	// bd update can clobber unspecified fields in dolt-server mode, so labels
+	// are re-emitted as a full post-mutation set for staged Tx applies.
+	opts.Labels = append([]string(nil), current.Labels...)
+	opts.RemoveLabels = removedLabels(item.original.Labels, current.Labels)
+	return opts
+}
+
+func snapshotBdStoreTxBead(bead Bead) Bead {
+	bead.Metadata = maps.Clone(bead.Metadata)
+	bead.Labels = append([]string(nil), bead.Labels...)
+	return bead
+}
+
+func (t *bdStoreTxTouched) note(opts UpdateOpts) {
+	t.title = t.title || opts.Title != nil
+	t.status = t.status || opts.Status != nil
+	t.beadType = t.beadType || opts.Type != nil
+	t.priority = t.priority || opts.Priority != nil
+	t.description = t.description || opts.Description != nil
+	t.parentID = t.parentID || opts.ParentID != nil
+	t.assignee = t.assignee || opts.Assignee != nil
+}
+
+func hasUpdateOpts(opts UpdateOpts) bool {
+	return opts.Title != nil ||
+		opts.Status != nil ||
+		opts.Type != nil ||
+		opts.Priority != nil ||
+		opts.Description != nil ||
+		opts.ParentID != nil ||
+		opts.Assignee != nil ||
+		len(opts.Metadata) > 0 ||
+		len(opts.Labels) > 0 ||
+		len(opts.RemoveLabels) > 0
+}
+
+func removedLabels(original, current []string) []string {
+	if len(original) == 0 {
+		return nil
+	}
+	kept := make(map[string]struct{}, len(current))
+	for _, label := range current {
+		kept[label] = struct{}{}
+	}
+	var removed []string
+	for _, label := range original {
+		if _, ok := kept[label]; !ok {
+			removed = append(removed, label)
+		}
+	}
+	return removed
 }
 
 func (s *BdStore) runBDTransientWrite(args ...string) error {

@@ -29,21 +29,20 @@ directory.
 
 ```
 orders/
-  review-check.toml
+  pancakes-check.toml
   dep-update.toml
 formulas/
   pancakes.toml
-  review.toml
 ```
 
-Here's a minimal order that dispatches the `review` formula from Tutorial 04
-every five minutes:
+Here's a minimal order that dispatches the `pancakes` formula from
+[Tutorial 05](/tutorials/05-formulas) every five minutes:
 
 ```toml
-# orders/review-check.toml
+# orders/pancakes-check.toml
 [order]
-description = "Check for PRs that need review"
-formula = "review"
+description = "Cook pancakes on a timer"
+formula = "pancakes"
 trigger = "cooldown"
 interval = "5m"
 pool = "worker"
@@ -56,9 +55,9 @@ the formula and routes it to the named pool. Any agent in that pool can pick it
 up.
 
 The controller evaluates trigger conditions on every tick. When five minutes have
-passed since the last run, it instantiates the `review` formula as a wisp and
+passed since the last run, it instantiates the `pancakes` formula as a wisp and
 routes it to the `worker` pool. The order name comes from the file basename
-(`review-check.toml` → `review-check`), not from anything in the TOML.
+(`pancakes-check.toml` → `pancakes-check`), not from anything in the TOML.
 
 Orders are discovered when the city starts and whenever the controller reloads
 config. You don't need to restart anything if the city is already watching the
@@ -76,11 +75,17 @@ ever fired:
 ```shell
 ~/my-city
 $ gc order list
-NAME            TYPE     TRIGGER      INTERVAL/SCHED  TARGET
-review-check    formula  cooldown  5m              worker
+NAME            TYPE     TRIGGER   INTERVAL/SCHED  TARGET
+pancakes-check  formula  cooldown  5m              worker
 dep-update      formula  cooldown  1h              worker
 release-notes   formula  cooldown  24h             worker
 ```
+
+Your output will also include a handful of built-in `mol-*` orders that ship
+with the tutorial template (`beads-health`, `gate-sweep`, `mol-dog-jsonl`,
+`mol-dog-reaper`, `orphan-sweep`, `prune-branches`, `spawn-storm-detect`,
+`wisp-compact`, etc.). They're the city's housekeeping orders — you can leave
+them alone.
 
 The `TARGET` column is the pool the order will route to (the field is still
 `pool` in the TOML).
@@ -89,14 +94,14 @@ To see the full definition:
 
 ```shell
 ~/my-city
-$ gc order show review-check
-Order:  review-check
-Description: Check for PRs that need review
-Formula:     review
-Trigger:        cooldown
+$ gc order show pancakes-check
+Order:  pancakes-check
+Description: Cook pancakes on a timer
+Formula:     pancakes
+Trigger:     cooldown
 Interval:    5m
 Target:      worker
-Source:      /Users/you/my-city/orders/review-check.toml
+Source:      /Users/you/my-city/orders/pancakes-check.toml
 ```
 
 To check which orders are due right now:
@@ -104,8 +109,8 @@ To check which orders are due right now:
 ```shell
 ~/my-city
 $ gc order check
-NAME            TRIGGER      DUE  REASON
-review-check    cooldown  yes  never run
+NAME            TRIGGER   DUE  REASON
+pancakes-check  cooldown  yes  never run
 dep-update      cooldown  no   cooldown: 14m remaining
 release-notes   cooldown  no   cooldown: 18h remaining
 ```
@@ -116,8 +121,8 @@ Any order can be triggered by hand, bypassing its trigger:
 
 ```shell
 ~/my-city
-$ gc order run review-check
-Order "review-check" executed: wisp mc-2xz → gc.routed_to=worker
+$ gc order run pancakes-check
+Order "pancakes-check" executed: wisp mc-2xz → gc.routed_to=worker
 ```
 
 For exec orders, the output is simpler — `Order "<name>" executed (exec)`.
@@ -371,17 +376,17 @@ order name. You can query the history:
 ~/my-city
 $ gc order history
 ORDER           BEAD     EXECUTED
-review-check    mc-3hb   2026-04-08T07:36:36Z
+pancakes-check  mc-3hb   2026-04-08T07:36:36Z
 dep-update      mc-784   2026-04-08T06:48:12Z
-review-check    mc-zbd   2026-04-08T07:31:22Z
+pancakes-check  mc-zbd   2026-04-08T07:31:22Z
 release-notes   mc-zb8   2026-04-07T13:00:01Z
 
 ~/my-city
-$ gc order history review-check
+$ gc order history pancakes-check
 ORDER           BEAD     EXECUTED
-review-check    mc-3hb   2026-04-08T07:36:36Z
-review-check    mc-zbd   2026-04-08T07:31:22Z
-review-check    mc-9p8   2026-04-08T07:26:18Z
+pancakes-check  mc-3hb   2026-04-08T07:36:36Z
+pancakes-check  mc-zbd   2026-04-08T07:31:22Z
+pancakes-check  mc-9p8   2026-04-08T07:26:18Z
 ```
 
 The tracking bead is created synchronously _before_ the dispatch goroutine
@@ -393,8 +398,8 @@ is due.
 
 Before dispatching, the controller checks whether the order already has open
 (non-closed) work. If it does, the order is skipped even if the trigger says it's
-due. This prevents pileup — if an agent is still working through the last review
-check, the controller won't dispatch another one.
+due. This prevents pileup — if an agent is still working through the last
+pancakes run, the controller won't dispatch another one.
 
 ## Rig-scoped orders
 

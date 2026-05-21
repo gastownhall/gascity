@@ -74,6 +74,7 @@ Agent defines a configured agent in the city.
 | `session` | string |  |  | Session overrides the session transport for this agent. "" (default) uses the city-level session provider (typically tmux). "acp" uses the Agent Client Protocol (JSON-RPC over stdio). The agent's resolved provider must have supports_acp = true. Enum: `acp` |
 | `provider` | string |  |  | Provider names the provider preset to use for this agent. |
 | `start_command` | string |  |  | StartCommand overrides the provider's command for this agent. |
+| `lifecycle` | string |  |  | Lifecycle controls runtime lifetime semantics. Empty uses the default long-lived session lifecycle; "one_shot" means the command is expected to do bounded work and exit cleanly. Enum: `one_shot` |
 | `args` | []string |  |  | Args overrides the provider's default arguments. |
 | `prompt_mode` | string |  | `arg` | PromptMode controls how prompts are delivered: "arg", "flag", or "none". Enum: `arg`, `flag`, `none` |
 | `prompt_flag` | string |  |  | PromptFlag is the CLI flag used to pass prompts when prompt_mode is "flag". |
@@ -148,6 +149,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `session` | string |  |  | Session overrides the session transport ("acp"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
+| `lifecycle` | string |  |  | Lifecycle overrides the runtime lifecycle ("one_shot" or empty). Enum: `one_shot` |
 | `nudge` | string |  |  | Nudge overrides the nudge text. |
 | `idle_timeout` | string |  |  | IdleTimeout overrides the idle timeout duration string (e.g., "30s", "5m", "1h"). |
 | `max_session_age` | string |  |  | MaxSessionAge overrides the max session age. Duration string (e.g., "5h"). Empty disables preemptive restart. |
@@ -200,6 +202,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `session` | string |  |  | Session overrides the session transport ("acp" or "tmux"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
+| `lifecycle` | string |  |  | Lifecycle overrides the runtime lifecycle ("one_shot" or empty). Enum: `one_shot` |
 | `nudge` | string |  |  | Nudge overrides the nudge text. |
 | `idle_timeout` | string |  |  | IdleTimeout overrides the idle timeout. Duration string (e.g., "30s", "5m", "1h"). |
 | `max_session_age` | string |  |  | MaxSessionAge overrides the max session age. Duration string (e.g., "5h"). |
@@ -255,7 +258,7 @@ ConvergenceConfig holds convergence loop limits.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `max_per_agent` | integer |  | `2` | MaxPerAgent is the maximum number of active convergence loops per agent. 0 means use default (2). |
+| `max_per_agent` | integer |  | `2` | MaxPerAgent is the maximum number of active convergence loops per agent in each bead store scope. City/HQ and each bound rig enforce the limit independently. 0 means use default (2). |
 | `max_total` | integer |  | `10` | MaxTotal is the maximum total number of active convergence loops. 0 means use default (10). |
 
 ## DaemonConfig

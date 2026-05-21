@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 var testBeaconTime = time.Unix(1_700_000_000, 0)
@@ -197,6 +199,56 @@ func TestTemplateParamsToConfigNoneModeUsesNudge(t *testing.T) {
 	}
 }
 
+func TestResolveTemplateControlDispatcherSuppressesStartupPrompt(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeFS := fsys.NewFake()
+	promptPath := filepath.Join(cityPath, "prompts", "control-dispatcher.template.md")
+	if err := fakeFS.WriteFile(promptPath, []byte("startup prompt for {{.AgentName}}"), 0o644); err != nil {
+		t.Fatalf("write prompt template: %v", err)
+	}
+	params := &agentBuildParams{
+		fs:              fakeFS,
+		cityName:        "maintainer-city",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "maintainer-city"},
+		providers:       map[string]config.ProviderSpec{},
+		lookPath:        func(string) (string, error) { return "", fmt.Errorf("not found") },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           config.ControlDispatcherAgentName,
+		Dir:            "gascity",
+		PromptTemplate: "prompts/control-dispatcher.template.md",
+		StartCommand:   config.ControlDispatcherStartCommandFor("gascity/" + config.ControlDispatcherAgentName),
+		Nudge:          "configured startup nudge",
+		ProcessNames:   []string{"gc"},
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if tp.Prompt != "" {
+		t.Fatalf("Prompt = %q, want empty for deterministic control dispatcher", tp.Prompt)
+	}
+	cfg := templateParamsToConfig(tp)
+	if cfg.PromptSuffix != "" {
+		t.Fatalf("PromptSuffix = %q, want empty", cfg.PromptSuffix)
+	}
+	if cfg.Nudge != "" {
+		t.Fatalf("Nudge = %q, want empty", cfg.Nudge)
+	}
+	if cfg.AcceptStartupDialogs == nil || *cfg.AcceptStartupDialogs {
+		t.Fatalf("AcceptStartupDialogs = %v, want false", cfg.AcceptStartupDialogs)
+	}
+	if !reflect.DeepEqual(cfg.ProcessNames, []string{"gc"}) {
+		t.Fatalf("ProcessNames = %v, want [gc]", cfg.ProcessNames)
+	}
+}
+
 func TestTemplateParamsToConfigNoneModeWithHooksStillUsesStartupNudge(t *testing.T) {
 	tp := TemplateParams{
 		Command: "opencode",
@@ -366,6 +418,36 @@ func TestTemplateParamsToConfigNilResolvedProvider(t *testing.T) {
 	}
 	if strings.HasPrefix(cfg.PromptSuffix, "--") {
 		t.Errorf("nil ResolvedProvider should not add flag prefix, got %q", cfg.PromptSuffix)
+	}
+}
+
+func TestResolveTemplateCarriesOneShotLifecycleToRuntimeConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	params := &agentBuildParams{
+		fs:         fsys.NewFake(),
+		cityName:   "bright-lights",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Name: "bright-lights"},
+		beaconTime: testBeaconTime,
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{
+		Name:         "scripted",
+		StartCommand: "env GC_LOG_LEVEL=debug custom-once --work",
+		Lifecycle:    config.AgentLifecycleOneShot,
+		Nudge:        "Check your hook for work.",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if got, want := tp.Hints.Lifecycle, runtime.LifecycleOneShot; got != want {
+		t.Fatalf("TemplateParams.Hints.Lifecycle = %q, want %q", got, want)
+	}
+	if got, want := templateParamsToConfig(tp).Lifecycle, runtime.LifecycleOneShot; got != want {
+		t.Fatalf("runtime config Lifecycle = %q, want %q", got, want)
 	}
 }
 

@@ -3247,12 +3247,13 @@ func (s *delayingPoolCreateStore) maxConcurrentSessionCreates() int {
 //
 // The store records in-flight session-bead creates directly so a regression
 // that re-serializes the loop (e.g., a future refactor that accidentally holds
-// a mutex across the create call) fails without depending on wall-clock
-// scheduler slack.
+// a mutex across the create call) or collapses the worker fanout fails without
+// depending on wall-clock scheduler slack.
 func TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates(t *testing.T) {
 	const (
-		requestCount = 8
-		// Keep scheduler overhead small relative to the half-serial ceiling.
+		requestCount = 16
+		// Keep concurrent creates overlapping long enough to observe the full
+		// worker cap without using elapsed time as the assertion.
 		createDelay = 100 * time.Millisecond
 	)
 	store := &delayingPoolCreateStore{MemStore: beads.NewMemStore(), delay: createDelay}
@@ -3283,8 +3284,8 @@ func TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates(t *testing.
 		t.Fatalf("desired count = %d, want %d; stderr=%q", got, requestCount, stderr.String())
 	}
 
-	if got := store.maxConcurrentSessionCreates(); got < 2 {
-		t.Fatalf("session bead creates max concurrency = %d, want at least 2", got)
+	if got := store.maxConcurrentSessionCreates(); got < poolRealizeParallelism {
+		t.Fatalf("session bead creates max concurrency = %d, want at least %d", got, poolRealizeParallelism)
 	}
 
 	aliases := make(map[string]bool, requestCount)
@@ -4097,6 +4098,123 @@ func TestBuildDesiredState_SuspendedNamedSession_DoesNotMaterialize(t *testing.T
 	}
 	if dsResult.NamedSessionDemand["mayor"] {
 		t.Fatal("suspended named session should not record demand")
+	}
+}
+
+func TestBuildDesiredState_ProductionDemandSkipsSuspendedAgentScaleCheck(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	liveMarker := filepath.Join(cityPath, "live.probed")
+	parkedMarker := filepath.Join(cityPath, "parked.probed")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{
+				Name:       "live",
+				ScaleCheck: scaleCheckMarkerCommand(liveMarker, 0),
+			},
+			{
+				Name:       "parked",
+				Suspended:  true,
+				ScaleCheck: scaleCheckMarkerCommand(parkedMarker, 1),
+			},
+		},
+	}
+
+	var stderr strings.Builder
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	assertMarkerExists(t, liveMarker)
+	assertMarkerAbsent(t, parkedMarker)
+	if _, ok := dsResult.ScaleCheckCounts["parked"]; ok {
+		t.Fatalf("ScaleCheckCounts contains suspended agent: %#v", dsResult.ScaleCheckCounts)
+	}
+}
+
+func TestBuildDesiredState_ProductionDemandSkipsSuspendedRigScaleCheck(t *testing.T) {
+	cityPath := t.TempDir()
+	liveRigPath := filepath.Join(cityPath, "rigs", "live-rig")
+	parkedRigPath := filepath.Join(cityPath, "rigs", "parked-rig")
+	if err := os.MkdirAll(liveRigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(parkedRigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	liveMarker := filepath.Join(cityPath, "live-rig.probed")
+	parkedMarker := filepath.Join(cityPath, "parked-rig.probed")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "live-rig", Path: liveRigPath},
+			{Name: "parked-rig", Path: parkedRigPath, Suspended: true},
+		},
+		Agents: []config.Agent{
+			{
+				Name:       "alpha",
+				Dir:        "live-rig",
+				ScaleCheck: scaleCheckMarkerCommand(liveMarker, 0),
+			},
+			{
+				Name:       "beta",
+				Dir:        "parked-rig",
+				ScaleCheck: scaleCheckMarkerCommand(parkedMarker, 1),
+			},
+		},
+	}
+
+	var stderr strings.Builder
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	assertMarkerExists(t, liveMarker)
+	assertMarkerAbsent(t, parkedMarker)
+	if _, ok := dsResult.ScaleCheckCounts["parked-rig/beta"]; ok {
+		t.Fatalf("ScaleCheckCounts contains agent on suspended rig: %#v", dsResult.ScaleCheckCounts)
+	}
+}
+
+func TestBuildDesiredState_ProductionDemandSkipsAllScaleChecksWhenCitySuspended(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	marker := filepath.Join(cityPath, "worker.probed")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city", Suspended: true},
+		Agents: []config.Agent{{
+			Name:       "worker",
+			ScaleCheck: scaleCheckMarkerCommand(marker, 1),
+		}},
+	}
+
+	var stderr strings.Builder
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	assertMarkerAbsent(t, marker)
+	if len(dsResult.State) != 0 {
+		t.Fatalf("State = %#v, want empty for suspended city", dsResult.State)
+	}
+	if len(dsResult.ScaleCheckCounts) != 0 {
+		t.Fatalf("ScaleCheckCounts = %#v, want none for suspended city", dsResult.ScaleCheckCounts)
+	}
+}
+
+func scaleCheckMarkerCommand(marker string, count int) string {
+	return fmt.Sprintf("printf probed > %s; printf %d", strconv.Quote(marker), count)
+}
+
+func assertMarkerExists(t *testing.T, marker string) {
+	t.Helper()
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected scale_check marker %s: %v", marker, err)
+	}
+}
+
+func assertMarkerAbsent(t *testing.T, marker string) {
+	t.Helper()
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("scale_check marker %s exists; suspended agent was probed", marker)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat scale_check marker %s: %v", marker, err)
 	}
 }
 

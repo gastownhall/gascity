@@ -7,6 +7,8 @@ import "github.com/gastownhall/gascity/internal/runtime"
 // through to runtime.Config. All fields are optional — zero values mean
 // no special startup handling (fire-and-forget).
 type StartupHints struct {
+	// Lifecycle describes whether the command is long-lived or expected to exit.
+	Lifecycle              runtime.Lifecycle
 	ReadyPromptPrefix      string
 	ReadyDelayMs           int
 	ProcessNames           []string

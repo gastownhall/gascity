@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -388,7 +389,7 @@ func TestDeliverSessionNudgeWithWorkerImmediateResumesSuspendedSession(t *testin
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryImmediate, &stdout, &stderr)
+	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryImmediate, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("deliverSessionNudgeWithWorker = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -441,7 +442,7 @@ func TestDeliverSessionNudgeWithWorkerWaitIdleResumesClaudeSession(t *testing.T)
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryWaitIdle, &stdout, &stderr)
+	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryWaitIdle, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("deliverSessionNudgeWithWorker = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -507,7 +508,7 @@ func TestDeliverSessionNudgeWithWorkerWaitIdleQueuesUnsupportedProviderAfterResu
 	t.Cleanup(func() { startNudgePoller = prev })
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryWaitIdle, &stdout, &stderr)
+	code := deliverSessionNudgeWithWorker(target, store, fake, "check deploy status", nudgeDeliveryWaitIdle, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("deliverSessionNudgeWithWorker = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1297,6 +1298,43 @@ dir = "myrig"
 	}
 	if target.continuationEpoch != "epoch-7" {
 		t.Fatalf("continuationEpoch = %q, want epoch-7", target.continuationEpoch)
+	}
+}
+
+func TestCmdNudgeStatusJSON(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY", cityDir)
+
+	now := time.Now().Add(-time.Minute)
+	if err := enqueueQueuedNudge(cityDir, newQueuedNudge("mayor", "review queued work", "session", now)); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdNudgeStatus([]string{"mayor"}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdNudgeStatus --json = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var result nudgeStatusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" || result.Command != "nudge status" {
+		t.Fatalf("unexpected JSON result header: %+v", result)
+	}
+	if result.Agent != "mayor" || result.Counts.Pending != 1 || len(result.Pending) != 1 {
+		t.Fatalf("unexpected JSON status: %+v", result)
+	}
+	if result.Pending[0].Message != "review queued work" {
+		t.Fatalf("pending message = %q, want queued nudge message", result.Pending[0].Message)
+	}
+	if result.InFlight == nil || result.Dead == nil {
+		t.Fatalf("empty queues should encode as arrays, got in_flight=%#v dead=%#v", result.InFlight, result.Dead)
 	}
 }
 
@@ -2267,12 +2305,14 @@ start_command = "echo"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdSessionNudge([]string{"sess-worker", "check", "deploy"}, nudgeDeliveryQueue, &stdout, &stderr)
+	code := cmdSessionNudge([]string{"sess-worker", "check", "deploy"}, nudgeDeliveryQueue, true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdSessionNudge = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Queued nudge for "+sessionBead.ID) {
-		t.Fatalf("stdout = %q, want queue confirmation", stdout.String())
+	for _, want := range []string{`"schema_version":"1"`, `"ok":true`, `"target":"` + sessionBead.ID + `"`, `"session_id":"` + sessionBead.ID + `"`, `"delivery":"queue"`, `"queued":true`, `"outcome":"queued"`} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout = %q, missing %s", stdout.String(), want)
+		}
 	}
 
 	pending, inFlight, dead, err := listQueuedNudges(cityDir, sessionBead.ID, time.Now())

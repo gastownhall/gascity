@@ -7,8 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `gc mail inbox`, `gc mail read`, `gc mail peek`, `gc mail thread`,
+  and `gc mail count` now accept `--json` and emit schema-versioned result
+  envelopes for script and dashboard consumers.
+
 ### Fixed
 
+- Empty JSON result collections for `gc mail thread`, `gc trace status`, and
+  `gc trace show` now encode as `[]` instead of `null`; `gc trace show` also
+  reports a concise no-records message in the default text mode.
+- `events.FileRecorder.Record` no longer blocks indefinitely on `flock` when
+  a prior `gc event emit` process died holding the lock. Acquisition now
+  uses non-blocking `LOCK_EX|LOCK_NB` retried at a 5 ms cadence for up to
+  250 ms total, then logs `events: lock: timed out after 250ms waiting on
+  flock at <path>` to stderr and returns without recording. The deferred
+  `LOCK_UN` still runs after a successful acquire; the happy path and
+  non-`EWOULDBLOCK` flock-error path are unchanged. Operators previously
+  saw hundreds of stuck `gc event emit` processes after a `SIGKILL` of the
+  holder; the new bounded wait drops the stuck event recorder instead of
+  stacking processes.
 - Kiro provider launch behavior is now explicit in release notes and provider
   docs: the built-in Kiro provider starts `kiro-cli` with `chat`,
   `--no-interactive`, `--agent gascity`, and `--trust-all-tools` by default.
@@ -51,6 +70,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `gc sling --json` now emits one JSONL result record, matching its checked-in
+  result schema; earlier JSON support emitted an indented multi-line object.
+- `gc trace status` and `gc trace show` now default to human-readable output;
+  scripts that need machine-readable trace data should pass `--json`. The
+  `--json` result shapes are also envelope objects now: `gc trace status
+  --json` uses `active_arms` instead of `arms` and includes
+  `schema_version`, `as_of`, `controller_running`, and `controller_pid`;
+  `gc trace show --json` returns `schema_version`, `city_path`, `count`, and
+  `records` instead of a bare record array. See
+  `schemas/trace/status/result.schema.json` and
+  `schemas/trace/show/result.schema.json` for the exact contracts.
 - Pack import cache validation now requires commit abbreviations in
   `packs.lock` to be at least seven characters long. Shorter abbreviations
   should be refreshed with `gc import install`.

@@ -279,12 +279,19 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 	}
 
-	// Post-start liveness check: verify the session survived startup.
+	requiresPostStartLiveness := k8sRequiresPostStartLiveness(cfg)
+
+	// Post-start liveness check: verify interactive sessions survived startup.
 	// Agents that fail immediately (e.g. --resume with a stale session key)
 	// exit within a second. A brief settle lets us detect this before
 	// returning success to the reconciler, which triggers recordWakeFailure
 	// and the crash-loop recovery (clear session_key, bump continuation_epoch).
-	if p.postStartSettle > 0 {
+	//
+	// Some configured commands are intentionally one-turn processes. Those
+	// should return from Start after the first tmux appearance and let normal
+	// session reconciliation observe completion, rather than converting clean
+	// command exit into startup failure.
+	if requiresPostStartLiveness && p.postStartSettle > 0 {
 		timer := time.NewTimer(p.postStartSettle)
 		defer timer.Stop()
 		select {
@@ -294,12 +301,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		case <-timer.C:
 		}
 	}
-	_, tmuxErr := p.ops.execInPod(ctx, podName, "agent",
-		[]string{"tmux", "has-session", "-t", tmuxSession}, nil)
-	if tmuxErr != nil {
-		cleanup("session died immediately after startup")
-		return fmt.Errorf("%w: session %q died immediately after startup: %w",
-			runtime.ErrSessionDiedDuringStartup, name, tmuxErr)
+	if requiresPostStartLiveness {
+		_, tmuxErr := p.ops.execInPod(ctx, podName, "agent",
+			[]string{"tmux", "has-session", "-t", tmuxSession}, nil)
+		if tmuxErr != nil {
+			cleanup("session died immediately after startup")
+			return fmt.Errorf("%w: session %q died immediately after startup: %w",
+				runtime.ErrSessionDiedDuringStartup, name, tmuxErr)
+		}
 	}
 
 	// Send initial nudge if configured (matches tmux adapter step 6).
@@ -308,6 +317,13 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	return nil
+}
+
+func k8sRequiresPostStartLiveness(cfg runtime.Config) bool {
+	if cfg.Lifecycle == runtime.LifecycleOneShot {
+		return false
+	}
+	return runtime.HasManagedStartupHints(cfg)
 }
 
 // Stop deletes the pod for the named session. Idempotent.

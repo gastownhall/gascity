@@ -36,7 +36,17 @@ func lookPathOnly(bins ...string) LookPathFunc {
 // --- ResolveProvider tests ---
 
 func TestResolveProviderAgentStartCommand(t *testing.T) {
-	agent := &Agent{Name: "mayor", StartCommand: "my-custom-cli --flag"}
+	delay := 1250
+	emitsPermissionWarning := true
+	agent := &Agent{
+		Name:                   "worker",
+		StartCommand:           "my-custom-cli --flag",
+		ReadyDelayMs:           &delay,
+		ReadyPromptPrefix:      "ready> ",
+		ProcessNames:           []string{"my-custom-cli"},
+		EmitsPermissionWarning: &emitsPermissionWarning,
+		ResumeCommand:          "my-custom-cli --resume {{.SessionKey}}",
+	}
 	rp, err := ResolveProvider(agent, nil, nil, lookPathNone)
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
@@ -46,6 +56,21 @@ func TestResolveProviderAgentStartCommand(t *testing.T) {
 	}
 	if rp.PromptMode != "none" {
 		t.Errorf("PromptMode = %q, want %q", rp.PromptMode, "none")
+	}
+	if !reflect.DeepEqual(rp.ProcessNames, []string{"my-custom-cli"}) {
+		t.Errorf("ProcessNames = %v, want [my-custom-cli]", rp.ProcessNames)
+	}
+	if rp.ReadyDelayMs != delay {
+		t.Errorf("ReadyDelayMs = %d, want %d", rp.ReadyDelayMs, delay)
+	}
+	if rp.ReadyPromptPrefix != "ready> " {
+		t.Errorf("ReadyPromptPrefix = %q, want %q", rp.ReadyPromptPrefix, "ready> ")
+	}
+	if !rp.EmitsPermissionWarning {
+		t.Error("EmitsPermissionWarning = false, want true")
+	}
+	if rp.ResumeCommand != "my-custom-cli --resume {{.SessionKey}}" {
+		t.Errorf("ResumeCommand = %q, want agent resume command", rp.ResumeCommand)
 	}
 }
 
@@ -225,6 +250,21 @@ func TestResolveProviderAgentStartCommandWinsOverWorkspace(t *testing.T) {
 	}
 	if rp.Command != "my-agent --custom" {
 		t.Errorf("Command = %q, want %q (agent.StartCommand should win)", rp.Command, "my-agent --custom")
+	}
+}
+
+func TestResolveProviderAgentLifecycleSurvivesStartCommandEscapeHatch(t *testing.T) {
+	agent := &Agent{
+		Name:         "scripted",
+		StartCommand: "env GC_LOG_LEVEL=debug custom-once --work",
+		Lifecycle:    AgentLifecycleOneShot,
+	}
+	rp, err := ResolveProvider(agent, &Workspace{Name: "city", Provider: "claude"}, nil, lookPathNone)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if got, want := rp.Lifecycle, AgentLifecycleOneShot; got != want {
+		t.Fatalf("Lifecycle = %q, want %q", got, want)
 	}
 }
 

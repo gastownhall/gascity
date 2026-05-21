@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "city_path",
+    "live",
+    "services"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "ok": {
+      "const": true
+    },
+    "city_path": {
+      "type": "string"
+    },
+    "live": {
+      "type": "boolean"
+    },
+    "services": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/service"
+      }
+    }
+  },
+  "$defs": {
+    "service": {
+      "type": "object",
+      "required": [
+        "service_name",
+        "kind",
+        "mount_path",
+        "publish_mode",
+        "state_root",
+        "local_state",
+        "publication_state"
+      ],
+      "properties": {
+        "service_name": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "workflow_contract": {
+          "type": "string"
+        },
+        "mount_path": {
+          "type": "string"
+        },
+        "publish_mode": {
+          "type": "string"
+        },
+        "visibility": {
+          "type": "string"
+        },
+        "hostname": {
+          "type": "string"
+        },
+        "state_root": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "local_state": {
+          "type": "string"
+        },
+        "publication_state": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "allow_websockets": {
+          "type": "boolean"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

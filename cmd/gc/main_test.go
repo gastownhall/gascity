@@ -170,7 +170,13 @@ func TestMain(m *testing.M) {
 	if !isTestscriptCommandInvocation(os.Args[0]) {
 		clearProcessLiveEnvForTests()
 	}
-	testTempRoot, err := os.MkdirTemp("/tmp", "gctest-")
+	if err := os.Setenv(managedDoltTestModeEnv, "1"); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv(managedDoltTestParentPIDEnv, fmt.Sprintf("%d", os.Getpid())); err != nil {
+		panic(err)
+	}
+	testTempRoot, err := os.MkdirTemp("/tmp", pidPrefixedTempPattern(testCmdGCTempRootPrefix))
 	if err != nil {
 		panic(err)
 	}
@@ -279,6 +285,27 @@ func TestVersion(t *testing.T) {
 	}
 	if !strings.Contains(longOut, "built:") {
 		t.Errorf("stdout missing 'built:': %q", longOut)
+	}
+
+	stdout.Reset()
+	stderr := bytes.Buffer{}
+	code = run([]string{"version", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run([version --json]) = %d, stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stdout lines = %d, want 1: %q", len(lines), stdout.String())
+	}
+	var got versionJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || got.Version != "dev" || got.Commit == "" || got.Date == "" {
+		t.Fatalf("version JSON = %+v", got)
 	}
 }
 

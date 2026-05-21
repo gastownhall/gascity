@@ -55,6 +55,36 @@ func TestGraphTable(t *testing.T) {
 	}
 }
 
+func TestGraphJSON(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "setup DB"})      // gc-1
+	_, _ = store.Create(beads.Bead{Title: "add migration"}) // gc-2
+	_ = store.DepAdd("gc-2", "gc-1", "blocks")
+
+	var stdout, stderr bytes.Buffer
+	code := doGraph(store, []string{"gc-1", "gc-2"}, graphOpts{JSON: true}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doGraph --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stdout lines = %d, want 1: %q", len(lines), stdout.String())
+	}
+	var payload graphJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.SchemaVersion != "1" || !payload.OK {
+		t.Fatalf("payload metadata = %+v", payload)
+	}
+	if payload.Summary.Total != 2 || payload.Summary.Ready != 1 || payload.Summary.Blocked != 1 {
+		t.Fatalf("summary = %+v, want total=2 ready=1 blocked=1", payload.Summary)
+	}
+	if len(payload.Nodes) != 2 || payload.Nodes[1].ID != "gc-2" || len(payload.Nodes[1].OpenBlockers) != 1 {
+		t.Fatalf("nodes = %+v, want gc-2 with one open blocker", payload.Nodes)
+	}
+}
+
 func TestGraphMermaid(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{Title: "task A"}) // gc-1

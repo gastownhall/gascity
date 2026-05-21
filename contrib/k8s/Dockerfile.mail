@@ -8,13 +8,18 @@
 #
 # The server exposes JSON-RPC on port 8765 and stores messages in SQLite.
 
-FROM python:3.12-slim@sha256:46cb7cc2877e60fbd5e21a9ae6115c30ace7a077b9f8772da879e4590c18c2e3
+FROM python:3.12-slim@sha256:9d3abd9fc11d06998ccdbdd93b4dd49b5ad7d67fcbbc11c016eb0eb2c2194891
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     TMPDIR=/tmp
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends --only-upgrade \
+    libcap2 \
+    libsystemd0 \
+    libudev1 \
+    && apt-get install -y --no-install-recommends \
     git \
     libnghttp2-14 \
     && rm -rf /var/lib/apt/lists/*

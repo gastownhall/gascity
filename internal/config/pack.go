@@ -2363,6 +2363,9 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if ov.StartCommand != nil {
 		a.StartCommand = *ov.StartCommand
 	}
+	if ov.Lifecycle != nil {
+		a.Lifecycle = *ov.Lifecycle
+	}
 	if ov.Nudge != nil {
 		a.Nudge = *ov.Nudge
 	}

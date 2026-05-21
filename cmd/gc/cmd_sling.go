@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -935,9 +934,7 @@ type slingJSONBatchSummary struct {
 
 func writeSlingJSONResult(result sling.SlingResult, stdout, stderr io.Writer) int {
 	payload := slingJSONFromResult(result)
-	enc := json.NewEncoder(stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(payload); err != nil {
+	if err := writeCLIJSONLine(stdout, payload); err != nil {
 		fmt.Fprintf(stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

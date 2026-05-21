@@ -226,7 +226,8 @@ gc init ~/my-city
 cd ~/my-city
 ```
 
-`gc init` registers the city with the supervisor and starts it automatically.
+`gc init` registers the city with the supervisor, which then starts it. By the
+time the command returns, the city is running.
 See the [Quickstart](/getting-started/quickstart) for a complete walkthrough.
 
 Gas City ships a JSONL archive that snapshots every bead database for

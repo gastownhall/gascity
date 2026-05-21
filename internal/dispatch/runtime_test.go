@@ -6933,9 +6933,31 @@ func writeCheckScript(t *testing.T, cityPath, name, contents string) string {
 		t.Fatalf("mkdir script dir: %v", err)
 	}
 	scriptPath := filepath.Join(scriptDir, name)
-	if err := os.WriteFile(scriptPath, []byte(contents), 0o755); err != nil {
+	tmp, err := os.CreateTemp(scriptDir, "."+name+".tmp-*")
+	if err != nil {
+		t.Fatalf("create temp script %s: %v", name, err)
+	}
+	tmpPath := tmp.Name()
+	keepTemp := true
+	defer func() {
+		if keepTemp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.WriteString(contents); err != nil {
+		_ = tmp.Close()
 		t.Fatalf("write %s: %v", name, err)
 	}
+	if err := tmp.Close(); err != nil {
+		t.Fatalf("close %s: %v", name, err)
+	}
+	if err := os.Chmod(tmpPath, 0o755); err != nil {
+		t.Fatalf("chmod %s: %v", name, err)
+	}
+	if err := os.Rename(tmpPath, scriptPath); err != nil {
+		t.Fatalf("install %s: %v", name, err)
+	}
+	keepTemp = false
 	return filepath.ToSlash(filepath.Join(".gc", "scripts", name))
 }
 

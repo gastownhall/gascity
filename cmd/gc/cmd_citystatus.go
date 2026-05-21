@@ -18,6 +18,7 @@ import (
 // StatusJSON is the JSON output format for "gc status --json".
 type StatusJSON struct {
 	SchemaVersion string            `json:"schema_version"`
+	OK            bool              `json:"ok"`
 	CityName      string            `json:"city_name"`
 	Workspace     WorkspaceJSON     `json:"workspace"`
 	CityPath      string            `json:"city_path"`

@@ -1424,6 +1424,106 @@ func TestGastownPatrolWispCommandsPropagateRoutingNamespace(t *testing.T) {
 	}
 }
 
+// TestGastownPromptRoutedToHandoffIsFullyQualifiedUnderBinding renders the
+// polecat, witness, and refinery prompt templates with a binding-aliased rig
+// (BindingPrefix="gastown.", GC_RIG="cashmaster") and shell-evaluates each
+// `gc.routed_to=` handoff expression they emit. It asserts every rendered
+// route resolves to a fully-qualified `<rig>/gastown.<role>` value rather
+// than the bare `gastown.<role>` short-name that broke rejection drop-back
+// in cashmaster convoys (upstream gastownhall/gascity#1397).
+//
+// The chain has two layers — Go template rendering and POSIX shell expansion
+// — and a regression in either layer produces the same symptom. This test
+// covers both at once.
+func TestGastownPromptRoutedToHandoffIsFullyQualifiedUnderBinding(t *testing.T) {
+	const (
+		rigName       = "cashmaster"
+		bindingName   = "gastown"
+		bindingPrefix = "gastown."
+	)
+	cases := []struct {
+		rel          string
+		agentName    string
+		templateName string
+		// wantRoutes maps the literal rendered `gc.routed_to=...` expression
+		// (after Go template rendering, before shell expansion) to the
+		// fully-qualified value it must shell-expand to with GC_RIG set.
+		wantRoutes map[string]string
+	}{
+		{
+			rel:          "packs/gastown/agents/polecat/prompt.template.md",
+			agentName:    rigName + "/" + bindingPrefix + "furiosa",
+			templateName: "polecat",
+			wantRoutes: map[string]string{
+				`"${GC_RIG:+$GC_RIG/}gastown.refinery"`: rigName + "/" + bindingPrefix + "refinery",
+			},
+		},
+		{
+			rel:          "packs/gastown/agents/witness/prompt.template.md",
+			agentName:    rigName + "/" + bindingPrefix + "witness",
+			templateName: "witness",
+			wantRoutes: map[string]string{
+				`"gastown.dog"`: bindingPrefix + "dog",
+			},
+		},
+		{
+			rel:          "packs/gastown/agents/refinery/prompt.template.md",
+			agentName:    rigName + "/" + bindingPrefix + "refinery",
+			templateName: "refinery",
+			wantRoutes:   map[string]string{},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(filepath.Base(filepath.Dir(tc.rel)), func(t *testing.T) {
+			body := renderGastownPromptForPack(t, tc.rel, tc.agentName, tc.templateName, rigName, bindingName, bindingPrefix)
+
+			// Every rendered gc.routed_to reference must be either a shell
+			// variable expansion or an expression that contains the binding
+			// prefix. A bare `gc.routed_to=refinery` (no prefix) is the
+			// regression we are guarding against.
+			for _, line := range strings.Split(body, "\n") {
+				idx := strings.Index(line, "gc.routed_to")
+				if idx < 0 {
+					continue
+				}
+				rest := line[idx+len("gc.routed_to"):]
+				if rest == "" {
+					continue
+				}
+				sep := rest[0]
+				if sep != '=' && sep != '"' && sep != ':' {
+					continue
+				}
+				for _, role := range []string{"refinery", "polecat", "witness", "deacon", "dog", "mayor"} {
+					bad := "gc.routed_to=" + role
+					if strings.Contains(line, bad) && !strings.Contains(line, bindingPrefix+role) {
+						t.Errorf("%s rendered route lost binding prefix: %s", tc.rel, strings.TrimSpace(line))
+					}
+				}
+			}
+
+			// Cross-check the specific expressions in the bead handoff:
+			// shell-expand each declared route under GC_RIG=cashmaster and
+			// assert the final value is fully-qualified.
+			for expr, want := range tc.wantRoutes {
+				if !strings.Contains(body, expr) {
+					t.Errorf("%s: rendered template missing expected handoff expression %q", tc.rel, expr)
+					continue
+				}
+				cmd := exec.Command("sh", "-c", `printf '%s' `+expr)
+				cmd.Env = append(os.Environ(), "GC_RIG="+rigName)
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("%s: shell-expanding %q: %v", tc.rel, expr, err)
+				}
+				if got := string(out); got != want {
+					t.Errorf("%s: expression %q with GC_RIG=%s expanded to %q, want %q (fully-qualified)", tc.rel, expr, rigName, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestGastownFormulasUsingBindingPrefixDefaultToUnbound(t *testing.T) {
 	dir := exampleDir()
 	paths, err := filepath.Glob(filepath.Join(dir, "packs", "gastown", "formulas", "*.toml"))

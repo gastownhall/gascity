@@ -1406,18 +1406,8 @@ func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNam
 	if sp == nil || strings.TrimSpace(name) == "" {
 		return false, false
 	}
-	return runtimeProviderLivenessFromRunning(sp, name, processNames, sp.IsRunning(name))
-}
-
-func runtimeProviderLivenessFromRunning(sp runtime.Provider, name string, processNames []string, running bool) (bool, bool) {
-	if len(processNames) == 0 {
-		return running, running
-	}
-	alive := sp.ProcessAlive(name, processNames)
-	if alive && !running {
-		running = true
-	}
-	return running, alive
+	obs := runtime.ObserveLiveness(sp, name, processNames)
+	return obs.Running, obs.Alive
 }
 
 func commitStartResult(

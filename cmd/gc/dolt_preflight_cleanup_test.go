@@ -91,7 +91,7 @@ func TestFileOpenedByAnyProcessBoundsLsof(t *testing.T) {
 }
 
 func TestFileOpenedByAnyProcessUsesUnixSocketTableForStaleSocket(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "dolt.sock")
+	socketPath := shortUnixSocketPath(t)
 	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
 	if err != nil {
 		t.Fatalf("socket(AF_UNIX): %v", err)
