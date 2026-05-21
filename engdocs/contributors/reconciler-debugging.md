@@ -74,6 +74,20 @@ Point the next agent at these artifacts:
 
 If a real session existed and the bug crossed into runtime behavior, also include the relevant session or provider logs.
 
+## Rig-Scoped Convergence Rollback
+
+Before rolling back a release that has created rig-scoped convergence loops,
+stop active loops in each affected rig:
+
+```bash
+gc --rig <rig-name> converge list
+gc --rig <rig-name> converge stop <bead-id>
+```
+
+Older controllers only watch the city/HQ convergence store. If rollback happens
+with active rig-scoped convergence beads still present, those loops become
+crash-orphans until a controller with rig-scoped convergence support runs again.
+
 ## How To Read The Trace
 
 These record types are usually the fastest path to the bug:

@@ -12,6 +12,7 @@ import (
 
 	gascity "github.com/gastownhall/gascity"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/spf13/cobra"
 )
 
@@ -435,6 +436,35 @@ func TestJSONSchemaResultForGraphConvergeOrderFormulaActions(t *testing.T) {
 				t.Fatalf("schema missing schema_version property: %+v", schema)
 			}
 		})
+	}
+}
+
+func validateJSONResultSchema(t *testing.T, commandPath []string, data []byte) {
+	t.Helper()
+
+	rawSchema, err := readBuiltinSchema(commandPath, jsonSchemaResultRole)
+	if err != nil {
+		t.Fatalf("read %s result schema: %v", strings.Join(commandPath, " "), err)
+	}
+	schemaDoc, err := jsonschema.UnmarshalJSON(bytes.NewReader(rawSchema))
+	if err != nil {
+		t.Fatalf("unmarshal schema: %v", err)
+	}
+	compiler := jsonschema.NewCompiler()
+	schemaName := strings.Join(commandPath, "-") + "-result.schema.json"
+	if err := compiler.AddResource(schemaName, schemaDoc); err != nil {
+		t.Fatalf("add schema resource: %v", err)
+	}
+	schema, err := compiler.Compile(schemaName)
+	if err != nil {
+		t.Fatalf("compile schema: %v", err)
+	}
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if err := schema.Validate(doc); err != nil {
+		t.Fatalf("payload does not match %s result schema: %v\n%s", strings.Join(commandPath, " "), err, string(data))
 	}
 }
 

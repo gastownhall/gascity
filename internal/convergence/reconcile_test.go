@@ -161,6 +161,7 @@ func TestReconcile_TerminatedNotClosed_CompletesClosure(t *testing.T) {
 		FieldTerminalActor:  "controller",
 		FieldFormula:        "test-formula",
 		FieldMaxIterations:  "5",
+		FieldRig:            "prod",
 	})
 
 	// Add a closed wisp child.
@@ -192,6 +193,13 @@ func TestReconcile_TerminatedNotClosed_CompletesClosure(t *testing.T) {
 	}
 	if ev.BeadID != "root-1" {
 		t.Errorf("event bead_id = %q, want %q", ev.BeadID, "root-1")
+	}
+	var payload TerminatedPayload
+	if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+		t.Fatalf("unmarshaling payload: %v", err)
+	}
+	if payload.Rig != "prod" {
+		t.Errorf("payload.Rig = %q, want prod", payload.Rig)
 	}
 }
 
@@ -296,6 +304,7 @@ func TestReconcile_WaitingManual_GenuineHold_NoStateChange(t *testing.T) {
 		FieldFormula:           "test-formula",
 		FieldGateMode:          GateModeManual,
 		FieldIteration:         "1",
+		FieldRig:               "prod",
 	})
 
 	store.addBead("wisp-1", "closed", "root-1", IdempotencyKey("root-1", 1), nil)
@@ -323,6 +332,13 @@ func TestReconcile_WaitingManual_GenuineHold_NoStateChange(t *testing.T) {
 	}
 	if !ev.Recovery {
 		t.Error("expected recovery flag to be true")
+	}
+	var payload WaitingManualPayload
+	if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+		t.Fatalf("unmarshaling payload: %v", err)
+	}
+	if payload.Rig != "prod" {
+		t.Errorf("payload.Rig = %q, want prod", payload.Rig)
 	}
 }
 

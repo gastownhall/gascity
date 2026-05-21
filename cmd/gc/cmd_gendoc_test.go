@@ -88,6 +88,47 @@ func TestCLIDocsFreshness(t *testing.T) {
 	walk(root)
 
 	if len(missing) > 0 {
-		t.Errorf("docs/reference/cli.md is stale — missing sections for %d commands. Run: go run ./cmd/genschema\nMissing: %v", len(missing), missing)
+		t.Errorf("docs/reference/cli.md is stale — missing sections for %d commands. Run: go run ./cmd/gc gen-doc\nMissing: %v", len(missing), missing)
 	}
+
+	var live bytes.Buffer
+	if err := docgen.RenderCLIMarkdown(&live, root); err != nil {
+		t.Fatalf("RenderCLIMarkdown: %v", err)
+	}
+	var staleSections []string
+	for _, command := range []string{
+		"gc mail inbox",
+		"gc mail read",
+		"gc mail peek",
+		"gc mail thread",
+		"gc mail count",
+		"gc trace status",
+		"gc trace show",
+	} {
+		committedSection, ok := cliDocSection(doc, command)
+		if !ok {
+			continue
+		}
+		liveSection, ok := cliDocSection(live.String(), command)
+		if !ok || committedSection != liveSection {
+			staleSections = append(staleSections, command)
+		}
+	}
+	if len(staleSections) > 0 {
+		t.Errorf("docs/reference/cli.md has stale command sections. Run: go run ./cmd/gc gen-doc\nStale: %v", staleSections)
+	}
+}
+
+func cliDocSection(doc, command string) (string, bool) {
+	heading := "## " + command + "\n"
+	start := strings.Index(doc, heading)
+	if start < 0 {
+		return "", false
+	}
+	rest := doc[start+len(heading):]
+	next := strings.Index(rest, "\n## ")
+	if next < 0 {
+		return doc[start:], true
+	}
+	return doc[start : start+len(heading)+next+1], true
 }

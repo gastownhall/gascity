@@ -684,6 +684,7 @@ gc converge list [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | Include closed/terminated loops |
+| `--all-rigs` | bool |  | List loops from city/HQ and every bound rig |
 | `--json` | bool |  | Output as JSON |
 | `--state` | string |  | Filter by state (active, waiting_manual, terminated) |
 
@@ -1921,12 +1922,18 @@ Close stale open order-tracking beads.
 This is intended for maintenance exec orders. It only closes tracking beads
 older than --stale-after so a fresh in-flight order is not interrupted.
 
+Use --include-wisps for operator recovery of abandoned order-run wisp
+subtrees whose open descendants are also older than --stale-after. Pass one
+or more scoped order names when --include-wisps is set; wisp recovery is
+order-scoped to avoid scanning unrelated beads.
+
 ```
-gc order sweep-tracking [flags]
+gc order sweep-tracking [order ...] [flags]
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--include-wisps` | bool |  | also close stale order-run wisp subtrees with open descendants |
 | `--quiet` | bool |  | suppress success output |
 | `--stale-after` | duration | `10m0s` | minimum age for an open tracking bead to be closed |
 

@@ -143,9 +143,10 @@ type HandlerResult struct {
 // root bead at a time. The controller event loop provides this guarantee.
 // Violating this assumption can cause stale-read races on metadata snapshots.
 type Handler struct {
-	Store   Store
-	Emitter EventEmitter
-	Clock   func() time.Time // injectable for testing; defaults to time.Now
+	Store     Store
+	StorePath string
+	Emitter   EventEmitter
+	Clock     func() time.Time // injectable for testing; defaults to time.Now
 }
 
 // HandleWispClosed processes a wisp_closed event for a convergence root bead.
@@ -668,6 +669,7 @@ func (h *Handler) evaluateGate(
 		BeadID:      rootBeadID,
 		Iteration:   iteration,
 		CityPath:    cityPath,
+		StorePath:   h.StorePath,
 		WispID:      wispID,
 		DocPath:     meta[VarPrefix+"doc_path"],
 		ArtifactDir: ArtifactDirFor(cityPath, rootBeadID, iteration),
@@ -776,7 +778,44 @@ func (h *Handler) emitEvent(eventType, eventID, beadID string, payload any) {
 	if h.Emitter == nil {
 		return
 	}
-	h.Emitter.Emit(eventType, eventID, beadID, MarshalPayload(payload), false)
+	h.Emitter.Emit(eventType, eventID, beadID, MarshalPayload(h.withEventRig(beadID, payload)), false)
+}
+
+func (h *Handler) withEventRig(beadID string, payload any) any {
+	rig := h.eventRig(beadID)
+	if rig == "" {
+		return payload
+	}
+	switch p := payload.(type) {
+	case CreatedPayload:
+		p.Rig = rig
+		return p
+	case IterationPayload:
+		p.Rig = rig
+		return p
+	case TerminatedPayload:
+		p.Rig = rig
+		return p
+	case WaitingManualPayload:
+		p.Rig = rig
+		return p
+	case ManualActionPayload:
+		p.Rig = rig
+		return p
+	default:
+		return payload
+	}
+}
+
+func (h *Handler) eventRig(beadID string) string {
+	if h.Store == nil || beadID == "" {
+		return ""
+	}
+	meta, err := h.Store.GetMetadata(beadID)
+	if err != nil {
+		return ""
+	}
+	return meta[FieldRig]
 }
 
 // clock returns the current time, using the injected Clock or time.Now.

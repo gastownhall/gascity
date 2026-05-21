@@ -35,11 +35,16 @@ const (
 	mailInjectPreviewScanSize = 4096
 )
 
-type mailMessagesJSONResult struct {
+type mailInboxJSONResult struct {
 	SchemaVersion string         `json:"schema_version"`
-	Recipient     string         `json:"recipient,omitempty"`
+	Recipient     string         `json:"recipient"`
 	Recipients    []string       `json:"recipients,omitempty"`
-	ThreadID      string         `json:"thread_id,omitempty"`
+	Messages      []mail.Message `json:"messages"`
+}
+
+type mailThreadJSONResult struct {
+	SchemaVersion string         `json:"schema_version"`
+	ThreadID      string         `json:"thread_id"`
 	Messages      []mail.Message `json:"messages"`
 }
 
@@ -1545,7 +1550,7 @@ func doMailInboxTargetWithJSON(mp mail.Provider, target resolvedMailTarget, json
 	}
 
 	if jsonOut {
-		if err := writeCLIJSONLine(stdout, mailMessagesJSONResult{
+		if err := writeCLIJSONLine(stdout, mailInboxJSONResult{
 			SchemaVersion: "1",
 			Recipient:     target.display,
 			Recipients:    jsonRecipients(target),
@@ -1600,6 +1605,13 @@ func doMailReadWithJSON(mp mail.Provider, rec events.Recorder, args []string, js
 		return 1
 	}
 
+	rec.Record(events.Event{
+		Type:    events.MailRead,
+		Actor:   eventActor(),
+		Subject: id,
+		Payload: mailEventPayload(nil),
+	})
+
 	if jsonOut {
 		if err := writeCLIJSONLine(stdout, mailMessageJSONResult{
 			SchemaVersion: "1",
@@ -1612,12 +1624,6 @@ func doMailReadWithJSON(mp mail.Provider, rec events.Recorder, args []string, js
 		printMessage(m, stdout)
 	}
 
-	rec.Record(events.Event{
-		Type:    events.MailRead,
-		Actor:   eventActor(),
-		Subject: id,
-		Payload: mailEventPayload(nil),
-	})
 	return 0
 }
 
@@ -1998,18 +2004,25 @@ func doMailThreadWithJSON(mp mail.Provider, args []string, jsonOut bool, stdout,
 		fmt.Fprintln(stderr, "gc mail thread: missing thread or message ID") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	id := args[0]
+	id := strings.TrimSpace(args[0])
+	if id == "" {
+		fmt.Fprintln(stderr, "gc mail thread: missing thread or message ID") //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	msgs, err := mp.Thread(id)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc mail thread: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if msgs == nil {
+		msgs = []mail.Message{}
+	}
 
 	if jsonOut {
-		if err := writeCLIJSONLine(stdout, mailMessagesJSONResult{
+		if err := writeCLIJSONLine(stdout, mailThreadJSONResult{
 			SchemaVersion: "1",
-			ThreadID:      id,
+			ThreadID:      canonicalMailThreadID(id, msgs),
 			Messages:      msgs,
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc mail thread: %v\n", err) //nolint:errcheck
@@ -2035,6 +2048,15 @@ func doMailThreadWithJSON(mp mail.Provider, args []string, jsonOut bool, stdout,
 	}
 	tw.Flush() //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func canonicalMailThreadID(fallback string, msgs []mail.Message) string {
+	for _, msg := range msgs {
+		if strings.TrimSpace(msg.ThreadID) != "" {
+			return msg.ThreadID
+		}
+	}
+	return fallback
 }
 
 func cmdMailCountWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer) int {
