@@ -7,6 +7,7 @@ package gastown_test
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,15 +17,25 @@ import (
 	"text/template"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
 func exampleDir() string {
 	_, filename, _, _ := runtime.Caller(0)
 	return filepath.Dir(filename)
+}
+
+func gastownFormulaSearchPaths() []string {
+	dir := exampleDir()
+	return []string{
+		filepath.Join(dir, "packs", "gastown", "formulas"),
+		filepath.Clean(filepath.Join(dir, "..", "..", "internal", "bootstrap", "packs", "core", "formulas")),
+	}
 }
 
 func runCmd(t *testing.T, dir, name string, args ...string) string {
@@ -410,6 +421,59 @@ func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
 			t.Fatalf("polecat formula must preserve refinery handoff diagnostics and pass a nudge message; found %q", bad)
 		}
 	}
+}
+
+func TestPolecatFormulaSelfReviewRendersAffectedTestModes(t *testing.T) {
+	fallback := cookPolecatSelfReviewDescription(t, map[string]string{
+		"issue":        "HW-42",
+		"test_command": "make test",
+	})
+	if strings.Contains(fallback, "{{affected_tests_command}}") {
+		t.Fatalf("fallback self-review retained affected_tests_command placeholder:\n%s", fallback)
+	}
+	assertContainsInOrder(t, fallback,
+		`if [ -n "" ]; then`,
+		`else`,
+		`make test`,
+	)
+
+	configured := cookPolecatSelfReviewDescription(t, map[string]string{
+		"issue":                  "HW-42",
+		"test_command":           "make test",
+		"affected_tests_command": "scripts/affected-tests.sh",
+	})
+	if strings.Contains(configured, "{{affected_tests_command}}") {
+		t.Fatalf("configured self-review retained affected_tests_command placeholder:\n%s", configured)
+	}
+	assertContainsInOrder(t, configured,
+		`if [ -n "scripts/affected-tests.sh" ]; then`,
+		`scripts/affected-tests.sh`,
+		`else`,
+		`make test`,
+	)
+}
+
+func cookPolecatSelfReviewDescription(t *testing.T, vars map[string]string) string {
+	t.Helper()
+
+	store := beads.NewMemStore()
+	result, err := molecule.Cook(context.Background(), store, "mol-polecat-work", gastownFormulaSearchPaths(), molecule.Options{
+		Title: "HW-42",
+		Vars:  vars,
+	})
+	if err != nil {
+		t.Fatalf("Cook mol-polecat-work: %v", err)
+	}
+
+	selfReviewID := result.IDMapping["mol-polecat-work.self-review"]
+	if selfReviewID == "" {
+		t.Fatalf("cooked formula missing self-review step: %#v", result.IDMapping)
+	}
+	selfReview, err := store.Get(selfReviewID)
+	if err != nil {
+		t.Fatalf("get self-review bead: %v", err)
+	}
+	return selfReview.Description
 }
 
 func TestPolecatPromptDoneSequenceSignalsRefinery(t *testing.T) {

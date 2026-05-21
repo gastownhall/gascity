@@ -23,6 +23,13 @@ only the refinery verifies merges and closes beads.
 `{{base_branch}}` may come from the work bead's own `metadata.target` or
 be inherited from a parent convoy with `metadata.target` set.
 
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| binding_prefix | import binding | Agent identity prefix for bound Gas Town imports. |
+| affected_tests_command | rig `formula_vars` | Shell-safe command that reads `git diff --name-only origin/{{base_branch}}...HEAD` and runs the matching test subset. Empty = run full `test_command`. |
+
 **Rejection-aware.** If the work bead has `metadata.branch` and
 `metadata.rejection_reason`, a previous attempt was rejected by the
 refinery. Resume the existing branch — don't redo all the work.
@@ -42,6 +49,10 @@ version = 10
 [vars]
 [vars.binding_prefix]
 description = "Import binding prefix for gastown agent identities, including trailing dot when bound."
+default = ""
+
+[vars.affected_tests_command]
+description = "Shell-safe affected-tests command. Must read `git diff --name-only origin/{{base_branch}}...HEAD` and run the matching test subset. From rig `formula_vars` or empty to run full test_command."
 default = ""
 
 [[steps]]
