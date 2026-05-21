@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Default bead-backed pool-demand counts now use the same routed target
+  resolution as worker claim queries and exclude epic-routed beads, matching
+  the default worker `work_query` behavior. Custom `scale_check` overrides are
+  unchanged.
 - Empty JSON result collections for `gc mail thread`, `gc trace status`, and
   `gc trace show` now encode as `[]` instead of `null`; `gc trace show` also
   reports a concise no-records message in the default text mode.

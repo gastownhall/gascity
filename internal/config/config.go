@@ -2495,18 +2495,24 @@ func (a *Agent) AttachEnabled() bool {
 
 // bdReadyPoolDemandShell returns the bd ready predicate for unassigned,
 // non-epic pool demand routed to target. This is the one-source-of-truth for the
-// "is there work this template can claim?" question that both the worker
-// (via EffectiveWorkQuery Tier 3) and the reconciler (via
-// EffectivePoolDemandQuery, count-form) ask. Diverging the two
-// re-introduces the protocol-mismatch class — see the
-// "scale_check ↔ work_query correspondence" note in
-// engdocs/architecture/dispatch.md and the spawn-storm regression
-// addressed by PR #1516.
+// "is there work on this routed queue?" question that both the worker (via
+// EffectiveWorkQuery Tier 3) and the reconciler (via EffectivePoolDemandQuery,
+// count-form) ask. Diverging the two re-introduces the protocol-mismatch class;
+// see the "scale_check ↔ work_query correspondence" note in
+// engdocs/architecture/dispatch.md.
 //
 // Callers append their own bd flags (--limit=1 for first-row work_query;
 // piped to jq 'length' for the count-form) and shell handling.
 func bdReadyPoolDemandShell(target string) string {
 	return `bd ready --metadata-field gc.routed_to=` + target + ` --unassigned --exclude-type=epic --json`
+}
+
+func (a *Agent) poolDemandTarget() string {
+	target := a.QualifiedName()
+	if a.PoolName != "" {
+		target = a.PoolName
+	}
+	return target
 }
 
 // EffectiveWorkQuery returns the work query command for this agent.
@@ -2541,10 +2547,7 @@ func (a *Agent) EffectiveWorkQuery() string {
 	if a.WorkQuery != "" {
 		return a.WorkQuery
 	}
-	target := a.QualifiedName()
-	if a.PoolName != "" {
-		target = a.PoolName
-	}
+	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
 		return `sh -c '` +
@@ -2683,8 +2686,8 @@ func (a *Agent) EffectivePoolDemandQuery() string {
 	if a.ScaleCheck != "" {
 		return a.ScaleCheck
 	}
-	template := a.QualifiedName()
-	return `ready_json=$(` + bdReadyPoolDemandShell(template) +
+	target := a.poolDemandTarget()
+	return `ready_json=$(` + bdReadyPoolDemandShell(target) +
 		` --limit 0) && printf '%s\n' "$ready_json" | jq 'length'`
 }
 
