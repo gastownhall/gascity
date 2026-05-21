@@ -19,7 +19,7 @@ Commit under review: 3a2027c7b
 ## Acceptance Evidence
 
 - Changed files: `cmd/gc/cmd_lint.go`, `cmd/gc/cmd_lint_test.go`, `cmd/gc/main.go`, `docs/reference/cli.md`, `internal/config/pack.go`, `schemas/lint/result.schema.json`.
-- `gc lint .` discovery, invalid TOML, missing template variable, malformed template action, valid pack, JSON report, and help text are covered by tests.
+- `gc lint .` discovery, city-root packs, loader warnings, runtime-compatible missing-key behavior, malformed template action, valid pack, ignored prompt-discovery directories, missing fragment diagnostics, and schema-backed recursive JSON reports are covered by tests.
 - CLI smoke checks validated both human output and JSON output.
 
 ## Test Evidence

@@ -2,13 +2,16 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "ok", "error_count", "packs"],
+  "required": ["schema_version", "ok", "passed", "error_count", "packs"],
   "properties": {
     "schema_version": {
       "type": "string",
-      "const": "1"
+      "const": "2"
     },
     "ok": {
+      "const": true
+    },
+    "passed": {
       "type": "boolean"
     },
     "error_count": {
@@ -40,7 +43,7 @@
               "properties": {
                 "severity": {
                   "type": "string",
-                  "enum": ["error"]
+                  "enum": ["error", "warning"]
                 },
                 "path": {
                   "type": "string"

@@ -1550,9 +1550,10 @@ gc init
 
 Validate a pack before merge.
 
-gc lint &lt;pack&gt; validates the pack.toml file and renders prompt templates
-with a synthetic agent context. Use gc lint . to recursively find every
-pack.toml below the current directory.
+gc lint &lt;pack&gt; validates the pack.toml file, reports non-fatal loader
+warnings, and parses prompt templates with the same missing-key behavior used
+by runtime prompt rendering. Use gc lint . to recursively find every pack.toml
+below the current directory.
 
 ```
 gc lint <pack> [flags]

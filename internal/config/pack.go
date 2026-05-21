@@ -1059,7 +1059,7 @@ func LoadPackForLint(fs fsys.FS, packDir string) (*LintPackLoad, error) {
 	topoPath := filepath.Join(absDir, packFile)
 	cache := &packLoadCache{results: make(map[string]*packLoadResult)}
 	agents, namedSessions, providers, _, topoDirs, _, _, err := loadPackWithCacheOptions(
-		fs, topoPath, absDir, absDir, "", nil, cache, LoadOptions{})
+		fs, topoPath, absDir, absDir, "", nil, cache, LoadOptions{AllowRootDefaultRigImports: true})
 	if err != nil {
 		return nil, err
 	}
@@ -1097,6 +1097,21 @@ func loadPackWithCacheOptions(fs fsys.FS, topoPath, topoDir, cityRoot, rigName s
 		return loadErr
 	})
 	return agents, namedSessions, providers, services, topoDirs, requirements, globals, err
+}
+
+func allowRootDefaultRigImports(opts LoadOptions, topoDir, cityRoot string) bool {
+	if !opts.AllowRootDefaultRigImports {
+		return false
+	}
+	absTopoDir, err := filepath.Abs(topoDir)
+	if err != nil {
+		absTopoDir = topoDir
+	}
+	absCityRoot, err := filepath.Abs(cityRoot)
+	if err != nil {
+		absCityRoot = cityRoot
+	}
+	return absTopoDir == absCityRoot
 }
 
 func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[string]bool, cache *packLoadCache, opts LoadOptions) ([]Agent, []NamedSession, map[string]ProviderSpec, []Service, []string, []PackRequirement, []ResolvedPackGlobal, error) {
@@ -1146,7 +1161,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	if fatalWarnings := fatalUndecodedWarnings(md, topoPath); len(fatalWarnings) > 0 {
 		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("parsing %s: %s", packFile, strings.Join(fatalWarnings, "; "))
 	}
-	if len(tc.Defaults.Rig.Imports) > 0 {
+	if len(tc.Defaults.Rig.Imports) > 0 && !allowRootDefaultRigImports(opts, topoDir, cityRoot) {
 		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("parsing %s: [defaults.rig.imports] is only supported in a city root pack.toml", packFile)
 	}
 

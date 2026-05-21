@@ -95,6 +95,9 @@ type LoadOptions struct {
 	// SuppressDeprecatedOrderWarnings suppresses only legacy order-path
 	// migration warnings produced while discovering pack orders.
 	SuppressDeprecatedOrderWarnings bool
+	// AllowRootDefaultRigImports permits [defaults.rig.imports] only on the
+	// root pack.toml being loaded. Normal pack imports still reject it.
+	AllowRootDefaultRigImports bool
 }
 
 // LoadWithIncludes loads a city.toml and merges all included fragments.

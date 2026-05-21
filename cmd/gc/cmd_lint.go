@@ -22,6 +22,7 @@ import (
 type lintReport struct {
 	SchemaVersion string           `json:"schema_version"`
 	OK            bool             `json:"ok"`
+	Passed        bool             `json:"passed"`
 	ErrorCount    int              `json:"error_count"`
 	Packs         []lintPackReport `json:"packs"`
 }
@@ -53,9 +54,10 @@ func newLintCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Validate a pack before merge",
 		Long: strings.TrimSpace(`Validate a pack before merge.
 
-gc lint <pack> validates the pack.toml file and renders prompt templates
-with a synthetic agent context. Use gc lint . to recursively find every
-pack.toml below the current directory.`),
+gc lint <pack> validates the pack.toml file, reports non-fatal loader
+warnings, and parses prompt templates with the same missing-key behavior used
+by runtime prompt rendering. Use gc lint . to recursively find every pack.toml
+below the current directory.`),
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return exitForCode(doLint(args[0], jsonOut, stdout, stderr))
@@ -75,7 +77,7 @@ func doLint(target string, jsonOut bool, stdout, stderr io.Writer) int {
 	} else {
 		writeLintHuman(stdout, stderr, report)
 	}
-	if report.OK {
+	if report.Passed {
 		return 0
 	}
 	return 1
@@ -83,13 +85,14 @@ func doLint(target string, jsonOut bool, stdout, stderr io.Writer) int {
 
 func lintTarget(target string) lintReport {
 	report := lintReport{
-		SchemaVersion: "1",
+		SchemaVersion: "2",
 		OK:            true,
+		Passed:        true,
 		Packs:         []lintPackReport{},
 	}
 	packDirs, diagnostics := lintPackDirs(target)
 	if len(diagnostics) > 0 {
-		report.OK = false
+		report.Passed = false
 		report.ErrorCount = len(diagnostics)
 		report.Packs = append(report.Packs, lintPackReport{
 			Path:        target,
@@ -101,13 +104,9 @@ func lintTarget(target string) lintReport {
 	for _, dir := range packDirs {
 		packReport := lintPack(dir)
 		report.Packs = append(report.Packs, packReport)
-		for _, diagnostic := range packReport.Diagnostics {
-			if diagnostic.Severity == "error" {
-				report.ErrorCount++
-			}
-		}
+		report.ErrorCount += lintErrorCount(packReport.Diagnostics)
 	}
-	report.OK = report.ErrorCount == 0
+	report.Passed = report.ErrorCount == 0
 	return report
 }
 
@@ -182,15 +181,21 @@ func lintPack(packDir string) lintPackReport {
 		return out
 	}
 	out.Name = loaded.Name
-	for _, target := range collectLintPromptTargets(packDir, loaded) {
+	for _, warning := range loaded.Warnings {
+		out.Diagnostics = append(out.Diagnostics, diagnosticFromWarning(filepath.Join(packDir, "pack.toml"), warning))
+	}
+	targets, diagnostics := collectLintPromptTargets(packDir, loaded)
+	out.Diagnostics = append(out.Diagnostics, diagnostics...)
+	for _, target := range targets {
 		out.Diagnostics = append(out.Diagnostics, lintPrompt(packDir, loaded.PackDirs, loaded.Providers, target)...)
 	}
-	out.OK = len(out.Diagnostics) == 0
+	out.OK = lintErrorCount(out.Diagnostics) == 0
 	return out
 }
 
-func collectLintPromptTargets(packDir string, loaded *config.LintPackLoad) []lintPromptTarget {
+func collectLintPromptTargets(packDir string, loaded *config.LintPackLoad) ([]lintPromptTarget, []lintDiagnostic) {
 	var targets []lintPromptTarget
+	var diagnostics []lintDiagnostic
 	seenRender := map[string]struct{}{}
 	seenPath := map[string]struct{}{}
 	for _, agentCfg := range loaded.Agents {
@@ -211,8 +216,21 @@ func collectLintPromptTargets(packDir string, loaded *config.LintPackLoad) []lin
 		})
 	}
 
-	_ = filepath.WalkDir(packDir, func(path string, entry iofs.DirEntry, walkErr error) error {
-		if walkErr != nil || entry.IsDir() || !isPromptTemplatePath(entry.Name()) {
+	err := filepath.WalkDir(packDir, func(path string, entry iofs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			diagnostics = append(diagnostics, diagnosticFromError(path, walkErr))
+			return nil
+		}
+		if entry == nil {
+			return nil
+		}
+		if entry.IsDir() {
+			if path != packDir && lintSkipDir(entry.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !isPromptTemplatePath(entry.Name()) {
 			return nil
 		}
 		if _, ok := seenPath[path]; ok {
@@ -221,7 +239,8 @@ func collectLintPromptTargets(packDir string, loaded *config.LintPackLoad) []lin
 		seenPath[path] = struct{}{}
 		rel, err := filepath.Rel(packDir, path)
 		if err != nil {
-			rel = path
+			diagnostics = append(diagnostics, diagnosticFromError(path, err))
+			return nil
 		}
 		name := lintAgentNameFromTemplate(path)
 		targets = append(targets, lintPromptTarget{
@@ -234,6 +253,9 @@ func collectLintPromptTargets(packDir string, loaded *config.LintPackLoad) []lin
 		})
 		return nil
 	})
+	if err != nil {
+		diagnostics = append(diagnostics, diagnosticFromError(packDir, err))
+	}
 
 	sort.SliceStable(targets, func(i, j int) bool {
 		if targets[i].sourcePath == targets[j].sourcePath {
@@ -241,7 +263,7 @@ func collectLintPromptTargets(packDir string, loaded *config.LintPackLoad) []lin
 		}
 		return targets[i].sourcePath < targets[j].sourcePath
 	})
-	return targets
+	return targets, diagnostics
 }
 
 func lintAgentNameFromTemplate(path string) string {
@@ -269,7 +291,7 @@ func lintPrompt(packDir string, packDirs []string, providers map[string]config.P
 	var tmpl *template.Template
 	tmpl = template.New("prompt").
 		Funcs(promptFuncMap("lint-city", "", nil, func() *template.Template { return tmpl })).
-		Option("missingkey=error")
+		Option("missingkey=zero")
 
 	for _, dir := range packDirs {
 		diagnostics = append(diagnostics, lintLoadSharedTemplates(tmpl, filepath.Join(dir, "prompts", "shared"))...)
@@ -332,11 +354,7 @@ func lintPromptContext(packDir string, agentCfg config.Agent, providers map[stri
 	if qualifiedName == "" {
 		qualifiedName = "lint-agent"
 	}
-	env["Alias"] = qualifiedName
 	providerKey := agentCfg.Provider
-	if providerKey == "" {
-		providerKey = "codex"
-	}
 	return PromptContext{
 		CityRoot:            packDir,
 		AgentName:           qualifiedName,
@@ -374,6 +392,25 @@ func diagnosticFromError(path string, err error) lintDiagnostic {
 	return newLintDiagnostic(path, lineFromError(message), message)
 }
 
+func diagnosticFromWarning(path string, warning string) lintDiagnostic {
+	message := strings.TrimSpace(warning)
+	if idx := strings.Index(message, ": "); idx > 0 {
+		candidate := message[:idx]
+		if filepath.IsAbs(candidate) || strings.HasSuffix(candidate, "pack.toml") {
+			path = candidate
+			message = strings.TrimSpace(message[idx+2:])
+		}
+	} else if path != "" {
+		message = strings.TrimPrefix(message, path+": ")
+	}
+	return lintDiagnostic{
+		Severity: "warning",
+		Path:     path,
+		Line:     lineFromError(message),
+		Message:  strings.TrimSpace(message),
+	}
+}
+
 func newLintDiagnostic(path string, line int, message string) lintDiagnostic {
 	return lintDiagnostic{
 		Severity: "error",
@@ -381,6 +418,16 @@ func newLintDiagnostic(path string, line int, message string) lintDiagnostic {
 		Line:     line,
 		Message:  strings.TrimSpace(message),
 	}
+}
+
+func lintErrorCount(diagnostics []lintDiagnostic) int {
+	var count int
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Severity == "error" {
+			count++
+		}
+	}
+	return count
 }
 
 func lineFromError(message string) int {
@@ -401,7 +448,12 @@ func lineFromError(message string) int {
 }
 
 func writeLintHuman(stdout, stderr io.Writer, report lintReport) {
-	if report.OK {
+	for _, pack := range report.Packs {
+		for _, diagnostic := range pack.Diagnostics {
+			fmt.Fprintln(stderr, formatLintDiagnostic(diagnostic)) //nolint:errcheck
+		}
+	}
+	if report.Passed {
 		switch len(report.Packs) {
 		case 1:
 			fmt.Fprintf(stdout, "gc lint: %s: ok\n", report.Packs[0].Path) //nolint:errcheck
@@ -409,11 +461,6 @@ func writeLintHuman(stdout, stderr io.Writer, report lintReport) {
 			fmt.Fprintf(stdout, "gc lint: %d pack(s) ok\n", len(report.Packs)) //nolint:errcheck
 		}
 		return
-	}
-	for _, pack := range report.Packs {
-		for _, diagnostic := range pack.Diagnostics {
-			fmt.Fprintln(stderr, formatLintDiagnostic(diagnostic)) //nolint:errcheck
-		}
 	}
 }
 
@@ -427,7 +474,13 @@ func formatLintDiagnostic(diagnostic lintDiagnostic) string {
 		message = "lint failed"
 	}
 	if diagnostic.Line > 0 {
+		if diagnostic.Severity != "" && diagnostic.Severity != "error" {
+			return fmt.Sprintf("%s:%d: %s: %s", path, diagnostic.Line, diagnostic.Severity, message)
+		}
 		return fmt.Sprintf("%s:%d: %s", path, diagnostic.Line, message)
+	}
+	if diagnostic.Severity != "" && diagnostic.Severity != "error" {
+		return fmt.Sprintf("%s: %s: %s", path, diagnostic.Severity, message)
 	}
 	return fmt.Sprintf("%s: %s", path, message)
 }
