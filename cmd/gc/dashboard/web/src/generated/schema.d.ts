@@ -2009,6 +2009,7 @@ export interface components {
             InjectFragmentsAppend: string[] | null;
             InstallAgentHooks: string[] | null;
             InstallAgentHooksAppend: string[] | null;
+            Lifecycle: string | null;
             MCP: string[] | null;
             MCPAppend: string[] | null;
             /** Format: int64 */

@@ -768,13 +768,11 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 		return err
 	}
 
-	hasHints := cfg.ReadyPromptPrefix != "" || cfg.ReadyDelayMs > 0 ||
-		len(cfg.ProcessNames) > 0 || cfg.EmitsPermissionWarning ||
-		cfg.AcceptStartupDialogs != nil ||
-		cfg.Nudge != "" || len(cfg.PreStart) > 0 || len(cfg.SessionSetup) > 0 || cfg.SessionSetupScript != "" ||
-		len(cfg.SessionLive) > 0
+	if cfg.Lifecycle == runtime.LifecycleOneShot {
+		return nil
+	}
 
-	if !hasHints {
+	if !runtime.HasManagedStartupHints(cfg) {
 		// Fire-and-forget: caller may SendImmediate before the agent is
 		// fully interactive. This is an accepted narrow race — it only
 		// occurs when no readiness hints are configured, and the message

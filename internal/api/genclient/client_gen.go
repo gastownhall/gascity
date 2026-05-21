@@ -343,6 +343,7 @@ type AgentPatch struct {
 	InjectFragmentsAppend   *[]string         `json:"InjectFragmentsAppend"`
 	InstallAgentHooks       *[]string         `json:"InstallAgentHooks"`
 	InstallAgentHooksAppend *[]string         `json:"InstallAgentHooksAppend"`
+	Lifecycle               *string           `json:"Lifecycle"`
 	MCP                     *[]string         `json:"MCP"`
 	MCPAppend               *[]string         `json:"MCPAppend"`
 	MaxActiveSessions       *int64            `json:"MaxActiveSessions"`

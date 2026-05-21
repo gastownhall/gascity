@@ -896,6 +896,25 @@ func TestDoStartSession_SetRemainOnExitErrorIgnored(t *testing.T) {
 	assertCallSequence(t, ops, []string{"createSession", "setRemainOnExit"})
 }
 
+func TestDoStartSession_OneShotLifecycleSkipsPostStartNudgeChecks(t *testing.T) {
+	ops := &fakeStartOps{
+		hasSessionResult:   false,
+		setRemainOnExitErr: ErrNoServer,
+	}
+
+	err := doStartSession(context.Background(), ops, "test", runtime.Config{
+		WorkDir:   "/w",
+		Command:   "true",
+		Lifecycle: runtime.LifecycleOneShot,
+		Nudge:     "start working",
+	}, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertCallSequence(t, ops, []string{"createSession", "setRemainOnExit"})
+}
+
 // ---------------------------------------------------------------------------
 // ensureFreshSession tests
 // ---------------------------------------------------------------------------

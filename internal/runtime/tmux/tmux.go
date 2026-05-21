@@ -36,7 +36,7 @@ import (
 
 const pollInterval = 100 * time.Millisecond
 
-var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "gemini", "kimi", "opencode", "pi"}
+var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", "gemini", "kimi", "opencode", "pi"}
 
 // Config holds configurable timeouts and intervals for the tmux provider.
 // All fields have sensible defaults matching the original hardcoded values.

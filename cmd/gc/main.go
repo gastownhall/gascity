@@ -250,6 +250,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newNudgeCmd(stdout, stderr),
 		newWaitCmd(stdout, stderr),
 		newAgentCmd(stdout, stderr),
+		newAgentScriptCmd(stdout, stderr),
 		newEventCmd(stdout, stderr),
 		newEventsCmd(stdout, stderr),
 		newTraceCmd(stdout, stderr),

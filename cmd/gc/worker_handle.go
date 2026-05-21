@@ -99,6 +99,7 @@ func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config 
 		return runtime.Config{}
 	}
 	return runtime.Config{
+		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 		ReadyDelayMs:           resolved.ReadyDelayMs,
 		ProcessNames:           resolved.ProcessNames,
@@ -500,6 +501,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 		SessionEnv: resolved.Env,
 		Hints: runtime.Config{
 			WorkDir:                workDir,
+			Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 			ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 			ReadyDelayMs:           resolved.ReadyDelayMs,
 			ProcessNames:           resolved.ProcessNames,
@@ -673,12 +675,14 @@ func startedConfigHashProvesWorkerACPTransport(
 	}
 	acpHash := runtime.CoreFingerprint(runtime.Config{
 		Command:    acpCommand,
+		Lifecycle:  runtime.Lifecycle(resolved.Lifecycle),
 		Env:        resolved.Env,
 		MCPServers: mcpServers,
 	})
 	defaultHash := runtime.CoreFingerprint(runtime.Config{
-		Command: defaultCommand,
-		Env:     resolved.Env,
+		Command:   defaultCommand,
+		Lifecycle: runtime.Lifecycle(resolved.Lifecycle),
+		Env:       resolved.Env,
 	})
 	if acpHash == defaultHash {
 		return false

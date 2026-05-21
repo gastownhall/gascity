@@ -104,6 +104,13 @@
           "type": "string",
           "description": "StartCommand overrides the provider's command for this agent."
         },
+        "lifecycle": {
+          "type": "string",
+          "enum": [
+            "one_shot"
+          ],
+          "description": "Lifecycle controls runtime lifetime semantics. Empty uses the default\nlong-lived session lifecycle; \"one_shot\" means the command is expected\nto do bounded work and exit cleanly."
+        },
         "args": {
           "items": {
             "type": "string"
@@ -437,6 +444,13 @@
           "type": "string",
           "description": "StartCommand overrides the start command."
         },
+        "lifecycle": {
+          "type": "string",
+          "enum": [
+            "one_shot"
+          ],
+          "description": "Lifecycle overrides the runtime lifecycle (\"one_shot\" or empty)."
+        },
         "nudge": {
           "type": "string",
           "description": "Nudge overrides the nudge text."
@@ -687,6 +701,13 @@
         "start_command": {
           "type": "string",
           "description": "StartCommand overrides the start command."
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": [
+            "one_shot"
+          ],
+          "description": "Lifecycle overrides the runtime lifecycle (\"one_shot\" or empty)."
         },
         "nudge": {
           "type": "string",

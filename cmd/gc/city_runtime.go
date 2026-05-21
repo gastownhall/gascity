@@ -1727,6 +1727,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 				"dir":                 agent.Dir,
 				"suspended":           agent.Suspended,
 				"start_command":       agent.StartCommand,
+				"lifecycle":           agent.Lifecycle,
 				"args":                append([]string(nil), agent.Args...),
 				"prompt_mode":         agent.PromptMode,
 				"prompt_flag":         agent.PromptFlag,

@@ -1323,6 +1323,7 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 		resolvedInfo.ResumeCommand = resumeCommand
 		return session.BuildResumeCommand(resolvedInfo), runtime.Config{
 			WorkDir:                info.WorkDir,
+			Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 			ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 			ReadyDelayMs:           resolved.ReadyDelayMs,
 			ProcessNames:           resolved.ProcessNames,

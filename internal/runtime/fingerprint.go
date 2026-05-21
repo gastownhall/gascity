@@ -36,13 +36,13 @@ type BreakdownCopyEntry struct {
 // different prefix) and silently rebaseline them instead of triggering a
 // false-positive drain. Bump this constant whenever the inputs to or the
 // algorithm of any Fingerprint helper change.
-const FingerprintVersion = "v1"
+const FingerprintVersion = "v2"
 
 // ConfigFingerprint returns a deterministic hash of the Config fields that
 // define an agent's behavioral identity. Changes to these fields indicate
 // the agent should be restarted (via drain when drain ops are available).
 //
-// Included: Command, Env, FingerprintExtra (pool config, etc.),
+// Included: Command, Lifecycle, Env, FingerprintExtra (pool config, etc.),
 // PreStart, SessionSetup, SessionSetupScript, OverlayDir, effective provider
 // overlay slots, CopyFiles, AcceptStartupDialogs, SessionLive.
 //
@@ -196,6 +196,9 @@ func envFingerprintInclude(key string) bool {
 func hashCoreFields(h hash.Hash, cfg Config) {
 	h.Write([]byte(cfg.Command)) //nolint:errcheck // hash.Write never errors
 	h.Write([]byte{0})           //nolint:errcheck // hash.Write never errors
+
+	h.Write([]byte(cfg.Lifecycle)) //nolint:errcheck // hash.Write never errors
+	h.Write([]byte{0})             //nolint:errcheck // hash.Write never errors
 
 	hashSortedMapIncluded(h, cfg.Env, envFingerprintInclude)
 	hashMCPServers(h, cfg.MCPServers)
@@ -369,6 +372,9 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 	fields := map[string]string{
 		"Command": fieldHash(func(h hash.Hash) {
 			h.Write([]byte(cfg.Command))
+		}),
+		"Lifecycle": fieldHash(func(h hash.Hash) {
+			h.Write([]byte(cfg.Lifecycle))
 		}),
 		"Env": fieldHash(func(h hash.Hash) {
 			hashSortedMapIncluded(h, cfg.Env, envFingerprintInclude)

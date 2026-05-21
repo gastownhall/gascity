@@ -39,7 +39,12 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 		if mode == "" {
 			mode = "none"
 		}
-		resolved := &ResolvedProvider{Command: agent.StartCommand, PromptMode: mode, PromptFlag: agent.PromptFlag}
+		resolved := &ResolvedProvider{
+			Command:    agent.StartCommand,
+			Lifecycle:  agent.Lifecycle,
+			PromptMode: mode,
+			PromptFlag: agent.PromptFlag,
+		}
 		if agent.ReadyDelayMs != nil {
 			resolved.ReadyDelayMs = *agent.ReadyDelayMs
 		}
@@ -702,6 +707,9 @@ func mergeAgentOverrides(rp *ResolvedProvider, agent *Agent) {
 	}
 	if agent.PromptFlag != "" {
 		rp.PromptFlag = agent.PromptFlag
+	}
+	if agent.Lifecycle != "" {
+		rp.Lifecycle = agent.Lifecycle
 	}
 	if agent.ReadyDelayMs != nil {
 		rp.ReadyDelayMs = *agent.ReadyDelayMs
