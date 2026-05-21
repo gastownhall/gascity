@@ -1449,7 +1449,7 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 	cfg.Rigs = filtered
 
 	// Write updated config.
-	if err := writeCityConfigForEditFS(fsys.OSFS{}, tomlPath, cfg); err != nil {
+	if err := config.WriteCityAndRigSiteBindingsForEditRemovingRigs(fsys.OSFS{}, tomlPath, cfg, rigName); err != nil {
 		fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

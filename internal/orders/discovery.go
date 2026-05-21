@@ -3,21 +3,17 @@ package orders
 import (
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // discoverRoot discovers orders for one logical root. Wave 2 requires flat
-// order files and hard-errors when older PackV1 subdirectory order paths are
-// still present.
+// order files and treats selected flat order files as load-bearing config:
+// unreadable files and older PackV1 subdirectory paths are hard errors.
 func discoverRoot(fs fsys.FS, root ScanRoot) ([]Order, error) {
-	return discoverRootWithOptions(fs, root, ScanOptions{})
-}
-
-func discoverRootWithOptions(fs fsys.FS, root ScanRoot, opts ScanOptions) ([]Order, error) {
 	found := make(map[string]Order)
 	var names []string
 
@@ -36,18 +32,24 @@ func discoverRootWithOptions(fs fsys.FS, root ScanRoot, opts ScanOptions) ([]Ord
 		return nil
 	}
 
-	if err := discoverFlatFiles(fs, root.Dir, found, add, opts); err != nil {
+	if err := discoverFlatFiles(fs, root.Dir, add); err != nil {
 		return nil, err
 	}
-	if err := rejectLegacySubdirectoryOrders(fs, root.Dir, "rename to orders/%s.toml"); err != nil {
+	legacyFindings, err := findLegacySubdirectoryOrders(fs, root.Dir, "rename to orders/%s.toml")
+	if err != nil {
 		return nil, err
 	}
 
 	legacyDir := legacyOrdersDir(root.FormulaLayer)
 	if legacyDir != "" && filepath.Clean(legacyDir) != filepath.Clean(root.Dir) {
-		if err := rejectLegacySubdirectoryOrders(fs, legacyDir, "move to orders/%s.toml"); err != nil {
+		findings, err := findLegacySubdirectoryOrders(fs, legacyDir, "move to orders/%s.toml")
+		if err != nil {
 			return nil, err
 		}
+		legacyFindings = append(legacyFindings, findings...)
+	}
+	if len(legacyFindings) > 0 {
+		return nil, legacyOrderLayoutError{findings: legacyFindings}
 	}
 
 	result := make([]Order, 0, len(names))
@@ -57,7 +59,7 @@ func discoverRootWithOptions(fs fsys.FS, root ScanRoot, opts ScanOptions) ([]Ord
 	return result, nil
 }
 
-func discoverFlatFiles(fs fsys.FS, dir string, found map[string]Order, add func(name, source string, data []byte) error, _ ScanOptions) error {
+func discoverFlatFiles(fs fsys.FS, dir string, add func(name, source string, data []byte) error) error {
 	entries, err := fs.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -65,7 +67,9 @@ func discoverFlatFiles(fs fsys.FS, dir string, found map[string]Order, add func(
 		}
 		return fmt.Errorf("reading order root %s: %w", dir, err)
 	}
-	pickedInfixed := make(map[string]bool)
+
+	selected := make(map[string]string)
+	var names []string
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -75,36 +79,60 @@ func discoverFlatFiles(fs fsys.FS, dir string, found map[string]Order, add func(
 		if !ok {
 			continue
 		}
-		infixed := fileName == name+LegacyFlatOrderSuffix
-		source := filepath.Join(dir, fileName)
-		if _, exists := found[name]; exists {
-			if infixed || !pickedInfixed[name] {
-				continue
-			}
+		if _, exists := selected[name]; !exists {
+			names = append(names, name)
+			selected[name] = fileName
+			continue
 		}
+		if fileName == name+CanonicalFlatOrderSuffix {
+			selected[name] = fileName
+		}
+	}
+
+	for _, name := range names {
+		fileName := selected[name]
+		source := filepath.Join(dir, fileName)
 		data, err := fs.ReadFile(source)
 		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				log.Printf("warning: unreadable order path %s: %v", source, err)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
 			}
-			continue
+			return fmt.Errorf("reading order %s: %w", source, err)
 		}
 		if err := add(name, source, data); err != nil {
 			return err
 		}
-		pickedInfixed[name] = infixed
 	}
 	return nil
 }
 
-func rejectLegacySubdirectoryOrders(fs fsys.FS, dir, hintFmt string) error {
+type legacyOrderLayoutFinding struct {
+	source string
+	hint   string
+}
+
+type legacyOrderLayoutError struct {
+	findings []legacyOrderLayoutFinding
+}
+
+func (e legacyOrderLayoutError) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "unsupported PackV1 order paths (%d); migrate all legacy order directories to flat orders/<name>.toml files before loading this city. This cutover applies to all pack schemas.", len(e.findings))
+	for _, finding := range e.findings {
+		fmt.Fprintf(&b, "\n- unsupported PackV1 order path %s; %s", finding.source, finding.hint)
+	}
+	return b.String()
+}
+
+func findLegacySubdirectoryOrders(fs fsys.FS, dir, hintFmt string) ([]legacyOrderLayoutFinding, error) {
 	entries, err := fs.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil
+			return nil, nil
 		}
-		return fmt.Errorf("reading order root %s: %w", dir, err)
+		return nil, fmt.Errorf("reading order root %s: %w", dir, err)
 	}
+	var findings []legacyOrderLayoutFinding
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -112,12 +140,15 @@ func rejectLegacySubdirectoryOrders(fs fsys.FS, dir, hintFmt string) error {
 		name := entry.Name()
 		source := filepath.Join(dir, name, orderFileName)
 		if _, err := fs.ReadFile(source); err == nil {
-			return fmt.Errorf("unsupported PackV1 order path %s; "+hintFmt, source, name)
+			findings = append(findings, legacyOrderLayoutFinding{
+				source: source,
+				hint:   fmt.Sprintf(hintFmt, name),
+			})
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("reading legacy order path %s: %w", source, err)
+			return nil, fmt.Errorf("reading legacy order path %s: %w", source, err)
 		}
 	}
-	return nil
+	return findings, nil
 }
 
 func legacyOrdersDir(formulaLayer string) string {

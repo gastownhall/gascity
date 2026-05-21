@@ -99,9 +99,9 @@ agents/&lt;name&gt;/agent.toml. These files live in the city directory and do
 not append [[agent]] blocks to city.toml.
 
 Use --prompt-template to copy prompt content from an existing file into
-the canonical prompt.template.md location. Use --dir to record a rig or
-working-directory prefix in agent.toml. Use --suspended to scaffold the
-agent in a suspended state.
+the canonical prompt.template.md location. Schema-2 convention agents are
+city-scoped; define rig-scoped agents in pack config or [[patches.agent]].
+Use --suspended to scaffold the agent in a suspended state.
 
 ```
 gc agent add --name <name> [flags]
@@ -111,13 +111,13 @@ gc agent add --name <name> [flags]
 
 ```
 gc agent add --name mayor
-  gc agent add --name polecat --dir my-project
+  gc agent add --name polecat
   gc agent add --name worker --prompt-template ./worker.md --suspended
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--dir` | string |  | Working directory for the agent (relative to city root) |
+| `--dir` | string |  | Legacy working directory for schema-1 agents; schema-2 convention agents are city-scoped |
 | `--json` | bool |  | Output in JSONL format |
 | `--name` | string |  | Name of the agent |
 | `--prompt-template` | string |  | Path to prompt template file (relative to city root) |

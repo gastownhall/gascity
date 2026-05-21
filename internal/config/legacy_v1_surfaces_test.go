@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -197,6 +198,26 @@ source = "legacy-pack"
 	}
 }
 
+func TestLoadWithIncludesReturnsRootPackReadErrors(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "city"
+`)
+	fs.Errors["/city/pack.toml"] = os.ErrPermission
+
+	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err == nil {
+		t.Fatal("LoadWithIncludes succeeded, want root pack.toml read error")
+	}
+	if !strings.Contains(err.Error(), "loading city pack.toml") {
+		t.Fatalf("error = %q, want loading context", err)
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("error = %q, want permission error", err)
+	}
+}
+
 func TestLoadWithIncludesRejectsInlineAgentInSchema2Fragments(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
@@ -217,7 +238,7 @@ name = "fragment-worker"
 		t.Fatal("LoadWithIncludes succeeded, want hard error for schema-2 fragment inline agent")
 	}
 	for _, want := range []string{
-		"PackV1 inline agent tables are no longer supported",
+		"PackV1 config surfaces are no longer supported",
 		"/city/fragments/legacy.toml:2: unsupported PackV1 [[agent]] tables",
 		"move each agent to agents/<name>/agent.toml",
 		packV1MigrationDocsURL,
@@ -228,7 +249,7 @@ name = "fragment-worker"
 	}
 }
 
-func TestLoadWithIncludesWarnsOnNonAgentLegacyV1SurfacesInSchema2Fragments(t *testing.T) {
+func TestLoadWithIncludesRejectsNonAgentLegacyV1SurfacesInSchema2Fragments(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 include = ["fragments/legacy.toml"]
@@ -247,24 +268,19 @@ default_rig_includes = ["default-pack"]
 source = "legacy-pack"
 `)
 
-	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
+	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err == nil {
+		t.Fatal("LoadWithIncludes succeeded, want hard error for schema-2 fragment legacy surfaces")
 	}
 	for _, want := range []string{
-		"/city/fragments/legacy.toml: [packs] is deprecated",
-		"/city/fragments/legacy.toml: workspace.includes is deprecated",
-		"/city/fragments/legacy.toml: workspace.default_rig_includes is deprecated",
+		"PackV1 config surfaces are no longer supported",
+		"/city/fragments/legacy.toml:6: unsupported PackV1 [packs] entries",
+		"/city/fragments/legacy.toml:3: unsupported PackV1 workspace.includes",
+		"/city/fragments/legacy.toml:4: unsupported PackV1 workspace.default_rig_includes",
+		packV1MigrationDocsURL,
 	} {
-		var found bool
-		for _, warning := range prov.Warnings {
-			if strings.Contains(warning, want) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Fatalf("warnings = %v, want substring %q", prov.Warnings, want)
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want substring %q", err, want)
 		}
 	}
 }

@@ -23,10 +23,9 @@ type OverrideErrorHandler func(err error) error
 
 // ScanOptions controls shared order discovery behavior.
 type ScanOptions struct {
-	FS               fsys.FS
-	OrderScanOptions orders.ScanOptions
-	OnRigScanError   RigScanErrorHandler
-	OnOverrideError  OverrideErrorHandler
+	FS              fsys.FS
+	OnRigScanError  RigScanErrorHandler
+	OnOverrideError OverrideErrorHandler
 }
 
 // ScanAll scans city-level and rig-exclusive order roots, stamps rig orders,
@@ -42,7 +41,7 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 	}
 
 	cityLayers := cityFormulaLayers(cityPath, cfg)
-	cityOrders, err := orders.ScanRootsWithOptions(fsysImpl, CityOrderRoots(cityPath, cfg), cfg.Orders.Skip, opts.OrderScanOptions)
+	cityOrders, err := orders.ScanRoots(fsysImpl, CityOrderRoots(cityPath, cfg), cfg.Orders.Skip)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +61,7 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 		if len(exclusive) == 0 && len(exclusivePackDirs) == 0 {
 			continue
 		}
-		aa, err := orders.ScanRootsWithOptions(fsysImpl, rigOrderRoots(exclusive, exclusivePackDirs, rigLocalFormulaLayer(exclusive, exclusivePackDirs)), cfg.Orders.Skip, opts.OrderScanOptions)
+		aa, err := orders.ScanRoots(fsysImpl, rigOrderRoots(exclusive, exclusivePackDirs, rigLocalFormulaLayer(exclusive, exclusivePackDirs)), cfg.Orders.Skip)
 		if err != nil {
 			if opts.OnRigScanError != nil {
 				if handlerErr := opts.OnRigScanError(rigName, err); handlerErr != nil {

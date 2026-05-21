@@ -1431,13 +1431,16 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	}
 
 	// V2 convention-based order discovery: top-level orders/ flat files are the
-	// standard layout. Deprecated locations are still discovered so pack loads
-	// surface migration warnings consistently.
-	if _, err := orders.ScanRootsWithOptions(fs, []orders.ScanRoot{{
-		Dir:          filepath.Join(topoDir, "orders"),
-		FormulaLayer: filepath.Join(topoDir, "formulas"),
-	}}, nil, orders.ScanOptions{SuppressDeprecatedPathWarnings: opts.SuppressDeprecatedOrderWarnings}); err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, err
+	// standard layout. Deprecated subdirectory order paths are a filesystem
+	// layout cutover, not a city.toml PackV1 authoring surface, so they are
+	// rejected for all pack schemas.
+	if !opts.allowLegacyOrderLayouts {
+		if _, err := orders.ScanRoots(fs, []orders.ScanRoot{{
+			Dir:          filepath.Join(topoDir, "orders"),
+			FormulaLayer: filepath.Join(topoDir, "formulas"),
+		}}, nil); err != nil {
+			return nil, nil, nil, nil, nil, nil, nil, err
+		}
 	}
 
 	// Stamp parent agents: set dir = rigName (unless already set), adjust paths.

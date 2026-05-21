@@ -3870,6 +3870,75 @@ func TestCmdInitFromTOMLFilePreservesExistingFiles(t *testing.T) {
 	}
 }
 
+func TestCmdInitFromTOMLFilePreserveExistingLeavesRigSiteBindings(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "city")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	preExistingPack := []byte("[pack]\nname = \"user-authored\"\nschema = 2\n")
+	preExistingCity := []byte(`[workspace]
+provider = "claude"
+
+[[rigs]]
+name = "backend"
+`)
+	preExistingSite := []byte(`[[rig]]
+name = "backend"
+path = "/existing/backend"
+`)
+	for _, f := range []struct {
+		path string
+		data []byte
+	}{
+		{filepath.Join(cityPath, "pack.toml"), preExistingPack},
+		{filepath.Join(cityPath, "city.toml"), preExistingCity},
+		{filepath.Join(cityPath, ".gc", "site.toml"), preExistingSite},
+	} {
+		if err := os.WriteFile(f.path, f.data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	src := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(src,
+		[]byte(`[workspace]
+name = "from-template"
+provider = "claude"
+
+[[rigs]]
+name = "frontend"
+path = "/template/frontend"
+`),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdInitFromTOMLFileWithOptions(fsys.OSFS{}, src, cityPath, "", &stdout, &stderr, true, true)
+	if code != 0 {
+		t.Fatalf("cmdInitFromTOMLFileWithOptions = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	site, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("LoadSiteBinding: %v", err)
+	}
+	if len(site.Rigs) != 1 || site.Rigs[0].Name != "backend" || site.Rigs[0].Path != "/existing/backend" {
+		t.Fatalf("site rig bindings = %#v, want preserved backend binding", site.Rigs)
+	}
+	siteData, err := os.ReadFile(filepath.Join(cityPath, ".gc", "site.toml"))
+	if err != nil {
+		t.Fatalf("reading site.toml: %v", err)
+	}
+	if strings.Contains(string(siteData), "/template/frontend") || strings.Contains(string(siteData), "frontend") {
+		t.Fatalf("site.toml picked up template rig binding:\n%s", siteData)
+	}
+}
+
 func TestCmdInitFromTOMLFilePreserveExistingBlockedByScaffold(t *testing.T) {
 	f := fsys.NewFake()
 	cityPath := "/city"
@@ -6849,41 +6918,21 @@ func TestCurrentRigContextUsesWorkingDirThroughSymlinkAlias(t *testing.T) {
 	}
 }
 
-// --- doAgentAdd with --dir and --suspended ---
+// --- doAgentAdd with schema-2 city-scoped scaffold metadata ---
 
-func TestDoAgentAddWithDir(t *testing.T) {
+func TestDoAgentAddWithDirRejectsSchema2ConventionAgent(t *testing.T) {
 	f := v2CityWithPack(t)
 
 	var stdout, stderr bytes.Buffer
 	code := doAgentAdd(f, "/city", "builder", "", "hello-world", false, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doAgentAdd = %d, want 0; stderr: %s", code, stderr.String())
+	if code != 1 {
+		t.Fatalf("doAgentAdd = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
-
-	agentToml, ok := f.Files[filepath.Join("/city", "agents", "builder", "agent.toml")]
-	if !ok {
-		t.Fatal("agents/builder/agent.toml missing")
+	if !strings.Contains(stderr.String(), "schema-2 convention agents are city-scoped") {
+		t.Fatalf("stderr = %q, want schema-2 city-scoped validation message", stderr.String())
 	}
-	if !strings.Contains(string(agentToml), "dir = \"hello-world\"") {
-		t.Errorf("agent.toml = %q, want dir", agentToml)
-	}
-	got, err := loadCityConfigFS(f, filepath.Join("/city", "city.toml"))
-	if err != nil {
-		t.Fatalf("loadCityConfigFS: %v", err)
-	}
-	explicit := explicitAgents(got.Agents)
-	found := false
-	for _, a := range explicit {
-		if a.Name != "builder" {
-			continue
-		}
-		found = true
-		if a.Dir != "hello-world" {
-			t.Errorf("Agents[builder].Dir = %q, want %q", a.Dir, "hello-world")
-		}
-	}
-	if !found {
-		t.Fatalf("explicit agents = %#v, want builder", explicit)
+	if _, ok := f.Files[filepath.Join("/city", "agents", "builder", "agent.toml")]; ok {
+		t.Fatal("agents/builder/agent.toml was created for rejected input")
 	}
 }
 
@@ -6891,7 +6940,7 @@ func TestDoAgentAddWithSuspended(t *testing.T) {
 	f := v2CityWithPack(t)
 
 	var stdout, stderr bytes.Buffer
-	code := doAgentAdd(f, "/city", "builder", "", "hello-world", true, &stdout, &stderr)
+	code := doAgentAdd(f, "/city", "builder", "", "", true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doAgentAdd = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -6917,8 +6966,8 @@ func TestDoAgentAddWithSuspended(t *testing.T) {
 		if !a.Suspended {
 			t.Error("Agents[builder].Suspended = false, want true")
 		}
-		if a.Dir != "hello-world" {
-			t.Errorf("Agents[builder].Dir = %q, want %q", a.Dir, "hello-world")
+		if a.Dir != "" {
+			t.Errorf("Agents[builder].Dir = %q, want empty", a.Dir)
 		}
 	}
 	if !found {

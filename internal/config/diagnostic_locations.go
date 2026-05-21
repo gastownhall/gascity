@@ -7,25 +7,40 @@ import (
 
 const packV1MigrationDocsURL = "https://docs.gascityhall.com/guides/migrating-to-pack-vnext"
 
-type configDiagnosticLocator struct {
+// DiagnosticLocator provides best-effort line numbers for TOML diagnostics.
+// It intentionally stays lightweight and line-oriented because it is used
+// after a successful decode to improve migration errors, not to validate TOML.
+type DiagnosticLocator struct {
 	lines []string
 }
 
+type configDiagnosticLocator = DiagnosticLocator
+
 func optionalConfigDiagnosticLocator(data [][]byte) configDiagnosticLocator {
 	if len(data) == 0 {
-		return configDiagnosticLocator{}
+		return DiagnosticLocator{}
 	}
 	return newConfigDiagnosticLocator(data[0])
 }
 
 func newConfigDiagnosticLocator(data []byte) configDiagnosticLocator {
-	if len(data) == 0 {
-		return configDiagnosticLocator{}
-	}
-	return configDiagnosticLocator{lines: strings.Split(string(data), "\n")}
+	return NewDiagnosticLocator(data)
 }
 
-func (l configDiagnosticLocator) lineForTable(table string) int {
+// NewDiagnosticLocator creates a locator for a TOML document.
+func NewDiagnosticLocator(data []byte) DiagnosticLocator {
+	if len(data) == 0 {
+		return DiagnosticLocator{}
+	}
+	return DiagnosticLocator{lines: strings.Split(string(data), "\n")}
+}
+
+func (l DiagnosticLocator) lineForTable(table string) int {
+	return l.LineForTable(table)
+}
+
+// LineForTable returns the 1-based line for a TOML table, or 0 when absent.
+func (l DiagnosticLocator) LineForTable(table string) int {
 	for i, line := range l.lines {
 		name, ok := parseTOMLTableHeader(line)
 		if ok && name == table {
@@ -35,7 +50,12 @@ func (l configDiagnosticLocator) lineForTable(table string) int {
 	return 0
 }
 
-func (l configDiagnosticLocator) lineForPacksTable() int {
+func (l DiagnosticLocator) lineForPacksTable() int {
+	return l.LineForPacksTable()
+}
+
+// LineForPacksTable returns the first 1-based line for [packs] or [packs.*].
+func (l DiagnosticLocator) LineForPacksTable() int {
 	for i, line := range l.lines {
 		name, ok := parseTOMLTableHeader(line)
 		if ok && (name == "packs" || strings.HasPrefix(name, "packs.")) {
@@ -45,7 +65,12 @@ func (l configDiagnosticLocator) lineForPacksTable() int {
 	return 0
 }
 
-func (l configDiagnosticLocator) lineForKey(table, key string) int {
+func (l DiagnosticLocator) lineForKey(table, key string) int {
+	return l.LineForKey(table, key)
+}
+
+// LineForKey returns the 1-based line for a key inside a TOML table.
+func (l DiagnosticLocator) LineForKey(table, key string) int {
 	var currentTable string
 	for i, line := range l.lines {
 		trimmed := trimTOMLDiagnosticLine(line)
@@ -67,7 +92,12 @@ func (l configDiagnosticLocator) lineForKey(table, key string) int {
 	return 0
 }
 
-func (l configDiagnosticLocator) lineForRigPath(rigName string) int {
+func (l DiagnosticLocator) lineForRigPath(rigName string) int {
+	return l.LineForRigPath(rigName)
+}
+
+// LineForRigPath returns the 1-based line for a [[rigs]] path field.
+func (l DiagnosticLocator) LineForRigPath(rigName string) int {
 	var inRig bool
 	var currentRigName string
 	var currentPathLine int
@@ -146,8 +176,23 @@ func trimTOMLDiagnosticLine(line string) string {
 	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 		return ""
 	}
-	if before, _, ok := strings.Cut(trimmed, "#"); ok {
-		trimmed = strings.TrimSpace(before)
+	inBasic := false
+	inLiteral := false
+	escaped := false
+	for i, r := range trimmed {
+		switch {
+		case escaped:
+			escaped = false
+		case inBasic && r == '\\':
+			escaped = true
+		case r == '"' && !inLiteral:
+			inBasic = !inBasic
+		case r == '\'' && !inBasic:
+			inLiteral = !inLiteral
+		case r == '#' && !inBasic && !inLiteral:
+			trimmed = strings.TrimSpace(trimmed[:i])
+			return trimmed
+		}
 	}
 	return trimmed
 }

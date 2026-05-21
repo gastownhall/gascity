@@ -12,12 +12,10 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// Formula file extensions. Canonical TOML is preferred, JSON is a legacy
-// fallback, and infixed TOML remains named here only so Wave 2 can emit clear
-// migration errors.
+// Formula file extensions. Canonical TOML is preferred, infixed TOML remains
+// supported at lower precedence, and JSON is a legacy fallback.
 const (
-	FormulaExtTOML = CanonicalTOMLExt
-	// PACKV2-CUTOVER: remove legacy formula filename support after the infix migration window closes.
+	FormulaExtTOML       = CanonicalTOMLExt
 	FormulaLegacyExtTOML = LegacyTOMLExt
 	FormulaExtJSON       = ".formula.json"
 	FormulaExt           = FormulaExtJSON // Legacy alias for backwards compatibility

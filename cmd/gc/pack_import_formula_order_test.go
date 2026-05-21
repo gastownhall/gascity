@@ -279,10 +279,12 @@ func TestPackV2OrdersOnlyPackVisibleToCity(t *testing.T) {
 [pack]
 name = "testcity"
 schema = 2
+
+[imports.pr_audit]
+source = "./packs/pr-audit"
 `)
 	writeFile(t, filepath.Join(cityDir, "city.toml"), `
 [workspace]
-includes = ["packs/pr-audit"]
 `)
 	writeFile(t, filepath.Join(packDir, "pack.toml"), `
 [pack]
@@ -322,6 +324,7 @@ func TestPackV2OrdersOnlyPackVisibleToRig(t *testing.T) {
 	packDir := filepath.Join(cityDir, "packs", "watcher")
 
 	for _, dir := range []string{
+		filepath.Join(cityDir, ".gc"),
 		rigDir,
 		filepath.Join(packDir, "orders"),
 	} {
@@ -341,10 +344,16 @@ name = "testcity"
 
 [[rigs]]
 name = "frontend"
-path = "./frontend"
 
 [rigs.imports.watcher]
 source = "./packs/watcher"
+`)
+	writeFile(t, filepath.Join(cityDir, ".gc", "site.toml"), `
+workspace_name = "testcity"
+
+[[rig]]
+name = "frontend"
+path = "./frontend"
 `)
 	writeFile(t, filepath.Join(packDir, "pack.toml"), `
 [pack]

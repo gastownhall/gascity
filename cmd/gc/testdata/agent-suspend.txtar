@@ -1,4 +1,4 @@
-# Agent suspend/resume and --dir tests with fake session provider.
+# Agent suspend/resume and city-scoped add tests with fake session provider.
 
 env GC_SESSION=fake
 env GC_BEADS=file
@@ -32,15 +32,15 @@ stdout 'Suspended agent'
 exec gc config show
 stdout 'suspended = true'
 
-# 7. gc agent add --dir --suspended registers correctly.
-exec gc agent add --name tester --dir other-project --suspended
+# 7. gc agent add --suspended registers a city-scoped agent correctly.
+exec gc agent add --name tester --suspended
 stdout 'Scaffolded agent'
 
 exec gc config show
 stdout 'tester'
 
-# 8. gc agent add --dir without --suspended.
-exec gc agent add --name reviewer --dir hello-world
+# 8. gc agent add without --suspended.
+exec gc agent add --name reviewer
 stdout 'Scaffolded agent'
 
 exec gc config show

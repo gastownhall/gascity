@@ -139,6 +139,7 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 	d.Register(&doctor.CityStructureCheck{})
 	d.Register(&doctor.CityConfigCheck{})
 	registerV2DeprecationChecks(d)
+	d.Register(expandedConfigLoadCheck{})
 	d.Register(&doctor.ImplicitImportCacheCheck{})
 	d.Register(&doctor.DeprecatedAttachmentFieldsCheck{})
 
@@ -311,6 +312,26 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+type expandedConfigLoadCheck struct{}
+
+func (expandedConfigLoadCheck) Name() string { return "expanded-config-load" }
+
+func (expandedConfigLoadCheck) CanFix() bool { return false }
+
+func (expandedConfigLoadCheck) WarmupEligible() bool { return false }
+
+func (expandedConfigLoadCheck) Fix(_ *doctor.CheckContext) error { return nil }
+
+func (expandedConfigLoadCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+	if _, err := loadCityConfig(ctx.CityPath, io.Discard); err != nil {
+		return errorCheck("expanded-config-load",
+			fmt.Sprintf("expanded config load error: %v", err),
+			"fix the reported config, include, import, or pack-layout error and rerun gc doctor",
+			nil)
+	}
+	return okCheck("expanded-config-load", "expanded config loaded")
 }
 
 // doctorJSONResult mirrors doctor.CheckResult for JSON output. Keeping the

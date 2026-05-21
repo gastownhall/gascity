@@ -226,6 +226,36 @@ interval = "1h"
 	}
 }
 
+func TestScanAllRejectsSchema1PackLegacyOrderDirectory(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte("[pack]\nname = \"legacy-city\"\nschema = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	legacyOrderDir := filepath.Join(cityPath, "orders", "heartbeat")
+	if err := os.MkdirAll(legacyOrderDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyOrderDir, "order.toml"), []byte(`[order]
+exec = "scripts/heartbeat.sh"
+trigger = "cooldown"
+interval = "5m"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ScanAll(cityPath, &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+		},
+	}, ScanOptions{})
+	if err == nil {
+		t.Fatal("ScanAll succeeded, want schema-1 legacy order directory rejection")
+	}
+	if !strings.Contains(err.Error(), "rename to orders/heartbeat.toml") {
+		t.Fatalf("ScanAll error = %v, want schema-1 flat-file migration guidance", err)
+	}
+}
+
 func TestCityOrderRootsUsesLocalAndPackFormulaLayersOnce(t *testing.T) {
 	cityPath, cityLayer := orderDiscoveryCity(t)
 	packLayer := filepath.Join(t.TempDir(), "formulas")

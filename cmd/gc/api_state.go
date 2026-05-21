@@ -72,10 +72,10 @@ var controllerStateInitRigDirIfReady = initDirIfReady
 var newControllerStateOpenCityStore = openCityStoreAt
 
 type configMutationSnapshot struct {
-	cityPath   string
-	files      map[string][]byte
-	existed    map[string]bool
-	agentFiles map[string]struct{}
+	cityPath  string
+	files     map[string][]byte
+	existed   map[string]bool
+	agentTree *fsys.TreeSnapshot
 }
 
 // newControllerState creates a controllerState with per-rig stores.
@@ -1040,10 +1040,9 @@ func (cs *controllerState) DeleteProviderPatch(name string) error {
 
 func captureConfigMutationSnapshot(cityPath string) (*configMutationSnapshot, error) {
 	snapshot := &configMutationSnapshot{
-		cityPath:   cityPath,
-		files:      make(map[string][]byte),
-		existed:    make(map[string]bool),
-		agentFiles: make(map[string]struct{}),
+		cityPath: cityPath,
+		files:    make(map[string][]byte),
+		existed:  make(map[string]bool),
 	}
 
 	capture := func(path string) error {
@@ -1069,16 +1068,11 @@ func captureConfigMutationSnapshot(cityPath string) (*configMutationSnapshot, er
 		}
 	}
 
-	agentFiles, err := filepath.Glob(filepath.Join(cityPath, "agents", "*", "agent.toml"))
+	agentTree, err := fsys.SnapshotTree(fsys.OSFS{}, filepath.Join(cityPath, "agents"))
 	if err != nil {
-		return nil, fmt.Errorf("listing agent overrides: %w", err)
+		return nil, fmt.Errorf("snapshotting agent scaffolds: %w", err)
 	}
-	for _, path := range agentFiles {
-		snapshot.agentFiles[path] = struct{}{}
-		if err := capture(path); err != nil {
-			return nil, err
-		}
-	}
+	snapshot.agentTree = agentTree
 
 	return snapshot, nil
 }
@@ -1086,17 +1080,9 @@ func captureConfigMutationSnapshot(cityPath string) (*configMutationSnapshot, er
 func (s *configMutationSnapshot) restore() error {
 	var restoreErr error
 
-	currentAgentFiles, err := filepath.Glob(filepath.Join(s.cityPath, "agents", "*", "agent.toml"))
-	if err != nil {
-		restoreErr = errors.Join(restoreErr, fmt.Errorf("listing current agent overrides: %w", err))
-	} else {
-		for _, path := range currentAgentFiles {
-			if _, existed := s.agentFiles[path]; existed {
-				continue
-			}
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				restoreErr = errors.Join(restoreErr, fmt.Errorf("removing %s: %w", path, err))
-			}
+	if s.agentTree != nil {
+		if err := s.agentTree.Restore(fsys.OSFS{}); err != nil {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("restoring agent scaffolds: %w", err))
 		}
 	}
 
