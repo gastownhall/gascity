@@ -492,7 +492,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 	}
 	effectiveStartOptions := startOptions
-	if !storeQueryPartial && reconcileOpts.workDirResolver == nil {
+	if !storeQueryPartial && reconcileOpts.workDirResolver == nil && len(assignedWorkBeads) > 0 {
 		effectiveStartOptions = append(append([]startExecutionOption(nil), startOptions...), withTaskWorkDirResolver(newAssignedTaskWorkDirResolver(assignedWorkBeads)))
 	}
 	if startupTimeout <= 0 && cfg != nil {
@@ -2721,6 +2721,9 @@ func clearMissingIdleProbes(dt *drainTracker, beadByID map[string]*beads.Bead) {
 // in the worktree that the previous session (or this session's prior run)
 // created, without any prompt-side logic.
 func resolveTaskWorkDir(store beads.Store, assignees ...string) string {
+	if store == nil {
+		return ""
+	}
 	seen := make(map[string]bool, len(assignees))
 	for _, assignee := range assignees {
 		assignee = strings.TrimSpace(assignee)
@@ -2738,7 +2741,7 @@ func resolveTaskWorkDir(store beads.Store, assignees ...string) string {
 			continue
 		}
 		for _, b := range assigned {
-			wd := b.Metadata["work_dir"]
+			wd := strings.TrimSpace(b.Metadata["work_dir"])
 			if wd != "" {
 				if info, err := os.Stat(wd); err == nil && info.IsDir() {
 					return wd
@@ -2754,6 +2757,8 @@ type assignedTaskWorkDir struct {
 	createdAt time.Time
 }
 
+// newAssignedTaskWorkDirResolver resolves work_dir values from the
+// reconciler's snapshot; misses intentionally fall back to the live lookup.
 func newAssignedTaskWorkDirResolver(assignedWorkBeads []beads.Bead) taskWorkDirResolver {
 	index := make(map[string]assignedTaskWorkDir)
 	for _, bead := range assignedWorkBeads {

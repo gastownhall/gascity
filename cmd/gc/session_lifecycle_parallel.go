@@ -640,7 +640,7 @@ func prepareStartCandidate(
 	store beads.Store,
 	clk clock.Clock,
 ) (*preparedStart, error) {
-	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard)
+	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard, nil)
 }
 
 func prepareStartCandidateForCity(
@@ -652,7 +652,7 @@ func prepareStartCandidateForCity(
 	store beads.Store,
 	clk clock.Clock,
 	stderr io.Writer,
-	workDirResolvers ...taskWorkDirResolver,
+	workDirResolver taskWorkDirResolver,
 ) (*preparedStart, error) {
 	session := candidate.session
 	if session != nil && strings.TrimSpace(session.ID) != "" && store != nil {
@@ -671,10 +671,6 @@ func prepareStartCandidateForCity(
 		return nil, err
 	}
 	candidate = refreshConfiguredNamedStartCandidate(candidate, cityPath, cityName, cfg, sp, store, clk, stderr)
-	var workDirResolver taskWorkDirResolver
-	if len(workDirResolvers) > 0 {
-		workDirResolver = workDirResolvers[0]
-	}
 	return buildPreparedStartWithWorkDirResolver(candidate, cfg, store, workDirResolver)
 }
 
@@ -887,7 +883,9 @@ func resolvePreparedTaskWorkDir(
 	workDirResolver taskWorkDirResolver,
 ) string {
 	if workDirResolver != nil {
-		return workDirResolver(candidate, cfg)
+		if workDir := workDirResolver(candidate, cfg); workDir != "" {
+			return workDir
+		}
 	}
 	return resolveTaskWorkDir(store, taskWorkDirAssignees(candidate, cfg)...)
 }
