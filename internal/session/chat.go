@@ -18,8 +18,20 @@ import (
 )
 
 // staleKeyDetectDelay is how long to wait after starting a session before
-// checking if it died immediately (stale resume key detection).
-const staleKeyDetectDelay = 2 * time.Second
+// checking if it died immediately (stale resume key detection). Tests that
+// drive the start path through a fake runtime can shorten this via
+// SetStaleKeyDetectDelayForTest to keep their wall-clock down.
+var staleKeyDetectDelay = 2 * time.Second
+
+// SetStaleKeyDetectDelayForTest overrides the stale-key detection delay used
+// by ensureRunning/ensureRunningRuntimeOnly. The returned func restores the
+// previous value. Intended for tests only; production code should not call
+// this.
+func SetStaleKeyDetectDelayForTest(d time.Duration) func() {
+	prev := staleKeyDetectDelay
+	staleKeyDetectDelay = d
+	return func() { staleKeyDetectDelay = prev }
+}
 
 const waitIdleNudgeTimeout = 30 * time.Second
 
@@ -121,6 +133,8 @@ var (
 	ErrSessionClosed = errors.New("session is closed")
 	// ErrSessionInactive reports that the requested session has no live runtime.
 	ErrSessionInactive = errors.New("session is not active")
+	// ErrSessionActive reports that the requested session currently has or is starting a live runtime.
+	ErrSessionActive = errors.New("session is active")
 	// ErrResumeRequired reports that the session cannot be resumed without an
 	// explicit resume command.
 	ErrResumeRequired = errors.New("session requires resume command")
@@ -147,6 +161,11 @@ var (
 	sessionMutationLocksMu sync.Mutex
 	sessionMutationLocks   = map[string]*sessionMutationLockEntry{}
 )
+
+// WithSessionMutationLock serializes metadata mutations for one session bead.
+func WithSessionMutationLock(id string, fn func() error) error {
+	return withSessionMutationLock(id, fn)
+}
 
 func withSessionMutationLock(id string, fn func() error) error {
 	lock := acquireSessionMutationLock(id)

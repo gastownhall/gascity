@@ -3595,6 +3595,83 @@ func TestRunWorkflowServeReturnsQueryError(t *testing.T) {
 	}
 }
 
+func TestRunWorkflowServeQueryKillEmitsCurrentSessionPayload(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "backend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+	cityToml := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = true
+
+[[rigs]]
+name = "backend"
+path = %q
+
+[[agent]]
+name = "worker"
+dir = "backend"
+`, rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_SESSION_ID", "sess-control-123")
+	t.Setenv("GC_TEMPLATE", "gascity/workflows.codex-min")
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	cityFlag = ""
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+	})
+
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		return nil, errors.New("signal: killed")
+	}
+	controlDispatcherServe = func(_, _, _ string, _ io.Writer, _ io.Writer) error {
+		t.Fatal("controlDispatcherServe should not be called on query failure")
+		return nil
+	}
+
+	err := runWorkflowServe("backend/worker", false, io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("runWorkflowServe returned nil error, want query failure")
+	}
+	evts, readErr := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.SessionWorkQueryFailed})
+	if readErr != nil {
+		t.Fatalf("read work-query failure events: %v", readErr)
+	}
+	if len(evts) != 1 {
+		t.Fatalf("work-query failure events = %d, want 1: %+v", len(evts), evts)
+	}
+	if evts[0].Subject != "gascity/workflows.codex-min" {
+		t.Fatalf("event subject = %q, want current session template", evts[0].Subject)
+	}
+	payload := decodeSessionLifecyclePayload(t, evts[0])
+	if payload.SessionID != "sess-control-123" {
+		t.Fatalf("payload SessionID = %q, want sess-control-123", payload.SessionID)
+	}
+	if payload.Template != "gascity/workflows.codex-min" {
+		t.Fatalf("payload Template = %q, want current session template", payload.Template)
+	}
+	if payload.Template == "backend/worker" {
+		t.Fatalf("payload Template used target agent %q, want current session context", payload.Template)
+	}
+	if payload.Reason != "work query killed (signal: killed)" {
+		t.Fatalf("payload Reason = %q, want work query killed (signal: killed)", payload.Reason)
+	}
+}
+
 func TestRunWorkflowServeExpandsTemplateCommandsWithCityFallback(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)

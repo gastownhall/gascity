@@ -116,6 +116,8 @@ func liveEnvKeysForTests() []string {
 
 func preserveTestControlEnv(key string) bool {
 	return key == "GC_FAST_UNIT" ||
+		key == managedDoltTestModeEnv ||
+		key == managedDoltTestParentPIDEnv ||
 		key == "GC_DOLT_REAL_BINARY" ||
 		strings.HasPrefix(key, "GC_LIVE_") ||
 		strings.HasPrefix(key, "GC_SESSION_CHAOS_") ||
@@ -165,7 +167,7 @@ var testProviderStubCommands = []string{
 }
 
 func installTestProviderStubs() (string, error) {
-	dir, err := os.MkdirTemp("", "gascity-provider-stubs-*")
+	dir, err := os.MkdirTemp("", pidPrefixedTempPattern(testProviderStubDirPrefix))
 	if err != nil {
 		return "", err
 	}
@@ -177,6 +179,22 @@ func installTestProviderStubs() (string, error) {
 		}
 	}
 	return dir, nil
+}
+
+func TestInstallTestProviderStubsUsesPIDPrefixedDir(t *testing.T) {
+	dir, err := installTestProviderStubs()
+	if err != nil {
+		t.Fatalf("installTestProviderStubs: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	pid, ok := pidFromPrefixedDirName(filepath.Base(dir), testProviderStubDirPrefix)
+	if !ok {
+		t.Fatalf("provider stubs dir %q does not use prefix %q", dir, testProviderStubDirPrefix)
+	}
+	if pid != os.Getpid() {
+		t.Fatalf("provider stubs dir PID = %d, want current PID %d", pid, os.Getpid())
+	}
 }
 
 func writeTestGitIdentity(homeDir string) error {

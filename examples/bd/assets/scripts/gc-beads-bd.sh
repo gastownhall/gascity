@@ -2356,12 +2356,44 @@ op_probe() {
     exit 2
 }
 
+# recovery_should_skip_due_to_enospc returns 0 (true) when the recent
+# dolt server log shows disk-exhaustion (ENOSPC) signatures. Restarting
+# dolt under ENOSPC does not free disk space, and the recovery cycle
+# itself amplifies the failure: every restart triggers a fresh conjoin
+# that drops another partial nbs_table_* file in the backup remote,
+# accelerating the disk-full feedback loop. See gastownhall/gascity#2158.
+#
+# Returns 1 (false) when no ENOSPC signature is found in the recent log
+# tail, or when the log file cannot be read.
+recovery_should_skip_due_to_enospc() {
+    [ -n "$LOG_FILE" ] && [ -r "$LOG_FILE" ] || return 1
+    # Scan the recent log tail rather than the whole file; an old transient
+    # ENOSPC error from a since-resolved disk-pressure event should not
+    # block recovery indefinitely.
+    tail -n 1000 "$LOG_FILE" 2>/dev/null \
+        | grep -qE 'no space left on device|copy_file_range:.*no space|ENOSPC' \
+        || return 1
+    return 0
+}
+
 # op_recover stops the dolt server, restarts it, and verifies health.
 op_recover() {
     local read_only_status
 
     if is_remote; then
         die "recovery not supported for remote dolt servers"
+    fi
+
+    # Skip auto-recovery when dolt has been failing due to disk exhaustion.
+    # Restarting dolt does not free disk space, and the recovery cycle
+    # itself amplifies the failure: each restart triggers a conjoin/backup
+    # sync that writes another partial table file to the backup remote.
+    # Require manual intervention (free disk space) before recovery
+    # resumes. See gastownhall/gascity#2158.
+    if recovery_should_skip_due_to_enospc; then
+        echo "skipping dolt recovery: recent dolt log shows ENOSPC — manual intervention required" >&2
+        echo "  free disk space, then re-run health checks" >&2
+        die "dolt recovery skipped: ENOSPC detected"
     fi
 
     if load_recover_managed_from_gc; then

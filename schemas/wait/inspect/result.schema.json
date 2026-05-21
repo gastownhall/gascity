@@ -1,33 +1,71 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["schema_version", "city_path", "wait"],
+  "required": [
+    "schema_version",
+    "ok",
+    "city_path",
+    "wait"
+  ],
   "properties": {
     "schema_version": {
       "type": "string"
+    },
+    "ok": {
+      "const": true
     },
     "city_path": {
       "type": "string"
     },
     "wait": {
       "type": "object",
-      "required": ["id", "session_id", "state", "kind", "status"],
+      "required": [
+        "id",
+        "session_id",
+        "state",
+        "kind",
+        "status"
+      ],
       "properties": {
-        "id": { "type": "string" },
-        "session_id": { "type": "string" },
-        "session_name": { "type": "string" },
-        "state": { "type": "string" },
-        "kind": { "type": "string" },
+        "id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "session_name": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
         "dep_ids": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
-        "dep_mode": { "type": "string" },
-        "registered_epoch": { "type": "string" },
-        "delivery_attempt": { "type": "string" },
-        "nudge_id": { "type": "string" },
-        "note": { "type": "string" },
-        "status": { "type": "string" },
+        "dep_mode": {
+          "type": "string"
+        },
+        "registered_epoch": {
+          "type": "string"
+        },
+        "delivery_attempt": {
+          "type": "string"
+        },
+        "nudge_id": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
         "created_at": {
           "type": "string",
           "format": "date-time"

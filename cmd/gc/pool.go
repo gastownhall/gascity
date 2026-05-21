@@ -264,6 +264,7 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		PromptTemplate:    src.PromptTemplate,
 		Nudge:             src.Nudge,
 		StartCommand:      src.StartCommand,
+		Lifecycle:         src.Lifecycle,
 		PromptMode:        src.PromptMode,
 		PromptFlag:        src.PromptFlag,
 		ReadyPromptPrefix: src.ReadyPromptPrefix,

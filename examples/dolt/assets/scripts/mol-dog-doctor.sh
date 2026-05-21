@@ -116,14 +116,28 @@ if [ "${ORPHAN_COUNT:-0}" -gt 0 ]; then
 fi
 
 # Backup freshness: check newest backup artifact per database.
+# Scope mirrors mol-dog-backup.sh: only DBs with a configured <db>-backup
+# remote are eligible. Cities with user DBs but no backup remotes
+# (legitimate config) must not get false stale-backup alarms.
+BACKUP_ELIGIBLE_DBS=""
+for db in $USER_DBS; do
+    db_dir="$DOLT_DATA_DIR/$db"
+    if [ -d "$db_dir/.dolt" ]; then
+        if (cd "$db_dir" && dolt backup 2>/dev/null | awk '{print $1}' | grep -qx "${db}-backup"); then
+            BACKUP_ELIGIBLE_DBS="$BACKUP_ELIGIBLE_DBS $db"
+        fi
+    fi
+done
+BACKUP_ELIGIBLE_DBS=$(printf '%s\n' "$BACKUP_ELIGIBLE_DBS" | tr ' ' '\n' | grep -v '^$' || true)
+
 BACKUP_STALE=""
-if [ -n "$USER_DBS" ]; then
+if [ -n "$BACKUP_ELIGIBLE_DBS" ]; then
     if [ ! -d "$BACKUP_ARTIFACT_DIR" ]; then
         BACKUP_STALE=" [WARN: backup artifact dir missing]"
     else
         BACKUP_STALE_ITEMS=""
         NOW_S=$(date +%s)
-        for db in $USER_DBS; do
+        for db in $BACKUP_ELIGIBLE_DBS; do
             NEWEST_BACKUP_MTIME=$(newest_backup_mtime_for_db "$db")
             if [ "$NEWEST_BACKUP_MTIME" -le 0 ]; then
                 append_backup_stale "$db backup missing"

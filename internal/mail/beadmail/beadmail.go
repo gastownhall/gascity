@@ -61,7 +61,7 @@ func (p *Provider) cachedSessionBeads() ([]beads.Bead, error) {
 		return nil, nil
 	}
 	if p.sessionCache == nil {
-		return p.store.List(beads.ListQuery{Label: session.LabelSession, IncludeClosed: true})
+		return session.ListAllSessionBeads(p.store, beads.ListQuery{IncludeClosed: true})
 	}
 	return p.sessionCache.get(p.store)
 }
@@ -72,7 +72,7 @@ func (c *sessionBeadCache) get(store beads.Store) ([]beads.Bead, error) {
 	if c.fetched {
 		return c.list, nil
 	}
-	list, err := store.List(beads.ListQuery{Label: session.LabelSession, IncludeClosed: true})
+	list, err := session.ListAllSessionBeads(store, beads.ListQuery{IncludeClosed: true})
 	if err != nil {
 		return nil, err
 	}

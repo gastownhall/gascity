@@ -29,6 +29,14 @@ func TestFatalFormattingRoutesV1V2DuplicateNamesToMigration(t *testing.T) {
 	}
 }
 
+func TestFatalFormattingReplacesMigrationGuideRepoPath(t *testing.T) {
+	line := FormatFatalLine(`agent "worker": pack v1/v2 layout collision To migrate, see: docs/guides/migrating-to-pack-vnext.md`)
+	want := `gc-fatal: agent "worker": pack v1/v2 layout collision To migrate, see: ` + WalkthroughURL["duplicate_name_v1v2"]
+	if got := line; got != want {
+		t.Fatalf("FormatFatalLine() = %q, want %q", got, want)
+	}
+}
+
 func TestRenderFatalLineTTY(t *testing.T) {
 	got := RenderFatalLine("broken", true)
 	const want = "\x1b[1;31mFATAL: broken\x1b[0m"

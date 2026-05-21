@@ -61,6 +61,7 @@ func newPrimeCmd(stdout, stderr io.Writer) *cobra.Command {
 	var hookMode bool
 	var hookFormat string
 	var strictMode bool
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "prime [agent-name]",
 		Short: "Output the behavioral prompt for an agent",
@@ -92,6 +93,21 @@ to empty output from valid conditional logic, or on suspended states
 		Args: cobra.MaximumNArgs(1),
 	}
 	cmd.RunE = func(_ *cobra.Command, args []string) error {
+		if jsonOut {
+			var buf strings.Builder
+			if doPrimeWithHookFormat(args, &buf, stderr, hookMode, hookFormat, strictMode) != 0 {
+				return errExit
+			}
+			agentName, _ := primeInvocationAgentName(args)
+			return writeCLIJSONLineOrErr(stdout, stderr, "gc prime", primeJSONResult{
+				SchemaVersion: "1",
+				Agent:         agentName,
+				Hook:          hookMode,
+				HookFormat:    hookFormat,
+				Content:       buf.String(),
+				Bytes:         buf.Len(),
+			})
+		}
 		if doPrimeWithHookFormat(args, stdout, stderr, hookMode, hookFormat, strictMode) != 0 {
 			return errExit
 		}
@@ -100,7 +116,17 @@ to empty output from valid conditional logic, or on suspended states
 	cmd.Flags().BoolVar(&hookMode, "hook", false, "compatibility mode for runtime hook invocations")
 	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
 	cmd.Flags().BoolVar(&strictMode, "strict", false, "fail on missing city, missing or unknown agent, or unreadable prompt_template instead of falling back to the default prompt")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	return cmd
+}
+
+type primeJSONResult struct {
+	SchemaVersion string `json:"schema_version"`
+	Agent         string `json:"agent,omitempty"`
+	Hook          bool   `json:"hook"`
+	HookFormat    string `json:"hook_format,omitempty"`
+	Content       string `json:"content"`
+	Bytes         int    `json:"bytes"`
 }
 
 // doPrime exists as the public non-strict entry point so callers don't
@@ -127,7 +153,7 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode, strictMo
 	return doPrimeWithHookFormat(args, stdout, stderr, hookMode, "", strictMode)
 }
 
-func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode bool) int {
+func primeInvocationAgentName(args []string) (string, bool) {
 	agentName := os.Getenv("GC_ALIAS")
 	if agentName == "" {
 		agentName = os.Getenv("GC_AGENT")
@@ -145,6 +171,11 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	if len(args) > 0 {
 		agentName = args[0]
 	}
+	return strings.TrimSpace(agentName), sessionTemplateContext
+}
+
+func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode bool) int {
+	agentName, sessionTemplateContext := primeInvocationAgentName(args)
 	hookContext := primeHookContext{}
 	suppressHookPrompt := false
 	if hookMode {

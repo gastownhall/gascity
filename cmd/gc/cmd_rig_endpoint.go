@@ -39,6 +39,7 @@ var verifyRigExternalEndpoint = verifyExternalDoltEndpoint
 
 func newRigSetEndpointCmd(stdout, stderr io.Writer) *cobra.Command {
 	var opts rigEndpointOptions
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "set-endpoint <rig>",
 		Short: "Set the canonical endpoint ownership for a rig",
@@ -59,6 +60,19 @@ This command owns the rig's canonical .beads/config.yaml topology state.`,
   gc rig set-endpoint frontend --inherit --dry-run`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				if cmdRigSetEndpoint(args[0], opts, io.Discard, stderr) != 0 {
+					return errExit
+				}
+				return writeManagementActionJSON(stdout, managementActionResult{
+					Command:  commandName("rig", "set-endpoint"),
+					Action:   "set-endpoint",
+					Name:     args[0],
+					Rig:      args[0],
+					DryRun:   managementBoolPtr(opts.DryRun),
+					Endpoint: rigEndpointJSONFromOptions(opts),
+				})
+			}
 			if cmdRigSetEndpoint(args[0], opts, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -75,6 +89,7 @@ This command owns the rig's canonical .beads/config.yaml topology state.`,
 	cmd.Flags().StringVar(&opts.User, "user", "", "external Dolt user")
 	cmd.Flags().BoolVar(&opts.AdoptUnverified, "adopt-unverified", false, "record the endpoint without live validation")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "show the canonical changes without writing files")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
 	return cmd
 }
 

@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pgauth"
+	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
 
 func trackingBeads(t *testing.T, store beads.Store, label string) []beads.Bead {
@@ -2669,6 +2670,85 @@ func TestOrderDispatchExecTimeout(t *testing.T) {
 	}
 }
 
+func TestShellExecRunnerDoesNotStartWhenContextCanceled(t *testing.T) {
+	workDir := t.TempDir()
+	markerPath := filepath.Join(workDir, "started")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	command := fmt.Sprintf("printf started > %q; sleep 10", markerPath)
+	_, err := shellExecRunner(ctx, command, workDir, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("shellExecRunner() error = %v, want %v", err, context.Canceled)
+	}
+	if _, err := os.Stat(markerPath); err == nil {
+		t.Fatalf("shellExecRunner started command after context cancellation; marker exists at %s", markerPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat marker %s: %v", markerPath, err)
+	}
+}
+
+func TestShellExecRunnerKillsProcessGroupOnTimeout(t *testing.T) {
+	workDir := t.TempDir()
+	heartbeatPath := filepath.Join(workDir, "heartbeat")
+	childPIDPath := filepath.Join(workDir, "child.pid")
+	t.Cleanup(func() { processgrouptest.KillFromPIDFile(t, childPIDPath) })
+	oldSignalGrace := shellExecSignalGrace
+	shellExecSignalGrace = 100 * time.Millisecond
+	t.Cleanup(func() { shellExecSignalGrace = oldSignalGrace })
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	command := fmt.Sprintf("sh -c 'printf \"%%s\\n\" \"$$\" > %q; trap \"\" TERM; while :; do printf . >> %q; sleep 0.05; done' & wait", childPIDPath, heartbeatPath)
+	_, err := shellExecRunner(ctx, command, workDir, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shellExecRunner() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+
+	size := processgrouptest.WaitForFileSize(t, heartbeatPath)
+	processgrouptest.AssertFileSizeStable(t, heartbeatPath, size, 300*time.Millisecond)
+}
+
+func TestShellExecRunnerKillsProcessGroupAfterWaitDelay(t *testing.T) {
+	workDir := t.TempDir()
+	heartbeatPath := filepath.Join(workDir, "heartbeat")
+	childPIDPath := filepath.Join(workDir, "child.pid")
+	t.Cleanup(func() { processgrouptest.KillFromPIDFile(t, childPIDPath) })
+	oldWaitDelay := shellExecPostCancelWaitDelay
+	oldSignalGrace := shellExecSignalGrace
+	shellExecPostCancelWaitDelay = 100 * time.Millisecond
+	shellExecSignalGrace = 100 * time.Millisecond
+	t.Cleanup(func() {
+		shellExecPostCancelWaitDelay = oldWaitDelay
+		shellExecSignalGrace = oldSignalGrace
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	command := fmt.Sprintf("sh -c 'printf \"%%s\\n\" \"$$\" > %q; trap \"\" TERM; while :; do printf . >> %q; sleep 0.05; done' &", childPIDPath, heartbeatPath)
+	_, err := shellExecRunner(ctx, command, workDir, nil)
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("shellExecRunner() error = %v, want %v", err, exec.ErrWaitDelay)
+	}
+
+	size := processgrouptest.WaitForFileSize(t, heartbeatPath)
+	processgrouptest.AssertFileSizeStable(t, heartbeatPath, size, 300*time.Millisecond)
+}
+
+func TestShellExecRunnerReturnsPartialOutputOnTimeout(t *testing.T) {
+	workDir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	output, err := shellExecRunner(ctx, "while :; do printf .; sleep 0.01; done", workDir, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shellExecRunner() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+	if !bytes.Contains(output, []byte(".")) {
+		t.Fatalf("shellExecRunner() output = %q, want partial command output", string(output))
+	}
+}
+
 func TestEffectiveTimeout(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -3084,6 +3164,418 @@ func TestSweepStaleOrderTracking_ClosesOnlyOldOpenTrackingBeads(t *testing.T) {
 	}
 	if gotWork.Status != "open" {
 		t.Fatalf("non-tracking work status = %s, want open", gotWork.Status)
+	}
+}
+
+func orderFilterForTest(names ...string) map[string]struct{} {
+	out := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		out[name] = struct{}{}
+	}
+	return out
+}
+
+type parentLastCloseStore struct {
+	beads.Store
+}
+
+func (s parentLastCloseStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	closed := 0
+	for _, id := range ids {
+		bead, err := s.Get(id)
+		if err != nil {
+			return closed, err
+		}
+		if bead.Status == "closed" {
+			continue
+		}
+		children, err := s.List(beads.ListQuery{ParentID: id, TierMode: beads.TierBoth})
+		if err != nil {
+			return closed, err
+		}
+		for _, child := range children {
+			if child.Status != "closed" {
+				return closed, fmt.Errorf("cannot close %s before open child %s", id, child.ID)
+			}
+		}
+		n, err := s.Store.CloseAll([]string{id}, metadata)
+		closed += n
+		if err != nil {
+			return closed, err
+		}
+	}
+	return closed, nil
+}
+
+type depListFailStore struct {
+	beads.Store
+	failID string
+}
+
+func (s depListFailStore) DepList(id, direction string) ([]beads.Dep, error) {
+	if id == s.failID {
+		return nil, fmt.Errorf("dependency list unavailable for %s", id)
+	}
+	return s.Store.DepList(id, direction)
+}
+
+func TestSweepStaleOrderTrackingWithWispsRequiresOrderFilter(t *testing.T) {
+	store := beads.NewMemStore()
+
+	result, err := sweepStaleOrderTrackingWithOptions(
+		store,
+		time.Now(),
+		time.Minute,
+		nil,
+		orderTrackingSweepMetadataInitiator,
+		true,
+	)
+	if err == nil {
+		t.Fatal("sweepStaleOrderTrackingWithOptions err = nil, want order-filter error")
+	}
+	if !strings.Contains(err.Error(), "requires at least one order name") {
+		t.Fatalf("err = %q, want order-filter context", err)
+	}
+	if result.trackingClosed != 0 || result.wispClosed != 0 {
+		t.Fatalf("result = %+v, want no partial closes", result)
+	}
+}
+
+func TestSweepStaleOrderTrackingWithWispsClosesOldOpenWispSubtree(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatalf("Create(wisp root): %v", err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:    "draft-digest",
+		ParentID: wispRoot.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	closedChild, err := store.Create(beads.Bead{
+		Title:    "prepare-submolecule",
+		ParentID: wispRoot.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(closed child): %v", err)
+	}
+	if err := store.Close(closedChild.ID); err != nil {
+		t.Fatalf("Close(closed child): %v", err)
+	}
+	grandchild, err := store.Create(beads.Bead{
+		Title:    "nested-step-still-running",
+		ParentID: closedChild.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(grandchild): %v", err)
+	}
+	otherRoot, err := store.Create(beads.Bead{
+		Title:  "mol-other-order",
+		Type:   "molecule",
+		Labels: []string{"order-run:other"},
+	})
+	if err != nil {
+		t.Fatalf("Create(other root): %v", err)
+	}
+	otherChild, err := store.Create(beads.Bead{
+		Title:    "other-step",
+		ParentID: otherRoot.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(other child): %v", err)
+	}
+
+	result, err := sweepStaleOrderTrackingWithOptions(
+		store,
+		wispRoot.CreatedAt.Add(time.Hour),
+		time.Minute,
+		orderFilterForTest("digest"),
+		orderTrackingSweepMetadataInitiator,
+		true,
+	)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingWithOptions: %v", err)
+	}
+	if result.trackingClosed != 0 {
+		t.Fatalf("trackingClosed = %d, want 0", result.trackingClosed)
+	}
+	if result.wispClosed != 3 {
+		t.Fatalf("wispClosed = %d, want 3", result.wispClosed)
+	}
+
+	for _, id := range []string{wispRoot.ID, child.ID, grandchild.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed", id, got.Status)
+		}
+		if got.Metadata["close_reason"] != staleOrderWispCloseReason {
+			t.Fatalf("%s close_reason = %q, want %q", id, got.Metadata["close_reason"], staleOrderWispCloseReason)
+		}
+		if got.Metadata["order_tracking_sweep"] != orderTrackingSweepMetadataReason {
+			t.Fatalf("%s order_tracking_sweep = %q, want %q", id, got.Metadata["order_tracking_sweep"], orderTrackingSweepMetadataReason)
+		}
+	}
+	for _, id := range []string{otherRoot.ID, otherChild.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("unscoped wisp %s status = %q, want open", id, got.Status)
+		}
+	}
+}
+
+func TestSweepStaleOrderTrackingWithoutWispsLeavesOpenWispSubtree(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatalf("Create(wisp root): %v", err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:    "draft-digest",
+		ParentID: wispRoot.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+
+	result, err := sweepStaleOrderTrackingWithOptions(
+		store,
+		wispRoot.CreatedAt.Add(time.Hour),
+		time.Minute,
+		nil,
+		orderTrackingSweepMetadataInitiator,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingWithOptions: %v", err)
+	}
+	if result.wispClosed != 0 {
+		t.Fatalf("wispClosed = %d, want 0", result.wispClosed)
+	}
+	gotChild, err := store.Get(child.ID)
+	if err != nil {
+		t.Fatalf("Get(child): %v", err)
+	}
+	if gotChild.Status != "open" {
+		t.Fatalf("child status = %q, want open", gotChild.Status)
+	}
+}
+
+func TestSweepStaleOrderTrackingWithWispsClosesDeepestFirst(t *testing.T) {
+	base := beads.NewMemStore()
+	store := parentLastCloseStore{Store: base}
+
+	wispRoot, err := base.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatalf("Create(wisp root): %v", err)
+	}
+	child, err := base.Create(beads.Bead{
+		Title:    "draft-digest",
+		ParentID: wispRoot.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	grandchild, err := base.Create(beads.Bead{
+		Title:    "nested-step-still-running",
+		ParentID: child.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(grandchild): %v", err)
+	}
+
+	result, err := sweepStaleOrderTrackingWithOptions(
+		store,
+		wispRoot.CreatedAt.Add(time.Hour),
+		time.Minute,
+		orderFilterForTest("digest"),
+		orderTrackingSweepMetadataInitiator,
+		true,
+	)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingWithOptions: %v", err)
+	}
+	if result.wispClosed != 3 {
+		t.Fatalf("wispClosed = %d, want 3", result.wispClosed)
+	}
+
+	for _, id := range []string{wispRoot.ID, child.ID, grandchild.ID} {
+		got, err := base.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed", id, got.Status)
+		}
+	}
+}
+
+func TestSweepStaleOrderTrackingWithWispsClosesRootOnlyWisp(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "vapor-order-root",
+		Type:   "task",
+		Labels: []string{"order-run:digest"},
+		Metadata: map[string]string{
+			"gc.kind": "wisp",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(wisp root): %v", err)
+	}
+
+	result, err := sweepStaleOrderTrackingWithOptions(
+		store,
+		wispRoot.CreatedAt.Add(time.Hour),
+		time.Minute,
+		orderFilterForTest("digest"),
+		orderTrackingSweepMetadataInitiator,
+		true,
+	)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingWithOptions: %v", err)
+	}
+	if result.wispClosed != 1 {
+		t.Fatalf("wispClosed = %d, want 1", result.wispClosed)
+	}
+	got, err := store.Get(wispRoot.ID)
+	if err != nil {
+		t.Fatalf("Get(wisp root): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("wisp root status = %q, want closed", got.Status)
+	}
+}
+
+func TestSweepStaleOrderTrackingWithWispsSkipsFreshOpenDescendant(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatalf("Create(wisp root): %v", err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	child, err := store.Create(beads.Bead{
+		Title:    "fresh-step",
+		ParentID: wispRoot.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	cutoff := wispRoot.CreatedAt.Add(child.CreatedAt.Sub(wispRoot.CreatedAt) / 2)
+
+	closed, err := sweepStaleOrderWispSubtrees(store, cutoff, orderFilterForTest("digest"), orderTrackingSweepMetadataInitiator)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderWispSubtrees: %v", err)
+	}
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+	for _, id := range []string{wispRoot.ID, child.ID} {
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.Status != "open" {
+			t.Fatalf("%s status = %q, want open", id, got.Status)
+		}
+	}
+}
+
+func TestSweepStaleOrderTrackingWithWispsPropagatesDescendantListError(t *testing.T) {
+	base := beads.NewMemStore()
+
+	wispRoot, err := base.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatalf("Create(wisp root): %v", err)
+	}
+	store := parentListFailStore{
+		Store:        base,
+		failParentID: wispRoot.ID,
+		err:          fmt.Errorf("child list unavailable"),
+	}
+
+	closed, err := sweepStaleOrderWispSubtrees(
+		store,
+		wispRoot.CreatedAt.Add(time.Minute),
+		orderFilterForTest("digest"),
+		orderTrackingSweepMetadataInitiator,
+	)
+	if err == nil {
+		t.Fatal("sweepStaleOrderWispSubtrees err = nil, want descendant-list error")
+	}
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+	if !strings.Contains(err.Error(), "checking stale wisp descendants") {
+		t.Fatalf("err = %q, want descendant context", err)
+	}
+}
+
+func TestSweepStaleOrderTrackingWithWispsPropagatesCloseOrderError(t *testing.T) {
+	base := beads.NewMemStore()
+
+	wispRoot, err := base.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatalf("Create(wisp root): %v", err)
+	}
+	child, err := base.Create(beads.Bead{
+		Title:    "draft-digest",
+		ParentID: wispRoot.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	store := depListFailStore{Store: base, failID: child.ID}
+
+	closed, err := sweepStaleOrderWispSubtrees(
+		store,
+		wispRoot.CreatedAt.Add(time.Minute),
+		orderFilterForTest("digest"),
+		orderTrackingSweepMetadataInitiator,
+	)
+	if err == nil {
+		t.Fatal("sweepStaleOrderWispSubtrees err = nil, want close-order error")
+	}
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+	if !strings.Contains(err.Error(), "ordering stale order wisp closes") {
+		t.Fatalf("err = %q, want close-order context", err)
 	}
 }
 
@@ -4771,6 +5263,7 @@ func TestOrderDispatchOpenWispRootDoesNotBlockRedispatch(t *testing.T) {
 	// root remains open because nothing in the dispatch path closes it.
 	wispRoot, err := store.Create(beads.Bead{
 		Title:  "mol-formula-pool-work",
+		Type:   "molecule",
 		Labels: []string{"order-run:my-pool-order"},
 	})
 	if err != nil {
@@ -4847,6 +5340,312 @@ func TestHasOpenWorkStrictSkipsClosedTrackingBead(t *testing.T) {
 	if has {
 		t.Fatal("closed tracking bead must not count as in-flight work; " +
 			"the defensive status filter at order_dispatch.go:802 should skip it")
+	}
+}
+
+// TestHasOpenWorkStrictBlocksOnWispWithOpenChildren is the regression guard
+// for tr-kds01: the deacon's cooldown gate fired a new digest wisp every 24h
+// even when the prior wisp's step beads had never been picked up by the pool
+// agent. The leftover open wisp root (no labelOrderTracking) is normally
+// treated as orphan state (ga-jra/ga-lo8c). But when the wisp's child step
+// beads are still open, the wisp is in-flight work — the pool agent simply
+// hasn't completed it yet — and the gate must block.
+func TestHasOpenWorkStrictBlocksOnWispWithOpenChildren(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Step bead still open — pool agent hasn't picked it up yet.
+	if _, err := store.Create(beads.Bead{
+		Title:    "determine-period",
+		ParentID: wispRoot.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ad := &memoryOrderDispatcher{}
+	has, err := ad.hasOpenWorkStrict(store, "digest")
+	if err != nil {
+		t.Fatalf("hasOpenWorkStrict: %v", err)
+	}
+	if !has {
+		t.Fatal("wisp root with open child step beads must count as in-flight; " +
+			"the gate ignored them and the next cooldown tick poured a duplicate wisp (tr-kds01)")
+	}
+}
+
+func TestHasOpenWorkStrictBlocksOnWispWithPartiallyClosedChildren(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedChild, err := store.Create(beads.Bead{
+		Title:    "determine-period",
+		ParentID: wispRoot.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(closedChild.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:    "draft-digest",
+		ParentID: wispRoot.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ad := &memoryOrderDispatcher{}
+	has, err := ad.hasOpenWorkStrict(store, "digest")
+	if err != nil {
+		t.Fatalf("hasOpenWorkStrict: %v", err)
+	}
+	if !has {
+		t.Fatal("wisp root with a remaining open child step must count as in-flight work")
+	}
+}
+
+func TestHasOpenWorkStrictBlocksOnWispWithOpenDescendant(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedChild, err := store.Create(beads.Bead{
+		Title:    "prepare-submolecule",
+		ParentID: wispRoot.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(closedChild.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:    "nested-step-still-running",
+		ParentID: closedChild.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ad := &memoryOrderDispatcher{}
+	has, err := ad.hasOpenWorkStrict(store, "digest")
+	if err != nil {
+		t.Fatalf("hasOpenWorkStrict: %v", err)
+	}
+	if !has {
+		t.Fatal("wisp root with an open nested descendant must count as in-flight work")
+	}
+}
+
+func TestHasOpenWorkStrictBlocksOnGraphWorkflowWispWithOpenDescendant(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "graph-workflow-digest",
+		Type:   "task",
+		Labels: []string{"order-run:digest"},
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedChild, err := store.Create(beads.Bead{
+		Title:    "prepare-graph-step",
+		ParentID: wispRoot.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(closedChild.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:    "graph-step-still-running",
+		ParentID: closedChild.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ad := &memoryOrderDispatcher{}
+	has, err := ad.hasOpenWorkStrict(store, "digest")
+	if err != nil {
+		t.Fatalf("hasOpenWorkStrict: %v", err)
+	}
+	if !has {
+		t.Fatal("graph workflow wisp with an open nested descendant must count as in-flight work")
+	}
+}
+
+func TestHasOpenWorkStrictBlocksOnRootOnlyWisp(t *testing.T) {
+	store := beads.NewMemStore()
+
+	if _, err := store.Create(beads.Bead{
+		Title:  "vapor-order-root",
+		Type:   "task",
+		Labels: []string{"order-run:digest"},
+		Metadata: map[string]string{
+			"gc.kind": "wisp",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ad := &memoryOrderDispatcher{}
+	has, err := ad.hasOpenWorkStrict(store, "digest")
+	if err != nil {
+		t.Fatalf("hasOpenWorkStrict: %v", err)
+	}
+	if !has {
+		t.Fatal("open root-only gc.kind=wisp bead must count as in-flight order work")
+	}
+}
+
+// TestHasOpenWorkStrictAllowsWispWithAllChildrenClosed protects the
+// ga-jra/ga-lo8c invariant after the tr-kds01 fix. A wisp root whose step
+// beads are ALL closed represents work that completed (or was hand-cleaned)
+// but whose root was never auto-closed — molecule roots never close
+// themselves. Such a root must not permanently block re-dispatch.
+func TestHasOpenWorkStrictAllowsWispWithAllChildrenClosed(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:    "determine-period",
+		ParentID: wispRoot.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(child.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	ad := &memoryOrderDispatcher{}
+	has, err := ad.hasOpenWorkStrict(store, "digest")
+	if err != nil {
+		t.Fatalf("hasOpenWorkStrict: %v", err)
+	}
+	if has {
+		t.Fatal("wisp root with all children closed is leftover state, not in-flight work; " +
+			"counting it would permanently block re-dispatch (ga-jra/ga-lo8c)")
+	}
+}
+
+type parentListFailStore struct {
+	beads.Store
+	failParentID string
+	err          error
+}
+
+func (s parentListFailStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.ParentID == s.failParentID {
+		return nil, s.err
+	}
+	return s.Store.List(q)
+}
+
+func TestHasOpenWorkStrictPropagatesWispChildListError(t *testing.T) {
+	base := beads.NewMemStore()
+
+	wispRoot, err := base.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := parentListFailStore{
+		Store:        base,
+		failParentID: wispRoot.ID,
+		err:          fmt.Errorf("children tier unavailable"),
+	}
+	ad := &memoryOrderDispatcher{}
+	has, err := ad.hasOpenWorkStrict(store, "digest")
+	if err == nil {
+		t.Fatal("hasOpenWorkStrict err = nil, want child-list error")
+	}
+	if has {
+		t.Fatal("hasOpenWorkStrict returned true with child-list error; caller must fail closed on the error")
+	}
+	if !strings.Contains(err.Error(), "checking open descendants of wisp") {
+		t.Fatalf("hasOpenWorkStrict err = %q, want wisp descendant context", err)
+	}
+}
+
+// TestOrderDispatchOpenWispWithOpenStepsBlocksRedispatch is the
+// integration-level guard for tr-kds01. The scenario: a periodic
+// formula+pool order whose first dispatch's step beads were never picked
+// up by the pool agent. The wisp root and its step beads sit open. The
+// next cooldown tick MUST NOT fire another wisp.
+func TestOrderDispatchOpenWispWithOpenStepsBlocksRedispatch(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:my-pool-order"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Step bead still open — pool never picked up the prior wisp's work.
+	if _, err := store.Create(beads.Bead{
+		Title:    "determine-period",
+		ParentID: wispRoot.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ran := false
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		ran = true
+		return nil, nil
+	}
+
+	aa := []orders.Order{{
+		Name:     "my-pool-order",
+		Trigger:  "cooldown",
+		Interval: "1s",
+		Exec:     "scripts/run.sh",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now().Add(5*time.Second))
+	ad.drain(context.Background())
+
+	if ran {
+		t.Fatal("exec must NOT run — prior wisp has open step beads, " +
+			"the cooldown gate must treat it as in-flight (tr-kds01)")
 	}
 }
 
@@ -5036,8 +5835,8 @@ func TestOrderDispatcherCancelTerminatesInFlight(t *testing.T) {
 	store := beads.NewMemStore()
 	execStarted := make(chan struct{})
 
-	// Exec respects ctx — returns when canceled. This mirrors what
-	// exec.CommandContext does in production: SIGKILL on ctx.Done.
+	// Exec respects ctx — returns when canceled. This mirrors the
+	// production runner's forced subprocess teardown on ctx.Done.
 	fakeExec := func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
 		close(execStarted)
 		<-ctx.Done()

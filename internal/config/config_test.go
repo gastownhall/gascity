@@ -4512,6 +4512,9 @@ func TestInjectImplicitAgents_NoProviders(t *testing.T) {
 	if !a.Implicit {
 		t.Fatal("control-dispatcher should be implicit")
 	}
+	if !reflect.DeepEqual(a.ProcessNames, []string{"gc"}) {
+		t.Fatalf("control-dispatcher ProcessNames = %v, want [gc]", a.ProcessNames)
+	}
 }
 
 func TestInjectImplicitAgents_WorkspaceProvider(t *testing.T) {

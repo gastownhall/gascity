@@ -157,7 +157,17 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 	}
 	queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
 	runner := func(command, dir string) (string, error) {
-		return shellWorkQueryWithEnv(command, dir, queryEnv)
+		out, err := shellWorkQueryWithEnv(command, dir, queryEnv)
+		if err != nil {
+			// A killed/timed-out work query strands the session with no
+			// output and no cause on the event bus; emit one so the
+			// reconciler can escalate instead of skipping it forever
+			// (issues #1496/#1497). Ordinary command errors are ignored
+			// by emitWorkQueryFailure and stay on the stderr path below.
+			emitWorkQueryFailure(openCityRecorderAt(cityPath, stderr),
+				os.Getenv("GC_SESSION_ID"), a.QualifiedName(), command, err)
+		}
+		return out, err
 	}
 	return doHook(workQuery, workDir, inject, runner, stdout, stderr)
 }

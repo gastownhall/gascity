@@ -47,6 +47,23 @@ type traceStatusJSON struct {
 	ActiveArms        []TraceArm `json:"active_arms"`
 }
 
+type traceStatusResultJSON struct {
+	SchemaVersion     string     `json:"schema_version"`
+	CityPath          string     `json:"city_path"`
+	AsOf              time.Time  `json:"as_of"`
+	ControllerRunning bool       `json:"controller_running"`
+	ControllerPID     int        `json:"controller_pid,omitempty"`
+	HeadSeq           uint64     `json:"head_seq"`
+	ActiveArms        []TraceArm `json:"active_arms"`
+}
+
+type traceShowResultJSON struct {
+	SchemaVersion string                         `json:"schema_version"`
+	CityPath      string                         `json:"city_path"`
+	Count         int                            `json:"count"`
+	Records       []SessionReconcilerTraceRecord `json:"records"`
+}
+
 func newTraceCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "trace",
@@ -117,16 +134,18 @@ func newTraceStopCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 func newTraceStatusCmd(stdout, stderr io.Writer) *cobra.Command {
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show trace arms and stream state",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdTraceStatus(stdout, stderr) != 0 {
+			if cmdTraceStatusWithJSON(jsonOut, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON result")
 	return cmd
 }
 
@@ -154,7 +173,7 @@ func newTraceShowCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&tickID, "tick", "", "filter by tick id")
 	cmd.Flags().StringVar(&recordType, "type", "", "filter by record type")
 	cmd.Flags().StringVar(&reason, "reason", "", "filter by reason code")
-	cmd.Flags().BoolVar(&jsonOut, "json", true, "emit JSON array")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON result")
 	return cmd
 }
 
@@ -305,6 +324,10 @@ func cmdTraceStop(template string, all bool, stdout, stderr io.Writer) int {
 }
 
 func cmdTraceStatus(stdout, stderr io.Writer) int {
+	return cmdTraceStatusWithJSON(false, stdout, stderr)
+}
+
+func cmdTraceStatusWithJSON(jsonOut bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc trace status: %v\n", err) //nolint:errcheck
@@ -320,17 +343,38 @@ func cmdTraceStatus(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc trace status: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	payload := map[string]any{
-		"city_path": cityPath,
-		"head_seq":  head,
-		"arms":      status.ActiveArms,
+	activeArms := status.ActiveArms
+	if activeArms == nil {
+		activeArms = []TraceArm{}
 	}
-	data, err := json.MarshalIndent(payload, "", "  ")
-	if err != nil {
-		fmt.Fprintf(stderr, "gc trace status: %v\n", err) //nolint:errcheck
-		return 1
+	result := traceStatusResultJSON{
+		SchemaVersion:     "1",
+		CityPath:          cityPath,
+		AsOf:              status.AsOf,
+		ControllerRunning: status.ControllerRunning,
+		ControllerPID:     status.ControllerPID,
+		HeadSeq:           head,
+		ActiveArms:        activeArms,
 	}
-	fmt.Fprintln(stdout, string(data)) //nolint:errcheck
+	if jsonOut {
+		if err := writeCLIJSONLine(stdout, result); err != nil {
+			fmt.Fprintf(stderr, "gc trace status: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		return 0
+	}
+
+	fmt.Fprintf(stdout, "Trace status for %s\n", cityPath)                    //nolint:errcheck
+	fmt.Fprintf(stdout, "Controller running: %t\n", status.ControllerRunning) //nolint:errcheck
+	if status.ControllerPID > 0 {
+		fmt.Fprintf(stdout, "Controller PID: %d\n", status.ControllerPID) //nolint:errcheck
+	}
+	fmt.Fprintf(stdout, "Head seq: %d\n", head)                     //nolint:errcheck
+	fmt.Fprintf(stdout, "Active trace arms: %d\n", len(activeArms)) //nolint:errcheck
+	for _, arm := range activeArms {
+		_, _ = fmt.Fprintf(stdout, "- %s %s %s until %s\n",
+			arm.Source, arm.ScopeValue, arm.Level, arm.ExpiresAt.Format(time.RFC3339))
+	}
 	return 0
 }
 
@@ -360,18 +404,28 @@ func cmdTraceShow(template, since, traceID, tickID, recordType, reason string, j
 		fmt.Fprintf(stderr, "gc trace show: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	if recs == nil {
+		recs = []SessionReconcilerTraceRecord{}
+	}
 	if !jsonOut {
+		if len(recs) == 0 {
+			fmt.Fprintln(stdout, "No trace records found") //nolint:errcheck
+			return 0
+		}
 		for _, rec := range recs {
 			fmt.Fprintln(stdout, traceRecordSummary(rec)) //nolint:errcheck
 		}
 		return 0
 	}
-	data, err := json.MarshalIndent(recs, "", "  ")
-	if err != nil {
+	if err := writeCLIJSONLine(stdout, traceShowResultJSON{
+		SchemaVersion: "1",
+		CityPath:      cityPath,
+		Count:         len(recs),
+		Records:       recs,
+	}); err != nil {
 		fmt.Fprintf(stderr, "gc trace show: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	fmt.Fprintln(stdout, string(data)) //nolint:errcheck
 	return 0
 }
 

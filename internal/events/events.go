@@ -41,12 +41,35 @@ const (
 	SessionMaxAgeKilled = "session.max_age_killed"
 	SessionSuspended    = "session.suspended"
 	SessionUpdated      = "session.updated"
-	ConvoyCreated       = "convoy.created"
-	ConvoyClosed        = "convoy.closed"
-	ControllerStarted   = "controller.started"
-	ControllerStopped   = "controller.stopped"
-	CitySuspended       = "city.suspended"
-	CityResumed         = "city.resumed"
+	// SessionDrainAckedWithAssignedWork fires when a session acknowledges
+	// drain (via `gc runtime drain-ack`) while still holding the assignee
+	// on an open or in-progress work bead. Distinguishes a worker that
+	// exited mid-task (e.g., per-turn cap, crash) from a worker that
+	// performed a clean phase handoff (the latter null the bead's
+	// assignee before drain-acking). The reconciler emits this as a
+	// mechanism-only signal; pack-level subscribers own the recovery
+	// policy (commit-and-push, clear-assignee-and-respawn, or escalate).
+	// See gastownhall/gascity#2293.
+	SessionDrainAckedWithAssignedWork = "session.drain_acked_with_assigned_work"
+	// SessionWorkQueryFailed fires when the current managed session's
+	// work-discovery query subprocess is killed by an external signal or
+	// aborted by the runner-imposed timeout before producing output.
+	// Emission requires the current session ID so the lifecycle payload
+	// remains correlated; the companion reconciler handler is tracked in
+	// #1497.
+	SessionWorkQueryFailed = "session.work_query_failed"
+	ConvoyCreated          = "convoy.created"
+	ConvoyClosed           = "convoy.closed"
+	ControllerStarted      = "controller.started"
+	ControllerStopped      = "controller.stopped"
+	// SupervisorShutdownRequested fires when the supervisor's main loop
+	// observes a shutdown trigger (signal or socket stop) and is about to
+	// cancel the supervisor context. Carries attribution so operators can
+	// answer "why did the supervisor exit" without scraping macOS/launchd
+	// logs.
+	SupervisorShutdownRequested = "supervisor.shutdown_requested"
+	CitySuspended               = "city.suspended"
+	CityResumed                 = "city.resumed"
 	// Typed async request result events. 5 success types (one per
 	// operation, fully typed payload) + 1 shared failure type.
 	RequestResultCityCreate     = "request.result.city.create"
@@ -92,6 +115,8 @@ var KnownEventTypes = []string{
 	SessionWoke, SessionStopped, SessionCrashed,
 	SessionDraining, SessionUndrained, SessionQuarantined,
 	SessionIdleKilled, SessionMaxAgeKilled, SessionSuspended, SessionUpdated,
+	SessionDrainAckedWithAssignedWork,
+	SessionWorkQueryFailed,
 	BeadCreated, BeadClosed, BeadUpdated,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
@@ -104,6 +129,7 @@ var KnownEventTypes = []string{
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
+	SupervisorShutdownRequested,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,

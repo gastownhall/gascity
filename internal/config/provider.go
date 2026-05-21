@@ -191,6 +191,7 @@ type ResolvedProvider struct {
 	// Provenance records per-field and per-map-key layer attribution.
 	Provenance             ProviderProvenance
 	Command                string
+	Lifecycle              string
 	Args                   []string
 	PromptMode             string
 	PromptFlag             string

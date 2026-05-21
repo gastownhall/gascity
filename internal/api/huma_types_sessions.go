@@ -120,6 +120,20 @@ type SessionPatchInput struct {
 	Body SessionPatchBody
 }
 
+// SessionPermissionModeBody is the request body for updating the
+// schema-backed permission_mode option on a session.
+type SessionPermissionModeBody struct {
+	_              struct{} `json:"-" additionalProperties:"false"`
+	PermissionMode string   `json:"permission_mode" minLength:"1" pattern:"\\S" doc:"Provider schema value for the permission_mode option."`
+}
+
+// SessionPermissionModeInput is the Huma input for POST /v0/city/{cityName}/session/{id}/permission-mode.
+type SessionPermissionModeInput struct {
+	CityScope
+	ID   string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Body SessionPermissionModeBody
+}
+
 // SessionCloseInput is the Huma input for POST /v0/city/{cityName}/session/{id}/close.
 type SessionCloseInput struct {
 	CityScope

@@ -426,7 +426,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		// silently shadow a **bootstrap** implicit-import pack, hard-stop
 		// with a diagnostic. Non-bootstrap implicit imports retain the
 		// pre-v0.15.1 "explicit wins over implicit" contract and are
-		// shadowed silently (see docs/packv2/doc-packman.md). See
+		// shadowed silently (see engdocs/design/packv2/doc-packman.md). See
 		// engdocs/proposals/skill-materialization.md — "Name-collision
 		// with a user-declared [imports.core]".
 		bootstrapNames := bootstrapImportNames(implicitImports)
@@ -611,6 +611,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Validate cross-entity semantic constraints.
 	prov.Warnings = append(prov.Warnings, ValidateSemantics(root, path)...)
 	prov.Warnings = append(prov.Warnings, DetectLegacyProviderInheritance(root, path)...)
+	prov.Warnings = append(prov.Warnings, detectLegacyWorkspaceFields(root, path, prov.Workspace)...)
 
 	// Build the resolved provider cache now that compose + patch have
 	// populated the full provider table. Chain resolution errors
@@ -1156,6 +1157,14 @@ func mergeWorkspace(base, fragment *City, fragMeta toml.MetaData, fragPath strin
 			prov.Workspace[f.key] = fragPath
 		}
 	}
+	if fragMeta.IsDefined("workspace", "suspended") {
+		if base.Workspace.Suspended {
+			prov.Warnings = append(prov.Warnings,
+				fmt.Sprintf("workspace.suspended redefined by %q", fragPath))
+		}
+		base.Workspace.Suspended = fragment.Workspace.Suspended
+		prov.Workspace["suspended"] = fragPath
+	}
 	// install_agent_hooks is a []string — handle outside the wsField loop.
 	if fragMeta.IsDefined("workspace", "install_agent_hooks") {
 		if len(base.Workspace.InstallAgentHooks) > 0 {
@@ -1397,7 +1406,7 @@ func trackRigs(prov *Provenance, rigs []Rig, source string) {
 }
 
 func trackWorkspace(prov *Provenance, meta toml.MetaData, source string) {
-	for _, f := range []string{"name", "provider", "start_command", "session_template", "install_agent_hooks"} {
+	for _, f := range []string{"name", "provider", "start_command", "session_template", "suspended", "install_agent_hooks", "global_fragments"} {
 		if meta.IsDefined("workspace", f) {
 			prov.Workspace[f] = source
 		}

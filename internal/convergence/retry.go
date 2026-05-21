@@ -49,6 +49,7 @@ func (h *Handler) RetryHandler(_ context.Context, sourceBeadID, _ string, maxIte
 	gateTimeout := meta[FieldGateTimeout]
 	gateTimeoutAction := meta[FieldGateTimeoutAction]
 	cityPath := meta[FieldCityPath]
+	rig := meta[FieldRig]
 	evaluatePrompt := meta[FieldEvaluatePrompt]
 	vars := ExtractVars(meta)
 
@@ -93,6 +94,7 @@ func (h *Handler) RetryHandler(_ context.Context, sourceBeadID, _ string, maxIte
 		{FieldGateTimeoutAction, gateTimeoutAction},
 		{FieldMaxIterations, EncodeInt(maxIterations)},
 		{FieldCityPath, cityPath},
+		{FieldRig, rig},
 		{FieldEvaluatePrompt, evaluatePrompt},
 		{FieldRetrySource, sourceBeadID},
 		{FieldState, StateActive},

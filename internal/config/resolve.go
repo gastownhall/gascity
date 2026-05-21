@@ -39,7 +39,28 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 		if mode == "" {
 			mode = "none"
 		}
-		return &ResolvedProvider{Command: agent.StartCommand, PromptMode: mode, PromptFlag: agent.PromptFlag}, nil
+		resolved := &ResolvedProvider{
+			Command:    agent.StartCommand,
+			Lifecycle:  agent.Lifecycle,
+			PromptMode: mode,
+			PromptFlag: agent.PromptFlag,
+		}
+		if agent.ReadyDelayMs != nil {
+			resolved.ReadyDelayMs = *agent.ReadyDelayMs
+		}
+		if agent.ReadyPromptPrefix != "" {
+			resolved.ReadyPromptPrefix = agent.ReadyPromptPrefix
+		}
+		if len(agent.ProcessNames) > 0 {
+			resolved.ProcessNames = cloneStrings(agent.ProcessNames)
+		}
+		if agent.EmitsPermissionWarning != nil {
+			resolved.EmitsPermissionWarning = *agent.EmitsPermissionWarning
+		}
+		if agent.ResumeCommand != "" {
+			resolved.ResumeCommand = agent.ResumeCommand
+		}
+		return resolved, nil
 	}
 
 	// Step 2: determine provider name.
@@ -686,6 +707,9 @@ func mergeAgentOverrides(rp *ResolvedProvider, agent *Agent) {
 	}
 	if agent.PromptFlag != "" {
 		rp.PromptFlag = agent.PromptFlag
+	}
+	if agent.Lifecycle != "" {
+		rp.Lifecycle = agent.Lifecycle
 	}
 	if agent.ReadyDelayMs != nil {
 		rp.ReadyDelayMs = *agent.ReadyDelayMs

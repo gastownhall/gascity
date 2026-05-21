@@ -421,6 +421,161 @@ func TestReconcileSessionBeads_DrainAckWithAssignedOpenWorkSleepsInsteadOfDraini
 	}
 }
 
+// TestReconcileSessionBeads_DrainAckMidPhaseEmitsAssignedWorkEvent pins
+// gastownhall/gascity#2293's Shape A contract: when a session drain-acks
+// while still holding the assignee on an in-progress work bead (the cap-hit
+// shape — worker exited mid-task without nulling assignee), the reconciler
+// MUST emit events.SessionDrainAckedWithAssignedWork carrying the session
+// and bead IDs so pack-side subscribers can apply recovery policy. The SDK
+// reconciler stops at the event; it does not commit, push, or clear assignee.
+func TestReconcileSessionBeads_DrainAckMidPhaseEmitsAssignedWorkEvent(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	fake := events.NewFake()
+	env.rec = fake
+
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	stranded, err := env.store.Create(beads.Bead{
+		Title:    "implement phase work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create(stranded bead): %v", err)
+	}
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+
+	var matched *events.Event
+	for i := range fake.Events {
+		if fake.Events[i].Type == events.SessionDrainAckedWithAssignedWork {
+			matched = &fake.Events[i]
+			break
+		}
+	}
+	if matched == nil {
+		t.Fatalf("expected %s event, got %d events of other types", events.SessionDrainAckedWithAssignedWork, len(fake.Events))
+	}
+	if !strings.Contains(string(matched.Payload), session.ID) {
+		t.Errorf("event payload does not reference session ID %q: %s", session.ID, matched.Payload)
+	}
+	if !strings.Contains(string(matched.Payload), stranded.ID) {
+		t.Errorf("event payload does not reference stranded bead ID %q: %s", stranded.ID, matched.Payload)
+	}
+
+	// Verify the SDK did NOT mutate the bead's assignee — recovery policy
+	// must live in pack-side subscribers, not the reconciler.
+	got, err := env.store.Get(stranded.ID)
+	if err != nil {
+		t.Fatalf("Get(stranded): %v", err)
+	}
+	if got.Assignee != session.ID {
+		t.Errorf("stranded bead assignee = %q, want %q (SDK must not clear assignee — pack-side recovery)", got.Assignee, session.ID)
+	}
+	if got.Status == "closed" {
+		t.Errorf("stranded bead status = %q, SDK must not close the bead", got.Status)
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckCleanHandoffSuppressesAssignedWorkEvent
+// pins the other half of the Shape A contract: the phase-end handoff path
+// (worker writes --assignee "" before drain-ack) MUST NOT emit the event.
+// Without this discriminator, every clean handoff would be misclassified as
+// a cap-hit, breaking the SDLC multi-phase pattern.
+func TestReconcileSessionBeads_DrainAckCleanHandoffSuppressesAssignedWorkEvent(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	fake := events.NewFake()
+	env.rec = fake
+
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	// Phase-end handoff shape: bead exists but assignee is already nulled
+	// before drain-ack. Status open / re-routed for the next phase.
+	if _, err := env.store.Create(beads.Bead{
+		Title:  "next phase work",
+		Type:   "task",
+		Status: "open",
+		// Assignee intentionally empty — worker handed off before draining.
+		Metadata: map[string]string{"gc.routed_to": "tester"},
+	}); err != nil {
+		t.Fatalf("Create(handed-off bead): %v", err)
+	}
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	_ = reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	for _, ev := range fake.Events {
+		if ev.Type == events.SessionDrainAckedWithAssignedWork {
+			t.Fatalf("unexpected %s event on clean handoff path: %+v", events.SessionDrainAckedWithAssignedWork, ev)
+		}
+	}
+}
+
 func TestReconcileSessionBeads_UndesiredDrainAckStopsAndCloses(t *testing.T) {
 	env := newReconcilerTestEnv()
 	session := env.createSessionBead("worker", "worker")
@@ -4408,6 +4563,69 @@ func TestPendingCreateLeaseExpiredForRollbackFallsBackToStaleWindowForInvalidLas
 	}
 }
 
+func TestTraceHealClearedPendingCreateLeaseRecordsDecision(t *testing.T) {
+	trace := &sessionReconcilerTraceCycle{
+		tracer: &SessionReconcilerTracer{
+			detail: map[string]TraceSource{"helper": TraceSourceManual},
+		},
+		dropReasons:       map[string]int{},
+		pendingDetail:     map[string][]SessionReconcilerTraceRecord{},
+		pendingDropped:    map[string]int{},
+		templatesTouched:  map[string]struct{}{},
+		detailedTemplates: map[string]struct{}{},
+		decisionCounts:    map[string]int{},
+		operationCounts:   map[string]int{},
+		mutationCounts:    map[string]int{},
+		reasonCounts:      map[string]int{},
+		outcomeCounts:     map[string]int{},
+	}
+	session := makeBead("b1", map[string]string{
+		"session_name": "helper",
+		"state":        "asleep",
+		"template":     "helper",
+	})
+
+	traceHealClearedPendingCreateLease(
+		trace,
+		session,
+		&config.City{Agents: []config.Agent{{Name: "helper"}}},
+		"",
+		"",
+		"creating",
+		"2026-05-19T08:58:30Z",
+		"2026-05-19T08:58:30Z",
+		false,
+		map[string]string{
+			"pending_create_claim":      "",
+			"pending_create_started_at": "",
+			"state":                     "asleep",
+		},
+	)
+
+	if len(trace.records) != 1 {
+		t.Fatalf("trace records = %d, want 1", len(trace.records))
+	}
+	rec := trace.records[0]
+	if rec.RecordType != TraceRecordDecision {
+		t.Fatalf("record type = %q, want decision", rec.RecordType)
+	}
+	if rec.SiteCode != TraceSiteReconcilerPendingCreate {
+		t.Fatalf("site = %q, want %q", rec.SiteCode, TraceSiteReconcilerPendingCreate)
+	}
+	if rec.OutcomeCode != TraceOutcomeApplied {
+		t.Fatalf("outcome = %q, want %q", rec.OutcomeCode, TraceOutcomeApplied)
+	}
+	if got := rec.Fields["raw_reason_code"]; got != "heal_cleared_stale_lease" {
+		t.Fatalf("raw_reason_code = %#v, want heal_cleared_stale_lease", got)
+	}
+	if got := rec.Fields["state_before"]; got != "creating" {
+		t.Fatalf("state_before = %#v, want creating", got)
+	}
+	if got := rec.Fields["state_after"]; got != "asleep" {
+		t.Fatalf("state_after = %#v, want asleep", got)
+	}
+}
+
 func TestReconcileSessionBeads_RollsBackPendingCreateWhenConflictingRuntimeAlreadyRunning(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -5369,6 +5587,146 @@ func TestReconcileSessionBeads_IdleTimeoutStopsAndStaysAsleep(t *testing.T) {
 	}
 }
 
+// TestReconcileSessionBeads_IdleTimeoutRespectsUserHold guards the
+// session_reconciler.go idle-timeout block: a session with a future
+// held_until (set by `gc session suspend`) must not be idle-killed.
+// Without the guard, the idle kill path stops the runtime and rewrites the
+// intended user-hold sleep state.
+func TestReconcileSessionBeads_IdleTimeoutRespectsUserHold(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	heldUntil := env.clk.Now().Add(100 * time.Hour).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"held_until": heldUntil,
+	})
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	it := newFakeIdleTracker()
+	it.idle["worker"] = true
+
+	rec := events.NewFake()
+	env.rec = rec
+
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames,
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if !env.sp.IsRunning("worker") {
+		t.Error("held worker must not be idle-killed while held_until is in the future")
+	}
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["sleep_reason"] == "idle-timeout" {
+		t.Errorf("sleep_reason = %q, must not be idle-timeout for held session", b.Metadata["sleep_reason"])
+	}
+	if got := b.Metadata["held_until"]; got != heldUntil {
+		t.Errorf("held_until = %q, want preserved %q", got, heldUntil)
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionIdleKilled {
+			t.Error("SessionIdleKilled must not fire while held_until is in the future")
+		}
+	}
+}
+
+func TestReconcileSessionBeads_IdleTimeoutSuspendedUserHoldStartsDrain(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	heldUntil := env.clk.Now().Add(100 * time.Hour).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"held_until":   heldUntil,
+		"sleep_intent": "user-hold",
+		"state":        "suspended",
+	})
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	it := newFakeIdleTracker()
+	it.idle["worker"] = true
+
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatal("expected suspended user-hold session to start draining")
+	}
+	if ds.reason != "user-hold" {
+		t.Fatalf("drain reason = %q, want user-hold", ds.reason)
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("held worker must drain before the runtime is stopped")
+	}
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := b.Metadata["held_until"]; got != heldUntil {
+		t.Fatalf("held_until = %q, want preserved %q", got, heldUntil)
+	}
+}
+
+func TestReconcileSessionBeads_IdleTimeoutRespectsQuarantineBlocker(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	qUntil := env.clk.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"quarantined_until": qUntil,
+		"sleep_reason":      "quarantine",
+		"state":             "quarantined",
+	})
+
+	it := newFakeIdleTracker()
+	it.idle["worker"] = true
+	rec := events.NewFake()
+	env.rec = rec
+
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("quarantined worker must not be idle-killed while quarantined_until is in the future")
+	}
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["sleep_reason"] == "idle-timeout" {
+		t.Fatalf("sleep_reason = %q, must not be idle-timeout for quarantined session", b.Metadata["sleep_reason"])
+	}
+	if got := b.Metadata["quarantined_until"]; got != qUntil {
+		t.Fatalf("quarantined_until = %q, want preserved %q", got, qUntil)
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionIdleKilled {
+			t.Fatal("SessionIdleKilled must not fire while quarantined_until is in the future")
+		}
+	}
+}
+
 func TestReconcileSessionBeads_IdleTimeoutNilTrackerSkipped(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
@@ -5446,6 +5804,91 @@ func TestReconcileSessionBeads_MaxSessionAgeKillsAgedSession(t *testing.T) {
 	}
 	if !fired {
 		t.Error("expected SessionMaxAgeKilled event")
+	}
+}
+
+// TestReconcileSessionBeads_MaxSessionAgeRespectsUserHold guards the
+// session_reconciler.go max-session-age block: a session with a future
+// held_until (set by `gc session suspend`) must not be max-age killed.
+// Without the guard, the max-age kill path stops the runtime and rewrites the
+// intended user-hold sleep state.
+func TestReconcileSessionBeads_MaxSessionAgeRespectsUserHold(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	heldUntil := env.clk.Now().Add(100 * time.Hour).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"creation_complete_at": env.clk.Now().Add(-6 * time.Hour).UTC().Format(time.RFC3339),
+		"held_until":           heldUntil,
+	})
+
+	tr := newMaxSessionAgeTracker()
+	tr.setConfig("witness", 5*time.Hour, 0)
+	rec := events.NewFake()
+	env.rec = rec
+
+	env.maxAgeReconcile([]beads.Bead{session}, tr)
+
+	if !env.sp.IsRunning("witness") {
+		t.Error("held witness must not be max-age killed while held_until is in the future")
+	}
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["sleep_reason"] == "max-session-age" {
+		t.Errorf("sleep_reason = %q, must not be max-session-age for held session", b.Metadata["sleep_reason"])
+	}
+	if got := b.Metadata["held_until"]; got != heldUntil {
+		t.Errorf("held_until = %q, want preserved %q", got, heldUntil)
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionMaxAgeKilled {
+			t.Error("SessionMaxAgeKilled must not fire while held_until is in the future")
+		}
+	}
+}
+
+func TestReconcileSessionBeads_MaxSessionAgeRespectsQuarantineBlocker(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	qUntil := env.clk.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"creation_complete_at": env.clk.Now().Add(-6 * time.Hour).UTC().Format(time.RFC3339),
+		"quarantined_until":    qUntil,
+		"sleep_reason":         "quarantine",
+		"state":                "quarantined",
+	})
+
+	tr := newMaxSessionAgeTracker()
+	tr.setConfig("witness", 5*time.Hour, 0)
+	rec := events.NewFake()
+	env.rec = rec
+
+	env.maxAgeReconcile([]beads.Bead{session}, tr)
+
+	if !env.sp.IsRunning("witness") {
+		t.Fatal("quarantined witness must not be max-age killed while quarantined_until is in the future")
+	}
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["sleep_reason"] == "max-session-age" {
+		t.Fatalf("sleep_reason = %q, must not be max-session-age for quarantined session", b.Metadata["sleep_reason"])
+	}
+	if got := b.Metadata["quarantined_until"]; got != qUntil {
+		t.Fatalf("quarantined_until = %q, want preserved %q", got, qUntil)
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionMaxAgeKilled {
+			t.Fatal("SessionMaxAgeKilled must not fire while quarantined_until is in the future")
+		}
 	}
 }
 

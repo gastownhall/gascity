@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,9 +15,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
@@ -23,7 +27,9 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/processgroup"
 )
 
 var startDeprecatedOrderWarningDedup = logutil.NewDedup(logutil.DefaultDedupCapacity)
@@ -58,8 +64,16 @@ const (
 	// watchdog retries every 30s, and the order-firing pipeline silently
 	// wedges (no bead.created/closed events, only metadata churn).
 	staleOrderTrackingCloseReason = "order-tracking sweep: stale tracking bead exceeded retention window"
+	staleOrderWispCloseReason     = "order-tracking sweep: stale order wisp subtree exceeded retention window"
 
 	completedOrderTrackingCloseReason = "order dispatch completed: tracking bead lifecycle finished"
+)
+
+var (
+	// shellExecPostCancelWaitDelay is os/exec's pipe-close wait after
+	// Cancel returns; the TERM and KILL waits each use shellExecSignalGrace.
+	shellExecPostCancelWaitDelay = 2 * time.Second
+	shellExecSignalGrace         = 2 * time.Second
 )
 
 // orderDispatcher evaluates order trigger conditions and dispatches due
@@ -81,15 +95,95 @@ type orderDispatcher interface {
 }
 
 // ExecRunner runs a shell command with context, working directory, and
-// environment variables. Returns combined stdout or an error.
+// environment variables. Returns combined stdout or an error. When context
+// cancellation stops a command, the returned error is ctx.Err(), not an
+// *exec.ExitError, and the returned output may be partial.
 type ExecRunner func(ctx context.Context, command, dir string, env []string) ([]byte, error)
 
 // shellExecRunner is the production ExecRunner using os/exec.
 func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = dir
 	cmd.Env = mergeOrderExecEnv(cmd.Environ(), env)
-	return cmd.CombinedOutput()
+	processgroup.StartCommandInNewGroup(cmd)
+
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+
+	var cleanupMu sync.Mutex
+	var cleanupErr error
+	var cleanupOnce sync.Once
+	startedPGID := 0
+	canceled := false
+	cleanupProcess := func() error {
+		cleanupOnce.Do(func() {
+			cleanupMu.Lock()
+			pgid := startedPGID
+			cleanupMu.Unlock()
+			err := cancelShellExecProcessGroup(cmd, pgid)
+			cleanupMu.Lock()
+			cleanupErr = err
+			cleanupMu.Unlock()
+		})
+		cleanupMu.Lock()
+		defer cleanupMu.Unlock()
+		return cleanupErr
+	}
+	cmd.Cancel = func() error {
+		cleanupMu.Lock()
+		canceled = true
+		cleanupMu.Unlock()
+		_ = cleanupProcess()
+		return nil
+	}
+	cmd.WaitDelay = shellExecPostCancelWaitDelay
+
+	if err := cmd.Start(); err != nil {
+		return output.Bytes(), err
+	}
+	cleanupMu.Lock()
+	startedPGID = cmd.Process.Pid
+	if pgid, err := syscall.Getpgid(cmd.Process.Pid); err == nil {
+		startedPGID = pgid
+	}
+	cleanupMu.Unlock()
+
+	err := cmd.Wait()
+	cleanupMu.Lock()
+	wasCanceled := canceled
+	cleanupMu.Unlock()
+	if errors.Is(err, exec.ErrWaitDelay) || wasCanceled {
+		_ = cleanupProcess()
+	}
+
+	cleanupMu.Lock()
+	wasCanceled = canceled
+	errCleanup := cleanupErr
+	cleanupMu.Unlock()
+	if wasCanceled {
+		if err := ctx.Err(); err != nil {
+			if errCleanup != nil {
+				return output.Bytes(), errors.Join(err, errCleanup)
+			}
+			return output.Bytes(), err
+		}
+	}
+	if errCleanup != nil {
+		if err != nil {
+			return output.Bytes(), errors.Join(err, errCleanup)
+		}
+		return output.Bytes(), errCleanup
+	}
+	return output.Bytes(), err
+}
+
+func cancelShellExecProcessGroup(cmd *exec.Cmd, pgid int) error {
+	return processgroup.TerminateCommand(cmd, pgid, shellExecSignalGrace, processgroup.Options{})
 }
 
 func mergeOrderExecEnv(environ, env []string) []string {
@@ -203,14 +297,20 @@ func scanOrderSetSnapshotFSWithOptions(fs fsys.FS, cityPath string, cfg *config.
 	if cfg == nil {
 		cfg = &config.City{}
 	}
-	allAA, err := scanAllOrdersFSWithOptions(fs, cityPath, cfg, stderr, cmdName, opts)
+	allAA, err := orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{
+		FS:               fs,
+		OrderScanOptions: opts,
+		OnRigScanError: func(rigName string, err error) error {
+			fmt.Fprintf(stderr, "%s: rig %s: %v\n", cmdName, rigName, err) //nolint:errcheck // best-effort stderr
+			return nil
+		},
+		OnOverrideError: func(err error) error {
+			logDispatchError(stderr, "%s: order overrides: %v", cmdName, err)
+			return nil
+		},
+	})
 	if err != nil {
 		return orderSetSnapshot{}, err
-	}
-	if len(cfg.Orders.Overrides) > 0 {
-		if err := orders.ApplyOverrides(allAA, convertOverrides(cfg.Orders.Overrides)); err != nil {
-			logDispatchError(stderr, "%s: order overrides: %v", cmdName, err)
-		}
 	}
 	return orderSetSnapshot{
 		Orders:    append([]orders.Order(nil), allAA...),
@@ -458,9 +558,8 @@ func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store bea
 
 // cancel signals all in-flight dispatchOne goroutines to terminate. Safe
 // to call multiple times. Caller should follow with drain to wait for
-// goroutine completion (exec.CommandContext propagates the cancel as
-// SIGKILL; dispatchOne's deferred cleanup writes the tracking-bead
-// outcome before doneInflight signals drain).
+// goroutine completion; dispatchOne's deferred cleanup writes the
+// tracking-bead outcome before doneInflight signals drain.
 func (m *memoryOrderDispatcher) cancel() {
 	if m.dispatchCancel != nil {
 		m.dispatchCancel()
@@ -893,22 +992,32 @@ func (m *memoryOrderDispatcher) rigSuspendedByName(rigName string) bool {
 	return false
 }
 
-// hasOpenWorkStrict reports whether an open tracking bead exists for this
-// order — i.e. a dispatchOne goroutine is still in flight. Tracking beads
-// carry both "order-run:<scoped>" and labelOrderTracking; dispatchOne closes
-// them via defer when dispatch returns.
+// hasOpenWorkStrict reports whether any in-flight work exists for this
+// order — either a dispatchOne goroutine still running, or a wisp whose
+// step beads have not all been completed by the pool agent.
 //
-// Wisp root beads also carry "order-run:<scoped>" (so gc order history and
-// the orders API feed can attribute the wisp to its order), but molecule
-// roots never auto-close when their step beads finish. A leftover open
-// root is not in-flight work and must not block re-dispatch — counting it
-// caused ga-jra/ga-lo8c, where formula+pool orders stalled indefinitely
-// after a city restart because the first auto-fire's wisp root permanently
-// tripped this check.
+// Tracking beads carry both "order-run:<scoped>" and labelOrderTracking;
+// dispatchOne closes them via defer when dispatch returns. An open
+// tracking bead means a dispatchOne goroutine is in flight.
+//
+// Wisp root beads also carry "order-run:<scoped>" (so gc order history
+// and the orders API feed can attribute the wisp to its order) but never
+// carry labelOrderTracking. Molecule roots never auto-close when their
+// step beads finish, so a leftover open root with all-closed children is
+// orphan state — counting it would permanently block re-dispatch
+// (ga-jra/ga-lo8c, where formula+pool orders stalled after a city restart
+// because the first auto-fire's wisp root tripped this check). But a
+// wisp root whose child step beads are still open IS in-flight work: the
+// pool agent has not yet executed the wisp. Counting those prevents the
+// cooldown gate from pouring duplicate wisps when the pool stalls
+// (tr-kds01, where 24h-interval digest wisps accumulated because the
+// pool never picked them up).
 func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName string) (bool, error) {
 	results, err := store.List(beads.ListQuery{
-		Label:    "order-run:" + scopedName,
-		Sort:     beads.SortCreatedDesc,
+		Label: "order-run:" + scopedName,
+		Sort:  beads.SortCreatedDesc,
+		// Tracking beads are ephemeral while wisp roots are issue-tier, so
+		// the single-flight gate must union both tiers.
 		TierMode: beads.TierBoth,
 	})
 	if err != nil {
@@ -918,10 +1027,67 @@ func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName 
 		if b.Status == "closed" {
 			continue
 		}
-		for _, lbl := range b.Labels {
-			if lbl == labelOrderTracking {
+		if beadLabelsContain(b.Labels, labelOrderTracking) {
+			return true, nil
+		}
+		if !isOrderWispRootCandidate(b) {
+			continue
+		}
+		if isOrderRootOnlyWispCandidate(b) {
+			return true, nil
+		}
+		hasOpenDescendants, err := storeHasOpenDescendants(store, b.ID)
+		if err != nil {
+			return false, fmt.Errorf("checking open descendants of wisp %s: %w", b.ID, err)
+		}
+		if hasOpenDescendants {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func isOrderWispRootCandidate(b beads.Bead) bool {
+	if beads.IsMoleculeType(b.Type) {
+		return true
+	}
+	return b.Metadata["gc.kind"] == "workflow" || b.Metadata["gc.kind"] == "wisp"
+}
+
+func isOrderRootOnlyWispCandidate(b beads.Bead) bool {
+	return b.Metadata["gc.kind"] == "wisp" && !beads.IsMoleculeType(b.Type)
+}
+
+// storeHasOpenDescendants reports whether any transitive child of parentID is
+// non-closed. It includes closed intermediate nodes so nested molecule work
+// remains visible after a direct child step has completed.
+func storeHasOpenDescendants(store beads.Store, parentID string) (bool, error) {
+	seen := map[string]struct{}{parentID: {}}
+	queue := []string{parentID}
+	for len(queue) > 0 {
+		parentID := queue[0]
+		queue = queue[1:]
+
+		children, err := store.List(beads.ListQuery{
+			ParentID:      parentID,
+			IncludeClosed: true,
+			TierMode:      beads.TierBoth,
+		})
+		if err != nil {
+			return false, err
+		}
+		for _, c := range children {
+			if c.ID == "" {
+				continue
+			}
+			if _, ok := seen[c.ID]; ok {
+				continue
+			}
+			seen[c.ID] = struct{}{}
+			if c.Status != "closed" {
 				return true, nil
 			}
+			queue = append(queue, c.ID)
 		}
 	}
 	return false, nil
@@ -985,19 +1151,33 @@ func beadLabelsContain(labels []string, want string) bool {
 	return false
 }
 
+type orderTrackingSweepResult struct {
+	trackingClosed int
+	wispClosed     int
+}
+
 // sweepStaleOrderTracking closes open order-tracking beads whose creation
 // timestamp is older than staleAfter. When onlyOrders is non-empty, it only
 // closes tracking beads for those scoped order names.
 func sweepStaleOrderTracking(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string) (int, error) {
+	result, err := sweepStaleOrderTrackingWithOptions(store, now, staleAfter, onlyOrders, initiator, false)
+	return result.trackingClosed, err
+}
+
+func sweepStaleOrderTrackingWithOptions(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
-		return 0, fmt.Errorf("stale-after must be positive")
+		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
+	}
+	if includeWispSubtrees && len(onlyOrders) == 0 {
+		return orderTrackingSweepResult{}, fmt.Errorf("include-wisps requires at least one order name")
 	}
 	all, err := store.ListByLabel(labelOrderTracking, 0, beads.WithBothTiers)
 	if err != nil {
-		return 0, fmt.Errorf("listing order-tracking beads: %w", err)
+		return orderTrackingSweepResult{}, fmt.Errorf("listing order-tracking beads: %w", err)
 	}
 
 	cutoff := now.Add(-staleAfter)
+	result := orderTrackingSweepResult{}
 	var ids []string
 	for _, b := range all {
 		if len(onlyOrders) > 0 {
@@ -1015,20 +1195,218 @@ func sweepStaleOrderTracking(store beads.Store, now time.Time, staleAfter time.D
 		ids = append(ids, b.ID)
 	}
 	if len(ids) == 0 {
+		if !includeWispSubtrees {
+			return result, nil
+		}
+	} else {
+		metadata := map[string]string{
+			"order_tracking_sweep": orderTrackingSweepMetadataReason,
+			"close_reason":         staleOrderTrackingCloseReason,
+		}
+		if initiator != "" {
+			metadata["order_tracking_sweep_by"] = initiator
+		}
+		n, err := store.CloseAll(ids, metadata)
+		result.trackingClosed = n
+		if err != nil {
+			return result, fmt.Errorf("closing stale order-tracking beads: %w", err)
+		}
+	}
+
+	if includeWispSubtrees {
+		n, err := sweepStaleOrderWispSubtrees(store, cutoff, onlyOrders, initiator)
+		result.wispClosed = n
+		if err != nil {
+			return result, err
+		}
+	}
+	return result, nil
+}
+
+func sweepStaleOrderWispSubtrees(store beads.Store, cutoff time.Time, onlyOrders map[string]struct{}, initiator string) (int, error) {
+	roots, err := staleOrderWispRoots(store, cutoff, onlyOrders)
+	if err != nil {
+		return 0, err
+	}
+	ids := make([]string, 0, len(roots))
+	seen := make(map[string]struct{}, len(roots))
+	for _, root := range roots {
+		if root.ID == "" || root.Status == "closed" {
+			continue
+		}
+		if beadLabelsContain(root.Labels, labelOrderTracking) {
+			continue
+		}
+		if !isOrderWispRootCandidate(root) {
+			continue
+		}
+		if !isOrderRootOnlyWispCandidate(root) {
+			openDescendants, err := storeHasOpenDescendants(store, root.ID)
+			if err != nil {
+				return 0, fmt.Errorf("checking stale wisp descendants of %s: %w", root.ID, err)
+			}
+			if !openDescendants {
+				continue
+			}
+		}
+		subtree, err := collectOrderWispSubtree(store, root)
+		if err != nil {
+			return 0, fmt.Errorf("collecting stale wisp subtree %s: %w", root.ID, err)
+		}
+		if !openSubtreeOlderThan(subtree, cutoff) {
+			continue
+		}
+		for _, id := range staleOrderWispSubtreeCloseIDs(subtree) {
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
 		return 0, nil
+	}
+	ordered, err := closeorder.Order(store, ids)
+	if err != nil {
+		return 0, fmt.Errorf("ordering stale order wisp closes: %w", err)
 	}
 	metadata := map[string]string{
 		"order_tracking_sweep": orderTrackingSweepMetadataReason,
-		"close_reason":         staleOrderTrackingCloseReason,
+		"order_wisp_sweep":     "stale-order-wisp",
+		"close_reason":         staleOrderWispCloseReason,
 	}
 	if initiator != "" {
 		metadata["order_tracking_sweep_by"] = initiator
 	}
-	n, err := store.CloseAll(ids, metadata)
+	n, err := store.CloseAll(ordered, metadata)
 	if err != nil {
-		return n, fmt.Errorf("closing stale order-tracking beads: %w", err)
+		return n, fmt.Errorf("closing stale order wisp subtrees: %w", err)
 	}
 	return n, nil
+}
+
+func staleOrderWispRoots(store beads.Store, cutoff time.Time, onlyOrders map[string]struct{}) ([]beads.Bead, error) {
+	if len(onlyOrders) == 0 {
+		return nil, fmt.Errorf("include-wisps requires at least one order name")
+	}
+	var roots []beads.Bead
+	for orderName := range onlyOrders {
+		matches, err := store.List(beads.ListQuery{
+			Label:         "order-run:" + orderName,
+			CreatedBefore: cutoff,
+			TierMode:      beads.TierBoth,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("listing stale order wisps for %s: %w", orderName, err)
+		}
+		roots = append(roots, matches...)
+	}
+	return roots, nil
+}
+
+func collectOrderWispSubtree(store beads.Store, root beads.Bead) ([]beads.Bead, error) {
+	if root.ID == "" {
+		return nil, nil
+	}
+	seen := map[string]struct{}{root.ID: {}}
+	out := []beads.Bead{root}
+	queue := []string{root.ID}
+	for len(queue) > 0 {
+		parentID := queue[0]
+		queue = queue[1:]
+
+		children, err := store.List(beads.ListQuery{
+			ParentID:      parentID,
+			IncludeClosed: true,
+			TierMode:      beads.TierBoth,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, child := range children {
+			if child.ID == "" {
+				continue
+			}
+			if _, ok := seen[child.ID]; ok {
+				continue
+			}
+			seen[child.ID] = struct{}{}
+			out = append(out, child)
+			queue = append(queue, child.ID)
+		}
+	}
+	return out, nil
+}
+
+func staleOrderWispSubtreeCloseIDs(subtree []beads.Bead) []string {
+	if len(subtree) == 0 {
+		return nil
+	}
+	byID := make(map[string]beads.Bead, len(subtree))
+	for _, bead := range subtree {
+		if bead.ID != "" {
+			byID[bead.ID] = bead
+		}
+	}
+	depthMemo := make(map[string]int, len(subtree))
+	const visitingDepth = -1
+	var depth func(string) int
+	depth = func(id string) int {
+		if d, ok := depthMemo[id]; ok {
+			if d == visitingDepth {
+				return 0
+			}
+			return d
+		}
+		bead, ok := byID[id]
+		if !ok {
+			return 0
+		}
+		parentID := strings.TrimSpace(bead.ParentID)
+		if parentID == "" || parentID == id {
+			depthMemo[id] = 0
+			return 0
+		}
+		parent, ok := byID[parentID]
+		if !ok || parent.ID == "" {
+			depthMemo[id] = 0
+			return 0
+		}
+		depthMemo[id] = visitingDepth
+		d := depth(parentID) + 1
+		depthMemo[id] = d
+		return d
+	}
+
+	ordered := append([]beads.Bead(nil), subtree...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if da, db := depth(ordered[i].ID), depth(ordered[j].ID); da != db {
+			return da > db
+		}
+		return ordered[i].ID < ordered[j].ID
+	})
+
+	ids := make([]string, 0, len(ordered))
+	for _, bead := range ordered {
+		if bead.ID == "" || bead.Status == "closed" {
+			continue
+		}
+		ids = append(ids, bead.ID)
+	}
+	return ids
+}
+
+func openSubtreeOlderThan(subtree []beads.Bead, cutoff time.Time) bool {
+	for _, b := range subtree {
+		if b.Status == "closed" {
+			continue
+		}
+		if b.CreatedAt.IsZero() || !b.CreatedAt.Before(cutoff) {
+			return false
+		}
+	}
+	return true
 }
 
 func orderNameFromTrackingBead(b beads.Bead) (string, bool) {
@@ -1086,10 +1464,7 @@ func effectiveTimeout(a orders.Order, maxTimeout time.Duration) time.Duration {
 // rigLocalLayer], we strip the city prefix to avoid double-scanning city
 // orders.
 func rigExclusiveLayers(rigLayers, cityLayers []string) []string {
-	if len(rigLayers) <= len(cityLayers) {
-		return nil
-	}
-	return rigLayers[len(cityLayers):]
+	return orderdiscovery.RigExclusiveLayers(rigLayers, cityLayers)
 }
 
 // qualifyPool resolves a raw pool name from an order TOML to the qualified
@@ -1202,24 +1577,4 @@ func appendUniquePoolTarget(values []string, want string) []string {
 		}
 	}
 	return append(values, want)
-}
-
-// convertOverrides converts config.OrderOverride to orders.Override.
-func convertOverrides(cfgOvs []config.OrderOverride) []orders.Override {
-	out := make([]orders.Override, len(cfgOvs))
-	for i, c := range cfgOvs {
-		out[i] = orders.Override{
-			Name:     c.Name,
-			Rig:      c.Rig,
-			Enabled:  c.Enabled,
-			Trigger:  c.Trigger,
-			Interval: c.Interval,
-			Schedule: c.Schedule,
-			Check:    c.Check,
-			On:       c.On,
-			Pool:     c.Pool,
-			Timeout:  c.Timeout,
-		}
-	}
-	return out
 }

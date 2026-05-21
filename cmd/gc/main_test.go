@@ -170,18 +170,29 @@ func TestMain(m *testing.M) {
 	if !isTestscriptCommandInvocation(os.Args[0]) {
 		clearProcessLiveEnvForTests()
 	}
-	testTempRoot, err := os.MkdirTemp("/tmp", "gctest-")
+	if err := os.Setenv(managedDoltTestModeEnv, "1"); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv(managedDoltTestParentPIDEnv, fmt.Sprintf("%d", os.Getpid())); err != nil {
+		panic(err)
+	}
+	testTempRoot, err := os.MkdirTemp("/tmp", pidPrefixedTempPattern(testCmdGCTempRootPrefix))
 	if err != nil {
 		panic(err)
 	}
 	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
 		panic(err)
 	}
-	gcHome, err := os.MkdirTemp("", "gascity-gc-home-*")
+	tmpRoot := os.TempDir()
+	sweepOrphanPIDPrefixedDirs(tmpRoot, testGCHomeDirPrefix)
+	sweepOrphanPIDPrefixedDirs(tmpRoot, testRuntimeDirPrefix)
+	sweepOrphanPIDPrefixedDirs(tmpRoot, testProviderStubDirPrefix)
+
+	gcHome, err := os.MkdirTemp("", pidPrefixedTempPattern(testGCHomeDirPrefix))
 	if err != nil {
 		panic(err)
 	}
-	runtimeDir, err := os.MkdirTemp("", "gascity-runtime-*")
+	runtimeDir, err := os.MkdirTemp("", pidPrefixedTempPattern(testRuntimeDirPrefix))
 	if err != nil {
 		panic(err)
 	}
@@ -204,7 +215,7 @@ func TestMain(m *testing.M) {
 	}
 	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
-	testscript.Main(newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir), map[string]func(){
+	testscript.Main(newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFormulaDir, sharedTestCityDir), map[string]func(){
 		"gc": func() {
 			configureTestscriptEnvDefaults()
 			os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -274,6 +285,27 @@ func TestVersion(t *testing.T) {
 	}
 	if !strings.Contains(longOut, "built:") {
 		t.Errorf("stdout missing 'built:': %q", longOut)
+	}
+
+	stdout.Reset()
+	stderr := bytes.Buffer{}
+	code = run([]string{"version", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run([version --json]) = %d, stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stdout lines = %d, want 1: %q", len(lines), stdout.String())
+	}
+	var got versionJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || got.Version != "dev" || got.Commit == "" || got.Date == "" {
+		t.Fatalf("version JSON = %+v", got)
 	}
 }
 

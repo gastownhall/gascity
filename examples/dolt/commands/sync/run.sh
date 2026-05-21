@@ -3,10 +3,21 @@
 #
 # Uses the live Dolt SQL server when reachable so sync does not restart
 # active databases. Falls back to CLI mode only when no server is running.
-# Pushes committed `main` branch state only; it does not auto-commit working
+# Pushes committed branch state only; it does not auto-commit working
 # changes before pushing.
 # Use --gc to purge closed ephemeral beads before syncing.
 # Use --dry-run to preview without pushing.
+#
+# Refspec resolution (per database):
+#   1. GC_DOLT_REFSPEC_<DB_UPPER> env var override, in <local>:<remote> form
+#      (e.g. GC_DOLT_REFSPEC_GA=main:gascity-3). DB name is uppercased with
+#      '-' replaced by '_' to derive the env var key; database names that
+#      differ only by '-' vs '_' intentionally share the same env var key.
+#   2. Default: the database's active branch is pushed to a same-named branch
+#      on the remote (i.e. <active>:<active>). This works transparently for the
+#      common case where local and remote branch names match, including 'main'
+#      on legacy setups.
+#   3. Fallback when active_branch() cannot be resolved (or in CLI mode): 'main'.
 #
 # Environment: GC_CITY_PATH, GC_DOLT_PORT, GC_DOLT_USER, GC_DOLT_PASSWORD
 set -e
@@ -101,6 +112,54 @@ valid_remote_name() {
   esac
 }
 
+valid_branch_name() {
+  case "$1" in
+    -*|.*|*..*|*@{*) return 1 ;;
+    [A-Za-z0-9_.-]*)
+      case "$1" in *[!A-Za-z0-9_./-]*) return 1 ;; *) return 0 ;; esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# refspec_env_value <db> — emit the GC_DOLT_REFSPEC_<DB_UPPER> override, if any.
+# DB name is uppercased and '-' is replaced with '_' to form a valid env key.
+refspec_env_value() {
+  db="$1"
+  valid_database_name "$db" || return 1
+  key=$(printf '%s' "$db" | tr 'a-z-' 'A-Z_')
+  case "$key" in
+    *[!A-Z0-9_]*) return 0 ;;
+  esac
+  eval "printf '%s' \"\${GC_DOLT_REFSPEC_$key:-}\""
+}
+
+warn_refspec_fallback() {
+  printf '  %s: WARN: active branch unresolved; falling back to main\n' "$1" >&2
+}
+
+# refspec_parts <refspec> — split <local>:<remote> into two lines.
+# A bare <branch> expands to <branch>:<branch>. Returns 1 if either side is
+# empty or invalid.
+refspec_parts() {
+  rs="$1"
+  case "$rs" in
+    *:*)
+      l=${rs%%:*}
+      r=${rs#*:}
+      ;;
+    *)
+      l="$rs"
+      r="$rs"
+      ;;
+  esac
+  [ -z "$l" ] && return 1
+  [ -z "$r" ] && return 1
+  valid_branch_name "$l" || return 1
+  valid_branch_name "$r" || return 1
+  printf '%s\n%s\n' "$l" "$r"
+}
+
 dolt_sql() {
   query="$1"
   host="${GC_DOLT_HOST:-127.0.0.1}"
@@ -113,6 +172,91 @@ find_remote_sql() {
   db="$1"
   remote_csv=$(dolt_sql "USE \`$db\`; SELECT name, url FROM dolt_remotes LIMIT 1") || return 1
   printf '%s\n' "$remote_csv" | awk -F, 'NR > 1 && $1 != "" {print $1 "|" $2; exit}'
+}
+
+# resolve_refspec_sql <db> — emit two lines: local-branch and remote-branch.
+# Honors GC_DOLT_REFSPEC_<DB> first, then falls back to active_branch() over SQL,
+# then to 'main' if both fail.
+resolve_refspec_sql() {
+  db="$1"
+  if ! valid_database_name "$db"; then
+    echo "  $db: ERROR: invalid database name" >&2
+    return 1
+  fi
+  override=$(refspec_env_value "$db") || return 1
+  if [ -n "$override" ]; then
+    parts=$(refspec_parts "$override") || {
+      echo "  $db: ERROR: invalid refspec override: $override" >&2
+      return 1
+    }
+    printf '%s\n' "$parts"
+    return 0
+  fi
+  if active_csv=$(dolt_sql "USE \`$db\`; SELECT active_branch()" 2>/dev/null); then
+    active=$(printf '%s\n' "$active_csv" | awk 'NR > 1 && $0 != "" {gsub(/^"|"$/, ""); print; exit}')
+    if [ -n "$active" ] && valid_branch_name "$active"; then
+      printf '%s\n%s\n' "$active" "$active"
+      return 0
+    fi
+  fi
+  warn_refspec_fallback "$db"
+  printf 'main\nmain\n'
+}
+
+# resolve_refspec_cli <db-dir> <db-name> — same as resolve_refspec_sql, but
+# resolves the active branch from repo_state.json when the SQL server is down.
+repo_state_active_branch() {
+  awk '
+    function emit(line) {
+      sub(/.*"head"[[:space:]]*:[[:space:]]*"refs\/heads\//, "", line)
+      sub(/".*/, "", line)
+      print line
+      exit
+    }
+    {
+      line = $0
+      if (depth == 1 && line ~ /^[[:space:]]*"head"[[:space:]]*:[[:space:]]*"refs\/heads\//) {
+        emit(line)
+      }
+      if (depth == 0 && line ~ /^[[:space:]]*\{[[:space:]]*"head"[[:space:]]*:[[:space:]]*"refs\/heads\//) {
+        emit(line)
+      }
+      opens = gsub(/\{/, "{", line)
+      closes = gsub(/\}/, "}", line)
+      depth += opens - closes
+      if (depth < 0) {
+        depth = 0
+      }
+    }
+  ' "$1"
+}
+
+resolve_refspec_cli() {
+  d="$1"
+  db="$2"
+  if ! valid_database_name "$db"; then
+    echo "  $db: ERROR: invalid database name" >&2
+    return 1
+  fi
+  override=$(refspec_env_value "$db") || return 1
+  if [ -n "$override" ]; then
+    parts=$(refspec_parts "$override") || {
+      echo "  $db: ERROR: invalid refspec override: $override" >&2
+      return 1
+    }
+    printf '%s\n' "$parts"
+    return 0
+  fi
+  state="$d/.dolt/repo_state.json"
+  if [ -f "$state" ]; then
+    head=$(repo_state_active_branch "$state" | head -1)
+    if [ -n "$head" ] && valid_branch_name "$head"; then
+      printf '%s\n%s\n' "$head" "$head"
+      return 0
+    fi
+  fi
+  warn_refspec_fallback "$db"
+  printf 'main\nmain\n'
 }
 
 sync_database_sql() {
@@ -137,18 +281,28 @@ sync_database_sql() {
     return 1
   fi
 
+  refspec_pair=$(resolve_refspec_sql "$name") || return 1
+  local_branch=$(printf '%s\n' "$refspec_pair" | sed -n '1p')
+  remote_branch=$(printf '%s\n' "$refspec_pair" | sed -n '2p')
+
   if [ "$dry_run" = true ]; then
-    echo "  $name: would push to $remote_url"
+    echo "  $name: would push $local_branch -> $remote_name:$remote_branch ($remote_url)"
     return 0
   fi
 
-  if [ "$force" = true ]; then
-    push_query="USE \`$name\`; CALL DOLT_PUSH('--force', '--set-upstream', '$remote_name', 'main')"
+  if [ "$local_branch" = "$remote_branch" ]; then
+    refspec_arg="$local_branch"
   else
-    push_query="USE \`$name\`; CALL DOLT_PUSH('$remote_name', 'main')"
+    refspec_arg="$local_branch:$remote_branch"
+  fi
+
+  if [ "$force" = true ]; then
+    push_query="USE \`$name\`; CALL DOLT_PUSH('--force', '--set-upstream', '$remote_name', '$refspec_arg')"
+  else
+    push_query="USE \`$name\`; CALL DOLT_PUSH('$remote_name', '$refspec_arg')"
   fi
   if dolt_sql "$push_query" >/dev/null 2>&1; then
-    echo "  $name: pushed to $remote_url"
+    echo "  $name: pushed $local_branch -> $remote_name:$remote_branch ($remote_url)"
     return 0
   fi
 
@@ -178,18 +332,28 @@ sync_database_cli() {
     return 1
   fi
 
+  refspec_pair=$(resolve_refspec_cli "$d" "$name") || return 1
+  local_branch=$(printf '%s\n' "$refspec_pair" | sed -n '1p')
+  remote_branch=$(printf '%s\n' "$refspec_pair" | sed -n '2p')
+
   if [ "$dry_run" = true ]; then
-    echo "  $name: would push to $remote"
+    echo "  $name: would push $local_branch -> $remote_name:$remote_branch ($remote)"
     return 0
   fi
 
+  if [ "$local_branch" = "$remote_branch" ]; then
+    refspec_arg="$local_branch"
+  else
+    refspec_arg="$local_branch:$remote_branch"
+  fi
+
   if [ "$force" = true ]; then
-    if (cd "$d" && dolt push --force --set-upstream "$remote_name" main 2>&1); then
-      echo "  $name: pushed to $remote"
+    if (cd "$d" && dolt push --force --set-upstream "$remote_name" "$refspec_arg" 2>&1); then
+      echo "  $name: pushed $local_branch -> $remote_name:$remote_branch ($remote)"
       return 0
     fi
-  elif (cd "$d" && dolt push "$remote_name" main 2>&1); then
-    echo "  $name: pushed to $remote"
+  elif (cd "$d" && dolt push "$remote_name" "$refspec_arg" 2>&1); then
+    echo "  $name: pushed $local_branch -> $remote_name:$remote_branch ($remote)"
     return 0
   fi
 

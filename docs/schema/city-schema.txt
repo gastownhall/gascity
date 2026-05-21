@@ -104,6 +104,13 @@
           "type": "string",
           "description": "StartCommand overrides the provider's command for this agent."
         },
+        "lifecycle": {
+          "type": "string",
+          "enum": [
+            "one_shot"
+          ],
+          "description": "Lifecycle controls runtime lifetime semantics. Empty uses the default\nlong-lived session lifecycle; \"one_shot\" means the command is expected\nto do bounded work and exit cleanly."
+        },
         "args": {
           "items": {
             "type": "string"
@@ -287,7 +294,7 @@
         },
         "fallback": {
           "type": "boolean",
-          "description": "Fallback marks this agent as a fallback definition. During pack\ncomposition, a non-fallback agent with the same name wins silently.\nWhen two fallbacks collide, the first loaded (depth-first) wins.\nSee docs/packv2/migration.mdx for migration guidance."
+          "description": "Fallback marks this agent as a fallback definition. During pack\ncomposition, a non-fallback agent with the same name wins silently.\nWhen two fallbacks collide, the first loaded (depth-first) wins.\nSee docs/guides/migrating-to-pack-vnext.md for migration guidance."
         },
         "depends_on": {
           "items": {
@@ -436,6 +443,13 @@
         "start_command": {
           "type": "string",
           "description": "StartCommand overrides the start command."
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": [
+            "one_shot"
+          ],
+          "description": "Lifecycle overrides the runtime lifecycle (\"one_shot\" or empty)."
         },
         "nudge": {
           "type": "string",
@@ -687,6 +701,13 @@
         "start_command": {
           "type": "string",
           "description": "StartCommand overrides the start command."
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": [
+            "one_shot"
+          ],
+          "description": "Lifecycle overrides the runtime lifecycle (\"one_shot\" or empty)."
         },
         "nudge": {
           "type": "string",
@@ -1042,7 +1063,7 @@
       "properties": {
         "max_per_agent": {
           "type": "integer",
-          "description": "MaxPerAgent is the maximum number of active convergence loops per agent.\n0 means use default (2).",
+          "description": "MaxPerAgent is the maximum number of active convergence loops per agent\nin each bead store scope. City/HQ and each bound rig enforce the limit\nindependently. 0 means use default (2).",
           "default": 2
         },
         "max_total": {

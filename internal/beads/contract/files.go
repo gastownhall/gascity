@@ -172,6 +172,42 @@ func ReadAutoStartDisabled(fs fsys.FS, path string) (bool, error) {
 	return false, nil
 }
 
+// ReadExportAuto returns the configured value of export.auto along with a
+// presence indicator. ok=false means the key is absent from the config OR
+// the value is not a recognized boolean (the upstream bd default is true).
+// Used by gc to gate cleanup of stale .beads/issues.jsonl exports: when
+// export.auto is explicitly false, the JSONL is a stale artifact that bd's
+// auto-import-on-write path (sa-41j3kp) would otherwise reload on every
+// write, stalling bd create for minutes on large datasets.
+//
+// Because this gates destructive cleanup, parsing is strict: only the
+// boolean literals strconv.ParseBool accepts count as present. A garbage
+// value (e.g. "yes", "off", "foo") returns ok=false so callers fall back
+// to other gc-managed signals rather than mis-treating the scope as
+// canonical.
+func ReadExportAuto(fs fsys.FS, path string) (value bool, ok bool, err error) {
+	doc, err := readConfigDoc(fs, path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, false, nil
+		}
+		if raw, scanOK := scanConfigLineValue(fs, path, "export.auto:"); scanOK {
+			if parsed, parseErr := strconv.ParseBool(raw); parseErr == nil {
+				return parsed, true, nil
+			}
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	if raw, present := configStringValue(mappingRoot(doc), "export.auto"); present {
+		if parsed, parseErr := strconv.ParseBool(raw); parseErr == nil {
+			return parsed, true, nil
+		}
+		return false, false, nil
+	}
+	return false, false, nil
+}
+
 // ReadEndpointStatus reads gc.endpoint_status when present.
 func ReadEndpointStatus(fs fsys.FS, path string) (EndpointStatus, bool, error) {
 	doc, err := readConfigDoc(fs, path)

@@ -1070,6 +1070,9 @@ func TestReaperFormulaSQLReflectsCurrentSchema(t *testing.T) {
 		if strings.Contains(fence, "parent_id") {
 			t.Errorf("formula sql fence %d references parent_id (column does not exist in wisps):\n%s", i, fence)
 		}
+		if strings.Contains(fence, "depends_on_id") {
+			t.Errorf("formula sql fence %d references dependencies.depends_on_id instead of split target columns:\n%s", i, fence)
+		}
 		if strings.Contains(fence, "LEFT JOIN wisps parent ON") {
 			t.Errorf("formula sql fence %d still has the broken parent self-join:\n%s", i, fence)
 		}
@@ -1170,9 +1173,23 @@ exit 0
 	if strings.Contains(log, "parent_id") {
 		t.Errorf("reaper SQL references parent_id (column does not exist in wisps):\n%s", log)
 	}
+	if strings.Contains(log, "depends_on_id") {
+		t.Errorf("reaper SQL references dependencies.depends_on_id instead of split target columns:\n%s", log)
+	}
 	// mail was removed: not a SQL table; messages are beads with type=message.
 	if strings.Contains(log, ".mail") {
 		t.Errorf("reaper SQL references .mail table (does not exist in beads schema):\n%s", log)
+	}
+	for _, want := range []string{
+		"SHOW COLUMNS FROM `beads`.dependencies",
+		"SELECT DISTINCT d.depends_on_wisp_id",
+		"d.depends_on_wisp_id IS NOT NULL",
+		"SELECT DISTINCT d.depends_on_issue_id",
+		"d.depends_on_issue_id IS NOT NULL",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("reaper SQL missing %q:\n%s", want, log)
+		}
 	}
 	// DOLT_COMMIT must use CALL, not SELECT.
 	if strings.Contains(log, "SELECT DOLT_COMMIT") {
@@ -1199,7 +1216,7 @@ exit 0
 		purgeSQL := log[purgeIdx:]
 		if !strings.Contains(purgeSQL, "child_wisp.status IN ('open', 'hooked', 'in_progress')") ||
 			!strings.Contains(purgeSQL, "d.type = 'parent-child'") ||
-			!strings.Contains(purgeSQL, "d.depends_on_id IS NOT NULL") {
+			!strings.Contains(purgeSQL, "d.depends_on_wisp_id IS NOT NULL") {
 			t.Errorf("reaper purge can delete closed parents with non-closed children:\n%s", purgeSQL)
 		}
 	}
@@ -1210,6 +1227,55 @@ exit 0
 	}
 	if strings.Contains(string(gcData), "mail:") {
 		t.Errorf("reaper DOG_DONE still reports removed mail cleanup:\n%s", gcData)
+	}
+}
+
+func TestReaperSkipsDependencyQueriesWithoutSplitDependencyTargets(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":          doltLog,
+		"DOLT_DBS":               "beads",
+		"DOLT_DEPENDENCY_SCHEMA": "legacy",
+		"GC_CALL_LOG":            gcLog,
+		"GC_CITY":                cityDir,
+		"GC_CITY_PATH":           cityDir,
+		"GC_DOLT_HOST":           "127.0.0.1",
+		"GC_DOLT_PORT":           "3307",
+		"GC_DOLT_USER":           "root",
+		"GC_DOLT_PASSWORD":       "",
+		"PATH":                   binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "SHOW COLUMNS FROM `beads`.dependencies") {
+		t.Fatalf("reaper did not probe dependency target columns:\n%s", log)
+	}
+	if strings.Contains(log, "FROM `beads`.dependencies d") || strings.Contains(log, "JOIN `beads`.dependencies d") {
+		t.Fatalf("reaper ran dependency-aware queries against legacy dependency schema:\n%s", log)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "dependencies table lacks split target columns") {
+		t.Fatalf("reaper did not surface legacy dependency schema anomaly:\n%s", gcData)
 	}
 }
 
@@ -1871,6 +1937,9 @@ exit 0
 	}
 	if !strings.Contains(log, "dependencies d") || !strings.Contains(log, "d.type = 'parent-child'") {
 		t.Fatalf("reaper stale-wisp close path does not use parent-child dependencies:\n%s", log)
+	}
+	if !strings.Contains(log, "d.depends_on_wisp_id = parent_wisp.id") || !strings.Contains(log, "d.depends_on_issue_id = parent_issue.id") {
+		t.Fatalf("reaper stale-wisp close path does not use split dependency target columns:\n%s", log)
 	}
 	if strings.Contains(log, "parent_wisp.id IS NULL AND parent_issue.id IS NULL") {
 		t.Fatalf("reaper closes stale wisps when parent liveness is unresolved:\n%s", log)
@@ -3452,6 +3521,20 @@ case "$*" in
     esac
   done
   printf 'wisps\n'
+  ;;
+*"SHOW COLUMNS FROM"*"dependencies"*)
+  printf 'Field,Type,Null,Key,Default,Extra\n'
+  if [ "${DOLT_DEPENDENCY_SCHEMA:-split}" = "legacy" ]; then
+    printf 'issue_id,varchar,NO,,,\n'
+    printf 'depends_on_id,varchar,NO,,,\n'
+    printf 'type,varchar,NO,,,\n'
+  else
+    printf 'issue_id,varchar,NO,,,\n'
+    printf 'depends_on_issue_id,varchar,YES,,,\n'
+    printf 'depends_on_wisp_id,varchar,YES,,,\n'
+    printf 'depends_on_external,varchar,YES,,,\n'
+    printf 'type,varchar,NO,,,\n'
+  fi
   ;;
 *"SELECT *"*)
   printf '{"id":"ga-1","title":"sample"}\n'

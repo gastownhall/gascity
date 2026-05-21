@@ -169,6 +169,8 @@ printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
     SHELL="${SHELL:-/bin/sh}" \
     LANG="${LANG:-C.UTF-8}" \
     TMPDIR="${TMPDIR:-/tmp}" \
+    OBSERVABLE_TEST_LOG="${OBSERVABLE_TEST_LOG-}" \
+    OBSERVABLE_FAILURE_LINES="${OBSERVABLE_FAILURE_LINES-}" \
     XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
     GOPATH="${TEST_LOCAL_GOPATH}" \
     GOCACHE="${TEST_LOCAL_GOCACHE}" \

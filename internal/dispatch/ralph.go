@@ -50,7 +50,9 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	if err != nil {
 		return ControlResult{}, err
 	}
-	opts.tracef("ralph check-result bead=%s logical=%s attempt=%d outcome=%s exit=%v", bead.ID, logicalID, attempt, result.Outcome, result.ExitCode)
+	opts.tracef("ralph check-result bead=%s logical=%s attempt=%d outcome=%s exit=%s dur=%s truncated=%v stderr=%q stdout=%q",
+		bead.ID, logicalID, attempt, result.Outcome, formatGateExitCode(result.ExitCode), result.Duration, result.Truncated,
+		traceClipString(result.Stderr, traceCheckOutputCap), traceClipString(result.Stdout, traceCheckOutputCap))
 	if err := persistCheckResult(store, bead.ID, result); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: persisting check result: %w", bead.ID, err)
 	}
@@ -1192,4 +1194,30 @@ func rewriteAttemptSegment(ref, kind string, oldAttempt, nextAttempt int) (strin
 	}
 	replacement := "." + kind + "." + strconv.Itoa(nextAttempt)
 	return ref[:index] + replacement + ref[end:], true
+}
+
+// traceCheckOutputCap bounds stderr/stdout in the ralph check-result trace
+// line so a noisy script does not produce an unreadable log entry.
+// GateResult already truncates each stream to convergence.MaxOutputBytes
+// (4 KiB); this further clips for tracing.
+const traceCheckOutputCap = 512
+
+// traceClipString returns s truncated to at most limit bytes, appending an
+// ellipsis marker when truncation occurred. Used to keep ralph check-result
+// trace lines bounded.
+func traceClipString(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	return s[:limit] + "...[clipped]"
+}
+
+// formatGateExitCode renders a GateResult.ExitCode pointer for tracing.
+// Avoids leaking the *int address (the prior trace line emitted %v against
+// the pointer, producing `exit=0x...` instead of the numeric exit code).
+func formatGateExitCode(code *int) string {
+	if code == nil {
+		return "<nil>"
+	}
+	return strconv.Itoa(*code)
 }

@@ -3,8 +3,10 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -290,6 +292,135 @@ func TestRequireNoLeakedDoltAfterWithFilterIgnoresUnownedTempPID(t *testing.T) {
 	}
 	if strings.Contains(msg, "1002") {
 		t.Fatalf("error included unowned leaked PID 1002; got %q", msg)
+	}
+}
+
+func TestRequireNoLeakedDoltAfterWithFilterReportsAndKillsOwnedPID(t *testing.T) {
+	ownedRoot := filepath.Join("/tmp", "TestDoltLeakHelper", "owned-city")
+	owned := DoltProcInfo{
+		PID: 1001,
+		Argv: []string{
+			"dolt",
+			"sql-server",
+			"--config",
+			filepath.Join(ownedRoot, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml"),
+		},
+	}
+	unowned := DoltProcInfo{
+		PID: 1002,
+		Argv: []string{
+			"dolt",
+			"sql-server",
+			"--config",
+			filepath.Join("/tmp", "TestDoltLeakHelper", "other-city", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml"),
+		},
+	}
+	enumerate := scriptedDoltEnumerator(t,
+		nil,
+		[]DoltProcInfo{owned, unowned},
+	)
+	type killCall struct {
+		pid int
+		sig syscall.Signal
+	}
+	var killed []killCall
+	inner := &recordingTB{}
+	requireNoLeakedDoltAfterWithFilterAndKiller(inner, enumerate, func(configPath string) bool {
+		return samePath(configPath, ownedRoot) || strings.HasPrefix(configPath, ownedRoot+string(filepath.Separator))
+	}, func(pid int, sig syscall.Signal) error {
+		killed = append(killed, killCall{pid: pid, sig: sig})
+		return nil
+	})
+	inner.runCleanups()
+
+	if !inner.failed() {
+		t.Fatalf("expected leak Errorf for owned PID; nothing recorded")
+	}
+	wantKilled := []killCall{
+		{pid: 1001, sig: syscall.SIGTERM},
+		{pid: 1001, sig: syscall.SIGKILL},
+	}
+	if fmt.Sprint(killed) != fmt.Sprint(wantKilled) {
+		t.Fatalf("killed = %v, want %v", killed, wantKilled)
+	}
+	msg := strings.Join(inner.errors, "\n")
+	if !strings.Contains(msg, "1001") {
+		t.Fatalf("error missing owned leaked PID 1001; got %q", msg)
+	}
+	if strings.Contains(msg, "1002") {
+		t.Fatalf("error included unowned leaked PID 1002; got %q", msg)
+	}
+}
+
+func TestRequireNoLeakedDoltAfterWithFilterReportsKillErrors(t *testing.T) {
+	ownedRoot := filepath.Join("/tmp", "TestDoltLeakHelper", "owned-city")
+	owned := DoltProcInfo{
+		PID: 1001,
+		Argv: []string{
+			"dolt",
+			"sql-server",
+			"--config",
+			filepath.Join(ownedRoot, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml"),
+		},
+	}
+	enumerate := scriptedDoltEnumerator(t, nil, []DoltProcInfo{owned})
+	inner := &recordingTB{}
+	requireNoLeakedDoltAfterWithFilterAndKiller(inner, enumerate, func(configPath string) bool {
+		return samePath(configPath, ownedRoot) || strings.HasPrefix(configPath, ownedRoot+string(filepath.Separator))
+	}, func(_ int, sig syscall.Signal) error {
+		if sig == syscall.SIGTERM {
+			return errors.New("synthetic kill failure")
+		}
+		return nil
+	})
+	inner.runCleanups()
+
+	msg := strings.Join(inner.errors, "\n")
+	if !strings.Contains(msg, "test leaked 1 dolt sql-server") {
+		t.Fatalf("error missing leak report; got %q", msg)
+	}
+	if !strings.Contains(msg, "SIGTERM pid 1001") || !strings.Contains(msg, "synthetic kill failure") {
+		t.Fatalf("error missing kill failure; got %q", msg)
+	}
+}
+
+func TestIsStaleCmdGCTestConfigPathSkipsActiveRoot(t *testing.T) {
+	activeRoot := filepath.Join("/tmp", "gctest-active")
+	activeConfig := filepath.Join(activeRoot, "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	if isStaleCmdGCTestConfigPath(activeConfig, []string{activeRoot}, "/tmp") {
+		t.Fatalf("active config path %q classified as stale", activeConfig)
+	}
+
+	staleRoot := filepath.Join("/tmp", fmt.Sprintf("%s%d-stale", testCmdGCTempRootPrefix, nonLivePID(t)))
+	staleConfig := filepath.Join(staleRoot, "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	if !isStaleCmdGCTestConfigPath(staleConfig, []string{activeRoot}, "/tmp") {
+		t.Fatalf("stale config path %q not classified as stale", staleConfig)
+	}
+}
+
+func TestIsStaleCmdGCTestConfigPathSkipsActiveSiblingRoot(t *testing.T) {
+	activeRoot := filepath.Join("/tmp", "gctest-sibling")
+	activeConfig := filepath.Join(activeRoot, "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+
+	if isStaleCmdGCTestConfigPath(activeConfig, []string{activeRoot}, "/tmp") {
+		t.Fatalf("active sibling config path %q classified as stale", activeConfig)
+	}
+}
+
+func TestIsStaleCmdGCTestConfigPathSkipsLivePeerOwnerPIDRoot(t *testing.T) {
+	peerRoot := filepath.Join("/tmp", fmt.Sprintf("%s%d-peer", testCmdGCTempRootPrefix, os.Getpid()))
+	peerConfig := filepath.Join(peerRoot, "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+
+	if isStaleCmdGCTestConfigPath(peerConfig, nil, "/tmp") {
+		t.Fatalf("live peer config path %q classified as stale", peerConfig)
+	}
+}
+
+func TestIsStaleCmdGCTestConfigPathSkipsLegacyUnownedRoot(t *testing.T) {
+	legacyConfig := filepath.Join("/tmp", "gctest-legacy", "TestCase", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+
+	if isStaleCmdGCTestConfigPath(legacyConfig, nil, "/tmp") {
+		t.Fatalf("legacy unowned config path %q classified as stale", legacyConfig)
 	}
 }
 

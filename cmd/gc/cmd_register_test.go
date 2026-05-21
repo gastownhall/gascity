@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -414,7 +415,7 @@ func TestDoCities(t *testing.T) {
 
 	// Empty list.
 	var stdout, stderr bytes.Buffer
-	code := doCities(&stdout, &stderr)
+	code := doCities(false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
@@ -437,12 +438,36 @@ func TestDoCities(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	code = doCities(&stdout, &stderr)
+	code = doCities(false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
 	if !strings.Contains(stdout.String(), "bright-lights") {
 		t.Errorf("expected 'bright-lights' in output, got: %s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"cities", "list", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc cities list --json exit %d: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stdout lines = %d, want 1: %q", len(lines), stdout.String())
+	}
+	var got citiesListJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" {
+		t.Fatalf("schema_version = %q, want 1", got.SchemaVersion)
+	}
+	if len(got.Cities) != 1 || got.Cities[0].Name != "bright-lights" || got.Cities[0].Path != cityPath {
+		t.Fatalf("cities = %+v, want bright-lights at %s", got.Cities, cityPath)
 	}
 }
 

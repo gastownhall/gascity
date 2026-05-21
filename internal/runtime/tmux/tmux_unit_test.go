@@ -7,3 +7,9 @@ func TestProviderEnvSkipsEscapeForPiAlias(t *testing.T) {
 		t.Fatal("pi provider alias should skip pre-enter Escape")
 	}
 }
+
+func TestProviderEnvSkipsEscapeForCopilot(t *testing.T) {
+	if !providerEnvSkipsEscape("copilot") {
+		t.Fatal("copilot provider should skip pre-enter Escape")
+	}
+}

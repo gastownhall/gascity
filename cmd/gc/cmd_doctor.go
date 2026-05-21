@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
@@ -19,6 +18,7 @@ import (
 var (
 	newDoctorDoltServerCheck    = doctor.NewDoltServerCheck
 	newDoctorRigDoltServerCheck = doctor.NewRigDoltServerCheck
+	newDoctorDoltBackupCheck    = doctor.NewDoltBackupCheck
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -124,16 +124,16 @@ func (c *doltTopologyCheck) Fix(_ *doctor.CheckContext) error { return nil }
 func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
-		if jsonOut {
-			_ = writeDoctorJSONError(stdout, err)
-			return 1
-		}
 		fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	d := &doctor.Doctor{}
 	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: verbose}
+	managedDoltDataDir := filepath.Join(cityPath, ".beads", "dolt")
+	if layout, err := resolveManagedDoltRuntimeLayout(cityPath); err == nil {
+		managedDoltDataDir = layout.DataDir
+	}
 
 	// Core checks — always run.
 	d.Register(&doctor.CityStructureCheck{})
@@ -158,6 +158,7 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 		d.Register(doctor.NewConfigSemanticsCheck(cfg, filepath.Join(cityPath, "city.toml")))
 		d.Register(doctor.NewDurationRangeCheck(cfg))
 		d.Register(doctor.NewProviderParityCheck(cfg))
+		d.Register(doctor.NewInstructionsFileCheck(cfg, cityPath))
 		d.Register(doctor.NewSkillCollisionCheck(cfg, cityPath))
 		d.Register(doctor.NewOrderFiringCurrentCheck(cfg, cityPath))
 		d.Register(newCodexHooksDriftCheck(codexHookWorkDirs(cityPath, cfg)))
@@ -260,6 +261,13 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 			d.Register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || gcDoltSkip()))
 			// Custom types check — rig store.
 			d.Register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
+			// Dolt-backup registration catches the silent gap left by
+			// `gc rig add` before the rig is eligible for mol-dog backup
+			// automation. Gated to match the sibling dolt-server check:
+			// skip non-managed-bdstore rigs and GC_DOLT=skip environments.
+			if rigUsesManagedBdStoreContract(cityPath, rig) && !gcDoltSkip() {
+				d.Register(newDoctorDoltBackupCheck(cityPath, rig, managedDoltDataDir))
+			}
 		}
 	}
 
@@ -353,16 +361,7 @@ func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
 			Fixed:        r.Fixed,
 		})
 	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(out)
-}
-
-func writeDoctorJSONError(w io.Writer, err error) error {
-	out := doctorJSONReport{Error: err.Error(), Results: []doctorJSONResult{}}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(out)
+	return writeCLIJSONLine(w, out)
 }
 
 // collectPackDirs returns all unique pack directories from the city

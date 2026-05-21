@@ -18,7 +18,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -28,6 +27,11 @@ import (
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
+
+// newCityRuntimeOpenSweepStore opens the city store used for the orphaned
+// order-tracking sweep in newCityRuntime. Test code can swap this to return
+// an in-memory store and skip spawning managed dolt.
+var newCityRuntimeOpenSweepStore = openStoreAtForCity
 
 // reloadOrderDrainTimeout bounds how long config reload will wait for
 // the outgoing order dispatcher's in-flight goroutines before replacing
@@ -97,14 +101,13 @@ type CityRuntime struct {
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
 
-	convHandler         *convergence.Handler     // nil until bead store available
-	convStoreAdapter    *convergenceStoreAdapter // typed reference; avoids type assertions in tick/reconcile
-	convergenceReqCh    chan convergenceRequest  // receives CLI commands from controller.sock
-	reloadReqCh         chan reloadRequest       // receives structured reload requests from controller.sock
-	pokeCh              chan struct{}            // non-blocking signal to trigger immediate reconciler tick
-	controlDispatcherCh chan struct{}            // non-blocking signal for control-dispatcher-only reconcile
-	nudgeWakeCh         chan struct{}            // signal to dispatch queued nudges; fed by wake socket listener
-	reloadMu            sync.Mutex               // guards activeReload
+	convScopes          map[string]*convergenceScope // nil until bead store available; keyed by rig name ("" = city/HQ)
+	convergenceReqCh    chan convergenceRequest      // receives CLI commands from controller.sock
+	reloadReqCh         chan reloadRequest           // receives structured reload requests from controller.sock
+	pokeCh              chan struct{}                // non-blocking signal to trigger immediate reconciler tick
+	controlDispatcherCh chan struct{}                // non-blocking signal for control-dispatcher-only reconcile
+	nudgeWakeCh         chan struct{}                // signal to dispatch queued nudges; fed by wake socket listener
+	reloadMu            sync.Mutex                   // guards activeReload
 	activeReload        *reloadRequest
 	onStarted           func()
 	onStatus            func(string)
@@ -228,7 +231,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	// (goroutines killed on restart, or silent Close failures).
 	// Retry with backoff as defense-in-depth against transient store
 	// errors immediately after ensureBeadsProvider returns (#753).
-	if sweepStore, err := openStoreAtForCity(p.CityPath, p.CityPath); err != nil {
+	if sweepStore, err := newCityRuntimeOpenSweepStore(p.CityPath, p.CityPath); err != nil {
 		fmt.Fprintf(p.Stderr, "gc start: order tracking sweep: %v\n", err) //nolint:errcheck // best-effort stderr
 	} else if n, err := sweepOrphanedOrderTrackingRetry(sweepStore, 3, time.Second); err != nil {
 		fmt.Fprintf(p.Stderr, "gc start: order tracking sweep (closed %d): %v\n", n, err) //nolint:errcheck // best-effort stderr
@@ -482,6 +485,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		}()
 
 		cleanupDeadRuntimeSessionCorpses(sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
+		// Reap live runtimes still bound to a closed bead (e.g. a named-session
+		// identity re-minted as a pool slot) so the name's current owner can
+		// rebind it and attach lands on the right runtime.
+		reapRuntimesBoundToClosedBeads(cr.cityBeadStore(), sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
 		// Reap stale session beads from a previous run before building desired
 		// state, so desired state does not reference already-closed beads (#742).
 		if reapStaleSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
@@ -692,10 +699,16 @@ func (cr *CityRuntime) safeTick(fn func(), trigger string) (panicked bool) {
 }
 
 func convergenceStartupComplete(cr *CityRuntime) bool {
-	return cr.convHandler == nil ||
-		cr.convergenceReqCh == nil ||
-		cr.convStoreAdapter == nil ||
-		cr.convStoreAdapter.activeIndex != nil
+	if cr.convScopes == nil || cr.convergenceReqCh == nil {
+		return true
+	}
+	// Startup is complete once every scope's active index is populated.
+	for _, scope := range cr.convScopes {
+		if scope.adapter.activeIndex == nil {
+			return false
+		}
+	}
+	return true
 }
 
 // tick performs one reconciliation tick: pool death detection, config
@@ -855,6 +868,10 @@ func (cr *CityRuntime) tick(
 	// Reap open session beads whose tmux session is dead before loading demand
 	// so stale names cannot block desired-state computation (#742).
 	cleanupDeadRuntimeSessionCorpses(sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
+	// Reap live runtimes still bound to a closed bead (e.g. a named-session
+	// identity re-minted as a pool slot) so the name's current owner can rebind
+	// it and attach lands on the right runtime.
+	reapRuntimesBoundToClosedBeads(cr.cityBeadStore(), sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
 	if reapStaleSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
 		sessionBeads = cr.loadSessionBeadSnapshot()
 	}
@@ -1710,6 +1727,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 				"dir":                 agent.Dir,
 				"suspended":           agent.Suspended,
 				"start_command":       agent.StartCommand,
+				"lifecycle":           agent.Lifecycle,
 				"args":                append([]string(nil), agent.Args...),
 				"prompt_mode":         agent.PromptMode,
 				"prompt_flag":         agent.PromptFlag,

@@ -36,6 +36,17 @@ type wakeTarget struct {
 	alive   bool
 }
 
+func lifecycleTimerBlocker(metadata map[string]string, now time.Time) string {
+	switch {
+	case metadataTimeInFuture(metadata["held_until"], now):
+		return "user_hold"
+	case metadataTimeInFuture(metadata["quarantined_until"], now):
+		return "quarantine"
+	default:
+		return ""
+	}
+}
+
 // buildDepsMap extracts template dependency edges from config for topo ordering.
 // Maps template QualifiedName -> list of dependency template QualifiedNames.
 func buildDepsMap(cfg *config.City) map[string][]string {
@@ -481,6 +492,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			apply(&reconcileOpts)
 		}
 	}
+	if startupTimeout <= 0 && cfg != nil {
+		startupTimeout = cfg.Session.StartupTimeoutDuration()
+	}
 	maxAgeTr := reconcileOpts.maxSessionAgeTr
 	deps := buildDepsMap(cfg)
 	if cityName == "" {
@@ -717,7 +731,26 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 			}
 			// Heal state using provider liveness, not agent membership.
-			healState(session, providerAlive, store, clk)
+			// rollbackAvailable mirrors the rollback gate at line ~639: when
+			// storeQueryPartial=true the formal rollback is deferred, so the
+			// heal path must also preserve pending_create_claim to avoid a
+			// half-applied rollback that races the next complete tick.
+			stateBeforeHeal := strings.TrimSpace(session.Metadata["state"])
+			pendingCreateStartedAtBeforeHeal := strings.TrimSpace(session.Metadata["pending_create_started_at"])
+			lastWokeAtBeforeHeal := strings.TrimSpace(session.Metadata["last_woke_at"])
+			healBatch := healStateWithRollback(session, providerAlive, store, clk, startupTimeout, !storeQueryPartial)
+			traceHealClearedPendingCreateLease(
+				trace,
+				*session,
+				cfg,
+				"",
+				name,
+				stateBeforeHeal,
+				pendingCreateStartedAtBeforeHeal,
+				lastWokeAtBeforeHeal,
+				providerAlive,
+				healBatch,
+			)
 			switch {
 			case preserveNamed:
 				template := normalizedSessionTemplate(*session, cfg)
@@ -798,6 +831,32 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								Payload: api.SessionLifecyclePayloadJSON(session.ID, template, "drain acknowledged"),
 							})
 							if hasAssignedWork {
+								// gastownhall/gascity#2293: the session drain-acked but the
+								// bead it owned is still assigned to it. Emit a typed event
+								// so pack-side subscribers can decide recovery policy (commit-
+								// and-push, clear-assignee-and-respawn, escalate). The SDK
+								// reconciler intentionally stops at signal emission — it must
+								// not bake pack-specific recovery into core (ZFC + zero
+								// hardcoded roles per AGENTS.md).
+								strandedBead, found, beadLookupErr := firstOpenAssignedWorkBeadForReachableStore(cityPath, cfg, store, rigStores, *session)
+								if beadLookupErr != nil {
+									fmt.Fprintf(stderr, "session reconciler: locating stranded bead for drain-acked %s: %v\n", name, beadLookupErr) //nolint:errcheck
+								}
+								if found {
+									rec.Record(events.Event{
+										Type:    events.SessionDrainAckedWithAssignedWork,
+										Actor:   "gc",
+										Subject: template,
+										Message: "session drain-acked while still assigned to work bead",
+										Payload: api.SessionDrainAckedWithAssignedWorkPayloadJSON(
+											session.ID,
+											strandedBead.ID,
+											template,
+											strandedBead.Status,
+											"drain_acked_with_assigned_work",
+										),
+									})
+								}
 								batch := sessionpkg.CompleteDrainPatch(clk.Now().UTC(), "idle", session.Metadata["wake_mode"] == "fresh")
 								_ = store.SetMetadataBatch(session.ID, batch)
 								if session.Metadata == nil {
@@ -1046,6 +1105,33 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
 							hasAssignedWork = true
 						}
+						if hasAssignedWork {
+							// gastownhall/gascity#2293: cap-hit-shape drain-ack —
+							// the worker exited mid-task without nulling the
+							// bead's assignee. Emit a typed event so pack-side
+							// subscribers can apply recovery policy. SDK stays
+							// out of the commit/push/respawn decision (ZFC +
+							// zero hardcoded roles per AGENTS.md).
+							strandedBead, found, beadLookupErr := firstOpenAssignedWorkBeadForReachableStore(cityPath, cfg, store, rigStores, *session)
+							if beadLookupErr != nil {
+								fmt.Fprintf(stderr, "session reconciler: locating stranded bead for drain-acked %s: %v\n", name, beadLookupErr) //nolint:errcheck
+							}
+							if found {
+								rec.Record(events.Event{
+									Type:    events.SessionDrainAckedWithAssignedWork,
+									Actor:   "gc",
+									Subject: tp.DisplayName(),
+									Message: "session drain-acked while still assigned to work bead",
+									Payload: api.SessionDrainAckedWithAssignedWorkPayloadJSON(
+										session.ID,
+										strandedBead.ID,
+										tp.TemplateName,
+										strandedBead.Status,
+										"drain_acked_with_assigned_work",
+									),
+								})
+							}
+						}
 						batch := sessionpkg.AcknowledgeDrainPatch(session.Metadata["wake_mode"] == "fresh")
 						if hasAssignedWork {
 							batch = sessionpkg.CompleteDrainPatch(clk.Now().UTC(), sleepReason, session.Metadata["wake_mode"] == "fresh")
@@ -1076,7 +1162,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 		// Heal advisory state metadata.
 		stateBeforeHeal := sessionpkg.State(strings.TrimSpace(session.Metadata["state"]))
-		healState(session, alive, store, clk)
+		pendingCreateStartedAtBeforeHeal := strings.TrimSpace(session.Metadata["pending_create_started_at"])
+		lastWokeAtBeforeHeal := strings.TrimSpace(session.Metadata["last_woke_at"])
+		healBatch := healStateWithRollback(session, alive, store, clk, startupTimeout, true)
+		traceHealClearedPendingCreateLease(
+			trace,
+			*session,
+			cfg,
+			tp.TemplateName,
+			name,
+			string(stateBeforeHeal),
+			pendingCreateStartedAtBeforeHeal,
+			lastWokeAtBeforeHeal,
+			alive,
+			healBatch,
+		)
 		if recoverPendingIdleSleep(session, store, running, clk) {
 			alive = false
 		}
@@ -1465,11 +1565,20 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if maxAgeTr != nil && alive {
 			creationCompleteAt, hasAnchor := parseRFC3339Metadata(session.Metadata["creation_complete_at"])
 			if hasAnchor && maxAgeTr.shouldRestart(name, creationCompleteAt, clk.Now()) {
-				if pendingInteractionKeepsAwake(*session, sp, name, clk) {
+				blocker := lifecycleTimerBlocker(session.Metadata, clk.Now())
+				switch {
+				case blocker != "":
+					// Respect lifecycle timer blockers already enforced by
+					// wake evaluation. Bypass the max-age restart so
+					// SleepPatch does not rewrite the intended sleep state.
+					if trace != nil {
+						trace.recordDecision("reconciler.session.max_session_age", tp.TemplateName, name, blocker, "deferred_"+blocker, nil, nil, "")
+					}
+				case pendingInteractionKeepsAwake(*session, sp, name, clk):
 					if trace != nil {
 						trace.recordDecision("reconciler.session.max_session_age", tp.TemplateName, name, "pending", "deferred_pending", nil, nil, "")
 					}
-				} else {
+				default:
 					hasWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session)
 					if assignedErr != nil {
 						// Fail closed: treat error as "has work" so a transient
@@ -1514,7 +1623,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 		// Idle timeout: restart sessions idle longer than configured threshold.
 		if it != nil && alive && it.checkIdle(name, sp, clk.Now()) {
-			if pendingInteractionKeepsAwake(*session, sp, name, clk) {
+			blocker := lifecycleTimerBlocker(session.Metadata, clk.Now())
+			switch {
+			case blocker != "":
+				// Respect lifecycle timer blockers without skipping the
+				// post-loop wake/drain pass. A metadata-only suspend uses
+				// sleep_intent=user-hold and still needs that pass to drain
+				// the live runtime.
+				if trace != nil {
+					trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, blocker, "deferred_"+blocker, nil, nil, "")
+				}
+			case pendingInteractionKeepsAwake(*session, sp, name, clk):
 				drainCancelled := false
 				if dt != nil {
 					drainCancelled = cancelSessionDrain(*session, sp, dt)
@@ -1525,33 +1644,34 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}, nil, "")
 				}
 				continue
-			}
-			fmt.Fprintf(stderr, "session reconciler: idle timeout for %s\n", tp.DisplayName()) //nolint:errcheck // best-effort stderr
-			if trace != nil {
-				trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, "idle_timeout", "stop", nil, nil, "")
-			}
-			if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
-				fmt.Fprintf(stderr, "session reconciler: stopping idle %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
-			} else {
-				_ = sp.ClearScrollback(name)
-				rec.Record(events.Event{
-					Type:    events.SessionIdleKilled,
-					Actor:   "gc",
-					Subject: tp.DisplayName(),
-				})
-				telemetry.RecordAgentIdleKill(context.Background(), tp.DisplayName())
-				// Mark for immediate re-wake on this same tick by clearing
-				// last_woke_at and setting state to asleep. The wake logic
-				// below will pick it up.
-				batch := sessionpkg.SleepPatch(clk.Now(), "idle-timeout")
-				_ = store.SetMetadataBatch(session.ID, batch)
-				if session.Metadata == nil {
-					session.Metadata = make(map[string]string, len(batch))
+			default:
+				fmt.Fprintf(stderr, "session reconciler: idle timeout for %s\n", tp.DisplayName()) //nolint:errcheck // best-effort stderr
+				if trace != nil {
+					trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, "idle_timeout", "stop", nil, nil, "")
 				}
-				for key, value := range batch {
-					session.Metadata[key] = value
+				if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
+					fmt.Fprintf(stderr, "session reconciler: stopping idle %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
+				} else {
+					_ = sp.ClearScrollback(name)
+					rec.Record(events.Event{
+						Type:    events.SessionIdleKilled,
+						Actor:   "gc",
+						Subject: tp.DisplayName(),
+					})
+					telemetry.RecordAgentIdleKill(context.Background(), tp.DisplayName())
+					// Mark for immediate re-wake on this same tick by clearing
+					// last_woke_at and setting state to asleep. The wake logic
+					// below will pick it up.
+					batch := sessionpkg.SleepPatch(clk.Now(), "idle-timeout")
+					_ = store.SetMetadataBatch(session.ID, batch)
+					if session.Metadata == nil {
+						session.Metadata = make(map[string]string, len(batch))
+					}
+					for key, value := range batch {
+						session.Metadata[key] = value
+					}
+					alive = false
 				}
-				alive = false
 			}
 			// Fall through to wakeReasons — it will re-wake immediately if config present
 		}
@@ -1929,6 +2049,79 @@ func assignedWorkStoreRefForSession(cityPath string, cfg *config.City, session b
 	return assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg), true
 }
 
+// firstOpenAssignedWorkBeadForReachableStore returns the first open or
+// in-progress work bead still assigned to the given session in the store the
+// session's configured agent can query, plus whether one was found. Uses the
+// same reachability resolution as sessionHasOpenAssignedWorkForReachableStore
+// (configured agent's store, with cross-store fallback when the agent
+// template isn't resolvable); emission sites that need the stranded bead's
+// ID (e.g., for the SessionDrainAckedWithAssignedWork event payload per
+// gastownhall/gascity#2293) call this instead of the bool-only helper.
+// Status iteration prefers "in_progress" over "open" so the bead returned is
+// the most-urgent stranded candidate — this is intentional and asymmetric
+// with the bool helpers, which short-circuit on any match and so iterate
+// in the historical "open" / "in_progress" order.
+// Returns (zero-bead, false, nil) when nothing matches.
+func firstOpenAssignedWorkBeadForReachableStore(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	session beads.Bead,
+) (beads.Bead, bool, error) {
+	storeRef, ok := assignedWorkStoreRefForSession(cityPath, cfg, session)
+	if !ok {
+		if bead, found, err := firstOpenAssignedWorkBeadInStore(store, session); err != nil || found {
+			return bead, found, err
+		}
+		for _, rs := range rigStores {
+			if bead, found, err := firstOpenAssignedWorkBeadInStore(rs, session); err != nil || found {
+				return bead, found, err
+			}
+		}
+		return beads.Bead{}, false, nil
+	}
+	if storeRef == "" {
+		return firstOpenAssignedWorkBeadInStore(store, session)
+	}
+	rigStore, ok := rigStores[storeRef]
+	if !ok || rigStore == nil {
+		return beads.Bead{}, false, fmt.Errorf("rig store %q unavailable for session %q", storeRef, session.Metadata["session_name"])
+	}
+	return firstOpenAssignedWorkBeadInStore(rigStore, session)
+}
+
+func firstOpenAssignedWorkBeadInStore(store beads.Store, session beads.Bead) (beads.Bead, bool, error) {
+	if store == nil {
+		return beads.Bead{}, false, nil
+	}
+	identifiers := sessionAssignmentIdentifiers(session)
+	seen := make(map[string]struct{}, len(identifiers))
+	for _, status := range []string{"in_progress", "open"} {
+		for _, assignee := range identifiers {
+			if assignee == "" {
+				continue
+			}
+			key := status + "\x00" + assignee
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			items, err := store.List(beads.ListQuery{Assignee: assignee, Status: status, Live: true})
+			if err != nil {
+				return beads.Bead{}, false, err
+			}
+			for _, item := range items {
+				if sessionpkg.IsSessionBeadOrRepairable(item) {
+					continue
+				}
+				return item, true, nil
+			}
+		}
+	}
+	return beads.Bead{}, false, nil
+}
+
 func sessionHasOpenAssignedWorkInStore(store beads.Store, session beads.Bead) (bool, error) {
 	if store == nil {
 		return false, nil
@@ -2176,6 +2369,44 @@ func configDriftTracePayload(storedHash, currentHash string, driftedFields []str
 	payload["current_hash"] = currentHash
 	payload["drifted_fields"] = fields
 	return payload
+}
+
+func traceHealClearedPendingCreateLease(
+	trace *sessionReconcilerTraceCycle,
+	session beads.Bead,
+	cfg *config.City,
+	template string,
+	name string,
+	stateBeforeHeal string,
+	pendingCreateStartedAtBeforeHeal string,
+	lastWokeAtBeforeHeal string,
+	providerAlive bool,
+	batch map[string]string,
+) {
+	if trace == nil || strings.TrimSpace(stateBeforeHeal) != string(sessionpkg.StateCreating) {
+		return
+	}
+	if cleared, ok := batch["pending_create_claim"]; !ok || cleared != "" {
+		return
+	}
+	template = strings.TrimSpace(template)
+	if template == "" {
+		template = normalizedSessionTemplate(session, cfg)
+	}
+	if template == "" {
+		template = session.Metadata["template"]
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = session.Metadata["session_name"]
+	}
+	trace.recordDecision("reconciler.session.pending_create", template, name, "heal_cleared_stale_lease", string(TraceOutcomeApplied), traceRecordPayload{
+		"last_woke_at":              lastWokeAtBeforeHeal,
+		"pending_create_started_at": pendingCreateStartedAtBeforeHeal,
+		"provider_alive":            providerAlive,
+		"state_after":               session.Metadata["state"],
+		"state_before":              stateBeforeHeal,
+	}, nil, "")
 }
 
 func applyTemplateOverridesToConfig(agentCfg *runtime.Config, session beads.Bead, tp TemplateParams) {

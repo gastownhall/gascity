@@ -290,6 +290,7 @@ func buildMaxSessionAgeTracker(cfg *config.City, cityName string, sp runtime.Pro
 
 func newStartCmd(stdout, stderr io.Writer) *cobra.Command {
 	var foregroundMode bool
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "start [path]",
 		Short: "Start the city under the machine-wide supervisor",
@@ -305,7 +306,11 @@ Use "gc supervisor run" for foreground operation.`,
   gc supervisor run`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if doStart(args, foregroundMode, stdout, stderr) != 0 {
+			if jsonOut && (foregroundMode || dryRunMode) {
+				fmt.Fprintln(stderr, "gc start: --json is only supported for supervisor-managed start") //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			if doStartJSON(args, foregroundMode, jsonOut, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -329,11 +334,19 @@ Use "gc supervisor run" for foreground operation.`,
 		"detect supervisor binary drift but do not auto-restart; exits non-zero on drift")
 	cmd.Flags().BoolVar(&startVerboseMode, "verbose", false,
 		"disable warning deduplication and print every supervisor warning")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
 	return cmd
 }
 
 func doStart(args []string, controllerMode bool, stdout, stderr io.Writer) int {
 	return doStartWithNameOverrideAndSummary(args, controllerMode, stdout, stderr, "")
+}
+
+func doStartJSON(args []string, controllerMode bool, jsonOut bool, stdout, stderr io.Writer) int {
+	if !jsonOut {
+		return doStart(args, controllerMode, stdout, stderr)
+	}
+	return doStartWithNameOverrideJSON(args, controllerMode, stdout, stderr, "", true)
 }
 
 func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr io.Writer, nameOverride string) int {
@@ -378,6 +391,10 @@ func doStartWithNameOverrideAndSummary(args []string, controllerMode bool, stdou
 }
 
 func doStartWithNameOverrideRaw(args []string, controllerMode bool, stdout, stderr io.Writer, nameOverride string) int {
+	return doStartWithNameOverrideJSON(args, controllerMode, stdout, stderr, nameOverride, false)
+}
+
+func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, stderr io.Writer, nameOverride string, jsonOut bool) int {
 	// --foreground / --controller bypass the supervisor entirely (legacy
 	// standalone reconciler). No drift to check.
 	if controllerMode {
@@ -407,7 +424,11 @@ func doStartWithNameOverrideRaw(args []string, controllerMode bool, stdout, stde
 	// Drift detection runs against any already-running supervisor before
 	// we hand work to it. When no supervisor is running the check is a
 	// no-op (registration spawns a fresh one).
-	if exitCode, cont := runStartDriftCheck(cityPath, stdout, stderr); !cont {
+	driftStdout := stdout
+	if jsonOut {
+		driftStdout = stderr
+	}
+	if exitCode, cont := runStartDriftCheck(cityPath, driftStdout, stderr); !cont {
 		return exitCode
 	}
 
@@ -439,8 +460,29 @@ func doStartWithNameOverrideRaw(args []string, controllerMode bool, stdout, stde
 		printDoltAuthorIdentityBlock(stderr, "gc start", status)
 		return 1
 	}
-	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, stdout, stderr, "gc start", true); code != 0 {
+	startStdout := stdout
+	if jsonOut {
+		startStdout = io.Discard
+	}
+	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, startStdout, stderr, "gc start", true); code != 0 {
 		return code
+	}
+	if jsonOut {
+		cityName := nameOverride
+		if entry, registered, err := registeredCityEntry(cityPath); err == nil && registered {
+			cityName = entry.EffectiveName()
+		}
+		if err := writeLifecycleActionJSON(stdout, lifecycleActionJSON{
+			Command:  "start",
+			Action:   "start",
+			Message:  "City started under supervisor.",
+			CityName: cityName,
+			CityPath: cityPath,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc start: writing JSON result: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
 	}
 	fmt.Fprintln(stdout, "City started under supervisor.") //nolint:errcheck // best-effort stdout
 	return 0

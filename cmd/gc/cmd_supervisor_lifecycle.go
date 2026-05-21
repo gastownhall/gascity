@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/searchpath"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/spf13/cobra"
@@ -326,40 +327,11 @@ func supervisorProcessEnvMap(data []byte) map[string]string {
 }
 
 func terminateProcessGroup(pgid int, timeout time.Duration) error {
-	if pgid <= 1 || pgid == supervisorGetpgrp() {
-		return fmt.Errorf("refusing to signal unsafe process group %d", pgid)
-	}
-	if err := supervisorKill(-pgid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return err
-	}
-	if err := waitForProcessGroupExit(pgid, timeout); err == nil {
-		return nil
-	}
-	if err := supervisorKill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return err
-	}
-	return waitForProcessGroupExit(pgid, timeout)
-}
-
-func waitForProcessGroupExit(pgid int, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for {
-		if !processGroupAlive(pgid) {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("process group %d did not exit within %s", pgid, timeout)
-		}
-		time.Sleep(supervisorProcessGroupPollPeriod)
-	}
-}
-
-func processGroupAlive(pgid int) bool {
-	if pgid <= 0 {
-		return false
-	}
-	err := supervisorKill(-pgid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
+	return processgroup.Terminate(pgid, timeout, processgroup.Options{
+		Kill:           supervisorKill,
+		CurrentGroupID: supervisorGetpgrp,
+		PollPeriod:     supervisorProcessGroupPollPeriod,
+	})
 }
 
 func newSupervisorRunCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -418,6 +390,10 @@ func defaultSupervisorBeadsActor() {
 }
 
 func doSupervisorStart(stdout, stderr io.Writer) int {
+	return doSupervisorStartJSON(stdout, stderr, false)
+}
+
+func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
 		fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
 		return 1
@@ -467,6 +443,14 @@ func doSupervisorStart(stdout, stderr io.Writer) int {
 	deadline := time.Now().Add(supervisorReadyTimeout)
 	for time.Now().Before(deadline) {
 		if pid := supervisorAliveHook(); pid != 0 {
+			if jsonOut {
+				return writeLifecycleActionJSONOrExit(stdout, stderr, "gc supervisor start", lifecycleActionJSON{
+					Command:       "supervisor start",
+					Action:        "start",
+					Message:       "Supervisor started.",
+					SupervisorPID: pid,
+				})
+			}
 			fmt.Fprintf(stdout, "Supervisor started (PID %d)\n", pid) //nolint:errcheck // best-effort stdout
 			return 0
 		}
