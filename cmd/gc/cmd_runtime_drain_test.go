@@ -403,9 +403,14 @@ func TestDoRuntimeDrainCheckJSON(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
 	}
-	if result.SchemaVersion != "1" || result.Command != "runtime drain-check" || !result.Draining || result.Session != "worker" {
+	if result.SchemaVersion != "1" ||
+		!result.OK ||
+		result.Command != "runtime drain-check" ||
+		!result.Draining ||
+		result.Session != "worker" {
 		t.Fatalf("unexpected JSON result: %+v", result)
 	}
+	validateJSONAgainstResultSchema(t, []string{"runtime", "drain-check"}, stdout.Bytes())
 }
 
 func TestDoRuntimeDrainCheckJSONNotDrainingWritesFalseResult(t *testing.T) {
@@ -423,7 +428,11 @@ func TestDoRuntimeDrainCheckJSONNotDrainingWritesFalseResult(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
 	}
-	if result.SchemaVersion != "1" || result.Command != "runtime drain-check" || result.Draining || result.Session != "worker" {
+	if result.SchemaVersion != "1" ||
+		!result.OK ||
+		result.Command != "runtime drain-check" ||
+		result.Draining ||
+		result.Session != "worker" {
 		t.Fatalf("unexpected JSON result: %+v", result)
 	}
 	validateJSONAgainstResultSchema(t, []string{"runtime", "drain-check"}, stdout.Bytes())
