@@ -4,10 +4,13 @@
 // OpenCode's plugin API is ESM and hook-oriented:
 //   - event() is side-effect-only (no prompt injection)
 //   - experimental.chat.system.transform mutates output.system
+//   - experimental.session.compacting → inject context before compaction
 //
 // Gas City uses:
 //   - session.created / session.compacted → gc prime --hook (side effects such
 //     as session-id persistence and poller bootstrap)
+//   - experimental.session.compacting → gc handoff --auto "context cycle"
+//     and inject the handoff confirmation into the compaction context
 //   - experimental.chat.system.transform → inject gc prime --hook, queued
 //     nudges, and unread mail into the system prompt for each turn
 
@@ -17,12 +20,13 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+const GC_BIN = process.env.GC_BIN || "gc";
 const PATH_PREFIX =
-  `${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
+  `${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:`;
 
 async function run(directory, ...args) {
   try {
-    const { stdout } = await execFileAsync("gc", args, {
+    const { stdout } = await execFileAsync(GC_BIN, args, {
       cwd: directory,
       encoding: "utf-8",
       timeout: 30000,
@@ -134,6 +138,13 @@ export default async function gascityPlugin({ directory, client }) {
         } else {
           output.system.unshift(prefix);
         }
+      }
+    },
+
+    "experimental.session.compacting": async (_input, output) => {
+      const handoff = await run(directory, "handoff", "--auto", "context cycle");
+      if (handoff && Array.isArray(output?.context)) {
+        output.context.push(handoff);
       }
     },
   };

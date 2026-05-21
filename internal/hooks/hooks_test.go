@@ -1478,6 +1478,28 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	if !strings.Contains(copilotHooks, `gc handoff --auto \"context cycle\"`) {
 		t.Error("copilot preCompact should use auto handoff")
 	}
+	opencodeHooks := string(fs.Files["/work/.opencode/plugins/gascity.js"])
+	for _, want := range []string{
+		`process.env.GC_BIN || "gc"`,
+		`/opt/homebrew/bin:/usr/local/bin`,
+		`"experimental.session.compacting"`,
+		`run(directory, "handoff", "--auto", "context cycle")`,
+		"output.context.push(handoff)",
+		"mirrorTranscript(directory, client",
+	} {
+		if !strings.Contains(opencodeHooks, want) {
+			t.Errorf("OpenCode plugin missing marker %q:\n%s", want, opencodeHooks)
+		}
+	}
+	for _, unwanted := range []string{
+		`run(directory, "handoff", "context cycle")`,
+		`"session", "reset"`,
+		`"session.deleted"`,
+	} {
+		if strings.Contains(opencodeHooks, unwanted) {
+			t.Errorf("OpenCode plugin contains obsolete marker %q:\n%s", unwanted, opencodeHooks)
+		}
+	}
 	for _, rel := range []string{
 		"/work/.codex/hooks.json",
 		"/work/.gemini/settings.json",

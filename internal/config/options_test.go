@@ -1142,6 +1142,37 @@ func TestBuiltinProviders_GeminiHasNilArgsAndOptionDefaults(t *testing.T) {
 	}
 }
 
+func TestBuiltinProviders_OpenCodeHasModelOptions(t *testing.T) {
+	builtins := BuiltinProviders()
+	opencode := builtins["opencode"]
+
+	if !schemaHasChoice(opencode.OptionsSchema, "model", "opencode/deepseek-v4-flash-free") {
+		t.Fatal("opencode OptionsSchema missing hosted model choice")
+	}
+	args, metadata, err := ResolveOptions(opencode.OptionsSchema, map[string]string{
+		"model": "opencode/deepseek-v4-flash-free",
+	}, nil)
+	if err != nil {
+		t.Fatalf("ResolveOptions(opencode model): %v", err)
+	}
+	if !reflect.DeepEqual(args, []string{"--model", "opencode/deepseek-v4-flash-free"}) {
+		t.Fatalf("model args = %v, want --model opencode/deepseek-v4-flash-free", args)
+	}
+	if metadata["opt_model"] != "opencode/deepseek-v4-flash-free" {
+		t.Fatalf("metadata[opt_model] = %q, want opencode/deepseek-v4-flash-free", metadata["opt_model"])
+	}
+
+	legacy := normalizeProviderLayerArgsForSchema(ProviderSpec{
+		Args: []string{"-m", "opencode/deepseek-v4-flash-free"},
+	}, opencode.OptionsSchema)
+	if len(legacy.Args) != 0 {
+		t.Fatalf("normalized legacy args = %v, want empty", legacy.Args)
+	}
+	if legacy.OptionDefaults["model"] != "opencode/deepseek-v4-flash-free" {
+		t.Fatalf("inferred model = %q, want opencode/deepseek-v4-flash-free", legacy.OptionDefaults["model"])
+	}
+}
+
 func TestValidateOptionDefaults_Valid(t *testing.T) {
 	schema := []ProviderOption{
 		{Key: "permission_mode", Choices: []OptionChoice{
