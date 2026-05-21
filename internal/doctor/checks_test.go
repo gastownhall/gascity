@@ -468,6 +468,73 @@ func TestConfigRefsCheck_SessionSetupScriptSourceDir(t *testing.T) {
 	}
 }
 
+func TestConfigRefsCheck_SessionSetupScriptDoubleSlashUsesCityRoot(t *testing.T) {
+	cityDir := t.TempDir()
+	sourceDir := filepath.Join(cityDir, "packs", "feature")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(cityDir, "scripts", "setup.sh")
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:               "worker",
+			SessionSetupScript: "//scripts/setup.sh",
+			SourceDir:          sourceDir,
+		}},
+	}
+	c := NewConfigRefsCheck(cfg, cityDir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; msg = %s; details = %v", r.Status, r.Message, r.Details)
+	}
+}
+
+func TestConfigRefsCheck_SessionSetupScriptLegacyCityRelativeWithSourceDir(t *testing.T) {
+	cityDir := t.TempDir()
+	sourceDir := filepath.Join(cityDir, "packs", "feature")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		script string
+	}{
+		{name: "same pack", script: "packs/feature/scripts/setup.sh"},
+		{name: "shared pack", script: "packs/shared/scripts/setup.sh"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scriptPath := filepath.Join(cityDir, filepath.FromSlash(tc.script))
+			if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(scriptPath, []byte("#!/bin/sh"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg := &config.City{
+				Agents: []config.Agent{{
+					Name:               "worker",
+					SessionSetupScript: tc.script,
+					SourceDir:          sourceDir,
+				}},
+			}
+			c := NewConfigRefsCheck(cfg, cityDir)
+			r := c.Run(&CheckContext{})
+			if r.Status != StatusOK {
+				t.Errorf("status = %d, want OK; msg = %s; details = %v", r.Status, r.Message, r.Details)
+			}
+		})
+	}
+}
+
 // --- BuiltinPackFamilyCheck ---
 
 func TestBuiltinPackFamilyCheck_Unmodified(t *testing.T) {

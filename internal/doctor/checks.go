@@ -227,20 +227,44 @@ func resolveConfigRefPath(cityPath, p string) string {
 	return filepath.Join(cityPath, p)
 }
 
-// resolveSessionSetupScriptPath resolves a session_setup_script path.
-// Unlike prompt_template and overlay_dir, session_setup_script is left
-// as-authored during composition and resolved at runtime against the
-// agent's SourceDir. The doctor check mirrors that resolution: relative
-// paths resolve against SourceDir when available, falling back to cityPath
-// for inline agents that have no SourceDir.
+// resolveSessionSetupScriptPath resolves a session_setup_script path. Unlike
+// prompt_template and overlay_dir, session_setup_script is left as-authored
+// during composition and resolved at runtime against the agent's SourceDir.
+// The doctor check mirrors that runtime resolution.
 func resolveSessionSetupScriptPath(cityPath, sourceDir, p string) string {
-	if filepath.IsAbs(p) {
+	if strings.HasPrefix(p, "//") {
+		return filepath.Join(cityPath, strings.TrimPrefix(p, "//"))
+	}
+	if p == "" || filepath.IsAbs(p) {
 		return p
 	}
 	if sourceDir != "" {
-		return filepath.Join(sourceDir, p)
+		relSource, err := filepath.Rel(cityPath, sourceDir)
+		if err == nil {
+			relSource = filepath.Clean(relSource)
+			cleanPath := filepath.Clean(p)
+			if relSource != "." && relSource != "" && !strings.HasPrefix(relSource, "..") &&
+				(cleanPath == relSource || strings.HasPrefix(cleanPath, relSource+string(os.PathSeparator))) {
+				return filepath.Join(cityPath, cleanPath)
+			}
+		}
+
+		sourceCandidate := filepath.Join(sourceDir, p)
+		cityCandidate := filepath.Join(cityPath, filepath.Clean(p))
+		if pathExists(cityCandidate) && !pathExists(sourceCandidate) {
+			return cityCandidate
+		}
+		return sourceCandidate
 	}
 	return filepath.Join(cityPath, p)
+}
+
+func pathExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // BuiltinPackFamilyCheck fails when a city overrides only one member of the
