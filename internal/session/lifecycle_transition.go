@@ -281,6 +281,7 @@ func SleepPatch(now time.Time, reason string) MetadataPatch {
 func AcknowledgeDrainPatch(freshWake bool) MetadataPatch {
 	patch := MetadataPatch{
 		"state":                     string(StateDrained),
+		"state_reason":              "",
 		"last_woke_at":              "",
 		"pending_create_claim":      "",
 		"pending_create_started_at": "",
@@ -296,6 +297,7 @@ func AcknowledgeDrainPatch(freshWake bool) MetadataPatch {
 // CompleteDrainPatch records a completed controller drain as ordinary asleep.
 func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPatch {
 	patch := SleepPatch(now, reason)
+	patch["state_reason"] = ""
 	if freshWake {
 		patch["session_key"] = ""
 		applyFreshWakeConversationReset(patch)

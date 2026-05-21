@@ -23,7 +23,6 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
-	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -97,6 +96,7 @@ type CityRuntime struct {
 	sessionDrains     *drainTracker // in-memory drain tracker; nil when bead reconciler disabled
 	asyncStartLimiter *asyncStartLimiter
 	asyncStarts       asyncStartTracker
+	asyncStops        asyncStartTracker
 	demandSnapshot    *runtimeDemandSnapshot
 
 	fsPressureConsecutiveSkips int
@@ -882,12 +882,16 @@ func (cr *CityRuntime) tick(
 	// so stale names cannot block desired-state computation (#742).
 	phaseStart = time.Now()
 	cleanupDeadRuntimeSessionCorpses(sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
+	recordPhase(TraceSiteControllerTickPhase, "cleanup_dead_runtime_session_corpses", phaseStart, nil)
 	// Reap live runtimes still bound to a closed bead (e.g. a named-session
 	// identity re-minted as a pool slot) so the name's current owner can rebind
 	// it and attach lands on the right runtime.
+	phaseStart = time.Now()
 	reapRuntimesBoundToClosedBeads(cr.cityBeadStore(), sessionBeads, cr.sessionDrains, cr.sp, cr.stderr)
+	recordPhase(TraceSiteControllerTickPhase, "reap_runtimes_bound_to_closed_beads", phaseStart, nil)
+	phaseStart = time.Now()
 	reaped := reapStaleSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr)
-	recordPhase(TraceSiteControllerTickPhase, "cleanup_dead_and_stale_sessions", phaseStart, map[string]any{"reaped": reaped})
+	recordPhase(TraceSiteControllerTickPhase, "reap_stale_session_beads", phaseStart, map[string]any{"reaped": reaped})
 	if reaped > 0 {
 		phaseStart = time.Now()
 		sessionBeads = cr.loadSessionBeadSnapshot()
@@ -908,6 +912,7 @@ func (cr *CityRuntime) tick(
 			sessionBeads.Open(),
 			cr.dops,
 			cr.sessionDrains,
+			&cr.asyncStops,
 			clock.Real{},
 			cr.rec,
 			cr.stderr,
@@ -1867,6 +1872,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		withAsyncStartFollowUp(cr.requestAsyncStartFollowUpTick),
 		withAsyncStartLimiter(cr.ensureAsyncStartLimiter()),
 		withAsyncStartTracker(&cr.asyncStarts),
+		withAsyncDrainAckStopTracker(&cr.asyncStops),
 		withMaxSessionAgeTracker(cr.mat),
 	)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.reconcile_sessions", phaseStart, map[string]any{
@@ -2040,6 +2046,26 @@ func (cr *CityRuntime) waitForAsyncStarts() bool {
 	return true
 }
 
+func (cr *CityRuntime) waitForAsyncStops() bool {
+	if cr == nil {
+		return true
+	}
+	timeout := time.Duration(0)
+	if cr.cfg != nil {
+		timeout = cr.cfg.Daemon.ShutdownTimeoutDuration()
+	}
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	if !cr.asyncStops.waitUntil(timeout, cr.forceStopRequested) {
+		if cr.stderr != nil && !cr.forceStopRequested() {
+			fmt.Fprintf(cr.stderr, "%s: async drain-ack stops still running after %s; continuing shutdown\n", cr.logPrefix, timeout) //nolint:errcheck // best-effort stderr
+		}
+		return false
+	}
+	return true
+}
+
 func sweepUndesiredPoolSessionBeads(
 	store beads.Store,
 	rigStores map[string]beads.Store,
@@ -2150,13 +2176,16 @@ func sweepUndesiredPoolSessionBeads(
 
 func poolSessionBeadRuntimeRunning(bead beads.Bead, sp runtime.Provider) (bool, error) {
 	if sp == nil {
-		return false, sessionpkg.ErrSessionNotFound
+		return false, fmt.Errorf("pool session runtime check: %w", runtime.ErrSessionNotFound)
 	}
 	name := strings.TrimSpace(bead.Metadata["session_name"])
 	if name == "" {
-		return false, sessionpkg.ErrSessionNotFound
+		return false, fmt.Errorf("pool session runtime check missing session name: %w", runtime.ErrSessionNotFound)
 	}
-	return sp.IsRunning(name), nil
+	// The sweep only needs provider-runtime presence, not process aliveness or
+	// attachment/activity details. ObserveLiveness preserves provider-native
+	// running semantics without the heavier worker observation path.
+	return runtime.ObserveLiveness(sp, name, nil).Running, nil
 }
 
 // pendingCreateClaimStillLeasedForSweep keeps pending_create_claim protection
@@ -2656,6 +2685,7 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 func (cr *CityRuntime) shutdown() {
 	cr.shutdownOnce.Do(func() {
 		asyncStartsDrained := cr.waitForAsyncStarts()
+		cr.waitForAsyncStops()
 		preserveSessions := cr.preserveSessionsShutdown.Load()
 		if preserveSessions {
 			cr.recordPreservedShutdownTrace()

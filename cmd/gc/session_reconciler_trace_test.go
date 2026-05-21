@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 func TestTraceDetailScopesIncludesDependencies(t *testing.T) {
@@ -550,6 +553,71 @@ func TestRecordControllerOperationIsAlwaysOnBaseline(t *testing.T) {
 	}
 	if op.Fields["phase"] != "demand" {
 		t.Fatalf("phase field = %#v, want demand", op.Fields["phase"])
+	}
+}
+
+func TestSessionReconcilePhaseTraceUsesDistinctSites(t *testing.T) {
+	cityDir := t.TempDir()
+	tracer := newSessionReconcilerTracer(cityDir, "trace-town", io.Discard)
+	defer tracer.Close() //nolint:errcheck
+	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "", time.Now().UTC(), &config.City{})
+	if cycle == nil {
+		t.Fatal("BeginCycle returned nil")
+	}
+
+	reconcileSessionBeadsTracedWithNamedDemand(
+		context.Background(),
+		cityDir,
+		nil,
+		nil,
+		nil,
+		&config.City{},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		newDrainTracker(),
+		nil,
+		nil,
+		false,
+		nil,
+		"trace-town",
+		nil,
+		clock.Real{},
+		events.Discard,
+		0,
+		0,
+		io.Discard,
+		io.Discard,
+		cycle,
+	)
+
+	got := make(map[string]TraceSiteCode)
+	for _, rec := range cycle.records {
+		if rec.RecordType != TraceRecordOperation {
+			continue
+		}
+		name, _ := rec.Fields["operation_name"].(string)
+		if strings.HasPrefix(name, "session_reconcile.") {
+			got[name] = rec.SiteCode
+		}
+	}
+	want := map[string]TraceSiteCode{
+		"session_reconcile.build_deps":                        TraceSiteSessionReconcileBuildDeps,
+		"session_reconcile.heal_and_retire_duplicates":        TraceSiteSessionReconcileHealRetire,
+		"session_reconcile.topo_order":                        TraceSiteSessionReconcileTopoOrder,
+		"session_reconcile.forward_pass":                      TraceSiteSessionReconcileForwardPass,
+		"session_reconcile.compute_awake_set_and_idle_probes": TraceSiteSessionReconcileAwakeSet,
+		"session_reconcile.apply_wake_sleep_decisions":        TraceSiteSessionReconcileWakeSleep,
+		"session_reconcile.execute_planned_starts":            TraceSiteSessionReconcileStartExecution,
+		"session_reconcile.advance_drains":                    TraceSiteSessionReconcileDrainAdvance,
+	}
+	for name, site := range want {
+		if got[name] != site {
+			t.Fatalf("%s site = %q, want %q; all sites: %#v", name, got[name], site, got)
+		}
 	}
 }
 

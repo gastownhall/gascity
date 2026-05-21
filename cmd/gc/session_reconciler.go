@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"strings"
 	"sync"
@@ -31,6 +30,9 @@ import (
 
 const maxIdleSleepProbesPerTick = 3
 
+// drainAckAsyncStops deduplicates process-local async stop goroutines. A
+// controller restart can briefly double-stop through a fresh process map; stop
+// providers are idempotent and SessionGone errors are suppressed below.
 var drainAckAsyncStops sync.Map
 
 type wakeTarget struct {
@@ -55,12 +57,20 @@ func isDrainAckStopPending(session beads.Bead) bool {
 		strings.TrimSpace(session.Metadata["state_reason"]) == sessionpkg.DrainAckStopPendingReason
 }
 
-func markDrainAckStopPending(session *beads.Bead, store beads.Store, clk clock.Clock) bool {
+func markDrainAckStopPending(session *beads.Bead, store beads.Store, clk clock.Clock, stderr io.Writer) bool {
 	if session == nil || store == nil || session.ID == "" {
 		return false
 	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
 	batch := sessionpkg.DrainAckStopPendingPatch(clk.Now().UTC())
 	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+		name := strings.TrimSpace(session.Metadata["session_name"])
+		if name == "" {
+			name = session.ID
+		}
+		fmt.Fprintf(stderr, "session reconciler: marking drain-ack stop-pending %s: %v\n", name, err) //nolint:errcheck
 		return false
 	}
 	if session.Metadata == nil {
@@ -80,26 +90,49 @@ func clearDrainTrackerForStopPending(session *beads.Bead, dt *drainTracker) {
 	dt.remove(session.ID)
 }
 
-func drainAckAsyncStopKey(sp runtime.Provider, cityPath, sessionID, name string) string {
-	if id := strings.TrimSpace(sessionID); id != "" {
-		return fmt.Sprintf("provider:%p\x00city:%s\x00id:%s", sp, strings.TrimSpace(cityPath), id)
+func drainAckAsyncStopKey(store beads.Store, cityPath, sessionID, name string) string {
+	scope := strings.TrimSpace(cityPath)
+	if scope == "" {
+		scope = fmt.Sprintf("store:%p", store)
 	}
-	return fmt.Sprintf("provider:%p\x00city:%s\x00name:%s", sp, strings.TrimSpace(cityPath), strings.TrimSpace(name))
+	if id := strings.TrimSpace(sessionID); id != "" {
+		return fmt.Sprintf("city:%s\x00id:%s", scope, id)
+	}
+	return fmt.Sprintf("city:%s\x00name:%s", scope, strings.TrimSpace(name))
 }
 
-func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name string) {
+func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name string, tracker *asyncStartTracker, stderr io.Writer) {
 	name = strings.TrimSpace(name)
 	if name == "" || sp == nil {
 		return
 	}
-	key := drainAckAsyncStopKey(sp, cityPath, sessionID, name)
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	key := drainAckAsyncStopKey(store, cityPath, sessionID, name)
 	if _, loaded := drainAckAsyncStops.LoadOrStore(key, struct{}{}); loaded {
 		return
 	}
+	done := func() {}
+	if tracker != nil {
+		var tracking bool
+		done, tracking = tracker.start()
+		if !tracking {
+			drainAckAsyncStops.Delete(key)
+			return
+		}
+	}
 	go func() {
-		defer drainAckAsyncStops.Delete(key)
+		defer func() {
+			drainAckAsyncStops.Delete(key)
+			done()
+			if r := recover(); r != nil {
+				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s panicked: %v\n", name, r) //nolint:errcheck
+				panic(r)
+			}
+		}()
 		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
-			log.Printf("session reconciler: async drain-ack stop %s: %v", name, err)
+			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: %v\n", name, err) //nolint:errcheck
 		}
 	}()
 }
@@ -165,14 +198,10 @@ func finalizeDrainAckStoppedSession(
 	if template == "" {
 		template = session.Metadata["template"]
 	}
-	if dops != nil {
-		_ = dops.clearDrain(name)
-	}
-	if dt != nil {
-		dt.clearIdleProbe(session.ID)
-		dt.remove(session.ID)
-	}
-	if rec != nil {
+	recordStopped := func() {
+		if rec == nil {
+			return
+		}
 		rec.Record(events.Event{
 			Type:    events.SessionStopped,
 			Actor:   "gc",
@@ -186,9 +215,6 @@ func finalizeDrainAckStoppedSession(
 		fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
 		hasAssignedWork = true
 	}
-	if hasAssignedWork {
-		recordDrainAckAssignedWorkEvent(cityPath, cfg, store, rigStores, *session, template, template, name, rec, stderr)
-	}
 	if closeIfUnassigned && !hasAssignedWork {
 		if closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, *session, "drained", clk.Now().UTC(), stderr) {
 			session.Status = "closed"
@@ -198,19 +224,62 @@ func finalizeDrainAckStoppedSession(
 			for key, value := range sessionpkg.ClosePatch(clk.Now().UTC(), "drained") {
 				session.Metadata[key] = value
 			}
+			if dops != nil {
+				_ = dops.clearDrain(name)
+			}
+			if dt != nil {
+				dt.clearIdleProbe(session.ID)
+				dt.remove(session.ID)
+			}
+			recordStopped()
+			return
 		}
-		return
+		if latest, err := store.Get(session.ID); err == nil && latest.Status == "closed" {
+			session.Status = latest.Status
+			session.Metadata = latest.Metadata
+			if dops != nil {
+				_ = dops.clearDrain(name)
+			}
+			if dt != nil {
+				dt.clearIdleProbe(session.ID)
+				dt.remove(session.ID)
+			}
+			recordStopped()
+			return
+		}
+		assignedAfterCloseGate, closeGateAssignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session)
+		if closeGateAssignedErr != nil {
+			fmt.Fprintf(stderr, "session reconciler: checking assigned work after failed drain-ack close gate for %s: %v\n", name, closeGateAssignedErr) //nolint:errcheck
+			assignedAfterCloseGate = true
+		}
+		if assignedAfterCloseGate {
+			hasAssignedWork = true
+		}
 	}
 	batch := sessionpkg.AcknowledgeDrainPatch(session.Metadata["wake_mode"] == "fresh")
 	if hasAssignedWork {
 		batch = sessionpkg.CompleteDrainPatch(clk.Now().UTC(), "idle", session.Metadata["wake_mode"] == "fresh")
 	}
-	_ = store.SetMetadataBatch(session.ID, batch)
+	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: finalizing drain-ack stopped %s: %v\n", name, err) //nolint:errcheck
+		return
+	}
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]string, len(batch))
 	}
 	for key, value := range batch {
 		session.Metadata[key] = value
+	}
+	if dops != nil {
+		_ = dops.clearDrain(name)
+	}
+	if dt != nil {
+		dt.clearIdleProbe(session.ID)
+		dt.remove(session.ID)
+	}
+	recordStopped()
+	if hasAssignedWork {
+		recordDrainAckAssignedWorkEvent(cityPath, cfg, store, rigStores, *session, template, template, name, rec, stderr)
 	}
 }
 
@@ -225,6 +294,7 @@ func reconcileDrainAckStopPending(
 	desired bool,
 	dops drainOps,
 	dt *drainTracker,
+	asyncStopTracker *asyncStartTracker,
 	clk clock.Clock,
 	rec events.Recorder,
 	stderr io.Writer,
@@ -235,7 +305,7 @@ func reconcileDrainAckStopPending(
 	name := strings.TrimSpace(session.Metadata["session_name"])
 	obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, session.ID, tp.Hints.ProcessNames)
 	if err != nil || obs.Running || obs.Alive {
-		queueDrainAckAsyncStop(cityPath, store, sp, cfg, session.ID, name)
+		queueDrainAckAsyncStop(cityPath, store, sp, cfg, session.ID, name, asyncStopTracker, stderr)
 		return true
 	}
 	finalizeDrainAckStoppedSession(
@@ -255,6 +325,7 @@ func finalizeDrainAckStopPendingSessions(
 	sessions []beads.Bead,
 	dops drainOps,
 	dt *drainTracker,
+	asyncStopTracker *asyncStartTracker,
 	clk clock.Clock,
 	rec events.Recorder,
 	stderr io.Writer,
@@ -271,9 +342,12 @@ func finalizeDrainAckStopPendingSessions(
 		name := strings.TrimSpace(session.Metadata["session_name"])
 		obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, session.ID, nil)
 		if err != nil || obs.Running || obs.Alive {
-			queueDrainAckAsyncStop(cityPath, store, sp, cfg, session.ID, name)
+			queueDrainAckAsyncStop(cityPath, store, sp, cfg, session.ID, name, asyncStopTracker, stderr)
 			continue
 		}
+		// Pool-managed stop-pending beads close here instead of staying open as
+		// state=drained: open pool session beads occupy slots in the next demand
+		// calculation, while closed beads remain only as lifecycle history.
 		finalizeDrainAckStoppedSession(
 			cityPath, cfg, store, rigStores, session,
 			normalizedSessionTemplate(*session, cfg),
@@ -738,9 +812,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		startupTimeout = cfg.Session.StartupTimeoutDuration()
 	}
 	maxAgeTr := reconcileOpts.maxSessionAgeTr
-	recordPhase := func(name string, start time.Time, fields map[string]any) {
+	asyncStopTracker := reconcileOpts.asyncStopTracker
+	recordPhase := func(site TraceSiteCode, name string, start time.Time, fields map[string]any) {
 		if trace != nil {
-			trace.RecordControllerOperation(TraceSiteControllerTickPhase, TraceReasonRetained, TraceOutcomeComplete, name, time.Since(start), fields)
+			trace.RecordControllerOperation(site, TraceReasonRetained, TraceOutcomeComplete, name, time.Since(start), fields)
 		}
 	}
 	phaseStart := time.Now()
@@ -748,7 +823,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	if cityName == "" {
 		cityName = config.EffectiveCityName(cfg, "")
 	}
-	recordPhase("session_reconcile.build_deps", phaseStart, map[string]any{
+	recordPhase(TraceSiteSessionReconcileBuildDeps, "session_reconcile.build_deps", phaseStart, map[string]any{
 		"dependency_template_count": len(deps),
 	})
 
@@ -773,14 +848,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			store, rigStores, sp, cfg, cityName, sessions, bySessionName, indexBySessionName, clk.Now().UTC(), stderr,
 		)
 	}
-	recordPhase("session_reconcile.heal_and_retire_duplicates", phaseStart, map[string]any{
+	recordPhase(TraceSiteSessionReconcileHealRetire, "session_reconcile.heal_and_retire_duplicates", phaseStart, map[string]any{
 		"session_count": len(sessions),
 	})
 
 	// Topo-order sessions by template dependencies.
 	phaseStart = time.Now()
 	ordered := topoOrder(sessions, deps)
-	recordPhase("session_reconcile.topo_order", phaseStart, map[string]any{
+	recordPhase(TraceSiteSessionReconcileTopoOrder, "session_reconcile.topo_order", phaseStart, map[string]any{
 		"ordered_session_count": len(ordered),
 	})
 
@@ -832,7 +907,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 		cb.pruneIdle(cbNow)
 	}
-	recordPhase("session_reconcile.circuit_breaker_restore", phaseStart, map[string]any{
+	recordPhase(TraceSiteSessionReconcileCircuitBreaker, "session_reconcile.circuit_breaker_restore", phaseStart, map[string]any{
 		"enabled":       cbEnabled,
 		"session_count": len(ordered),
 	})
@@ -889,7 +964,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		name := strings.TrimSpace(session.Metadata["session_name"])
 		tp, desired := desiredState[name]
 
-		if reconcileDrainAckStopPending(cityPath, cfg, sp, store, rigStores, session, tp, desired, dops, dt, clk, rec, stderr) {
+		if reconcileDrainAckStopPending(cityPath, cfg, sp, store, rigStores, session, tp, desired, dops, dt, asyncStopTracker, clk, rec, stderr) {
 			continue
 		}
 
@@ -1082,12 +1157,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							if template == "" {
 								template = session.Metadata["template"]
 							}
-							if hasAssignedWork {
-								recordDrainAckAssignedWorkEvent(cityPath, cfg, store, rigStores, *session, template, template, name, rec, stderr)
-							}
-							if markDrainAckStopPending(session, store, clk) {
+							if markDrainAckStopPending(session, store, clk, stderr) {
 								clearDrainTrackerForStopPending(session, dt)
-								queueDrainAckAsyncStop(cityPath, store, sp, cfg, session.ID, name)
+								queueDrainAckAsyncStop(cityPath, store, sp, cfg, session.ID, name, asyncStopTracker, stderr)
 								if trace != nil {
 									trace.recordDecision("reconciler.session.drain_ack", template, name, "orphaned", "stop_pending", nil, nil, "")
 								}
@@ -1285,49 +1357,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 					if alive {
-						hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session)
-						if assignedErr != nil {
-							fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
-							hasAssignedWork = true
-						}
-						if hasAssignedWork {
-							recordDrainAckAssignedWorkEvent(cityPath, cfg, store, rigStores, *session, tp.DisplayName(), tp.TemplateName, name, rec, stderr)
-						}
-						if markDrainAckStopPending(session, store, clk) {
+						if markDrainAckStopPending(session, store, clk, stderr) {
 							clearDrainTrackerForStopPending(session, dt)
-							queueDrainAckAsyncStop(cityPath, store, sp, cfg, session.ID, name)
+							queueDrainAckAsyncStop(cityPath, store, sp, cfg, session.ID, name, asyncStopTracker, stderr)
 							if trace != nil {
 								trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, "acknowledged", "stop_pending", nil, nil, "")
 							}
 						}
 						continue
-					}
-					if store != nil && session.ID != "" {
-						// Drain-ack lands here right after the agent ran
-						// `bd close` on its last unit of work. The cached
-						// `ownershipWorkBeads` snapshot taken earlier in
-						// this tick predates that close, so it still shows
-						// the bead as open+assigned and falsely flipped
-						// pool workers into CompleteDrainPatch
-						// (state=asleep + sleep_reason=idle) instead of
-						// AcknowledgeDrainPatch (state=drained). That hid
-						// the bead from the close gate and stranded new
-						// queue work on a ghost slot. Re-query the store
-						// so the decision reflects reality.
-						hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session)
-						if assignedErr != nil {
-							fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
-							hasAssignedWork = true
-						}
-						if hasAssignedWork {
-							// gastownhall/gascity#2293: cap-hit-shape drain-ack —
-							// the worker exited mid-task without nulling the
-							// bead's assignee. Emit a typed event so pack-side
-							// subscribers can apply recovery policy. SDK stays
-							// out of the commit/push/respawn decision (ZFC +
-							// zero hardcoded roles per AGENTS.md).
-							recordDrainAckAssignedWorkEvent(cityPath, cfg, store, rigStores, *session, tp.DisplayName(), tp.TemplateName, name, rec, stderr)
-						}
 					}
 					finalizeDT := dt
 					if reconcilerOwnedAck {
@@ -1890,7 +1927,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 		wakeTargets = append(wakeTargets, wakeTarget{session: session, tp: tp, alive: alive})
 	}
-	recordPhase("session_reconcile.forward_pass", phaseStart, map[string]any{
+	recordPhase(TraceSiteSessionReconcileForwardPass, "session_reconcile.forward_pass", phaseStart, map[string]any{
 		"ordered_session_count":  len(ordered),
 		"wake_target_count":      len(wakeTargets),
 		"rollback_count":         rollbacksThisTick,
@@ -1946,7 +1983,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 	idleProbeTargets := selectIdleProbeTargets(wakeTargets, wakeEvals, dt)
 	launchIdleProbes(ctx, idleProbeTargets, wakeTargets, dt, sp, clk)
-	recordPhase("session_reconcile.compute_awake_set_and_idle_probes", phaseStart, map[string]any{
+	recordPhase(TraceSiteSessionReconcileAwakeSet, "session_reconcile.compute_awake_set_and_idle_probes", phaseStart, map[string]any{
 		"wake_target_count":      len(wakeTargets),
 		"idle_probe_target_cnt":  len(idleProbeTargets),
 		"awake_decision_count":   len(awakeDecisions),
@@ -2114,7 +2151,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			closeBead(store, target.session.ID, closeReason, clk.Now().UTC(), stderr)
 		}
 	}
-	recordPhase("session_reconcile.apply_wake_sleep_decisions", phaseStart, map[string]any{
+	recordPhase(TraceSiteSessionReconcileWakeSleep, "session_reconcile.apply_wake_sleep_decisions", phaseStart, map[string]any{
 		"wake_target_count":     len(wakeTargets),
 		"start_candidate_count": len(startCandidates),
 	})
@@ -2130,7 +2167,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		clk, rec, startupTimeout, stdout, stderr, trace,
 		effectiveStartOptions...,
 	)
-	recordPhase("session_reconcile.execute_planned_starts", phaseStart, map[string]any{
+	recordPhase(TraceSiteSessionReconcileStartExecution, "session_reconcile.execute_planned_starts", phaseStart, map[string]any{
 		"start_candidate_count": len(startCandidates),
 		"planned_wake_count":    plannedWakes,
 	})
@@ -2146,7 +2183,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	}
 	advanceSessionDrainsWithSessionsTraced(dt, sp, store, sessionLookup, ordered, wakeEvals, cfg, poolDesired, nil, readyWaitSet, clk, trace)
 	clearMissingIdleProbes(dt, beadByID)
-	recordPhase("session_reconcile.advance_drains", phaseStart, map[string]any{
+	recordPhase(TraceSiteSessionReconcileDrainAdvance, "session_reconcile.advance_drains", phaseStart, map[string]any{
 		"ordered_session_count": len(ordered),
 		"wake_eval_count":       len(wakeEvals),
 	})

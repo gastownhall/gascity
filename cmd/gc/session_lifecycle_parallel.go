@@ -221,12 +221,13 @@ func (p startPhaseTimings) formatLog() string {
 }
 
 type startExecutionOptions struct {
-	async           bool
-	asyncFollowUp   func()
-	asyncLimiter    *asyncStartLimiter
-	asyncTracker    *asyncStartTracker
-	maxSessionAgeTr maxSessionAgeTracker
-	workDirResolver taskWorkDirResolver
+	async            bool
+	asyncFollowUp    func()
+	asyncLimiter     *asyncStartLimiter
+	asyncTracker     *asyncStartTracker
+	asyncStopTracker *asyncStartTracker
+	maxSessionAgeTr  maxSessionAgeTracker
+	workDirResolver  taskWorkDirResolver
 }
 
 type startExecutionOption func(*startExecutionOptions)
@@ -254,6 +255,12 @@ func withAsyncStartLimiter(limiter *asyncStartLimiter) startExecutionOption {
 func withAsyncStartTracker(tracker *asyncStartTracker) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.asyncTracker = tracker
+	}
+}
+
+func withAsyncDrainAckStopTracker(tracker *asyncStartTracker) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.asyncStopTracker = tracker
 	}
 }
 
