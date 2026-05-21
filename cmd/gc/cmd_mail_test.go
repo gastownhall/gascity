@@ -1275,6 +1275,9 @@ func TestMailInboxJSON(t *testing.T) {
 	if got.SchemaVersion != "1" || got.Recipient != "mayor" || len(got.Messages) != 1 || got.Messages[0].Body != "json body" {
 		t.Fatalf("unexpected JSON result: %+v", got)
 	}
+	if len(got.Recipients) != 1 || got.Recipients[0] != "mayor" {
+		t.Fatalf("recipients = %#v, want [mayor]", got.Recipients)
+	}
 	validateJSONResultSchema(t, []string{"mail", "inbox"}, stdout.Bytes())
 }
 
@@ -2172,6 +2175,9 @@ func TestMailCountJSON(t *testing.T) {
 	}
 	if got.SchemaVersion != "1" || got.Recipient != "bob" || got.Total != 2 || got.Unread != 1 {
 		t.Fatalf("unexpected JSON result: %+v", got)
+	}
+	if len(got.Recipients) != 1 || got.Recipients[0] != "bob" {
+		t.Fatalf("recipients = %#v, want [bob]", got.Recipients)
 	}
 	validateJSONResultSchema(t, []string{"mail", "count"}, stdout.Bytes())
 }

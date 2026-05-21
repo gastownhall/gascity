@@ -44,7 +44,25 @@ type traceStatusJSON struct {
 	AsOf              time.Time  `json:"as_of"`
 	ControllerRunning bool       `json:"controller_running"`
 	ControllerPID     int        `json:"controller_pid,omitempty"`
+	HeadSeq           uint64     `json:"head_seq"`
 	ActiveArms        []TraceArm `json:"active_arms"`
+	LegacyArms        []TraceArm `json:"arms,omitempty"`
+}
+
+func (s *traceStatusJSON) UnmarshalJSON(data []byte) error {
+	type traceStatusJSONAlias traceStatusJSON
+	var decoded traceStatusJSONAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*s = traceStatusJSON(decoded)
+	if s.ActiveArms == nil && s.LegacyArms != nil {
+		s.ActiveArms = append([]TraceArm(nil), s.LegacyArms...)
+	}
+	if s.LegacyArms == nil && s.ActiveArms != nil {
+		s.LegacyArms = append([]TraceArm(nil), s.ActiveArms...)
+	}
+	return nil
 }
 
 type traceStatusResultJSON struct {
@@ -703,12 +721,15 @@ func traceStatusLocal(cityPath string) (*traceStatusJSON, string, error) {
 func traceStatusFromState(cityPath string, state TraceArmState, now time.Time) traceStatusJSON {
 	arms := traceArmStatus(state, now)
 	pid := controllerAlive(cityPath)
+	head, _ := traceHeadSeq(traceCityRuntimeDir(cityPath))
 	return traceStatusJSON{
 		CityPath:          cityPath,
 		AsOf:              now,
 		ControllerRunning: pid != 0,
 		ControllerPID:     pid,
+		HeadSeq:           head,
 		ActiveArms:        arms,
+		LegacyArms:        append([]TraceArm(nil), arms...),
 	}
 }
 

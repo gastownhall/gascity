@@ -4,6 +4,7 @@
   "required": [
     "schema_version",
     "ok",
+    "recipients",
     "messages"
   ],
   "properties": {

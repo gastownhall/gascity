@@ -11,7 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `gc mail inbox`, `gc mail read`, `gc mail peek`, `gc mail thread`,
   and `gc mail count` now accept `--json` and emit schema-versioned result
-  envelopes for script and dashboard consumers.
+  envelopes for script and dashboard consumers. `gc mail inbox --json` and
+  `gc mail count --json` always include the resolved `recipients` array,
+  including single-recipient targets.
 
 ### Fixed
 
@@ -81,6 +83,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `records` instead of a bare record array. See
   `schemas/trace/status/result.schema.json` and
   `schemas/trace/show/result.schema.json` for the exact contracts.
+  During rolling upgrades, trace controller socket status replies include the
+  legacy `arms` alias and upgraded CLIs still accept `arms` from older
+  controllers.
 - Pack import cache validation now requires commit abbreviations in
   `packs.lock` to be at least seven characters long. Shorter abbreviations
   should be refreshed with `gc import install`.

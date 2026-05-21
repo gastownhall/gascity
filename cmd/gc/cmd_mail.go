@@ -2112,7 +2112,7 @@ func doMailCountTargetWithJSON(mp mail.Provider, target resolvedMailTarget, json
 }
 
 func jsonRecipients(target resolvedMailTarget) []string {
-	if len(target.recipients) <= 1 {
+	if len(target.recipients) == 0 {
 		return nil
 	}
 	return append([]string(nil), target.recipients...)
