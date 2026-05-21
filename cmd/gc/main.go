@@ -605,7 +605,8 @@ func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
 	var allStale []staleRegisteredCity
 	defer func() { emitStaleRegisteredCityWarnings(os.Stderr, allStale) }()
 
-	matches, stale, err := registeredRigBindingsByName(nameOrPath, false)
+	var deferredRegisteredLoadErr error
+	matches, stale, err, loadErr := registeredRigBindingsByNameWithDeferredLoadError(nameOrPath, false)
 	allStale = append(allStale, stale...)
 	if err != nil {
 		return resolvedContext{}, err
@@ -613,18 +614,22 @@ func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
 	if len(matches) > 0 {
 		return resolveRigBindingMatches(nameOrPath, matches)
 	}
+	deferredRegisteredLoadErr = loadErr
 
 	abs, err := filepath.Abs(nameOrPath)
 	if err != nil {
 		return resolvedContext{}, fmt.Errorf("rig %q: %w", nameOrPath, err)
 	}
-	matches, stale, err = registeredRigBindingsByPath(abs, false)
+	matches, stale, err, loadErr = registeredRigBindingsByPathWithDeferredLoadError(abs, false)
 	allStale = append(allStale, stale...)
 	if err != nil {
 		return resolvedContext{}, err
 	}
 	if len(matches) > 0 {
 		return resolveRigBindingMatches(abs, matches)
+	}
+	if deferredRegisteredLoadErr == nil {
+		deferredRegisteredLoadErr = loadErr
 	}
 
 	// Fallback: a city declared locally but not yet handed to the
@@ -637,6 +642,9 @@ func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
 		return resolvedContext{}, err
 	} else if ok {
 		return ctx, nil
+	}
+	if deferredRegisteredLoadErr != nil {
+		return resolvedContext{}, deferredRegisteredLoadErr
 	}
 	return resolvedContext{}, fmt.Errorf("rig %q is not registered in any city", nameOrPath)
 }
@@ -827,21 +835,31 @@ type registeredRigBinding struct {
 }
 
 func registeredRigBindingsByName(name string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error) {
+	matches, stale, err, _ = registeredRigBindingsByNameWithDeferredLoadError(name, failOnLoadError)
+	return matches, stale, err
+}
+
+func registeredRigBindingsByNameWithDeferredLoadError(name string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
 	return registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
 		return binding.Rig.Name == name
 	})
 }
 
 func registeredRigBindingsByPath(dir string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error) {
+	matches, stale, err, _ = registeredRigBindingsByPathWithDeferredLoadError(dir, failOnLoadError)
+	return matches, stale, err
+}
+
+func registeredRigBindingsByPathWithDeferredLoadError(dir string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
 	dir = normalizePathForCompare(dir)
-	matches, stale, err = registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
+	matches, stale, err, deferredLoadErr = registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
 		rigPath := normalizePathForCompare(binding.Path)
 		return pathWithinScope(dir, rigPath)
 	})
 	if err != nil {
-		return nil, stale, err
+		return nil, stale, err, nil
 	}
-	return keepDeepestRigBindings(matches), stale, nil
+	return keepDeepestRigBindings(matches), stale, nil, deferredLoadErr
 }
 
 // staleRegisteredCity identifies a registered city whose city.toml is
@@ -872,11 +890,11 @@ func emitStaleRegisteredCityWarnings(w io.Writer, stale []staleRegisteredCity) {
 	}
 }
 
-func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding) bool) (_ []registeredRigBinding, stale []staleRegisteredCity, _ error) {
+func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding) bool) (_ []registeredRigBinding, stale []staleRegisteredCity, _ error, deferredLoadErr error) {
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	cities, err := reg.List()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, err, nil
 	}
 	var matched []registeredRigBinding
 	var loadErrors []string
@@ -905,9 +923,12 @@ func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding
 		}
 	}
 	if len(loadErrors) > 0 && (failOnLoadError || len(matched) > 0) {
-		return nil, stale, fmt.Errorf("loading registered city rig bindings: %s", strings.Join(loadErrors, "; "))
+		return nil, stale, fmt.Errorf("loading registered city rig bindings: %s", strings.Join(loadErrors, "; ")), nil
 	}
-	return matched, stale, nil
+	if len(loadErrors) > 0 {
+		return matched, stale, nil, fmt.Errorf("loading registered city rig bindings: %s", strings.Join(loadErrors, "; "))
+	}
+	return matched, stale, nil, nil
 }
 
 func missingRootCityTOML(err error, cityPath string) (string, bool) {

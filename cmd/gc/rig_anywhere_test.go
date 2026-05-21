@@ -1393,6 +1393,45 @@ func TestRigAnywhere_ResolveRigToContext(t *testing.T) {
 		}
 	})
 
+	t.Run("local_unregistered_city_miss_preserves_registered_load_error", func(t *testing.T) {
+		resetFlags(t)
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+		t.Setenv("GC_CITY", "")
+		t.Setenv("GC_CITY_PATH", "")
+		t.Setenv("GC_CITY_ROOT", "")
+		t.Setenv("GC_DIR", "")
+
+		badCity := setupCity(t, "broken-registered-miss-city")
+		if err := os.WriteFile(config.SiteBindingPath(badCity), []byte("[[rig]\nname = \"broken\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		registerCityForRigResolution(t, gcHome, badCity, "broken-registered-miss-city")
+
+		cityPath := setupCity(t, "local-miss-city")
+		rigDir := filepath.Join(t.TempDir(), "local-other-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		toml := fmt.Sprintf("[workspace]\nname = \"local-miss-city\"\n\n[[agent]]\nname = \"mayor\"\n\n[[rigs]]\nname = \"local-other-rig\"\npath = %q\n", rigDir)
+		writeRigAnywhereCityToml(t, cityPath, toml)
+		setCwd(t, cityPath)
+
+		_, err := resolveRigToContext("missing-rig")
+		if err == nil {
+			t.Fatal("resolveRigToContext should preserve registered load errors when local fallback misses")
+		}
+		if !strings.Contains(err.Error(), "loading registered city rig bindings") {
+			t.Fatalf("error = %q, want registered city binding load error", err)
+		}
+		if !strings.Contains(err.Error(), "broken-registered-miss-city") {
+			t.Fatalf("error = %q, want bad city name", err)
+		}
+		if strings.Contains(err.Error(), "not registered") {
+			t.Fatalf("error = %q, should preserve registered load error instead of not registered", err)
+		}
+	})
+
 	t.Run("local_unregistered_city_resolves_by_rig_path", func(t *testing.T) {
 		resetFlags(t)
 		gcHome := t.TempDir()
