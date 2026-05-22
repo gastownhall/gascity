@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -899,11 +898,19 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 	}
 	hqPrefix := config.EffectiveHQPrefix(cfg)
 	cityName := cfg.EffectiveCityName()
+	resolveRigPaths(cityPath, cfg.Rigs)
+	rigsByName := make(map[string]config.Rig, len(cfg.Rigs))
+	for i := range cfg.Rigs {
+		rigsByName[cfg.Rigs[i].Name] = cfg.Rigs[i]
+	}
 
 	if jsonOutput {
-		result := rigListJSONWithCache{
-			CityPath: cityPath,
-			CityName: cityName,
+		cacheAgeS := cr.AgeSeconds
+		result := RigListJSON{
+			SchemaVersion: "1",
+			CityPath:      cityPath,
+			CityName:      cityName,
+			CacheAgeS:     &cacheAgeS,
 			Rigs: []RigListItem{{
 				Name:   cityName,
 				Path:   cityPath,
@@ -911,20 +918,39 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 				HQ:     true,
 				Beads:  rigBeadsStatus(fs, cityPath),
 			}},
-			CacheAgeS: cr.AgeSeconds,
 		}
 		for _, rig := range cr.Body {
+			path := rig.Path
+			prefix := rig.Prefix
+			defaultBranch := rig.DefaultBranch
+			defaultSlingTarget := ""
+			if cfgRig, ok := rigsByName[rig.Name]; ok {
+				path = cfgRig.Path
+				prefix = cfgRig.EffectivePrefix()
+				defaultBranch = cfgRig.EffectiveDefaultBranch()
+				defaultSlingTarget = cfgRig.DefaultSlingTarget
+			}
 			result.Rigs = append(result.Rigs, RigListItem{
-				Name:      rig.Name,
-				Path:      rig.Path,
-				Prefix:    rig.Prefix,
-				Suspended: rig.Suspended,
-				Beads:     rigBeadsStatus(fs, rig.Path),
+				Name:               rig.Name,
+				Path:               path,
+				Prefix:             prefix,
+				DefaultBranch:      defaultBranch,
+				Suspended:          rig.Suspended,
+				Running:            rig.RunningCount > 0,
+				DefaultSlingTarget: defaultSlingTarget,
+				Beads:              rigBeadsStatus(fs, path),
 			})
 		}
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(result); err != nil {
+		result.Summary.Total = len(result.Rigs)
+		for _, rig := range result.Rigs {
+			if rig.Suspended {
+				result.Summary.Suspended++
+			}
+			if rig.Running {
+				result.Summary.Running++
+			}
+		}
+		if err := writeCLIJSONLine(stdout, result); err != nil {
 			fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -962,16 +988,6 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 	return 0
 }
 
-// rigListJSONWithCache is the --json output for `gc rig list` on the API
-// path. Structurally identical to RigListJSON but adds the _cache_age_s
-// envelope field documented in docs/rules/gc-read-path-routes-through-api.md.
-type rigListJSONWithCache struct {
-	CityPath  string        `json:"city_path"`
-	CityName  string        `json:"city_name"`
-	Rigs      []RigListItem `json:"rigs"`
-	CacheAgeS float64       `json:"_cache_age_s"`
-}
-
 // cacheAgeBannerThresholdSeconds is the cache-age cutoff above which human
 // output appends the "reconciler may be lagging" banner. Matches the
 // enabler contract D5 documented in the ga-h6w plan.
@@ -984,6 +1000,7 @@ type RigListJSON struct {
 	CityName      string         `json:"city_name"`
 	Rigs          []RigListItem  `json:"rigs"`
 	Summary       RigListSummary `json:"summary"`
+	CacheAgeS     *float64       `json:"_cache_age_s,omitempty"`
 }
 
 // RigListItem is one rig entry in the JSON output.

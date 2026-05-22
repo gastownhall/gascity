@@ -17,15 +17,24 @@ const storeHealthCacheTTL = 30 * time.Second
 // when the TTL has elapsed. Safe for concurrent callers.
 func (s *Server) cachedStoreHealth(now time.Time) *StatusStoreHealth {
 	s.storeHealthMu.Lock()
-	defer s.storeHealthMu.Unlock()
 	if s.storeHealthEntry != nil && now.Before(s.storeHealthExpires) {
-		return s.storeHealthEntry
+		entry := s.storeHealthEntry
+		s.storeHealthMu.Unlock()
+		return entry
 	}
 	compute := s.storeHealthComputer
 	if compute == nil {
 		compute = s.computeStoreHealth
 	}
+	s.storeHealthMu.Unlock()
+
 	h := compute()
+
+	s.storeHealthMu.Lock()
+	defer s.storeHealthMu.Unlock()
+	if s.storeHealthEntry != nil && now.Before(s.storeHealthExpires) {
+		return s.storeHealthEntry
+	}
 	s.storeHealthEntry = h
 	s.storeHealthExpires = now.Add(storeHealthCacheTTL)
 	return h
@@ -70,7 +79,7 @@ func countBeadStoreRows(store beads.Store) int {
 	if store == nil {
 		return 0
 	}
-	list, err := store.List(beads.ListQuery{AllowScan: true})
+	list, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
 	if err != nil {
 		return 0
 	}

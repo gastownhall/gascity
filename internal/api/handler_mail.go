@@ -138,6 +138,11 @@ func (s *Server) resolveMailQueryRecipientsWithContext(ctx context.Context, reci
 	if err != nil {
 		return []string{recipient}
 	}
+	if bead, getErr := store.Get(resolved); getErr == nil {
+		if recipients := apiSessionMailboxAddresses(bead); len(recipients) > 0 {
+			return recipients
+		}
+	}
 	return []string{resolved}
 }
 
@@ -167,8 +172,9 @@ func (s *Server) mailRecipientsForNamedSession(store beads.Store, spec apiNamedS
 			continue
 		}
 		seen[b.ID] = true
-		recipients = append(recipients, b.ID)
+		recipients = append(recipients, apiSessionMailboxAddresses(b)...)
 	}
+	recipients = uniqueMailRecipients(recipients)
 	sort.Strings(recipients)
 	return recipients, nil
 }
