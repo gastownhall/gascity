@@ -521,6 +521,25 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// overwritten with the city-uniform default here. template_resolve.go
 	// owns the qualified override for the CLI create path.
 	sessionEnv := mergeEnv(resolved.Env, cityIdentityAnchorsForCity(cityPath))
+	// Resolve session_live so resumed sessions get re-themed (status bar,
+	// keybindings) the same way reconciler-started sessions do. Without this,
+	// `gc session attach` recreates the tmux runtime with an empty
+	// Hints.SessionLive, doStartSession's runSessionLive early-returns, and
+	// the session_live theme/keybinding hooks never run. The setup context is
+	// built via the reconciler's own sessionSetupContextForAgent() so
+	// {{.Rig}}/{{.RigRoot}}/{{.AgentBase}} expand correctly. See ga-vtkhi.
+	qualifiedName := firstNonEmptyGCString(info.AgentName, info.Template)
+	var sessionLive []string
+	if agentCfg := findAgentByTemplate(cfg, info.Template); agentCfg != nil && len(agentCfg.SessionLive) > 0 {
+		setupCtx := sessionSetupContextForAgent(cityPath, cfg.EffectiveCityName(), qualifiedName, agentCfg, cfg.Rigs)
+		setupCtx.Session = info.SessionName
+		setupCtx.WorkDir = workDir
+		setupCtx.ConfigDir = cityPath
+		if agentCfg.SourceDir != "" {
+			setupCtx.ConfigDir = agentCfg.SourceDir
+		}
+		sessionLive = expandSessionSetup(agentCfg.SessionLive, setupCtx)
+	}
 	return &worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    workDir,
@@ -535,6 +554,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 			EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 			AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
 			MCPServers:             mcpServers,
+			SessionLive:            sessionLive,
 		},
 		Resume: session.ProviderResume{
 			ResumeFlag:    firstNonEmptyGCString(resolved.ResumeFlag, info.ResumeFlag),

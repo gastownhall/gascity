@@ -1497,6 +1497,52 @@ ready_delay_ms = 250
 	}
 }
 
+// TestResolvedWorkerRuntimeWithConfigPopulatesSessionLiveOnResume guards the
+// ga-vtkhi fix: the `gc session attach` resume path must carry the agent's
+// session_live commands (with templates expanded) into Hints.SessionLive so
+// the recreated tmux runtime re-applies the status-bar/keybinding theme the
+// same way reconciler-started sessions do.
+func TestResolvedWorkerRuntimeWithConfigPopulatesSessionLiveOnResume(t *testing.T) {
+	cityDir := t.TempDir()
+	writePhase0InterfaceCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+provider = "stub"
+session_live = ["theme apply {{.Session}}"]
+
+[providers.stub]
+command = "/bin/echo"
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	runtimeCfg, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+		Template:    "worker",
+		AgentName:   "worker",
+		SessionName: "test-city__worker",
+	}, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
+	}
+	if len(runtimeCfg.Hints.SessionLive) != 1 {
+		t.Fatalf("Hints.SessionLive = %v, want 1 command", runtimeCfg.Hints.SessionLive)
+	}
+	if got, want := runtimeCfg.Hints.SessionLive[0], "theme apply test-city__worker"; got != want {
+		t.Fatalf("Hints.SessionLive[0] = %q, want %q (template must expand on resume)", got, want)
+	}
+}
+
 func TestResolvedWorkerRuntimeWithConfigIgnoresMCPResolutionErrorForACPResume(t *testing.T) {
 	cityDir := t.TempDir()
 	writePhase0InterfaceCity(t, cityDir, `[workspace]
