@@ -1556,10 +1556,14 @@ func (c *capturingRecorder) Record(e events.Event) {
 	c.events = append(c.events, e)
 }
 
-func (c *capturingRecorder) byType(t string) []events.Event {
+// strandedEvents returns the captured events.SessionStranded events,
+// in emission order. Specialized to the only event type any test in
+// this package currently filters for; add a sibling method (or migrate
+// to events.NewFake()) if a future test needs another type.
+func (c *capturingRecorder) strandedEvents() []events.Event {
 	out := make([]events.Event, 0, len(c.events))
 	for _, e := range c.events {
-		if e.Type == t {
+		if e.Type == events.SessionStranded {
 			out = append(out, e)
 		}
 	}
@@ -1632,7 +1636,7 @@ func TestReconcileSessionBeads_PoolSlotWithStrandedWorkEmitsDiagnostic(t *testin
 		&env.stderr,
 	)
 
-	stranded := rec.byType(events.SessionStranded)
+	stranded := rec.strandedEvents()
 	if len(stranded) != 1 {
 		t.Fatalf("session.stranded events emitted = %d, want 1; got events: %+v", len(stranded), rec.events)
 	}
@@ -1694,7 +1698,7 @@ func TestReconcileSessionBeads_PoolSlotWithStrandedWorkEmitsDiagnostic(t *testin
 		&env.stderr,
 	)
 
-	stranded = rec.byType(events.SessionStranded)
+	stranded = rec.strandedEvents()
 	if len(stranded) != 1 {
 		t.Fatalf("session.stranded events after second tick = %d, want still 1 (throttled); events: %+v", len(stranded), rec.events)
 	}
@@ -1783,7 +1787,7 @@ func TestReconcileSessionBeads_PoolSlotStrandedThrottleSurvivesSetMetadataFailur
 		&env.stderr,
 	)
 
-	stranded := rec.byType(events.SessionStranded)
+	stranded := rec.strandedEvents()
 	if len(stranded) != 1 {
 		t.Fatalf("session.stranded events after first tick (SetMetadata failing) = %d, want 1; events: %+v", len(stranded), rec.events)
 	}
@@ -1832,7 +1836,7 @@ func TestReconcileSessionBeads_PoolSlotStrandedThrottleSurvivesSetMetadataFailur
 		&env.stderr,
 	)
 
-	stranded = rec.byType(events.SessionStranded)
+	stranded = rec.strandedEvents()
 	if len(stranded) != 1 {
 		t.Fatalf("session.stranded events after second tick (durable marker still missing) = %d, want still 1 (in-memory throttle should hold); events: %+v", len(stranded), rec.events)
 	}
