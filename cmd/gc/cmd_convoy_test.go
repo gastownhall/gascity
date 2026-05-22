@@ -2068,8 +2068,8 @@ func TestRouteConvoyList_SixRowMatrix(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("GC_DEBUG", "1")
 			cityPath := writeConvoyTestCity(t)
+			t.Setenv("GC_DEBUG", "1")
 
 			var c *api.Client
 			if !tc.useNilClient {
@@ -2162,8 +2162,8 @@ func TestRouteConvoyStatus_SixRowMatrix(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("GC_DEBUG", "1")
 			cityPath := writeConvoyTestCity(t)
+			t.Setenv("GC_DEBUG", "1")
 
 			var c *api.Client
 			if !tc.useNilClient {
@@ -2251,8 +2251,8 @@ func TestRouteConvoyCheck_SixRowMatrix(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("GC_DEBUG", "1")
 			cityPath := writeConvoyTestCity(t)
+			t.Setenv("GC_DEBUG", "1")
 
 			var c *api.Client
 			if !tc.useNilClient {
@@ -2362,7 +2362,6 @@ func TestRouteConvoyStatus_WorkflowConvoyFallsBack(t *testing.T) {
 	// the router must fall back to the local path so workflow-aware
 	// rendering still works. The local fallback won't find the store so exit
 	// is non-zero, but the route log must record the workflow-convoy reason.
-	t.Setenv("GC_DEBUG", "1")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -2375,6 +2374,7 @@ func TestRouteConvoyStatus_WorkflowConvoyFallsBack(t *testing.T) {
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
 	cityPath := writeConvoyTestCity(t)
+	t.Setenv("GC_DEBUG", "1")
 	var stdout, stderr bytes.Buffer
 	_ = routeConvoyStatus(cityPath, "gc-wf-1", c, "", false, &stdout, &stderr)
 	if !strings.Contains(stderr.String(), "route=fallback reason=workflow-convoy") {

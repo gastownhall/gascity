@@ -3355,8 +3355,8 @@ func TestRouteMailCheck_SixRowMatrix(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("GC_DEBUG", "1")
 			cityPath := writeMailTestCity(t)
+			t.Setenv("GC_DEBUG", "1")
 
 			var c *api.Client
 			if !tc.useNilClient {
@@ -3440,8 +3440,8 @@ func TestRouteMailPeek_SixRowMatrix(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("GC_DEBUG", "1")
 			cityPath := writeMailTestCity(t)
+			t.Setenv("GC_DEBUG", "1")
 
 			var c *api.Client
 			if !tc.useNilClient {
@@ -3529,8 +3529,8 @@ func TestRouteMailCount_SixRowMatrix(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("GC_DEBUG", "1")
 			cityPath := writeMailTestCity(t)
+			t.Setenv("GC_DEBUG", "1")
 
 			var c *api.Client
 			if !tc.useNilClient {

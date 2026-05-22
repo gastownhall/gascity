@@ -11570,6 +11570,7 @@ export interface operations {
             /** @description OK */
             200: {
                 headers: {
+                    "X-GC-Cache-Age-S"?: number;
                     "X-GC-Index"?: number;
                     "X-GC-Request-Id": components["headers"]["X-GC-Request-Id"];
                     [name: string]: unknown;

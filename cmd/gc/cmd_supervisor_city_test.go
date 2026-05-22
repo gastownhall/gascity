@@ -1757,8 +1757,16 @@ func TestSupervisorCreatesControllerSocketForManagedCity(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"),
-		[]byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+	cityToml := `[workspace]
+name = "test-city"
+
+[session]
+provider = "fake"
+
+[daemon]
+shutdown_timeout = "100ms"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
