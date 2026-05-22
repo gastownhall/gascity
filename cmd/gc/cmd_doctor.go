@@ -232,6 +232,11 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 	d.Register(doctor.NewScopedDoltVersionCheckForConfig(cityPath, skipManagedDoltCheck, cfg, cfgErr))
 	d.Register(&doctor.EventsLogCheck{})
 	d.Register(doctor.NewEventLogSizeCheck())
+	// bd auto-backup growth canary. bd's auto-backup pipeline (upstream of
+	// gascity, gastownhall/beads#2993) writes to .beads/backup/ on every bd
+	// invocation without retention. This check warns before the directory
+	// fills the disk and cascades into broken dolt writes.
+	d.Register(doctor.NewBdBackupSizeCheck(cityPath))
 	// Worktree checks deliberately run even when cfgErr != nil — they
 	// only need the city path, and a broken city.toml is exactly when
 	// silent disk-fill is most likely. The zero-value DoctorConfig

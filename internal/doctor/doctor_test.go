@@ -46,6 +46,7 @@ func TestCheckWarmupEligibleDefaultsFalse(t *testing.T) {
 	checks := []Check{
 		&AgentSessionsCheck{},
 		&BDSplitStoreCheck{},
+		&BdBackupSizeCheck{},
 		&BeadsRoleCheck{},
 		&BeadsStoreCheck{},
 		&BinaryCheck{},
