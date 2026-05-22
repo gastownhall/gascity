@@ -807,6 +807,314 @@ exit 1
 	}
 }
 
+func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing.T) {
+	tests := []struct {
+		name               string
+		scope              string
+		configuredIdentity string
+		protectedID        string
+		protectedAssignee  string
+		orphanID           string
+		orphanAssignee     string
+	}{
+		{
+			name:               "hq-reported-shape",
+			scope:              "hq",
+			configuredIdentity: "gastown.deacon",
+			protectedID:        "gc-wisp-protected-hq-1578",
+			protectedAssignee:  "gastown.deacon",
+			orphanID:           "gc-wisp-orphan-hq-1578",
+			orphanAssignee:     "ghost.worker-404",
+		},
+		{
+			name:               "rig-neutral-direct",
+			scope:              "project-alpha",
+			configuredIdentity: "project-alpha/custom.worker",
+			protectedID:        "gc-wisp-protected-neutral-1578",
+			protectedAssignee:  "project-alpha/custom.worker",
+			orphanID:           "gc-wisp-orphan-neutral-1578",
+			orphanAssignee:     "project-alpha/missing.worker-404",
+		},
+		{
+			name:               "rig-refinery-direct",
+			scope:              "project-alpha",
+			configuredIdentity: "project-alpha/gastown.refinery",
+			protectedID:        "gc-wisp-protected-refinery-1578",
+			protectedAssignee:  "project-alpha/gastown.refinery",
+			orphanID:           "gc-wisp-orphan-refinery-1578",
+			orphanAssignee:     "project-alpha/gastown.retired-404",
+		},
+		{
+			name:               "rig-witness-direct",
+			scope:              "project-alpha",
+			configuredIdentity: "project-alpha/gastown.witness",
+			protectedID:        "gc-wisp-protected-witness-1578",
+			protectedAssignee:  "project-alpha/gastown.witness",
+			orphanID:           "gc-wisp-orphan-witness-1578",
+			orphanAssignee:     "project-alpha/gastown.missing-404",
+		},
+		{
+			name:               "rig-pool-instance",
+			scope:              "project-alpha",
+			configuredIdentity: "project-alpha/gastown.refinery",
+			protectedID:        "gc-wisp-protected-pool-1578",
+			protectedAssignee:  "project-alpha/gastown.refinery-3",
+			orphanID:           "gc-wisp-orphan-pool-1578",
+			orphanAssignee:     "project-alpha/gastown.retired-3",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			binDir := filepath.Join(root, "bin")
+			if err := os.MkdirAll(binDir, 0o755); err != nil {
+				t.Fatalf("MkdirAll(%s): %v", binDir, err)
+			}
+			for _, name := range []string{"bash", "cat", "mktemp", "jq", "awk", "grep", "sed", "rm"} {
+				linkTestPathTool(t, binDir, name)
+			}
+
+			gcLog := filepath.Join(root, "gc.log")
+			if err := os.WriteFile(gcLog, nil, 0o644); err != nil {
+				t.Fatalf("WriteFile(%s): %v", gcLog, err)
+			}
+			fakeGC := filepath.Join(binDir, "gc")
+			writeStrictOrphanSweepGCStub(t, fakeGC)
+
+			beadsJSON := orphanSweepProtectedWispBeadsJSON(t, tt.protectedID, tt.protectedAssignee, tt.orphanID, tt.orphanAssignee)
+			hqJSON := "[]"
+			rigJSON := "[]"
+			switch tt.scope {
+			case "hq":
+				hqJSON = beadsJSON
+			case "project-alpha":
+				rigJSON = beadsJSON
+			default:
+				t.Fatalf("unsupported scope %q", tt.scope)
+			}
+
+			env := orphanSweepCleanroomEnv(t, root, binDir, gcLog, hqJSON, rigJSON, tt.configuredIdentity, tt.orphanID)
+			assertOrphanSweepFakeGC(t, env, filepath.Join(binDir, "bash"), fakeGC, gcLog)
+
+			script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+			cmd := exec.Command(script)
+			cmd.Env = env
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, orphanSweepFailureContext(out, gcLog))
+			}
+			if got, want := strings.TrimSpace(string(out)), "orphan-sweep: reset 1 orphaned beads"; got != want {
+				t.Fatalf("orphan-sweep output = %q, want %q\n%s", got, want, orphanSweepFailureContext(out, gcLog))
+			}
+
+			logData, err := os.ReadFile(gcLog)
+			if err != nil {
+				t.Fatalf("ReadFile(%s): %v", gcLog, err)
+			}
+			log := string(logData)
+			lines := nonEmptyLogLines(log)
+			orphanUpdate := "bd update " + tt.orphanID + " --status=open --assignee="
+			if got := countExactLine(lines, orphanUpdate); got != 1 {
+				t.Fatalf("orphan update count = %d, want 1 for %q\n%s", got, orphanUpdate, orphanSweepFailureContext(out, gcLog))
+			}
+			if strings.Contains(log, "bd update "+tt.protectedID+" ") {
+				t.Fatalf("protected wisp %s was reset\n%s", tt.protectedID, orphanSweepFailureContext(out, gcLog))
+			}
+			if strings.Contains(log, "UNEXPECTED:") {
+				t.Fatalf("unexpected fake gc invocation\n%s", orphanSweepFailureContext(out, gcLog))
+			}
+			if strings.Contains(log, "config show") {
+				t.Fatalf("primary regression must not use config show fallback\n%s", orphanSweepFailureContext(out, gcLog))
+			}
+			if got := countExactLine(lines, "session list --json"); got != 1 {
+				t.Fatalf("session probe count = %d, want 1\n%s", got, orphanSweepFailureContext(out, gcLog))
+			}
+			if strings.Contains(log, "--rig project-alpha session list --json") {
+				t.Fatalf("unexpected rig-scoped session probe\n%s", orphanSweepFailureContext(out, gcLog))
+			}
+
+			wantTranscript := []string{
+				"bd list --status=in_progress --json --limit=0",
+				"rig list --json",
+				"bd list --rig project-alpha --status=in_progress --json --limit=0",
+				"config explain",
+				"session list --json",
+				orphanUpdate,
+			}
+			if !equalStringSlices(lines, wantTranscript) {
+				t.Fatalf("gc transcript mismatch\nwant:\n%s\ngot:\n%s\n%s",
+					strings.Join(wantTranscript, "\n"),
+					strings.Join(lines, "\n"),
+					orphanSweepFailureContext(out, gcLog))
+			}
+		})
+	}
+}
+
+func writeStrictOrphanSweepGCStub(t *testing.T, path string) {
+	t.Helper()
+	writeExecutable(t, path, `#!/bin/sh
+if [ "$1" = "--rig" ]; then
+  shift 2
+fi
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+if [ "$*" = "bd list --status=in_progress --json --limit=0" ]; then
+  printf '%s\n' "$ORPHAN_SWEEP_HQ_JSON"
+  exit 0
+fi
+if [ "$*" = "rig list --json" ]; then
+  printf '{"rigs":[{"name":"hq","hq":true},{"name":"project-alpha","hq":false}]}\n'
+  exit 0
+fi
+if [ "$*" = "bd list --rig project-alpha --status=in_progress --json --limit=0" ]; then
+  printf '%s\n' "$ORPHAN_SWEEP_RIG_JSON"
+  exit 0
+fi
+if [ "$*" = "config explain" ]; then
+  printf 'Agent: %s\n  source: pack\n' "$ORPHAN_SWEEP_CONFIGURED_IDENTITY"
+  exit 0
+fi
+if [ "$*" = "session list --json" ]; then
+  printf '[]\n'
+  exit 0
+fi
+if [ "$*" = "bd update $ORPHAN_SWEEP_ORPHAN_ID --status=open --assignee=" ]; then
+  exit 0
+fi
+printf 'UNEXPECTED: %s\n' "$*" >> "$GC_CALL_LOG"
+printf 'UNEXPECTED: %s\n' "$*" >&2
+exit 2
+`)
+}
+
+func orphanSweepProtectedWispBeadsJSON(t *testing.T, protectedID, protectedAssignee, orphanID, orphanAssignee string) string {
+	t.Helper()
+	type bead struct {
+		ID        string `json:"id"`
+		Status    string `json:"status"`
+		Assignee  string `json:"assignee"`
+		Ephemeral bool   `json:"ephemeral"`
+		IssueType string `json:"issue_type"`
+	}
+	data, err := json.Marshal([]bead{
+		{
+			ID:        protectedID,
+			Status:    "in_progress",
+			Assignee:  protectedAssignee,
+			Ephemeral: true,
+			IssueType: "molecule",
+		},
+		{
+			ID:        orphanID,
+			Status:    "in_progress",
+			Assignee:  orphanAssignee,
+			Ephemeral: true,
+			IssueType: "molecule",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(orphan-sweep beads): %v", err)
+	}
+	return string(data)
+}
+
+func orphanSweepCleanroomEnv(t *testing.T, root, binDir, gcLog, hqJSON, rigJSON, configuredIdentity, orphanID string) []string {
+	t.Helper()
+	dirs := map[string]string{
+		"HOME":              filepath.Join(root, "home"),
+		"XDG_CONFIG_HOME":   filepath.Join(root, "xdg-config"),
+		"XDG_CACHE_HOME":    filepath.Join(root, "xdg-cache"),
+		"XDG_STATE_HOME":    filepath.Join(root, "xdg-state"),
+		"TMPDIR":            filepath.Join(root, "tmp"),
+		"GC_CITY":           filepath.Join(root, "city"),
+		"GC_CITY_PATH":      filepath.Join(root, "city"),
+		"BEADS_DIR":         filepath.Join(root, "beads"),
+		"GIT_CONFIG_GLOBAL": filepath.Join(root, "gitconfig"),
+	}
+	for key, path := range dirs {
+		if key == "GIT_CONFIG_GLOBAL" {
+			if err := os.WriteFile(path, nil, 0o644); err != nil {
+				t.Fatalf("WriteFile(%s): %v", path, err)
+			}
+			continue
+		}
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+	}
+	return []string{
+		"HOME=" + dirs["HOME"],
+		"XDG_CONFIG_HOME=" + dirs["XDG_CONFIG_HOME"],
+		"XDG_CACHE_HOME=" + dirs["XDG_CACHE_HOME"],
+		"XDG_STATE_HOME=" + dirs["XDG_STATE_HOME"],
+		"TMPDIR=" + dirs["TMPDIR"],
+		"GC_CITY=" + dirs["GC_CITY"],
+		"GC_CITY_PATH=" + dirs["GC_CITY_PATH"],
+		"GC_CALL_LOG=" + gcLog,
+		"BEADS_DIR=" + dirs["BEADS_DIR"],
+		"GIT_CONFIG_GLOBAL=" + dirs["GIT_CONFIG_GLOBAL"],
+		"GIT_CONFIG_NOSYSTEM=1",
+		"ORPHAN_SWEEP_HQ_JSON=" + hqJSON,
+		"ORPHAN_SWEEP_RIG_JSON=" + rigJSON,
+		"ORPHAN_SWEEP_CONFIGURED_IDENTITY=" + configuredIdentity,
+		"ORPHAN_SWEEP_ORPHAN_ID=" + orphanID,
+		"PATH=" + binDir,
+	}
+}
+
+func assertOrphanSweepFakeGC(t *testing.T, env []string, bashPath, fakeGC, gcLog string) {
+	t.Helper()
+	cmd := exec.Command(bashPath, "-c", "command -v gc")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("command -v gc failed: %v\n%s", err, orphanSweepFailureContext(out, gcLog))
+	}
+	if got := strings.TrimSpace(string(out)); got != fakeGC {
+		t.Fatalf("command -v gc = %q, want %q\n%s", got, fakeGC, orphanSweepFailureContext(out, gcLog))
+	}
+}
+
+func orphanSweepFailureContext(output []byte, callLogPath string) string {
+	logData, err := os.ReadFile(callLogPath)
+	if err != nil {
+		return fmt.Sprintf("captured output:\n%s\nrecent GC_CALL_LOG (%s): <read error: %v>", output, callLogPath, err)
+	}
+	return fmt.Sprintf("captured output:\n%s\nrecent GC_CALL_LOG (%s):\n%s", output, callLogPath, logData)
+}
+
+func nonEmptyLogLines(log string) []string {
+	log = strings.TrimSpace(log)
+	if log == "" {
+		return nil
+	}
+	return strings.Split(log, "\n")
+}
+
+func countExactLine(lines []string, want string) int {
+	count := 0
+	for _, line := range lines {
+		if line == want {
+			count++
+		}
+	}
+	return count
+}
+
+func equalStringSlices(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestMaintenanceDoltScriptsUseManagedRuntimePorts(t *testing.T) {
 	scripts := []struct {
 		name   string
