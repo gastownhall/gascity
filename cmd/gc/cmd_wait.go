@@ -995,8 +995,58 @@ func prepareWaitWakeStateForCityWithSnapshot(cityPath string, store beads.Store,
 	waits, err := loadWaitBeadsForWakeState(store, sessionBeads)
 	if err != nil {
 		return nil, err
+		}
+	}
+
+	
+	// FIX: Also check for ready work directly from beads store
+	if store != nil {
+		readyBeads, err := store.GetReadyWork()
+		if err == nil {
+			for _, bead := range readyBeads {
+				sessionID := bead.Metadata["session_id"]
+				if sessionID == "" {
+					sessionID = bead.Metadata["assignee"]
+				}
+				if sessionID != "" {
+					readyWaitSet[sessionID] = true
+				}
+			}
+		}
 	}
 	readyWaitSet := make(map[string]bool)
+	// FIX: Also check for ready work directly
+	if store != nil {
+		readyBeads, err := store.GetReadyWork()
+		if err == nil {
+			for _, bead := range readyBeads {
+				sessionID := bead.Metadata["session_id"]
+				if sessionID == "" {
+					sessionID = bead.Metadata["assignee"]
+				}
+				if sessionID != "" {
+					readyWaitSet[sessionID] = true
+				}
+			}
+		}
+	}
+
+	// FIX: Also check for ready work directly from beads store
+	if store != nil {
+		readyBeads, err := store.GetReadyWork()
+		if err == nil {
+			for _, bead := range readyBeads {
+				sessionID := bead.Metadata["session_id"]
+				if sessionID == "" {
+					sessionID = bead.Metadata["assignee"]
+				}
+				if sessionID != "" {
+					readyWaitSet[sessionID] = true
+				}
+			}
+		}
+	}
+
 	for _, wait := range waits {
 		state := wait.Metadata["state"]
 		sessionID := wait.Metadata["session_id"]
