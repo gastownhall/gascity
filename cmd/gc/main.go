@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -35,6 +36,43 @@ var errExit = errors.New("exit")
 
 type commandExitError struct {
 	code int
+}
+
+type switchableWriter struct {
+	target io.Writer
+}
+
+func (w *switchableWriter) Write(p []byte) (int, error) {
+	if w == nil || w.target == nil {
+		return 0, io.ErrClosedPipe
+	}
+	return w.target.Write(p)
+}
+
+type countingWriter struct {
+	target io.Writer
+	mu     sync.Mutex
+	n      int64
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	if w == nil || w.target == nil {
+		return 0, io.ErrClosedPipe
+	}
+	n, err := w.target.Write(p)
+	w.mu.Lock()
+	w.n += int64(n)
+	w.mu.Unlock()
+	return n, err
+}
+
+func (w *countingWriter) BytesWritten() int64 {
+	if w == nil {
+		return 0
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.n
 }
 
 func (e *commandExitError) Error() string {
@@ -86,6 +124,13 @@ var rigFlag string
 // run executes the gc CLI with the given args, writing output to stdout and
 // errors to stderr. Returns the exit code.
 func run(args []string, stdout, stderr io.Writer) int {
+	prevCityFlag, prevRigFlag := cityFlag, rigFlag
+	cityFlag, rigFlag = "", ""
+	defer func() {
+		cityFlag = prevCityFlag
+		rigFlag = prevRigFlag
+	}()
+
 	// Initialize OTel telemetry (opt-in via GC_OTEL_METRICS_URL / GC_OTEL_LOGS_URL).
 	provider, err := telemetry.Init(context.Background(), "gascity", version)
 	if err != nil {
@@ -100,17 +145,62 @@ func run(args []string, stdout, stderr io.Writer) int {
 		telemetry.SetProcessOTELAttrs()
 	}
 
-	root := newRootCmd(stdout, stderr)
+	execStdout := &switchableWriter{target: stdout}
+	var jsonStdout bytes.Buffer
+	var observedStdout *countingWriter
+	root := newRootCmd(execStdout, stderr)
 	if args == nil {
 		args = []string{}
 	}
+	bufferJSONExecution := shouldBufferJSONExecution(root, args)
+	reportJSONFailure := shouldReportJSONExecutionError(root, args)
+	if bufferJSONExecution {
+		execStdout.target = &jsonStdout
+	} else if reportJSONFailure {
+		observedStdout = &countingWriter{target: stdout}
+		execStdout.target = observedStdout
+	}
 	root.SetArgs(args)
-	root.SetOut(stdout)
+	root.SetOut(execStdout)
 	root.SetErr(stderr)
+	if handled, code := handleJSONSchemaRequest(root, args, stdout); handled {
+		return code
+	}
+	if handled, code := handleJSONContractRequest(root, args, stdout, stderr); handled {
+		return code
+	}
 	if err := root.Execute(); err != nil {
-		return commandExitCode(err)
+		code := commandExitCode(err)
+		if bufferJSONExecution {
+			if len(bytes.TrimSpace(jsonStdout.Bytes())) > 0 {
+				if _, copyErr := io.Copy(stdout, &jsonStdout); copyErr != nil {
+					return 1
+				}
+			} else {
+				_ = writeJSONFailure(stdout, "command_failed", commandFailureMessage(err), code)
+			}
+		} else if reportJSONFailure && observedStdout.BytesWritten() == 0 {
+			_ = writeJSONFailure(stdout, "command_failed", commandFailureMessage(err), code)
+		}
+		return code
+	}
+	if bufferJSONExecution {
+		if _, err := io.Copy(stdout, &jsonStdout); err != nil {
+			return 1
+		}
 	}
 	return 0
+}
+
+func commandFailureMessage(err error) string {
+	if err == nil {
+		return "command failed"
+	}
+	msg := strings.TrimSpace(err.Error())
+	if msg == "" || errors.Is(err, errExit) {
+		return "command failed; see stderr for diagnostics"
+	}
+	return msg
 }
 
 // newRootCmd creates the root cobra command with all subcommands.
@@ -143,6 +233,8 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		"path to the city directory (default: walk up from cwd)")
 	root.PersistentFlags().StringVar(&rigFlag, "rig", "",
 		"rig name or path (default: discover from cwd)")
+	configureJSONSchemaFlag(root)
+	_ = root.RegisterFlagCompletionFunc("rig", completeRigFlagNames)
 	root.AddCommand(
 		newStartCmd(stdout, stderr),
 		newInitCmd(stdout, stderr),
@@ -158,6 +250,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newNudgeCmd(stdout, stderr),
 		newWaitCmd(stdout, stderr),
 		newAgentCmd(stdout, stderr),
+		newAgentScriptCmd(stdout, stderr),
 		newEventCmd(stdout, stderr),
 		newEventsCmd(stdout, stderr),
 		newTraceCmd(stdout, stderr),
@@ -165,19 +258,21 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newImportCmd(stdout, stderr),
 		newConfigCmd(stdout, stderr),
 		newPackCmd(stdout, stderr),
+		newLintCmd(stdout, stderr),
 		newDoctorCmd(stdout, stderr),
 		newHookCmd(stdout, stderr),
 		newSlingCmd(stdout, stderr),
 		newConvoyCmd(stdout, stderr),
 		newWispCmd(stdout, stderr),
 		newPrimeCmd(stdout, stderr),
+		newPromptCmd(stdout, stderr),
 		newHandoffCmd(stdout, stderr),
 		newBeadsCmd(stdout, stderr),
 		newBuildImageCmd(stdout, stderr),
 		newSkillCmd(stdout, stderr),
 		newMcpCmd(stdout, stderr),
 		newInternalCmd(stdout, stderr),
-		newVersionCmd(stdout),
+		newVersionCmd(stdout, stderr),
 		newDashboardCmd(stdout, stderr),
 		newGraphCmd(stdout, stderr),
 		newRegisterCmd(stdout, stderr),
@@ -191,9 +286,11 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 		newFormulaCmd(stdout, stderr),
 		newBdCmd(stdout, stderr),
 		newBdStoreBridgeCmd(stdout, stderr),
+		newDoltCleanupCmd(stdout, stderr),
 		newDoltConfigCmd(stdout, stderr),
 		newDoltStateCmd(stdout, stderr),
 		newShellCmd(stdout, stderr),
+		newAnalyzeCmd(stdout, stderr),
 	)
 	// gen-doc needs the root command to walk the tree; add after construction.
 	root.AddCommand(newGenDocCmd(stdout, stderr, root))
@@ -202,6 +299,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	registerPackCommands(root, stdout, stderr)
 
 	installArgUsageErrors(root, stderr)
+	installFlagGroupUsageErrors(root, stderr)
 
 	return root
 }
@@ -219,6 +317,32 @@ func installArgUsageErrors(cmd *cobra.Command, stderr io.Writer) {
 	}
 	for _, child := range cmd.Commands() {
 		installArgUsageErrors(child, stderr)
+	}
+}
+
+// installFlagGroupUsageErrors wraps PreRunE on every command so mutually
+// exclusive / required-together / one-required flag violations surface as
+// readable usage errors. Without this, cobra's own ValidateFlagGroups error
+// returns through RunE and is swallowed by the root's SilenceErrors, causing
+// `gc <cmd> --a --b` (with --a/--b mutex) to exit 1 with no output.
+func installFlagGroupUsageErrors(cmd *cobra.Command, stderr io.Writer) {
+	prev := cmd.PreRunE
+	prevRun := cmd.PreRun
+	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		if err := cmd.ValidateFlagGroups(); err != nil {
+			printCommandUsageError(stderr, cmd, err)
+			return errExit
+		}
+		if prev != nil {
+			return prev(cmd, args)
+		}
+		if prevRun != nil {
+			prevRun(cmd, args)
+		}
+		return nil
+	}
+	for _, child := range cmd.Commands() {
+		installFlagGroupUsageErrors(child, stderr)
 	}
 }
 
@@ -322,10 +446,11 @@ func resolveCommandCity(args []string) (string, error) {
 //  4. Explicit city env (GC_CITY / GC_CITY_PATH / GC_CITY_ROOT) + GC_RIG
 //  5. Explicit city env only (city set, rig from GC_DIR/cwd if applicable)
 //  6. GC_RIG only (rig from registered city site bindings)
-//  7. GC_DIR-derived city path
-//  8. Registered rig binding lookup (cwd prefix match)
-//  9. Walk up from cwd looking for city.toml
-//  10. Fail
+//  7. Registered rig binding lookup using GC_DIR (rig with leftover .gc/)
+//  8. GC_DIR-derived city path (walk-up)
+//  9. Registered rig binding lookup (cwd prefix match)
+//  10. Walk up from cwd looking for city.toml
+//  11. Fail
 func resolveContext() (resolvedContext, error) {
 	city := cityFlag
 	rig := rigFlag
@@ -379,13 +504,36 @@ func resolveContext() (resolvedContext, error) {
 		return ctx, nil
 	}
 
-	// Step 7: GC_DIR-derived city path.
+	// Step 7: Registered rig binding lookup using GC_DIR. Must run before
+	// the GC_DIR walkup (step 8) so that a rig dir with a leftover ".gc/"
+	// runtime artifact does not get mistaken for a legacy city via
+	// findCity's HasRuntimeRoot fallback. Spawned rig agents have GC_DIR
+	// set to the rig path; when that path is a sibling of the city
+	// (e.g. rig at /Code/rigname and city at /Code/cityname), the walkup
+	// never reaches the real city and the stale ".gc/" inside the rig
+	// would otherwise win.
+	//
+	// Guard: only run the (potentially expensive) registry scan when GC_DIR
+	// actually shows the legacy-fallback misfire shape — a .gc/ directory
+	// without a sibling city.toml. When GC_DIR carries its own city.toml
+	// the walkup at step 8 finds the right city in O(1) and we don't pay
+	// for a full registry scan. When GC_DIR has neither, step 9 (cwd-based
+	// rig lookup) covers it.
+	if gcDir := strings.TrimSpace(os.Getenv("GC_DIR")); gcDir != "" {
+		if citylayout.HasRuntimeRoot(gcDir) && !citylayout.HasCityConfig(gcDir) {
+			if ctx, ok := lookupRigFromCwd(gcDir); ok {
+				return ctx, nil
+			}
+		}
+	}
+
+	// Step 8: GC_DIR-derived city path.
 	if gcDirCity, ok := resolveCityPathFromGCDir(); ok {
 		rn := rigFromCwdDir(gcDirCity, strings.TrimSpace(os.Getenv("GC_DIR")))
 		return resolvedContext{CityPath: gcDirCity, RigName: rn}, nil
 	}
 
-	// Step 8: Registered rig binding lookup (cwd prefix match).
+	// Step 9: Registered rig binding lookup (cwd prefix match).
 	cwd, err := os.Getwd()
 	if err != nil {
 		return resolvedContext{}, err
@@ -394,7 +542,7 @@ func resolveContext() (resolvedContext, error) {
 		return ctx, nil
 	}
 
-	// Step 9: Walk up from cwd looking for city.toml.
+	// Step 10: Walk up from cwd looking for city.toml.
 	cityPath, err := findCity(cwd)
 	if err != nil {
 		return resolvedContext{}, err
@@ -450,29 +598,189 @@ func validateCityPath(p string) (string, error) {
 }
 
 // resolveRigToContext resolves a rig name or path to a full context by scanning
-// registered cities and their machine-local .gc/site.toml rig bindings.
+// registered cities and their machine-local .gc/site.toml rig bindings. This
+// is an explicit rig-resolution path, so stale-sibling warnings are emitted
+// to os.Stderr (deduped across the two registry scans below).
 func resolveRigToContext(nameOrPath string) (resolvedContext, error) {
-	if matches, err := registeredRigBindingsByName(nameOrPath, true); err != nil {
+	var allStale []staleRegisteredCity
+	defer func() { emitStaleRegisteredCityWarnings(os.Stderr, allStale) }()
+
+	var deferredRegisteredLoadErr error
+	matches, stale, err, loadErr := registeredRigBindingsByNameWithDeferredLoadError(nameOrPath, false)
+	allStale = append(allStale, stale...)
+	if err != nil {
 		return resolvedContext{}, err
-	} else if len(matches) > 0 {
+	}
+	if len(matches) > 0 {
 		return resolveRigBindingMatches(nameOrPath, matches)
 	}
+	deferredRegisteredLoadErr = loadErr
 
 	abs, err := filepath.Abs(nameOrPath)
 	if err != nil {
 		return resolvedContext{}, fmt.Errorf("rig %q: %w", nameOrPath, err)
 	}
-	if matches, err := registeredRigBindingsByPath(abs, true); err != nil {
+	matches, stale, err, loadErr = registeredRigBindingsByPathWithDeferredLoadError(abs, false)
+	allStale = append(allStale, stale...)
+	if err != nil {
 		return resolvedContext{}, err
-	} else if len(matches) > 0 {
+	}
+	if len(matches) > 0 {
 		return resolveRigBindingMatches(abs, matches)
 	}
+	if deferredRegisteredLoadErr == nil {
+		deferredRegisteredLoadErr = loadErr
+	}
 
+	// Fallback: a city declared locally but not yet handed to the
+	// supervisor (cities.toml does not list it) is invisible to the
+	// registry walks above. Honor explicit local city resolution by checking
+	// the resolved city for a site-bound rig of this name. Site binding is
+	// required: legacy city.toml-only paths remain rejected so the existing
+	// legacy_city_toml_path_is_not_registered_binding test continues to pass.
+	if ctx, ok, err := lookupRigFromLocalCity(nameOrPath); err != nil {
+		return resolvedContext{}, err
+	} else if ok {
+		return ctx, nil
+	}
+	if deferredRegisteredLoadErr != nil {
+		return resolvedContext{}, deferredRegisteredLoadErr
+	}
 	return resolvedContext{}, fmt.Errorf("rig %q is not registered in any city", nameOrPath)
 }
 
+func resolveLocalCityForRigFallback() (string, error) {
+	if cityFlag != "" {
+		return validateCityPath(cityFlag)
+	}
+	if gcCity, ok := resolveExplicitCityPathEnv(); ok {
+		return gcCity, nil
+	}
+	if gcDir := strings.TrimSpace(os.Getenv("GC_DIR")); gcDir != "" {
+		gcDirCity, err := findCity(gcDir)
+		if err != nil {
+			if !isCityDiscoveryNotFound(err) {
+				return "", err
+			}
+		} else {
+			return gcDirCity, nil
+		}
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	cityPath, err := findCity(cwd)
+	if err != nil {
+		if isCityDiscoveryNotFound(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return cityPath, nil
+}
+
+func isCityDiscoveryNotFound(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "not in a city directory")
+}
+
+// lookupRigFromLocalCity resolves the local city without consulting --rig or
+// GC_RIG, then builds declared rig candidates from city.toml plus
+// .gc/site.toml, matching the registered resolver's binding semantics.
+// Legacy city.toml-only paths are still rejected so this fallback preserves
+// the invariant pinned by legacy_city_toml_path_is_not_registered_binding.
+func lookupRigFromLocalCity(nameOrPath string) (resolvedContext, bool, error) {
+	cityPath, err := resolveLocalCityForRigFallback()
+	if err != nil {
+		return resolvedContext{}, false, err
+	}
+	if cityPath == "" {
+		return resolvedContext{}, false, nil
+	}
+	bindings, err := localCityRigBindings(cityPath)
+	if err != nil {
+		return resolvedContext{}, false, err
+	}
+
+	var nameMatches []registeredRigBinding
+	for _, binding := range bindings {
+		if binding.Rig.Name == nameOrPath {
+			nameMatches = append(nameMatches, binding)
+		}
+	}
+	if len(nameMatches) > 0 {
+		ctx, err := resolveRigBindingMatches(nameOrPath, nameMatches)
+		return ctx, true, err
+	}
+
+	requestPath := normalizePathForCompare(nameOrPath)
+	var pathMatches []registeredRigBinding
+	for _, binding := range bindings {
+		if pathWithinScope(requestPath, normalizePathForCompare(binding.Path)) {
+			pathMatches = append(pathMatches, binding)
+		}
+	}
+	pathMatches = keepDeepestRigBindings(pathMatches)
+	if len(pathMatches) > 0 {
+		ctx, err := resolveRigBindingMatches(requestPath, pathMatches)
+		return ctx, true, err
+	}
+
+	return resolvedContext{}, false, nil
+}
+
+func localCityRigBindings(cityPath string) ([]registeredRigBinding, error) {
+	cfg, err := loadCityConfigSuppressDeprecatedOrderWarnings(cityPath, io.Discard)
+	if err != nil {
+		if _, ok := missingRootCityTOML(err, cityPath); ok {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("loading local city rig bindings: %s: %w", cityPath, err)
+	}
+	siteBinding, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading local city rig bindings: %s: %w", cityPath, err)
+	}
+	city := supervisor.CityEntry{Path: cityPath, Name: cfg.ResolvedWorkspaceName}
+	return siteBoundRigBindings(city, cfg, siteBinding), nil
+}
+
+func siteBoundRigBindings(city supervisor.CityEntry, cfg *config.City, siteBinding *config.SiteBinding) []registeredRigBinding {
+	siteRigPaths := make(map[string]string, len(siteBinding.Rigs))
+	for _, rig := range siteBinding.Rigs {
+		name := strings.TrimSpace(rig.Name)
+		path := strings.TrimSpace(rig.Path)
+		if name == "" || path == "" {
+			continue
+		}
+		siteRigPaths[name] = path
+	}
+
+	var bindings []registeredRigBinding
+	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Name) == "" {
+			continue
+		}
+		sitePath := strings.TrimSpace(siteRigPaths[rig.Name])
+		if sitePath == "" {
+			continue
+		}
+		rig.Path = sitePath
+		bindings = append(bindings, registeredRigBinding{
+			City: city,
+			Rig:  rig,
+			Path: resolveStoreScopeRoot(city.Path, sitePath),
+		})
+	}
+	return bindings
+}
+
+// resolveRigPathToContext resolves an explicit path argument to a registered
+// rig context. Stale-sibling warnings are emitted to os.Stderr because the
+// caller is explicitly depending on the registry.
 func resolveRigPathToContext(dir string) (resolvedContext, bool, error) {
-	matches, err := registeredRigBindingsByPath(dir, true)
+	matches, stale, err := registeredRigBindingsByPath(dir, true)
+	emitStaleRegisteredCityWarnings(os.Stderr, stale)
 	if err != nil {
 		return resolvedContext{}, false, err
 	}
@@ -488,8 +796,10 @@ func resolveRigPathToContext(dir string) (resolvedContext, bool, error) {
 
 // lookupRigFromCwd checks registered city site bindings for a rig matching cwd.
 // Ambiguous bindings deliberately fall through to the city walk-up fallback.
+// This is an opportunistic probe (failOnLoadError=false): stale-sibling
+// warnings are intentionally dropped so unrelated commands stay quiet.
 func lookupRigFromCwd(cwd string) (resolvedContext, bool) {
-	matches, err := registeredRigBindingsByPath(cwd, false)
+	matches, _, err := registeredRigBindingsByPath(cwd, false)
 	if err != nil || len(matches) != 1 {
 		return resolvedContext{}, false
 	}
@@ -524,35 +834,80 @@ type registeredRigBinding struct {
 	Path string
 }
 
-func registeredRigBindingsByName(name string, failOnLoadError bool) ([]registeredRigBinding, error) {
+func registeredRigBindingsByName(name string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error) {
+	matches, stale, err, _ = registeredRigBindingsByNameWithDeferredLoadError(name, failOnLoadError)
+	return matches, stale, err
+}
+
+func registeredRigBindingsByNameWithDeferredLoadError(name string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
 	return registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
 		return binding.Rig.Name == name
 	})
 }
 
-func registeredRigBindingsByPath(dir string, failOnLoadError bool) ([]registeredRigBinding, error) {
+func registeredRigBindingsByPath(dir string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error) {
+	matches, stale, err, _ = registeredRigBindingsByPathWithDeferredLoadError(dir, failOnLoadError)
+	return matches, stale, err
+}
+
+func registeredRigBindingsByPathWithDeferredLoadError(dir string, failOnLoadError bool) (matches []registeredRigBinding, stale []staleRegisteredCity, err error, deferredLoadErr error) {
 	dir = normalizePathForCompare(dir)
-	matches, err := registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
+	matches, stale, err, deferredLoadErr = registeredRigBindings(failOnLoadError, func(binding registeredRigBinding) bool {
 		rigPath := normalizePathForCompare(binding.Path)
 		return pathWithinScope(dir, rigPath)
 	})
 	if err != nil {
-		return nil, err
+		return nil, stale, err, nil
 	}
-	return keepDeepestRigBindings(matches), nil
+	return keepDeepestRigBindings(matches), stale, nil, deferredLoadErr
 }
 
-func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding) bool) ([]registeredRigBinding, error) {
+// staleRegisteredCity identifies a registered city whose city.toml is
+// missing on disk. registeredRigBindings returns these as structured data
+// instead of emitting to stderr so callers that are explicitly resolving a
+// registered rig can warn, while opportunistic probes stay quiet.
+type staleRegisteredCity struct {
+	Label string
+	Path  string
+}
+
+// emitStaleRegisteredCityWarnings writes one `warning: ...` line per stale
+// registry entry. Each Label is emitted at most once even if stale carries
+// duplicates (e.g. from callers that invoke registeredRigBindings twice in
+// one command).
+func emitStaleRegisteredCityWarnings(w io.Writer, stale []staleRegisteredCity) {
+	if w == nil || len(stale) == 0 {
+		return
+	}
+	seen := make(map[string]struct{}, len(stale))
+	for _, s := range stale {
+		if _, already := seen[s.Label]; already {
+			continue
+		}
+		seen[s.Label] = struct{}{}
+		fmt.Fprintf(w, "warning: skipping stale registered city %q: city.toml missing at %s\n", //nolint:errcheck // best-effort stderr
+			s.Label, s.Path)
+	}
+}
+
+func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding) bool) (_ []registeredRigBinding, stale []staleRegisteredCity, _ error, deferredLoadErr error) {
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	cities, err := reg.List()
 	if err != nil {
-		return nil, err
+		return nil, nil, err, nil
 	}
 	var matched []registeredRigBinding
 	var loadErrors []string
 	for _, c := range cities {
 		cfg, err := loadCityConfigSuppressDeprecatedOrderWarnings(c.Path, io.Discard)
 		if err != nil {
+			// Tolerate stale registry entries whose city.toml has been
+			// deleted out from under the registry, but keep missing includes
+			// or other config dependencies as load errors.
+			if cityTOML, ok := missingRootCityTOML(err, c.Path); ok {
+				stale = append(stale, staleRegisteredCity{Label: registeredCityLabel(c), Path: cityTOML})
+				continue
+			}
 			loadErrors = append(loadErrors, fmt.Sprintf("%s: %v", registeredCityLabel(c), err))
 			continue
 		}
@@ -561,38 +916,31 @@ func registeredRigBindings(failOnLoadError bool, match func(registeredRigBinding
 			loadErrors = append(loadErrors, fmt.Sprintf("%s: %v", registeredCityLabel(c), err))
 			continue
 		}
-		siteRigPaths := make(map[string]string, len(siteBinding.Rigs))
-		for _, siteRig := range siteBinding.Rigs {
-			name := strings.TrimSpace(siteRig.Name)
-			path := strings.TrimSpace(siteRig.Path)
-			if name == "" || path == "" {
-				continue
-			}
-			siteRigPaths[name] = path
-		}
-		for _, rig := range cfg.Rigs {
-			if strings.TrimSpace(rig.Name) == "" {
-				continue
-			}
-			sitePath := strings.TrimSpace(siteRigPaths[rig.Name])
-			if sitePath == "" {
-				continue
-			}
-			rig.Path = sitePath
-			binding := registeredRigBinding{
-				City: c,
-				Rig:  rig,
-				Path: resolveStoreScopeRoot(c.Path, sitePath),
-			}
+		for _, binding := range siteBoundRigBindings(c, cfg, siteBinding) {
 			if match(binding) {
 				matched = append(matched, binding)
 			}
 		}
 	}
 	if len(loadErrors) > 0 && (failOnLoadError || len(matched) > 0) {
-		return nil, fmt.Errorf("loading registered city rig bindings: %s", strings.Join(loadErrors, "; "))
+		return nil, stale, fmt.Errorf("loading registered city rig bindings: %s", strings.Join(loadErrors, "; ")), nil
 	}
-	return matched, nil
+	if len(loadErrors) > 0 {
+		return matched, stale, nil, fmt.Errorf("loading registered city rig bindings: %s", strings.Join(loadErrors, "; "))
+	}
+	return matched, stale, nil, nil
+}
+
+func missingRootCityTOML(err error, cityPath string) (string, bool) {
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", false
+	}
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) {
+		return "", false
+	}
+	cityTOML := filepath.Clean(filepath.Join(cityPath, "city.toml"))
+	return cityTOML, samePath(pathErr.Path, cityTOML)
 }
 
 func keepDeepestRigBindings(matches []registeredRigBinding) []registeredRigBinding {
@@ -659,8 +1007,12 @@ func openCityRecorder(stderr io.Writer) events.Recorder {
 }
 
 func openCityRecorderAt(cityPath string, stderr io.Writer) events.Recorder {
-	rec, err := events.NewFileRecorder(
-		filepath.Join(cityPath, ".gc", "events.jsonl"), stderr)
+	eventsCfg := config.EventsConfig{}
+	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
+		eventsCfg = cfg.Events
+	}
+	rec, err := newFileEventsRecorder(
+		filepath.Join(cityPath, ".gc", "events.jsonl"), eventsCfg, stderr)
 	if err != nil {
 		return events.Discard
 	}
@@ -669,7 +1021,11 @@ func openCityRecorderAt(cityPath string, stderr io.Writer) events.Recorder {
 
 // eventActor returns the public actor identity for events.
 // Prefer the session alias when present, but preserve GC_AGENT fallback for
-// managed-session hooks and older event-emitting contexts.
+// managed-session hooks and older event-emitting contexts. BEADS_ACTOR is
+// the cross-process identity signal shared with bd; falling through to it
+// before "human" lets supervisor-spawned hooks (e.g., bd on_close →
+// `gc event emit`) be attributed correctly to the controller or the order
+// that triggered the close.
 func eventActor() string {
 	if alias := strings.TrimSpace(os.Getenv("GC_ALIAS")); alias != "" {
 		return alias
@@ -680,6 +1036,9 @@ func eventActor() string {
 	if sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID")); sessionID != "" {
 		return sessionID
 	}
+	if beadsActor := strings.TrimSpace(os.Getenv("BEADS_ACTOR")); beadsActor != "" {
+		return beadsActor
+	}
 	return "human"
 }
 
@@ -687,25 +1046,34 @@ func eventActor() string {
 // Store using the configured provider. On error it writes to stderr and returns
 // nil plus an exit code.
 func openCityStore(stderr io.Writer, cmdName string) (beads.Store, int) {
+	store, _, code := openCityStoreWithPath(stderr, cmdName)
+	return store, code
+}
+
+// openCityStoreWithPath locates the city root and opens its Store, returning
+// the resolved city path used for the store.
+func openCityStoreWithPath(stderr io.Writer, cmdName string) (beads.Store, string, int) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-		return nil, 1
+		return nil, "", 1
 	}
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
-		return nil, 1
+		return nil, "", 1
 	}
-	return store, 0
+	return store, cityPath, 0
 }
 
 // openCityStoreAt opens a bead store at the given city path.
 // Used by the controller (which already knows the city path) and by
-// openCityStore (which resolves the path first).
+// openCityStore (which resolves the path first). Keep the passed city path
+// authoritative; rerouting through cityForStoreDir would let inherited
+// GC_CITY override an explicit --city resolution.
 func openCityStoreAt(cityPath string) (beads.Store, error) {
-	return openStoreAtForCity(cityPath, cityForStoreDir(cityPath))
+	return openStoreAtForCity(cityPath, cityPath)
 }
 
 const fileStoreLayoutScopedV1 = "scope-local-v1"
@@ -790,9 +1158,17 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 				if err != nil {
 					return nil, err
 				}
-				copyExecProjectedDoltEnv(env, bdRuntimeEnvForRig(runtimeCityPath, cfg, target.ScopeRoot))
+				projected, err := bdRuntimeEnvForRigWithError(runtimeCityPath, cfg, target.ScopeRoot)
+				if err != nil {
+					return nil, err
+				}
+				copyExecProjectedBackendEnv(env, projected)
 			} else {
-				copyExecProjectedDoltEnv(env, bdRuntimeEnv(runtimeCityPath))
+				projected, err := bdRuntimeEnvWithError(runtimeCityPath)
+				if err != nil {
+					return nil, err
+				}
+				copyExecProjectedBackendEnv(env, projected)
 			}
 		}
 		store := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))

@@ -119,8 +119,9 @@ type Provider interface {
 	// exist. Used for graceful shutdown before Stop.
 	Interrupt(name string) error
 
-	// IsRunning reports whether the named session exists and has a
-	// live process.
+	// IsRunning reports whether the named provider runtime exists. It does not
+	// prove that the configured agent process is alive; callers that need that
+	// distinction should use ObserveLiveness or ProcessAlive.
 	IsRunning(name string) bool
 
 	// IsAttached reports whether a user terminal is currently connected
@@ -139,7 +140,11 @@ type Provider interface {
 
 	// Nudge sends structured content to the named session to wake or
 	// redirect the agent. Returns nil if the session does not exist
-	// (best-effort). Use [TextContent] to wrap a plain string.
+	// and the provider can safely treat that as a best-effort no-op.
+	// Providers that can observe a live session without owning the
+	// delivery channel return [ErrSessionNotFound] so callers do not
+	// mistake a no-op for delivery. Use [TextContent] to wrap a plain
+	// string.
 	Nudge(name string, content []ContentBlock) error
 
 	// SetMeta stores a key-value pair associated with the named session.
@@ -299,7 +304,8 @@ type CopyEntry struct {
 
 // HashPathContent returns a hex-encoded SHA-256 of the content at path.
 // For a regular file, hashes the file content. For a directory, hashes
-// a sorted manifest of relative paths and their contents. Returns empty
+// a sorted manifest of relative paths and their contents while ignoring
+// runtime-generated Python cache and editor backup artifacts. Returns empty
 // string on any error (caller should treat as "unknown").
 func HashPathContent(path string) string {
 	info, err := os.Stat(path)
@@ -325,10 +331,19 @@ func HashPathContent(path string) string {
 			walkErr = true
 			return nil
 		}
+		rel, _ := filepath.Rel(path, p)
+		if rel == "." {
+			return nil
+		}
+		if hashPathContentSkipEntry(d) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if d.IsDir() {
 			return nil
 		}
-		rel, _ := filepath.Rel(path, p)
 		entries = append(entries, rel)
 		return nil
 	})
@@ -349,6 +364,33 @@ func HashPathContent(path string) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
+func hashPathContentSkipEntry(d fs.DirEntry) bool {
+	base := d.Name()
+	if d.IsDir() {
+		switch base {
+		case "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache":
+			return true
+		default:
+			return false
+		}
+	}
+	switch filepath.Ext(base) {
+	case ".pyc", ".pyo":
+		return true
+	case ".swp", ".swx":
+		return strings.HasPrefix(base, ".")
+	}
+	return strings.HasSuffix(base, "~")
+}
+
+// Lifecycle describes the expected lifetime of a runtime command.
+type Lifecycle string
+
+const (
+	// LifecycleOneShot marks commands that are expected to do bounded work and exit.
+	LifecycleOneShot Lifecycle = "one_shot"
+)
+
 // Config holds the parameters for starting a new session.
 type Config struct {
 	// WorkDir is the working directory for the session process.
@@ -357,6 +399,10 @@ type Config struct {
 	// Command is the shell command to run in the session.
 	// If empty, a default shell is started.
 	Command string
+
+	// Lifecycle describes whether the command is long-lived or expected to
+	// exit after one turn. Empty means the default long-lived session lifecycle.
+	Lifecycle Lifecycle
 
 	// Env is additional environment variables set in the session.
 	Env map[string]string
@@ -378,6 +424,10 @@ type Config struct {
 
 	// EmitsPermissionWarning is true if the agent shows a bypass-permissions dialog.
 	EmitsPermissionWarning bool
+
+	// AcceptStartupDialogs overrides automatic startup dialog handling.
+	// Nil keeps the runtime default derived from other startup hints.
+	AcceptStartupDialogs *bool
 
 	// Nudge is text typed into the session after the agent is ready.
 	// Used for CLI agents that don't accept command-line prompts.
@@ -402,14 +452,16 @@ type Config struct {
 	SessionLive []string
 
 	// ProviderName is the resolved provider name (e.g., "claude", "codex").
-	// Used for per-provider overlay filtering: files from
-	// overlay/per-provider/<ProviderName>/ are copied alongside any extras
-	// listed in InstallAgentHooks.
+	// Used for launch/runtime behavior that follows a built-in family.
 	ProviderName string
+
+	// ProviderOverlayName is the concrete provider name used for per-provider
+	// overlay filtering. When empty, ProviderName is used for compatibility.
+	ProviderOverlayName string
 
 	// InstallAgentHooks lists additional provider hook slots whose
 	// overlay/per-provider/<name>/ content should be staged alongside
-	// ProviderName's. Populated from the agent's install_agent_hooks
+	// ProviderOverlayName's. Populated from the agent's install_agent_hooks
 	// config, so an agent running Claude can still get a materialized
 	// .gemini/settings.json for parallel tooling.
 	InstallAgentHooks []string
@@ -449,6 +501,40 @@ type Config struct {
 	// separately so the tmux adapter's file-expansion path can
 	// reconstruct the command correctly for long prompts.
 	PromptFlag string
+}
+
+// OverlayProviderNames returns the effective provider overlay slots to stage for
+// cfg, preserving first-use order while skipping empty and duplicate names.
+func OverlayProviderNames(cfg Config) []string {
+	return OverlayProviderNamesFromParts(cfg.ProviderName, cfg.ProviderOverlayName, cfg.InstallAgentHooks)
+}
+
+// OverlayProviderNamesFromParts returns the effective provider overlay slots
+// for a launch provider, concrete overlay provider, and installed hooks.
+func OverlayProviderNamesFromParts(providerName, providerOverlayName string, installAgentHooks []string) []string {
+	primary := strings.TrimSpace(providerOverlayName)
+	if primary == "" {
+		primary = strings.TrimSpace(providerName)
+	}
+	providers := make([]string, 0, 1+len(installAgentHooks))
+	providers = appendOverlayProviderName(providers, primary)
+	for _, hook := range installAgentHooks {
+		providers = appendOverlayProviderName(providers, hook)
+	}
+	return providers
+}
+
+func appendOverlayProviderName(providers []string, name string) []string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return providers
+	}
+	for _, existing := range providers {
+		if existing == name {
+			return providers
+		}
+	}
+	return append(providers, name)
 }
 
 // SyncWorkDirEnv returns cfg with GC_DIR synchronized to WorkDir.

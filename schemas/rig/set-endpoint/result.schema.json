@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "name", "rig", "dry_run", "endpoint"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "rig set-endpoint" },
+    "action": { "const": "set-endpoint" },
+    "name": { "type": "string" },
+    "rig": { "type": "string" },
+    "dry_run": { "type": "boolean" },
+    "endpoint": {
+      "type": "object",
+      "required": ["mode"],
+      "properties": {
+        "mode": { "enum": ["inherit", "external", "self"] },
+        "host": { "type": "string" },
+        "port": { "type": "string" },
+        "user": { "type": "string" },
+        "adopt_unverified": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

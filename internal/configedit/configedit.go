@@ -645,9 +645,10 @@ func (e *Editor) CreateRig(r config.Rig) error {
 // distinguish "not set" from "set to zero value" to avoid the PATCH
 // zero-value trap (e.g., omitting suspended must not reset it to false).
 type RigUpdate struct {
-	Path      string
-	Prefix    string
-	Suspended *bool
+	Path          string
+	Prefix        string
+	DefaultBranch string
+	Suspended     *bool
 }
 
 // UpdateRig partially updates an existing rig. Only non-nil/non-empty
@@ -661,6 +662,9 @@ func (e *Editor) UpdateRig(name string, patch RigUpdate) error {
 				}
 				if patch.Prefix != "" {
 					cfg.Rigs[i].Prefix = patch.Prefix
+				}
+				if patch.DefaultBranch != "" {
+					cfg.Rigs[i].DefaultBranch = patch.DefaultBranch
 				}
 				if patch.Suspended != nil {
 					cfg.Rigs[i].Suspended = *patch.Suspended

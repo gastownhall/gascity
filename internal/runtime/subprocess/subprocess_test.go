@@ -45,6 +45,36 @@ func TestStartCreatesProcess(t *testing.T) {
 	}
 }
 
+func TestStartPersistsRuntimeMetadataForGetMeta(t *testing.T) {
+	p := newTestProvider(t)
+	err := p.Start(context.Background(), "meta-start", runtime.Config{
+		Command: "sleep 3600",
+		Env: map[string]string{
+			"GC_SESSION_ID":     "bead-123",
+			"GC_INSTANCE_TOKEN": "token-456",
+			"GC_TEMPLATE":       "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop("meta-start") //nolint:errcheck
+
+	for key, want := range map[string]string{
+		"GC_SESSION_ID":     "bead-123",
+		"GC_INSTANCE_TOKEN": "token-456",
+		"GC_TEMPLATE":       "worker",
+	} {
+		got, err := p.GetMeta("meta-start", key)
+		if err != nil {
+			t.Fatalf("GetMeta(%s): %v", key, err)
+		}
+		if got != want {
+			t.Fatalf("GetMeta(%s) = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestStartLongSocketPathUsesShortSocketName(t *testing.T) {
 	// Use /tmp for a short base path — TMPDIR on macOS (/var/folders/...)
 	// is too long to find a depth where legacy > limit but short < limit.
@@ -354,6 +384,49 @@ func TestStartStagesSingleFileCopyIntoWorkDirRoot(t *testing.T) {
 	}
 	if string(data) != "seed data" {
 		t.Fatalf("staged file = %q, want %q", string(data), "seed data")
+	}
+}
+
+func TestStartStagesKiroPackOverlayBeforeLaunch(t *testing.T) {
+	workDir := t.TempDir()
+	packOverlay := t.TempDir()
+	agentConfig := filepath.Join(packOverlay, "per-provider", "kiro", ".kiro", "agents", "gascity.json")
+	if err := os.MkdirAll(filepath.Dir(agentConfig), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", filepath.Dir(agentConfig), err)
+	}
+	if err := os.WriteFile(agentConfig, []byte(`{"name":"gascity"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", agentConfig, err)
+	}
+	fallbackInstructions := filepath.Join(packOverlay, "per-provider", "kiro", "AGENTS.md")
+	if err := os.WriteFile(fallbackInstructions, []byte("fallback instructions"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", fallbackInstructions, err)
+	}
+	projectInstructions := filepath.Join(workDir, "AGENTS.md")
+	if err := os.WriteFile(projectInstructions, []byte("project instructions"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q): %v", projectInstructions, err)
+	}
+
+	p := newTestProvider(t)
+	err := p.Start(context.Background(), "kiro-overlay", runtime.Config{
+		Command:         "sleep 3600",
+		WorkDir:         workDir,
+		ProviderName:    "kiro",
+		PackOverlayDirs: []string{packOverlay},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer p.Stop("kiro-overlay") //nolint:errcheck
+
+	if _, err := os.Stat(filepath.Join(workDir, ".kiro", "agents", "gascity.json")); err != nil {
+		t.Fatalf("expected Kiro agent config to be staged: %v", err)
+	}
+	data, err := os.ReadFile(projectInstructions)
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if string(data) != "project instructions" {
+		t.Fatalf("AGENTS.md = %q, want project instructions preserved", string(data))
 	}
 }
 

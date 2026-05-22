@@ -121,6 +121,7 @@ func TestFake_CapturesAllConfigFields(t *testing.T) {
 	cfg := Config{
 		WorkDir:                "/proj",
 		Command:                "claude --dangerously-skip-permissions",
+		Lifecycle:              LifecycleOneShot,
 		Env:                    map[string]string{"GC_AGENT": "mayor", "HOME": "/home/user"},
 		ReadyPromptPrefix:      "❯ ",
 		ReadyDelayMs:           10000,
@@ -137,6 +138,9 @@ func TestFake_CapturesAllConfigFields(t *testing.T) {
 	}
 	if got.Command != "claude --dangerously-skip-permissions" {
 		t.Errorf("Command = %q, want %q", got.Command, "claude --dangerously-skip-permissions")
+	}
+	if got.Lifecycle != LifecycleOneShot {
+		t.Errorf("Lifecycle = %q, want %q", got.Lifecycle, LifecycleOneShot)
 	}
 	if got.Env["GC_AGENT"] != "mayor" {
 		t.Errorf("Env[GC_AGENT] = %q, want %q", got.Env["GC_AGENT"], "mayor")

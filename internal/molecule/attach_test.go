@@ -3,6 +3,7 @@ package molecule
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -620,6 +621,98 @@ func TestAttachEpochWithIdempotency(t *testing.T) {
 	}
 }
 
+func TestAttachDuplicateRecoveryPopulatesIDMappingAndAdvancesEpoch(t *testing.T) {
+	base := beads.NewMemStore()
+	root := setupWorkflow(t, base)
+	control := setupWorkflowChild(t, base, root.ID, "Control")
+	_ = base.SetMetadata(control.ID, "gc.control_epoch", "1")
+
+	store := &attachFailOnceDepStore{
+		Store: base,
+		err:   errors.New("wiring outer dep: invalid connection: i/o timeout"),
+	}
+	recipe := makeWorkflowRecipe("attempt")
+	_, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+		ExpectedEpoch:  1,
+		IdempotencyKey: "attempt:1",
+	})
+	if err == nil {
+		t.Fatal("expected first attach to fail during outer dependency wiring")
+	}
+
+	afterFailedAttach, err := base.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control after failed attach: %v", err)
+	}
+	if afterFailedAttach.Metadata["gc.control_epoch"] != "1" {
+		t.Fatalf("epoch after failed attach = %q, want 1", afterFailedAttach.Metadata["gc.control_epoch"])
+	}
+
+	result, err := Attach(context.Background(), base, recipe, control.ID, AttachOptions{
+		ExpectedEpoch:  1,
+		IdempotencyKey: "attempt:1",
+	})
+	if err != nil {
+		t.Fatalf("duplicate attach recovery: %v", err)
+	}
+	if !result.Duplicate {
+		t.Fatal("duplicate recovery should report Duplicate")
+	}
+	if result.IDMapping["attempt"] != result.RootID || result.RootID == "" {
+		t.Fatalf("duplicate IDMapping = %#v root=%q, want root step mapping", result.IDMapping, result.RootID)
+	}
+	assertBlockingDep(t, base, control.ID, result.RootID)
+	afterRecovery, err := base.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control after recovery: %v", err)
+	}
+	if afterRecovery.Metadata["gc.control_epoch"] != "2" {
+		t.Fatalf("epoch after duplicate recovery = %q, want 2", afterRecovery.Metadata["gc.control_epoch"])
+	}
+}
+
+func TestAttachIdempotencyRejectsFailedPartialSubDAG(t *testing.T) {
+	base := beads.NewMemStore()
+	root := setupWorkflow(t, base)
+	control := setupWorkflowChild(t, base, root.ID, "Control")
+
+	store := &attachFailOnceDepStore{
+		Store: base,
+		err:   errors.New("wiring dep: lock wait timeout exceeded; try restarting transaction"),
+	}
+	recipe := makeWorkflowRecipe("attempt", "run")
+	_, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+		IdempotencyKey: "attempt:1",
+	})
+	if err == nil {
+		t.Fatal("expected first attach to fail during dependency wiring")
+	}
+
+	failedRoots, err := base.List(beads.ListQuery{
+		Metadata: map[string]string{
+			"gc.idempotency_key": "attempt:1",
+			"gc.root_bead_id":    root.ID,
+			"molecule_failed":    "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("list failed partial roots: %v", err)
+	}
+	if len(failedRoots) != 1 {
+		t.Fatalf("failed partial roots = %d, want 1", len(failedRoots))
+	}
+
+	_, err = Attach(context.Background(), base, recipe, control.ID, AttachOptions{
+		IdempotencyKey: "attempt:1",
+	})
+	if err == nil {
+		t.Fatal("expected duplicate attach to reject failed partial sub-DAG")
+	}
+	if !strings.Contains(err.Error(), "molecule_failed") {
+		t.Fatalf("duplicate attach error = %v, want molecule_failed context", err)
+	}
+}
+
 func TestAttachIdempotentDuplicateSkipsRuntimeVarValidation(t *testing.T) {
 	store := beads.NewMemStore()
 	root := setupWorkflow(t, store)
@@ -679,4 +772,18 @@ func TestAttachIdempotentDuplicateSkipsRuntimeVarValidation(t *testing.T) {
 	if result2.RootID != result1.RootID {
 		t.Fatalf("duplicate attach root = %q, want %q", result2.RootID, result1.RootID)
 	}
+}
+
+type attachFailOnceDepStore struct {
+	beads.Store
+	err    error
+	failed bool
+}
+
+func (s *attachFailOnceDepStore) DepAdd(issueID, dependsOnID, depType string) error {
+	if !s.failed {
+		s.failed = true
+		return s.err
+	}
+	return s.Store.DepAdd(issueID, dependsOnID, depType)
 }

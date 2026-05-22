@@ -38,6 +38,20 @@ type SessionStreamRawMessageEvent struct {
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
 }
 
+type sessionStreamActivityPayload struct {
+	Activity string `json:"activity"`
+}
+
+type syntheticContentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type syntheticAssistantFrame struct {
+	Role    string                  `json:"role"`
+	Content []syntheticContentBlock `json:"content"`
+}
+
 var sessionStreamPendingStallTimeout = 5 * time.Second
 
 func runtimePendingInteraction(pending *worker.PendingInteraction) runtime.PendingInteraction {
@@ -73,13 +87,14 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
+	format := r.URL.Query().Get("format")
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
 	historyReq := worker.HistoryRequest{}
-	if r.URL.Query().Get("format") == "raw" && !info.Closed {
+	if format == "raw" && !info.Closed {
 		historyReq.TailCompactions = 1
 	}
 	history, historyErr := handle.History(worker.WithoutOperationEvents(r.Context()), historyReq)
@@ -115,7 +130,16 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	format := r.URL.Query().Get("format")
+	if format == "raw" && !info.Closed {
+		data, _ := json.Marshal(SessionStreamRawMessageEvent{
+			ID:       info.ID,
+			Template: info.Template,
+			Provider: info.Provider,
+			Format:   "raw",
+			Messages: []SessionRawMessageFrame{},
+		})
+		writeSSE(w, "message", 0, data)
+	}
 	if info.Closed {
 		if format == "raw" {
 			s.emitClosedSessionSnapshotRaw(w, info, history)
@@ -133,20 +157,9 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		}
 	case format == "raw":
 		// No log file yet. If the session is running, poll tmux pane content
-		// and wrap it as a fake raw JSONL assistant message so MC's existing
+		// and wrap it as a fake raw JSONL assistant message so a real-world app's existing
 		// rendering pipeline shows terminal output (e.g. OAuth prompts).
-		if running {
-			s.streamSessionPeekRaw(ctx, w, info, handle)
-		} else {
-			data, _ := json.Marshal(SessionStreamRawMessageEvent{
-				ID:       info.ID,
-				Template: info.Template,
-				Provider: info.Provider,
-				Format:   "raw",
-				Messages: []SessionRawMessageFrame{},
-			})
-			writeSSE(w, "message", 1, data)
-		}
+		s.streamSessionPeekRaw(ctx, w, info, handle)
 		return
 	default:
 		s.streamSessionPeek(ctx, w, info, handle)
@@ -182,7 +195,7 @@ func (s *Server) emitClosedSessionSnapshot(w http.ResponseWriter, info session.I
 		return
 	}
 	writeSSE(w, "turn", 1, data)
-	actData, _ := json.Marshal(map[string]string{"activity": "idle"})
+	actData, _ := json.Marshal(sessionStreamActivityPayload{Activity: "idle"})
 	writeSSE(w, "activity", 2, actData)
 }
 
@@ -206,7 +219,7 @@ func (s *Server) emitClosedSessionSnapshotRaw(w http.ResponseWriter, info sessio
 		return
 	}
 	writeSSE(w, "message", 1, data)
-	actData, _ := json.Marshal(map[string]string{"activity": "idle"})
+	actData, _ := json.Marshal(sessionStreamActivityPayload{Activity: "idle"})
 	writeSSE(w, "activity", 2, actData)
 }
 
@@ -285,7 +298,7 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 		if currentActivity != "" && currentActivity != lastActivity {
 			lastActivity = currentActivity
 			seq++
-			actData, _ := json.Marshal(map[string]string{"activity": currentActivity})
+			actData, _ := json.Marshal(sessionStreamActivityPayload{Activity: currentActivity})
 			writeSSE(w, "activity", seq, actData)
 			lastProgress = time.Now()
 			emitted = true
@@ -306,7 +319,7 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 					activity = "in-turn"
 				}
 				seq++
-				actData, _ := json.Marshal(map[string]string{"activity": activity})
+				actData, _ := json.Marshal(sessionStreamActivityPayload{Activity: activity})
 				writeSSE(w, "activity", seq, actData)
 				return true
 			}
@@ -340,12 +353,12 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 		return emitted
 	}
 
-	_ = emitSnapshot(initial)
 	if logPath != "" {
 		poll.Stop()
 		keepalive.Stop()
 		lw = newLogFileWatcher(logPath)
 		defer lw.Close()
+		_ = emitSnapshot(initial)
 		lw.Run(ctx, reloadSnapshot, func() { writeSSEComment(w) }, RunOpts{
 			OnStall:      func() { _ = emitPending() },
 			StallTimeout: sessionStreamPendingStallTimeout,
@@ -354,6 +367,7 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 		return
 	}
 
+	_ = emitSnapshot(initial)
 	for {
 		select {
 		case <-ctx.Done():
@@ -438,7 +452,7 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 		if activity != "" && activity != lastActivity {
 			lastActivity = activity
 			seq++
-			actData, _ := json.Marshal(map[string]string{"activity": activity})
+			actData, _ := json.Marshal(sessionStreamActivityPayload{Activity: activity})
 			writeSSE(w, "activity", seq, actData)
 			emitted = true
 		}
@@ -462,16 +476,17 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 		return emitted
 	}
 
-	_ = emitSnapshot(initial)
 	if logPath != "" {
 		poll.Stop()
 		keepalive.Stop()
 		lw = newLogFileWatcher(logPath)
 		defer lw.Close()
+		_ = emitSnapshot(initial)
 		lw.Run(ctx, reloadSnapshot, func() { writeSSEComment(w) }, RunOpts{Wake: workerOps})
 		return
 	}
 
+	_ = emitSnapshot(initial)
 	for {
 		select {
 		case <-ctx.Done():
@@ -491,7 +506,7 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 }
 
 // streamSessionPeekRaw polls tmux pane content and wraps it as format=raw
-// messages so MC's JSONL rendering pipeline can display terminal output
+// messages so a real-world app's JSONL rendering pipeline can display terminal output
 // (e.g. OAuth prompts, startup screens) when no transcript log exists yet.
 func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter, info session.Info, handle interface {
 	worker.PeekHandle
@@ -532,11 +547,9 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 			lastOutput = output
 			seq++
 			if output != "" {
-				fakeMsg, _ := json.Marshal(map[string]interface{}{
-					"role": "assistant",
-					"content": []map[string]string{
-						{"type": "text", "text": output},
-					},
+				fakeMsg, _ := json.Marshal(syntheticAssistantFrame{
+					Role:    "assistant",
+					Content: []syntheticContentBlock{{Type: "text", Text: output}},
 				})
 				data, err := json.Marshal(SessionStreamRawMessageEvent{
 					ID:       info.ID,
@@ -759,12 +772,12 @@ func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse
 		return emitted
 	}
 
-	_ = emitSnapshot(initial)
 	if logPath != "" {
 		poll.Stop()
 		keepalive.Stop()
 		lw = newLogFileWatcher(logPath)
 		defer lw.Close()
+		_ = emitSnapshot(initial)
 		lw.Run(ctx, reloadSnapshot, func() {
 			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 		}, RunOpts{
@@ -775,6 +788,7 @@ func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse
 		return
 	}
 
+	_ = emitSnapshot(initial)
 	for {
 		select {
 		case <-ctx.Done():
@@ -885,18 +899,19 @@ func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Se
 		return emitted
 	}
 
-	_ = emitSnapshot(initial)
 	if logPath != "" {
 		poll.Stop()
 		keepalive.Stop()
 		lw = newLogFileWatcher(logPath)
 		defer lw.Close()
+		_ = emitSnapshot(initial)
 		lw.Run(ctx, reloadSnapshot, func() {
 			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 		}, RunOpts{Wake: workerOps})
 		return
 	}
 
+	_ = emitSnapshot(initial)
 	for {
 		select {
 		case <-ctx.Done():
@@ -957,11 +972,9 @@ func (s *Server) streamSessionPeekRawHuma(ctx context.Context, send sse.Sender, 
 		lastOutput = output
 
 		if output != "" {
-			fakeMsg, err := json.Marshal(map[string]any{
-				"role": "assistant",
-				"content": []map[string]string{
-					{"type": "text", "text": output},
-				},
+			fakeMsg, err := json.Marshal(syntheticAssistantFrame{
+				Role:    "assistant",
+				Content: []syntheticContentBlock{{Type: "text", Text: output}},
 			})
 			if err == nil {
 				seq++

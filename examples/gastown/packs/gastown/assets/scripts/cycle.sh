@@ -1,17 +1,18 @@
 #!/bin/sh
-# cycle.sh — cycle between Gas Town agent sessions in the same group.
+# cycle.sh — cycle between Gas City agent sessions in the same scope group.
 # Usage: cycle.sh next|prev <current-session> <client-tty>
 # Called via tmux run-shell from a keybinding.
 #
-# This is Gas Town-specific. It knows the role names and grouping rules:
-#   Town group:    mayor ↔ deacon
-#   Dog pool:      dog-1 ↔ dog-2 ↔ dog-3
-#   Rig ops:       {rig}--witness ↔ {rig}--refinery ↔ {rig}--polecat-*  (per rig)
-#   Crew:          {rig}--{name} members  (per rig, excluding witness/refinery/polecat)
+# Grouping rules (driven by SDK session-name primitives — no role awareness):
+#   Rig group:      "<rig>--*"     all agents in same rig cycle together.
+#   Scope group:    "<scope>__*"   all agents in same scope cycle together.
+#   Pool:           "<base>-N"     same-base pool members cycle (e.g. dog-1).
+#   Catch-all:      anything else cycles all sessions on the socket.
 #
-# Session name format (per-city socket isolation): {agent}
-#   Town-scoped:  mayor, deacon, dog-1
-#   Rig-scoped:   myrig--witness, myrig--polecat-1
+# The "--" and "__" separators correspond to the SDK session-name mapping
+# (slash → "--", dot → "__") in internal/agent/session_name.go. Keying on
+# the separator rather than role names lets this script work for any pack,
+# including custom packs whose role taxonomy differs from gastown's.
 
 direction="$1"
 current="$2"
@@ -22,27 +23,25 @@ client="$3"
 # Socket-aware tmux command (uses GC_TMUX_SOCKET when set).
 gcmux() { tmux ${GC_TMUX_SOCKET:+-L "$GC_TMUX_SOCKET"} "$@"; }
 
-# Determine the group filter pattern based on known Gas Town roles.
+# Determine the group filter pattern based on session-name shape.
 case "$current" in
-    # Rig ops: witness ↔ refinery ↔ polecats in same rig.
-    *--witness|*--refinery|*--polecat-*)
-        rig="${current%%--*}"
-        pattern="^${rig}--\(witness\|refinery\|polecat-\)"
-        ;;
-    # Other rig-scoped (crew, etc): cycle all same-rig non-infra agents.
+    # Rig-scoped: any "<rig>--*" session.
     *--*)
         rig="${current%%--*}"
         pattern="^${rig}--"
         ;;
-    # Town group: mayor ↔ deacon.
-    mayor|deacon)
-        pattern="^\(mayor\|deacon\)$"
+    # Scope-scoped: any "<scope>__*" session (city or imported scope).
+    *__*)
+        scope="${current%%__*}"
+        pattern="^${scope}__"
         ;;
-    # Dog pool: cycle between dog instances.
-    dog-[0-9]*)
-        pattern="^dog-[0-9]"
+    # Pool: "<base>-N" naming (generic; covers dog-1, dog-2, ... and any
+    # custom pool with the same shape).
+    *-[0-9]*)
+        base="${current%-*}"
+        pattern="^${base}-[0-9][0-9]*$"
         ;;
-    # Unknown — cycle all sessions on this socket (all are GC sessions).
+    # Unknown shape — cycle all sessions on this socket.
     *)
         pattern="."
         ;;

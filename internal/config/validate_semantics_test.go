@@ -77,6 +77,33 @@ func TestValidateSemanticsStartCommandSkipsProviderCheck(t *testing.T) {
 	}
 }
 
+func TestValidateSemanticsAgentSessionTransportAllowsTmux(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "worker", Provider: "claude", Session: "tmux"},
+		},
+	}
+	warnings := ValidateSemantics(cfg, "city.toml")
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings for tmux session transport, got: %v", warnings)
+	}
+}
+
+func TestValidateSemanticsAgentSessionTransportRejectsUnknown(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "worker", Provider: "claude", Session: "stdio"},
+		},
+	}
+	warnings := ValidateSemantics(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "stdio") || !strings.Contains(warnings[0], "tmux") {
+		t.Fatalf("warning should mention bad value and allowed transports: %s", warnings[0])
+	}
+}
+
 func TestValidateSemanticsProviderPromptModeBad(t *testing.T) {
 	cfg := &City{
 		Providers: map[string]ProviderSpec{
@@ -197,6 +224,21 @@ func TestValidateAgentsPromptModeValidValues(t *testing.T) {
 		if err := ValidateAgents(agents); err != nil {
 			t.Errorf("prompt_mode %q should be valid, got: %v", mode, err)
 		}
+	}
+}
+
+func TestValidateAgentsLifecycleValues(t *testing.T) {
+	for _, lifecycle := range []string{"", AgentLifecycleOneShot} {
+		if err := ValidateAgents([]Agent{{Name: "ok", Lifecycle: lifecycle}}); err != nil {
+			t.Errorf("lifecycle %q should be valid, got: %v", lifecycle, err)
+		}
+	}
+	err := ValidateAgents([]Agent{{Name: "bad", Lifecycle: "short_lived"}})
+	if err == nil {
+		t.Fatal("expected error for bad lifecycle")
+	}
+	if !strings.Contains(err.Error(), "short_lived") {
+		t.Errorf("error should mention bad value: %v", err)
 	}
 }
 

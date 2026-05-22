@@ -78,6 +78,23 @@ func instantiateViaGraphApply(ctx context.Context, applier beads.GraphApplyStore
 	}, nil
 }
 
+func isTransientGraphApplyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	if !strings.Contains(text, "bd create --graph") {
+		return false
+	}
+	return strings.Contains(text, "i/o timeout") ||
+		strings.Contains(text, "timed out after") ||
+		strings.Contains(text, "deadline exceeded") ||
+		strings.Contains(text, "invalid connection") ||
+		strings.Contains(text, "bad connection") ||
+		strings.Contains(text, "connection reset") ||
+		strings.Contains(text, "broken pipe")
+}
+
 func instantiateFragmentViaGraphApply(ctx context.Context, store beads.Store, applier beads.GraphApplyStore, recipe *formula.FragmentRecipe, opts FragmentOptions) (*FragmentResult, error) {
 	graphApplyTracef("graph-apply fragment-enter root=%s applier=%T", opts.RootID, applier)
 	plan, err := buildFragmentApplyPlan(store, recipe, opts)
@@ -111,7 +128,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 
 	vars := applyVarDefaults(opts.Vars, recipe.Vars)
 	priorityOverride := clonePriority(opts.PriorityOverride)
-	graphWorkflow := len(recipe.Steps) > 0 && recipe.Steps[0].Metadata["gc.kind"] == "workflow"
+	graphWorkflow := preservesGraphActionTypes(recipe)
 	rootKey := recipe.Steps[0].ID
 	rootIncluded := false
 
@@ -134,7 +151,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 		}
 		if step.IsRoot {
 			rootIncluded = true
-			if !opts.PreserveRootType && step.Metadata["gc.kind"] != "workflow" {
+			if !opts.PreserveRootType && !preserveExecutableRootType(step) {
 				node.Type = "molecule"
 			}
 			if opts.Title != "" {
@@ -150,6 +167,13 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 				node.Metadata["idempotency_key"] = opts.IdempotencyKey
 			}
 		} else {
+			// graph.v2 workflows and their retry/Ralph attempt sub-recipes
+			// use step beads as independently routable actionable work, not
+			// scaffolding — skip the #1039 coercion so Ready() still surfaces
+			// them for worker claim.
+			if !graphWorkflow {
+				node.Type = nonRootStepBeadType(node.Type)
+			}
 			if node.Metadata == nil {
 				node.Metadata = make(map[string]string, 1)
 			}
@@ -296,6 +320,10 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 		if err != nil {
 			return nil, err
 		}
+		// Fragment entries stay "task" — unlike formula scaffolding steps,
+		// fanout-expanded fragment nodes are actionable work that pool
+		// workers claim from `bd ready`. Do not apply nonRootStepBeadType
+		// here (#1039).
 		if node.Metadata == nil {
 			node.Metadata = make(map[string]string, 2)
 		}

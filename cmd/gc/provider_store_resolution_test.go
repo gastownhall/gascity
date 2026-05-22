@@ -261,7 +261,7 @@ trigger = "manual"
 	chdirProviderAwareTest(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderRun("poll", "", &stdout, &stderr)
+	code := cmdOrderRun("poll", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderRun(exec) = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -307,7 +307,7 @@ pool = "dog"
 	chdirProviderAwareTest(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderRun("digest", "", &stdout, &stderr)
+	code := cmdOrderRun("digest", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderRun(formula) = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -331,6 +331,15 @@ pool = "dog"
 func TestDoConvoyAutocloseUsesBeadsDirStoreRoot(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("GC_BEADS", "file")
+
+	envCityDir := t.TempDir()
+	if err := ensureScopedFileStoreLayout(envCityDir); err != nil {
+		t.Fatal(err)
+	}
+	writeProviderAwareTestCity(t, envCityDir, `[workspace]
+name = "ambient"
+`)
+	t.Setenv("GC_CITY", envCityDir)
 
 	cityDir := t.TempDir()
 	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
@@ -390,9 +399,44 @@ name = "demo"
 	}
 }
 
+func TestAutocloseCityPathForStoreRootPrefersStoreRootCityOverInheritedGCCity(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+
+	envCityDir := t.TempDir()
+	if err := ensureScopedFileStoreLayout(envCityDir); err != nil {
+		t.Fatal(err)
+	}
+	writeProviderAwareTestCity(t, envCityDir, `[workspace]
+name = "ambient"
+`)
+	t.Setenv("GC_CITY", envCityDir)
+
+	storeCityDir := t.TempDir()
+	if err := ensureScopedFileStoreLayout(storeCityDir); err != nil {
+		t.Fatal(err)
+	}
+	writeProviderAwareTestCity(t, storeCityDir, `[workspace]
+name = "store"
+`)
+
+	got := autocloseCityPathForStoreRoot(storeCityDir)
+	if canonicalTestPath(got) != canonicalTestPath(storeCityDir) {
+		t.Fatalf("autocloseCityPathForStoreRoot(%q) = %q, want store-root city %q", storeCityDir, got, storeCityDir)
+	}
+}
+
 func TestDoWispAutocloseUsesBeadsDirStoreRoot(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("GC_BEADS", "file")
+
+	envCityDir := t.TempDir()
+	if err := ensureScopedFileStoreLayout(envCityDir); err != nil {
+		t.Fatal(err)
+	}
+	writeProviderAwareTestCity(t, envCityDir, `[workspace]
+name = "ambient"
+`)
+	t.Setenv("GC_CITY", envCityDir)
 
 	cityDir := t.TempDir()
 	if err := ensureScopedFileStoreLayout(cityDir); err != nil {

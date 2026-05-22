@@ -21,8 +21,15 @@ When you file a bead, default to immediately dispatching it to a polecat:
 
 ```bash
 gc bd create "Fix the auth timeout bug" -t task --json   # file it
-gc bd update <bead-id> --set-metadata gc.routed_to=<rig>/polecat  # dispatch to polecat pool (pool reconciler picks up routed metadata)
+TARGET_RIG="${GC_RIG:-}"  # set to the target rig, or leave empty in an HQ-only city
+POLECAT_TARGET="${TARGET_RIG:+$TARGET_RIG/}{{ .BindingPrefix }}polecat"
+gc sling "$POLECAT_TARGET" <bead-id>                     # dispatch to polecat pool (sets gc.routed_to metadata for controller scale_check)
 ```
+
+**Pool dispatch leaves the assignee empty.** The polecat that picks the bead up sets the
+assignee on claim. If you set `--assignee` yourself, the supervisor's scale_check
+(`bd ready --metadata-field gc.routed_to=<canonical> --unassigned`) won't count the bead as
+pool demand and no session will spawn. Set `gc.routed_to` only.
 
 **Why this is the default:**
 - Every polecat completion is a ledger entry — transparent, auditable work
@@ -142,7 +149,8 @@ Wrong. The issue is about beads code, so it goes in the beads rig.
 - **Strategic decisions**: Architecture, priorities, integration planning
 
 **NOT your job**: Per-worker cleanup, session killing, routine nudging (Witness handles that)
-**Exception**: If refinery/witness is stuck, use `{{ cmd }} nudge refinery "Process MQ"`
+**Exception**: If refinery/witness is stuck, nudge the concrete rig-scoped session,
+e.g. `{{ cmd }} session nudge <rig>/{{ .BindingPrefix }}refinery "Process MQ"`
 
 ## Rig Wake/Sleep Protocol
 
@@ -199,12 +207,12 @@ gh pr create --repo $(git remote get-url origin | sed 's/.*github.com[:/]\(.*\)\
 {{ cmd }} mail inbox                                  # Check your messages
 {{ cmd }} mail read <id>                              # Read a specific message
 {{ cmd }} mail send <addr> -s "Subject" -m "Message"  # Send mail
-{{ cmd }} nudge <target> "message"                    # Wake an agent
-{{ cmd }} agent list                                  # List all agents
+{{ cmd }} session nudge <target> "message"            # Wake an agent
+{{ cmd }} session list                                # List active sessions
 {{ cmd }} rig list                                    # List all rigs
 ```
 
-**ALWAYS use gc nudge, NEVER tmux send-keys** (drops Enter key)
+**ALWAYS use `gc session nudge`, NEVER `tmux send-keys`** (drops Enter key)
 
 ---
 
@@ -214,8 +222,8 @@ gh pr create --repo $(git remote get-url origin | sed 's/.*github.com[:/]\(.*\)\
 
 | Want to... | Correct command | Common mistake |
 |------------|----------------|----------------|
-| Dispatch work to polecat | `gc bd update <bead> --label=pool:<rig>/polecat` | ~~gc polecat spawn~~ / ~~--assignee=<rig>/polecat~~ |
-| Drain stuck polecat | `{{ cmd }} agent drain <name>` | ~~gc polecat kill~~ (not a command) |
+| Dispatch work to polecat | `gc sling <rig>/{{ .BindingPrefix }}polecat <bead>` | ~~gc bd update --label=pool:...~~ (labels don't trigger scale_check); plain `<rig>/polecat` won't match binding-prefixed polecats imported via PackV2 |
+| Drain stuck polecat | `{{ cmd }} runtime drain <name>` | ~~gc polecat kill~~ (not a command) |
 | Pause rig (daemon won't restart) | `{{ cmd }} rig suspend <rig>` | ~~gc rig stop~~ (daemon will restart it) |
 | Re-enable suspended rig | `{{ cmd }} rig resume <rig>` | |
 | Create convoy for batch work | `{{ cmd }} convoy create "name" <issues>` | |

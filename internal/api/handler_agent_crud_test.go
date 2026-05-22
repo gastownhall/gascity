@@ -1,11 +1,18 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 func TestHandleAgentCreate(t *testing.T) {
@@ -30,6 +37,184 @@ func TestHandleAgentCreate(t *testing.T) {
 	}
 	if !found {
 		t.Error("agent 'coder' not found in config after create")
+	}
+}
+
+// agentVisibilityFakeState wraps fakeMutatorState with an
+// AgentVisibilityWaiter implementation so the handler-side wiring can be
+// exercised without spinning up the real controller.
+type agentVisibilityFakeState struct {
+	*fakeMutatorState
+	waitCalled             atomic.Bool
+	waitName               atomic.Value // string
+	waitErr                error
+	waitUntilContextDone   bool
+	publishAgentDuringWait bool
+	pendingAgent           *config.Agent
+}
+
+func (s *agentVisibilityFakeState) CreateAgent(a config.Agent) error {
+	if !s.publishAgentDuringWait {
+		return s.fakeMutatorState.CreateAgent(a)
+	}
+	pending := a
+	s.pendingAgent = &pending
+	return nil
+}
+
+func (s *agentVisibilityFakeState) WaitForAgentVisibility(ctx context.Context, qualifiedName string) error {
+	s.waitCalled.Store(true)
+	s.waitName.Store(qualifiedName)
+	if s.waitUntilContextDone {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if s.waitErr != nil {
+		return s.waitErr
+	}
+	if s.publishAgentDuringWait && s.pendingAgent != nil {
+		s.cfg.Agents = append(s.cfg.Agents, *s.pendingAgent)
+		s.pendingAgent = nil
+	}
+	return nil
+}
+
+// TestHandleAgentCreate_InvokesVisibilityWaiter verifies that POST /agents
+// calls WaitForAgentVisibility with the qualified name on success. This is
+// the read-after-write guarantee that prevents a follow-up POST /sling from
+// 404ing on the freshly created target.
+func TestHandleAgentCreate_InvokesVisibilityWaiter(t *testing.T) {
+	fs := &agentVisibilityFakeState{fakeMutatorState: newFakeMutatorState(t)}
+	h := newTestCityHandler(t, fs)
+
+	body := `{"name":"coder","dir":"myrig","provider":"claude"}`
+	req := newPostRequest(cityURL(fs, "/agents"), strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	if !fs.waitCalled.Load() {
+		t.Fatal("WaitForAgentVisibility was not called")
+	}
+	if got, _ := fs.waitName.Load().(string); got != "myrig/coder" {
+		t.Errorf("WaitForAgentVisibility called with %q, want %q", got, "myrig/coder")
+	}
+}
+
+// TestHandleAgentCreate_MakesImmediateSlingTargetVisible proves the handler
+// sequence that regressed in the live contract: once POST /agents returns 201,
+// a POST /sling against the same freshly-created target resolves through the
+// handler's current Config snapshot.
+func TestHandleAgentCreate_MakesImmediateSlingTargetVisible(t *testing.T) {
+	fs := &agentVisibilityFakeState{
+		fakeMutatorState:       newFakeMutatorState(t),
+		publishAgentDuringWait: true,
+	}
+	fs.cfg.Rigs[0].Prefix = "gc"
+	srv := New(fs)
+	srv.SlingRunnerFunc = func(_ string, _ string, _ map[string]string) (string, error) {
+		return "", nil
+	}
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	b, err := fs.stores["myrig"].Create(beads.Bead{Title: "route me", Type: "task"})
+	if err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+
+	createReq := newPostRequest(cityURL(fs, "/agents"), strings.NewReader(
+		`{"name":"coder","dir":"myrig","provider":"test-agent"}`,
+	))
+	createRec := httptest.NewRecorder()
+	h.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d; body = %s", createRec.Code, http.StatusCreated, createRec.Body.String())
+	}
+
+	slingBody := `{"target":"myrig/coder","bead":"` + b.ID + `"}`
+	slingRec := httptest.NewRecorder()
+	h.ServeHTTP(slingRec, newPostRequest(cityURL(fs, "/sling"), strings.NewReader(slingBody)))
+	if slingRec.Code != http.StatusOK {
+		t.Fatalf("sling status = %d, want %d; body = %s", slingRec.Code, http.StatusOK, slingRec.Body.String())
+	}
+}
+
+func TestHandleAgentCreate_VisibilityWaiterTimeoutIsBounded(t *testing.T) {
+	fs := &agentVisibilityFakeState{
+		fakeMutatorState:     newFakeMutatorState(t),
+		waitUntilContextDone: true,
+	}
+	srv := New(fs)
+	srv.agentVisibilityWaitTimeout = 10 * time.Millisecond
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := newPostRequest(cityURL(fs, "/agents"), strings.NewReader(
+		`{"name":"coder","dir":"myrig","provider":"test-agent"}`,
+	))
+	rec := httptest.NewRecorder()
+	start := time.Now()
+	h.ServeHTTP(rec, req)
+
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("handler returned after %s, want bounded visibility timeout", elapsed)
+	}
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusGatewayTimeout, rec.Body.String())
+	}
+	if got := rec.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After = %q, want 1", got)
+	}
+	if strings.Contains(rec.Body.String(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("response leaked raw context error: %s", rec.Body.String())
+	}
+}
+
+func TestHandleAgentCreate_VisibilityWaiterCancelIsServiceUnavailable(t *testing.T) {
+	fs := &agentVisibilityFakeState{
+		fakeMutatorState: newFakeMutatorState(t),
+		waitErr:          context.Canceled,
+	}
+	h := newTestCityHandler(t, fs)
+
+	req := newPostRequest(cityURL(fs, "/agents"), strings.NewReader(
+		`{"name":"coder","dir":"myrig","provider":"test-agent"}`,
+	))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	if got := rec.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After = %q, want 1", got)
+	}
+	if strings.Contains(rec.Body.String(), context.Canceled.Error()) {
+		t.Fatalf("response leaked raw context error: %s", rec.Body.String())
+	}
+}
+
+// TestHandleAgentCreate_VisibilityWaiterErrorSurfacesAs500 ensures that a
+// projection failure does not silently 201 — the caller must know the agent
+// isn't yet reachable through findAgent.
+func TestHandleAgentCreate_VisibilityWaiterErrorSurfacesAs500(t *testing.T) {
+	fs := &agentVisibilityFakeState{
+		fakeMutatorState: newFakeMutatorState(t),
+		waitErr:          errors.New("simulated visibility wait failure"),
+	}
+	h := newTestCityHandler(t, fs)
+
+	body := `{"name":"coder","dir":"myrig","provider":"claude"}`
+	req := newPostRequest(cityURL(fs, "/agents"), strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusInternalServerError, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "simulated visibility wait failure") {
+		t.Fatalf("response leaked raw waiter error: %s", w.Body.String())
 	}
 }
 

@@ -96,7 +96,7 @@ func toOrderResponse(a orders.Order) orderResponse {
 // lastRunOutcomeFromLabels extracts the run outcome from bead labels.
 func lastRunOutcomeFromLabels(labels []string) string {
 	switch {
-	case containsString(labels, "exec-failed"), containsString(labels, "wisp-failed"):
+	case orderLabelsContainExecFailure(labels), orderLabelsContainTriggerEnvFailure(labels), containsString(labels, "wisp-failed"):
 		return "failed"
 	case containsString(labels, "wisp-canceled"):
 		return "canceled"

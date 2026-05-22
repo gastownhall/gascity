@@ -37,9 +37,7 @@ func TestExecutePreparedStartWaveUsesWorkerBoundaryForKnownSession(t *testing.T)
 		}},
 		sp,
 		store,
-		nil,
 		10*time.Second,
-		1,
 	)
 	if len(results) != 1 {
 		t.Fatalf("len(results) = %d, want 1", len(results))

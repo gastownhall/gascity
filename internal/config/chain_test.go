@@ -283,3 +283,210 @@ func TestResolveProviderChain_SharedAncestorDAG(t *testing.T) {
 		t.Errorf("both should have BuiltinAncestor=codex; got A=%q B=%q", rA.BuiltinAncestor, rB.BuiltinAncestor)
 	}
 }
+
+// --- Kiro overlay materialization tests ---
+//
+// These test custom "kiro" provider overlays via base-chain inheritance.
+// They verify the standalone custom provider path as well as the
+// base = "builtin:claude" inheritance path.
+
+func TestResolveProviderChain_KiroStandaloneNoBase(t *testing.T) {
+	custom := map[string]ProviderSpec{
+		"kiro": {
+			Command:          "kiro-cli",
+			Args:             []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+			PromptMode:       "arg",
+			ReadyDelayMs:     5000,
+			ProcessNames:     []string{"kiro", "node"},
+			SupportsHooks:    boolPtr(true),
+			InstructionsFile: "AGENTS.md",
+			ResumeFlag:       "--resume",
+			ResumeStyle:      "flag",
+			Env:              map[string]string{"KIRO_AGENT_MODE": "headless"},
+			PermissionModes:  map[string]string{"unrestricted": "--trust-mode full"},
+		},
+	}
+	r, err := ResolveProviderChain("kiro", custom["kiro"], customs(custom))
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if r.BuiltinAncestor != "" {
+		t.Errorf("BuiltinAncestor = %q, want empty (kiro is standalone)", r.BuiltinAncestor)
+	}
+	if len(r.Chain) != 1 {
+		t.Errorf("Chain length = %d, want 1 (leaf only)", len(r.Chain))
+	}
+	if r.Command != "kiro-cli" {
+		t.Errorf("Command = %q, want kiro", r.Command)
+	}
+	if r.ReadyDelayMs != 5000 {
+		t.Errorf("ReadyDelayMs = %d, want 5000", r.ReadyDelayMs)
+	}
+	if r.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want headless", r.Env["KIRO_AGENT_MODE"])
+	}
+	if r.PermissionModes["unrestricted"] != "--trust-mode full" {
+		t.Errorf("PermissionModes[unrestricted] = %q, want --trust-mode full", r.PermissionModes["unrestricted"])
+	}
+}
+
+func TestResolveProviderChain_KiroInheritsFromClaude(t *testing.T) {
+	custom := map[string]ProviderSpec{
+		"kiro": {
+			Base:         basePtr("builtin:claude"),
+			Command:      "kiro-cli",
+			Args:         []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+			ReadyDelayMs: 5000,
+			ProcessNames: []string{"kiro", "node"},
+			Env:          map[string]string{"KIRO_AGENT_MODE": "headless"},
+		},
+	}
+	r, err := ResolveProviderChain("kiro", custom["kiro"], customs(custom))
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if r.BuiltinAncestor != "claude" {
+		t.Errorf("BuiltinAncestor = %q, want claude", r.BuiltinAncestor)
+	}
+	if len(r.Chain) != 2 {
+		t.Errorf("Chain length = %d, want 2 (kiro → builtin:claude)", len(r.Chain))
+	}
+	if r.Command != "kiro-cli" {
+		t.Errorf("Command = %q, want kiro (leaf override)", r.Command)
+	}
+	if r.ReadyDelayMs != 5000 {
+		t.Errorf("ReadyDelayMs = %d, want 5000 (leaf override)", r.ReadyDelayMs)
+	}
+	if r.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want headless (leaf env)", r.Env["KIRO_AGENT_MODE"])
+	}
+	// Inherited from builtin claude.
+	if !r.SupportsHooks {
+		t.Error("SupportsHooks = false, want true (inherited from claude)")
+	}
+	if !r.SupportsACP {
+		t.Error("SupportsACP = false, want true (inherited from claude)")
+	}
+	if !r.EmitsPermissionWarning {
+		t.Error("EmitsPermissionWarning = false, want true (inherited from claude)")
+	}
+	if r.InstructionsFile != "CLAUDE.md" {
+		t.Errorf("InstructionsFile = %q, want CLAUDE.md (inherited from claude)", r.InstructionsFile)
+	}
+	if r.ResumeFlag != "--resume" {
+		t.Errorf("ResumeFlag = %q, want --resume (inherited from claude)", r.ResumeFlag)
+	}
+	if r.SessionIDFlag != "--session-id" {
+		t.Errorf("SessionIDFlag = %q, want --session-id (inherited from claude)", r.SessionIDFlag)
+	}
+	// PermissionModes inherited from builtin claude.
+	if r.PermissionModes == nil {
+		t.Fatal("PermissionModes nil — inheritance from builtin claude failed")
+	}
+	if r.PermissionModes["unrestricted"] != "--dangerously-skip-permissions" {
+		t.Errorf("PermissionModes[unrestricted] = %q, want --dangerously-skip-permissions (inherited)", r.PermissionModes["unrestricted"])
+	}
+	// OptionsSchema inherited from builtin claude.
+	if len(r.OptionsSchema) == 0 {
+		t.Error("OptionsSchema empty — builtin claude OptionsSchema not inherited")
+	}
+}
+
+func TestResolveProviderChain_KiroOverridesClaudeInstructionsFile(t *testing.T) {
+	custom := map[string]ProviderSpec{
+		"kiro": {
+			Base:             basePtr("builtin:claude"),
+			Command:          "kiro-cli",
+			InstructionsFile: "AGENTS.md",
+		},
+	}
+	r, err := ResolveProviderChain("kiro", custom["kiro"], customs(custom))
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if r.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want AGENTS.md (leaf override)", r.InstructionsFile)
+	}
+	if r.BuiltinAncestor != "claude" {
+		t.Errorf("BuiltinAncestor = %q, want claude", r.BuiltinAncestor)
+	}
+}
+
+func TestResolveProviderChain_KiroExplicitEmptyBaseStandalone(t *testing.T) {
+	custom := map[string]ProviderSpec{
+		"kiro": {
+			Base:    basePtr(""),
+			Command: "kiro-cli",
+		},
+	}
+	r, err := ResolveProviderChain("kiro", custom["kiro"], customs(custom))
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if r.BuiltinAncestor != "" {
+		t.Errorf("BuiltinAncestor = %q, want empty (explicit base=\"\" opts out)", r.BuiltinAncestor)
+	}
+	if len(r.Chain) != 1 {
+		t.Errorf("Chain length = %d, want 1", len(r.Chain))
+	}
+}
+
+func TestResolveProviderChain_KiroDisablesInheritedSupportsACP(t *testing.T) {
+	custom := map[string]ProviderSpec{
+		"kiro": {
+			Base:        basePtr("builtin:claude"),
+			Command:     "kiro-cli",
+			SupportsACP: boolPtr(false),
+		},
+	}
+	r, err := ResolveProviderChain("kiro", custom["kiro"], customs(custom))
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if r.SupportsACP {
+		t.Error("SupportsACP = true, want false (kiro explicitly disabled)")
+	}
+	if !r.SupportsHooks {
+		t.Error("SupportsHooks = false, want true (inherited from claude, not overridden)")
+	}
+}
+
+func TestResolveProviderChain_KiroAddsEnvOverClaudeBase(t *testing.T) {
+	custom := map[string]ProviderSpec{
+		"kiro": {
+			Base:    basePtr("builtin:claude"),
+			Command: "kiro-cli",
+			Env:     map[string]string{"KIRO_AGENT_MODE": "headless"},
+		},
+	}
+	r, err := ResolveProviderChain("kiro", custom["kiro"], customs(custom))
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if r.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want headless", r.Env["KIRO_AGENT_MODE"])
+	}
+}
+
+func TestResolveProviderChain_KiroProvenance(t *testing.T) {
+	custom := map[string]ProviderSpec{
+		"kiro": {
+			Base:         basePtr("builtin:claude"),
+			Command:      "kiro-cli",
+			ReadyDelayMs: 5000,
+		},
+	}
+	r, err := ResolveProviderChain("kiro", custom["kiro"], customs(custom))
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if r.Provenance.FieldLayer["command"] != "providers.kiro" {
+		t.Errorf("command provenance = %q, want providers.kiro", r.Provenance.FieldLayer["command"])
+	}
+	if r.Provenance.FieldLayer["ready_delay_ms"] != "providers.kiro" {
+		t.Errorf("ready_delay_ms provenance = %q, want providers.kiro", r.Provenance.FieldLayer["ready_delay_ms"])
+	}
+	if r.Provenance.FieldLayer["resume_flag"] != "builtin:claude" {
+		t.Errorf("resume_flag provenance = %q, want builtin:claude", r.Provenance.FieldLayer["resume_flag"])
+	}
+}

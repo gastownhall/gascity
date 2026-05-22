@@ -1,8 +1,10 @@
 #!/bin/sh
-# gc dolt sql — Open an interactive Dolt SQL shell.
+# gc dolt sql — Open a Dolt SQL shell or run a one-shot query.
 #
 # Connects to the running Dolt server if available, otherwise opens
-# in embedded mode using the first database directory found.
+# in embedded mode using the first database directory found. Trailing
+# arguments are forwarded verbatim to `dolt sql`, so non-interactive
+# use is supported via `gc dolt sql -q "QUERY"`.
 #
 # Environment: GC_CITY_PATH, GC_DOLT_HOST, GC_DOLT_PORT, GC_DOLT_USER,
 #              GC_DOLT_PASSWORD (all optional except GC_CITY_PATH)
@@ -34,10 +36,14 @@ if is_running; then
     host="127.0.0.1"
   fi
   args="--host $host --port $GC_DOLT_PORT --user $GC_DOLT_USER --no-tls"
-  if [ -n "$GC_DOLT_PASSWORD" ]; then
-    export DOLT_CLI_PASSWORD="$GC_DOLT_PASSWORD"
-  fi
-  exec dolt $args sql
+  # Always export DOLT_CLI_PASSWORD so dolt's credential parser skips
+  # the TTY password prompt. When GC_DOLT_PASSWORD is empty (the
+  # managed-local default — root has no password), an unset env var
+  # causes `dolt sql -q "..."` to fail with "inappropriate ioctl for
+  # device" under non-interactive callers (CI, scripts, automation).
+  # Exporting empty satisfies dolt without changing auth outcomes.
+  export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
+  exec dolt $args sql "$@"
 else
   # Embedded mode — find first database directory.
   if [ ! -d "$data_dir" ]; then
@@ -52,5 +58,5 @@ else
     echo "gc dolt sql: no dolt server running and no databases found" >&2
     exit 1
   fi
-  exec dolt --data-dir "$data_dir" sql
+  exec dolt --data-dir "$data_dir" sql "$@"
 fi

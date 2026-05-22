@@ -4,10 +4,114 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/events"
 )
+
+func TestCmdHookQueryKillEmitsCurrentSessionTemplate(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+work_query = "kill -9 $$"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_ID", "sess-hook-123")
+	t.Setenv("GC_SESSION_NAME", "worker-1")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithFormat(nil, false, "", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("cmdHookWithFormat() = %d, want 1 for killed work query; stderr=%s", code, stderr.String())
+	}
+	evts, err := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.SessionWorkQueryFailed})
+	if err != nil {
+		t.Fatalf("read work-query failure events: %v", err)
+	}
+	if len(evts) != 1 {
+		t.Fatalf("work-query failure events = %d, want 1: %+v", len(evts), evts)
+	}
+	if evts[0].Subject != "worker" {
+		t.Fatalf("event subject = %q, want current session template", evts[0].Subject)
+	}
+	if strings.Contains(evts[0].Message, "kill -9") {
+		t.Fatalf("event message leaked raw work query command: %q", evts[0].Message)
+	}
+	payload := decodeSessionLifecyclePayload(t, evts[0])
+	if payload.SessionID != "sess-hook-123" {
+		t.Fatalf("payload SessionID = %q, want sess-hook-123", payload.SessionID)
+	}
+	if payload.Template != "worker" {
+		t.Fatalf("payload Template = %q, want current session template", payload.Template)
+	}
+	if payload.Reason != "work query killed (signal: killed)" {
+		t.Fatalf("payload Reason = %q, want work query killed (signal: killed)", payload.Reason)
+	}
+}
+
+func TestCmdHookExplicitDifferentTargetSuppressesSessionFailureEvent(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+work_query = "printf '[]'"
+
+[[agent]]
+name = "other"
+work_query = "kill -9 $$"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_ID", "sess-hook-456")
+	t.Setenv("GC_SESSION_NAME", "worker-1")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithFormat([]string{"other"}, false, "", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("cmdHookWithFormat(explicit other) = %d, want 1 for killed work query; stderr=%s", code, stderr.String())
+	}
+	evts, err := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.SessionWorkQueryFailed})
+	if err != nil {
+		t.Fatalf("read work-query failure events: %v", err)
+	}
+	if len(evts) != 0 {
+		t.Fatalf("work-query failure events = %d, want 0 for explicit different target: %+v", len(evts), evts)
+	}
+}
 
 func TestHookNoWork(t *testing.T) {
 	runner := func(string, string) (string, error) { return "", nil }
@@ -42,6 +146,40 @@ func TestHookCommandError(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "command failed") {
 		t.Errorf("stderr = %q, want to contain %q", stderr.String(), "command failed")
+	}
+}
+
+func TestHookCommandErrorPrintsPartialOutput(t *testing.T) {
+	runner := func(string, string) (string, error) {
+		return "[]\n", fmt.Errorf("timed out after 15s with partial stdout")
+	}
+	var stdout, stderr bytes.Buffer
+	code := doHook("bd ready", "", false, runner, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("doHook(error with output) = %d, want 1", code)
+	}
+	if got := stdout.String(); got != "[]" {
+		t.Errorf("stdout = %q, want partial JSON output", got)
+	}
+	if !strings.Contains(stderr.String(), "partial stdout") {
+		t.Errorf("stderr = %q, want timeout diagnostic", stderr.String())
+	}
+}
+
+func TestShellWorkQueryWithEnvTimeoutReportsPartialOutput(t *testing.T) {
+	oldTimeout := hookWorkQueryTimeout
+	hookWorkQueryTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { hookWorkQueryTimeout = oldTimeout })
+
+	out, err := shellWorkQueryWithEnv("printf '[]\\n'; sleep 1", "", nil)
+	if err == nil {
+		t.Fatal("shellWorkQueryWithEnv() error = nil, want timeout")
+	}
+	if strings.TrimSpace(out) != "[]" {
+		t.Fatalf("stdout = %q, want partial JSON output", out)
+	}
+	if !strings.Contains(err.Error(), "partial stdout") {
+		t.Fatalf("error = %v, want partial stdout diagnostic", err)
 	}
 }
 
@@ -85,34 +223,196 @@ func TestHookInjectSuppressesNoReadyMessage(t *testing.T) {
 	}
 }
 
-func TestHookInjectFormatsOutput(t *testing.T) {
+func TestHookInjectIsNonIntrusiveWithWork(t *testing.T) {
 	runner := func(string, string) (string, error) { return "hw-1  open  Fix the bug\n", nil }
 	var stdout, stderr bytes.Buffer
 	code := doHook("bd ready", "", true, runner, &stdout, &stderr)
 	if code != 0 {
 		t.Errorf("doHook(inject, work) = %d, want 0", code)
 	}
-	out := stdout.String()
-	if !strings.Contains(out, "<system-reminder>") {
-		t.Errorf("stdout missing <system-reminder>: %q", out)
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty non-intrusive inject output", stdout.String())
 	}
-	if !strings.Contains(out, "</system-reminder>") {
-		t.Errorf("stdout missing </system-reminder>: %q", out)
+}
+
+func TestHookInjectDoesNotRunWorkQuery(t *testing.T) {
+	called := false
+	runner := func(string, string) (string, error) {
+		called = true
+		return "hw-1  open  Fix the bug\n", nil
 	}
-	if !strings.Contains(out, "<work-items>") {
-		t.Errorf("stdout missing <work-items>: %q", out)
+	var stdout, stderr bytes.Buffer
+	code := doHook("bd ready", "", true, runner, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("doHook(inject, work) = %d, want 0", code)
 	}
-	if !strings.Contains(out, "hw-1") {
-		t.Errorf("stdout missing work item: %q", out)
+	if called {
+		t.Fatal("inject mode ran the work query even though its output is ignored")
 	}
-	if !strings.Contains(out, "gc hook") {
-		t.Errorf("stdout missing 'gc hook' hint: %q", out)
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty non-intrusive inject output", stdout.String())
 	}
-	if !strings.Contains(out, "bd update <id> --claim") {
-		t.Errorf("stdout missing claim command: %q", out)
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", stderr.String())
 	}
-	if !strings.Contains(out, "bd close <id>") {
-		t.Errorf("stdout missing close command: %q", out)
+}
+
+func TestHookCommandCodexInjectDoesNotBlockStop(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+work_query = "printf '[{\"id\":\"hw-1\",\"title\":\"Fix the bug\"}]'"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	cmd := newHookCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"worker", "--inject", "--hook-format", "codex"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc hook command failed: %v; stderr=%s", err, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty non-blocking Stop hook output", stdout.String())
+	}
+}
+
+func TestHookCommandInjectSkipsConfiguredWorkQuery(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "work-query-ran")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+work_query = "printf ran > %q"
+`, marker)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	cmd := newHookCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"worker", "--inject", "--hook-format", "codex"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc hook command failed: %v; stderr=%s", err, stderr.String())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("inject mode ran configured work_query; marker stat err=%v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty non-blocking Stop hook output", stdout.String())
+	}
+}
+
+func TestHookCommandHookFormatIsIgnoredForNonInjectOutput(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+work_query = "printf '[{\"id\":\"hw-1\",\"title\":\"Fix the bug\"}]'"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	run := func(args ...string) (string, string, error) {
+		var stdout, stderr bytes.Buffer
+		cmd := newHookCmd(&stdout, &stderr)
+		cmd.SetArgs(args)
+		err := cmd.Execute()
+		return stdout.String(), stderr.String(), err
+	}
+
+	rawOut, rawErr, err := run("worker")
+	if err != nil {
+		t.Fatalf("gc hook worker failed: %v; stderr=%s", err, rawErr)
+	}
+	formattedOut, formattedErr, err := run("worker", "--hook-format", "codex")
+	if err != nil {
+		t.Fatalf("gc hook worker --hook-format codex failed: %v; stderr=%s", err, formattedErr)
+	}
+	if formattedOut != rawOut {
+		t.Fatalf("hook-format changed non-inject output:\nraw:       %q\nformatted: %q", rawOut, formattedOut)
+	}
+	if formattedErr != rawErr {
+		t.Fatalf("hook-format changed non-inject stderr:\nraw:       %q\nformatted: %q", rawErr, formattedErr)
+	}
+	if strings.Contains(formattedOut, "system-reminder") {
+		t.Fatalf("non-inject hook output was provider-formatted: %q", formattedOut)
+	}
+}
+
+func TestCmdHookSessionTemplateContextDoesNotScanSessionsForName(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	fakeBin := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fakeBD := filepath.Join(fakeBin, "bd")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nprintf '[]'\n", logPath)
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_ALIAS", "worker-1")
+	t.Setenv("GC_SESSION_ID", "mc-session")
+	t.Setenv("GC_SESSION_NAME", "runtime-session")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithFormat(nil, false, "", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("cmdHookWithFormat() = %d, want 1 for empty work; stderr=%s", code, stderr.String())
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", logPath, err)
+	}
+	logText := string(logData)
+	if strings.Contains(logText, "--label=gc:session") {
+		t.Fatalf("gc hook scanned all session beads before running work_query:\n%s", logText)
+	}
+	if !strings.Contains(logText, "--assignee=runtime-session") {
+		t.Fatalf("gc hook did not pass runtime session name into work_query; bd log:\n%s", logText)
 	}
 }
 
@@ -144,6 +444,30 @@ func TestHookPassesWorkQuery(t *testing.T) {
 	}
 }
 
+func TestShellWorkQueryTimesOutPromptly(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	oldTimeout := hookWorkQueryTimeout
+	hookWorkQueryTimeout = 50 * time.Millisecond
+	t.Cleanup(func() {
+		hookWorkQueryTimeout = oldTimeout
+	})
+
+	start := time.Now()
+	_, err := shellWorkQueryWithEnv("sleep 5", t.TempDir(), nil)
+	if err == nil {
+		t.Fatal("shellWorkQueryWithEnv(sleep) err = nil, want timeout")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("err = %v, want timeout diagnostic", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("shellWorkQueryWithEnv timeout elapsed %s, want under 1s", elapsed)
+	}
+}
+
 func TestWorkQueryHasReadyWorkEmptyJSONArray(t *testing.T) {
 	if workQueryHasReadyWork("[]") {
 		t.Fatal("workQueryHasReadyWork([]) = true, want false")
@@ -157,8 +481,9 @@ func TestWorkQueryHasReadyWorkNonEmptyJSONArray(t *testing.T) {
 }
 
 func TestCmdHookUsesAgentCityAndRigRoot(t *testing.T) {
-	t.Setenv("GC_TMUX_SESSION", "host-session")
 	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_TMUX_SESSION", "host-session")
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig-repo")
 	workDir := filepath.Join(cityDir, ".gc", "worktrees", "myrig", "polecat-1")
@@ -213,7 +538,7 @@ max = 5
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook(nil, false, &stdout, &stderr)
+	code := cmdHook(nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -237,7 +562,7 @@ max = 5
 		t.Fatalf("stdout = %q, want GC_RIG_ROOT=%q", out, rigDir)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, "args=list --status in_progress --assignee=myrig--polecat --json --limit=1") {
+	if !strings.Contains(out, "args=list --status in_progress --assignee=host-session --exclude-type=epic --json --limit=1") {
 		t.Fatalf("stdout = %q, want pool work_query args", out)
 	}
 }
@@ -248,8 +573,9 @@ max = 5
 // for rig-backed agents. Without the fix, the subprocess reads the city
 // store and returns [] for rig-routed work.
 func TestCmdHookOverridesInheritedCityBeadsDir(t *testing.T) {
-	t.Setenv("GC_TMUX_SESSION", "host-session")
 	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_TMUX_SESSION", "host-session")
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig-repo")
 	fakeBin := t.TempDir()
@@ -292,7 +618,7 @@ dir = "myrig"
 	t.Setenv("BEADS_DIR", cityBeads)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -319,8 +645,9 @@ dir = "myrig"
 // rig-matching loop misses the rig entirely (skipping GC_RIG and any
 // per-rig Dolt overrides).
 func TestCmdHookResolvesRelativeRigPath(t *testing.T) {
-	t.Setenv("GC_TMUX_SESSION", "host-session")
 	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_TMUX_SESSION", "host-session")
 	cityDir := t.TempDir()
 	fakeBin := t.TempDir()
 
@@ -359,7 +686,7 @@ dir = "myrig"
 	t.Setenv("GC_DIR", rigAbs)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -380,8 +707,9 @@ dir = "myrig"
 }
 
 func TestCmdHookExpandsTemplateCommandsWithCityFallback(t *testing.T) {
-	t.Setenv("GC_TMUX_SESSION", "host-session")
 	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_TMUX_SESSION", "host-session")
 	cityDir := filepath.Join(t.TempDir(), "demo-city")
 	rigDir := filepath.Join(cityDir, "frontend")
 	fakeBin := t.TempDir()
@@ -416,7 +744,7 @@ work_query = "bd {{.CityName}} {{.Rig}} {{.AgentBase}}"
 	t.Setenv("GC_DIR", rigDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -430,8 +758,9 @@ work_query = "bd {{.CityName}} {{.Rig}} {{.AgentBase}}"
 // rig) must fall back to the city-scoped bead store, not mistakenly be
 // treated as rig-backed and pointed at `<dir>/.beads`.
 func TestCmdHookNonRigDirAgentUsesCityStore(t *testing.T) {
-	t.Setenv("GC_TMUX_SESSION", "host-session")
 	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_TMUX_SESSION", "host-session")
 	cityDir := t.TempDir()
 	fakeBin := t.TempDir()
 
@@ -464,7 +793,7 @@ dir = "workdir"
 	t.Setenv("GC_CITY", cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -481,8 +810,9 @@ dir = "workdir"
 }
 
 func TestCmdHookPoolInstanceUsesTemplatePoolLabel(t *testing.T) {
-	t.Setenv("GC_TMUX_SESSION", "host-session")
 	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_TMUX_SESSION", "host-session")
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig-repo")
 	workDir := filepath.Join(cityDir, ".gc", "worktrees", "myrig", "polecat-1")
@@ -538,7 +868,7 @@ max = 5
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook(nil, false, &stdout, &stderr)
+	code := cmdHook(nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -547,7 +877,7 @@ max = 5
 		t.Fatalf("stdout = %q, want command to run from rig root %q", out, rigDir)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, "args=list --status in_progress --assignee=myrig--polecat-1 --json --limit=1") {
+	if !strings.Contains(out, "args=list --status in_progress --assignee=host-session --exclude-type=epic --json --limit=1") {
 		t.Fatalf("stdout = %q, want pool template work_query args", out)
 	}
 }
@@ -573,8 +903,9 @@ func TestWorkQueryEnvForDirOverridesInheritedPWD(t *testing.T) {
 }
 
 func TestCmdHookExportsResolvedIdentityForFixedAgentQuery(t *testing.T) {
-	t.Setenv("GC_TMUX_SESSION", "host-session")
 	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_TMUX_SESSION", "host-session")
 	cityDir := t.TempDir()
 	fakeBin := t.TempDir()
 
@@ -602,7 +933,7 @@ name = "worker"
 	t.Setenv("GC_CITY", cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -610,18 +941,19 @@ name = "worker"
 	if !strings.Contains(out, "agent=worker") {
 		t.Fatalf("stdout = %q, want GC_AGENT=worker", out)
 	}
-	if !strings.Contains(out, "session=worker") {
-		t.Fatalf("stdout = %q, want GC_SESSION_NAME=worker", out)
+	if !strings.Contains(out, "session=host-session") {
+		t.Fatalf("stdout = %q, want GC_SESSION_NAME=host-session", out)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, `args=list --status in_progress --assignee=worker --json --limit=1`) {
+	if !strings.Contains(out, `args=list --status in_progress --assignee=host-session --exclude-type=epic --json --limit=1`) {
 		t.Fatalf("stdout = %q, want metadata-routed work query", out)
 	}
 }
 
 func TestCmdHookExportsResolvedIdentityFromRigContext(t *testing.T) {
-	t.Setenv("GC_TMUX_SESSION", "host-session")
 	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_TMUX_SESSION", "host-session")
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig-repo")
 	fakeBin := t.TempDir()
@@ -662,7 +994,7 @@ dir = "myrig"
 	wantSession := cliSessionName(cityDir, "test-city", wantAgent, "")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -674,7 +1006,7 @@ dir = "myrig"
 		t.Fatalf("stdout = %q, want GC_SESSION_NAME=%s", out, wantSession)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, `args=list --status in_progress --assignee=myrig--worker --json --limit=1`) {
+	if !strings.Contains(out, `args=list --status in_progress --assignee=host-session --exclude-type=epic --json --limit=1`) {
 		t.Fatalf("stdout = %q, want metadata-routed work query", out)
 	}
 }

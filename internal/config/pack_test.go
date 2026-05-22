@@ -267,6 +267,265 @@ name = "witness"
 	}
 }
 
+// TestLoadWithIncludes_PatchTargetsRigPackDerivedAgent verifies that a
+// city-level [[patches.agent]] block can target a rig-scope agent that
+// comes from a rig pack via [rigs.imports.<binding>]. The merged agent's
+// canonical identity is "rig/binding.name" (e.g., "proj/gs.refinery"),
+// and patches keyed by dir="rig" name="binding.name" must resolve to it.
+//
+// Regression for gco-dma / HQ gc-t2c: city-level patches were applied
+// before rig pack expansion, so the target agent didn't exist in
+// cfg.Agents when ApplyPatches ran and every form of [[patches.agent]]
+// pointing at a rig pack agent failed with "not found in merged config".
+func TestLoadWithIncludes_PatchTargetsRigPackDerivedAgent(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		patch string
+	}{
+		{
+			name: "dir plus binding qualified name",
+			patch: `
+[[patches.agent]]
+dir = "proj"
+name = "gs.refinery"
+suspended = true
+`,
+		},
+		{
+			name: "single qualified name",
+			patch: `
+[[patches.agent]]
+name = "proj/gs.refinery"
+suspended = true
+`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.gs]
+source = "./packs/gastown"
+`+tt.patch)
+			writeFile(t, dir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[[agent]]
+name = "refinery"
+scope = "rig"
+`)
+
+			cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+			if err != nil {
+				t.Fatalf("LoadWithIncludes: %v", err)
+			}
+
+			var refinery *Agent
+			for i := range cfg.Agents {
+				if cfg.Agents[i].QualifiedName() == "proj/gs.refinery" {
+					refinery = &cfg.Agents[i]
+					break
+				}
+			}
+			if refinery == nil {
+				names := make([]string, 0, len(cfg.Agents))
+				for _, a := range cfg.Agents {
+					names = append(names, a.QualifiedName())
+				}
+				t.Fatalf("agent proj/gs.refinery not found in merged config; agents: %v", names)
+			}
+			if !refinery.Suspended {
+				t.Errorf("refinery.Suspended = false, want true (patch should have applied)")
+			}
+		})
+	}
+}
+
+func TestLoadWithIncludes_RigPatchOverridesCityPatchForRigPackDerivedAgent(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.gs]
+source = "./packs/gastown"
+
+[[rigs.patches]]
+agent = "refinery"
+suspended = false
+
+[[patches.agent]]
+dir = "proj"
+name = "gs.refinery"
+suspended = true
+nudge = "city patch applied"
+`)
+	writeFile(t, dir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[[agent]]
+name = "refinery"
+scope = "rig"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var refinery *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].QualifiedName() == "proj/gs.refinery" {
+			refinery = &cfg.Agents[i]
+			break
+		}
+	}
+	if refinery == nil {
+		t.Fatal("agent proj/gs.refinery not found in merged config")
+	}
+	if refinery.Nudge != "city patch applied" {
+		t.Errorf("refinery.Nudge = %q, want city patch to apply before rig patch", refinery.Nudge)
+	}
+	if refinery.Suspended {
+		t.Errorf("refinery.Suspended = true, want false (rig patch should win after city patch)")
+	}
+}
+
+func TestLoadWithIncludes_ProvenanceUsesDeferredRigPatchFinalIdentity(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.gs]
+source = "./packs/gastown"
+
+[[rigs.patches]]
+agent = "refinery"
+dir = "ops"
+`)
+	writeFile(t, dir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[[agent]]
+name = "refinery"
+scope = "rig"
+`)
+
+	cfg, prov, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.Agents[0].QualifiedName() != "ops/gs.refinery" {
+		t.Fatalf("agent QualifiedName() = %q, want ops/gs.refinery", cfg.Agents[0].QualifiedName())
+	}
+	if _, ok := prov.Agents["ops/gs.refinery"]; !ok {
+		t.Fatalf("provenance missing final identity ops/gs.refinery; agents: %v", prov.Agents)
+	}
+	if _, ok := prov.Agents["proj/gs.refinery"]; ok {
+		t.Fatalf("provenance retained stale identity proj/gs.refinery; agents: %v", prov.Agents)
+	}
+}
+
+func TestApplyDeferredRigPatchesRejectsShiftedAgentRange(t *testing.T) {
+	suspended := true
+	cfg := &City{
+		Agents: []Agent{
+			{Dir: "proj", BindingName: "gs", Name: "refinery"},
+			{Dir: "proj", BindingName: "gs", Name: "refinery"},
+		},
+	}
+	deferred := []deferredRigPatches{
+		{
+			rigName:            "proj",
+			agentStart:         0,
+			agentEnd:           1,
+			expectedAgentCount: len(cfg.Agents),
+			expectedAgentNames: []string{"proj/gs.refinery"},
+			overrides:          []AgentOverride{{Agent: "refinery", Suspended: &suspended}},
+		},
+	}
+
+	cfg.Agents[0].Dir = "other"
+
+	err := applyDeferredRigPatches(cfg, deferred)
+	if err == nil {
+		t.Fatal("expected shifted deferred range to fail")
+	}
+	if !strings.Contains(err.Error(), "changed before deferred rig patches") {
+		t.Fatalf("error = %q, want changed-range message", err)
+	}
+	if cfg.Agents[0].Suspended {
+		t.Fatal("wrong agent was patched before shifted range was rejected")
+	}
+}
+
+// TestLoadWithIncludes_PatchTargetingMissingRigAgentStillErrors verifies
+// that a misspelled [[patches.agent]] target still produces a clear
+// "not found in merged config" error after the ordering fix. Without
+// this check, the swap could mask typos by silently no-oping if the
+// patch list ever became deferral-friendly. The merged config sees both
+// city-scope and rig-scope pack agents before the error is raised.
+func TestLoadWithIncludes_PatchTargetingMissingRigAgentStillErrors(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.gs]
+source = "./packs/gastown"
+
+[[patches.agent]]
+dir = "proj"
+name = "gs.nonexistent"
+suspended = true
+`)
+	writeFile(t, dir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[[agent]]
+name = "refinery"
+scope = "rig"
+`)
+
+	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err == nil {
+		t.Fatal("expected LoadWithIncludes to fail for nonexistent patch target")
+	}
+	if !strings.Contains(err.Error(), "proj/gs.nonexistent") {
+		t.Errorf("error = %q, want mention of proj/gs.nonexistent", err)
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error = %q, want mention of 'not found'", err)
+	}
+}
+
 func TestExpandPacks_OverrideNotFound(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/gt/pack.toml", `
@@ -638,6 +897,38 @@ func TestPackContentHashRecursive(t *testing.T) {
 	h3 := PackContentHashRecursive(fsys.OSFS{}, dir)
 	if h3 == h1 {
 		t.Error("hash should change when subdirectory file changes")
+	}
+}
+
+func TestPackContentHashRecursiveIgnoresRuntimeDirs(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "pack.toml", "test")
+	writeFile(t, dir, "prompts/a.md", "prompt a")
+
+	h1 := PackContentHashRecursive(fsys.OSFS{}, dir)
+	writeFile(t, dir, "state/triage/runs/audit.json", `{"status":"running"}`)
+	writeFile(t, dir, "tmp/scratch.txt", "scratch")
+	writeFile(t, dir, "__pycache__/helper.pyc", "compiled")
+	writeFile(t, dir, ".gc/runtime.json", `{"pid":123}`)
+	writeFile(t, dir, ".beads/db", "runtime state")
+	writeFile(t, dir, ".cache/tool/result.json", `{"cached":true}`)
+	writeFile(t, dir, ".git/HEAD", "ref: refs/heads/main")
+	writeFile(t, dir, "nested/__pycache__/helper.pyc", "compiled")
+	h2 := PackContentHashRecursive(fsys.OSFS{}, dir)
+	if h2 != h1 {
+		t.Fatalf("hash changed after runtime output writes: %q vs %q", h1, h2)
+	}
+
+	writeFile(t, dir, "prompts/state/example.md", "state prompt")
+	hPromptState := PackContentHashRecursive(fsys.OSFS{}, dir)
+	if hPromptState == h1 {
+		t.Fatal("hash should change for config content below a non-runtime state path")
+	}
+
+	writeFile(t, dir, "prompts/a.md", "modified prompt a")
+	h3 := PackContentHashRecursive(fsys.OSFS{}, dir)
+	if h3 == h1 {
+		t.Fatal("hash should still change when config-bearing pack content changes")
 	}
 }
 
@@ -3415,6 +3706,82 @@ script = "doctor/check2.sh"
 	}
 	if entries[1].Entry.Fix != "" {
 		t.Errorf("Entry.Fix without fix field = %q, want empty", entries[1].Entry.Fix)
+	}
+}
+
+func TestPackDoctorWarmupFlagParses(t *testing.T) {
+	cases := []struct {
+		name       string
+		toml       string
+		wantWarmup bool
+	}{
+		{
+			name: "explicit_true",
+			toml: `
+[pack]
+name = "warmup-pack"
+schema = 1
+
+[[doctor]]
+name = "check-x"
+script = "doctor/check-x.sh"
+warmup = true
+`,
+			wantWarmup: true,
+		},
+		{
+			name: "explicit_false",
+			toml: `
+[pack]
+name = "warmup-pack"
+schema = 1
+
+[[doctor]]
+name = "check-x"
+script = "doctor/check-x.sh"
+warmup = false
+`,
+			wantWarmup: false,
+		},
+		{
+			name: "default_omitted",
+			toml: `
+[pack]
+name = "warmup-pack"
+schema = 1
+
+[[doctor]]
+name = "check-x"
+script = "doctor/check-x.sh"
+`,
+			wantWarmup: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, "pack.toml", tc.toml)
+
+			entries := LoadPackDoctorEntries(fsys.OSFS{}, []string{dir})
+			if len(entries) != 1 {
+				t.Fatalf("got %d entries, want 1", len(entries))
+			}
+			if entries[0].Entry.Warmup != tc.wantWarmup {
+				t.Fatalf("Entry.Warmup = %v, want %v", entries[0].Entry.Warmup, tc.wantWarmup)
+			}
+
+			doctors, err := legacyPackDoctors(fsys.OSFS{}, []PackDoctorEntry{entries[0].Entry}, dir, entries[0].PackName)
+			if err != nil {
+				t.Fatalf("legacyPackDoctors: %v", err)
+			}
+			if len(doctors) != 1 {
+				t.Fatalf("got %d synthesized doctors, want 1", len(doctors))
+			}
+			if doctors[0].Warmup != tc.wantWarmup {
+				t.Errorf("DiscoveredDoctor.Warmup = %v, want %v", doctors[0].Warmup, tc.wantWarmup)
+			}
+		})
 	}
 }
 

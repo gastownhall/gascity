@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
@@ -28,14 +29,16 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 			}
 			return ControlResult{}, fmt.Errorf("%s: resolving fanout outcome: %w", bead.ID, err)
 		}
-		if err := setOutcomeAndClose(store, bead.ID, outcome); err != nil {
+		closeMetadata := map[string]string{"gc.outcome": outcome}
+		clearControllerSpawnErrorMetadata(closeMetadata)
+		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing fanout: %w", bead.ID, err)
 		}
 		closedBead, err := store.Get(bead.ID)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reloading closed fanout: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileTerminalScopedMember(store, closedBead)
+		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, closedBead, opts)
 		if err != nil {
 			return ControlResult{}, err
 		}
@@ -61,7 +64,11 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 	if sourceRef == "" {
 		return ControlResult{}, fmt.Errorf("%s: missing gc.control_for", bead.ID)
 	}
-	source, err := resolveWorkflowStepByRefFromBeads(workflowBeads, rootID, sourceRef)
+	blockerIDs, err := controlBlockerIDs(store, bead.ID)
+	if err != nil {
+		return ControlResult{}, fmt.Errorf("%s: loading control blockers: %w", bead.ID, err)
+	}
+	source, err := resolveWorkflowStepByRefFromBeads(workflowBeads, rootID, sourceRef, workflowStepMatchOptions{PreferredIDs: blockerIDs})
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: resolving source step %q: %w", bead.ID, sourceRef, err)
 	}
@@ -73,7 +80,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reloading failed fanout: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileTerminalScopedMember(store, closedBead)
+		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, closedBead, opts)
 		if err != nil {
 			return ControlResult{}, err
 		}
@@ -92,7 +99,7 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reloading empty fanout: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileTerminalScopedMember(store, closedBead)
+		scopeResult, err := reconcileTerminalScopedMemberWithOptions(store, closedBead, opts)
 		if err != nil {
 			return ControlResult{}, err
 		}
@@ -110,22 +117,32 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 	if mode == "" {
 		mode = "parallel"
 	}
-	if bead.Metadata["gc.fanout_state"] == "" {
+	if strings.TrimSpace(bead.Metadata["gc.fanout_state"]) == "" {
 		if err := store.SetMetadataBatch(bead.ID, map[string]string{"gc.fanout_state": "spawning"}); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
 			return ControlResult{}, fmt.Errorf("%s: recording fanout spawn start: %w", bead.ID, err)
 		}
 	}
+	fanoutSinkBlockers := fanoutSinkBlockerIDs(blockerIDs, source.ID)
 
 	var previousSinkIDs []string
 	totalCreated := 0
 	for index, item := range items {
-		targetRef := sourceRef + ".item." + strconv.Itoa(index+1)
+		targetRef := fanoutTargetRef(source, sourceRef, index)
 		target := &formula.Step{
 			ID:          targetRef,
 			Title:       source.Title,
 			Description: source.Description,
 		}
 		itemVars := materializeFanoutVars(bondVars, item, index)
+		if scopeRef := strings.TrimSpace(bead.Metadata["gc.scope_ref"]); scopeRef != "" {
+			if itemVars == nil {
+				itemVars = make(map[string]string, 1)
+			}
+			itemVars["scope_ref"] = scopeRef
+		}
 		fragment, err := formula.CompileExpansionFragment(context.Background(), bead.Metadata["gc.bond"], opts.FormulaSearchPaths, target, itemVars)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: compiling fragment %d: %w", bead.ID, index+1, err)
@@ -135,8 +152,13 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 				return ControlResult{}, fmt.Errorf("%s: preparing fragment %d: %w", bead.ID, index+1, err)
 			}
 		}
+		routeFanoutFragmentSteps(fragment, bead, opts, store)
 		externalDeps := expectedFragmentExternalDeps(fragment, mode, previousSinkIDs)
-		existingMapping, err := resolveExistingFragmentInstanceFromBeads(store, workflowBeads, rootID, fragment, externalDeps)
+		existingMapping, err := resolveExistingFragmentInstanceFromBeads(store, workflowBeads, rootID, fragment, externalDeps, fragmentResumeMatchOptions{
+			StepRefAliases:     fanoutLegacyStepAliases(fragment, targetRef, sourceRef, index),
+			AliasScopeRef:      strings.TrimSpace(bead.Metadata["gc.scope_ref"]),
+			FanoutSinkBlockers: fanoutSinkBlockers,
+		})
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: resuming fragment %d: %w", bead.ID, index+1, err)
 		}
@@ -151,6 +173,9 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 				ExternalDeps: externalDeps,
 			})
 			if err != nil {
+				if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+					return ControlResult{}, ErrControlPending
+				}
 				return ControlResult{}, fmt.Errorf("%s: instantiating fragment %d: %w", bead.ID, index+1, err)
 			}
 			totalCreated += inst.Created
@@ -160,6 +185,9 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		sinkIDs := mapStepIDs(fragment.Sinks, idMapping)
 		for _, sinkID := range sinkIDs {
 			if err := store.DepAdd(bead.ID, sinkID, "blocks"); err != nil {
+				if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+					return ControlResult{}, ErrControlPending
+				}
 				return ControlResult{}, fmt.Errorf("%s: wiring fanout blocker: %w", bead.ID, err)
 			}
 		}
@@ -168,27 +196,170 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 		}
 	}
 
-	if err := store.SetMetadataBatch(bead.ID, map[string]string{
+	spawnedMetadata := map[string]string{
 		"gc.fanout_state":  "spawned",
 		"gc.spawned_count": strconv.Itoa(len(items)),
-	}); err != nil {
+	}
+	clearControllerSpawnErrorMetadata(spawnedMetadata)
+	if err := store.SetMetadataBatch(bead.ID, spawnedMetadata); err != nil {
+		if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+			return ControlResult{}, ErrControlPending
+		}
 		return ControlResult{}, fmt.Errorf("%s: recording fanout state: %w", bead.ID, err)
 	}
 	return ControlResult{Processed: true, Action: "fanout-spawn", Created: totalCreated}, nil
 }
 
-func resolveExistingFragmentInstanceFromBeads(store beads.Store, all []beads.Bead, _ string, fragment *formula.FragmentRecipe, externalDeps []molecule.ExternalDep) (map[string]string, error) {
+func fanoutTargetRef(source beads.Bead, sourceRef string, index int) string {
+	base := strings.TrimSpace(source.Metadata["gc.step_ref"])
+	if base == "" {
+		base = sourceRef
+	}
+	return base + ".item." + strconv.Itoa(index+1)
+}
+
+func controlBlockerIDs(store beads.Store, controlID string) (map[string]struct{}, error) {
+	deps, err := store.DepList(controlID, "down")
+	if err != nil {
+		return nil, err
+	}
+	blockers := make(map[string]struct{}, len(deps))
+	for _, dep := range deps {
+		if dep.Type != "blocks" || dep.DependsOnID == "" {
+			continue
+		}
+		blockers[dep.DependsOnID] = struct{}{}
+	}
+	if len(blockers) == 0 {
+		return nil, nil
+	}
+	return blockers, nil
+}
+
+func fanoutSinkBlockerIDs(blockers map[string]struct{}, sourceID string) map[string]struct{} {
+	if len(blockers) == 0 {
+		return nil
+	}
+	sinks := make(map[string]struct{}, len(blockers))
+	for blockerID := range blockers {
+		if blockerID == sourceID {
+			continue
+		}
+		sinks[blockerID] = struct{}{}
+	}
+	if len(sinks) == 0 {
+		return nil
+	}
+	return sinks
+}
+
+func fanoutLegacyStepAliases(fragment *formula.FragmentRecipe, targetRef, sourceRef string, index int) map[string]string {
+	if fragment == nil {
+		return nil
+	}
+	legacyBase := strings.TrimSpace(sourceRef)
+	if legacyBase == "" {
+		return nil
+	}
+	legacyTargetRef := legacyBase + ".item." + strconv.Itoa(index+1)
+	if legacyTargetRef == targetRef {
+		return nil
+	}
+
+	aliases := make(map[string]string, len(fragment.Steps))
+	for _, step := range fragment.Steps {
+		if strings.Count(step.ID, targetRef) != 1 {
+			continue
+		}
+		legacyID := strings.Replace(step.ID, targetRef, legacyTargetRef, 1)
+		if legacyID != step.ID {
+			aliases[step.ID] = legacyID
+		}
+	}
+	if len(aliases) == 0 {
+		return nil
+	}
+	return aliases
+}
+
+type fragmentResumeMatchOptions struct {
+	StepRefAliases     map[string]string
+	AliasScopeRef      string
+	FanoutSinkBlockers map[string]struct{}
+}
+
+func routeFanoutFragmentSteps(fragment *formula.FragmentRecipe, control beads.Bead, opts ProcessOptions, store beads.Store) {
+	if fragment == nil {
+		return
+	}
+	executionRoute := strings.TrimSpace(control.Metadata["gc.execution_routed_to"])
+	routeCfg := loadAttemptRouteConfig(opts.CityPath)
+	for i := range fragment.Steps {
+		step := &fragment.Steps[i]
+		if step.Metadata["gc.kind"] == "spec" {
+			continue
+		}
+		if isAttemptControlKind(step.Metadata["gc.kind"]) {
+			target := strings.TrimSpace(step.Metadata["gc.execution_routed_to"])
+			if target == "" {
+				target = fanoutFragmentStepTarget(*step, executionRoute, routeCfg)
+			}
+			applyAttemptControlStepRoute(step, target, routeCfg, store)
+			continue
+		}
+		if fanoutFragmentStepHasRoute(*step) {
+			continue
+		}
+		target := fanoutFragmentStepTarget(*step, executionRoute, routeCfg)
+		if target == "" {
+			continue
+		}
+		applyAttemptStepRoute(step, target, routeCfg, store)
+	}
+}
+
+func fanoutFragmentStepTarget(step formula.RecipeStep, executionRoute string, routeCfg *config.City) string {
+	target := strings.TrimSpace(step.Metadata["gc.run_target"])
+	if target == "" {
+		target = strings.TrimSpace(step.Metadata["gc.routed_to"])
+	}
+	if target == "" {
+		target = strings.TrimSpace(step.Assignee)
+	}
+	if target == "" {
+		return executionRoute
+	}
+	return qualifyAttemptTargetWithSourceRoute(target, executionRoute, routeCfg)
+}
+
+func fanoutFragmentStepHasRoute(step formula.RecipeStep) bool {
+	if strings.TrimSpace(step.Metadata["gc.execution_routed_to"]) != "" {
+		return true
+	}
+	if strings.TrimSpace(step.Metadata["gc.routed_to"]) != "" {
+		return true
+	}
+	return strings.TrimSpace(step.Assignee) != ""
+}
+
+func resolveExistingFragmentInstanceFromBeads(store beads.Store, all []beads.Bead, _ string, fragment *formula.FragmentRecipe, externalDeps []molecule.ExternalDep, opts fragmentResumeMatchOptions) (map[string]string, error) {
 	if fragment == nil || len(fragment.Steps) == 0 {
 		return nil, nil
 	}
 
 	expected := make(map[string]struct{}, len(fragment.Steps))
+	aliasToExpected := make(map[string]string, len(opts.StepRefAliases))
 	for _, step := range fragment.Steps {
 		expected[step.ID] = struct{}{}
+		if alias := strings.TrimSpace(opts.StepRefAliases[step.ID]); alias != "" && alias != step.ID {
+			aliasToExpected[alias] = step.ID
+		}
 	}
 
 	mapping := make(map[string]string, len(fragment.Steps))
 	partial := make(map[string]beads.Bead, len(fragment.Steps))
+	rejectedAlias := make(map[string]beads.Bead)
+	usedAlias := false
 	for _, bead := range all {
 		if bead.Metadata["gc.partial_fragment"] == "true" {
 			continue
@@ -197,37 +368,130 @@ func resolveExistingFragmentInstanceFromBeads(store beads.Store, all []beads.Bea
 		if stepRef == "" {
 			continue
 		}
-		if _, ok := expected[stepRef]; !ok {
+		matchID := stepRef
+		aliasMatch := false
+		if _, ok := expected[matchID]; !ok {
+			matchID = aliasToExpected[stepRef]
+			aliasMatch = matchID != ""
+		}
+		if matchID == "" {
 			continue
 		}
-		if existing := mapping[stepRef]; existing != "" && existing != bead.ID {
-			return nil, fmt.Errorf("duplicate fragment bead for %s (%s, %s)", stepRef, existing, bead.ID)
+		if aliasMatch {
+			scopeOwned := false
+			if opts.AliasScopeRef != "" {
+				beadScopeRef := strings.TrimSpace(bead.Metadata["gc.scope_ref"])
+				if beadScopeRef != "" {
+					if beadScopeRef != opts.AliasScopeRef {
+						continue
+					}
+					scopeOwned = true
+				}
+			}
+			blockerOwned := len(opts.FanoutSinkBlockers) > 0
+			// Legacy aliases are only safe to reuse once current-iteration
+			// ownership is proven. Without a matching scope_ref or already-wired
+			// sink blockers, an open legacy fragment could still belong to an
+			// older iteration that shared the same logical target.
+			if !scopeOwned && !blockerOwned {
+				if bead.Status != "closed" {
+					rejectedAlias[bead.ID] = bead
+				}
+				continue
+			}
+			usedAlias = true
 		}
-		mapping[stepRef] = bead.ID
+		if existing := mapping[matchID]; existing != "" && existing != bead.ID {
+			return nil, fmt.Errorf("duplicate fragment bead for %s (%s, %s)", matchID, existing, bead.ID)
+		}
+		mapping[matchID] = bead.ID
 		partial[bead.ID] = bead
 	}
 
 	switch {
 	case len(mapping) == 0:
+		if err := discardFragmentCandidates(store, fragment.Name, rejectedAlias); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	case len(mapping) != len(expected):
-		if err := discardPartialFragmentInstance(store, partial); err != nil {
-			return nil, fmt.Errorf("recovering partial fragment instance for %s: %w", fragment.Name, err)
+		if err := discardFragmentCandidates(store, fragment.Name, partial, rejectedAlias); err != nil {
+			return nil, err
 		}
 		return nil, nil
 	default:
+		if usedAlias && !fragmentAliasMatchesExistingBlockers(fragment, mapping, opts.FanoutSinkBlockers) {
+			if err := discardFragmentCandidates(store, fragment.Name, openFragmentBeads(partial), rejectedAlias); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		}
+		if len(rejectedAlias) > 0 {
+			if err := discardFragmentCandidates(store, fragment.Name, rejectedAlias); err != nil {
+				return nil, err
+			}
+		}
 		complete, err := fragmentInstanceComplete(store, fragment, mapping, externalDeps)
 		if err != nil {
 			return nil, err
 		}
 		if !complete {
-			if err := discardPartialFragmentInstance(store, partial); err != nil {
-				return nil, fmt.Errorf("recovering incompletely wired fragment instance for %s: %w", fragment.Name, err)
+			if err := discardFragmentCandidates(store, fragment.Name, partial); err != nil {
+				return nil, err
 			}
 			return nil, nil
 		}
 		return mapping, nil
 	}
+}
+
+func fragmentAliasMatchesExistingBlockers(fragment *formula.FragmentRecipe, mapping map[string]string, blockers map[string]struct{}) bool {
+	if len(blockers) == 0 {
+		return true
+	}
+	sinkIDs := mapStepIDs(fragment.Sinks, mapping)
+	if len(sinkIDs) == 0 {
+		return false
+	}
+	for _, sinkID := range sinkIDs {
+		if _, ok := blockers[sinkID]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func discardFragmentCandidates(store beads.Store, fragmentName string, groups ...map[string]beads.Bead) error {
+	candidates := make(map[string]beads.Bead)
+	for _, group := range groups {
+		for id, bead := range group {
+			candidates[id] = bead
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	if err := discardPartialFragmentInstance(store, candidates); err != nil {
+		return fmt.Errorf("recovering partial fragment instance for %s: %w", fragmentName, err)
+	}
+	return nil
+}
+
+func openFragmentBeads(group map[string]beads.Bead) map[string]beads.Bead {
+	if len(group) == 0 {
+		return nil
+	}
+	openOnly := make(map[string]beads.Bead)
+	for id, bead := range group {
+		if bead.Status == "closed" {
+			continue
+		}
+		openOnly[id] = bead
+	}
+	if len(openOnly) == 0 {
+		return nil
+	}
+	return openOnly
 }
 
 func fragmentInstanceComplete(store beads.Store, fragment *formula.FragmentRecipe, mapping map[string]string, externalDeps []molecule.ExternalDep) (bool, error) {
@@ -248,6 +512,9 @@ func fragmentInstanceComplete(store beads.Store, fragment *formula.FragmentRecip
 			return false, err
 		}
 		if bead.Assignee != step.Assignee {
+			return false, nil
+		}
+		if !fragmentRouteMetadataMatches(bead, step) {
 			return false, nil
 		}
 	}
@@ -302,6 +569,15 @@ func fragmentInstanceComplete(store beads.Store, fragment *formula.FragmentRecip
 	}
 
 	return true, nil
+}
+
+func fragmentRouteMetadataMatches(bead beads.Bead, step formula.RecipeStep) bool {
+	for _, key := range []string{"gc.routed_to", "gc.execution_routed_to"} {
+		if strings.TrimSpace(bead.Metadata[key]) != strings.TrimSpace(step.Metadata[key]) {
+			return false
+		}
+	}
+	return true
 }
 
 func expectedFragmentExternalDeps(fragment *formula.FragmentRecipe, mode string, previousSinkIDs []string) []molecule.ExternalDep {
@@ -454,12 +730,33 @@ func detachIncomingDeps(store beads.Store, beadID string) error {
 	return nil
 }
 
-func resolveWorkflowStepByRefFromBeads(all []beads.Bead, rootID, stepRef string) (beads.Bead, error) {
+type workflowStepMatchOptions struct {
+	PreferredIDs map[string]struct{}
+}
+
+func resolveWorkflowStepByRefFromBeads(all []beads.Bead, rootID, stepRef string, opts workflowStepMatchOptions) (beads.Bead, error) {
+	if len(opts.PreferredIDs) > 0 {
+		if match, ok := findWorkflowStepByRef(all, stepRef, opts.PreferredIDs); ok {
+			return match, nil
+		}
+	}
+	if match, ok := findWorkflowStepByRef(all, stepRef, nil); ok {
+		return match, nil
+	}
+	return beads.Bead{}, fmt.Errorf("step ref %q not found under root %s", stepRef, rootID)
+}
+
+func findWorkflowStepByRef(all []beads.Bead, stepRef string, allowedIDs map[string]struct{}) (beads.Bead, bool) {
 	var suffixMatch *beads.Bead
 	for _, bead := range all {
+		if len(allowedIDs) > 0 {
+			if _, ok := allowedIDs[bead.ID]; !ok {
+				continue
+			}
+		}
 		ref := bead.Metadata["gc.step_ref"]
 		if ref == stepRef {
-			return bead, nil
+			return bead, true
 		}
 		if suffixMatch == nil && strings.HasSuffix(ref, "."+stepRef) {
 			match := bead
@@ -467,9 +764,9 @@ func resolveWorkflowStepByRefFromBeads(all []beads.Bead, rootID, stepRef string)
 		}
 	}
 	if suffixMatch != nil {
-		return *suffixMatch, nil
+		return *suffixMatch, true
 	}
-	return beads.Bead{}, fmt.Errorf("step ref %q not found under root %s", stepRef, rootID)
+	return beads.Bead{}, false
 }
 
 func resolveFanoutItems(source beads.Bead, forEach string) ([]interface{}, error) {

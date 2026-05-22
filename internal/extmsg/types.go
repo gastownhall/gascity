@@ -131,6 +131,14 @@ type ExternalOriginEnvelope struct {
 }
 
 // AdapterCapabilities describes what a transport adapter supports.
+//
+// Intentionally untagged: this struct does not cross the gc↔adapter HTTP
+// callback wire. It is passed by value at adapter construction (see
+// NewHTTPAdapter) and exposed via the Huma API at POST /extmsg/adapters,
+// which serializes it with PascalCase keys today. Adding json tags here
+// would silently change that public API contract; if a snake_case
+// migration is wanted, do it as a coordinated API change with
+// regenerated clients, not as a side-effect of this fix.
 type AdapterCapabilities struct {
 	SupportsChildConversations bool
 	SupportsAttachments        bool
@@ -138,12 +146,19 @@ type AdapterCapabilities struct {
 }
 
 // PublishRequest is a request to publish a message to an external conversation.
+//
+// JSON tags are required: this struct is serialized over the HTTP wire to
+// out-of-process adapters (gc → adapter `/publish`), and the adapter side
+// parses snake_case keys. Without tags, Go marshals fields as PascalCase,
+// and case-insensitive matching on the receiver does not bridge the
+// underscore difference (so `ReplyToMessageID` would not match the
+// adapter's `reply_to_message_id` tag and the field would silently zero).
 type PublishRequest struct {
-	Conversation     ConversationRef
-	Text             string
-	ReplyToMessageID string
-	IdempotencyKey   string
-	Metadata         map[string]string
+	Conversation     ConversationRef   `json:"conversation"`
+	Text             string            `json:"text"`
+	ReplyToMessageID string            `json:"reply_to_message_id,omitempty"`
+	IdempotencyKey   string            `json:"idempotency_key,omitempty"`
+	Metadata         map[string]string `json:"metadata,omitempty"`
 }
 
 // PublishFailureKind classifies the reason a publish attempt failed.
@@ -165,6 +180,13 @@ const (
 )
 
 // PublishReceipt is the result of a publish attempt.
+//
+// Intentionally untagged: this struct is exposed via the Huma API as
+// OutboundResult.Receipt at POST /extmsg/outbound, where the public
+// contract is PascalCase. The gc↔adapter HTTP callback wire (which
+// uses snake_case) is bridged in HTTPAdapter.Publish via an explicit
+// wire-shaped intermediate type, so domain-type tagging is not needed
+// to fix the silent-drop bug.
 type PublishReceipt struct {
 	MessageID    string
 	Conversation ConversationRef
@@ -330,6 +352,10 @@ const (
 	GroupRouteDefault GroupRouteMatch = "default"
 	// GroupRouteNoMatch means no routing match was found.
 	GroupRouteNoMatch GroupRouteMatch = "no_match"
+	// GroupRouteParticipantMatch means an outbound publish was authorized
+	// because the publishing session is a participant of the group bound
+	// to the conversation.
+	GroupRouteParticipantMatch GroupRouteMatch = "participant_match"
 )
 
 // GroupRouteDecision is the result of routing an inbound message within a group.
@@ -337,6 +363,18 @@ type GroupRouteDecision struct {
 	Match           GroupRouteMatch
 	TargetSessionID string
 	UpdateCursor    bool
+}
+
+// GroupOutboundDecision is the result of authorizing an outbound publish
+// against a conversation's group when no single-session binding exists.
+//
+// A non-nil decision with Match == GroupRouteParticipantMatch authorizes
+// the caller's session to publish on behalf of the group; any other Match
+// value (including GroupRouteNoMatch) means no authorization was found.
+type GroupOutboundDecision struct {
+	Match       GroupRouteMatch
+	GroupID     string
+	Participant ConversationGroupParticipant
 }
 
 // BindInput is the input for creating a session binding.
@@ -479,6 +517,7 @@ type GroupService interface {
 	UpsertParticipant(ctx context.Context, caller Caller, input UpsertParticipantInput) (ConversationGroupParticipant, error)
 	RemoveParticipant(ctx context.Context, caller Caller, input RemoveParticipantInput) error
 	ResolveInbound(ctx context.Context, event ExternalInboundMessage) (*GroupRouteDecision, error)
+	ResolveOutbound(ctx context.Context, ref ConversationRef, sessionID string) (*GroupOutboundDecision, error)
 	UpdateCursor(ctx context.Context, caller Caller, input UpdateCursorInput) error
 }
 

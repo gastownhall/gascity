@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -38,50 +39,68 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		return ControlResult{}, fmt.Errorf("%s: no attempt found", bead.ID)
 	}
 	if attempt.Status != "closed" {
-		// Invariant violation: control bead should not be ready if attempt is open.
-		return ControlResult{}, fmt.Errorf("%s: latest attempt %s is %s, not closed (invariant violation)", bead.ID, attempt.ID, attempt.Status)
+		if err := ensureBlockingDependency(store, bead.ID, attempt.ID); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
+			return ControlResult{}, fmt.Errorf("%s: blocking on pending attempt %s: %w", bead.ID, attempt.ID, err)
+		}
+		if err := syncControlEpochToAttempt(store, bead, attempt); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
+			return ControlResult{}, fmt.Errorf("%s: advancing recovered attempt epoch for %s: %w", bead.ID, attempt.ID, err)
+		}
+		if err := closeGeneratedSpecBeadsForAttempt(store, bead, attempt); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
+			return ControlResult{}, fmt.Errorf("%s: closing generated spec beads for pending attempt %s: %w", bead.ID, attempt.ID, err)
+		}
+		return ControlResult{}, ErrControlPending
 	}
 
 	attemptNum, _ := strconv.Atoi(attempt.Metadata["gc.attempt"])
 	result := classifyRetryAttempt(attempt)
-
-	// Record decision in attempt log.
-	if err := appendAttemptLog(store, bead.ID, attemptNum, result.Outcome, result.Reason); err != nil {
+	attemptLog, err := appendAttemptLogValue(bead.Metadata["gc.attempt_log"], attemptNum, result.Outcome, result.Reason)
+	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: recording attempt log: %w", bead.ID, err)
 	}
 
 	switch result.Outcome {
 	case "pass":
+		closeMetadata := map[string]string{
+			"gc.attempt_log": attemptLog,
+			"gc.outcome":     "pass",
+		}
+		clearControllerSpawnErrorMetadata(closeMetadata)
 		if outputJSON := attempt.Metadata["gc.output_json"]; outputJSON != "" {
-			if err := store.SetMetadata(bead.ID, "gc.output_json", outputJSON); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: propagating output: %w", bead.ID, err)
-			}
+			closeMetadata["gc.output_json"] = outputJSON
 		}
-		if err := propagateRetrySubjectMetadata(store, bead.ID, attempt); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: propagating metadata: %w", bead.ID, err)
-		}
-		if err := setOutcomeAndClose(store, bead.ID, "pass"); err != nil {
+		copyNonGCMetadata(closeMetadata, attempt.Metadata)
+		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
+		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
 		}
 		return ControlResult{Processed: true, Action: "pass", Skipped: scopeResult.Skipped}, nil
 
 	case "hard":
-		if err := store.SetMetadataBatch(bead.ID, map[string]string{
+		closeMetadata := map[string]string{
+			"gc.attempt_log":       attemptLog,
+			"gc.outcome":           "fail",
 			"gc.failed_attempt":    strconv.Itoa(attemptNum),
 			"gc.failure_class":     "hard",
 			"gc.failure_reason":    result.Reason,
 			"gc.final_disposition": "hard_fail",
-		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: marking hard fail: %w", bead.ID, err)
 		}
-		if err := setOutcomeAndClose(store, bead.ID, "fail"); err != nil {
+		clearControllerSpawnErrorMetadata(closeMetadata)
+		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing hard-failed: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
+		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
 		}
@@ -89,11 +108,11 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 
 	case "transient":
 		if attemptNum >= maxAttempts {
-			exhaustedResult, err := handleRetryExhaustion(store, bead.ID, attemptNum, result.Reason, onExhausted)
+			exhaustedResult, err := handleRetryExhaustion(store, bead.ID, attemptNum, result.Reason, onExhausted, attemptLog)
 			if err != nil {
 				return ControlResult{}, err
 			}
-			scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
+			scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 			if err != nil {
 				return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
 			}
@@ -102,17 +121,19 @@ func processRetryControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		}
 
 		// Spawn next attempt.
+		spawnMetadata := map[string]string{"gc.attempt_log": attemptLog}
+		clearControllerSpawnErrorMetadata(spawnMetadata)
+		if err := store.SetMetadataBatch(bead.ID, spawnMetadata); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
+			return ControlResult{}, fmt.Errorf("%s: recording attempt log: %w", bead.ID, err)
+		}
 		nextAttempt := attemptNum + 1
 		if err := spawnNextAttempt(context.Background(), store, bead, nextAttempt, opts); err != nil {
-			// Controller-internal failure → close with hard error.
-			_ = store.SetMetadataBatch(bead.ID, map[string]string{
-				"gc.controller_error":  err.Error(),
-				"gc.final_disposition": "controller_error",
-			})
-			_ = setOutcomeAndClose(store, bead.ID, "fail")
-			// Reconcile any enclosing scope so a controller_error terminal
-			// closure does not leave the scope body stalled.
-			_, _ = reconcileClosedScopeMember(store, bead.ID)
+			if markControllerSpawnError(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
 			return ControlResult{}, fmt.Errorf("%s: spawning attempt %d: %w", bead.ID, nextAttempt, err)
 		}
 
@@ -139,7 +160,25 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		return ControlResult{}, fmt.Errorf("%s: no iteration found", bead.ID)
 	}
 	if iteration.Status != "closed" {
-		return ControlResult{}, fmt.Errorf("%s: latest iteration %s is %s, not closed (invariant violation)", bead.ID, iteration.ID, iteration.Status)
+		if err := ensureBlockingDependency(store, bead.ID, iteration.ID); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
+			return ControlResult{}, fmt.Errorf("%s: blocking on pending iteration %s: %w", bead.ID, iteration.ID, err)
+		}
+		if err := syncControlEpochToAttempt(store, bead, iteration); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
+			return ControlResult{}, fmt.Errorf("%s: advancing recovered iteration epoch for %s: %w", bead.ID, iteration.ID, err)
+		}
+		if err := closeGeneratedSpecBeadsForAttempt(store, bead, iteration); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
+			return ControlResult{}, fmt.Errorf("%s: closing generated spec beads for pending iteration %s: %w", bead.ID, iteration.ID, err)
+		}
+		return ControlResult{}, ErrControlPending
 	}
 
 	iterationNum, _ := strconv.Atoi(iteration.Metadata["gc.attempt"])
@@ -164,20 +203,24 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 		return ControlResult{}, fmt.Errorf("%s: running check: %w", bead.ID, err)
 	}
 
-	if err := appendAttemptLog(store, bead.ID, iterationNum, checkResult.Outcome, checkResult.Stderr); err != nil {
+	attemptLog, err := appendAttemptLogValue(bead.Metadata["gc.attempt_log"], iterationNum, checkResult.Outcome, checkResult.Stderr)
+	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: recording attempt log: %w", bead.ID, err)
 	}
 
 	if checkResult.Outcome == convergence.GatePass {
-		if outputJSON := iteration.Metadata["gc.output_json"]; outputJSON != "" {
-			if err := store.SetMetadata(bead.ID, "gc.output_json", outputJSON); err != nil {
-				return ControlResult{}, fmt.Errorf("%s: propagating output: %w", bead.ID, err)
-			}
+		closeMetadata := map[string]string{
+			"gc.attempt_log": attemptLog,
+			"gc.outcome":     "pass",
 		}
-		if err := setOutcomeAndClose(store, bead.ID, "pass"); err != nil {
+		clearControllerSpawnErrorMetadata(closeMetadata)
+		if outputJSON := iteration.Metadata["gc.output_json"]; outputJSON != "" {
+			closeMetadata["gc.output_json"] = outputJSON
+		}
+		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
+		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
 		}
@@ -185,16 +228,16 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 	}
 
 	if iterationNum >= maxAttempts {
-		if err := store.SetMetadataBatch(bead.ID, map[string]string{
+		closeMetadata := map[string]string{
+			"gc.attempt_log":    attemptLog,
 			"gc.outcome":        "fail",
 			"gc.failed_attempt": strconv.Itoa(iterationNum),
-		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: marking exhausted: %w", bead.ID, err)
 		}
-		if err := setOutcomeAndClose(store, bead.ID, "fail"); err != nil {
+		clearControllerSpawnErrorMetadata(closeMetadata)
+		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing exhausted: %w", bead.ID, err)
 		}
-		scopeResult, err := reconcileClosedScopeMember(store, bead.ID)
+		scopeResult, err := reconcileClosedScopeMemberWithOptions(store, bead.ID, opts)
 		if err != nil {
 			return ControlResult{}, fmt.Errorf("%s: reconciling enclosing scope: %w", bead.ID, err)
 		}
@@ -202,47 +245,150 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 	}
 
 	// Spawn next iteration.
+	spawnMetadata := map[string]string{"gc.attempt_log": attemptLog}
+	clearControllerSpawnErrorMetadata(spawnMetadata)
+	if err := store.SetMetadataBatch(bead.ID, spawnMetadata); err != nil {
+		if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+			return ControlResult{}, ErrControlPending
+		}
+		return ControlResult{}, fmt.Errorf("%s: recording attempt log: %w", bead.ID, err)
+	}
 	nextIteration := iterationNum + 1
 	if err := spawnNextAttempt(context.Background(), store, bead, nextIteration, opts); err != nil {
-		_ = store.SetMetadataBatch(bead.ID, map[string]string{
-			"gc.controller_error":  err.Error(),
-			"gc.final_disposition": "controller_error",
-		})
-		_ = setOutcomeAndClose(store, bead.ID, "fail")
-		// Reconcile any enclosing scope so a controller_error terminal
-		// closure does not leave the scope body stalled.
-		_, _ = reconcileClosedScopeMember(store, bead.ID)
+		if markControllerSpawnError(store, bead.ID, err, opts) {
+			return ControlResult{}, ErrControlPending
+		}
 		return ControlResult{}, fmt.Errorf("%s: spawning iteration %d: %w", bead.ID, nextIteration, err)
 	}
 
 	return ControlResult{Processed: true, Action: "retry", Created: 1}, nil
 }
 
-func handleRetryExhaustion(store beads.Store, beadID string, attemptNum int, reason, onExhausted string) (ControlResult, error) {
+func ensureBlockingDependency(store beads.Store, issueID, dependsOnID string) error {
+	deps, err := store.DepList(issueID, "down")
+	if err != nil {
+		return err
+	}
+	for _, dep := range deps {
+		if dep.DependsOnID == dependsOnID && dep.Type == "blocks" {
+			return nil
+		}
+	}
+	return store.DepAdd(issueID, dependsOnID, "blocks")
+}
+
+func controllerSpawnBoundaryPending(store beads.Store, beadID string, err error, opts ProcessOptions) bool {
+	if err == nil {
+		return false
+	}
+	return markControllerSpawnError(store, beadID, err, opts)
+}
+
+func syncControlEpochToAttempt(store beads.Store, control, attempt beads.Bead) error {
+	current, err := strconv.Atoi(strings.TrimSpace(control.Metadata["gc.control_epoch"]))
+	if err != nil || current < 1 {
+		return nil
+	}
+	attemptNum, err := strconv.Atoi(strings.TrimSpace(attempt.Metadata["gc.attempt"]))
+	if err != nil || attemptNum <= current {
+		return nil
+	}
+	return store.SetMetadata(control.ID, "gc.control_epoch", strconv.Itoa(attemptNum))
+}
+
+func markControllerSpawnError(store beads.Store, beadID string, err error, opts ProcessOptions) bool {
+	metadata := map[string]string{
+		"gc.controller_error": err.Error(),
+	}
+	if IsTransientControllerError(err) && !isPartialAttemptAttachError(err) {
+		metadata["gc.controller_error_class"] = "transient"
+		metadata["gc.controller_retryable"] = "true"
+		_ = store.SetMetadataBatch(beadID, metadata)
+		return true
+	}
+
+	metadata["gc.controller_error_class"] = "hard"
+	metadata["gc.controller_retryable"] = ""
+	metadata["gc.final_disposition"] = "controller_error"
+	_ = store.SetMetadataBatch(beadID, metadata)
+	_ = setOutcomeAndClose(store, beadID, "fail")
+	// Reconcile any enclosing scope so a controller_error terminal closure
+	// does not leave the scope body stalled.
+	_, _ = reconcileClosedScopeMemberWithOptions(store, beadID, opts)
+	return false
+}
+
+func clearControllerSpawnErrorMetadata(metadata map[string]string) {
+	metadata["gc.controller_error"] = ""
+	metadata["gc.controller_error_class"] = ""
+	metadata["gc.controller_retryable"] = ""
+}
+
+func isPartialAttemptAttachError(err error) bool {
+	var partial *partialAttemptAttachError
+	return errors.As(err, &partial)
+}
+
+// IsTransientControllerError is the dispatch/store transient classifier for
+// control spawn and spawn-state update boundaries. Prefer typed checks when
+// callers expose them; the string fallback covers wrapped Dolt/MySQL/tmux
+// messages that arrive through the bead store CLI boundary.
+func IsTransientControllerError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	transientNeedles := []string{
+		"i/o timeout",
+		"context deadline exceeded",
+		"invalid connection",
+		"connection refused",
+		"connection reset by peer",
+		"broken pipe",
+		"bad connection",
+		"server has gone away",
+		"too many connections",
+		"lock wait timeout",
+		"deadlock found",
+	}
+	for _, needle := range transientNeedles {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func handleRetryExhaustion(store beads.Store, beadID string, attemptNum int, reason, onExhausted, attemptLog string) (ControlResult, error) {
 	if onExhausted == "soft_fail" {
-		if err := store.SetMetadataBatch(beadID, map[string]string{
+		closeMetadata := map[string]string{
+			"gc.attempt_log":       attemptLog,
+			"gc.outcome":           "pass",
 			"gc.failed_attempt":    strconv.Itoa(attemptNum),
 			"gc.failure_class":     "transient",
 			"gc.failure_reason":    reason,
 			"gc.final_disposition": "soft_fail",
-		}); err != nil {
-			return ControlResult{}, fmt.Errorf("%s: marking soft-fail: %w", beadID, err)
 		}
-		if err := setOutcomeAndClose(store, beadID, "pass"); err != nil {
+		clearControllerSpawnErrorMetadata(closeMetadata)
+		if err := updateMetadataAndClose(store, beadID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing soft-failed: %w", beadID, err)
 		}
 		return ControlResult{Processed: true, Action: "soft-fail"}, nil
 	}
 
-	if err := store.SetMetadataBatch(beadID, map[string]string{
+	closeMetadata := map[string]string{
+		"gc.attempt_log":       attemptLog,
+		"gc.outcome":           "fail",
 		"gc.failed_attempt":    strconv.Itoa(attemptNum),
 		"gc.failure_class":     "transient",
 		"gc.failure_reason":    reason,
 		"gc.final_disposition": "hard_fail",
-	}); err != nil {
-		return ControlResult{}, fmt.Errorf("%s: marking exhausted: %w", beadID, err)
 	}
-	if err := setOutcomeAndClose(store, beadID, "fail"); err != nil {
+	clearControllerSpawnErrorMetadata(closeMetadata)
+	if err := updateMetadataAndClose(store, beadID, closeMetadata); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing exhausted: %w", beadID, err)
 	}
 	return ControlResult{Processed: true, Action: "fail"}, nil
@@ -271,7 +417,7 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 	// Attach bypasses graph compile routing, so spawned attempts need their
 	// execution lane restored manually. Prefer each step's explicit target when
 	// available, and only inherit the parent execution lane as a fallback.
-	executionRoute := control.Metadata["gc.execution_routed_to"]
+	executionRoute := strings.TrimSpace(control.Metadata["gc.execution_routed_to"])
 	routeCfg := loadAttemptRouteConfig(opts.CityPath)
 	for i := range recipe.Steps {
 		if recipe.Steps[i].Metadata["gc.kind"] == "spec" {
@@ -286,6 +432,8 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		}
 		if target == "" {
 			target = executionRoute
+		} else {
+			target = qualifyAttemptTargetWithSourceRoute(target, executionRoute, routeCfg)
 		}
 		if isAttemptControlKind(recipe.Steps[i].Metadata["gc.kind"]) {
 			applyAttemptControlStepRoute(&recipe.Steps[i], target, routeCfg, store)
@@ -307,12 +455,83 @@ func spawnNextAttempt(ctx context.Context, store beads.Store, control beads.Bead
 		ExpectedEpoch:  epoch,
 	})
 	if err != nil {
+		failedRootID, lookupErr := failedAttemptAttachRootID(store, control, attemptNum)
+		if lookupErr != nil {
+			return &failedAttemptAttachLookupError{lookupErr: lookupErr, err: err}
+		}
+		if failedRootID != "" {
+			return &partialAttemptAttachError{rootID: failedRootID, err: err}
+		}
 		return err
 	}
-	if err := closeAttachedSpecBeads(store, recipe, result.IDMapping); err != nil {
+	if err := closeAttachedSpecBeads(store, recipe, result); err != nil {
 		return err
 	}
 	return nil
+}
+
+type partialAttemptAttachError struct {
+	rootID string
+	err    error
+}
+
+func (e *partialAttemptAttachError) Error() string {
+	return fmt.Sprintf("partial attempt attach %s is marked molecule_failed: %v", e.rootID, e.err)
+}
+
+func (e *partialAttemptAttachError) Unwrap() error {
+	return e.err
+}
+
+type failedAttemptAttachLookupError struct {
+	lookupErr error
+	err       error
+}
+
+func (e *failedAttemptAttachLookupError) Error() string {
+	return fmt.Sprintf("checking failed attempt attach state: %v; original attach error: %v", e.lookupErr, e.err)
+}
+
+func (e *failedAttemptAttachLookupError) Unwrap() []error {
+	return []error{e.lookupErr, e.err}
+}
+
+func failedAttemptAttachRootID(store beads.Store, control beads.Bead, attemptNum int) (string, error) {
+	rootID := control.Metadata["gc.root_bead_id"]
+	if rootID == "" {
+		rootID = control.ID
+	}
+	matches, err := store.List(beads.ListQuery{
+		Metadata: map[string]string{
+			"gc.idempotency_key": fmt.Sprintf("%s:attempt:%d", control.ID, attemptNum),
+			"gc.root_bead_id":    rootID,
+			"molecule_failed":    "true",
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(matches) == 0 {
+		return "", nil
+	}
+	return matches[0].ID, nil
+}
+
+func qualifyAttemptTargetWithSourceRoute(target, sourceRoute string, cfg *config.City) string {
+	target = strings.TrimSpace(target)
+	if target == "" || strings.Contains(target, "/") || cfg == nil {
+		return target
+	}
+	sourceRoute = strings.TrimSpace(sourceRoute)
+	slash := strings.IndexByte(sourceRoute, '/')
+	if slash <= 0 {
+		return target
+	}
+	candidate := sourceRoute[:slash] + "/" + target
+	if config.FindAgent(cfg, candidate) != nil || config.FindNamedSession(cfg, candidate) != nil {
+		return candidate
+	}
+	return target
 }
 
 // buildAttemptRecipe constructs a minimal formula.Recipe for one attempt
@@ -350,6 +569,9 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		"gc.step_id":  stepID,
 		"gc.step_ref": attemptPrefix,
 	}
+	if step.OnComplete != nil {
+		rootMeta["gc.output_json_required"] = "true"
+	}
 	// Ralph iterations need scope metadata for grouping.
 	if rootKind == "scope" {
 		rootMeta["gc.scope_role"] = "body"
@@ -373,6 +595,8 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		Name:  attemptPrefix,
 		Steps: []formula.RecipeStep{rootStep},
 	}
+	var fanoutSteps []formula.RecipeStep
+	var fanoutDeps []formula.RecipeDep
 
 	// For steps with children (scoped ralph), add children as sub-steps.
 	// Children may have retry/ralph config — propagate their metadata
@@ -408,6 +632,9 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 				if _, exists := childMeta[k]; !exists {
 					childMeta[k] = v
 				}
+			}
+			if child.OnComplete != nil {
+				childMeta["gc.output_json_required"] = "true"
 			}
 			// Derive gc.kind and control metadata from retry/ralph config.
 			if child.Retry != nil {
@@ -454,6 +681,10 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 				childStep.Type = "task"
 			}
 			recipe.Steps = append(recipe.Steps, childStep)
+			if fanoutStep, fanoutDep, ok := buildAttemptRecipeFanoutControl(childStep, child.OnComplete); ok {
+				fanoutSteps = append(fanoutSteps, fanoutStep)
+				fanoutDeps = append(fanoutDeps, fanoutDep)
+			}
 			// No parent-child dep to the iteration scope — it creates a
 			// deadlock (scope waits for children, children wait for scope).
 			// Children are associated with the iteration via gc.scope_ref
@@ -472,8 +703,52 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 	}
 
 	applyAttemptRecipeScopeChecks(recipe)
+	recipe.Steps = append(recipe.Steps, fanoutSteps...)
+	recipe.Deps = append(recipe.Deps, fanoutDeps...)
 
 	return recipe
+}
+
+func buildAttemptRecipeFanoutControl(source formula.RecipeStep, onComplete *formula.OnCompleteSpec) (formula.RecipeStep, formula.RecipeDep, bool) {
+	if onComplete == nil {
+		return formula.RecipeStep{}, formula.RecipeDep{}, false
+	}
+	sourceRef := source.Metadata["gc.step_ref"]
+	if sourceRef == "" {
+		sourceRef = source.ID
+	}
+	meta := map[string]string{
+		"gc.kind":        "fanout",
+		"gc.control_for": sourceRef,
+		"gc.for_each":    onComplete.ForEach,
+		"gc.bond":        onComplete.Bond,
+		"gc.fanout_mode": "parallel",
+	}
+	if onComplete.Sequential {
+		meta["gc.fanout_mode"] = "sequential"
+	}
+	if len(onComplete.Vars) > 0 {
+		if data, err := json.Marshal(onComplete.Vars); err == nil {
+			meta["gc.bond_vars"] = string(data)
+		}
+	}
+	for _, key := range []string{"gc.scope_ref", "gc.scope_role", "gc.on_fail", "gc.step_id", "gc.ralph_step_id", "gc.attempt"} {
+		if value := source.Metadata[key]; value != "" {
+			meta[key] = value
+		}
+	}
+	control := formula.RecipeStep{
+		ID:       source.ID + "-fanout",
+		Title:    "Expand fanout for " + source.Title,
+		Type:     "task",
+		Metadata: meta,
+	}
+	dep := formula.RecipeDep{
+		StepID:      control.ID,
+		DependsOnID: source.ID,
+		Type:        "blocks",
+	}
+	return control, dep, true
 }
 
 func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {
@@ -574,8 +849,13 @@ func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.
 			step.Assignee = binding.directSessionID
 			return
 		}
-		step.Metadata["gc.routed_to"] = binding.qualifiedName
-		step.Metadata["gc.execution_routed_to"] = binding.qualifiedName
+		if binding.qualifiedName != "" {
+			step.Metadata["gc.routed_to"] = binding.qualifiedName
+			step.Metadata["gc.execution_routed_to"] = binding.qualifiedName
+		} else {
+			delete(step.Metadata, "gc.routed_to")
+			delete(step.Metadata, "gc.execution_routed_to")
+		}
 		step.Labels = removeAttemptPoolLabels(step.Labels)
 		if binding.metadataOnly {
 			step.Assignee = ""
@@ -597,9 +877,11 @@ func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget stri
 	if step.Metadata == nil {
 		step.Metadata = make(map[string]string)
 	}
+	resolvedExecutionTarget := strings.TrimSpace(executionTarget)
 	if binding, ok := resolveAttemptRouteBinding(executionTarget, cfg, store); ok {
 		switch {
 		case binding.qualifiedName != "":
+			resolvedExecutionTarget = binding.qualifiedName
 			step.Metadata["gc.execution_routed_to"] = binding.qualifiedName
 		case executionTarget != "":
 			// Direct session delivery still executes via the named/session target,
@@ -615,23 +897,51 @@ func applyAttemptControlStepRoute(step *formula.RecipeStep, executionTarget stri
 	}
 	step.Labels = removeAttemptPoolLabels(step.Labels)
 
-	controlTarget := config.ControlDispatcherAgentName
-	if binding, ok := resolveAttemptRouteBinding(controlTarget, cfg, store); ok {
-		step.Metadata["gc.routed_to"] = controlTarget
-		if binding.directSessionID != "" {
-			step.Assignee = binding.directSessionID
-			return
-		}
-		if binding.metadataOnly {
-			step.Assignee = ""
-			return
-		}
-		step.Assignee = binding.sessionName
+	controlTarget := controlDispatcherTargetForExecutionTarget(resolvedExecutionTarget)
+	if assignee, ok := resolveAttemptControlAssignee(controlTarget, cfg, store); ok {
+		delete(step.Metadata, "gc.routed_to")
+		step.Assignee = assignee
 		return
 	}
 
 	step.Metadata["gc.routed_to"] = controlTarget
 	step.Assignee = ""
+}
+
+func controlDispatcherTargetForExecutionTarget(executionTarget string) string {
+	executionTarget = strings.TrimSpace(executionTarget)
+	if slash := strings.IndexByte(executionTarget, '/'); slash > 0 {
+		return executionTarget[:slash] + "/" + config.ControlDispatcherAgentName
+	}
+	return config.ControlDispatcherAgentName
+}
+
+func resolveAttemptControlAssignee(target string, cfg *config.City, store beads.Store) (string, bool) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", false
+	}
+	if binding, ok := resolveAttemptRouteBinding(target, cfg, store); ok {
+		if binding.directSessionID != "" {
+			return binding.directSessionID, true
+		}
+		if binding.sessionName != "" {
+			return binding.sessionName, true
+		}
+	}
+	if cfg != nil {
+		if named := config.FindNamedSession(cfg, target); named != nil {
+			if spec, ok := session.FindNamedSessionSpec(cfg, cfg.EffectiveCityName(), named.QualifiedName()); ok && spec.SessionName != "" {
+				return spec.SessionName, true
+			}
+		}
+		if agentCfg := config.FindAgent(cfg, target); agentCfg != nil {
+			if sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, agentCfg.QualifiedName()); sessionName != "" {
+				return sessionName, true
+			}
+		}
+	}
+	return "", false
 }
 
 func isAttemptControlKind(kind string) bool {
@@ -656,13 +966,16 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 	}
 	if cfg != nil {
 		if named := config.FindNamedSession(cfg, target); named != nil {
-			if store != nil {
-				if spec, ok := session.FindNamedSessionSpec(cfg, cfg.EffectiveCityName(), named.QualifiedName()); ok {
-					if candidates, err := store.List(beads.ListQuery{Label: session.LabelSession}); err == nil {
+			if spec, ok := session.FindNamedSessionSpec(cfg, cfg.EffectiveCityName(), named.QualifiedName()); ok {
+				if store != nil {
+					if candidates, err := session.NamedSessionResolutionCandidates(store, spec); err == nil {
 						if bead, found := session.FindCanonicalNamedSessionBead(candidates, spec); found {
 							return attemptRouteBinding{directSessionID: bead.ID}, true
 						}
 					}
+				}
+				if spec.SessionName != "" {
+					return attemptRouteBinding{sessionName: spec.SessionName}, true
 				}
 			}
 			return attemptRouteBinding{
@@ -798,23 +1111,109 @@ func newSpecRecipeStep(childID string, child *formula.Step) *formula.RecipeStep 
 	}
 }
 
-func closeAttachedSpecBeads(store beads.Store, recipe *formula.Recipe, idMapping map[string]string) error {
-	if recipe == nil || len(recipe.Steps) == 0 || len(idMapping) == 0 {
+func closeAttachedSpecBeads(store beads.Store, recipe *formula.Recipe, result *molecule.AttachResult) error {
+	if recipe == nil || len(recipe.Steps) == 0 || result == nil {
 		return nil
 	}
+	var fallbackRefs []string
 	for _, step := range recipe.Steps {
 		if step.Metadata["gc.kind"] != "spec" {
 			continue
 		}
-		beadID := idMapping[step.ID]
-		if beadID == "" {
+		beadID := result.IDMapping[step.ID]
+		if beadID != "" {
+			if err := setOutcomeAndClose(store, beadID, "pass"); err != nil {
+				return fmt.Errorf("closing spec bead %s: %w", beadID, err)
+			}
 			continue
 		}
-		if err := setOutcomeAndClose(store, beadID, "pass"); err != nil {
-			return fmt.Errorf("closing spec bead %s: %w", beadID, err)
+		if ref := recipeStepRef(step); ref != "" {
+			fallbackRefs = append(fallbackRefs, ref)
+		}
+	}
+	if len(fallbackRefs) > 0 && result.WorkflowRootID != "" {
+		if err := closeSpecBeadsByRefs(store, result.WorkflowRootID, fallbackRefs); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func closeGeneratedSpecBeadsForAttempt(store beads.Store, control, attempt beads.Bead) error {
+	attemptRef := strings.TrimSpace(attempt.Metadata["gc.step_ref"])
+	if attemptRef == "" {
+		attemptRef = strings.TrimSpace(attempt.Ref)
+	}
+	if attemptRef == "" {
+		return nil
+	}
+	rootID := control.Metadata["gc.root_bead_id"]
+	if rootID == "" {
+		rootID = control.ID
+	}
+	all, err := listByWorkflowRoot(store, rootID)
+	if err != nil {
+		return err
+	}
+	for _, bead := range all {
+		if bead.Status == "closed" || bead.Metadata["gc.kind"] != "spec" {
+			continue
+		}
+		ref := strings.TrimSpace(bead.Metadata["gc.step_ref"])
+		if ref == "" {
+			ref = strings.TrimSpace(bead.Ref)
+		}
+		if !strings.HasPrefix(ref, attemptRef+".") {
+			continue
+		}
+		if err := setOutcomeAndClose(store, bead.ID, "pass"); err != nil {
+			return fmt.Errorf("closing spec bead %s: %w", bead.ID, err)
+		}
+	}
+	return nil
+}
+
+func closeSpecBeadsByRefs(store beads.Store, rootID string, refs []string) error {
+	wanted := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		if ref = strings.TrimSpace(ref); ref != "" {
+			wanted[ref] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	all, err := listByWorkflowRoot(store, rootID)
+	if err != nil {
+		return err
+	}
+	for _, bead := range all {
+		if bead.Status == "closed" || bead.Metadata["gc.kind"] != "spec" {
+			continue
+		}
+		ref := strings.TrimSpace(bead.Metadata["gc.step_ref"])
+		if ref == "" {
+			ref = strings.TrimSpace(bead.Ref)
+		}
+		if _, ok := wanted[ref]; !ok {
+			continue
+		}
+		if err := setOutcomeAndClose(store, bead.ID, "pass"); err != nil {
+			return fmt.Errorf("closing spec bead %s: %w", bead.ID, err)
+		}
+	}
+	return nil
+}
+
+func recipeStepRef(step formula.RecipeStep) string {
+	if ref := strings.TrimSpace(step.Metadata["gc.step_ref"]); ref != "" {
+		return ref
+	}
+	return strings.TrimSpace(step.ID)
+}
+
+func isFailedPartialMolecule(bead beads.Bead) bool {
+	return strings.TrimSpace(bead.Metadata["molecule_failed"]) == "true"
 }
 
 // findLatestAttempt finds the most recent attempt/iteration child of a control bead.
@@ -827,15 +1226,30 @@ func findLatestAttempt(store beads.Store, control beads.Bead) (beads.Bead, error
 	}
 
 	all, err := listByWorkflowRoot(store, rootID)
-	if err != nil {
-		return beads.Bead{}, err
+	if err == nil {
+		latest := latestAttemptFromCandidates(control, all)
+		if latest.ID != "" {
+			return latest, nil
+		}
 	}
 
-	latest := latestAttemptFromCandidates(control, all)
+	latest, depErr := latestAttemptFromDependencies(store, control)
+	if depErr != nil {
+		if err != nil {
+			return beads.Bead{}, fmt.Errorf("%w; dependency fallback: %w", err, depErr)
+		}
+		return beads.Bead{}, depErr
+	}
 	if latest.ID != "" {
 		return latest, nil
 	}
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	return beads.Bead{}, nil
+}
 
+func latestAttemptFromDependencies(store beads.Store, control beads.Bead) (beads.Bead, error) {
 	deps, err := store.DepList(control.ID, "down")
 	if err != nil {
 		return beads.Bead{}, err
@@ -861,6 +1275,9 @@ func latestAttemptFromCandidates(control beads.Bead, candidates []beads.Bead) be
 	latestAttempt := 0
 	controlKind := control.Metadata["gc.kind"]
 	for _, b := range candidates {
+		if isFailedPartialMolecule(b) {
+			continue
+		}
 		// Skip beads that are control infrastructure, not actual work.
 		// For ralph controls, scope beads ARE the iterations — don't skip them.
 		kind := b.Metadata["gc.kind"]
@@ -937,10 +1354,17 @@ func appendAttemptLog(store beads.Store, controlID string, attempt int, outcome,
 	if err != nil {
 		return err
 	}
+	logJSON, err := appendAttemptLogValue(control.Metadata["gc.attempt_log"], attempt, outcome, reason)
+	if err != nil {
+		return err
+	}
+	return store.SetMetadata(controlID, "gc.attempt_log", logJSON)
+}
 
+func appendAttemptLogValue(existing string, attempt int, outcome, reason string) (string, error) {
 	var log []map[string]string
-	if raw := control.Metadata["gc.attempt_log"]; raw != "" {
-		_ = json.Unmarshal([]byte(raw), &log)
+	if existing != "" {
+		_ = json.Unmarshal([]byte(existing), &log)
 	}
 
 	entry := map[string]string{
@@ -964,13 +1388,39 @@ func appendAttemptLog(store beads.Store, controlID string, attempt int, outcome,
 	}
 	entry["action"] = action
 
-	log = append(log, entry)
+	if len(log) > 0 {
+		last := log[len(log)-1]
+		if last["attempt"] == entry["attempt"] && last["outcome"] == entry["outcome"] && last["action"] == entry["action"] {
+			log[len(log)-1] = entry
+		} else {
+			log = append(log, entry)
+		}
+	} else {
+		log = append(log, entry)
+	}
 	logJSON, err := json.Marshal(log)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	return store.SetMetadata(controlID, "gc.attempt_log", string(logJSON))
+	return string(logJSON), nil
+}
+
+func copyNonGCMetadata(dst, src map[string]string) {
+	for key, value := range src {
+		if key == "" || strings.HasPrefix(key, "gc.") {
+			continue
+		}
+		dst[key] = value
+	}
+}
+
+func updateMetadataAndClose(store beads.Store, beadID string, metadata map[string]string) error {
+	status := "closed"
+	return store.Update(beadID, beads.UpdateOpts{
+		Status:   &status,
+		Metadata: metadata,
+	})
 }
 
 // Note: listByWorkflowRoot, setOutcomeAndClose, propagateRetrySubjectMetadata,

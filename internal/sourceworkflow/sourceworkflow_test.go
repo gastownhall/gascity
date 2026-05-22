@@ -102,6 +102,37 @@ func TestLockIdentityCanonicalizesScopeRefSymlinks(t *testing.T) {
 	}
 }
 
+func TestLockScopeForStoreRefResolvesCityRigAndDefaultScopes(t *testing.T) {
+	cityPath := filepath.Clean("/city")
+	rigPath := filepath.Join("rigs", "alpha")
+	resolveRig := func(name string) (string, bool) {
+		if name != "alpha" {
+			return "", false
+		}
+		return rigPath, true
+	}
+
+	tests := []struct {
+		name             string
+		defaultStorePath string
+		storeRef         string
+		want             string
+	}{
+		{name: "default store path", defaultStorePath: "/city/rigs/default", want: filepath.Clean("/city/rigs/default")},
+		{name: "city store ref", storeRef: "city:test", want: cityPath},
+		{name: "rig store ref", storeRef: "rig:alpha", want: filepath.Join(cityPath, rigPath)},
+		{name: "unknown store ref", storeRef: "external:one", want: filepath.Clean("external:one")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := LockScopeForStoreRef(cityPath, tt.defaultStorePath, tt.storeRef, resolveRig)
+			if got != tt.want {
+				t.Fatalf("LockScopeForStoreRef() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestWorkflowMatchesSourceUsesSourceStoreRefWhenPresent(t *testing.T) {
 	root := beads.Bead{
 		ID: "wf-1",
@@ -308,6 +339,64 @@ func (s *parentLastCloseStore) CloseAll(ids []string, metadata map[string]string
 	return s.MemStore.CloseAll(ids, metadata)
 }
 
+type blockValidatingWorkflowStore struct {
+	*beads.MemStore
+}
+
+func (s *blockValidatingWorkflowStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	closed := 0
+	for _, id := range ids {
+		bead, err := s.Get(id)
+		if err != nil {
+			return closed, err
+		}
+		if bead.Status == "closed" {
+			continue
+		}
+		if err := s.assertNoOpenBlockers(id); err != nil {
+			return closed, err
+		}
+		n, err := s.MemStore.CloseAll([]string{id}, metadata)
+		closed += n
+		if err != nil {
+			return closed, err
+		}
+	}
+	return closed, nil
+}
+
+func (s *blockValidatingWorkflowStore) assertNoOpenBlockers(id string) error {
+	deps, err := s.DepList(id, "down")
+	if err != nil {
+		return err
+	}
+	for _, d := range deps {
+		if d.IssueID != id || d.Type != "blocks" {
+			continue
+		}
+		blocker, err := s.Get(d.DependsOnID)
+		if err != nil {
+			continue
+		}
+		if blocker.Status != "closed" {
+			return fmt.Errorf("cannot close %s: blocked by open %s", id, d.DependsOnID)
+		}
+	}
+	return nil
+}
+
+type closeReasonValidatingWorkflowStore struct {
+	*beads.MemStore
+}
+
+func (s *closeReasonValidatingWorkflowStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	reason := metadata["close_reason"]
+	if len(reason) < 20 {
+		return 0, fmt.Errorf("close_reason length = %d, want >=20", len(reason))
+	}
+	return s.MemStore.CloseAll(ids, metadata)
+}
+
 func TestCloseWorkflowSubtreeClosesDeepestChildrenFirst(t *testing.T) {
 	store := &parentLastCloseStore{MemStore: beads.NewMemStore()}
 
@@ -358,6 +447,125 @@ func TestCloseWorkflowSubtreeClosesDeepestChildrenFirst(t *testing.T) {
 	}
 }
 
+func TestCloseWorkflowSubtreeOrdersBlockersBeforeBlocked(t *testing.T) {
+	store := &blockValidatingWorkflowStore{MemStore: beads.NewMemStore()}
+
+	root, err := store.Create(beads.Bead{
+		Title: "root",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	stepNames := []string{
+		"submit-and-exit",
+		"self-review",
+		"implement",
+		"preflight-tests",
+		"workspace-setup",
+		"load-context",
+	}
+	steps := make([]beads.Bead, 0, len(stepNames))
+	for _, name := range stepNames {
+		step, err := store.Create(beads.Bead{
+			Title:    name,
+			Type:     "task",
+			ParentID: root.ID,
+			Metadata: map[string]string{
+				"gc.root_bead_id": root.ID,
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", name, err)
+		}
+		steps = append(steps, step)
+	}
+	for i := 0; i < len(steps)-1; i++ {
+		blocked := steps[i]
+		blocker := steps[i+1]
+		if err := store.DepAdd(blocked.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatalf("DepAdd(%s blocks-on %s): %v", blocked.ID, blocker.ID, err)
+		}
+	}
+
+	closed, err := CloseWorkflowSubtree(store, root.ID)
+	if err != nil {
+		t.Fatalf("CloseWorkflowSubtree: %v", err)
+	}
+	wantClosed := 1 + len(steps)
+	if closed != wantClosed {
+		t.Fatalf("CloseWorkflowSubtree closed %d beads, want %d", closed, wantClosed)
+	}
+	for _, id := range append([]string{root.ID}, workflowIDsOf(steps)...) {
+		bead, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if bead.Status != "closed" {
+			t.Fatalf("bead %s status = %q, want closed", id, bead.Status)
+		}
+		if got := bead.Metadata["gc.outcome"]; got != "skipped" {
+			t.Fatalf("bead %s gc.outcome = %q, want skipped", id, got)
+		}
+	}
+}
+
+func TestCloseWorkflowSubtreeStampsCloseReason(t *testing.T) {
+	store := &closeReasonValidatingWorkflowStore{MemStore: beads.NewMemStore()}
+	root, err := store.Create(beads.Bead{
+		Title: "root",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind": "workflow",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:    "child",
+		Type:     "task",
+		ParentID: root.ID,
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+
+	closed, err := CloseWorkflowSubtree(store, root.ID)
+	if err != nil {
+		t.Fatalf("CloseWorkflowSubtree: %v", err)
+	}
+	if closed != 2 {
+		t.Fatalf("CloseWorkflowSubtree closed %d beads, want 2", closed)
+	}
+	for _, id := range []string{root.ID, child.ID} {
+		bead, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got := bead.Metadata["gc.outcome"]; got != "skipped" {
+			t.Fatalf("%s gc.outcome = %q, want skipped", id, got)
+		}
+		if got := bead.Metadata["close_reason"]; got != WorkflowSubtreeClosedReason {
+			t.Fatalf("%s close_reason = %q, want %q", id, got, WorkflowSubtreeClosedReason)
+		}
+	}
+}
+
+func workflowIDsOf(bs []beads.Bead) []string {
+	out := make([]string, len(bs))
+	for i, b := range bs {
+		out[i] = b.ID
+	}
+	return out
+}
+
 func TestCloseWorkflowSubtreeHandlesParentCycles(t *testing.T) {
 	store := beads.NewMemStore()
 	root, err := store.Create(beads.Bead{
@@ -404,6 +612,63 @@ func TestCloseWorkflowSubtreeHandlesParentCycles(t *testing.T) {
 		}
 		if bead.Status != "closed" {
 			t.Fatalf("bead %s status = %q, want closed", id, bead.Status)
+		}
+	}
+}
+
+// TestCloseWorkflowSubtree_StampsCloseReason verifies that the cleanup
+// path stamps both gc.outcome=skipped (the workflow-level outcome) and
+// close_reason=WorkflowSubtreeClosedReason (the validator-satisfying
+// audit string). Under bd's validation.on-close=error, omitting the
+// close_reason silently leaves cleanup beads open.
+func TestCloseWorkflowSubtree_StampsCloseReason(t *testing.T) {
+	if got := len(WorkflowSubtreeClosedReason); got < 20 {
+		t.Fatalf("WorkflowSubtreeClosedReason = %q (%d chars), want >=20", WorkflowSubtreeClosedReason, got)
+	}
+
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:    "root",
+		Type:     "task",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:    "child",
+		Type:     "task",
+		ParentID: root.ID,
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	if err := store.DepAdd(child.ID, root.ID, "parent-child"); err != nil {
+		t.Fatalf("DepAdd(child): %v", err)
+	}
+
+	closed, err := CloseWorkflowSubtree(store, root.ID)
+	if err != nil {
+		t.Fatalf("CloseWorkflowSubtree: %v", err)
+	}
+	if closed != 2 {
+		t.Fatalf("CloseWorkflowSubtree closed %d beads, want 2", closed)
+	}
+
+	for _, id := range []string{root.ID, child.ID} {
+		bead, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if bead.Status != "closed" {
+			t.Fatalf("bead %s status = %q, want closed", id, bead.Status)
+		}
+		if got := bead.Metadata["close_reason"]; got != WorkflowSubtreeClosedReason {
+			t.Errorf("bead %s close_reason = %q, want %q", id, got, WorkflowSubtreeClosedReason)
+		}
+		if got := bead.Metadata["gc.outcome"]; got != "skipped" {
+			t.Errorf("bead %s gc.outcome = %q, want skipped", id, got)
 		}
 	}
 }

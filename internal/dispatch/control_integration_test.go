@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -161,6 +162,67 @@ func TestRetryLifecycleTransientThenPass(t *testing.T) {
 	}
 	if log[1]["outcome"] != "pass" || log[1]["action"] != "close" {
 		t.Errorf("log[1] = %v, want pass/close", log[1])
+	}
+}
+
+func TestRetryLifecycleRequiredOutputMissingDoesNotPass(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	spec := &formula.Step{
+		ID:    "prepare-items",
+		Title: "Prepare Items",
+		Type:  "task",
+		Retry: &formula.RetrySpec{MaxAttempts: 2},
+	}
+	root, control := makeRetryControl(t, store, "mol-test.prepare-items", spec, 2)
+
+	attempt1 := makeAttemptBead(t, store, root.ID, "mol-test.prepare-items.attempt.1", 1, map[string]string{
+		"gc.outcome":              "pass",
+		"gc.output_json_required": "true",
+	})
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl attempt 1: %v", err)
+	}
+	if result.Action != "retry" {
+		t.Fatalf("attempt 1 action = %q, want retry", result.Action)
+	}
+
+	attempt2 := findAttemptByRef(t, store, root.ID, "mol-test.prepare-items.attempt.2")
+	if attempt2.ID == "" {
+		t.Fatal("attempt 2 was not created by Attach")
+	}
+	if err := store.SetMetadataBatch(attempt2.ID, map[string]string{
+		"gc.outcome":              "pass",
+		"gc.output_json_required": "true",
+	}); err != nil {
+		t.Fatalf("set attempt 2 metadata: %v", err)
+	}
+	mustClose(t, store, attempt2.ID)
+
+	result2, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl attempt 2: %v", err)
+	}
+	if result2.Action != "fail" {
+		t.Fatalf("attempt 2 action = %q, want fail", result2.Action)
+	}
+
+	controlFinal := mustGet(t, store, control.ID)
+	if controlFinal.Status != "closed" {
+		t.Fatalf("control final status = %q, want closed", controlFinal.Status)
+	}
+	if controlFinal.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("control outcome = %q, want fail", controlFinal.Metadata["gc.outcome"])
+	}
+	if controlFinal.Metadata["gc.failure_reason"] != "missing_required_output_json" {
+		t.Fatalf("control failure_reason = %q, want missing_required_output_json", controlFinal.Metadata["gc.failure_reason"])
+	}
+	if controlFinal.Metadata["gc.output_json"] != "" {
+		t.Fatalf("control output_json = %q, want empty", controlFinal.Metadata["gc.output_json"])
 	}
 }
 
@@ -593,6 +655,11 @@ dir = "gascity"
 [agent.pool]
 min = 0
 max = -1
+
+[[agent]]
+name = "control-dispatcher"
+dir = "gascity"
+max_active_sessions = 1
 `), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
@@ -671,8 +738,8 @@ max = -1
 	if claude.ID == "" {
 		t.Fatal("review-claude child not created")
 	}
-	if claude.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
-		t.Fatalf("review-claude gc.routed_to = %q, want %q", claude.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
+	if got := claude.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("review-claude gc.routed_to = %q, want empty direct dispatcher assignee", got)
 	}
 	if claude.Metadata["gc.execution_routed_to"] != "gascity/claude" {
 		t.Fatalf("review-claude gc.execution_routed_to = %q, want gascity/claude", claude.Metadata["gc.execution_routed_to"])
@@ -680,16 +747,16 @@ max = -1
 	if containsString(claude.Labels, "pool:gascity/claude") {
 		t.Fatalf("review-claude labels = %v, should not contain legacy pool label", claude.Labels)
 	}
-	if claude.Assignee != "" {
-		t.Fatalf("review-claude assignee = %q, want empty metadata-only control route", claude.Assignee)
+	if claude.Assignee != "gascity--control-dispatcher" {
+		t.Fatalf("review-claude assignee = %q, want gascity--control-dispatcher", claude.Assignee)
 	}
 
 	codex := findAttemptByRef(t, store, root.ID, "mol-adopt-pr-v2.review-loop.iteration.2.review-codex")
 	if codex.ID == "" {
 		t.Fatal("review-codex child not created")
 	}
-	if codex.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
-		t.Fatalf("review-codex gc.routed_to = %q, want %q", codex.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
+	if got := codex.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("review-codex gc.routed_to = %q, want empty direct dispatcher assignee", got)
 	}
 	if codex.Metadata["gc.execution_routed_to"] != "gascity/codex" {
 		t.Fatalf("review-codex gc.execution_routed_to = %q, want gascity/codex", codex.Metadata["gc.execution_routed_to"])
@@ -700,8 +767,8 @@ max = -1
 	if containsString(codex.Labels, "pool:gascity/claude") {
 		t.Fatalf("review-codex labels = %v, should not contain pool:gascity/claude", codex.Labels)
 	}
-	if codex.Assignee != "" {
-		t.Fatalf("review-codex assignee = %q, want empty metadata-only control route", codex.Assignee)
+	if codex.Assignee != "gascity--control-dispatcher" {
+		t.Fatalf("review-codex assignee = %q, want gascity--control-dispatcher", codex.Assignee)
 	}
 
 	synthesize := findAttemptByRef(t, store, root.ID, "mol-adopt-pr-v2.review-loop.iteration.2.synthesize")
@@ -865,7 +932,7 @@ func TestResolveAttemptRouteBinding_ConfigTargetBeatsCollidingSessionAlias(t *te
 func TestResolveAttemptRouteBinding_NamedSessionTargetUsesCanonicalBeadID(t *testing.T) {
 	t.Parallel()
 
-	store := beads.NewMemStore()
+	store := &countingAttemptRouteStore{MemStore: beads.NewMemStore()}
 	named, err := store.Create(beads.Bead{
 		Title:  "worker",
 		Type:   session.BeadType,
@@ -896,6 +963,7 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetUsesCanonicalBeadID(t *tes
 		}},
 	}
 
+	startCalls := store.calls
 	binding, ok := resolveAttemptRouteBinding("worker", cfg, store)
 	if !ok {
 		t.Fatal("resolveAttemptRouteBinding did not resolve named target")
@@ -906,9 +974,28 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetUsesCanonicalBeadID(t *tes
 	if binding.qualifiedName != "" || binding.sessionName != "" {
 		t.Fatalf("binding = %+v, want direct named session only", binding)
 	}
+	// Per-resolution List calls must stay bounded so the per-attempt cost
+	// does not fan out under reconciler load. The previous implementation
+	// issued four sequential List calls per resolution; collapsing them
+	// into one label-scoped scan was the fix for ga-pa57. Allow a small
+	// margin (≤2) for unrelated lookups in the binding path while still
+	// guarding against regression to the four-call shape.
+	if delta := store.calls - startCalls; delta > 2 {
+		t.Fatalf("resolveAttemptRouteBinding issued %d List calls, want ≤2 (regression risk for ga-pa57 contention)", delta)
+	}
 }
 
-func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesMetadataOnly(t *testing.T) {
+type countingAttemptRouteStore struct {
+	*beads.MemStore
+	calls int
+}
+
+func (s *countingAttemptRouteStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.calls++
+	return s.MemStore.List(query)
+}
+
+func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesSessionName(t *testing.T) {
 	t.Parallel()
 
 	store := beads.NewMemStore()
@@ -929,11 +1016,180 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesMe
 	if !ok {
 		t.Fatal("resolveAttemptRouteBinding did not resolve named target")
 	}
-	if binding.directSessionID != "" || binding.sessionName != "" {
-		t.Fatalf("binding = %+v, want no direct or legacy session-name target without a canonical bead", binding)
+	if binding.directSessionID != "" {
+		t.Fatalf("directSessionID = %q, want empty without canonical bead", binding.directSessionID)
 	}
-	if binding.qualifiedName != "worker" || !binding.metadataOnly {
-		t.Fatalf("binding = %+v, want metadata-only worker route", binding)
+	if binding.sessionName != "worker" {
+		t.Fatalf("sessionName = %q, want worker", binding.sessionName)
+	}
+	if binding.qualifiedName != "" || binding.metadataOnly {
+		t.Fatalf("binding = %+v, want concrete session-name route", binding)
+	}
+}
+
+func TestApplyAttemptControlStepRoute_ImplicitControlDispatcherUsesConcreteAssignee(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "maintainer-city"},
+		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Rigs: []config.Rig{{
+			Name: "gascity",
+			Path: t.TempDir(),
+		}},
+		Agents: []config.Agent{{
+			Name: "claude",
+			Dir:  "gascity",
+		}},
+	}
+	config.InjectImplicitAgents(cfg)
+
+	step := &formula.RecipeStep{
+		Metadata: map[string]string{
+			"gc.routed_to": "stale-route",
+		},
+	}
+	applyAttemptControlStepRoute(step, "gascity/claude", cfg, beads.NewMemStore())
+
+	if step.Assignee != "gascity--control-dispatcher" {
+		t.Fatalf("assignee = %q, want gascity--control-dispatcher", step.Assignee)
+	}
+	if got := step.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("gc.routed_to = %q, want empty for concrete control dispatcher assignee", got)
+	}
+	if got := step.Metadata["gc.execution_routed_to"]; got != "gascity/claude" {
+		t.Fatalf("gc.execution_routed_to = %q, want gascity/claude", got)
+	}
+}
+
+func TestSpawnNextAttemptUsesSourceRigForBareChildControlRoute(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "maintainer-city"
+
+[daemon]
+formula_v2 = true
+
+[[rigs]]
+name = "frontend"
+path = "/tmp/frontend"
+
+[[rigs]]
+name = "backend"
+path = "/tmp/backend"
+
+[[agent]]
+name = "reviewer"
+dir = "frontend"
+
+[[agent]]
+name = "control-dispatcher"
+dir = "frontend"
+max_active_sessions = 1
+
+[[agent]]
+name = "reviewer"
+dir = "backend"
+
+[[agent]]
+name = "control-dispatcher"
+dir = "backend"
+max_active_sessions = 1
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	spec := &formula.Step{
+		ID:    "review-loop",
+		Title: "Review loop",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{MaxAttempts: 3},
+		Children: []*formula.Step{
+			{
+				ID:    "review",
+				Title: "Review",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.run_target": "reviewer",
+				},
+				Retry: &formula.RetrySpec{MaxAttempts: 2},
+			},
+		},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal step spec: %v", err)
+	}
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review-loop",
+		Metadata: map[string]string{
+			"gc.kind":                "ralph",
+			"gc.root_bead_id":        root.ID,
+			"gc.step_ref":            "mol-adopt-pr-v2.review-loop",
+			"gc.step_id":             "review-loop",
+			"gc.source_step_spec":    string(specJSON),
+			"gc.control_epoch":       "1",
+			"gc.execution_routed_to": "frontend/reviewer",
+		},
+	})
+
+	if err := spawnNextAttempt(t.Context(), store, control, 2, ProcessOptions{CityPath: cityPath}); err != nil {
+		t.Fatalf("spawnNextAttempt: %v", err)
+	}
+
+	review := findAttemptByRef(t, store, root.ID, "mol-adopt-pr-v2.review-loop.iteration.2.review")
+	if review.ID == "" {
+		t.Fatal("review child not created")
+	}
+	if got := review.Metadata["gc.execution_routed_to"]; got != "frontend/reviewer" {
+		t.Fatalf("review gc.execution_routed_to = %q, want frontend/reviewer", got)
+	}
+	if got := review.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("review gc.routed_to = %q, want empty direct dispatcher assignee", got)
+	}
+	if review.Assignee != "frontend--control-dispatcher" {
+		t.Fatalf("review assignee = %q, want frontend--control-dispatcher", review.Assignee)
+	}
+}
+
+func TestApplyAttemptControlStepRoute_ConfiguredControlDispatcherNeverUsesMetadataRoute(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "maintainer-city"},
+		Agents: []config.Agent{
+			{
+				Name: "claude",
+				Dir:  "gascity",
+			},
+			{
+				Name: "control-dispatcher",
+				Dir:  "gascity",
+			},
+		},
+	}
+
+	step := &formula.RecipeStep{
+		Metadata: map[string]string{
+			"gc.routed_to": "stale-route",
+		},
+	}
+	applyAttemptControlStepRoute(step, "gascity/claude", cfg, beads.NewMemStore())
+
+	if step.Assignee != "gascity--control-dispatcher" {
+		t.Fatalf("assignee = %q, want gascity--control-dispatcher", step.Assignee)
+	}
+	if got := step.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("gc.routed_to = %q, want empty for concrete control dispatcher assignee", got)
 	}
 }
 
@@ -999,8 +1255,8 @@ func TestApplyAttemptControlStepRoute_KeepsControlBeadsOnDispatcherForNamedExecu
 	if got := step.Metadata["gc.execution_routed_to"]; got != "worker" {
 		t.Fatalf("gc.execution_routed_to = %q, want worker", got)
 	}
-	if got := step.Metadata["gc.routed_to"]; got != config.ControlDispatcherAgentName {
-		t.Fatalf("gc.routed_to = %q, want %q", got, config.ControlDispatcherAgentName)
+	if got := step.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("gc.routed_to = %q, want empty for concrete control-dispatcher assignee", got)
 	}
 	if step.Assignee != dispatcher.ID {
 		t.Fatalf("assignee = %q, want canonical control-dispatcher bead %q", step.Assignee, dispatcher.ID)
@@ -1088,14 +1344,14 @@ func TestRetryIdempotencyKeyPreventsDoubleSpawn(t *testing.T) {
 	allAfterFirst, _ := store.ListOpen()
 	countAfterFirst := len(allAfterFirst)
 
-	// Process again with same state — epoch conflict should prevent double spawn.
+	// Process again with same state -- epoch conflict should prevent double spawn.
 	// The epoch was already incremented by the first Attach, so a second
 	// processRetryControl with the same attempt (attempt 1 still closed, attempt 2
 	// still open) will find attempt 2 as the latest and see it's not closed.
-	// This verifies the invariant violation guard.
+	// This verifies the pending guard.
 	_, err = processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
-	if err == nil {
-		t.Fatal("expected error on second process (attempt 2 is open)")
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("second process error = %v, want %v", err, ErrControlPending)
 	}
 
 	// No new beads should have been created.

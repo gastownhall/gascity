@@ -56,10 +56,10 @@ func TestStripResumeFlag(t *testing.T) {
 	}{
 		{
 			name:       "removes resume flag and key",
-			cmd:        "claude --model claude-opus-4-6 --resume abc-123",
+			cmd:        "claude --model claude-opus-4-7 --resume abc-123",
 			resumeFlag: "--resume",
 			sessionKey: "abc-123",
-			want:       "claude --model claude-opus-4-6",
+			want:       "claude --model claude-opus-4-7",
 		},
 		{
 			name:       "resume flag at end",
@@ -88,6 +88,17 @@ func TestStripResumeFlag(t *testing.T) {
 			resumeFlag: "--resume",
 			sessionKey: "",
 			want:       "claude --resume abc-123",
+		},
+		{
+			// PR #2035 review: callers rely on freshCmd == cmd to detect
+			// a no-op strip. TrimSpace on a non-replacement path would
+			// silently change the return value when cmd has padding,
+			// breaking that signal.
+			name:       "no strip preserves leading and trailing whitespace",
+			cmd:        "  claude --model sonnet  ",
+			resumeFlag: "--resume",
+			sessionKey: "abc-123",
+			want:       "  claude --model sonnet  ",
 		},
 	}
 	for _, tt := range tests {

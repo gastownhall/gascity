@@ -11,13 +11,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	goruntime "runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -33,6 +36,8 @@ import (
 // ---------------------------------------------------------------------------
 
 const pollInterval = 100 * time.Millisecond
+
+var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", "gemini", "kimi", "opencode", "pi"}
 
 // Config holds configurable timeouts and intervals for the tmux provider.
 // All fields have sensible defaults matching the original hardcoded values.
@@ -109,6 +114,8 @@ type RuntimeTmuxConfig struct {
 // timed lock acquisition — preventing permanent lockout if a nudge hangs.
 var sessionNudgeLocks sync.Map // map[string]chan struct{}
 
+var pasteBufferSeq uint64
+
 // validSessionNameRe validates session names to prevent shell injection
 var validSessionNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
@@ -119,13 +126,41 @@ var (
 	ErrSessionNotFound    = errors.New("session not found")
 	ErrInvalidSessionName = errors.New("invalid session name")
 	ErrIdleTimeout        = errors.New("agent not idle before timeout")
+	// ErrServerDegraded indicates the tmux server bound to SocketName is
+	// reachable on the filesystem but unresponsive. Creating a new session
+	// in this state would let tmux's own (very short) liveness probe time
+	// out and fall through to unlink+bind, spawning a parallel server on
+	// the same socket path and orphaning every existing session on the
+	// original server. Callers should surface this to the user instead of
+	// proceeding — see issue ga-h9z.
+	ErrServerDegraded = errors.New("tmux server degraded: refusing new-session to avoid socket clobber")
 )
 
 const (
 	hiddenAttachReadyTimeout = 2 * time.Second
 	hiddenAttachMaxLifetime  = 20 * time.Second
 	hiddenAttachPollInterval = 50 * time.Millisecond
+	maxSendKeysLiteralLen    = 4096
 )
+
+// tmuxSubprocessTimeout caps the wall-clock time any single tmux subprocess
+// invocation may run before the kernel SIGKILLs it. Bounds the shutdown path
+// against wedged tmux servers and FD/inode-exhausted hosts where fork()
+// blocks. Test-overridable; production value is 30s.
+var tmuxSubprocessTimeout = 30 * time.Second
+
+// newSessionProbeTimeout bounds the pre-flight has-session probe used by
+// NewSession variants to detect a degraded server before tmux's own short
+// liveness check fires. Must be short enough that a wedged server fails fast
+// and BAILs (preventing socket clobber per ga-h9z), but long enough that a
+// healthy-but-slow server still responds. Test-overridable.
+var newSessionProbeTimeout = 2 * time.Second
+
+// probeSessionName is the bogus target used by probeServerAlive's has-session
+// call. A healthy server replies "session not found"; a dead server replies
+// "no server running" / "error connecting to"; a degraded server hangs or
+// returns something else. The name is deliberately unrouteable.
+const probeSessionName = "__gascity_probe__"
 
 // validateSessionName checks that a session name contains only safe characters.
 // Returns ErrInvalidSessionName if the name contains dots, colons, or other
@@ -205,8 +240,13 @@ func (t *Tmux) approvalDedup() *approvalDedup {
 	return t.interactionDedup
 }
 
-// runCtx executes a tmux command with a context (for timeout/cancellation).
+// runCtx executes a tmux command with a context. The caller-supplied
+// context is composed with tmuxSubprocessTimeout so a wedged tmux server
+// or fork-blocked host cannot hang the call indefinitely. When the parent
+// already has an earlier deadline, that earlier deadline wins.
 func (t *Tmux) runCtx(ctx context.Context, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, tmuxSubprocessTimeout)
+	defer cancel()
 	allArgs := []string{"-u"}
 	if t.cfg.SocketName != "" {
 		allArgs = append(allArgs, "-L", t.cfg.SocketName)
@@ -215,18 +255,12 @@ func (t *Tmux) runCtx(ctx context.Context, args ...string) (string, error) {
 	return t.exec.executeCtx(ctx, allArgs)
 }
 
-// run executes a tmux command and returns stdout.
-// All commands include -u flag for UTF-8 support regardless of locale settings.
-// When SocketName is configured, -L <socket> is injected after -u.
-// See: https://github.com/steveyegge/gastown/issues/1219
+// run executes a tmux command and returns stdout. All commands include -u
+// for UTF-8 regardless of locale; when SocketName is set, -L <socket> is
+// injected after -u (see https://github.com/steveyegge/gastown/issues/1219).
+// Every invocation is bounded by tmuxSubprocessTimeout via runCtx.
 func (t *Tmux) run(args ...string) (string, error) {
-	allArgs := []string{"-u"}
-	if t.cfg.SocketName != "" {
-		allArgs = append(allArgs, "-L", t.cfg.SocketName)
-	}
-	allArgs = append(allArgs, args...)
-
-	return t.exec.execute(allArgs)
+	return t.runCtx(context.Background(), args...)
 }
 
 // wrapError wraps tmux errors with context.
@@ -255,9 +289,55 @@ func wrapError(err error, stderr string, args []string) error {
 	return fmt.Errorf("tmux %s: %w", args[0], err)
 }
 
+// probeServerAlive verifies the tmux server bound to SocketName is responsive
+// before invoking new-session. This prevents the socket-clobber failure
+// described in ga-h9z: when tmux is asked to create a session against a
+// socket whose server is alive-but-slow, tmux's internal liveness probe can
+// time out and tmux falls through to unlink+bind, spawning a parallel server
+// on the same path and orphaning every session on the original.
+//
+// Returns:
+//   - nil when SocketName is empty (default-server case is out of scope) or
+//     when the server replies (alive — including the expected "session not
+//     found" for the bogus probe target).
+//   - nil with ErrNoServer semantics absorbed (no server bound is safe; tmux
+//     will create a fresh server cleanly).
+//   - ErrServerDegraded when the probe times out or returns any other error,
+//     indicating the server is in a state where new-session would risk
+//     clobbering. Callers MUST surface this and refuse to proceed.
+func (t *Tmux) probeServerAlive() error {
+	if t.cfg.SocketName == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), newSessionProbeTimeout)
+	defer cancel()
+	_, err := t.runCtx(ctx, "has-session", "-t", "="+probeSessionName)
+	if err == nil {
+		// Server is alive and (improbably) actually has a session with the
+		// probe name. Still safe — server responded.
+		return nil
+	}
+	if errors.Is(err, ErrSessionNotFound) {
+		// Healthy server, just doesn't have the probe session. Safe.
+		return nil
+	}
+	if errors.Is(err, ErrNoServer) {
+		// No server bound (stale socket or never existed). Safe — tmux will
+		// unlink any stale socket and bind a fresh server.
+		return nil
+	}
+	// Timeout, fork failure, or any other unrecognized error: server is in
+	// an indeterminate state. Refuse to proceed rather than let tmux silently
+	// fork into a parallel server.
+	return fmt.Errorf("%w (socket=%s): %w", ErrServerDegraded, t.cfg.SocketName, err)
+}
+
 // NewSession creates a new detached tmux session.
 func (t *Tmux) NewSession(name, workDir string) error {
 	if err := validateSessionName(name); err != nil {
+		return err
+	}
+	if err := t.probeServerAlive(); err != nil {
 		return err
 	}
 	args := []string{"new-session", "-d", "-s", name}
@@ -282,6 +362,9 @@ func (t *Tmux) NewSession(name, workDir string) error {
 // See: https://github.com/anthropics/gastown/issues/280
 func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 	if err := validateSessionName(name); err != nil {
+		return err
+	}
+	if err := t.probeServerAlive(); err != nil {
 		return err
 	}
 	args := []string{"new-session", "-d", "-s", name}
@@ -311,6 +394,9 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 // Requires tmux >= 3.2.
 func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env map[string]string) error {
 	if err := validateSessionName(name); err != nil {
+		return err
+	}
+	if err := t.probeServerAlive(); err != nil {
 		return err
 	}
 	// Disable mouse mode and monitor-activity before creating the session.
@@ -1137,7 +1223,7 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 		cmdArgs = append(cmdArgs, "-L", t.cfg.SocketName)
 	}
 	cmdArgs = append(cmdArgs, "attach-session", "-t", target)
-	cmd := exec.CommandContext(ctx, "script", "-qfc", "tmux "+shellquote.Join(cmdArgs), "/dev/null")
+	cmd := exec.CommandContext(ctx, "script", hiddenAttachScriptArgs(goruntime.GOOS, cmdArgs)...)
 	cmd.Env = append(cmd.Environ(), "TERM=xterm-256color")
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
@@ -1178,6 +1264,14 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 		return err
 	}
 	return nil
+}
+
+func hiddenAttachScriptArgs(goos string, tmuxArgs []string) []string {
+	if goos == "darwin" {
+		args := []string{"-q", "/dev/null", "tmux"}
+		return append(args, tmuxArgs...)
+	}
+	return []string{"-qfc", "tmux " + shellquote.Join(tmuxArgs), "/dev/null"}
 }
 
 func (t *Tmux) hiddenAttachClient(target string) *hiddenAttachClient {
@@ -1313,6 +1407,66 @@ func isTransientSendKeysError(err error) bool {
 	return strings.Contains(msg, "not in a mode")
 }
 
+func isCommandTooLongError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "command too long")
+}
+
+func nextPasteBufferName() string {
+	seq := atomic.AddUint64(&pasteBufferSeq, 1)
+	return fmt.Sprintf("gc-nudge-%d-%d", os.Getpid(), seq)
+}
+
+func (t *Tmux) sendLiteralText(target, text string) error {
+	if len(text) > maxSendKeysLiteralLen {
+		return t.pasteLiteralText(target, text)
+	}
+	_, err := t.run("send-keys", "-t", target, "-l", text)
+	if isCommandTooLongError(err) {
+		return t.pasteLiteralText(target, text)
+	}
+	return err
+}
+
+func (t *Tmux) pasteLiteralText(target, text string) error {
+	tmp, err := os.CreateTemp("", "gc-tmux-paste-*")
+	if err != nil {
+		return fmt.Errorf("creating tmux paste buffer file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if _, err := tmp.WriteString(text); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("writing tmux paste buffer file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing tmux paste buffer file: %w", err)
+	}
+
+	bufferName := nextPasteBufferName()
+	loaded := false
+	if _, err := t.run("load-buffer", "-b", bufferName, tmpName); err != nil {
+		return fmt.Errorf("loading tmux paste buffer: %w", err)
+	}
+	loaded = true
+	defer func() {
+		if loaded {
+			_, _ = t.run("delete-buffer", "-b", bufferName)
+		}
+	}()
+
+	// Force bracketed paste so multiline nudges arrive as one paste operation
+	// instead of being interpreted as individual keypresses by provider TUIs.
+	if _, err := t.run("paste-buffer", "-p", "-d", "-b", bufferName, "-t", target); err != nil {
+		return fmt.Errorf("pasting tmux buffer: %w", err)
+	}
+	loaded = false
+	return nil
+}
+
 // sendKeysLiteralWithRetry sends literal text to a tmux target, retrying on
 // transient errors (e.g., "not in a mode" during agent TUI startup).
 // This is the core retry loop used by both NudgeSession and NudgePane.
@@ -1332,7 +1486,7 @@ func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Durati
 	var lastErr error
 
 	for time.Now().Before(deadline) {
-		_, err := t.run("send-keys", "-t", target, "-l", text)
+		err := t.sendLiteralText(target, text)
 		if err == nil {
 			return nil
 		}
@@ -1393,13 +1547,14 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		return err
 	}
 
-	// 2. Wait 500ms for paste to complete (tested, required)
-	time.Sleep(500 * time.Millisecond)
+	// 2. Wait for paste to complete (tested, required). Kimi's TUI can take
+	// longer to accept large pasted prompts in detached panes.
+	time.Sleep(t.nudgeSubmitDebounce(target))
 
 	// 3. Send Escape only for TUIs where it's an insert-mode escape, not a
-	// semantic input key. Claude, Codex, and Gemini all treat Escape as a
-	// semantic control key in some busy states, so default submit must not
-	// synthesize it for them.
+	// semantic input key. Claude, Codex, Gemini, and OpenCode all treat
+	// Escape as a semantic control key in some busy states, so default submit
+	// must not synthesize it for them.
 	if t.shouldSendEscapeBeforeEnter(target) {
 		// See: https://github.com/anthropics/gastown/issues/307
 		_, _ = t.run("send-keys", "-t", target, "Escape")
@@ -1476,14 +1631,8 @@ func (t *Tmux) NudgePane(pane, message string) error {
 
 func (t *Tmux) shouldSendEscapeBeforeEnter(target string) bool {
 	provider, err := t.GetEnvironment(target, "GC_PROVIDER")
-	if err == nil {
-		switch strings.TrimSpace(provider) {
-		case "claude", "codex", "gemini":
-			return false
-		default:
-			// Unrecognized provider (custom alias) — fall through to
-			// process-tree detection instead of assuming escape is needed.
-		}
+	if err == nil && providerEnvSkipsEscape(provider) {
+		return false
 	}
 	if t.targetLooksLikeNoEscapeProvider(target) {
 		return false
@@ -1491,9 +1640,26 @@ func (t *Tmux) shouldSendEscapeBeforeEnter(target string) bool {
 	return true
 }
 
+func providerEnvSkipsEscape(provider string) bool {
+	family := sessionlog.ProviderFamily(provider)
+	for _, noEscape := range providersSkippingEscapeBeforeEnter {
+		if family == noEscape {
+			return true
+		}
+	}
+	return false
+}
+
 func (t *Tmux) targetLooksLikeNoEscapeProvider(target string) bool {
-	noEscapeProviders := []string{"claude", "codex", "gemini"}
-	return t.targetLooksLikeAnyProvider(target, noEscapeProviders...)
+	return t.targetLooksLikeAnyProvider(target, providersSkippingEscapeBeforeEnter...)
+}
+
+func (t *Tmux) nudgeSubmitDebounce(target string) time.Duration {
+	provider := t.providerEnv(target)
+	if provider == "kimi" || (provider == "" && t.targetLooksLikeProvider(target, "kimi")) {
+		return 1500 * time.Millisecond
+	}
+	return 500 * time.Millisecond
 }
 
 func (t *Tmux) targetLooksLikeProvider(target, provider string) bool {
@@ -1690,6 +1856,28 @@ func (t *Tmux) IsPaneDead(target string) (bool, error) {
 	}
 }
 
+func (t *Tmux) sessionPanesDead(session string) (bool, error) {
+	out, err := t.run("list-panes", "-s", "-t", "="+session, "-F", "#{pane_dead}")
+	if err != nil {
+		return false, err
+	}
+	values := strings.Fields(out)
+	if len(values) == 0 {
+		return false, fmt.Errorf("empty pane_dead list for session %s", session)
+	}
+	for _, value := range values {
+		switch value {
+		case "0":
+			return false, nil
+		case "1":
+			continue
+		default:
+			return false, fmt.Errorf("unexpected pane_dead value %q for session %s", value, session)
+		}
+	}
+	return true, nil
+}
+
 // IsSessionRunning reports whether the tmux session exists and its primary pane
 // still has a live process. Dead panes kept by remain-on-exit are treated as
 // not running.
@@ -1825,12 +2013,9 @@ func (t *Tmux) CheckSessionHealth(session string, maxInactivity time.Duration) Z
 // Uses ps to get the actual command name from the process's executable path.
 // This handles cases where argv[0] is modified (e.g., Claude showing version "2.1.30").
 func processMatchesNames(pid string, names []string) bool {
-	if len(names) == 0 {
+	nameSet := processNameSet(names)
+	if len(nameSet) == 0 {
 		return false
-	}
-	nameSet := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		nameSet[name] = struct{}{}
 	}
 
 	// Use ps to get the command name (COMM column gives the executable name)
@@ -1839,12 +2024,7 @@ func processMatchesNames(pid string, names []string) bool {
 	if err != nil {
 		return false
 	}
-	// Get just the base name (in case it's a full path like /Users/.../claude)
 	commPath := strings.TrimSpace(string(out))
-	comm := filepath.Base(commPath)
-	if _, ok := nameSet[comm]; ok {
-		return true
-	}
 
 	// Fall back to argv[0] from the full command line. This catches wrapper
 	// scripts launched as "/path/to/codex" where COMM may report "bash" or
@@ -1854,57 +2034,14 @@ func processMatchesNames(pid string, names []string) bool {
 	if err != nil {
 		return false
 	}
-	args := strings.Fields(strings.TrimSpace(string(out)))
-	if len(args) == 0 {
-		return false
-	}
-	argv0 := filepath.Base(args[0])
-	if _, ok := nameSet[argv0]; ok {
-		return true
-	}
-
-	// Wrapper runtimes often execute providers through interpreters such as bun,
-	// node, or npx, leaving the actual provider name only in the first positional
-	// argument. Only check the first non-flag argument after a known interpreter
-	// to avoid false positives (e.g., "vim claude.txt" or "tail -f gemini.log").
-	knownInterpreters := map[string]struct{}{
-		"node": {}, "bun": {}, "npx": {}, "deno": {},
-	}
-	// Runner subcommands (e.g., "bun run gemini") that should be skipped
-	// when scanning for the provider name in positional args.
-	runnerSubcommands := map[string]struct{}{
-		"run": {}, "exec": {}, "x": {},
-	}
-	if _, isInterpreter := knownInterpreters[argv0]; isInterpreter {
-		for _, token := range args[1:] {
-			token = strings.TrimSpace(token)
-			if token == "" || strings.HasPrefix(token, "-") {
-				continue
-			}
-			// Skip known runner subcommands like "run" in "bun run gemini".
-			if _, isRunner := runnerSubcommands[token]; isRunner {
-				continue
-			}
-			base := filepath.Base(token)
-			if _, ok := nameSet[base]; ok {
-				return true
-			}
-			baseNoExt := strings.TrimSuffix(base, filepath.Ext(base))
-			if _, ok := nameSet[baseNoExt]; ok {
-				return true
-			}
-			break // only check the first positional argument
-		}
-	}
-	return false
+	return processMatchesNameSet(commPath, string(out), nameSet)
 }
 
 // hasDescendantWithNames checks if a process has any descendant (child, grandchild, etc.)
 // matching any of the given names. Recursively traverses the process tree up to maxDepth.
 // Used when the pane command is a shell (bash, zsh) that launched an agent.
 func hasDescendantWithNames(pid string, names []string, depth int) bool {
-	const maxDepth = 10 // Prevent infinite loops in case of circular references
-	if len(names) == 0 || depth > maxDepth {
+	if len(names) == 0 || depth > maxProcessDescendantDepth {
 		return false
 	}
 	// Use pgrep to find child processes.

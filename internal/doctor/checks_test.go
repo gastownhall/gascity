@@ -44,6 +44,32 @@ func setupCity(t *testing.T, tomlContent string) string {
 	return dir
 }
 
+// clearInheritedBeadsEnv scrubs GC_BEADS_SCOPE_ROOT (and related beads/dolt
+// env) before a test sets an explicit GC_BEADS override. The doctor provider
+// resolution honors an explicit GC_BEADS only when GC_BEADS_SCOPE_ROOT is
+// unset or points back to cityPath; an inherited GC_BEADS_SCOPE_ROOT from a
+// gc agent's outer city disqualifies the override and the provider falls back
+// to the test's city.toml peek, defeating the assertion.
+func clearInheritedBeadsEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"GC_BEADS",
+		"GC_BEADS_SCOPE_ROOT",
+		"GC_BIN",
+		"GC_DOLT",
+		"GC_DOLT_HOST",
+		"GC_DOLT_PORT",
+		"GC_DOLT_USER",
+		"GC_DOLT_PASSWORD",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_USER",
+		"BEADS_DOLT_PASSWORD",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
 // --- CityStructureCheck ---
 
 func TestCityStructureCheck_OK(t *testing.T) {
@@ -374,6 +400,136 @@ func TestConfigRefsCheck_AbsolutePaths(t *testing.T) {
 			}
 			if len(r.Details) != tc.wantIssues {
 				t.Errorf("got %d issues, want %d: %v", len(r.Details), tc.wantIssues, r.Details)
+			}
+		})
+	}
+}
+
+// City-root-relative paths (produced by adjustFragmentPath during
+// composition) resolve correctly against cityPath.
+func TestConfigRefsCheck_CityRootRelativePaths(t *testing.T) {
+	cityDir := t.TempDir()
+
+	// Create files at city-root-relative locations (as produced by pack composition).
+	promptDir := filepath.Join(cityDir, "packs", "mypack", "agents", "worker")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "prompt.template.md"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	overlayDir := filepath.Join(cityDir, "packs", "mypack", "overlays", "custom")
+	if err := os.MkdirAll(overlayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:           "worker",
+			PromptTemplate: "packs/mypack/agents/worker/prompt.template.md",
+			OverlayDir:     "packs/mypack/overlays/custom",
+		}},
+	}
+	c := NewConfigRefsCheck(cfg, cityDir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; msg = %s; details = %v", r.Status, r.Message, r.Details)
+	}
+}
+
+// session_setup_script is left as-authored (pack-relative) during
+// composition — resolving it against cityPath produces a false positive
+// when the script lives in the pack directory, not the city root.
+func TestConfigRefsCheck_SessionSetupScriptSourceDir(t *testing.T) {
+	cityDir := t.TempDir()
+	packDir := t.TempDir()
+
+	// Create a setup script inside the pack directory.
+	scriptPath := filepath.Join(packDir, "scripts", "setup.sh")
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name: "worker",
+			// As-authored: pack-relative, not city-root-relative.
+			SessionSetupScript: "scripts/setup.sh",
+			SourceDir:          packDir,
+		}},
+	}
+	c := NewConfigRefsCheck(cfg, cityDir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; msg = %s; details = %v", r.Status, r.Message, r.Details)
+	}
+}
+
+func TestConfigRefsCheck_SessionSetupScriptDoubleSlashUsesCityRoot(t *testing.T) {
+	cityDir := t.TempDir()
+	sourceDir := filepath.Join(cityDir, "packs", "feature")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(cityDir, "scripts", "setup.sh")
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:               "worker",
+			SessionSetupScript: "//scripts/setup.sh",
+			SourceDir:          sourceDir,
+		}},
+	}
+	c := NewConfigRefsCheck(cfg, cityDir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; msg = %s; details = %v", r.Status, r.Message, r.Details)
+	}
+}
+
+func TestConfigRefsCheck_SessionSetupScriptLegacyCityRelativeWithSourceDir(t *testing.T) {
+	cityDir := t.TempDir()
+	sourceDir := filepath.Join(cityDir, "packs", "feature")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		script string
+	}{
+		{name: "same pack", script: "packs/feature/scripts/setup.sh"},
+		{name: "shared pack", script: "packs/shared/scripts/setup.sh"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scriptPath := filepath.Join(cityDir, filepath.FromSlash(tc.script))
+			if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(scriptPath, []byte("#!/bin/sh"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg := &config.City{
+				Agents: []config.Agent{{
+					Name:               "worker",
+					SessionSetupScript: tc.script,
+					SourceDir:          sourceDir,
+				}},
+			}
+			c := NewConfigRefsCheck(cfg, cityDir)
+			r := c.Run(&CheckContext{})
+			if r.Status != StatusOK {
+				t.Errorf("status = %d, want OK; msg = %s; details = %v", r.Status, r.Message, r.Details)
 			}
 		})
 	}
@@ -1007,6 +1163,7 @@ func TestBDSplitStoreCheck_InvalidExternalCityConfigUsesNeutralGuidance(t *testi
 }
 
 func TestBDSplitStoreCheck_FileProviderUsesNeutralRecoveryGuidance(t *testing.T) {
+	clearInheritedBeadsEnv(t)
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 	fs := fsys.OSFS{}
@@ -1757,6 +1914,7 @@ provider = "exec:/tmp/gc-beads-bd"
 }
 
 func TestBeadsStoreCheck_GCBeadsExecOverrideExternalCityUnavailableFailsBeforePing(t *testing.T) {
+	clearInheritedBeadsEnv(t)
 	dir := setupCity(t, `[workspace]
 name = "test"
 [beads]
@@ -1795,6 +1953,7 @@ provider = "file"
 }
 
 func TestBeadsStoreCheck_GCBeadsFileOverrideSkipsBdPreflight(t *testing.T) {
+	clearInheritedBeadsEnv(t)
 	dir := setupCity(t, `[workspace]
 name = "test"
 `)
@@ -2266,6 +2425,57 @@ func setupManagedDoltCity(t *testing.T) string {
 	return dir
 }
 
+func startDoctorTCPListenerProcess(t *testing.T, dataDir string) (*exec.Cmd, int) {
+	t.Helper()
+	readyPath := filepath.Join(t.TempDir(), "ready")
+	proc := exec.Command("python3", "-c", `
+import socket
+import sys
+import time
+data_dir = sys.argv[1]
+ready_path = sys.argv[2]
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("127.0.0.1", 0))
+sock.listen(5)
+with open(ready_path, "w") as f:
+    f.write(str(sock.getsockname()[1]) + "\n")
+while True:
+    time.sleep(1)
+`, dataDir, readyPath)
+	if err := proc.Start(); err != nil {
+		t.Fatalf("start doctor TCP listener: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = proc.Process.Kill()
+		_ = proc.Wait()
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		data, err := os.ReadFile(readyPath)
+		if err == nil {
+			trimmed := strings.TrimSpace(string(data))
+			if trimmed == "" {
+				time.Sleep(25 * time.Millisecond)
+				continue
+			}
+			port, parseErr := strconv.Atoi(trimmed)
+			if parseErr != nil {
+				t.Fatalf("parse listener port %q: %v", trimmed, parseErr)
+			}
+			conn, dialErr := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
+			if dialErr == nil {
+				_ = conn.Close()
+				return proc, port
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("doctor TCP listener for %s did not become ready", dataDir)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 func setupFreshManagedDoltCity(t *testing.T) string {
 	t.Helper()
 	t.Setenv("GC_DOLT_DATA_DIR", "")
@@ -2717,14 +2927,9 @@ func TestDoltNomsSizeCheck_UsesPublishedRuntimeDataDir(t *testing.T) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	port := ln.Addr().(*net.TCPAddr).Port
+	proc, port := startDoctorTCPListenerProcess(t, dataDir)
 	statePath := filepath.Join(dir, ".gc", "runtime", "packs", "dolt", "dolt-state.json")
-	state := fmt.Sprintf(`{"running":true,"pid":%d,"port":%d,"data_dir":%q}`, os.Getpid(), port, dataDir)
+	state := fmt.Sprintf(`{"running":true,"pid":%d,"port":%d,"data_dir":%q}`, proc.Process.Pid, port, dataDir)
 	if err := os.WriteFile(statePath, []byte(state), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -2903,9 +3108,17 @@ func writeDoctorManagedDoltConfig(t *testing.T, cityPath string, overrides map[s
 		"data_dir": filepath.Join(cityPath, ".beads", "dolt"),
 		"behavior": map[string]any{
 			"auto_gc_behavior": map[string]any{
-				"enable":        true,
-				"archive_level": 1,
+				"enable":        false,
+				"archive_level": 0,
 			},
+		},
+		"system_variables": map[string]any{
+			"dolt_auto_gc_enabled":   "OFF",
+			"dolt_stats_enabled":     "OFF",
+			"dolt_stats_gc_enabled":  "OFF",
+			"dolt_stats_memory_only": "ON",
+			"dolt_stats_paused":      "ON",
+			"wait_timeout":           "30",
 		},
 	}
 	for k, v := range overrides {
@@ -3029,6 +3242,44 @@ func TestDoltConfigCheck_OK(t *testing.T) {
 	}
 }
 
+func TestDoltConfigCheck_AcceptsConfiguredWaitTimeout(t *testing.T) {
+	t.Setenv("GC_DOLT_WAIT_TIMEOUT", "60")
+	dir := setupManagedDoltCity(t)
+	writeDoctorManagedDoltConfig(t, dir, map[string]any{
+		"system_variables.wait_timeout": "60",
+	})
+	c := NewDoltConfigCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK for configured wait_timeout; msg = %s", r.Status, r.Message)
+	}
+}
+
+func TestDoltConfigCheck_AcceptsDisabledWaitTimeout(t *testing.T) {
+	t.Setenv("GC_DOLT_WAIT_TIMEOUT", "-1")
+	dir := setupManagedDoltCity(t)
+	writeDoctorManagedDoltConfig(t, dir, map[string]any{
+		"system_variables.wait_timeout": "__missing__",
+	})
+	c := NewDoltConfigCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK for disabled wait_timeout; msg = %s", r.Status, r.Message)
+	}
+}
+
+func TestDoltConfigCheck_AcceptsLegacyArchiveLevelOne(t *testing.T) {
+	dir := setupManagedDoltCity(t)
+	writeDoctorManagedDoltConfig(t, dir, map[string]any{
+		"behavior.auto_gc_behavior.archive_level": 1,
+	})
+	c := NewDoltConfigCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK for one-release archive_level=1 compatibility; msg = %s", r.Status, r.Message)
+	}
+}
+
 func TestDoltConfigCheck_UsesTrustedCityRuntimeDir(t *testing.T) {
 	dir := setupManagedDoltCity(t)
 	customRuntimeDir := filepath.Join(t.TempDir(), "runtime-root")
@@ -3136,10 +3387,10 @@ func TestDoltConfigCheck_WrongDataDir(t *testing.T) {
 	}
 }
 
-func TestDoltConfigCheck_AutoGCDisabled(t *testing.T) {
+func TestDoltConfigCheck_AutoGCEnabled(t *testing.T) {
 	dir := setupManagedDoltCity(t)
 	writeDoctorManagedDoltConfig(t, dir, map[string]any{
-		"behavior.auto_gc_behavior.enable": false,
+		"behavior.auto_gc_behavior.enable": true,
 	})
 	c := NewDoltConfigCheck(dir, false)
 	r := c.Run(&CheckContext{})
@@ -3148,6 +3399,21 @@ func TestDoltConfigCheck_AutoGCDisabled(t *testing.T) {
 	}
 	if !strings.Contains(r.Message, "auto_gc_behavior.enable") {
 		t.Errorf("message = %q, want auto_gc_behavior.enable mention", r.Message)
+	}
+}
+
+func TestDoltConfigCheck_StatsEnabled(t *testing.T) {
+	dir := setupManagedDoltCity(t)
+	writeDoctorManagedDoltConfig(t, dir, map[string]any{
+		"system_variables.dolt_stats_enabled": "ON",
+	})
+	c := NewDoltConfigCheck(dir, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "dolt_stats_enabled") {
+		t.Errorf("message = %q, want dolt_stats_enabled mention", r.Message)
 	}
 }
 
@@ -3247,22 +3513,25 @@ func TestManagedDoltChecksSkipInvalidCityConfig(t *testing.T) {
 
 func TestParseDoltVersion(t *testing.T) {
 	cases := []struct {
-		name    string
-		in      string
-		wantMaj int
-		wantMin int
-		wantPat int
-		wantErr bool
+		name       string
+		in         string
+		wantMaj    int
+		wantMin    int
+		wantPat    int
+		wantPreRel bool
+		wantErr    bool
 	}{
-		{"plain", "dolt version 1.75.2", 1, 75, 2, false},
-		{"with_warning", "dolt version 1.75.2\nWarning: some deprecation", 1, 75, 2, false},
-		{"no_prefix", "1.50.0", 1, 50, 0, false},
-		{"with_v_prefix", "v1.50.0", 1, 50, 0, false},
-		{"prerelease", "dolt version 1.76.0-rc1", 1, 76, 0, false},
-		{"build_suffix", "dolt version 1.76.0+build.5", 1, 76, 0, false},
-		{"empty", "", 0, 0, 0, true},
-		{"garbage", "hello world", 0, 0, 0, true},
-		{"too_few_parts", "dolt version 1.50", 0, 0, 0, true},
+		{"plain", "dolt version 1.75.2", 1, 75, 2, false, false},
+		{"with_warning", "dolt version 1.75.2\nWarning: some deprecation", 1, 75, 2, false, false},
+		{"no_prefix", "1.50.0", 1, 50, 0, false, false},
+		{"with_v_prefix", "v1.50.0", 1, 50, 0, false, false},
+		{"prerelease", "dolt version 1.76.0-rc1", 1, 76, 0, true, false},
+		{"dev_prerelease", "dolt version 1.86.2-dev.0", 1, 86, 2, true, false},
+		{"build_suffix", "dolt version 1.76.0+build.5", 1, 76, 0, false, false},
+		{"hyphenated_build_suffix", "dolt version 1.76.0+build-5", 1, 76, 0, false, false},
+		{"empty", "", 0, 0, 0, false, true},
+		{"garbage", "hello world", 0, 0, 0, false, true},
+		{"too_few_parts", "dolt version 1.50", 0, 0, 0, false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3279,6 +3548,9 @@ func TestParseDoltVersion(t *testing.T) {
 			if got.Major != tc.wantMaj || got.Minor != tc.wantMin || got.Patch != tc.wantPat {
 				t.Errorf("parseDoltVersion(%q) = %d.%d.%d, want %d.%d.%d",
 					tc.in, got.Major, got.Minor, got.Patch, tc.wantMaj, tc.wantMin, tc.wantPat)
+			}
+			if got.PreRelease != tc.wantPreRel {
+				t.Errorf("parseDoltVersion(%q).PreRelease = %v, want %v", tc.in, got.PreRelease, tc.wantPreRel)
 			}
 		})
 	}
@@ -3318,12 +3590,12 @@ func TestDoltVersionCheck_OK(t *testing.T) {
 
 func TestDoltVersionCheck_OK_AtMinimum(t *testing.T) {
 	c := NewDoltVersionCheck()
-	c.versionOutput = func() (string, error) { return "dolt version 1.86.1\n", nil }
+	c.versionOutput = func() (string, error) { return "dolt version 1.86.2\n", nil }
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
 	}
-	if !strings.Contains(r.Message, "1.86.1") {
+	if !strings.Contains(r.Message, "1.86.2") {
 		t.Errorf("message = %q, want version in message", r.Message)
 	}
 }
@@ -3342,7 +3614,42 @@ func TestDoltVersionCheck_Error_BelowManagedConfigFloor(t *testing.T) {
 
 func TestDoltVersionCheck_Error_BelowMinimum(t *testing.T) {
 	c := NewDoltVersionCheck()
-	c.versionOutput = func() (string, error) { return "dolt version 1.86.0\n", nil }
+	c.versionOutput = func() (string, error) { return "dolt version 1.86.1\n", nil }
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "below minimum") {
+		t.Errorf("message = %q, want below-minimum text", r.Message)
+	}
+}
+
+func TestDoltVersionCheck_Error_PreReleaseAtFloor(t *testing.T) {
+	cases := []string{
+		"dolt version 1.86.2-rc1\n",
+		"dolt version 1.86.2-rc1+build.5\n",
+		"dolt version 1.86.2-dev.0\n",
+		"dolt version 1.99.0-rc1\n",
+		"dolt version 2.0.0-rc1\n",
+	}
+	for _, version := range cases {
+		t.Run(strings.TrimSpace(version), func(t *testing.T) {
+			c := NewDoltVersionCheck()
+			c.versionOutput = func() (string, error) { return version, nil }
+			r := c.Run(&CheckContext{})
+			if r.Status != StatusError {
+				t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+			}
+			if !strings.Contains(r.Message, "pre-release") || !strings.Contains(r.Message, "1.86.2") {
+				t.Errorf("message = %q, want pre-release and minimum version text", r.Message)
+			}
+		})
+	}
+}
+
+func TestDoltVersionCheck_Error_LeadingWhitespaceBelowMinimum(t *testing.T) {
+	c := NewDoltVersionCheck()
+	c.versionOutput = func() (string, error) { return "  dolt version 1.85.9\n", nil }
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusError {
 		t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)

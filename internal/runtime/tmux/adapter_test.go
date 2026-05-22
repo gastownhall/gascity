@@ -159,6 +159,42 @@ func TestProvider_RecyclesDeadPaneWithoutProcessNames(t *testing.T) {
 	}
 }
 
+func TestProviderObserveLivenessKeepsZombieShellVisible(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = testSocketName
+	p := NewProviderWithConfig(cfg)
+	name := "gc-test-zombie-shell-liveness"
+	_ = p.Stop(name)
+	defer func() { _ = p.Stop(name) }()
+
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command:      "sh -c 'sleep 2; exec sh -i'",
+		WorkDir:      t.TempDir(),
+		ProcessNames: []string{"sleep"},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		obs := runtime.ObserveLiveness(p, name, nil)
+		if obs.Running && !obs.Alive {
+			if !p.IsRunning(name) {
+				t.Fatalf("IsRunning = false, want true while zombie shell pane is still present")
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	obs := runtime.ObserveLiveness(p, name, nil)
+	t.Fatalf("ObserveLiveness() = %#v, want running zombie shell with dead process", obs)
+}
+
 func TestProvider_StartCanceledCleansUpSession(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")

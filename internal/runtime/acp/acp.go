@@ -150,7 +150,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		p.mu.Unlock()
 	}
 
-	if err := runtime.StageWorkDir(cfg.WorkDir, cfg.OverlayDir, cfg.CopyFiles); err != nil {
+	if err := runtime.StageSessionWorkDir(cfg); err != nil {
 		clearSentinel()
 		return fmt.Errorf("staging workdir for %q: %w", name, err)
 	}
@@ -454,14 +454,15 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 }
 
 // Nudge sends a session/prompt to the named session. Waits for the agent to
-// become idle before sending. Returns nil if the session doesn't exist or
-// the agent process exits during the send (best-effort).
+// become idle before sending. Returns ErrSessionNotFound when this provider
+// instance does not own the in-memory ACP connection. Returns nil if the
+// agent process exits during the send (best-effort).
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	p.mu.Lock()
 	sc, ok := p.conns[name]
 	p.mu.Unlock()
 	if !ok {
-		return nil
+		return fmt.Errorf("%w: ACP provider does not own session %q", runtime.ErrSessionNotFound, name)
 	}
 	if !sc.alive() {
 		return nil

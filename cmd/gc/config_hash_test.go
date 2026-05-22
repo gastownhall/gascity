@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestConfigHash_Canonical(t *testing.T) {
@@ -64,6 +65,12 @@ func TestConfigHash_Behavioral(t *testing.T) {
 	if h := canonicalConfigHash(envChanged, nil); h == baseHash {
 		t.Error("env change should produce different hash")
 	}
+
+	lifecycleChanged := base
+	lifecycleChanged.Hints.Lifecycle = runtime.LifecycleOneShot
+	if h := canonicalConfigHash(lifecycleChanged, nil); h == baseHash {
+		t.Error("lifecycle change should produce different hash")
+	}
 }
 
 func TestConfigHash_IgnoresNudge(t *testing.T) {
@@ -80,6 +87,27 @@ func TestConfigHash_IgnoresNudge(t *testing.T) {
 	changed.Hints.Nudge = "second work item"
 	if h := canonicalConfigHash(changed, nil); h != baseHash {
 		t.Errorf("nudge change produced different hash: %q vs %q", h, baseHash)
+	}
+}
+
+func TestConfigHash_IncludesOverlayProviderIdentity(t *testing.T) {
+	claudeFallback := TemplateParams{
+		Command: "agent",
+		Prompt:  "prompt",
+		Hints: agent.StartupHints{
+			ProviderName: "claude",
+		},
+	}
+	kiroOverlay := claudeFallback
+	kiroOverlay.Hints.ProviderOverlayName = "kiro"
+	if canonicalConfigHash(claudeFallback, nil) == canonicalConfigHash(kiroOverlay, nil) {
+		t.Fatal("ProviderOverlayName should affect canonical config hash")
+	}
+
+	withHook := kiroOverlay
+	withHook.Hints.InstallAgentHooks = []string{"gemini"}
+	if canonicalConfigHash(kiroOverlay, nil) == canonicalConfigHash(withHook, nil) {
+		t.Fatal("InstallAgentHooks should affect canonical config hash")
 	}
 }
 

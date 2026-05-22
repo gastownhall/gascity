@@ -3,12 +3,17 @@
 package beads
 
 import (
+	"context"
 	"errors"
 	"time"
 )
 
 // ErrNotFound is returned when a bead ID does not exist in the store.
 var ErrNotFound = errors.New("bead not found")
+
+// ErrParentProjectionSuperseded reports that a parent update was overtaken by a
+// concurrent reparent before the caller's projection wait could converge.
+var ErrParentProjectionSuperseded = errors.New("parent projection superseded by concurrent update")
 
 // Bead is a single unit of work in Gas City. Everything is a bead: tasks,
 // mail, molecules, convoys.
@@ -28,6 +33,11 @@ type Bead struct {
 	Labels       []string          `json:"labels,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	Dependencies []Dep             `json:"dependencies,omitempty"`
+	// Ephemeral routes the bead to the wisps tier on Create. Wisps live in
+	// a separate Dolt table, are not git-synced, and are eligible for TTL
+	// garbage collection. Reads must opt in via ListQuery.TierMode (or the
+	// WithEphemeral/WithBothTiers QueryOpts on the legacy label helpers).
+	Ephemeral bool `json:"ephemeral,omitempty"`
 }
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.
@@ -42,6 +52,22 @@ type UpdateOpts struct {
 	Labels       []string // append these labels (nil = no change)
 	RemoveLabels []string // remove these labels (nil = no change)
 	Metadata     map[string]string
+}
+
+// Tx is the write surface available inside a Store.Tx callback.
+// Keep this interface limited to methods needed by current transactional
+// write pairs; do not add Store methods speculatively.
+type Tx interface {
+	Update(id string, opts UpdateOpts) error
+	SetMetadataBatch(id string, kvs map[string]string) error
+	Close(id string) error
+}
+
+func runSequentialTx(tx Tx, fn func(Tx) error) error {
+	if fn == nil {
+		return errors.New("beads tx: nil callback")
+	}
+	return fn(tx)
 }
 
 func cloneIntPtr(v *int) *int {
@@ -85,6 +111,7 @@ var readyExcludeTypes = map[string]bool{
 	"merge-request": true, // processed by automation
 	"gate":          true, // async wait conditions
 	"molecule":      true, // workflow containers
+	"step":          true, // non-root formula steps; parent molecule is the actionable unit (#1039)
 	"message":       true, // mail/communication items
 	"session":       true, // runtime/session continuity beads, never actionable work
 	"agent":         true, // identity/state tracking beads
@@ -114,6 +141,13 @@ const (
 	// IncludeClosed extends the query to include closed beads.
 	// Without this, cached queries only return non-closed beads.
 	IncludeClosed QueryOpt = iota + 1
+	// WithEphemeral routes the legacy label helpers (ListByLabel,
+	// ListByMetadata) at the wisps tier instead of the default issues tier.
+	WithEphemeral
+	// WithBothTiers unions the issues and wisps tiers in a single query.
+	// Mutually exclusive with WithEphemeral; if both are passed,
+	// WithBothTiers wins.
+	WithBothTiers
 )
 
 // HasOpt returns true if opts contains the given option.
@@ -148,6 +182,10 @@ type Store interface {
 	// does not exist. Closing an already-closed bead is a no-op.
 	Close(id string) error
 
+	// Reopen sets a closed bead's status back to "open". Returns ErrNotFound
+	// if the ID does not exist.
+	Reopen(id string) error
+
 	// CloseAll closes multiple beads in a single batch operation and sets
 	// the given metadata on each. Already-closed beads are skipped.
 	// Returns the number of beads actually closed.
@@ -167,8 +205,8 @@ type Store interface {
 	// Ready returns open, unblocked beads representing actionable work.
 	// Infrastructure types (molecule, message, gate, etc.) are excluded
 	// to match the bd CLI's GetReadyWork semantics. Same ordering note
-	// as List.
-	Ready() ([]Bead, error)
+	// as List. Pass ReadyQuery to constrain the ready lookup.
+	Ready(query ...ReadyQuery) ([]Bead, error)
 
 	// Legacy helper; prefer List with ListQuery in new code.
 	// Children returns all beads whose ParentID matches the given ID,
@@ -205,6 +243,13 @@ type Store interface {
 	// Returns ErrNotFound if the bead does not exist.
 	SetMetadataBatch(id string, kvs map[string]string) error
 
+	// Tx executes fn inside a single logical transaction identified by
+	// commitMsg. Implementations without native transaction support may execute
+	// writes sequentially or stage them until fn returns; outside observers
+	// should not depend on seeing partial writes before Tx returns. fn must not
+	// retain the Tx after it returns.
+	Tx(commitMsg string, fn func(tx Tx) error) error
+
 	// Delete permanently removes a bead from the store. The bead should be
 	// closed first. Returns ErrNotFound if the bead does not exist.
 	Delete(id string) error
@@ -225,4 +270,15 @@ type Store interface {
 	// query: "down" returns what this bead depends on (default),
 	// "up" returns what depends on this bead.
 	DepList(id, direction string) ([]Dep, error)
+}
+
+// ParentProjectionWaiter is an optional capability for stores whose
+// parent-child listing path may lag a successful parent update. Callers that
+// need strict read-after-write semantics for parent projections can type-assert
+// this interface after a successful Update.
+type ParentProjectionWaiter interface {
+	// WaitForParentProjection blocks until the store's parent-child listing
+	// view reflects a reparent from oldParentID to newParentID for id, or
+	// returns an error if the projection does not converge.
+	WaitForParentProjection(ctx context.Context, id, oldParentID, newParentID string) error
 }

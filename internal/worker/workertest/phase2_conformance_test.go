@@ -18,6 +18,8 @@ func TestPhase2Catalog(t *testing.T) {
 		RequirementInputInitialMessageFirstStart,
 		RequirementInputInitialMessageResume,
 		RequirementInputOverrideDefaults,
+		RequirementInputInProgressResumeRestart,
+		RequirementInputPreClaimResumeRestart,
 		RequirementTranscriptDiagnostics,
 		RequirementInteractionSignal,
 		RequirementInteractionPending,
@@ -74,6 +76,27 @@ func TestPhase2HistoryDiagnostics(t *testing.T) {
 			})
 			reporter.Require(t, historyDiagnosticsResult(profile.ID, path, history, err))
 		})
+	}
+}
+
+func TestPiMalformedTranscriptFixtureReportsMalformedTail(t *testing.T) {
+	profile := Profile{ID: ProfilePiTmuxCLI, Provider: "pi/tmux-cli"}
+	path := writeMalformedHistoryTranscript(t, profile)
+	history, err := worker.SessionLogAdapter{}.LoadHistory(worker.LoadRequest{
+		Provider:       profile.Provider,
+		TranscriptPath: path,
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory: %v", err)
+	}
+	if history == nil {
+		t.Fatal("LoadHistory returned nil history")
+	}
+	if !historyHasDiagnosticCode(history, "malformed_tail") {
+		t.Fatalf("diagnostics = %#v, want malformed_tail", history.Diagnostics)
+	}
+	if !history.TailState.Degraded {
+		t.Fatalf("TailState.Degraded = false, diagnostics = %#v", history.Diagnostics)
 	}
 }
 

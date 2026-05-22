@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func TestBuildPrimeContextFallsBackToConfiguredRigRoot(t *testing.T) {
@@ -65,6 +67,43 @@ func TestBuildPrimeContextLogsTemplateExpansionWarning(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "echo {{.Rig") {
 		t.Fatalf("stderr should redact raw template, got %q", stderr.String())
+	}
+}
+
+func TestBuildPrimeContextRendersBindingQualifiedRoute(t *testing.T) {
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_BRANCH", "")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("GC_ALIAS", "")
+
+	cityPath := t.TempDir()
+	promptDir := filepath.Join(cityPath, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(promptDir): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "polecat.template.md"), []byte("route={{ .RigName }}/{{ .BindingPrefix }}refinery\nbinding={{ .BindingName }}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+
+	ctx := buildPrimeContext(cityPath, "test-city", &config.Agent{
+		Name:        "polecat",
+		Dir:         "demo",
+		BindingName: "gastown",
+	}, []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}, nil)
+
+	if ctx.BindingName != "gastown" {
+		t.Fatalf("BindingName = %q, want gastown", ctx.BindingName)
+	}
+	if ctx.BindingPrefix != "gastown." {
+		t.Fatalf("BindingPrefix = %q, want gastown.", ctx.BindingPrefix)
+	}
+	var stderr bytes.Buffer
+	got := renderPrompt(fsys.OSFS{}, cityPath, "test-city", "prompts/polecat.template.md", ctx, "", &stderr, nil, nil, nil)
+	want := "route=demo/gastown.refinery\nbinding=gastown\n"
+	if got != want {
+		t.Fatalf("rendered prompt = %q, want %q; stderr=%q", got, want, stderr.String())
 	}
 }
 
@@ -223,6 +262,9 @@ max = 5
 }
 
 func TestDoPrimeWithHook_UsesGCTemplateForNamepoolSessionContext(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	promptDir := filepath.Join(cityDir, "prompts")
 	if err := os.MkdirAll(promptDir, 0o755); err != nil {
@@ -268,6 +310,9 @@ prompt_template = "prompts/polecat.template.md"
 }
 
 func TestDoPrimeWithHook_StartupPromptDeliveryEnvControlsPromptSuppression(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	promptDir := filepath.Join(cityDir, "prompts")
 	if err := os.MkdirAll(promptDir, 0o755); err != nil {
@@ -344,7 +389,7 @@ prompt_template = "prompts/worker.md"
 		{name: "unset source not delivered", wantPromptInHook: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			withPrimeHookStdin(t, nil)
+			withPrimeHookStdin(t)
 			t.Setenv("GC_CITY", cityDir)
 			t.Setenv("GC_AGENT", "worker")
 			t.Setenv("GC_ALIAS", "worker")
@@ -373,6 +418,9 @@ prompt_template = "prompts/worker.md"
 }
 
 func TestDoPrimeWithHook_DeliveredStartupPromptJSONHookFormat(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
 	cityDir := t.TempDir()
 	promptDir := filepath.Join(cityDir, "prompts")
 	if err := os.MkdirAll(promptDir, 0o755); err != nil {
@@ -403,7 +451,7 @@ prompt_template = "prompts/worker.md"
 	t.Setenv("GC_HOOK_SOURCE", "startup")
 	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
 	t.Setenv(startupPromptDeliveredEnv, "1")
-	withPrimeHookStdin(t, nil)
+	withPrimeHookStdin(t)
 
 	var stdout, stderr bytes.Buffer
 	code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookOutputFormatGemini, false)
@@ -428,17 +476,208 @@ prompt_template = "prompts/worker.md"
 	}
 }
 
-func withPrimeHookStdin(t *testing.T, payload map[string]string) {
+func TestDoPrimeWithHookFormat_FormatsDefaultFallback(t *testing.T) {
+	t.Setenv("GC_CITY", filepath.Join(t.TempDir(), "missing-city"))
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookOutputFormatCodex, false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+
+	var payload struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not hook JSON: %v\n%s", err, stdout.String())
+	}
+	if got, want := payload.HookSpecificOutput.HookEventName, "SessionStart"; got != want {
+		t.Fatalf("hookEventName = %q, want %q", got, want)
+	}
+	if !strings.Contains(payload.HookSpecificOutput.AdditionalContext, "# Gas City Agent") {
+		t.Fatalf("additionalContext = %q, want default prime prompt", payload.HookSpecificOutput.AdditionalContext)
+	}
+}
+
+func TestDoPrimeWithHook_DeliveredStartupPromptCodexJSONHookFormat(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedBeadsEnv(t)
+	clearInheritedCityRoutingEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityDir)
+	promptDir := filepath.Join(cityDir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(promptDir): %v", err)
+	}
+	const promptContent = "launch-only startup prompt\n"
+	if err := os.WriteFile(filepath.Join(promptDir, "worker.md"), []byte(promptContent), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.md"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_AGENT", "worker")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_NAME", "gastown--worker")
+	t.Setenv("GC_SESSION_ID", "sess-777")
+	t.Setenv(managedSessionHookEnv, "1")
+	t.Setenv("GC_HOOK_SOURCE", "startup")
+	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+	t.Setenv(startupPromptDeliveredEnv, "1")
+	withPrimeHookStdin(t)
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, "codex", false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+
+	var got struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("hook output is not JSON: %v; stdout=%q", err, stdout.String())
+	}
+	if got.HookSpecificOutput.HookEventName != "SessionStart" {
+		t.Fatalf("hookEventName = %q, want SessionStart", got.HookSpecificOutput.HookEventName)
+	}
+	context := got.HookSpecificOutput.AdditionalContext
+	if strings.Contains(context, promptContent) {
+		t.Fatalf("additionalContext = %q, want no repeated startup prompt", context)
+	}
+	if !strings.Contains(context, "[gastown] worker") {
+		t.Fatalf("additionalContext = %q, want hook beacon", context)
+	}
+}
+
+func TestDoPrimeWithHook_CodexJSONFormatInfersAgentFromWorkDir(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		identity    string
+		agentDir    string
+		agentName   string
+		promptFile  string
+		promptText  string
+		beaconAgent string
+	}{
+		{
+			name:        "city scoped",
+			identity:    "mayor",
+			agentName:   "mayor",
+			promptFile:  "prompts/mayor.md",
+			promptText:  "mayor startup prompt\n",
+			beaconAgent: "mayor",
+		},
+		{
+			name:        "rig scoped",
+			identity:    "hello-world/witness",
+			agentDir:    "hello-world",
+			agentName:   "witness",
+			promptFile:  "prompts/witness.md",
+			promptText:  "witness startup prompt\n",
+			beaconAgent: "hello-world/witness",
+		},
+		{
+			name:        "workflow style",
+			identity:    "gascity/workflows.codex-max",
+			agentDir:    "gascity",
+			agentName:   "workflows.codex-max",
+			promptFile:  "prompts/codex-max.md",
+			promptText:  "codex-max startup prompt\n",
+			beaconAgent: "gascity/workflows.codex-max",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clearGCEnv(t)
+			clearInheritedBeadsEnv(t)
+			clearInheritedCityRoutingEnv(t)
+			disableManagedDoltRecoveryForTest(t)
+			t.Setenv("GC_TEMPLATE", "")
+			t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+			withPrimeHookStdin(t)
+
+			cityDir := t.TempDir()
+			cleanupManagedDoltTestCity(t, cityDir)
+			agentWorkDirParts := append([]string{cityDir, ".gc", "agents"}, strings.Split(tt.identity, "/")...)
+			agentWorkDir := filepath.Join(agentWorkDirParts...)
+			if err := os.MkdirAll(agentWorkDir, 0o755); err != nil {
+				t.Fatalf("MkdirAll(agentWorkDir): %v", err)
+			}
+			promptPath := filepath.Join(cityDir, tt.promptFile)
+			if err := os.MkdirAll(filepath.Dir(promptPath), 0o755); err != nil {
+				t.Fatalf("MkdirAll(prompt dir): %v", err)
+			}
+			if err := os.WriteFile(promptPath, []byte(tt.promptText), 0o644); err != nil {
+				t.Fatalf("WriteFile(prompt): %v", err)
+			}
+			cityTOML := fmt.Sprintf(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = %q
+dir = %q
+prompt_template = %q
+`, tt.agentName, tt.agentDir, tt.promptFile)
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+				t.Fatalf("WriteFile(city.toml): %v", err)
+			}
+			t.Chdir(agentWorkDir)
+
+			var stdout, stderr bytes.Buffer
+			code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookOutputFormatCodex, false)
+			if code != 0 {
+				t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
+			}
+
+			var got struct {
+				HookSpecificOutput struct {
+					HookEventName     string `json:"hookEventName"`
+					AdditionalContext string `json:"additionalContext"`
+				} `json:"hookSpecificOutput"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatalf("hook output is not JSON: %v; stdout=%q", err, stdout.String())
+			}
+			if got.HookSpecificOutput.HookEventName != "SessionStart" {
+				t.Fatalf("hookEventName = %q, want SessionStart", got.HookSpecificOutput.HookEventName)
+			}
+			context := got.HookSpecificOutput.AdditionalContext
+			if !strings.Contains(context, strings.TrimSpace(tt.promptText)) {
+				t.Fatalf("additionalContext = %q, want prompt %q", context, strings.TrimSpace(tt.promptText))
+			}
+			if !strings.Contains(context, "[gastown] "+tt.beaconAgent) {
+				t.Fatalf("additionalContext = %q, want hook beacon for %s", context, tt.beaconAgent)
+			}
+		})
+	}
+}
+
+func withPrimeHookStdin(t *testing.T) {
 	t.Helper()
 
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
-	}
-	if payload != nil {
-		if err := json.NewEncoder(writer).Encode(payload); err != nil {
-			t.Fatal(err)
-		}
 	}
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)

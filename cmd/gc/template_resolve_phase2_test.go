@@ -20,11 +20,14 @@ type phase2ProviderCase struct {
 	family                string
 	wantCommand           string
 	wantCommandPrefix     string
+	wantPromptMode        string
+	wantPromptFlag        string
 	wantSettingsArg       bool
 	wantReadyDelayMs      int
 	wantReadyPromptPrefix string
 	wantProcessNames      []string
 	wantEmitsPermission   bool
+	wantAcceptDialogs     *bool
 	wantModelOverride     string
 	wantModelOverrideArgs []string
 }
@@ -86,6 +89,29 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 			wantModelOverride:     "gemini-2.5-pro",
 			wantModelOverrideArgs: []string{"--model", "gemini-2.5-pro"},
 		},
+		{
+			profileID:             "kimi/tmux-cli",
+			family:                "kimi",
+			wantCommand:           "kimi --yolo --no-thinking",
+			wantPromptMode:        "none",
+			wantReadyDelayMs:      5000,
+			wantReadyPromptPrefix: "",
+			wantProcessNames:      []string{"kimi", "python"},
+			wantAcceptDialogs:     phase2BoolPtr(false),
+			wantModelOverride:     "kimi-k2.6",
+			wantModelOverrideArgs: []string{"--model", "kimi-k2.6"},
+		},
+		{
+			profileID:             "opencode/tmux-cli",
+			family:                "opencode",
+			wantCommand:           "opencode",
+			wantPromptMode:        "flag",
+			wantPromptFlag:        "--prompt",
+			wantReadyDelayMs:      8000,
+			wantProcessNames:      []string{"opencode", "node", "bun"},
+			wantModelOverride:     "opencode/deepseek-v4-flash-free",
+			wantModelOverrideArgs: []string{"--model", "opencode/deepseek-v4-flash-free"},
+		},
 	}
 
 	filter := strings.TrimSpace(os.Getenv("PROFILE"))
@@ -145,6 +171,9 @@ func resolvePhase2Template(t *testing.T, tc phase2ProviderCase) TemplateParams {
 		SessionSetupScript: filepath.Join("scripts", tc.family+".sh"),
 		SessionLive:        []string{"echo live-" + tc.family},
 		Env:                map[string]string{"WORKER_CORE_MARKER": tc.family},
+	}
+	if strings.HasSuffix(string(tc.profileID), "/tmux-cli") {
+		agentCfg.Session = "tmux"
 	}
 
 	tp, err := resolveTemplate(params, agentCfg, agentCfg.QualifiedName(), map[string]string{"phase": "phase2"})

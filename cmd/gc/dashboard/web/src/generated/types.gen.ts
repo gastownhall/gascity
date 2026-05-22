@@ -74,9 +74,12 @@ export type AgentPatch = {
     InjectFragmentsAppend: Array<string> | null;
     InstallAgentHooks: Array<string> | null;
     InstallAgentHooksAppend: Array<string> | null;
+    Lifecycle: string | null;
     MCP: Array<string> | null;
     MCPAppend: Array<string> | null;
     MaxActiveSessions: number | null;
+    MaxSessionAge: string | null;
+    MaxSessionAgeJitter: string | null;
     MinActiveSessions: number | null;
     Name: string;
     Nudge: string | null;
@@ -103,6 +106,7 @@ export type AgentPatch = {
     SleepAfterIdle: string | null;
     StartCommand: string | null;
     Suspended: boolean | null;
+    TmuxAlias: string | null;
     WakeMode: string | null;
     WorkDir: string | null;
 };
@@ -130,6 +134,10 @@ export type AgentPatchSetInputBody = {
      * Override suspended state.
      */
     suspended?: boolean;
+    /**
+     * Override tmux session name template.
+     */
+    tmux_alias?: string;
     /**
      * Override session working directory.
      */
@@ -218,11 +226,38 @@ export type AnnotatedProviderResponse = {
     ready_delay_ms?: number;
 };
 
+export type AsyncAcceptedBody = {
+    /**
+     * City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.
+     */
+    event_cursor: string;
+    /**
+     * Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.
+     */
+    request_id: string;
+    /**
+     * Async request status.
+     */
+    status: string;
+};
+
+export type AsyncAcceptedResponse = {
+    /**
+     * Supervisor event-stream cursor captured before the async request was accepted. Pass this value as after_cursor to /v0/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or every event log is empty.
+     */
+    event_cursor: string;
+    /**
+     * Correlation ID. Watch /v0/events/stream for request.result.city.create, request.result.city.unregister, or request.failed with this request_id.
+     */
+    request_id: string;
+};
+
 export type Bead = {
     assignee?: string;
     created_at: string;
     dependencies?: Array<Dep> | null;
     description?: string;
+    ephemeral?: boolean;
     from?: string;
     id: string;
     issue_type: string;
@@ -366,24 +401,28 @@ export type CityCreateRequest = {
      */
     dir: string;
     /**
-     * Provider name for the city's default session template.
+     * Provider name for the city's default session template. Mutually exclusive with start_command.
      */
-    provider: string;
+    provider?: string;
+    /**
+     * Custom workspace start command for the city's default session template. Mutually exclusive with provider.
+     */
+    start_command?: string;
 };
 
-export type CityCreateResponse = {
+export type CityCreateSucceededPayload = {
     /**
-     * Resolved city name as persisted in city.toml. Use this to filter the event stream for completion.
+     * Resolved city name.
      */
     name: string;
     /**
-     * True when scaffolding + registration succeeded. Does not imply the city is ready yet; watch /v0/events/stream for city.ready.
-     */
-    ok: boolean;
-    /**
-     * Resolved absolute path of the created city directory.
+     * Resolved absolute city directory path.
      */
     path: string;
+    /**
+     * Correlation ID from the 202 response.
+     */
+    request_id: string;
 };
 
 export type CityGetResponse = {
@@ -408,10 +447,8 @@ export type CityInfo = {
 };
 
 export type CityLifecyclePayload = {
-    error?: string;
     name: string;
     path: string;
-    phases_completed?: Array<string> | null;
 };
 
 export type CityPatchInputBody = {
@@ -421,19 +458,19 @@ export type CityPatchInputBody = {
     suspended?: boolean;
 };
 
-export type CityUnregisterResponse = {
+export type CityUnregisterSucceededPayload = {
     /**
-     * Resolved registry name. Filter the event stream by this to observe completion.
+     * City name that was unregistered.
      */
     name: string;
     /**
-     * True when the registry entry was removed and the supervisor was signaled. Does not imply the city's controller has stopped yet; watch /v0/events/stream for city.unregistered.
-     */
-    ok: boolean;
-    /**
-     * Resolved absolute city directory. The directory itself is not modified; unregister only affects the supervisor's registry.
+     * Absolute city directory path.
      */
     path: string;
+    /**
+     * Correlation ID from the 202 response.
+     */
+    request_id: string;
 };
 
 export type ConfigAgentResponse = {
@@ -717,7 +754,60 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityLifecyclePayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
+
+export type EventRotateAnchor = {
+    /**
+     * Anchor event sequence.
+     */
+    seq: number;
+    /**
+     * Anchor event timestamp.
+     */
+    ts: string;
+    /**
+     * Anchor event type.
+     */
+    type: string;
+};
+
+export type EventRotateArchive = {
+    /**
+     * Archive compression status.
+     */
+    compression_status: 'pending' | 'complete';
+    /**
+     * First event sequence included in the archive.
+     */
+    first_seq: number;
+    /**
+     * Last event sequence included in the archive.
+     */
+    last_seq: number;
+    /**
+     * Absolute path to the archive.
+     */
+    path: string;
+};
+
+export type EventRotateResponse = {
+    /**
+     * Anchor event metadata when rotated is true.
+     */
+    anchor_event?: EventRotateAnchor;
+    /**
+     * Archive metadata when rotated is true.
+     */
+    archive?: EventRotateArchive;
+    /**
+     * No-op reason when rotated is false.
+     */
+    reason?: string;
+    /**
+     * Whether an archive was produced.
+     */
+    rotated: boolean;
+};
 
 export type EventStreamEnvelope = {
     actor: string;
@@ -1003,6 +1093,10 @@ export type FormulaListBody = {
      * Whether the list is partial.
      */
     partial: boolean;
+    /**
+     * Total number of formulas in the list.
+     */
+    total: number;
 };
 
 export type FormulaPreviewBody = {
@@ -1432,7 +1526,7 @@ export type ListBodyWireEvent = {
     /**
      * The list of items.
      */
-    items: Array<WireEvent> | null;
+    items: Array<TypedEventStreamEnvelope> | null;
     /**
      * Cursor for the next page of results.
      */
@@ -1787,6 +1881,14 @@ export type PoolOverride = {
     OnDeath: string | null;
 };
 
+export type ProjectIdentityStampedPayload = {
+    layer: string;
+    new_id: string;
+    old_id?: string;
+    scope_root: string;
+    source: string;
+};
+
 export type ProviderCreateInputBody = {
     /**
      * ACP transport command arguments override.
@@ -1866,6 +1968,7 @@ export type ProviderOptionDto = {
 export type ProviderPatch = {
     ACPArgs: Array<string> | null;
     ACPCommand: string | null;
+    AcceptStartupDialogs: boolean | null;
     Args: Array<string> | null;
     ArgsAppend: Array<string> | null;
     Base: string | null;
@@ -1883,6 +1986,10 @@ export type ProviderPatch = {
 };
 
 export type ProviderPatchSetInputBody = {
+    /**
+     * Override startup dialog acceptance behavior.
+     */
+    accept_startup_dialogs?: boolean;
     /**
      * Override ACP transport command arguments.
      */
@@ -2070,6 +2177,25 @@ export type ReadinessResponse = {
     };
 };
 
+export type RequestFailedPayload = {
+    /**
+     * Machine-readable error code.
+     */
+    error_code: string;
+    /**
+     * Human-readable error description.
+     */
+    error_message: string;
+    /**
+     * Which operation failed.
+     */
+    operation: 'city.create' | 'city.unregister' | 'session.create' | 'session.message' | 'session.submit';
+    /**
+     * Correlation ID from the 202 response.
+     */
+    request_id: string;
+};
+
 export type RigActionBody = {
     /**
      * Action that was performed.
@@ -2094,6 +2220,10 @@ export type RigActionBody = {
 };
 
 export type RigCreateInputBody = {
+    /**
+     * Mainline branch (e.g. main, master). Auto-detected when omitted.
+     */
+    default_branch?: string;
     /**
      * Rig name.
      */
@@ -2120,6 +2250,10 @@ export type RigCreatedOutputBody = {
 };
 
 export type RigPatch = {
+    DefaultBranch: string | null;
+    FormulaVars: {
+        [key: string]: string;
+    };
     Name: string;
     Path: string | null;
     Prefix: string | null;
@@ -2127,6 +2261,10 @@ export type RigPatch = {
 };
 
 export type RigPatchSetInputBody = {
+    /**
+     * Override mainline branch.
+     */
+    default_branch?: string;
     /**
      * Rig name.
      */
@@ -2147,6 +2285,7 @@ export type RigPatchSetInputBody = {
 
 export type RigResponse = {
     agent_count: number;
+    default_branch?: string;
     git?: GitStatus;
     last_activity?: string;
     name: string;
@@ -2157,6 +2296,10 @@ export type RigResponse = {
 };
 
 export type RigUpdateInputBody = {
+    /**
+     * Mainline branch (e.g. main, master).
+     */
+    default_branch?: string;
     /**
      * Filesystem path.
      */
@@ -2169,6 +2312,12 @@ export type RigUpdateInputBody = {
      * Whether rig is suspended.
      */
     suspended?: boolean;
+};
+
+export type RotatedPayload = {
+    prior_archive: string;
+    prior_first_seq: number;
+    prior_last_seq: number;
 };
 
 export type ScopeGroup = {
@@ -2261,10 +2410,59 @@ export type SessionCreateBody = {
     title?: string;
 };
 
+export type SessionCreateSucceededPayload = {
+    /**
+     * Correlation ID from the 202 response.
+     */
+    request_id: string;
+    /**
+     * Full session state as returned by GET /session/{id}. For session.create, this result is emitted only after the session has left creating and can accept normal metadata and lifecycle commands.
+     */
+    session: SessionResponse;
+};
+
+export type SessionDrainAckedWithAssignedWorkPayload = {
+    /**
+     * ID of the work bead still holding this session as its assignee.
+     */
+    bead_id: string;
+    /**
+     * Status of the stranded bead at emission time (typically 'in_progress' for cap-hit, 'open' if recovery races claim).
+     */
+    bead_status?: string;
+    /**
+     * Short diagnostic context. Today both emission sites pass 'drain_acked_with_assigned_work'; reserved for finer-grained shape discriminators if later Shape-N variants land.
+     */
+    reason?: string;
+    /**
+     * Canonical session bead ID for the session that drain-acked.
+     */
+    session_id: string;
+    /**
+     * Pool template name when known at the emission site.
+     */
+    template?: string;
+};
+
 export type SessionInfo = {
     attached: boolean;
     last_activity?: string;
     name: string;
+};
+
+export type SessionLifecyclePayload = {
+    /**
+     * Short human-readable reason.
+     */
+    reason?: string;
+    /**
+     * Canonical session bead ID. Always present.
+     */
+    session_id: string;
+    /**
+     * Session template name when known at the emission site.
+     */
+    template?: string;
 };
 
 export type SessionMessageInputBody = {
@@ -2274,15 +2472,15 @@ export type SessionMessageInputBody = {
     message: string;
 };
 
-export type SessionMessageOutputBody = {
+export type SessionMessageSucceededPayload = {
     /**
-     * Session ID.
+     * Correlation ID from the 202 response.
      */
-    id: string;
+    request_id: string;
     /**
-     * Operation result.
+     * Session ID that received the message.
      */
-    status: string;
+    session_id: string;
 };
 
 export type SessionPatchBody = {
@@ -2299,6 +2497,13 @@ export type SessionPatchBody = {
 export type SessionPendingResponse = {
     pending?: PendingInteraction;
     supported: boolean;
+};
+
+export type SessionPermissionModeBody = {
+    /**
+     * Provider schema value for the permission_mode option.
+     */
+    permission_mode: string;
 };
 
 /**
@@ -2350,6 +2555,7 @@ export type SessionRespondOutputBody = {
 export type SessionResponse = {
     active_bead?: string;
     activity?: string;
+    agent_kind?: string;
     alias?: string;
     attached: boolean;
     configured_named_session?: boolean;
@@ -2360,6 +2566,7 @@ export type SessionResponse = {
     id: string;
     kind?: string;
     last_active?: string;
+    last_nudge_delivered_at?: string;
     last_output?: string;
     metadata?: {
         [key: string]: string;
@@ -2425,23 +2632,23 @@ export type SessionSubmitInputBody = {
     message: string;
 };
 
-export type SessionSubmitOutputBody = {
+export type SessionSubmitSucceededPayload = {
     /**
-     * Session ID.
-     */
-    id: string;
-    /**
-     * Resolved submit intent.
+     * Resolved submit intent (default, follow_up, interrupt_now).
      */
     intent: string;
     /**
-     * Whether the message was queued.
+     * Whether the message was queued for later delivery.
      */
     queued: boolean;
     /**
-     * Operation result.
+     * Correlation ID from the 202 response.
      */
-    status: string;
+    request_id: string;
+    /**
+     * Session ID that received the submission.
+     */
+    session_id: string;
 };
 
 export type SessionTranscriptGetResponse = {
@@ -2560,11 +2767,58 @@ export type StatusAgentCounts = {
     total: number;
 };
 
+export type StatusAgentDetail = {
+    /**
+     * True when the pool is draining this instance.
+     */
+    draining?: boolean;
+    /**
+     * True when this row is a pool-expanded instance (renderer indents differently).
+     */
+    expanded?: boolean;
+    /**
+     * Pool group label for expanded rows; same as QualifiedName for singletons.
+     */
+    group_name?: string;
+    /**
+     * Unqualified agent name (for pool instances, the per-instance short name like 'polecat-1').
+     */
+    name: string;
+    /**
+     * Rig-qualified name when applicable, else the bare agent name.
+     */
+    qualified_name: string;
+    /**
+     * Observed running state of the agent's session.
+     */
+    running: boolean;
+    /**
+     * 'scaled (min=N, max=M)' header emitted once per pool group.
+     */
+    scale_label?: string;
+    /**
+     * city or rig.
+     */
+    scope: string;
+    /**
+     * tmux session name CLI drain-ops key on.
+     */
+    session_name?: string;
+    /**
+     * Whether the agent (or its rig) is suspended.
+     */
+    suspended: boolean;
+};
+
 export type StatusBody = {
     /**
      * Total agent count (deprecated, use agents.total).
      */
     agent_count: number;
+    /**
+     * Per-agent state (for CLI status views). Empty when none.
+     */
+    agent_details?: Array<StatusAgentDetail> | null;
     /**
      * Agent state counts.
      */
@@ -2578,6 +2832,18 @@ export type StatusBody = {
      */
     name: string;
     /**
+     * Per-named-session detail. Empty when none configured.
+     */
+    named_session_details?: Array<StatusNamedSessionDetail> | null;
+    /**
+     * True when one or more status backing reads returned incomplete data.
+     */
+    partial?: boolean;
+    /**
+     * Human-readable errors from incomplete status backing reads.
+     */
+    partial_errors?: Array<string> | null;
+    /**
      * City directory path.
      */
     path: string;
@@ -2586,6 +2852,10 @@ export type StatusBody = {
      */
     rig_count: number;
     /**
+     * Per-rig detail (for CLI status views). Empty when none.
+     */
+    rig_details?: Array<StatusRigDetail> | null;
+    /**
      * Rig state counts.
      */
     rigs: StatusRigCounts;
@@ -2593,6 +2863,14 @@ export type StatusBody = {
      * Number of running agent processes.
      */
     running: number;
+    /**
+     * Active/suspended session counts. Omitted when unavailable.
+     */
+    session_counts_detail?: StatusSessionCountsDetail;
+    /**
+     * Dolt bead store health summary. Omitted when unavailable.
+     */
+    store_health?: StatusStoreHealth;
     /**
      * Whether the city is suspended.
      */
@@ -2622,6 +2900,21 @@ export type StatusMailCounts = {
     unread: number;
 };
 
+export type StatusNamedSessionDetail = {
+    /**
+     * Qualified named-session identity.
+     */
+    identity: string;
+    /**
+     * Named-session mode (on-demand, always, etc.).
+     */
+    mode: string;
+    /**
+     * Lifecycle status string (materialized, reserved-unmaterialized, etc.).
+     */
+    status: string;
+};
+
 export type StatusRigCounts = {
     /**
      * Number of suspended rigs.
@@ -2631,6 +2924,67 @@ export type StatusRigCounts = {
      * Total number of rigs.
      */
     total: number;
+};
+
+export type StatusRigDetail = {
+    /**
+     * Rig name.
+     */
+    name: string;
+    /**
+     * Rig directory path.
+     */
+    path: string;
+    /**
+     * Whether the rig is suspended (either explicitly or because all its agents are suspended).
+     */
+    suspended: boolean;
+};
+
+export type StatusSessionCountsDetail = {
+    /**
+     * Number of active sessions.
+     */
+    active: number;
+    /**
+     * Number of suspended sessions.
+     */
+    suspended: number;
+};
+
+export type StatusStoreHealth = {
+    /**
+     * RFC3339 timestamp of last maintenance run.
+     */
+    last_gc_at?: string;
+    /**
+     * Status of last maintenance run ('success' or 'failed').
+     */
+    last_gc_status?: string;
+    /**
+     * Live bead row count.
+     */
+    live_rows: number;
+    /**
+     * On-disk path of the Dolt store.
+     */
+    path: string;
+    /**
+     * Derived megabytes per row.
+     */
+    ratio_mb_per_row: number;
+    /**
+     * Total bytes of the store directory.
+     */
+    size_bytes: number;
+    /**
+     * Ratio threshold; a ratio above this trips warning.
+     */
+    threshold_mb_per_row: number;
+    /**
+     * True when maintenance is overdue.
+     */
+    warning: boolean;
 };
 
 export type StatusWorkCounts = {
@@ -2646,6 +3000,20 @@ export type StatusWorkCounts = {
      * Number of ready work items.
      */
     ready: number;
+};
+
+export type StoreMaintenanceDonePayload = {
+    after_bytes: number;
+    before_bytes: number;
+    duration_s: number;
+    snapshot_path: string;
+};
+
+export type StoreMaintenanceFailedPayload = {
+    duration_s: number;
+    error_msg: string;
+    snapshot_path?: string;
+    stage: string;
 };
 
 export type SubmissionCapabilities = {
@@ -2670,11 +3038,46 @@ export type SupervisorCitiesOutputBody = {
 };
 
 export type SupervisorEventListOutputBody = {
-    items: Array<WireTaggedEvent> | null;
+    /**
+     * Supervisor event-stream cursor captured before the history snapshot was listed. Pass this value as after_cursor to /v0/events/stream to receive events emitted after the snapshot boundary without replaying unrelated historical backlog.
+     */
+    event_cursor: string;
+    items: Array<TypedTaggedEventStreamEnvelope> | null;
     total: number;
 };
 
+export type SupervisorFsPressureSkippedTickPayload = {
+    /**
+     * The Linux PSI some avg60 value observed for filesystem IO pressure.
+     */
+    avg60: number;
+    /**
+     * Number of consecutive pressure skips including this tick.
+     */
+    consecutive_skips: number;
+    /**
+     * Maximum consecutive skips before the supervisor forces one reconciliation tick.
+     */
+    max_consecutive_skips: number;
+    /**
+     * The pressure decision outcome: skipped for a shed tick or forced for the bounded liveness tick.
+     */
+    outcome: string;
+    /**
+     * The configured avg60 threshold that triggered the skip.
+     */
+    threshold: number;
+    /**
+     * The daemon tick trigger, such as patrol or poke.
+     */
+    trigger?: string;
+};
+
 export type SupervisorHealthOutputBody = {
+    /**
+     * Build identity (typically a short git commit hash, with "-dirty" suffix when built from an unclean tree). Empty when unavailable.
+     */
+    build_id?: string;
     /**
      * Cities currently running.
      */
@@ -2699,6 +3102,25 @@ export type SupervisorHealthOutputBody = {
      * Supervisor version.
      */
     version: string;
+};
+
+export type SupervisorShutdownPayload = {
+    /**
+     * For source=socket_stop, the address reported by the connecting client. Typically empty for unix-socket peers.
+     */
+    client_addr?: string;
+    /**
+     * Resulting shutdown mode.
+     */
+    mode: 'destructive' | 'preserve_sessions' | 'unknown';
+    /**
+     * For source=signal, the human-readable signal name (e.g. "terminated", "interrupt"). Empty for socket_stop.
+     */
+    signal?: string;
+    /**
+     * Which path triggered the shutdown.
+     */
+    source: 'signal' | 'socket_stop';
 };
 
 export type SupervisorStartup = {
@@ -2752,20 +3174,12 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeBeadUpdated) | ({
     type: 'city.created';
 } & TypedEventStreamEnvelopeCityCreated) | ({
-    type: 'city.init_failed';
-} & TypedEventStreamEnvelopeCityInitFailed) | ({
-    type: 'city.ready';
-} & TypedEventStreamEnvelopeCityReady) | ({
     type: 'city.resumed';
 } & TypedEventStreamEnvelopeCityResumed) | ({
     type: 'city.suspended';
 } & TypedEventStreamEnvelopeCitySuspended) | ({
-    type: 'city.unregister_failed';
-} & TypedEventStreamEnvelopeCityUnregisterFailed) | ({
     type: 'city.unregister_requested';
 } & TypedEventStreamEnvelopeCityUnregisterRequested) | ({
-    type: 'city.unregistered';
-} & TypedEventStreamEnvelopeCityUnregistered) | ({
     type: 'controller.started';
 } & TypedEventStreamEnvelopeControllerStarted) | ({
     type: 'controller.stopped';
@@ -2774,6 +3188,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeConvoyClosed) | ({
     type: 'convoy.created';
 } & TypedEventStreamEnvelopeConvoyCreated) | ({
+    type: 'events.rotated';
+} & TypedEventStreamEnvelopeEventsRotated) | ({
     type: 'extmsg.adapter_added';
 } & TypedEventStreamEnvelopeExtmsgAdapterAdded) | ({
     type: 'extmsg.adapter_removed';
@@ -2788,6 +3204,10 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeExtmsgOutbound) | ({
     type: 'extmsg.unbound';
 } & TypedEventStreamEnvelopeExtmsgUnbound) | ({
+    type: 'gc.store.maintenance.done';
+} & TypedEventStreamEnvelopeGcStoreMaintenanceDone) | ({
+    type: 'gc.store.maintenance.failed';
+} & TypedEventStreamEnvelopeGcStoreMaintenanceFailed) | ({
     type: 'mail.archived';
 } & TypedEventStreamEnvelopeMailArchived) | ({
     type: 'mail.deleted';
@@ -2808,14 +3228,32 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedEventStreamEnvelopeOrderFired) | ({
+    type: 'project.identity.stamped';
+} & TypedEventStreamEnvelopeProjectIdentityStamped) | ({
     type: 'provider.swapped';
 } & TypedEventStreamEnvelopeProviderSwapped) | ({
+    type: 'request.failed';
+} & TypedEventStreamEnvelopeRequestFailed) | ({
+    type: 'request.result.city.create';
+} & TypedEventStreamEnvelopeRequestResultCityCreate) | ({
+    type: 'request.result.city.unregister';
+} & TypedEventStreamEnvelopeRequestResultCityUnregister) | ({
+    type: 'request.result.session.create';
+} & TypedEventStreamEnvelopeRequestResultSessionCreate) | ({
+    type: 'request.result.session.message';
+} & TypedEventStreamEnvelopeRequestResultSessionMessage) | ({
+    type: 'request.result.session.submit';
+} & TypedEventStreamEnvelopeRequestResultSessionSubmit) | ({
     type: 'session.crashed';
 } & TypedEventStreamEnvelopeSessionCrashed) | ({
+    type: 'session.drain_acked_with_assigned_work';
+} & TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
     type: 'session.draining';
 } & TypedEventStreamEnvelopeSessionDraining) | ({
     type: 'session.idle_killed';
 } & TypedEventStreamEnvelopeSessionIdleKilled) | ({
+    type: 'session.max_age_killed';
+} & TypedEventStreamEnvelopeSessionMaxAgeKilled) | ({
     type: 'session.quarantined';
 } & TypedEventStreamEnvelopeSessionQuarantined) | ({
     type: 'session.stopped';
@@ -2828,8 +3266,16 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionUpdated) | ({
     type: 'session.woke';
 } & TypedEventStreamEnvelopeSessionWoke) | ({
+    type: 'session.work_query_failed';
+} & TypedEventStreamEnvelopeSessionWorkQueryFailed) | ({
+    type: 'supervisor.fs_pressure.skipped_tick';
+} & TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
+    type: 'supervisor.shutdown_requested';
+} & TypedEventStreamEnvelopeSupervisorShutdownRequested) | ({
     type: 'worker.operation';
-} & TypedEventStreamEnvelopeWorkerOperation);
+} & TypedEventStreamEnvelopeWorkerOperation) | ({
+    type: 'TypedEventStreamEnvelopeCustom';
+} & TypedEventStreamEnvelopeCustom);
 
 /**
  * TypedEventStreamEnvelope bead.closed
@@ -2888,34 +3334,6 @@ export type TypedEventStreamEnvelopeCityCreated = {
 };
 
 /**
- * TypedEventStreamEnvelope city.init_failed
- */
-export type TypedEventStreamEnvelopeCityInitFailed = {
-    actor: string;
-    message?: string;
-    payload: CityLifecyclePayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'city.init_failed';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope city.ready
- */
-export type TypedEventStreamEnvelopeCityReady = {
-    actor: string;
-    message?: string;
-    payload: CityLifecyclePayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'city.ready';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedEventStreamEnvelope city.resumed
  */
 export type TypedEventStreamEnvelopeCityResumed = {
@@ -2944,20 +3362,6 @@ export type TypedEventStreamEnvelopeCitySuspended = {
 };
 
 /**
- * TypedEventStreamEnvelope city.unregister_failed
- */
-export type TypedEventStreamEnvelopeCityUnregisterFailed = {
-    actor: string;
-    message?: string;
-    payload: CityLifecyclePayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'city.unregister_failed';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedEventStreamEnvelope city.unregister_requested
  */
 export type TypedEventStreamEnvelopeCityUnregisterRequested = {
@@ -2968,20 +3372,6 @@ export type TypedEventStreamEnvelopeCityUnregisterRequested = {
     subject?: string;
     ts: string;
     type: 'city.unregister_requested';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope city.unregistered
- */
-export type TypedEventStreamEnvelopeCityUnregistered = {
-    actor: string;
-    message?: string;
-    payload: CityLifecyclePayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'city.unregistered';
     workflow?: WorkflowEventProjection;
 };
 
@@ -3038,6 +3428,34 @@ export type TypedEventStreamEnvelopeConvoyCreated = {
     subject?: string;
     ts: string;
     type: 'convoy.created';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope custom
+ */
+export type TypedEventStreamEnvelopeCustom = {
+    actor: string;
+    message?: string;
+    payload: unknown;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: string;
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope events.rotated
+ */
+export type TypedEventStreamEnvelopeEventsRotated = {
+    actor: string;
+    message?: string;
+    payload: RotatedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'events.rotated';
     workflow?: WorkflowEventProjection;
 };
 
@@ -3136,6 +3554,34 @@ export type TypedEventStreamEnvelopeExtmsgUnbound = {
     subject?: string;
     ts: string;
     type: 'extmsg.unbound';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope gc.store.maintenance.done
+ */
+export type TypedEventStreamEnvelopeGcStoreMaintenanceDone = {
+    actor: string;
+    message?: string;
+    payload: StoreMaintenanceDonePayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'gc.store.maintenance.done';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope gc.store.maintenance.failed
+ */
+export type TypedEventStreamEnvelopeGcStoreMaintenanceFailed = {
+    actor: string;
+    message?: string;
+    payload: StoreMaintenanceFailedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'gc.store.maintenance.failed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -3280,6 +3726,20 @@ export type TypedEventStreamEnvelopeOrderFired = {
 };
 
 /**
+ * TypedEventStreamEnvelope project.identity.stamped
+ */
+export type TypedEventStreamEnvelopeProjectIdentityStamped = {
+    actor: string;
+    message?: string;
+    payload: ProjectIdentityStampedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'project.identity.stamped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope provider.swapped
  */
 export type TypedEventStreamEnvelopeProviderSwapped = {
@@ -3294,16 +3754,114 @@ export type TypedEventStreamEnvelopeProviderSwapped = {
 };
 
 /**
+ * TypedEventStreamEnvelope request.failed
+ */
+export type TypedEventStreamEnvelopeRequestFailed = {
+    actor: string;
+    message?: string;
+    payload: RequestFailedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope request.result.city.create
+ */
+export type TypedEventStreamEnvelopeRequestResultCityCreate = {
+    actor: string;
+    message?: string;
+    payload: CityCreateSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.city.create';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope request.result.city.unregister
+ */
+export type TypedEventStreamEnvelopeRequestResultCityUnregister = {
+    actor: string;
+    message?: string;
+    payload: CityUnregisterSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.city.unregister';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope request.result.session.create
+ */
+export type TypedEventStreamEnvelopeRequestResultSessionCreate = {
+    actor: string;
+    message?: string;
+    payload: SessionCreateSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.session.create';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope request.result.session.message
+ */
+export type TypedEventStreamEnvelopeRequestResultSessionMessage = {
+    actor: string;
+    message?: string;
+    payload: SessionMessageSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.session.message';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope request.result.session.submit
+ */
+export type TypedEventStreamEnvelopeRequestResultSessionSubmit = {
+    actor: string;
+    message?: string;
+    payload: SessionSubmitSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.session.submit';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.crashed
  */
 export type TypedEventStreamEnvelopeSessionCrashed = {
     actor: string;
     message?: string;
-    payload: NoPayload;
+    payload: SessionLifecyclePayload;
     seq: number;
     subject?: string;
     ts: string;
     type: 'session.crashed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope session.drain_acked_with_assigned_work
+ */
+export type TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork = {
+    actor: string;
+    message?: string;
+    payload: SessionDrainAckedWithAssignedWorkPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.drain_acked_with_assigned_work';
     workflow?: WorkflowEventProjection;
 };
 
@@ -3336,6 +3894,20 @@ export type TypedEventStreamEnvelopeSessionIdleKilled = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.max_age_killed
+ */
+export type TypedEventStreamEnvelopeSessionMaxAgeKilled = {
+    actor: string;
+    message?: string;
+    payload: NoPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.max_age_killed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.quarantined
  */
 export type TypedEventStreamEnvelopeSessionQuarantined = {
@@ -3355,7 +3927,7 @@ export type TypedEventStreamEnvelopeSessionQuarantined = {
 export type TypedEventStreamEnvelopeSessionStopped = {
     actor: string;
     message?: string;
-    payload: NoPayload;
+    payload: SessionLifecyclePayload;
     seq: number;
     subject?: string;
     ts: string;
@@ -3420,6 +3992,48 @@ export type TypedEventStreamEnvelopeSessionWoke = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.work_query_failed
+ */
+export type TypedEventStreamEnvelopeSessionWorkQueryFailed = {
+    actor: string;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.work_query_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope supervisor.fs_pressure.skipped_tick
+ */
+export type TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
+    actor: string;
+    message?: string;
+    payload: SupervisorFsPressureSkippedTickPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.fs_pressure.skipped_tick';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope supervisor.shutdown_requested
+ */
+export type TypedEventStreamEnvelopeSupervisorShutdownRequested = {
+    actor: string;
+    message?: string;
+    payload: SupervisorShutdownPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.shutdown_requested';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope worker.operation
  */
 export type TypedEventStreamEnvelopeWorkerOperation = {
@@ -3447,20 +4061,12 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeBeadUpdated) | ({
     type: 'city.created';
 } & TypedTaggedEventStreamEnvelopeCityCreated) | ({
-    type: 'city.init_failed';
-} & TypedTaggedEventStreamEnvelopeCityInitFailed) | ({
-    type: 'city.ready';
-} & TypedTaggedEventStreamEnvelopeCityReady) | ({
     type: 'city.resumed';
 } & TypedTaggedEventStreamEnvelopeCityResumed) | ({
     type: 'city.suspended';
 } & TypedTaggedEventStreamEnvelopeCitySuspended) | ({
-    type: 'city.unregister_failed';
-} & TypedTaggedEventStreamEnvelopeCityUnregisterFailed) | ({
     type: 'city.unregister_requested';
 } & TypedTaggedEventStreamEnvelopeCityUnregisterRequested) | ({
-    type: 'city.unregistered';
-} & TypedTaggedEventStreamEnvelopeCityUnregistered) | ({
     type: 'controller.started';
 } & TypedTaggedEventStreamEnvelopeControllerStarted) | ({
     type: 'controller.stopped';
@@ -3469,6 +4075,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeConvoyClosed) | ({
     type: 'convoy.created';
 } & TypedTaggedEventStreamEnvelopeConvoyCreated) | ({
+    type: 'events.rotated';
+} & TypedTaggedEventStreamEnvelopeEventsRotated) | ({
     type: 'extmsg.adapter_added';
 } & TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded) | ({
     type: 'extmsg.adapter_removed';
@@ -3483,6 +4091,10 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeExtmsgOutbound) | ({
     type: 'extmsg.unbound';
 } & TypedTaggedEventStreamEnvelopeExtmsgUnbound) | ({
+    type: 'gc.store.maintenance.done';
+} & TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone) | ({
+    type: 'gc.store.maintenance.failed';
+} & TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed) | ({
     type: 'mail.archived';
 } & TypedTaggedEventStreamEnvelopeMailArchived) | ({
     type: 'mail.deleted';
@@ -3503,14 +4115,32 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedTaggedEventStreamEnvelopeOrderFired) | ({
+    type: 'project.identity.stamped';
+} & TypedTaggedEventStreamEnvelopeProjectIdentityStamped) | ({
     type: 'provider.swapped';
 } & TypedTaggedEventStreamEnvelopeProviderSwapped) | ({
+    type: 'request.failed';
+} & TypedTaggedEventStreamEnvelopeRequestFailed) | ({
+    type: 'request.result.city.create';
+} & TypedTaggedEventStreamEnvelopeRequestResultCityCreate) | ({
+    type: 'request.result.city.unregister';
+} & TypedTaggedEventStreamEnvelopeRequestResultCityUnregister) | ({
+    type: 'request.result.session.create';
+} & TypedTaggedEventStreamEnvelopeRequestResultSessionCreate) | ({
+    type: 'request.result.session.message';
+} & TypedTaggedEventStreamEnvelopeRequestResultSessionMessage) | ({
+    type: 'request.result.session.submit';
+} & TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit) | ({
     type: 'session.crashed';
 } & TypedTaggedEventStreamEnvelopeSessionCrashed) | ({
+    type: 'session.drain_acked_with_assigned_work';
+} & TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
     type: 'session.draining';
 } & TypedTaggedEventStreamEnvelopeSessionDraining) | ({
     type: 'session.idle_killed';
 } & TypedTaggedEventStreamEnvelopeSessionIdleKilled) | ({
+    type: 'session.max_age_killed';
+} & TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled) | ({
     type: 'session.quarantined';
 } & TypedTaggedEventStreamEnvelopeSessionQuarantined) | ({
     type: 'session.stopped';
@@ -3523,8 +4153,16 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionUpdated) | ({
     type: 'session.woke';
 } & TypedTaggedEventStreamEnvelopeSessionWoke) | ({
+    type: 'session.work_query_failed';
+} & TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed) | ({
+    type: 'supervisor.fs_pressure.skipped_tick';
+} & TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
+    type: 'supervisor.shutdown_requested';
+} & TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested) | ({
     type: 'worker.operation';
-} & TypedTaggedEventStreamEnvelopeWorkerOperation);
+} & TypedTaggedEventStreamEnvelopeWorkerOperation) | ({
+    type: 'TypedTaggedEventStreamEnvelopeCustom';
+} & TypedTaggedEventStreamEnvelopeCustom);
 
 /**
  * TypedTaggedEventStreamEnvelope bead.closed
@@ -3587,36 +4225,6 @@ export type TypedTaggedEventStreamEnvelopeCityCreated = {
 };
 
 /**
- * TypedTaggedEventStreamEnvelope city.init_failed
- */
-export type TypedTaggedEventStreamEnvelopeCityInitFailed = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: CityLifecyclePayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'city.init_failed';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope city.ready
- */
-export type TypedTaggedEventStreamEnvelopeCityReady = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: CityLifecyclePayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'city.ready';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedTaggedEventStreamEnvelope city.resumed
  */
 export type TypedTaggedEventStreamEnvelopeCityResumed = {
@@ -3647,21 +4255,6 @@ export type TypedTaggedEventStreamEnvelopeCitySuspended = {
 };
 
 /**
- * TypedTaggedEventStreamEnvelope city.unregister_failed
- */
-export type TypedTaggedEventStreamEnvelopeCityUnregisterFailed = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: CityLifecyclePayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'city.unregister_failed';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedTaggedEventStreamEnvelope city.unregister_requested
  */
 export type TypedTaggedEventStreamEnvelopeCityUnregisterRequested = {
@@ -3673,21 +4266,6 @@ export type TypedTaggedEventStreamEnvelopeCityUnregisterRequested = {
     subject?: string;
     ts: string;
     type: 'city.unregister_requested';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope city.unregistered
- */
-export type TypedTaggedEventStreamEnvelopeCityUnregistered = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload: CityLifecyclePayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: 'city.unregistered';
     workflow?: WorkflowEventProjection;
 };
 
@@ -3748,6 +4326,36 @@ export type TypedTaggedEventStreamEnvelopeConvoyCreated = {
     subject?: string;
     ts: string;
     type: 'convoy.created';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope custom
+ */
+export type TypedTaggedEventStreamEnvelopeCustom = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: unknown;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: string;
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope events.rotated
+ */
+export type TypedTaggedEventStreamEnvelopeEventsRotated = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: RotatedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'events.rotated';
     workflow?: WorkflowEventProjection;
 };
 
@@ -3853,6 +4461,36 @@ export type TypedTaggedEventStreamEnvelopeExtmsgUnbound = {
     subject?: string;
     ts: string;
     type: 'extmsg.unbound';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope gc.store.maintenance.done
+ */
+export type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: StoreMaintenanceDonePayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'gc.store.maintenance.done';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope gc.store.maintenance.failed
+ */
+export type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: StoreMaintenanceFailedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'gc.store.maintenance.failed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4007,6 +4645,21 @@ export type TypedTaggedEventStreamEnvelopeOrderFired = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope project.identity.stamped
+ */
+export type TypedTaggedEventStreamEnvelopeProjectIdentityStamped = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: ProjectIdentityStampedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'project.identity.stamped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope provider.swapped
  */
 export type TypedTaggedEventStreamEnvelopeProviderSwapped = {
@@ -4022,17 +4675,122 @@ export type TypedTaggedEventStreamEnvelopeProviderSwapped = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope request.failed
+ */
+export type TypedTaggedEventStreamEnvelopeRequestFailed = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: RequestFailedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope request.result.city.create
+ */
+export type TypedTaggedEventStreamEnvelopeRequestResultCityCreate = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: CityCreateSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.city.create';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope request.result.city.unregister
+ */
+export type TypedTaggedEventStreamEnvelopeRequestResultCityUnregister = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: CityUnregisterSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.city.unregister';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope request.result.session.create
+ */
+export type TypedTaggedEventStreamEnvelopeRequestResultSessionCreate = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SessionCreateSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.session.create';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope request.result.session.message
+ */
+export type TypedTaggedEventStreamEnvelopeRequestResultSessionMessage = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SessionMessageSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.session.message';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope request.result.session.submit
+ */
+export type TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SessionSubmitSucceededPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'request.result.session.submit';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope session.crashed
  */
 export type TypedTaggedEventStreamEnvelopeSessionCrashed = {
     actor: string;
     city: string;
     message?: string;
-    payload: NoPayload;
+    payload: SessionLifecyclePayload;
     seq: number;
     subject?: string;
     ts: string;
     type: 'session.crashed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.drain_acked_with_assigned_work
+ */
+export type TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SessionDrainAckedWithAssignedWorkPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.drain_acked_with_assigned_work';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4067,6 +4825,21 @@ export type TypedTaggedEventStreamEnvelopeSessionIdleKilled = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope session.max_age_killed
+ */
+export type TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: NoPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.max_age_killed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope session.quarantined
  */
 export type TypedTaggedEventStreamEnvelopeSessionQuarantined = {
@@ -4088,7 +4861,7 @@ export type TypedTaggedEventStreamEnvelopeSessionStopped = {
     actor: string;
     city: string;
     message?: string;
-    payload: NoPayload;
+    payload: SessionLifecyclePayload;
     seq: number;
     subject?: string;
     ts: string;
@@ -4157,6 +4930,51 @@ export type TypedTaggedEventStreamEnvelopeSessionWoke = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope session.work_query_failed
+ */
+export type TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.work_query_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope supervisor.fs_pressure.skipped_tick
+ */
+export type TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SupervisorFsPressureSkippedTickPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.fs_pressure.skipped_tick';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope supervisor.shutdown_requested
+ */
+export type TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SupervisorShutdownPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.shutdown_requested';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope worker.operation
  */
 export type TypedTaggedEventStreamEnvelopeWorkerOperation = {
@@ -4176,34 +4994,57 @@ export type UnboundEventPayload = {
     session_id: string;
 };
 
-export type WireEvent = {
-    actor: string;
-    message?: string;
-    payload?: EventPayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: string;
-};
-
-export type WireTaggedEvent = {
-    actor: string;
-    city: string;
-    message?: string;
-    payload?: EventPayload;
-    seq: number;
-    subject?: string;
-    ts: string;
-    type: string;
-};
-
 export type WorkerOperationEventPayload = {
+    /**
+     * Qualified agent identity (best-effort, absent if the session has no agent_name metadata or alias).
+     */
+    agent_name?: string;
+    /**
+     * Work bead this operation is acting on (best-effort, may be absent for non-bead-scoped ops).
+     */
+    bead_id?: string;
+    /**
+     * Input tokens written into the prompt cache (best-effort, currently always absent).
+     */
+    cache_creation_tokens?: number;
+    /**
+     * Cached input tokens read (best-effort, currently always absent).
+     */
+    cache_read_tokens?: number;
+    /**
+     * Output tokens (best-effort, currently always absent).
+     */
+    completion_tokens?: number;
+    /**
+     * Estimated invocation cost in USD (best-effort, currently always absent; see #1255 for pricing seam).
+     */
+    cost_usd_estimate?: number;
     delivered?: boolean;
     duration_ms: number;
     error?: string;
     finished_at: string;
+    /**
+     * LLM invocation wall-clock latency (best-effort, currently always absent — no source).
+     */
+    latency_ms?: number;
+    /**
+     * LLM model identifier (best-effort, may be absent until follow-up wiring lands).
+     */
+    model?: string;
     op_id: string;
     operation: string;
+    /**
+     * SHA-256 of the rendered prompt (best-effort, currently always absent; #1256 follow-up).
+     */
+    prompt_sha?: string;
+    /**
+     * Non-cached input tokens (best-effort, currently always absent; treat zero as 'not measured', not 'free').
+     */
+    prompt_tokens?: number;
+    /**
+     * Template version frontmatter (best-effort, currently always absent; #1256 follow-up).
+     */
+    prompt_version?: string;
     provider?: string;
     queued?: boolean;
     result: string;
@@ -4387,7 +5228,7 @@ export type PostV0CityResponses = {
     /**
      * Accepted
      */
-    202: CityCreateResponse;
+    202: AsyncAcceptedResponse;
 };
 
 export type PostV0CityResponse = PostV0CityResponses[keyof PostV0CityResponses];
@@ -5458,6 +6299,10 @@ export type GetV0CityByCityNameBeadsData = {
          * Filter by rig.
          */
         rig?: string;
+        /**
+         * Include closed beads.
+         */
+        all?: boolean;
     };
     url: '/v0/city/{cityName}/beads';
 };
@@ -6089,11 +6934,52 @@ export type EmitEventResponses = {
 
 export type EmitEventResponse = EmitEventResponses[keyof EmitEventResponses];
 
+export type RotateEventsData = {
+    body?: never;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: {
+        /**
+         * Wait for archive compression to complete before returning.
+         */
+        wait?: boolean;
+    };
+    url: '/v0/city/{cityName}/events/rotate';
+};
+
+export type RotateEventsErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type RotateEventsError = RotateEventsErrors[keyof RotateEventsErrors];
+
+export type RotateEventsResponses = {
+    /**
+     * OK
+     */
+    200: EventRotateResponse;
+};
+
+export type RotateEventsResponse = RotateEventsResponses[keyof RotateEventsResponses];
+
 export type StreamEventsData = {
     body?: never;
     headers?: {
         /**
-         * SSE reconnect position from the last received event ID.
+         * SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head.
          */
         'Last-Event-ID'?: string;
     };
@@ -6105,7 +6991,7 @@ export type StreamEventsData = {
     };
     query?: {
         /**
-         * Reconnect position: only deliver events after this sequence number.
+         * Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head.
          */
         after_seq?: string;
     };
@@ -7130,7 +8016,7 @@ export type GetV0CityByCityNameMailThreadByIdData = {
          */
         cityName: string;
         /**
-         * Thread ID.
+         * Thread ID, or any message ID in the thread.
          */
         id: string;
     };
@@ -7616,7 +8502,12 @@ export type GetV0CityByCityNameOrdersCheckData = {
          */
         cityName: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Bypass cached order-check responses and cached order history.
+         */
+        fresh?: boolean;
+    };
     url: '/v0/city/{cityName}/orders/check';
 };
 
@@ -8907,6 +9798,10 @@ export type GetV0CityByCityNameSessionByIdData = {
          * Include last output preview.
          */
         peek?: boolean;
+        /**
+         * Number of lines to include in the last output preview when peek=true. Defaults to 5.
+         */
+        peek_lines?: number;
     };
     url: '/v0/city/{cityName}/session/{id}';
 };
@@ -9161,7 +10056,7 @@ export type SendSessionMessageResponses = {
     /**
      * Accepted
      */
-    202: SessionMessageOutputBody;
+    202: AsyncAcceptedBody;
 };
 
 export type SendSessionMessageResponse = SendSessionMessageResponses[keyof SendSessionMessageResponses];
@@ -9199,6 +10094,46 @@ export type GetV0CityByCityNameSessionByIdPendingResponses = {
 };
 
 export type GetV0CityByCityNameSessionByIdPendingResponse = GetV0CityByCityNameSessionByIdPendingResponses[keyof GetV0CityByCityNameSessionByIdPendingResponses];
+
+export type PostV0CityByCityNameSessionByIdPermissionModeData = {
+    body: SessionPermissionModeBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Session ID, alias, or runtime session_name.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/permission-mode';
+};
+
+export type PostV0CityByCityNameSessionByIdPermissionModeErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type PostV0CityByCityNameSessionByIdPermissionModeError = PostV0CityByCityNameSessionByIdPermissionModeErrors[keyof PostV0CityByCityNameSessionByIdPermissionModeErrors];
+
+export type PostV0CityByCityNameSessionByIdPermissionModeResponses = {
+    /**
+     * OK
+     */
+    200: SessionResponse;
+};
+
+export type PostV0CityByCityNameSessionByIdPermissionModeResponse = PostV0CityByCityNameSessionByIdPermissionModeResponses[keyof PostV0CityByCityNameSessionByIdPermissionModeResponses];
 
 export type PostV0CityByCityNameSessionByIdRenameData = {
     body: SessionRenameInputBody;
@@ -9466,7 +10401,7 @@ export type SubmitSessionResponses = {
     /**
      * Accepted
      */
-    202: SessionSubmitOutputBody;
+    202: AsyncAcceptedBody;
 };
 
 export type SubmitSessionResponse = SubmitSessionResponses[keyof SubmitSessionResponses];
@@ -9536,6 +10471,10 @@ export type GetV0CityByCityNameSessionByIdTranscriptData = {
          * Pagination cursor: return entries before this UUID.
          */
         before?: string;
+        /**
+         * Pagination cursor: return entries after this UUID.
+         */
+        after?: string;
     };
     url: '/v0/city/{cityName}/session/{id}/transcript';
 };
@@ -9680,7 +10619,7 @@ export type CreateSessionResponses = {
     /**
      * Accepted
      */
-    202: SessionResponse;
+    202: AsyncAcceptedBody;
 };
 
 export type CreateSessionResponse = CreateSessionResponses[keyof CreateSessionResponses];
@@ -9791,7 +10730,7 @@ export type PostV0CityByCityNameUnregisterResponses = {
     /**
      * Accepted
      */
-    202: CityUnregisterResponse;
+    202: AsyncAcceptedResponse;
 };
 
 export type PostV0CityByCityNameUnregisterResponse = PostV0CityByCityNameUnregisterResponses[keyof PostV0CityByCityNameUnregisterResponses];
@@ -9938,14 +10877,14 @@ export type StreamSupervisorEventsData = {
     body?: never;
     headers?: {
         /**
-         * Reconnect cursor (composite per-city cursor).
+         * Reconnect cursor (composite per-city cursor). Omit Last-Event-ID and after_cursor to start at the current supervisor event head.
          */
         'Last-Event-ID'?: string;
     };
     path?: never;
     query?: {
         /**
-         * Alternative to Last-Event-ID for browsers that can't set custom headers.
+         * Alternative to Last-Event-ID for browsers that can't set custom headers. Omit after_cursor and Last-Event-ID to start at the current supervisor event head.
          */
         after_cursor?: string;
     };

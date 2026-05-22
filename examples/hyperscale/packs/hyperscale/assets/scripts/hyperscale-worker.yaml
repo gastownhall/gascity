@@ -1,0 +1,33 @@
+description: |
+  Hyperscale demo worker — migrated from mock-worker.sh.
+
+  Claims one routed pool bead, simulates a unit of work, and closes
+  the bead. The minimal claim-and-close cycle: 100 of these run in
+  parallel to demonstrate pool scaling on K8s.
+
+  One process = one turn. The worker probes its hook once, processes a
+  single bead, and exits; gc's reconciler re-spawns it while pool work
+  remains. This replaces mock-worker.sh's 10-attempt claim loop —
+  retry-until-claimed is the reconciler's job now, not the script's.
+
+schema_version: v1
+
+turns:
+  # Pool work on the hook: claim it, do the work, close it.
+  - when:
+      hook: has_work
+    do:
+      - bd_claim: "{bead.id}"
+      - sleep_ms: 50
+      - bd_update:
+          id: "{bead.id}"
+          status: closed
+          notes: "hyperscale demo: completed by scripted worker {alias}"
+      - log: "worker {alias} closed {bead.id}"
+      - exit: 0
+  # Nothing routed to us: exit cleanly so the reconciler can re-pool.
+  - when:
+      hook: empty
+    do:
+      - log: "hook empty; no pool work to claim"
+      - exit: 0

@@ -11,34 +11,72 @@ on:
       - reopened
       - synchronize
       - ready_for_review
-      - labeled
   workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number for label-dispatched runs
+        required: false
+        type: string
+      head_repo:
+        description: Pull request head repository for label-dispatched runs
+        required: false
+        type: string
+      head_sha:
+        description: Pull request head SHA for label-dispatched runs
+        required: false
+        type: string
+      head_ref:
+        description: Pull request head ref for label-dispatched runs
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: review-formulas-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  group: review-formulas-${{ github.event_name }}-${{ inputs.pr_number || github.event.pull_request.number || github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  DOLT_VERSION: "1.86.1"
-  BD_VERSION: "v1.0.0"
+  DOLT_VERSION: "2.0.3"
+  BD_VERSION: "v1.0.4"
 
 jobs:
+  runner-policy:
+    name: Runner policy
+    runs-on: ${{ github.event_name == 'pull_request' && contains(fromJSON('["julianknutsen","csells","sjarmak","quad341"]'), github.event.pull_request.user.login) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    outputs:
+      use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
+      reason: ${{ steps.policy.outputs.reason }}
+      runner_2vcpu: ${{ steps.policy.outputs.runner_2vcpu }}
+      runner_8vcpu: ${{ steps.policy.outputs.runner_8vcpu }}
+      runner_16vcpu: ${{ steps.policy.outputs.runner_16vcpu }}
+      runner_32vcpu: ${{ steps.policy.outputs.runner_32vcpu }}
+      runner_macos: ${{ steps.policy.outputs.runner_macos }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Select runner backend
+        id: policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          python3 .github/workflows/scripts/runner_policy.py
+
   gate:
     name: review-formulas routing
-    if: >-
-      github.event_name != 'pull_request' ||
-      github.event.action != 'labeled' ||
-      github.event.label.name == 'needs-review-formulas'
-    runs-on: ubuntu-latest
+    needs: runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     outputs:
       run_shard: ${{ steps.gate.outputs.run_shard }}
       reason: ${{ steps.gate.outputs.reason }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
         id: filter
         with:
           filters: |
@@ -62,8 +100,6 @@ jobs:
         id: gate
         env:
           EVENT_NAME: ${{ github.event_name }}
-          EVENT_ACTION: ${{ github.event.action }}
-          LABELED_NAME: ${{ github.event.label.name }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
           PATH_HIT: ${{ steps.filter.outputs.review_formulas }}
           NEEDS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'needs-review-formulas') }}
@@ -71,6 +107,12 @@ jobs:
           run_shard=false
           reason="skipped"
 
+          # Review-formulas shards each run for ~10-15 min and exercise
+          # full agent workflows end-to-end. Keep them as a pre-merge
+          # opt-in (via the `needs-review-formulas` label) plus a
+          # post-merge safety net on pushes to main. Path-based opt-in
+          # on every Go-touching PR pushes the PR wall-clock past the
+          # Blacksmith 5-minute budget.
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             run_shard=true
             reason="manual dispatch"
@@ -78,13 +120,11 @@ jobs:
             run_shard=true
             reason="push to main safety net"
           elif [[ "$PR_DRAFT" != "true" ]]; then
-            if [[ "$EVENT_ACTION" == "labeled" && "$LABELED_NAME" != "needs-review-formulas" ]]; then
-              reason="ignored unrelated label event"
-            elif [[ "$PATH_HIT" == "true" || "$NEEDS_LABEL" == "true" ]]; then
+            if [[ "$NEEDS_LABEL" == "true" ]]; then
               run_shard=true
-              reason="pull request path/label match"
+              reason="pull request needs-review-formulas label"
             else
-              reason="pull request path/label miss"
+              reason="pull request without needs-review-formulas label (path hit: ${PATH_HIT})"
             fi
           else
             reason="draft pull request"
@@ -100,25 +140,45 @@ jobs:
 
   review-formulas-shard:
     name: Integration / review-formulas (${{ matrix.label }})
-    needs: gate
+    needs:
+      - runner-policy
+      - gate
     if: needs.gate.outputs.run_shard == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          - shard: review-formulas-basic
-            label: basic
-            coverprofile: coverage.integration-review-formulas-basic.txt
-          - shard: review-formulas-retries
-            label: retries
-            coverprofile: coverage.integration-review-formulas-retries.txt
-          - shard: review-formulas-recovery
-            label: recovery
+          - label: basic-1-of-2
+            command: >-
+              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-basic-1-of-2.txt
+              ./scripts/test-integration-shard review-formulas-basic-1-of-2
+            coverprofile: coverage.integration-review-formulas-basic-1-of-2.txt
+          - label: basic-2-of-2
+            command: >-
+              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-basic-2-of-2.txt
+              ./scripts/test-integration-shard review-formulas-basic-2-of-2
+            coverprofile: coverage.integration-review-formulas-basic-2-of-2.txt
+          - label: retries-1-of-2
+            command: >-
+              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-retries-1-of-2.txt
+              ./scripts/test-integration-shard review-formulas-retries-1-of-2
+            coverprofile: coverage.integration-review-formulas-retries-1-of-2.txt
+          - label: retries-2-of-2
+            command: >-
+              GO_TEST_COVERPROFILE=coverage.integration-review-formulas-retries-2-of-2.txt
+              ./scripts/test-integration-shard review-formulas-retries-2-of-2
+            coverprofile: coverage.integration-review-formulas-retries-2-of-2.txt
+          - label: recovery
+            command: make test-integration-review-formulas-recovery-cover
             coverprofile: coverage.integration-review-formulas-recovery.txt
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
@@ -128,7 +188,7 @@ jobs:
         run: make install-tools
       - name: Run review-formulas shard
         id: shard
-        run: GO_TEST_COVERPROFILE=${{ matrix.coverprofile }} ./scripts/test-integration-shard ${{ matrix.shard }}
+        run: ${{ matrix.command }}
       - name: Inspect shard coverage profile
         if: steps.shard.outcome == 'success'
         run: |
@@ -145,7 +205,7 @@ jobs:
             github.event_name != 'pull_request' ||
             github.event.pull_request.head.repo.full_name == github.repository
           )
-        uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
+        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
         with:
           files: ${{ matrix.coverprofile }}
           flags: integration-review-formulas
@@ -159,16 +219,11 @@ jobs:
     # explicit while the shards run in parallel underneath it.
     name: Integration / review-formulas
     needs:
+      - runner-policy
       - gate
       - review-formulas-shard
-    if: >-
-      always() &&
-      (
-        github.event_name != 'pull_request' ||
-        github.event.action != 'labeled' ||
-        github.event.label.name == 'needs-review-formulas'
-      )
-    runs-on: ubuntu-latest
+    if: always()
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     steps:
       - name: Finalize review-formulas result
         env:

@@ -36,18 +36,12 @@ func TestRequiresDedicatedTestenvImportFile(t *testing.T) {
 	dirInfos := map[string]*dirInfo{}
 	var strayImports []string
 
-	skipDirs := map[string]bool{
-		"vendor":       true,
-		"node_modules": true,
-		".git":         true,
-	}
-
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			if skipDirs[d.Name()] {
+			if skipRepoLintDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -157,8 +151,8 @@ func TestRequiresDedicatedTestenvImportFile(t *testing.T) {
 		b.WriteString("\"")
 		b.WriteString(importPath)
 		b.WriteString("\"\n\n")
-		b.WriteString("This guarantees GC_* env vars are scrubbed before tests run,\n")
-		b.WriteString("so a leak from an agent session cannot corrupt a live city.\n")
+		b.WriteString("This guarantees leak-vector env vars are scrubbed before tests run,\n")
+		b.WriteString("so a leak from an agent session cannot corrupt a live city or spawn orphaned infrastructure.\n")
 		b.WriteString("Run `go run scripts/add-testenv-import.go` to generate the canonical files,\n")
 		b.WriteString("scrub legacy imports, and remove stale stubs.")
 		t.Fatal(b.String())
@@ -175,18 +169,13 @@ func TestNoLeakVectorReadsAtPackageInit(t *testing.T) {
 	for _, name := range testenv.LeakVectorVars {
 		leakVars[name] = true
 	}
-	skipDirs := map[string]bool{
-		"vendor":       true,
-		"node_modules": true,
-		".git":         true,
-	}
 	var offenders []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			if skipDirs[d.Name()] {
+			if skipRepoLintDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -231,6 +220,16 @@ func TestNoLeakVectorReadsAtPackageInit(t *testing.T) {
 	if len(offenders) > 0 {
 		t.Fatalf("production code must not read leak-vector GC_* vars during init or top-level var init:\n  %s", strings.Join(offenders, "\n  "))
 	}
+}
+
+func skipRepoLintDir(name string) bool {
+	if name == "vendor" || name == "node_modules" {
+		return true
+	}
+	if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+		return true
+	}
+	return name == "worktrees" || strings.HasPrefix(name, "worktree-")
 }
 
 // repoRoot returns the repository root by asking git. Falls back to walking up

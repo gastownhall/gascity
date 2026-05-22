@@ -325,6 +325,45 @@ func TestLifecycleCoordination_InitDirIfReady_BdDeferred(t *testing.T) {
 	}
 }
 
+func TestLifecycleCoordination_InitDirIfReadySkipsProviderForPostgresCityAndRig(t *testing.T) {
+	cityPath, rigPath, _ := writeInheritedCityPostgresRigFixture(t, "")
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+
+	originalEnsure := initDirIfReadyEnsureBeadsProvider
+	t.Cleanup(func() {
+		initDirIfReadyEnsureBeadsProvider = originalEnsure
+	})
+
+	var ensureCalls int
+	initDirIfReadyEnsureBeadsProvider = func(string) error {
+		ensureCalls++
+		return fmt.Errorf("managed Dolt provider start should not run for postgres-backed scopes")
+	}
+
+	deferred, err := initDirIfReady(cityPath, cityPath, "gc")
+	if err != nil {
+		t.Fatalf("initDirIfReady(city) error = %v, want nil", err)
+	}
+	if deferred {
+		t.Fatal("initDirIfReady(city) deferred = true, want false")
+	}
+	assertHooksExist(t, cityPath, "after postgres city init")
+
+	deferred, err = initDirIfReady(cityPath, rigPath, "pg")
+	if err != nil {
+		t.Fatalf("initDirIfReady(rig) error = %v, want nil", err)
+	}
+	if deferred {
+		t.Fatal("initDirIfReady(rig) deferred = true, want false")
+	}
+	assertHooksExist(t, rigPath, "after postgres rig add")
+
+	if ensureCalls != 0 {
+		t.Fatalf("managed Dolt provider start calls = %d, want 0", ensureCalls)
+	}
+}
+
 func TestLifecycleCoordination_InitDirIfReady_RetriesTransientManagedDoltFailure(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
@@ -368,6 +407,47 @@ func TestLifecycleCoordination_InitDirIfReady_RetriesTransientManagedDoltFailure
 	}
 	if ensureCalls != 2 {
 		t.Fatalf("ensureBeadsProvider calls = %d, want 2", ensureCalls)
+	}
+	if initCalls != 2 {
+		t.Fatalf("initAndHookDir calls = %d, want 2", initCalls)
+	}
+}
+
+func TestLifecycleCoordination_InitDirIfReady_RetriesManagedDoltSchemaNotReady(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	MaterializeBuiltinPacks(dir) //nolint:errcheck
+	t.Setenv("GC_BEADS", "bd")
+
+	originalEnsure := initDirIfReadyEnsureBeadsProvider
+	originalInitAndHook := initDirIfReadyInitAndHookDir
+	originalDelay := initDirIfReadyRetryDelay
+	t.Cleanup(func() {
+		initDirIfReadyEnsureBeadsProvider = originalEnsure
+		initDirIfReadyInitAndHookDir = originalInitAndHook
+		initDirIfReadyRetryDelay = originalDelay
+	})
+
+	initDirIfReadyRetryDelay = 0
+	initDirIfReadyEnsureBeadsProvider = func(_ string) error { return nil }
+
+	var initCalls int
+	initDirIfReadyInitAndHookDir = func(_, _, _ string) error {
+		initCalls++
+		if initCalls == 1 {
+			return fmt.Errorf("bd list: exit status 1: table not found: issues")
+		}
+		return nil
+	}
+
+	deferred, err := initDirIfReady(dir, dir, "gc")
+	if err != nil {
+		t.Fatalf("initDirIfReady() error = %v, want nil after retry", err)
+	}
+	if deferred {
+		t.Fatal("initDirIfReady() deferred = true, want false")
 	}
 	if initCalls != 2 {
 		t.Fatalf("initAndHookDir calls = %d, want 2", initCalls)

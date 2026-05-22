@@ -22,21 +22,23 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
+	if err := cacheLiveOr503(store); err != nil {
+		return nil, err
+	}
 	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
-	sp := s.state.SessionProvider()
 
-	sessions, err := mgr.List(input.State, input.Template)
+	all, partialErrors, err := sessionReadModelRows(store)
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
+	listResult := mgr.ListFullFromBeads(all, input.State, input.Template)
+	sessions := listResult.Sessions
 
 	// Build bead index for reason enrichment.
 	beadIndex := make(map[string]*beads.Bead)
-	if all, listErr := store.List(beads.ListQuery{Label: session.LabelSession}); listErr == nil {
-		for i := range all {
-			beadIndex[all[i].ID] = &all[i]
-		}
+	for i := range listResult.Beads {
+		beadIndex[listResult.Beads[i].ID] = &listResult.Beads[i]
 	}
 
 	wantPeek := input.Peek
@@ -44,7 +46,7 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	items := make([]sessionResponse, len(sessions))
 	for i, sess := range sessions {
 		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, hasDeferredQueue)
-		s.enrichSessionResponse(&items[i], sess, cfg, sp, wantPeek, false)
+		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
 	}
 
 	// Pagination support.
@@ -70,8 +72,14 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 			items = items[:pp.Limit]
 		}
 		return &ListOutput[sessionResponse]{
-			Index: s.latestIndex(),
-			Body:  ListBody[sessionResponse]{Items: items, Total: total},
+			Index:     s.latestIndex(),
+			CacheAgeS: cacheAgeSeconds(store),
+			Body: ListBody[sessionResponse]{
+				Items:         items,
+				Total:         total,
+				Partial:       len(partialErrors) > 0,
+				PartialErrors: partialErrors,
+			},
 		}, nil
 	}
 
@@ -80,8 +88,15 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		page = []sessionResponse{}
 	}
 	return &ListOutput[sessionResponse]{
-		Index: s.latestIndex(),
-		Body:  ListBody[sessionResponse]{Items: page, Total: total, NextCursor: nextCursor},
+		Index:     s.latestIndex(),
+		CacheAgeS: cacheAgeSeconds(store),
+		Body: ListBody[sessionResponse]{
+			Items:         page,
+			Total:         total,
+			NextCursor:    nextCursor,
+			Partial:       len(partialErrors) > 0,
+			PartialErrors: partialErrors,
+		},
 	}, nil
 }
 
@@ -93,6 +108,9 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 	store := s.state.CityBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
+	}
+	if err := cacheLiveOr503(store); err != nil {
+		return nil, err
 	}
 	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
@@ -109,10 +127,11 @@ func (s *Server) humaHandleSessionGet(_ context.Context, input *SessionGetInput)
 	b, _ := store.Get(id)
 	wantPeek := input.Peek
 	resp := sessionResponseWithReason(info, &b, cfg, strings.TrimSpace(s.state.CityPath()) != "")
-	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek, true)
+	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek, true, true, input.PeekLines)
 	return &IndexOutput[sessionResponse]{
-		Index: s.latestIndex(),
-		Body:  resp,
+		Index:     s.latestIndex(),
+		CacheAgeS: cacheAgeSeconds(store),
+		Body:      resp,
 	}, nil
 }
 
@@ -151,12 +170,20 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 		// sentinel) rather than 1 compaction.
 		tail, _ := input.Compactions()
 		before := input.Before
+		after := input.After
+
+		if before != "" && after != "" {
+			return nil, huma.Error422UnprocessableEntity("before and after are mutually exclusive")
+		}
 
 		if wantRaw {
 			var rawSess *sessionlog.Session
-			if before != "" {
+			switch {
+			case before != "":
 				rawSess, err = sessionlog.ReadProviderFileRawOlder(info.Provider, path, tail, before)
-			} else {
+			case after != "":
+				rawSess, err = sessionlog.ReadProviderFileRawNewer(info.Provider, path, tail, after)
+			default:
 				rawSess, err = sessionlog.ReadProviderFileRaw(info.Provider, path, tail)
 			}
 			if err != nil {
@@ -176,9 +203,12 @@ func (s *Server) humaHandleSessionTranscript(_ context.Context, input *SessionTr
 		}
 
 		var sess *sessionlog.Session
-		if before != "" {
+		switch {
+		case before != "":
 			sess, err = sessionlog.ReadProviderFileOlder(info.Provider, path, tail, before)
-		} else {
+		case after != "":
+			sess, err = sessionlog.ReadProviderFileNewer(info.Provider, path, tail, after)
+		default:
 			sess, err = sessionlog.ReadProviderFile(info.Provider, path, tail)
 		}
 		if err != nil {
@@ -265,6 +295,13 @@ func (s *Server) humaHandleSessionPending(_ context.Context, input *SessionIDInp
 	id, err := s.resolveSessionIDWithConfig(store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
+	}
+
+	if b, bErr := store.Get(id); bErr == nil && b.Metadata["state"] == "creating" {
+		return &IndexOutput[sessionPendingResponse]{
+			Index: s.latestIndex(),
+			Body:  sessionPendingResponse{Supported: false},
+		}, nil
 	}
 
 	mgr := s.sessionManager(store)

@@ -39,7 +39,28 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 		if mode == "" {
 			mode = "none"
 		}
-		return &ResolvedProvider{Command: agent.StartCommand, PromptMode: mode, PromptFlag: agent.PromptFlag}, nil
+		resolved := &ResolvedProvider{
+			Command:    agent.StartCommand,
+			Lifecycle:  agent.Lifecycle,
+			PromptMode: mode,
+			PromptFlag: agent.PromptFlag,
+		}
+		if agent.ReadyDelayMs != nil {
+			resolved.ReadyDelayMs = *agent.ReadyDelayMs
+		}
+		if agent.ReadyPromptPrefix != "" {
+			resolved.ReadyPromptPrefix = agent.ReadyPromptPrefix
+		}
+		if len(agent.ProcessNames) > 0 {
+			resolved.ProcessNames = cloneStrings(agent.ProcessNames)
+		}
+		if agent.EmitsPermissionWarning != nil {
+			resolved.EmitsPermissionWarning = *agent.EmitsPermissionWarning
+		}
+		if agent.ResumeCommand != "" {
+			resolved.ResumeCommand = agent.ResumeCommand
+		}
+		return resolved, nil
 	}
 
 	// Step 2: determine provider name.
@@ -76,6 +97,9 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 	// §Kind / provider-family propagation.
 	resolved.BuiltinAncestor = BuiltinFamily(name, cityProviders)
 	mergeAgentOverrides(resolved, agent)
+	if agent.ResumeCommand == "" {
+		completeResolvedProviderResumeCommand(resolved)
+	}
 
 	// Step 4b: workspace.start_command overrides the resolved command when
 	// the agent doesn't set its own. Unlike the escape hatch at step 2
@@ -98,6 +122,22 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 	}
 
 	return resolved, nil
+}
+
+// AgentProcessNames resolves the process-name hints used to observe an agent's
+// runtime liveness, following the same provider resolution path as launch.
+func AgentProcessNames(cfg *City, agent Agent, lookPath LookPathFunc) []string {
+	if len(agent.ProcessNames) > 0 {
+		return append([]string(nil), agent.ProcessNames...)
+	}
+	if cfg == nil || lookPath == nil {
+		return nil
+	}
+	resolved, err := ResolveProvider(&agent, &cfg.Workspace, cfg.Providers, lookPath)
+	if err != nil || len(resolved.ProcessNames) == 0 {
+		return nil
+	}
+	return append([]string(nil), resolved.ProcessNames...)
 }
 
 // ResolveInstallHooks returns the hook providers to install for an agent.
@@ -137,9 +177,10 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 			// opt-out and must not fall through to legacy auto-inheritance.
 			if spec.Base != nil {
 				if strings.TrimSpace(*spec.Base) == "" {
-					return &spec, nil
+					standalone := normalizeProviderLayerArgsForSchema(spec, spec.OptionsSchema)
+					return &standalone, nil
 				}
-				resolved, err := ResolveProviderChain(name, spec, cityProviders)
+				resolved, err := resolveProviderChain(name, spec, cityProviders, false)
 				if err != nil {
 					return nil, err
 				}
@@ -150,14 +191,19 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 			// if the provider name or command matches a known builtin.
 			builtins := BuiltinProviders()
 			if base, ok := builtins[name]; ok {
-				merged := MergeProviderOverBuiltin(base, spec)
+				base = normalizeProviderLayerArgsForSchema(base, base.OptionsSchema)
+				child := normalizeProviderLayerArgsForSchema(spec, providerSchemaForLayerArgs(base, spec))
+				merged := MergeProviderOverBuiltin(base, child)
 				return &merged, nil
 			}
 			if base, ok := builtins[spec.Command]; ok {
-				merged := MergeProviderOverBuiltin(base, spec)
+				base = normalizeProviderLayerArgsForSchema(base, base.OptionsSchema)
+				child := normalizeProviderLayerArgsForSchema(spec, providerSchemaForLayerArgs(base, spec))
+				merged := MergeProviderOverBuiltin(base, child)
 				return &merged, nil
 			}
-			return &spec, nil
+			standalone := normalizeProviderLayerArgsForSchema(spec, spec.OptionsSchema)
+			return &standalone, nil
 		}
 	}
 
@@ -165,7 +211,7 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 	builtins := BuiltinProviders()
 	if spec, ok := builtins[name]; ok {
 		if _, err := lookPath(spec.pathCheckBinary()); err != nil {
-			return nil, fmt.Errorf("%w: %q", ErrProviderNotInPATH, name)
+			return nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, spec.pathCheckBinary())
 		}
 		return &spec, nil
 	}
@@ -221,6 +267,9 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	// otherwise base is preserved (including base's own &false).
 	if city.EmitsPermissionWarning != nil {
 		result.EmitsPermissionWarning = city.EmitsPermissionWarning
+	}
+	if city.AcceptStartupDialogs != nil {
+		result.AcceptStartupDialogs = cloneBoolPtr(city.AcceptStartupDialogs)
 	}
 	if city.PathCheck != "" {
 		result.PathCheck = city.PathCheck
@@ -386,6 +435,41 @@ func optionKeysRemovedByReplacement(base, replacement []ProviderOption) map[stri
 	return removed
 }
 
+func providerSchemaForLayerArgs(parent, child ProviderSpec) []ProviderOption {
+	if child.OptionsSchema == nil {
+		return parent.OptionsSchema
+	}
+	if child.OptionsSchemaMerge == "by_key" {
+		schema, _ := mergeOptionsSchemaByKey(parent.OptionsSchema, child.OptionsSchema)
+		return schema
+	}
+	return child.OptionsSchema
+}
+
+func normalizeProviderLayerArgsForSchema(spec ProviderSpec, schema []ProviderOption) ProviderSpec {
+	if len(schema) == 0 {
+		return spec
+	}
+	allFlags := CollectAllSchemaFlags(schema)
+	if len(allFlags) == 0 {
+		return spec
+	}
+	defaults := cloneStringMap(spec.OptionDefaults)
+	if defaults == nil {
+		defaults = make(map[string]string)
+	}
+	if spec.Args != nil {
+		spec.Args = stripArgsSlice(spec.Args, allFlags, schema, defaults)
+	}
+	if spec.ArgsAppend != nil {
+		spec.ArgsAppend = stripArgsSlice(spec.ArgsAppend, allFlags, schema, defaults)
+	}
+	if len(defaults) > 0 || spec.OptionDefaults != nil {
+		spec.OptionDefaults = defaults
+	}
+	return spec
+}
+
 // resolveProviderKind determines the canonical builtin provider name for a
 // given provider name. If the name is a builtin, it returns itself. If
 // it's a custom alias whose Command matches a builtin, it returns the
@@ -484,6 +568,7 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		ReadyDelayMs:           spec.ReadyDelayMs,
 		ReadyPromptPrefix:      spec.ReadyPromptPrefix,
 		EmitsPermissionWarning: derefBool(spec.EmitsPermissionWarning),
+		AcceptStartupDialogs:   cloneBoolPtr(spec.AcceptStartupDialogs),
 		SupportsACP:            derefBool(spec.SupportsACP),
 		SupportsHooks:          derefBool(spec.SupportsHooks),
 		InstructionsFile:       spec.InstructionsFile,
@@ -507,6 +592,9 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 						rp.OptionsSchema[i].Choices[j].FlagArgs = make([]string, len(c.FlagArgs))
 						copy(rp.OptionsSchema[i].Choices[j].FlagArgs, c.FlagArgs)
 					}
+					if len(c.FlagAliases) > 0 {
+						rp.OptionsSchema[i].Choices[j].FlagAliases = cloneStringSlices(c.FlagAliases)
+					}
 				}
 			}
 		}
@@ -516,7 +604,7 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		rp.InstructionsFile = "AGENTS.md"
 	}
 	// Copy slices to avoid aliasing.
-	if len(spec.Args) > 0 {
+	if spec.Args != nil {
 		rp.Args = make([]string, len(spec.Args))
 		copy(rp.Args, spec.Args)
 	}
@@ -525,10 +613,11 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 	// if a city.toml still has schema-managed flags in args (e.g.,
 	// --dangerously-skip-permissions), they get removed because the option is
 	// covered by OptionsSchema. Inferred defaults preserve user intent.
-	if len(rp.OptionsSchema) > 0 && len(rp.Args) > 0 {
+	if len(rp.OptionsSchema) > 0 && rp.Args != nil {
 		allFlags := CollectAllSchemaFlags(rp.OptionsSchema)
 		inferredDefaults := make(map[string]string)
-		// Seed with existing OptionDefaults so they aren't overridden.
+		// Seed with existing OptionDefaults; same-layer Args override them
+		// when stripArgsSlice infers a schema-managed choice.
 		for k, v := range spec.OptionDefaults {
 			inferredDefaults[k] = v
 		}
@@ -539,7 +628,6 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 	} else {
 		rp.EffectiveDefaults = ComputeEffectiveDefaults(rp.OptionsSchema, spec.OptionDefaults, nil)
 	}
-
 	if len(spec.ProcessNames) > 0 {
 		rp.ProcessNames = make([]string, len(spec.ProcessNames))
 		copy(rp.ProcessNames, spec.ProcessNames)
@@ -565,6 +653,10 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		copy(rp.ACPArgs, spec.ACPArgs)
 	}
 	return rp
+}
+
+func completeResolvedProviderResumeCommand(rp *ResolvedProvider) {
+	rp.ResumeCommand = completeResumeCommandDefaults(rp.ResumeCommand, rp.ResumeFlag, rp.ResumeStyle, rp.OptionsSchema, rp.EffectiveDefaults)
 }
 
 // AgentHasHooks reports whether an agent has provider hooks installed
@@ -615,6 +707,9 @@ func mergeAgentOverrides(rp *ResolvedProvider, agent *Agent) {
 	}
 	if agent.PromptFlag != "" {
 		rp.PromptFlag = agent.PromptFlag
+	}
+	if agent.Lifecycle != "" {
+		rp.Lifecycle = agent.Lifecycle
 	}
 	if agent.ReadyDelayMs != nil {
 		rp.ReadyDelayMs = *agent.ReadyDelayMs
@@ -685,6 +780,9 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 		v := r.EmitsPermissionWarning
 		out.EmitsPermissionWarning = &v
 	}
+	if leaf.AcceptStartupDialogs == nil && providerBoolFieldSet(r, "accept_startup_dialogs") {
+		out.AcceptStartupDialogs = cloneBoolPtr(r.AcceptStartupDialogs)
+	}
 	if leaf.SupportsACP == nil && providerBoolFieldSet(r, "supports_acp") {
 		v := r.SupportsACP
 		out.SupportsACP = &v
@@ -734,20 +832,13 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 		}
 	}
 	if r.OptionsSchema != nil {
-		out.OptionsSchema = append([]ProviderOption(nil), r.OptionsSchema...)
+		out.OptionsSchema = deepCopyProviderOptions(r.OptionsSchema)
 	}
-	// EffectiveDefaults on ResolvedProvider is the merged defaults; fold
-	// into OptionDefaults on the spec so downstream specToResolved picks
-	// it up when rebuilding.
+	// EffectiveDefaults on ResolvedProvider is the normalized merged defaults;
+	// replace OptionDefaults on the folded spec so same-layer schema-managed
+	// args cannot be shadowed again by the original stale leaf map.
 	if r.EffectiveDefaults != nil {
-		if out.OptionDefaults == nil {
-			out.OptionDefaults = make(map[string]string, len(r.EffectiveDefaults))
-		}
-		for k, v := range r.EffectiveDefaults {
-			if _, ok := out.OptionDefaults[k]; !ok {
-				out.OptionDefaults[k] = v
-			}
-		}
+		out.OptionDefaults = cloneStringMap(r.EffectiveDefaults)
 	}
 	return out
 }

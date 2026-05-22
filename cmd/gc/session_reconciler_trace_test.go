@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 func TestTraceDetailScopesIncludesDependencies(t *testing.T) {
@@ -49,6 +52,45 @@ func TestNormalizeTraceOutcomeCodeAcceptsDeferredActive(t *testing.T) {
 	}
 	if raw != "" {
 		t.Fatalf("raw outcome = %q, want empty", raw)
+	}
+}
+
+func TestConfigDriftTracePayloadIncludesDriftedFields(t *testing.T) {
+	payload := configDriftTracePayload("stored", "current", []string{"CopyFiles"}, traceRecordPayload{
+		"active_reason": "attached",
+	})
+
+	fields, ok := payload["drifted_fields"].([]string)
+	if !ok {
+		t.Fatalf("drifted_fields type = %T, want []string", payload["drifted_fields"])
+	}
+	if len(fields) != 1 || fields[0] != "CopyFiles" {
+		t.Fatalf("drifted_fields = %v, want [CopyFiles]", fields)
+	}
+	if payload["stored_hash"] != "stored" || payload["current_hash"] != "current" {
+		t.Fatalf("hash fields missing from payload: %#v", payload)
+	}
+	if payload["active_reason"] != "attached" {
+		t.Fatalf("extra field not preserved: %#v", payload)
+	}
+}
+
+func TestConfigDriftTracePayloadReservedFieldsOverrideExtras(t *testing.T) {
+	payload := configDriftTracePayload("stored", "current", []string{"CopyFiles"}, traceRecordPayload{
+		"stored_hash":    "extra-stored",
+		"current_hash":   "extra-current",
+		"drifted_fields": []string{"Command"},
+	})
+
+	fields, ok := payload["drifted_fields"].([]string)
+	if !ok {
+		t.Fatalf("drifted_fields type = %T, want []string", payload["drifted_fields"])
+	}
+	if len(fields) != 1 || fields[0] != "CopyFiles" {
+		t.Fatalf("drifted_fields = %v, want [CopyFiles]", fields)
+	}
+	if payload["stored_hash"] != "stored" || payload["current_hash"] != "current" {
+		t.Fatalf("reserved hash fields should win over extras: %#v", payload)
 	}
 }
 
@@ -458,6 +500,223 @@ func TestTraceCycleResultRollupIncludesFlushedRecords(t *testing.T) {
 	}
 }
 
+func TestRecordControllerOperationIsAlwaysOnBaseline(t *testing.T) {
+	cityDir := t.TempDir()
+	tracer := newSessionReconcilerTracer(cityDir, "trace-town", io.Discard)
+	if !tracer.Enabled() {
+		t.Fatal("tracer should be enabled")
+	}
+	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "", time.Now().UTC(), &config.City{})
+	if cycle == nil {
+		t.Fatal("BeginCycle returned nil")
+	}
+	cycle.RecordControllerOperation(
+		TraceSiteDesiredStateBuild,
+		TraceReasonRetained,
+		TraceOutcomeApplied,
+		"load_demand_snapshot",
+		42*time.Millisecond,
+		map[string]any{"phase": "demand"},
+	)
+	if err := cycle.End(TraceCompletionCompleted, map[string]any{}); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	if err := tracer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityDir), TraceFilter{})
+	if err != nil {
+		t.Fatalf("ReadTraceRecords: %v", err)
+	}
+	var op *SessionReconcilerTraceRecord
+	for i := range records {
+		if records[i].RecordType == TraceRecordOperation && records[i].SiteCode == TraceSiteDesiredStateBuild {
+			op = &records[i]
+			break
+		}
+	}
+	if op == nil {
+		t.Fatal("controller operation missing")
+	}
+	if op.TraceMode != TraceModeBaseline {
+		t.Fatalf("trace_mode = %q, want baseline", op.TraceMode)
+	}
+	if op.TraceSource != TraceSourceAlwaysOn {
+		t.Fatalf("trace_source = %q, want always_on", op.TraceSource)
+	}
+	if op.OperationID == "" {
+		t.Fatal("operation_id should be populated")
+	}
+	if op.DurationMS != 42 {
+		t.Fatalf("duration_ms = %d, want 42", op.DurationMS)
+	}
+	if op.Fields["phase"] != "demand" {
+		t.Fatalf("phase field = %#v, want demand", op.Fields["phase"])
+	}
+}
+
+func TestSessionReconcilePhaseTraceUsesDistinctSites(t *testing.T) {
+	cityDir := t.TempDir()
+	tracer := newSessionReconcilerTracer(cityDir, "trace-town", io.Discard)
+	defer tracer.Close() //nolint:errcheck
+	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "", time.Now().UTC(), &config.City{})
+	if cycle == nil {
+		t.Fatal("BeginCycle returned nil")
+	}
+
+	reconcileSessionBeadsTracedWithNamedDemand(
+		context.Background(),
+		cityDir,
+		nil,
+		nil,
+		nil,
+		&config.City{},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		newDrainTracker(),
+		nil,
+		nil,
+		false,
+		nil,
+		"trace-town",
+		nil,
+		clock.Real{},
+		events.Discard,
+		0,
+		0,
+		io.Discard,
+		io.Discard,
+		cycle,
+	)
+
+	got := make(map[string]TraceSiteCode)
+	for _, rec := range cycle.records {
+		if rec.RecordType != TraceRecordOperation {
+			continue
+		}
+		name, _ := rec.Fields["operation_name"].(string)
+		if strings.HasPrefix(name, "session_reconcile.") {
+			got[name] = rec.SiteCode
+		}
+	}
+	want := map[string]TraceSiteCode{
+		"session_reconcile.build_deps":                        TraceSiteSessionReconcileBuildDeps,
+		"session_reconcile.heal_and_retire_duplicates":        TraceSiteSessionReconcileHealRetire,
+		"session_reconcile.topo_order":                        TraceSiteSessionReconcileTopoOrder,
+		"session_reconcile.circuit_breaker_restore":           TraceSiteSessionReconcileCircuitBreaker,
+		"session_reconcile.forward_pass":                      TraceSiteSessionReconcileForwardPass,
+		"session_reconcile.compute_awake_set_and_idle_probes": TraceSiteSessionReconcileAwakeSet,
+		"session_reconcile.apply_wake_sleep_decisions":        TraceSiteSessionReconcileWakeSleep,
+		"session_reconcile.execute_planned_starts":            TraceSiteSessionReconcileStartExecution,
+		"session_reconcile.advance_drains":                    TraceSiteSessionReconcileDrainAdvance,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("session_reconcile operation count = %d, want %d; got %#v, want %#v", len(got), len(want), got, want)
+	}
+	for name, site := range want {
+		if got[name] != site {
+			t.Fatalf("%s site = %q, want %q; all sites: %#v", name, got[name], site, got)
+		}
+	}
+}
+
+func TestTraceFlushAfterEndOnlyPersistsPostEndRecords(t *testing.T) {
+	cityDir := t.TempDir()
+	tracer := newSessionReconcilerTracer(cityDir, "trace-town", io.Discard)
+	if !tracer.Enabled() {
+		t.Fatal("tracer should be enabled")
+	}
+	now := time.Now().UTC()
+	if _, err := tracer.armStore.upsertArm(TraceArm{
+		ScopeType:      TraceArmScopeTemplate,
+		ScopeValue:     "worker",
+		Source:         TraceArmSourceManual,
+		Level:          TraceModeDetail,
+		ArmedAt:        now,
+		ExpiresAt:      now.Add(15 * time.Minute),
+		LastExtendedAt: now,
+		UpdatedAt:      now,
+	}); err != nil {
+		t.Fatalf("upsertArm: %v", err)
+	}
+	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "", time.Now().UTC(), &config.City{})
+	if cycle == nil {
+		t.Fatal("BeginCycle returned nil")
+	}
+	cycle.RecordOperation(
+		TraceSiteLifecycleStartExecute,
+		TraceReasonWake,
+		TraceOutcomeApplied,
+		"provider_start",
+		"worker",
+		"worker",
+		10*time.Millisecond,
+		map[string]any{"step": "before-end"},
+	)
+	if err := cycle.End(TraceCompletionCompleted, map[string]any{}); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	cycle.RecordOperation(
+		TraceSiteLifecycleStartExecute,
+		TraceReasonWake,
+		TraceOutcomeApplied,
+		"provider_start",
+		"worker",
+		"worker",
+		20*time.Millisecond,
+		map[string]any{"step": "after-end"},
+	)
+	if err := cycle.flushCurrentBatch(TraceDurabilityDurable); err != nil {
+		t.Fatalf("flushCurrentBatch: %v", err)
+	}
+	if err := tracer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityDir), TraceFilter{})
+	if err != nil {
+		t.Fatalf("ReadTraceRecords: %v", err)
+	}
+	var beforeEnd, afterEnd int
+	var cycleResult *SessionReconcilerTraceRecord
+	for _, rec := range records {
+		if rec.RecordType == TraceRecordCycleResult {
+			recCopy := rec
+			cycleResult = &recCopy
+			continue
+		}
+		if rec.RecordType != TraceRecordOperation {
+			continue
+		}
+		switch rec.Fields["step"] {
+		case "before-end":
+			beforeEnd++
+		case "after-end":
+			if got := rec.Fields["post_cycle_result"]; got != true {
+				t.Fatalf("post_cycle_result = %#v, want true", got)
+			}
+			if got := rec.Fields["rollup_excluded"]; got != true {
+				t.Fatalf("rollup_excluded = %#v, want true", got)
+			}
+			afterEnd++
+		}
+	}
+	if cycleResult == nil {
+		t.Fatal("cycle_result missing")
+	}
+	if cycleResult.RecordCount >= len(records) {
+		t.Fatalf("cycle_result record_count = %d, want less than persisted records %d because post-End records are rollup-excluded", cycleResult.RecordCount, len(records))
+	}
+	if beforeEnd != 1 || afterEnd != 1 {
+		t.Fatalf("operation counts before-end=%d after-end=%d, want 1 each", beforeEnd, afterEnd)
+	}
+}
+
 func TestTraceFlushCurrentBatchQueueFullDegrades(t *testing.T) {
 	cityDir := t.TempDir()
 	store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
@@ -493,6 +752,30 @@ func TestTraceFlushCurrentBatchQueueFullDegrades(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "flush_queue_full") {
 		t.Fatalf("stderr = %q, want flush_queue_full", stderr.String())
+	}
+}
+
+func TestTraceCloseDoesNotDependOnMutableFlushChannelField(t *testing.T) {
+	cityDir := t.TempDir()
+	store, err := newSessionReconcilerTraceStore(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close() //nolint:errcheck
+
+	flushCh := make(chan sessionReconcilerTraceFlushRequest)
+	tracer := &SessionReconcilerTracer{
+		store:     store,
+		flushDone: make(chan struct{}),
+		flushCh:   nil,
+	}
+	go tracer.runFlushLoop(flushCh)
+	close(flushCh)
+
+	select {
+	case <-tracer.flushDone:
+	case <-time.After(time.Second):
+		t.Fatal("flush loop did not exit after the original channel closed")
 	}
 }
 

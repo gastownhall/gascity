@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/signal"
+	"syscall"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -17,8 +20,11 @@ import (
 
 func newHandoffCmd(stdout, stderr io.Writer) *cobra.Command {
 	var target string
+	var auto bool
+	var hookFormat string
+	var jsonOut bool
 	cmd := &cobra.Command{
-		Use:   "handoff <subject> [message]",
+		Use:   "handoff [subject] [message]",
 		Short: "Send handoff mail and restart controller-managed sessions",
 		Long: `Convenience command for context handoff.
 
@@ -33,6 +39,16 @@ For controller-restartable sessions, equivalent to:
   gc mail send $GC_ALIAS <subject> [message]
   gc runtime request-restart
 
+Under normal operation the controller stops controller-restartable
+self-handoff sessions before this command returns. If the controller does not
+act within a bounded timeout, gc handoff exits 1 with a diagnostic instead of
+blocking indefinitely. If interrupted, the restart request remains set for the
+controller to process on its next reconcile tick.
+
+Auto handoff (--auto): sends mail to self and returns without requesting a
+restart. This is for PreCompact hooks, where the provider is already managing
+the context compaction lifecycle.
+
 Remote handoff (--target): sends mail to a target session. If the target is
 controller-restartable, kills it so the reconciler restarts it with the handoff
 mail waiting. For on-demand configured named targets, sends mail and returns
@@ -44,21 +60,77 @@ For controller-restartable targets, equivalent to:
   gc session kill <target>
 
 Self-handoff requires session context (GC_ALIAS or GC_SESSION_ID, plus
-GC_SESSION_NAME and city context env). Remote handoff accepts a session alias or ID.`,
-		Args: cobra.RangeArgs(1, 2),
+GC_SESSION_NAME and city context env). Remote handoff accepts a session alias
+or ID. Subject is required unless --auto is set.`,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if auto {
+				return cobra.MaximumNArgs(2)(cmd, args)
+			}
+			return cobra.RangeArgs(1, 2)(cmd, args)
+		},
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdHandoff(args, target, stdout, stderr) != 0 {
+			out := stdout
+			if jsonOut {
+				out = io.Discard
+			}
+			if cmdHandoff(args, target, auto, hookFormat, out, stderr) != 0 {
 				return errExit
+			}
+			if jsonOut {
+				return writeCLIJSONLineOrErr(stdout, stderr, "gc handoff", handoffJSONResult{
+					SchemaVersion: "1",
+					OK:            true,
+					Mode:          handoffJSONMode(target, auto),
+					Target:        target,
+					Auto:          auto,
+					Subject:       handoffJSONSubject(args, auto),
+				})
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&target, "target", "", "Remote session alias or ID to handoff (kills only controller-restartable sessions)")
+	cmd.Flags().BoolVar(&auto, "auto", false, "Send handoff mail without requesting restart (for PreCompact hooks)")
+	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	return cmd
 }
 
-func cmdHandoff(args []string, target string, stdout, stderr io.Writer) int {
+type handoffJSONResult struct {
+	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
+	Mode          string `json:"mode"`
+	Target        string `json:"target,omitempty"`
+	Auto          bool   `json:"auto"`
+	Subject       string `json:"subject,omitempty"`
+}
+
+func handoffJSONMode(target string, auto bool) string {
 	if target != "" {
+		return "remote"
+	}
+	if auto {
+		return "auto"
+	}
+	return "self"
+}
+
+func handoffJSONSubject(args []string, auto bool) string {
+	if len(args) > 0 {
+		return args[0]
+	}
+	if auto {
+		return "context cycle"
+	}
+	return "HANDOFF: context cycle"
+}
+
+func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdout, stderr io.Writer) int {
+	if target != "" {
+		if auto {
+			fmt.Fprintln(stderr, "gc handoff: --auto cannot be used with --target") //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		return cmdHandoffRemote(args, target, stdout, stderr)
 	}
 
@@ -74,9 +146,13 @@ func cmdHandoff(args []string, target string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	rec := openCityRecorderAt(current.cityPath, stderr)
+	if auto {
+		return doHandoffAuto(store, rec, current.display, args, hookFormat, stdout, stderr)
+	}
+
 	sp := newSessionProvider()
 	dops := newDrainOps(sp)
-	rec := openCityRecorderAt(current.cityPath, stderr)
 	cfg, _ := loadCityConfig(current.cityPath, stderr)
 	persistRestart := sessionRestartPersister(current.cityPath, store, sp, cfg, current.sessionName)
 
@@ -88,12 +164,14 @@ func cmdHandoff(args []string, target string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	// Block forever. The controller will kill the entire process tree.
-	select {}
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return waitForControllerRestart(sigCtx, dops, current.sessionName, "gc handoff",
+		controllerRestartPollInterval, controllerRestartTimeout(cfg), stderr)
 }
 
-// cmdHandoffRemote sends handoff mail to a remote session and stops the target
-// only when the controller can restart it. Returns immediately.
+// cmdHandoffRemote sends handoff mail to a remote session and kills its runtime.
+// Returns immediately (non-blocking). The reconciler restarts the target.
 func cmdHandoffRemote(args []string, target string, stdout, stderr io.Writer) int {
 	targetInfo, err := resolveSessionRuntimeTarget(target, stderr)
 	if err != nil {
@@ -150,48 +228,23 @@ func doHandoff(store beads.Store, rec events.Recorder, dops drainOps, persistRes
 func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps, persistRestart func() error,
 	sessionAddress, sessionName string, args []string, stdout, stderr io.Writer,
 ) handoffOutcome {
-	subject := args[0]
-	var message string
-	if len(args) > 1 {
-		message = args[1]
-	}
-
-	b, err := store.Create(beads.Bead{
-		Title:       subject,
-		Description: message,
-		Type:        "message",
-		Assignee:    sessionAddress,
-		From:        sessionAddress,
-		Labels:      []string{"thread:" + handoffThreadID()},
-	})
-	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: creating mail: %v\n", err) //nolint:errcheck // best-effort stderr
+	b, ok := createHandoffMail(store, rec, sessionAddress, sessionAddress, args, "HANDOFF: context cycle", stderr)
+	if !ok {
 		return handoffOutcome{code: 1}
 	}
-	rec.Record(events.Event{
-		Type:    events.MailSent,
-		Actor:   sessionAddress,
-		Subject: b.ID,
-		Message: sessionAddress,
-		Payload: mailEventPayload(nil),
-	})
 
 	restartable, err := sessionRestartableByController(store, sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
 		return handoffOutcome{code: 1}
 	}
-	// On-demand named sessions are human-attended and the controller cannot
-	// respawn their process after a restart request. Preserve the handoff
-	// mail so context survives, but skip both restart flags. Regression
-	// guard: gastownhall/gascity#744.
 	if !restartable {
 		if err := clearRestartRequest(store, dops, sessionName); err != nil {
 			fmt.Fprintf(stderr, "gc handoff: clearing stale restart request: %v\n", err) //nolint:errcheck // best-effort stderr
-			return handoffOutcome{code: 1, restartRequested: false}
+			return handoffOutcome{code: 1}
 		}
 		fmt.Fprintf(stdout, "Handoff: sent mail %s (named session; restart skipped).\n", b.ID) //nolint:errcheck // best-effort stdout
-		return handoffOutcome{code: 0, restartRequested: false}
+		return handoffOutcome{code: 0}
 	}
 
 	if err := dops.setRestartRequested(sessionName); err != nil {
@@ -214,6 +267,59 @@ func doHandoffWithOutcome(store beads.Store, rec events.Recorder, dops drainOps,
 
 	fmt.Fprintf(stdout, "Handoff: sent mail %s, requesting restart...\n", b.ID) //nolint:errcheck // best-effort stdout
 	return handoffOutcome{code: 0, restartRequested: true}
+}
+
+// doHandoffAuto sends handoff mail to self without requesting restart.
+func doHandoffAuto(store beads.Store, rec events.Recorder, sessionAddress string, args []string, hookFormat string, stdout, stderr io.Writer) int {
+	b, ok := createHandoffMail(store, rec, sessionAddress, sessionAddress, args, "context cycle", stderr)
+	if !ok {
+		return 1
+	}
+	message := fmt.Sprintf("Handoff: sent auto mail %s (restart skipped).\n", b.ID)
+	if err := writeProviderHookContextForEvent(stdout, hookFormat, "PreCompact", message); err != nil {
+		fmt.Fprintf(stderr, "gc handoff: writing hook output: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return 0
+}
+
+func createHandoffMail(store beads.Store, rec events.Recorder, senderAddress, recipientAddress string, args []string, defaultSubject string, stderr io.Writer) (beads.Bead, bool) {
+	subject := defaultSubject
+	if len(args) > 0 {
+		subject = args[0]
+	}
+	var message string
+	if len(args) > 1 {
+		message = args[1]
+	}
+	metadata, err := mailSenderRouteMetadata(store, senderAddress)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc handoff: resolving sender route: %v\n", err) //nolint:errcheck // best-effort stderr
+		return beads.Bead{}, false
+	}
+	senderDisplay := mailSenderDisplayFromMetadata(senderAddress, metadata)
+
+	b, err := store.Create(beads.Bead{
+		Title:       subject,
+		Description: message,
+		Type:        "message",
+		Assignee:    recipientAddress,
+		From:        senderDisplay,
+		Labels:      []string{"thread:" + handoffThreadID()},
+		Metadata:    metadata,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "gc handoff: creating mail: %v\n", err) //nolint:errcheck // best-effort stderr
+		return beads.Bead{}, false
+	}
+	rec.Record(events.Event{
+		Type:    events.MailSent,
+		Actor:   senderDisplay,
+		Subject: b.ID,
+		Message: recipientAddress,
+		Payload: mailEventPayload(nil),
+	})
+	return b, true
 }
 
 func sessionRestartableByController(store beads.Store, sessionName string) (bool, error) {
@@ -267,37 +373,15 @@ func clearRestartRequest(store beads.Store, dops drainOps, sessionName string) e
 	return errors.Join(errs...)
 }
 
-// doHandoffRemote sends handoff mail to a remote session and stops the target
-// only when the controller can restart it.
+// doHandoffRemote sends handoff mail to a remote session and kills its runtime.
+// Non-blocking: returns immediately after killing the session.
 func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider,
 	sessionName, targetAddress, sender string, args []string, stdout, stderr io.Writer,
 ) int {
-	subject := args[0]
-	var message string
-	if len(args) > 1 {
-		message = args[1]
-	}
-
-	// Send mail to target.
-	b, err := store.Create(beads.Bead{
-		Title:       subject,
-		Description: message,
-		Type:        "message",
-		Assignee:    targetAddress,
-		From:        sender,
-		Labels:      []string{"thread:" + handoffThreadID()},
-	})
-	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: creating mail: %v\n", err) //nolint:errcheck // best-effort stderr
+	b, ok := createHandoffMail(store, rec, sender, targetAddress, args, "HANDOFF: context cycle", stderr)
+	if !ok {
 		return 1
 	}
-	rec.Record(events.Event{
-		Type:    events.MailSent,
-		Actor:   sender,
-		Subject: b.ID,
-		Message: targetAddress,
-		Payload: mailEventPayload(nil),
-	})
 
 	restartable, err := sessionRestartableByController(store, sessionName)
 	if err != nil {
@@ -327,11 +411,19 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 		fmt.Fprintf(stderr, "gc handoff: killing %s: %v\n", targetAddress, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	sessionID, resolveErr := resolveSessionID(store, sessionName)
+	if resolveErr != nil {
+		// The session was just killed; resolution can fail if its bead
+		// has been closed mid-flight. Fall back to the runtime name so
+		// subscribers still get a usable correlation key.
+		sessionID = sessionName
+	}
 	rec.Record(events.Event{
 		Type:    events.SessionStopped,
 		Actor:   sender,
 		Subject: targetAddress,
 		Message: "handoff",
+		Payload: api.SessionLifecyclePayloadJSON(sessionID, "", "handoff"),
 	})
 
 	fmt.Fprintf(stdout, "Handoff: sent mail %s to %s, killed session (reconciler will restart)\n", b.ID, targetAddress) //nolint:errcheck // best-effort stdout

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -72,6 +73,37 @@ func TestResolveWorkerSessionRuntimePreservesStoredResolvedCommandAndBackfillsCu
 	}
 	if got, want := runtimeCfg.Hints.ReadyDelayMs, 321; got != want {
 		t.Fatalf("Hints.ReadyDelayMs = %d, want %d", got, want)
+	}
+	// Regression for upstream gastownhall/gascity#101 (re-opened): the
+	// API resume resolver must seed the three city-anchor identity vars
+	// so the restarted shell can locate its city. Without this assertion
+	// the new reseed could silently regress without test coverage.
+	if got, want := runtimeCfg.SessionEnv["GC_CITY"], fs.cityPath; got != want {
+		t.Errorf("SessionEnv[GC_CITY] = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.SessionEnv["GC_CITY_PATH"], fs.cityPath; got != want {
+		t.Errorf("SessionEnv[GC_CITY_PATH] = %q, want %q", got, want)
+	}
+	if runtimeCfg.SessionEnv["GC_CITY_RUNTIME_DIR"] == "" {
+		t.Error("SessionEnv[GC_CITY_RUNTIME_DIR] = empty, want set")
+	}
+	// Identity-only contract (per Copilot review): no dispatcher trace
+	// default — that must stay per-dispatcher-qualified, not reseeded
+	// to the city-uniform value here.
+	if got, present := runtimeCfg.SessionEnv["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]; present {
+		t.Errorf("SessionEnv[GC_CONTROL_DISPATCHER_TRACE_DEFAULT] = %q present, want absent (identity-only)", got)
+	}
+	if got, want := runtimeCfg.Hints.Env["GC_CITY"], fs.cityPath; got != want {
+		t.Errorf("Hints.Env[GC_CITY] = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.Hints.Env["GC_CITY_PATH"], fs.cityPath; got != want {
+		t.Errorf("Hints.Env[GC_CITY_PATH] = %q, want %q", got, want)
+	}
+	if runtimeCfg.Hints.Env["GC_CITY_RUNTIME_DIR"] == "" {
+		t.Error("Hints.Env[GC_CITY_RUNTIME_DIR] = empty, want set")
+	}
+	if got, present := runtimeCfg.Hints.Env["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]; present {
+		t.Errorf("Hints.Env[GC_CONTROL_DISPATCHER_TRACE_DEFAULT] = %q present, want absent (identity-only)", got)
 	}
 }
 
@@ -619,6 +651,150 @@ func TestResolveWorkerSessionRuntimeFallsBackToPersistedProviderWhenCommandMissi
 	}
 }
 
+func TestResolveWorkerSessionRuntimeProviderCollisionUsesPersistedProvider(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents = []config.Agent{{
+		Name:     "test-agent",
+		Provider: "agent-provider",
+	}}
+	fs.cfg.Providers["test-agent"] = config.ProviderSpec{
+		Command:   "/bin/echo",
+		Args:      []string{"provider-session"},
+		PathCheck: "true",
+	}
+	fs.cfg.Providers["agent-provider"] = config.ProviderSpec{
+		Command:   "/bin/echo",
+		Args:      []string{"agent-template"},
+		PathCheck: "true",
+	}
+
+	srv := New(fs)
+	runtimeCfg, err := srv.resolveWorkerSessionRuntimeWithMetadata(session.Info{
+		Template: "test-agent",
+		Provider: "test-agent",
+		WorkDir:  t.TempDir(),
+	}, "", map[string]string{
+		"session_origin": "manual",
+	})
+	if err != nil {
+		t.Fatalf("resolveWorkerSessionRuntimeWithMetadata: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("resolveWorkerSessionRuntimeWithMetadata() = nil")
+	}
+	if got, wantPrefix := runtimeCfg.Command, "/bin/echo provider-session"; !strings.HasPrefix(got, wantPrefix) {
+		t.Fatalf("Command = %q, want prefix %q", got, wantPrefix)
+	}
+}
+
+func TestResolveWorkerSessionRuntimeProviderNameCollisionUsesPersistedProvider(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents = []config.Agent{{
+		Name:     "codex",
+		Provider: "codex",
+		WorkDir:  ".gc/worktrees/agent-codex",
+	}}
+	fs.cfg.Providers["codex"] = config.ProviderSpec{
+		Command:   "/bin/echo",
+		Args:      []string{"provider-session"},
+		PathCheck: "true",
+	}
+
+	srv := New(fs)
+	providerWorkDir := t.TempDir()
+	runtimeCfg, err := srv.resolveWorkerSessionRuntimeWithMetadata(session.Info{
+		Template: "codex",
+		Provider: "codex",
+		WorkDir:  providerWorkDir,
+	}, "", map[string]string{
+		"session_origin": "manual",
+	})
+	if err != nil {
+		t.Fatalf("resolveWorkerSessionRuntimeWithMetadata: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("resolveWorkerSessionRuntimeWithMetadata() = nil")
+	}
+	if got, wantPrefix := runtimeCfg.Command, "/bin/echo provider-session"; !strings.HasPrefix(got, wantPrefix) {
+		t.Fatalf("Command = %q, want prefix %q", got, wantPrefix)
+	}
+	if got, want := runtimeCfg.WorkDir, providerWorkDir; got != want {
+		t.Fatalf("WorkDir = %q, want %q", got, want)
+	}
+}
+
+func TestResolveWorkerSessionRuntimeLegacyProviderKindSkipsNameCollisionTemplate(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents = []config.Agent{{
+		Name:     "codex",
+		Provider: "codex",
+		Session:  "acp",
+		WorkDir:  ".gc/worktrees/agent-codex",
+	}}
+	fs.cfg.Providers["codex"] = config.ProviderSpec{
+		Command:    "/bin/echo",
+		Args:       []string{"provider-session"},
+		PathCheck:  "true",
+		ACPCommand: "/bin/echo",
+		ACPArgs:    []string{"agent-acp"},
+	}
+
+	srv := New(fs)
+	runtimeCfg, err := srv.resolveWorkerSessionRuntimeWithMetadata(session.Info{
+		Template: "codex",
+		Provider: "codex",
+		WorkDir:  t.TempDir(),
+	}, "", map[string]string{
+		"real_world_app_session_kind": "provider",
+	})
+	if err != nil {
+		t.Fatalf("resolveWorkerSessionRuntimeWithMetadata: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("resolveWorkerSessionRuntimeWithMetadata() = nil")
+	}
+	if got, wantPrefix := runtimeCfg.Command, "/bin/echo provider-session"; !strings.HasPrefix(got, wantPrefix) {
+		t.Fatalf("Command = %q, want prefix %q", got, wantPrefix)
+	}
+}
+
+func TestResolveWorkerSessionRuntimeLegacyManualAgentUsesTemplateWhenProviderMatches(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents = []config.Agent{{
+		Name:     "worker",
+		Dir:      "myrig",
+		Provider: "test-agent",
+	}}
+	fs.cfg.Providers["test-agent"] = config.ProviderSpec{
+		Command:           "/bin/echo",
+		Args:              []string{"agent-template"},
+		PathCheck:         "true",
+		ReadyPromptPrefix: "agent-ready>",
+	}
+
+	srv := New(fs)
+	runtimeCfg, err := srv.resolveWorkerSessionRuntimeWithMetadata(session.Info{
+		Template: "myrig/worker",
+		Provider: "test-agent",
+		WorkDir:  t.TempDir(),
+	}, "", map[string]string{
+		"agent_name":     "myrig/worker",
+		"session_origin": "manual",
+	})
+	if err != nil {
+		t.Fatalf("resolveWorkerSessionRuntimeWithMetadata: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("resolveWorkerSessionRuntimeWithMetadata() = nil")
+	}
+	if got, want := runtimeCfg.Command, "/bin/echo agent-template"; got != want {
+		t.Fatalf("Command = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.Hints.ReadyPromptPrefix, "agent-ready>"; got != want {
+		t.Fatalf("Hints.ReadyPromptPrefix = %q, want %q", got, want)
+	}
+}
+
 func TestWorkerFactorySessionByIDUsesResolvedTemplateRuntime(t *testing.T) {
 	fs := newSessionFakeState(t)
 	fs.cfg.Agents[0].Provider = "resolved-worker"
@@ -773,6 +949,63 @@ func TestWorkerFactorySessionByIDUsesResolvedCommandAndResumeSettingsOnResume(t 
 		t.Fatal("LastStartConfig() = nil")
 	}
 	if got, want := start.Command, "/bin/echo --resume-resolved "+info.SessionKey; got != want {
+		t.Fatalf("start command = %q, want %q", got, want)
+	}
+}
+
+func TestWorkerFactorySessionByIDAppliesTemplateOverridesToExplicitResumeCommand(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	fs.cfg.Agents[0].Provider = "resolved-worker"
+	spec := fs.cfg.Providers["test-agent"]
+	spec.Command = "/bin/echo"
+	spec.ResumeCommand = "/bin/echo resume {{.SessionKey}} --skip-permissions"
+	spec.SessionIDFlag = "--session-id"
+	fs.cfg.Providers["resolved-worker"] = spec
+
+	srv := New(fs)
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(
+		context.Background(),
+		"myrig/worker",
+		"Chat",
+		"/bin/echo --skip-permissions",
+		t.TempDir(),
+		"resolved-worker",
+		nil,
+		session.ProviderResume{
+			ResumeCommand: "/bin/echo resume {{.SessionKey}} --skip-permissions",
+			SessionIDFlag: "--session-id",
+		},
+		runtime.Config{},
+	)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if err := fs.cityBeadStore.SetMetadata(info.ID, "template_overrides", `{"permission_mode":"plan"}`); err != nil {
+		t.Fatalf("SetMetadata(template_overrides): %v", err)
+	}
+
+	factory, err := srv.workerFactory(fs.cityBeadStore)
+	if err != nil {
+		t.Fatalf("workerFactory: %v", err)
+	}
+	handle, err := factory.SessionByID(info.ID)
+	if err != nil {
+		t.Fatalf("SessionByID(%q): %v", info.ID, err)
+	}
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	start := fs.sp.LastStartConfig(info.SessionName)
+	if start == nil {
+		t.Fatal("LastStartConfig() = nil")
+	}
+	want := "/bin/echo resume " + info.SessionKey + " --permission-mode plan --effort max"
+	if got := start.Command; got != want {
 		t.Fatalf("start command = %q, want %q", got, want)
 	}
 }

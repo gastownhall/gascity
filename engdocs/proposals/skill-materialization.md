@@ -52,7 +52,7 @@ activation is **out of scope for v0.15.1** and lands on main afterwards.
    don't drain.
 3. No cleanup on skill removal — the current stub materializer only writes.
 4. `Agent.Skills` / `SharedSkills` filter lists exist in config but don't
-   match the PackV2 design doc (`docs/packv2/doc-agent-v2.md:191`) which says
+   match the PackV2 design doc (`engdocs/design/packv2/doc-agent-v2.md:191`) which says
    every agent gets every city skill.
 
 ## Goals
@@ -78,11 +78,11 @@ activation is **out of scope for v0.15.1** and lands on main afterwards.
   `skills/` (shipped with the `gc` binary, e.g., `core`) contribute. A
   user's `[imports.foo]` pointing at a third-party pack does **not** have
   its `skills/` walked in v0.15.1 (tracked in
-  `docs/packv2/doc-pack-v2.md:59-60`). The materializer's source set is
+  `engdocs/design/packv2/doc-pack-v2.md:59-60`). The materializer's source set is
   the union of these two categories; see "Skill source discovery" below
   for the enumeration rule.
 - **Skill promotion workflows** (`gc skill promote …`) — design-noted in
-  `docs/packv2/doc-agent-v2.md:207` as a later slice.
+  `engdocs/design/packv2/doc-agent-v2.md:207` as a later slice.
 - **Fold-in of `maintenance` and `dolt` into `core`.** v0.15.1 ships the
   `core` bootstrap pack initially containing only the gc-topic stubs. Folding
   the other builtin packs into `core` lands on main after v0.15.1.
@@ -230,7 +230,7 @@ come later if relocatable worktrees become a requirement.
 
 ### No attachment filtering
 
-Per `docs/packv2/doc-agent-v2.md:191`:
+Per `engdocs/design/packv2/doc-agent-v2.md:191`:
 
 > An agent gets city-wide skills + its own skills. Agent-specific wins on
 > name collision.
@@ -590,7 +590,7 @@ behavior is silent shadowing:
 bootstrap entry into `~/.gc/implicit-import.toml`, and
 `internal/bootstrap/packs/import/lib/implicit.py:154` (the `gc import`
 splice logic) plus the packman semantics
-(`docs/packv2/doc-packman.md:169`) treat explicit `[imports.X]` as
+(`engdocs/design/packv2/doc-packman.md:169`) treat explicit `[imports.X]` as
 taking precedence over the implicit splice. A user with `[imports.core]`
 therefore silently overrides the bootstrap entry, which on upgrade would
 silently replace the expected `gc-<topic>` skills with whatever is in
@@ -693,9 +693,9 @@ That is not part of this release.
    symlinks.
 4. **MCP activation.** Lands on main post-v0.15.1.
 5. **Skill promotion (`gc skill promote`).** Not in this hotfix. Tracked
-   in `docs/packv2/doc-agent-v2.md:207`.
+   in `engdocs/design/packv2/doc-agent-v2.md:207`.
 6. **Imported-pack skill catalogs.** Still current-city-pack-only. Tracked
-   in `docs/packv2/doc-pack-v2.md:59`.
+   in `engdocs/design/packv2/doc-pack-v2.md:59`.
 7. **Per-pool PreStart caching.** Optional perf improvement if pool
    scale-up invocation cost becomes noticeable.
 8. **`CoreFingerprintBreakdown` per-skill drift log.** Small ergonomic

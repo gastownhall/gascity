@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pgauth"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
@@ -114,12 +116,58 @@ func (s *slingTestStore) Get(id string) (beads.Bead, error) {
 	}
 	b, ok := s.synthetic[id]
 	if !ok {
-		if _, _, looksLikeBead := sling.BeadIDParts(id); !looksLikeBead {
+		if !slingTestLooksLikeBeadID(id) {
 			return beads.Bead{}, err
 		}
 		return s.ensureSynthetic(id), nil
 	}
 	return b, nil
+}
+
+// slingTestLooksLikeBeadID accepts the same single-dash shapes as
+// sling.BeadIDParts plus multi-dash shapes whose trailing token has the
+// bead-suffix shape: alphanumeric, ≤8 chars, and either ≤4 chars long
+// or containing at least one digit. The digit-or-≤4 rule mirrors
+// looksLikeBeadIDSuffix and prevents prose like "code-review-please"
+// (suffix "please" — 6 chars, no digit) from being silently fabricated
+// as a synthetic bead and masking the auto-create-text-bead branch in
+// tests. Tests that rely on multi-dash bead IDs whose suffix violates
+// this shape must seed beads explicitly.
+func slingTestLooksLikeBeadID(id string) bool {
+	if _, _, ok := sling.BeadIDParts(id); ok {
+		return true
+	}
+	id = strings.TrimSpace(id)
+	if id == "" || strings.ContainsAny(id, " \t\n") {
+		return false
+	}
+	last := strings.LastIndex(id, "-")
+	if last <= 0 || last == len(id)-1 {
+		return false
+	}
+	suffix := id[last+1:]
+	base := suffix
+	if dot := strings.IndexByte(suffix, '.'); dot > 0 {
+		base = suffix[:dot]
+	}
+	if base == "" || len(base) > 8 {
+		return false
+	}
+	hasDigit := false
+	for _, c := range base {
+		switch {
+		case c >= '0' && c <= '9':
+			hasDigit = true
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		default:
+			return false
+		}
+	}
+	if len(base) > 4 && !hasDigit {
+		return false
+	}
+	return true
 }
 
 func (s *slingTestStore) SetMetadata(id, key, value string) error {
@@ -285,7 +333,11 @@ var (
 )
 
 func init() {
-	dir, err := os.MkdirTemp("", "gc-sling-test-formulas-*")
+	tmpRoot := os.TempDir()
+	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingFormulaDirPrefix)
+	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingCityDirPrefix)
+
+	dir, err := os.MkdirTemp("", pidPrefixedTempPattern(testSlingFormulaDirPrefix))
 	if err != nil {
 		panic(err)
 	}
@@ -301,7 +353,7 @@ func init() {
 	}
 	sharedTestFormulaDir = dir
 
-	cityDir, err := os.MkdirTemp("", "gc-sling-test-city-*")
+	cityDir, err := os.MkdirTemp("", pidPrefixedTempPattern(testSlingCityDirPrefix))
 	if err != nil {
 		panic(err)
 	}
@@ -353,6 +405,30 @@ func TestBuildSlingCommand(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("BuildSlingCommand(%q, %q) = %q, want %q", tt.template, tt.beadID, got, tt.want)
 		}
+	}
+}
+
+func TestSlingJSONFromResult(t *testing.T) {
+	result := sling.SlingResult{
+		Target:      "repo-a/polecat",
+		Method:      "formula",
+		BeadID:      "repo-a-1",
+		FormulaName: "pack-review",
+		WorkflowID:  "wf-1",
+		ConvoyID:    "convoy-1",
+		Routed:      1,
+		NudgeAgent:  &config.Agent{Name: "polecat", Dir: "repo-a"},
+	}
+
+	got := slingJSONFromResult(result)
+	if got.SchemaVersion != "1" || !got.Success {
+		t.Fatalf("schema/success = %q/%v, want v1 success", got.SchemaVersion, got.Success)
+	}
+	if got.Target != "repo-a/polecat" || got.BeadID != "repo-a-1" || got.Formula != "pack-review" {
+		t.Fatalf("payload = %+v, want target/bead/formula refs", got)
+	}
+	if !got.Routed || !got.Queued || got.WorkflowID != "wf-1" || got.ConvoyID != "convoy-1" {
+		t.Fatalf("payload = %+v, want routed queued workflow convoy refs", got)
 	}
 }
 
@@ -500,6 +576,36 @@ func TestShellSlingRunnerOverridesInheritedBDEnv(t *testing.T) {
 	}
 	if got := strings.TrimSpace(out); got != "rig-db.example.com|3307|rig-db.example.com|3307" {
 		t.Fatalf("shellSlingRunner env = %q", got)
+	}
+}
+
+func TestShellSlingRunnerStripsInheritedSecrets(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "ghs_should_not_leak")
+	t.Setenv("OPENAI_API_KEY", "sk-should-not-leak")
+
+	out, err := shellSlingRunner("", `printf '%s|%s' "${GITHUB_TOKEN:-unset}" "${OPENAI_API_KEY:-unset}"`, nil)
+	if err != nil {
+		t.Fatalf("shellSlingRunner: %v", err)
+	}
+	if got := strings.TrimSpace(out); got != "unset|unset" {
+		t.Fatalf("shellSlingRunner inherited secrets = %q, want unset|unset", got)
+	}
+}
+
+func TestSourceWorkflowCleanupCommandQuotesUntrustedArgs(t *testing.T) {
+	got := sourceWorkflowCleanupCommand("ga-1; touch /tmp/pwn", "rig:demo; rm -rf /")
+	if got == "gc workflow delete-source ga-1; touch /tmp/pwn --store-ref rig:demo; rm -rf / --apply" {
+		t.Fatalf("cleanup command left shell metacharacters unquoted: %q", got)
+	}
+	args := shellquote.Split(got)
+	want := []string{"gc", "workflow", "delete-source", "ga-1; touch /tmp/pwn", "--store-ref", "rig:demo; rm -rf /", "--apply"}
+	if len(args) != len(want) {
+		t.Fatalf("cleanup command args = %#v, want %#v", args, want)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("cleanup command arg[%d] = %q, want %q (command %q)", i, args[i], want[i], got)
+		}
 	}
 }
 
@@ -853,6 +959,115 @@ func TestDoSlingNudgePoolNoMembers(t *testing.T) {
 	}
 }
 
+func TestBuiltInSlingPoolRouteContractUsesMetadataOnly(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	maxPolecats := 5
+	maxRefinery := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "saitoc", Path: "/tmp/saitoc", Prefix: "gc"}},
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "saitoc", MaxActiveSessions: &maxPolecats},
+			{Name: "refinery", Dir: "saitoc", MaxActiveSessions: &maxRefinery},
+		},
+	}
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	store := newSlingTestStore()
+	deps.Store = store
+
+	created, err := store.Create(beads.Bead{Title: "route contract work", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	opts := testOpts(cfg.Agents[0], created.ID)
+	code := doSling(opts, deps, &fakeQuerier{bead: created}, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("doSling returned %d; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	routed, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get routed bead: %v", err)
+	}
+	if got := routed.Metadata["gc.routed_to"]; got != "saitoc/polecat" {
+		t.Fatalf("gc.routed_to = %q, want saitoc/polecat", got)
+	}
+	for _, label := range routed.Labels {
+		if strings.HasPrefix(label, "pool:") {
+			t.Fatalf("built-in sling added legacy pool label %q; labels=%v", label, routed.Labels)
+		}
+	}
+
+	counts, partials, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{
+		defaultScaleCheckTargetForAgent(sharedTestCityDir, cfg, &cfg.Agents[0], nil, map[string]beads.Store{"saitoc": store}),
+	})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errors: %v", errs)
+	}
+	if len(partials) != 0 {
+		t.Fatalf("defaultScaleCheckCounts partials: %v", partials)
+	}
+	if got := counts["saitoc/polecat"]; got != 1 {
+		t.Fatalf("polecat scale count after sling = %d, want 1", got)
+	}
+
+	inProgress := "in_progress"
+	polecatSession := "pc-1"
+	if err := store.Update(created.ID, beads.UpdateOpts{
+		Status:   &inProgress,
+		Assignee: &polecatSession,
+	}); err != nil {
+		t.Fatalf("claim update: %v", err)
+	}
+	claimed, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get claimed bead: %v", err)
+	}
+	states := ComputePoolDesiredStates(cfg, []beads.Bead{claimed}, []beads.Bead{{
+		ID:     polecatSession,
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":     "saitoc/polecat",
+			"session_name": polecatSession,
+		},
+	}}, map[string]int{"saitoc/polecat": 0})
+	if len(states) != 1 || len(states[0].Requests) != 1 {
+		t.Fatalf("resume states = %#v, want one polecat resume request", states)
+	}
+	if req := states[0].Requests[0]; req.Tier != "resume" || req.WorkBeadID != created.ID || req.SessionBeadID != polecatSession {
+		t.Fatalf("resume request = %#v, want claimed work preserved for polecat session", req)
+	}
+
+	open := "open"
+	refinery := "saitoc/refinery"
+	if err := store.Update(created.ID, beads.UpdateOpts{
+		Status:   &open,
+		Assignee: &refinery,
+		Labels:   []string{"pool:saitoc/polecat"},
+		Metadata: map[string]string{"gc.routed_to": refinery},
+	}); err != nil {
+		t.Fatalf("handoff update: %v", err)
+	}
+	counts, partials, errs = defaultScaleCheckCounts([]defaultScaleCheckTarget{
+		defaultScaleCheckTargetForAgent(sharedTestCityDir, cfg, &cfg.Agents[0], nil, map[string]beads.Store{"saitoc": store}),
+		defaultScaleCheckTargetForAgent(sharedTestCityDir, cfg, &cfg.Agents[1], nil, map[string]beads.Store{"saitoc": store}),
+	})
+	if len(errs) != 0 {
+		t.Fatalf("post-handoff defaultScaleCheckCounts errors: %v", errs)
+	}
+	if len(partials) != 0 {
+		t.Fatalf("post-handoff defaultScaleCheckCounts partials: %v", partials)
+	}
+	if got := counts["saitoc/polecat"]; got != 0 {
+		t.Fatalf("polecat scale count after refinery handoff with stale pool label = %d, want 0", got)
+	}
+	if got := counts["saitoc/refinery"]; got != 0 {
+		t.Fatalf("refinery generic scale count for assigned handoff = %d, want 0", got)
+	}
+}
+
 func TestDoSlingCustomSlingQuery(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -944,7 +1159,7 @@ dir = "frontend"
 	t.Chdir(cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdSling([]string{"frontend/worker", "ship feature"}, false, false, true, "", nil, "", true, false, "", false, false, false, "", "", &stdout, &stderr)
+	code := cmdSling([]string{"frontend/worker", "ship feature"}, false, false, true, "", nil, "", true, false, false, "", false, false, false, "", "", &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1021,6 +1236,183 @@ dir = "frontend"
 	return cityDir
 }
 
+// setupRigScopedBdCity writes a city.toml with one rig ("frontend",
+// prefix "FE") and a rig-scoped .beads/config.yaml compatible with the
+// bd provider contract. Returns the city and rig paths. Used by the
+// #200 regression guards for the bd provider.
+func setupRigScopedBdCity(t *testing.T) (cityDir, rigDir string) {
+	t.Helper()
+	cityDir = t.TempDir()
+	rigDir = filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: FE
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "demo"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "FE"
+
+[[agent]]
+name = "worker"
+dir = "frontend"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	return cityDir, rigDir
+}
+
+// bdInvocation records a single bd subprocess call — env snapshot,
+// dir, and argv — so tests can assert on the scope the command ran in.
+type bdInvocation struct {
+	Env  map[string]string
+	Dir  string
+	Args []string
+}
+
+// installCaptureBdRunner swaps beadsExecCommandRunnerWithEnv with a
+// fake that records every bd invocation and returns plausible
+// responses for the subcommands cmdSling's inline-text path actually
+// runs (show, create, update). Unexpected subcommands fail the test
+// loudly so drift in sling's bd usage surfaces instead of silently
+// passing. Returns a pointer to the capture slice; auto-restores via
+// t.Cleanup.
+func installCaptureBdRunner(t *testing.T) *[]bdInvocation {
+	t.Helper()
+	orig := beadsExecCommandRunnerWithEnv
+	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = orig })
+
+	calls := &[]bdInvocation{}
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		snap := maps.Clone(env)
+		return func(dir, name string, args ...string) ([]byte, error) {
+			*calls = append(*calls, bdInvocation{Env: snap, Dir: dir, Args: append([]string(nil), args...)})
+			if name != "bd" {
+				t.Errorf("unexpected command %q args=%v", name, args)
+				return nil, fmt.Errorf("unexpected command %q", name)
+			}
+			switch {
+			case len(args) >= 2 && args[0] == "create" && args[1] == "--json":
+				title := ""
+				if len(args) > 2 {
+					title = args[2]
+				}
+				return []byte(fmt.Sprintf(`{"id":"FE-abc","title":%q,"status":"open","issue_type":"task","created_at":"2026-04-22T00:00:00Z","assignee":"","from":"","parent":"","ref":"","needs":null,"description":"","labels":null}`, title)), nil
+			case len(args) >= 2 && args[0] == "update" && args[1] == "--json":
+				return []byte(`{}`), nil
+			case len(args) >= 2 && args[0] == "show" && args[1] == "--json":
+				return nil, fmt.Errorf("issue not found")
+			case len(args) >= 2 && args[0] == "list" && args[1] == "--json":
+				return []byte(`[]`), nil
+			default:
+				t.Errorf("unexpected bd subcommand args=%v — fake must be extended if sling now invokes this", args)
+				return nil, fmt.Errorf("unexpected bd subcommand args=%v", args)
+			}
+		}
+	}
+	return calls
+}
+
+// firstBdCreate returns the first `bd create --json` invocation
+// captured by installCaptureBdRunner, or fails the test if none was
+// observed.
+func firstBdCreate(t *testing.T, calls []bdInvocation) bdInvocation {
+	t.Helper()
+	for _, c := range calls {
+		if len(c.Args) >= 2 && c.Args[0] == "create" && c.Args[1] == "--json" {
+			return c
+		}
+	}
+	t.Fatalf("no bd create invocation observed. Captured %d calls: %v", len(calls), calls)
+	return bdInvocation{}
+}
+
+// Regression guard for #200: on 0.13.5 the pre-bdStoreForRig code path
+// hardcoded BEADS_DIR to <cityPath>/.beads for every bd subprocess, so
+// bd create landed the inline bead in the city store and the cross-rig
+// guard blocked routing. Commit 92c6c0d7 introduced bdStoreForRig +
+// bdRuntimeEnvForRig which silently fixed it; this test locks the
+// invariant for the default bd provider so the scoping cannot regress.
+func TestCmdSlingInlineBeadRigScopedBdProvider(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir, rigDir := setupRigScopedBdCity(t)
+	calls := installCaptureBdRunner(t)
+
+	t.Chdir(cityDir)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling([]string{"frontend/worker", "ship feature"}, false, false, true, "", nil, "", true, false, false, "", false, false, false, "", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	create := firstBdCreate(t, *calls)
+	wantBeadsDir := filepath.Join(rigDir, ".beads")
+	if got := create.Env["BEADS_DIR"]; got != wantBeadsDir {
+		t.Fatalf("bd create BEADS_DIR = %q, want %q (rig-scoped); all calls: %v", got, wantBeadsDir, *calls)
+	}
+	if got := create.Env["GC_RIG_ROOT"]; got != rigDir {
+		t.Fatalf("bd create GC_RIG_ROOT = %q, want %q", got, rigDir)
+	}
+	if got := create.Env["GC_RIG"]; got != "frontend" {
+		t.Fatalf("bd create GC_RIG = %q, want %q", got, "frontend")
+	}
+	if got := create.Dir; got != rigDir {
+		t.Fatalf("bd create dir = %q, want %q", got, rigDir)
+	}
+}
+
+// Reporter's exact #200 repro: CWD=rig, bare target resolves to
+// rig-scoped agent via currentRigContext, and the inline bead must
+// still land in the rig store.
+func TestCmdSlingInlineBeadBareTargetFromRigCwdBdProvider(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	_, rigDir := setupRigScopedBdCity(t)
+	calls := installCaptureBdRunner(t)
+
+	t.Chdir(rigDir)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling([]string{"worker", "ship feature"}, false, false, true, "", nil, "", true, false, false, "", false, false, false, "", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	create := firstBdCreate(t, *calls)
+	wantBeadsDir := filepath.Join(rigDir, ".beads")
+	if got := create.Env["BEADS_DIR"]; got != wantBeadsDir {
+		t.Fatalf("bd create BEADS_DIR = %q, want %q (rig-scoped). Bare target %q from rig cwd must land in the rig store; all calls: %v",
+			got, wantBeadsDir, "worker", *calls)
+	}
+	// Mirror the env-surface assertions from the qualified-target
+	// variant so a regression that sets BEADS_DIR correctly but drops
+	// GC_RIG/GC_RIG_ROOT via the currentRigContext path still fails
+	// loudly.
+	if got := create.Env["GC_RIG_ROOT"]; got != rigDir {
+		t.Fatalf("bd create GC_RIG_ROOT = %q, want %q", got, rigDir)
+	}
+	if got := create.Env["GC_RIG"]; got != "frontend" {
+		t.Fatalf("bd create GC_RIG = %q, want %q", got, "frontend")
+	}
+	if got := create.Dir; got != rigDir {
+		t.Fatalf("bd create dir = %q, want %q", got, rigDir)
+	}
+}
+
 func TestCmdSlingRefusesMissingBead(t *testing.T) {
 	// A bead-ID-shaped argument that doesn't resolve in the store must
 	// cause sling to error out — otherwise a fabricated / typo'd ID
@@ -1032,7 +1424,7 @@ func TestCmdSlingRefusesMissingBead(t *testing.T) {
 		[]string{"frontend/worker", "FE-ghost1"},
 		false, false, false, // isFormula, doNudge, force=false
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		false, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -1073,7 +1465,7 @@ func TestCmdSlingDryRunRefusesMissingBead(t *testing.T) {
 		[]string{"frontend/worker", "FE-ghost1"},
 		false, false, false,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		false, false, true,
 		"", "",
 		&stdout, &stderr,
@@ -1098,7 +1490,7 @@ func TestCmdSlingDryRunPreviewsInlineText(t *testing.T) {
 		[]string{"frontend/worker", "write docs"},
 		false, false, false,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		false, false, true,
 		"", "",
 		&stdout, &stderr,
@@ -1133,8 +1525,75 @@ func TestCmdSlingDryRunPreviewsInlineText(t *testing.T) {
 	}
 }
 
+// TestCmdSlingDryRunInlineTextHasNoFalsePositivePreCheck verifies that
+// inline-text dry-runs print a "Would create new task bead" hint and
+// suppress the Pre-check ✓ line (which would be vacuously true for a
+// bead that does not exist yet).
+func TestCmdSlingDryRunInlineTextHasNoFalsePositivePreCheck(t *testing.T) {
+	cityDir := setupCmdSlingBeadExistsFixture(t)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{"frontend/worker", "write docs"},
+		false, false, false,
+		"", nil, "",
+		true, false, false, "",
+		false, false, true,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("cmdSling dry-run returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "has no existing molecule/wisp children ✓") {
+		t.Fatalf("dry-run stdout still emits false-positive Pre-check ✓ for inline text:\n%s", out)
+	}
+	if !strings.Contains(out, "Would create new task bead") {
+		t.Fatalf("dry-run stdout missing inline-text creation hint:\n%s", out)
+	}
+	// Cook/route preview commands must use a placeholder rather than
+	// the inline title: the live path creates a bead first and uses
+	// the new ID, so showing "write docs" as the bead-id arg would
+	// describe a command that wouldn't actually run.
+	if strings.Contains(out, "--on=write docs") || strings.Contains(out, "--on='write docs'") {
+		t.Fatalf("dry-run stdout uses inline title as bead ID in --on=...:\n%s", out)
+	}
+	if !strings.Contains(out, "<new-bead-id>") {
+		t.Fatalf("dry-run stdout missing <new-bead-id> placeholder:\n%s", out)
+	}
+	// Pre-existing footer must still be present.
+	if !strings.Contains(out, "No side effects executed (--dry-run).") {
+		t.Fatalf("dry-run stdout missing dry-run footer:\n%s", out)
+	}
+
+	// Sanity: city/frontend stores must remain empty (no bead created).
+	for _, dir := range []string{cityDir, filepath.Join(cityDir, "frontend")} {
+		store, err := openStoreAtForCity(dir, cityDir)
+		if err != nil {
+			t.Fatalf("openStoreAtForCity(%s): %v", dir, err)
+		}
+		bs, err := store.List(beads.ListQuery{AllowScan: true})
+		if err != nil {
+			t.Fatalf("List(%s): %v", dir, err)
+		}
+		if len(bs) != 0 {
+			t.Fatalf("store %s has %d beads after dry-run, want 0: %#v", dir, len(bs), bs)
+		}
+	}
+}
+
+func mustResolveInlineBeadAction(t *testing.T, cfg *config.City, beadOrFormula string, dryRun bool, store beads.Store) (bool, bool) {
+	t.Helper()
+	create, inlineText, err := resolveInlineBeadAction(cfg, beadOrFormula, dryRun, store)
+	if err != nil {
+		t.Fatalf("resolveInlineBeadAction: %v", err)
+	}
+	return create, inlineText
+}
+
 func TestResolveInlineBeadActionDryRunInlineTextDoesNotProbeStore(t *testing.T) {
-	create, inlineText := resolveInlineBeadAction(&config.City{}, "write docs", true)
+	create, inlineText := mustResolveInlineBeadAction(t, &config.City{}, "write docs", true, nil)
 	if create {
 		t.Fatal("create = true, want false during dry-run")
 	}
@@ -1144,7 +1603,7 @@ func TestResolveInlineBeadActionDryRunInlineTextDoesNotProbeStore(t *testing.T) 
 }
 
 func TestResolveInlineBeadActionWhitespaceInlineTextDoesNotProbeStore(t *testing.T) {
-	create, inlineText := resolveInlineBeadAction(&config.City{}, "write docs", false)
+	create, inlineText := mustResolveInlineBeadAction(t, &config.City{}, "write docs", false, nil)
 	if !create {
 		t.Fatal("create = false, want true for whitespace inline text")
 	}
@@ -1154,7 +1613,7 @@ func TestResolveInlineBeadActionWhitespaceInlineTextDoesNotProbeStore(t *testing
 }
 
 func TestResolveInlineBeadActionSingleTokenInlineTextDoesNotProbeStore(t *testing.T) {
-	create, inlineText := resolveInlineBeadAction(&config.City{}, "docs", false)
+	create, inlineText := mustResolveInlineBeadAction(t, &config.City{}, "docs", false, nil)
 	if !create {
 		t.Fatal("create = false, want true for single-token inline text")
 	}
@@ -1164,12 +1623,55 @@ func TestResolveInlineBeadActionSingleTokenInlineTextDoesNotProbeStore(t *testin
 }
 
 func TestResolveInlineBeadActionBeadIDDoesNotProbeStore(t *testing.T) {
-	create, inlineText := resolveInlineBeadAction(&config.City{}, "FE-123", false)
+	create, inlineText := mustResolveInlineBeadAction(t, &config.City{}, "FE-123", false, nil)
 	if create {
 		t.Fatal("create = true, want false for bead ID")
 	}
 	if inlineText {
 		t.Fatal("inlineText = true, want false")
+	}
+}
+
+func TestResolveInlineBeadActionHyphenatedRigPrefixIsBeadID(t *testing.T) {
+	// Bead IDs whose configured rig prefix contains a hyphen
+	// (agent-diagnostics-hnn from rig "agent-diagnostics") must
+	// classify as bead IDs, not inline text.
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "agent-diagnostics", Path: "/tmp/agent-diag", Prefix: "agent-diagnostics"},
+		},
+	}
+
+	create, inlineText := mustResolveInlineBeadAction(t, cfg, "agent-diagnostics-hnn", false, nil)
+	if create {
+		t.Fatal("create = true, want false for configured hyphenated bead ID")
+	}
+	if inlineText {
+		t.Fatal("inlineText = true, want false outside dry-run")
+	}
+
+	create, inlineText = mustResolveInlineBeadAction(t, cfg, "agent-diagnostics-hnn", true, nil)
+	if create {
+		t.Fatal("create = true, want false during dry-run")
+	}
+	if inlineText {
+		t.Fatal("inlineText = true, want false for configured bead ID even in dry-run")
+	}
+}
+
+func TestResolveInlineBeadActionUnknownHyphenatedTextStillCreates(t *testing.T) {
+	// Inline text shaped like "<unknown-prefix>-<word>" with no store must
+	// still create an inline task bead. Only inputs that match a CONFIGURED
+	// rig prefix are protected from the auto-create branch (without a store).
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "fe", Path: "/fe", Prefix: "fe"}},
+	}
+	create, inlineText := mustResolveInlineBeadAction(t, cfg, "code-review-please", false, nil)
+	if !create {
+		t.Fatal("create = false, want true for non-configured hyphenated text")
+	}
+	if inlineText {
+		t.Fatal("inlineText = true, want false outside dry-run")
 	}
 }
 
@@ -1179,7 +1681,7 @@ func TestResolveInlineBeadActionConfiguredAlphaSuffixIsBeadID(t *testing.T) {
 		Rigs:      []config.Rig{{Name: "frontend", Path: "/tmp/frontend", Prefix: "FE"}},
 	}
 
-	create, inlineText := resolveInlineBeadAction(cfg, "FE-hello", false)
+	create, inlineText := mustResolveInlineBeadAction(t, cfg, "FE-hello", false, nil)
 	if create {
 		t.Fatal("create = true, want false for configured bead ID with all-alpha suffix")
 	}
@@ -1187,7 +1689,7 @@ func TestResolveInlineBeadActionConfiguredAlphaSuffixIsBeadID(t *testing.T) {
 		t.Fatal("inlineText = true, want false outside dry-run")
 	}
 
-	create, inlineText = resolveInlineBeadAction(cfg, "FE-a1pha", false)
+	create, inlineText = mustResolveInlineBeadAction(t, cfg, "FE-a1pha", false, nil)
 	if create {
 		t.Fatal("create = true, want false for configured bead ID with digit")
 	}
@@ -1196,11 +1698,73 @@ func TestResolveInlineBeadActionConfiguredAlphaSuffixIsBeadID(t *testing.T) {
 	}
 }
 
+func TestResolveInlineBeadActionMultiDashStoreHitIsBeadID(t *testing.T) {
+	// A multi-dash ID that fails the suffix heuristic but exists in the store
+	// must classify as a bead ID, not inline text.
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "fo", Path: "/tmp/fo", Prefix: "fo"}},
+	}
+	store := seededStore("fo-spawn-storm")
+
+	create, inlineText := mustResolveInlineBeadAction(t, cfg, "fo-spawn-storm", false, store)
+	if create {
+		t.Fatal("create = true, want false — bead exists in store")
+	}
+	if inlineText {
+		t.Fatal("inlineText = true, want false outside dry-run")
+	}
+
+	create, inlineText = mustResolveInlineBeadAction(t, cfg, "fo-spawn-storm", true, store)
+	if create {
+		t.Fatal("create = true, want false during dry-run")
+	}
+	if inlineText {
+		t.Fatal("inlineText = true, want false — bead exists in store")
+	}
+}
+
+func TestResolveInlineBeadActionMultiDashStoreMissStillCreates(t *testing.T) {
+	// A multi-dash ID absent from the store falls through to inline-text
+	// creation — the caller will auto-create a bead from the text.
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "fo", Path: "/tmp/fo", Prefix: "fo"}},
+	}
+	store := seededStore() // empty
+
+	create, inlineText := mustResolveInlineBeadAction(t, cfg, "fo-typo-not-real", false, store)
+	if !create {
+		t.Fatal("create = false, want true for unknown multi-dash text")
+	}
+	if inlineText {
+		t.Fatal("inlineText = true, want false outside dry-run")
+	}
+}
+
+func TestResolveInlineBeadActionMultiDashStoreErrorSurfaces(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "fo", Path: "/tmp/fo", Prefix: "fo"}},
+	}
+	store := &getErrStore{Store: beads.NewMemStore(), err: fmt.Errorf("lookup failed")}
+
+	_, _, err := resolveInlineBeadAction(cfg, "fo-spawn-storm", false, store)
+	if err == nil {
+		t.Fatal("resolveInlineBeadAction error = nil, want lookup failure")
+	}
+	if !strings.Contains(err.Error(), "lookup failed") {
+		t.Fatalf("resolveInlineBeadAction error = %q, want lookup failure", err)
+	}
+}
+
 func TestCmdSlingConfiguredPrefixAllAlphaExistingBeadUsesPrefixStore(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("GC_BEADS", "file")
 
 	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
 	frontendDir := filepath.Join(cityDir, "frontend")
 	ordersDir := filepath.Join(cityDir, "orders")
 	for _, dir := range []string{frontendDir, ordersDir} {
@@ -1250,7 +1814,7 @@ dir = "orders"
 		[]string{"orders/worker", "FE-abcde"},
 		false, false, true,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		true, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -1287,6 +1851,203 @@ dir = "orders"
 	}
 }
 
+// TestCmdSlingHyphenatedRigPrefixExistingBeadDoesNotOrphan verifies
+// that an existing bead in a rig whose configured prefix contains a
+// hyphen ("agent-diagnostics-hnn" in rig "agent-diagnostics") routes
+// to the rig store without auto-creating a city orphan.
+func TestCmdSlingHyphenatedRigPrefixExistingBeadDoesNotOrphan(t *testing.T) {
+	beadID := "agent-diagnostics-hnn"
+	cityDir, rigDir, _ := setupCmdSlingHyphenatedRigPrefixBeadFixture(t, beadID, "agent-diagnostics")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{"agent-diagnostics/worker", beadID},
+		false, false, true,
+		"", nil, "",
+		true, false, false, "",
+		true, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("cmdSling returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	// The pre-fix bug printed a "Created gc-NNN — \"agent-diagnostics-hnn\""
+	// line because the live path took the auto-create-text-bead branch.
+	if strings.Contains(stdout.String(), "Created ") {
+		t.Fatalf("orphan auto-create regression: stdout = %q", stdout.String())
+	}
+
+	assertHyphenatedRigBeadRoutedWithoutInlineOrphan(t, cityDir, rigDir, beadID, "agent-diagnostics/worker")
+}
+
+func TestCmdSlingHyphenatedRigPrefixMultiDashExistingBeadDoesNotOrphan(t *testing.T) {
+	beadID := "agent-diagnostics-spawn-storm"
+	cityDir, rigDir, _ := setupCmdSlingHyphenatedRigPrefixBeadFixture(t, beadID, "agent-diagnostics")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{"agent-diagnostics/worker", beadID},
+		false, false, true,
+		"", nil, "",
+		true, false, false, "",
+		true, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("cmdSling returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Created ") {
+		t.Fatalf("orphan auto-create regression: stdout = %q", stdout.String())
+	}
+
+	assertHyphenatedRigBeadRoutedWithoutInlineOrphan(t, cityDir, rigDir, beadID, "agent-diagnostics/worker")
+}
+
+func TestCmdSlingOneArgHyphenatedPrefixMultiDashExistingBeadUsesDefaultTarget(t *testing.T) {
+	beadID := "agent-diagnostics-spawn-storm"
+	cityDir, rigDir, _ := setupCmdSlingHyphenatedRigPrefixBeadFixture(t, beadID, "agent-diagnostics")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{beadID},
+		false, false, false,
+		"", nil, "",
+		true, false, false, "",
+		false, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("cmdSling returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Created ") {
+		t.Fatalf("orphan auto-create regression: stdout = %q", stdout.String())
+	}
+
+	assertHyphenatedRigBeadRoutedWithoutInlineOrphan(t, cityDir, rigDir, beadID, "agent-diagnostics/worker")
+}
+
+func TestCmdSlingCrossRigHyphenatedPrefixMultiDashExistingBeadUsesPrefixStore(t *testing.T) {
+	beadID := "agent-diagnostics-spawn-storm"
+	cityDir, rigDir, otherDir := setupCmdSlingHyphenatedRigPrefixBeadFixture(t, beadID, "other")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{"other/worker", beadID},
+		false, false, true,
+		"", nil, "",
+		true, false, false, "",
+		true, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("cmdSling returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Created ") {
+		t.Fatalf("stdout = %q, want existing bead route without inline creation", stdout.String())
+	}
+
+	assertHyphenatedRigBeadRoutedWithoutInlineOrphan(t, cityDir, rigDir, beadID, "other/worker")
+	assertStoreHasNoBeadTitle(t, cityDir, otherDir, beadID)
+}
+
+func setupCmdSlingHyphenatedRigPrefixBeadFixture(t *testing.T, beadID, agentDir string) (cityDir, rigDir, otherDir string) {
+	t.Helper()
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir = t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	rigDir = filepath.Join(cityDir, "agent-diagnostics")
+	otherDir = filepath.Join(cityDir, "other")
+	for _, dir := range []string{rigDir, otherDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", dir, err)
+		}
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
+	}
+	for _, dir := range []string{cityDir, rigDir, otherDir} {
+		if err := ensurePersistedScopeLocalFileStore(dir); err != nil {
+			t.Fatalf("ensurePersistedScopeLocalFileStore(%s): %v", dir, err)
+		}
+	}
+	writeTestFileStoreBeads(t, rigDir, []beads.Bead{{
+		ID:       beadID,
+		Title:    "existing diagnostics work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{},
+	}})
+	cityToml := fmt.Sprintf(`[workspace]
+name = "demo"
+
+[[rigs]]
+name = "agent-diagnostics"
+path = "agent-diagnostics"
+prefix = "agent-diagnostics"
+default_sling_target = "agent-diagnostics/worker"
+
+[[rigs]]
+name = "other"
+path = "other"
+prefix = "OT"
+
+[[agent]]
+name = "worker"
+dir = %q
+`, agentDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Chdir(cityDir)
+	return cityDir, rigDir, otherDir
+}
+
+func assertHyphenatedRigBeadRoutedWithoutInlineOrphan(t *testing.T, cityDir, rigDir, beadID, wantTarget string) {
+	t.Helper()
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	routed, err := rigStore.Get(beadID)
+	if err != nil {
+		t.Fatalf("rigStore.Get(%s): %v", beadID, err)
+	}
+	if routed.Metadata["gc.routed_to"] != wantTarget {
+		t.Fatalf("rig bead gc.routed_to = %q, want %s (routing must land on the existing bead, not an orphan)", routed.Metadata["gc.routed_to"], wantTarget)
+	}
+
+	// City store must NOT contain a stray bead from the auto-create path.
+	assertStoreHasNoBeadTitle(t, cityDir, cityDir, beadID)
+}
+
+func assertStoreHasNoBeadTitle(t *testing.T, cityDir, storeDir, beadTitle string) {
+	t.Helper()
+	store, err := openStoreAtForCity(storeDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(%s): %v", storeDir, err)
+	}
+	storeBeads, err := store.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("store.List(%s): %v", storeDir, err)
+	}
+	for _, b := range storeBeads {
+		if b.Title == beadTitle {
+			t.Fatalf("store %s has orphan bead %q (title %q): inline-text auto-create fired for a known-rig bead ID", storeDir, b.ID, b.Title)
+		}
+	}
+}
+
 func TestCmdSlingConfiguredPrefixAllAlphaExistingBeadUsesSelectedPrefixStore(t *testing.T) {
 	cityDir, frontendDir := setupCmdSlingConfiguredPrefixAllAlphaFrontendFixture(t, false, true)
 
@@ -1295,7 +2056,7 @@ func TestCmdSlingConfiguredPrefixAllAlphaExistingBeadUsesSelectedPrefixStore(t *
 		[]string{"frontend/worker", "FE-abcde"},
 		false, false, false,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		true, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -1335,7 +2096,7 @@ func TestCmdSlingOneArgConfiguredPrefixAllAlphaExistingBeadUsesDefaultTarget(t *
 		[]string{"FE-abcde"},
 		false, false, false,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		true, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -1366,6 +2127,11 @@ func setupCmdSlingConfiguredPrefixAllAlphaFrontendFixture(t *testing.T, defaultT
 	t.Setenv("GC_BEADS", "file")
 
 	cityDir = t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
 	frontendDir = filepath.Join(cityDir, "frontend")
 	if err := os.MkdirAll(frontendDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(frontend): %v", err)
@@ -1436,7 +2202,7 @@ func TestCmdSlingForceBypassesMissingBeadCheck(t *testing.T) {
 		[]string{"frontend/worker", "FE-ghost1"},
 		false, false, true, // force=true
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		false, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -1487,7 +2253,7 @@ sling_query = "true"
 		[]string{"frontend/worker", "FE-ghost1"},
 		false, false, true,
 		"", nil, "",
-		false, false, "",
+		false, false, false, "",
 		true, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -1523,7 +2289,7 @@ func TestCmdSlingAcceptsExistingBead(t *testing.T) {
 		[]string{"frontend/worker", seeded.ID},
 		false, false, false, // force=false; existence check should pass naturally
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		false, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -1533,11 +2299,319 @@ func TestCmdSlingAcceptsExistingBead(t *testing.T) {
 	}
 }
 
+func TestCmdSlingMultiDashBeadIDRoutesExistingBead(t *testing.T) {
+	// gc sling target fo-spawn-storm must route the existing bead and must
+	// not create a new inline bead, when "fo-spawn-storm" exists in the store.
+	cityDir, rigDir := setupCmdSlingMultiDashBeadFixture(t, true)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{"foundations/worker", "fo-spawn-storm"},
+		false, false, false,
+		"", nil, "",
+		true, false, false, "",
+		false, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("cmdSling returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Created ") {
+		t.Errorf("created new inline bead instead of routing existing one; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "found existing bead") {
+		t.Errorf("stderr = %q, want existing-bead routing breadcrumb", stderr.String())
+	}
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	routed, err := rigStore.Get("fo-spawn-storm")
+	if err != nil {
+		t.Fatalf("rigStore.Get(fo-spawn-storm): %v", err)
+	}
+	if routed.Metadata["gc.routed_to"] != "foundations/worker" {
+		t.Fatalf("rig bead gc.routed_to = %q, want foundations/worker", routed.Metadata["gc.routed_to"])
+	}
+	all, err := rigStore.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("rigStore.List: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("rig store bead count = %d, want 1: %#v", len(all), all)
+	}
+}
+
+func TestCmdSlingOneArgMultiDashExistingBeadUsesDefaultTarget(t *testing.T) {
+	cityDir, rigDir := setupCmdSlingMultiDashBeadFixture(t, true)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{"fo-spawn-storm"},
+		false, false, false,
+		"", nil, "",
+		true, false, false, "",
+		false, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("cmdSling returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Created ") {
+		t.Fatalf("stdout = %q, want existing bead route without inline creation", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "found existing bead") {
+		t.Errorf("stderr = %q, want existing-bead routing breadcrumb", stderr.String())
+	}
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	routed, err := rigStore.Get("fo-spawn-storm")
+	if err != nil {
+		t.Fatalf("rigStore.Get(fo-spawn-storm): %v", err)
+	}
+	if routed.Metadata["gc.routed_to"] != "foundations/worker" {
+		t.Fatalf("rig bead gc.routed_to = %q, want foundations/worker", routed.Metadata["gc.routed_to"])
+	}
+	all, err := rigStore.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("rigStore.List: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("rig store bead count = %d, want 1: %#v", len(all), all)
+	}
+}
+
+func TestCmdSlingCrossRigMultiDashExistingBeadUsesPrefixStore(t *testing.T) {
+	cityDir, rigDir := setupCmdSlingMultiDashBeadFixture(t, false)
+	ordersDir := filepath.Join(cityDir, "orders")
+	if err := os.MkdirAll(ordersDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(orders): %v", err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(ordersDir); err != nil {
+		t.Fatalf("ensurePersistedScopeLocalFileStore(orders): %v", err)
+	}
+	cityToml := `[workspace]
+name = "demo"
+
+[[rigs]]
+name = "foundations"
+path = "foundations"
+prefix = "fo"
+
+[[rigs]]
+name = "orders"
+path = "orders"
+prefix = "od"
+
+[[agent]]
+name = "worker"
+dir = "orders"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{"orders/worker", "fo-spawn-storm"},
+		false, false, true,
+		"", nil, "",
+		true, false, false, "",
+		true, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("cmdSling returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Created ") {
+		t.Fatalf("stdout = %q, want existing bead route without inline creation", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "found existing bead") {
+		t.Errorf("stderr = %q, want existing-bead routing breadcrumb", stderr.String())
+	}
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	routed, err := rigStore.Get("fo-spawn-storm")
+	if err != nil {
+		t.Fatalf("rigStore.Get(fo-spawn-storm): %v", err)
+	}
+	if routed.Metadata["gc.routed_to"] != "orders/worker" {
+		t.Fatalf("rig bead gc.routed_to = %q, want orders/worker", routed.Metadata["gc.routed_to"])
+	}
+	all, err := rigStore.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("rigStore.List: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("rig store bead count = %d, want 1: %#v", len(all), all)
+	}
+
+	ordersStore, err := openStoreAtForCity(ordersDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(orders): %v", err)
+	}
+	ordersBeads, err := ordersStore.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("ordersStore.List: %v", err)
+	}
+	if len(ordersBeads) != 0 {
+		t.Fatalf("orders store bead count = %d, want 0: %#v", len(ordersBeads), ordersBeads)
+	}
+}
+
+func TestCmdSlingUnderscoredPrefixMultiDashExistingBeadUsesPrefixStore(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	rigDir := filepath.Join(cityDir, "live-docs")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
+	}
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := ensurePersistedScopeLocalFileStore(dir); err != nil {
+			t.Fatalf("ensurePersistedScopeLocalFileStore(%s): %v", dir, err)
+		}
+	}
+	const beadID = "live_docs-spawn-storm"
+	writeTestFileStoreBeads(t, rigDir, []beads.Bead{{
+		ID:       beadID,
+		Title:    "spawn storm bead",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{},
+	}})
+	cityToml := `[workspace]
+name = "demo"
+
+[[rigs]]
+name = "live_docs"
+path = "live-docs"
+prefix = "live_docs"
+
+[[agent]]
+name = "worker"
+dir = "live_docs"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Chdir(cityDir)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{"live_docs/worker", beadID},
+		false, false, false,
+		"", nil, "",
+		true, false, false, "",
+		false, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("cmdSling returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Created ") {
+		t.Fatalf("stdout = %q, want existing bead route without inline creation", stdout.String())
+	}
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	routed, err := rigStore.Get(beadID)
+	if err != nil {
+		t.Fatalf("rigStore.Get(%s): %v", beadID, err)
+	}
+	if routed.Metadata["gc.routed_to"] != "live_docs/worker" {
+		t.Fatalf("rig bead gc.routed_to = %q, want live_docs/worker", routed.Metadata["gc.routed_to"])
+	}
+
+	assertStoreHasNoBeadTitle(t, cityDir, cityDir, beadID)
+}
+
+func setupCmdSlingMultiDashBeadFixture(t *testing.T, defaultTarget bool) (cityDir, rigDir string) {
+	t.Helper()
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir = t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	rigDir = filepath.Join(cityDir, "foundations")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
+	}
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := ensurePersistedScopeLocalFileStore(dir); err != nil {
+			t.Fatalf("ensurePersistedScopeLocalFileStore(%s): %v", dir, err)
+		}
+	}
+	writeTestFileStoreBeads(t, rigDir, []beads.Bead{{
+		ID:       "fo-spawn-storm",
+		Title:    "spawn storm bead",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{},
+	}})
+	defaultTargetLine := ""
+	if defaultTarget {
+		defaultTargetLine = "default_sling_target = \"foundations/worker\"\n"
+	}
+	cityToml := `[workspace]
+name = "demo"
+
+[[rigs]]
+name = "foundations"
+path = "foundations"
+prefix = "fo"
+` + defaultTargetLine + `
+
+[[agent]]
+name = "worker"
+dir = "foundations"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Chdir(cityDir)
+	return cityDir, rigDir
+}
+
 func TestCmdSlingRefusesMissingConfiguredFallbackBeadID(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("GC_BEADS", "file")
 
 	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
 	rigDir := filepath.Join(cityDir, "orders")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(rig): %v", err)
@@ -1573,7 +2647,7 @@ dir = "orders"
 		[]string{"orders/worker", "od-zzzz1"},
 		false, false, false,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		false, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -1597,7 +2671,7 @@ func TestCmdSlingRefusesMissingConfiguredPrefixAllAlphaBeadID(t *testing.T) {
 		[]string{"frontend/worker", "FE-abcde"},
 		false, false, false,
 		"", nil, "",
-		true, false, "",
+		true, false, false, "",
 		true, false, false,
 		"", "",
 		&stdout, &stderr,
@@ -1652,7 +2726,10 @@ dolt.auto-start: false
 	}
 	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}
 
-	env := slingStoreEnv(cfg, cityDir, rigDir)
+	env, err := slingStoreEnvWithError(cfg, cityDir, rigDir)
+	if err != nil {
+		t.Fatalf("slingStoreEnvWithError() error = %v", err)
+	}
 	if got := env["GC_DOLT_PORT"]; got != wantPort {
 		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, wantPort)
 	}
@@ -1661,6 +2738,41 @@ dolt.auto-start: false
 	}
 	if got := env["GC_RIG"]; got != "repo" {
 		t.Fatalf("GC_RIG = %q, want %q", got, "repo")
+	}
+}
+
+func TestSlingStoreEnvWithError_SurfacesPostgresProjectionError(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: city
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(cityDir, "rigs", "pg")
+	writePGScopeFixture(t, rigDir, "")
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "pg", Path: rigDir}}}
+
+	_, err := slingStoreEnvWithError(cfg, cityDir, rigDir)
+	if err == nil {
+		t.Fatal("slingStoreEnvWithError() error = nil, want postgres projection error")
+	}
+	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
+		t.Fatalf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
 	}
 }
 
@@ -1698,13 +2810,22 @@ func TestNewSlingCmdArgs(t *testing.T) {
 }
 
 // fakeQuerier implements BeadQuerier for testing pre-flight checks.
+// Callers may wire a parent bead for hasLiveConvoyParent lookups by
+// setting bead.ParentID and parent.ID to the same value.
 type fakeQuerier struct {
-	bead beads.Bead
-	err  error
+	bead   beads.Bead
+	parent *beads.Bead
+	err    error
 }
 
-func (q *fakeQuerier) Get(_ string) (beads.Bead, error) {
-	return q.bead, q.err
+func (q *fakeQuerier) Get(id string) (beads.Bead, error) {
+	if q.err != nil {
+		return beads.Bead{}, q.err
+	}
+	if q.parent != nil && id == q.bead.ParentID {
+		return *q.parent, nil
+	}
+	return q.bead, nil
 }
 
 // fakeChildQuerier implements BeadChildQuerier for testing batch dispatch.
@@ -2376,6 +3497,113 @@ func TestOnFormulaAttachesAndRoutes(t *testing.T) {
 	}
 }
 
+func TestOnRootOnlyFormulaKeepsAttachedWispPrivate(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "root-only.formula.toml"), []byte(`
+formula = "root-only"
+description = "Private attached root"
+version = 1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		FormulaLayers: config.FormulaLayers{City: []string{dir}},
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
+	}, nil)
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "root-only"
+	code := doSling(opts, deps, deps.Store, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	source, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42): %v", err)
+	}
+	if source.Metadata["gc.routed_to"] != "mayor" {
+		t.Errorf("source gc.routed_to = %q, want mayor", source.Metadata["gc.routed_to"])
+	}
+	rootID := source.Metadata["molecule_id"]
+	if rootID == "" {
+		t.Fatal("source bead missing molecule_id")
+	}
+	root, err := deps.Store.Get(rootID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", rootID, err)
+	}
+	if root.Type != "molecule" {
+		t.Fatalf("attached root type = %q, want molecule", root.Type)
+	}
+	if root.Metadata["gc.kind"] == "wisp" {
+		t.Fatalf("attached root leaked gc.kind=wisp metadata: %+v", root.Metadata)
+	}
+	ready, err := deps.Store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	for _, bead := range ready {
+		if bead.ID == rootID {
+			t.Fatalf("attached wisp root %s appeared in Ready(): %+v", rootID, ready)
+		}
+	}
+}
+
+func TestFormulaRootOnlyRoutesRunnableWispRoot(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "root-only.formula.toml"), []byte(`
+formula = "root-only"
+description = "Standalone root"
+version = 1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		FormulaLayers: config.FormulaLayers{City: []string{dir}},
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "root-only")
+	opts.IsFormula = true
+	code := doSling(opts, deps, deps.Store, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	root, err := deps.Store.Get("gc-1")
+	if err != nil {
+		t.Fatalf("store.Get(gc-1): %v", err)
+	}
+	if root.Type != "task" {
+		t.Fatalf("root type = %q, want task", root.Type)
+	}
+	if root.Metadata["gc.kind"] != "wisp" {
+		t.Fatalf("root gc.kind = %q, want wisp", root.Metadata["gc.kind"])
+	}
+	if root.Metadata["gc.routed_to"] != "mayor" {
+		t.Fatalf("root gc.routed_to = %q, want mayor", root.Metadata["gc.routed_to"])
+	}
+	ready, err := deps.Store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != root.ID {
+		t.Fatalf("Ready() = %+v, want only routed root %s", ready, root.ID)
+	}
+}
+
 func TestOnFormulaCopiesSourcePriorityToCreatedBeads(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -2548,8 +3776,8 @@ title = "Do work"
 			if bead.Assignee != config.ControlDispatcherAgentName {
 				t.Fatalf("workflow-finalize assignee = %q, want %q", bead.Assignee, config.ControlDispatcherAgentName)
 			}
-			if bead.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
-				t.Fatalf("workflow-finalize gc.routed_to = %q, want %q", bead.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
+			if got := bead.Metadata["gc.routed_to"]; got != "" {
+				t.Fatalf("workflow-finalize gc.routed_to = %q, want empty direct dispatcher assignee", got)
 			}
 			if bead.Metadata[graphExecutionRouteMetaKey] != "mayor" {
 				t.Fatalf("workflow-finalize execution route = %q, want mayor", bead.Metadata[graphExecutionRouteMetaKey])
@@ -2871,6 +4099,33 @@ func TestResolveSlingStoreRootUsesPrefixRigForConfiguredAllAlphaBeadID(t *testin
 	}
 }
 
+func TestResolveSlingStoreRootHonorsHyphenatedRigPrefix(t *testing.T) {
+	// A rig whose configured prefix itself contains a hyphen must
+	// receive its own beads — the longest configured prefix wins
+	// over a shorter prefix that also matches the bead-ID head.
+	cityPath := filepath.Join(t.TempDir(), "city")
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "agent", Path: filepath.Join("rigs", "agent"), Prefix: "agent"},
+			{Name: "agent-diagnostics", Path: filepath.Join("rigs", "agent-diag"), Prefix: "agent-diagnostics"},
+		},
+	}
+
+	got := resolveSlingStoreRoot(cfg, cityPath, "agent-diagnostics-hnn", config.Agent{Dir: "agent"})
+	want := filepath.Join(cityPath, "rigs", "agent-diag")
+	if got != want {
+		t.Fatalf("resolveSlingStoreRoot(agent-diagnostics-hnn) = %q, want %q (longest configured prefix should win)", got, want)
+	}
+
+	// Sanity check: a bead under the shorter "agent" prefix still resolves
+	// to that rig.
+	got = resolveSlingStoreRoot(cfg, cityPath, "agent-x1", config.Agent{Dir: "agent-diagnostics"})
+	want = filepath.Join(cityPath, "rigs", "agent")
+	if got != want {
+		t.Fatalf("resolveSlingStoreRoot(agent-x1) = %q, want %q", got, want)
+	}
+}
+
 func TestResolveSlingStoreRootUsesCityRootForHQPrefix(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "city")
 	cfg := &config.City{
@@ -2895,10 +4150,10 @@ func TestSlingFormulaRepoDirUsesCanonicalRigRoot(t *testing.T) {
 		},
 	}
 
-	got := slingFormulaRepoDir("plain text", deps, config.Agent{Dir: "alpha"})
+	got := sling.SlingFormulaRepoDir("plain text", deps, config.Agent{Dir: "alpha"})
 	want := filepath.Join(cityPath, "rigs", "alpha")
 	if got != want {
-		t.Fatalf("slingFormulaRepoDir() = %q, want %q", got, want)
+		t.Fatalf("SlingFormulaRepoDir() = %q, want %q", got, want)
 	}
 }
 
@@ -4292,6 +5547,52 @@ func TestDryRunConvoy(t *testing.T) {
 	}
 }
 
+func TestDryRunConvoyUsesTracksMembers(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "CVY-1", Type: "convoy", Status: "open", Title: "Sprint 12 tasks"},
+		{ID: "EPIC-1", Type: "epic", Status: "open", Title: "Product work"},
+		{ID: "BL-1", Type: "task", Status: "open", Title: "Login page", ParentID: "EPIC-1"},
+		{ID: "BL-2", Type: "task", Status: "closed", Title: "Auth backend", ParentID: "EPIC-1"},
+	}, []beads.Dep{
+		{IssueID: "CVY-1", DependsOnID: "BL-1", Type: "tracks"},
+		{IssueID: "CVY-1", DependsOnID: "BL-2", Type: "tracks"},
+	})
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = store
+	opts := testOpts(a, "CVY-1")
+	opts.DryRun = true
+	code := doSlingBatch(opts, deps, store, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("dry-run returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Children (2 total, 1 open)") {
+		t.Fatalf("stdout missing tracks children summary: %s", out)
+	}
+	if !strings.Contains(out, "BL-1") || !strings.Contains(out, "would route") {
+		t.Errorf("stdout missing tracked open child route preview: %s", out)
+	}
+	if !strings.Contains(out, "BL-2") || !strings.Contains(out, "skip") {
+		t.Errorf("stdout missing tracked closed child skip preview: %s", out)
+	}
+	if !strings.Contains(out, "bd update 'BL-1' --set-metadata gc.routed_to=mayor") {
+		t.Errorf("stdout missing tracked BL-1 route command: %s", out)
+	}
+	if strings.Contains(out, "bd update 'BL-2' --set-metadata gc.routed_to=mayor") {
+		t.Errorf("stdout should not route closed tracked BL-2: %s", out)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
 func TestDryRunBatchOnFormula(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -4502,7 +5803,10 @@ func TestDryRunNilQuerier(t *testing.T) {
 // --- Idempotency detection (checkBeadState + integration) tests ---
 
 func TestCheckBeadStateIdempotentFixedAgent(t *testing.T) {
-	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Metadata: map[string]string{"gc.routed_to": "mayor"}}}
+	q := &fakeQuerier{
+		bead:   beads.Bead{ID: "BL-42", ParentID: "CVY-1", Metadata: map[string]string{"gc.routed_to": "mayor"}},
+		parent: &beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"},
+	}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	result := checkBeadState(q, "BL-42", a)
@@ -4515,7 +5819,10 @@ func TestCheckBeadStateIdempotentFixedAgent(t *testing.T) {
 }
 
 func TestCheckBeadStateIdempotentPool(t *testing.T) {
-	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Metadata: map[string]string{"gc.routed_to": "hw/polecat"}}}
+	q := &fakeQuerier{
+		bead:   beads.Bead{ID: "BL-42", ParentID: "CVY-1", Metadata: map[string]string{"gc.routed_to": "hw/polecat"}},
+		parent: &beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"},
+	}
 	a := config.Agent{Name: "polecat", Dir: "hw", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)}
 
 	result := checkBeadState(q, "BL-42", a)
@@ -4528,11 +5835,15 @@ func TestCheckBeadStateIdempotentPool(t *testing.T) {
 }
 
 func TestCheckBeadStateIdempotentPoolMultiLabels(t *testing.T) {
-	q := &fakeQuerier{bead: beads.Bead{
-		ID:       "BL-42",
-		Labels:   []string{"priority:high", "sprint:3"},
-		Metadata: map[string]string{"gc.routed_to": "hw/polecat"},
-	}}
+	q := &fakeQuerier{
+		bead: beads.Bead{
+			ID:       "BL-42",
+			ParentID: "CVY-1",
+			Labels:   []string{"priority:high", "sprint:3"},
+			Metadata: map[string]string{"gc.routed_to": "hw/polecat"},
+		},
+		parent: &beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"},
+	}
 	a := config.Agent{Name: "polecat", Dir: "hw", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)}
 
 	result := checkBeadState(q, "BL-42", a)
@@ -4594,7 +5905,10 @@ func TestDoSlingIdempotentSkipsRouting(t *testing.T) {
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
-	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Metadata: map[string]string{"gc.routed_to": "mayor"}}}
+	q := &fakeQuerier{
+		bead:   beads.Bead{ID: "BL-42", ParentID: "CVY-1", Metadata: map[string]string{"gc.routed_to": "mayor"}},
+		parent: &beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"},
+	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-42")
@@ -4611,6 +5925,205 @@ func TestDoSlingIdempotentSkipsRouting(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "skipping (idempotent)") {
 		t.Errorf("stdout = %q, want idempotent label", stdout.String())
+	}
+}
+
+// TestDoSlingRecoversMissingConvoyOnPreRoutedBead covers the case where a
+// bead has gc.routed_to set (e.g., declared via bd create --metadata) but
+// no auto-convoy membership — a prior sling never finished, or the route came
+// from outside gc sling. A subsequent sling must re-run finalize() to create
+// the auto-convoy tracking dependency and poke the controller, instead of
+// skipping as idempotent and leaving the work orphaned.
+func TestDoSlingRecoversMissingConvoyOnPreRoutedBead(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	// Override the package-level poke hook so we can count controller pokes
+	// without spinning up IPC.
+	var pokeCount int
+	oldPoke := slingPokeController
+	slingPokeController = func(string) error {
+		pokeCount++
+		return nil
+	}
+	t.Cleanup(func() { slingPokeController = oldPoke })
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	existingConvoy, err := deps.Store.Create(beads.Bead{Title: "existing convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("seed existing convoy: %v", err)
+	}
+	// Pre-set gc.routed_to on the bead via the store, without ever creating
+	// a convoy. Mirrors `bd create --metadata '{"gc.routed_to":"mayor"}'`.
+	if err := deps.Store.SetMetadata("BL-42", "gc.routed_to", "mayor"); err != nil {
+		t.Fatalf("seed routed_to: %v", err)
+	}
+
+	opts := testOpts(a, "BL-42")
+	code := doSling(opts, deps, deps.Store, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	bead, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42): %v", err)
+	}
+	if got := bead.Metadata["gc.routed_to"]; got != "mayor" {
+		t.Errorf("gc.routed_to = %q, want %q (should be unchanged)", got, "mayor")
+	}
+	if bead.ParentID != "" {
+		t.Fatalf("ParentID = %q, want empty because auto-convoy membership uses tracks deps", bead.ParentID)
+	}
+	trackDeps, err := deps.Store.DepList(bead.ID, "up")
+	if err != nil {
+		t.Fatalf("DepList(%s, up): %v", bead.ID, err)
+	}
+	var recoveredConvoyID string
+	for _, dep := range trackDeps {
+		if dep.Type == "tracks" && dep.DependsOnID == bead.ID {
+			recoveredConvoyID = dep.IssueID
+		}
+	}
+	if recoveredConvoyID == "" {
+		t.Fatalf("expected recovered bead to have a tracks dependency, got deps=%v", trackDeps)
+	}
+	if recoveredConvoyID == existingConvoy.ID {
+		t.Fatalf("recovered convoy = pre-existing convoy %s, want a fresh convoy", existingConvoy.ID)
+	}
+	parent, err := deps.Store.Get(recoveredConvoyID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", recoveredConvoyID, err)
+	}
+	if parent.Type != "convoy" {
+		t.Errorf("parent.Type = %q, want %q", parent.Type, "convoy")
+	}
+	if parent.Status == "closed" {
+		t.Errorf("parent convoy should not be closed immediately after recovery")
+	}
+	if pokeCount < 1 {
+		t.Errorf("expected slingPokeController to fire at least once, got %d", pokeCount)
+	}
+	if !strings.Contains(stdout.String(), "Auto-convoy") {
+		t.Errorf("stdout should mention Auto-convoy: %s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "skipping (idempotent)") {
+		t.Errorf("stdout should not report idempotent skip: %s", stdout.String())
+	}
+}
+
+func TestDoSlingNoConvoyRepeatIsIdempotent(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	var pokeCount int
+	oldPoke := slingPokeController
+	slingPokeController = func(string) error {
+		pokeCount++
+		return nil
+	}
+	t.Cleanup(func() { slingPokeController = oldPoke })
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
+
+	opts := testOpts(a, "BL-42")
+	opts.NoConvoy = true
+	code := doSling(opts, deps, deps.Store, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("first doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	first, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42): %v", err)
+	}
+	if first.ParentID != "" {
+		t.Fatalf("first no-convoy sling set ParentID = %q, want empty", first.ParentID)
+	}
+	if pokeCount != 1 {
+		t.Fatalf("first no-convoy sling poke count = %d, want 1", pokeCount)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = doSling(opts, deps, deps.Store, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("second doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	second, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42) after second sling: %v", err)
+	}
+	if second.ParentID != "" {
+		t.Fatalf("second no-convoy sling set ParentID = %q, want empty", second.ParentID)
+	}
+	if pokeCount != 1 {
+		t.Fatalf("second no-convoy sling poked controller; count = %d, want 1", pokeCount)
+	}
+	if !strings.Contains(stdout.String(), "skipping (idempotent)") {
+		t.Fatalf("stdout = %q, want idempotent skip", stdout.String())
+	}
+
+	all, err := deps.Store.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("list beads: %v", err)
+	}
+	for _, b := range all {
+		if b.Type == "convoy" {
+			t.Fatalf("unexpected convoy bead after no-convoy repeat: %+v", b)
+		}
+	}
+}
+
+func TestDoSlingKeepsWorkflowParentIdempotent(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	var pokeCount int
+	oldPoke := slingPokeController
+	slingPokeController = func(string) error {
+		pokeCount++
+		return nil
+	}
+	t.Cleanup(func() { slingPokeController = oldPoke })
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "WF-1", Title: "workflow", Type: "workflow", Status: "in_progress", Metadata: map[string]string{"gc.kind": "workflow"}},
+		{
+			ID:       "BL-42",
+			Title:    "workflow step",
+			Type:     "task",
+			Status:   "open",
+			ParentID: "WF-1",
+			Metadata: map[string]string{"gc.routed_to": "mayor"},
+		},
+	}, nil)
+
+	opts := testOpts(a, "BL-42")
+	code := doSling(opts, deps, deps.Store, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	bead, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42): %v", err)
+	}
+	if bead.ParentID != "WF-1" {
+		t.Fatalf("ParentID = %q, want original workflow parent WF-1", bead.ParentID)
+	}
+	if pokeCount != 0 {
+		t.Fatalf("idempotent workflow parent sling poked controller; count = %d, want 0", pokeCount)
+	}
+	if !strings.Contains(stdout.String(), "skipping (idempotent)") {
+		t.Fatalf("stdout = %q, want idempotent skip", stdout.String())
 	}
 }
 
@@ -4651,8 +6164,11 @@ func TestDoSlingIdempotentWithOnFormula(t *testing.T) {
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
-	// Bead is already assigned to mayor — idempotent.
-	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Assignee: "mayor"}}
+	// Bead is already assigned to mayor with a live convoy parent — idempotent.
+	q := &fakeQuerier{
+		bead:   beads.Bead{ID: "BL-42", ParentID: "CVY-1", Assignee: "mayor"},
+		parent: &beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"},
+	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	opts := testOpts(a, "BL-42")
@@ -4679,11 +6195,11 @@ func TestDoSlingBatchIdempotentChildSkipped(t *testing.T) {
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
-	q.beadsByID["BL-1"] = beads.Bead{ID: "BL-1", Status: "open", Assignee: "mayor"}
-	q.beadsByID["BL-2"] = beads.Bead{ID: "BL-2", Status: "open"}
+	q.beadsByID["BL-1"] = beads.Bead{ID: "BL-1", Status: "open", Assignee: "mayor", ParentID: "CVY-1"}
+	q.beadsByID["BL-2"] = beads.Bead{ID: "BL-2", Status: "open", ParentID: "CVY-1"}
 	q.childrenOf["CVY-1"] = []beads.Bead{
-		{ID: "BL-1", Status: "open", Assignee: "mayor"},
-		{ID: "BL-2", Status: "open"},
+		{ID: "BL-1", Status: "open", Assignee: "mayor", ParentID: "CVY-1"},
+		{ID: "BL-2", Status: "open", ParentID: "CVY-1"},
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
@@ -4720,11 +6236,11 @@ func TestDoSlingBatchAllIdempotent(t *testing.T) {
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
-	q.beadsByID["BL-1"] = beads.Bead{ID: "BL-1", Status: "open", Assignee: "mayor"}
-	q.beadsByID["BL-2"] = beads.Bead{ID: "BL-2", Status: "open", Assignee: "mayor"}
+	q.beadsByID["BL-1"] = beads.Bead{ID: "BL-1", Status: "open", Assignee: "mayor", ParentID: "CVY-1"}
+	q.beadsByID["BL-2"] = beads.Bead{ID: "BL-2", Status: "open", Assignee: "mayor", ParentID: "CVY-1"}
 	q.childrenOf["CVY-1"] = []beads.Bead{
-		{ID: "BL-1", Status: "open", Assignee: "mayor"},
-		{ID: "BL-2", Status: "open", Assignee: "mayor"},
+		{ID: "BL-1", Status: "open", Assignee: "mayor", ParentID: "CVY-1"},
+		{ID: "BL-2", Status: "open", Assignee: "mayor", ParentID: "CVY-1"},
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
@@ -4751,7 +6267,10 @@ func TestDryRunIdempotentBead(t *testing.T) {
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
-	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Title: "Login page", Assignee: "mayor", Status: "open"}}
+	q := &fakeQuerier{
+		bead:   beads.Bead{ID: "BL-42", Title: "Login page", ParentID: "CVY-1", Assignee: "mayor", Status: "open"},
+		parent: &beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"},
+	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	deps.Store = seededStore("BL-42")
@@ -5172,11 +6691,11 @@ func TestDoSlingBatchAllIdempotentNoNudge(t *testing.T) {
 
 	q := newFakeChildQuerier()
 	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
-	q.beadsByID["BL-1"] = beads.Bead{ID: "BL-1", Status: "open", Assignee: "mayor"}
-	q.beadsByID["BL-2"] = beads.Bead{ID: "BL-2", Status: "open", Assignee: "mayor"}
+	q.beadsByID["BL-1"] = beads.Bead{ID: "BL-1", Status: "open", Assignee: "mayor", ParentID: "CVY-1"}
+	q.beadsByID["BL-2"] = beads.Bead{ID: "BL-2", Status: "open", Assignee: "mayor", ParentID: "CVY-1"}
 	q.childrenOf["CVY-1"] = []beads.Bead{
-		{ID: "BL-1", Status: "open", Assignee: "mayor"},
-		{ID: "BL-2", Status: "open", Assignee: "mayor"},
+		{ID: "BL-1", Status: "open", Assignee: "mayor", ParentID: "CVY-1"},
+		{ID: "BL-2", Status: "open", Assignee: "mayor", ParentID: "CVY-1"},
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
@@ -5464,6 +6983,89 @@ func TestDefaultFormulaDryRun(t *testing.T) {
 	}
 }
 
+func TestBuildSlingFormulaVarsPrefersStoredRigDefaultBranchForPolecatFormula(t *testing.T) {
+	// Storing default_branch in city.toml must override the live probe so
+	// rigs whose origin/HEAD is unset still get the right base_branch.
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: "/scamper", Prefix: "SC", DefaultBranch: "master"},
+		},
+	}
+	store := &recordingStore{
+		Store: beads.NewMemStore(),
+		beadsByID: map[string]beads.Bead{
+			"SC-1": {ID: "SC-1"}, // no metadata.target — must fall through to rig default
+		},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Store = store
+
+	vars := buildSlingFormulaVars("mol-polecat-work", "SC-1", nil, config.Agent{Name: "polecat", Dir: "scamper"}, deps)
+
+	if got, ok := findVarValue(vars, "base_branch"); !ok || got != "master" {
+		t.Fatalf("base_branch var = %q, %v; want master, true (from rig DefaultBranch)", got, ok)
+	}
+}
+
+func TestBuildSlingFormulaVarsPrefersStoredRigDefaultBranchForHyphenatedPrefix(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "agent-diagnostics", Path: "/agent-diagnostics", Prefix: "agent-diagnostics", DefaultBranch: "master"},
+		},
+	}
+	store := &recordingStore{
+		Store: beads.NewMemStore(),
+		beadsByID: map[string]beads.Bead{
+			"agent-diagnostics-hnn": {ID: "agent-diagnostics-hnn"},
+		},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Store = store
+
+	vars := buildSlingFormulaVars("mol-polecat-work", "agent-diagnostics-hnn", nil, config.Agent{Name: "polecat"}, deps)
+
+	if got, ok := findVarValue(vars, "base_branch"); !ok || got != "master" {
+		t.Fatalf("base_branch var = %q, %v; want master, true (from hyphenated rig prefix DefaultBranch)", got, ok)
+	}
+}
+
+func TestBuildSlingFormulaVarsPrefersStoredRigDefaultBranchForAgentPath(t *testing.T) {
+	rigPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: rigPath, Prefix: "SC", DefaultBranch: "master"},
+		},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+
+	vars := buildSlingFormulaVars("mol-refinery-patrol", "", nil, config.Agent{Name: "refinery", Dir: rigPath}, deps)
+
+	if got, ok := findVarValue(vars, "target_branch"); !ok || got != "master" {
+		t.Fatalf("target_branch var = %q, %v; want master, true (from path-scoped agent DefaultBranch)", got, ok)
+	}
+}
+
+func TestBuildSlingFormulaVarsPrefersStoredRigDefaultBranchForRefineryFormula(t *testing.T) {
+	// The refinery's mol-refinery-patrol uses target_branch instead of
+	// base_branch, but the resolution path is identical.
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "scamper", Path: "/scamper", Prefix: "SC", DefaultBranch: "master"},
+		},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+
+	vars := buildSlingFormulaVars("mol-refinery-patrol", "", nil, config.Agent{Name: "refinery", Dir: "scamper"}, deps)
+
+	if got, ok := findVarValue(vars, "target_branch"); !ok || got != "master" {
+		t.Fatalf("target_branch var = %q, %v; want master, true (from rig DefaultBranch)", got, ok)
+	}
+}
+
 func TestBuildSlingFormulaVarsUsesBeadTargetForPolecatFormula(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	store := &recordingStore{
@@ -5658,6 +7260,68 @@ func TestBuildSlingFormulaVarsPreservesExplicitValues(t *testing.T) {
 	}
 }
 
+func TestBuildSlingFormulaVarsSeedsRoutingNamespace(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+
+	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42", nil, config.Agent{
+		Name:        "polecat",
+		Dir:         "hw",
+		BindingName: "gastown",
+	}, deps)
+
+	if got, ok := findVarValue(vars, "rig_name"); !ok || got != "hw" {
+		t.Fatalf("rig_name var = %q, %v; want hw, true", got, ok)
+	}
+	if got, ok := findVarValue(vars, "binding_name"); !ok || got != "gastown" {
+		t.Fatalf("binding_name var = %q, %v; want gastown, true", got, ok)
+	}
+	if got, ok := findVarValue(vars, "binding_prefix"); !ok || got != "gastown." {
+		t.Fatalf("binding_prefix var = %q, %v; want gastown., true", got, ok)
+	}
+}
+
+func TestBuildSlingFormulaVarsPreservesExplicitRoutingNamespace(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+
+	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42", []string{
+		"rig_name=override-rig",
+		"binding_name=override-binding",
+		"binding_prefix=override.",
+	}, config.Agent{
+		Name:        "polecat",
+		Dir:         "hw",
+		BindingName: "gastown",
+	}, deps)
+
+	if got, ok := findVarValue(vars, "rig_name"); !ok || got != "override-rig" {
+		t.Fatalf("rig_name var = %q, %v; want override-rig, true", got, ok)
+	}
+	if got, ok := findVarValue(vars, "binding_name"); !ok || got != "override-binding" {
+		t.Fatalf("binding_name var = %q, %v; want override-binding, true", got, ok)
+	}
+	if got, ok := findVarValue(vars, "binding_prefix"); !ok || got != "override." {
+		t.Fatalf("binding_prefix var = %q, %v; want override., true", got, ok)
+	}
+}
+
+func TestBuildSlingFormulaVarsSeedsEmptyRoutingNamespaceForUnboundAgent(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+
+	vars := buildSlingFormulaVars("mol-deacon-patrol", "CITY-42", nil, config.Agent{
+		Name: "deacon",
+	}, deps)
+
+	for _, key := range []string{"rig_name", "binding_name", "binding_prefix"} {
+		got, ok := findVarValue(vars, key)
+		if !ok || got != "" {
+			t.Fatalf("%s var = %q, %v; want empty string, true", key, got, ok)
+		}
+	}
+}
+
 func TestBeadMetadataTargetStopsOnParentCycle(t *testing.T) {
 	store := &recordingStore{
 		Store: beads.NewMemStore(),
@@ -5667,8 +7331,8 @@ func TestBeadMetadataTargetStopsOnParentCycle(t *testing.T) {
 		},
 	}
 
-	if got := beadMetadataTarget(store, "A"); got != "" {
-		t.Fatalf("beadMetadataTarget = %q, want empty string", got)
+	if got := sling.BeadMetadataTarget(store, "A"); got != "" {
+		t.Fatalf("BeadMetadataTarget = %q, want empty string", got)
 	}
 }
 
@@ -5722,6 +7386,100 @@ func TestBuildSlingFormulaVarsInjectsIssueAndBaseBranch(t *testing.T) {
 	if got, ok := findVarValue(vars, "base_branch"); !ok || got != "integration/convoy-7" {
 		t.Fatalf("base_branch var = %q, %v; want integration/convoy-7, true", got, ok)
 	}
+}
+
+// TestBuildSlingFormulaVarsRigDefaults covers rig-scoped formula var defaults
+// flowing into the final vars map, plus precedence:
+//
+//	--var > rig.formula_vars > routing-injected > formula default
+func TestBuildSlingFormulaVarsRigDefaults(t *testing.T) {
+	t.Run("rig defaults flow in when caller omits --var", func(t *testing.T) {
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs: []config.Rig{
+				{
+					Name: "mo",
+					Path: "/mo",
+					FormulaVars: map[string]string{
+						"test_command": "make test-fast",
+						"lint_command": "golangci-lint run",
+					},
+				},
+			},
+		}
+		deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+		vars := buildSlingFormulaVars("mol-polecat-work", "MO-1", nil,
+			config.Agent{Name: "polecat", Dir: "mo"}, deps)
+
+		if got, ok := findVarValue(vars, "test_command"); !ok || got != "make test-fast" {
+			t.Fatalf("test_command = %q, %v; want make test-fast (from rig defaults)", got, ok)
+		}
+		if got, ok := findVarValue(vars, "lint_command"); !ok || got != "golangci-lint run" {
+			t.Fatalf("lint_command = %q, %v; want golangci-lint run (from rig defaults)", got, ok)
+		}
+	})
+
+	t.Run("--var wins over rig defaults", func(t *testing.T) {
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs: []config.Rig{
+				{
+					Name:        "mo",
+					Path:        "/mo",
+					FormulaVars: map[string]string{"test_command": "make test-fast"},
+				},
+			},
+		}
+		deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+		vars := buildSlingFormulaVars("mol-polecat-work", "MO-1",
+			[]string{"test_command=go test -short ./..."},
+			config.Agent{Name: "polecat", Dir: "mo"}, deps)
+
+		if got, ok := findVarValue(vars, "test_command"); !ok || got != "go test -short ./..." {
+			t.Fatalf("test_command = %q, %v; want 'go test -short ./...' (--var override)", got, ok)
+		}
+	})
+
+	t.Run("no rig match is a no-op", func(t *testing.T) {
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs: []config.Rig{
+				{
+					Name:        "mo",
+					Path:        "/mo",
+					FormulaVars: map[string]string{"test_command": "make test-fast"},
+				},
+			},
+		}
+		deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+		vars := buildSlingFormulaVars("mol-polecat-work", "UNK-1", nil,
+			config.Agent{Name: "polecat", Dir: "other-rig"}, deps)
+
+		if _, ok := findVarValue(vars, "test_command"); ok {
+			t.Fatalf("test_command should not be set when agent rig does not match any rig with formula_vars")
+		}
+	})
+
+	t.Run("rig match by filesystem path resolves like Dir=rigName", func(t *testing.T) {
+		rigPath := "/abs/mo-path"
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs: []config.Rig{
+				{
+					Name:        "mo",
+					Path:        rigPath,
+					FormulaVars: map[string]string{"test_command": "make test-fast"},
+				},
+			},
+		}
+		deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+		vars := buildSlingFormulaVars("mol-polecat-work", "MO-1", nil,
+			config.Agent{Name: "polecat", Dir: rigPath}, deps)
+
+		if got, ok := findVarValue(vars, "test_command"); !ok || got != "make test-fast" {
+			t.Fatalf("test_command = %q, %v; want make test-fast (path-resolved rig lookup)", got, ok)
+		}
+	})
 }
 
 // --- 1-arg sling tests (via doSling, not cmdSling which needs a real city) ---
@@ -5789,6 +7547,33 @@ func TestOneArgSlingFormulaRequiresTarget(t *testing.T) {
 	err := cmd.Execute()
 	if err == nil {
 		t.Fatal("expected error for --formula with 1 arg")
+	}
+}
+
+func TestSlingJSONArgumentErrorIsStructured(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := newSlingCmd(&stdout, &stderr)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--json"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for --formula with 1 arg")
+	}
+
+	var payload cliJSONErrorOutput
+	if unmarshalErr := json.Unmarshal(stdout.Bytes(), &payload); unmarshalErr != nil {
+		t.Fatalf("stdout is not JSON error: %v\n%s", unmarshalErr, stdout.String())
+	}
+	if payload.OK || payload.Error.Code != "invalid_arguments" || payload.Error.ExitCode != 1 {
+		t.Fatalf("payload = %+v, want invalid_arguments exit 1", payload)
+	}
+	var diagnostic cliJSONDiagnostic
+	if unmarshalErr := json.Unmarshal(bytes.TrimSpace(stderr.Bytes()), &diagnostic); unmarshalErr != nil {
+		t.Fatalf("stderr is not JSON diagnostic: %v\n%s", unmarshalErr, stderr.String())
+	}
+	if diagnostic.Code != payload.Error.Code || diagnostic.ExitCode != payload.Error.ExitCode {
+		t.Fatalf("diagnostic = %+v, payload error = %+v", diagnostic, payload.Error)
 	}
 }
 

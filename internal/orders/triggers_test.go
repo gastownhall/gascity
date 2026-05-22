@@ -2,11 +2,14 @@ package orders
 
 import (
 	"bytes"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
 
 func neverRan(_ string) (time.Time, error) { return time.Time{}, nil }
@@ -66,6 +69,15 @@ func TestCheckTriggerCronMatched(t *testing.T) {
 	}
 }
 
+func TestCheckTriggerCronEveryMinuteStepMatched(t *testing.T) {
+	a := Order{Name: "cleanup", Trigger: "cron", Schedule: "*/1 * * * *"}
+	now := time.Date(2026, 2, 27, 12, 34, 0, 0, time.UTC)
+	result := CheckTrigger(a, now, neverRan, nil, nil)
+	if !result.Due {
+		t.Errorf("Due = false, want true for */1 schedule; reason=%q", result.Reason)
+	}
+}
+
 func TestCheckTriggerCronNotMatched(t *testing.T) {
 	a := Order{Name: "cleanup", Trigger: "cron", Schedule: "0 3 * * *"}
 	// 12:00 UTC — should not match.
@@ -97,6 +109,29 @@ func TestCheckTriggerCondition(t *testing.T) {
 	}
 }
 
+func TestCheckTriggerConditionUsesOptions(t *testing.T) {
+	dir := t.TempDir()
+	if realDir, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = realDir
+	}
+	a := Order{
+		Name:    "check",
+		Trigger: "condition",
+		Check:   `test "$GC_CITY_PATH" = "$EXPECT_CITY" && test "$(pwd -P)" = "$(cd "$EXPECT_CITY" && pwd -P)"`,
+	}
+	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+	result := CheckTriggerWithOptions(a, now, neverRan, nil, nil, TriggerOptions{
+		ConditionDir: dir,
+		ConditionEnv: []string{
+			"EXPECT_CITY=" + dir,
+			"GC_CITY_PATH=" + dir,
+		},
+	})
+	if !result.Due {
+		t.Errorf("Due = false, want true with condition cwd/env: %s", result.Reason)
+	}
+}
+
 func TestCheckTriggerConditionFails(t *testing.T) {
 	a := Order{Name: "check", Trigger: "condition", Check: "false"}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
@@ -104,6 +139,69 @@ func TestCheckTriggerConditionFails(t *testing.T) {
 	if result.Due {
 		t.Errorf("Due = true, want false (exit non-zero)")
 	}
+}
+
+func TestCheckTriggerConditionKillsProcessGroupOnTimeout(t *testing.T) {
+	dir := t.TempDir()
+	heartbeatPath := filepath.Join(dir, "heartbeat")
+	childPIDPath := filepath.Join(dir, "child.pid")
+	t.Cleanup(func() { processgrouptest.KillFromPIDFile(t, childPIDPath) })
+	oldSignalGrace := conditionCheckSignalGrace
+	conditionCheckSignalGrace = 100 * time.Millisecond
+	t.Cleanup(func() { conditionCheckSignalGrace = oldSignalGrace })
+	a := Order{
+		Name:    "check",
+		Trigger: "condition",
+		Check:   fmt.Sprintf("sh -c 'printf \"%%s\\n\" \"$$\" > %q; trap \"\" TERM; while :; do printf . >> %q; sleep 0.05; done' & wait", childPIDPath, heartbeatPath),
+	}
+	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+	result := CheckTriggerWithOptions(a, now, neverRan, nil, nil, TriggerOptions{
+		ConditionDir:     dir,
+		ConditionTimeout: 100 * time.Millisecond,
+	})
+	if result.Due {
+		t.Fatalf("Due = true, want false after condition timeout")
+	}
+	if !strings.Contains(result.Reason, "timed out") {
+		t.Fatalf("Reason = %q, want timeout", result.Reason)
+	}
+
+	size := processgrouptest.WaitForFileSize(t, heartbeatPath)
+	processgrouptest.AssertFileSizeStable(t, heartbeatPath, size, 300*time.Millisecond)
+}
+
+func TestCheckTriggerConditionKillsProcessGroupAfterWaitDelay(t *testing.T) {
+	dir := t.TempDir()
+	heartbeatPath := filepath.Join(dir, "heartbeat")
+	childPIDPath := filepath.Join(dir, "child.pid")
+	t.Cleanup(func() { processgrouptest.KillFromPIDFile(t, childPIDPath) })
+	oldWaitDelay := conditionCheckPostCancelWaitDelay
+	oldSignalGrace := conditionCheckSignalGrace
+	conditionCheckPostCancelWaitDelay = 100 * time.Millisecond
+	conditionCheckSignalGrace = 100 * time.Millisecond
+	t.Cleanup(func() {
+		conditionCheckPostCancelWaitDelay = oldWaitDelay
+		conditionCheckSignalGrace = oldSignalGrace
+	})
+	a := Order{
+		Name:    "check",
+		Trigger: "condition",
+		Check:   fmt.Sprintf("sh -c 'printf \"%%s\\n\" \"$$\" > %q; trap \"\" TERM; while :; do printf . >> %q; sleep 0.05; done' &", childPIDPath, heartbeatPath),
+	}
+	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+	result := CheckTriggerWithOptions(a, now, neverRan, nil, nil, TriggerOptions{
+		ConditionDir:     dir,
+		ConditionTimeout: 10 * time.Second,
+	})
+	if result.Due {
+		t.Fatalf("Due = true, want false after condition post-cancel wait delay")
+	}
+	if !strings.Contains(result.Reason, "post-cancel wait delay") {
+		t.Fatalf("Reason = %q, want post-cancel wait delay", result.Reason)
+	}
+
+	size := processgrouptest.WaitForFileSize(t, heartbeatPath)
+	processgrouptest.AssertFileSizeStable(t, heartbeatPath, size, 300*time.Millisecond)
 }
 
 func TestCronFieldMatches(t *testing.T) {

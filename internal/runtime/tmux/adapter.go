@@ -33,6 +33,7 @@ var instanceTokenReader = rand.Reader
 // Compile-time check.
 var (
 	_ runtime.Provider                      = (*Provider)(nil)
+	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
 	_ runtime.ImmediateNudgeProvider        = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
@@ -76,22 +77,36 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		p.mu.Unlock()
 	}
 
+	if err := stageStartFiles(cfg, os.Stderr); err != nil {
+		return err
+	}
+
+	err = doStartSession(ctx, &tmuxStartOps{tm: p.tm}, name, cfg, p.cfg.SetupTimeout)
+	if err == nil {
+		p.cache.Invalidate()
+		return nil
+	}
+	p.cleanupFailedStart(name, cfg)
+	return err
+}
+
+func stageStartFiles(cfg runtime.Config, warnings io.Writer) error {
 	// Copy overlays and CopyFiles before creating the tmux session.
 	// Local provider: files are on the same filesystem.
-	// V2 per-provider overlay support: CopyDirForProviders copies universal
-	// files then per-provider/<provider>/ slots for ProviderName plus any
-	// InstallAgentHooks entries (flattened).
-	overlayProviders := append([]string{cfg.ProviderName}, cfg.InstallAgentHooks...)
+	// V2 per-provider overlay support: StageProviderOverlayDir copies universal
+	// files then flattened per-provider/<provider>/ slots for ProviderOverlayName
+	// with ProviderName fallback, plus any InstallAgentHooks entries.
+	overlayProviders := runtime.OverlayProviderNames(cfg)
 	if cfg.WorkDir != "" {
 		for _, od := range cfg.PackOverlayDirs {
-			if err := overlay.CopyDirForProviders(od, cfg.WorkDir, overlayProviders, io.Discard); err != nil {
+			if err := runtime.StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings); err != nil {
 				return fmt.Errorf("copying pack overlay %s: %w", od, err)
 			}
 		}
 	}
 	// Agent-level overlay (highest priority; merges known settings files, overwrites others).
 	if cfg.OverlayDir != "" && cfg.WorkDir != "" {
-		if err := overlay.CopyDirForProviders(cfg.OverlayDir, cfg.WorkDir, overlayProviders, io.Discard); err != nil {
+		if err := runtime.StageProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, overlayProviders, warnings); err != nil {
 			return fmt.Errorf("copying overlay %s: %w", cfg.OverlayDir, err)
 		}
 	}
@@ -108,14 +123,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 		_ = overlay.CopyFileOrDir(cf.Src, dst, io.Discard)
 	}
-
-	err = doStartSession(ctx, &tmuxStartOps{tm: p.tm}, name, cfg, p.cfg.SetupTimeout)
-	if err == nil {
-		p.cache.Invalidate()
-		return nil
-	}
-	p.cleanupFailedStart(name, cfg)
-	return err
+	return nil
 }
 
 func ensureInstanceToken(env map[string]string) (map[string]string, error) {
@@ -138,13 +146,36 @@ func injectSessionRuntimeHintsEnv(env map[string]string, cfg runtime.Config) map
 	for k, v := range env {
 		cloned[k] = v
 	}
+	if provider := strings.TrimSpace(cfg.ProviderName); provider != "" && strings.TrimSpace(cloned["GC_PROVIDER"]) == "" {
+		cloned["GC_PROVIDER"] = provider
+	}
 	if prompt := strings.TrimSpace(cfg.ReadyPromptPrefix); prompt != "" {
 		cloned[sessionReadyPromptEnvKey] = cfg.ReadyPromptPrefix
 	} else {
 		delete(cloned, sessionReadyPromptEnvKey)
 	}
+	// Publish ProcessNames into the session env so later liveness observation
+	// can distinguish a live pane shell from a live agent process. Sessions
+	// without ProcessNames keep pane-only liveness for conformance tests and
+	// ad-hoc invocations.
+	if names := joinNonEmpty(cfg.ProcessNames, ","); names != "" && strings.TrimSpace(cloned[gtProcessNamesEnvKey]) == "" {
+		cloned[gtProcessNamesEnvKey] = names
+	}
 	return cloned
 }
+
+// joinNonEmpty joins trimmed non-empty entries with sep; returns "" if none.
+func joinNonEmpty(parts []string, sep string) string {
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return strings.Join(out, sep)
+}
+
+const gtProcessNamesEnvKey = "GT_PROCESS_NAMES"
 
 func newInstanceToken() (string, error) {
 	b := make([]byte, 16)
@@ -203,7 +234,7 @@ func (p *Provider) Stop(name string) error {
 func (p *Provider) Interrupt(name string) error {
 	if p.tm.requiresHiddenAttachedInterrupt(name) && !p.tm.IsSessionAttached(name) {
 		if err := p.tm.ensureHiddenAttachedClient(name); err != nil {
-			return fmt.Errorf("preparing detached gemini interrupt: %w", err)
+			return fmt.Errorf("preparing detached interrupt: %w", err)
 		}
 	}
 	if used, err := p.tm.sendHiddenAttachedKeys(name, "C-c"); used {
@@ -223,9 +254,27 @@ func (p *Provider) Interrupt(name string) error {
 // Uses a short-lived cache (default 2s TTL) backed by a single
 // `tmux list-panes -a` call instead of per-session HasSession + IsPaneDead
 // subprocess calls. Sessions with remain-on-exit corpses (pane_dead=1)
-// are correctly excluded — only sessions with live panes are "running".
+// are correctly excluded. A live pane can still be a zombie shell; use
+// ObserveLiveness or ProcessAlive when agent-process liveness matters.
 func (p *Provider) IsRunning(name string) bool {
 	return p.cache.IsRunning(name)
+}
+
+// IsDeadRuntimeSession reports whether a visible tmux session is a
+// remain-on-exit corpse with no live panes.
+func (p *Provider) IsDeadRuntimeSession(name string) (bool, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false, nil
+	}
+	dead, err := p.tm.sessionPanesDead(name)
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return false, nil
+		}
+		return false, err
+	}
+	return dead, nil
 }
 
 // IsAttached reports whether a user terminal is connected to the named session.
@@ -237,10 +286,54 @@ func (p *Provider) IsAttached(name string) bool {
 // process matching one of the given names in its process tree.
 // Returns true if processNames is empty (no check possible).
 func (p *Provider) ProcessAlive(name string, processNames []string) bool {
+	processNames = nonEmptyProcessNames(processNames)
 	if len(processNames) == 0 {
 		return true
 	}
-	return p.tm.IsRuntimeRunning(name, processNames)
+	return p.cache.ProcessAlive(name, processNames)
+}
+
+// ObserveLiveness reports both pane presence and agent-process presence for a
+// tmux session. If processNames is empty, it strictly consults GT_PROCESS_NAMES
+// from the session environment; it never falls back to Claude defaults.
+func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.Liveness {
+	if strings.TrimSpace(name) == "" {
+		return runtime.Liveness{}
+	}
+	running := p.cache.IsRunning(name)
+	processNames = nonEmptyProcessNames(processNames)
+	if len(processNames) == 0 {
+		processNames = p.sessionProcessNames(name)
+	}
+	if len(processNames) == 0 {
+		return runtime.Liveness{Running: running, Alive: running}
+	}
+	alive := p.cache.ProcessAlive(name, processNames)
+	if alive && !running {
+		running = true
+	}
+	return runtime.Liveness{
+		Running: running,
+		Alive:   alive,
+	}
+}
+
+func (p *Provider) sessionProcessNames(name string) []string {
+	namesRaw, err := p.tm.GetEnvironment(name, gtProcessNamesEnvKey)
+	if err != nil {
+		return nil
+	}
+	return nonEmptyProcessNames(strings.Split(namesRaw, ","))
+}
+
+func nonEmptyProcessNames(processNames []string) []string {
+	out := make([]string, 0, len(processNames))
+	for _, name := range processNames {
+		if name = strings.TrimSpace(name); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // Capabilities reports tmux provider capabilities.
@@ -602,6 +695,16 @@ func (o *tmuxStartOps) acceptStartupDialogs(ctx context.Context, name string) er
 	return o.tm.AcceptStartupDialogs(ctx, name)
 }
 
+func shouldAcceptStartupDialogs(cfg runtime.Config) bool {
+	if cfg.AcceptStartupDialogs != nil {
+		return *cfg.AcceptStartupDialogs
+	}
+	if len(cfg.ProcessNames) == 0 && !cfg.EmitsPermissionWarning {
+		return false
+	}
+	return true
+}
+
 func (o *tmuxStartOps) waitForReady(ctx context.Context, name string, rc *RuntimeConfig, timeout time.Duration) error {
 	return o.tm.WaitForRuntimeReady(ctx, name, rc, timeout)
 }
@@ -665,12 +768,11 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 		return err
 	}
 
-	hasHints := cfg.ReadyPromptPrefix != "" || cfg.ReadyDelayMs > 0 ||
-		len(cfg.ProcessNames) > 0 || cfg.EmitsPermissionWarning ||
-		cfg.Nudge != "" || len(cfg.PreStart) > 0 || len(cfg.SessionSetup) > 0 || cfg.SessionSetupScript != "" ||
-		len(cfg.SessionLive) > 0
+	if cfg.Lifecycle == runtime.LifecycleOneShot {
+		return nil
+	}
 
-	if !hasHints {
+	if !runtime.HasManagedStartupHints(cfg) {
 		// Fire-and-forget: caller may SendImmediate before the agent is
 		// fully interactive. This is an accepted narrow race — it only
 		// occurs when no readiness hints are configured, and the message
@@ -690,7 +792,7 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 	// Step 3: Accept startup dialogs (workspace trust + bypass permissions).
 	// Always attempted when process names are set, since any Claude-like
 	// agent may show a trust dialog regardless of EmitsPermissionWarning.
-	if len(cfg.ProcessNames) > 0 || cfg.EmitsPermissionWarning {
+	if shouldAcceptStartupDialogs(cfg) {
 		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
 		if err := ctx.Err(); err != nil {
 			return err
@@ -713,7 +815,7 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 	// Some CLIs surface trust or permissions dialogs only after their initial
 	// ready screen. Re-run dialog acceptance after readiness so late dialogs do
 	// not strand the session in an unusable startup state.
-	if len(cfg.ProcessNames) > 0 || cfg.EmitsPermissionWarning {
+	if shouldAcceptStartupDialogs(cfg) {
 		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
 		if err := ctx.Err(); err != nil {
 			return err
@@ -726,7 +828,7 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 		return fmt.Errorf("verifying session: %w", err)
 	}
 	if !alive {
-		return fmt.Errorf("session %q died during startup", name)
+		return fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, name)
 	}
 
 	// Step 5.5: Run session setup commands and script.
@@ -740,7 +842,9 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 		return err
 	}
 	if cfg.Nudge != "" {
-		_ = ops.sendKeys(name, cfg.Nudge) // best-effort
+		if err := ops.sendKeys(name, cfg.Nudge); err != nil {
+			return fmt.Errorf("sending startup nudge: %w", err)
+		}
 	}
 
 	// Step 6.5: Run session_live commands (idempotent, re-applicable).

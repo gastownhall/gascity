@@ -14,6 +14,7 @@ cmd/gc/.runtime/
 **/.beads/*
 !**/.beads/config.yaml
 !**/.beads/metadata.json
+!**/.beads/identity.toml
 .claude/
 !examples/gastown/packs/gastown/overlays/default/.claude/
 !examples/gastown/packs/gastown/overlays/default/.claude/settings.json
@@ -45,3 +46,4 @@ reports/
 # Developer scratch — diff dumps and ad-hoc patches created during review
 tmp_*.diff
 tmp_*.patch
+issues.jsonl

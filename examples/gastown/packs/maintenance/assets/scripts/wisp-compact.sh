@@ -31,8 +31,14 @@ PROMOTED=0
 DELETED=0
 SKIPPED=0
 
-# Process each ephemeral bead.
-echo "$EPHEMERALS" | jq -c '.[]' 2>/dev/null | while IFS= read -r bead; do
+# Process each ephemeral bead. Capturing jq output into BEADS first
+# (instead of piping into the loop) preserves the original pipefail
+# fail-loud on jq error AND keeps PROMOTED/DELETED/SKIPPED in the parent
+# shell so they survive to the summary echo below. EPHEMERALS is
+# pre-validated as a non-empty array on lines 22-27, so BEADS is
+# guaranteed non-empty here.
+BEADS=$(echo "$EPHEMERALS" | jq -c '.[]' 2>/dev/null)
+while IFS= read -r bead; do
     id=$(echo "$bead" | jq -r '.id')
     status=$(echo "$bead" | jq -r '.status')
     updated_at=$(echo "$bead" | jq -r '.updated_at // .created_at')
@@ -50,8 +56,13 @@ echo "$EPHEMERALS" | jq -c '.[]' 2>/dev/null | while IFS= read -r bead; do
         esac
     done
 
-    # Calculate age.
-    BEAD_TS=$(date -d "$updated_at" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "$updated_at" +%s 2>/dev/null) || continue
+    # Calculate age. bd emits RFC3339 timestamps with a trailing 'Z'; the
+    # second BSD `date -ju -f` fallback handles that explicitly and forces
+    # UTC semantics to match GNU `date -d`. The third layout supports older
+    # no-Z timestamps without interpreting them in the local timezone.
+    BEAD_TS=$(date -d "$updated_at" +%s 2>/dev/null || \
+              date -ju -f "%Y-%m-%dT%H:%M:%SZ" "$updated_at" +%s 2>/dev/null || \
+              date -ju -f "%Y-%m-%dT%H:%M:%S" "$updated_at" +%s 2>/dev/null) || continue
     AGE=$((NOW - BEAD_TS))
 
     # Skip if within TTL (unless force-promote via keep label).
@@ -73,7 +84,7 @@ echo "$EPHEMERALS" | jq -c '.[]' 2>/dev/null | while IFS= read -r bead; do
     # Closed + past TTL + no special attributes → delete.
     bd delete "$id" --force 2>/dev/null || true
     DELETED=$((DELETED + 1))
-done
+done <<< "$BEADS"
 
 TOTAL=$((PROMOTED + DELETED))
 if [ "$TOTAL" -gt 0 ]; then

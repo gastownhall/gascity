@@ -3,7 +3,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: $0 <packages|review-formulas|review-formulas-basic|review-formulas-retries|review-formulas-recovery|bdstore|rest|rest-smoke|rest-full|all>" >&2
+  echo "usage: $0 <packages|packages-core-N-of-M|packages-cmd-gc-N-of-M|packages-runtime-tmux-N-of-M|review-formulas|review-formulas-basic[-N-of-M]|review-formulas-retries[-N-of-M]|review-formulas-recovery|bdstore|rest|rest-smoke[-N-of-M]|rest-full[-N-of-M]|all>" >&2
   exit 1
 fi
 
@@ -111,6 +111,40 @@ run_pkg_tests() {
   run_go_test "${go_test_args[@]}" "$test_pkg" -run "$regex"
 }
 
+run_pkg_tests_modulo() {
+  local test_pkg="$1"
+  local shard_index="$2"
+  local shard_total="$3"
+  shift 3
+  local -a tests=("$@") selected=()
+  local i
+
+  validate_modulo_shard "$shard_index" "$shard_total"
+  for i in "${!tests[@]}"; do
+    if (( i % shard_total == shard_index - 1 )); then
+      selected+=("${tests[$i]}")
+    fi
+  done
+  if [[ ${#selected[@]} -eq 0 ]]; then
+    echo "no tests selected for shard ${shard} (${shard_index} of ${shard_total})" >&2
+    exit 1
+  fi
+  run_pkg_tests "$test_pkg" "${selected[@]}"
+}
+
+validate_modulo_shard() {
+  local shard_index="$1"
+  local shard_total="$2"
+  if ! [[ "$shard_index" =~ ^[0-9]+$ && "$shard_total" =~ ^[0-9]+$ ]]; then
+    echo "shard index and total must be positive integers" >&2
+    exit 1
+  fi
+  if (( shard_index < 1 || shard_total < 1 || shard_index > shard_total )); then
+    echo "invalid shard ${shard_index} of ${shard_total}" >&2
+    exit 1
+  fi
+}
+
 list_integration_tests() {
   run_go_test -tags integration -list '^Test' "$pkg" | grep '^Test'
 }
@@ -152,12 +186,78 @@ run_packages_shard() {
   run_go_test "${go_test_args[@]}" "${packages[@]}"
 }
 
+run_packages_core_shard() {
+  local shard_index="$1"
+  local shard_total="$2"
+  local -a packages=() selected=() go_test_args=()
+  local line i
+
+  validate_modulo_shard "$shard_index" "$shard_total"
+  while IFS= read -r line; do
+    packages+=("$line")
+  done < <(
+    go list ./... |
+      grep -v '^github.com/gastownhall/gascity/test/integration$' |
+      grep -v '^github.com/gastownhall/gascity/cmd/gc$' |
+      grep -v '^github.com/gastownhall/gascity/internal/runtime/tmux$'
+  )
+  if [[ ${#packages[@]} -eq 0 ]]; then
+    echo "no core packages found" >&2
+    exit 1
+  fi
+  for i in "${!packages[@]}"; do
+    if (( i % shard_total == shard_index - 1 )); then
+      selected+=("${packages[$i]}")
+    fi
+  done
+  if [[ ${#selected[@]} -eq 0 ]]; then
+    echo "no core packages selected for shard ${shard_index} of ${shard_total}" >&2
+    exit 1
+  fi
+  echo "Running shard packages-core-${shard_index}-of-${shard_total} (${#selected[@]} packages)"
+  go_test_args=(-tags integration -timeout "$timeout")
+  if [[ -n "${GO_TEST_COVERPROFILE:-}" ]]; then
+    go_test_args+=(-coverpkg=./... -coverprofile "$GO_TEST_COVERPROFILE")
+  fi
+  run_go_test "${go_test_args[@]}" "${selected[@]}"
+}
+
+run_packages_cmd_gc_shard() {
+  local shard_index="$1"
+  local shard_total="$2"
+  validate_modulo_shard "$shard_index" "$shard_total"
+  # The package integration bucket should stay a fast package sweep. The
+  # slow process-backed cmd/gc scenarios run through make test-cmd-gc-process
+  # locally and the dedicated CI cmd/gc process job on Linux.
+  GC_FAST_UNIT="${GC_FAST_UNIT:-1}" GO_TEST_TAGS=integration GO_TEST_TIMEOUT="$timeout" "$repo_root/scripts/test-go-test-shard" ./cmd/gc "$shard_index" "$shard_total"
+}
+
+run_packages_runtime_tmux_shard() {
+  local shard_index="$1"
+  local shard_total="$2"
+  validate_modulo_shard "$shard_index" "$shard_total"
+  GO_TEST_TAGS=integration GO_TEST_TIMEOUT="$timeout" "$repo_root/scripts/test-go-test-shard" ./internal/runtime/tmux "$shard_index" "$shard_total"
+}
+
 run_rest_smoke_shard() {
   validate_selected_tests "${rest_smoke_tests[@]}"
   run_pkg_tests "$pkg" "${rest_smoke_tests[@]}"
 }
 
+run_rest_smoke_shard_modulo() {
+  local shard_index="$1"
+  local shard_total="$2"
+  validate_selected_tests "${rest_smoke_tests[@]}"
+  run_pkg_tests_modulo "$pkg" "$shard_index" "$shard_total" "${rest_smoke_tests[@]}"
+}
+
 run_rest_full_shard() {
+  run_rest_full_shard_modulo 1 1
+}
+
+run_rest_full_shard_modulo() {
+  local shard_index="$1"
+  local shard_total="$2"
   # bash 3.2 has no associative arrays; encode the excluded set as a
   # newline-delimited string and use grep -Fx to test membership.
   local -a all_tests=() rest_tests=()
@@ -178,7 +278,7 @@ run_rest_full_shard() {
     fi
   done
 
-  run_pkg_tests "$pkg" "${rest_tests[@]}"
+  run_pkg_tests_modulo "$pkg" "$shard_index" "$shard_total" "${rest_tests[@]}"
 }
 
 run_review_formulas_all() {
@@ -188,6 +288,37 @@ run_review_formulas_all() {
   "$0" review-formulas-recovery || { st=$?; [[ $status -ne 0 ]] || status=$st; }
   exit "$status"
 }
+
+if [[ "$shard" =~ ^packages-core-([0-9]+)-of-([0-9]+)$ ]]; then
+  run_packages_core_shard "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+  exit 0
+fi
+if [[ "$shard" =~ ^packages-cmd-gc-([0-9]+)-of-([0-9]+)$ ]]; then
+  run_packages_cmd_gc_shard "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+  exit 0
+fi
+if [[ "$shard" =~ ^packages-runtime-tmux-([0-9]+)-of-([0-9]+)$ ]]; then
+  run_packages_runtime_tmux_shard "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+  exit 0
+fi
+if [[ "$shard" =~ ^review-formulas-basic-([0-9]+)-of-([0-9]+)$ ]]; then
+  validate_selected_tests "${review_formulas_basic_tests[@]}"
+  run_pkg_tests_modulo "$pkg" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${review_formulas_basic_tests[@]}"
+  exit 0
+fi
+if [[ "$shard" =~ ^review-formulas-retries-([0-9]+)-of-([0-9]+)$ ]]; then
+  validate_selected_tests "${review_formulas_retry_tests[@]}"
+  run_pkg_tests_modulo "$pkg" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${review_formulas_retry_tests[@]}"
+  exit 0
+fi
+if [[ "$shard" =~ ^rest-smoke-([0-9]+)-of-([0-9]+)$ ]]; then
+  run_rest_smoke_shard_modulo "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+  exit 0
+fi
+if [[ "$shard" =~ ^rest-full-([0-9]+)-of-([0-9]+)$ ]]; then
+  run_rest_full_shard_modulo "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+  exit 0
+fi
 
 case "$shard" in
   packages)

@@ -8,8 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestMailLifecycle(t *testing.T) {
@@ -76,6 +78,11 @@ func TestMailLifecycle(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get status = %d, want %d", rec.Code, http.StatusOK)
 	}
+	var readMsg mail.Message
+	json.NewDecoder(rec.Body).Decode(&readMsg) //nolint:errcheck
+	if !readMsg.Read {
+		t.Fatalf("get after read: Read = false, want true")
+	}
 
 	// Archive.
 	req = newPostRequest(cityURL(state, "/mail/")+sent.ID+"/archive", nil)
@@ -84,6 +91,50 @@ func TestMailLifecycle(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("archive status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+func TestMailMarkUnread(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+
+	body := `{"from":"mayor","to":"worker","subject":"Unread test","body":"check this"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/mail"), bytes.NewBufferString(body)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("send status = %d, want %d; body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var sent mail.Message
+	json.NewDecoder(rec.Body).Decode(&sent) //nolint:errcheck
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/mail/")+sent.ID+"/read", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("read status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/mail/")+sent.ID+"/mark-unread", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("mark-unread status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/mail?agent=myrig/worker"), nil))
+	var inbox struct {
+		Items []mail.Message `json:"items"`
+		Total int            `json:"total"`
+	}
+	json.NewDecoder(rec.Body).Decode(&inbox) //nolint:errcheck
+	if inbox.Total != 1 {
+		t.Fatalf("inbox after mark-unread: Total = %d, want 1 (message should reappear)", inbox.Total)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/mail/")+sent.ID, nil))
+	var unread mail.Message
+	json.NewDecoder(rec.Body).Decode(&unread) //nolint:errcheck
+	if unread.Read {
+		t.Fatalf("get after mark-unread: Read = true, want false")
 	}
 }
 
@@ -150,6 +201,52 @@ func TestMailCount(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
 	if resp["unread"] != 2 {
 		t.Errorf("unread = %d, want 2", resp["unread"])
+	}
+}
+
+func TestMailInboxSeesHistoricalAliasSessionAddedAfterInitialMiss(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/mail?agent=old-worker"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("initial inbox status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	store := state.stores["myrig"]
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker",
+			"alias_history": "old-worker",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	if _, err := state.cityMailProv.Send("human", "worker", "Fresh session", "visible after initial miss"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/mail?agent=old-worker"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second inbox status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var inbox struct {
+		Items []mail.Message `json:"items"`
+		Total int            `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&inbox); err != nil {
+		t.Fatalf("decode inbox: %v", err)
+	}
+	if inbox.Total != 1 {
+		t.Fatalf("second inbox Total = %d, want 1", inbox.Total)
+	}
+	if len(inbox.Items) != 1 || inbox.Items[0].Body != "visible after initial miss" {
+		t.Fatalf("second inbox items = %#v, want visible historical-alias message", inbox.Items)
 	}
 }
 

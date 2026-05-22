@@ -362,3 +362,132 @@ url = "https://example.com/deputy"
 		t.Fatalf("stage2-only agents should not contribute stage1 targets, got %+v", targets)
 	}
 }
+
+func TestResolveAgentMCPProjectionSkipsImplicitStartCommandAgents(t *testing.T) {
+	// Implicit start-command infrastructure agents can inherit the city pack's
+	// MCP catalog while having no provider family. They never invoke
+	// `gc internal project-mcp`, matching the implicit-peer skip in
+	// validateStage2TargetClaimants, so MCP resolution should short-circuit for
+	// them rather than trip provider-family validation. Regression for
+	// gascity#2203 - formula_v2 cities that register MCP servers used to fail
+	// city start with:
+	//   init: project MCP: agent "control-dispatcher": effective MCP
+	//   requires a supported provider family, got ""
+	cityPath := t.TempDir()
+	mcpFile := filepath.Join(cityPath, "mcp", "kb.toml")
+	writeMCPSource(t, mcpFile, `
+name = "kb"
+transport = "http"
+url = "http://localhost:3100/mcp/kb"
+`)
+
+	cfg := &config.City{
+		Workspace:  config.Workspace{Provider: "claude"},
+		Providers:  map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none"}},
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+	}
+
+	// Reproduce the shape of the implicit control-dispatcher agent
+	// emitted by config.injectControlDispatcherAgents: Implicit=true,
+	// empty Provider.
+	implicit := &config.Agent{
+		Name:         config.ControlDispatcherAgentName,
+		Scope:        "city",
+		StartCommand: config.ControlDispatcherStartCommandFor(config.ControlDispatcherAgentName),
+		Implicit:     true,
+	}
+
+	catalog, projection, err := resolveAgentMCPProjection(
+		cityPath, cfg, implicit,
+		"control-dispatcher",
+		filepath.Join(cityPath, ".gc", "control-dispatcher"),
+		"", // empty providerKind matches the bug scenario
+	)
+	if err != nil {
+		t.Fatalf("resolveAgentMCPProjection(implicit) returned error: %v", err)
+	}
+	if len(catalog.Servers) != 0 {
+		t.Fatalf("implicit agent should return empty MCP catalog, got %d servers", len(catalog.Servers))
+	}
+	if projection.Provider != "" || len(projection.Servers) != 0 {
+		t.Fatalf("implicit agent should return zero MCPProjection, got %+v", projection)
+	}
+}
+
+func TestResolveAgentMCPProjectionKeepsImplicitStartCommandWithProviderKind(t *testing.T) {
+	cityPath := t.TempDir()
+	mcpFile := filepath.Join(cityPath, "mcp", "kb.toml")
+	writeMCPSource(t, mcpFile, `
+name = "kb"
+transport = "http"
+url = "http://localhost:3100/mcp/kb"
+`)
+
+	cfg := &config.City{
+		Workspace:  config.Workspace{Provider: "claude"},
+		Providers:  map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none"}},
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+	}
+	implicit := &config.Agent{
+		Name:         config.ControlDispatcherAgentName,
+		Scope:        "city",
+		StartCommand: config.ControlDispatcherStartCommandFor(config.ControlDispatcherAgentName),
+		Implicit:     true,
+	}
+
+	catalog, projection, err := resolveAgentMCPProjection(
+		cityPath, cfg, implicit,
+		config.ControlDispatcherAgentName,
+		filepath.Join(cityPath, ".gc", "control-dispatcher"),
+		"claude",
+	)
+	if err != nil {
+		t.Fatalf("resolveAgentMCPProjection(implicit with providerKind): %v", err)
+	}
+	if len(catalog.Servers) != 1 {
+		t.Fatalf("catalog servers len = %d, want 1", len(catalog.Servers))
+	}
+	if projection.Provider != "claude" {
+		t.Fatalf("projection provider = %q, want claude", projection.Provider)
+	}
+	if len(projection.Servers) != 1 {
+		t.Fatalf("projection servers len = %d, want 1", len(projection.Servers))
+	}
+}
+
+func TestBuildStage1MCPTargetsIncludesImplicitProviderAgents(t *testing.T) {
+	cityPath := t.TempDir()
+	mcpFile := filepath.Join(cityPath, "mcp", "kb.toml")
+	writeMCPSource(t, mcpFile, `
+name = "kb"
+transport = "http"
+url = "http://localhost:3100/mcp/kb"
+`)
+
+	cfg := &config.City{
+		Workspace:  config.Workspace{Provider: "claude"},
+		Providers:  map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none"}},
+		Session:    config.SessionConfig{Provider: "tmux"},
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+		Agents: []config.Agent{
+			{Name: "claude", Provider: "claude", Implicit: true},
+		},
+	}
+
+	targets, err := buildStage1MCPTargets(cityPath, cfg, stubLookPath)
+	if err != nil {
+		t.Fatalf("buildStage1MCPTargets: %v", err)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("stage1 targets len = %d, want 1: %+v", len(targets), targets)
+	}
+	if targets[0].Projection.Provider != "claude" {
+		t.Fatalf("projection provider = %q, want claude", targets[0].Projection.Provider)
+	}
+	if len(targets[0].Projection.Servers) != 1 {
+		t.Fatalf("projection servers len = %d, want 1", len(targets[0].Projection.Servers))
+	}
+	if got := targets[0].Agents; len(got) != 1 || got[0] != "claude" {
+		t.Fatalf("target agents = %+v, want [claude]", got)
+	}
+}

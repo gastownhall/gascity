@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -13,6 +14,26 @@ import (
 )
 
 const lookPathCacheTTL = 30 * time.Second
+
+// agentVisibilityPollInterval is how often WaitForAgentVisibilityIn re-reads
+// the cfg snapshot while waiting for a freshly created agent to become
+// resolvable through findAgent. Kept short because the typical race window
+// (a runtime config-reload tick that started before the mutation but applies
+// after it) is sub-second; the fast cadence keeps the POST /agents response
+// from blocking the caller for a perceptible time on the happy path.
+const agentVisibilityPollInterval = 50 * time.Millisecond
+
+// defaultAgentVisibilityWaitTimeout bounds the POST /agents read-after-write wait.
+// The controller should converge much faster; this timeout prevents a broken
+// projection from tying up the handler after the config mutation succeeded.
+const defaultAgentVisibilityWaitTimeout = 3 * time.Second
+
+func (s *Server) agentCreateVisibilityWaitTimeout() time.Duration {
+	if s.agentVisibilityWaitTimeout > 0 {
+		return s.agentVisibilityWaitTimeout
+	}
+	return defaultAgentVisibilityWaitTimeout
+}
 
 type agentResponse struct {
 	Name        string       `json:"name"`
@@ -64,9 +85,8 @@ type expandedAgent struct {
 // provider prefix matching — the same approach as discoverPoolInstances.
 func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister) []expandedAgent {
 	maxSess := a.EffectiveMaxActiveSessions()
-	isMultiSession := maxSess == nil || *maxSess != 1
 
-	if !isMultiSession {
+	if !isMultiSessionAgent(a) {
 		return []expandedAgent{{
 			qualifiedName: a.QualifiedName(),
 			rig:           a.Dir,
@@ -151,6 +171,44 @@ func agentSessionName(cityName, qualifiedName, sessionTemplate string) string {
 	return agent.SessionNameFor(cityName, qualifiedName, sessionTemplate)
 }
 
+// WaitForAgentVisibilityIn polls cfgSnapshot() until findAgent resolves the
+// given qualified agent name, or returns an error if ctx is done. It is the
+// shared building block for AgentVisibilityWaiter implementations.
+//
+// Callers pass cs.Config (or any other snapshot accessor that returns the
+// hot-reloaded *config.City) so the polling reads the live snapshot, not a
+// stale capture. The first check happens before the first sleep so the
+// happy path returns immediately when no runtime race occurred.
+func WaitForAgentVisibilityIn(ctx context.Context, cfgSnapshot func() *config.City, qualifiedName string) error {
+	return waitForAgentVisibilityIn(ctx, cfgSnapshot, qualifiedName, agentVisibilityPollInterval)
+}
+
+func waitForAgentVisibilityIn(ctx context.Context, cfgSnapshot func() *config.City, qualifiedName string, interval time.Duration) error {
+	check := func() bool {
+		cfg := cfgSnapshot()
+		if cfg == nil {
+			return false
+		}
+		_, ok := findAgent(cfg, qualifiedName)
+		return ok
+	}
+	if check() {
+		return nil
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for agent %q to become visible: %w", qualifiedName, ctx.Err())
+		case <-ticker.C:
+		}
+		if check() {
+			return nil
+		}
+	}
+}
+
 // findAgent looks up an agent by qualified name in the config.
 // For multi-session agents, it matches instance names.
 func findAgent(cfg *config.City, name string) (config.Agent, bool) {
@@ -161,8 +219,7 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 		}
 		// Check multi-session instance members.
 		maxSess := a.EffectiveMaxActiveSessions()
-		isMultiSession := maxSess == nil || *maxSess != 1
-		if isMultiSession && a.Dir == dir {
+		if isMultiSessionAgent(a) && a.Dir == dir {
 			isUnlimited := maxSess == nil || *maxSess < 0
 			if isUnlimited {
 				// Unlimited: match "{name}-{N}" or "{binding.name}-{N}" where N >= 1.
@@ -193,7 +250,14 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 			}
 			for i := 1; i <= poolMax; i++ {
 				memberName := poolInstanceNameForAPI(a.Name, i, a)
+				// V2 agents address instances with the binding prefix
+				// (matching Agent.QualifiedInstanceName), so accept both
+				// the bare and binding-qualified forms — same shape the
+				// unlimited path applies above.
 				if memberName == baseName {
+					return a, true
+				}
+				if a.BindingName != "" && a.BindingName+"."+memberName == baseName {
 					return a, true
 				}
 			}
@@ -243,13 +307,25 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 	}
 	for _, assignee := range unique {
 		for _, rn := range rigNames {
-			matches, err := stores[rn].List(beads.ListQuery{
+			query := beads.ListQuery{
 				Assignee: assignee,
 				Status:   "in_progress",
 				Live:     live,
 				Limit:    1,
 				Sort:     beads.SortCreatedDesc,
-			})
+			}
+			if !live {
+				if cached, ok := stores[rn].(cachedListStore); ok {
+					matches, cacheOK := cached.CachedList(query)
+					if cacheOK {
+						if len(matches) > 0 {
+							return matches[0].ID
+						}
+						continue
+					}
+				}
+			}
+			matches, err := stores[rn].List(query)
 			if err != nil {
 				continue
 			}
@@ -461,18 +537,45 @@ func poolQualifiedNameForSlot(a config.Agent, slot int) string {
 // isMultiSessionAgent reports whether the agent can have more than one
 // concurrent session. This is the replacement for the removed IsPool() method.
 func isMultiSessionAgent(a config.Agent) bool {
-	maxSess := a.EffectiveMaxActiveSessions()
-	return maxSess == nil || *maxSess != 1
+	return a.SupportsExpandedSessionIdentities()
+}
+
+// classifyAgentKind labels an agent so dashboards can route its sessions to
+// the correct panel without referencing specific role names. The signal is
+// purely structural:
+//   - "crew" when the agent's identity Dir ends in a "crew" segment, the
+//     convention for persistent named workspaces under <rig>/crew/<name>.
+//   - "pool" when the agent can host more than one concurrent session.
+//   - "role" otherwise — a singleton agent (e.g. mayor, witness) that lives
+//     outside the crew dir. The classifier never inspects role names.
+func classifyAgentKind(a config.Agent) string {
+	if isCrewDir(a.Dir) {
+		return "crew"
+	}
+	if isMultiSessionAgent(a) {
+		return "pool"
+	}
+	return "role"
+}
+
+// isCrewDir reports whether dir is a "crew" segment (e.g. "crew" or
+// "<rig>/crew"). Crew agents organize themselves under this convention so
+// the dashboard can list them as named workers separate from role agents.
+func isCrewDir(dir string) bool {
+	return dir == "crew" || strings.HasSuffix(dir, "/crew")
 }
 
 func poolInstanceNameForAPI(base string, slot int, a config.Agent) string {
-	maxSess := a.EffectiveMaxActiveSessions()
-	isMultiInstance := maxSess != nil && (*maxSess > 1 || *maxSess < 0)
-	if !isMultiInstance {
+	if a.UsesCanonicalSingletonPoolIdentity() {
 		return base
 	}
 	if slot >= 1 && slot <= len(a.NamepoolNames) {
 		return a.NamepoolNames[slot-1]
+	}
+	maxSess := a.EffectiveMaxActiveSessions()
+	isMultiInstance := maxSess != nil && (*maxSess > 1 || *maxSess < 0)
+	if !isMultiInstance {
+		return base
 	}
 	return fmt.Sprintf("%s-%d", base, slot)
 }

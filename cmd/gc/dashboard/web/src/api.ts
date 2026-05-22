@@ -39,13 +39,12 @@ export function hasCityScope(): boolean {
 }
 
 export type DashboardSchema = components["schemas"];
-// `WireEvent` / `WireTaggedEvent` are the list-endpoint shapes with
-// typed payload fields. `EventStreamEnvelope` /
-// `TaggedEventStreamEnvelope` are the SSE-stream shapes with the
-// same typed payload union.
-export type CityEventRecord = DashboardSchema["WireEvent"];
+// Event list items and SSE frames both use envelope `type` as the
+// discriminator for the typed payload union.
+export type CityEventRecord = DashboardSchema["TypedEventStreamEnvelope"];
 export type CityEventStreamEnvelope = DashboardSchema["EventStreamEnvelope"];
-export type SupervisorEventRecord = DashboardSchema["WireTaggedEvent"];
+export type SupervisorEventRecord =
+  DashboardSchema["TypedTaggedEventStreamEnvelope"];
 export type SupervisorEventStreamEnvelope = DashboardSchema["TaggedEventStreamEnvelope"];
 export type HeartbeatEvent = DashboardSchema["HeartbeatEvent"];
 export type SessionRecord = DashboardSchema["SessionResponse"];

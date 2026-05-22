@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 
@@ -14,10 +15,18 @@ import (
 
 // apiClient returns an API client if a controller with a mutable API server
 // is running for the city at cityPath. Returns nil if no controller is running,
-// the API is not configured, or the API is bound to a non-localhost address
-// (which runs in read-only mode). CLI commands use this to route writes through
-// the API when available, falling back to direct file mutation.
+// the API is not configured, GC_NO_API is set truthy (operator escape hatch),
+// or the API is bound to a non-localhost address without allow_mutations.
+// CLI commands use this to route reads/writes through the API when available,
+// falling back to direct bd or file mutation.
 func apiClient(cityPath string) *api.Client {
+	// Operator escape hatch: GC_NO_API=1|true|yes → always fall back.
+	// Unknown values warn to stderr and fail open (fall through to normal path).
+	if disabled, warn := classifyGCNoAPI(os.Getenv("GC_NO_API")); disabled {
+		return nil
+	} else if warn != "" {
+		fmt.Fprintln(os.Stderr, "warning: "+warn) //nolint:errcheck // best-effort stderr
+	}
 	// Check if controller is alive.
 	if controllerAlive(cityPath) != 0 {
 		// Load config to find API port.
@@ -52,6 +61,30 @@ func apiClient(cityPath string) *api.Client {
 // exactly one city, so the client must match the runtime identity.
 func standaloneControllerCityName(cfg *config.City, cityPath string) string {
 	return loadedCityName(cfg, cityPath)
+}
+
+// apiClientFallbackReason returns a reason code describing why apiClient
+// returned nil for cityPath. Read-path CLI commands call this when the
+// client is nil to emit a route=fallback reason=<code> log line.
+//
+// The closed set mirrors the enabler's reason codes (ga-71l): "escape-hatch"
+// (GC_NO_API truthy), "non-loopback-bind" (API bound to non-localhost with
+// mutations disallowed), "controller-down" (everything else — no controller,
+// config missing, API port unset).
+func apiClientFallbackReason(cityPath string) string {
+	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); disabled {
+		return "escape-hatch"
+	}
+	if controllerAlive(cityPath) != 0 {
+		tomlPath := filepath.Join(cityPath, "city.toml")
+		if cfg, err := config.Load(fsys.OSFS{}, tomlPath); err == nil && cfg.API.Port > 0 {
+			bind := cfg.API.BindOrDefault()
+			if bind != "127.0.0.1" && bind != "localhost" && bind != "::1" && !cfg.API.AllowMutations {
+				return "non-loopback-bind"
+			}
+		}
+	}
+	return "controller-down"
 }
 
 // resolveAgentForAPI resolves a bare agent name (e.g., "worker") to its

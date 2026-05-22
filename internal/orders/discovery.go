@@ -68,7 +68,15 @@ func warnDeprecatedPath(opts ScanOptions, format string, args ...any) {
 	if opts.SuppressDeprecatedPathWarnings {
 		return
 	}
-	log.Printf(format, args...)
+	msg := fmt.Sprintf(format, args...)
+	if opts.DeprecatedPathWarningDedup != nil && !opts.VerboseDeprecatedPathWarnings && !opts.DeprecatedPathWarningDedup.First(msg) {
+		return
+	}
+	if opts.DeprecatedPathWarningWriter != nil {
+		fmt.Fprintln(opts.DeprecatedPathWarningWriter, msg) //nolint:errcheck // best-effort warning emission
+		return
+	}
+	log.Print(msg)
 }
 
 func discoverFlatFiles(fs fsys.FS, dir string, found map[string]Order, add func(name, source string, data []byte) error, opts ScanOptions) error {

@@ -140,7 +140,7 @@ func ReadFile(path string, tailCompactions int) (*Session, error) {
 
 	// Apply compact-boundary pagination.
 	if tailCompactions > 0 {
-		paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, "")
+		paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, "", "")
 		sess.Messages = paginated
 		sess.Pagination = info
 	}
@@ -150,11 +150,17 @@ func ReadFile(path string, tailCompactions int) (*Session, error) {
 
 // ReadProviderFile reads a provider-specific transcript file.
 func ReadProviderFile(provider, path string, tailCompactions int) (*Session, error) {
-	switch providerFamily(provider) {
+	switch ProviderFamily(provider) {
 	case "codex":
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "kimi":
+		return ReadKimiFile(path, tailCompactions)
+	case "opencode":
+		return ReadOpenCodeFile(path, tailCompactions)
+	case "pi":
+		return ReadPiFile(path, tailCompactions)
 	default:
 		return ReadFile(path, tailCompactions)
 	}
@@ -184,7 +190,7 @@ func ReadFileRaw(path string, tailCompactions int) (*Session, error) {
 	}
 
 	if tailCompactions > 0 {
-		paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, "")
+		paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, "", "")
 		sess.Messages = paginated
 		sess.Pagination = info
 	}
@@ -197,11 +203,17 @@ func ReadFileRaw(path string, tailCompactions int) (*Session, error) {
 // on each returned entry, so the Codex reader is sufficient for both raw and
 // conversation views.
 func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, error) {
-	switch providerFamily(provider) {
+	switch ProviderFamily(provider) {
 	case "codex":
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "kimi":
+		return ReadKimiFile(path, tailCompactions)
+	case "opencode":
+		return ReadOpenCodeFile(path, tailCompactions)
+	case "pi":
+		return ReadPiFile(path, tailCompactions)
 	default:
 		return ReadFileRaw(path, tailCompactions)
 	}
@@ -227,7 +239,7 @@ func ReadFileOlder(path string, tailCompactions int, beforeMessageID string) (*S
 	base := filepath.Base(path)
 	sessionID := strings.TrimSuffix(base, filepath.Ext(base))
 
-	paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, beforeMessageID)
+	paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, beforeMessageID, "")
 
 	return &Session{
 		ID:                 sessionID,
@@ -252,7 +264,7 @@ func ReadFileRawOlder(path string, tailCompactions int, beforeMessageID string) 
 	base := filepath.Base(path)
 	sessionID := strings.TrimSuffix(base, filepath.Ext(base))
 
-	paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, beforeMessageID)
+	paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, beforeMessageID, "")
 
 	return &Session{
 		ID:                 sessionID,
@@ -265,30 +277,138 @@ func ReadFileRawOlder(path string, tailCompactions int, beforeMessageID string) 
 }
 
 // ReadProviderFileOlder reads an older page of a provider-specific transcript.
-// Codex sessions do not currently support message-ID pagination, so the full
-// provider transcript is returned.
+// Codex and Pi sessions do not currently support message-ID pagination, so the
+// full provider transcript is returned.
 func ReadProviderFileOlder(provider, path string, tailCompactions int, beforeMessageID string) (*Session, error) {
-	switch providerFamily(provider) {
+	switch ProviderFamily(provider) {
 	case "codex":
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "kimi":
+		return ReadKimiFilePage(path, tailCompactions, beforeMessageID, "")
+	case "opencode":
+		return ReadOpenCodeFile(path, tailCompactions)
+	case "pi":
+		return ReadPiFile(path, tailCompactions)
 	default:
 		return ReadFileOlder(path, tailCompactions, beforeMessageID)
 	}
 }
 
 // ReadProviderFileRawOlder reads an older page of a provider-specific raw
-// transcript. Codex sessions do not currently support message-ID pagination, so
-// the full provider transcript is returned.
+// transcript. Codex and Pi sessions do not currently support message-ID
+// pagination, so the full provider transcript is returned.
 func ReadProviderFileRawOlder(provider, path string, tailCompactions int, beforeMessageID string) (*Session, error) {
-	switch providerFamily(provider) {
+	switch ProviderFamily(provider) {
 	case "codex":
 		return ReadCodexFile(path, tailCompactions)
 	case "gemini":
 		return ReadGeminiFile(path, tailCompactions)
+	case "kimi":
+		return ReadKimiFilePage(path, tailCompactions, beforeMessageID, "")
+	case "opencode":
+		return ReadOpenCodeFile(path, tailCompactions)
+	case "pi":
+		return ReadPiFile(path, tailCompactions)
 	default:
 		return ReadFileRawOlder(path, tailCompactions, beforeMessageID)
+	}
+}
+
+// ReadFileNewer loads newer messages after a cursor.
+func ReadFileNewer(path string, tailCompactions int, afterMessageID string) (*Session, error) {
+	entries, diagnostics, err := parseFileDetailed(path)
+	if err != nil {
+		return nil, err
+	}
+
+	dag := BuildDag(entries)
+
+	var messages []*Entry
+	for _, e := range dag.ActiveBranch {
+		if displayTypes[e.Type] {
+			messages = append(messages, e)
+		}
+	}
+
+	base := filepath.Base(path)
+	sessionID := strings.TrimSuffix(base, filepath.Ext(base))
+
+	paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, "", afterMessageID)
+
+	return &Session{
+		ID:                 sessionID,
+		Messages:           paginated,
+		OrphanedToolUseIDs: dag.OrphanedToolUseIDs,
+		HasBranches:        dag.HasBranches,
+		Pagination:         info,
+		Diagnostics:        diagnostics,
+	}, nil
+}
+
+// ReadFileRawNewer loads newer raw (unfiltered) messages after a cursor.
+func ReadFileRawNewer(path string, tailCompactions int, afterMessageID string) (*Session, error) {
+	entries, diagnostics, err := parseFileDetailed(path)
+	if err != nil {
+		return nil, err
+	}
+
+	dag := BuildDag(entries)
+	messages := dag.ActiveBranch
+
+	base := filepath.Base(path)
+	sessionID := strings.TrimSuffix(base, filepath.Ext(base))
+
+	paginated, info := sliceAtCompactBoundaries(messages, tailCompactions, "", afterMessageID)
+
+	return &Session{
+		ID:                 sessionID,
+		Messages:           paginated,
+		OrphanedToolUseIDs: dag.OrphanedToolUseIDs,
+		HasBranches:        dag.HasBranches,
+		Pagination:         info,
+		Diagnostics:        diagnostics,
+	}, nil
+}
+
+// ReadProviderFileNewer reads a newer page of a provider-specific transcript.
+// Codex and Pi sessions do not currently support message-ID pagination, so the
+// full provider transcript is returned.
+func ReadProviderFileNewer(provider, path string, tailCompactions int, afterMessageID string) (*Session, error) {
+	switch ProviderFamily(provider) {
+	case "codex":
+		return ReadCodexFile(path, tailCompactions)
+	case "gemini":
+		return ReadGeminiFile(path, tailCompactions)
+	case "kimi":
+		return ReadKimiFilePage(path, tailCompactions, "", afterMessageID)
+	case "opencode":
+		return ReadOpenCodeFile(path, tailCompactions)
+	case "pi":
+		return ReadPiFile(path, tailCompactions)
+	default:
+		return ReadFileNewer(path, tailCompactions, afterMessageID)
+	}
+}
+
+// ReadProviderFileRawNewer reads a newer page of a provider-specific raw
+// transcript. Codex and Pi sessions do not currently support message-ID
+// pagination, so the full provider transcript is returned.
+func ReadProviderFileRawNewer(provider, path string, tailCompactions int, afterMessageID string) (*Session, error) {
+	switch ProviderFamily(provider) {
+	case "codex":
+		return ReadCodexFile(path, tailCompactions)
+	case "gemini":
+		return ReadGeminiFile(path, tailCompactions)
+	case "kimi":
+		return ReadKimiFilePage(path, tailCompactions, "", afterMessageID)
+	case "opencode":
+		return ReadOpenCodeFile(path, tailCompactions)
+	case "pi":
+		return ReadPiFile(path, tailCompactions)
+	default:
+		return ReadFileRawNewer(path, tailCompactions, afterMessageID)
 	}
 }
 
@@ -345,7 +465,7 @@ func parseFileDetailed(path string) ([]*Entry, SessionDiagnostics, error) {
 // sliceAtCompactBoundaries returns the tail portion of messages starting
 // from the Nth-from-last compact boundary. The boundary itself is
 // included so consumers can render a "Context compacted" divider.
-func sliceAtCompactBoundaries(messages []*Entry, tailCompactions int, beforeMessageID string) ([]*Entry, *PaginationInfo) {
+func sliceAtCompactBoundaries(messages []*Entry, tailCompactions int, beforeMessageID, afterMessageID string) ([]*Entry, *PaginationInfo) {
 	totalCount := len(messages)
 
 	// For "load older" requests: truncate at cursor first.
@@ -354,6 +474,16 @@ func sliceAtCompactBoundaries(messages []*Entry, tailCompactions int, beforeMess
 		for i, m := range messages {
 			if m.UUID == beforeMessageID {
 				working = messages[:i]
+				break
+			}
+		}
+	}
+
+	// For "load newer" requests: truncate at cursor, keeping entries after it.
+	if afterMessageID != "" {
+		for i, m := range working {
+			if m.UUID == afterMessageID {
+				working = working[i+1:]
 				break
 			}
 		}
@@ -406,29 +536,40 @@ func sliceAtCompactBoundaries(messages []*Entry, tailCompactions int, beforeMess
 	}
 }
 
-// FindSessionFile searches for the most recently modified JSONL session
-// file matching the given working directory. It tries slug-based lookup
-// (Claude) across all search paths, then falls back to CWD-based lookup
-// (Codex). Returns "" if no match is found.
+// FindSessionFile searches for the most recently modified JSONL session file
+// matching the given working directory. It tries slug-based lookup (Claude)
+// across all search paths, then falls back to CWD-based providers that do not
+// expose stable IDs for generic auto lookup.
 func FindSessionFile(searchPaths []string, workDir string) string {
 	// Try slug-based lookup first (Claude: {searchPath}/{slug}/*.jsonl).
 	if path := findSlugSessionFile(searchPaths, workDir); path != "" {
 		return path
 	}
 	// Fall back to Codex CWD-based lookup.
-	return FindCodexSessionFile(searchPaths, workDir)
+	if path := FindCodexSessionFile(searchPaths, workDir); path != "" {
+		return path
+	}
+	return FindPiSessionFile(searchPaths, workDir)
 }
 
 // FindSessionFileForProvider resolves the best available transcript file for a
 // specific provider.
 func FindSessionFileForProvider(searchPaths []string, provider, workDir string) string {
-	switch providerFamily(provider) {
+	switch ProviderFamily(provider) {
 	case "codex":
 		return FindCodexSessionFile(searchPaths, workDir)
 	case "gemini":
 		return FindGeminiSessionFile(searchPaths, workDir)
-	default:
+	case "kimi":
+		return FindKimiSessionFile(searchPaths, workDir)
+	case "opencode":
+		return FindOpenCodeSessionFile(searchPaths, workDir)
+	case "pi":
+		return FindPiSessionFile(searchPaths, workDir)
+	case "", "auto":
 		return FindSessionFile(searchPaths, workDir)
+	default:
+		return findSlugSessionFile(searchPaths, workDir)
 	}
 }
 
@@ -437,11 +578,17 @@ func FindSessionFileForProvider(searchPaths []string, provider, workDir string) 
 // silently jumping to an unrelated transcript that merely shares the same
 // workdir while still allowing canonical provider fallback files.
 func FindProviderFallbackSessionFile(searchPaths []string, provider, workDir string) string {
-	switch providerFamily(provider) {
+	switch ProviderFamily(provider) {
 	case "codex":
 		return FindCodexSessionFile(searchPaths, workDir)
 	case "gemini":
 		return FindGeminiSessionFile(searchPaths, workDir)
+	case "kimi":
+		return FindKimiSessionFile(searchPaths, workDir)
+	case "opencode":
+		return FindOpenCodeSessionFile(searchPaths, workDir)
+	case "pi":
+		return FindPiSessionFile(searchPaths, workDir)
 	default:
 		return findClaudeLatestSessionFile(searchPaths, workDir)
 	}
@@ -770,6 +917,16 @@ func DefaultGeminiSearchPaths() []string {
 	return []string{filepath.Join(home, ".gemini", "tmp")}
 }
 
+// DefaultKimiSearchPaths returns the default search paths for Kimi Code
+// session files (~/.kimi/sessions).
+func DefaultKimiSearchPaths() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	return []string{filepath.Join(home, ".kimi", "sessions")}
+}
+
 // MergeSearchPaths merges default paths with user-configured extra paths,
 // expanding ~ and deduplicating.
 func MergeSearchPaths(extraPaths []string) []string {
@@ -782,6 +939,10 @@ func mergeCodexSearchPaths(extraPaths []string) []string {
 
 func mergeGeminiSearchPaths(extraPaths []string) []string {
 	return mergePaths(DefaultGeminiSearchPaths(), extraPaths)
+}
+
+func mergePiSearchPaths(extraPaths []string) []string {
+	return mergePaths(DefaultPiSearchPaths(), extraPaths)
 }
 
 func mergePaths(defaults, extras []string) []string {
@@ -808,13 +969,20 @@ func mergePaths(defaults, extras []string) []string {
 	return result
 }
 
-func providerFamily(provider string) string {
+// ProviderFamily returns the canonical transcript provider family for provider.
+func ProviderFamily(provider string) string {
 	p := strings.ToLower(strings.TrimSpace(provider))
 	switch {
 	case strings.Contains(p, "codex"):
 		return "codex"
 	case strings.Contains(p, "gemini"):
 		return "gemini"
+	case strings.Contains(p, "kimi"):
+		return "kimi"
+	case strings.Contains(p, "opencode"):
+		return "opencode"
+	case p == "pi" || strings.HasPrefix(p, "pi/") || strings.HasSuffix(p, "/pi") || strings.HasSuffix(p, "-pi") || strings.Contains(p, "-pi/"):
+		return "pi"
 	default:
 		return p
 	}

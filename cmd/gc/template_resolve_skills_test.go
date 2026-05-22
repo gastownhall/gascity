@@ -684,3 +684,83 @@ func TestResolveTemplatePoolInstanceMaterializeUsesTemplateName(t *testing.T) {
 		t.Errorf("singleton materialize-skills should carry own qualified name mayor; got: %q", singletonCmd)
 	}
 }
+
+// TestResolveTemplateNamedSessionMaterializeUsesTemplateName mirrors the
+// pool-instance regression for [[named_session]] entries. A named_session
+// expands a template agent under a session-specific qualifiedName
+// (e.g. template "rig/crew" → session "rig/utz"). materialize-skills
+// resolves the template via resolveAgentIdentity, which has no mapping
+// from "rig/utz" back to "rig/crew" — so pre_start[1] fails on every
+// named-session start (utz/frito/dorito in city_hy). Skills are
+// per-template; all sessions sharing a template share the catalog.
+func TestResolveTemplateNamedSessionMaterializeUsesTemplateName(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"),
+		[]byte("[pack]\nname = \"s\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	skillDir := filepath.Join(cityPath, "skills", "plan")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: plan\ndescription: test\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sharedCat, err := materialize.LoadCityCatalog(filepath.Join(cityPath, "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Template agent — Name="crew", Dir="rig". The named_session shares
+	// this config under qualifiedName "rig/utz". WorkDir != scope root
+	// so the stage-2 PreStart entry fires.
+	template := &config.Agent{
+		Name:     "crew",
+		Dir:      "rig",
+		Scope:    "rig",
+		Provider: "claude",
+		WorkDir:  ".gc/worktrees/rig/utz",
+	}
+
+	params := &agentBuildParams{
+		cityName:  "city",
+		cityPath:  cityPath,
+		workspace: &config.Workspace{Provider: "claude"},
+		providers: map[string]config.ProviderSpec{
+			"claude": {Command: "echo", PromptMode: "none"},
+		},
+		lookPath:        func(string) (string, error) { return "/bin/echo", nil },
+		fs:              fsys.OSFS{},
+		rigs:            []config.Rig{{Name: "rig", Path: filepath.Join(cityPath, "rig")}},
+		beaconTime:      time.Unix(0, 0),
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+		skillCatalog:    &sharedCat,
+		sessionProvider: "tmux",
+	}
+
+	tp, err := resolveTemplate(params, template, "rig/utz", nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	var materializeCmd string
+	for _, entry := range tp.Hints.PreStart {
+		if strings.Contains(entry, "internal materialize-skills") {
+			materializeCmd = entry
+			break
+		}
+	}
+	if materializeCmd == "" {
+		t.Fatalf("expected stage-2 materialize-skills PreStart entry; PreStart=%v", tp.Hints.PreStart)
+	}
+
+	if !strings.Contains(materializeCmd, "--agent rig/crew") {
+		t.Errorf("materialize-skills --agent flag should carry template name rig/crew; got: %q", materializeCmd)
+	}
+	if strings.Contains(materializeCmd, "--agent rig/utz") {
+		t.Errorf("materialize-skills --agent flag must NOT carry named_session identity rig/utz; got: %q", materializeCmd)
+	}
+}

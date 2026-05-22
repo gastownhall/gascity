@@ -1,7 +1,7 @@
 description = """
 Refinery patrol loop. Poured as a root-only wisp on startup:
 
-  gc bd mol wisp mol-refinery-patrol --root-only
+  gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}}
   gc bd update $WISP --assignee=$GC_AGENT
 
 Each wisp is ONE iteration: check for work, merge one branch, pour
@@ -29,10 +29,14 @@ closes the bead once the PR is verified.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-refinery-patrol"
-version = 2
+version = 4
 contract = "graph.v2"
 
 [vars]
+[vars.binding_prefix]
+description = "Import binding prefix for gastown agent identities, including trailing dot when bound."
+default = ""
+
 [vars.run_tests]
 description = "Whether to run tests before merging"
 default = "true"
@@ -70,27 +74,82 @@ description = "Auto-create work beads to land completed integration branches"
 default = "false"
 
 [vars.event_timeout]
-description = "Seconds to wait for events before re-checking (exponential backoff)"
-default = "30"
+description = "Seconds to sleep before re-checking for work. Replaces former event-watch loop which hot-spun on cache-reconcile firehose."
+default = "60"
+
+[[steps]]
+id = "validate-identity"
+title = "Validate canonical agent identity"
+description = """
+**Fail fast if `$GC_AGENT` is not set.**
+
+The refinery uses `$GC_AGENT` (not `$GC_ALIAS`) as its canonical mailbox
+identity. The session harness
+(`internal/session/lifecycle.go:RuntimeEnvWithSessionContext`) guarantees
+`$GC_AGENT` is populated for every live session — it falls back to the
+session name when the alias is empty. `$GC_ALIAS` can legitimately be
+empty, which is how a refinery once self-polled for 13h42m with seven
+queued beads while looking healthy-idle (upstream #1833).
+
+Verify at startup:
+```bash
+if [ -z "${GC_AGENT:-}" ]; then
+    echo "GC_AGENT is empty — session harness did not inject the canonical identity."
+    echo "Refusing to self-poll with an empty filter; escalate before proceeding."
+    gc mail send mayor/ -s "ESCALATION: refinery started with empty GC_AGENT [HIGH]" \\
+        -m "Session has no canonical agent identity. Investigate session harness."
+    gc runtime drain-ack
+    exit 1
+fi
+```
+
+Close this step only when `$GC_AGENT` is confirmed non-empty."""
 
 [[steps]]
 id = "check-inbox"
 title = "Context check, then mail"
+needs = ["validate-identity"]
 description = """
 **1. Context check (FIRST — before any work):**
-```bash
-RSS=$(ps -o rss= -p $$ | tr -d ' ')
-RSS_MB=$((RSS / 1024))
-```
 
-If RSS > 1500 MB or context feels heavy, request a restart:
+If context feels heavy (multi-hour session, large recent diffs, or you notice
+yourself taking shortcuts or summarizing prematurely), pour and assign the next
+wisp, burn the current wisp, then request a restart:
 ```bash
+CURRENT_WISP=${GC_BEAD_ID:-}
+if [ -z "$CURRENT_WISP" ]; then
+  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+fi
+NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
+if [ -z "$NEXT" ]; then
+  echo "Could not pour next refinery wisp; not requesting restart."
+  gc runtime drain-ack
+  exit 1
+fi
+if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
+  echo "Could not assign next refinery wisp; not requesting restart."
+  gc runtime drain-ack
+  exit 1
+fi
+if [ -n "$CURRENT_WISP" ]; then
+  gc bd mol burn "$CURRENT_WISP" --force
+else
+  echo "Could not resolve current wisp; not requesting restart."
+  gc runtime drain-ack
+  exit 1
+fi
 gc runtime request-restart
+RESTART_STATUS=$?
+echo "Restart request returned with status $RESTART_STATUS; stop this session now."
+exit "$RESTART_STATUS"
 ```
-This sets `GC_RESTART_REQUESTED` metadata on the session and blocks
-forever. The controller will kill and restart the session on the next
-reconcile tick. The current wisp stays assigned and the new session
-the new session re-reads formula steps and resumes from context.
+This sets `GC_RESTART_REQUESTED` metadata on the session and blocks until the
+controller stops this session; on controller fault it can return nonzero after
+a bounded timeout. If the command returns for any reason, stop immediately. Do
+not check mail, close this step, or process merge work from this old session
+after burning the current wisp. On the normal path, the controller kills and
+restarts the session on the next reconcile tick. The new session wakes on the
+wisp you just assigned and re-reads formula steps with fresh context.
 
 **2. Check mail:**
 ```bash
@@ -122,15 +181,14 @@ gc bd show $WORK --json | jq '.[0].metadata'
 The bead MUST have `metadata.branch`. If `metadata.target` is missing,
 use {{target_branch}} as default. Note the work bead ID and close this step.
 
-If NO work found: wait for assignment:
+If NO work found: sleep before re-checking:
 ```bash
-SEQ=$(gc events --seq)
-gc events --watch --type=bead.updated \
-  --after=$SEQ --timeout {{event_timeout}}s
+sleep {{event_timeout}}
 ```
 
-On event: re-check for assigned work. If found, close this step.
-On timeout: re-check anyway, then wait again with doubled timeout (cap 300s).
+Re-check for assigned work. If found, close this step. Otherwise repeat the sleep.
+
+Note: previous implementation watched `gc events --type=bead.updated` for fast wake-up, but cache-reconcile fires that event constantly, turning the watch into a tight loop with no useful backoff. Fixed sleep gives predictable idle cost (~$0 vs ~$3.46/15min hot-loop measured 2026-04-29).
 
 **Do not close this step until you have a work bead with branch metadata.**"""
 
@@ -166,17 +224,39 @@ gc workflow delete-source $WORK --apply && gc workflow reopen-source $WORK
 3. Put the work bead back in the pool with rejection metadata:
 ```bash
 gc bd update $WORK \
+  --status=open \
+  --assignee="" \
   --set-metadata rejection_reason="Conflicts with $TARGET at $(git rev-parse origin/$TARGET)" \
-  --set-metadata gc.routed_to=<rig>/polecat
+  --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
 ```
 4. Do NOT delete the branch (new polecat needs it for conflict resolution).
 5. Clean up temp branch: `git checkout {{target_branch}} && git branch -D temp`
 6. Pour next patrol iteration before burning:
 ```bash
-NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')
-gc bd update "$NEXT" --assignee=$GC_AGENT
+CURRENT_WISP=${GC_BEAD_ID:-}
+if [ -z "$CURRENT_WISP" ]; then
+  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+fi
+NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
+if [ -z "$NEXT" ]; then
+  echo "Could not pour next refinery wisp; not burning."
+  gc runtime drain-ack
+  exit 1
+fi
+if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
+  echo "Could not assign next refinery wisp; not burning."
+  gc runtime drain-ack
+  exit 1
+fi
+if [ -n "$CURRENT_WISP" ]; then
+  gc bd mol burn "$CURRENT_WISP" --force
+else
+  echo "Could not resolve current wisp; not burning."
+  gc runtime drain-ack
+  exit 1
+fi
 ```
-7. Burn this wisp: `gc bd mol burn <wisp-id> --force`
+7. Close this step after the current wisp is burned.
 
 **A new polecat will pick up the bead, see the branch and rejection,
 rebase, and reassign to refinery.**"""
@@ -236,16 +316,39 @@ TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_bran
    - Put the work bead back in the pool with rejection metadata:
      ```bash
      gc bd update $WORK \
-       --set-metadata rejection_reason="<failure summary>"
+       --status=open \
+       --assignee="" \
+       --set-metadata rejection_reason="<failure summary>" \
+       --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
      ```
    - Delete branch: `git push origin --delete $BRANCH`
    - Clean up: `git checkout "$TARGET" && git branch -D temp`
    - Pour next patrol iteration before burning:
      ```bash
-     NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')
-     gc bd update "$NEXT" --assignee=$GC_AGENT
+     CURRENT_WISP=${GC_BEAD_ID:-}
+     if [ -z "$CURRENT_WISP" ]; then
+       CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+     fi
+     NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
+     if [ -z "$NEXT" ]; then
+       echo "Could not pour next refinery wisp; not burning."
+       gc runtime drain-ack
+       exit 1
+     fi
+     if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
+       echo "Could not assign next refinery wisp; not burning."
+       gc runtime drain-ack
+       exit 1
+     fi
+     if [ -n "$CURRENT_WISP" ]; then
+       gc bd mol burn "$CURRENT_WISP" --force
+     else
+       echo "Could not resolve current wisp; not burning."
+       gc runtime drain-ack
+       exit 1
+     fi
      ```
-   - Burn this wisp: `gc bd mol burn <wisp-id> --force`
+   - Close this step after the current wisp is burned.
 
 3. If pre-existing on target:
    - Check for duplicates first:
@@ -297,13 +400,36 @@ Work bead: $WORK
 Existing PR: $EXISTING_PR
 Branch: $BRANCH
 Target: $TARGET"
-  NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')
-  gc bd update "$NEXT" --assignee=$GC_AGENT
   CURRENT_WISP=${GC_BEAD_ID:-}
+  if [ -z "$CURRENT_WISP" ]; then
+    CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+  fi
+  if [ -z "$CURRENT_WISP" ]; then
+    echo "Could not resolve current wisp; not burning."
+    echo "$reason"
+    echo "STOP. Existing PR metadata needs human correction."
+    gc runtime drain-ack
+    exit 1
+  fi
+  NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
+  if [ -z "$NEXT" ]; then
+    echo "Could not pour next refinery wisp; not burning."
+    gc runtime drain-ack
+    exit 1
+  fi
+  if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
+    echo "Could not assign next refinery wisp; not burning."
+    gc runtime drain-ack
+    exit 1
+  fi
   if [ -n "$CURRENT_WISP" ]; then
     gc bd mol burn "$CURRENT_WISP" --force
   else
-    echo "Could not infer current wisp; burn this wisp manually after recording the summary."
+    echo "Could not resolve current wisp; not burning."
+    echo "$reason"
+    echo "STOP. Existing PR metadata needs human correction."
+    gc runtime drain-ack
+    exit 1
   fi
   echo "$reason"
   echo "STOP. Existing PR metadata needs human correction."
@@ -388,12 +514,24 @@ REMOTE=$(git rev-parse origin/$TARGET)
 If SHAs differ: STOP. Debug and retry. Do NOT continue.
 
 **3. Record merge metadata and close work bead:**
+
+Run as a single chained command so the metadata write cannot be skipped
+when the close-reason already names the SHA. Both the `--set-metadata`
+write and the `gc bd close` are required — `merged_sha` and
+`merged_target` are the only forensic breadcrumbs tying a closed bead
+to its merge commit on `$TARGET`. `--unset-metadata rejection_reason`
+clears any stale rejection field from an earlier rejected/reworked
+attempt before the successful close.
+
 ```bash
+MERGED_SHA=$(git rev-parse HEAD) && \
+MERGED_SHORT=$(git rev-parse --short HEAD) && \
 gc bd update $WORK \
   --set-metadata merge_result=merged \
-  --set-metadata merged_sha=$(git rev-parse HEAD) \
-  --set-metadata merged_target=$TARGET
-gc bd close $WORK --reason "Merged to $TARGET at $(git rev-parse --short HEAD)"
+  --set-metadata merged_sha=$MERGED_SHA \
+  --set-metadata merged_target=$TARGET \
+  --unset-metadata rejection_reason && \
+gc bd close $WORK --reason "Merged to $TARGET at $MERGED_SHORT"
 ```
 
 **4. Cleanup:**
@@ -516,12 +654,22 @@ fi
 If this command fails or prints empty output: STOP. Debug and retry. Do NOT continue.
 
 **4. Record PR metadata and close the work bead:**
+
+Run as a single chained command so the metadata write cannot be skipped
+when the close-reason already names the PR. Both the `--set-metadata`
+write and the `gc bd close` are required — `pr_url` and `pr_number`
+are the only forensic breadcrumbs tying a closed bead to its pull
+request. `--unset-metadata rejection_reason` clears any stale rejection
+field from an earlier rejected/reworked attempt before the successful
+close.
+
 ```bash
 gc bd update $WORK \
   --set-metadata merge_result=pull_request \
   --set-metadata pr_url="$PR_URL" \
   --set-metadata pr_number="$PR_NUMBER" \
-  --set-metadata merged_target="$TARGET"
+  --set-metadata merged_target="$TARGET" \
+  --unset-metadata rejection_reason && \
 gc bd close $WORK --reason "Pull request ready: $PR_URL"
 ```
 
@@ -598,15 +746,30 @@ The convoy bead assignment is the ONLY path.
 
 If auto_land = "false": skip this entirely.
 
-**2. Pour next iteration:**
+**2. Resolve the current wisp, pour next iteration, then burn this wisp:**
 ```bash
-NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')
-gc bd update "$NEXT" --assignee=$GC_AGENT
-```
-
-**4. Burn this wisp:**
-```bash
-gc bd mol burn <this-wisp-id> --force
+CURRENT_WISP=${GC_BEAD_ID:-}
+if [ -z "$CURRENT_WISP" ]; then
+  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+fi
+NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')
+if [ -z "$NEXT" ]; then
+  echo "Could not pour next refinery wisp; not burning."
+  gc runtime drain-ack
+  exit 1
+fi
+if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
+  echo "Could not assign next refinery wisp; not burning."
+  gc runtime drain-ack
+  exit 1
+fi
+if [ -n "$CURRENT_WISP" ]; then
+  gc bd mol burn "$CURRENT_WISP" --force
+else
+  echo "Could not resolve current wisp; not burning."
+  gc runtime drain-ack
+  exit 1
+fi
 ```
 
 Close this step. The new wisp is ready — re-read formula steps to begin."""

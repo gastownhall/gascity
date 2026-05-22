@@ -110,7 +110,7 @@ func (s *fakeStore) SetMetadata(id, key, value string) error {
 	return nil
 }
 
-func (s *fakeStore) CloseBead(id string) error {
+func (s *fakeStore) CloseBead(id, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, ok := s.beads[id]
@@ -119,6 +119,12 @@ func (s *fakeStore) CloseBead(id string) error {
 	}
 	rec.info.Status = "closed"
 	rec.info.ClosedAt = time.Now()
+	if reason != "" {
+		if rec.metadata == nil {
+			rec.metadata = map[string]string{}
+		}
+		rec.metadata["close_reason"] = reason
+	}
 	return nil
 }
 
@@ -296,6 +302,42 @@ func (e *fakeEmitter) findEvent(eventType string) (emittedEvent, bool) {
 		}
 	}
 	return emittedEvent{}, false
+}
+
+func TestWithEventRigPopulatesEveryRigPayload(t *testing.T) {
+	store := newFakeStore()
+	store.addBead("root-1", "in_progress", "", "", map[string]string{
+		FieldRig: "prod",
+	})
+	handler := &Handler{Store: store}
+
+	tests := []struct {
+		name    string
+		payload any
+	}{
+		{name: "created", payload: CreatedPayload{}},
+		{name: "iteration", payload: IterationPayload{}},
+		{name: "terminated", payload: TerminatedPayload{}},
+		{name: "waiting manual", payload: WaitingManualPayload{}},
+		{name: "manual action", payload: ManualActionPayload{}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := handler.withEventRig("root-1", tc.payload)
+			data, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("marshaling payload: %v", err)
+			}
+			var decoded map[string]any
+			if err := json.Unmarshal(data, &decoded); err != nil {
+				t.Fatalf("unmarshaling payload: %v", err)
+			}
+			if decoded["rig"] != "prod" {
+				t.Fatalf("rig = %v, want prod", decoded["rig"])
+			}
+		})
+	}
 }
 
 // --- Test Helpers ---

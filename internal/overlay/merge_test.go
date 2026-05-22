@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 )
@@ -61,6 +62,23 @@ func TestMergeSettingsJSON_UnionHookCategories(t *testing.T) {
 	}
 }
 
+func TestMergeSettingsJSON_CanonicalizesCommandsWithoutHTMLEscaping(t *testing.T) {
+	base := `{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"export PATH=\"$HOME/bin:$PATH\" && gc prime"}]}]}}`
+	over := `{}`
+
+	result, err := MergeSettingsJSON([]byte(base), []byte(over))
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+
+	if bytes.Contains(result, []byte(`\u0026`)) {
+		t.Fatalf("merged JSON escaped command operator:\n%s", result)
+	}
+	if !bytes.Contains(result, []byte(` && gc prime`)) {
+		t.Fatalf("merged JSON missing literal command operator:\n%s", result)
+	}
+}
+
 func TestMergeSettingsJSON_SameMatcherReplacement(t *testing.T) {
 	// Crew scenario: overlay changes PreCompact catch-all command.
 	base := `{
@@ -70,7 +88,7 @@ func TestMergeSettingsJSON_SameMatcherReplacement(t *testing.T) {
 	}`
 	over := `{
 		"hooks": {
-			"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "gc handoff \"context cycle\""}]}]
+			"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "gc handoff --auto \"context cycle\""}]}]
 		}
 	}`
 
@@ -91,7 +109,7 @@ func TestMergeSettingsJSON_SameMatcherReplacement(t *testing.T) {
 	entry := arr[0].(map[string]any)
 	innerHooks := entry["hooks"].([]any)
 	cmd := innerHooks[0].(map[string]any)["command"].(string)
-	if cmd != `gc handoff "context cycle"` {
+	if cmd != `gc handoff --auto "context cycle"` {
 		t.Errorf("PreCompact command = %q, want gc handoff", cmd)
 	}
 }
@@ -278,6 +296,16 @@ func TestMergeSettingsJSON_InvalidOverlay(t *testing.T) {
 	}
 }
 
+func TestMergeSettingsJSON_NullOverlayIsNotObject(t *testing.T) {
+	_, err := MergeSettingsJSON([]byte(`{}`), []byte(`null`))
+	if err == nil {
+		t.Fatal("expected error for null overlay JSON")
+	}
+	if !IsOverlayObjectShapeError(err) {
+		t.Fatalf("expected overlay object-shape error, got %v", err)
+	}
+}
+
 func TestMergeSettingsJSON_WitnessScenario(t *testing.T) {
 	// Full witness scenario: base has 4 default hooks, overlay adds PreToolUse only.
 	base := `{
@@ -333,7 +361,7 @@ func TestMergeSettingsJSON_CrewScenario(t *testing.T) {
 	}`
 	over := `{
 		"hooks": {
-			"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "gc handoff \"context cycle\""}]}]
+			"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "gc handoff --auto \"context cycle\""}]}]
 		}
 	}`
 
@@ -362,7 +390,7 @@ func TestMergeSettingsJSON_CrewScenario(t *testing.T) {
 	entry := arr[0].(map[string]any)
 	innerHooks := entry["hooks"].([]any)
 	cmd := innerHooks[0].(map[string]any)["command"].(string)
-	if cmd != `gc handoff "context cycle"` {
+	if cmd != `gc handoff --auto "context cycle"` {
 		t.Errorf("PreCompact command = %q, want gc handoff", cmd)
 	}
 }
@@ -372,7 +400,7 @@ func TestMergeSettingsJSON_BackwardCompat_FullOverlay(t *testing.T) {
 	full := `{
 		"hooks": {
 			"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "gc prime"}]}],
-			"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "gc handoff \"context cycle\""}]}],
+			"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "gc handoff --auto \"context cycle\""}]}],
 			"UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "gc mail check --inject"}]}],
 			"Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "gc hook --inject"}]}]
 		}

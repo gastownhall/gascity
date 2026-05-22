@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
@@ -50,7 +51,9 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	if err != nil {
 		return ControlResult{}, err
 	}
-	tracef("ralph check-result bead=%s logical=%s attempt=%d outcome=%s exit=%v", bead.ID, logicalID, attempt, result.Outcome, result.ExitCode)
+	opts.tracef("ralph check-result bead=%s logical=%s attempt=%d outcome=%s exit=%s dur=%s truncated=%v stderr=%q stdout=%q",
+		bead.ID, logicalID, attempt, result.Outcome, formatGateExitCode(result.ExitCode), result.Duration, result.Truncated,
+		traceClipString(result.Stderr, traceCheckOutputCap), traceClipString(result.Stdout, traceCheckOutputCap))
 	if err := persistCheckResult(store, bead.ID, result); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: persisting check result: %w", bead.ID, err)
 	}
@@ -89,11 +92,14 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	nextAttempt := attempt + 1
 	switch bead.Metadata["gc.retry_state"] {
 	case "":
-		tracef("ralph retry-mark-spawning bead=%s next=%d", bead.ID, nextAttempt)
+		opts.tracef("ralph retry-mark-spawning bead=%s next=%d", bead.ID, nextAttempt)
 		if err := store.SetMetadataBatch(bead.ID, map[string]string{
 			"gc.retry_state":  "spawning",
 			"gc.next_attempt": strconv.Itoa(nextAttempt),
 		}); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
 			return ControlResult{}, fmt.Errorf("%s: recording retry spawn start: %w", bead.ID, err)
 		}
 	case "spawning":
@@ -104,23 +110,31 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 		return ControlResult{}, fmt.Errorf("%s: unsupported gc.retry_state %q", bead.ID, bead.Metadata["gc.retry_state"])
 	}
 	if bead.Metadata["gc.retry_state"] != "spawned" {
-		tracef("ralph retry-append-start bead=%s next=%d", bead.ID, nextAttempt)
-		if _, err := appendRalphRetry(store, logicalID, subject, bead, nextAttempt, opts.CityPath); err != nil {
+		opts.tracef("ralph retry-append-start bead=%s next=%d", bead.ID, nextAttempt)
+		if _, err := appendRalphRetry(store, logicalID, subject, bead, nextAttempt, opts); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
 			return ControlResult{}, fmt.Errorf("%s: appending retry: %w", bead.ID, err)
 		}
-		tracef("ralph retry-append-done bead=%s next=%d", bead.ID, nextAttempt)
-		if err := store.SetMetadataBatch(bead.ID, map[string]string{
+		opts.tracef("ralph retry-append-done bead=%s next=%d", bead.ID, nextAttempt)
+		spawnedMetadata := map[string]string{
 			"gc.retry_state":  "spawned",
 			"gc.next_attempt": strconv.Itoa(nextAttempt),
-		}); err != nil {
+		}
+		clearControllerSpawnErrorMetadata(spawnedMetadata)
+		if err := store.SetMetadataBatch(bead.ID, spawnedMetadata); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
 			return ControlResult{}, fmt.Errorf("%s: recording retry spawn complete: %w", bead.ID, err)
 		}
 	}
-	tracef("ralph retry-finalize-start bead=%s next=%d", bead.ID, nextAttempt)
+	opts.tracef("ralph retry-finalize-start bead=%s next=%d", bead.ID, nextAttempt)
 	if err := finalizeRalphRetry(store, logicalID, bead.ID); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: finalizing retry: %w", bead.ID, err)
 	}
-	tracef("ralph retry-finalize-done bead=%s next=%d", bead.ID, nextAttempt)
+	opts.tracef("ralph retry-finalize-done bead=%s next=%d", bead.ID, nextAttempt)
 	return ControlResult{Processed: true, Action: "retry"}, nil
 }
 
@@ -139,6 +153,15 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	if checkPath == "" {
 		return convergence.GateResult{}, fmt.Errorf("%s: missing gc.check_path", bead.ID)
 	}
+	// gc.check_path comes from formula metadata after variable substitution
+	// (internal/formula/expand.go), and sling API `vars` can flow into that
+	// substitution. Enforce the relative-path contract at this boundary so
+	// an absolute string synthesized via vars cannot bypass containment in
+	// convergence.ResolveConditionPath (which intentionally trusts callers
+	// to vouch for absolute inputs).
+	if filepath.IsAbs(checkPath) {
+		return convergence.GateResult{}, fmt.Errorf("%s: gc.check_path must be relative, got absolute %q", bead.ID, checkPath)
+	}
 	cityPath := opts.CityPath
 	if cityPath == "" {
 		cityPath = resolveInheritedMetadata(store, bead, "gc.city_path")
@@ -146,21 +169,42 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	if cityPath == "" {
 		return convergence.GateResult{}, fmt.Errorf("%s: missing city path for exec check", bead.ID)
 	}
+	storePath := opts.StorePath
+	if storePath == "" {
+		storePath = cityPath
+	}
 
 	workDir := resolveInheritedMetadata(store, bead, "work_dir", "gc.work_dir")
 	resolvedWorkDir := ""
 	if workDir != "" {
 		if filepath.IsAbs(workDir) {
-			resolvedWorkDir = workDir
+			resolvedWorkDir = filepath.Clean(workDir)
 		} else {
-			resolvedWorkDir = filepath.Join(cityPath, workDir)
+			resolvedWorkDir = filepath.Clean(filepath.Join(storePath, workDir))
+		}
+		// work_dir flows from bead metadata, which can be populated via
+		// sling API vars (internal/api/handler_sling.go →
+		// internal/sling/sling.go → internal/molecule/molecule.go → bead
+		// metadata). cityPath and storePath are operator-controlled by the
+		// dispatcher; work_dir is the only path input on this hot path that
+		// originates outside that surface. Require it to stay inside the
+		// city OR store roots so the OR-containment relaxation in
+		// convergence.ResolveConditionPath (gastownhall/gascity#2354) cannot
+		// be weaponised by a caller-supplied work_dir that escapes both
+		// operator-controlled trees.
+		if !pathutil.PathWithin(cityPath, resolvedWorkDir) && !pathutil.PathWithin(storePath, resolvedWorkDir) {
+			return convergence.GateResult{}, fmt.Errorf("%s: work_dir %q escapes both city and store roots", bead.ID, workDir)
 		}
 	}
-	scriptBase := cityPath
+	scriptBase := storePath
 	if resolvedWorkDir != "" {
 		scriptBase = resolvedWorkDir
 	}
-	scriptPath, err := convergence.ResolveConditionPath(scriptBase, checkPath)
+	// Pass cityPath and scriptBase as distinct envelope/base roles: in
+	// gastownhall/gascity#2320 storePath (a rig subtree) was passed as both,
+	// causing relative gc.check_path values to be looked up under the rig
+	// tree even when the script lives in the city tree.
+	scriptPath, err := convergence.ResolveConditionPath(cityPath, scriptBase, checkPath)
 	if err != nil {
 		return convergence.GateResult{}, fmt.Errorf("%s: resolving check path: %w", bead.ID, err)
 	}
@@ -184,10 +228,15 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 		timeout = parsed
 	}
 
+	conditionBeadID := subject.ID
+	if conditionBeadID == "" {
+		conditionBeadID = bead.ID
+	}
 	result := convergence.RunCondition(context.Background(), scriptPath, convergence.ConditionEnv{
-		BeadID:    bead.ID,
+		BeadID:    conditionBeadID,
 		Iteration: attempt,
 		CityPath:  cityPath,
+		StorePath: storePath,
 		WorkDir:   resolvedWorkDir,
 	}, timeout, 0)
 	return result, nil
@@ -220,7 +269,7 @@ func persistCheckResult(store beads.Store, beadID string, result convergence.Gat
 	return store.SetMetadataBatch(beadID, batch)
 }
 
-func appendRalphRetry(store beads.Store, logicalID string, prevSubject, prevCheck beads.Bead, nextAttempt int, cityPath string) (map[string]string, error) {
+func appendRalphRetry(store beads.Store, logicalID string, prevSubject, prevCheck beads.Bead, nextAttempt int, opts ProcessOptions) (map[string]string, error) {
 	var rootBeads []beads.Bead
 	rootID := prevSubject.Metadata["gc.root_bead_id"]
 	if rootID != "" {
@@ -255,10 +304,10 @@ func appendRalphRetry(store beads.Store, logicalID string, prevSubject, prevChec
 		}
 		return existing, nil
 	}
-	cfg := loadAttemptRouteConfig(cityPath)
+	cfg := loadAttemptRouteConfig(opts.CityPath)
 	if molecule.IsGraphApplyEnabled() {
 		if applier, ok := store.(beads.GraphApplyStore); ok {
-			return appendRalphRetryViaGraphApply(store, applier, logicalID, prevSubject, prevCheck, attemptSet, oldAttempt, nextAttempt, oldScopeRef, newScopeRef, cfg)
+			return appendRalphRetryViaGraphApply(store, applier, logicalID, prevSubject, prevCheck, attemptSet, oldAttempt, nextAttempt, oldScopeRef, newScopeRef, cfg, opts)
 		}
 	}
 	return appendRalphRetryLegacy(store, logicalID, prevSubject, prevCheck, attemptSet, oldAttempt, nextAttempt, oldScopeRef, newScopeRef, cfg)
@@ -411,7 +460,7 @@ func appendRalphRetryLegacy(store beads.Store, logicalID string, prevSubject, pr
 	return mapping, nil
 }
 
-func appendRalphRetryViaGraphApply(store beads.Store, applier beads.GraphApplyStore, logicalID string, prevSubject, prevCheck beads.Bead, attemptSet map[string]beads.Bead, oldAttempt, nextAttempt int, oldScopeRef, newScopeRef string, cfg *config.City) (map[string]string, error) {
+func appendRalphRetryViaGraphApply(store beads.Store, applier beads.GraphApplyStore, logicalID string, prevSubject, prevCheck beads.Bead, attemptSet map[string]beads.Bead, oldAttempt, nextAttempt int, oldScopeRef, newScopeRef string, cfg *config.City, opts ProcessOptions) (map[string]string, error) {
 	ordered := make([]beads.Bead, 0, len(attemptSet))
 	for _, bead := range attemptSet {
 		ordered = append(ordered, bead)
@@ -458,7 +507,7 @@ func appendRalphRetryViaGraphApply(store beads.Store, applier beads.GraphApplySt
 		Type:   "blocks",
 	})
 
-	tracef("ralph retry-graph-apply-start logical=%s next=%d nodes=%d edges=%d", logicalID, nextAttempt, len(plan.Nodes), len(plan.Edges))
+	opts.tracef("ralph retry-graph-apply-start logical=%s next=%d nodes=%d edges=%d", logicalID, nextAttempt, len(plan.Nodes), len(plan.Edges))
 	applied, err := applier.ApplyGraphPlan(context.Background(), plan)
 	if err != nil {
 		return nil, err
@@ -466,7 +515,7 @@ func appendRalphRetryViaGraphApply(store beads.Store, applier beads.GraphApplySt
 	if err := beads.ValidateGraphApplyResult(plan, applied); err != nil {
 		return nil, err
 	}
-	tracef("ralph retry-graph-apply-done logical=%s next=%d nodes=%d", logicalID, nextAttempt, len(applied.IDs))
+	opts.tracef("ralph retry-graph-apply-done logical=%s next=%d nodes=%d", logicalID, nextAttempt, len(applied.IDs))
 
 	mapping := make(map[string]string, len(applied.IDs))
 	for oldID, newID := range applied.IDs {
@@ -1150,6 +1199,9 @@ func rewriteRalphAttemptRef(ref string, oldAttempt, nextAttempt int) string {
 	if rewritten, ok := rewriteAttemptSegment(ref, "check", oldAttempt, nextAttempt); ok {
 		return rewritten
 	}
+	if rewritten, ok := rewriteAttemptSegment(ref, "iteration", oldAttempt, nextAttempt); ok {
+		return rewritten
+	}
 	return ref
 }
 
@@ -1165,4 +1217,30 @@ func rewriteAttemptSegment(ref, kind string, oldAttempt, nextAttempt int) (strin
 	}
 	replacement := "." + kind + "." + strconv.Itoa(nextAttempt)
 	return ref[:index] + replacement + ref[end:], true
+}
+
+// traceCheckOutputCap bounds stderr/stdout in the ralph check-result trace
+// line so a noisy script does not produce an unreadable log entry.
+// GateResult already truncates each stream to convergence.MaxOutputBytes
+// (4 KiB); this further clips for tracing.
+const traceCheckOutputCap = 512
+
+// traceClipString returns s truncated to at most limit bytes, appending an
+// ellipsis marker when truncation occurred. Used to keep ralph check-result
+// trace lines bounded.
+func traceClipString(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	return s[:limit] + "...[clipped]"
+}
+
+// formatGateExitCode renders a GateResult.ExitCode pointer for tracing.
+// Avoids leaking the *int address (the prior trace line emitted %v against
+// the pointer, producing `exit=0x...` instead of the numeric exit code).
+func formatGateExitCode(code *int) string {
+	if code == nil {
+		return "<nil>"
+	}
+	return strconv.Itoa(*code)
 }

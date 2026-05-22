@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -68,7 +69,20 @@ func (e controllerCommandError) Is(target error) bool {
 		(target == errControllerUnresponsive && e.unresponsive)
 }
 
-const controllerSocketPathLimit = 100
+const (
+	controllerSocketPathLimit        = 100
+	sessionCircuitResetCommandPrefix = "session-circuit-reset:"
+)
+
+type sessionCircuitResetRequest struct {
+	Identity  string `json:"identity"`
+	SessionID string `json:"session_id,omitempty"`
+}
+
+type sessionCircuitResetReply struct {
+	Outcome string `json:"outcome"`
+	Error   string `json:"error,omitempty"`
+}
 
 // controllerSocketPath returns the Unix socket path for controller commands.
 // It preserves the legacy .gc/controller.sock location for short city paths,
@@ -108,6 +122,7 @@ func acquireControllerLock(cityPath string) (*os.File, error) {
 func startControllerSocket(
 	cityPath string,
 	cancelFn context.CancelFunc,
+	forceShutdown *atomic.Bool,
 	dirty *atomic.Bool,
 	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
@@ -130,19 +145,21 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, cancelFn, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+			go handleControllerConn(conn, cityPath, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 		}
 	}()
 	return lis, nil
 }
 
 // handleControllerConn reads from a connection and dispatches commands.
-// Supported commands: "stop" (shutdown), "ping" (liveness check, returns PID),
-// "converge:{json}" (convergence commands routed to event loop).
+// Supported commands: "stop" (shutdown), "stop-force" (shutdown without
+// interrupt grace), "ping" (liveness check, returns PID), "converge:{json}"
+// (convergence commands routed to event loop).
 func handleControllerConn(
 	conn net.Conn,
 	cityPath string,
 	cancelFn context.CancelFunc,
+	forceShutdown *atomic.Bool,
 	dirty *atomic.Bool,
 	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
@@ -158,6 +175,12 @@ func handleControllerConn(
 		line := scanner.Text()
 		switch {
 		case line == "stop":
+			cancelFn()
+			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
+		case line == "stop-force":
+			if forceShutdown != nil {
+				forceShutdown.Store(true)
+			}
 			cancelFn()
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case line == "ping":
@@ -187,6 +210,8 @@ func handleControllerConn(
 			default:
 			}
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
+		case strings.HasPrefix(line, sessionCircuitResetCommandPrefix):
+			handleSessionCircuitResetSocketCmd(conn, cityPath, line[len(sessionCircuitResetCommandPrefix):])
 		case strings.HasPrefix(line, "converge:"):
 			handleConvergeSocketCmd(conn, line[len("converge:"):], convergenceReqCh)
 		case strings.HasPrefix(line, "trace-arm:"):
@@ -207,6 +232,113 @@ func handleControllerConn(
 			handleTraceStatusSocketCmd(conn, cityPath)
 		}
 	}
+}
+
+func handleSessionCircuitResetSocketCmd(conn net.Conn, cityPath, payload string) {
+	var req sessionCircuitResetRequest
+	if err := json.Unmarshal([]byte(payload), &req); err != nil {
+		writeJSONLine(conn, sessionCircuitResetReply{
+			Outcome: "failed",
+			Error:   fmt.Sprintf("invalid session circuit reset request: %v", err),
+		})
+		return
+	}
+	identity := strings.TrimSpace(req.Identity)
+	if identity == "" {
+		writeJSONLine(conn, sessionCircuitResetReply{
+			Outcome: "failed",
+			Error:   "identity is required",
+		})
+		return
+	}
+	sessionID := strings.TrimSpace(req.SessionID)
+	if sessionID == "" {
+		writeJSONLine(conn, sessionCircuitResetReply{
+			Outcome: "failed",
+			Error:   "session_id is required; upgrade gc to clear persisted session circuit breaker metadata",
+		})
+		return
+	}
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		writeJSONLine(conn, sessionCircuitResetReply{
+			Outcome: "failed",
+			Error:   fmt.Sprintf("opening city store: %v", err),
+		})
+		return
+	}
+	if err := resetSessionCircuitBreakerState(store, sessionID, identity, defaultSessionCircuitBreaker()); err != nil {
+		writeJSONLine(conn, sessionCircuitResetReply{
+			Outcome: "failed",
+			Error:   err.Error(),
+		})
+		return
+	}
+	writeJSONLine(conn, sessionCircuitResetReply{Outcome: "ok"})
+}
+
+func resetSessionCircuitBreakerState(store beads.Store, sessionID string, identity string, cb *sessionCircuitBreaker) error {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return nil
+	}
+	if cb == nil {
+		cb = defaultSessionCircuitBreaker()
+	}
+	if err := loadPersistedSessionCircuitResetGeneration(store, sessionID, identity, cb); err != nil {
+		return err
+	}
+	initialSnapshot := cb.snapshotIdentity(identity)
+	if strings.TrimSpace(sessionID) == "" {
+		cb.Reset(identity)
+		return nil
+	}
+	if err := resetAndClearSessionCircuitBreakerState(store, sessionID, identity, cb, initialSnapshot); err != nil {
+		return err
+	}
+	// The second cycle invalidates an OPEN persist that may race through
+	// the first clear window. If the second clear fails, restore the pre-reset
+	// snapshot so the controller never leaves memory CLOSED while storage still
+	// says OPEN. TestResetSessionCircuitBreakerStateClearsRacingOpenPersist
+	// guards this from being collapsed into a single reset.
+	return resetAndClearSessionCircuitBreakerState(store, sessionID, identity, cb, initialSnapshot)
+}
+
+func resetAndClearSessionCircuitBreakerState(store beads.Store, sessionID string, identity string, cb *sessionCircuitBreaker, restoreSnapshot sessionCircuitBreakerIdentitySnapshot) error {
+	resetGeneration := cb.Reset(identity)
+	if err := clearPersistedSessionCircuitBreakerMetadata(store, sessionID, resetGeneration); err != nil {
+		cb.restoreIdentity(identity, restoreSnapshot)
+		// Restore the pre-reset snapshot rather than the just-reset one so a
+		// durable clear failure cannot strand the breaker CLOSED in memory.
+		return err
+	}
+	return nil
+}
+
+func resetSessionCircuitBreakerOnController(cityPath, sessionID, identity string) error {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return nil
+	}
+	payload, err := json.Marshal(sessionCircuitResetRequest{Identity: identity, SessionID: sessionID})
+	if err != nil {
+		return fmt.Errorf("encoding session circuit reset request: %w", err)
+	}
+	resp, err := sendControllerCommand(cityPath, sessionCircuitResetCommandPrefix+string(payload))
+	if err != nil {
+		return err
+	}
+	var reply sessionCircuitResetReply
+	if err := json.Unmarshal(resp, &reply); err != nil {
+		return fmt.Errorf("decoding session circuit reset reply: %w", err)
+	}
+	if reply.Outcome != "ok" {
+		if reply.Error != "" {
+			return fmt.Errorf("%s", reply.Error)
+		}
+		return fmt.Errorf("session circuit reset failed")
+	}
+	return nil
 }
 
 func handleReloadSocketCmd(conn net.Conn, payload string, ch chan reloadRequest) {
@@ -258,6 +390,7 @@ func handleReloadSocketCmd(conn net.Conn, payload string, ch chan reloadRequest)
 	req := reloadRequest{
 		wait:       wire.Wait,
 		timeout:    timeout,
+		soft:       wire.Soft,
 		acceptedCh: make(chan reloadControlReply, 1),
 		doneCh:     make(chan reloadControlReply, 1),
 	}
@@ -572,16 +705,7 @@ func (r *configWatchRegistrar) isConventionRootCreate(path string) bool {
 }
 
 func pathIsWithin(root, path string) bool {
-	root = normalizePathForCompare(root)
-	path = normalizePathForCompare(path)
-	if samePath(root, path) {
-		return true
-	}
-	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
-	if err != nil {
-		return false
-	}
-	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	return pathutil.PathWithin(root, path)
 }
 
 func isConventionDiscoveryDirName(base string) bool {
@@ -773,7 +897,11 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 		return nil, fmt.Errorf("fetching packs: %w", err)
 	}
 
-	newCfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, extraConfigFiles...)
+	allIncludes, err := cityConfigIncludesWithBuiltinPacks(cityRoot, extraConfigFiles...)
+	if err != nil {
+		return nil, err
+	}
+	newCfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, allIncludes...)
 	if err != nil {
 		return nil, fmt.Errorf("parsing city.toml: %w", err)
 	}
@@ -834,7 +962,20 @@ func gracefulStopAll(
 	store beads.Store,
 	stdout, stderr io.Writer,
 ) {
-	if timeout <= 0 || len(names) == 0 {
+	gracefulStopAllWithForceSignal(names, sp, timeout, rec, cfg, store, stdout, stderr, nil)
+}
+
+func gracefulStopAllWithForceSignal(
+	names []string,
+	sp runtime.Provider,
+	timeout time.Duration,
+	rec events.Recorder,
+	cfg *config.City,
+	store beads.Store,
+	stdout, stderr io.Writer,
+	forceStopRequested func() bool,
+) {
+	if timeout <= 0 || len(names) == 0 || stopForceRequested(forceStopRequested) {
 		// Immediate kill (no grace period).
 		stopTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), cfg, store, sp, rec, "gc", stdout, stderr)
 		return
@@ -851,14 +992,20 @@ func gracefulStopAll(
 	// The configured timeout is the post-dispatch grace window; dispatch
 	// latency is intentionally outside that budget so every interrupted
 	// session still gets the full graceful-exit wait once nudged.
-	sent := interruptTargetsBounded(targets, cfg, store, sp, stderr)
+	sent := interruptTargetsBoundedWithForceSignal(targets, cfg, store, sp, stderr, forceStopRequested)
 	fmt.Fprintf(stdout, "Sent interrupt to %d/%d agent(s), waiting %s...\n", //nolint:errcheck // best-effort stdout
 		sent, len(names), timeout)
 
 	// Poll until all agents exit or timeout expires (avoid sleeping full duration).
 	pollInterval := 500 * time.Millisecond
+	if forceStopRequested != nil {
+		pollInterval = 50 * time.Millisecond
+	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		if stopForceRequested(forceStopRequested) {
+			break
+		}
 		allExited := true
 		if runningSet, ok := runningSessionSet(sp, names); ok {
 			allExited = len(runningSet) == 0
@@ -875,6 +1022,9 @@ func gracefulStopAll(
 			break
 		}
 		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
 		if remaining < pollInterval {
 			time.Sleep(remaining)
 		} else {
@@ -893,19 +1043,43 @@ func gracefulStopAll(
 			running, _ = workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
 		}
 		if !running {
+			if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
+				fmt.Fprintf(stderr, "cleaning exited agent '%s': %v\n", name, err) //nolint:errcheck // best-effort stderr
+			}
 			fmt.Fprintf(stdout, "Agent '%s' exited gracefully\n", name) //nolint:errcheck // best-effort stdout
 			subject := name
-			if target, ok := targetByName[name]; ok && target.subject != "" {
-				subject = target.subject
+			// SessionLifecyclePayload.SessionID is contractually "always
+			// present" — when the targetByName lookup misses (or the
+			// bead's ID couldn't be filled) we fall back to the loop
+			// variable, which is the session_name. ResolveSessionID
+			// canonicalizes session_name → bead ID for any consumer.
+			sessionID := name
+			var template string
+			if target, ok := targetByName[name]; ok {
+				if target.subject != "" {
+					subject = target.subject
+				}
+				if target.sessionID != "" {
+					sessionID = target.sessionID
+				}
+				template = target.template
+				if cityStopSessionMarked(store, target.sessionID) {
+					markCityStopSessionAsAsleep(store, target.sessionID, stderr)
+				}
 			}
 			rec.Record(events.Event{
 				Type: events.SessionStopped, Actor: "gc", Subject: subject,
+				Payload: api.SessionLifecyclePayloadJSON(sessionID, template, "exited gracefully"),
 			})
 			continue
 		}
 		survivors = append(survivors, name)
 	}
 	stopTargetsBounded(filterStopTargets(targets, survivors), cfg, store, sp, rec, "gc", stdout, stderr)
+}
+
+func stopForceRequested(forceStopRequested func() bool) bool {
+	return forceStopRequested != nil && forceStopRequested()
 }
 
 func runningSessionSet(sp runtime.Provider, names []string) (map[string]bool, bool) {
@@ -1074,7 +1248,8 @@ func runController(
 	configDirty := &atomic.Bool{}
 
 	sockPath := controllerSocketPath(cityPath)
-	lis, err := startControllerSocket(cityPath, cancel, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	forceShutdown := &atomic.Bool{}
+	lis, err := startControllerSocket(cityPath, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1121,6 +1296,7 @@ func runController(
 		Rec:                     rec,
 		PoolSessions:            poolSessions,
 		PoolDeathHandlers:       poolDeathHandlers,
+		ForceStopShutdown:       forceShutdown,
 		ReloadReqCh:             reloadReqCh,
 		ConvergenceReqCh:        convergenceReqCh,
 		PokeCh:                  pokeCh,
@@ -1156,7 +1332,7 @@ func runController(
 		// not own the supervisor registry/reconciler path required by
 		// async POST /v0/city, so leave the initializer nil and let the
 		// handler return 501 for create/unregister routes.
-		apiMux := api.NewSupervisorMux(&singleCityStateResolver{state: cs}, nil, readOnly, "controller", time.Now())
+		apiMux := api.NewSupervisorMux(&singleCityStateResolver{state: cs}, nil, readOnly, "controller", commit, time.Now())
 		addr := net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port))
 		apiLis, apiErr := net.Listen("tcp", addr)
 		if apiErr != nil {

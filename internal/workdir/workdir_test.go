@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -57,6 +58,49 @@ func TestResolveWorkDirPathUsesPoolInstanceBase(t *testing.T) {
 	}
 }
 
+// TestResolveWorkDirPathGivesEachPoolSlotUniqueWorktree is the #774 regression
+// guard: N pool workers sharing one template must each resolve to a distinct
+// worktree path derived from their namepool slot, not the template base.
+func TestResolveWorkDirPathGivesEachPoolSlotUniqueWorktree(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
+	agent := config.Agent{
+		Name:              "ant",
+		Dir:               "demo",
+		WorkDir:           ".gc/worktrees/{{.Rig}}/ants/{{.AgentBase}}",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(4),
+	}
+
+	cases := []struct {
+		slot string
+		want string
+	}{
+		{slot: "demo/ant-fenrir", want: filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants", "ant-fenrir")},
+		{slot: "demo/ant-grendel", want: filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants", "ant-grendel")},
+		{slot: "demo/ant-hati", want: filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants", "ant-hati")},
+		{slot: "demo/ant-skoll", want: filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants", "ant-skoll")},
+	}
+
+	seen := make(map[string]string, len(cases))
+	for _, tc := range cases {
+		t.Run(tc.slot, func(t *testing.T) {
+			got := ResolveWorkDirPath(cityPath, "gastown", tc.slot, agent, rigs)
+			if got != tc.want {
+				t.Fatalf("ResolveWorkDirPath(%q) = %q, want %q", tc.slot, got, tc.want)
+			}
+			if prev, dup := seen[got]; dup {
+				t.Fatalf("slot %q collided with %q on path %q", tc.slot, prev, got)
+			}
+			seen[got] = tc.slot
+		})
+	}
+
+	if len(seen) != len(cases) {
+		t.Fatalf("unique paths = %d, want %d", len(seen), len(cases))
+	}
+}
+
 func TestSessionQualifiedNameCanonicalizesBareAndQualifiedPoolAliases(t *testing.T) {
 	cityPath := t.TempDir()
 	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
@@ -83,6 +127,16 @@ func TestSessionQualifiedNameKeepsSingletonTemplateIdentity(t *testing.T) {
 
 	if got := SessionQualifiedName(cityPath, agent, rigs, "demo/boot", ""); got != "demo/witness" {
 		t.Fatalf("SessionQualifiedName() = %q, want %q", got, "demo/witness")
+	}
+}
+
+func TestSessionQualifiedNameUsesSingletonExplicitNameWhenAliasEmpty(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
+	agent := config.Agent{Name: "witness", Dir: "demo", MaxActiveSessions: intPtr(1)}
+
+	if got := SessionQualifiedName(cityPath, agent, rigs, "", "crew--gastown"); got != "demo/crew--gastown" {
+		t.Fatalf("SessionQualifiedName() = %q, want singleton tmux_alias explicit name in work_dir identity", got)
 	}
 }
 
@@ -167,5 +221,243 @@ func TestSamePathUsesSharedPathNormalization(t *testing.T) {
 	want := runtime.GOOS == "darwin"
 	if got != want {
 		t.Fatalf("samePath(%q, %q) = %v, want %v", a, b, got, want)
+	}
+}
+
+// writeStaleGitPointer creates a stale worktree marker file at parent/.git
+// whose gitdir target does not exist on disk. Mirrors the bug shape from
+// gascity#1556.
+func writeStaleGitPointer(t *testing.T, parent, missingTarget string) {
+	t.Helper()
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitFile := filepath.Join(parent, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+missingTarget+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeValidGitPointer creates a worktree marker file at parent/.git whose
+// gitdir target is an existing directory.
+func writeValidGitPointer(t *testing.T, parent, target string) {
+	t.Helper()
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitFile := filepath.Join(parent, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+target+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateAncestorWorktreesNotStale_NoMarkersInAncestry(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "a", "b", "c", "polecat-1")
+	if err := ValidateAncestorWorktreesNotStale(target); err != nil {
+		t.Fatalf("ValidateAncestorWorktreesNotStale() = %v, want nil (ancestry has no .git markers)", err)
+	}
+}
+
+func TestValidateAncestorWorktreesNotStale_AncestorHasRealGitDir(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(repo, ".gc", "worktrees", "demo", "polecats", "polecat-1")
+	if err := ValidateAncestorWorktreesNotStale(target); err != nil {
+		t.Fatalf("ValidateAncestorWorktreesNotStale() = %v, want nil (ancestor has real .git directory)", err)
+	}
+}
+
+func TestValidateAncestorWorktreesNotStale_AncestorHasValidWorktreePointer(t *testing.T) {
+	root := t.TempDir()
+	wtParent := filepath.Join(root, "repo", ".gc", "worktrees", "demo", "polecats", "furiosa")
+	gitdirTarget := filepath.Join(root, "repo", ".git", "worktrees", "furiosa")
+	writeValidGitPointer(t, wtParent, gitdirTarget)
+	target := filepath.Join(wtParent, "child-spawn")
+	if err := ValidateAncestorWorktreesNotStale(target); err != nil {
+		t.Fatalf("ValidateAncestorWorktreesNotStale() = %v, want nil (ancestor has valid worktree pointer)", err)
+	}
+}
+
+func TestValidateAncestorWorktreesNotStale_AncestorHasStalePointer(t *testing.T) {
+	root := t.TempDir()
+	staleParent := filepath.Join(root, "repo", ".gc", "worktrees", "demo", "polecats", "furiosa")
+	missingTarget := filepath.Join(root, "repo", ".git", "worktrees", "furiosa-was-removed")
+	writeStaleGitPointer(t, staleParent, missingTarget)
+	target := filepath.Join(staleParent, "worktrees", "ta-2j4p")
+	err := ValidateAncestorWorktreesNotStale(target)
+	if err == nil {
+		t.Fatal("ValidateAncestorWorktreesNotStale() = nil, want error (ancestor has stale worktree pointer)")
+	}
+	for _, want := range []string{staleParent, missingTarget} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing reference %q", err.Error(), want)
+		}
+	}
+}
+
+func TestValidateAncestorWorktreesNotStale_PathItselfMissingButAncestryClean(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(repo, "does", "not", "exist", "yet")
+	if err := ValidateAncestorWorktreesNotStale(target); err != nil {
+		t.Fatalf("ValidateAncestorWorktreesNotStale() = %v, want nil (path missing but ancestry clean)", err)
+	}
+}
+
+func TestValidateAncestorWorktreesNotStale_StopsAtFirstValidMarker(t *testing.T) {
+	// Two levels of worktree markers in the chain. The closer one (a valid
+	// worktree pointer) should stop the walk; the further-up stale marker
+	// must NOT be reached and thus must NOT trigger rejection. This mirrors
+	// git's own resolution: once a valid worktree root is found, deeper
+	// ancestors are not consulted.
+	root := t.TempDir()
+	deepStaleParent := filepath.Join(root, "outer")
+	deepStaleTarget := filepath.Join(root, "outer", ".git", "worktrees", "gone")
+	writeStaleGitPointer(t, deepStaleParent, deepStaleTarget)
+
+	innerWtParent := filepath.Join(deepStaleParent, "inner", "polecats", "furiosa")
+	innerWtTarget := filepath.Join(root, "real-repo", ".git", "worktrees", "furiosa")
+	writeValidGitPointer(t, innerWtParent, innerWtTarget)
+
+	target := filepath.Join(innerWtParent, "child-spawn")
+	if err := ValidateAncestorWorktreesNotStale(target); err != nil {
+		t.Fatalf("ValidateAncestorWorktreesNotStale() = %v, want nil (closer valid marker should stop the walk)", err)
+	}
+}
+
+func TestValidateAncestorWorktreesNotStale_WalkTerminatesAtFilesystemRoot(t *testing.T) {
+	// Tests that the loop terminates on systems where the temp tree has no
+	// .git marker anywhere from path up to /. The validator must not loop
+	// or stat-thrash.
+	root := t.TempDir()
+	target := filepath.Join(root, "no", "git", "anywhere", "in", "ancestry")
+	if err := ValidateAncestorWorktreesNotStale(target); err != nil {
+		t.Fatalf("ValidateAncestorWorktreesNotStale() = %v, want nil (no markers up to FS root)", err)
+	}
+}
+
+// PR #2033 review: a gitdir: target written as a relative path must be
+// resolved against the directory containing the .git file (Git's gitfile
+// format), not against the process working directory.
+func TestValidateAncestorWorktreesNotStale_RelativeGitdirTarget(t *testing.T) {
+	root := t.TempDir()
+	wtParent := filepath.Join(root, "repo", ".gc", "worktrees", "demo", "polecats", "furiosa")
+	// Absolute target on disk lives alongside the pointer parent, so a
+	// relative pointer "../../../.git/worktrees/furiosa" resolves to it.
+	absTarget := filepath.Join(root, "repo", ".git", "worktrees", "furiosa")
+	if err := os.MkdirAll(absTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(wtParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	relTarget, err := filepath.Rel(wtParent, absTarget)
+	if err != nil {
+		t.Fatalf("filepath.Rel: %v", err)
+	}
+	gitFile := filepath.Join(wtParent, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+relTarget+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(wtParent, "child-spawn")
+	if err := ValidateAncestorWorktreesNotStale(target); err != nil {
+		t.Fatalf("ValidateAncestorWorktreesNotStale() = %v, want nil (relative gitdir should resolve against .git parent)", err)
+	}
+}
+
+// PR #2033 review: a gitdir target that exists on disk but is not a
+// directory (regular file, broken symlink, etc.) must be rejected with
+// the same shape as a missing target — the pointer is non-worktree-
+// capable and spawning into a descendant produces dangling content.
+func TestValidateAncestorWorktreesNotStale_GitdirTargetNotDirectory(t *testing.T) {
+	root := t.TempDir()
+	staleParent := filepath.Join(root, "repo", ".gc", "worktrees", "demo", "polecats", "furiosa")
+	if err := os.MkdirAll(staleParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Target exists but is a regular file rather than a worktree admin dir.
+	fileTarget := filepath.Join(root, "repo", ".git", "worktrees", "furiosa-file")
+	if err := os.MkdirAll(filepath.Dir(fileTarget), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fileTarget, []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitFile := filepath.Join(staleParent, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: "+fileTarget+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(staleParent, "child-spawn")
+	err := ValidateAncestorWorktreesNotStale(target)
+	if err == nil {
+		t.Fatal("ValidateAncestorWorktreesNotStale() = nil, want error (gitdir target is a file, not a directory)")
+	}
+	for _, want := range []string{staleParent, fileTarget, "not a directory"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing reference %q", err.Error(), want)
+		}
+	}
+}
+
+func TestResolveTmuxAlias_EmptyWhenUnset(t *testing.T) {
+	cityPath := t.TempDir()
+	got, err := ResolveTmuxAlias(cityPath, "gastown", config.Agent{Name: "worker", Dir: "demo"}, nil)
+	if err != nil {
+		t.Fatalf("ResolveTmuxAlias: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("ResolveTmuxAlias() = %q, want empty (no template configured)", got)
+	}
+}
+
+func TestResolveTmuxAlias_ExpandsRigTemplate(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
+	got, err := ResolveTmuxAlias(cityPath, "gastown", config.Agent{
+		Name:      "crew-demo",
+		Dir:       "demo",
+		TmuxAlias: "crew--{{.Rig}}",
+	}, rigs)
+	if err != nil {
+		t.Fatalf("ResolveTmuxAlias: %v", err)
+	}
+	if got != "crew--demo" {
+		t.Fatalf("ResolveTmuxAlias() = %q, want %q", got, "crew--demo")
+	}
+}
+
+func TestResolveTmuxAlias_SanitizesQualifiedAgentName(t *testing.T) {
+	cityPath := t.TempDir()
+	got, err := ResolveTmuxAlias(cityPath, "gastown", config.Agent{
+		Name:        "mayor",
+		BindingName: "gastown",
+		TmuxAlias:   "{{.Agent}}",
+	}, nil)
+	if err != nil {
+		t.Fatalf("ResolveTmuxAlias: %v", err)
+	}
+	// "gastown.mayor" must be sanitized to "gastown__mayor" for tmux.
+	if got != "gastown__mayor" {
+		t.Fatalf("ResolveTmuxAlias() = %q, want %q", got, "gastown__mayor")
+	}
+}
+
+func TestResolveTmuxAlias_ReturnsErrorOnBadTemplate(t *testing.T) {
+	_, err := ResolveTmuxAlias("", "", config.Agent{
+		Name:      "worker",
+		TmuxAlias: "{{.NotAField}}",
+	}, nil)
+	if err == nil {
+		t.Fatal("ResolveTmuxAlias: want error on unknown template field, got nil")
 	}
 }

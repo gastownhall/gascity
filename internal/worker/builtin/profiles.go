@@ -22,9 +22,10 @@ type BuiltinProviderOption struct {
 //
 //nolint:revive // Mirrors the config boundary naming intentionally.
 type BuiltinOptionChoice struct {
-	Value    string
-	Label    string
-	FlagArgs []string
+	Value       string
+	Label       string
+	FlagArgs    []string
+	FlagAliases [][]string
 }
 
 // BuiltinProviderSpec is the canonical builtin worker materialization source.
@@ -41,6 +42,7 @@ type BuiltinProviderSpec struct {
 	ReadyPromptPrefix      string
 	ProcessNames           []string
 	EmitsPermissionWarning bool
+	AcceptStartupDialogs   *bool
 	Env                    map[string]string
 	PathCheck              string
 	SupportsACP            bool
@@ -58,6 +60,8 @@ type BuiltinProviderSpec struct {
 	ACPCommand             string
 	ACPArgs                []string
 }
+
+func boolPtr(b bool) *bool { return &b }
 
 // ProfileIdentity captures the explicit production identity for a canonical
 // worker profile.
@@ -77,7 +81,7 @@ const (
 )
 
 var builtinProviderOrder = []string{
-	"claude", "codex", "gemini", "cursor", "copilot",
+	"claude", "codex", "gemini", "kimi", "kiro", "cursor", "copilot",
 	"amp", "opencode", "auggie", "pi", "omp",
 }
 
@@ -130,6 +134,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 					{Value: "low", Label: "Low", FlagArgs: []string{"--effort", "low"}},
 					{Value: "medium", Label: "Medium", FlagArgs: []string{"--effort", "medium"}},
 					{Value: "high", Label: "High", FlagArgs: []string{"--effort", "high"}},
+					{Value: "xhigh", Label: "Extra High", FlagArgs: []string{"--effort", "xhigh"}},
 					{Value: "max", Label: "Max", FlagArgs: []string{"--effort", "max"}},
 				},
 			},
@@ -139,9 +144,9 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Type:  "select",
 				Choices: []BuiltinOptionChoice{
 					{Value: "", Label: "Default"},
-					{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-6"}},
-					{Value: "sonnet", Label: "Sonnet", FlagArgs: []string{"--model", "claude-sonnet-4-6"}},
-					{Value: "haiku", Label: "Haiku", FlagArgs: []string{"--model", "claude-haiku-4-5-20251001"}},
+					{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-7"}, FlagAliases: [][]string{{"-m", "claude-opus-4-7"}}},
+					{Value: "sonnet", Label: "Sonnet", FlagArgs: []string{"--model", "claude-sonnet-4-6"}, FlagAliases: [][]string{{"-m", "claude-sonnet-4-6"}}},
+					{Value: "haiku", Label: "Haiku", FlagArgs: []string{"--model", "claude-haiku-4-5-20251001"}, FlagAliases: [][]string{{"-m", "claude-haiku-4-5-20251001"}}},
 				},
 			},
 		},
@@ -187,9 +192,10 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Type:  "select",
 				Choices: []BuiltinOptionChoice{
 					{Value: "", Label: "Default"},
-					{Value: "gpt-5.5", Label: "GPT-5.5", FlagArgs: []string{"--model", "gpt-5.5"}},
-					{Value: "o3", Label: "o3", FlagArgs: []string{"--model", "o3"}},
-					{Value: "o4-mini", Label: "o4-mini", FlagArgs: []string{"--model", "o4-mini"}},
+					{Value: "gpt-5.5", Label: "GPT-5.5", FlagArgs: []string{"--model", "gpt-5.5"}, FlagAliases: [][]string{{"-m", "gpt-5.5"}}},
+					{Value: "gpt-5.3-codex-spark", Label: "GPT-5.3 Codex Spark", FlagArgs: []string{"--model", "gpt-5.3-codex-spark"}, FlagAliases: [][]string{{"-m", "gpt-5.3-codex-spark"}}},
+					{Value: "o3", Label: "o3", FlagArgs: []string{"--model", "o3"}, FlagAliases: [][]string{{"-m", "o3"}}},
+					{Value: "o4-mini", Label: "o4-mini", FlagArgs: []string{"--model", "o4-mini"}, FlagAliases: [][]string{{"-m", "o4-mini"}}},
 				},
 			},
 			{
@@ -208,10 +214,10 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Type:  "select",
 				Choices: []BuiltinOptionChoice{
 					{Value: "", Label: "Default"},
-					{Value: "low", Label: "Low", FlagArgs: []string{"-c", "model_reasoning_effort=low"}},
-					{Value: "medium", Label: "Medium", FlagArgs: []string{"-c", "model_reasoning_effort=medium"}},
-					{Value: "high", Label: "High", FlagArgs: []string{"-c", "model_reasoning_effort=high"}},
-					{Value: "xhigh", Label: "Extra High", FlagArgs: []string{"-c", "model_reasoning_effort=xhigh"}},
+					{Value: "low", Label: "Low", FlagArgs: []string{"-c", "model_reasoning_effort=low"}, FlagAliases: [][]string{{"-c", "model_reasoning_effort=\"low\""}}},
+					{Value: "medium", Label: "Medium", FlagArgs: []string{"-c", "model_reasoning_effort=medium"}, FlagAliases: [][]string{{"-c", "model_reasoning_effort=\"medium\""}}},
+					{Value: "high", Label: "High", FlagArgs: []string{"-c", "model_reasoning_effort=high"}, FlagAliases: [][]string{{"-c", "model_reasoning_effort=\"high\""}}},
+					{Value: "xhigh", Label: "Extra High", FlagArgs: []string{"-c", "model_reasoning_effort=xhigh"}, FlagAliases: [][]string{{"-c", "model_reasoning_effort=\"xhigh\""}}},
 				},
 			},
 		},
@@ -257,11 +263,51 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Type:  "select",
 				Choices: []BuiltinOptionChoice{
 					{Value: "", Label: "Default"},
-					{Value: "gemini-2.5-pro", Label: "Gemini 2.5 Pro", FlagArgs: []string{"--model", "gemini-2.5-pro"}},
-					{Value: "gemini-2.5-flash", Label: "Gemini 2.5 Flash", FlagArgs: []string{"--model", "gemini-2.5-flash"}},
+					{Value: "gemini-2.5-pro", Label: "Gemini 2.5 Pro", FlagArgs: []string{"--model", "gemini-2.5-pro"}, FlagAliases: [][]string{{"-m", "gemini-2.5-pro"}}},
+					{Value: "gemini-2.5-flash", Label: "Gemini 2.5 Flash", FlagArgs: []string{"--model", "gemini-2.5-flash"}, FlagAliases: [][]string{{"-m", "gemini-2.5-flash"}}},
 				},
 			},
 		},
+	},
+	"kimi": {
+		DisplayName:          "Kimi Code CLI",
+		Command:              "kimi",
+		Args:                 []string{"--yolo", "--no-thinking"},
+		PromptMode:           "none",
+		ReadyDelayMs:         5000,
+		ProcessNames:         []string{"kimi", "python"},
+		AcceptStartupDialogs: boolPtr(false),
+		SupportsACP:          true,
+		InstructionsFile:     "AGENTS.md",
+		ResumeFlag:           "--session",
+		ResumeStyle:          "flag",
+		PrintArgs:            []string{"--quiet", "--prompt"},
+		TitleModel:           "kimi-k2.6",
+		ACPArgs:              []string{"--yolo", "--no-thinking", "acp"},
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "kimi-k2.6", Label: "Kimi K2.6", FlagArgs: []string{"--model", "kimi-k2.6"}, FlagAliases: [][]string{{"-m", "kimi-k2.6"}}},
+					{Value: "kimi-k2-thinking-turbo", Label: "Kimi K2 Thinking Turbo", FlagArgs: []string{"--model", "kimi-k2-thinking-turbo"}, FlagAliases: [][]string{{"-m", "kimi-k2-thinking-turbo"}}},
+				},
+			},
+		},
+	},
+	"kiro": {
+		DisplayName:      "Kiro",
+		Command:          "kiro-cli",
+		Args:             []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+		PromptMode:       "arg",
+		ReadyDelayMs:     5000,
+		ProcessNames:     []string{"kiro-cli", "kiro", "node"},
+		SupportsACP:      true,
+		SupportsHooks:    true,
+		InstructionsFile: "AGENTS.md",
+		ACPArgs:          []string{"acp", "--agent", "gascity"},
 	},
 	"cursor": {
 		DisplayName:       "Cursor Agent",
@@ -273,46 +319,108 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ProcessNames:      []string{"cursor-agent"},
 		SupportsHooks:     true,
 		InstructionsFile:  "AGENTS.md",
+		ResumeFlag:        "--resume",
+		ResumeStyle:       "flag",
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:     "mcp_approval",
+				Label:   "MCP Approval",
+				Type:    "select",
+				Default: "prompt",
+				Choices: []BuiltinOptionChoice{
+					{Value: "prompt", Label: "Prompt for MCP approval"},
+					{Value: "approve", Label: "Approve visible MCP servers", FlagArgs: []string{"--approve-mcps"}},
+				},
+			},
+		},
 	},
 	"copilot": {
-		DisplayName:       "GitHub Copilot",
-		Command:           "copilot",
-		Args:              []string{"--yolo"},
-		PromptMode:        "arg",
+		DisplayName: "GitHub Copilot",
+		Command:     "copilot",
+		Args:        []string{"--yolo"},
+		// PromptMode "none" delivers the prompt via tmux send-keys after the
+		// ready prefix is detected (Step 6 in doStartSession), instead of
+		// appending to argv. Required for copilot CLI 1.0.x which rejects
+		// positional prompt arguments ("error: too many arguments"). The old
+		// 0.0.x line accepted argv prompts; the rewrite in 1.0 made -p the
+		// only non-interactive entry, but -p exits after completion and
+		// breaks the long-running session contract gascity needs. Using
+		// "none" + send-keys preserves the interactive REPL.
+		PromptMode:        "none",
 		ReadyPromptPrefix: "\u276f ",
 		ReadyDelayMs:      5000,
 		ProcessNames:      []string{"copilot"},
 		SupportsHooks:     true,
 		InstructionsFile:  "AGENTS.md",
+		ResumeFlag:        "--resume",
+		ResumeStyle:       "flag",
 	},
 	"amp": {
+		// Hook mechanism: Amp CLI's plugin system (session.start,
+		// tool.call) is documented at https://ampcode.com/manual.
+		// Gas Town has not yet wired hook installation for amp —
+		// tracked as gap 4 of gastownhall/gascity#672. Nudges still
+		// drain via the supervisor dispatcher / per-session poller
+		// without requiring provider hooks; the remaining work is
+		// event-driven coordination (session-start priming,
+		// pre-compaction handoff).
 		DisplayName:      "Sourcegraph AMP",
 		Command:          "amp",
 		Args:             []string{"--dangerously-allow-all", "--no-ide"},
 		PromptMode:       "arg",
 		ProcessNames:     []string{"amp"},
 		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "threads continue",
+		ResumeStyle:      "subcommand",
 	},
 	"opencode": {
 		DisplayName:      "OpenCode",
 		Command:          "opencode",
 		Args:             []string{},
-		PromptMode:       "none",
+		PromptMode:       "flag",
+		PromptFlag:       "--prompt",
 		ReadyDelayMs:     8000,
 		ProcessNames:     []string{"opencode", "node", "bun"},
 		Env:              map[string]string{"OPENCODE_PERMISSION": `{"*":"allow"}`},
 		SupportsACP:      true,
 		SupportsHooks:    true,
 		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--session",
+		ResumeStyle:      "flag",
 		ACPArgs:          []string{"acp"},
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "opencode/deepseek-v4-flash-free", Label: "DeepSeek V4 Flash Free", FlagArgs: []string{"--model", "opencode/deepseek-v4-flash-free"}, FlagAliases: [][]string{{"-m", "opencode/deepseek-v4-flash-free"}}},
+					{Value: "opencode/nemotron-3-super-free", Label: "Nemotron 3 Super Free", FlagArgs: []string{"--model", "opencode/nemotron-3-super-free"}, FlagAliases: [][]string{{"-m", "opencode/nemotron-3-super-free"}}},
+					{Value: "opencode/big-pickle", Label: "Big Pickle", FlagArgs: []string{"--model", "opencode/big-pickle"}, FlagAliases: [][]string{{"-m", "opencode/big-pickle"}}},
+				},
+			},
+		},
 	},
 	"auggie": {
+		// Hook mechanism: Auggie CLI exposes SessionStart, SessionEnd,
+		// Stop, PreToolUse, PostToolUse hooks via ~/.augment/settings.json
+		// (https://docs.augmentcode.com/cli/overview). The config is
+		// USER-global rather than project-local, which complicates Gas
+		// Town's per-workdir installation model — wiring auggie hooks
+		// requires either merging into the user's existing config or
+		// designing a per-rig override mechanism. Tracked as gap 4 of
+		// gastownhall/gascity#672. Nudges still drain via the supervisor
+		// dispatcher / per-session poller without requiring provider
+		// hooks.
 		DisplayName:      "Auggie CLI",
 		Command:          "auggie",
 		Args:             []string{"--allow-indexing"},
 		PromptMode:       "arg",
 		ProcessNames:     []string{"auggie"},
 		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--resume",
+		ResumeStyle:      "flag",
 	},
 	"pi": {
 		DisplayName:      "Pi Coding Agent",
@@ -323,6 +431,19 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ProcessNames:     []string{"pi", "node", "bun"},
 		SupportsHooks:    true,
 		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--session",
+		ResumeStyle:      "flag",
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "ollama-cloud-gpt-oss-20b", Label: "Ollama Cloud GPT-OSS 20B", FlagArgs: []string{"--provider", "ollama-cloud", "--model", "gpt-oss:20b"}},
+				},
+			},
+		},
 	},
 	"omp": {
 		DisplayName:      "Oh My Pi (OMP)",
@@ -360,23 +481,29 @@ func BuiltinProviders() map[string]BuiltinProviderSpec {
 func CanonicalProfileIdentity(profile string) (ProfileIdentity, bool) {
 	switch profile {
 	case "claude/tmux-cli":
-		return newProfileIdentity(profile, "claude", "tmux-cli"), true
+		return newProfileIdentity(profile, "claude"), true
 	case "codex/tmux-cli":
-		return newProfileIdentity(profile, "codex", "tmux-cli"), true
+		return newProfileIdentity(profile, "codex"), true
 	case "gemini/tmux-cli":
-		return newProfileIdentity(profile, "gemini", "tmux-cli"), true
+		return newProfileIdentity(profile, "gemini"), true
+	case "kimi/tmux-cli":
+		return newProfileIdentity(profile, "kimi"), true
+	case "opencode/tmux-cli":
+		return newProfileIdentity(profile, "opencode"), true
+	case "pi/tmux-cli":
+		return newProfileIdentity(profile, "pi"), true
 	default:
 		return ProfileIdentity{}, false
 	}
 }
 
-func newProfileIdentity(profile, family, transport string) ProfileIdentity {
+func newProfileIdentity(profile, family string) ProfileIdentity {
 	compatibility := fmt.Sprintf("%s|behavior=%s|transcript=%s", profile, canonicalBehaviorClaimsVersion, canonicalTranscriptAdapterVersion)
 	sum := sha256.Sum256([]byte(compatibility))
 	return ProfileIdentity{
 		Profile:                  profile,
 		ProviderFamily:           family,
-		TransportClass:           transport,
+		TransportClass:           "tmux-cli",
 		BehaviorClaimsVersion:    canonicalBehaviorClaimsVersion,
 		TranscriptAdapterVersion: canonicalTranscriptAdapterVersion,
 		CompatibilityVersion:     compatibility,
@@ -420,9 +547,10 @@ func cloneBuiltinChoices(choices []BuiltinOptionChoice) []BuiltinOptionChoice {
 	out := make([]BuiltinOptionChoice, len(choices))
 	for i, choice := range choices {
 		out[i] = BuiltinOptionChoice{
-			Value:    choice.Value,
-			Label:    choice.Label,
-			FlagArgs: cloneStrings(choice.FlagArgs),
+			Value:       choice.Value,
+			Label:       choice.Label,
+			FlagArgs:    cloneStrings(choice.FlagArgs),
+			FlagAliases: cloneStringSlices(choice.FlagAliases),
 		}
 	}
 	return out
@@ -445,5 +573,16 @@ func cloneStrings(values []string) []string {
 	}
 	out := make([]string, len(values))
 	copy(out, values)
+	return out
+}
+
+func cloneStringSlices(values [][]string) [][]string {
+	if values == nil {
+		return nil
+	}
+	out := make([][]string, len(values))
+	for i := range values {
+		out[i] = cloneStrings(values[i])
+	}
 	return out
 }

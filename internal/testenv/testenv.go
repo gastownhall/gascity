@@ -1,6 +1,8 @@
-// Package testenv scrubs the leak-vector GC_* env vars at test-binary init
-// time so a leak from an agent session (e.g. GC_CITY pointing at a live city)
-// cannot reach test code and corrupt that city. See PR #746 for the incident.
+// Package testenv scrubs leak-vector env vars at test-binary init time so a
+// leak from an agent session (e.g. GC_CITY pointing at a live city, or
+// GC_BEADS=bd pointing at a managed Dolt runtime) cannot reach test code and
+// corrupt that city or spawn orphaned infrastructure. See PR #746 for the
+// original city-env incident.
 //
 // Every real test directory in this repo must contain an untagged
 // `testenv_import_test.go` that blank-imports this package:
@@ -28,12 +30,13 @@
 //
 // Passthrough: a parent that intentionally launches a helper subprocess
 // with seeded leak-vector vars (e.g. workspacesvc's proxy_process tests,
-// where proxy_process.go seeds GC_CITY/GC_CITY_PATH/GC_CITY_RUNTIME_DIR
-// into the child env) can set GC_TESTENV_PASSTHROUGH in the child env to
-// a comma-separated list of leak-vector var names. init() preserves only
-// those named vars and scrubs the rest. The passthrough var itself is
-// always unset so the child cannot propagate the list further. Unlike a
-// blanket bypass, every surviving GC_* must be explicitly declared.
+// where proxy_process.go seeds GC_CITY/GC_CITY_PATH/GC_CITY_RUNTIME_DIR/
+// GC_CONTROL_DISPATCHER_TRACE_DEFAULT into the child env) can set
+// GC_TESTENV_PASSTHROUGH in the child env to a comma-separated list of
+// leak-vector var names. init() preserves only those named vars and scrubs
+// the rest. The passthrough var itself is always unset so the child cannot
+// propagate the list further. Unlike a blanket bypass, every surviving GC_*
+// must be explicitly declared.
 //
 // Testscript subcommand bypass: when the test binary is re-invoked via
 // rogpeppe/go-internal/testscript's Main as a registered subcommand (e.g.
@@ -66,22 +69,39 @@ func isGoTestBinary() bool {
 // list does not flow onward to further subprocesses.
 const PassthroughVar = "GC_TESTENV_PASSTHROUGH"
 
-// LeakVectorVars is the list of GC_* env vars that point at live-city paths
-// or session identities. If any of these survive into a test process, the
-// test can write to the live city or pose as a real session. Stripped
-// unconditionally at package init except for names listed in PassthroughVar.
+// LeakVectorVars is the list of env vars that point at live-city paths,
+// session identities, bead stores, or Dolt runtimes. If any of these survive
+// into a test process, the test can write to the live city, pose as a real
+// session, or spawn orphaned test infrastructure. Stripped unconditionally at
+// package init except for names listed in PassthroughVar.
 //
-// Adding a new GC_* var that names a city-path or session identity? Add it
-// here too. Test-gate vars (GC_FAST_UNIT, GC_DOLT_REAL_BINARY, ...) do NOT
-// belong here — they're how tests opt into expensive paths.
+// Adding a new env var that names a city path, session identity, bead store,
+// or managed Dolt target? Add it here too. Test-gate vars (GC_FAST_UNIT,
+// GC_DOLT_REAL_BINARY, ...) do NOT belong here — they're how tests opt into
+// expensive paths.
 var LeakVectorVars = []string{
+	"BEADS_DIR",
+	"BEADS_DOLT_PASSWORD",
+	"BEADS_DOLT_SERVER_HOST",
+	"BEADS_DOLT_SERVER_PORT",
+	"BEADS_DOLT_SERVER_USER",
+	"DOLT_ROOT_PATH",
 	"GC_AGENT",
 	"GC_ALIAS",
+	"GC_BEADS",
+	"GC_BEADS_SCOPE_ROOT",
+	"GC_BIN",
 	"GC_CITY",
 	"GC_CITY_PATH",
 	"GC_CITY_ROOT",
 	"GC_CITY_RUNTIME_DIR",
+	"GC_CONTROL_DISPATCHER_TRACE_DEFAULT",
 	"GC_DIR",
+	"GC_DOLT",
+	"GC_DOLT_HOST",
+	"GC_DOLT_PASSWORD",
+	"GC_DOLT_PORT",
+	"GC_DOLT_USER",
 	"GC_HOME",
 	"GC_SESSION_ID",
 	"GC_SESSION_NAME",

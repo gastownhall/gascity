@@ -3,6 +3,8 @@ package k8s
 import (
 	"encoding/base64"
 	"fmt"
+	"maps"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -10,6 +12,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -65,6 +69,41 @@ func projectedPodStoreRoot(cfg runtime.Config, podWorkDir string) string {
 		return podWorkDir
 	}
 	return storeRoot
+}
+
+func projectedPodRuntimeDir(cfgEnv map[string]string, ctrlCity string) string {
+	podCity := "/workspace"
+	runtimeDir := strings.TrimSpace(cfgEnv["GC_CITY_RUNTIME_DIR"])
+	if runtimeDir == "" {
+		return citylayout.RuntimeDataDir(podCity)
+	}
+	remapped := remapControllerPathToPod(runtimeDir, ctrlCity)
+	if remapped != runtimeDir {
+		return remapped
+	}
+	return citylayout.RuntimeDataDir(podCity)
+}
+
+func projectControllerRuntimePathToPod(path, ctrlCity, ctrlRuntimeDir, podRuntimeDir string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return path
+	}
+	if remapped := remapControllerPathToPod(path, ctrlCity); remapped != path {
+		return remapped
+	}
+	if ctrlRuntimeDir != "" && pathutil.PathWithin(ctrlRuntimeDir, path) {
+		normalizedRoot := pathutil.NormalizePathForCompare(ctrlRuntimeDir)
+		normalizedPath := pathutil.NormalizePathForCompare(path)
+		rel, err := filepath.Rel(normalizedRoot, normalizedPath)
+		if err == nil {
+			if rel == "." {
+				return podRuntimeDir
+			}
+			return filepath.Join(podRuntimeDir, rel)
+		}
+	}
+	return path
 }
 
 // projectedPodDoltEnv adapts the controller projection to a pod-visible Dolt
@@ -284,6 +323,14 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 		},
 	}
 
+	// Apply optional scheduling fields.
+	pod.Spec.NodeSelector = maps.Clone(p.nodeSelector)
+	pod.Spec.Tolerations = cloneTolerations(p.tolerations)
+	if p.affinity != nil {
+		pod.Spec.Affinity = p.affinity.DeepCopy()
+	}
+	pod.Spec.PriorityClassName = p.priorityClassName
+
 	// Add init container when staging is needed (skip when prebaked).
 	if !p.prebaked && needsStaging(cfg, ctrlCity) {
 		initVolMounts := []corev1.VolumeMount{
@@ -304,6 +351,20 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 	}
 
 	return pod, nil
+}
+
+func cloneTolerations(in []corev1.Toleration) []corev1.Toleration {
+	if len(in) == 0 {
+		return nil
+	}
+	out := append([]corev1.Toleration(nil), in...)
+	for i := range out {
+		if in[i].TolerationSeconds != nil {
+			seconds := *in[i].TolerationSeconds
+			out[i].TolerationSeconds = &seconds
+		}
+	}
+	return out
 }
 
 // agentSecurityContext returns a container security context.
@@ -339,6 +400,8 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 	}
 
 	ctrlCity := controllerCityPath(cfgEnv)
+	ctrlRuntimeDir := strings.TrimSpace(cfgEnv["GC_CITY_RUNTIME_DIR"])
+	podRuntimeDir := projectedPodRuntimeDir(cfgEnv, ctrlCity)
 
 	var env []corev1.EnvVar
 	for k, v := range cfgEnv {
@@ -352,7 +415,11 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 			val = "/workspace"
 		case "GC_DIR":
 			val = podWorkDir
-		case "GC_STORE_ROOT", "GC_RIG_ROOT", "BEADS_DIR", "GT_ROOT", "GC_CITY_RUNTIME_DIR", "GC_PACK_STATE_DIR", "GC_PACK_DIR":
+		case "GC_CITY_RUNTIME_DIR":
+			val = podRuntimeDir
+		case "GC_CONTROL_DISPATCHER_TRACE_DEFAULT", "GC_PACK_STATE_DIR":
+			val = projectControllerRuntimePathToPod(val, ctrlCity, ctrlRuntimeDir, podRuntimeDir)
+		case "GC_STORE_ROOT", "GC_RIG_ROOT", "BEADS_DIR", "GT_ROOT", "GC_PACK_DIR":
 			val = remapControllerPathToPod(val, ctrlCity)
 		}
 		env = append(env, corev1.EnvVar{Name: k, Value: val})
@@ -402,6 +469,9 @@ func buildPodEnv(cfgEnv map[string]string, podWorkDir, managedServiceHost, manag
 // via init container.
 func needsStaging(cfg runtime.Config, ctrlCity string) bool {
 	if cfg.OverlayDir != "" {
+		return true
+	}
+	if len(cfg.PackOverlayDirs) > 0 {
 		return true
 	}
 	if len(cfg.CopyFiles) > 0 {

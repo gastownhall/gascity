@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -19,10 +18,11 @@ import (
 var (
 	newDoctorDoltServerCheck    = doctor.NewDoltServerCheck
 	newDoctorRigDoltServerCheck = doctor.NewRigDoltServerCheck
+	newDoctorDoltBackupCheck    = doctor.NewDoltBackupCheck
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
-	var fix, verbose bool
+	var fix, verbose, jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check workspace health",
@@ -31,26 +31,30 @@ func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
 Checks city structure, config validity, binary dependencies (tmux, git,
 bd, dolt), controller status, agent sessions, zombie/orphan sessions,
 bead stores, Dolt server health, event log integrity, and per-rig
-health. Use --fix to attempt automatic repairs.`,
+health. Use --fix for the canonical remediation path, including any
+safe mechanical PackV1-to-PackV2 rewrites that are available on this
+branch.`,
 		Example: `  gc doctor
   gc doctor --fix
-  gc doctor --verbose`,
+  gc doctor --verbose
+  gc doctor --json`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doDoctor(fix, verbose, stdout, stderr) != 0 {
+			if doDoctor(fix, verbose, jsonOut, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&fix, "fix", false, "attempt to fix issues automatically")
+	cmd.Flags().BoolVar(&fix, "fix", false, "attempt automatic repairs and safe mechanical migrations")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show extra diagnostic details")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit structured JSON instead of human-readable output")
 	return cmd
 }
 
 // doDoctor runs all health checks and prints results.
 func doctorSkipsDoltChecks(cityPath string) bool {
-	if os.Getenv("GC_DOLT") == "skip" {
+	if gcDoltSkip() {
 		return true
 	}
 	cfg, err := loadCityConfig(cityPath, io.Discard)
@@ -78,7 +82,7 @@ func workspaceNeedsCityDoltCheck(cityPath string, cfg *config.City) bool {
 }
 
 func managedDoltOpsCheckSkip(cityPath string, cfg *config.City, cfgErr error) bool {
-	if os.Getenv("GC_DOLT") == "skip" {
+	if gcDoltSkip() {
 		return true
 	}
 	return !doctor.ManagedLocalDoltChecksApplicableForConfig(cityPath, cfg, cfgErr)
@@ -117,7 +121,7 @@ func (c *doltTopologyCheck) CanFix() bool { return false }
 
 func (c *doltTopologyCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
-func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
+func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -126,6 +130,10 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 
 	d := &doctor.Doctor{}
 	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: verbose}
+	managedDoltDataDir := filepath.Join(cityPath, ".beads", "dolt")
+	if layout, err := resolveManagedDoltRuntimeLayout(cityPath); err == nil {
+		managedDoltDataDir = layout.DataDir
+	}
 
 	// Core checks — always run.
 	d.Register(&doctor.CityStructureCheck{})
@@ -141,18 +149,26 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		resolveRigPaths(cityPath, cfg.Rigs)
 		if workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
 			d.Register(newDoltTopologyCheck(cityPath, cfg))
+			d.Register(newDoltDriftCheck(cityPath, cfg))
 		}
 		d.Register(doctor.NewConfigValidCheck(cfg))
 		d.Register(doctor.NewConfigRefsCheck(cfg, cityPath))
+		d.Register(doctor.NewStaleLocalPackDirCheck(cfg.Packs, cfg.Imports, cfg.DefaultRigImports, cityPath, cfg.Rigs...))
+		d.Register(doctor.NewPreStartScriptsCheck(cfg))
 		d.Register(doctor.NewBuiltinPackFamilyCheck(cfg, cityPath))
 		d.Register(doctor.NewConfigSemanticsCheck(cfg, filepath.Join(cityPath, "city.toml")))
 		d.Register(doctor.NewDurationRangeCheck(cfg))
+		d.Register(doctor.NewProviderParityCheck(cfg))
+		d.Register(doctor.NewInstructionsFileCheck(cfg, cityPath))
 		d.Register(doctor.NewSkillCollisionCheck(cfg, cityPath))
+		d.Register(doctor.NewOrderFiringCurrentCheck(cfg, cityPath))
+		d.Register(newCodexHooksDriftCheck(codexHookWorkDirs(cityPath, cfg)))
 		d.Register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		d.Register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
 	}
 	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
 		d.Register(newImportStateDoctorCheck(cityPath))
+		d.Register(newJsonlArchiveDoctorCheck(cityPath))
 	}
 
 	// System formulas/orders now ship via the core bootstrap pack; pack
@@ -172,6 +188,12 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	d.Register(doctor.NewBinaryCheck("jq", "", exec.LookPath))
 	d.Register(doctor.NewBinaryCheck("pgrep", "", exec.LookPath))
 	d.Register(doctor.NewBinaryCheck("lsof", "", exec.LookPath))
+	// beads.role must be set before any bd command runs; check it here so
+	// the missing-role error appears before the downstream data/Dolt checks
+	// that will all fail for the same root cause.
+	if initNeedsBdTooling(cityPath) {
+		d.Register(&doctor.BeadsRoleCheck{})
+	}
 
 	// Controller check + session checks (gated by controller state).
 	controllerRunning := doctor.IsControllerRunning(cityPath)
@@ -193,9 +215,10 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	if cfgErr == nil {
 		d.Register(doctor.NewBDSplitStoreCheck(cityPath))
 		d.Register(doctor.NewBeadsStoreCheck(cityPath, storeFactory))
+		d.Register(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
 		d.Register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 	}
-	skipCityDoltCheck := os.Getenv("GC_DOLT") == "skip" || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
+	skipCityDoltCheck := gcDoltSkip() || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
 	d.Register(newDoctorDoltServerCheck(cityPath, skipCityDoltCheck))
 	// Managed Dolt ops checks (PR 3). Size + config drift are only
 	// meaningful when the workspace uses the managed bd/Dolt backend; rigs
@@ -208,6 +231,16 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	d.Register(doctor.NewScopedDoltVersionCheckForConfig(cityPath, skipManagedDoltCheck, cfg, cfgErr))
 	d.Register(&doctor.EventsLogCheck{})
 	d.Register(doctor.NewEventLogSizeCheck())
+	// Worktree checks deliberately run even when cfgErr != nil — they
+	// only need the city path, and a broken city.toml is exactly when
+	// silent disk-fill is most likely. The zero-value DoctorConfig
+	// produces sensible 10/50 GB defaults via its accessor methods.
+	var doctorCfg config.DoctorConfig
+	if cfg != nil {
+		doctorCfg = cfg.Doctor
+	}
+	d.Register(doctor.NewWorktreeDiskSizeCheck(doctorCfg))
+	d.Register(doctor.NewNestedWorktreePruneCheck(doctorCfg))
 
 	// Custom types check — city store.
 	d.Register(doctor.NewCustomTypesCheck(cityPath, "city"))
@@ -226,9 +259,16 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 			d.Register(doctor.NewRigGitCheck(rig))
 			d.Register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
 			d.Register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
-			d.Register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || os.Getenv("GC_DOLT") == "skip"))
+			d.Register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || gcDoltSkip()))
 			// Custom types check — rig store.
 			d.Register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
+			// Dolt-backup registration catches the silent gap left by
+			// `gc rig add` before the rig is eligible for mol-dog backup
+			// automation. Gated to match the sibling dolt-server check:
+			// skip non-managed-bdstore rigs and GC_DOLT=skip environments.
+			if rigUsesManagedBdStoreContract(cityPath, rig) && !gcDoltSkip() {
+				d.Register(newDoctorDoltBackupCheck(cityPath, rig, managedDoltDataDir))
+			}
 		}
 	}
 
@@ -244,17 +284,85 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 				FixScript: entry.FixScript,
 				PackDir:   entry.PackDir,
 				PackName:  entry.PackName,
+				Warmup:    entry.Warmup,
 			})
 		}
 	}
 
-	report := d.Run(ctx, stdout, fix)
-	doctor.PrintSummary(stdout, report)
+	var report *doctor.Report
+	if jsonOut {
+		report = d.RunCollect(ctx, fix)
+		if err := writeDoctorJSON(stdout, report); err != nil {
+			fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	} else {
+		report = d.Run(ctx, stdout, fix)
+		doctor.PrintSummary(stdout, report)
+	}
 
 	if report.Failed > 0 {
 		return 1
 	}
 	return 0
+}
+
+// doctorJSONResult mirrors doctor.CheckResult for JSON output. Keeping the
+// shape separate from the internal type keeps the wire format stable if the
+// internal struct grows new fields that shouldn't leak out.
+type doctorJSONResult struct {
+	Name         string   `json:"name"`
+	Status       string   `json:"status"`
+	Message      string   `json:"message"`
+	FixHint      string   `json:"fix_hint,omitempty"`
+	Details      []string `json:"details,omitempty"`
+	FixAttempted bool     `json:"fix_attempted,omitempty"`
+	FixError     string   `json:"fix_error,omitempty"`
+	Fixed        bool     `json:"fixed,omitempty"`
+}
+
+type doctorJSONReport struct {
+	Passed  int                `json:"passed"`
+	Warned  int                `json:"warned"`
+	Failed  int                `json:"failed"`
+	Fixed   int                `json:"fixed"`
+	Results []doctorJSONResult `json:"results"`
+	Error   string             `json:"error,omitempty"`
+}
+
+func doctorStatusString(s doctor.CheckStatus) string {
+	switch s {
+	case doctor.StatusOK:
+		return "ok"
+	case doctor.StatusWarning:
+		return "warning"
+	case doctor.StatusError:
+		return "error"
+	}
+	return "unknown"
+}
+
+func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
+	out := doctorJSONReport{
+		Passed:  report.Passed,
+		Warned:  report.Warned,
+		Failed:  report.Failed,
+		Fixed:   report.Fixed,
+		Results: make([]doctorJSONResult, 0, len(report.Results)),
+	}
+	for _, r := range report.Results {
+		out.Results = append(out.Results, doctorJSONResult{
+			Name:         r.Name,
+			Status:       doctorStatusString(r.Status),
+			Message:      r.Message,
+			FixHint:      r.FixHint,
+			Details:      r.Details,
+			FixAttempted: r.FixAttempted,
+			FixError:     r.FixError,
+			Fixed:        r.Fixed,
+		})
+	}
+	return writeCLIJSONLine(w, out)
 }
 
 // collectPackDirs returns all unique pack directories from the city

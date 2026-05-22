@@ -98,7 +98,7 @@ func TestLiveClaudeInterruptNow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mgr.Get(%q): %v", id, err)
 	}
-	resumeCmd, hints := buildResumeCommand(t.TempDir(), cfg, info, "", io.Discard)
+	resumeCmd, hints := buildResumeCommand(t.TempDir(), cfg, info, "", nil, io.Discard)
 	socket := cfg.Session.Socket
 	if socket == "" {
 		socket = cfg.Workspace.Name
@@ -174,7 +174,7 @@ func TestLiveGeminiSubmitIntents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mgr.Get(%q): %v", id, err)
 	}
-	resumeCmd, hints := buildResumeCommand(t.TempDir(), cfg, info, "", io.Discard)
+	resumeCmd, hints := buildResumeCommand(t.TempDir(), cfg, info, "", nil, io.Discard)
 	socket := cfg.Session.Socket
 	if socket == "" {
 		socket = cfg.Workspace.Name

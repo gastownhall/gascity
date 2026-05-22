@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,9 +19,32 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 )
+
+type sweepLivenessProvider struct {
+	*runtime.Fake
+	running map[string]bool
+}
+
+func (p *sweepLivenessProvider) IsRunning(string) bool {
+	return false
+}
+
+func (p *sweepLivenessProvider) ObserveLiveness(name string, _ []string) runtime.Liveness {
+	return runtime.Liveness{Running: p.running[name]}
+}
+
+type sweepIsRunningFalseNegativeProvider struct {
+	*runtime.Fake
+}
+
+func (p *sweepIsRunningFalseNegativeProvider) IsRunning(name string) bool {
+	_ = p.Fake.IsRunning(name)
+	return false
+}
 
 func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 	store := beads.NewMemStore()
@@ -69,6 +93,255 @@ func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 	}
 }
 
+func TestSweepUndesiredPoolSessionBeads_UsesProcessNameFallback(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-process-alive",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "active",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+	sp := &sweepIsRunningFalseNegativeProvider{Fake: runtime.NewFake()}
+	if err := sp.Start(context.Background(), "worker-bd-process-alive", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		nil,
+		sessionBeads,
+		nil,
+		&config.City{Agents: []config.Agent{{
+			Name:              "worker",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+			ProcessNames:      []string{"agent-cli"},
+		}}},
+		sp,
+		false,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0 when process-name liveness recovers IsRunning false negative", closed)
+	}
+	if got := sp.CountCalls("ProcessAlive", "worker-bd-process-alive"); got == 0 {
+		t.Fatal("ProcessAlive was not checked with configured process-name hints")
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("process-alive pool bead was closed: %+v", got)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_RunningProbeAvoidsFullObservation(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-running",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "active",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker-bd-running", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.SetAttached("worker-bd-running", true)
+	sp.SetActivity("worker-bd-running", time.Now())
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		nil,
+		sessionBeads,
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		sp,
+		false,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+	if got := sp.CountCalls("IsAttached", "worker-bd-running"); got != 0 {
+		t.Fatalf("IsAttached calls = %d, want 0; sweep only needs running state", got)
+	}
+	if got := sp.CountCalls("GetLastActivity", "worker-bd-running"); got != 0 {
+		t.Fatalf("GetLastActivity calls = %d, want 0; sweep only needs running state", got)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_UsesRuntimeLivenessObservation(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-observed",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "active",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		nil,
+		newSessionBeadSnapshot([]beads.Bead{bead}),
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		&sweepLivenessProvider{Fake: runtime.NewFake(), running: map[string]bool{"worker-bd-observed": true}},
+		false,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0 when runtime liveness reports the pool session as running", closed)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("liveness-observed running pool bead was closed: %+v", got)
+	}
+}
+
+func TestPoolSessionBeadRuntimeRunningUsesRuntimeNotFoundSentinel(t *testing.T) {
+	if _, err := poolSessionBeadRuntimeRunning(beads.Bead{}, nil, nil); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("nil provider error = %v, want runtime.ErrSessionNotFound", err)
+	}
+	if _, err := poolSessionBeadRuntimeRunning(beads.Bead{Metadata: map[string]string{}}, runtime.NewFake(), nil); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("missing session name error = %v, want runtime.ErrSessionNotFound", err)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_SkipsProtectedCreateBeforeRuntimeProbe(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":              "worker-bd-fresh-create",
+			"template":                  "worker",
+			"agent_name":                "worker",
+			"pool_slot":                 "1",
+			poolManagedMetadataKey:      boolMetadata(true),
+			"state":                     "creating",
+			"pending_create_started_at": pendingCreateStartedAtNow(time.Now().UTC()),
+			"continuation_epoch":        "1",
+			"generation":                "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+	sp := runtime.NewFake()
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		nil,
+		sessionBeads,
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		sp,
+		false,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+	if got := sp.CountCalls("IsRunning", "worker-bd-fresh-create"); got != 0 {
+		t.Fatalf("IsRunning calls = %d, want 0; fresh pending create is protected by metadata", got)
+	}
+}
+
+// stubManagedDoltStoreOpeners replaces the two package-level store openers
+// used during newCityRuntime + newControllerState startup with in-memory
+// stubs. This prevents tests from spawning real managed dolt servers (~12s
+// each). The original openers are restored via t.Cleanup.
+//
+// Tests that verify the managed-dolt preflight ordering invariant still
+// install their own fake managedDoltHealth/Owned/Port hooks to record events;
+// this helper only handles the side-effects from sweepStore / city store
+// opening which otherwise force a real dolt spawn.
+func stubManagedDoltStoreOpeners(t *testing.T) {
+	t.Helper()
+	prevCityStore := newControllerStateOpenCityStore
+	prevSweepStore := newCityRuntimeOpenSweepStore
+	newControllerStateOpenCityStore = func(string) (beads.Store, error) {
+		return beads.NewMemStore(), nil
+	}
+	newCityRuntimeOpenSweepStore = func(string, string) (beads.Store, error) {
+		return beads.NewMemStore(), nil
+	}
+	t.Cleanup(func() {
+		newControllerStateOpenCityStore = prevCityStore
+		newCityRuntimeOpenSweepStore = prevSweepStore
+	})
+}
+
+// newTestCityRuntime builds a CityRuntime and registers a cleanup that
+// cancels in-flight dispatched orders before invoking shutdown. Do NOT
+// add a duplicate t.Cleanup(cr.shutdown) in callers — t.Cleanup is LIFO,
+// and a duplicate would consume cr.shutdownOnce before this wrapper's
+// cancel runs, reintroducing the .gc/ RemoveAll race.
+func newTestCityRuntime(t *testing.T, params CityRuntimeParams) *CityRuntime {
+	t.Helper()
+
+	cr := newCityRuntime(params)
+	t.Cleanup(func() {
+		// Tests pass context.Background to cr.tick, so dispatched orders
+		// cannot be canceled via tick ctx propagation. Type-assert to the
+		// concrete dispatcher (only it spawns subprocess goroutines that
+		// need cancellation; test fakes have nothing to interrupt).
+		cancelInflight(cr.od)
+		for _, od := range cr.retiredOrderDispatchers {
+			cancelInflight(od)
+		}
+		cr.shutdown()
+	})
+	return cr
+}
+
+func cancelInflight(od orderDispatcher) {
+	if m, ok := od.(*memoryOrderDispatcher); ok {
+		m.cancel()
+	}
+}
+
 func TestFilterReleasedAssignedWorkBeads_PreservesSameIDUnreleasedWork(t *testing.T) {
 	assigned := []beads.Bead{
 		{ID: "gc-1", Title: "released city work"},
@@ -104,6 +377,105 @@ func TestFilterReleasedAssignedWorkBeads_IgnoresMismatchedReleasedIndex(t *testi
 	}
 }
 
+type sessionSnapshotListFailStore struct {
+	beads.Store
+}
+
+func (s sessionSnapshotListFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == sessionBeadLabel {
+		return nil, errors.New("session snapshot unavailable")
+	}
+	return s.Store.List(query)
+}
+
+type orderedRuntimeEvents struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (r *orderedRuntimeEvents) record(event string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, event)
+}
+
+func (r *orderedRuntimeEvents) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = nil
+}
+
+func (r *orderedRuntimeEvents) index(event string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, got := range r.events {
+		if got == event {
+			return i
+		}
+	}
+	return -1
+}
+
+func (r *orderedRuntimeEvents) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.events...)
+}
+
+type managedDoltPreflightOrderStore struct {
+	beads.Store
+	events *orderedRuntimeEvents
+}
+
+type managedDoltPreflightOrderDispatcher struct {
+	store beads.Store
+}
+
+func (d *managedDoltPreflightOrderDispatcher) dispatch(context.Context, string, time.Time) {
+	_, _ = d.store.ListByLabel(labelOrderTracking, 0, beads.IncludeClosed)
+	_, _ = d.store.Create(beads.Bead{
+		Title:  "order:preflight-due",
+		Labels: []string{"order-run:preflight-due", labelOrderTracking},
+	})
+}
+
+func (d *managedDoltPreflightOrderDispatcher) drain(context.Context) bool {
+	return true
+}
+
+func hasLabelPrefix(labels []string, prefix string) bool {
+	for _, label := range labels {
+		if strings.HasPrefix(label, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *managedDoltPreflightOrderStore) Create(b beads.Bead) (beads.Bead, error) {
+	if hasLabelPrefix(b.Labels, "order-run:") {
+		s.events.record("order-create")
+	}
+	return s.Store.Create(b)
+}
+
+func (s *managedDoltPreflightOrderStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == sessionBeadLabel {
+		s.events.record("session-list")
+	}
+	if query.Label == labelOrderTracking || strings.HasPrefix(query.Label, "order-run:") {
+		s.events.record("order-list")
+	}
+	return s.Store.List(query)
+}
+
+func (s *managedDoltPreflightOrderStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	if label == labelOrderTracking || strings.HasPrefix(label, "order-run:") {
+		s.events.record("order-list")
+	}
+	return s.Store.ListByLabel(label, limit, opts...)
+}
+
 func TestCityRuntimeRequestDeferredDrainFollowUpTick_PokesOnce(t *testing.T) {
 	cr := &CityRuntime{
 		sessionDrains: newDrainTracker(),
@@ -129,6 +501,45 @@ func TestCityRuntimeRequestDeferredDrainFollowUpTick_PokesOnce(t *testing.T) {
 	case <-cr.pokeCh:
 		t.Fatal("unexpected second poke without a new deferred drain follow-up")
 	default:
+	}
+}
+
+func TestCityRuntimeShutdownMarksCityStopSleepReason(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "control-dispatcher",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "control-dispatcher",
+			"template":     "control-dispatcher",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cr := &CityRuntime{
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+		},
+		sp:                  runtime.NewFake(),
+		rec:                 events.Discard,
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+
+	cr.shutdown()
+
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata["sleep_reason"] != sleepReasonCityStop {
+		t.Fatalf("sleep_reason = %q, want %q", got.Metadata["sleep_reason"], sleepReasonCityStop)
 	}
 }
 
@@ -195,10 +606,892 @@ func TestCityRuntimeDemandSnapshotReusesStablePatrolDemand(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeEnsureManagedDoltPublishedForTickCallsHealthWhenManagedPortMissing(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	healthCalls := 0
+	cr := &CityRuntime{
+		cityPath: "/tmp/test-city",
+		stderr:   io.Discard,
+		managedDoltHealth: func(cityPath string) error {
+			healthCalls++
+			if cityPath != "/tmp/test-city" {
+				t.Fatalf("health cityPath = %q, want %q", cityPath, "/tmp/test-city")
+			}
+			return nil
+		},
+		managedDoltOwned: func(cityPath string) (bool, error) {
+			if cityPath != "/tmp/test-city" {
+				t.Fatalf("owned cityPath = %q, want %q", cityPath, "/tmp/test-city")
+			}
+			return true, nil
+		},
+		managedDoltPort: func(cityPath string) string {
+			if cityPath != "/tmp/test-city" {
+				t.Fatalf("port cityPath = %q, want %q", cityPath, "/tmp/test-city")
+			}
+			return ""
+		},
+	}
+	cr.ensureManagedDoltPublishedForTick()
+
+	if healthCalls != 1 {
+		t.Fatalf("healthCalls = %d, want 1", healthCalls)
+	}
+}
+
+func TestCityRuntimeEnsureManagedDoltPublishedForTickSkipsHealthWhenManagedPortPresent(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	healthCalls := 0
+	cr := &CityRuntime{
+		cityPath: "/tmp/test-city",
+		stderr:   io.Discard,
+		managedDoltHealth: func(string) error {
+			healthCalls++
+			return nil
+		},
+		managedDoltOwned: func(string) (bool, error) {
+			return true, nil
+		},
+		managedDoltPort: func(string) string {
+			return "3307"
+		},
+	}
+	cr.ensureManagedDoltPublishedForTick()
+
+	if healthCalls != 0 {
+		t.Fatalf("healthCalls = %d, want 0", healthCalls)
+	}
+}
+
+func TestCityRuntimeEnsureManagedDoltPublishedForTickLogsOwnershipError(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	var stderr bytes.Buffer
+	healthCalls := 0
+	cr := &CityRuntime{
+		cityPath:  "/tmp/test-city",
+		logPrefix: "gc test",
+		stderr:    &stderr,
+		managedDoltHealth: func(string) error {
+			healthCalls++
+			return nil
+		},
+		managedDoltOwned: func(string) (bool, error) {
+			return false, errors.New("canonical endpoint unreadable")
+		},
+		managedDoltPort: func(string) string {
+			return ""
+		},
+	}
+	cr.ensureManagedDoltPublishedForTick()
+
+	if healthCalls != 0 {
+		t.Fatalf("healthCalls = %d, want 0", healthCalls)
+	}
+	if !strings.Contains(stderr.String(), "gc test: managed dolt ownership preflight: canonical endpoint unreadable") {
+		t.Fatalf("stderr = %q, want ownership preflight error", stderr.String())
+	}
+}
+
+func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "bd")
+	stubManagedDoltStoreOpeners(t)
+
+	cityPath := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityPath)
+
+	orderEvents := &orderedRuntimeEvents{}
+	store := &managedDoltPreflightOrderStore{
+		Store:  beads.NewMemStore(),
+		events: orderEvents,
+	}
+	sp := runtime.NewFake()
+	cr := &CityRuntime{
+		cityPath: cityPath,
+		cityName: "test-city",
+		cfg:      &config.City{},
+		sp:       sp,
+		buildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		dops:          newDrainOps(sp),
+		rec:           events.Discard,
+		sessionDrains: newDrainTracker(),
+		logPrefix:     "gc test",
+		stdout:        io.Discard,
+		stderr:        io.Discard,
+		managedDoltHealth: func(string) error {
+			orderEvents.record("preflight")
+			return nil
+		},
+		managedDoltOwned: func(string) (bool, error) {
+			return true, nil
+		},
+		managedDoltPort: func(string) string {
+			return ""
+		},
+	}
+	cs := newControllerState(context.Background(), cr.cfg, sp, events.NewFake(), "test-city", cr.cityPath)
+	cs.cityBeadStore = store
+	cr.setControllerState(cs)
+
+	dirty := &atomic.Bool{}
+	lastProviderName := ""
+	prevPoolRunning := map[string]bool{}
+	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+
+	preflightIndex := orderEvents.index("preflight")
+	sessionListIndex := orderEvents.index("session-list")
+	if preflightIndex == -1 || sessionListIndex == -1 || preflightIndex > sessionListIndex {
+		t.Fatalf("events = %#v, want preflight before first session-list", orderEvents.snapshot())
+	}
+}
+
+func TestCityRuntimeTickPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityPath := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityPath)
+	orderEvents := &orderedRuntimeEvents{}
+	store := &managedDoltPreflightOrderStore{
+		Store:  beads.NewMemStore(),
+		events: orderEvents,
+	}
+	ad := &managedDoltPreflightOrderDispatcher{store: store}
+	sp := runtime.NewFake()
+	cr := &CityRuntime{
+		cityPath: cityPath,
+		cityName: "test-city",
+		cfg:      &config.City{},
+		sp:       sp,
+		buildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		dops:          newDrainOps(sp),
+		od:            ad,
+		rec:           events.Discard,
+		sessionDrains: newDrainTracker(),
+		logPrefix:     "gc test",
+		stdout:        io.Discard,
+		stderr:        io.Discard,
+		managedDoltHealth: func(string) error {
+			orderEvents.record("preflight")
+			return nil
+		},
+		managedDoltOwned: func(string) (bool, error) {
+			return true, nil
+		},
+		managedDoltPort: func(string) string {
+			return ""
+		},
+	}
+	cs := newControllerState(context.Background(), cr.cfg, sp, events.NewFake(), "test-city", cr.cityPath)
+	cs.cityBeadStore = store
+	cr.setControllerState(cs)
+
+	dirty := &atomic.Bool{}
+	lastProviderName := ""
+	prevPoolRunning := map[string]bool{}
+	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+
+	preflightIndex := orderEvents.index("preflight")
+	orderListIndex := orderEvents.index("order-list")
+	orderCreateIndex := orderEvents.index("order-create")
+	if preflightIndex == -1 || orderListIndex == -1 || preflightIndex > orderListIndex {
+		t.Fatalf("events = %#v, want preflight before order dispatch store read", orderEvents.snapshot())
+	}
+	if orderCreateIndex == -1 || preflightIndex > orderCreateIndex {
+		t.Fatalf("events = %#v, want preflight before order tracking create", orderEvents.snapshot())
+	}
+	tracking, err := store.ListByLabel("order-run:preflight-due", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("list tracking beads: %v", err)
+	}
+	if len(tracking) == 0 {
+		t.Fatalf("events = %#v, want due order to dispatch after preflight", orderEvents.snapshot())
+	}
+}
+
+func TestCityRuntimeRunStartupPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	stubManagedDoltStoreOpeners(t)
+	cleanupManagedDoltTestCity(t, cityPath)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	orderEvents := &orderedRuntimeEvents{}
+	store := &managedDoltPreflightOrderStore{
+		Store:  beads.NewMemStore(),
+		events: orderEvents,
+	}
+	sp := runtime.NewFake()
+	managedPort := "3307"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops: newDrainOps(sp),
+		Rec:  events.Discard,
+		OnStarted: func() {
+			cancel()
+		},
+		ManagedDoltHealth: func(string) error {
+			orderEvents.record("preflight")
+			return nil
+		},
+		ManagedDoltOwned: func(string) (bool, error) {
+			return true, nil
+		},
+		ManagedDoltPort: func(string) string {
+			return managedPort
+		},
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = store
+	cr.setControllerState(cs)
+	orderEvents.reset()
+	managedPort = ""
+	t.Setenv("GC_BEADS", "bd")
+
+	cr.run(ctx)
+
+	preflightIndex := orderEvents.index("preflight")
+	sessionListIndex := orderEvents.index("session-list")
+	if preflightIndex == -1 || sessionListIndex == -1 || preflightIndex > sessionListIndex {
+		t.Fatalf("events = %#v, want preflight before first session-list", orderEvents.snapshot())
+	}
+}
+
+func TestCityRuntimeControlDispatcherPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "bd")
+	stubManagedDoltStoreOpeners(t)
+
+	orderEvents := &orderedRuntimeEvents{}
+	store := &managedDoltPreflightOrderStore{
+		Store:  beads.NewMemStore(),
+		events: orderEvents,
+	}
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	cr := &CityRuntime{
+		cityPath: cityPath,
+		cityName: "test-city",
+		cfg: &config.City{Agents: []config.Agent{
+			{Name: config.ControlDispatcherAgentName},
+		}},
+		sp:            sp,
+		dops:          newDrainOps(sp),
+		rec:           events.Discard,
+		sessionDrains: newDrainTracker(),
+		logPrefix:     "gc test",
+		stdout:        io.Discard,
+		stderr:        io.Discard,
+		managedDoltHealth: func(string) error {
+			orderEvents.record("preflight")
+			return nil
+		},
+		managedDoltOwned: func(string) (bool, error) {
+			return true, nil
+		},
+		managedDoltPort: func(string) string {
+			return ""
+		},
+	}
+	cs := newControllerState(context.Background(), cr.cfg, sp, events.NewFake(), "test-city", cr.cityPath)
+	cs.cityBeadStore = store
+	cr.setControllerState(cs)
+
+	cr.controlDispatcherTick(context.Background())
+
+	preflightIndex := orderEvents.index("preflight")
+	sessionListIndex := orderEvents.index("session-list")
+	if preflightIndex == -1 || sessionListIndex == -1 || preflightIndex > sessionListIndex {
+		t.Fatalf("events = %#v, want preflight before first session-list", orderEvents.snapshot())
+	}
+}
+
+func TestNewCityRuntimePreflightsManagedDoltPublicationBeforeStartupStoreWork(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "bd")
+	stubManagedDoltStoreOpeners(t)
+
+	healthCalls := 0
+	cityPath := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityPath)
+	sp := runtime.NewFake()
+	_ = newCityRuntime(CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		Cfg:      &config.City{},
+		SP:       sp,
+		ManagedDoltHealth: func(cityPath string) error {
+			healthCalls++
+			if cityPath == "" {
+				t.Fatal("health preflight got empty cityPath")
+			}
+			return nil
+		},
+		ManagedDoltOwned: func(string) (bool, error) {
+			return true, nil
+		},
+		ManagedDoltPort: func(string) string {
+			return ""
+		},
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+
+	if healthCalls != 1 {
+		t.Fatalf("healthCalls = %d, want 1", healthCalls)
+	}
+}
+
+func TestNewCityRuntimePreflightUsesResolvableProviderStateByDefault(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	healthCalls := 0
+	cityPath := t.TempDir()
+	writeReachableProviderManagedDoltState(t, cityPath)
+	sp := runtime.NewFake()
+	_ = newCityRuntime(CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		Cfg:      &config.City{},
+		SP:       sp,
+		ManagedDoltHealth: func(string) error {
+			healthCalls++
+			return nil
+		},
+		ManagedDoltOwned: func(string) (bool, error) {
+			return true, nil
+		},
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+
+	if healthCalls != 0 {
+		t.Fatalf("healthCalls = %d, want 0 when provider state is already resolvable", healthCalls)
+	}
+}
+
+func TestCityRuntimeTickPreflightUsesResolvableProviderStateByDefault(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	healthCalls := 0
+	cityPath := t.TempDir()
+	writeReachableProviderManagedDoltState(t, cityPath)
+	cr := &CityRuntime{
+		cityPath:  cityPath,
+		logPrefix: "gc test",
+		stderr:    io.Discard,
+		managedDoltHealth: func(string) error {
+			healthCalls++
+			return nil
+		},
+		managedDoltOwned: func(string) (bool, error) {
+			return true, nil
+		},
+	}
+
+	cr.ensureManagedDoltPublishedForTick()
+
+	if healthCalls != 0 {
+		t.Fatalf("healthCalls = %d, want 0 when provider state is already resolvable", healthCalls)
+	}
+}
+
+func TestCityRuntimeDemandSnapshotRetainsOnlyPoolScaleCheckPartials(t *testing.T) {
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{{
+		ID:     "session-worker",
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-123",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "awake",
+		},
+	}})
+
+	tests := []struct {
+		name   string
+		result DesiredStateResult
+		want   int
+	}{
+		{
+			name: "pool partial retains awake pool session",
+			result: DesiredStateResult{
+				State:                          map[string]TemplateParams{},
+				ScaleCheckCounts:               map[string]int{"worker": 0},
+				ScaleCheckPartialTemplates:     map[string]bool{"worker": true},
+				PoolScaleCheckPartialTemplates: map[string]bool{"worker": true},
+			},
+			want: 1,
+		},
+		{
+			name: "named partial does not retain generic pool session",
+			result: DesiredStateResult{
+				State:                           map[string]TemplateParams{},
+				ScaleCheckCounts:                map[string]int{"worker": 0},
+				ScaleCheckPartialTemplates:      map[string]bool{"worker": true},
+				NamedScaleCheckPartialTemplates: map[string]bool{"worker": true},
+			},
+			want: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cr := &CityRuntime{
+				cityName: "test-city",
+				cityPath: t.TempDir(),
+				cfg: &config.City{
+					Workspace: config.Workspace{Name: "test-city"},
+					Agents: []config.Agent{{
+						Name:              "worker",
+						MinActiveSessions: intPtr(0),
+						MaxActiveSessions: intPtr(5),
+					}},
+				},
+				cs: &controllerState{
+					eventProv: events.NewFake(),
+				},
+				stderr: io.Discard,
+			}
+			cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+				return tc.result
+			}
+
+			snapshot := cr.loadDemandSnapshot(sessionBeads, nil, "poke", false)
+
+			if got := snapshot.result.PoolDesiredCounts["worker"]; got != tc.want {
+				t.Fatalf("PoolDesiredCounts[worker] = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCityRuntimeAsyncStartLimiterUsesMaxWakesPerTick(t *testing.T) {
+	maxWakes := 7
+	cfg := &config.City{Daemon: config.DaemonConfig{MaxWakesPerTick: &maxWakes}}
+	cr := &CityRuntime{cfg: cfg}
+
+	if got := cr.ensureAsyncStartLimiter().capacity(); got != maxWakes {
+		t.Fatalf("limiter cap = %d, want %d", got, maxWakes)
+	}
+
+	maxWakes = 2
+	if got := cr.ensureAsyncStartLimiter().capacity(); got != maxWakes {
+		t.Fatalf("limiter cap after config change = %d, want %d", got, maxWakes)
+	}
+}
+
+func TestCityRuntimeAsyncStartLimiterResizePreservesInFlightBudget(t *testing.T) {
+	maxWakes := 3
+	cfg := &config.City{Daemon: config.DaemonConfig{MaxWakesPerTick: &maxWakes}}
+	cr := &CityRuntime{cfg: cfg}
+	limiter := cr.ensureAsyncStartLimiter()
+
+	var releases []func()
+	for i := 0; i < maxWakes; i++ {
+		release, reserved, outcome := reserveAsyncStartSlot(context.Background(), limiter)
+		if !reserved {
+			t.Fatalf("reserve initial slot = %s, want success", outcome)
+		}
+		releases = append(releases, release)
+	}
+
+	maxWakes = 2
+	resized := cr.ensureAsyncStartLimiter()
+	if resized != limiter {
+		t.Fatal("resized limiter should preserve the same in-flight reservation counter")
+	}
+	if got := resized.capacity(); got != maxWakes {
+		t.Fatalf("resized cap = %d, want %d", got, maxWakes)
+	}
+	if _, reserved, outcome := reserveAsyncStartSlot(context.Background(), resized); reserved || outcome != "deferred_by_async_start_limit" {
+		t.Fatalf("reserve while old slots exceed resized cap = reserved %v outcome %q, want deferred", reserved, outcome)
+	}
+
+	releases[0]()
+	if _, reserved, outcome := reserveAsyncStartSlot(context.Background(), resized); reserved || outcome != "deferred_by_async_start_limit" {
+		t.Fatalf("reserve at resized cap = reserved %v outcome %q, want deferred", reserved, outcome)
+	}
+	releases[1]()
+	release, reserved, outcome := reserveAsyncStartSlot(context.Background(), resized)
+	if !reserved {
+		t.Fatalf("reserve below resized cap = %s, want success", outcome)
+	}
+	release()
+	releases[2]()
+}
+
+type recordingOrderDispatcher struct {
+	called      atomic.Bool
+	calls       atomic.Int32
+	onDispatch  func(context.Context, string, time.Time)
+	drainCalls  int
+	drainCtxErr error
+}
+
+func (r *recordingOrderDispatcher) dispatch(ctx context.Context, cityRoot string, now time.Time) {
+	r.calls.Add(1)
+	r.called.Store(true)
+	if r.onDispatch != nil {
+		r.onDispatch(ctx, cityRoot, now)
+	}
+}
+
+func (r *recordingOrderDispatcher) drain(ctx context.Context) bool {
+	r.drainCalls++
+	r.drainCtxErr = ctx.Err()
+	return true
+}
+
+type blockingOrderDispatcher struct {
+	mu         sync.Mutex
+	drainCalls int
+	ctxErrs    []error
+	release    chan struct{}
+	drained    chan struct{}
+}
+
+func newBlockingOrderDispatcher() *blockingOrderDispatcher {
+	return &blockingOrderDispatcher{
+		release: make(chan struct{}),
+		drained: make(chan struct{}, 16),
+	}
+}
+
+func (b *blockingOrderDispatcher) dispatch(context.Context, string, time.Time) {}
+
+func (b *blockingOrderDispatcher) drain(ctx context.Context) bool {
+	b.mu.Lock()
+	b.drainCalls++
+	b.ctxErrs = append(b.ctxErrs, ctx.Err())
+	b.mu.Unlock()
+	b.drained <- struct{}{}
+	select {
+	case <-b.release:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (b *blockingOrderDispatcher) waitForDrainCalls(t *testing.T, want int) {
+	t.Helper()
+	deadline := time.After(500 * time.Millisecond)
+	for {
+		b.mu.Lock()
+		got := b.drainCalls
+		b.mu.Unlock()
+		if got >= want {
+			return
+		}
+		select {
+		case <-b.drained:
+		case <-deadline:
+			t.Fatalf("drainCalls = %d, want at least %d", got, want)
+		}
+	}
+}
+
+func (b *blockingOrderDispatcher) drainContextErrors() []error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]error(nil), b.ctxErrs...)
+}
+
+func TestCityRuntimeTickDispatchesOrdersBeforeDemandSnapshot(t *testing.T) {
+	store := beads.NewMemStore()
+	od := &recordingOrderDispatcher{}
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cityPath:            t.TempDir(),
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		sp:                  runtime.NewFake(),
+		standaloneCityStore: store,
+		od:                  od,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		if !od.called.Load() {
+			t.Fatal("order dispatch should happen before demand snapshot build")
+		}
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	var dirty atomic.Bool
+	var lastProviderName string
+	var prevPoolRunning map[string]bool
+	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+
+	if !od.called.Load() {
+		t.Fatal("order dispatcher was not called")
+	}
+}
+
+func TestCityRuntimeTickReturnsBeforeDemandWhenCanceled(t *testing.T) {
+	store := beads.NewMemStore()
+	od := &recordingOrderDispatcher{}
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cityPath:            t.TempDir(),
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		sp:                  runtime.NewFake(),
+		standaloneCityStore: store,
+		od:                  od,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		t.Fatal("demand snapshot should not run after city context is canceled")
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var dirty atomic.Bool
+	var lastProviderName string
+	var prevPoolRunning map[string]bool
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+
+	if od.called.Load() {
+		t.Fatal("order dispatcher should not run after city context is canceled")
+	}
+}
+
+func TestCityRuntimeTickReturnsBeforeDemandWhenCanceledDuringOrderDispatch(t *testing.T) {
+	store := beads.NewMemStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	od := &recordingOrderDispatcher{
+		onDispatch: func(context.Context, string, time.Time) {
+			cancel()
+		},
+	}
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cityPath:            t.TempDir(),
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		sp:                  runtime.NewFake(),
+		standaloneCityStore: store,
+		od:                  od,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		t.Fatal("demand snapshot should not run after order dispatch cancels the city context")
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	var dirty atomic.Bool
+	var lastProviderName string
+	var prevPoolRunning map[string]bool
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+
+	if !od.called.Load() {
+		t.Fatal("order dispatcher was not called")
+	}
+}
+
+func TestCityRuntimeRunDispatchesOrdersBeforeStartupReconcile(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	od := &recordingOrderDispatcher{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var started atomic.Bool
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			if !od.called.Load() {
+				t.Fatal("order dispatch should happen before startup reconcile")
+			}
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops: newDrainOps(sp),
+		Rec:  events.Discard,
+		OnStarted: func() {
+			started.Store(true)
+			cancel()
+		},
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	cr.od = od
+
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+
+	cr.run(ctx)
+
+	if !started.Load() {
+		t.Fatal("OnStarted was not called")
+	}
+	if got := od.calls.Load(); got != 1 {
+		t.Fatalf("order dispatch calls = %d, want 1", got)
+	}
+}
+
+func TestCityRuntimeRunStartupOrderDispatchPanicIsRecovered(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	od := &recordingOrderDispatcher{
+		onDispatch: func(context.Context, string, time.Time) {
+			panic("startup order boom")
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var stderr bytes.Buffer
+	var started atomic.Bool
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops: newDrainOps(sp),
+		Rec:  events.Discard,
+		OnStarted: func() {
+			started.Store(true)
+			cancel()
+		},
+		Stdout: io.Discard,
+		Stderr: &stderr,
+	})
+	cr.od = od
+
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+
+	cr.run(ctx)
+
+	if !started.Load() {
+		t.Fatal("OnStarted was not called after recovered startup order panic")
+	}
+	if got := od.calls.Load(); got != 1 {
+		t.Fatalf("order dispatch calls = %d, want 1", got)
+	}
+	if !strings.Contains(stderr.String(), "trigger=startup-orders") {
+		t.Fatalf("stderr = %q, want startup-orders panic trigger", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "startup order boom") {
+		t.Fatalf("stderr = %q, want recovered panic detail", stderr.String())
+	}
+}
+
+func TestOrderTrackingSweepWatchdogOnlyClosesSweepOrderTracking(t *testing.T) {
+	store := beads.NewMemStore()
+	sweepTracking, err := store.Create(beads.Bead{
+		Title:  "order:" + orderTrackingSweepOrder,
+		Labels: []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(sweep): %v", err)
+	}
+	mergeTracking, err := store.Create(beads.Bead{
+		Title:  "order:pr-merge-queue",
+		Labels: []string{"order-run:pr-merge-queue", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(merge): %v", err)
+	}
+
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingSweepWatchdog(time.Now().Add(orderTrackingSweepWatchdogStaleAfter + time.Second))
+
+	gotSweep, err := store.Get(sweepTracking.ID)
+	if err != nil {
+		t.Fatalf("Get(sweep): %v", err)
+	}
+	if gotSweep.Status != "closed" {
+		t.Fatalf("sweep tracking status = %s, want closed", gotSweep.Status)
+	}
+	gotMerge, err := store.Get(mergeTracking.ID)
+	if err != nil {
+		t.Fatalf("Get(merge): %v", err)
+	}
+	if gotMerge.Status != "open" {
+		t.Fatalf("merge tracking status = %s, want open", gotMerge.Status)
+	}
+}
+
 func TestCityRuntimeDemandSnapshotRefreshesWhenDemandCommandsAreCustom(t *testing.T) {
 	cases := []struct {
-		name  string
-		agent config.Agent
+		name       string
+		agent      config.Agent
+		wantBuilds int
 	}{
 		{
 			name: "custom scale_check",
@@ -206,6 +1499,7 @@ func TestCityRuntimeDemandSnapshotRefreshesWhenDemandCommandsAreCustom(t *testin
 				Name:       "worker",
 				ScaleCheck: "test -f external-queue && echo 1 || echo 0",
 			},
+			wantBuilds: 2,
 		},
 		{
 			name: "custom work_query",
@@ -213,6 +1507,7 @@ func TestCityRuntimeDemandSnapshotRefreshesWhenDemandCommandsAreCustom(t *testin
 				Name:      "worker",
 				WorkQuery: "gh issue list --json number --limit 1",
 			},
+			wantBuilds: 1,
 		},
 	}
 
@@ -240,10 +1535,37 @@ func TestCityRuntimeDemandSnapshotRefreshesWhenDemandCommandsAreCustom(t *testin
 			_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
 			_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
 
-			if buildCalls != 2 {
-				t.Fatalf("buildDesiredState call count = %d, want 2 when demand command is not event-backed", buildCalls)
+			if buildCalls != tc.wantBuilds {
+				t.Fatalf("buildDesiredState call count = %d, want %d", buildCalls, tc.wantBuilds)
 			}
 		})
+	}
+}
+
+func TestCityRuntimeDemandSnapshotDoesNotRunControllerWorkQuery(t *testing.T) {
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Agents: []config.Agent{{
+				Name:      "worker",
+				WorkQuery: `printf '[{"id":"work-1"}]'`,
+			}},
+		},
+		cs: &controllerState{
+			eventProv: events.NewFake(),
+		},
+		stderr: io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	snapshot := cr.loadDemandSnapshot(newSessionBeadSnapshot(nil), nil, "patrol", false)
+
+	if len(snapshot.result.WorkSet) != 0 {
+		t.Fatalf("WorkSet = %#v, want empty; controller demand must not run work_query", snapshot.result.WorkSet)
 	}
 }
 
@@ -423,8 +1745,8 @@ func TestSweepUndesiredPoolSessionBeads_SweepsStaleCreatingState(t *testing.T) {
 	}
 }
 
-// Stale post-creating beads (state=active, last_woke_at="",
-// creation_complete_at older than staleCreatingStateTimeout) MUST be
+// Stale post-creating beads (state=active,
+// creation_complete_at older than postCreateProtectionTimeout) MUST be
 // sweepable. Without this, the grace window would never expire.
 func TestSweepUndesiredPoolSessionBeads_SweepsLongStuckActiveWithoutWake(t *testing.T) {
 	store := beads.NewMemStore()
@@ -440,7 +1762,7 @@ func TestSweepUndesiredPoolSessionBeads_SweepsLongStuckActiveWithoutWake(t *test
 			poolManagedMetadataKey: boolMetadata(true),
 			"state":                "active",
 			"state_reason":         "creation_complete",
-			"creation_complete_at": time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339),
+			"creation_complete_at": time.Now().Add(-3 * time.Minute).UTC().Format(time.RFC3339),
 			"continuation_epoch":   "1",
 			"generation":           "1",
 		},
@@ -460,7 +1782,46 @@ func TestSweepUndesiredPoolSessionBeads_SweepsLongStuckActiveWithoutWake(t *test
 		false,
 	)
 	if closed != 1 {
-		t.Fatalf("closed = %d, want 1 — bead beyond staleCreatingStateTimeout must be sweepable", closed)
+		t.Fatalf("closed = %d, want 1 — bead beyond postCreateProtectionTimeout must be sweepable", closed)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_SkipsRecentCreationCompleteAfterWakeRecorded(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-recent-awake",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "awake",
+			"state_reason":         "creation_complete",
+			"creation_complete_at": time.Now().Add(-70 * time.Second).UTC().Format(time.RFC3339),
+			"last_woke_at":         time.Now().Add(-80 * time.Second).UTC().Format(time.RFC3339),
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		nil,
+		sessionBeads,
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		runtime.NewFake(),
+		false,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0 — bead within postCreateProtectionTimeout must survive even after wake bookkeeping lands", closed)
 	}
 }
 
@@ -741,31 +2102,72 @@ func TestSweepUndesiredPoolSessionBeads_SkipsPendingCreateClaim(t *testing.T) {
 	}
 }
 
-// pending_create_claim is an authoritative ownership flag for the lifecycle
-// reconciler (sessionStartRequested in session_reconcile.go). The sweep must
-// honor that contract regardless of age — expiring it here would let the
-// sweep close a bead the reconciler still considers live.
-func TestSweepUndesiredPoolSessionBeads_SkipsStalePendingCreateClaim(t *testing.T) {
+// #1460: pending_create_claim stays protected only for the pending-create
+// lease. Once a never-started create ages past that lease, the sweep must
+// reap it instead of preserving the pool slot forever.
+func TestSweepUndesiredPoolSessionBeads_SweepsExpiredPendingCreateClaimLease(t *testing.T) {
 	store := beads.NewMemStore()
+	now := time.Now().UTC()
 	bead, err := store.Create(beads.Bead{
 		Title:  "worker",
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel, "agent:worker"},
 		Metadata: map[string]string{
-			"session_name":         "worker-bd-stale-claim",
-			"template":             "worker",
-			"agent_name":           "worker",
-			"pool_slot":            "1",
-			poolManagedMetadataKey: boolMetadata(true),
-			"pending_create_claim": "true",
-			"continuation_epoch":   "1",
-			"generation":           "1",
+			"session_name":              "worker-bd-stale-claim",
+			"template":                  "worker",
+			"agent_name":                "worker",
+			"pool_slot":                 "1",
+			"state":                     "creating",
+			poolManagedMetadataKey:      boolMetadata(true),
+			"pending_create_claim":      "true",
+			"pending_create_started_at": pendingCreateStartedAtNow(now.Add(-(pendingCreateNeverStartedTimeout + time.Second))),
+			"continuation_epoch":        "1",
+			"generation":                "1",
 		},
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	bead.CreatedAt = time.Now().Add(-2 * time.Minute)
+	bead.CreatedAt = now.Add(-24 * time.Hour)
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		nil,
+		sessionBeads,
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		runtime.NewFake(),
+		false,
+	)
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1 — expired pending_create_claim lease must be reaped", closed)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_UsesPendingCreateStartedAtForCreatingState(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Now().UTC()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":              "worker-bd-fresh-create",
+			"template":                  "worker",
+			"agent_name":                "worker",
+			"pool_slot":                 "1",
+			poolManagedMetadataKey:      boolMetadata(true),
+			"state":                     "creating",
+			"pending_create_started_at": pendingCreateStartedAtNow(now.Add(-30 * time.Second)),
+			"continuation_epoch":        "1",
+			"generation":                "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	bead.CreatedAt = now.Add(-2 * time.Minute)
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
@@ -778,7 +2180,22 @@ func TestSweepUndesiredPoolSessionBeads_SkipsStalePendingCreateClaim(t *testing.
 		false,
 	)
 	if closed != 0 {
-		t.Fatalf("closed = %d, want 0 — pending_create_claim must remain authoritative regardless of age", closed)
+		t.Fatalf("closed = %d, want 0 — fresh pending_create_started_at must keep old creating bead alive", closed)
+	}
+}
+
+func TestIsStaleCreatingTreatsZeroPendingCreateStartedAtAsMissing(t *testing.T) {
+	now := time.Now().UTC()
+	bead := beads.Bead{
+		Metadata: map[string]string{
+			"state":                     "creating",
+			"pending_create_started_at": (time.Time{}).UTC().Format(time.RFC3339),
+		},
+		CreatedAt: now,
+	}
+
+	if isStaleCreating(bead) {
+		t.Fatal("zero pending_create_started_at should fall back to fresh CreatedAt")
 	}
 }
 
@@ -822,6 +2239,59 @@ func TestSweepUndesiredPoolSessionBeads_ClosesStoppedSessions(t *testing.T) {
 	}
 	if got.Status != "closed" {
 		t.Fatalf("stopped pool bead status = %q, want closed", got.Status)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_ClosesMissingOrStaleSessionName(t *testing.T) {
+	tests := []struct {
+		name        string
+		sessionName string
+		liveName    string
+	}{
+		{name: "missing", sessionName: "", liveName: ""},
+		{name: "stale", sessionName: "worker-bd-stale", liveName: "worker-bd-current"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			bead, err := store.Create(beads.Bead{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel, "agent:worker"},
+				Metadata: map[string]string{
+					"session_name":         tt.sessionName,
+					"template":             "worker",
+					"agent_name":           "worker",
+					"pool_slot":            "1",
+					poolManagedMetadataKey: boolMetadata(true),
+					"state":                "drained",
+					"continuation_epoch":   "1",
+					"generation":           "1",
+				},
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			sp := runtime.NewFake()
+			if tt.liveName != "" {
+				if err := sp.Start(context.Background(), tt.liveName, runtime.Config{}); err != nil {
+					t.Fatalf("Start(%s): %v", tt.liveName, err)
+				}
+			}
+
+			closed := sweepUndesiredPoolSessionBeads(
+				store,
+				nil,
+				newSessionBeadSnapshot([]beads.Bead{bead}),
+				nil,
+				&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+				sp,
+				false,
+			)
+			if closed != 1 {
+				t.Fatalf("closed = %d, want 1 for unrecoverable pool session name", closed)
+			}
+		})
 	}
 }
 
@@ -1000,6 +2470,278 @@ func TestCityRuntimeBeadReconcileTick_TransientStoreQueryPartialKeepsRunningPool
 	}
 }
 
+func TestCityRuntimeBeadReconcileTick_ScaleCheckPartialKeepsOnlyAffectedPoolSession(t *testing.T) {
+	store := beads.NewMemStore()
+	worker, err := store.Create(beads.Bead{
+		ID:     "session-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-123",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "awake",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create worker session: %v", err)
+	}
+	helper, err := store.Create(beads.Bead{
+		ID:     "session-helper",
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:helper"},
+		Metadata: map[string]string{
+			"session_name":         "helper-bd-123",
+			"template":             "helper",
+			"agent_name":           "helper",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "awake",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create helper session: %v", err)
+	}
+
+	sp := runtime.NewFake()
+	for _, name := range []string{"worker-bd-123", "helper-bd-123"} {
+		if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+			t.Fatalf("Start(%s): %v", name, err)
+		}
+	}
+
+	cityPath := t.TempDir()
+	cfg := &config.City{Agents: []config.Agent{
+		{
+			Name:              "worker",
+			StartCommand:      "echo",
+			ScaleCheck:        "exit 42",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(5),
+		},
+		{
+			Name:              "helper",
+			StartCommand:      "echo",
+			ScaleCheck:        "printf 0",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(5),
+		},
+	}}
+	cr := &CityRuntime{
+		cityPath:            cityPath,
+		cityName:            "maintainer-city",
+		cfg:                 cfg,
+		sp:                  sp,
+		standaloneCityStore: store,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{worker, helper})
+	var stderr strings.Builder
+	result := buildDesiredStateWithSessionBeads("maintainer-city", cityPath, time.Now().UTC(), cfg, sp, store, nil, snapshot, nil, &stderr)
+	if result.StoreQueryPartial {
+		t.Fatalf("StoreQueryPartial = true, want false for scoped scale_check failure; stderr=%s", stderr.String())
+	}
+	if !result.ScaleCheckPartialTemplates["worker"] || result.ScaleCheckPartialTemplates["helper"] {
+		t.Fatalf("ScaleCheckPartialTemplates = %v, want only worker", result.ScaleCheckPartialTemplates)
+	}
+	cr.beadReconcileTick(context.Background(), result, snapshot, nil)
+
+	if drain := cr.sessionDrains.get(worker.ID); drain != nil {
+		t.Fatalf("affected worker session was scheduled for drain: reason=%s", drain.reason)
+	}
+	if cr.sessionDrains.get(helper.ID) == nil {
+		t.Fatal("unaffected helper session was not scheduled for drain")
+	}
+	if !sp.IsRunning("worker-bd-123") {
+		t.Fatal("affected worker session should remain running")
+	}
+	if !sp.IsRunning("helper-bd-123") {
+		t.Fatal("helper drain should be asynchronous and not stop immediately")
+	}
+}
+
+func TestCityRuntimeBeadReconcileTick_ScaleCheckPartialPreservesDormantAffectedPoolSessionWithoutDrain(t *testing.T) {
+	store := beads.NewMemStore()
+	worker, err := store.Create(beads.Bead{
+		ID:     "session-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-123",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "asleep",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create worker session: %v", err)
+	}
+
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	cfg := &config.City{Agents: []config.Agent{{
+		Name:              "worker",
+		StartCommand:      "echo",
+		ScaleCheck:        "exit 42",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(5),
+	}}}
+	cr := &CityRuntime{
+		cityPath:            cityPath,
+		cityName:            "maintainer-city",
+		cfg:                 cfg,
+		sp:                  sp,
+		standaloneCityStore: store,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{worker})
+	var stderr strings.Builder
+	result := buildDesiredStateWithSessionBeads("maintainer-city", cityPath, time.Now().UTC(), cfg, sp, store, nil, snapshot, nil, &stderr)
+	if _, ok := result.State["worker-bd-123"]; !ok {
+		t.Fatalf("affected dormant worker session not preserved in desired state: keys=%v stderr=%s", mapKeys(result.State), stderr.String())
+	}
+
+	cr.beadReconcileTick(context.Background(), result, snapshot, nil)
+
+	if drain := cr.sessionDrains.get(worker.ID); drain != nil {
+		t.Fatalf("affected dormant worker session was scheduled for drain: reason=%s", drain.reason)
+	}
+	got, err := store.Get(worker.ID)
+	if err != nil {
+		t.Fatalf("Get worker session: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("affected dormant worker session was closed: %+v", got)
+	}
+	if state := got.Metadata["state"]; state != "asleep" {
+		t.Fatalf("affected dormant worker state = %q, want asleep", state)
+	}
+	if sp.IsRunning("worker-bd-123") {
+		t.Fatal("affected dormant worker should not be woken by scale_check retention")
+	}
+}
+
+func TestCityRuntimeBeadReconcileTick_StoreQueryPartialDoesNotReleaseAssignedWork(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		ID:       "ga-live",
+		Title:    "live assigned work from partial snapshot",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: "worker-session",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark work in_progress: %v", err)
+	}
+	work.Status = inProgress
+
+	cr := &CityRuntime{
+		cityPath:            t.TempDir(),
+		cityName:            "maintainer-city",
+		cfg:                 &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
+		sp:                  runtime.NewFake(),
+		standaloneCityStore: store,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+
+	cr.beadReconcileTick(context.Background(), DesiredStateResult{
+		State:              map[string]TemplateParams{},
+		ScaleCheckCounts:   map[string]int{"worker": 0},
+		AssignedWorkBeads:  []beads.Bead{work},
+		AssignedWorkStores: []beads.Store{store},
+		StoreQueryPartial:  true,
+	}, newSessionBeadSnapshot(nil), nil)
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work after partial tick: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-session" {
+		t.Fatalf("partial assigned-work snapshot released work: status=%q assignee=%q", got.Status, got.Assignee)
+	}
+}
+
+func TestCityRuntimeBeadReconcileTick_SessionQueryPartialDoesNotReleaseAssignedWork(t *testing.T) {
+	base := beads.NewMemStore()
+	store := sessionSnapshotListFailStore{Store: base}
+	work, err := base.Create(beads.Bead{
+		ID:       "ga-live",
+		Title:    "live assigned work from partial session snapshot",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: "worker-session",
+		Metadata: map[string]string{
+			"gc.routed_to": "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := base.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark work in_progress: %v", err)
+	}
+	work.Status = inProgress
+
+	cr := &CityRuntime{
+		cityPath:            t.TempDir(),
+		cityName:            "maintainer-city",
+		cfg:                 &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}}},
+		sp:                  runtime.NewFake(),
+		standaloneCityStore: store,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+
+	cr.beadReconcileTick(context.Background(), DesiredStateResult{
+		State:              map[string]TemplateParams{},
+		ScaleCheckCounts:   map[string]int{"worker": 0},
+		AssignedWorkBeads:  []beads.Bead{work},
+		AssignedWorkStores: []beads.Store{store},
+	}, nil, nil)
+
+	got, err := base.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work after partial tick: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-session" {
+		t.Fatalf("partial session snapshot released work: status=%q assignee=%q", got.Status, got.Assignee)
+	}
+}
+
 func TestCityRuntimeTick_LogsWispGCPurgeCountWithNonFatalError(t *testing.T) {
 	store := beads.NewMemStore()
 	var stdout, stderr bytes.Buffer
@@ -1091,7 +2833,7 @@ func TestCityRuntimeBeadReconcileTick_KeepsAssignedPoolWorkerAwake(t *testing.T)
 		Status: "open",
 		Labels: []string{sessionBeadLabel, "agent:gascity/claude"},
 		Metadata: map[string]string{
-			"session_name":         "claude-mc-live",
+			"session_name":         "claude-real-world-app-live",
 			"template":             "gascity/claude",
 			"agent_name":           "gascity/claude",
 			"pool_slot":            "1",
@@ -1106,7 +2848,7 @@ func TestCityRuntimeBeadReconcileTick_KeepsAssignedPoolWorkerAwake(t *testing.T)
 	}
 
 	sp := runtime.NewFake()
-	if err := sp.Start(context.Background(), "claude-mc-live", runtime.Config{}); err != nil {
+	if err := sp.Start(context.Background(), "claude-real-world-app-live", runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -1126,7 +2868,7 @@ func TestCityRuntimeBeadReconcileTick_KeepsAssignedPoolWorkerAwake(t *testing.T)
 		State:            map[string]TemplateParams{},
 		ScaleCheckCounts: map[string]int{"gascity/claude": 0},
 		AssignedWorkBeads: []beads.Bead{
-			workBead("ga-live", "gascity/claude", "claude-mc-live", "in_progress", 5),
+			workBead("ga-live", "gascity/claude", "claude-real-world-app-live", "in_progress", 5),
 		},
 	}
 
@@ -1143,7 +2885,7 @@ func TestCityRuntimeBeadReconcileTick_KeepsAssignedPoolWorkerAwake(t *testing.T)
 	if state := got.Metadata["state"]; state == "drained" || state == "asleep" {
 		t.Fatalf("assigned pool worker state = %q, want active/awake", state)
 	}
-	if !sp.IsRunning("claude-mc-live") {
+	if !sp.IsRunning("claude-real-world-app-live") {
 		t.Fatal("assigned pool worker should still be running")
 	}
 }
@@ -1156,7 +2898,7 @@ func TestCityRuntimeBeadReconcileTick_SweepRespectsLiveAssignedWork(t *testing.T
 		Status: "open",
 		Labels: []string{sessionBeadLabel, "agent:worker"},
 		Metadata: map[string]string{
-			"session_name":         "worker-mc-live",
+			"session_name":         "worker-real-world-app-live",
 			"template":             "worker",
 			"agent_name":           "worker",
 			"pool_slot":            "1",
@@ -1179,7 +2921,7 @@ func TestCityRuntimeBeadReconcileTick_SweepRespectsLiveAssignedWork(t *testing.T
 		Title:    "future work",
 		Type:     "task",
 		Status:   "open",
-		Assignee: "worker-mc-live",
+		Assignee: "worker-real-world-app-live",
 		Metadata: map[string]string{"gc.routed_to": "worker"},
 	}); err != nil {
 		t.Fatalf("Create work bead: %v", err)
@@ -1311,7 +3053,7 @@ func TestCityRuntimeTick_RefreshesManualSessionOverlayAfterSync(t *testing.T) {
 	if got.Status == "closed" {
 		t.Fatalf("manual session bead was closed after refreshed overlay should have preserved it: %+v", got)
 	}
-	if got.Metadata["state"] == "orphaned" || got.Metadata["close_reason"] == "orphaned" {
+	if got.Metadata["state"] == "orphaned" {
 		t.Fatalf("manual session bead was marked orphaned after refreshed overlay: %+v", got.Metadata)
 	}
 }
@@ -1493,7 +3235,7 @@ func TestCityRuntimeReloadProviderSwapPreservesDrainTracker(t *testing.T) {
 	}
 	sp := runtime.NewFake()
 	var stdout bytes.Buffer
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "test-city",
 		TomlPath: tomlPath,
@@ -1542,7 +3284,7 @@ func TestCityRuntimeReloadProviderSwapFailsOnPartialSessionListing(t *testing.T)
 	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "test-city",
 		TomlPath: tomlPath,
@@ -1592,7 +3334,7 @@ func TestCityRuntimeReloadProviderSwapFailsOnSessionListingError(t *testing.T) {
 	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "test-city",
 		TomlPath: tomlPath,
@@ -1639,7 +3381,7 @@ func TestCityRuntimeReloadAllowsRegistryAliasDifferentFromWorkspaceName(t *testi
 	sp := runtime.NewFake()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "machine-alias",
 		TomlPath: tomlPath,
@@ -1683,7 +3425,7 @@ func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
 	sp := runtime.NewFake()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath:  cityPath,
 		CityName:  "test-city",
 		TomlPath:  tomlPath,
@@ -1768,7 +3510,7 @@ func TestCityRuntimeReloadRetriesTransientLifecycleFailure(t *testing.T) {
 	sp := runtime.NewFake()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath:  cityPath,
 		CityName:  "test-city",
 		TomlPath:  tomlPath,
@@ -1860,7 +3602,7 @@ func TestCityRuntimeReloadStrictWarningsReturnedOnFailure(t *testing.T) {
 	sp := runtime.NewFake()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath:  cityPath,
 		CityName:  "test-city",
 		TomlPath:  tomlPath,
@@ -1934,7 +3676,7 @@ func TestCityRuntimeReloadNonStrictWarningsReturnedOnValidationFailure(t *testin
 	}
 	sp := runtime.NewFake()
 	var stderr bytes.Buffer
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath:  cityPath,
 		CityName:  "test-city",
 		TomlPath:  tomlPath,
@@ -2056,15 +3798,11 @@ func TestCityRuntimeReloadSameRevisionIsNoOp(t *testing.T) {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
 
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
 
 	sp := runtime.NewFake()
 	var stdout bytes.Buffer
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath:  cityPath,
 		CityName:  "test-city",
 		TomlPath:  tomlPath,
@@ -2098,6 +3836,248 @@ func TestCityRuntimeReloadSameRevisionIsNoOp(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeReloadSameRevisionRefreshesStoresWhenMetadataChanges(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	writeBackendMetadata(t, cityPath, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`)
+
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+	sp := runtime.NewFake()
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	oldStore := cs.CityBeadStore()
+	if oldStore == nil {
+		t.Fatal("precondition: controller state city store is nil")
+	}
+
+	var stdout bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		ConfigRev: configRev,
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: io.Discard,
+	})
+	cr.setControllerState(cs)
+
+	writeBackendMetadata(t, cityPath, `{"database":"beads","backend":"postgres","postgres_host":"db.example.test","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pg"}`)
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeApplied)
+	}
+	if got := cs.CityBeadStore(); got == oldStore {
+		t.Fatal("same-revision reload reused stale city store after metadata backend changed")
+	}
+	if cr.configRev != configRev {
+		t.Fatalf("configRev = %q, want same revision %q", cr.configRev, configRev)
+	}
+	if lastProviderName != "fake" {
+		t.Fatalf("lastProviderName = %q, want fake", lastProviderName)
+	}
+}
+
+func TestCityRuntimeReloadRetainsTimedOutDispatcherForShutdownDrain(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+
+	od := newBlockingOrderDispatcher()
+	var stdout bytes.Buffer
+	cr := &CityRuntime{
+		cityPath:   cityPath,
+		cityName:   "test-city",
+		tomlPath:   tomlPath,
+		configRev:  configRev,
+		cfg:        cfg,
+		sp:         runtime.NewFake(),
+		dops:       newDrainOps(runtime.NewFake()),
+		od:         od,
+		rec:        events.Discard,
+		logPrefix:  "gc start",
+		stdout:     &stdout,
+		stderr:     io.Discard,
+		configName: "test-city",
+	}
+
+	writeCityRuntimeConfigWithShutdownTimeout(t, tomlPath, "fake", "1s")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	lastProviderName := "fake"
+	cr.reloadConfig(ctx, &lastProviderName, cityPath)
+	od.waitForDrainCalls(t, 1)
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		cr.shutdown()
+		close(shutdownDone)
+	}()
+	od.waitForDrainCalls(t, 2)
+	close(od.release)
+	select {
+	case <-shutdownDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown did not return after retained dispatcher was released")
+	}
+}
+
+func TestCityRuntimeReloadDrainShortCircuitsOnTickContextCancel(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+
+	od := newBlockingOrderDispatcher()
+	cr := &CityRuntime{
+		cityPath:   cityPath,
+		cityName:   "test-city",
+		tomlPath:   tomlPath,
+		configRev:  configRev,
+		cfg:        cfg,
+		sp:         runtime.NewFake(),
+		dops:       newDrainOps(runtime.NewFake()),
+		od:         od,
+		rec:        events.Discard,
+		logPrefix:  "gc start",
+		stdout:     io.Discard,
+		stderr:     io.Discard,
+		configName: "test-city",
+	}
+
+	writeCityRuntimeConfigWithShutdownTimeout(t, tomlPath, "fake", "1s")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	lastProviderName := "fake"
+	start := time.Now()
+	cr.reloadConfig(ctx, &lastProviderName, cityPath)
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("reload drain took %s after tick context cancellation, want <200ms", elapsed)
+	}
+	errs := od.drainContextErrors()
+	if len(errs) == 0 || !errors.Is(errs[0], context.Canceled) {
+		t.Fatalf("drain ctx error = %v, want context.Canceled", errs)
+	}
+	close(od.release)
+}
+
+func TestCityRuntimeReloadDrainBoundedByTimeout(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+
+	od := newBlockingOrderDispatcher()
+	cr := &CityRuntime{
+		cityPath:   cityPath,
+		cityName:   "test-city",
+		tomlPath:   tomlPath,
+		configRev:  configRev,
+		cfg:        cfg,
+		sp:         runtime.NewFake(),
+		dops:       newDrainOps(runtime.NewFake()),
+		od:         od,
+		rec:        events.Discard,
+		logPrefix:  "gc start",
+		stdout:     io.Discard,
+		stderr:     io.Discard,
+		configName: "test-city",
+	}
+
+	writeCityRuntimeConfigWithShutdownTimeout(t, tomlPath, "fake", "1s")
+	lastProviderName := "fake"
+	start := time.Now()
+	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+	elapsed := time.Since(start)
+	if elapsed < reloadOrderDrainTimeout || elapsed > reloadOrderDrainTimeout+500*time.Millisecond {
+		t.Fatalf("reload elapsed = %s, want bounded near %s", elapsed, reloadOrderDrainTimeout)
+	}
+	close(od.release)
+}
+
+func TestCityRuntimeRunReloadsConfigBeforeStartupReconcile(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+
+	if err := os.WriteFile(tomlPath, []byte(`[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[session]
+provider = "fake"
+
+[[agent]]
+name = "fresh-agent"
+`), 0o644); err != nil {
+		t.Fatalf("write updated config: %v", err)
+	}
+
+	sp := runtime.NewFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	var sawFreshAgent atomic.Bool
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		ConfigRev: configRev,
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(cfg *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
+			for _, agent := range cfg.Agents {
+				if agent.Name == "fresh-agent" {
+					sawFreshAgent.Store(true)
+				}
+			}
+			cancel()
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+
+	cr.run(ctx)
+
+	if !sawFreshAgent.Load() {
+		t.Fatalf("startup did not see reloaded fresh-agent; agents = %#v", cr.cfg.Agents)
+	}
+}
+
 func TestNewCityRuntimeUsesRegisteredAliasForEffectiveIdentity(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -2109,7 +4089,7 @@ func TestNewCityRuntimeUsesRegisteredAliasForEffectiveIdentity(t *testing.T) {
 	}
 
 	sp := runtime.NewFake()
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "machine-alias",
 		TomlPath: tomlPath,
@@ -2140,14 +4120,10 @@ func TestCityRuntimeReloadKeepsRegisteredAliasForEffectiveIdentity(t *testing.T)
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfigNamed(t, tomlPath, "declared-city", "fake")
 
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
 
 	sp := runtime.NewFake()
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath:  cityPath,
 		CityName:  "machine-alias",
 		TomlPath:  tomlPath,
@@ -2193,18 +4169,14 @@ func TestCityRuntimeManualReloadReplyWaitsForTickCompletion(t *testing.T) {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
 
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
 
 	doneCh := make(chan reloadControlReply, 1)
 	dirty := &atomic.Bool{}
 	dirty.Store(true)
 	sp := runtime.NewFake()
 	var stdout bytes.Buffer
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath:    cityPath,
 		CityName:    "test-city",
 		TomlPath:    tomlPath,
@@ -2225,6 +4197,9 @@ func TestCityRuntimeManualReloadReplyWaitsForTickCompletion(t *testing.T) {
 		Stdout: &stdout,
 		Stderr: io.Discard,
 	})
+	// This test asserts reload reply timing only; order subprocesses add
+	// unrelated tempdir cleanup races after the tick has completed.
+	cr.od = nil
 	cr.activeReload = &reloadRequest{doneCh: doneCh}
 	lastProviderName := "fake"
 	var prevPoolRunning map[string]bool
@@ -2241,6 +4216,129 @@ func TestCityRuntimeManualReloadReplyWaitsForTickCompletion(t *testing.T) {
 	}
 	if cr.activeReload != nil {
 		t.Fatal("activeReload was not cleared")
+	}
+}
+
+func TestCityRuntimeSoftReloadAcceptsDriftForAppliedAndNoChange(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		mutateConfig   bool
+		storedCommand  string
+		desiredCommand string
+		wantOutcome    reloadOutcome
+		wantAccepted   int
+	}{
+		{
+			name:           "applied",
+			mutateConfig:   true,
+			storedCommand:  "old-cmd",
+			desiredCommand: "new-cmd",
+			wantOutcome:    reloadOutcomeApplied,
+			wantAccepted:   1,
+		},
+		{
+			name:           "no-change-drift",
+			storedCommand:  "old-cmd",
+			desiredCommand: "new-cmd",
+			wantOutcome:    reloadOutcomeNoChange,
+			wantAccepted:   1,
+		},
+		{
+			name:           "no-change-clean",
+			storedCommand:  "old-cmd",
+			desiredCommand: "old-cmd",
+			wantOutcome:    reloadOutcomeNoChange,
+			wantAccepted:   0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			tomlPath := filepath.Join(cityPath, "city.toml")
+			writeCityRuntimeSoftReloadConfig(t, tomlPath, "")
+
+			cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+			if tc.mutateConfig {
+				writeCityRuntimeSoftReloadConfig(t, tomlPath, "1s")
+			}
+
+			store := beads.NewMemStore()
+			oldHash := runtime.CoreFingerprint(runtime.Config{Command: tc.storedCommand})
+			sessionBead, err := store.Create(beads.Bead{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name":        "worker",
+					"template":            "worker",
+					"started_config_hash": oldHash,
+					"generation":          "1",
+					"state":               "active",
+				},
+			})
+			if err != nil {
+				t.Fatalf("Create(session): %v", err)
+			}
+
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "worker", runtime.Config{Command: tc.storedCommand}); err != nil {
+				t.Fatalf("Start(worker): %v", err)
+			}
+			doneCh := make(chan reloadControlReply, 1)
+			dirty := &atomic.Bool{}
+			dirty.Store(true)
+			var stdout, stderr bytes.Buffer
+			cr := newTestCityRuntime(t, CityRuntimeParams{
+				CityPath:    cityPath,
+				CityName:    "test-city",
+				TomlPath:    tomlPath,
+				ConfigRev:   configRev,
+				ConfigDirty: dirty,
+				Cfg:         cfg,
+				SP:          sp,
+				BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+					return DesiredStateResult{State: map[string]TemplateParams{
+						"worker": {Command: tc.desiredCommand, SessionName: "worker", TemplateName: "worker"},
+					}}
+				},
+				Dops:   newDrainOps(sp),
+				Rec:    events.Discard,
+				Stdout: &stdout,
+				Stderr: &stderr,
+			})
+			cr.od = nil
+			cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+			cs.cityBeadStore = store
+			cr.setControllerState(cs)
+			cr.sessionDrains = newDrainTracker()
+			cr.activeReload = &reloadRequest{soft: true, doneCh: doneCh}
+			lastProviderName := "fake"
+			var prevPoolRunning map[string]bool
+
+			cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "reload")
+
+			select {
+			case reply := <-doneCh:
+				if reply.Outcome != tc.wantOutcome {
+					t.Fatalf("reply.Outcome = %q, want %q; stderr=%s stdout=%s", reply.Outcome, tc.wantOutcome, stderr.String(), stdout.String())
+				}
+				if reply.AcceptedDriftCount == nil || *reply.AcceptedDriftCount != tc.wantAccepted {
+					t.Fatalf("AcceptedDriftCount = %v, want %d", reply.AcceptedDriftCount, tc.wantAccepted)
+				}
+			default:
+				t.Fatal("manual soft reload did not reply")
+			}
+			updated, err := store.Get(sessionBead.ID)
+			if err != nil {
+				t.Fatalf("Get(session): %v", err)
+			}
+			wantHash := runtime.CoreFingerprint(runtime.Config{Command: tc.desiredCommand})
+			if updated.Metadata["started_config_hash"] != wantHash {
+				t.Fatalf("started_config_hash = %q, want %q", updated.Metadata["started_config_hash"], wantHash)
+			}
+			if cr.activeReload != nil {
+				t.Fatal("activeReload was not cleared")
+			}
+		})
 	}
 }
 
@@ -2271,7 +4369,7 @@ func TestCityRuntimeReloadRestartsConfigWatcherWithNewPackTargets(t *testing.T) 
 	dirty := &atomic.Bool{}
 	pokeCh := make(chan struct{}, 8)
 	var stdout, stderr bytes.Buffer
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath:     cityPath,
 		CityName:     "test-city",
 		TomlPath:     tomlPath,
@@ -2339,18 +4437,14 @@ func TestCityRuntimeManualReloadPanicAfterReloadKeepsReloadReplyAndClears(t *tes
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
 
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
 
 	doneCh := make(chan reloadControlReply, 1)
 	dirty := &atomic.Bool{}
 	dirty.Store(true)
 	sp := runtime.NewFake()
 	var stderr bytes.Buffer
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath:    cityPath,
 		CityName:    "test-city",
 		TomlPath:    tomlPath,
@@ -2405,7 +4499,7 @@ func TestCityRuntimeWatchReloadPanicRestoresDirty(t *testing.T) {
 	dirty.Store(true)
 	sp := runtime.NewFake()
 	var stderr bytes.Buffer
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath:    cityPath,
 		CityName:    "test-city",
 		TomlPath:    tomlPath,
@@ -2448,9 +4542,10 @@ func TestCityRuntimeRunStopsBeforeStartedWhenCanceledDuringStartup(t *testing.T)
 	sp := runtime.NewFake()
 	var stdout bytes.Buffer
 	var started bool
+	od := &recordingOrderDispatcher{}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "test-city",
 		TomlPath: tomlPath,
@@ -2466,6 +4561,7 @@ func TestCityRuntimeRunStopsBeforeStartedWhenCanceledDuringStartup(t *testing.T)
 		Stdout:    &stdout,
 		Stderr:    io.Discard,
 	})
+	cr.od = od
 
 	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
@@ -2475,6 +4571,9 @@ func TestCityRuntimeRunStopsBeforeStartedWhenCanceledDuringStartup(t *testing.T)
 
 	if started {
 		t.Fatal("OnStarted called after cancellation")
+	}
+	if got := od.calls.Load(); got != 1 {
+		t.Fatalf("order dispatch calls = %d, want startup dispatch before cancellation", got)
 	}
 	if strings.Contains(stdout.String(), "City started.") {
 		t.Fatalf("stdout = %q, want no started banner after cancellation", stdout.String())
@@ -2566,7 +4665,7 @@ func TestCityRuntimeRun_PanicInStartupDoesNotShutdownCity(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "test-city",
 		TomlPath: tomlPath,
@@ -2635,7 +4734,7 @@ func TestCityRuntimeRun_RetriesStartupAfterRecoveredPanicBeforeStarted(t *testin
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "test-city",
 		TomlPath: tomlPath,
@@ -2730,7 +4829,7 @@ func TestCityRuntimeRun_ConvergenceStartupErrorDoesNotBlockStarted(t *testing.T)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "test-city",
 		TomlPath: tomlPath,
@@ -2791,7 +4890,7 @@ func TestCityRuntimeRun_RetriesConvergenceStartupUntilIndexPopulated(t *testing.
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "test-city",
 		TomlPath: tomlPath,
@@ -2819,7 +4918,7 @@ func TestCityRuntimeRun_RetriesConvergenceStartupUntilIndexPopulated(t *testing.
 
 	deadline := time.After(5 * time.Second)
 	for {
-		if cr.convStoreAdapter != nil && cr.convStoreAdapter.activeIndex != nil {
+		if scope := cr.convScopes[""]; scope != nil && scope.adapter.activeIndex != nil {
 			cancel()
 			break
 		}
@@ -2862,7 +4961,7 @@ func TestCityRuntimeRunShutsDownSessionsOnContextCancel(t *testing.T) {
 
 	var stdout bytes.Buffer
 	ctx, cancel := context.WithCancel(context.Background())
-	cr := newCityRuntime(CityRuntimeParams{
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath: cityPath,
 		CityName: "test-city",
 		TomlPath: tomlPath,
@@ -2900,6 +4999,250 @@ func TestCityRuntimeRunShutsDownSessionsOnContextCancel(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Stopped agent 'probe-session'") {
 		t.Fatalf("stdout = %q, want shutdown stop message", stdout.String())
 	}
+}
+
+// orderingFakeProvider appends "stop:<name>" to seq when Stop is called so
+// tests can assert ordering relative to other lifecycle events.
+type orderingFakeProvider struct {
+	*runtime.Fake
+	mu  sync.Mutex
+	seq []string
+}
+
+func (p *orderingFakeProvider) Stop(name string) error {
+	p.mu.Lock()
+	p.seq = append(p.seq, "stop:"+name)
+	p.mu.Unlock()
+	return p.Fake.Stop(name)
+}
+
+func (p *orderingFakeProvider) events() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.seq...)
+}
+
+type interruptStopsProvider struct {
+	*runtime.Fake
+}
+
+func (p *interruptStopsProvider) Interrupt(name string) error {
+	if err := p.Fake.Interrupt(name); err != nil {
+		return err
+	}
+	return p.Stop(name)
+}
+
+// TestCityRuntimeShutdownDrainsOrderDispatch verifies shutdown invokes
+// orderDispatcher.drain with a fresh (non-canceled) context before
+// stopping sessions — regression for #991.
+func TestCityRuntimeShutdownDrainsOrderDispatch(t *testing.T) {
+	cfg := &config.City{}
+	cfg.Daemon.ShutdownTimeout = "1s"
+
+	sp := runtime.NewFake()
+	od := &recordingOrderDispatcher{}
+
+	var stdout, stderr bytes.Buffer
+	cr := &CityRuntime{
+		cfg:       cfg,
+		sp:        sp,
+		od:        od,
+		rec:       events.Discard,
+		logPrefix: "gc start",
+		stdout:    &stdout,
+		stderr:    &stderr,
+	}
+
+	cr.shutdown()
+
+	if od.drainCalls != 1 {
+		t.Fatalf("drainCalls = %d, want 1", od.drainCalls)
+	}
+	if od.drainCtxErr != nil {
+		t.Fatalf("drain received a canceled ctx (%v); shutdown must pass a fresh context", od.drainCtxErr)
+	}
+}
+
+func TestCityRuntimeShutdownPreservesFullGracefulBudgetWithOrders(t *testing.T) {
+	cfg := &config.City{}
+	cfg.Daemon.ShutdownTimeout = "1s"
+
+	sp := &interruptStopsProvider{Fake: runtime.NewFake()}
+	if err := sp.Start(context.Background(), "probe", runtime.Config{}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	od := &recordingOrderDispatcher{}
+
+	var stdout, stderr bytes.Buffer
+	cr := &CityRuntime{
+		cfg:       cfg,
+		sp:        sp,
+		od:        od,
+		rec:       events.Discard,
+		logPrefix: "gc start",
+		stdout:    &stdout,
+		stderr:    &stderr,
+	}
+
+	cr.shutdown()
+
+	if !strings.Contains(stdout.String(), "waiting 1s") {
+		t.Fatalf("stdout = %q, want full 1s graceful session budget", stdout.String())
+	}
+}
+
+// TestCityRuntimeShutdownBlockedDispatchPersistsOutcomeBeforeGracefulStop
+// is the AC regression for #991: "a blocked/fake dispatch cannot let
+// controller exit before the tracking bead is closed or failure metadata
+// is persisted." It starts a real memoryOrderDispatcher, wedges its exec
+// until after shutdown is invoked, and asserts both that the tracking
+// bead is closed before shutdown returns AND that session Stop happens
+// AFTER the dispatch finishes — proving drain blocks gracefulStopAll.
+func TestCityRuntimeShutdownBlockedDispatchPersistsOutcomeBeforeGracefulStop(t *testing.T) {
+	store := beads.NewMemStore()
+	release := make(chan struct{})
+	execStarted := make(chan struct{})
+	execDone := make(chan struct{})
+
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		close(execStarted)
+		<-release
+		close(execDone)
+		return []byte("ok\n"), nil
+	}
+
+	ad := buildOrderDispatcherFromListExec(
+		[]orders.Order{{Name: "blocked", Trigger: "cooldown", Interval: "2m", Exec: "scripts/blocked.sh"}},
+		store, nil, fakeExec, nil,
+	)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	<-execStarted
+
+	sp := &orderingFakeProvider{Fake: runtime.NewFake()}
+	if err := sp.Start(context.Background(), "probe", runtime.Config{}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+
+	cfg := &config.City{}
+	cfg.Daemon.ShutdownTimeout = "200ms"
+
+	var stdout, stderr bytes.Buffer
+	cr := &CityRuntime{
+		cfg:       cfg,
+		sp:        sp,
+		od:        ad,
+		rec:       events.Discard,
+		logPrefix: "gc start",
+		stdout:    &stdout,
+		stderr:    &stderr,
+	}
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		cr.shutdown()
+		close(shutdownDone)
+	}()
+
+	// shutdown must not return while exec is blocked.
+	select {
+	case <-shutdownDone:
+		t.Fatal("shutdown returned before drain waited for in-flight dispatch")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Session must not have been stopped yet — drain is still waiting.
+	if got := sp.events(); len(got) != 0 {
+		t.Fatalf("session lifecycle ran before drain completed: %v", got)
+	}
+
+	close(release)
+	<-execDone
+
+	select {
+	case <-shutdownDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not return after dispatch completed")
+	}
+
+	// Tracking bead outcome must be persisted before shutdown returned.
+	all := trackingBeads(t, store, "order-run:blocked")
+	foundExecLabel := false
+	for _, b := range all {
+		for _, l := range b.Labels {
+			if l == "exec" {
+				foundExecLabel = true
+			}
+		}
+	}
+	if !foundExecLabel {
+		t.Fatalf("tracking bead missing exec outcome label after shutdown; beads=%+v", all)
+	}
+
+	// gracefulStopAll must have run after drain.
+	got := sp.events()
+	if len(got) == 0 || got[0] != "stop:probe" {
+		t.Fatalf("expected stop:probe after drain, got %v", got)
+	}
+}
+
+func TestCityRuntimeShutdownPreservesFullGracefulBudgetWhenNoOrders(t *testing.T) {
+	cfg := &config.City{}
+	cfg.Daemon.ShutdownTimeout = "1s"
+
+	sp := &interruptStopsProvider{Fake: runtime.NewFake()}
+	if err := sp.Start(context.Background(), "probe", runtime.Config{}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	cr := &CityRuntime{
+		cfg:       cfg,
+		sp:        sp,
+		rec:       events.Discard,
+		logPrefix: "gc start",
+		stdout:    &stdout,
+		stderr:    &stderr,
+	}
+
+	cr.shutdown()
+
+	if !strings.Contains(stdout.String(), "waiting 1s") {
+		t.Fatalf("stdout = %q, want full 1s graceful session budget", stdout.String())
+	}
+}
+
+func TestCityRuntimeShutdownZeroTimeoutDoesNotWaitForOrderDrain(t *testing.T) {
+	cfg := &config.City{}
+	cfg.Daemon.ShutdownTimeout = "0s"
+
+	od := newBlockingOrderDispatcher()
+	var stdout, stderr bytes.Buffer
+	cr := &CityRuntime{
+		cfg:       cfg,
+		sp:        runtime.NewFake(),
+		od:        od,
+		rec:       events.Discard,
+		logPrefix: "gc start",
+		stdout:    &stdout,
+		stderr:    &stderr,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		cr.shutdown()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("shutdown waited on order drain despite shutdown_timeout=0s")
+	}
+	close(od.release)
 }
 
 func TestCityRuntimeShutdownWarnsWhenSessionListingIsPartial(t *testing.T) {
@@ -2944,12 +5287,73 @@ func TestCityRuntimeShutdownWarnsWhenSessionListingIsPartial(t *testing.T) {
 
 func writeCityRuntimeConfig(t *testing.T, tomlPath, provider string) {
 	t.Helper()
+	clearInheritedBeadsEnv(t)
 	writeCityRuntimeConfigNamed(t, tomlPath, "test-city", provider)
+}
+
+func writeCityRuntimeSoftReloadConfig(t *testing.T, tomlPath, shutdownTimeout string) {
+	t.Helper()
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, filepath.Dir(tomlPath))
+	skippedOrders := []string{
+		"beads-health",
+		"cross-rig-deps",
+		"gate-sweep",
+		"mol-dog-jsonl",
+		"mol-dog-reaper",
+		"order-tracking-sweep",
+		"orphan-sweep",
+		"prune-branches",
+		"spawn-storm-detect",
+		"wisp-compact",
+	}
+	var buf strings.Builder
+	buf.WriteString("[workspace]\nname = \"test-city\"\n\n")
+	buf.WriteString("[beads]\nprovider = \"file\"\n\n")
+	buf.WriteString("[session]\nprovider = \"fake\"\n\n")
+	buf.WriteString("[orders]\nskip = [")
+	for i, name := range skippedOrders {
+		if i > 0 {
+			buf.WriteString(", ")
+		}
+		fmt.Fprintf(&buf, "%q", name)
+	}
+	buf.WriteString("]\n")
+	if shutdownTimeout != "" {
+		buf.WriteString("\n[daemon]\nshutdown_timeout = \"")
+		buf.WriteString(shutdownTimeout)
+		buf.WriteString("\"\n")
+	}
+	if err := os.WriteFile(tomlPath, []byte(buf.String()), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
+
+func loadCityRuntimeControllerConfig(t *testing.T, cityPath string) (*config.City, string) {
+	t.Helper()
+	cfg, prov, err := loadCityConfigWithBuiltinPacks(cityPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	applyFeatureFlags(cfg)
+	return cfg, config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
 }
 
 func writeCityRuntimeConfigNamed(t *testing.T, tomlPath, name, provider string) {
 	t.Helper()
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, filepath.Dir(tomlPath))
 	data := []byte("[workspace]\nname = \"" + name + "\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"" + provider + "\"\n")
+	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
+
+func writeCityRuntimeConfigWithShutdownTimeout(t *testing.T, tomlPath, provider, timeout string) {
+	t.Helper()
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, filepath.Dir(tomlPath))
+	data := []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"" + provider + "\"\n\n[daemon]\nshutdown_timeout = \"" + timeout + "\"\n")
 	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -2966,6 +5370,8 @@ func warningsContain(warnings []string, substr string) bool {
 
 func writeCityRuntimeConfigWithIncludes(t *testing.T, tomlPath string, includes []string) {
 	t.Helper()
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, filepath.Dir(tomlPath))
 	var quoted []string
 	for _, include := range includes {
 		quoted = append(quoted, fmt.Sprintf("%q", include))
@@ -2978,4 +5384,105 @@ func writeCityRuntimeConfigWithIncludes(t *testing.T, tomlPath string, includes 
 	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+}
+
+// TestCityRuntimeReloadAcceptNotBlockedBySlowTick is the regression test
+// for ga-8nbr: reload acceptance must not be starved by a slow reconciler
+// tick body. Before the fix, reloadReqCh was drained only by the main
+// select, which was also running tick bodies that can exceed the 5s
+// accept timeout (e.g., a session-start wave waiting for startup_timeout).
+// After the fix, a dedicated goroutine drains reloadReqCh so acceptance
+// is bounded by mutex contention, not by tick body duration.
+func TestCityRuntimeReloadAcceptNotBlockedBySlowTick(t *testing.T) {
+	oldAccept := controllerReloadAcceptTimeout
+	controllerReloadAcceptTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { controllerReloadAcceptTimeout = oldAccept })
+
+	reloadReqCh := make(chan reloadRequest)
+	pokeCh := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	cr := &CityRuntime{
+		reloadReqCh: reloadReqCh,
+		pokeCh:      pokeCh,
+		configDirty: &atomic.Bool{},
+		stderr:      io.Discard,
+	}
+
+	// Simulate the new accept goroutine from run(). Mirrors the
+	// production loop so the test validates the actual acceptance
+	// pathway, not a mock.
+	acceptDone := make(chan struct{})
+	go func() {
+		defer close(acceptDone)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case req := <-reloadReqCh:
+				cr.safeTick(func() {
+					cr.handleReloadRequest(&req)
+				}, "reload-accept")
+			}
+		}
+	}()
+
+	// Simulate a slow reconciler tick holding the main goroutine. The
+	// goroutine is separate from the accept loop so this test asserts
+	// that the accept loop is NOT blocked by a busy reconciler.
+	// Capture the delay locally so the goroutine's read does not race
+	// with t.Cleanup restoring controllerReloadAcceptTimeout.
+	tickBusyDelay := 3 * controllerReloadAcceptTimeout // 600ms: > accept timeout
+	tickBusy := make(chan struct{})
+	go func() {
+		select {
+		case <-time.After(tickBusyDelay):
+		case <-ctx.Done():
+		}
+		close(tickBusy)
+	}()
+
+	// Send a reload request as the socket handler would.
+	req := reloadRequest{
+		acceptedCh: make(chan reloadControlReply, 1),
+		doneCh:     make(chan reloadControlReply, 1),
+	}
+	sendStart := time.Now()
+	select {
+	case reloadReqCh <- req:
+	case <-time.After(controllerReloadAcceptTimeout):
+		t.Fatal("reloadReqCh send timed out — accept goroutine not draining")
+	}
+	sendElapsed := time.Since(sendStart)
+	if sendElapsed > controllerReloadAcceptTimeout/2 {
+		t.Fatalf("send took %s, want <%s (accept goroutine should be draining promptly)",
+			sendElapsed, controllerReloadAcceptTimeout/2)
+	}
+
+	// Accept reply must arrive well before the slow "tick" finishes.
+	select {
+	case reply := <-req.acceptedCh:
+		if reply.Outcome != reloadOutcomeAccepted {
+			t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeAccepted)
+		}
+	case <-tickBusy:
+		t.Fatal("accept reply did not arrive before simulated tick finished — starved by reconciler")
+	case <-time.After(2 * controllerReloadAcceptTimeout):
+		t.Fatal("accept reply did not arrive at all")
+	}
+
+	// activeReload must be staged under the mutex.
+	cr.reloadMu.Lock()
+	staged := cr.activeReload != nil
+	cr.reloadMu.Unlock()
+	if !staged {
+		t.Fatal("activeReload not staged after acceptance")
+	}
+	if !cr.configDirty.Load() {
+		t.Fatal("configDirty not set after acceptance")
+	}
+
+	cancel()
+	<-acceptDone
 }

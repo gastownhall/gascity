@@ -21,6 +21,41 @@ const (
 	SortCreatedDesc SortOrder = "created_desc"
 )
 
+// TierMode selects which storage tier(s) a List query reads from.
+// The zero value is TierIssues.
+//
+// For BdStore, where issues and wisps live in physically separate Dolt
+// tables, TierIssues is naturally tier-restricted by the underlying
+// `bd list` call. For in-memory stores (MemStore, ApplyListQuery) where
+// both tiers may share a single backing slice, Matches now filters out
+// any bead with Ephemeral=true under TierIssues. Pre-PR, such a query
+// would have returned ephemeral rows mixed in; callers that relied on
+// that behavior must opt into TierBoth explicitly.
+type TierMode int
+
+const (
+	// TierIssues reads only the permanent (issues) tier. Default.
+	TierIssues TierMode = iota
+	// TierWisps reads only the ephemeral (wisps) tier.
+	TierWisps
+	// TierBoth unions the issues and wisps tiers, deduping by ID and
+	// preserving the query's sort.
+	TierBoth
+)
+
+// TierModeFromOpts returns the tier mode implied by a slice of QueryOpts.
+// WithBothTiers takes precedence over WithEphemeral.
+func TierModeFromOpts(opts []QueryOpt) TierMode {
+	switch {
+	case HasOpt(opts, WithBothTiers):
+		return TierBoth
+	case HasOpt(opts, WithEphemeral):
+		return TierWisps
+	default:
+		return TierIssues
+	}
+}
+
 // ListQuery describes a filtered bead lookup.
 //
 // Queries are conjunctive: every populated field must match. A zero-value query
@@ -36,11 +71,33 @@ type ListQuery struct {
 	Limit         int
 	IncludeClosed bool
 	AllowScan     bool
+	// SkipLabels tells backing stores and cache reconciliation that the
+	// caller does not need labels for change detection. Stores that cannot
+	// omit labels may ignore it.
+	SkipLabels bool
 	// Live bypasses CachingStore and reads from the backing store. Other Store
 	// implementations ignore it. Use it only for lifecycle gates that must
 	// observe external mutations immediately.
 	Live bool
 	Sort SortOrder
+	// TierMode selects the storage tier(s) to read from. Zero value
+	// (TierIssues) preserves the legacy single-tier behavior.
+	TierMode TierMode
+}
+
+// ReadyQuery describes optional filters for ready-work lookup. A zero-value
+// query preserves Ready's historical behavior: all open, unblocked actionable
+// work.
+type ReadyQuery struct {
+	Assignee string
+	Limit    int
+}
+
+func readyQueryFromArgs(queries []ReadyQuery) ReadyQuery {
+	if len(queries) == 0 {
+		return ReadyQuery{}
+	}
+	return queries[0]
 }
 
 // HasFilter reports whether the query includes at least one indexed selector.
@@ -61,6 +118,18 @@ func (q ListQuery) IncludesClosed() bool {
 
 // Matches reports whether the bead satisfies the query.
 func (q ListQuery) Matches(b Bead) bool {
+	switch q.TierMode {
+	case TierWisps:
+		if !b.Ephemeral {
+			return false
+		}
+	case TierBoth:
+		// no tier filter
+	default: // TierIssues
+		if b.Ephemeral {
+			return false
+		}
+	}
 	if q.Status != "" {
 		if b.Status != q.Status {
 			return false

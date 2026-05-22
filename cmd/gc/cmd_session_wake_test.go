@@ -21,9 +21,11 @@ func TestSessionWake_StateTransitionsAndMetadata(t *testing.T) {
 		metadata        map[string]string
 		wantState       string
 		wantSleepReason string
+		wantPending     string
+		wantWakeRequest string
 	}{
 		{
-			name: "suspended becomes asleep",
+			name: "suspended requests start",
 			metadata: map[string]string{
 				"template":     "worker",
 				"state":        "suspended",
@@ -32,9 +34,11 @@ func TestSessionWake_StateTransitionsAndMetadata(t *testing.T) {
 			},
 			wantState:       "asleep",
 			wantSleepReason: "",
+			wantPending:     "",
+			wantWakeRequest: "explicit",
 		},
 		{
-			name: "drained becomes asleep",
+			name: "drained requests start",
 			metadata: map[string]string{
 				"template":     "worker",
 				"state":        "drained",
@@ -42,6 +46,8 @@ func TestSessionWake_StateTransitionsAndMetadata(t *testing.T) {
 			},
 			wantState:       "asleep",
 			wantSleepReason: "",
+			wantPending:     "",
+			wantWakeRequest: "explicit",
 		},
 		{
 			name: "creating clears quarantine but stays creating",
@@ -54,6 +60,8 @@ func TestSessionWake_StateTransitionsAndMetadata(t *testing.T) {
 			},
 			wantState:       "creating",
 			wantSleepReason: "",
+			wantPending:     "",
+			wantWakeRequest: "explicit",
 		},
 		{
 			name: "active stays active",
@@ -64,6 +72,8 @@ func TestSessionWake_StateTransitionsAndMetadata(t *testing.T) {
 			},
 			wantState:       "active",
 			wantSleepReason: "idle",
+			wantPending:     "",
+			wantWakeRequest: "explicit",
 		},
 	}
 
@@ -92,6 +102,12 @@ func TestSessionWake_StateTransitionsAndMetadata(t *testing.T) {
 			}
 			if got := updated.Metadata["sleep_reason"]; got != tt.wantSleepReason {
 				t.Fatalf("sleep_reason = %q, want %q", got, tt.wantSleepReason)
+			}
+			if got := updated.Metadata["pending_create_claim"]; got != tt.wantPending {
+				t.Fatalf("pending_create_claim = %q, want %q", got, tt.wantPending)
+			}
+			if got := updated.Metadata["wake_request"]; got != tt.wantWakeRequest {
+				t.Fatalf("wake_request = %q, want %q", got, tt.wantWakeRequest)
 			}
 			if got := updated.Metadata["held_until"]; got != "" {
 				t.Fatalf("held_until = %q, want empty", got)
@@ -225,7 +241,7 @@ func TestCmdSessionWake_ManagedBdPokesControllerAndMovesSuspendedToAsleep(t *tes
 	}
 }
 
-func TestCmdSessionWake_PokesManagedControllerAndMovesSuspendedToAsleep(t *testing.T) {
+func TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 
@@ -332,6 +348,12 @@ func TestCmdSessionWake_PokesManagedControllerAndMovesSuspendedToAsleep(t *testi
 	if got := updated.Metadata["state"]; got != "asleep" {
 		t.Fatalf("state = %q, want asleep", got)
 	}
+	if got := updated.Metadata["pending_create_claim"]; got != "" {
+		t.Fatalf("pending_create_claim = %q, want empty", got)
+	}
+	if got := updated.Metadata["wake_request"]; got != "explicit" {
+		t.Fatalf("wake_request = %q, want explicit", got)
+	}
 	if got := updated.Metadata["held_until"]; got != "" {
 		t.Fatalf("held_until = %q, want empty", got)
 	}
@@ -435,10 +457,13 @@ func TestCmdSessionWake_RequestsStartForContinuityEligibleArchivedSessionID(t *t
 	if err != nil {
 		t.Fatalf("Get(%s): %v", sessionID, err)
 	}
-	if got := updated.Metadata["state"]; got != "creating" {
-		t.Fatalf("state = %q, want creating", got)
+	if got := updated.Metadata["state"]; got != "archived" {
+		t.Fatalf("state = %q, want archived", got)
 	}
-	if got := updated.Metadata["pending_create_claim"]; got != "true" {
-		t.Fatalf("pending_create_claim = %q, want true", got)
+	if got := updated.Metadata["pending_create_claim"]; got != "" {
+		t.Fatalf("pending_create_claim = %q, want empty", got)
+	}
+	if got := updated.Metadata["wake_request"]; got != "explicit" {
+		t.Fatalf("wake_request = %q, want explicit", got)
 	}
 }

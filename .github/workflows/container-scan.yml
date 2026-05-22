@@ -1,0 +1,302 @@
+name: Container Scan
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".dockerignore"
+      - ".trivyignore.yaml"
+      - ".trivyignore-config"
+      - ".github/requirements/mcp-agent-mail.in"
+      - ".github/requirements/mcp-agent-mail.overrides.txt"
+      - ".github/requirements/mcp-agent-mail.txt"
+      - ".github/scripts/install-*.sh"
+      - ".github/workflows/container-scan.yml"
+      - "contrib/beads-scripts/gc-beads-br"
+      - "contrib/events-scripts/gc-events-k8s"
+      - "contrib/k8s/**"
+      - "contrib/mail-scripts/gc-mail-mcp-agent-mail"
+      - "contrib/session-scripts/gc-controller-k8s"
+      - "deps.env"
+      - "go.mod"
+      - "go.sum"
+  pull_request:
+    branches: [main]
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+    paths:
+      - ".dockerignore"
+      - ".trivyignore.yaml"
+      - ".trivyignore-config"
+      - ".github/requirements/mcp-agent-mail.in"
+      - ".github/requirements/mcp-agent-mail.overrides.txt"
+      - ".github/requirements/mcp-agent-mail.txt"
+      - ".github/scripts/install-*.sh"
+      - ".github/workflows/container-scan.yml"
+      - "contrib/beads-scripts/gc-beads-br"
+      - "contrib/events-scripts/gc-events-k8s"
+      - "contrib/k8s/**"
+      - "contrib/mail-scripts/gc-mail-mcp-agent-mail"
+      - "contrib/session-scripts/gc-controller-k8s"
+      - "deps.env"
+      - "go.mod"
+      - "go.sum"
+  schedule:
+    - cron: "43 6 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TRIVY_VERSION: "v0.70.0"
+
+jobs:
+  runner-policy:
+    name: Runner policy
+    runs-on: ${{ github.event_name == 'pull_request' && contains(fromJSON('["julianknutsen","csells","sjarmak","quad341"]'), github.event.pull_request.user.login) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    outputs:
+      use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
+      reason: ${{ steps.policy.outputs.reason }}
+      runner_2vcpu: ${{ steps.policy.outputs.runner_2vcpu }}
+      runner_8vcpu: ${{ steps.policy.outputs.runner_8vcpu }}
+      runner_16vcpu: ${{ steps.policy.outputs.runner_16vcpu }}
+      runner_32vcpu: ${{ steps.policy.outputs.runner_32vcpu }}
+      runner_macos: ${{ steps.policy.outputs.runner_macos }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Select runner backend
+        id: policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          python3 .github/workflows/scripts/runner_policy.py
+
+  dockerfile-config:
+    name: Dockerfile config
+    needs: runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Trivy
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          bin_dir="${RUNNER_TEMP}/gascity-trivy-bin"
+          TRIVY_INSTALL_BIN_DIR="$bin_dir" .github/scripts/install-trivy-archive.sh "${TRIVY_VERSION}"
+          echo "$bin_dir" >> "$GITHUB_PATH"
+
+      - name: Generate Dockerfile and manifest SARIF
+        run: |
+          mkdir -p trivy-results
+          trivy config \
+            --severity HIGH,CRITICAL \
+            --ignorefile .trivyignore-config \
+            --format sarif \
+            --output trivy-results/dockerfile-config.sarif \
+            contrib/k8s
+
+      - name: Upload Dockerfile SARIF
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
+        with:
+          sarif_file: trivy-results/dockerfile-config.sarif
+
+      - name: Upload Dockerfile scan artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trivy-dockerfile-config
+          path: trivy-results/dockerfile-config.sarif
+          retention-days: 5
+
+      - name: Summarize Dockerfile and manifest findings
+        run: |
+          trivy config \
+            --severity HIGH,CRITICAL \
+            --ignorefile .trivyignore-config \
+            --format table \
+            contrib/k8s
+
+      - name: Enforce Dockerfile and manifest policy
+        run: |
+          trivy config \
+            --severity HIGH,CRITICAL \
+            --ignorefile .trivyignore-config \
+            --exit-code 1 \
+            --format table \
+            contrib/k8s
+
+  image-vulnerabilities:
+    name: Image vulnerabilities
+    needs: runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Install Trivy
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          bin_dir="${RUNNER_TEMP}/gascity-trivy-bin"
+          TRIVY_INSTALL_BIN_DIR="$bin_dir" .github/scripts/install-trivy-archive.sh "${TRIVY_VERSION}"
+          echo "$bin_dir" >> "$GITHUB_PATH"
+
+      - name: Prepare image build inputs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          . ./deps.env
+          bin_dir="${RUNNER_TEMP}/gascity-container-scan-bin"
+          mkdir -p "$bin_dir"
+          BD_INSTALL_BIN_DIR="$bin_dir" .github/scripts/install-bd-archive.sh "$BD_VERSION"
+          BR_INSTALL_BIN_DIR="$bin_dir" .github/scripts/install-br-archive.sh "$BR_VERSION"
+          go build -o gc ./cmd/gc
+          cp -f "$bin_dir/bd" bd
+          cp -f "$bin_dir/br" br
+
+      - name: Build local images
+        run: |
+          set -euo pipefail
+          . ./deps.env
+          docker build \
+            -f contrib/k8s/Dockerfile.base \
+            --build-arg DOLT_VERSION="$DOLT_VERSION" \
+            -t "gc-agent-base:${IMAGE_TAG}" \
+            .
+          docker tag "gc-agent-base:${IMAGE_TAG}" gc-agent-base:latest
+
+          docker build \
+            -f contrib/k8s/Dockerfile.agent \
+            --build-arg BASE_IMAGE=gc-agent-base:latest \
+            -t "gc-agent:${IMAGE_TAG}" \
+            .
+          docker tag "gc-agent:${IMAGE_TAG}" gc-agent:latest
+
+          docker build \
+            -f contrib/k8s/Dockerfile.controller \
+            --build-arg BASE=gc-agent:latest \
+            -t "gc-controller:${IMAGE_TAG}" \
+            .
+
+          docker build \
+            -f contrib/k8s/Dockerfile.mail \
+            -t "gc-mcp-mail:${IMAGE_TAG}" \
+            .
+
+      - name: Generate image SARIF and SBOMs
+        run: |
+          set -euo pipefail
+          mkdir -p trivy-results
+          images=(
+            "gc-agent-base:${IMAGE_TAG}"
+            "gc-agent:${IMAGE_TAG}"
+            "gc-controller:${IMAGE_TAG}"
+            "gc-mcp-mail:${IMAGE_TAG}"
+          )
+          for image in "${images[@]}"; do
+            name="${image%%:*}"
+            trivy image \
+              --scanners vuln \
+              --severity HIGH,CRITICAL \
+              --ignore-unfixed \
+              --ignorefile .trivyignore.yaml \
+              --timeout 15m \
+              --format sarif \
+              --output "trivy-results/${name}.sarif" \
+              "$image"
+            trivy image \
+              --scanners vuln \
+              --ignorefile .trivyignore.yaml \
+              --timeout 15m \
+              --format cyclonedx \
+              --output "trivy-results/${name}.cdx.json" \
+              "$image"
+          done
+
+      - name: Enforce image vulnerability policy
+        run: |
+          set -euo pipefail
+          images=(
+            "gc-agent-base:${IMAGE_TAG}"
+            "gc-agent:${IMAGE_TAG}"
+            "gc-controller:${IMAGE_TAG}"
+            "gc-mcp-mail:${IMAGE_TAG}"
+          )
+          for image in "${images[@]}"; do
+            trivy image \
+              --scanners vuln \
+              --severity HIGH,CRITICAL \
+              --ignore-unfixed \
+              --ignorefile .trivyignore.yaml \
+              --exit-code 1 \
+              --timeout 15m \
+              --format table \
+              "$image"
+          done
+
+      - name: Upload base image SARIF
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
+        with:
+          sarif_file: trivy-results/gc-agent-base.sarif
+          category: trivy-image/gc-agent-base
+
+      - name: Upload agent image SARIF
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
+        with:
+          sarif_file: trivy-results/gc-agent.sarif
+          category: trivy-image/gc-agent
+
+      - name: Upload controller image SARIF
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
+        with:
+          sarif_file: trivy-results/gc-controller.sarif
+          category: trivy-image/gc-controller
+
+      - name: Upload MCP mail image SARIF
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
+        with:
+          sarif_file: trivy-results/gc-mcp-mail.sarif
+          category: trivy-image/gc-mcp-mail
+
+      - name: Upload image scan artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trivy-image-results
+          path: trivy-results/
+          retention-days: 5

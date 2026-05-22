@@ -19,7 +19,7 @@ func TestAgentFieldSync(t *testing.T) {
 	// Add to this list with a comment explaining why.
 	excluded := map[string]string{
 		"Name":        "identity field, not overridable",
-		"Description": "display field for MC session creation UI, not overridable via patch",
+		"Description": "display field for real-world app session creation UI, not overridable via patch",
 		// Provider-level fields: set during ResolveProvider, not typically
 		// overridden per-rig. Agent-level overrides happen in the Agent
 		// struct itself (which feeds into ResolveProvider).
@@ -53,6 +53,8 @@ func TestAgentFieldSync(t *testing.T) {
 		"NamepoolNames":                "runtime-only, loaded from Namepool file at config load time",
 		"BindingName":                  "runtime-only, set during V2 import expansion, not user-configurable",
 		"PackName":                     "runtime-only, set during V2 import expansion, not user-configurable",
+		"source":                       "runtime-only unexported provenance enum (ga-tpfc); stamped at discovery, not patched or overridden",
+		"layout":                       "runtime-only unexported pack-layout enum (ga-9ogb); stamped at discovery, not patched or overridden",
 	}
 
 	// Fields on AgentOverride/AgentPatch that don't map 1:1 to Agent fields.
@@ -167,6 +169,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		Dir:                     "target-dir",
 		Name:                    "target-name",
 		WorkDir:                 strVal(".gc/agents/worker"),
+		TmuxAlias:               strVal("worker--{{.Rig}}"),
 		Scope:                   strVal("city"),
 		Suspended:               &trueVal,
 		Attach:                  &trueVal,
@@ -177,8 +180,11 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		Session:                 strVal("acp"),
 		Provider:                strVal("claude"),
 		StartCommand:            strVal("claude --dangerously"),
+		Lifecycle:               strVal(AgentLifecycleOneShot),
 		Nudge:                   strVal("wake up"),
 		IdleTimeout:             strVal("15m"),
+		MaxSessionAge:           strVal("5h"),
+		MaxSessionAgeJitter:     strVal("15m"),
 		SleepAfterIdle:          strVal("30s"),
 		InstallAgentHooks:       []string{"claude"},
 		HooksInstalled:          &trueVal,
@@ -188,7 +194,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		SessionLive:             []string{"live-cmd"},
 		OverlayDir:              strVal("overlays/test"),
 		DefaultSlingFormula:     strVal("mol-work"),
-		InjectFragments:         []string{"frag1"},
+		InjectFragments:         Fragments("frag1"),
 		AppendFragments:         []string{"append1"},
 		DependsOn:               []string{"other-agent"},
 		ResumeCommand:           strVal("claude --resume {{.SessionKey}}"),
@@ -314,6 +320,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		Agent:                   "target",
 		Dir:                     strVal("new-dir"),
 		WorkDir:                 strVal(".gc/agents/target"),
+		TmuxAlias:               strVal("target--{{.Rig}}"),
 		Scope:                   strVal("city"),
 		Suspended:               &trueVal,
 		Attach:                  &trueVal,
@@ -325,8 +332,11 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		Session:                 strVal("acp"),
 		Provider:                strVal("claude"),
 		StartCommand:            strVal("claude --dangerously"),
+		Lifecycle:               strVal(AgentLifecycleOneShot),
 		Nudge:                   strVal("wake up"),
 		IdleTimeout:             strVal("15m"),
+		MaxSessionAge:           strVal("5h"),
+		MaxSessionAgeJitter:     strVal("15m"),
 		SleepAfterIdle:          strVal("30s"),
 		InstallAgentHooks:       []string{"claude"},
 		HooksInstalled:          &trueVal,
@@ -336,7 +346,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		SessionLive:             []string{"live-cmd"},
 		OverlayDir:              strVal("overlays/test"),
 		DefaultSlingFormula:     strVal("mol-work"),
-		InjectFragments:         []string{"frag1"},
+		InjectFragments:         Fragments("frag1"),
 		AppendFragments:         []string{"append1"},
 		DependsOn:               []string{"other-agent"},
 		ResumeCommand:           strVal("claude --resume {{.SessionKey}}"),

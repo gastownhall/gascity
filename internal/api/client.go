@@ -12,15 +12,22 @@
 package api
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"reflect"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -64,10 +71,68 @@ func (e *clientInitError) Error() string {
 }
 func (e *clientInitError) Unwrap() error { return e.err }
 
+// cacheNotLiveError indicates the supervisor returned 503 because its
+// read-path CachingStore has not yet reached the live state. Read handlers
+// return this shape during startup/reconcile rather than serve stale or
+// empty data; the CLI classifies it as fallbackable so reads land on raw
+// bd instead.
+type cacheNotLiveError struct {
+	msg string
+}
+
+func (e *cacheNotLiveError) Error() string {
+	if e.msg == "" {
+		return "cache not yet live"
+	}
+	return e.msg
+}
+
+// serverError indicates a generic 5xx API response without a recognized
+// detail prefix (cache_not_live / read_only / not_found). Read-path callers
+// classify it as fallbackable via ShouldFallbackForRead so the CLI lands on
+// direct bd when the supervisor is unhealthy. Mutation callers continue to
+// surface it as a hard error (ShouldFallback returns false) because writes
+// with unknown server-side state are unsafe to silently retry locally.
+type serverError struct {
+	status int
+	msg    string
+}
+
+func (e *serverError) Error() string {
+	if e.msg == "" {
+		return fmt.Sprintf("API returned %d", e.status)
+	}
+	return e.msg
+}
+
+// Status reports the HTTP status carried by the server error (always 5xx).
+func (e *serverError) Status() int { return e.status }
+
+// IsServerError reports whether err originates from a 5xx API response the
+// read-path CLI should treat as fallbackable. Independent of ShouldFallback
+// so mutation paths retain their strict no-fallback-on-5xx semantics.
+func IsServerError(err error) bool {
+	var se *serverError
+	return errors.As(err, &se)
+}
+
+// ShouldFallbackForRead reports whether err indicates a read-path command
+// should fall back to direct bd. Read-path commands tolerate generic 5xx
+// server errors (IsServerError) in addition to the cases ShouldFallback
+// already covers.
+func ShouldFallbackForRead(err error) bool {
+	if ShouldFallback(err) {
+		return true
+	}
+	return IsServerError(err)
+}
+
 // ShouldFallback reports whether err indicates the CLI should fall back to
-// direct file mutation. This is true for transport-level failures (connection
-// refused, timeout), read-only API rejections (server bound to non-localhost,
-// mutations disabled), and client-init failures (malformed base URL).
+// direct file mutation (or, for reads, to raw bd). True for transport-level
+// failures (connection refused, timeout), read-only API rejections (server
+// bound to non-localhost, mutations disabled), client-init failures
+// (malformed base URL), and cache-not-live 503 responses during supervisor
+// priming.
 func ShouldFallback(err error) bool {
 	if IsConnError(err) {
 		return true
@@ -77,7 +142,38 @@ func ShouldFallback(err error) bool {
 		return true
 	}
 	var ci *clientInitError
-	return errors.As(err, &ci)
+	if errors.As(err, &ci) {
+		return true
+	}
+	var cnl *cacheNotLiveError
+	return errors.As(err, &cnl)
+}
+
+// FallbackReason returns a stable reason code for err when
+// ShouldFallbackForRead(err) is true. The set is closed: "cache-not-live",
+// "read-only", "client-init", "conn-refused". Generic 5xx server errors
+// collapse to "conn-refused" since from the CLI's read-path perspective an
+// unhealthy server is equivalent to an unreachable one. Returns "unknown"
+// for non-fallbackable errors so callers that invoke FallbackReason
+// unconditionally produce a token instead of panicking; gate on
+// ShouldFallbackForRead first to avoid that sentinel.
+func FallbackReason(err error) string {
+	var cnl *cacheNotLiveError
+	if errors.As(err, &cnl) {
+		return "cache-not-live"
+	}
+	var ro *readOnlyError
+	if errors.As(err, &ro) {
+		return "read-only"
+	}
+	var ci *clientInitError
+	if errors.As(err, &ci) {
+		return "client-init"
+	}
+	if IsConnError(err) || IsServerError(err) {
+		return "conn-refused"
+	}
+	return "unknown"
 }
 
 // Client is an HTTP client for the Gas City API server. It wraps the
@@ -85,27 +181,154 @@ func ShouldFallback(err error) bool {
 // when a controller is running.
 type Client struct {
 	cw       *genclient.ClientWithResponses
+	baseURL  string // stored for SSE stream connections
 	cityName string // non-empty for city-scoped clients; passed to every per-city call
 	initErr  error  // set when NewClient failed to build the transport (malformed baseURL, etc.)
 }
 
 const sessionMessageTimeout = 4 * time.Minute
 
-// SessionSubmitResponse is the domain-facing shape of POST
-// /v0/city/{cityName}/session/{id}/submit's 202 body. It intentionally
-// shadows genclient.SessionSubmitOutputBody instead of re-exporting it
-// so callers in cmd/gc do not depend on the generated-client package:
-//
-//  1. regenerating the client (different tool, renamed field) would
-//     otherwise force a cascading edit across every CLI command; and
-//  2. the wire uses a string for Intent but the domain uses the typed
-//     session.SubmitIntent — this wrapper does the conversion in one
-//     place and lets callers work with the strong type.
+// SessionSubmitResponse is the domain-facing shape of a session submit result.
 type SessionSubmitResponse struct {
 	Status string               `json:"status"`
 	ID     string               `json:"id"`
 	Queued bool                 `json:"queued"`
 	Intent session.SubmitIntent `json:"intent"`
+}
+
+// sseEvent is a parsed SSE frame from the event stream.
+type sseEvent struct {
+	Event string
+	Data  string
+}
+
+// sseEnvelope is the JSON envelope of a typed event on the stream.
+type sseEnvelope struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+// waitForEvent connects to the appropriate SSE stream, reads frames
+// until it finds an event matching the given request_id (in success or
+// failure payloads), and returns the envelope. The caller decodes the
+// typed payload.
+func (c *Client) waitForEvent(ctx context.Context, requestID string, successType, failOp, eventCursor string) (*sseEnvelope, error) {
+	streamURL := c.baseURL + "/v0/events/stream"
+	cursor := strings.TrimSpace(eventCursor)
+	if c.cityName != "" {
+		if cursor == "" {
+			cursor = "0"
+		}
+		streamURL = c.baseURL + "/v0/city/" + c.cityName + "/events/stream?after_seq=" + url.QueryEscape(cursor)
+	} else {
+		if cursor == "" {
+			cursor = "0"
+		}
+		streamURL += "?after_cursor=" + url.QueryEscape(cursor)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build SSE request: %w", err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("X-GC-Request", "true")
+
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("SSE connect: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		detail := strings.TrimSpace(string(body))
+		if detail == "" {
+			detail = resp.Status
+		}
+		return nil, fmt.Errorf("SSE connect failed: %s: %s", resp.Status, detail)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	var current sseEvent
+	for scanner.Scan() {
+		line := scanner.Text()
+		switch {
+		case strings.HasPrefix(line, "event:"):
+			current.Event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			data := strings.TrimPrefix(line, "data:")
+			data = strings.TrimPrefix(data, " ")
+			if current.Data == "" {
+				current.Data = data
+			} else {
+				current.Data += "\n" + data
+			}
+		case line == "":
+			if current.Data == "" {
+				current = sseEvent{}
+				continue
+			}
+			var env sseEnvelope
+			if err := json.Unmarshal([]byte(current.Data), &env); err != nil {
+				return nil, fmt.Errorf("decode SSE event: %w", err)
+			}
+			if env.Type == successType {
+				matches, err := payloadContainsRequestID(env.Payload, requestID)
+				if err != nil {
+					return nil, fmt.Errorf("decode %s payload: %w", successType, err)
+				}
+				if matches {
+					return &env, nil
+				}
+			}
+			if env.Type == events.RequestFailed {
+				matches, err := payloadMatchesRequest(env.Payload, requestID, failOp)
+				if err != nil {
+					return nil, fmt.Errorf("decode %s payload: %w", events.RequestFailed, err)
+				}
+				if matches {
+					return &env, nil
+				}
+			}
+			current = sseEvent{}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("SSE scan: %w", err)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	return nil, fmt.Errorf("SSE stream closed before event for %s arrived", requestID)
+}
+
+func payloadContainsRequestID(raw json.RawMessage, requestID string) (bool, error) {
+	// Success event types are per-operation, so the typed envelope selects the
+	// operation and the payload only needs the unique correlation ID.
+	var p struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return false, err
+	}
+	return p.RequestID == requestID, nil
+}
+
+func payloadMatchesRequest(raw json.RawMessage, requestID, operation string) (bool, error) {
+	var p struct {
+		RequestID string `json:"request_id"`
+		Operation string `json:"operation"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return false, err
+	}
+	return p.RequestID == requestID && p.Operation == operation, nil
 }
 
 // NewClient creates a new supervisor-scope API client targeting the
@@ -139,7 +362,7 @@ func newClient(baseURL, cityName string) *Client {
 		// every method rather than panicking.
 		return &Client{initErr: &clientInitError{err: err}}
 	}
-	return &Client{cw: cw, cityName: cityName}
+	return &Client{cw: cw, baseURL: baseURL, cityName: cityName}
 }
 
 // requireCityScope reports an error if the client was constructed as a
@@ -214,6 +437,427 @@ func (c *Client) ListServices() ([]workspacesvc.Status, error) {
 		out = append(out, workspaceStatusFromGen(item))
 	}
 	return out, nil
+}
+
+// GetOrderHistory fetches order run history via
+// GET /v0/city/{cityName}/orders/history. scopedName is required (the
+// handler returns 400 when empty); limit=0 selects the server default;
+// before is an optional RFC3339 upper bound. The CachedRead.AgeSeconds
+// field carries the supervisor CachingStore age so callers can surface
+// _cache_age_s on --json output and a staleness banner on human output.
+func (c *Client) GetOrderHistory(scopedName string, limit int, before string) (CachedRead[[]OrderHistoryView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]OrderHistoryView]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameOrdersHistoryParams{
+		ScopedName: scopedName,
+	}
+	if limit > 0 {
+		l := int64(limit)
+		params.Limit = &l
+	}
+	if before != "" {
+		params.Before = &before
+	}
+	resp, err := c.cw.GetV0CityByCityNameOrdersHistoryWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return CachedRead[[]OrderHistoryView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]OrderHistoryView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]OrderHistoryView]{}, err
+	}
+	return CachedRead[[]OrderHistoryView]{
+		Body:       orderHistoryFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// ListSessions fetches the current set of sessions via
+// GET /v0/city/{cityName}/sessions. The stateFilter and templateFilter
+// arguments correspond to the state/template query parameters (empty means
+// omit). peek controls the optional last-output preview. The
+// CachedRead.AgeSeconds field carries the supervisor CachingStore age from
+// the X-GC-Cache-Age-S response header so callers can surface _cache_age_s
+// on --json output and a staleness banner on human output.
+func (c *Client) ListSessions(stateFilter, templateFilter string, peek bool) (CachedRead[[]SessionView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]SessionView]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameSessionsParams{}
+	if stateFilter != "" {
+		params.State = &stateFilter
+	}
+	if templateFilter != "" {
+		params.Template = &templateFilter
+	}
+	if peek {
+		params.Peek = &peek
+	}
+	resp, err := c.cw.GetV0CityByCityNameSessionsWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]SessionView]{}, err
+	}
+	return CachedRead[[]SessionView]{
+		Body:       sessionsFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// GetSession fetches one session by ID or alias via
+// GET /v0/city/{cityName}/session/{id}. peek=true asks the server to include
+// the last-output preview; peekLines selects the preview line count (0 means
+// "use the server default").
+func (c *Client) GetSession(id string, peek bool, peekLines int) (CachedRead[SessionView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[SessionView]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameSessionByIdParams{}
+	if peek {
+		params.Peek = &peek
+	}
+	if peekLines > 0 {
+		pl := int64(peekLines)
+		params.PeekLines = &pl
+	}
+	resp, err := c.cw.GetV0CityByCityNameSessionByIdWithResponse(context.Background(), c.cityName, id, params)
+	if err != nil {
+		return CachedRead[SessionView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[SessionView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[SessionView]{}, err
+	}
+	if resp.JSON200 == nil {
+		return CachedRead[SessionView]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return CachedRead[SessionView]{
+		Body:       sessionViewFromGen(*resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// ListRigs fetches the current set of configured rigs via
+// GET /v0/city/{cityName}/rigs. The CachedRead.AgeSeconds field carries the
+// supervisor CachingStore age from the X-GC-Cache-Age-S response header so
+// callers can surface _cache_age_s on --json output and a staleness banner
+// on human output.
+func (c *Client) ListRigs() (CachedRead[[]RigView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]RigView]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameRigsWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameRigsParams{})
+	if err != nil {
+		return CachedRead[[]RigView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]RigView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]RigView]{}, err
+	}
+	return CachedRead[[]RigView]{
+		Body:       rigsFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// ListConvoys fetches the open convoys across all rigs via
+// GET /v0/city/{cityName}/convoys. The CachedRead.AgeSeconds field carries the
+// supervisor CachingStore age from the X-GC-Cache-Age-S response header so
+// callers can surface _cache_age_s on --json output and a staleness banner
+// on human output.
+func (c *Client) ListConvoys() (CachedRead[[]beads.Bead], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameConvoysWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameConvoysParams{})
+	if err != nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	return CachedRead[[]beads.Bead]{
+		Body:       convoysFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// GetConvoy fetches one convoy by ID via
+// GET /v0/city/{cityName}/convoy/{id}. Returns the convoy bead, its direct
+// children, and progress counts. Workflow/graph convoys produce an empty
+// Convoy (ID == "") — callers should treat that as "not a simple convoy" and
+// fall back to the local path.
+func (c *Client) GetConvoy(id string) (CachedRead[ConvoyStatusView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[ConvoyStatusView]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameConvoyByIdWithResponse(context.Background(), c.cityName, id)
+	if err != nil {
+		return CachedRead[ConvoyStatusView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[ConvoyStatusView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[ConvoyStatusView]{}, err
+	}
+	if resp.JSON200 == nil {
+		return CachedRead[ConvoyStatusView]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return CachedRead[ConvoyStatusView]{
+		Body:       convoyStatusFromGen(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// CheckConvoy fetches one convoy's completion status via
+// GET /v0/city/{cityName}/convoy/{id}/check. Returns child totals and a
+// Complete flag that is true when total > 0 and all children are closed.
+func (c *Client) CheckConvoy(id string) (CachedRead[ConvoyCheckView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[ConvoyCheckView]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameConvoyByIdCheckWithResponse(context.Background(), c.cityName, id)
+	if err != nil {
+		return CachedRead[ConvoyCheckView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[ConvoyCheckView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[ConvoyCheckView]{}, err
+	}
+	if resp.JSON200 == nil {
+		return CachedRead[ConvoyCheckView]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return CachedRead[ConvoyCheckView]{
+		Body:       convoyCheckFromGen(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// ListBeadsOpts is the optional filter set for ListBeads. All fields are
+// zero-valued by default; the server falls back to its own defaults when a
+// field is empty. All mirrors the CLI --all flag and maps to the server's
+// IncludeClosed query semantic.
+type ListBeadsOpts struct {
+	Status   string
+	Type     string
+	Label    string
+	Assignee string
+	Rig      string
+	Limit    int
+	All      bool
+}
+
+// ListBeads fetches beads across all rigs via
+// GET /v0/city/{cityName}/beads. Server-side filters mirror the BeadListInput
+// query parameters. The CachedRead.AgeSeconds field carries the supervisor
+// CachingStore age from the X-GC-Cache-Age-S response header so callers can
+// surface _cache_age_s on --json output and a staleness banner on human
+// output.
+func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameBeadsParams{}
+	if opts.Status != "" {
+		params.Status = &opts.Status
+	}
+	if opts.Type != "" {
+		params.Type = &opts.Type
+	}
+	if opts.Label != "" {
+		params.Label = &opts.Label
+	}
+	if opts.Assignee != "" {
+		params.Assignee = &opts.Assignee
+	}
+	if opts.Rig != "" {
+		params.Rig = &opts.Rig
+	}
+	if opts.Limit > 0 {
+		lim := int64(opts.Limit)
+		params.Limit = &lim
+	}
+	if opts.All {
+		t := true
+		params.All = &t
+	}
+	resp, err := c.cw.GetV0CityByCityNameBeadsWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	return CachedRead[[]beads.Bead]{
+		Body:       beadsFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// GetBead fetches one bead by ID via
+// GET /v0/city/{cityName}/bead/{id}. Returns the bead detail with cache age
+// so callers can attach _cache_age_s (JSON) or a staleness banner (human).
+func (c *Client) GetBead(id string) (CachedRead[beads.Bead], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[beads.Bead]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameBeadByIdWithResponse(context.Background(), c.cityName, id)
+	if err != nil {
+		return CachedRead[beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[beads.Bead]{}, err
+	}
+	if resp.JSON200 == nil {
+		return CachedRead[beads.Bead]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return CachedRead[beads.Bead]{
+		Body:       beadFromGenPtr(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// GetStatus fetches the city-wide status snapshot via
+// GET /v0/city/{cityName}/status. The CachedRead.AgeSeconds field carries
+// the supervisor CachingStore age from the X-GC-Cache-Age-S response header
+// so callers can surface _cache_age_s on --json output and a staleness
+// banner on human output.
+func (c *Client) GetStatus() (CachedRead[StatusView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[StatusView]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameStatusWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameStatusParams{})
+	if err != nil {
+		return CachedRead[StatusView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[StatusView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[StatusView]{}, err
+	}
+	return CachedRead[StatusView]{
+		Body:       statusViewFromGen(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// ListMailInbox fetches unread messages for the given agent recipient via
+// GET /v0/city/{cityName}/mail. An empty agent lets the server choose the
+// default caller identity (same resolution path the CLI would take locally).
+// rig narrows the query to a single rig's provider when set. The
+// CachedRead.AgeSeconds field carries the supervisor CachingStore age so
+// callers can surface _cache_age_s on --json output and a staleness banner
+// on human output.
+func (c *Client) ListMailInbox(agent, rig string) (CachedRead[[]mail.Message], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]mail.Message]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameMailParams{}
+	if agent != "" {
+		params.Agent = &agent
+	}
+	if rig != "" {
+		params.Rig = &rig
+	}
+	resp, err := c.cw.GetV0CityByCityNameMailWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return CachedRead[[]mail.Message]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]mail.Message]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]mail.Message]{}, err
+	}
+	return CachedRead[[]mail.Message]{
+		Body:       mailMessagesFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// GetMail fetches a single message by ID via GET /v0/city/{cityName}/mail/{id}.
+// rig is an optional hint for O(1) lookup when the caller already knows which
+// rig owns the message.
+func (c *Client) GetMail(id, rig string) (CachedRead[mail.Message], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[mail.Message]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameMailByIdParams{}
+	if rig != "" {
+		params.Rig = &rig
+	}
+	resp, err := c.cw.GetV0CityByCityNameMailByIdWithResponse(context.Background(), c.cityName, id, params)
+	if err != nil {
+		return CachedRead[mail.Message]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[mail.Message]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[mail.Message]{}, err
+	}
+	if resp.JSON200 == nil {
+		return CachedRead[mail.Message]{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return CachedRead[mail.Message]{
+		Body:       mailMessageFromGen(*resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// CountMail fetches total/unread message counts via
+// GET /v0/city/{cityName}/mail/count. An empty agent lets the server choose
+// the default caller identity; rig narrows to a single rig's provider.
+func (c *Client) CountMail(agent, rig string) (CachedRead[MailCountView], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[MailCountView]{}, err
+	}
+	params := &genclient.GetV0CityByCityNameMailCountParams{}
+	if agent != "" {
+		params.Agent = &agent
+	}
+	if rig != "" {
+		params.Rig = &rig
+	}
+	resp, err := c.cw.GetV0CityByCityNameMailCountWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return CachedRead[MailCountView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[MailCountView]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[MailCountView]{}, err
+	}
+	return CachedRead[MailCountView]{
+		Body:       mailCountFromGen(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
 }
 
 // GetService fetches one current workspace service status.
@@ -321,8 +965,9 @@ func (c *Client) KillSession(id string) error {
 	return checkMutation(resp, err)
 }
 
-// SendSessionMessage delivers a message to a session via the compatibility
-// POST /v0/city/{cityName}/session/{id}/messages endpoint.
+// SendSessionMessage delivers a message to a session via the async
+// POST /v0/city/{cityName}/session/{id}/messages endpoint. Internally
+// handles the async protocol: POST → 202 + request_id → SSE event.
 func (c *Client) SendSessionMessage(id, message string) error {
 	if err := c.requireCityScope(); err != nil {
 		return err
@@ -332,11 +977,34 @@ func (c *Client) SendSessionMessage(id, message string) error {
 	resp, err := c.cw.SendSessionMessageWithResponse(ctx, c.cityName, id, nil, genclient.SendSessionMessageJSONRequestBody{
 		Message: message,
 	})
-	return checkMutation(resp, err)
+	if err != nil {
+		return &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if err := checkMutation(resp, err); err != nil {
+		return err
+	}
+	if resp.JSON202 == nil {
+		return fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	requestID := resp.JSON202.RequestId
+
+	env, err := c.waitForEvent(ctx, requestID, events.RequestResultSessionMessage, RequestOperationSessionMessage, resp.JSON202.EventCursor)
+	if err != nil {
+		return err
+	}
+	if env.Type == events.RequestFailed {
+		var p RequestFailedPayload
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			return fmt.Errorf("decode message failure: %w", err)
+		}
+		return fmt.Errorf("message failed: %s: %s", p.ErrorCode, p.ErrorMessage)
+	}
+	return nil
 }
 
 // SubmitSession sends a semantic submit request to a session. The id may
-// be either a bead ID or a resolvable session alias/name.
+// be either a bead ID or a resolvable session alias/name. Internally
+// handles the async protocol: POST → 202 + request_id → SSE event.
 func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) (SessionSubmitResponse, error) {
 	if err := c.requireCityScope(); err != nil {
 		return SessionSubmitResponse{}, err
@@ -356,19 +1024,34 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
 		return SessionSubmitResponse{}, err
 	}
-	// SubmitSession returns 202 Accepted on success.
 	if resp.JSON202 == nil {
 		return SessionSubmitResponse{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
 	}
-	out := SessionSubmitResponse{
-		Status: resp.JSON202.Status,
-		ID:     resp.JSON202.Id,
-		Queued: resp.JSON202.Queued,
+	requestID := resp.JSON202.RequestId
+
+	ctx, cancel := context.WithTimeout(context.Background(), sessionMessageTimeout)
+	defer cancel()
+	env, err := c.waitForEvent(ctx, requestID, events.RequestResultSessionSubmit, RequestOperationSessionSubmit, resp.JSON202.EventCursor)
+	if err != nil {
+		return SessionSubmitResponse{}, err
 	}
-	if resp.JSON202.Intent != "" {
-		out.Intent = session.SubmitIntent(resp.JSON202.Intent)
+	if env.Type == events.RequestFailed {
+		var p RequestFailedPayload
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			return SessionSubmitResponse{}, fmt.Errorf("decode submit failure: %w", err)
+		}
+		return SessionSubmitResponse{}, fmt.Errorf("submit failed: %s: %s", p.ErrorCode, p.ErrorMessage)
 	}
-	return out, nil
+	var p SessionSubmitSucceededPayload
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		return SessionSubmitResponse{}, fmt.Errorf("decode submit result: %w", err)
+	}
+	return SessionSubmitResponse{
+		Status: "accepted",
+		ID:     p.SessionID,
+		Queued: p.Queued,
+		Intent: session.SubmitIntent(p.Intent),
+	}, nil
 }
 
 var errClientUninitialized = errors.New("api client not initialized")
@@ -395,7 +1078,7 @@ func isNil(v any) bool {
 		return true
 	}
 	rv := reflect.ValueOf(v)
-	return rv.Kind() == reflect.Ptr && rv.IsNil()
+	return rv.Kind() == reflect.Pointer && rv.IsNil()
 }
 
 // pdOf extracts the generated client's decoded Problem Details pointer
@@ -414,7 +1097,7 @@ func pdOf(resp any) *genclient.ErrorModel {
 		return nil
 	}
 	rv := reflect.ValueOf(resp)
-	if rv.Kind() == reflect.Ptr {
+	if rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
 			return nil
 		}
@@ -455,6 +1138,27 @@ func apiErrorFromResponse(status int, pd *genclient.ErrorModel) error {
 			msg = "mutations disabled (read-only server)"
 		}
 		return &readOnlyError{msg: msg}
+	}
+	if status == http.StatusServiceUnavailable && strings.HasPrefix(detail, "cache_not_live") {
+		msg := detail
+		if msg == "" {
+			msg = "cache not yet live"
+		}
+		return &cacheNotLiveError{msg: msg}
+	}
+	// Generic 5xx (500/501/502/504/... plus 503 without a cache_not_live
+	// prefix) wraps into a serverError so read-path callers can classify it
+	// as fallbackable via ShouldFallbackForRead. Mutation callers continue
+	// to see it as non-fallbackable (ShouldFallback excludes it).
+	if status >= 500 {
+		msg := detail
+		if msg == "" {
+			msg = title
+		}
+		if msg == "" {
+			return &serverError{status: status}
+		}
+		return &serverError{status: status, msg: fmt.Sprintf("API error: %s", msg)}
 	}
 	if detail != "" {
 		return fmt.Errorf("API error: %s", detail)

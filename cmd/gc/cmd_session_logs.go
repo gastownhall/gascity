@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -13,12 +14,14 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 	"github.com/spf13/cobra"
 )
 
 func newSessionLogsCmd(stdout, stderr io.Writer) *cobra.Command {
 	var follow bool
 	var tail int
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "logs <session>",
 		Short: "Show session logs for a session",
@@ -46,19 +49,21 @@ Use -f to follow new messages as they arrive.`,
   gc session logs s-gc-123 -f`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionLogs(args, follow, tail, stdout, stderr) != 0 {
+			if cmdSessionLogs(args, follow, tail, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
+		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow new messages as they arrive")
 	cmd.Flags().IntVar(&tail, "tail", 10, "Number of most recent transcript entries to show (0 = all; compact dividers count as entries)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL result for the bounded snapshot")
 	return cmd
 }
 
 // cmdSessionLogs is the CLI entry point for viewing session logs.
-func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writer) int {
+func cmdSessionLogs(args []string, follow bool, tail int, jsonOutput bool, stdout, stderr io.Writer) int {
 	identifier := args[0]
 
 	cityPath, err := resolveCity()
@@ -81,7 +86,12 @@ func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writ
 		ok       bool
 	)
 	if err == nil && store != nil {
-		path, provider, ok = resolveStoredSessionLogSource(cityPath, cfg, store, identifier, searchPaths)
+		var diagnostic string
+		path, provider, ok, diagnostic = resolveStoredSessionLogSource(cityPath, cfg, store, identifier, searchPaths)
+		if ok && path == "" && diagnostic != "" {
+			fmt.Fprintf(stderr, "gc session logs: %s\n", diagnostic) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 	if !ok {
 		workDir, found := resolveConfiguredSessionLogContext(cityPath, cfg, identifier)
@@ -96,6 +106,9 @@ func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writ
 		return 1
 	}
 
+	if jsonOutput {
+		return doSessionLogsJSON(path, provider, identifier, follow, tail, stdout, stderr)
+	}
 	return doSessionLogs(path, provider, follow, tail, stdout, stderr)
 }
 
@@ -107,27 +120,49 @@ func resolveSessionLogPath(searchPaths []string, logCtx sessionLogContext) strin
 	return factory.DiscoverTranscript(logCtx.provider, logCtx.workDir, logCtx.sessionKey)
 }
 
-func resolveStoredSessionLogSource(cityPath string, cfg *config.City, store beads.Store, identifier string, searchPaths []string) (string, string, bool) {
+func resolveStoredSessionLogSource(cityPath string, cfg *config.City, store beads.Store, identifier string, searchPaths []string) (string, string, bool, string) {
 	logCtx, ok := resolveSessionLogContext(cityPath, cfg, store, identifier)
 	if !ok {
-		return "", "", false
+		return "", "", false, ""
 	}
 	if logCtx.sessionID != "" {
 		handle, err := workerHandleForSessionWithConfig(cityPath, store, newSessionProvider(), cfg, logCtx.sessionID)
 		if err == nil {
 			if path, pathErr := handle.TranscriptPath(context.Background()); pathErr == nil && strings.TrimSpace(path) != "" {
-				return path, logCtx.provider, true
+				return path, logCtx.provider, true, ""
 			}
 		}
 	}
-	path := resolveSessionLogPath(searchPaths, logCtx)
-	if path == "" && canFallbackStoredSessionLogByWorkDir(store, logCtx) {
+	path := ""
+	fallbackAllowed := canFallbackStoredSessionLogByWorkDir(store, logCtx)
+	if strings.TrimSpace(logCtx.sessionKey) != "" {
+		path = resolveSessionKeyedLogPath(searchPaths, logCtx)
+		if path == "" && fallbackAllowed {
+			path = resolveSessionLogPath(searchPaths, logCtx)
+		}
+	} else if fallbackAllowed {
+		path = resolveSessionLogPath(searchPaths, logCtx)
+	}
+	if !sessionLogPathFreshEnough(path, logCtx.createdAt) {
+		path = ""
+	}
+	if path == "" && fallbackAllowed {
 		factory, err := worker.NewFactory(worker.FactoryConfig{SearchPaths: searchPaths})
 		if err == nil {
 			path = factory.DiscoverWorkDirTranscript(logCtx.provider, logCtx.workDir)
 		}
 	}
-	return path, logCtx.provider, true
+	if !sessionLogPathFreshEnough(path, logCtx.createdAt) {
+		path = ""
+	}
+	if path == "" && !fallbackAllowed {
+		return "", logCtx.provider, true, ambiguousSessionLogDiagnostic(logCtx)
+	}
+	return path, logCtx.provider, true, ""
+}
+
+func resolveSessionKeyedLogPath(searchPaths []string, logCtx sessionLogContext) string {
+	return workertranscript.DiscoverKeyedPath(searchPaths, logCtx.provider, logCtx.workDir, logCtx.sessionKey)
 }
 
 type sessionLogContext struct {
@@ -135,6 +170,7 @@ type sessionLogContext struct {
 	workDir    string
 	sessionKey string
 	provider   string
+	createdAt  time.Time
 }
 
 func resolveSessionLogContext(cityPath string, cfg *config.City, store beads.Store, identifier string) (sessionLogContext, bool) {
@@ -162,19 +198,44 @@ func resolveSessionLogContext(cityPath string, cfg *config.City, store beads.Sto
 		workDir:    workDir,
 		sessionKey: strings.TrimSpace(b.Metadata["session_key"]),
 		provider:   provider,
+		createdAt:  b.CreatedAt,
 	}, true
+}
+
+func sessionLogPathFreshEnough(path string, sessionCreatedAt time.Time) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	if sessionCreatedAt.IsZero() {
+		return true
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return !info.ModTime().Before(sessionCreatedAt.Add(-2 * time.Second))
 }
 
 func canFallbackStoredSessionLogByWorkDir(store beads.Store, logCtx sessionLogContext) bool {
 	if store == nil || strings.TrimSpace(logCtx.sessionID) == "" || strings.TrimSpace(logCtx.workDir) == "" {
 		return false
 	}
-	all, err := store.ListByLabel(sessionpkg.LabelSession, 0)
+	all, err := sessionLogFallbackCandidates(store, logCtx.workDir, logCtx.provider)
 	if err != nil {
 		return false
 	}
+	targetLive := false
+	for _, b := range all {
+		if b.ID == logCtx.sessionID {
+			targetLive = sessionLogFallbackCandidateLive(b)
+			break
+		}
+	}
 	matches := 0
 	for _, b := range all {
+		if !sessionpkg.IsSessionBeadOrRepairable(b) {
+			continue
+		}
 		if strings.TrimSpace(b.Metadata["work_dir"]) != logCtx.workDir {
 			continue
 		}
@@ -185,12 +246,73 @@ func canFallbackStoredSessionLogByWorkDir(store beads.Store, logCtx sessionLogCo
 		if logCtx.provider != "" && provider != "" && provider != logCtx.provider {
 			continue
 		}
+		if targetLive && b.ID != logCtx.sessionID && !sessionLogFallbackCandidateLive(b) {
+			continue
+		}
 		matches++
 		if matches > 1 {
 			return false
 		}
 	}
 	return matches == 1
+}
+
+func sessionLogFallbackCandidates(store beads.Store, workDir, provider string) ([]beads.Bead, error) {
+	candidates := make(map[string]beads.Bead)
+	add := func(filters map[string]string) error {
+		found, err := store.ListByMetadata(filters, 0)
+		if err != nil {
+			return err
+		}
+		for _, b := range found {
+			candidates[b.ID] = b
+		}
+		return nil
+	}
+	if strings.TrimSpace(provider) == "" {
+		if err := add(map[string]string{"work_dir": workDir}); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := add(map[string]string{"work_dir": workDir, "provider": provider}); err != nil {
+			return nil, err
+		}
+		if err := add(map[string]string{"work_dir": workDir, "provider_kind": provider}); err != nil {
+			return nil, err
+		}
+	}
+	out := make([]beads.Bead, 0, len(candidates))
+	for _, b := range candidates {
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+func sessionLogFallbackCandidateLive(b beads.Bead) bool {
+	if b.Status == "closed" {
+		return false
+	}
+	switch sessionpkg.State(strings.TrimSpace(b.Metadata["state"])) {
+	case sessionpkg.StateActive, sessionpkg.StateAwake, sessionpkg.StateCreating, sessionpkg.StateDraining:
+		return true
+	default:
+		return false
+	}
+}
+
+func ambiguousSessionLogDiagnostic(logCtx sessionLogContext) string {
+	sessionID := strings.TrimSpace(logCtx.sessionID)
+	if sessionID == "" {
+		sessionID = "requested session"
+	}
+	provider := strings.TrimSpace(logCtx.provider)
+	if provider == "" {
+		provider = "provider"
+	}
+	if strings.TrimSpace(logCtx.sessionKey) == "" {
+		return fmt.Sprintf("session %q has no session_key and workdir fallback is ambiguous for %s work_dir %q", sessionID, provider, logCtx.workDir)
+	}
+	return fmt.Sprintf("no exact transcript found for session %q and workdir fallback is ambiguous for %s work_dir %q", sessionID, provider, logCtx.workDir)
 }
 
 func resolveConfiguredSessionLogContext(cityPath string, cfg *config.City, identifier string) (string, bool) {
@@ -245,6 +367,149 @@ func doSessionLogs(path, provider string, follow bool, tail int, stdout, stderr 
 }
 
 type sessionLogsReader func(factory *worker.Factory, provider, path string) (*worker.TranscriptSession, error)
+
+type sessionLogsJSONResult struct {
+	SchemaVersion  string                `json:"schema_version"`
+	Target         string                `json:"target"`
+	Provider       string                `json:"provider,omitempty"`
+	TranscriptPath string                `json:"transcript_path"`
+	Tail           int                   `json:"tail"`
+	EntryCount     int                   `json:"entry_count"`
+	Entries        []sessionLogEntryJSON `json:"entries"`
+}
+
+type sessionLogEntryJSON struct {
+	UUID            string                       `json:"uuid,omitempty"`
+	ParentUUID      string                       `json:"parent_uuid,omitempty"`
+	Type            string                       `json:"type"`
+	Subtype         string                       `json:"subtype,omitempty"`
+	Role            string                       `json:"role,omitempty"`
+	Timestamp       string                       `json:"timestamp,omitempty"`
+	CompactBoundary bool                         `json:"compact_boundary,omitempty"`
+	Text            string                       `json:"text,omitempty"`
+	Blocks          []transcriptContentBlockJSON `json:"blocks,omitempty"`
+	Message         json.RawMessage              `json:"message,omitempty"`
+}
+
+type transcriptContentBlockJSON struct {
+	Type      string          `json:"type"`
+	ID        string          `json:"id,omitempty"`
+	RequestID string          `json:"request_id,omitempty"`
+	Kind      string          `json:"kind,omitempty"`
+	State     string          `json:"state,omitempty"`
+	Text      string          `json:"text,omitempty"`
+	Prompt    string          `json:"prompt,omitempty"`
+	Options   []string        `json:"options,omitempty"`
+	Action    string          `json:"action,omitempty"`
+	Metadata  json.RawMessage `json:"metadata,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   json.RawMessage `json:"content,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
+}
+
+func doSessionLogsJSON(path, provider, target string, follow bool, tail int, stdout, stderr io.Writer) int {
+	if follow {
+		fmt.Fprintln(stderr, "gc session logs: --json is only supported for bounded snapshots; omit --follow") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if tail < 0 {
+		fmt.Fprintln(stderr, "gc session logs: --tail must be >= 0") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	factory, err := worker.NewFactory(worker.FactoryConfig{})
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session logs: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return runSessionLogsJSON(factory, provider, path, target, tail, stdout, stderr, readSessionFile)
+}
+
+func runSessionLogsJSON(factory *worker.Factory, provider, path, target string, tail int, stdout, stderr io.Writer, read sessionLogsReader) int {
+	sess, readErr := read(factory, provider, path)
+	if readErr != nil {
+		fmt.Fprintf(stderr, "gc session logs: %v\n", readErr) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	messages := tailMessages(sess.Messages, tail)
+	entries := make([]sessionLogEntryJSON, 0, len(messages))
+	for _, msg := range messages {
+		entries = append(entries, sessionLogEntryToJSON(msg))
+	}
+	if err := writeCLIJSONLine(stdout, sessionLogsJSONResult{
+		SchemaVersion:  "1",
+		Target:         target,
+		Provider:       provider,
+		TranscriptPath: path,
+		Tail:           tail,
+		EntryCount:     len(entries),
+		Entries:        entries,
+	}); err != nil {
+		fmt.Fprintf(stderr, "gc session logs: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return 0
+}
+
+func sessionLogEntryToJSON(e *worker.TranscriptEntry) sessionLogEntryJSON {
+	if e == nil {
+		return sessionLogEntryJSON{}
+	}
+	entry := sessionLogEntryJSON{
+		UUID:            e.UUID,
+		ParentUUID:      e.ParentUUID,
+		Type:            e.Type,
+		Subtype:         e.Subtype,
+		CompactBoundary: e.IsCompactBoundary(),
+	}
+	if !e.Timestamp.IsZero() {
+		entry.Timestamp = e.Timestamp.Format(time.RFC3339Nano)
+	}
+	if len(e.Message) > 0 {
+		entry.Message = e.Message
+	}
+	mc := resolveMessage(e.Message)
+	if mc == nil {
+		return entry
+	}
+	entry.Role = mc.Role
+	var text string
+	if json.Unmarshal(mc.Content, &text) == nil {
+		entry.Text = text
+		return entry
+	}
+	var blocks []worker.TranscriptContentBlock
+	if json.Unmarshal(mc.Content, &blocks) == nil && len(blocks) > 0 {
+		entry.Blocks = transcriptContentBlocksToJSON(blocks)
+	}
+	return entry
+}
+
+func transcriptContentBlocksToJSON(blocks []worker.TranscriptContentBlock) []transcriptContentBlockJSON {
+	out := make([]transcriptContentBlockJSON, 0, len(blocks))
+	for _, block := range blocks {
+		out = append(out, transcriptContentBlockJSON{
+			Type:      block.Type,
+			ID:        block.ID,
+			RequestID: block.RequestID,
+			Kind:      block.Kind,
+			State:     block.State,
+			Text:      block.Text,
+			Prompt:    block.Prompt,
+			Options:   block.Options,
+			Action:    block.Action,
+			Metadata:  block.Metadata,
+			Name:      block.Name,
+			Input:     block.Input,
+			ToolUseID: block.ToolUseID,
+			Content:   block.Content,
+			IsError:   block.IsError,
+		})
+	}
+	return out
+}
 
 func runSessionLogs(factory *worker.Factory, provider, path string, follow bool, tail int, stdout, stderr io.Writer, sleep func(time.Duration), read sessionLogsReader) int {
 	// Always read the full session; apply tail trimming locally so semantics
@@ -364,7 +629,7 @@ func printLogEntry(w io.Writer, e *worker.TranscriptEntry) {
 
 	mc := resolveMessage(e.Message)
 	if mc == nil {
-		// Unparseable message — print raw truncated.
+		// Unparseable message; print raw truncated.
 		if len(e.Message) > 0 {
 			raw := string(e.Message)
 			if len(raw) > 200 {

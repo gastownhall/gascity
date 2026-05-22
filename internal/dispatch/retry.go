@@ -140,6 +140,9 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 			"gc.retry_state":  "spawning",
 			"gc.next_attempt": strconv.Itoa(nextAttempt),
 		}); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
 			return ControlResult{}, fmt.Errorf("%s: recording retry spawn start: %w", bead.ID, err)
 		}
 	case "spawning":
@@ -169,12 +172,20 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 
 	if bead.Metadata["gc.retry_state"] != "spawned" {
 		if err := appendRetryAttempt(store, logicalID, subject, bead, nextAttempt, opts.CityPath); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
 			return ControlResult{}, fmt.Errorf("%s: appending retry attempt: %w", bead.ID, err)
 		}
-		if err := store.SetMetadataBatch(bead.ID, map[string]string{
+		spawnedMetadata := map[string]string{
 			"gc.retry_state":  "spawned",
 			"gc.next_attempt": strconv.Itoa(nextAttempt),
-		}); err != nil {
+		}
+		clearControllerSpawnErrorMetadata(spawnedMetadata)
+		if err := store.SetMetadataBatch(bead.ID, spawnedMetadata); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
 			return ControlResult{}, fmt.Errorf("%s: recording retry spawn complete: %w", bead.ID, err)
 		}
 	}
@@ -230,7 +241,10 @@ func classifyRetryAttempt(subject beads.Bead) retryEvalResult {
 	switch outcome {
 	case "pass":
 		if strings.TrimSpace(subject.Metadata["gc.failure_class"]) != "" || strings.TrimSpace(subject.Metadata["gc.failure_reason"]) != "" {
-			return retryEvalResult{Outcome: "hard", Reason: "invalid_worker_result_contract"}
+			return retryEvalResult{Outcome: "transient", Reason: "pass_with_failure_metadata"}
+		}
+		if strings.TrimSpace(subject.Metadata["gc.output_json_required"]) == "true" && strings.TrimSpace(subject.Metadata["gc.output_json"]) == "" {
+			return retryEvalResult{Outcome: "transient", Reason: "missing_required_output_json"}
 		}
 		return retryEvalResult{Outcome: "pass"}
 	case "fail":
@@ -240,12 +254,12 @@ func classifyRetryAttempt(subject beads.Bead) retryEvalResult {
 		case "hard", "":
 			return retryEvalResult{Outcome: "hard", Reason: retryFailureReason(subject)}
 		default:
-			return retryEvalResult{Outcome: "hard", Reason: "invalid_worker_result_contract"}
+			return retryEvalResult{Outcome: "transient", Reason: "unknown_failure_class"}
 		}
 	case "":
-		return retryEvalResult{Outcome: "hard", Reason: "invalid_worker_result_contract"}
+		return retryEvalResult{Outcome: "transient", Reason: "missing_outcome"}
 	default:
-		return retryEvalResult{Outcome: "hard", Reason: "invalid_worker_result_contract"}
+		return retryEvalResult{Outcome: "transient", Reason: "invalid_outcome_value"}
 	}
 }
 

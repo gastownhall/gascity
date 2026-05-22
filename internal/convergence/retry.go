@@ -49,6 +49,7 @@ func (h *Handler) RetryHandler(_ context.Context, sourceBeadID, _ string, maxIte
 	gateTimeout := meta[FieldGateTimeout]
 	gateTimeoutAction := meta[FieldGateTimeoutAction]
 	cityPath := meta[FieldCityPath]
+	rig := meta[FieldRig]
 	evaluatePrompt := meta[FieldEvaluatePrompt]
 	vars := ExtractVars(meta)
 
@@ -74,7 +75,7 @@ func (h *Handler) RetryHandler(_ context.Context, sourceBeadID, _ string, maxIte
 	// reconciler does not try to resume an incomplete convergence loop.
 	closeBead := func(cause error) error {
 		_ = h.Store.SetMetadata(newBeadID, FieldState, StateTerminated)
-		_ = h.Store.CloseBead(newBeadID)
+		_ = h.Store.CloseBead(newBeadID, CloseReasonRetryRollback)
 		return cause
 	}
 
@@ -93,6 +94,7 @@ func (h *Handler) RetryHandler(_ context.Context, sourceBeadID, _ string, maxIte
 		{FieldGateTimeoutAction, gateTimeoutAction},
 		{FieldMaxIterations, EncodeInt(maxIterations)},
 		{FieldCityPath, cityPath},
+		{FieldRig, rig},
 		{FieldEvaluatePrompt, evaluatePrompt},
 		{FieldRetrySource, sourceBeadID},
 		{FieldState, StateActive},
