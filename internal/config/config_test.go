@@ -862,11 +862,11 @@ func TestGastownCity(t *testing.T) {
 	if c.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", c.Workspace.Provider, "claude")
 	}
-	if len(c.Imports) != 1 || c.Imports["gastown"].Source != ".gc/system/packs/gastown" {
-		t.Errorf("Imports = %v, want gastown=.gc/system/packs/gastown", c.Imports)
+	if len(c.Imports) != 1 || c.Imports["gastown"].Source != PublicGastownPackSource || c.Imports["gastown"].Version != PublicGastownPackVersion {
+		t.Errorf("Imports = %v, want gastown=%s %s", c.Imports, PublicGastownPackSource, PublicGastownPackVersion)
 	}
-	if len(c.DefaultRigImports) != 1 || c.DefaultRigImports["gastown"].Source != ".gc/system/packs/gastown" {
-		t.Errorf("DefaultRigImports = %v, want gastown=.gc/system/packs/gastown", c.DefaultRigImports)
+	if len(c.DefaultRigImports) != 1 || c.DefaultRigImports["gastown"].Source != PublicGastownPackSource || c.DefaultRigImports["gastown"].Version != PublicGastownPackVersion {
+		t.Errorf("DefaultRigImports = %v, want gastown=%s %s", c.DefaultRigImports, PublicGastownPackSource, PublicGastownPackVersion)
 	}
 	if len(c.Workspace.GlobalFragments) != 2 {
 		t.Errorf("Workspace.GlobalFragments = %v, want 2 entries", c.Workspace.GlobalFragments)
@@ -914,8 +914,8 @@ func TestGastownCityRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(Marshal output): %v", err)
 	}
-	if len(got.Imports) != 1 || got.Imports["gastown"].Source != ".gc/system/packs/gastown" {
-		t.Errorf("round-trip Imports = %v, want gastown=.gc/system/packs/gastown", got.Imports)
+	if len(got.Imports) != 1 || got.Imports["gastown"].Source != PublicGastownPackSource || got.Imports["gastown"].Version != PublicGastownPackVersion {
+		t.Errorf("round-trip Imports = %v, want gastown=%s %s", got.Imports, PublicGastownPackSource, PublicGastownPackVersion)
 	}
 	if got.Workspace.Provider != "claude" {
 		t.Errorf("round-trip Provider = %q, want %q", got.Workspace.Provider, "claude")
