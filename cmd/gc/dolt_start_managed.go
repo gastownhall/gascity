@@ -70,21 +70,25 @@ var (
 // dispatch never runs in this mode; os.Exit terminates the process so no
 // subsequent dispatch can produce a misleading "unknown command" error.
 //
-// The two-stage guard hardens against accidental activation on production
-// `gc` binaries:
+// The argv[1] sentinel is the sole, sufficient guard. It is a private
+// re-exec marker (managedDoltTestWatchdogArg) that no production `gc`
+// invocation ever passes, so its presence is itself the authorization to
+// enter the watchdog. Checking it first means the watchdog works whether
+// the re-exec target is a Go test binary OR a real `gc` binary —
+// integration tests (e.g. TestInheritedExternalBdRigStoreConsistent...,
+// TestCmdSessionWait...) start managed dolt through a real `gc` subprocess
+// that re-execs itself as the watchdog, whose argv[0] does not contain
+// ".test". A prior `isTestBinary()` pre-gate blocked that path: the
+// sentinel argv fell through to cobra, which printed usage and exited 1
+// ("dolt server could not start via gc helper") on every CI shard that
+// exercised the real-binary dolt path (gastownhall/gascity#2313 follow-up
+// CI regression).
 //
-//   - `isTestBinary()` — only Go test binaries (whose argv[0] contains
-//     ".test") may enter the watchdog. This blocks a stray
-//     `GC_MANAGED_DOLT_TEST_MODE=1` in a non-test parent shell from
-//     re-arming the watchdog when a production `gc` re-execs itself for
-//     any reason (gastownhall/gascity#2313 follow-up).
-//   - argv[1] sentinel — the watchdog accepts only the explicit re-exec
-//     argv form. Any other invocation of the test binary falls through
-//     to normal test dispatch.
+// The stray-`GC_MANAGED_DOLT_TEST_MODE=1`-in-production threat is handled
+// at the spawn decision (managedDoltTestWatchdogEnabled), not here — a
+// production process is never re-exec'd with this sentinel, so reaching
+// init() with it set is already proof of an intentional test re-exec.
 func init() {
-	if !isTestBinary() {
-		return
-	}
 	if len(os.Args) < 2 || os.Args[1] != managedDoltTestWatchdogArg {
 		return
 	}
