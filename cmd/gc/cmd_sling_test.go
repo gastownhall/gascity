@@ -5603,7 +5603,7 @@ func TestDryRunConvoyUsesTracksMembers(t *testing.T) {
 // command handler). Inside, sling.DoSling decides single-vs-batch by
 // bead type. For non-container types (task, bug, feature, etc.) it
 // returns a single-bead result with ContainerType unset. The dry-run
-// rendering then has to honour that signal — otherwise it falls into
+// rendering then has to honor that signal — otherwise it falls into
 // the batch preview and reports "Children (0 total, 0 open)" plus an
 // empty route list, which is the opposite of what the real run does.
 //
