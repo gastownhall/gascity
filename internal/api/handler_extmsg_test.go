@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -202,6 +203,81 @@ func TestExtmsgNotifyMembersDoesNotMaterializeExcludedNamedSender(t *testing.T) 
 		if call.Method == "Nudge" {
 			t.Fatalf("excluded sender should not receive nudge; calls=%#v", fs.sp.Calls)
 		}
+	}
+}
+
+func TestExtmsgNotifyMembersSuppressesDiscriminatorForRoutedParticipant(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	services := extmsg.NewServices(fs.cityBeadStore)
+	fs.extmsgSvc = &services
+
+	ref := extmsg.ConversationRef{
+		ScopeID:        "guild-1",
+		Provider:       "discord",
+		AccountID:      "acct-1",
+		ConversationID: "thread-1",
+		Kind:           extmsg.ConversationThread,
+	}
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
+	group, err := services.Groups.EnsureGroup(context.Background(), caller, extmsg.EnsureGroupInput{
+		RootConversation: ref,
+		Mode:             extmsg.GroupModeLauncher,
+		DefaultHandle:    "project-lead",
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+
+	mayor := createTestSession(t, fs.cityBeadStore, fs.sp, "Mayor")
+	if err := fs.cityBeadStore.Update(mayor.ID, beads.UpdateOpts{
+		Metadata: map[string]string{"alias": "myrig/mayor-worker"},
+	}); err != nil {
+		t.Fatalf("Update(mayor alias): %v", err)
+	}
+	peer := createTestSession(t, fs.cityBeadStore, fs.sp, "Project Lead")
+	if err := fs.cityBeadStore.Update(peer.ID, beads.UpdateOpts{
+		Metadata: map[string]string{"alias": "myrig/project-lead"},
+	}); err != nil {
+		t.Fatalf("Update(peer alias): %v", err)
+	}
+
+	if _, err := services.Groups.UpsertParticipant(context.Background(), caller, extmsg.UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "mayor",
+		SessionID: mayor.ID,
+		Public:    true,
+	}); err != nil {
+		t.Fatalf("UpsertParticipant(mayor): %v", err)
+	}
+	if _, err := services.Groups.UpsertParticipant(context.Background(), caller, extmsg.UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "project-lead",
+		SessionID: peer.ID,
+		Public:    true,
+	}); err != nil {
+		t.Fatalf("UpsertParticipant(project-lead): %v", err)
+	}
+
+	srv.extmsgNotifyMembers(context.Background(), ref, "Alice", "human", "@mayor: status?", "", "mayor")
+
+	nudgesBySessionName := map[string]string{}
+	for _, call := range fs.sp.Calls {
+		if call.Method == "Nudge" {
+			nudgesBySessionName[call.Name] = call.Message
+		}
+	}
+	mayorNudge := nudgesBySessionName[mayor.SessionName]
+	if mayorNudge == "" {
+		t.Fatalf("missing mayor nudge; calls=%#v", fs.sp.Calls)
+	}
+	if strings.Contains(mayorNudge, "Addressed to:") {
+		t.Fatalf("addressed participant saw discriminator:\n%s", mayorNudge)
+	}
+	peerNudge := nudgesBySessionName[peer.SessionName]
+	if !strings.Contains(peerNudge, "Addressed to: @mayor") {
+		t.Fatalf("peer nudge missing discriminator; peer=%q calls=%#v", peerNudge, fs.sp.Calls)
 	}
 }
 

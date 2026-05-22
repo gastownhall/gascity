@@ -105,6 +105,7 @@ func (s *Server) extmsgNotifyMembers(
 		return
 	}
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "extmsg-notify"}
+	explicitTargetSessionID := extmsgNotifyExplicitTargetSessionID(ctx, svc, conv, explicitTarget)
 	members, err := svc.Transcript.ListMemberships(ctx, caller, conv)
 	if err != nil {
 		log.Printf("extmsg: ListMemberships failed for %s/%s: %v", conv.Provider, conv.ConversationID, err)
@@ -125,13 +126,16 @@ func (s *Server) extmsgNotifyMembers(
 	notifyResolved := func(sessionSelector, resolvedID string) {
 		handle := s.extmsgSessionHandleForResolvedID(resolvedID, sessionSelector)
 		nudge := formatExtmsgNotifyReminder(extmsgNotifyReminder{
-			Provider:       conv.Provider,
-			ConversationID: conv.ConversationID,
-			ActorDisplay:   actorDisplayName,
-			ActorKind:      actorKind,
-			Text:           text,
-			Handle:         handle,
-			ExplicitTarget: explicitTarget,
+			Provider:                conv.Provider,
+			ConversationID:          conv.ConversationID,
+			ActorDisplay:            actorDisplayName,
+			ActorKind:               actorKind,
+			Text:                    text,
+			RecipientSelector:       sessionSelector,
+			RecipientSessionID:      resolvedID,
+			Handle:                  handle,
+			ExplicitTarget:          explicitTarget,
+			ExplicitTargetSessionID: explicitTargetSessionID,
 		})
 		if err := s.sendBackgroundMessageToSession(ctx, store, resolvedID, nudge); err != nil {
 			log.Printf("extmsg: notify %s failed: %v", sessionSelector, err)
@@ -171,6 +175,24 @@ func (s *Server) extmsgNotifyMembers(
 	wg.Wait()
 }
 
+func extmsgNotifyExplicitTargetSessionID(ctx context.Context, svc *extmsg.Services, conv extmsg.ConversationRef, explicitTarget string) string {
+	if strings.TrimSpace(explicitTarget) == "" || svc == nil || svc.Groups == nil {
+		return ""
+	}
+	route, err := svc.Groups.ResolveInbound(ctx, extmsg.ExternalInboundMessage{
+		Conversation:   conv,
+		ExplicitTarget: explicitTarget,
+	})
+	if err != nil {
+		log.Printf("extmsg: resolve explicit target %q for %s/%s failed: %v", explicitTarget, conv.Provider, conv.ConversationID, err)
+		return ""
+	}
+	if route == nil || route.Match != extmsg.GroupRouteExplicitTarget {
+		return ""
+	}
+	return strings.TrimSpace(route.TargetSessionID)
+}
+
 func (s *Server) extmsgNotifyInboundMembers(ctx context.Context, msg extmsg.ExternalInboundMessage) {
 	actorKind := "agent"
 	if !msg.Actor.IsBot {
@@ -202,18 +224,21 @@ func titleCaseProvider(name string) string {
 //
 // ExplicitTarget carries the provider-resolved address-by-handle target (set
 // when an inbound was addressed to a specific agent via @handle: prefix or a
-// subteam mention). When non-empty and not equal to the receiving member's
-// own Handle, formatExtmsgNotifyReminder emits a "do not reply" discriminator
-// line so peer sessions can self-silence on off-target messages. See
+// subteam mention). When non-empty and not routed to the receiving session,
+// formatExtmsgNotifyReminder emits a "do not reply" discriminator line so
+// peer sessions can self-silence on off-target messages. See
 // gastownhall/gascity#2484.
 type extmsgNotifyReminder struct {
-	Provider       string
-	ConversationID string
-	ActorDisplay   string
-	ActorKind      string
-	Text           string
-	Handle         string
-	ExplicitTarget string
+	Provider                string
+	ConversationID          string
+	ActorDisplay            string
+	ActorKind               string
+	Text                    string
+	RecipientSelector       string
+	RecipientSessionID      string
+	Handle                  string
+	ExplicitTarget          string
+	ExplicitTargetSessionID string
 }
 
 // formatExtmsgNotifyReminder builds the inbound-message reminder body.
@@ -224,7 +249,7 @@ type extmsgNotifyReminder struct {
 // injecting attacker-controlled instructions into the receiving agent's
 // prompt. See gastownhall/gascity#2195.
 //
-// When ExplicitTarget is non-empty and does not match the receiving Handle,
+// When ExplicitTarget is non-empty and does not target the receiving session,
 // a discriminator line is appended so peer sessions can self-silence on
 // messages addressed to a different agent. See gastownhall/gascity#2484.
 func formatExtmsgNotifyReminder(r extmsgNotifyReminder) string {
@@ -240,7 +265,7 @@ func formatExtmsgNotifyReminder(r extmsgNotifyReminder) string {
 		r.Provider, r.ConversationID,
 		safeActor, r.ActorKind, safeText,
 	)
-	if target := strings.TrimSpace(r.ExplicitTarget); target != "" && !strings.EqualFold(target, strings.TrimSpace(r.Handle)) {
+	if target := strings.TrimSpace(r.ExplicitTarget); target != "" && !extmsgNotifyReminderTargetsRecipient(r, target) {
 		safeTarget := extmsg.SanitizeForSystemReminder(target)
 		fmt.Fprintf(&b,
 			"Addressed to: @%s — if that is not you, do not reply.\n\n",
@@ -257,4 +282,12 @@ func formatExtmsgNotifyReminder(r extmsgNotifyReminder) string {
 		r.Handle,
 	)
 	return b.String()
+}
+
+func extmsgNotifyReminderTargetsRecipient(r extmsgNotifyReminder, target string) bool {
+	if targetSessionID := strings.TrimSpace(r.ExplicitTargetSessionID); targetSessionID != "" {
+		return strings.TrimSpace(r.RecipientSessionID) == targetSessionID ||
+			apiNormalizeSessionTarget(r.RecipientSelector) == apiNormalizeSessionTarget(targetSessionID)
+	}
+	return strings.EqualFold(target, strings.TrimSpace(r.Handle))
 }
