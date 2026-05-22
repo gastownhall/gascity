@@ -32,10 +32,6 @@ func (c *RigPackCoverageCheck) CanFix() bool { return false }
 // Fix is a no-op.
 func (c *RigPackCoverageCheck) Fix(_ *CheckContext) error { return nil }
 
-// WarmupEligible returns false; this check is not part of the
-// `gc start` warm-up scan.
-func (c *RigPackCoverageCheck) WarmupEligible() bool { return false }
-
 type partialPackForCoverage struct {
 	Pack struct {
 		Name string `toml:"name"`
@@ -43,8 +39,15 @@ type partialPackForCoverage struct {
 	NamedSessions []config.NamedSession `toml:"named_session"`
 }
 
-// Run checks that rig-scoped always-mode named_sessions from city packs
-// are covered by at least one non-suspended rig importing that pack.
+// Run checks that every non-suspended rig imports the city packs which
+// declare rig-scoped always-mode named_sessions. A warning fires when any
+// active rig is missing such a pack, on the theory that a "mode=always"
+// rig-scoped session is intended to be present on every rig that runs
+// this kind of work — partial coverage is almost always a config error.
+//
+// Unreadable or malformed pack.toml files are surfaced as warnings
+// alongside any coverage gaps, rather than silently skipped, so a
+// misconfigured pack does not hide its own diagnostic.
 func (c *RigPackCoverageCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 
@@ -52,7 +55,13 @@ func (c *RigPackCoverageCheck) Run(_ *CheckContext) *CheckResult {
 
 	var issues []string
 	for _, packDir := range c.cfg.PackDirs {
-		sessions := rigAlwaysSessions(packDir)
+		sessions, err := rigAlwaysSessions(packDir)
+		if err != nil {
+			issues = append(issues, fmt.Sprintf(
+				"pack %q: %v (unable to evaluate rig-scoped named_session coverage)",
+				packDir, err))
+			continue
+		}
 		if len(sessions) == 0 {
 			continue
 		}
@@ -122,14 +131,21 @@ type rigAlwaysSession struct {
 	packName string
 }
 
-func rigAlwaysSessions(packDir string) []rigAlwaysSession {
-	data, err := os.ReadFile(filepath.Join(packDir, "pack.toml"))
+func rigAlwaysSessions(packDir string) ([]rigAlwaysSession, error) {
+	tomlPath := filepath.Join(packDir, "pack.toml")
+	data, err := os.ReadFile(tomlPath)
 	if err != nil {
-		return nil
+		// A pack directory with no pack.toml at all is not the case
+		// the check is designed to flag — those are caught by other
+		// checks. Only return an error for "exists but unreadable".
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", tomlPath, err)
 	}
 	var pc partialPackForCoverage
 	if _, err := toml.Decode(string(data), &pc); err != nil {
-		return nil
+		return nil, fmt.Errorf("parsing %s: %w", tomlPath, err)
 	}
 	var sessions []rigAlwaysSession
 	for _, ns := range pc.NamedSessions {
@@ -140,15 +156,25 @@ func rigAlwaysSessions(packDir string) []rigAlwaysSession {
 			})
 		}
 	}
-	return sessions
+	return sessions, nil
+}
+
+// absOrClean returns filepath.Abs(p) when that succeeds, and falls back
+// to filepath.Clean(p) otherwise so a transient os.Getwd failure cannot
+// silently turn a real path into the empty string (which would never
+// match a configured pack dir).
+func absOrClean(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return filepath.Clean(p)
 }
 
 func rigHasPackDir(rigPackDirs map[string][]string, rigName, packDir string) bool {
 	dirs := rigPackDirs[rigName]
-	absTarget, _ := filepath.Abs(packDir)
+	target := absOrClean(packDir)
 	for _, d := range dirs {
-		absDir, _ := filepath.Abs(d)
-		if absDir == absTarget {
+		if absOrClean(d) == target {
 			return true
 		}
 	}

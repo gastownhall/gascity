@@ -134,6 +134,10 @@ func (c *RigGitCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
+func (c *RigPackCoverageCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
 func (c *RigPathCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
