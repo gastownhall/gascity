@@ -36,6 +36,25 @@ func TestBdBackupSizeCheck_EmptyBackupDir(t *testing.T) {
 	}
 }
 
+func TestBdBackupSizeCheck_PathIsNotADirectory(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "backup"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := newTestBdBackupSizeCheck(dir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "is not a directory") {
+		t.Errorf("message = %q, want not-a-directory warning", r.Message)
+	}
+}
+
 func TestBdBackupSizeCheck_OKUnderThreshold(t *testing.T) {
 	dir := t.TempDir()
 	backupDir := filepath.Join(dir, ".beads", "backup")
@@ -56,6 +75,54 @@ func TestBdBackupSizeCheck_OKUnderThreshold(t *testing.T) {
 	}
 }
 
+func TestBdBackupSizeCheck_RigScopedBackupWarns(t *testing.T) {
+	dir := t.TempDir()
+	rigDir := filepath.Join(dir, "rigs", "demo")
+	backupDir := filepath.Join(rigDir, ".beads", "backup")
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c := NewBdBackupSizeCheck(dir)
+	c.scopeRoots = []string{dir, rigDir}
+	c.measureDir = func(root string) (int64, bool, error) {
+		if root == backupDir {
+			return bdBackupWarnBytes, true, nil
+		}
+		return 0, false, nil
+	}
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "scope rigs/demo") {
+		t.Errorf("message = %q, want rig scope label", r.Message)
+	}
+}
+
+func TestBdBackupSizeCheck_AggregateAcrossScopesWarns(t *testing.T) {
+	dir := t.TempDir()
+	rigDir := filepath.Join(dir, "rigs", "demo")
+	cityBackupDir := filepath.Join(dir, ".beads", "backup")
+	rigBackupDir := filepath.Join(rigDir, ".beads", "backup")
+	for _, backupDir := range []string{cityBackupDir, rigBackupDir} {
+		if err := os.MkdirAll(backupDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := NewBdBackupSizeCheck(dir)
+	c.scopeRoots = []string{dir, rigDir}
+	c.measureDir = func(string) (int64, bool, error) {
+		return bdBackupWarnBytes / 2, true, nil
+	}
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "aggregate bd auto-backup footprint") {
+		t.Errorf("message = %q, want aggregate warning", r.Message)
+	}
+}
+
 func TestBdBackupSizeCheck_WarnAtThreshold(t *testing.T) {
 	dir := t.TempDir()
 	backupDir := filepath.Join(dir, ".beads", "backup")
@@ -64,7 +131,7 @@ func TestBdBackupSizeCheck_WarnAtThreshold(t *testing.T) {
 	}
 	c := NewBdBackupSizeCheck(dir)
 	c.measureDir = func(string) (int64, bool, error) {
-		return bdBackupWarnBytes + 1, true, nil
+		return bdBackupWarnBytes, true, nil
 	}
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusWarning {
@@ -83,7 +150,7 @@ func TestBdBackupSizeCheck_ErrorAtThreshold(t *testing.T) {
 	}
 	c := NewBdBackupSizeCheck(dir)
 	c.measureDir = func(string) (int64, bool, error) {
-		return bdBackupErrorBytes + 1, true, nil
+		return bdBackupErrorBytes, true, nil
 	}
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusError {
@@ -107,6 +174,25 @@ func TestBdBackupSizeCheck_MeasureErrorWarns(t *testing.T) {
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Fatalf("status = %d, want Warning on measure error; msg = %s", r.Status, r.Message)
+	}
+}
+
+func TestBdBackupSizeCheck_MeasureMissingReportsNoBackupDir(t *testing.T) {
+	dir := t.TempDir()
+	backupDir := filepath.Join(dir, ".beads", "backup")
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c := NewBdBackupSizeCheck(dir)
+	c.measureDir = func(string) (int64, bool, error) {
+		return 0, false, nil
+	}
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "no bd backup directory present") {
+		t.Errorf("message = %q, want no-backup-dir message", r.Message)
 	}
 }
 

@@ -19,7 +19,9 @@ multi-agent cities (where every controller, agent, and order touches
 bd), the growth is fast enough to fill the disk in days.
 
 `gc doctor` emits a `bd-backup-size` warning at 5 GB and an error at
-15 GB to catch this before the next cascade.
+15 GB to catch this before the next cascade. The canary checks the city
+workspace and managed rig scope roots, reporting the largest individual
+`.beads/backup/` directory and the aggregate backup footprint.
 
 ## Why it matters — the disk-full cascade
 
@@ -95,16 +97,20 @@ gc stop
 # 2. Capture the existing backup as a safety net.
 mv ~/qlandia/.beads/backup ~/qlandia/.beads/backup.old-$(date +%Y%m%d)
 
-# 3. Re-sync — bd will register backup_export on next invocation and
-#    sync the current (post-GC) database state to the empty directory.
-gc start
-bd backup       # forces an immediate sync, dumps current size
+# 3. Trigger bd's auto-backup pipeline while the supervisor remains
+#    stopped. Do not use `bd backup sync` here; that syncs the separate
+#    explicit "default" backup remote, not the auto-backup `backup_export`
+#    remote documented above.
+bd -C ~/qlandia list --status open --limit 1 --json >/tmp/qlandia-bd-autobackup-smoke.json
 
 # 4. Verify the new backup is sane.
 du -sh ~/qlandia/.beads/backup        # should be ≲ source database size
 cat ~/qlandia/.beads/backup/backup_state.json  # current timestamp
 
-# 5. After confirming a clean run for ~1 day, delete the safety net.
+# 5. Restart the supervisor only after the first backup is known good.
+gc start
+
+# 6. After confirming a clean run for ~1 day, delete the safety net.
 rm -rf ~/qlandia/.beads/backup.old-*
 ```
 
@@ -141,14 +147,18 @@ import os, sys
 manifest = open(os.path.expanduser('~/qlandia/.beads/backup/manifest')).read()
 parts = manifest.strip().split(':')
 chunks = [parts[i] for i in range(5, len(parts), 2)]
-existing = set(
-    f.replace('.darc', '') for f in os.listdir(os.path.expanduser('~/qlandia/.beads/backup/'))
-    if f.endswith('.darc')
-)
+existing = set()
+for f in os.listdir(os.path.expanduser('~/qlandia/.beads/backup/')):
+    if f.endswith('.darc'):
+        existing.add(f[:-len('.darc')])
 missing = [c for c in chunks if c not in existing]
 for c in missing:
     print(c)
 "
+# If nbs_table_* files are present, treat the output as a candidate
+# list and cross-check with bd backup status or Dolt tooling before
+# copying. Raw table files can contain valid chunks that are not visible
+# as standalone .darc files.
 # Then copy each missing chunk from the live noms store:
 #   cp ~/qlandia/.beads/dolt/<db>/.dolt/noms/<hash> ~/qlandia/.beads/backup/
 ```

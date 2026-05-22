@@ -236,7 +236,7 @@ func doDoctor(fix, verbose, jsonOut bool, stdout, stderr io.Writer) int {
 	// gascity, gastownhall/beads#2993) writes to .beads/backup/ on every bd
 	// invocation without retention. This check warns before the directory
 	// fills the disk and cascades into broken dolt writes.
-	d.Register(doctor.NewBdBackupSizeCheck(cityPath))
+	d.Register(doctor.NewBdBackupSizeCheckForConfig(cityPath, cfg, cfgErr))
 	// Worktree checks deliberately run even when cfgErr != nil — they
 	// only need the city path, and a broken city.toml is exactly when
 	// silent disk-fill is most likely. The zero-value DoctorConfig
