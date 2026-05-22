@@ -6,7 +6,7 @@ const (
 	// source before being written to pack.toml.
 	PublicGastownPackSource = "https://github.com/gastownhall/gascity-packs.git//gastown"
 
-	// PublicGastownPackVersion pins fresh init output to the validation commit
-	// from the public built-in pack migration branch.
-	PublicGastownPackVersion = "sha:0090440b8e8efa4c40c2cef6bf585805ac87fa37"
+	// PublicGastownPackVersion pins fresh init output to the registry release
+	// content commit from gastownhall/gascity-packs main.
+	PublicGastownPackVersion = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
 )
