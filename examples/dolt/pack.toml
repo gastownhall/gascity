@@ -1,7 +1,7 @@
 # Dolt — reusable Dolt database management pack.
 #
-# Provides lifecycle commands (status, start, logs, sql, list, recover, sync,
-# rollback, cleanup, health) for the Dolt SQL server backing bead storage.
+# Provides lifecycle commands (status, start, restart, logs, sql, list, recover,
+# sync, rollback, cleanup, health) for the Dolt SQL server backing bead storage.
 #
 # Dog-backed formulas and orders rely on the city's maintenance pack.
 #
