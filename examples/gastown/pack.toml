@@ -8,13 +8,10 @@
 # without hand-editing city.toml.
 
 [pack]
-name = "gastown-city"
+name = "gastown"
 schema = 2
 
 [imports.gastown]
-source = "packs/gastown"
-
-[defaults.rig.imports.gastown]
 source = "packs/gastown"
 
 [defaults.rig.imports.gastown]
