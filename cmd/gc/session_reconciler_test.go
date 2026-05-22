@@ -117,6 +117,23 @@ func (p *blockingStopProvider) Stop(name string) error {
 	return p.Fake.Stop(name)
 }
 
+type panicStopProvider struct {
+	*runtime.Fake
+	stopStarted chan string
+}
+
+func newPanicStopProvider() *panicStopProvider {
+	return &panicStopProvider{
+		Fake:        runtime.NewFake(),
+		stopStarted: make(chan string, 1),
+	}
+}
+
+func (p *panicStopProvider) Stop(name string) error {
+	p.stopStarted <- name
+	panic("stop exploded")
+}
+
 type shutdownWaitStopProvider struct {
 	*blockingStopProvider
 	listCalled chan struct{}
@@ -823,6 +840,82 @@ func TestQueueDrainAckAsyncStopTracksShutdownWait(t *testing.T) {
 	close(sp.releaseStop)
 	if !tracker.wait(time.Second) {
 		t.Fatal("async drain-ack stop tracker did not drain after Stop returned")
+	}
+}
+
+func TestQueueDrainAckAsyncStopDedupScopedToTracker(t *testing.T) {
+	store := beads.NewMemStore()
+	first := newBlockingStopProvider()
+	if err := first.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(first worker): %v", err)
+	}
+	second := newBlockingStopProvider()
+	if err := second.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(second worker): %v", err)
+	}
+	firstReleased := false
+	secondReleased := false
+	defer func() {
+		if !firstReleased {
+			close(first.releaseStop)
+		}
+		if !secondReleased {
+			close(second.releaseStop)
+		}
+	}()
+
+	var stderr synchronizedBuffer
+	firstTracker := &asyncStartTracker{}
+	secondTracker := &asyncStartTracker{}
+	queueDrainAckAsyncStop("", store, first, &config.City{}, "gc-worker", "worker", firstTracker, &stderr)
+	select {
+	case <-first.stopStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first async drain-ack stop did not start")
+	}
+
+	queueDrainAckAsyncStop("", store, second, &config.City{}, "gc-worker", "worker", secondTracker, &stderr)
+	select {
+	case <-second.stopStarted:
+	case <-time.After(time.Second):
+		t.Fatal("second async drain-ack stop was suppressed by another tracker scope")
+	}
+	close(first.releaseStop)
+	firstReleased = true
+	close(second.releaseStop)
+	secondReleased = true
+	if !firstTracker.wait(time.Second) {
+		t.Fatal("first async drain-ack stop tracker did not drain after release")
+	}
+	if !secondTracker.wait(time.Second) {
+		t.Fatal("second async drain-ack stop tracker did not drain after release")
+	}
+}
+
+func TestQueueDrainAckAsyncStopRecoversStopPanic(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := newPanicStopProvider()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	var stderr synchronizedBuffer
+	tracker := &asyncStartTracker{}
+	queueDrainAckAsyncStop(t.TempDir(), store, sp, &config.City{}, "gc-worker", "worker", tracker, &stderr)
+
+	select {
+	case <-sp.stopStarted:
+	case <-time.After(time.Second):
+		t.Fatal("async drain-ack stop did not start")
+	}
+	if !tracker.wait(time.Second) {
+		t.Fatal("async drain-ack stop tracker did not drain after Stop panic")
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "session reconciler: async drain-ack stop worker panicked: stop exploded") {
+		t.Fatalf("stderr = %q, want panic diagnostic", got)
+	}
+	if !strings.Contains(got, "goroutine ") {
+		t.Fatalf("stderr = %q, want stack trace", got)
 	}
 }
 

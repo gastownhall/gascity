@@ -14,8 +14,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -29,11 +29,6 @@ import (
 )
 
 const maxIdleSleepProbesPerTick = 3
-
-// drainAckAsyncStops deduplicates process-local async stop goroutines. A
-// controller restart can briefly double-stop through a fresh process map; stop
-// providers are idempotent and SessionGone errors are suppressed below.
-var drainAckAsyncStops sync.Map
 
 type wakeTarget struct {
 	session *beads.Bead
@@ -90,15 +85,11 @@ func clearDrainTrackerForStopPending(session *beads.Bead, dt *drainTracker) {
 	dt.remove(session.ID)
 }
 
-func drainAckAsyncStopKey(store beads.Store, cityPath, sessionID, name string) string {
-	scope := strings.TrimSpace(cityPath)
-	if scope == "" {
-		scope = fmt.Sprintf("store:%p", store)
-	}
+func drainAckAsyncStopKey(sessionID, name string) string {
 	if id := strings.TrimSpace(sessionID); id != "" {
-		return fmt.Sprintf("city:%s\x00id:%s", scope, id)
+		return "id:" + id
 	}
-	return fmt.Sprintf("city:%s\x00name:%s", scope, strings.TrimSpace(name))
+	return "name:" + strings.TrimSpace(name)
 }
 
 func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID, name string, tracker *asyncStartTracker, stderr io.Writer) {
@@ -109,27 +100,17 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	key := drainAckAsyncStopKey(store, cityPath, sessionID, name)
-	if _, loaded := drainAckAsyncStops.LoadOrStore(key, struct{}{}); loaded {
+	key := drainAckAsyncStopKey(sessionID, name)
+	done, tracking := tracker.startDrainAckStop(key)
+	if !tracking {
 		return
-	}
-	done := func() {}
-	if tracker != nil {
-		var tracking bool
-		done, tracking = tracker.start()
-		if !tracking {
-			drainAckAsyncStops.Delete(key)
-			return
-		}
 	}
 	go func() {
 		defer func() {
-			drainAckAsyncStops.Delete(key)
-			done()
 			if r := recover(); r != nil {
-				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s panicked: %v\n", name, r) //nolint:errcheck
-				panic(r)
+				fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s panicked: %v\n%s", name, r, debug.Stack()) //nolint:errcheck
 			}
+			done()
 		}()
 		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
 			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: %v\n", name, err) //nolint:errcheck

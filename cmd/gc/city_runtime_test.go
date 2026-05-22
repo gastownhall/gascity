@@ -37,6 +37,15 @@ func (p *sweepLivenessProvider) ObserveLiveness(name string, _ []string) runtime
 	return runtime.Liveness{Running: p.running[name]}
 }
 
+type sweepIsRunningFalseNegativeProvider struct {
+	*runtime.Fake
+}
+
+func (p *sweepIsRunningFalseNegativeProvider) IsRunning(name string) bool {
+	_ = p.Fake.IsRunning(name)
+	return false
+}
+
 func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
@@ -81,6 +90,61 @@ func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 	}
 	if got.Status == "closed" {
 		t.Fatalf("running pool bead was closed: %+v", got)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_UsesProcessNameFallback(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-process-alive",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "active",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+	sp := &sweepIsRunningFalseNegativeProvider{Fake: runtime.NewFake()}
+	if err := sp.Start(context.Background(), "worker-bd-process-alive", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		nil,
+		sessionBeads,
+		nil,
+		&config.City{Agents: []config.Agent{{
+			Name:              "worker",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+			ProcessNames:      []string{"agent-cli"},
+		}}},
+		sp,
+		false,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0 when process-name liveness recovers IsRunning false negative", closed)
+	}
+	if got := sp.CountCalls("ProcessAlive", "worker-bd-process-alive"); got == 0 {
+		t.Fatal("ProcessAlive was not checked with configured process-name hints")
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("process-alive pool bead was closed: %+v", got)
 	}
 }
 
@@ -175,10 +239,10 @@ func TestSweepUndesiredPoolSessionBeads_UsesRuntimeLivenessObservation(t *testin
 }
 
 func TestPoolSessionBeadRuntimeRunningUsesRuntimeNotFoundSentinel(t *testing.T) {
-	if _, err := poolSessionBeadRuntimeRunning(beads.Bead{}, nil); !errors.Is(err, runtime.ErrSessionNotFound) {
+	if _, err := poolSessionBeadRuntimeRunning(beads.Bead{}, nil, nil); !errors.Is(err, runtime.ErrSessionNotFound) {
 		t.Fatalf("nil provider error = %v, want runtime.ErrSessionNotFound", err)
 	}
-	if _, err := poolSessionBeadRuntimeRunning(beads.Bead{Metadata: map[string]string{}}, runtime.NewFake()); !errors.Is(err, runtime.ErrSessionNotFound) {
+	if _, err := poolSessionBeadRuntimeRunning(beads.Bead{Metadata: map[string]string{}}, runtime.NewFake(), nil); !errors.Is(err, runtime.ErrSessionNotFound) {
 		t.Fatalf("missing session name error = %v, want runtime.ErrSessionNotFound", err)
 	}
 }

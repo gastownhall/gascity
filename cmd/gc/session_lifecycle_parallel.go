@@ -279,9 +279,10 @@ func withTaskWorkDirResolver(resolver taskWorkDirResolver) startExecutionOption 
 }
 
 type asyncStartTracker struct {
-	mu       sync.Mutex
-	wg       sync.WaitGroup
-	stopping bool
+	mu               sync.Mutex
+	wg               sync.WaitGroup
+	stopping         bool
+	drainAckStopKeys sync.Map
 }
 
 func (t *asyncStartTracker) start() (func(), bool) {
@@ -295,6 +296,28 @@ func (t *asyncStartTracker) start() (func(), bool) {
 	}
 	t.wg.Add(1)
 	return t.wg.Done, true
+}
+
+func (t *asyncStartTracker) startDrainAckStop(key string) (func(), bool) {
+	if t == nil {
+		return func() {}, true
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return t.start()
+	}
+	if _, loaded := t.drainAckStopKeys.LoadOrStore(key, struct{}{}); loaded {
+		return nil, false
+	}
+	done, ok := t.start()
+	if !ok {
+		t.drainAckStopKeys.Delete(key)
+		return nil, false
+	}
+	return func() {
+		t.drainAckStopKeys.Delete(key)
+		done()
+	}, true
 }
 
 func (t *asyncStartTracker) wait(timeout time.Duration) bool {
