@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -23,6 +24,20 @@ import (
 )
 
 const defaultManagedDoltHost = "127.0.0.1"
+
+var postgresCredentialResolvedSeen sync.Map // map[string]struct{}
+
+func postgresCredentialResolvedKey(cityPath string, payload pgauth.PostgresCredentialResolvedPayload) string {
+	return strings.Join([]string{
+		cityPath,
+		payload.ScopeKind,
+		payload.ScopeName,
+		payload.Source,
+		payload.Host,
+		payload.Port,
+		payload.User,
+	}, "\x00")
+}
 
 // bdCommandRunnerForCity centralizes bd subprocess env construction so all
 // GC-managed bd calls resolve Dolt against the same city-scoped runtime.
@@ -417,6 +432,9 @@ func emitPostgresCredentialResolved(cityPath, scopeRoot string, meta contract.Me
 		Host:      meta.PostgresHost,
 		Port:      meta.PostgresPort,
 		User:      meta.PostgresUser,
+	}
+	if _, loaded := postgresCredentialResolvedSeen.LoadOrStore(postgresCredentialResolvedKey(cityPath, payload), struct{}{}); loaded {
+		return
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
