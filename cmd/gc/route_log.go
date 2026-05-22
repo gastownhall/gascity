@@ -45,7 +45,7 @@ func routeLogEnabled() bool {
 // Callers pass their command-scoped stderr so CLI test harnesses observe
 // the audit trail through the buffer they already assert on, instead of
 // racing against the process-wide os.Stderr.
-func logRoute(w io.Writer, cmd, route, reason string, extra ...string) {
+func logRoute(w io.Writer, cmd, route, reason string, extra ...string) { //nolint:unparam // enabler: callers in follow-up read-path routing PR will supply extra key=value pairs
 	if !routeLogEnabled() {
 		return
 	}
