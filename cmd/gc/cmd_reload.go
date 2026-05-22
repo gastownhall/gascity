@@ -75,6 +75,11 @@ type reloadRequest struct {
 	soft       bool
 	acceptedCh chan reloadControlReply
 	doneCh     chan reloadControlReply
+	// started is stamped by handleReloadRequest when the request becomes
+	// the active reload. The controller uses it to detect a wedged tick
+	// that never cleared activeReload, so a fresh request can force-clear
+	// the stuck slot instead of being rejected as busy indefinitely.
+	started time.Time
 }
 
 func newReloadCmd(stdout, stderr io.Writer) *cobra.Command {
