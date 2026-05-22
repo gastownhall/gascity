@@ -1700,6 +1700,144 @@ func TestReconcileSessionBeads_PoolSlotWithStrandedWorkEmitsDiagnostic(t *testin
 	}
 }
 
+// throttleKeySetMetadataFailStore wraps a beads.Store and fails any
+// SetMetadata call writing the stranded throttle key. Other writes
+// pass through unmodified. Used by the throttle write-ordering
+// regression test below.
+type throttleKeySetMetadataFailStore struct {
+	beads.Store
+}
+
+func (s *throttleKeySetMetadataFailStore) SetMetadata(id, key, value string) error {
+	if key == strandedEventEmittedKey {
+		return errors.New("simulated store SetMetadata failure on throttle key")
+	}
+	return s.Store.SetMetadata(id, key, value)
+}
+
+// TestReconcileSessionBeads_PoolSlotStrandedThrottleSurvivesSetMetadataFailure
+// is the regression test for the throttle write-ordering bug: the
+// in-memory marker on session.Metadata must be set before the durable
+// SetMetadata write, so a transient store-write failure cannot cause
+// the next tick to re-emit the event and produce a duplicate-emission
+// storm under sustained disk pressure / store partition.
+func TestReconcileSessionBeads_PoolSlotStrandedThrottleSurvivesSetMetadataFailure(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	env.addDesired("worker", "worker", false) // runtime not running
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "asleep",
+		"sleep_reason":         "drained", // realistic stranded-worker case: clean drain, crashed before clearing assignee
+		poolManagedMetadataKey: boolMetadata(true),
+	})
+
+	work, err := env.store.Create(beads.Bead{
+		Title:    "stranded implementation",
+		Type:     "task",
+		Status:   "open",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("Update work bead status: %v", err)
+	}
+
+	rec := &capturingRecorder{}
+	env.rec = rec
+	// Swap in the failing-SetMetadata wrapper.
+	failingStore := &throttleKeySetMetadataFailStore{Store: env.store}
+
+	// First tick — diagnostic must fire AND SetMetadata fails on the
+	// throttle key. The in-memory marker on the *Bead value passed in
+	// must still be set so subsequent ticks see it.
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		failingStore,
+		newFakeDrainOps(),
+		nil,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	stranded := rec.byType(events.SessionStranded)
+	if len(stranded) != 1 {
+		t.Fatalf("session.stranded events after first tick (SetMetadata failing) = %d, want 1; events: %+v", len(stranded), rec.events)
+	}
+
+	// Crucially: the durable store write failed, so the session bead
+	// on disk does NOT have the throttle marker. Re-fetching it
+	// returns the unmarked bead. The reconciler must still suppress
+	// re-emission — this is what the in-memory-marker-first ordering
+	// is protecting against. Production wouldn't necessarily re-fetch
+	// here (it carries the same *Bead forward across ticks within a
+	// controller lifetime); we test the worst-case explicitly.
+	unmarked, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session) before second tick: %v", err)
+	}
+	if strings.TrimSpace(unmarked.Metadata[strandedEventEmittedKey]) != "" {
+		t.Fatalf("durable throttle marker should be absent after SetMetadata failure; got %q", unmarked.Metadata[strandedEventEmittedKey])
+	}
+
+	// Second tick with the same in-memory *Bead the controller would
+	// carry forward — the marker on it should suppress re-emission.
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session}, // SAME *Bead, with the in-memory marker the first tick set on it
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		failingStore,
+		newFakeDrainOps(),
+		nil,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	stranded = rec.byType(events.SessionStranded)
+	if len(stranded) != 1 {
+		t.Fatalf("session.stranded events after second tick (durable marker still missing) = %d, want still 1 (in-memory throttle should hold); events: %+v", len(stranded), rec.events)
+	}
+}
+
 // (Removed: TestReconcileSessionBeads_DrainAckPartialOwnershipSnapshotFailsClosed
 // guarded the old snapshot-backed fail-closed path — the sleep_reason
 // "ownership_snapshot_partial" branch. Drain-ack now re-queries the store

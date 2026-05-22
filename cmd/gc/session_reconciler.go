@@ -2124,7 +2124,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// happened. Emit a single diagnostic per session bead
 			// generation; the throttle marker on the bead itself
 			// keeps subsequent reconciler ticks quiet.
-			emitSessionStrandedDiagnostic(store, rigStores, target.session, target.tp.TemplateName, rec, clk, stderr)
+			emitSessionStrandedDiagnostic(cityPath, cfg, store, rigStores, target.session, target.tp.TemplateName, rec, clk, stderr)
 		}
 		if poolFreeable && !hasAssignedWork {
 			// Close directly rather than via closeSessionBeadIfUnassigned.
@@ -2405,7 +2405,16 @@ const strandedWorkIDListLimit = 10
 // longer alive but still has open in_progress work assigned. Throttled
 // per session bead via metadata so repeated reconciler ticks of the
 // same condition only emit once.
+//
+// The in-memory throttle marker on session.Metadata is set BEFORE the
+// durable store write, so a SetMetadata failure (disk pressure,
+// partition, slow remote) cannot cause the next tick to re-read the
+// unmarked bead and emit a duplicate event. SetMetadata is best-effort
+// for cross-restart durability; the in-memory marker is the
+// load-bearing single-emission guarantee within a controller lifetime.
 func emitSessionStrandedDiagnostic(
+	cityPath string,
+	cfg *config.City,
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	session *beads.Bead,
@@ -2417,10 +2426,13 @@ func emitSessionStrandedDiagnostic(
 	if rec == nil || session == nil {
 		return
 	}
-	if session.Metadata != nil && strings.TrimSpace(session.Metadata[strandedEventEmittedKey]) != "" {
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string, 1)
+	}
+	if strings.TrimSpace(session.Metadata[strandedEventEmittedKey]) != "" {
 		return
 	}
-	ids, err := collectSessionAssignedWorkIDs(store, rigStores, *session)
+	ids, err := collectSessionAssignedWorkIDs(cityPath, cfg, store, rigStores, *session)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: collecting stranded work ids for %s: %v\n", session.Metadata["session_name"], err) //nolint:errcheck
 	}
@@ -2432,14 +2444,13 @@ func emitSessionStrandedDiagnostic(
 		Subject: session.ID,
 		Message: formatStrandedMessage(template, session.Metadata["session_name"], ids),
 	})
+	// Set the in-memory marker first so a SetMetadata failure below
+	// can't cause the next tick (still seeing this same *Bead value or
+	// a re-fetch with the durable write missing) to emit again.
+	session.Metadata[strandedEventEmittedKey] = now.Format(time.RFC3339)
 	if err := store.SetMetadata(session.ID, strandedEventEmittedKey, now.Format(time.RFC3339)); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: stamping stranded throttle marker on %s: %v\n", session.ID, err) //nolint:errcheck
-		return
 	}
-	if session.Metadata == nil {
-		session.Metadata = make(map[string]string, 1)
-	}
-	session.Metadata[strandedEventEmittedKey] = now.Format(time.RFC3339)
 }
 
 // formatStrandedMessage builds the diagnostic message body for a
@@ -2464,18 +2475,24 @@ func formatStrandedMessage(template, sessionName string, ids []string) string {
 }
 
 // collectSessionAssignedWorkIDs returns the IDs of open/in_progress
-// work beads assigned to the session across the primary store and any
-// attached rig stores, excluding session beads themselves. Mirrors the
-// query in sessionHasOpenAssignedWork but returns the IDs for use in a
-// diagnostic message rather than a boolean.
-func collectSessionAssignedWorkIDs(store beads.Store, rigStores map[string]beads.Store, session beads.Bead) ([]string, error) {
+// work beads assigned to the session, excluding session beads
+// themselves. Mirrors the identifier resolution and store routing of
+// sessionHasOpenAssignedWorkForReachableStore so the diagnostic message
+// lists exactly the beads the gate considered when deciding to emit.
+//
+// Without this alignment the gate could see assigned work (via the
+// config-derived named-session identity, or via a rig-store-routed
+// query) while the collector queried only the bare bead identifiers
+// against every store — producing a "0 stranded beads" message in the
+// exact failure mode the diagnostic exists to surface.
+func collectSessionAssignedWorkIDs(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, session beads.Bead) ([]string, error) {
+	identifiers := sessionAssignmentIdentifiersForConfig(session, cfg)
 	seen := make(map[string]struct{})
 	out := make([]string, 0, 4)
 	collect := func(s beads.Store) error {
 		if s == nil {
 			return nil
 		}
-		identifiers := sessionAssignmentIdentifiers(session)
 		for _, status := range []string{"open", "in_progress"} {
 			for _, assignee := range identifiers {
 				if assignee == "" {
@@ -2499,11 +2516,32 @@ func collectSessionAssignedWorkIDs(store beads.Store, rigStores map[string]beads
 		}
 		return nil
 	}
-	if err := collect(store); err != nil {
-		return out, err
-	}
-	for _, rs := range rigStores {
-		if err := collect(rs); err != nil {
+	// Route to the same store the gate routed to.
+	storeRef, ok := assignedWorkStoreRefForSession(cityPath, cfg, session)
+	switch {
+	case !ok:
+		// No agent template resolvable: gate fans out across the
+		// primary store + all rig stores. Mirror that.
+		if err := collect(store); err != nil {
+			return out, err
+		}
+		for _, rs := range rigStores {
+			if err := collect(rs); err != nil {
+				return out, err
+			}
+		}
+	case storeRef == "":
+		// Agent template resolvable but no rig store binding: gate
+		// queries only the primary store.
+		if err := collect(store); err != nil {
+			return out, err
+		}
+	default:
+		rigStore, found := rigStores[storeRef]
+		if !found || rigStore == nil {
+			return out, fmt.Errorf("rig store %q unavailable for session %q", storeRef, session.Metadata["session_name"])
+		}
+		if err := collect(rigStore); err != nil {
 			return out, err
 		}
 	}
