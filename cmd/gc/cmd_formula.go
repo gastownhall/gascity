@@ -498,14 +498,14 @@ func allFormulaSearchPaths(warningWriter ...io.Writer) []string {
 
 // formulaVersionCheckResult holds the output for --json mode.
 type formulaVersionCheckResult struct {
-	BeadID       string `json:"bead_id"`
-	FormulaName  string `json:"formula_name"`
-	BeadHash     string `json:"bead_hash"`
-	DiskHash     string `json:"disk_hash"`
-	BeadVersion  string `json:"bead_version"`
-	DiskVersion  int    `json:"disk_version"`
-	Match        bool   `json:"match"`
-	FormulaPath  string `json:"formula_path,omitempty"`
+	BeadID      string `json:"bead_id"`
+	FormulaName string `json:"formula_name"`
+	BeadHash    string `json:"bead_hash"`
+	DiskHash    string `json:"disk_hash"`
+	BeadVersion string `json:"bead_version"`
+	DiskVersion int    `json:"disk_version"`
+	Match       bool   `json:"match"`
+	FormulaPath string `json:"formula_path,omitempty"`
 }
 
 func newFormulaVersionCheckCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -579,15 +579,16 @@ since it was spawned.`,
 				FormulaPath: recipe.FormulaSource,
 			}
 
-			if jsonOutput {
+			switch {
+			case jsonOutput:
 				enc := json.NewEncoder(stdout)
 				enc.SetIndent("", "  ")
 				if err := enc.Encode(result); err != nil {
 					return err
 				}
-			} else if match {
+			case match:
 				_, _ = fmt.Fprintf(stdout, "✓ formula %s: bead %s matches on-disk version (hash %s)\n", formulaName, beadID, beadHash[:12])
-			} else {
+			default:
 				_, _ = fmt.Fprintf(stdout, "✗ formula %s: bead %s DIVERGES from on-disk version\n", formulaName, beadID)
 				_, _ = fmt.Fprintf(stdout, "  bead hash: %s\n", beadHash)
 				_, _ = fmt.Fprintf(stdout, "  disk hash: %s\n", diskHash)
