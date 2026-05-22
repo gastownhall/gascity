@@ -242,9 +242,7 @@ func apiSessionMailboxAddresses(b beads.Bead) []string {
 	for _, alias := range session.AliasHistory(b.Metadata) {
 		add(alias)
 	}
-	if len(addresses) == 0 {
-		add(strings.TrimSpace(b.Metadata["session_name"]))
-	}
+	add(b.Metadata["session_name"])
 	return addresses
 }
 

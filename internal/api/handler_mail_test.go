@@ -346,6 +346,7 @@ func TestMailAPIQueriesAllResolvedSessionMailboxAddresses(t *testing.T) {
 		Metadata: map[string]string{
 			"alias":         "sky",
 			"alias_history": "mayor,witness",
+			"session_name":  "runtime-sky",
 		},
 	})
 	if err != nil {
@@ -355,6 +356,7 @@ func TestMailAPIQueriesAllResolvedSessionMailboxAddresses(t *testing.T) {
 		"sky":            {{ID: "msg-current", From: "human", To: "sky", Body: "current alias"}},
 		sessionBead.ID:   {{ID: "msg-id", From: "human", To: sessionBead.ID, Body: "session id"}},
 		"mayor":          {{ID: "msg-history", From: "human", To: "mayor", Body: "historical alias"}},
+		"runtime-sky":    {{ID: "msg-runtime", From: "human", To: "runtime-sky", Body: "runtime session name"}},
 		"unrelated-user": {{ID: "msg-other", From: "human", To: "unrelated-user", Body: "other"}},
 	}}
 	h := newTestCityHandler(t, state)
@@ -371,8 +373,8 @@ func TestMailAPIQueriesAllResolvedSessionMailboxAddresses(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&inbox); err != nil {
 		t.Fatalf("decode inbox: %v", err)
 	}
-	if inbox.Total != 3 {
-		t.Fatalf("inbox Total = %d, want 3 resolved mailbox addresses; items=%#v", inbox.Total, inbox.Items)
+	if inbox.Total != 4 {
+		t.Fatalf("inbox Total = %d, want 4 resolved mailbox addresses; items=%#v", inbox.Total, inbox.Items)
 	}
 
 	rec = httptest.NewRecorder()
@@ -387,8 +389,8 @@ func TestMailAPIQueriesAllResolvedSessionMailboxAddresses(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&count); err != nil {
 		t.Fatalf("decode count: %v", err)
 	}
-	if count.Total != 3 || count.Unread != 3 {
-		t.Fatalf("count = (%d total, %d unread), want (3 total, 3 unread)", count.Total, count.Unread)
+	if count.Total != 4 || count.Unread != 4 {
+		t.Fatalf("count = (%d total, %d unread), want (4 total, 4 unread)", count.Total, count.Unread)
 	}
 }
 
