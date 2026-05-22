@@ -6,8 +6,12 @@ package main
 // reference it in tests without build-tag juggling.
 var fsPressurePath = ""
 
-// fsPressureReadFile is unused on non-Linux but declared so tests on
-// non-Linux platforms can still reference the symbol.
+// fsPressureReadFile mirrors the Linux declaration so the shared test helper
+// configureFSPressureForTests (main_test.go) compiles on all platforms. The
+// non-Linux readFSPressureAvg60 stub never reads it, so it is write-only here;
+// silence the unused check rather than build-tag-splitting the test helper.
+//
+//nolint:unused // assigned cross-platform by tests; only read on Linux
 var fsPressureReadFile = func(string) ([]byte, error) { return nil, nil }
 
 // readFSPressureAvg60 always returns 0 on non-Linux so the backpressure gate
