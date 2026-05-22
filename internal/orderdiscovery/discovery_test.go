@@ -240,12 +240,266 @@ func TestCityOrderRootsUsesLocalAndPackFormulaLayersOnce(t *testing.T) {
 	if len(roots) != 2 {
 		t.Fatalf("got %d roots, want 2: %#v", len(roots), roots)
 	}
-	if roots[0].Dir != filepath.Join(cityPath, "orders") || roots[0].FormulaLayer != cityLayer {
-		t.Fatalf("first root = %+v, want city orders root", roots[0])
+	if roots[0].Dir != filepath.Join(filepath.Dir(packLayer), "orders") || roots[0].FormulaLayer != packLayer {
+		t.Fatalf("first root = %+v, want pack orders root", roots[0])
 	}
-	if roots[1].Dir != filepath.Join(filepath.Dir(packLayer), "orders") || roots[1].FormulaLayer != packLayer {
-		t.Fatalf("second root = %+v, want pack orders root", roots[1])
+	if roots[1].Dir != filepath.Join(cityPath, "orders") || roots[1].FormulaLayer != cityLayer {
+		t.Fatalf("second root = %+v, want city orders root", roots[1])
 	}
+}
+
+func TestScanAllCityLocalOrderOverridesOrdersOnlyPack(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "audit-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "audit", `[order]
+exec = "scripts/pack.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "audit", `[order]
+exec = "scripts/city.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+		},
+		PackDirs: []string{packDir},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	if len(aa) != 1 {
+		t.Fatalf("got %d orders, want 1: %#v", len(aa), aa)
+	}
+	if aa[0].Exec != "scripts/city.sh" {
+		t.Fatalf("Exec = %q, want city-local order to win", aa[0].Exec)
+	}
+}
+
+func TestScanAllRigLocalOrderOverridesOrdersOnlyPack(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	rigLayer := orderDiscoveryRigLayer(t, "frontend")
+	packDir := filepath.Join(t.TempDir(), "watch-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "watch", `[order]
+exec = "scripts/pack.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(filepath.Dir(rigLayer), "orders"), "watch", `[order]
+exec = "scripts/rig.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"frontend": {cityLayer, rigLayer},
+			},
+		},
+		Rigs: []config.Rig{
+			{Name: "frontend", FormulasDir: rigLayer},
+		},
+		RigPackDirs: map[string][]string{
+			"frontend": {packDir},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	for _, a := range aa {
+		if a.Name != "watch" || a.Rig != "frontend" {
+			continue
+		}
+		if a.Exec != "scripts/rig.sh" {
+			t.Fatalf("Exec = %q, want rig-local order to win", a.Exec)
+		}
+		return
+	}
+	t.Fatalf("missing rig-scoped watch order in %#v", aa)
+}
+
+func TestScanAllSameOrdersOnlyPackImportedAtCityAndRigScopes(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "shared-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "sweep", `[order]
+exec = "scripts/sweep.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"frontend": {cityLayer},
+			},
+		},
+		PackDirs: []string{packDir},
+		RigPackDirs: map[string][]string{
+			"frontend": {packDir},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	var cityFound, rigFound bool
+	for _, a := range aa {
+		if a.Name != "sweep" {
+			continue
+		}
+		switch a.Rig {
+		case "":
+			cityFound = true
+		case "frontend":
+			rigFound = true
+		}
+	}
+	if !cityFound || !rigFound {
+		t.Fatalf("found city=%v rig=%v in %#v, want both city and rig orders", cityFound, rigFound, aa)
+	}
+}
+
+func TestScanAllCityPackRootsPreserveTopoOrderAcrossOrdersOnlyPacks(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packA, layerA := orderDiscoveryPackLayer(t, "pack-a")
+	packB := filepath.Join(t.TempDir(), "pack-b")
+	packC, layerC := orderDiscoveryPackLayer(t, "pack-c")
+	writeOrderDiscoveryFile(t, filepath.Join(packA, "orders"), "audit", `[order]
+exec = "scripts/a.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(packB, "orders"), "audit", `[order]
+exec = "scripts/b.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(packC, "orders"), "audit", `[order]
+exec = "scripts/c.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{layerA, layerC, cityLayer},
+		},
+		PackDirs: []string{packA, packB, packC},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	if len(aa) != 1 {
+		t.Fatalf("got %d orders, want 1: %#v", len(aa), aa)
+	}
+	if aa[0].Exec != "scripts/c.sh" {
+		t.Fatalf("Exec = %q, want later formula pack to override earlier orders-only pack", aa[0].Exec)
+	}
+}
+
+func TestScanAllRigPackRootsPreserveTopoOrderAcrossOrdersOnlyPacks(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packA, layerA := orderDiscoveryPackLayer(t, "rig-pack-a")
+	packB := filepath.Join(t.TempDir(), "rig-pack-b")
+	packC, layerC := orderDiscoveryPackLayer(t, "rig-pack-c")
+	writeOrderDiscoveryFile(t, filepath.Join(packA, "orders"), "watch", `[order]
+exec = "scripts/a.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(packB, "orders"), "watch", `[order]
+exec = "scripts/b.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(packC, "orders"), "watch", `[order]
+exec = "scripts/c.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"frontend": {cityLayer, layerA, layerC},
+			},
+		},
+		RigPackDirs: map[string][]string{
+			"frontend": {packA, packB, packC},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	for _, a := range aa {
+		if a.Name != "watch" || a.Rig != "frontend" {
+			continue
+		}
+		if a.Exec != "scripts/c.sh" {
+			t.Fatalf("Exec = %q, want later rig formula pack to override earlier orders-only pack", a.Exec)
+		}
+		return
+	}
+	t.Fatalf("missing rig-scoped watch order in %#v", aa)
+}
+
+func TestScanAllRigLocalOrderUsesCanonicalFormulaLayer(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	rigLayer := orderDiscoveryRigLayer(t, "frontend")
+	packDir := filepath.Join(t.TempDir(), "watch-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "watch", `[order]
+exec = "scripts/pack.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(filepath.Dir(rigLayer), "orders"), "watch", `[order]
+exec = "scripts/rig.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"frontend": {cityLayer, rigLayer},
+			},
+		},
+		RigPackDirs: map[string][]string{
+			"frontend": {packDir},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	for _, a := range aa {
+		if a.Name != "watch" || a.Rig != "frontend" {
+			continue
+		}
+		if a.Exec != "scripts/rig.sh" {
+			t.Fatalf("Exec = %q, want canonical rig-local formula layer to win", a.Exec)
+		}
+		return
+	}
+	t.Fatalf("missing rig-scoped watch order in %#v", aa)
 }
 
 func TestRigExclusiveLayersReturnsOnlyRigSuffix(t *testing.T) {
@@ -281,6 +535,16 @@ func orderDiscoveryRigLayer(t *testing.T, rigName string) string {
 		t.Fatal(err)
 	}
 	return rigLayer
+}
+
+func orderDiscoveryPackLayer(t *testing.T, packName string) (packDir, layer string) {
+	t.Helper()
+	packDir = filepath.Join(t.TempDir(), packName)
+	layer = filepath.Join(packDir, "formulas")
+	if err := os.MkdirAll(layer, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return packDir, layer
 }
 
 func writeOrderDiscoveryFile(t *testing.T, dir, name, content string) {

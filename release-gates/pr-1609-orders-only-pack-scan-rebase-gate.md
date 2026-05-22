@@ -19,9 +19,9 @@ Existing PR: https://github.com/gastownhall/gascity/pull/1609
 
 ## Acceptance Evidence
 
-- `cityOrderRoots` appends scan roots from `cfg.PackDirs`, using a synthesized `<packDir>/formulas` layer so `PACK_DIR` resolution remains stable for orders-only packs.
-- Rig scan roots include rig-exclusive pack dirs from `cfg.RigPackDirs`, with dedupe against city-level pack dirs.
-- Tests cover both city-level and rig-level orders-only pack discovery.
+- `cityOrderRoots` and rig scan roots build roots from topo-ordered pack dirs, using a synthesized `<packDir>/formulas` layer so `PACK_DIR` resolution remains stable for orders-only packs.
+- Rig scan roots include the full configured `cfg.RigPackDirs[rig]` set; packs imported at both city and rig scope can contribute orders at both scopes.
+- Tests cover city-level and rig-level orders-only pack discovery, same city/rig scope visibility, local override precedence, and mixed formula-pack / orders-only-pack / formula-pack precedence.
 - PR #1609 already existed for this branch, so deployment updates the existing PR rather than opening a duplicate.
 
 ## Test Evidence

@@ -58,11 +58,11 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 	var rigOrders []orders.Order
 	for _, rigName := range sortedRigNames(rigNames) {
 		exclusive := RigExclusiveLayers(cfg.FormulaLayers.Rigs[rigName], cityLayers)
-		exclusivePackDirs := rigExclusivePackDirs(cfg.RigPackDirs[rigName], cfg.PackDirs)
+		exclusivePackDirs := cfg.RigPackDirs[rigName]
 		if len(exclusive) == 0 && len(exclusivePackDirs) == 0 {
 			continue
 		}
-		aa, err := orders.ScanRootsWithOptions(fsysImpl, rigOrderRoots(exclusive, exclusivePackDirs), cfg.Orders.Skip, opts.OrderScanOptions)
+		aa, err := orders.ScanRootsWithOptions(fsysImpl, rigOrderRoots(exclusive, exclusivePackDirs, rigLocalFormulaLayer(exclusive, exclusivePackDirs)), cfg.Orders.Skip, opts.OrderScanOptions)
 		if err != nil {
 			if opts.OnRigScanError != nil {
 				if handlerErr := opts.OnRigScanError(rigName, err); handlerErr != nil {
@@ -108,69 +108,94 @@ func cityFormulaLayers(cityPath string, cfg *config.City) []string {
 func CityOrderRoots(cityPath string, cfg *config.City) []orders.ScanRoot {
 	formulaLayers := cityFormulaLayers(cityPath, cfg)
 	localFormulas := citylayout.ResolveFormulasDir(cityPath, cfg.FormulasDir())
-	roots := make([]orders.ScanRoot, 0, len(formulaLayers)+len(cfg.PackDirs)+2)
-	seen := make(map[string]bool, len(formulaLayers)+len(cfg.PackDirs)+2)
-	appendRoot := func(root orders.ScanRoot) {
-		key := filepath.Clean(root.Dir) + "\n" + filepath.Clean(root.FormulaLayer)
-		if seen[key] {
-			return
-		}
-		seen[key] = true
-		roots = append(roots, root)
-	}
 
 	// Formula layers include system packs (via LoadWithIncludes extraIncludes)
 	// and user packs (via workspace.includes). City-local formulas are highest
 	// priority and override pack formulas when order names collide.
-	for _, layer := range formulaLayers {
-		if layer == localFormulas {
-			for _, root := range []string{citylayout.OrdersPath(cityPath)} {
-				appendRoot(orders.ScanRoot{
-					Dir:          root,
-					FormulaLayer: localFormulas,
-				})
-			}
-			continue
-		}
-		appendRoot(orders.ScanRoot{
-			Dir:          filepath.Join(filepath.Dir(layer), "orders"),
-			FormulaLayer: layer,
-		})
-	}
-
-	for _, packDir := range cfg.PackDirs {
-		appendRoot(orders.ScanRoot{
-			Dir:          filepath.Join(packDir, "orders"),
-			FormulaLayer: filepath.Join(packDir, "formulas"),
-		})
-	}
-	return roots
+	return orderRoots(formulaLayers, cfg.PackDirs, localFormulas, orders.ScanRoot{
+		Dir:          citylayout.OrdersPath(cityPath),
+		FormulaLayer: localFormulas,
+	})
 }
 
-func rigOrderRoots(formulaLayers []string, packDirs []string) []orders.ScanRoot {
-	roots := make([]orders.ScanRoot, 0, len(formulaLayers)+len(packDirs))
-	seen := make(map[string]bool, len(formulaLayers)+len(packDirs))
+func rigOrderRoots(formulaLayers []string, packDirs []string, localFormulas string) []orders.ScanRoot {
+	localRoot := orders.ScanRoot{}
+	if localFormulas != "" {
+		localRoot = formulaLayerRoot(localFormulas)
+	}
+	return orderRoots(formulaLayers, packDirs, localFormulas, localRoot)
+}
+
+func orderRoots(formulaLayers []string, packDirs []string, localFormulas string, localRoot orders.ScanRoot) []orders.ScanRoot {
+	roots := make([]orders.ScanRoot, 0, len(formulaLayers)+len(packDirs)+1)
+	seen := make(map[string]bool, len(formulaLayers)+len(packDirs)+1)
 	appendRoot := func(root orders.ScanRoot) {
-		key := filepath.Clean(root.Dir) + "\n" + filepath.Clean(root.FormulaLayer)
+		key := scanRootKey(root)
 		if seen[key] {
 			return
 		}
 		seen[key] = true
 		roots = append(roots, root)
 	}
-	for _, layer := range formulaLayers {
-		appendRoot(orders.ScanRoot{
-			Dir:          filepath.Join(filepath.Dir(layer), "orders"),
-			FormulaLayer: layer,
-		})
-	}
+
 	for _, packDir := range packDirs {
-		appendRoot(orders.ScanRoot{
-			Dir:          filepath.Join(packDir, "orders"),
-			FormulaLayer: filepath.Join(packDir, "formulas"),
-		})
+		appendRoot(packRoot(packDir))
+	}
+
+	localFound := false
+	for _, layer := range formulaLayers {
+		if samePath(layer, localFormulas) {
+			if !localFound {
+				if localRoot.Dir == "" {
+					localRoot = formulaLayerRoot(layer)
+				}
+				localFound = true
+			}
+			continue
+		}
+		appendRoot(formulaLayerRoot(layer))
+	}
+
+	if localFound {
+		appendRoot(localRoot)
 	}
 	return roots
+}
+
+func formulaLayerRoot(layer string) orders.ScanRoot {
+	return orders.ScanRoot{
+		Dir:          filepath.Join(filepath.Dir(layer), "orders"),
+		FormulaLayer: layer,
+	}
+}
+
+func packRoot(packDir string) orders.ScanRoot {
+	return orders.ScanRoot{
+		Dir:          filepath.Join(packDir, "orders"),
+		FormulaLayer: filepath.Join(packDir, "formulas"),
+	}
+}
+
+func scanRootKey(root orders.ScanRoot) string {
+	return filepath.Clean(root.Dir) + "\n" + filepath.Clean(root.FormulaLayer)
+}
+
+func samePath(a, b string) bool {
+	return a != "" && b != "" && filepath.Clean(a) == filepath.Clean(b)
+}
+
+func rigLocalFormulaLayer(formulaLayers []string, packDirs []string) string {
+	packFormulaLayers := make(map[string]bool, len(packDirs))
+	for _, packDir := range packDirs {
+		packFormulaLayers[filepath.Clean(filepath.Join(packDir, "formulas"))] = true
+	}
+	for i := len(formulaLayers) - 1; i >= 0; i-- {
+		layer := formulaLayers[i]
+		if !packFormulaLayers[filepath.Clean(layer)] {
+			return layer
+		}
+	}
+	return ""
 }
 
 // RigExclusiveLayers returns the suffix of rig layers that is not inherited
@@ -180,23 +205,6 @@ func RigExclusiveLayers(rigLayers, cityLayers []string) []string {
 		return nil
 	}
 	return rigLayers[len(cityLayers):]
-}
-
-func rigExclusivePackDirs(rigPackDirs, cityPackDirs []string) []string {
-	if len(rigPackDirs) == 0 {
-		return nil
-	}
-	cityClean := make(map[string]bool, len(cityPackDirs))
-	for _, dir := range cityPackDirs {
-		cityClean[filepath.Clean(dir)] = true
-	}
-	out := make([]string, 0, len(rigPackDirs))
-	for _, dir := range rigPackDirs {
-		if !cityClean[filepath.Clean(dir)] {
-			out = append(out, dir)
-		}
-	}
-	return out
 }
 
 func sortedRigNames(rigs map[string]struct{}) []string {
