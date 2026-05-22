@@ -1711,13 +1711,6 @@ func cmdMailPeekWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer) 
 	return routeMailPeek(cityPath, args, c, reason, jsonOut, stdout, stderr)
 }
 
-// cmdMailPeek shows a message without marking it as read. It routes through
-// the supervisor API when a controller is up and falls back to direct bd
-// reads otherwise.
-func cmdMailPeek(args []string, stdout, stderr io.Writer) int {
-	return cmdMailPeekWithJSON(args, false, stdout, stderr)
-}
-
 // mailPeekAPIClient returns (client, "") when the API path is available,
 // or (nil, reason) when the caller should fall back. Indirected through a
 // var so tests inject a client pointed at httptest.Server.
@@ -1731,7 +1724,7 @@ var mailPeekAPIClient = func(cityPath string) (*api.Client, string) {
 // routeMailPeek dispatches `mail peek` to the supervisor API when a
 // controller is up; otherwise falls back to the local mail-provider path.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
-func routeMailPeek(cityPath string, args []string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
+func routeMailPeek(_ string, args []string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
 	const cmdName = "mail peek"
 	id := args[0]
 	if c != nil {
@@ -2208,12 +2201,6 @@ func cmdMailCountWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer)
 	return routeMailCount(cityPath, args, c, reason, jsonOut, stdout, stderr)
 }
 
-// cmdMailCount shows total/unread count. It routes through the supervisor
-// API when a controller is up and falls back to direct bd reads otherwise.
-func cmdMailCount(args []string, stdout, stderr io.Writer) int {
-	return cmdMailCountWithJSON(args, false, stdout, stderr)
-}
-
 // mailCountAPIClient returns (client, "") when the API path is available,
 // or (nil, reason) when the caller should fall back. Indirected through a
 // var so tests inject a client pointed at httptest.Server.
@@ -2227,7 +2214,7 @@ var mailCountAPIClient = func(cityPath string) (*api.Client, string) {
 // routeMailCount dispatches `mail count` to the supervisor API when a
 // controller is up; otherwise falls back to the local mail-provider path.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
-func routeMailCount(cityPath string, args []string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
+func routeMailCount(_ string, args []string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
 	const cmdName = "mail count"
 	recipient := defaultMailIdentity()
 	if len(args) > 0 {

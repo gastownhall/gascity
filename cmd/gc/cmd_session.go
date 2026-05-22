@@ -1985,7 +1985,7 @@ var sessionPeekAPIClient = func(cityPath string) (*api.Client, string) {
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 // The API path passes the raw target to the server which resolves aliases;
 // fallback resolves locally via resolveSessionIDWithConfig.
-func routeSessionPeek(cityPath, target string, lines int, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
+func routeSessionPeek(_, target string, lines int, c *api.Client, nilReason string, jsonOutput bool, stdout, stderr io.Writer) int {
 	const cmdName = "session peek"
 	if c != nil {
 		cr, err := c.GetSession(target, true, lines)
