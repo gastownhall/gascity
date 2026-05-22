@@ -272,7 +272,9 @@ describe("status panel scope rendering", () => {
     await renderStatus();
 
     const stats = scopeStats();
+    expect(document.querySelectorAll(".scope-stat")).toHaveLength(5);
     expect(Object.keys(stats)).toHaveLength(5);
+    expect(document.getElementById("scope-badge")?.textContent).toBe("City");
     expect(stats["City"]).toBe("alpha");
     expect(stats["Session"]).toBe("—");
     expect(stats["Activity"]).toBe("—");
@@ -311,6 +313,7 @@ describe("status panel scope rendering", () => {
     await renderStatus();
 
     expect(document.getElementById("scope-badge")?.textContent).toBe("City");
+    expect(document.querySelectorAll(".scope-stat")).toHaveLength(5);
     expect(scopeStats()).toMatchObject({
       City: "alpha",
       Session: "control-dispatcher",

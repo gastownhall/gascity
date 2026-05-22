@@ -2422,7 +2422,9 @@
             }
 
             .scope-status {
+                flex-wrap: wrap;
                 justify-content: center;
+                row-gap: 8px;
             }
 
             .health-grid {
@@ -2542,7 +2544,10 @@
             }
 
             .scope-status {
+                flex-wrap: wrap;
                 justify-content: center;
+                row-gap: 8px;
+                column-gap: 12px;
             }
 
             .summary-banner {
