@@ -620,10 +620,9 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 		}
 		want, manage := replacements[key]
 		if !manage {
-			// Per YAML semantics, last-write-wins for duplicate top-level
-			// keys. Drop earlier occurrences so the canonical writer
-			// converges on a single entry per key.
-			if i != lastTopLevelIndex[key] {
+			// When fallback rewrites malformed input, keep YAML's
+			// last-write-wins semantics for duplicate top-level keys.
+			if key != "" && i != lastTopLevelIndex[key] {
 				changed = true
 				continue
 			}
@@ -956,7 +955,8 @@ func repairMalformedConfigLines(lines []string) ([]string, bool) {
 // key. Returns the original line as a one-element slice when no split is
 // possible.
 func splitGluedConfigLine(line string) []string {
-	if strings.TrimLeft(line, " \t") != line {
+	trimmedLeft := strings.TrimLeft(line, " \t")
+	if trimmedLeft != line || strings.HasPrefix(trimmedLeft, "#") {
 		return []string{line}
 	}
 	colon := strings.Index(line, ":")
@@ -973,7 +973,7 @@ func splitGluedConfigLine(line string) []string {
 		return []string{line}
 	}
 	afterQuote := quoteStart + 1 + quoteEnd + 1
-	tail := rest[afterQuote:]
+	tail := strings.TrimLeft(rest[afterQuote:], " \t")
 	if !looksLikeTopLevelKeyStart(tail) {
 		return []string{line}
 	}
@@ -1001,6 +1001,8 @@ func looksLikeTopLevelKeyStart(s string) bool {
 }
 
 func isYamlKeyRune(r rune) bool {
+	// This is intentionally a narrow .beads/config.yaml repair heuristic,
+	// not a general YAML key parser.
 	switch {
 	case r >= 'a' && r <= 'z':
 		return true
@@ -1022,6 +1024,9 @@ func lastTopLevelKeyIndex(lines []string) map[string]int {
 	last := make(map[string]int, len(lines))
 	for i, line := range lines {
 		if key, _, ok := topLevelConfigLine(line); ok {
+			if key == "" {
+				continue
+			}
 			last[key] = i
 		}
 	}

@@ -391,7 +391,7 @@ func TestEnsureCanonicalConfigRepairsGluedSyncRemoteLine(t *testing.T) {
 		"gc.endpoint_origin: inherited_city",
 		"gc.endpoint_status: verified",
 		"",
-		`sync.remote: "git+ssh://git@example.com/foo/service-inventory.git"types.custom: molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step`,
+		`sync.remote: "git+ssh://git@example.com/foo/service-inventory.git"  types.custom: molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step`,
 		"types.custom: molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step",
 		"",
 	}, "\n")
@@ -435,12 +435,24 @@ func TestEnsureCanonicalConfigRepairsGluedSyncRemoteLine(t *testing.T) {
 	if got := countLineOccurrences(text, "types.custom: molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step"); got != 1 {
 		t.Fatalf("types.custom should appear exactly once, found %d:\n%s", got, text)
 	}
+
+	changed, err = EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "si",
+		EndpointOrigin: EndpointOriginInheritedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("second EnsureCanonicalConfig() error = %v", err)
+	}
+	if changed {
+		t.Fatalf("second EnsureCanonicalConfig() should be idempotent:\n%s", text)
+	}
 }
 
 // TestEnsureCanonicalConfigDedupsUnmanagedKeysOnMalformedRepair ensures
-// that when fallback repairs are needed, duplicate top-level keys are
+// that when fallback rewrites malformed input, duplicate top-level keys are
 // collapsed even when they aren't in the managed set. YAML semantics say
-// last-write-wins; the canonical writer should match.
+// last-write-wins, and this fallback rewrite should match.
 func TestEnsureCanonicalConfigDedupsUnmanagedKeysOnMalformedRepair(t *testing.T) {
 	fs := fsys.OSFS{}
 	dir := t.TempDir()
@@ -475,6 +487,103 @@ func TestEnsureCanonicalConfigDedupsUnmanagedKeysOnMalformedRepair(t *testing.T)
 	}
 	if count := countLineOccurrences(text, "types.custom: second-value"); count != 1 {
 		t.Fatalf("expected exactly one types.custom line, found %d:\n%s", count, text)
+	}
+}
+
+func TestEnsureCanonicalConfigFallbackPreservesEmptyKeyMalformedLines(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"issue_prefix: gc",
+		": first malformed line",
+		": second malformed line",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	}); err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, needle := range []string{": first malformed line", ": second malformed line"} {
+		if got := countLineOccurrences(text, needle); got != 1 {
+			t.Fatalf("expected malformed line %q to be preserved once, found %d:\n%s", needle, got, text)
+		}
+	}
+}
+
+func TestSplitGluedConfigLine(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want []string
+	}{
+		{
+			name: "adjacent key",
+			line: `sync.remote: "git+ssh://git@example.com/foo.git"types.custom: molecule`,
+			want: []string{
+				`sync.remote: "git+ssh://git@example.com/foo.git"`,
+				"types.custom: molecule",
+			},
+		},
+		{
+			name: "horizontal whitespace before glued key",
+			line: `sync.remote: "git+ssh://git@example.com/foo.git"  types.custom: molecule`,
+			want: []string{
+				`sync.remote: "git+ssh://git@example.com/foo.git"`,
+				"types.custom: molecule",
+			},
+		},
+		{
+			name: "recursive chain",
+			line: `sync.remote: "git+ssh://git@example.com/foo.git"types.custom: "molecule"gc.endpoint_origin: managed_city`,
+			want: []string{
+				`sync.remote: "git+ssh://git@example.com/foo.git"`,
+				`types.custom: "molecule"`,
+				"gc.endpoint_origin: managed_city",
+			},
+		},
+		{
+			name: "comment line",
+			line: `# sync.remote: "git+ssh://git@example.com/foo.git"types.custom: molecule`,
+			want: []string{`# sync.remote: "git+ssh://git@example.com/foo.git"types.custom: molecule`},
+		},
+		{
+			name: "indented line",
+			line: `  sync.remote: "git+ssh://git@example.com/foo.git"types.custom: molecule`,
+			want: []string{`  sync.remote: "git+ssh://git@example.com/foo.git"types.custom: molecule`},
+		},
+		{
+			name: "unbalanced quote",
+			line: `sync.remote: "git+ssh://git@example.com/foo.gittypes.custom: molecule`,
+			want: []string{`sync.remote: "git+ssh://git@example.com/foo.gittypes.custom: molecule`},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitGluedConfigLine(tc.line)
+			if len(got) != len(tc.want) {
+				t.Fatalf("splitGluedConfigLine() = %#v, want %#v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("splitGluedConfigLine()[%d] = %q, want %q; all got %#v", i, got[i], tc.want[i], got)
+				}
+			}
+		})
 	}
 }
 
@@ -981,7 +1090,7 @@ func TestReadDoltDatabase(t *testing.T) {
 func countLineOccurrences(text, needle string) int {
 	count := 0
 	for _, line := range strings.Split(text, "\n") {
-		if strings.TrimSpace(line) == needle {
+		if line == needle {
 			count++
 		}
 	}
