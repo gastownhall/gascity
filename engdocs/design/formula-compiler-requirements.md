@@ -89,6 +89,21 @@ are present, they are consistent and valid.
 If both are present but disagree, compilation fails before durable work is
 written.
 
+### Composition through extends
+
+Formula requirements are inherited safety constraints, not overrideable config.
+The effective requirement set for a resolved formula is the conjunction of:
+
+- the child formula's direct `[requires]` entries
+- every resolved parent formula's effective requirements
+- requirements implied by legacy parent or child `contract = "graph.v2"`
+
+A child may strengthen a parent requirement by adding another comparator, but it
+cannot weaken or erase the parent constraint. Multiple parents all contribute
+their constraints. If the combined constraints do not overlap, resolution fails
+before durable work with `formula.compiler_requirement_conflict` and names the
+formula sources that contributed the incompatible requirements.
+
 ### Unknown requirements
 
 Unknown keys under `[requires]` fail validation.
@@ -119,6 +134,10 @@ Minimum rules:
 6. `contract = "graph.v2"` is accepted as a deprecated alias for
    `formula_compiler = ">=2.0.0"`.
 7. Conflicting legacy and new declarations are rejected.
+8. Parent and child formula requirements compose by conjunction through
+   `extends`; child formulas cannot weaken or erase parent requirements.
+9. Non-overlapping composed requirements are rejected with
+   `formula.compiler_requirement_conflict`.
 
 Gas City should use a standard semver comparator implementation rather than a
 custom parser.
@@ -146,9 +165,24 @@ Example invalid comparator:
 formula.compiler_requirement_invalid: formula_compiler must be a semver comparator, for example ">=2.0.0"
 ```
 
+Example inherited requirement conflict:
+
+```text
+formula.compiler_requirement_conflict: formula "child" has non-overlapping formula_compiler requirements: <2.0.0 from formula "legacy-parent" [requires]; >=2.0.0 from formula "v2-parent" [requires]
+```
+
 These codes are enough for CLI, controller, order, and test assertions. Do not
 build a broader typed diagnostic system until there is a concrete consumer that
 needs it.
+
+## Doctor Surface
+
+`gc doctor` includes a formula requirements check over visible city and rig
+formula layers. It reports deprecated `contract = "graph.v2"` aliases with
+migration guidance, v2-only formula constructs that lack an explicit compiler
+requirement, cities that disable `formula_v2` while visible formulas require
+compiler v2, invalid or unknown requirement axes, and inherited requirement
+conflicts that would otherwise only appear when cooking a formula.
 
 ## Compatibility
 

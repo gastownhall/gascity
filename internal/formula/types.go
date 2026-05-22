@@ -121,6 +121,8 @@ type Formula struct {
 
 	// Source tracks where this formula was loaded from (set by parser).
 	Source string `json:"source,omitempty"`
+
+	compilerRequirementSources []formulaCompilerConstraint
 }
 
 // CatalogMetadata describes a formula exposed through gc formula catalog.

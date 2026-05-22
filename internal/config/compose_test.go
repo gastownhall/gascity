@@ -1144,14 +1144,15 @@ overlay_dir = "overlays/theme"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("len(cfg.Agents) = %d, want 1", len(cfg.Agents))
+	agents := explicitAgents(cfg.Agents)
+	if len(agents) != 1 {
+		t.Fatalf("len(explicit agents) = %d, want 1", len(agents))
 	}
-	if cfg.Agents[0].PromptTemplate != "fragments/prompts/theme.md" {
-		t.Fatalf("PromptTemplate = %q, want fragments/prompts/theme.md", cfg.Agents[0].PromptTemplate)
+	if agents[0].PromptTemplate != "fragments/prompts/theme.md" {
+		t.Fatalf("PromptTemplate = %q, want fragments/prompts/theme.md", agents[0].PromptTemplate)
 	}
-	if cfg.Agents[0].OverlayDir != "fragments/overlays/theme" {
-		t.Fatalf("OverlayDir = %q, want fragments/overlays/theme", cfg.Agents[0].OverlayDir)
+	if agents[0].OverlayDir != "fragments/overlays/theme" {
+		t.Fatalf("OverlayDir = %q, want fragments/overlays/theme", agents[0].OverlayDir)
 	}
 }
 
@@ -1239,14 +1240,15 @@ scope = "city"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("len(cfg.Agents) = %d, want 1", len(cfg.Agents))
+	agents := explicitAgents(cfg.Agents)
+	if len(agents) != 1 {
+		t.Fatalf("len(explicit agents) = %d, want 1", len(agents))
 	}
-	if cfg.Agents[0].PromptTemplate != "prompts/local.md" {
-		t.Fatalf("PromptTemplate = %q, want prompts/local.md", cfg.Agents[0].PromptTemplate)
+	if agents[0].PromptTemplate != "prompts/local.md" {
+		t.Fatalf("PromptTemplate = %q, want prompts/local.md", agents[0].PromptTemplate)
 	}
-	if cfg.Agents[0].OverlayDir != "overlays/local" {
-		t.Fatalf("OverlayDir = %q, want overlays/local", cfg.Agents[0].OverlayDir)
+	if agents[0].OverlayDir != "overlays/local" {
+		t.Fatalf("OverlayDir = %q, want overlays/local", agents[0].OverlayDir)
 	}
 }
 
@@ -1297,14 +1299,15 @@ overlay_dir = "overlays/base-worker"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("len(cfg.Agents) = %d, want 1", len(cfg.Agents))
+	agents := explicitAgents(cfg.Agents)
+	if len(agents) != 1 {
+		t.Fatalf("len(explicit agents) = %d, want 1", len(agents))
 	}
-	if cfg.Agents[0].PromptTemplate != "fragments/prompts/rig-worker.md" {
-		t.Fatalf("PromptTemplate = %q, want fragments/prompts/rig-worker.md", cfg.Agents[0].PromptTemplate)
+	if agents[0].PromptTemplate != "fragments/prompts/rig-worker.md" {
+		t.Fatalf("PromptTemplate = %q, want fragments/prompts/rig-worker.md", agents[0].PromptTemplate)
 	}
-	if cfg.Agents[0].OverlayDir != "fragments/overlays/rig-worker" {
-		t.Fatalf("OverlayDir = %q, want fragments/overlays/rig-worker", cfg.Agents[0].OverlayDir)
+	if agents[0].OverlayDir != "fragments/overlays/rig-worker" {
+		t.Fatalf("OverlayDir = %q, want fragments/overlays/rig-worker", agents[0].OverlayDir)
 	}
 }
 

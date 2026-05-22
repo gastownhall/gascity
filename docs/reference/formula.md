@@ -47,6 +47,15 @@ needs = ["dry", "wet"]
 | `requires` | table | Optional host capability requirements such as `formula_compiler = ">=2.0.0"` |
 | `extends` | []string | Optional parent formulas to compose from |
 
+`[requires]` is composed through `extends` as a safety constraint. A child
+inherits every parent requirement, including requirements implied by legacy
+`contract = "graph.v2"`, and may only add tighter constraints. Non-overlapping
+parent/child requirements fail as `formula.compiler_requirement_conflict`
+before any durable work is written. `gc doctor` reports deprecated legacy
+contracts, missing v2 requirements, disabled `formula_v2` mismatches, invalid
+requirement axes, and inherited requirement conflicts across visible formula
+layers.
+
 ## Step Fields
 
 Each `[[steps]]` entry represents one task bead inside the instantiated

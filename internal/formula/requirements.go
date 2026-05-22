@@ -3,6 +3,8 @@ package formula
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 
 	semver "github.com/Masterminds/semver/v3"
@@ -13,6 +15,8 @@ const (
 	defaultFormulaCompilerCapability = "1.0.0"
 	graphV2Requirement               = ">=2.0.0"
 )
+
+var semverLiteralPattern = regexp.MustCompile(`\d+(?:\.\d+){0,2}`)
 
 type formulaCompilerConstraint struct {
 	Raw    string
@@ -74,6 +78,9 @@ func ValidateHostRequirements(f *Formula, formulaV2Enabled bool) error {
 	if err != nil {
 		return err
 	}
+	if err := validateFormulaCompilerConstraintSet(f.Formula, constraints); err != nil {
+		return err
+	}
 	if len(constraints) == 0 {
 		return nil
 	}
@@ -99,16 +106,13 @@ func validateRequirementDeclarations(f *Formula) []string {
 		return nil
 	}
 	var errs []string
-	if raw := formulaCompilerRequirement(f); raw != "" {
-		constraint, err := semver.NewConstraint(raw)
-		if err != nil {
-			errs = append(errs, invalidFormulaCompilerRequirement(raw, err).Error())
-		} else if declaresGraphV2Contract(f) {
-			graphV2, graphErr := semver.NewVersion(currentFormulaCompilerCapability)
-			if graphErr != nil || !constraint.Check(graphV2) {
-				errs = append(errs, fmt.Sprintf("formula.compiler_requirement_conflict: contract = %q requires formula_compiler %s but [requires] formula_compiler = %q does not include %s", f.Contract, graphV2Requirement, raw, currentFormulaCompilerCapability))
-			}
-		}
+	constraints, err := formulaCompilerConstraints(f)
+	if err != nil {
+		errs = append(errs, err.Error())
+		return errs
+	}
+	if err := validateFormulaCompilerConstraintSet(f.Formula, constraints); err != nil {
+		errs = append(errs, err.Error())
 	}
 	return errs
 }
@@ -117,13 +121,11 @@ func formulaCompilerConstraints(f *Formula) ([]formulaCompilerConstraint, error)
 	if f == nil {
 		return nil, nil
 	}
-	var constraints []formulaCompilerConstraint
-	if declaresGraphV2Contract(f) {
-		constraints = append(constraints, formulaCompilerConstraint{Raw: graphV2Requirement, Source: `contract = "graph.v2"`})
+	constraints := f.compilerRequirementSources
+	if len(constraints) == 0 {
+		constraints = directFormulaCompilerConstraints(f)
 	}
-	if raw := formulaCompilerRequirement(f); raw != "" {
-		constraints = append(constraints, formulaCompilerConstraint{Raw: raw, Source: "requires.formula_compiler"})
-	}
+	constraints = append([]formulaCompilerConstraint(nil), constraints...)
 	for _, candidate := range constraints {
 		if _, err := semver.NewConstraint(candidate.Raw); err != nil {
 			return nil, invalidFormulaCompilerRequirement(candidate.Raw, err)
@@ -132,18 +134,151 @@ func formulaCompilerConstraints(f *Formula) ([]formulaCompilerConstraint, error)
 	return constraints, nil
 }
 
-func declaresGraphCompilerRequirement(f *Formula) bool {
+func directFormulaCompilerConstraints(f *Formula) []formulaCompilerConstraint {
+	if f == nil {
+		return nil
+	}
+	var constraints []formulaCompilerConstraint
 	if declaresGraphV2Contract(f) {
-		return true
+		constraints = append(constraints, formulaCompilerConstraint{Raw: graphV2Requirement, Source: formulaCompilerConstraintSource(f, `contract = "graph.v2"`)})
 	}
-	raw := formulaCompilerRequirement(f)
-	if raw == "" {
-		return false
+	if raw := formulaCompilerRequirement(f); raw != "" {
+		constraints = append(constraints, formulaCompilerConstraint{Raw: raw, Source: formulaCompilerConstraintSource(f, "[requires]")})
 	}
-	constraint, err := semver.NewConstraint(raw)
-	if err != nil {
-		return false
+	return constraints
+}
+
+func formulaCompilerConstraintSource(f *Formula, suffix string) string {
+	name := "<unknown>"
+	if f != nil && strings.TrimSpace(f.Formula) != "" {
+		name = strings.TrimSpace(f.Formula)
 	}
+	return fmt.Sprintf("formula %q %s", name, suffix)
+}
+
+func setFormulaCompilerConstraints(f *Formula, constraints []formulaCompilerConstraint) {
+	if f == nil || len(constraints) == 0 {
+		return
+	}
+	f.compilerRequirementSources = append([]formulaCompilerConstraint(nil), constraints...)
+	parts := make([]string, 0, len(constraints))
+	for _, constraint := range constraints {
+		parts = append(parts, constraint.Raw)
+	}
+	f.Requires = &Requirements{FormulaCompiler: strings.Join(parts, ", ")}
+}
+
+func validateFormulaCompilerConstraintSet(formulaName string, constraints []formulaCompilerConstraint) error {
+	if len(constraints) < 2 {
+		return nil
+	}
+	parsed := make([]*semver.Constraints, 0, len(constraints))
+	for _, constraint := range constraints {
+		c, err := semver.NewConstraint(constraint.Raw)
+		if err != nil {
+			return invalidFormulaCompilerRequirement(constraint.Raw, err)
+		}
+		parsed = append(parsed, c)
+	}
+	if compilerConstraintsHaveIntersection(parsed, constraints) {
+		return nil
+	}
+	return formulaCompilerRequirementConflict(formulaName, constraints)
+}
+
+func compilerConstraintsHaveIntersection(parsed []*semver.Constraints, constraints []formulaCompilerConstraint) bool {
+	for _, candidate := range compilerRequirementCandidateVersions(constraints) {
+		matches := true
+		for _, constraint := range parsed {
+			if !constraint.Check(candidate) {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return true
+		}
+	}
+	return false
+}
+
+func compilerRequirementCandidateVersions(constraints []formulaCompilerConstraint) []*semver.Version {
+	seen := make(map[string]bool)
+	var out []*semver.Version
+	add := func(major, minor, patch int) {
+		if major < 0 || minor < 0 || patch < 0 {
+			return
+		}
+		raw := fmt.Sprintf("%d.%d.%d", major, minor, patch)
+		if seen[raw] {
+			return
+		}
+		v, err := semver.NewVersion(raw)
+		if err != nil {
+			return
+		}
+		seen[raw] = true
+		out = append(out, v)
+	}
+	addLiteral := func(raw string) {
+		parts := strings.Split(raw, ".")
+		nums := [3]int{}
+		for i := range nums {
+			if i >= len(parts) {
+				break
+			}
+			n, err := strconv.Atoi(parts[i])
+			if err != nil {
+				return
+			}
+			nums[i] = n
+		}
+		major, minor, patch := nums[0], nums[1], nums[2]
+		add(major, minor, patch)
+		add(major, minor, patch+1)
+		if patch > 0 {
+			add(major, minor, patch-1)
+		}
+		add(major, minor+1, 0)
+		if minor > 0 {
+			add(major, minor-1, 999)
+		}
+		add(major+1, 0, 0)
+		if major > 0 {
+			add(major-1, 999, 999)
+		}
+	}
+
+	add(0, 0, 0)
+	add(1, 0, 0)
+	add(2, 0, 0)
+	add(3, 0, 0)
+	add(999, 999, 999)
+	for _, constraint := range constraints {
+		for _, raw := range semverLiteralPattern.FindAllString(constraint.Raw, -1) {
+			addLiteral(raw)
+		}
+	}
+	return out
+}
+
+func formulaCompilerRequirementConflict(formulaName string, constraints []formulaCompilerConstraint) error {
+	name := strings.TrimSpace(formulaName)
+	if name == "" {
+		name = "<unknown>"
+	}
+	parts := make([]string, 0, len(constraints))
+	for _, constraint := range constraints {
+		source := constraint.Source
+		if source != "" {
+			source = " from " + source
+		}
+		parts = append(parts, fmt.Sprintf("%s%s", constraint.Raw, source))
+	}
+	return fmt.Errorf("formula.compiler_requirement_conflict: formula %q has non-overlapping formula_compiler requirements: %s", name, strings.Join(parts, "; "))
+}
+
+func declaresGraphCompilerRequirement(f *Formula) bool {
 	defaultCapability, err := semver.NewVersion(defaultFormulaCompilerCapability)
 	if err != nil {
 		return false
@@ -152,7 +287,20 @@ func declaresGraphCompilerRequirement(f *Formula) bool {
 	if err != nil {
 		return false
 	}
-	return !constraint.Check(defaultCapability) && constraint.Check(currentCapability)
+	constraints, err := formulaCompilerConstraints(f)
+	if err != nil {
+		return false
+	}
+	for _, candidate := range constraints {
+		constraint, err := semver.NewConstraint(candidate.Raw)
+		if err != nil {
+			return false
+		}
+		if !constraint.Check(defaultCapability) && constraint.Check(currentCapability) {
+			return true
+		}
+	}
+	return false
 }
 
 func formulaCompilerRequirement(f *Formula) string {

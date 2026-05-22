@@ -214,6 +214,8 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		return formula, nil
 	}
 
+	compilerConstraints := directFormulaCompilerConstraints(formula)
+
 	// Build merged formula from parents
 	merged := &Formula{
 		Formula:     formula.Formula,
@@ -243,6 +245,12 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		if err != nil {
 			return nil, fmt.Errorf("resolve parent %s: %w", parentName, err)
 		}
+
+		parentConstraints, err := formulaCompilerConstraints(parent)
+		if err != nil {
+			return nil, fmt.Errorf("resolve parent %s: %w", parentName, err)
+		}
+		compilerConstraints = append(compilerConstraints, parentConstraints...)
 
 		if merged.Contract == "" {
 			merged.Contract = parent.Contract
@@ -300,6 +308,11 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	if formula.Description != "" {
 		merged.Description = formula.Description
 	}
+
+	if err := validateFormulaCompilerConstraintSet(merged.Formula, compilerConstraints); err != nil {
+		return nil, err
+	}
+	setFormulaCompilerConstraints(merged, compilerConstraints)
 
 	if err := merged.Validate(); err != nil {
 		return nil, err

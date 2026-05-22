@@ -51,11 +51,21 @@ sling_query = "bd update {} --set-metadata gc.routed_to=frontend/worker"
 	if err := json.Unmarshal([]byte(lines[0]), &result); err != nil {
 		t.Fatalf("invalid JSON: %v\nraw: %s", err, stdout.String())
 	}
-	if result.SchemaVersion != "1" || result.CityName != "test-city" || len(result.Agents) != 2 {
+	if result.SchemaVersion != "1" || result.CityName != "test-city" {
 		t.Fatalf("unexpected result: %+v", result)
 	}
-	var worker AgentListItem
+	userAgents := make([]AgentListItem, 0, len(result.Agents))
 	for _, item := range result.Agents {
+		if item.QualifiedName == config.ControlDispatcherAgentName {
+			continue
+		}
+		userAgents = append(userAgents, item)
+	}
+	if len(userAgents) != 2 {
+		t.Fatalf("user agents = %+v, want mayor and frontend/worker", userAgents)
+	}
+	var worker AgentListItem
+	for _, item := range userAgents {
 		if item.QualifiedName == "frontend/worker" {
 			worker = item
 		}

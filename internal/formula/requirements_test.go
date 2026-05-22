@@ -178,10 +178,300 @@ title = "Review"
 	requireErrorContains(t, err, "formula.compiler_requirement_conflict")
 }
 
+func TestResolveInheritsParentFormulaCompilerRequirement(t *testing.T) {
+	dir := t.TempDir()
+	writeNamedFormula(t, dir, "parent", `
+formula = "parent"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "parent-step"
+title = "Parent"
+`)
+	writeNamedFormula(t, dir, "child", `
+formula = "child"
+extends = ["parent"]
+
+[[steps]]
+id = "child-step"
+title = "Child"
+`)
+
+	resolved := resolveRequirementFormula(t, dir, "child")
+	constraints, err := formulaCompilerConstraints(resolved)
+	if err != nil {
+		t.Fatalf("formulaCompilerConstraints: %v", err)
+	}
+	requireConstraintSources(t, constraints, `formula "parent" [requires]`)
+
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(false)
+	defer SetFormulaV2Enabled(prev)
+	_, err = Compile(context.Background(), "child", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("Compile unexpectedly succeeded")
+	}
+	requireErrorContains(t, err, "formula.compiler_requirement_unsatisfied")
+	requireErrorContains(t, err, `formula "parent" [requires]`)
+}
+
+func TestResolveChildStrengthensParentFormulaCompilerRequirement(t *testing.T) {
+	dir := t.TempDir()
+	writeNamedFormula(t, dir, "parent", `
+formula = "parent"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "parent-step"
+title = "Parent"
+`)
+	writeNamedFormula(t, dir, "child", `
+formula = "child"
+extends = ["parent"]
+
+[requires]
+formula_compiler = "<3.0.0"
+
+[[steps]]
+id = "child-step"
+title = "Child"
+`)
+
+	resolved := resolveRequirementFormula(t, dir, "child")
+	constraints, err := formulaCompilerConstraints(resolved)
+	if err != nil {
+		t.Fatalf("formulaCompilerConstraints: %v", err)
+	}
+	requireConstraintSources(t, constraints, `formula "parent" [requires]`, `formula "child" [requires]`)
+
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	defer SetFormulaV2Enabled(prev)
+	if _, err := Compile(context.Background(), "child", []string{dir}, nil); err != nil {
+		t.Fatalf("Compile failed: %v", err)
+	}
+}
+
+func TestResolveChildCannotWeakenParentFormulaCompilerRequirement(t *testing.T) {
+	dir := t.TempDir()
+	writeNamedFormula(t, dir, "parent", `
+formula = "parent"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "parent-step"
+title = "Parent"
+`)
+	writeNamedFormula(t, dir, "child", `
+formula = "child"
+extends = ["parent"]
+
+[requires]
+formula_compiler = ">=1.0.0"
+
+[[steps]]
+id = "child-step"
+title = "Child"
+`)
+
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(false)
+	defer SetFormulaV2Enabled(prev)
+	_, err := Compile(context.Background(), "child", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("Compile unexpectedly succeeded")
+	}
+	requireErrorContains(t, err, "formula.compiler_requirement_unsatisfied")
+	requireErrorContains(t, err, ">=2.0.0")
+	requireErrorContains(t, err, `formula "parent" [requires]`)
+}
+
+func TestResolveMultipleParentFormulaCompilerRequirementsAllApply(t *testing.T) {
+	dir := t.TempDir()
+	writeNamedFormula(t, dir, "v2-parent", `
+formula = "v2-parent"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "v2"
+title = "V2"
+`)
+	writeNamedFormula(t, dir, "upper-parent", `
+formula = "upper-parent"
+
+[requires]
+formula_compiler = "<3.0.0"
+
+[[steps]]
+id = "upper"
+title = "Upper"
+`)
+	writeNamedFormula(t, dir, "child", `
+formula = "child"
+extends = ["v2-parent", "upper-parent"]
+
+[[steps]]
+id = "child-step"
+title = "Child"
+`)
+
+	resolved := resolveRequirementFormula(t, dir, "child")
+	constraints, err := formulaCompilerConstraints(resolved)
+	if err != nil {
+		t.Fatalf("formulaCompilerConstraints: %v", err)
+	}
+	requireConstraintSources(t, constraints, `formula "v2-parent" [requires]`, `formula "upper-parent" [requires]`)
+}
+
+func TestResolveLegacyParentContractParticipatesAsRequirement(t *testing.T) {
+	dir := t.TempDir()
+	writeNamedFormula(t, dir, "parent", `
+formula = "parent"
+contract = "graph.v2"
+
+[[steps]]
+id = "parent-step"
+title = "Parent"
+`)
+	writeNamedFormula(t, dir, "child", `
+formula = "child"
+extends = ["parent"]
+
+[[steps]]
+id = "child-step"
+title = "Child"
+`)
+
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(false)
+	defer SetFormulaV2Enabled(prev)
+	_, err := Compile(context.Background(), "child", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("Compile unexpectedly succeeded")
+	}
+	requireErrorContains(t, err, "formula.compiler_requirement_unsatisfied")
+	requireErrorContains(t, err, `formula "parent" contract = "graph.v2"`)
+}
+
+func TestResolveRejectsParentChildFormulaCompilerRequirementConflict(t *testing.T) {
+	dir := t.TempDir()
+	writeNamedFormula(t, dir, "parent", `
+formula = "parent"
+
+[requires]
+formula_compiler = "<2.0.0"
+
+[[steps]]
+id = "parent-step"
+title = "Parent"
+`)
+	writeNamedFormula(t, dir, "child", `
+formula = "child"
+extends = ["parent"]
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "child-step"
+title = "Child"
+`)
+
+	_, err := Compile(context.Background(), "child", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("Compile unexpectedly succeeded")
+	}
+	requireErrorContains(t, err, "formula.compiler_requirement_conflict")
+	requireErrorContains(t, err, `formula "parent" [requires]`)
+	requireErrorContains(t, err, `formula "child" [requires]`)
+}
+
+func TestResolveRejectsMultiParentFormulaCompilerRequirementConflict(t *testing.T) {
+	dir := t.TempDir()
+	writeNamedFormula(t, dir, "legacy-parent", `
+formula = "legacy-parent"
+
+[requires]
+formula_compiler = "<2.0.0"
+
+[[steps]]
+id = "legacy"
+title = "Legacy"
+`)
+	writeNamedFormula(t, dir, "v2-parent", `
+formula = "v2-parent"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "v2"
+title = "V2"
+`)
+	writeNamedFormula(t, dir, "child", `
+formula = "child"
+extends = ["legacy-parent", "v2-parent"]
+
+[[steps]]
+id = "child-step"
+title = "Child"
+`)
+
+	_, err := Compile(context.Background(), "child", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("Compile unexpectedly succeeded")
+	}
+	requireErrorContains(t, err, "formula.compiler_requirement_conflict")
+	requireErrorContains(t, err, `formula "legacy-parent" [requires]`)
+	requireErrorContains(t, err, `formula "v2-parent" [requires]`)
+}
+
 func writeFormula(t *testing.T, dir, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, "review.toml"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func writeNamedFormula(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name+".toml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func resolveRequirementFormula(t *testing.T, dir, name string) *Formula {
+	t.Helper()
+	p := NewParser(dir)
+	f, err := p.LoadByName(name)
+	if err != nil {
+		t.Fatalf("LoadByName(%q): %v", name, err)
+	}
+	resolved, err := p.Resolve(f)
+	if err != nil {
+		t.Fatalf("Resolve(%q): %v", name, err)
+	}
+	return resolved
+}
+
+func requireConstraintSources(t *testing.T, constraints []formulaCompilerConstraint, want ...string) {
+	t.Helper()
+	got := make(map[string]bool, len(constraints))
+	for _, constraint := range constraints {
+		got[constraint.Source] = true
+	}
+	for _, source := range want {
+		if !got[source] {
+			t.Fatalf("constraint sources = %v, missing %q", got, source)
+		}
 	}
 }
 
