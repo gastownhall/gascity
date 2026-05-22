@@ -1,7 +1,11 @@
 package api
 
 import (
+	"bytes"
+	"fmt"
 	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -159,6 +163,89 @@ func TestMaybeGenerateTitleAsync_MockProvider(t *testing.T) {
 	}
 }
 
+func TestGenerateTitle_BuiltinKimiPromptFlagArgs(t *testing.T) {
+	spec := config.BuiltinProviders()["kimi"]
+	args := captureGenerateTitleArgs(t, spec, "fix the login redirect loop")
+	want := []string{
+		"--yolo",
+		"--no-thinking",
+		"--model",
+		"kimi-k2.6",
+		"--quiet",
+		"--prompt",
+		titlePrompt + "fix the login redirect loop",
+	}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("kimi title argv = %#v, want %#v", args, want)
+	}
+}
+
+func TestGenerateTitle_BuiltinProviderArgOrder(t *testing.T) {
+	tests := []struct {
+		name string
+		spec config.ProviderSpec
+		want []string
+	}{
+		{
+			name: "claude",
+			spec: config.BuiltinProviders()["claude"],
+			want: []string{"--model", "claude-haiku-4-5-20251001", "-p", titlePrompt + "summarize this"},
+		},
+		{
+			name: "codex",
+			spec: config.BuiltinProviders()["codex"],
+			want: []string{"--model", "o4-mini", "exec", titlePrompt + "summarize this"},
+		},
+		{
+			name: "gemini",
+			spec: config.BuiltinProviders()["gemini"],
+			want: []string{"--model", "gemini-2.5-flash", "-p", titlePrompt + "summarize this"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := captureGenerateTitleArgs(t, tt.spec, "summarize this")
+			if !reflect.DeepEqual(args, tt.want) {
+				t.Fatalf("%s title argv = %#v, want %#v", tt.name, args, tt.want)
+			}
+		})
+	}
+}
+
+func captureGenerateTitleArgs(t *testing.T, spec config.ProviderSpec, message string) []string {
+	t.Helper()
+	dir := t.TempDir()
+	argvPath := filepath.Join(dir, "argv")
+	script := filepath.Join(dir, "mock-title-provider")
+	scriptBody := fmt.Sprintf("#!/bin/sh\n: > %q\nfor arg in \"$@\"; do printf '%%s\\000' \"$arg\" >> %q; done\necho \"Generated Title\"\n", argvPath, argvPath)
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	provider := &config.ResolvedProvider{
+		Command:       script,
+		Args:          spec.Args,
+		PrintArgs:     spec.PrintArgs,
+		TitleModel:    spec.TitleModel,
+		OptionsSchema: spec.OptionsSchema,
+	}
+
+	got := generateTitle(provider, message, "")
+	if got != "Generated Title" {
+		t.Fatalf("generateTitle() = %q, want Generated Title", got)
+	}
+	rawArgs, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := bytes.Split(bytes.TrimSuffix(rawArgs, []byte{0}), []byte{0})
+	args := make([]string, len(fields))
+	for i, field := range fields {
+		args[i] = string(field)
+	}
+	return args
+}
+
 func TestTitleModelFlagArgs(t *testing.T) {
 	rp := &config.ResolvedProvider{
 		TitleModel: "haiku",
@@ -166,7 +253,7 @@ func TestTitleModelFlagArgs(t *testing.T) {
 			{
 				Key: "model",
 				Choices: []config.OptionChoice{
-					{Value: "opus", FlagArgs: []string{"--model", "claude-opus-4-6"}},
+					{Value: "opus", FlagArgs: []string{"--model", "claude-opus-4-7"}},
 					{Value: "haiku", FlagArgs: []string{"--model", "claude-haiku-4-5-20251001"}},
 				},
 			},

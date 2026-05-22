@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -155,6 +156,9 @@ provider = "file"
 	}
 	if got := rawBeadsProviderForScope(cityDir, cityDir); got != "file" {
 		t.Fatalf("rawBeadsProviderForScope(city) = %q, want file outside scoped override", got)
+	}
+	if got := beadsProvider(cityDir); got != "file" {
+		t.Fatalf("beadsProvider(city) = %q, want file outside scoped override", got)
 	}
 }
 
@@ -431,6 +435,143 @@ func TestNewSessionProvider_PreregistersACPBeadAndLegacyNames(t *testing.T) {
 	}
 }
 
+func TestEventsProviderNameUsesMergedCityConfig(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_EVENTS", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_RIG", "")
+
+	oldCityFlag, oldRigFlag := cityFlag, rigFlag
+	cityFlag, rigFlag = "", ""
+	t.Cleanup(func() {
+		cityFlag = oldCityFlag
+		rigFlag = oldRigFlag
+	})
+
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+include = ["infra.toml"]
+
+[workspace]
+name = "test-city"
+
+[events]
+provider = "fake"
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "infra.toml"), []byte(`
+[events]
+provider = "fail"
+`), 0o644); err != nil {
+		t.Fatalf("write infra.toml: %v", err)
+	}
+
+	if got := eventsProviderName(); got != "fail" {
+		t.Fatalf("eventsProviderName() = %q, want included provider %q", got, "fail")
+	}
+}
+
+func TestOpenCityEventsProviderUsesMergedCityConfig(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_EVENTS", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_RIG", "")
+
+	oldCityFlag, oldRigFlag := cityFlag, rigFlag
+	cityFlag, rigFlag = "", ""
+	t.Cleanup(func() {
+		cityFlag = oldCityFlag
+		rigFlag = oldRigFlag
+	})
+
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+include = ["infra.toml"]
+
+[workspace]
+name = "test-city"
+
+[events]
+provider = "fail"
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "infra.toml"), []byte(`
+[events]
+provider = "fake"
+`), 0o644); err != nil {
+		t.Fatalf("write infra.toml: %v", err)
+	}
+
+	var stderr strings.Builder
+	ep, code := openCityEventsProvider(&stderr, "test")
+	if code != 0 || ep == nil {
+		t.Fatalf("openCityEventsProvider() code = %d, provider nil = %t, stderr = %q", code, ep == nil, stderr.String())
+	}
+	t.Cleanup(func() { _ = ep.Close() })
+
+	if _, err := ep.List(events.Filter{}); err != nil {
+		t.Fatalf("openCityEventsProvider() did not use included fake provider: %v", err)
+	}
+}
+
+func TestEventsProviderNamePrefersEnvOverCityConfig(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_EVENTS", "fake")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_RIG", "")
+
+	oldCityFlag, oldRigFlag := cityFlag, rigFlag
+	cityFlag, rigFlag = "", ""
+	t.Cleanup(func() {
+		cityFlag = oldCityFlag
+		rigFlag = oldRigFlag
+	})
+
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "test-city"
+
+[events]
+provider = "fail"
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	if got := eventsProviderName(); got != "fake" {
+		t.Fatalf("eventsProviderName() = %q, want env provider %q", got, "fake")
+	}
+}
+
+func TestEventsProviderNameFallsBackOnMalformedCityTOML(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_EVENTS", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_RIG", "")
+
+	oldCityFlag, oldRigFlag := cityFlag, rigFlag
+	cityFlag, rigFlag = "", ""
+	t.Cleanup(func() {
+		cityFlag = oldCityFlag
+		rigFlag = oldRigFlag
+	})
+
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`invalid ][`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	if got := eventsProviderName(); got != "" {
+		t.Fatalf("eventsProviderName() = %q, want empty fallback", got)
+	}
+}
+
 func TestNewSessionProvider_PreregistersACPNamedSessionRuntimeName(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
@@ -692,6 +833,62 @@ func TestLoadProviderSessionSnapshotLoadsStoreWithoutACPAgents(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("openSessionProviderStore called %d times, want 1", calls)
+	}
+}
+
+func TestStatusSessionProviderSkipsSessionSnapshot(t *testing.T) {
+	oldOpen := openSessionProviderStore
+	t.Cleanup(func() { openSessionProviderStore = oldOpen })
+
+	calls := 0
+	openSessionProviderStore = func(string) (beads.Store, error) {
+		calls++
+		return nil, errors.New("session snapshot should not load for status")
+	}
+
+	sp := newStatusSessionProviderForCity(&config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Session:   config.SessionConfig{Provider: "subprocess"},
+	}, "/tmp/city")
+	if sp == nil {
+		t.Fatal("newStatusSessionProviderForCity() = nil")
+	}
+	if calls != 0 {
+		t.Fatalf("openSessionProviderStore called %d times, want 0", calls)
+	}
+}
+
+func TestStatusSessionProviderUsesProvidedSnapshotToWrapObservedACPSessions(t *testing.T) {
+	oldBuild := buildSessionProviderByName
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	buildSessionProviderByName = func(name string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
+		if name == "acp" {
+			return acpSP, nil
+		}
+		return defaultSP, nil
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Session:   config.SessionConfig{Provider: "fake"},
+		Agents:    []config.Agent{{Name: "mayor"}},
+	}
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "orphan-acp",
+			"transport":    "acp",
+			"session_name": "provider-session",
+		},
+	}})
+
+	sp := newStatusSessionProviderForCityWithSnapshot(cfg, t.TempDir(), snapshot)
+	if err := sp.Attach("provider-session"); err == nil || !strings.Contains(err.Error(), "ACP transport") {
+		t.Fatalf("Attach(provider-session) error = %v, want ACP transport error from snapshot-backed wrapper", err)
 	}
 }
 

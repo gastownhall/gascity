@@ -10,6 +10,7 @@
 package acceptance_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -32,15 +33,23 @@ func TestConvergeCommands(t *testing.T) {
 		}
 	})
 
-	t.Run("List_JSON_ReturnsArray", func(t *testing.T) {
+	t.Run("List_JSON_ReturnsEnvelope", func(t *testing.T) {
 		out, err := c.GC("converge", "list", "--json")
 		if err != nil {
 			t.Fatalf("gc converge list --json: %v\n%s", err, out)
 		}
-		trimmed := strings.TrimSpace(out)
-		// Empty JSON array or null is expected on a fresh city.
-		if trimmed != "[]" && trimmed != "null" {
-			t.Errorf("expected empty JSON array on fresh city, got:\n%s", out)
+		var payload struct {
+			OK      bool  `json:"ok"`
+			Entries []any `json:"entries"`
+		}
+		if err := json.Unmarshal([]byte(out), &payload); err != nil {
+			t.Fatalf("gc converge list --json returned invalid JSON: %v\n%s", err, out)
+		}
+		if !payload.OK {
+			t.Fatalf("gc converge list --json ok = false, want true:\n%s", out)
+		}
+		if len(payload.Entries) != 0 {
+			t.Errorf("expected empty entries array on fresh city, got:\n%s", out)
 		}
 	})
 

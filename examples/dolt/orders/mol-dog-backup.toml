@@ -1,6 +1,10 @@
+# Converted from formula+pool to exec. All backup operations are
+# deterministic: dolt backup sync per DB, rsync backup artifacts to offsite path.
+# No LLM judgment needed — runs inline in the controller. The timeout covers a
+# 30s SQL probe, up to 10 120s database syncs, and one 300s offsite rsync.
 [order]
 description = "Sync Dolt backups to configured remotes"
-formula = "mol-dog-backup"
+exec = "$PACK_DIR/assets/scripts/mol-dog-backup.sh"
 trigger = "cooldown"
 interval = "6h"
-pool = "dog"
+timeout = "1800s"

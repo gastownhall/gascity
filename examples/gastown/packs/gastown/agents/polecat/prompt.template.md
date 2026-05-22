@@ -6,6 +6,14 @@
 
 ---
 
+## CRITICAL: Never Close Beads
+
+**You MUST NOT close beads. EVER. No exceptions.**
+
+Do not run `bd close`, `gc bd close`, or set `--status=closed`. Only the
+Refinery closes beads after verifying the merge. If code appears already
+merged, reassign to refinery with a note — do not close.
+
 ## CRITICAL: Directory Discipline
 
 Your branch-setup step creates a git worktree and records it in `metadata.work_dir`
@@ -77,6 +85,12 @@ The formula step descriptions are your instructions — work through them in ord
 The formula handles everything: load context -> branch setup -> preflight ->
 implement -> self-review + tests -> submit and exit.
 
+**Affected-test gate before push.** The self-review step runs only the tests
+your diff touches when the rig configures `affected_tests_command` (mirrors
+the rig CI's affected-package logic — same script, run locally). Falls back
+to the full `test_command` for rigs without one. Either way, push is gated
+on local pass — don't ship a PR with locally-failing tests.
+
 {{ template "following-mol" . }}
 
 Your formula: `mol-polecat-work`
@@ -100,7 +114,7 @@ gc mail inbox
 When nudged after dispatch, run `gc hook` or `{{ .WorkQuery }}`. That lookup
 checks assigned work first (session bead ID, runtime session name, then
 alias) and only falls through to unassigned pool work routed to
-`{{ .RigName }}/polecat`.
+`${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}polecat`.
 
 **Hook/work query -> Read formula steps -> Follow in order -> done sequence.**
 
@@ -153,7 +167,8 @@ When blocked, you MUST escalate. Do NOT wait for human input.
 **How:**
 ```bash
 # Blocking issues
-gc mail send {{ .RigName }}/witness -s "ESCALATION: Brief description [HIGH]" -m "Details"
+WITNESS_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}witness"
+gc mail send "$WITNESS_TARGET" -s "ESCALATION: Brief description [HIGH]" -m "Details"
 
 # Cross-rig or strategic
 gc mail send mayor/ -s "BLOCKED: <topic>" -m "Context"
@@ -166,8 +181,9 @@ After escalating: continue if possible, otherwise `gc bd update <bead> --status=
 ## Communication
 
 ```bash
-gc nudge {{ .RigName }}/witness "Quick question about bead status"   # Default: nudge
-gc mail send {{ .RigName }}/witness -s "HELP: Blocked on X" -m "..."  # Escalation: mail
+WITNESS_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}witness"
+gc session nudge "$WITNESS_TARGET" "Quick question about bead status" # Default: nudge
+gc mail send "$WITNESS_TARGET" -s "HELP: Blocked on X" -m "..."       # Escalation: mail
 gc mail send mayor/ -s "BLOCKED: Need coordination" -m "..."          # Cross-rig: mail
 ```
 
@@ -176,7 +192,7 @@ gc mail send mayor/ -s "BLOCKED: Need coordination" -m "..."          # Cross-ri
 **Your mail budget is 0-1 messages per session.**
 
 - **Escalation**: Mail to witness as HELP — this is the ONE allowed mail use
-- **Everything else**: Use `gc nudge` — ephemeral, zero Dolt overhead
+- **Everything else**: Use `gc session nudge` — ephemeral, zero Dolt overhead
 - **Completion**: The done sequence handles notification — do NOT mail "I'm done"
 - **Status updates**: If asked for status, respond via nudge, not mail
 
@@ -199,7 +215,10 @@ gc bd update <work-bead> \
   --set-metadata branch=$(git branch --show-current) \
   --set-metadata target={{ .DefaultBranch }} \
   --notes "Implemented: <brief summary>"
-gc bd update <work-bead> --status=open --assignee={{ .RigName }}/refinery --set-metadata gc.routed_to={{ .RigName }}/refinery
+REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"
+gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"
+gc session wake "$REFINERY_TARGET" || true
+gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true
 gc runtime drain-ack
 exit
 ```
@@ -217,14 +236,14 @@ is the "Idle Polecat heresy."
 
 | Want to... | Correct command |
 |------------|----------------|
-| Signal work complete | Done sequence (push, set metadata, reassign, `gc runtime drain-ack`, exit) |
+| Signal work complete | Done sequence (push, set metadata, reassign, wake refinery, nudge refinery, `gc runtime drain-ack`, exit) |
 | Read formula steps | `gc bd show <wisp-id>` (shows formula ref) |
-| Escalate blocker | `gc mail send {{ .RigName }}/witness -s "ESCALATION: desc [HIGH]" -m "..."` |
+| Escalate blocker | `WITNESS_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}witness"; gc mail send "$WITNESS_TARGET" -s "ESCALATION: desc [HIGH]" -m "..."` |
 | Context exhaustion | `gc runtime request-restart` |
 | Handoff to next session | `gc mail send -s "HANDOFF: ..." -m "..."` then `gc runtime drain-ack && exit` |
 
 Polecat: {{ basename .AgentName }}
 Rig: {{ .RigName }}
 Working directory: {{ .WorkDir }}
-Mail identity: {{ .RigName }}/{{ basename .AgentName }}
+Mail identity: {{ .AgentName }}
 Formula: mol-polecat-work

@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltversion"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -177,7 +178,7 @@ func (c *ConfigRefsCheck) Run(_ *CheckContext) *CheckResult {
 			}
 		}
 		if a.SessionSetupScript != "" {
-			path := resolveConfigRefPath(c.cityPath, a.SessionSetupScript)
+			path := config.ResolveSessionSetupScriptPath(c.cityPath, a.SourceDir, a.SessionSetupScript)
 			if _, err := os.Stat(path); err != nil {
 				issues = append(issues, fmt.Sprintf("agent %q: session_setup_script %q not found", qn, path))
 			}
@@ -314,7 +315,7 @@ func isSubpath(root, path string) bool {
 	if err != nil {
 		return false
 	}
-	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+	return !pathutil.IsOutsideDir(rel)
 }
 
 func readPackName(dir string) string {
@@ -2387,19 +2388,48 @@ type DoltConfigExpectedValue struct {
 //
 // This is intentionally a contract subset, not a byte-for-byte mirror of
 // writeManagedDoltConfigFile in cmd/gc/cmd_dolt_config.go. It covers the keys
-// whose drift would change managed runtime behavior materially. Dynamic values
-// such as data_dir are checked by DoltConfigCheck because they depend on the
-// inspected city path.
+// whose drift would change managed runtime behavior materially. wait_timeout
+// follows the same GC_DOLT_WAIT_TIMEOUT environment override as config
+// generation. Dynamic values such as data_dir are checked by DoltConfigCheck
+// because they depend on the inspected city path.
 func DoltConfigExpectedValues() []DoltConfigExpectedValue {
-	return []DoltConfigExpectedValue{
-		{"behavior.auto_gc_behavior.enable", true},
-		{"behavior.auto_gc_behavior.archive_level", 1},
+	values := []DoltConfigExpectedValue{
+		{"behavior.auto_gc_behavior.enable", false},
+		{"behavior.auto_gc_behavior.archive_level", 0},
+		{"system_variables.dolt_auto_gc_enabled", "OFF"},
+		{"system_variables.dolt_stats_enabled", "OFF"},
+		{"system_variables.dolt_stats_gc_enabled", "OFF"},
+		{"system_variables.dolt_stats_memory_only", "ON"},
+		{"system_variables.dolt_stats_paused", "ON"},
 		{"listener.read_timeout_millis", 300000},
 		{"listener.write_timeout_millis", 300000},
 		{"listener.max_connections", 1000},
 		{"listener.back_log", 50},
 		{"listener.max_connections_timeout_millis", 5000},
 	}
+	if waitTimeout := managedDoltConfigExpectedWaitTimeout(); waitTimeout > 0 {
+		values = append(values, DoltConfigExpectedValue{
+			Path:  "system_variables.wait_timeout",
+			Value: strconv.Itoa(waitTimeout),
+		})
+	}
+	return values
+}
+
+func managedDoltConfigExpectedWaitTimeout() int {
+	const defaultWaitTimeout = 30
+	raw := os.Getenv("GC_DOLT_WAIT_TIMEOUT")
+	if raw == "" {
+		return defaultWaitTimeout
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return defaultWaitTimeout
+	}
+	if n < 0 {
+		return 0
+	}
+	return n
 }
 
 // lookupYAMLPath walks a dotted key path through a decoded YAML map and
@@ -2523,7 +2553,7 @@ func (c *DoltConfigCheck) Run(_ *CheckContext) *CheckResult {
 				drifted = append(drifted, fmt.Sprintf("%s (got %v, want %v)", exp.Path, got, want))
 			}
 		case int:
-			if !yamlIntEqual(got, want) {
+			if !doltConfigExpectedIntEqual(exp.Path, got, want) {
 				drifted = append(drifted, fmt.Sprintf("%s (got %v, want %d)", exp.Path, got, want))
 			}
 		default:
@@ -2554,6 +2584,20 @@ func (c *DoltConfigCheck) Run(_ *CheckContext) *CheckResult {
 	return r
 }
 
+func doltConfigExpectedIntEqual(path string, got any, want int) bool {
+	if yamlIntEqual(got, want) {
+		return true
+	}
+	// Managed configs written before archive_level defaulted to 0 can contain
+	// archive_level: 1. Accept that one-release compatibility value so first
+	// post-upgrade doctor runs do not report drift before gc start rewrites the
+	// managed config.
+	if path == "behavior.auto_gc_behavior.archive_level" && want == 0 {
+		return yamlIntEqual(got, 1)
+	}
+	return false
+}
+
 // CanFix returns false. TODO: wire Fix() into the same code path as
 // `gc start` uses to rewrite the managed config once that helper is exposed
 // from the doctor package.
@@ -2562,87 +2606,14 @@ func (c *DoltConfigCheck) CanFix() bool { return false }
 // Fix is a no-op. See TODO on CanFix.
 func (c *DoltConfigCheck) Fix(_ *CheckContext) error { return nil }
 
-// doltVersionInfo is the parsed semantic version of the installed `dolt`.
-type doltVersionInfo struct {
-	Major, Minor, Patch int
-	Raw                 string
-}
+type doltVersionInfo = doltversion.Info
 
-// parseDoltVersion parses the first version-like token from `dolt version`
-// output. Accepted formats:
-//
-//	"dolt version 1.75.2\nWarning: ..."
-//	"dolt version 1.75.2"
-//	"1.75.2"
-//
-// Any suffix after patch (e.g. "-rc1") is ignored.
 func parseDoltVersion(out string) (doltVersionInfo, error) {
-	out = strings.TrimSpace(out)
-	if out == "" {
-		return doltVersionInfo{}, fmt.Errorf("empty version output")
-	}
-	// Only look at the first line — dolt sometimes emits a "Warning: ..."
-	// second line for deprecated flags.
-	if i := strings.IndexByte(out, '\n'); i >= 0 {
-		out = out[:i]
-	}
-	out = strings.TrimSpace(out)
-	// Strip the "dolt version " prefix if present.
-	const prefix = "dolt version "
-	if strings.HasPrefix(strings.ToLower(out), prefix) {
-		out = out[len(prefix):]
-	}
-	// Take the first whitespace-delimited token.
-	if i := strings.IndexAny(out, " \t"); i >= 0 {
-		out = out[:i]
-	}
-	out = strings.TrimPrefix(out, "v")
-	// Strip any pre-release / build suffix after MAJOR.MINOR.PATCH.
-	core := out
-	for _, sep := range []string{"-", "+"} {
-		if i := strings.Index(core, sep); i >= 0 {
-			core = core[:i]
-		}
-	}
-	parts := strings.Split(core, ".")
-	if len(parts) < 3 {
-		return doltVersionInfo{}, fmt.Errorf("unrecognized version %q", out)
-	}
-	major, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return doltVersionInfo{}, fmt.Errorf("unrecognized major in %q: %w", out, err)
-	}
-	minor, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return doltVersionInfo{}, fmt.Errorf("unrecognized minor in %q: %w", out, err)
-	}
-	patch, err := strconv.Atoi(parts[2])
-	if err != nil {
-		return doltVersionInfo{}, fmt.Errorf("unrecognized patch in %q: %w", out, err)
-	}
-	return doltVersionInfo{Major: major, Minor: minor, Patch: patch, Raw: fmt.Sprintf("%d.%d.%d", major, minor, patch)}, nil
+	return doltversion.Parse(out)
 }
 
-// compareDoltVersion returns -1 if a<b, 0 if a==b, 1 if a>b.
 func compareDoltVersion(a, b doltVersionInfo) int {
-	switch {
-	case a.Major != b.Major:
-		if a.Major < b.Major {
-			return -1
-		}
-		return 1
-	case a.Minor != b.Minor:
-		if a.Minor < b.Minor {
-			return -1
-		}
-		return 1
-	case a.Patch != b.Patch:
-		if a.Patch < b.Patch {
-			return -1
-		}
-		return 1
-	}
-	return 0
+	return doltversion.Compare(a, b)
 }
 
 // DoltVersionCheck shells out to `dolt version` and verifies the managed-Dolt
@@ -2730,21 +2701,24 @@ func (c *DoltVersionCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
-	info, err := parseDoltVersion(out)
-	if err != nil {
+	info, err := doltversion.CheckFinalMinimum(out, doltversion.ManagedMin)
+	switch {
+	case errors.Is(err, doltversion.ErrPreRelease):
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("dolt version %s is a pre-release; final release %s or newer is required for managed config", info.Raw, doltversion.ManagedMin)
+		r.FixHint = "upgrade dolt: https://docs.dolthub.com/introduction/installation"
+		return r
+	case errors.Is(err, doltversion.ErrBelowMinimum):
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("dolt version %s is below minimum %s required for managed config", info.Raw, doltversion.ManagedMin)
+		r.FixHint = "upgrade dolt: https://docs.dolthub.com/introduction/installation"
+		return r
+	case err != nil:
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("parse dolt version: %v", err)
 		return r
 	}
 
-	minVer, _ := parseDoltVersion(doltversion.ManagedMin)
-
-	if compareDoltVersion(info, minVer) < 0 {
-		r.Status = StatusError
-		r.Message = fmt.Sprintf("dolt version %s is below minimum %s required for managed config", info.Raw, doltversion.ManagedMin)
-		r.FixHint = "upgrade dolt: https://docs.dolthub.com/introduction/installation"
-		return r
-	}
 	r.Status = StatusOK
 	r.Message = fmt.Sprintf("dolt %s", info.Raw)
 	return r

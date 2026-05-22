@@ -6,6 +6,7 @@ package api
 
 import (
 	"strconv"
+	"time"
 )
 
 // --- Event types ---
@@ -41,11 +42,48 @@ type EventEmitOutput struct {
 	}
 }
 
+// EventRotateInput is the Huma input for POST /v0/city/{cityName}/events/rotate.
+type EventRotateInput struct {
+	CityScope
+	Wait bool `query:"wait" required:"false" doc:"Wait for archive compression to complete before returning."`
+}
+
+// EventRotateArchive describes the archive produced by a successful force
+// rotation.
+type EventRotateArchive struct {
+	Path              string `json:"path" doc:"Absolute path to the archive."`
+	FirstSeq          uint64 `json:"first_seq" doc:"First event sequence included in the archive."`
+	LastSeq           uint64 `json:"last_seq" doc:"Last event sequence included in the archive."`
+	CompressionStatus string `json:"compression_status" enum:"pending,complete" doc:"Archive compression status."`
+}
+
+// EventRotateAnchor describes the events.rotated anchor event written to the
+// new active log after a successful force rotation.
+type EventRotateAnchor struct {
+	Seq  uint64    `json:"seq" doc:"Anchor event sequence."`
+	Type string    `json:"type" doc:"Anchor event type." example:"events.rotated"`
+	Ts   time.Time `json:"ts" doc:"Anchor event timestamp."`
+}
+
+// EventRotateResponse is the response body for POST
+// /v0/city/{cityName}/events/rotate.
+type EventRotateResponse struct {
+	Rotated     bool                `json:"rotated" doc:"Whether an archive was produced."`
+	Reason      string              `json:"reason,omitempty" doc:"No-op reason when rotated is false."`
+	Archive     *EventRotateArchive `json:"archive,omitempty" doc:"Archive metadata when rotated is true."`
+	AnchorEvent *EventRotateAnchor  `json:"anchor_event,omitempty" doc:"Anchor event metadata when rotated is true."`
+}
+
+// EventRotateOutput wraps EventRotateResponse for Huma.
+type EventRotateOutput struct {
+	Body EventRotateResponse
+}
+
 // EventStreamInput is the Huma input for GET /v0/city/{cityName}/events/stream.
 type EventStreamInput struct {
 	CityScope
-	AfterSeq    string `query:"after_seq" required:"false" doc:"Reconnect position: only deliver events after this sequence number."`
-	LastEventID string `header:"Last-Event-ID" required:"false" doc:"SSE reconnect position from the last received event ID."`
+	AfterSeq    string `query:"after_seq" required:"false" doc:"Reconnect position: only deliver events after this sequence number. Omit after_seq and Last-Event-ID to start at the current city event head."`
+	LastEventID string `header:"Last-Event-ID" required:"false" doc:"SSE reconnect position from the last received event ID. Omit Last-Event-ID and after_seq to start at the current city event head."`
 }
 
 // HeartbeatEvent is an empty event emitted periodically on SSE streams to keep

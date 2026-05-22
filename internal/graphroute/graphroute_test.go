@@ -1,6 +1,9 @@
 package graphroute
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -268,6 +271,176 @@ func TestDecorateGraphWorkflowRecipe_NilRecipe(t *testing.T) {
 	}
 }
 
+// TestApplyGraphRouting_RetryWithInlineMetadataRoutesAttemptBeads guards the
+// sling path for formulas whose steps carry inline continuation/session
+// metadata AND a [steps.retry] block (shape used by
+// gastownhall-upstream-followup). The ApplyRetries pass expands each such
+// step into a control + spec + attempt triple; routing must land on both the
+// control bead and the attempt bead so pool workers can claim the work.
+// Regression for fo-followup-formula-routing-bug.
+func TestApplyGraphRouting_RetryWithInlineMetadataRoutesAttemptBeads(t *testing.T) {
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+
+	dir := t.TempDir()
+	formulaContent := `
+formula = "followup-shape"
+version = 1
+contract = "graph.v2"
+
+[[steps]]
+id = "load-context"
+title = "Load context"
+description = "do a thing"
+metadata = { "gc.continuation_group" = "followup-shape", "gc.session_affinity" = "require" }
+
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+
+[[steps]]
+id = "apply-fix"
+title = "Apply fix"
+needs = ["load-context"]
+description = "do another thing"
+metadata = { "gc.continuation_group" = "followup-shape", "gc.session_affinity" = "require" }
+
+[steps.retry]
+max_attempts = 1
+on_exhausted = "hard_fail"
+`
+	if err := os.WriteFile(filepath.Join(dir, "followup-shape.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recipe, err := formula.Compile(context.Background(), "followup-shape", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "worker", MaxActiveSessions: intPtr(4)},
+		{Name: "control-dispatcher", MaxActiveSessions: intPtr(1)},
+	}}
+	deps := Deps{Resolver: testAgentResolver{}}
+	a := cfg.Agents[0]
+	err = ApplyGraphRouting(recipe, &a, a.QualifiedName(), nil, "", "", "", "", nil, "test-city", cfg, deps)
+	if err != nil {
+		t.Fatalf("ApplyGraphRouting: %v", err)
+	}
+
+	stepByID := make(map[string]formula.RecipeStep, len(recipe.Steps))
+	for _, s := range recipe.Steps {
+		stepByID[s.ID] = s
+	}
+
+	// Attempt beads (the actual work) must be routed to the pool so workers
+	// can claim them. These are the beads that had gc.routed_to=null in the
+	// bug report.
+	attemptIDs := []string{
+		"followup-shape.load-context.attempt.1",
+		"followup-shape.apply-fix.attempt.1",
+	}
+	for _, id := range attemptIDs {
+		s, ok := stepByID[id]
+		if !ok {
+			t.Fatalf("missing attempt step %q; have steps %v", id, stepIDs(recipe.Steps))
+		}
+		if got := s.Metadata["gc.routed_to"]; got != "worker" {
+			t.Errorf("attempt %q gc.routed_to = %q, want worker", id, got)
+		}
+	}
+
+	// Retry control beads (gc.kind=retry) must route to the control dispatcher
+	// via direct assignee (not gc.routed_to) per ApplyGraphControlRouteBinding:
+	// gc.routed_to means "config queue work" and must not be used for a known
+	// dispatcher session.
+	controlIDs := []string{
+		"followup-shape.load-context",
+		"followup-shape.apply-fix",
+	}
+	for _, id := range controlIDs {
+		s, ok := stepByID[id]
+		if !ok {
+			t.Fatalf("missing control step %q", id)
+		}
+		if got := s.Metadata["gc.kind"]; got != "retry" {
+			t.Errorf("control %q gc.kind = %q, want retry", id, got)
+		}
+		if got := s.Metadata["gc.routed_to"]; got != "" {
+			t.Errorf("control %q gc.routed_to = %q, want empty (routed by direct assignee)", id, got)
+		}
+		if s.Assignee == "" {
+			t.Errorf("control %q assignee is empty; want control-dispatcher session", id)
+		}
+	}
+
+	// Spec beads (gc.kind=spec) are workflow topology and intentionally
+	// carry no gc.routed_to.
+	specIDs := []string{
+		"followup-shape.load-context.spec",
+		"followup-shape.apply-fix.spec",
+	}
+	for _, id := range specIDs {
+		s, ok := stepByID[id]
+		if !ok {
+			t.Fatalf("missing spec step %q", id)
+		}
+		if got := s.Metadata["gc.kind"]; got != "spec" {
+			t.Errorf("spec %q gc.kind = %q, want spec", id, got)
+		}
+		if got := s.Metadata["gc.routed_to"]; got != "" {
+			t.Errorf("spec %q gc.routed_to = %q, want empty (topology step)", id, got)
+		}
+	}
+}
+
+// TestCompileRetryWithInlineMetadataRequiresGraphContract documents the
+// validation that catches the root cause of fo-followup-formula-routing-bug:
+// a formula whose steps carry graph-only metadata (continuation_group) plus a
+// [steps.retry] block must declare contract = "graph.v2" or compile will
+// reject it. Without the contract the formula silently compiled into a
+// legacy recipe whose step beads never received routing metadata.
+func TestCompileRetryWithInlineMetadataRequiresGraphContract(t *testing.T) {
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+
+	dir := t.TempDir()
+	formulaContent := `
+formula = "missing-contract"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Work"
+metadata = { "gc.continuation_group" = "group-a" }
+
+[steps.retry]
+max_attempts = 2
+`
+	if err := os.WriteFile(filepath.Join(dir, "missing-contract.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := formula.Compile(context.Background(), "missing-contract", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("Compile succeeded; want contract validation error")
+	}
+	if !strings.Contains(err.Error(), `contract = "graph.v2"`) {
+		t.Fatalf("Compile error = %v, want graph.v2 contract guidance", err)
+	}
+}
+
+func stepIDs(steps []formula.RecipeStep) []string {
+	ids := make([]string, 0, len(steps))
+	for _, s := range steps {
+		ids = append(ids, s.ID)
+	}
+	return ids
+}
+
 func TestResolveGraphStepBinding_CycleDetection(t *testing.T) {
 	// Step A has kind "check" with dep on B, B has kind "check" with dep on A.
 	// This creates a routing cycle.
@@ -352,6 +525,71 @@ func TestResolveGraphStepBinding_AssigneeConcreteSessionBeatsTemplateCollision(t
 	}
 }
 
+func TestResolveGraphStepBinding_CanonicalSingletonPoolUsesConcreteSession(t *testing.T) {
+	zero := 0
+	one := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: &zero, MaxActiveSessions: &one},
+		},
+	}
+	stepByID := map[string]*formula.RecipeStep{
+		"demo.work": {
+			ID:       "demo.work",
+			Title:    "Work",
+			Metadata: map[string]string{"gc.run_target": "worker"},
+		},
+	}
+	cache := make(map[string]GraphRouteBinding)
+	resolving := make(map[string]bool)
+
+	binding, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
+	if err != nil {
+		t.Fatalf("ResolveGraphStepBinding: %v", err)
+	}
+	if binding.QualifiedName != "frontend/worker" {
+		t.Fatalf("QualifiedName = %q, want frontend/worker", binding.QualifiedName)
+	}
+	if binding.SessionName != "frontend--worker" {
+		t.Fatalf("SessionName = %q, want frontend--worker", binding.SessionName)
+	}
+	if binding.MetadataOnly {
+		t.Fatal("MetadataOnly = true, want false for canonical singleton pool")
+	}
+}
+
+func TestResolveGraphStepBinding_CanonicalSingletonPoolReportsMissingSessionName(t *testing.T) {
+	zero := 0
+	one := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Name:            "test-city",
+			SessionTemplate: `{{""}}`,
+		},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: &zero, MaxActiveSessions: &one},
+		},
+	}
+	stepByID := map[string]*formula.RecipeStep{
+		"demo.work": {
+			ID:       "demo.work",
+			Title:    "Work",
+			Metadata: map[string]string{"gc.run_target": "worker"},
+		},
+	}
+	cache := make(map[string]GraphRouteBinding)
+	resolving := make(map[string]bool)
+
+	_, err := ResolveGraphStepBinding("demo.work", stepByID, nil, nil, cache, resolving, GraphRouteBinding{}, "frontend", beads.NewMemStore(), cfg.Workspace.Name, cfg, Deps{Resolver: testAgentResolver{}})
+	if err == nil {
+		t.Fatal("ResolveGraphStepBinding succeeded; want missing session-name error")
+	}
+	if !strings.Contains(err.Error(), `could not resolve session name for "frontend/worker"`) {
+		t.Fatalf("ResolveGraphStepBinding error = %q, want missing session-name guidance", err)
+	}
+}
+
 func TestControlDispatcherBinding_NilConfig(t *testing.T) {
 	_, err := ControlDispatcherBinding(nil, "city", nil, "", Deps{})
 	if err == nil {
@@ -364,6 +602,55 @@ func TestControlDispatcherBinding_NilResolver(t *testing.T) {
 	_, err := ControlDispatcherBinding(nil, "city", cfg, "", Deps{})
 	if err == nil {
 		t.Error("expected error for nil resolver")
+	}
+}
+
+func TestControlDispatcherBinding_ConfiguredDispatcherUsesConcreteSessionName(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{
+		Name: "control-dispatcher",
+		Dir:  "gascity",
+	}}}
+
+	binding, err := ControlDispatcherBinding(nil, "test-city", cfg, "gascity", Deps{Resolver: testAgentResolver{}})
+	if err != nil {
+		t.Fatalf("ControlDispatcherBinding: %v", err)
+	}
+	if binding.QualifiedName != "gascity/control-dispatcher" {
+		t.Fatalf("QualifiedName = %q, want gascity/control-dispatcher", binding.QualifiedName)
+	}
+	if binding.SessionName != "gascity--control-dispatcher" {
+		t.Fatalf("SessionName = %q, want gascity--control-dispatcher", binding.SessionName)
+	}
+	if binding.MetadataOnly {
+		t.Fatalf("MetadataOnly = true, want false")
+	}
+}
+
+func TestAssignGraphStepRoute_ControlBindingUsesDirectAssigneeWithoutRoutedTo(t *testing.T) {
+	step := &formula.RecipeStep{
+		Metadata: map[string]string{
+			"gc.routed_to": "stale-control-route",
+		},
+	}
+	execution := GraphRouteBinding{
+		QualifiedName: "gascity/claude",
+		MetadataOnly:  true,
+	}
+	control := GraphRouteBinding{
+		QualifiedName: "gascity/control-dispatcher",
+		SessionName:   "gascity--control-dispatcher",
+	}
+
+	AssignGraphStepRoute(step, execution, &control)
+
+	if step.Assignee != "gascity--control-dispatcher" {
+		t.Fatalf("control assignee = %q, want gascity--control-dispatcher", step.Assignee)
+	}
+	if got := step.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("control gc.routed_to = %q, want empty direct assignee", got)
+	}
+	if got := step.Metadata[GraphExecutionRouteMetaKey]; got != "gascity/claude" {
+		t.Fatalf("control execution route = %q, want gascity/claude", got)
 	}
 }
 

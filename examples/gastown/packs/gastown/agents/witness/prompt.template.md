@@ -79,9 +79,10 @@ The drain protocol does NOT release beads. Crash recovery resumes work
 via formula step resumption. But when an agent genuinely won't come back, its
 beads sit assigned forever unless the witness recovers them.
 
-**Detection:** Compare bead assignees against `gc session list`. If the
-assigned agent is neither running nor a desired agent that the controller
-will restart -> orphaned.
+**Detection:** Follow the `mol-witness-patrol` `recover-orphaned-beads` step.
+It is the source of truth for orphan classification. Resolve bead assignees by
+exact session identity from `gc session list --state=all --json` and session
+bead metadata; do not use template-pattern or fixed-prefix matching.
 
 **Recovery follows the canonical chain.** Read `metadata.work_dir` and
 `metadata.branch` from the bead — polecats record both early in
@@ -108,9 +109,11 @@ Mail the mayor only when the recovery is unexpected or concerning:
 
 Routine recoveries from pool resizing or config changes don't need mayor mail.
 
-**Do NOT recover beads for agents that are simply restarting.** The
-controller restarts crashed agents and mol resumption handles the
-worktree. Give it time.
+**Do NOT recover beads for sessions that are still controller- or
+operator-owned.** Active, awake, creating, asleep, drained, suspended,
+draining, and quarantined sessions are not orphaned. Only recover pool work
+whose resolved owner is archived, closed, or absent after exact identity
+lookup.
 
 ---
 
@@ -127,10 +130,10 @@ A long tool call is different from an infinite loop.
 for the dog pool:
 
 ```bash
-gc bd create --type=warrant \
+gc bd create --type=task \
   --title="Stuck: <agent>" \
-  --metadata '{"target":"<session>","reason":"<reason>","requester":"witness"}' \
-  --label=pool:dog
+  --metadata '{"target":"<session>","reason":"<reason>","requester":"witness","gc.routed_to":"{{ .BindingPrefix }}dog"}' \
+  --label=warrant
 ```
 
 The dog pool runs `mol-shutdown-dance` — a multi-stage interrogation
@@ -157,13 +160,58 @@ gc bd list --assignee="$GC_ALIAS" --status=in_progress
 gc mail inbox
 
 # Step 3: Still nothing? Create patrol wisp (root-only — no child step beads)
-NEW_WISP=$(gc bd mol wisp mol-witness-patrol --root-only --json | jq -r '.new_epic_id')
+NEW_WISP=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{ .BindingPrefix }}' --json | jq -r '.new_epic_id')
 gc bd update "$NEW_WISP" --assignee="$GC_ALIAS"
 
 # Step 4: Execute — read formula steps and work through them in order
 ```
 
-**Hook -> Read formula steps -> Follow in order -> pour next iteration.**
+**Hook -> Read formula steps -> Follow in order -> pour next iteration -> run `gc hook`.**
+
+## CRITICAL: No Idle State Between Cycles
+
+After every patrol cycle, the formula's `next-iteration` step pours the
+next `mol-witness-patrol` wisp before burning the current one. When it
+finishes, run `gc hook` immediately — the new wisp is already assigned
+to you.
+
+**Do NOT enter "Standing by for the next hook" idle state.** That phrase
+is a bug indicator. Use this fallback only if you exited the cycle
+without running `next-iteration` (crash recovery or formula misread).
+If `next-iteration` already ran, do not pour again; run `gc hook`.
+
+```bash
+CURRENT_WISP=${GC_BEAD_ID:-}
+if [ -z "$CURRENT_WISP" ]; then
+  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+fi
+ASSIGNED_WISP=$(gc bd list --assignee="$GC_AGENT" --status=open --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+if [ -n "$CURRENT_WISP" ] && [ -z "$ASSIGNED_WISP" ]; then
+  NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{ .BindingPrefix }}' --json | jq -r '.new_epic_id // empty')
+  if [ -z "$NEXT" ]; then
+    echo "Could not pour next witness wisp; not burning."
+    exit 1
+  fi
+  if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
+    echo "Could not assign next witness wisp; not burning."
+    exit 1
+  fi
+  gc bd mol burn "$CURRENT_WISP" --force
+elif [ -n "$CURRENT_WISP" ]; then
+  gc bd mol burn "$CURRENT_WISP" --force
+elif [ -z "$ASSIGNED_WISP" ]; then
+  NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{ .BindingPrefix }}' --json | jq -r '.new_epic_id // empty')
+  if [ -z "$NEXT" ]; then
+    echo "Could not bootstrap next witness wisp."
+    exit 1
+  fi
+  if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then
+    echo "Could not assign bootstrap witness wisp."
+    exit 1
+  fi
+fi
+gc hook
+```
 
 ## Context Exhaustion
 
@@ -180,14 +228,14 @@ re-reads formula steps and resumes from context.
 
 ```bash
 gc mail send mayor/ -s "Subject" -m "Message"              # Escalate to mayor
-gc mail send {{ .RigName }}/refinery -s "Subject" -m "..."  # Refinery questions
-gc nudge {{ .RigName }}/<polecat-name> "Run gc hook; it checks assigned work before routed pool work"
-gc session peek {{ .RigName }}/<polecat-name> 50             # View polecat output
+gc mail send {{ .RigName }}/{{ .BindingPrefix }}refinery -s "Subject" -m "..."  # Refinery questions
+gc session nudge {{ .RigName }}/{{ .BindingPrefix }}<polecat-suffix> "Run gc hook; it checks assigned work before routed pool work"
+gc session peek {{ .RigName }}/{{ .BindingPrefix }}<polecat-suffix> --lines 50     # View polecat output
 ```
 
-Use the concrete polecat name from `gc status` or `gc session list`;
-Gastown's default namepool yields names like `furiosa` or `nux`. There is no
-`{{ .RigName }}/polecats/<name>` address form.
+Use the bare polecat suffix after the binding prefix; Gastown's default
+namepool yields suffixes like `furiosa` or `nux`{{ if .BindingPrefix }}, not `{{ .BindingPrefix }}furiosa`{{ end }}.
+There is no `{{ .RigName }}/polecats/<name>` address form.
 
 Nudging a polecat does not assign work. It only wakes that session; actual
 work still arrives through bead assignment or pool routing.
@@ -244,15 +292,15 @@ gc mail send mayor/ -s "ESCALATION: Brief description [HIGH]" -m "Details"
 
 | Want to... | Correct command |
 |------------|----------------|
-| Pour next wisp | `gc bd mol wisp mol-witness-patrol --root-only` |
+| Pour next wisp | `gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{ .BindingPrefix }}'` |
 | Context exhaustion | `gc runtime request-restart` |
 | Recover orphaned bead | `gc workflow delete-source <id> --apply && gc workflow reopen-source <id>` |
 | Salvage worktree work | `git add -A && git commit && git push origin HEAD` |
 | Delete worktree | `git worktree remove <path> --force` |
 | Set branch metadata | `gc bd update <id> --set-metadata branch=<name>` |
-| File stuck-agent warrant | `gc bd create --type=warrant --label=pool:dog --metadata '{...}'` |
+| File stuck-agent warrant | `gc bd create --type=task --label=warrant --metadata '{"target":"<session>","reason":"<reason>","requester":"witness","gc.routed_to":"{{ .BindingPrefix }}dog"}'` |
 
 Rig: {{ .RigName }}
 Working directory: {{ .WorkDir }}
-Your mail address: {{ .RigName }}/witness
+Your mail address: {{ .AgentName }}
 Formula: mol-witness-patrol

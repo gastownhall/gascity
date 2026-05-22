@@ -61,6 +61,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Method:        http.MethodPost,
 		Path:          "/agents",
 		Summary:       "Create an agent",
+		Description:   "Creates an agent and waits until it is visible to immediate follow-up operations. If the agent is durably created but visibility confirmation is canceled or times out, the retryable 503/504 response includes a Retry-After header.",
 		DefaultStatus: http.StatusCreated,
 	}, (*Server).humaHandleAgentCreate)
 	cityPatch(sm, "/agent/{dir}/{base}", (*Server).humaHandleAgentUpdateQualified)
@@ -203,7 +204,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityPost(sm, "/convoy/{id}/close", (*Server).humaHandleConvoyClose)
 	cityDelete(sm, "/convoy/{id}", (*Server).humaHandleConvoyDelete)
 
-	// Events (list/emit — stream is a separate SSE registration below).
+	// Events (list/emit/rotate — stream is a separate SSE registration below).
 	cityGet(sm, "/events", (*Server).humaHandleEventList)
 	cityRegister(sm, huma.Operation{
 		OperationID:   "emit-event",
@@ -212,6 +213,12 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Summary:       "Emit an event",
 		DefaultStatus: http.StatusCreated,
 	}, (*Server).humaHandleEventEmit)
+	cityRegister(sm, huma.Operation{
+		OperationID: "rotate-events",
+		Method:      http.MethodPost,
+		Path:        "/events/rotate",
+		Summary:     "Force rotate the city event log",
+	}, (*Server).humaHandleEventRotate)
 
 	// Orders.
 	cityGet(sm, "/orders", (*Server).humaHandleOrderList)
@@ -258,6 +265,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/session/{id}/transcript", (*Server).humaHandleSessionTranscript)
 	cityGet(sm, "/session/{id}/pending", (*Server).humaHandleSessionPending)
 	cityPatch(sm, "/session/{id}", (*Server).humaHandleSessionPatch)
+	cityPost(sm, "/session/{id}/permission-mode", (*Server).humaHandleSessionPermissionMode)
 	cityRegister(sm, huma.Operation{
 		OperationID:   "submit-session",
 		Method:        http.MethodPost,
@@ -310,7 +318,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:        cityScopePrefix + "/events/stream",
 		Summary:     "Stream city events in real time",
 		Description: "Server-Sent Events stream of city events with optional workflow projections. " +
-			"Supports reconnection via Last-Event-ID header or after_seq query param.",
+			"Supports reconnection via Last-Event-ID header or after_seq query param; omitting both starts at the current city event head.",
 	}, map[string]any{
 		"event": sseEventContract{
 			runtimeSample: eventStreamEnvelope{},

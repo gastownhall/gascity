@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -115,6 +116,29 @@ func TestContentBlocksPlainString(t *testing.T) {
 	blocks := e.ContentBlocks()
 	if blocks != nil {
 		t.Errorf("expected nil blocks for plain string content, got %d", len(blocks))
+	}
+}
+
+func TestProviderFamilyPiAliasAnchoring(t *testing.T) {
+	tests := []struct {
+		provider string
+		want     string
+	}{
+		{provider: "pi", want: "pi"},
+		{provider: "pi/tmux", want: "pi"},
+		{provider: "my-pi", want: "pi"},
+		{provider: "my-pi/tmux", want: "pi"},
+		{provider: "wrapped/pi", want: "pi"},
+		{provider: "happy-pirate", want: "happy-pirate"},
+		{provider: "claude-pirep", want: "claude-pirep"},
+		{provider: "user-pid", want: "user-pid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			if got := ProviderFamily(tt.provider); got != tt.want {
+				t.Fatalf("ProviderFamily(%q) = %q, want %q", tt.provider, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -489,7 +513,7 @@ func TestReadFileOlderDiagnostics(t *testing.T) {
 
 func TestSliceAtCompactBoundariesNoBoundaries(t *testing.T) {
 	entries := makeEntries("a", "b", "c", "d")
-	sliced, info := sliceAtCompactBoundaries(entries, 1, "")
+	sliced, info := sliceAtCompactBoundaries(entries, 1, "", "")
 	if len(sliced) != 4 {
 		t.Fatalf("got %d, want all 4 (no boundaries to slice at)", len(sliced))
 	}
@@ -512,7 +536,7 @@ func TestSliceAtCompactBoundariesOneBoundary(t *testing.T) {
 	}
 
 	// tailCompactions=1 with 2 boundaries → slice from the last boundary.
-	sliced, info := sliceAtCompactBoundaries(entries, 1, "")
+	sliced, info := sliceAtCompactBoundaries(entries, 1, "", "")
 	if len(sliced) != 2 {
 		t.Fatalf("got %d, want 2 (from cb2 to end)", len(sliced))
 	}
@@ -538,7 +562,7 @@ func TestSliceAtCompactBoundariesReturnsAllWhenFewer(t *testing.T) {
 	}
 
 	// 1 boundary, tailCompactions=1 → len(boundaries) <= tailCompactions → return all.
-	sliced, info := sliceAtCompactBoundaries(entries, 1, "")
+	sliced, info := sliceAtCompactBoundaries(entries, 1, "", "")
 	if len(sliced) != 3 {
 		t.Fatalf("got %d, want 3 (all entries returned when boundaries <= tailCompactions)", len(sliced))
 	}
@@ -562,7 +586,7 @@ func TestSliceAtCompactBoundariesMultiple(t *testing.T) {
 	}
 
 	// tailCompactions=2 → include from the 2nd-from-last boundary.
-	sliced, info := sliceAtCompactBoundaries(entries, 2, "")
+	sliced, info := sliceAtCompactBoundaries(entries, 2, "", "")
 	if len(sliced) != 4 {
 		t.Fatalf("got %d, want 4", len(sliced))
 	}
@@ -584,7 +608,7 @@ func TestSliceAtCompactBoundariesBeforeCursor(t *testing.T) {
 	}
 
 	// Load older messages before "cb2".
-	sliced, info := sliceAtCompactBoundaries(entries, 1, "cb2")
+	sliced, info := sliceAtCompactBoundaries(entries, 1, "cb2", "")
 	// Working set is [a, cb1, b] — 1 boundary, tailCompactions=1 → return all.
 	if len(sliced) != 3 {
 		t.Fatalf("got %d, want 3 (all working set when boundaries <= tailCompactions)", len(sliced))
@@ -610,7 +634,7 @@ func TestSliceAtCompactBoundariesBeforeCursorWithSlicing(t *testing.T) {
 
 	// Load older before "cb3". Working set: [a, cb1, b, cb2, c].
 	// 2 boundaries in working set, tailCompactions=1 → slice from cb2.
-	sliced, info := sliceAtCompactBoundaries(entries, 1, "cb3")
+	sliced, info := sliceAtCompactBoundaries(entries, 1, "cb3", "")
 	if len(sliced) != 2 {
 		t.Fatalf("got %d, want 2", len(sliced))
 	}
@@ -619,6 +643,79 @@ func TestSliceAtCompactBoundariesBeforeCursorWithSlicing(t *testing.T) {
 	}
 	if !info.HasOlderMessages {
 		t.Error("expected HasOlderMessages")
+	}
+}
+
+func TestSliceAtCompactBoundariesAfterCursor(t *testing.T) {
+	entries := []*Entry{
+		{UUID: "a", Type: "user"},
+		{UUID: "cb1", Type: "system", Subtype: "compact_boundary"},
+		{UUID: "b", Type: "assistant"},
+		{UUID: "cb2", Type: "system", Subtype: "compact_boundary"},
+		{UUID: "c", Type: "user"},
+	}
+
+	// After "cb1" with tailCompactions=0 → returns [b, cb2, c].
+	sliced, info := sliceAtCompactBoundaries(entries, 0, "", "cb1")
+	if len(sliced) != 3 {
+		t.Fatalf("got %d, want 3 (entries after cb1)", len(sliced))
+	}
+	if sliced[0].UUID != "b" {
+		t.Errorf("first = %q, want %q", sliced[0].UUID, "b")
+	}
+	if info.ReturnedMessageCount != 3 {
+		t.Errorf("ReturnedMessageCount = %d, want 3", info.ReturnedMessageCount)
+	}
+}
+
+func TestSliceAtCompactBoundariesAfterCursorWithSlicing(t *testing.T) {
+	entries := []*Entry{
+		{UUID: "a", Type: "user"},
+		{UUID: "cb1", Type: "system", Subtype: "compact_boundary"},
+		{UUID: "b", Type: "assistant"},
+		{UUID: "cb2", Type: "system", Subtype: "compact_boundary"},
+		{UUID: "c", Type: "user"},
+		{UUID: "cb3", Type: "system", Subtype: "compact_boundary"},
+		{UUID: "d", Type: "assistant"},
+	}
+
+	// After "a" with tailCompactions=1 → working set is [cb1, b, cb2, c, cb3, d],
+	// then sliced from last boundary cb3 → [cb3, d].
+	sliced, info := sliceAtCompactBoundaries(entries, 1, "", "a")
+	if len(sliced) != 2 {
+		t.Fatalf("got %d, want 2 (sliced from cb3)", len(sliced))
+	}
+	if sliced[0].UUID != "cb3" {
+		t.Errorf("first = %q, want %q", sliced[0].UUID, "cb3")
+	}
+	if !info.HasOlderMessages {
+		t.Error("expected HasOlderMessages after compaction slicing")
+	}
+}
+
+func TestSliceAtCompactBoundariesAfterCursorLastEntry(t *testing.T) {
+	entries := makeEntries("a", "b", "c")
+
+	// After last entry → empty slice.
+	sliced, info := sliceAtCompactBoundaries(entries, 0, "", "c")
+	if len(sliced) != 0 {
+		t.Fatalf("got %d, want 0 (cursor at last entry)", len(sliced))
+	}
+	if info.ReturnedMessageCount != 0 {
+		t.Errorf("ReturnedMessageCount = %d, want 0", info.ReturnedMessageCount)
+	}
+}
+
+func TestSliceAtCompactBoundariesAfterCursorNotFound(t *testing.T) {
+	entries := makeEntries("a", "b", "c")
+
+	// After nonexistent UUID → full set returned.
+	sliced, info := sliceAtCompactBoundaries(entries, 0, "", "z")
+	if len(sliced) != 3 {
+		t.Fatalf("got %d, want 3 (cursor not found = full set)", len(sliced))
+	}
+	if info.ReturnedMessageCount != 3 {
+		t.Errorf("ReturnedMessageCount = %d, want 3", info.ReturnedMessageCount)
 	}
 }
 
@@ -1091,6 +1188,59 @@ func TestReadFileOlder(t *testing.T) {
 	}
 }
 
+func TestReadFileNewer(t *testing.T) {
+	path := writeJSONL(t,
+		`{"uuid":"a","parentUuid":"","type":"user","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"b","parentUuid":"a","type":"assistant","timestamp":"2025-01-01T00:00:01Z"}`,
+		`{"uuid":"cb1","parentUuid":"b","type":"system","subtype":"compact_boundary","timestamp":"2025-01-01T00:00:02Z"}`,
+		`{"uuid":"c","parentUuid":"cb1","type":"user","timestamp":"2025-01-01T00:00:03Z"}`,
+		`{"uuid":"cb2","parentUuid":"c","type":"system","subtype":"compact_boundary","timestamp":"2025-01-01T00:00:04Z"}`,
+		`{"uuid":"d","parentUuid":"cb2","type":"assistant","timestamp":"2025-01-01T00:00:05Z"}`,
+	)
+	sess, err := ReadFileNewer(path, 0, "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Should return display-type entries after "b": c and d (cb1/cb2 are system).
+	for _, m := range sess.Messages {
+		if m.UUID == "a" || m.UUID == "b" {
+			t.Errorf("should not contain entry %q (before or at cursor)", m.UUID)
+		}
+	}
+	found := false
+	for _, m := range sess.Messages {
+		if m.UUID == "d" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected entry d in newer messages")
+	}
+}
+
+func TestReadFileRawNewer(t *testing.T) {
+	path := writeJSONL(t,
+		`{"uuid":"a","parentUuid":"","type":"user","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"b","parentUuid":"a","type":"assistant","timestamp":"2025-01-01T00:00:01Z"}`,
+		`{"uuid":"cb1","parentUuid":"b","type":"system","subtype":"compact_boundary","timestamp":"2025-01-01T00:00:02Z"}`,
+		`{"uuid":"c","parentUuid":"cb1","type":"user","timestamp":"2025-01-01T00:00:03Z"}`,
+		`{"uuid":"d","parentUuid":"c","type":"assistant","timestamp":"2025-01-01T00:00:05Z"}`,
+	)
+	sess, err := ReadFileRawNewer(path, 0, "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Raw includes all types (including system). After "b": cb1, c, d.
+	if len(sess.Messages) != 3 {
+		t.Fatalf("got %d messages, want 3 (cb1, c, d after cursor b)", len(sess.Messages))
+	}
+	for _, m := range sess.Messages {
+		if m.UUID == "a" || m.UUID == "b" {
+			t.Errorf("should not contain entry %q (before or at cursor)", m.UUID)
+		}
+	}
+}
+
 // --- Edge case tests (from review findings) ---
 
 func TestSliceAtCompactBoundariesCursorAtFirstMessage(t *testing.T) {
@@ -1100,7 +1250,7 @@ func TestSliceAtCompactBoundariesCursorAtFirstMessage(t *testing.T) {
 		{UUID: "c", Type: "user"},
 	}
 	// Cursor at first message → should return empty working set.
-	sliced, info := sliceAtCompactBoundaries(entries, 1, "a")
+	sliced, info := sliceAtCompactBoundaries(entries, 1, "a", "")
 	if len(sliced) != 0 {
 		t.Fatalf("got %d, want 0 (cursor at first message = no older messages)", len(sliced))
 	}
@@ -1116,7 +1266,7 @@ func TestSliceAtCompactBoundariesTailCompactionsZero(t *testing.T) {
 		{UUID: "b", Type: "assistant"},
 	}
 	// tailCompactions=0 should return everything (no panic).
-	sliced, info := sliceAtCompactBoundaries(entries, 0, "")
+	sliced, info := sliceAtCompactBoundaries(entries, 0, "", "")
 	if len(sliced) != 3 {
 		t.Fatalf("got %d, want 3", len(sliced))
 	}
@@ -1132,7 +1282,7 @@ func TestSliceAtCompactBoundariesTailZeroWithCursor(t *testing.T) {
 		{UUID: "c", Type: "user"},
 	}
 	// tailCompactions=0 with cursor should still respect the cursor.
-	sliced, info := sliceAtCompactBoundaries(entries, 0, "b")
+	sliced, info := sliceAtCompactBoundaries(entries, 0, "b", "")
 	if len(sliced) != 1 {
 		t.Fatalf("got %d, want 1 (only messages before cursor 'b')", len(sliced))
 	}
@@ -1320,6 +1470,159 @@ func TestReadCodexFileInteractionLifecycleUsesDistinctEntryIDs(t *testing.T) {
 	}
 }
 
+func TestReadCodexFileErrorEventMsgTypes(t *testing.T) {
+	errorLine := `{"timestamp":"2026-05-03T00:05:41.798Z","type":"event_msg","payload":{"type":"error","message":"You've hit your usage limit.","codex_error_info":"usage_limit_exceeded"}}`
+	streamErrorLine := `{"timestamp":"2026-05-03T00:06:00.000Z","type":"event_msg","payload":{"type":"stream_error","message":"stream interrupted"}}`
+	turnAbortedLine := `{"timestamp":"2026-05-03T00:07:00.000Z","type":"event_msg","payload":{"type":"turn_aborted","message":"turn was aborted"}}`
+	userMsgLine := `{"timestamp":"2026-05-03T00:04:00.000Z","type":"event_msg","payload":{"type":"user_message","message":"hello"}}`
+	responseLine := `{"timestamp":"2026-05-03T00:04:30.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"hi"}]}}`
+
+	path := writeJSONL(t, userMsgLine, responseLine, errorLine, streamErrorLine, turnAbortedLine)
+
+	sess, err := ReadCodexFile(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Expect: user_message (event_msg, but no response_item user → included),
+	// response_item/message, error, stream_error, turn_aborted = 5 entries.
+	if got := len(sess.Messages); got != 5 {
+		t.Fatalf("Messages = %d, want 5", got)
+	}
+
+	// Verify the three error-category entries.
+	for i, want := range []struct {
+		idx     int
+		entType string
+		rawLine string
+	}{
+		{2, "system", errorLine},
+		{3, "system", streamErrorLine},
+		{4, "system", turnAbortedLine},
+	} {
+		msg := sess.Messages[want.idx]
+		if msg.Type != want.entType {
+			t.Errorf("[%d] Type = %q, want %q", i, msg.Type, want.entType)
+		}
+		if string(msg.Raw) != want.rawLine {
+			t.Errorf("[%d] Raw mismatch:\n got: %s\nwant: %s", i, msg.Raw, want.rawLine)
+		}
+		if msg.UUID != fmt.Sprintf("codex-event-%d", want.idx) {
+			t.Errorf("[%d] UUID = %q, want codex-event-%d", i, msg.UUID, want.idx)
+		}
+		if msg.TextContent() == "" && len(msg.ContentBlocks()) == 0 {
+			t.Errorf("[%d] error entry has no visible message content", i)
+		}
+	}
+	if text := sess.Messages[2].ContentBlocks()[0].Text; !strings.Contains(text, "usage_limit_exceeded") || !strings.Contains(text, "You've hit your usage limit.") {
+		t.Fatalf("error text = %q, want code and message", text)
+	}
+
+	// Verify parent chain is linked.
+	for i := 1; i < len(sess.Messages); i++ {
+		if sess.Messages[i].ParentUUID != sess.Messages[i-1].UUID {
+			t.Errorf("Messages[%d].ParentUUID = %q, want %q", i, sess.Messages[i].ParentUUID, sess.Messages[i-1].UUID)
+		}
+	}
+}
+
+func TestReadCodexFileUnknownEventMsgForwarded(t *testing.T) {
+	unknownLine := `{"timestamp":"2026-05-03T00:08:00.000Z","type":"event_msg","payload":{"type":"new_future_type","data":"something"}}`
+
+	path := writeJSONL(t, unknownLine)
+
+	sess, err := ReadCodexFile(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := len(sess.Messages); got != 1 {
+		t.Fatalf("Messages = %d, want 1 (unknown event_msg should be forwarded)", got)
+	}
+	msg := sess.Messages[0]
+	if msg.Type != "event_msg" {
+		t.Fatalf("Type = %q, want event_msg", msg.Type)
+	}
+	if string(msg.Raw) != unknownLine {
+		t.Fatalf("Raw mismatch:\n got: %s\nwant: %s", msg.Raw, unknownLine)
+	}
+}
+
+func TestReadCodexFileTokenCountEventMsgSkipped(t *testing.T) {
+	path := writeJSONL(t,
+		`{"timestamp":"2026-05-03T00:08:00.000Z","type":"event_msg","payload":{"type":"token_count","input_tokens":10,"output_tokens":2}}`,
+		`{"timestamp":"2026-05-03T00:08:01.000Z","type":"event_msg","payload":{"type":"new_future_type","data":"diagnostic"}}`,
+	)
+
+	sess, err := ReadCodexFile(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := len(sess.Messages); got != 1 {
+		t.Fatalf("Messages = %d, want only unknown diagnostic event", got)
+	}
+	if sess.Messages[0].Type != "event_msg" {
+		t.Fatalf("Type = %q, want event_msg", sess.Messages[0].Type)
+	}
+	if !strings.Contains(string(sess.Messages[0].Raw), "new_future_type") {
+		t.Fatalf("Raw = %s, want unknown diagnostic event", sess.Messages[0].Raw)
+	}
+}
+
+func TestReadCodexFileCustomToolPayloadsPreserved(t *testing.T) {
+	path := writeJSONL(t,
+		`{"timestamp":"2026-05-03T00:08:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-edit","name":"apply_patch","input":{"patch":"*** Begin Patch\n*** End Patch"}}}`,
+		`{"timestamp":"2026-05-03T00:08:01.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-edit","output":{"output":"Success. Updated files."}}}`,
+	)
+
+	sess, err := ReadCodexFile(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(sess.Messages); got != 2 {
+		t.Fatalf("Messages = %d, want 2", got)
+	}
+	toolUseBlocks := sess.Messages[0].ContentBlocks()
+	if len(toolUseBlocks) != 1 {
+		t.Fatalf("tool use blocks = %d, want 1", len(toolUseBlocks))
+	}
+	if toolUseBlocks[0].Type != "tool_use" || toolUseBlocks[0].ID != "call-edit" {
+		t.Fatalf("tool use block = %#v, want call-edit tool_use", toolUseBlocks[0])
+	}
+	assertRawMetadata(t, toolUseBlocks[0].Input, map[string]any{"patch": "*** Begin Patch\n*** End Patch"})
+
+	toolResultBlocks := sess.Messages[1].ContentBlocks()
+	if len(toolResultBlocks) != 1 {
+		t.Fatalf("tool result blocks = %d, want 1", len(toolResultBlocks))
+	}
+	if toolResultBlocks[0].Type != "tool_result" || toolResultBlocks[0].ToolUseID != "call-edit" {
+		t.Fatalf("tool result block = %#v, want call-edit tool_result", toolResultBlocks[0])
+	}
+	assertRawMetadata(t, toolResultBlocks[0].Content, map[string]any{"output": "Success. Updated files."})
+}
+
+func TestReadCodexFileFunctionCallFallsBackToID(t *testing.T) {
+	path := writeJSONL(t,
+		`{"timestamp":"2026-05-03T00:08:00.000Z","type":"response_item","payload":{"type":"function_call","id":"call-from-id","name":"Read"}}`,
+	)
+
+	sess, err := ReadCodexFile(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(sess.Messages); got != 1 {
+		t.Fatalf("Messages = %d, want 1", got)
+	}
+	blocks := sess.Messages[0].ContentBlocks()
+	if len(blocks) != 1 {
+		t.Fatalf("blocks = %d, want 1", len(blocks))
+	}
+	if blocks[0].ID != "call-from-id" {
+		t.Fatalf("tool_use id = %q, want id fallback", blocks[0].ID)
+	}
+}
+
 func TestFindCodexSessionFileIn(t *testing.T) {
 	sessDir := t.TempDir()
 	workDir := "/data/projects/myproject"
@@ -1439,6 +1742,20 @@ func TestFindSessionFileFallsBackToCodex(t *testing.T) {
 	got := FindSessionFile([]string{t.TempDir()}, "/nonexistent/codex/project")
 	if got != "" {
 		t.Errorf("expected empty, got %q", got)
+	}
+}
+
+func TestFindSessionFileFallsBackToPi(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "pi-project")
+	want := filepath.Join(base, "session.jsonl")
+	body := `{"type":"session","version":3,"id":"ses_pi","timestamp":"2026-02-02T00:00:00.000Z","cwd":"` + filepath.ToSlash(workDir) + `"}`
+	if err := os.WriteFile(want, []byte(body+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := FindSessionFile([]string{base}, workDir); got != want {
+		t.Fatalf("FindSessionFile() = %q, want Pi fallback %q", got, want)
 	}
 }
 

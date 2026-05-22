@@ -10,7 +10,24 @@ on:
         options:
           - smoke
           - full
+          - needs-mac
         default: smoke
+      pr_number:
+        description: Pull request number for label-dispatched runs
+        required: false
+        type: string
+      head_repo:
+        description: Pull request head repository for label-dispatched runs
+        required: false
+        type: string
+      head_sha:
+        description: Pull request head SHA for label-dispatched runs
+        required: false
+        type: string
+      head_ref:
+        description: Pull request head ref for label-dispatched runs
+        required: false
+        type: string
   schedule:
     - cron: "17 3 * * *"
   pull_request:
@@ -20,18 +37,17 @@ on:
       - reopened
       - synchronize
       - ready_for_review
-      - labeled
 
 permissions:
   contents: read
 
 concurrency:
-  group: mac-regression-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  group: mac-regression-${{ inputs.pr_number || github.event.pull_request.number || github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 env:
-  DOLT_VERSION: "1.86.1"
-  BD_VERSION: "v1.0.0"
+  DOLT_VERSION: "2.0.3"
+  BD_VERSION: "v1.0.4"
 
 # Trigger gate re-used by every job below via `if:`.
 # We want each job to run when EITHER:
@@ -42,10 +58,32 @@ env:
 # expression; keep them in sync.
 
 jobs:
+  runner-policy:
+    name: Runner policy
+    runs-on: ${{ github.event_name == 'pull_request' && contains(fromJSON('["julianknutsen","csells","sjarmak","quad341"]'), github.event.pull_request.user.login) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    outputs:
+      use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
+      reason: ${{ steps.policy.outputs.reason }}
+      runner_2vcpu: ${{ steps.policy.outputs.runner_2vcpu }}
+      runner_8vcpu: ${{ steps.policy.outputs.runner_8vcpu }}
+      runner_16vcpu: ${{ steps.policy.outputs.runner_16vcpu }}
+      runner_32vcpu: ${{ steps.policy.outputs.runner_32vcpu }}
+      runner_macos: ${{ steps.policy.outputs.runner_macos }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Select runner backend
+        id: policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          python3 .github/workflows/scripts/runner_policy.py
+
   # Fast quality gates that Linux runs on every PR. Keep these cheap so a
   # Mac-parity loop stays interactive.
   mac-quality:
     name: Mac / quality (lint, fmt, vet, docs)
+    needs: runner-policy
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
@@ -55,14 +93,14 @@ jobs:
         !github.event.pull_request.draft &&
         contains(github.event.pull_request.labels.*.name, 'needs-mac')
       )
-    runs-on:
-      - self-hosted
-      - macOS
-      - ARM64
-      - macstadium
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-gascity-macos
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
@@ -70,7 +108,16 @@ jobs:
           install-claude-cli: "false"
       - name: Install tools
         run: make install-tools
+      - name: Restore golangci-lint cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .cache/golangci-lint
+          key: ${{ runner.os }}-golangci-lint-${{ hashFiles('go.sum', '.golangci.yml', 'Makefile') }}
+          restore-keys: |
+            ${{ runner.os }}-golangci-lint-
       - name: Lint
+        env:
+          GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
         run: make lint
       - name: Format
         run: make fmt-check
@@ -82,6 +129,7 @@ jobs:
   # Unit tests — the suite Mac already ran as "smoke".
   mac-unit:
     name: Mac / make test
+    needs: runner-policy
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
@@ -91,14 +139,14 @@ jobs:
         !github.event.pull_request.draft &&
         contains(github.event.pull_request.labels.*.name, 'needs-mac')
       )
-    runs-on:
-      - self-hosted
-      - macOS
-      - ARM64
-      - macstadium
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-gascity-macos
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
@@ -110,6 +158,7 @@ jobs:
   # Tier A acceptance — smoke-level gate on every PR.
   mac-acceptance:
     name: Mac / acceptance (Tier A)
+    needs: runner-policy
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
@@ -119,14 +168,14 @@ jobs:
         !github.event.pull_request.draft &&
         contains(github.event.pull_request.labels.*.name, 'needs-mac')
       )
-    runs-on:
-      - self-hosted
-      - macOS
-      - ARM64
-      - macstadium
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-gascity-macos
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
@@ -146,26 +195,30 @@ jobs:
   # job's result still reflects the actual outcome for the summary.
   mac-cover:
     name: Mac / test-cover
-    # Heavy job: schedule/full-dispatch/PR(needs-mac). Smoke dispatch skips.
+    needs: runner-policy
+    # Heavy job: schedule/full-dispatch/needs-mac-dispatch/PR(needs-mac). Smoke dispatch skips.
     if: >-
       github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && inputs.suite == 'full') ||
+      (
+        github.event_name == 'workflow_dispatch' &&
+        (inputs.suite == 'full' || inputs.suite == 'needs-mac')
+      ) ||
       (
         github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         !github.event.pull_request.draft &&
         contains(github.event.pull_request.labels.*.name, 'needs-mac')
       )
-    runs-on:
-      - self-hosted
-      - macOS
-      - ARM64
-      - macstadium
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 25
     outputs:
       outcome: ${{ steps.cover.outcome }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-gascity-macos
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
@@ -185,46 +238,72 @@ jobs:
           path: coverage.txt
           if-no-files-found: ignore
 
-  # Integration shards. Linux runs these with continue-on-error today while
-  # stabilizing; we mirror that until Mac parity is proven. These three
-  # shards run on `needs-mac` label, nightly, or manual dispatch. The
-  # long-running review-formulas shard lives in a separate job below so
-  # it can gate on nightly / full-dispatch only.
-  # Integration shards. Linux runs these with continue-on-error today
-  # while stabilizing; we mirror that until Mac parity is proven. Split
-  # into discrete jobs (rather than a matrix) so each shard publishes
-  # its own `outputs.outcome` — matrix-job outputs are last-writer-wins
-  # and would mask a per-shard failure in the summary row.
+  # Integration shards. Packages and REST are matrix jobs whose aggregate
+  # result now gates the summary directly. The long-running review-formulas
+  # shard stays separate so it can gate on nightly / full-dispatch only.
   mac-integration-packages:
-    name: Mac / integration (packages)
+    name: Mac / integration packages / ${{ matrix.shard_name }}
+    needs:
+      - runner-policy
+      - mac-quality
+      - mac-unit
+      - mac-acceptance
     if: >-
       github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && inputs.suite == 'full') ||
+      (
+        github.event_name == 'workflow_dispatch' &&
+        (inputs.suite == 'full' || inputs.suite == 'needs-mac')
+      ) ||
       (
         github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         !github.event.pull_request.draft &&
         contains(github.event.pull_request.labels.*.name, 'needs-mac')
       )
-    runs-on:
-      - self-hosted
-      - macOS
-      - ARM64
-      - macstadium
-    timeout-minutes: 60
-    outputs:
-      outcome: ${{ steps.shard.outcome }}
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
+    timeout-minutes: ${{ matrix.timeout_minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard_name: core
+            timeout_minutes: 60
+            command: |
+              ./scripts/test-integration-shard packages-core-1-of-4
+              ./scripts/test-integration-shard packages-core-2-of-4
+              ./scripts/test-integration-shard packages-core-3-of-4
+              ./scripts/test-integration-shard packages-core-4-of-4
+          - shard_name: cmd-gc
+            timeout_minutes: 75
+            command: |
+              ./scripts/test-integration-shard packages-cmd-gc-1-of-6
+              ./scripts/test-integration-shard packages-cmd-gc-2-of-6
+              ./scripts/test-integration-shard packages-cmd-gc-3-of-6
+              ./scripts/test-integration-shard packages-cmd-gc-4-of-6
+              ./scripts/test-integration-shard packages-cmd-gc-5-of-6
+              ./scripts/test-integration-shard packages-cmd-gc-6-of-6
+          - shard_name: tmux
+            timeout_minutes: 45
+            command: |
+              ./scripts/test-integration-shard packages-runtime-tmux-1-of-3
+              ./scripts/test-integration-shard packages-runtime-tmux-2-of-3
+              ./scripts/test-integration-shard packages-runtime-tmux-3-of-3
     env:
-      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
-      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_BASE_URL: https://ollama.com
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.OLLAMA_API_KEY }}
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
       CLAUDE_CODE_EFFORT_LEVEL: auto
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-gascity-macos
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
@@ -234,39 +313,47 @@ jobs:
         run: make install-tools
       - name: Run integration shard
         id: shard
-        continue-on-error: true
-        run: make test-integration-packages
+        run: ${{ matrix.command }}
 
   mac-integration-bdstore:
     name: Mac / integration (bdstore)
+    needs:
+      - runner-policy
+      - mac-quality
+      - mac-unit
+      - mac-acceptance
     if: >-
       github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && inputs.suite == 'full') ||
+      (
+        github.event_name == 'workflow_dispatch' &&
+        (inputs.suite == 'full' || inputs.suite == 'needs-mac')
+      ) ||
       (
         github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         !github.event.pull_request.draft &&
         contains(github.event.pull_request.labels.*.name, 'needs-mac')
       )
-    runs-on:
-      - self-hosted
-      - macOS
-      - ARM64
-      - macstadium
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 60
     outputs:
       outcome: ${{ steps.shard.outcome }}
     env:
-      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
-      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_BASE_URL: https://ollama.com
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.OLLAMA_API_KEY }}
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
       CLAUDE_CODE_EFFORT_LEVEL: auto
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-gascity-macos
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
@@ -280,35 +367,70 @@ jobs:
         run: make test-integration-bdstore
 
   mac-integration-rest:
-    name: Mac / integration (rest)
+    name: Mac / integration rest / ${{ matrix.shard_name }}
+    needs:
+      - runner-policy
+      - mac-quality
+      - mac-unit
+      - mac-acceptance
     if: >-
       github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && inputs.suite == 'full') ||
+      (
+        github.event_name == 'workflow_dispatch' &&
+        (inputs.suite == 'full' || inputs.suite == 'needs-mac')
+      ) ||
       (
         github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         !github.event.pull_request.draft &&
         contains(github.event.pull_request.labels.*.name, 'needs-mac')
       )
-    runs-on:
-      - self-hosted
-      - macOS
-      - ARM64
-      - macstadium
-    timeout-minutes: 60
-    outputs:
-      outcome: ${{ steps.shard.outcome }}
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
+    timeout-minutes: ${{ matrix.timeout_minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard_name: smoke
+            timeout_minutes: 45
+            command: make test-integration-rest-smoke
+          - shard_name: full-1-2-of-8
+            timeout_minutes: 45
+            command: |
+              ./scripts/test-integration-shard rest-full-1-of-8
+              ./scripts/test-integration-shard rest-full-2-of-8
+          - shard_name: full-3-4-of-8
+            timeout_minutes: 45
+            command: |
+              ./scripts/test-integration-shard rest-full-3-of-8
+              ./scripts/test-integration-shard rest-full-4-of-8
+          - shard_name: full-5-6-of-8
+            timeout_minutes: 45
+            command: |
+              ./scripts/test-integration-shard rest-full-5-of-8
+              ./scripts/test-integration-shard rest-full-6-of-8
+          - shard_name: full-7-of-8
+            timeout_minutes: 45
+            command: ./scripts/test-integration-shard rest-full-7-of-8
+          - shard_name: full-8-of-8
+            timeout_minutes: 45
+            command: ./scripts/test-integration-shard rest-full-8-of-8
     env:
-      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
-      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_BASE_URL: https://ollama.com
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.OLLAMA_API_KEY }}
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
       CLAUDE_CODE_EFFORT_LEVEL: auto
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-gascity-macos
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
@@ -318,34 +440,39 @@ jobs:
         run: make install-tools
       - name: Run integration shard
         id: shard
-        continue-on-error: true
-        run: make test-integration-rest
+        run: ${{ matrix.command }}
 
   # Long-running review-formulas shard — nightly / full dispatch only.
   mac-integration-review-formulas:
     name: Mac / integration (review-formulas)
+    needs:
+      - runner-policy
+      - mac-quality
+      - mac-unit
+      - mac-acceptance
     if: >-
       github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && inputs.suite == 'full')
-    runs-on:
-      - self-hosted
-      - macOS
-      - ARM64
-      - macstadium
+    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 90
     outputs:
       outcome: ${{ steps.shard.outcome }}
     env:
-      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
-      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
-      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_MODEL }}
+      ANTHROPIC_BASE_URL: https://ollama.com
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.OLLAMA_API_KEY }}
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_HAIKU_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_OPUS_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SUBAGENT_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_SONNET_MODEL || vars.GC_WORKER_INFERENCE_CLAUDE_OLLAMA_MODEL }}
       CLAUDE_CODE_EFFORT_LEVEL: auto
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
       - uses: ./.github/actions/setup-gascity-macos
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
@@ -361,10 +488,9 @@ jobs:
   # Aggregate summary so a single check reports Mac parity status on the
   # PR. Gated on the same trigger set as the parity jobs so it doesn't
   # post a misleading green check on PRs that never ran Mac at all. The
-  # best-effort jobs (cover, integration, review-formulas) keep their
-  # failures visible here via job outputs that capture the real
-  # step outcome — needs.<job>.result masks it as success because the
-  # failing steps are continue-on-error.
+  # best-effort jobs keep their failures visible here via job outputs that
+  # capture the real step outcome — needs.<job>.result masks it as success
+  # because the failing steps are continue-on-error.
   mac-regression-summary:
     name: Mac regression summary
     if: >-
@@ -379,6 +505,7 @@ jobs:
         )
       )
     needs:
+      - runner-policy
       - mac-quality
       - mac-unit
       - mac-acceptance
@@ -387,20 +514,18 @@ jobs:
       - mac-integration-bdstore
       - mac-integration-rest
       - mac-integration-review-formulas
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     steps:
       - name: Summarize
         env:
           QUALITY: ${{ needs.mac-quality.result }}
           UNIT: ${{ needs.mac-unit.result }}
           ACCEPTANCE: ${{ needs.mac-acceptance.result }}
-          # Best-effort jobs: use outputs.outcome (not needs.*.result)
-          # because their test step is continue-on-error, which forces
-          # needs.*.result to "success" even on failure.
+          # Best-effort jobs: use outputs.outcome (not needs.*.result).
           COVER: ${{ needs.mac-cover.outputs.outcome || needs.mac-cover.result }}
-          INT_PACKAGES: ${{ needs.mac-integration-packages.outputs.outcome || needs.mac-integration-packages.result }}
+          INT_PACKAGES: ${{ needs.mac-integration-packages.result }}
           INT_BDSTORE: ${{ needs.mac-integration-bdstore.outputs.outcome || needs.mac-integration-bdstore.result }}
-          INT_REST: ${{ needs.mac-integration-rest.outputs.outcome || needs.mac-integration-rest.result }}
+          INT_REST: ${{ needs.mac-integration-rest.result }}
           REVIEW_FORMULAS: ${{ needs.mac-integration-review-formulas.outputs.outcome || needs.mac-integration-review-formulas.result }}
         run: |
           cat >>"$GITHUB_STEP_SUMMARY" <<EOF
@@ -412,14 +537,14 @@ jobs:
           | Mac / make test | ${UNIT} |
           | Mac / acceptance (Tier A) | ${ACCEPTANCE} |
           | Mac / test-cover (best-effort) | ${COVER} |
-          | Mac / integration packages (best-effort) | ${INT_PACKAGES} |
+          | Mac / integration packages | ${INT_PACKAGES} |
           | Mac / integration bdstore (best-effort) | ${INT_BDSTORE} |
-          | Mac / integration rest (best-effort) | ${INT_REST} |
+          | Mac / integration rest | ${INT_REST} |
           | Mac / integration review-formulas (best-effort) | ${REVIEW_FORMULAS} |
           EOF
 
           fail=0
-          for result in "$QUALITY" "$UNIT" "$ACCEPTANCE"; do
+          for result in "$QUALITY" "$UNIT" "$ACCEPTANCE" "$INT_PACKAGES" "$INT_REST"; do
             # Skipped is acceptable (e.g. when run outside the needs-mac trigger set)
             case "$result" in
               success|skipped|"") ;;

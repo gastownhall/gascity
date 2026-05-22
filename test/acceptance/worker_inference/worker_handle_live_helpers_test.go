@@ -3,7 +3,10 @@
 package workerinference_test
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +18,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/runtime"
 	runtimetmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -82,6 +87,9 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 	if err := writeWorkerHandleInstructions(root, resolved.InstructionsFile); err != nil {
 		return nil, err
 	}
+	if err := installLiveHandleProviderHooks(root, liveSetup.Profile); err != nil {
+		return nil, err
+	}
 
 	socketName := filepath.Base(root)
 	tmuxCfg := runtimetmux.DefaultConfig()
@@ -137,6 +145,17 @@ func newLiveWorkerHandleHarness(t *testing.T) (*liveWorkerHandleHarness, error) 
 	return harness, nil
 }
 
+func installLiveHandleProviderHooks(workDir string, profile workerpkg.Profile) error {
+	switch profile {
+	case workerpkg.ProfileOpenCodeTmuxCLI:
+		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"opencode"})
+	case workerpkg.ProfilePiTmuxCLI:
+		return hooks.Install(fsys.OSFS{}, workDir, workDir, []string{"pi"})
+	default:
+		return nil
+	}
+}
+
 func liveWorkerDebugf(format string, args ...any) {
 	if strings.TrimSpace(os.Getenv("GC_WORKER_HANDLE_DEBUG")) != "1" {
 		return
@@ -165,7 +184,8 @@ func resolveLiveHandleProvider() (*config.ResolvedProvider, error) {
 	}
 	return config.ResolveProvider(agent, workspace, map[string]config.ProviderSpec{
 		liveSetup.Provider: {
-			Command: liveSetup.BinaryPath,
+			Command:    liveSetup.BinaryPath,
+			ArgsAppend: liveProviderArgsAppend(),
 		},
 	}, exec.LookPath)
 }
@@ -273,20 +293,21 @@ func (h *liveWorkerHandleHarness) stop() (workerpkg.State, map[string]string, er
 func (h *liveWorkerHandleHarness) submitAndWaitForFile(prompt, outputRel string, delivery workerpkg.DeliveryIntent) (workerpkg.State, string, map[string]string, error) {
 	ctx := context.Background()
 	evidence := h.baseEvidence()
-	evidence["prompt"] = prompt
 	evidence["submit_delivery"] = string(delivery)
 	outputPath := filepath.Join(h.workDir, outputRel)
 	evidence["output_path"] = outputPath
+	actualPrompt := prompt + "\n\nWrite the requested output file at this exact path: " + outputPath
+	evidence["prompt"] = actualPrompt
 
 	result, err := h.handle.Message(ctx, workerpkg.MessageRequest{
-		Text:     prompt,
+		Text:     actualPrompt,
 		Delivery: delivery,
 	})
 	evidence["submit_queued"] = strconv.FormatBool(result.Queued)
 
 	state, stateErr := h.handle.State(ctx)
 	evidence = h.withStateEvidence(evidence, state, stateErr)
-	liveWorkerDebugf("submit-and-wait work_dir=%s delivery=%s phase=%s session_id=%s session_name=%s queued=%v err=%v state_err=%v prompt=%q", h.workDir, delivery, state.Phase, state.SessionID, state.SessionName, result.Queued, err, stateErr, prompt)
+	liveWorkerDebugf("submit-and-wait work_dir=%s delivery=%s phase=%s session_id=%s session_name=%s queued=%v err=%v state_err=%v prompt=%q", h.workDir, delivery, state.Phase, state.SessionID, state.SessionName, result.Queued, err, stateErr, actualPrompt)
 	if err != nil {
 		return state, "", h.withBlockedEvidence(evidence, state.SessionName), err
 	}
@@ -326,6 +347,30 @@ func (h *liveWorkerHandleHarness) waitForBusyTurnStart(sessionName, outputNeedle
 	evidence["busy_session_name"] = sessionName
 	evidence["busy_output_needle"] = outputNeedle
 
+	if h.profile == workerpkg.ProfilePiTmuxCLI {
+		var (
+			transcriptPath string
+			lastErr        error
+		)
+		found := pollForCondition(30*time.Second, 500*time.Millisecond, func() bool {
+			transcriptPath, lastErr = findPiAssistantOutputTranscript(h.gcHome, outputNeedle)
+			return transcriptPath != ""
+		})
+		if pane, err := captureTmuxPane(h.workDir, sessionName, 120); err == nil && strings.TrimSpace(pane) != "" {
+			evidence["pane_tail"] = pane
+		}
+		if found {
+			evidence["busy_detection"] = "pi-transcript-assistant-output"
+			evidence["busy_transcript_path"] = transcriptPath
+			return evidence, nil
+		}
+		evidence["busy_detection"] = "pi-transcript-assistant-output-missing"
+		if lastErr != nil {
+			return evidence, lastErr
+		}
+		return evidence, fmt.Errorf("pi transcript did not show assistant output for %q", outputNeedle)
+	}
+
 	var (
 		lastPane string
 		lastErr  error
@@ -353,6 +398,89 @@ func (h *liveWorkerHandleHarness) waitForBusyTurnStart(sessionName, outputNeedle
 		return evidence, lastErr
 	}
 	return evidence, fmt.Errorf("busy turn did not show in-flight activity for %q", outputNeedle)
+}
+
+func findPiAssistantOutputTranscript(gcHome, outputNeedle string) (string, error) {
+	needle := strings.TrimSpace(outputNeedle)
+	if needle == "" {
+		return "", nil
+	}
+	roots := []string{
+		filepath.Join(gcHome, ".pi", "agent", "sessions"),
+		filepath.Join(gcHome, ".local", "share", "gascity", "pi-transcripts"),
+	}
+	var lastErr error
+	for _, root := range roots {
+		info, err := os.Stat(root)
+		if err != nil || !info.IsDir() {
+			if err != nil && !os.IsNotExist(err) {
+				lastErr = err
+			}
+			continue
+		}
+		var found string
+		walkErr := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				lastErr = walkErr
+				return nil
+			}
+			if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".jsonl") {
+				return nil
+			}
+			ok, err := piTranscriptContainsAssistantOutput(path, needle)
+			if err != nil {
+				lastErr = err
+				return nil
+			}
+			if ok {
+				found = path
+				return filepath.SkipAll
+			}
+			return nil
+		})
+		if walkErr != nil && !errors.Is(walkErr, filepath.SkipAll) {
+			lastErr = walkErr
+		}
+		if found != "" {
+			return found, nil
+		}
+	}
+	return "", lastErr
+}
+
+func piTranscriptContainsAssistantOutput(path, needle string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close() //nolint:errcheck // read-only file
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 256*1024), 50*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var entry struct {
+			Type    string `json:"type"`
+			Message struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if entry.Type == "message" &&
+			strings.EqualFold(strings.TrimSpace(entry.Message.Role), "assistant") &&
+			strings.Contains(string(entry.Message.Content), needle) {
+			return true, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 func livePaneShowsBusyIndicator(lines []string) bool {

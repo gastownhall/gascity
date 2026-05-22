@@ -98,7 +98,7 @@ func TestEnsureGitignoreEntries_Idempotent(t *testing.T) {
 
 func TestEnsureGitignoreEntries_NoOpWhenAllPresent(t *testing.T) {
 	f := fsys.NewFake()
-	original := ".gc/\n.beads/*\n!.beads/config.yaml\n!.beads/metadata.json\nhooks/\n.runtime/\n"
+	original := ".gc/\n.beads/*\n!.beads/config.yaml\n!.beads/metadata.json\n!.beads/identity.toml\nhooks/\n.runtime/\n"
 	f.Files[filepath.Join("/city", ".gitignore")] = []byte(original)
 
 	if err := ensureGitignoreEntries(f, "/city", cityGitignoreEntries); err != nil {
@@ -115,7 +115,7 @@ func TestDoInit_WritesGitignoreEntries(t *testing.T) {
 	f := fsys.NewFake()
 
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr)
+	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -137,7 +137,7 @@ func TestDoInit_GitignoreIdempotent(t *testing.T) {
 	f := fsys.NewFake()
 
 	var stdout, stderr bytes.Buffer
-	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr)
+	code := doInit(f, "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr, false)
 	if code != 0 {
 		t.Fatalf("first doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -152,6 +152,68 @@ func TestDoInit_GitignoreIdempotent(t *testing.T) {
 	second := string(f.Files[filepath.Join("/bright-lights", ".gitignore")])
 	if first != second {
 		t.Errorf("gitignore changed on second pass;\nfirst:  %q\nsecond: %q", first, second)
+	}
+}
+
+// TestEnsureGitignoreEntries_IdentityTomlNegationPresent locks designer §6:
+// both city- and rig-rendered .gitignore must contain
+// "!.beads/identity.toml" so the identity file is committed alongside
+// .beads/config.yaml and .beads/metadata.json.
+func TestEnsureGitignoreEntries_IdentityTomlNegationPresent(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		dir     string
+		entries []string
+	}{
+		{"city", "/city", cityGitignoreEntries},
+		{"rig", "/rig", rigGitignoreEntries},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := fsys.NewFake()
+			if err := ensureGitignoreEntries(f, tc.dir, tc.entries); err != nil {
+				t.Fatalf("ensureGitignoreEntries: %v", err)
+			}
+			got := string(f.Files[filepath.Join(tc.dir, ".gitignore")])
+			if !strings.Contains(got, "!.beads/identity.toml") {
+				t.Errorf("%s .gitignore missing %q; got:\n%s", tc.name, "!.beads/identity.toml", got)
+			}
+		})
+	}
+}
+
+// TestEnsureGitignoreEntries_IdentityTomlNegationAfterGlob locks the
+// ordering invariant: "!.beads/identity.toml" must appear AFTER
+// ".beads/*" in the rendered output, otherwise the negation is inert.
+// This catches the most common regression — alphabetical reorders of
+// the slice.
+func TestEnsureGitignoreEntries_IdentityTomlNegationAfterGlob(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		dir     string
+		entries []string
+	}{
+		{"city", "/city", cityGitignoreEntries},
+		{"rig", "/rig", rigGitignoreEntries},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := fsys.NewFake()
+			if err := ensureGitignoreEntries(f, tc.dir, tc.entries); err != nil {
+				t.Fatalf("ensureGitignoreEntries: %v", err)
+			}
+			got := string(f.Files[filepath.Join(tc.dir, ".gitignore")])
+			globIdx := strings.Index(got, ".beads/*")
+			negIdx := strings.Index(got, "!.beads/identity.toml")
+			if globIdx < 0 {
+				t.Fatalf("%s .gitignore missing %q; got:\n%s", tc.name, ".beads/*", got)
+			}
+			if negIdx < 0 {
+				t.Fatalf("%s .gitignore missing %q; got:\n%s", tc.name, "!.beads/identity.toml", got)
+			}
+			if negIdx < globIdx {
+				t.Errorf("%s .gitignore: %q must appear AFTER %q (negation requires it); got:\n%s",
+					tc.name, "!.beads/identity.toml", ".beads/*", got)
+			}
+		})
 	}
 }
 

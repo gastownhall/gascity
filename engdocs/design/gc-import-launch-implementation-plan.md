@@ -223,17 +223,18 @@ behavior or sharp edges.
 including one remediation command and one default-rig syntax.
 
 **Acceptance criteria:**
-- `docs/packv2/` reflects shipped behavior, not aspirational behavior
+- `engdocs/design/packv2/` reflects shipped behavior where it is used as a
+  rollout ledger, and public `docs/guides/` carry the user-facing guidance
 - `docs/guides/` no longer advertises legacy `[packs]` / implicit-import
   guidance as current for schema-2
 - conformance/skew docs are updated to remove known false statements
 
 **Likely files:**
-- `docs/packv2/doc-pack-v2.md`
-- `docs/packv2/doc-packman.md`
-- `docs/packv2/doc-loader-v2.md`
-- `docs/packv2/doc-conformance-matrix.md`
-- `docs/packv2/skew-analysis.md`
+- `engdocs/design/packv2/doc-pack-v2.md`
+- `engdocs/design/packv2/doc-packman.md`
+- `engdocs/design/packv2/doc-loader-v2.md`
+- `engdocs/design/packv2/doc-conformance-matrix.md`
+- `engdocs/design/packv2/skew-analysis.md`
 - `docs/guides/migrating-to-pack-vnext.md`
 - `docs/guides/shareable-packs.md`
 

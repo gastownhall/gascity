@@ -36,6 +36,25 @@ func writeMalformedHistoryTranscript(t *testing.T, profile Profile) string {
 			t.Fatalf("write malformed gemini transcript: %v", err)
 		}
 		return path
+	case ProfileKimiTmuxCLI:
+		return writeLinesFile(t, filepath.Join("sessions", "5decc6790b1207964f31266c8258989e", "kimi-malformed", "context.jsonl"), []string{
+			`{"role":"user","content":"hello"}`,
+			`{"role":"assistant","content":"done"}`,
+			`{"role":"assistant","content":`,
+		})
+	case ProfileOpenCodeTmuxCLI:
+		path := filepath.Join(t.TempDir(), "session.json")
+		if err := os.WriteFile(path, []byte(`{"info":{"id":"malformed-opencode","directory":"/tmp/gascity/phase2/opencode"},"messages":[`), 0o644); err != nil {
+			t.Fatalf("write malformed opencode transcript: %v", err)
+		}
+		return path
+	case ProfilePiTmuxCLI:
+		return writeLinesFile(t, "session.jsonl", []string{
+			`{"type":"session","version":3,"id":"malformed-pi","timestamp":"2026-04-04T09:00:00Z","cwd":"/tmp/gascity/phase2/pi"}`,
+			`{"type":"message","id":"u1","parentId":null,"timestamp":"2026-04-04T09:00:00Z","message":{"role":"user","content":"hello"}}`,
+			`{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-04-04T09:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`,
+			`{"type":"message","id":"torn","message":`,
+		})
 	default:
 		t.Fatalf("unsupported profile %s", profile.ID)
 		return ""
@@ -70,6 +89,21 @@ func writeInteractionHistoryTranscript(t *testing.T, profile Profile) string {
 			t.Fatalf("write gemini interaction transcript: %v", err)
 		}
 		return path
+	case ProfileKimiTmuxCLI:
+		return writeLinesFile(t, filepath.Join("sessions", "5decc6790b1207964f31266c8258989e", "kimi-interaction-phase2", "context.jsonl"), []string{
+			`{"role":"user","content":"run a tool"}`,
+			`{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]}`,
+		})
+	case ProfileOpenCodeTmuxCLI:
+		return writeOpenCodeExportTranscript(t, "opencode-interaction-phase2", "/tmp/gascity/phase2/opencode", []string{
+			`{"info":{"id":"msg_user_1","sessionID":"opencode-interaction-phase2","role":"user","time":{"created":1770000000000}},"parts":[{"id":"part_user_1","type":"text","text":"run a tool"}]}`,
+			`{"info":{"id":"msg_assistant_1","sessionID":"opencode-interaction-phase2","role":"assistant","parentID":"msg_user_1","time":{"created":1770000001000}},"parts":[{"id":"part_interaction_1","type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]}`,
+		})
+	case ProfilePiTmuxCLI:
+		return writePiSessionTranscript(t, "pi-interaction-phase2", "/tmp/gascity/phase2/pi", []string{
+			`{"type":"message","id":"msg_user_1","parentId":null,"timestamp":"2026-04-04T09:00:00Z","message":{"role":"user","content":"run a tool"}}`,
+			`{"type":"message","id":"msg_assistant_1","parentId":"msg_user_1","timestamp":"2026-04-04T09:00:01Z","message":{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]}}`,
+		})
 	default:
 		t.Fatalf("unsupported profile %s", profile.ID)
 		return ""
@@ -111,6 +145,21 @@ func writeInteractionLifecycleTranscript(t *testing.T, profile Profile, finalSta
 			t.Fatalf("write gemini interaction lifecycle transcript: %v", err)
 		}
 		return path
+	case ProfileKimiTmuxCLI:
+		return writeLinesFile(t, filepath.Join("sessions", "5decc6790b1207964f31266c8258989e", "kimi-interaction-lifecycle-phase2", "context.jsonl"), []string{
+			`{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]}`,
+			fmt.Sprintf(`{"role":"user","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}]}`, finalStateText, finalAction),
+		})
+	case ProfileOpenCodeTmuxCLI:
+		return writeOpenCodeExportTranscript(t, "opencode-interaction-lifecycle-phase2", "/tmp/gascity/phase2/opencode", []string{
+			`{"info":{"id":"msg_assistant_1","sessionID":"opencode-interaction-lifecycle-phase2","role":"assistant","time":{"created":1770000000000}},"parts":[{"id":"part_interaction_1","type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]}`,
+			fmt.Sprintf(`{"info":{"id":"msg_user_1","sessionID":"opencode-interaction-lifecycle-phase2","role":"user","parentID":"msg_assistant_1","time":{"created":1770000001000}},"parts":[{"id":"part_interaction_2","type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}]}`, finalStateText, finalAction),
+		})
+	case ProfilePiTmuxCLI:
+		return writePiSessionTranscript(t, "pi-interaction-lifecycle-phase2", "/tmp/gascity/phase2/pi", []string{
+			`{"type":"message","id":"msg_assistant_1","parentId":null,"timestamp":"2026-04-04T09:00:00Z","message":{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]}}`,
+			fmt.Sprintf(`{"type":"message","id":"msg_user_1","parentId":"msg_assistant_1","timestamp":"2026-04-04T09:00:01Z","message":{"role":"user","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}]}}`, finalStateText, finalAction),
+		})
 	default:
 		t.Fatalf("unsupported profile %s", profile.ID)
 		return ""
@@ -163,10 +212,65 @@ func writeToolTranscript(t *testing.T, profile Profile, openTail bool) string {
 			t.Fatalf("write gemini transcript: %v", err)
 		}
 		return path
+	case ProfileKimiTmuxCLI:
+		lines := []string{
+			`{"role":"user","content":"read the file"}`,
+			`{"role":"assistant","content":[],"tool_calls":[{"type":"function","id":"call-1","function":{"name":"Read","arguments":"{\"path\":\"README.md\"}"}}]}`,
+		}
+		if !openTail {
+			lines = append(lines,
+				`{"role":"tool","content":"file data","tool_call_id":"call-1"}`,
+				`{"role":"assistant","content":"done"}`,
+			)
+		}
+		return writeLinesFile(t, filepath.Join("sessions", "5decc6790b1207964f31266c8258989e", "kimi-tool-phase2", "context.jsonl"), lines)
+	case ProfileOpenCodeTmuxCLI:
+		state := `{"status":"running","input":{"path":"README.md"}}`
+		tail := ""
+		if !openTail {
+			state = `{"status":"completed","input":{"path":"README.md"},"output":"file data"}`
+			tail = `,{"info":{"id":"msg_assistant_2","sessionID":"opencode-tool-phase2","role":"assistant","parentID":"msg_assistant_1","time":{"created":1770000002000}},"parts":[{"id":"part_assistant_2","type":"text","text":"done"}]}`
+		}
+		return writeOpenCodeExportTranscript(t, "opencode-tool-phase2", "/tmp/gascity/phase2/opencode", []string{
+			`{"info":{"id":"msg_user_1","sessionID":"opencode-tool-phase2","role":"user","time":{"created":1770000000000}},"parts":[{"id":"part_user_1","type":"text","text":"read the file"}]}`,
+			`{"info":{"id":"msg_assistant_1","sessionID":"opencode-tool-phase2","role":"assistant","parentID":"msg_user_1","time":{"created":1770000001000}},"parts":[{"id":"part_tool_1","type":"tool","callID":"call-1","tool":"Read","state":` + state + `}]}` + tail,
+		})
+	case ProfilePiTmuxCLI:
+		entries := []string{
+			`{"type":"message","id":"msg_user_1","parentId":null,"timestamp":"2026-04-04T09:00:00Z","message":{"role":"user","content":"read the file"}}`,
+			`{"type":"message","id":"msg_assistant_1","parentId":"msg_user_1","timestamp":"2026-04-04T09:00:01Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call-1","name":"Read","arguments":{"path":"README.md"}}]}}`,
+		}
+		if !openTail {
+			entries = append(entries,
+				`{"type":"message","id":"msg_tool_1","parentId":"msg_assistant_1","timestamp":"2026-04-04T09:00:02Z","message":{"role":"toolResult","toolCallId":"call-1","toolName":"Read","content":[{"type":"text","text":"file data"}],"isError":false}}`,
+				`{"type":"message","id":"msg_assistant_2","parentId":"msg_tool_1","timestamp":"2026-04-04T09:00:03Z","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`,
+			)
+		}
+		return writePiSessionTranscript(t, "pi-tool-phase2", "/tmp/gascity/phase2/pi", entries)
 	default:
 		t.Fatalf("unsupported profile %s", profile.ID)
 		return ""
 	}
+}
+
+func writeOpenCodeExportTranscript(t *testing.T, sessionID, workDir string, messages []string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "session.json")
+	body := `{"info":{"id":` + fmt.Sprintf("%q", sessionID) + `,"directory":` + fmt.Sprintf("%q", workDir) + `},"messages":[` + strings.Join(messages, ",") + `]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write opencode transcript: %v", err)
+	}
+	return path
+}
+
+func writePiSessionTranscript(t *testing.T, sessionID, workDir string, entries []string) string {
+	t.Helper()
+
+	lines := append([]string{
+		`{"type":"session","version":3,"id":` + fmt.Sprintf("%q", sessionID) + `,"timestamp":"2026-04-04T09:00:00Z","cwd":` + fmt.Sprintf("%q", workDir) + `}`,
+	}, entries...)
+	return writeLinesFile(t, "session.jsonl", lines)
 }
 
 func writeLinesFile(t *testing.T, rel string, lines []string) string {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +51,7 @@ func TestWispGC_PurgesExpiredMolecules(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
 		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
+		makeGCBeadWithMetadata("wisp-1", now.Add(-2*time.Hour), "closed", "task", map[string]string{"gc.kind": "wisp"}),
 		makeGCBead("mol-2", now.Add(-30*time.Minute), "closed", "molecule"),
 		makeGCBead("mol-3", now.Add(-3*time.Hour), "closed", "molecule"),
 	})
@@ -59,10 +61,10 @@ func TestWispGC_PurgesExpiredMolecules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runGC: %v", err)
 	}
-	if purged != 2 {
-		t.Fatalf("purged = %d, want 2", purged)
+	if purged != 3 {
+		t.Fatalf("purged = %d, want 3", purged)
 	}
-	assertDeletedIDs(t, store.deletedIDs, "mol-1", "mol-3")
+	assertDeletedIDs(t, store.deletedIDs, "mol-1", "wisp-1", "mol-3")
 }
 
 func TestWispGC_NothingExpired(t *testing.T) {
@@ -363,6 +365,29 @@ func TestWispGC_PurgesExpiredTrackingBeads(t *testing.T) {
 	assertDeletedIDs(t, store.deletedIDs, "mol-1", "track-old")
 }
 
+func TestWispGC_PurgesLegacyIssuesTierTrackingBeads(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "track-legacy",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-3 * time.Hour),
+			Labels:    []string{labelOrderTracking},
+		},
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "track-legacy")
+}
+
 func TestWispGC_TrackingListErrorIsSurfacedAndMoleculePurgeContinues(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
@@ -427,9 +452,10 @@ func TestWispGC_ListErrorFailsRun(t *testing.T) {
 }
 
 type gcQueryKey struct {
-	Status string
-	Type   string
-	Label  string
+	Status   string
+	Type     string
+	Label    string
+	Metadata string
 }
 
 type gcTestStore struct {
@@ -448,7 +474,7 @@ func newGCStore(existing []beads.Bead) *gcTestStore {
 }
 
 func (s *gcTestStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if err := s.listErrors[gcQueryKey{Status: query.Status, Type: query.Type, Label: query.Label}]; err != nil {
+	if err := s.listErrors[gcQueryKey{Status: query.Status, Type: query.Type, Label: query.Label, Metadata: metadataQueryKey(query.Metadata)}]; err != nil {
 		return nil, err
 	}
 	return s.MemStore.List(query)
@@ -471,13 +497,45 @@ func makeGCBead(id string, createdAt time.Time, status, beadType string) beads.B
 }
 
 func makeGCBeadWithLabels(id string, createdAt time.Time, status, beadType string, labels ...string) beads.Bead {
+	// Order-tracking beads live in the ephemeral (wisps) tier in production;
+	// mirror that here so wisp_gc's tier-aware queries see them.
+	ephemeral := false
+	for _, l := range labels {
+		if l == labelOrderTracking {
+			ephemeral = true
+			break
+		}
+	}
 	return beads.Bead{
 		ID:        id,
 		Status:    status,
 		Type:      beadType,
 		CreatedAt: createdAt,
 		Labels:    labels,
+		Ephemeral: ephemeral,
 	}
+}
+
+func makeGCBeadWithMetadata(id string, createdAt time.Time, status, beadType string, metadata map[string]string) beads.Bead {
+	bead := makeGCBead(id, createdAt, status, beadType)
+	bead.Metadata = metadata
+	return bead
+}
+
+func metadataQueryKey(metadata map[string]string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(metadata))
+	for key := range metadata {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+metadata[key])
+	}
+	return strings.Join(parts, "\x00")
 }
 
 func assertDeletedIDs(t *testing.T, deleted []string, want ...string) {

@@ -10,6 +10,14 @@ import (
 	"time"
 )
 
+// csrfHeaderName mirrors internal/api/city_scope.go:csrfHeaderName.
+// http_adapter's outbound requests must set it because adapters often
+// register a callback URL pointing at gc's own /svc/<service>/publish
+// proxy (proxy_process mode), which is gated by the same CSRF check
+// gc's CLI client already passes. Defined locally to avoid an import
+// cycle on internal/api.
+const csrfHeaderName = "X-GC-Request"
+
 // HTTPAdapter implements TransportAdapter by forwarding publish requests
 // to an external HTTP service at callbackURL. Used for out-of-process
 // adapters that register via the API.
@@ -64,6 +72,9 @@ func (a *HTTPAdapter) Publish(ctx context.Context, req PublishRequest) (*Publish
 		return nil, fmt.Errorf("creating HTTP request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	// See csrfHeaderName above for why this is required on outbound
+	// callbacks. Harmless when callbackURL is an external HTTP listener.
+	httpReq.Header.Set(csrfHeaderName, "true")
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
@@ -103,8 +114,8 @@ func (a *HTTPAdapter) Publish(ctx context.Context, req PublishRequest) (*Publish
 		}, nil
 	}
 
-	var receipt PublishReceipt
-	if err := json.Unmarshal(respBody, &receipt); err != nil {
+	var wire wirePublishReceipt
+	if err := json.Unmarshal(respBody, &wire); err != nil {
 		// Malformed 2xx body — cannot confirm delivery.
 		return &PublishReceipt{
 			Conversation: req.Conversation,
@@ -112,7 +123,38 @@ func (a *HTTPAdapter) Publish(ctx context.Context, req PublishRequest) (*Publish
 			FailureKind:  PublishFailureTransient,
 		}, nil
 	}
-	return &receipt, nil
+	return wire.toPublishReceipt(), nil
+}
+
+// wirePublishReceipt mirrors PublishReceipt with the snake_case json tags
+// adapters write on the /publish response body. PublishReceipt itself is
+// intentionally untagged — it is exposed via the Huma API as
+// OutboundResult.Receipt where PascalCase is the public contract — so we
+// use this intermediate type at the wire boundary instead of changing
+// PublishReceipt's serialization shape.
+//
+// Without this shim, json.Unmarshal into the untagged PublishReceipt
+// silently zeroes MessageID, FailureKind, RetryAfter, and Metadata,
+// because Go's case-insensitive field match does not bridge the
+// underscore boundary (e.g. "message_id" does not match "MessageID").
+type wirePublishReceipt struct {
+	MessageID    string             `json:"message_id,omitempty"`
+	Conversation ConversationRef    `json:"conversation"`
+	Delivered    bool               `json:"delivered"`
+	FailureKind  PublishFailureKind `json:"failure_kind,omitempty"`
+	RetryAfter   time.Duration      `json:"retry_after,omitempty"`
+	Metadata     map[string]string  `json:"metadata,omitempty"`
+}
+
+func (w wirePublishReceipt) toPublishReceipt() *PublishReceipt {
+	return &PublishReceipt{
+		MessageID:    w.MessageID,
+		Conversation: w.Conversation,
+		Delivered:    w.Delivered,
+		FailureKind:  w.FailureKind,
+		RetryAfter:   w.RetryAfter,
+		Metadata:     w.Metadata,
+	}
 }
 
 // EnsureChildConversation forwards a child conversation request to the
@@ -135,6 +177,7 @@ func (a *HTTPAdapter) EnsureChildConversation(ctx context.Context, ref Conversat
 		return nil, fmt.Errorf("creating HTTP request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set(csrfHeaderName, "true")
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {

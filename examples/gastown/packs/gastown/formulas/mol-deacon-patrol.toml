@@ -1,7 +1,7 @@
 description = """
 Deacon patrol loop. Poured as a root-only wisp on startup:
 
-  gc bd mol wisp mol-deacon-patrol --root-only
+  gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix='{{binding_prefix}}'
   gc bd update $WISP --assignee=$GC_AGENT
 
 Each wisp is ONE iteration: check inbox, run town-wide coordination
@@ -46,12 +46,16 @@ between patrol cycles.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-deacon-patrol"
-version = 12
+version = 14
 
 [vars]
+[vars.binding_prefix]
+description = "Import binding prefix for gastown agent identities, including trailing dot when bound."
+default = ""
+
 [vars.event_timeout]
-description = "Seconds to wait for events before re-checking (exponential backoff)"
-default = "30"
+description = "Seconds to sleep before re-checking. Replaces former event-watch loop which hot-spun on cache-reconcile firehose."
+default = "60"
 
 [[steps]]
 id = "check-inbox"
@@ -159,10 +163,9 @@ something is stuck. This is exactly why an LLM does it, not Go code.
 
 **For stuck coordination agents, file a warrant:**
 ```bash
-gc bd create --type=warrant \
+gc bd create --type=task --label=warrant \
   --title="Stuck: <rig>/<role>" \
-  --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon"}' \
-  --set-metadata gc.routed_to=dog
+  --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon","gc.routed_to":"{{binding_prefix}}dog"}'
 ```
 
 The dog pool runs `mol-shutdown-dance` for due process.
@@ -173,9 +176,79 @@ patterns of failure).
 Close this step after assessment."""
 
 [[steps]]
+id = "queue-starvation-check"
+title = "Cross-check assigned work against visible work signal"
+needs = ["health-scan"]
+description = """
+Cross-check assigned work against visible work signal. A session can
+look healthy-idle in a patrol wisp view while its queue is silently
+starving — the refinery (upstream #1833) self-polled for 13h42m with
+seven beads in its queue and no visible work signal, because its poll
+filter resolved to an identity that didn't match its own.
+
+The deacon's wisp-freshness check catches "no patrol activity" but not
+"active polling, wrong filter, queue silently piling up." This step
+closes that gap.
+
+**Step 1: For each active coordination/merge session, compute the pair:**
+- `A` = count of open beads assigned to the session's agent identity
+- `B` = the most recent bead.updated_at across those beads (work signal)
+
+```bash
+gc agents list --json --active | jq -r '.[] | .agent_id' | while read -r AGENT; do
+    ASSIGNED=$(gc bd list --status=open --assignee="$AGENT" --json --limit=0 | jq 'length')
+    LATEST=$(gc bd list --status=open --assignee="$AGENT" --json --limit=0 \\
+        | jq -r '[.[].updated_at] | max // ""')
+    printf '%s\\t%s\\t%s\\n' "$AGENT" "$ASSIGNED" "$LATEST"
+done
+```
+
+The latest bead.updated_at is the cheapest proxy for "did this session
+move work recently?" — every claim, status transition, metadata update,
+or note bumps it.
+
+**Step 2: Flag when queue > 0 and signal is stale (judgment call,
+guideline ~30min):**
+
+If `A > 0` AND `now - B` has grown well past the patrol's natural
+cadence (default guideline: 30min — roughly 6x the 300s max patrol
+backoff), the session is holding work without making progress. This
+is exactly why an LLM does it, not Go code. Consider:
+- Coordination agents (refinery, witness) naturally cycle in seconds
+  when work is present; 30min is an eternity, not a lull.
+- Polecats may take longer per step; be more lenient before flagging.
+- A freshly-assigned bead with no prior activity gets `updated_at` at
+  assignment time; if it's hours old, the session picked it up but
+  never acted.
+
+**Step 3: For flagged sessions, nudge first, then warrant:**
+
+```bash
+gc session nudge "$STUCK_SESSION" "Queue has $ASSIGNED open beads, no bead activity for <duration>. Run gc hook."
+```
+
+If the nudge doesn't unstick within the next patrol cycle, escalate
+by filing a warrant for the dog pool:
+
+```bash
+gc bd create --type=task --label=warrant \\
+    --title="Stuck queue: <session> — $ASSIGNED beads, no activity $duration" \\
+    --metadata '{"target":"<session>","reason":"queue starvation: N beads, no bead.updated_at progress","requester":"deacon","gc.routed_to":"{{binding_prefix}}dog"}'
+```
+
+The dog runs `mol-shutdown-dance` and the controller respawns a fresh
+session that re-reads the queue with a correct filter.
+
+**Step 4: A genuinely-idle session (no assigned beads) is NOT flagged.**
+If `A == 0`, this step is a no-op for that session. Idle-but-ready
+refineries and witnesses are healthy.
+
+Close this step after the cross-check runs for every active session."""
+
+[[steps]]
 id = "utility-agent-health"
 title = "Check utility agent (dog) health"
-needs = ["health-scan"]
+needs = ["queue-starvation-check"]
 description = """
 Detect utility agents (dogs) that are alive but stuck on their work.
 
@@ -186,7 +259,7 @@ wisp timestamps.
 
 **Step 1: Find active utility agent work:**
 ```bash
-gc bd list --status=in_progress --metadata-field gc.routed_to=dog --json --limit=0
+gc bd list --status=in_progress --metadata-field gc.routed_to={{binding_prefix}}dog --json --limit=0
 ```
 
 **Step 2: For each, assess progress:**
@@ -199,10 +272,9 @@ No hardcoded thresholds. Use judgment.
 
 **Step 3: For stuck utility agents, file a warrant:**
 ```bash
-gc bd create --type=warrant \
+gc bd create --type=task --label=warrant \
   --title="Stuck dog: <agent>" \
-  --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon"}' \
-  --set-metadata gc.routed_to=dog
+  --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon","gc.routed_to":"{{binding_prefix}}dog"}'
 ```
 
 A different dog from the pool picks up the warrant and runs the
@@ -265,14 +337,14 @@ The compactor dog (`mol-dog-compactor`) may have failed. Log for awareness.
 If the compactor order is configured, it will self-dispatch. Otherwise
 nudge the dog pool:
 ```bash
-gc nudge dog/ "Compactor needed: <db_name> has <count> commits"
+gc session nudge dog/ "Compactor needed: <db_name> has <count> commits"
 ```
 
 **Stale backups:**
 The backup dog (`mol-dog-backup`) may have failed. Same pattern — log and
 nudge if order hasn't self-healed:
 ```bash
-gc nudge dog/ "Backup needed: dolt backup is <age> old"
+gc session nudge dog/ "Backup needed: dolt backup is <age> old"
 ```
 
 **Zombie processes:**
@@ -340,19 +412,16 @@ Handle any urgent messages that arrived during patrol. Archive the rest.
 
 **3. Pour next iteration BEFORE burning:**
 ```bash
-NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --json | jq -r '.new_epic_id')
+NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id')
 gc bd update "$NEXT" --assignee=$GC_AGENT
 ```
 
-**4. Wait for activity (exponential backoff):**
+**4. Wait before next cycle:**
 ```bash
-SEQ=$(gc events --seq)
-gc events --watch --type=bead.updated \
-  --after=$SEQ --timeout {{event_timeout}}s
+sleep {{event_timeout}}
 ```
 
-On event: proceed immediately.
-On timeout: double the timeout (cap 300s) and proceed anyway.
+Previous implementation watched `gc events --type=bead.updated` for fast wake-up, but cache-reconcile fires that event constantly, turning the watch into a tight loop with no useful backoff. Fixed sleep gives predictable idle cost.
 
 **5. Burn this wisp:**
 ```bash

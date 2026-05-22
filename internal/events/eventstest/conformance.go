@@ -13,6 +13,14 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
+// rotatableProvider is the small interface a Provider must satisfy
+// for the rotation subtest. Providers that don't expose rotation
+// (e.g. exec, fake) skip the test rather than failing the suite.
+type rotatableProvider interface {
+	events.Provider
+	ForceRotate() (events.RotationResult, error)
+}
+
 // RunProviderTests runs the core conformance suite against a Provider implementation.
 // The newProvider function must return a fresh, empty provider and a cleanup closure.
 func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provider, func())) {
@@ -282,13 +290,91 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 		}
 	})
 
+	t.Run("ListFilterBySubject", func(t *testing.T) {
+		p, cleanup := newProvider(t)
+		defer cleanup()
+
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "actor-a", Subject: "gc-1"})
+		p.Record(events.Event{Type: events.BeadClosed, Actor: "actor-a", Subject: "gc-2"})
+		p.Record(events.Event{Type: events.BeadUpdated, Actor: "actor-b", Subject: "gc-1"})
+
+		got, err := p.List(events.Filter{Subject: "gc-1"})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("List(Subject) returned %d events, want 2", len(got))
+		}
+		for _, e := range got {
+			if e.Subject != "gc-1" {
+				t.Errorf("Subject = %q, want gc-1", e.Subject)
+			}
+		}
+	})
+
+	t.Run("ListFilterByUntil", func(t *testing.T) {
+		p, cleanup := newProvider(t)
+		defer cleanup()
+
+		cutoff := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+		before := cutoff.Add(-time.Minute)
+		after := cutoff.Add(time.Minute)
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "actor-a", Subject: "before", Ts: before})
+		p.Record(events.Event{Type: events.BeadUpdated, Actor: "actor-a", Subject: "boundary", Ts: cutoff})
+		p.Record(events.Event{Type: events.BeadClosed, Actor: "actor-a", Subject: "after", Ts: after})
+
+		got, err := p.List(events.Filter{Until: cutoff})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("List(Until) returned %d events, want 2", len(got))
+		}
+		if got[0].Subject != "before" {
+			t.Errorf("got[0].Subject = %q, want before", got[0].Subject)
+		}
+		if got[1].Subject != "boundary" {
+			t.Errorf("got[1].Subject = %q, want boundary", got[1].Subject)
+		}
+	})
+
+	t.Run("ListFilterByLimit", func(t *testing.T) {
+		p, cleanup := newProvider(t)
+		defer cleanup()
+
+		for _, subject := range []string{"gc-1", "gc-2", "gc-3", "gc-4"} {
+			p.Record(events.Event{Type: events.BeadCreated, Actor: "actor-a", Subject: subject})
+		}
+
+		got, err := p.List(events.Filter{Limit: 2})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("List(Limit) returned %d events, want 2", len(got))
+		}
+		if got[0].Subject != "gc-1" {
+			t.Errorf("got[0].Subject = %q, want gc-1", got[0].Subject)
+		}
+		if got[1].Subject != "gc-2" {
+			t.Errorf("got[1].Subject = %q, want gc-2", got[1].Subject)
+		}
+	})
+
 	t.Run("ListFilterCombined", func(t *testing.T) {
 		p, cleanup := newProvider(t)
 		defer cleanup()
 
-		p.Record(events.Event{Type: events.BeadCreated, Actor: "human"}) // seq 1
-		p.Record(events.Event{Type: events.BeadClosed, Actor: "human"})  // seq 2
-		p.Record(events.Event{Type: events.BeadCreated, Actor: "human"}) // seq 3
+		base := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+		p.Record(events.Event{Type: events.MailSent, Actor: "seed", Subject: "seed", Ts: base})                           // seq 1
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1", Ts: base.Add(2 * time.Hour)})    // after Until
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1", Ts: base.Add(-2 * time.Hour)})   // before Since
+		p.Record(events.Event{Type: events.BeadClosed, Actor: "human", Subject: "gc-1", Ts: base.Add(10 * time.Minute)})  // wrong Type
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "agent", Subject: "gc-1", Ts: base.Add(20 * time.Minute)}) // wrong Actor
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-2", Ts: base.Add(30 * time.Minute)}) // wrong Subject
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1", Ts: base.Add(40 * time.Minute)}) // match 1
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1", Ts: base.Add(50 * time.Minute)}) // match 2
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1", Ts: base.Add(55 * time.Minute)}) // limited out
 
 		// Get all to find seq of first event.
 		all, err := p.List(events.Filter{})
@@ -299,16 +385,28 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 			t.Fatal("need at least 1 event")
 		}
 
-		// Type + AfterSeq combined: bead.created with seq > first event.
-		got, err := p.List(events.Filter{Type: events.BeadCreated, AfterSeq: all[0].Seq})
+		got, err := p.List(events.Filter{
+			Type:     events.BeadCreated,
+			Actor:    "human",
+			Subject:  "gc-1",
+			Since:    base.Add(-time.Hour),
+			Until:    base.Add(time.Hour),
+			AfterSeq: all[0].Seq,
+			Limit:    2,
+		})
 		if err != nil {
 			t.Fatalf("List(combined): %v", err)
 		}
-		if len(got) != 1 {
-			t.Fatalf("List(Type+AfterSeq) returned %d events, want 1", len(got))
+		if len(got) != 2 {
+			t.Fatalf("List(all predicates) returned %d events, want 2", len(got))
 		}
-		if got[0].Type != events.BeadCreated {
-			t.Errorf("Type = %q, want %q", got[0].Type, events.BeadCreated)
+		for _, e := range got {
+			if e.Type != events.BeadCreated || e.Actor != "human" || e.Subject != "gc-1" {
+				t.Fatalf("event = %+v, want bead.created by human for gc-1", e)
+			}
+			if e.Ts.Before(base.Add(-time.Hour)) || e.Ts.After(base.Add(time.Hour)) {
+				t.Fatalf("event Ts = %s, want within combined window", e.Ts)
+			}
 		}
 	})
 
@@ -533,6 +631,108 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) (events.Provi
 
 		if err := p.Close(); err != nil {
 			t.Errorf("Close() = %v, want nil", err)
+		}
+	})
+}
+
+// RunRotationTests exercises the events.jsonl rotation contract on
+// providers that expose ForceRotate. The test asserts the three
+// invariants from the architect's NFRs:
+//
+//   - (a) Seq is monotonic across rotation. The events.rotated anchor
+//     in the new active log has Seq strictly greater than the highest
+//     Seq in the archive (FR-03).
+//   - (b) ReadAll covers active + archives in a single chronological
+//     stream (NFR-04 — archive-aware reads).
+//   - (c) A Watch positioned before the rotation continues yielding
+//     events from the new active log without gap (designer §8.1).
+//
+// Providers that don't satisfy ForceRotate skip this test.
+func RunRotationTests(t *testing.T, newProvider func(t *testing.T) (events.Provider, func())) {
+	t.Helper()
+
+	t.Run("RotationPreservesInvariants", func(t *testing.T) {
+		p, cleanup := newProvider(t)
+		defer cleanup()
+
+		rec, ok := p.(rotatableProvider)
+		if !ok {
+			t.Skipf("provider %T does not support ForceRotate", p)
+		}
+
+		// Phase 1: write some pre-rotate events.
+		for i := 0; i < 5; i++ {
+			p.Record(events.Event{Type: events.BeadCreated, Actor: "human"})
+		}
+
+		// Phase 2: start a watcher BEFORE rotation. Drain any backlog
+		// so the watcher's offset is at end-of-active before we rotate.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		w, err := p.Watch(ctx, 0)
+		if err != nil {
+			t.Fatalf("Watch: %v", err)
+		}
+		defer w.Close() //nolint:errcheck // test cleanup
+
+		seen := make([]events.Event, 0, 5)
+		for i := 0; i < 5; i++ {
+			e, err := w.Next()
+			if err != nil {
+				t.Fatalf("Next pre %d: %v", i, err)
+			}
+			seen = append(seen, e)
+		}
+
+		// Phase 3: rotate.
+		res, err := rec.ForceRotate()
+		if err != nil {
+			t.Fatalf("ForceRotate: %v", err)
+		}
+		if !res.Rotated {
+			t.Fatal("ForceRotate did not rotate a non-empty log")
+		}
+		if res.Done != nil {
+			<-res.Done
+		}
+
+		// (a) The anchor's seq must be strictly greater than the last
+		// archived event's seq.
+		if res.AnchorSeq <= res.LastSeq {
+			t.Errorf("AnchorSeq %d <= LastSeq %d (FR-03 violated)", res.AnchorSeq, res.LastSeq)
+		}
+
+		// Phase 4: write more events post-rotate.
+		for i := 0; i < 3; i++ {
+			p.Record(events.Event{Type: events.BeadClosed, Actor: "human"})
+		}
+
+		// (c) The watcher should yield the anchor + the post-rotate
+		// events without gap.
+		for i := 0; i < 4; i++ { // 1 anchor + 3 post-rotate
+			e, err := w.Next()
+			if err != nil {
+				t.Fatalf("Next post %d: %v", i, err)
+			}
+			seen = append(seen, e)
+		}
+		if seen[5].Type != events.EventsRotated {
+			t.Errorf("expected anchor at index 5, got %q", seen[5].Type)
+		}
+
+		// (b) ReadAll spans active + archives.
+		all, err := p.List(events.Filter{})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(all) < len(seen) {
+			t.Errorf("List returned %d events, watcher saw %d — archive walk missed events",
+				len(all), len(seen))
+		}
+		for i := 1; i < len(all); i++ {
+			if all[i].Seq <= all[i-1].Seq {
+				t.Errorf("List seq not monotonic at %d: %d <= %d", i, all[i].Seq, all[i-1].Seq)
+			}
 		}
 	})
 }

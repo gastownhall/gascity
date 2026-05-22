@@ -1,13 +1,17 @@
 package dispatch
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 // ---------------------------------------------------------------------------
@@ -25,14 +29,17 @@ func TestProcessRetryControlPass(t *testing.T) {
 	control := mustCreate(t, store, beads.Bead{
 		Title: "review",
 		Metadata: map[string]string{
-			"gc.kind":             "retry",
-			"gc.root_bead_id":     root.ID,
-			"gc.step_ref":         "mol-test.review",
-			"gc.step_id":          "review",
-			"gc.max_attempts":     "3",
-			"gc.on_exhausted":     "hard_fail",
-			"gc.source_step_spec": `{"id":"review","title":"Review","type":"task","retry":{"max_attempts":3}}`,
-			"gc.control_epoch":    "1",
+			"gc.kind":                   "retry",
+			"gc.root_bead_id":           root.ID,
+			"gc.step_ref":               "mol-test.review",
+			"gc.step_id":                "review",
+			"gc.max_attempts":           "3",
+			"gc.on_exhausted":           "hard_fail",
+			"gc.source_step_spec":       `{"id":"review","title":"Review","type":"task","retry":{"max_attempts":3}}`,
+			"gc.control_epoch":          "1",
+			"gc.controller_error":       "previous transient",
+			"gc.controller_error_class": "transient",
+			"gc.controller_retryable":   "true",
 		},
 	})
 	attempt1 := mustCreate(t, store, beads.Bead{
@@ -69,6 +76,74 @@ func TestProcessRetryControlPass(t *testing.T) {
 	}
 	if after.Metadata["review.verdict"] != "approved" {
 		t.Fatalf("control review.verdict = %q, want approved", after.Metadata["review.verdict"])
+	}
+	if after.Metadata["gc.controller_error"] != "" ||
+		after.Metadata["gc.controller_error_class"] != "" ||
+		after.Metadata["gc.controller_retryable"] != "" {
+		t.Fatalf("stale controller retry metadata was not cleared: %v", after.Metadata)
+	}
+}
+
+func TestProcessRetryControlPassClosesWithSingleFinalMetadataUpdate(t *testing.T) {
+	t.Parallel()
+	base := beads.NewMemStore()
+
+	root := mustCreate(t, base, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, base, beads.Bead{
+		Title: "review",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review",
+			"gc.step_id":          "review",
+			"gc.max_attempts":     "3",
+			"gc.on_exhausted":     "hard_fail",
+			"gc.source_step_spec": `{"id":"review","title":"Review","type":"task","retry":{"max_attempts":3}}`,
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt1 := mustCreate(t, base, beads.Bead{
+		Title: "review attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review.attempt.1",
+			"gc.attempt":      "1",
+			"gc.outcome":      "pass",
+			"gc.output_json":  `{"ok":true}`,
+			"review.verdict":  "approved",
+		},
+	})
+	mustClose(t, base, attempt1.ID)
+	mustDep(t, base, control.ID, attempt1.ID, "blocks")
+
+	store := &controlCloseTrackingStore{Store: base, targetID: control.ID}
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl: %v", err)
+	}
+	if !result.Processed || result.Action != "pass" {
+		t.Fatalf("result = %+v, want processed pass", result)
+	}
+	if store.setMetadataCalls != 0 || store.setMetadataBatchCalls != 0 {
+		t.Fatalf("metadata calls before close = SetMetadata:%d SetMetadataBatch:%d, want none", store.setMetadataCalls, store.setMetadataBatchCalls)
+	}
+	if store.closeUpdateCalls != 1 {
+		t.Fatalf("close update calls = %d, want 1", store.closeUpdateCalls)
+	}
+	for key, want := range map[string]string{
+		"gc.outcome":     "pass",
+		"gc.output_json": `{"ok":true}`,
+		"review.verdict": "approved",
+	} {
+		if got := store.closeUpdateMetadata[key]; got != want {
+			t.Fatalf("close metadata %s = %q, want %q", key, got, want)
+		}
+	}
+	if store.closeUpdateMetadata["gc.attempt_log"] == "" {
+		t.Fatal("close metadata missing gc.attempt_log")
 	}
 }
 
@@ -243,6 +318,110 @@ func TestProcessRetryControlSoftFailOnExhaustion(t *testing.T) {
 	}
 	if after.Metadata["gc.final_disposition"] != "soft_fail" {
 		t.Fatalf("disposition = %q, want soft_fail", after.Metadata["gc.final_disposition"])
+	}
+}
+
+func TestProcessRetryControlRetriesInvalidWorkerResultContract(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		attemptMeta map[string]string
+		wantReason  string
+	}{
+		{
+			name: "pass with failure metadata",
+			attemptMeta: map[string]string{
+				"gc.outcome":        "pass",
+				"gc.failure_class":  "transient",
+				"gc.failure_reason": "rate_limited",
+			},
+			wantReason: "pass_with_failure_metadata",
+		},
+		{
+			name: "missing outcome",
+			attemptMeta: map[string]string{
+				"gc.failure_class":  "transient",
+				"gc.failure_reason": "rate_limited",
+			},
+			wantReason: "missing_outcome",
+		},
+		{
+			name: "unknown failure class",
+			attemptMeta: map[string]string{
+				"gc.outcome":       "fail",
+				"gc.failure_class": "mystery",
+			},
+			wantReason: "unknown_failure_class",
+		},
+		{
+			name: "invalid outcome value",
+			attemptMeta: map[string]string{
+				"gc.outcome":       "mystery",
+				"gc.failure_class": "transient",
+			},
+			wantReason: "invalid_outcome_value",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+
+			root := mustCreate(t, store, beads.Bead{
+				Title:    "workflow",
+				Metadata: map[string]string{"gc.kind": "workflow"},
+			})
+			control := mustCreate(t, store, beads.Bead{
+				Title: "review",
+				Metadata: map[string]string{
+					"gc.kind":             "retry",
+					"gc.root_bead_id":     root.ID,
+					"gc.step_ref":         "mol-test.review",
+					"gc.step_id":          "review",
+					"gc.max_attempts":     "2",
+					"gc.on_exhausted":     "hard_fail",
+					"gc.source_step_spec": `{"id":"review","title":"Review","type":"task","retry":{"max_attempts":2}}`,
+					"gc.control_epoch":    "1",
+				},
+			})
+			attemptMeta := map[string]string{
+				"gc.root_bead_id": root.ID,
+				"gc.step_ref":     "mol-test.review.attempt.1",
+				"gc.attempt":      "1",
+			}
+			for key, value := range tt.attemptMeta {
+				attemptMeta[key] = value
+			}
+			attempt1 := mustCreate(t, store, beads.Bead{
+				Title:    "review attempt 1",
+				Metadata: attemptMeta,
+			})
+			mustClose(t, store, attempt1.ID)
+			mustDep(t, store, control.ID, attempt1.ID, "blocks")
+
+			result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+			if err != nil {
+				t.Fatalf("processRetryControl: %v", err)
+			}
+			if result.Action != "retry" {
+				t.Fatalf("action = %q, want retry", result.Action)
+			}
+
+			after := mustGet(t, store, control.ID)
+			if after.Status != "open" {
+				t.Fatalf("control status = %q, want open", after.Status)
+			}
+			if after.Metadata["gc.failure_reason"] != "" {
+				t.Fatalf("control gc.failure_reason = %q, want unset before exhaustion", after.Metadata["gc.failure_reason"])
+			}
+			var log []map[string]string
+			if err := json.Unmarshal([]byte(after.Metadata["gc.attempt_log"]), &log); err != nil {
+				t.Fatalf("unmarshal attempt_log: %v", err)
+			}
+			if len(log) != 1 || log[0]["reason"] != tt.wantReason {
+				t.Fatalf("attempt_log = %v, want reason %q", log, tt.wantReason)
+			}
+		})
 	}
 }
 
@@ -439,11 +618,60 @@ func TestProcessRetryControlInvariantViolation(t *testing.T) {
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
 	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
-	if err == nil {
-		t.Fatal("expected invariant violation error")
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("error = %v, want %v", err, ErrControlPending)
 	}
-	if !strings.Contains(err.Error(), "invariant violation") {
-		t.Fatalf("error = %v, want invariant violation", err)
+}
+
+func TestProcessRetryControlPendingAttemptAddsBlockingDep(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review",
+			"gc.step_id":          "review",
+			"gc.max_attempts":     "3",
+			"gc.source_step_spec": `{"id":"review","title":"Review","type":"task"}`,
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt := mustCreate(t, store, beads.Bead{
+		Title: "review attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review.attempt.1",
+			"gc.attempt":      "1",
+		},
+	})
+
+	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("error = %v, want %v", err, ErrControlPending)
+	}
+
+	deps, err := store.DepList(control.ID, "down")
+	if err != nil {
+		t.Fatalf("DepList: %v", err)
+	}
+	if len(deps) != 1 || deps[0].DependsOnID != attempt.ID || deps[0].Type != "blocks" {
+		t.Fatalf("deps = %#v, want one blocks dep on pending attempt %s", deps, attempt.ID)
+	}
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	for _, bead := range ready {
+		if bead.ID == control.ID {
+			t.Fatalf("control bead stayed ready while pending attempt %s is open", attempt.ID)
+		}
 	}
 }
 
@@ -463,10 +691,21 @@ func TestProcessRetryControlControllerError(t *testing.T) {
 			"gc.root_bead_id":     root.ID,
 			"gc.step_ref":         "mol-test.review",
 			"gc.step_id":          "review",
+			"gc.scope_ref":        "review-scope",
+			"gc.scope_role":       "member",
 			"gc.max_attempts":     "3",
 			"gc.on_exhausted":     "hard_fail",
 			"gc.source_step_spec": `{not valid json`,
 			"gc.control_epoch":    "1",
+		},
+	})
+	body := mustCreate(t, store, beads.Bead{
+		Title: "review scope",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.scope_ref":    "review-scope",
+			"gc.scope_role":   "body",
 		},
 	})
 	attempt1 := mustCreate(t, store, beads.Bead{
@@ -483,7 +722,14 @@ func TestProcessRetryControlControllerError(t *testing.T) {
 	mustClose(t, store, attempt1.ID)
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
-	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	sawTrace := false
+	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{
+		Tracef: func(format string, args ...any) {
+			if strings.Contains(fmt.Sprintf(format, args...), "resolve-body") {
+				sawTrace = true
+			}
+		},
+	})
 	if err == nil {
 		t.Fatal("expected error from bad source_step_spec")
 	}
@@ -498,6 +744,545 @@ func TestProcessRetryControlControllerError(t *testing.T) {
 	}
 	if after.Metadata["gc.controller_error"] == "" {
 		t.Fatal("gc.controller_error should be set")
+	}
+	if after.Metadata["gc.controller_error_class"] != "hard" {
+		t.Fatalf("gc.controller_error_class = %q, want hard", after.Metadata["gc.controller_error_class"])
+	}
+	if after.Metadata["gc.controller_retryable"] == "true" {
+		t.Fatalf("gc.controller_retryable = %q, want not retryable", after.Metadata["gc.controller_retryable"])
+	}
+	bodyAfter := mustGet(t, store, body.ID)
+	if bodyAfter.Status != "closed" || bodyAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("scope body = status %q outcome %q, want closed/fail", bodyAfter.Status, bodyAfter.Metadata["gc.outcome"])
+	}
+	if !sawTrace {
+		t.Fatal("expected hard controller-error reconciliation to use ProcessOptions trace")
+	}
+}
+
+func TestProcessRetryControlTransientControllerErrorStaysOpenForRetry(t *testing.T) {
+	t.Parallel()
+	base := beads.NewMemStore()
+
+	root := mustCreate(t, base, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, base, beads.Bead{
+		Title: "review",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review",
+			"gc.step_id":          "review",
+			"gc.max_attempts":     "3",
+			"gc.on_exhausted":     "hard_fail",
+			"gc.source_step_spec": `{"id":"review","title":"Review","type":"task","retry":{"max_attempts":3}}`,
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt1 := mustCreate(t, base, beads.Bead{
+		Title: "review attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id":   root.ID,
+			"gc.step_ref":       "mol-test.review.attempt.1",
+			"gc.attempt":        "1",
+			"gc.outcome":        "fail",
+			"gc.failure_class":  "transient",
+			"gc.failure_reason": "rate_limited",
+		},
+	})
+	mustClose(t, base, attempt1.ID)
+	mustDep(t, base, control.ID, attempt1.ID, "blocks")
+
+	store := &failOnceDepAddStore{
+		Store: base,
+		err:   errors.New("failed to check for dependency cycle: invalid connection: i/o timeout"),
+	}
+	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("processRetryControl error = %v, want %v", err, ErrControlPending)
+	}
+
+	afterFailure := mustGet(t, store, control.ID)
+	if afterFailure.Status != "open" {
+		t.Fatalf("control status after transient controller error = %q, want open", afterFailure.Status)
+	}
+	if afterFailure.Metadata["gc.controller_error_class"] != "transient" {
+		t.Fatalf("controller error class = %q, want transient", afterFailure.Metadata["gc.controller_error_class"])
+	}
+	if afterFailure.Metadata["gc.controller_retryable"] != "true" {
+		t.Fatalf("controller retryable = %q, want true", afterFailure.Metadata["gc.controller_retryable"])
+	}
+	if afterFailure.Metadata["gc.final_disposition"] != "" || afterFailure.Metadata["gc.outcome"] != "" {
+		t.Fatalf("transient controller error should not set terminal metadata: %v", afterFailure.Metadata)
+	}
+
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("second processRetryControl error = %v, want %v", err, ErrControlPending)
+	}
+	if result.Processed {
+		t.Fatalf("second result = %+v, want pending without processing", result)
+	}
+
+	deps, err := store.DepList(control.ID, "down")
+	if err != nil {
+		t.Fatalf("deps after retry: %v", err)
+	}
+	foundAttempt2Dep := false
+	for _, dep := range deps {
+		if dep.Type == "blocks" && dep.DependsOnID != attempt1.ID {
+			foundAttempt2Dep = true
+		}
+	}
+	if !foundAttempt2Dep {
+		t.Fatalf("expected retry to wire control dependency to the spawned attempt, deps=%v", deps)
+	}
+}
+
+func TestProcessRetryControlTransientAttemptLogErrorStaysOpenForRetry(t *testing.T) {
+	t.Parallel()
+	base := beads.NewMemStore()
+
+	root := mustCreate(t, base, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, base, beads.Bead{
+		Title: "review",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review",
+			"gc.step_id":          "review",
+			"gc.max_attempts":     "3",
+			"gc.on_exhausted":     "hard_fail",
+			"gc.source_step_spec": `{"id":"review","title":"Review","type":"task","retry":{"max_attempts":3}}`,
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt1 := mustCreate(t, base, beads.Bead{
+		Title: "review attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id":   root.ID,
+			"gc.step_ref":       "mol-test.review.attempt.1",
+			"gc.attempt":        "1",
+			"gc.outcome":        "fail",
+			"gc.failure_class":  "transient",
+			"gc.failure_reason": "rate_limited",
+		},
+	})
+	mustClose(t, base, attempt1.ID)
+	mustDep(t, base, control.ID, attempt1.ID, "blocks")
+
+	store := &failOnceMetadataKeyStore{
+		Store: base,
+		key:   "gc.attempt_log",
+		err:   errors.New("failed to update metadata: invalid connection: i/o timeout"),
+	}
+	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("processRetryControl error = %v, want %v", err, ErrControlPending)
+	}
+
+	after := mustGet(t, store, control.ID)
+	if after.Status != "open" {
+		t.Fatalf("control status = %q, want open", after.Status)
+	}
+	if after.Metadata["gc.controller_error_class"] != "transient" || after.Metadata["gc.controller_retryable"] != "true" {
+		t.Fatalf("controller retry metadata = %v, want transient retryable", after.Metadata)
+	}
+}
+
+func TestProcessRetryControlPreRootTransientSpawnDoesNotDuplicateAttemptLog(t *testing.T) {
+	t.Parallel()
+	base := beads.NewMemStore()
+
+	root := mustCreate(t, base, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, base, beads.Bead{
+		Title: "review",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review",
+			"gc.step_id":          "review",
+			"gc.max_attempts":     "3",
+			"gc.on_exhausted":     "hard_fail",
+			"gc.source_step_spec": `{"id":"review","title":"Review","type":"task","retry":{"max_attempts":3}}`,
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt1 := mustCreate(t, base, beads.Bead{
+		Title: "review attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id":   root.ID,
+			"gc.step_ref":       "mol-test.review.attempt.1",
+			"gc.attempt":        "1",
+			"gc.outcome":        "fail",
+			"gc.failure_class":  "transient",
+			"gc.failure_reason": "rate_limited",
+		},
+	})
+	mustClose(t, base, attempt1.ID)
+	mustDep(t, base, control.ID, attempt1.ID, "blocks")
+
+	store := &failNCreateStore{
+		Store:     base,
+		failures:  2,
+		err:       errors.New("creating bead for step: invalid connection: i/o timeout"),
+		remaining: 2,
+	}
+	for tick := 1; tick <= 2; tick++ {
+		_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+		if !errors.Is(err, ErrControlPending) {
+			t.Fatalf("tick %d processRetryControl error = %v, want %v", tick, err, ErrControlPending)
+		}
+	}
+
+	after := mustGet(t, store, control.ID)
+	var entries []map[string]string
+	if err := json.Unmarshal([]byte(after.Metadata["gc.attempt_log"]), &entries); err != nil {
+		t.Fatalf("unmarshal attempt log %q: %v", after.Metadata["gc.attempt_log"], err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("attempt log entries = %d (%v), want one idempotent retry entry", len(entries), entries)
+	}
+	if entries[0]["attempt"] != "1" || entries[0]["action"] != "retry" {
+		t.Fatalf("attempt log entry = %v, want attempt 1 retry", entries[0])
+	}
+	if store.failures != 2 || store.remaining != 0 {
+		t.Fatalf("create failure accounting failures=%d remaining=%d, want 2/0", store.failures, store.remaining)
+	}
+}
+
+func TestProcessRetryControlSuccessfulSpawnClearsTransientControllerError(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review",
+		Metadata: map[string]string{
+			"gc.kind":                   "retry",
+			"gc.root_bead_id":           root.ID,
+			"gc.step_ref":               "mol-test.review",
+			"gc.step_id":                "review",
+			"gc.max_attempts":           "3",
+			"gc.on_exhausted":           "hard_fail",
+			"gc.source_step_spec":       `{"id":"review","title":"Review","type":"task","retry":{"max_attempts":3}}`,
+			"gc.control_epoch":          "1",
+			"gc.controller_error":       "previous invalid connection: i/o timeout",
+			"gc.controller_error_class": "transient",
+			"gc.controller_retryable":   "true",
+		},
+	})
+	attempt1 := mustCreate(t, store, beads.Bead{
+		Title: "review attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id":   root.ID,
+			"gc.step_ref":       "mol-test.review.attempt.1",
+			"gc.attempt":        "1",
+			"gc.outcome":        "fail",
+			"gc.failure_class":  "transient",
+			"gc.failure_reason": "rate_limited",
+		},
+	})
+	mustClose(t, store, attempt1.ID)
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+
+	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl: %v", err)
+	}
+	if !result.Processed || result.Action != "retry" {
+		t.Fatalf("result = %+v, want processed retry", result)
+	}
+
+	after := mustGet(t, store, control.ID)
+	if after.Metadata["gc.controller_error"] != "" ||
+		after.Metadata["gc.controller_error_class"] != "" ||
+		after.Metadata["gc.controller_retryable"] != "" {
+		t.Fatalf("stale controller retry metadata was not cleared: %v", after.Metadata)
+	}
+}
+
+func TestProcessRalphControlSuccessfulSpawnClearsTransientControllerError(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":                   "ralph",
+			"gc.root_bead_id":           root.ID,
+			"gc.step_ref":               "mol-test.review-loop",
+			"gc.step_id":                "review-loop",
+			"gc.max_attempts":           "3",
+			"gc.source_step_spec":       `{"id":"review-loop","title":"Review loop","type":"task","ralph":{"max_attempts":3,"check":{"mode":"exec","path":"unused.sh"}}}`,
+			"gc.control_epoch":          "1",
+			"gc.controller_error":       "previous invalid connection: i/o timeout",
+			"gc.controller_error_class": "transient",
+			"gc.controller_retryable":   "true",
+		},
+	})
+	iteration1 := mustCreate(t, store, beads.Bead{
+		Title: "review loop iteration 1",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop.iteration.1",
+			"gc.attempt":      "1",
+			"gc.outcome":      "fail",
+		},
+	})
+	mustClose(t, store, iteration1.ID)
+	mustDep(t, store, control.ID, iteration1.ID, "blocks")
+
+	result, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRalphControl: %v", err)
+	}
+	if !result.Processed || result.Action != "retry" {
+		t.Fatalf("result = %+v, want processed retry", result)
+	}
+
+	after := mustGet(t, store, control.ID)
+	if after.Metadata["gc.controller_error"] != "" ||
+		after.Metadata["gc.controller_error_class"] != "" ||
+		after.Metadata["gc.controller_retryable"] != "" {
+		t.Fatalf("stale controller retry metadata was not cleared: %v", after.Metadata)
+	}
+}
+
+func TestProcessRalphControlTransientControllerErrorStaysOpenForRetry(t *testing.T) {
+	t.Parallel()
+	base := beads.NewMemStore()
+
+	root := mustCreate(t, base, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, base, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":             "ralph",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.review-loop",
+			"gc.step_id":          "review-loop",
+			"gc.max_attempts":     "3",
+			"gc.source_step_spec": `{"id":"review-loop","title":"Review loop","type":"task","ralph":{"max_attempts":3,"check":{"mode":"exec","path":"unused.sh"}}}`,
+			"gc.control_epoch":    "1",
+		},
+	})
+	iteration1 := mustCreate(t, base, beads.Bead{
+		Title: "review loop iteration 1",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop.iteration.1",
+			"gc.attempt":      "1",
+			"gc.outcome":      "fail",
+		},
+	})
+	mustClose(t, base, iteration1.ID)
+	mustDep(t, base, control.ID, iteration1.ID, "blocks")
+
+	store := &failOnceDepAddStore{
+		Store: base,
+		err:   errors.New("adding dep: read tcp 127.0.0.1:53564->127.0.0.1:21792: i/o timeout"),
+	}
+	_, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("processRalphControl error = %v, want %v", err, ErrControlPending)
+	}
+
+	afterFailure := mustGet(t, store, control.ID)
+	if afterFailure.Status != "open" {
+		t.Fatalf("ralph control status after transient controller error = %q, want open", afterFailure.Status)
+	}
+	if afterFailure.Metadata["gc.controller_error_class"] != "transient" {
+		t.Fatalf("controller error class = %q, want transient", afterFailure.Metadata["gc.controller_error_class"])
+	}
+
+	result, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("second processRalphControl error = %v, want %v", err, ErrControlPending)
+	}
+	if result.Processed {
+		t.Fatalf("second result = %+v, want pending without processing", result)
+	}
+}
+
+func TestProcessRalphControlPartialInstantiateTransientFailureClosesHard(t *testing.T) {
+	t.Parallel()
+	base := beads.NewMemStore()
+
+	root := mustCreate(t, base, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, base, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop",
+			"gc.step_id":      "review-loop",
+			"gc.max_attempts": "3",
+			"gc.source_step_spec": `{
+				"id":"review-loop",
+				"title":"Review loop",
+				"type":"task",
+				"ralph":{"max_attempts":3,"check":{"mode":"exec","path":"unused.sh"}},
+				"children":[
+					{"id":"review","title":"Review","type":"task"},
+					{"id":"fix","title":"Fix","type":"task","needs":["review"]}
+				]
+			}`,
+			"gc.control_epoch": "1",
+		},
+	})
+	iteration1 := mustCreate(t, base, beads.Bead{
+		Title: "review loop iteration 1",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop.iteration.1",
+			"gc.attempt":      "1",
+			"gc.outcome":      "fail",
+		},
+	})
+	mustClose(t, base, iteration1.ID)
+	mustDep(t, base, control.ID, iteration1.ID, "blocks")
+
+	store := &failOnceDepAddStore{
+		Store: base,
+		err:   errors.New("wiring dep: lock wait timeout exceeded; try restarting transaction"),
+	}
+	_, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err == nil {
+		t.Fatal("expected hard controller error for partial instantiate failure")
+	}
+	if errors.Is(err, ErrControlPending) {
+		t.Fatalf("processRalphControl error = %v, want hard error", err)
+	}
+
+	afterFailure := mustGet(t, store, control.ID)
+	if afterFailure.Status != "closed" {
+		t.Fatalf("ralph control status after partial instantiate error = %q, want closed", afterFailure.Status)
+	}
+	if afterFailure.Metadata["gc.controller_error_class"] != "hard" {
+		t.Fatalf("controller error class = %q, want hard", afterFailure.Metadata["gc.controller_error_class"])
+	}
+	if afterFailure.Metadata["gc.final_disposition"] != "controller_error" {
+		t.Fatalf("final disposition = %q, want controller_error", afterFailure.Metadata["gc.final_disposition"])
+	}
+	if afterFailure.Metadata["gc.controller_retryable"] == "true" {
+		t.Fatalf("partial instantiate failure should not be retryable: %v", afterFailure.Metadata)
+	}
+}
+
+func TestProcessRalphControlClosesNestedSpecBeadsAfterRecoveredGraphAttachDepFailure(t *testing.T) {
+	prev := molecule.IsGraphApplyEnabled()
+	molecule.SetGraphApplyEnabled(true)
+	t.Cleanup(func() { molecule.SetGraphApplyEnabled(prev) })
+
+	base := beads.NewMemStore()
+	root := mustCreate(t, base, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, base, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop",
+			"gc.step_id":      "review-loop",
+			"gc.max_attempts": "3",
+			"gc.source_step_spec": `{
+				"id":"review-loop",
+				"title":"Review loop",
+				"type":"task",
+				"ralph":{"max_attempts":3,"check":{"mode":"exec","path":"unused.sh"}},
+				"children":[
+					{"id":"review","title":"Review","type":"task","retry":{"max_attempts":2}}
+				]
+			}`,
+			"gc.control_epoch": "1",
+		},
+	})
+	iteration1 := mustCreate(t, base, beads.Bead{
+		Title: "review loop iteration 1",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop.iteration.1",
+			"gc.attempt":      "1",
+			"gc.outcome":      "fail",
+		},
+	})
+	mustClose(t, base, iteration1.ID)
+	mustDep(t, base, control.ID, iteration1.ID, "blocks")
+
+	store := &graphApplyOuterDepFailStore{
+		MemStore: base,
+		err:      errors.New("adding dep: invalid connection: i/o timeout"),
+	}
+	_, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("first processRalphControl error = %v, want %v", err, ErrControlPending)
+	}
+	spec := findOpenSpecByRef(t, store, root.ID, "mol-test.review-loop.iteration.2.review.spec")
+	if spec.ID == "" {
+		t.Fatal("expected graph attach to leave nested spec bead open after outer dep failure")
+	}
+
+	_, err = processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("second processRalphControl error = %v, want %v", err, ErrControlPending)
+	}
+	specAfter := mustGet(t, store, spec.ID)
+	if specAfter.Status != "closed" || specAfter.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("spec after recovery = status %q outcome %q, want closed/pass", specAfter.Status, specAfter.Metadata["gc.outcome"])
+	}
+	if after := mustGet(t, store, control.ID); after.Metadata["gc.control_epoch"] != "2" {
+		t.Fatalf("control epoch after recovery = %q, want 2", after.Metadata["gc.control_epoch"])
+	}
+}
+
+func TestIsTransientControllerError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "deadline", err: context.DeadlineExceeded, want: true},
+		{name: "dolt invalid connection timeout", err: errors.New("failed to check for dependency cycle: invalid connection: i/o timeout"), want: true},
+		{name: "mysql lock timeout", err: errors.New("Error 1205 (HY000): lock wait timeout exceeded; try restarting transaction"), want: true},
+		{name: "mysql deadlock", err: errors.New("Error 1213 (40001): Deadlock found when trying to get lock; try restarting transaction"), want: true},
+		{name: "bad step spec", err: errors.New("deserializing step spec: invalid character 'n'"), want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsTransientControllerError(tt.err); got != tt.want {
+				t.Fatalf("IsTransientControllerError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -588,6 +1373,94 @@ func TestFindLatestAttemptMultipleAttempts(t *testing.T) {
 	}
 	if found.ID != attempt2.ID {
 		t.Fatalf("findLatestAttempt returned %q, want %q (latest attempt)", found.ID, attempt2.ID)
+	}
+}
+
+func TestFindLatestAttemptFallsBackToDependenciesWhenRootScanFails(t *testing.T) {
+	t.Parallel()
+	base := beads.NewMemStore()
+
+	root := mustCreate(t, base, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+
+	control := mustCreate(t, base, beads.Bead{
+		Title: "rebase retry",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-feature.rebase-check",
+			"gc.step_id":      "rebase-check",
+		},
+	})
+
+	attempt := mustCreate(t, base, beads.Bead{
+		Title: "rebase attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-feature.rebase-check.attempt.1",
+			"gc.attempt":      "1",
+		},
+	})
+	mustClose(t, base, attempt.ID)
+	mustDep(t, base, control.ID, attempt.ID, "blocks")
+
+	store := &listFailStore{
+		Store: base,
+		err:   errors.New("search wisps: context canceled"),
+	}
+	found, err := findLatestAttempt(store, mustGet(t, store, control.ID))
+	if err != nil {
+		t.Fatalf("findLatestAttempt: %v", err)
+	}
+	if found.ID != attempt.ID {
+		t.Fatalf("findLatestAttempt returned %q, want dependency attempt %q", found.ID, attempt.ID)
+	}
+}
+
+func TestFindLatestAttemptSkipsMoleculeFailedPartialRoot(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review retry",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-feature.review",
+			"gc.step_id":      "review",
+		},
+	})
+	attempt1 := mustCreate(t, store, beads.Bead{
+		Title: "attempt 1",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-feature.review.attempt.1",
+			"gc.attempt":      "1",
+		},
+	})
+	mustClose(t, store, attempt1.ID)
+	mustCreate(t, store, beads.Bead{
+		Title: "failed partial attempt 2",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-feature.review.attempt.2",
+			"gc.attempt":      "2",
+			"molecule_failed": "true",
+		},
+	})
+
+	found, err := findLatestAttempt(store, mustGet(t, store, control.ID))
+	if err != nil {
+		t.Fatalf("findLatestAttempt: %v", err)
+	}
+	if found.ID != attempt1.ID {
+		t.Fatalf("findLatestAttempt returned %q, want non-failed attempt %q", found.ID, attempt1.ID)
 	}
 }
 
@@ -844,6 +1717,94 @@ func TestProcessRalphControlClosesEnclosingScopeOnIterationFailure(t *testing.T)
 	scopeAfter := mustGet(t, store, scopeBody.ID)
 	if scopeAfter.Status != "closed" || scopeAfter.Metadata["gc.outcome"] != "fail" {
 		t.Fatalf("scope body = status %q outcome %q, want closed/fail", scopeAfter.Status, scopeAfter.Metadata["gc.outcome"])
+	}
+}
+
+func TestProcessRalphControlReturnsPendingForOpenIteration(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop",
+			"gc.step_id":      "review-loop",
+			"gc.max_attempts": "2",
+		},
+	})
+	iteration := mustCreate(t, store, beads.Bead{
+		Title: "review loop iteration 1",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop.iteration.1",
+			"gc.scope_role":   "body",
+			"gc.attempt":      "1",
+		},
+	})
+	mustDep(t, store, control.ID, iteration.ID, "blocks")
+
+	_, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("error = %v, want %v", err, ErrControlPending)
+	}
+}
+
+func TestProcessRalphControlPendingIterationAddsBlockingDep(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "review loop",
+		Metadata: map[string]string{
+			"gc.kind":         "ralph",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop",
+			"gc.step_id":      "review-loop",
+			"gc.max_attempts": "2",
+		},
+	})
+	iteration := mustCreate(t, store, beads.Bead{
+		Title: "review loop iteration 1",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "mol-test.review-loop.iteration.1",
+			"gc.scope_role":   "body",
+			"gc.attempt":      "1",
+		},
+	})
+
+	_, err := processRalphControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("error = %v, want %v", err, ErrControlPending)
+	}
+
+	deps, err := store.DepList(control.ID, "down")
+	if err != nil {
+		t.Fatalf("DepList: %v", err)
+	}
+	if len(deps) != 1 || deps[0].DependsOnID != iteration.ID || deps[0].Type != "blocks" {
+		t.Fatalf("deps = %#v, want one blocks dep on pending iteration %s", deps, iteration.ID)
+	}
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	for _, bead := range ready {
+		if bead.ID == control.ID {
+			t.Fatalf("control bead stayed ready while pending iteration %s is open", iteration.ID)
+		}
 	}
 }
 
@@ -1204,6 +2165,190 @@ func mustDep(t *testing.T, store beads.Store, from, to, depType string) { //noli
 	}
 }
 
+type listFailStore struct {
+	beads.Store
+	err error
+}
+
+func (s *listFailStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, s.err
+}
+
+type controlCloseTrackingStore struct {
+	beads.Store
+	targetID              string
+	setMetadataCalls      int
+	setMetadataBatchCalls int
+	closeUpdateCalls      int
+	closeUpdateMetadata   map[string]string
+}
+
+func (s *controlCloseTrackingStore) SetMetadata(id, key, value string) error {
+	if id == s.targetID {
+		s.setMetadataCalls++
+	}
+	return s.Store.SetMetadata(id, key, value)
+}
+
+func (s *controlCloseTrackingStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if id == s.targetID {
+		s.setMetadataBatchCalls++
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+func (s *controlCloseTrackingStore) Update(id string, opts beads.UpdateOpts) error {
+	if id == s.targetID && opts.Status != nil && *opts.Status == "closed" {
+		s.closeUpdateCalls++
+		s.closeUpdateMetadata = make(map[string]string, len(opts.Metadata))
+		for key, value := range opts.Metadata {
+			s.closeUpdateMetadata[key] = value
+		}
+	}
+	return s.Store.Update(id, opts)
+}
+
+type failOnceMetadataKeyStore struct {
+	beads.Store
+	key    string
+	err    error
+	failed bool
+}
+
+func (s *failOnceMetadataKeyStore) SetMetadata(id, key, value string) error {
+	if !s.failed && key == s.key {
+		s.failed = true
+		return s.err
+	}
+	return s.Store.SetMetadata(id, key, value)
+}
+
+func (s *failOnceMetadataKeyStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if !s.failed {
+		if _, ok := kvs[s.key]; ok {
+			s.failed = true
+			return s.err
+		}
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+type failOnceCreateStore struct {
+	beads.Store
+	err    error
+	failed bool
+}
+
+func (s *failOnceCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
+	if !s.failed {
+		s.failed = true
+		return beads.Bead{}, s.err
+	}
+	return s.Store.Create(bead)
+}
+
+type failNCreateStore struct {
+	beads.Store
+	err       error
+	failures  int
+	remaining int
+}
+
+func (s *failNCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
+	if s.remaining > 0 {
+		s.remaining--
+		return beads.Bead{}, s.err
+	}
+	return s.Store.Create(bead)
+}
+
+type graphApplyOuterDepFailStore struct {
+	*beads.MemStore
+	err    error
+	failed bool
+}
+
+func (s *graphApplyOuterDepFailStore) ApplyGraphPlan(_ context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
+	ids := make(map[string]string, len(plan.Nodes))
+	for _, node := range plan.Nodes {
+		metadata := cloneMetadata(node.Metadata)
+		for key, ref := range node.MetadataRefs {
+			if metadata == nil {
+				metadata = make(map[string]string, 1)
+			}
+			metadata[key] = ids[ref]
+		}
+		parentID := node.ParentID
+		if node.ParentKey != "" {
+			parentID = ids[node.ParentKey]
+		}
+		assignee := node.Assignee
+		if node.AssignAfterCreate {
+			assignee = ""
+		}
+		created, err := s.Create(beads.Bead{
+			Title:       node.Title,
+			Description: node.Description,
+			Type:        node.Type,
+			Priority:    node.Priority,
+			Assignee:    assignee,
+			From:        node.From,
+			Labels:      append([]string{}, node.Labels...),
+			ParentID:    parentID,
+			Ref:         node.Key,
+			Metadata:    metadata,
+		})
+		if err != nil {
+			return nil, err
+		}
+		ids[node.Key] = created.ID
+		if node.AssignAfterCreate && node.Assignee != "" {
+			if err := s.Update(created.ID, beads.UpdateOpts{Assignee: &node.Assignee}); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, edge := range plan.Edges {
+		fromID := edge.FromID
+		if edge.FromKey != "" {
+			fromID = ids[edge.FromKey]
+		}
+		toID := edge.ToID
+		if edge.ToKey != "" {
+			toID = ids[edge.ToKey]
+		}
+		if fromID == "" || toID == "" {
+			return nil, fmt.Errorf("unresolved graph edge %s/%s -> %s/%s", edge.FromID, edge.FromKey, edge.ToID, edge.ToKey)
+		}
+		if err := s.MemStore.DepAdd(fromID, toID, edge.Type); err != nil {
+			return nil, err
+		}
+	}
+	return &beads.GraphApplyResult{IDs: ids}, nil
+}
+
+func (s *graphApplyOuterDepFailStore) DepAdd(issueID, dependsOnID, depType string) error {
+	if !s.failed {
+		s.failed = true
+		return s.err
+	}
+	return s.MemStore.DepAdd(issueID, dependsOnID, depType)
+}
+
+func findOpenSpecByRef(t *testing.T, store beads.Store, rootID, stepRef string) beads.Bead {
+	t.Helper()
+	all, err := listByWorkflowRoot(store, rootID)
+	if err != nil {
+		t.Fatalf("list workflow beads: %v", err)
+	}
+	for _, bead := range all {
+		if bead.Status == "open" && bead.Metadata["gc.kind"] == "spec" && bead.Metadata["gc.step_ref"] == stepRef {
+			return bead
+		}
+	}
+	return beads.Bead{}
+}
+
 // ---------------------------------------------------------------------------
 // Regression: scope bead must block on children (not parent-child deadlock)
 // ---------------------------------------------------------------------------
@@ -1412,6 +2557,92 @@ func TestBuildAttemptRecipeComposeExpandFanout(t *testing.T) {
 	}
 }
 
+func TestBuildAttemptRecipeRalphChildOnCompleteCreatesScopedFanout(t *testing.T) {
+	t.Parallel()
+
+	step := &formula.Step{
+		ID:    "review-loop",
+		Title: "Review loop",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{MaxAttempts: 3},
+		Children: []*formula.Step{
+			{
+				ID:    "dc-members",
+				Title: "List design council members",
+				Type:  "task",
+				OnComplete: &formula.OnCompleteSpec{
+					ForEach:    "output.members",
+					Bond:       "review-member",
+					Sequential: true,
+					Vars: map[string]string{
+						"member": "{item.name}",
+					},
+				},
+			},
+		},
+	}
+	control := beads.Bead{
+		ID: "ctrl-fanout",
+		Metadata: map[string]string{
+			"gc.step_id":  "review-loop",
+			"gc.step_ref": "mol-review.review-loop",
+		},
+	}
+
+	recipe := buildAttemptRecipe(step, control, 2)
+	sourceID := "mol-review.review-loop.iteration.2.dc-members"
+	source := recipe.StepByID(sourceID)
+	if source == nil {
+		t.Fatal("missing dc-members source step")
+	}
+	if got := source.Metadata["gc.output_json_required"]; got != "true" {
+		t.Fatalf("source gc.output_json_required = %q, want true", got)
+	}
+
+	fanout := recipe.StepByID(sourceID + "-fanout")
+	if fanout == nil {
+		t.Fatal("missing dc-members fanout control")
+	}
+	if got := fanout.Metadata["gc.kind"]; got != "fanout" {
+		t.Fatalf("fanout gc.kind = %q, want fanout", got)
+	}
+	if got := fanout.Metadata["gc.control_for"]; got != sourceID {
+		t.Fatalf("fanout gc.control_for = %q, want %s", got, sourceID)
+	}
+	if got := fanout.Metadata["gc.scope_ref"]; got != "mol-review.review-loop.iteration.2" {
+		t.Fatalf("fanout gc.scope_ref = %q, want mol-review.review-loop.iteration.2", got)
+	}
+	if got := fanout.Metadata["gc.scope_role"]; got != "member" {
+		t.Fatalf("fanout gc.scope_role = %q, want member", got)
+	}
+	if got := fanout.Metadata["gc.attempt"]; got != "2" {
+		t.Fatalf("fanout gc.attempt = %q, want 2", got)
+	}
+	if got := fanout.Metadata["gc.for_each"]; got != "output.members" {
+		t.Fatalf("fanout gc.for_each = %q, want output.members", got)
+	}
+	if got := fanout.Metadata["gc.bond"]; got != "review-member" {
+		t.Fatalf("fanout gc.bond = %q, want review-member", got)
+	}
+	if got := fanout.Metadata["gc.fanout_mode"]; got != "sequential" {
+		t.Fatalf("fanout gc.fanout_mode = %q, want sequential", got)
+	}
+	if got := fanout.Metadata["gc.bond_vars"]; got != `{"member":"{item.name}"}` {
+		t.Fatalf("fanout gc.bond_vars = %q, want member binding", got)
+	}
+
+	foundFanoutDep := false
+	for _, dep := range recipe.Deps {
+		if dep.StepID == sourceID+"-fanout" && dep.DependsOnID == sourceID && dep.Type == "blocks" {
+			foundFanoutDep = true
+			break
+		}
+	}
+	if !foundFanoutDep {
+		t.Fatalf("missing fanout blocks dependency on source; deps = %+v", recipe.Deps)
+	}
+}
+
 func TestBuildAttemptRecipeScopeMetadataAndStepRef(t *testing.T) {
 	t.Parallel()
 
@@ -1454,6 +2685,20 @@ func mustGet(t *testing.T, store beads.Store, id string) beads.Bead {
 		t.Fatalf("get %s: %v", id, err)
 	}
 	return b
+}
+
+type failOnceDepAddStore struct {
+	beads.Store
+	err    error
+	failed bool
+}
+
+func (s *failOnceDepAddStore) DepAdd(issueID, dependsOnID, depType string) error {
+	if !s.failed {
+		s.failed = true
+		return s.err
+	}
+	return s.Store.DepAdd(issueID, dependsOnID, depType)
 }
 
 // ---------------------------------------------------------------------------

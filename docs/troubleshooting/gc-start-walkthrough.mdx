@@ -1,0 +1,311 @@
+---
+title: gc start failure walkthrough
+description: Match a failure symptom to its cause and resolution.
+---
+
+When `gc start` fails, the last line is a `FATAL:` marker. The line below
+it is a URL that links here. Find your symptom in the lookup below, then
+expand its section for the cause and resolution.
+
+<Note>
+This page covers the seven failure modes encountered in the 2026-04-26
+selfhost UX bug haul (umbrella PRD `ga-r8hs`). For installation issues
+(`gc` not on PATH, missing prerequisites, version mismatches), see
+[Troubleshooting](/getting-started/troubleshooting). For Dolt store
+recovery, see [Dolt bloat recovery](/troubleshooting/dolt-bloat-recovery).
+</Note>
+
+## What a failed gc start looks like
+
+![Failed gc start showing the FATAL prefix, warning de-duplication, and walkthrough URL — left panel is the TTY render with bold-red FATAL, right panel is the non-TTY render with plain ASCII FATAL prefix.](/images/troubleshooting/gc-start-fatal.png)
+
+The `FATAL:` prefix is the stable marker — bold red on a TTY, plain
+`gc-fatal:` ASCII when piped or redirected. The same line ends with
+` see: <URL>` pointing to the matching section below.
+
+```bash
+# Find the FATAL line in a saved log:
+grep -E '^(FATAL|gc-fatal):' gc-start.log
+```
+
+## Quick lookup
+
+| If you see this symptom | Section |
+|-------------------------|---------|
+| `bd init: signal: killed` (or supervisor stuck at `starting_bead_store`) | [bd op_init timeout](#bd-op-init-timeout) |
+| `pack schema 2 not supported (max 1)` | [Pack schema mismatch](#pack-schema-mismatch) |
+| `agent X: duplicate name (from … and …)` | [Duplicate agent name](#duplicate-name) |
+| `unknown field agent.pool` (or other unknown field) | [Unknown field](#unknown-field-agent-pool) |
+| `rig X: path is required` | [Rig path required](#rig-path-required) |
+| `named_session X: referenced template not found` | [Template not found](#template-not-found) |
+| `named_session X: duplicate identity` | [Duplicate identity](#duplicate-identity) |
+
+<Tip>
+If your symptom does not match any of the above, run `gc doctor --verbose`
+and consult the [installation troubleshooting](/getting-started/troubleshooting)
+page. If still stuck, file an issue (link at the bottom of this page).
+</Tip>
+
+## 1. bd op_init timeout {#bd-op-init-timeout}
+
+**Symptom**
+
+```text
+FATAL: exec beads init: signal: killed
+```
+
+Or `gc start` hangs and the supervisor cycles through
+`starting_bead_store` retries with no actionable error.
+
+**Cause**
+
+`bd >= 1.0.3` triggers a config schema auto-migration on every
+`bd config set` call. Older versions of the `gc-beads-bd` shim issued
+two `bd config set` invocations during `op_init`, taking 18s and ~50s
+respectively — each `SIGKILL`'d by the 30s `op_init` provider timeout.
+The supervisor never reached ready state.
+
+Fixed in `ga-5mym.1` by replacing the slow path with a direct
+`.beads/config.yaml` write (idempotent, < 5s wall clock).
+
+**Resolution**
+
+Upgrade `gc` to 1.1.0 or later. Verify:
+
+```bash
+gc version
+bd version   # should report 1.0.3 or later
+gc start
+```
+
+If `gc start` still hangs after upgrading, check that your `gc` binary
+on disk matches the running supervisor — see
+[Pack schema mismatch](#pack-schema-mismatch) for the drift-detection
+flow.
+
+## 2. Pack schema mismatch {#pack-schema-mismatch}
+
+**Symptom**
+
+```text
+FATAL: pack schema 2 not supported (max 1)
+```
+
+Typically appears after running `go install ./cmd/gc` while the
+supervisor is still running.
+
+**Cause**
+
+The on-disk `gc` binary was rebuilt and now understands pack schema 2.
+The running `gascity-supervisor` (a long-lived systemd user service)
+keeps executing the previous binary's image and the cached pack
+snapshots it parsed at startup. New requests to the supervisor still
+go through the old code path.
+
+The fix shipped in `ga-a3ry.1` (binary drift detection in `gc start`)
+detects this automatically and restarts the supervisor.
+
+**Resolution**
+
+The `gc start` command in 1.1.0 detects the drift and offers to
+restart the supervisor. Confirm:
+
+```bash
+gc start                  # detects + restarts automatically
+# or, if --no-auto-restart was set:
+systemctl --user restart gascity-supervisor
+gc start
+```
+
+Verify after restart:
+
+```bash
+gc start                  # prints "Supervisor: pid=… exe=… buildID=…"
+```
+
+The reported `buildID` should match `gc version`.
+
+## 3. Duplicate agent name {#duplicate-name}
+
+**Symptom**
+
+```text
+FATAL: agent 'mayor': duplicate name
+       (from packs/gastown/pack.toml [agent #2]
+        and .gc/system/packs/gastown/agents/mayor/agent.toml)
+       pack v1 → v2 mismatch
+```
+
+**Cause**
+
+Your pack declares `[[agent]]` blocks (pack v1 layout) for an agent
+name that an auto-imported system pack declares in
+`agents/<name>/agent.toml` (pack v2 layout). Both contribute the same
+agent name; the validator refuses ambiguity.
+
+The `pack v1 → v2 mismatch` line is emitted by `ga-9ogb` (collision
+detection); the source paths are filled in by `ga-tpfc.1` (source-path
+ergonomics). Before 1.1.0, the second source rendered as an empty
+string.
+
+**Resolution**
+
+Choose one of the following.
+
+<CodeGroup>
+```bash Migrate your pack to v2 (recommended)
+# See the migration guide:
+#   https://docs.gascityhall.com/guides/migrating-to-pack-vnext
+# Move each [[agent]] block to its own agents/<name>/ directory.
+```
+
+```toml Override the system pack with fallback = true
+# In your pack's agents/<name>/agent.toml (v2 layout):
+[agent]
+name = "mayor"
+fallback = true   # use only if no other declaration exists
+# … the rest of your agent config …
+```
+</CodeGroup>
+
+The recommended path is migration. The `fallback = true` escape hatch
+is for packs that intentionally wrap a system pack and need the local
+declaration to win when both are present.
+
+**Background**: [Pack v1 → v2 migration guide](/guides/migrating-to-pack-vnext) ·
+
+## 4. Unknown field {#unknown-field-agent-pool}
+
+**Symptom**
+
+```text
+FATAL: unknown field agent.pool
+```
+
+Or any `unknown field <path>` error during pack parse.
+
+**Cause**
+
+Your `pack.toml` declares a field that the current `gc` binary's
+schema does not recognise. The most common case in 1.1.0 is
+`[agent.pool]`, removed in favour of flat `min_active_sessions` and
+`max_active_sessions` on the agent itself.
+
+**Resolution**
+
+Translate the deprecated block:
+
+```toml
+# Before (pack v1, pre-1.1.0):
+[[agent]]
+name = "worker"
+[agent.pool]
+min_active = 1
+max_active = 4
+
+# After:
+[[agent]]
+name = "worker"
+min_active_sessions = 1
+max_active_sessions = 4
+```
+
+For a full mapping of removed/renamed fields, see the
+[Pack v1 → v2 migration guide](/guides/migrating-to-pack-vnext).
+
+## 5. Rig path required {#rig-path-required}
+
+**Symptom**
+
+```text
+FATAL: rig X: path is required
+```
+
+**Cause**
+
+In earlier releases, rig paths could be inferred from a `site.toml`
+companion file. That mechanism is gone; `city.toml` is now the sole
+source of truth for rig locations.
+
+**Resolution**
+
+Add a `path` to each `[[rigs]]` entry in `city.toml`:
+
+```toml
+[[rigs]]
+name = "mainline"
+path = "rigs/mainline"   # relative to the city directory, or absolute
+```
+
+Run `gc start` to verify.
+
+## 6. Template not found {#template-not-found}
+
+**Symptom**
+
+```text
+FATAL: named_session mayor: referenced template not found
+```
+
+**Cause**
+
+A `[[named_session]]` block in `city.toml` references an agent template
+(by name) that no loaded pack provides. The most common case: the
+relevant pack is missing from `[city] includes`.
+
+**Resolution**
+
+Add the pack to `city.toml`'s `includes` list:
+
+```toml
+[city]
+includes = ["packs/gastown"]   # or the path to the pack that declares the agent
+```
+
+If the template name is misspelled, fix the spelling. Verify with:
+
+```bash
+gc doctor    # lists loaded packs and known templates
+```
+
+## 7. Duplicate identity {#duplicate-identity}
+
+**Symptom**
+
+```text
+FATAL: named_session mayor: duplicate identity
+```
+
+**Cause**
+
+The same agent template is declared as a `[[named_session]]` in
+**both** `city.toml` and a pack's `pack.toml`. Each side claims
+ownership of the named-session identity; the validator refuses the
+collision.
+
+**Resolution**
+
+Remove the `[[named_session]]` from one side. The convention is to
+let the pack own the named-session identity and let `city.toml`
+override only when necessary:
+
+```toml
+# Remove from city.toml:
+# [[named_session]]
+# template = "mayor"
+```
+
+If you need to override pack-provided behaviour, set the override
+fields in the pack's named-session declaration directly, or extend the
+pack's `agent` config rather than redeclaring the identity.
+
+## Still stuck?
+
+1. Run `gc doctor --verbose` and capture its output.
+2. Capture the failed `gc start` output:
+   ```bash
+   gc start 2> gc-start.log
+   ```
+3. File an issue at
+   [gastownhall/gascity/issues](https://github.com/gastownhall/gascity/issues)
+   with both attached, plus your OS / architecture and `gc version`.

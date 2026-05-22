@@ -5,13 +5,54 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
+
+// statusObservationConcurrency caps how many agent observations gc status
+// runs in parallel. Observations are mostly tmux probes; the bound keeps the
+// command from fanning out to hundreds of goroutines on very large cities
+// while still cutting wall time on the common 10-30 agent case.
+const statusObservationConcurrency = 8
+
+// observeStatusTargetsParallel runs observeSessionTargetWithWarning for each
+// target concurrently with a bounded worker pool. Results are returned in
+// input order. stderr is shared safely across goroutines.
+func observeStatusTargetsParallel(
+	sp runtime.Provider,
+	cfg *config.City,
+	cityPath string,
+	store beads.Store,
+	targets []statusObservationTarget,
+	stderr io.Writer,
+) []worker.LiveObservation {
+	out := make([]worker.LiveObservation, len(targets))
+	if len(targets) == 0 {
+		return out
+	}
+	safeStderr := lockedStderr(stderr)
+	sem := make(chan struct{}, statusObservationConcurrency)
+	var wg sync.WaitGroup
+	for i, t := range targets {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, t statusObservationTarget) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			out[i] = observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, t, safeStderr)
+		}(i, t)
+	}
+	wg.Wait()
+	return out
+}
 
 type cityStatusSnapshot struct {
 	CityName      string
@@ -47,6 +88,9 @@ func openCityStatusStore(cityPath string, stderr io.Writer) (beads.Store, int) {
 	if cityPath == "" {
 		return nil, 0
 	}
+	if !cityStatusStorePresent(cityPath) {
+		return nil, 0
+	}
 	opened, err := openCityStoreAtForStatus(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc status: opening bead store: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -55,7 +99,60 @@ func openCityStatusStore(cityPath string, stderr io.Writer) (beads.Store, int) {
 	return opened, 0
 }
 
+func cityStatusStorePresent(cityPath string) bool {
+	for _, candidate := range []string{
+		filepath.Join(cityPath, ".beads"),
+		filepath.Join(cityPath, ".gc", "beads.json"),
+	} {
+		if _, err := os.Stat(candidate); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// openStoreHealthEvents is the hook collectCityStatusSnapshot uses to
+// read the latest gc.store.maintenance.{done,failed} event for the
+// StoreHealth block. Tests replace this with a fake provider; the
+// default opens the city's JSONL event log directly (nil on failure so
+// the block still reports size/row data).
+var openStoreHealthEvents = defaultOpenStoreHealthEvents
+
+func defaultOpenStoreHealthEvents(cityPath string, stderr io.Writer) events.Provider {
+	eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
+	providerName := os.Getenv("GC_EVENTS")
+	if providerName == "" {
+		providerName = peekEventsProvider(filepath.Join(cityPath, "city.toml"))
+	}
+	p, err := newEventsProviderForName(providerName, eventsPath, stderr)
+	if err != nil {
+		return nil
+	}
+	return p
+}
+
+func buildCityStoreHealth(cityPath string, store beads.Store, stderr io.Writer) *StoreHealth {
+	ep := openStoreHealthEvents(cityPath, stderr)
+	defer func() {
+		if closer, ok := ep.(io.Closer); ok {
+			_ = closer.Close()
+		}
+	}()
+	return collectStoreHealth(cityPath, store, ep)
+}
+
 func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath string, store beads.Store, stderr io.Writer) cityStatusSnapshot {
+	return collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, loadStatusSessionSnapshot(store, stderr), stderr)
+}
+
+func collectCityStatusSnapshotFromStoreSnapshot(
+	sp runtime.Provider,
+	cfg *config.City,
+	cityPath string,
+	store beads.Store,
+	statusSnapshot *sessionBeadSnapshot,
+	stderr io.Writer,
+) cityStatusSnapshot {
 	suspended := os.Getenv("GC_SUSPENDED") == "1"
 	if cfg != nil {
 		suspended = citySuspended(cfg)
@@ -66,6 +163,10 @@ func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath s
 		Suspended:  suspended,
 	}
 	snapshot.CityName = loadedCityName(cfg, cityPath)
+	registerStatusProviderACPRoutes(sp, statusSnapshot, snapshot.CityName, cfg)
+	if snapshot.Controller.Running && cityPath != "" {
+		snapshot.Summary.StoreHealth = buildCityStoreHealth(cityPath, store, stderr)
+	}
 	if cfg == nil {
 		return snapshot
 	}
@@ -93,6 +194,18 @@ func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath s
 		}
 	}
 
+	// Phase 1: walk the agent config and materialize a row + observation
+	// target per (agent or pool instance) without contacting the runtime.
+	// Each plan entry remembers everything needed to stitch the observation
+	// result back in once it arrives.
+	type agentPlan struct {
+		row       cityStatusAgentRow
+		target    statusObservationTarget
+		suspended bool
+		rigDir    string
+	}
+	var plans []agentPlan
+
 	for _, a := range cfg.Agents {
 		suspended := a.Suspended || (a.Dir != "" && suspendedRigs[a.Dir])
 		sp0 := scaleParamsFor(&a)
@@ -109,19 +222,16 @@ func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath s
 			scaleLabel := fmt.Sprintf("scaled (min=%d, %s)", sp0.Min, maxDisplay)
 			headerShown := false
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, snapshot.CityName, cfg.Workspace.SessionTemplate, sp) {
-				sn := cliSessionName(cityPath, snapshot.CityName, qualifiedInstance, cfg.Workspace.SessionTemplate)
-				obs := observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, sn, stderr)
+				target := statusObservationTargetForIdentity(statusSnapshot, snapshot.CityName, qualifiedInstance, cfg.Workspace.SessionTemplate)
 				_, instanceName := config.ParseQualifiedName(qualifiedInstance)
 				row := cityStatusAgentRow{
 					Agent: StatusAgentJSON{
 						Name:          instanceName,
 						QualifiedName: qualifiedInstance,
 						Scope:         scope,
-						Running:       obs.Running,
-						Suspended:     suspended || obs.Suspended,
 						Pool:          nil,
 					},
-					SessionName: sn,
+					SessionName: target.runtimeSessionName,
 					GroupName:   a.QualifiedName(),
 					Expanded:    true,
 				}
@@ -129,35 +239,46 @@ func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath s
 					row.ScaleLabel = scaleLabel
 					headerShown = true
 				}
-				snapshot.Agents = append(snapshot.Agents, row)
-				snapshot.Summary.TotalAgents++
-				if obs.Running {
-					snapshot.Summary.RunningAgents++
-				}
-				addRigCount(a.Dir, suspended || obs.Suspended)
+				plans = append(plans, agentPlan{row: row, target: target, suspended: suspended, rigDir: a.Dir})
 			}
 			continue
 		}
 
-		sn := cliSessionName(cityPath, snapshot.CityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
-		obs := observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, sn, stderr)
-		snapshot.Agents = append(snapshot.Agents, cityStatusAgentRow{
+		target := statusObservationTargetForIdentity(statusSnapshot, snapshot.CityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
+		row := cityStatusAgentRow{
 			Agent: StatusAgentJSON{
 				Name:          a.Name,
 				QualifiedName: a.QualifiedName(),
 				Scope:         scope,
-				Running:       obs.Running,
-				Suspended:     suspended || obs.Suspended,
 			},
-			SessionName: sn,
+			SessionName: target.runtimeSessionName,
 			GroupName:   a.QualifiedName(),
 			Expanded:    false,
-		})
+		}
+		plans = append(plans, agentPlan{row: row, target: target, suspended: suspended, rigDir: a.Dir})
+	}
+
+	// Phase 2: fan out runtime observations across the worker pool. This is
+	// the long pole on multi-rig cities; running the probes serially used to
+	// dominate gc status wall time.
+	targets := make([]statusObservationTarget, len(plans))
+	for i, p := range plans {
+		targets[i] = p.target
+	}
+	observations := observeStatusTargetsParallel(sp, cfg, cityPath, store, targets, stderr)
+
+	// Phase 3: stitch observation results back into rows and tallies in the
+	// original order to keep output deterministic.
+	for i, p := range plans {
+		obs := observations[i]
+		p.row.Agent.Running = obs.Running
+		p.row.Agent.Suspended = p.suspended || obs.Suspended || p.target.suspended
+		snapshot.Agents = append(snapshot.Agents, p.row)
 		snapshot.Summary.TotalAgents++
 		if obs.Running {
 			snapshot.Summary.RunningAgents++
 		}
-		addRigCount(a.Dir, suspended || obs.Suspended)
+		addRigCount(p.rigDir, p.suspended || obs.Suspended || p.target.suspended)
 	}
 
 	for _, r := range cfg.Rigs {
@@ -168,16 +289,18 @@ func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath s
 			}
 		}
 		snapshot.Rigs = append(snapshot.Rigs, StatusRigJSON{
-			Name:      r.Name,
-			Path:      r.Path,
-			Suspended: suspended,
+			Name:               r.Name,
+			Path:               r.Path,
+			Prefix:             r.EffectivePrefix(),
+			Suspended:          suspended,
+			DefaultSlingTarget: r.DefaultSlingTarget,
 		})
 	}
 
 	for _, ns := range cfg.NamedSessions {
 		identity := ns.QualifiedName()
 		mode := ns.ModeOrDefault()
-		status := namedSessionStatusForCity(cityPath, cfg, store, snapshot.CityName, identity, mode, suspendedRigs)
+		status := namedSessionStatusForCity(cityPath, cfg, store, statusSnapshot, snapshot.CityName, identity, mode, suspendedRigs)
 		snapshot.NamedSessions = append(snapshot.NamedSessions, cityStatusNamedSession{
 			Identity: identity,
 			Status:   status,
@@ -192,6 +315,7 @@ func namedSessionStatusForCity(
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
+	statusSnapshot *sessionBeadSnapshot,
 	cityName string,
 	identity string,
 	mode string,
@@ -204,6 +328,22 @@ func namedSessionStatusForCity(
 		}
 	}
 	if store == nil {
+		return status
+	}
+	if statusSnapshot != nil {
+		if bead, ok := statusSnapshot.FindSessionBeadByNamedIdentity(identity); ok {
+			if state := strings.TrimSpace(bead.Metadata["state"]); state != "" {
+				return state
+			}
+			return "materialized"
+		}
+		// Bead not in snapshot. If the snapshot itself is degraded
+		// (load timeout or list error), surface that as a lookup error
+		// so operators see the same signal the pre-snapshot resolver
+		// path produced. See gastownhall/gascity#2148.
+		if err := statusSnapshot.LoadError(); err != nil {
+			return "lookup error: " + err.Error()
+		}
 		return status
 	}
 
@@ -225,8 +365,11 @@ func namedSessionStatusForCity(
 	return "materialized"
 }
 
-func collectCitySessionCounts(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City) (StatusSummaryJSON, error) {
+func collectCitySessionCounts(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, snapshot *sessionBeadSnapshot) (StatusSummaryJSON, error) {
 	summary := StatusSummaryJSON{}
+	if snapshot != nil {
+		return countCitySessionsFromSnapshot(snapshot), nil
+	}
 	if store == nil {
 		return summary, nil
 	}
@@ -257,19 +400,59 @@ func collectCitySessionCounts(cityPath string, store beads.Store, sp runtime.Pro
 	return summary, nil
 }
 
+func countCitySessionsFromSnapshot(snapshot *sessionBeadSnapshot) StatusSummaryJSON {
+	summary := StatusSummaryJSON{}
+	if snapshot == nil {
+		return summary
+	}
+	for _, bead := range snapshot.Open() {
+		if bead.Status == "closed" || !session.IsSessionBeadOrRepairable(bead) {
+			continue
+		}
+		switch sessionMetadataState(bead) {
+		case string(session.StateActive):
+			summary.ActiveSessions++
+		case string(session.StateSuspended):
+			summary.SuspendedSessions++
+		}
+	}
+	return summary
+}
+
 func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSummaryJSON) StatusJSON {
-	var agents []StatusAgentJSON
+	agents := make([]StatusAgentJSON, 0, len(snapshot.Agents))
 	for _, row := range snapshot.Agents {
 		agents = append(agents, row.Agent)
 	}
+	rigs := snapshot.Rigs
+	if rigs == nil {
+		rigs = []StatusRigJSON{}
+	}
+	var signals []string
+	if snapshot.Suspended {
+		signals = append(signals, "city_suspended")
+	}
+	if !snapshot.Controller.Running {
+		signals = append(signals, "controller_not_running")
+	}
+	if snapshot.Summary.TotalAgents > 0 && snapshot.Summary.RunningAgents == 0 {
+		signals = append(signals, "no_agents_running")
+	}
+	degraded := len(signals) > 0
+	running := snapshot.Controller.Running
 	return StatusJSON{
-		CityName:   snapshot.CityName,
-		CityPath:   snapshot.CityPath,
-		Controller: snapshot.Controller,
-		Suspended:  snapshot.Suspended,
-		Agents:     agents,
-		Rigs:       snapshot.Rigs,
-		Summary:    summary,
+		SchemaVersion: "1",
+		OK:            true,
+		CityName:      snapshot.CityName,
+		Workspace:     WorkspaceJSON{Name: snapshot.CityName, Path: snapshot.CityPath},
+		CityPath:      snapshot.CityPath,
+		Controller:    snapshot.Controller,
+		Running:       running,
+		Suspended:     snapshot.Suspended,
+		Health:        HealthJSON{Usable: running && !snapshot.Suspended, Degraded: degraded, Signals: signals},
+		Agents:        agents,
+		Rigs:          rigs,
+		Summary:       summary,
 	}
 }
 
@@ -323,4 +506,6 @@ func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.
 			fmt.Fprintf(stdout, "  %-24s%s%s\n", r.Name, r.Path, annotation) //nolint:errcheck // best-effort stdout
 		}
 	}
+
+	renderStoreHealthBlock(stdout, snapshot.Summary.StoreHealth)
 }

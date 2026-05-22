@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,8 +18,20 @@ import (
 )
 
 // staleKeyDetectDelay is how long to wait after starting a session before
-// checking if it died immediately (stale resume key detection).
-const staleKeyDetectDelay = 2 * time.Second
+// checking if it died immediately (stale resume key detection). Tests that
+// drive the start path through a fake runtime can shorten this via
+// SetStaleKeyDetectDelayForTest to keep their wall-clock down.
+var staleKeyDetectDelay = 2 * time.Second
+
+// SetStaleKeyDetectDelayForTest overrides the stale-key detection delay used
+// by ensureRunning/ensureRunningRuntimeOnly. The returned func restores the
+// previous value. Intended for tests only; production code should not call
+// this.
+func SetStaleKeyDetectDelayForTest(d time.Duration) func() {
+	prev := staleKeyDetectDelay
+	staleKeyDetectDelay = d
+	return func() { staleKeyDetectDelay = prev }
+}
 
 const waitIdleNudgeTimeout = 30 * time.Second
 
@@ -27,7 +40,13 @@ const waitIdleNudgeTimeout = 30 * time.Second
 var ErrStateSync = errors.New("session state sync failed")
 
 // stripResumeFlag removes the resume flag and session key from a command
-// string, returning a command suitable for a fresh start.
+// string, returning a command suitable for a fresh start. When the strip
+// is a no-op (the flag/key isn't in cmd, or either argument is empty),
+// the original cmd is returned exactly — TrimSpace only runs when a
+// replacement actually happened. Callers rely on exact equality with
+// the input to detect the no-op case; trimming on a non-replacement
+// path would corrupt that signal when cmd has leading/trailing
+// whitespace.
 func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
 	if resumeFlag == "" || sessionKey == "" {
 		return cmd
@@ -38,6 +57,9 @@ func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
 	if result == cmd {
 		// Try without the leading space (flag at start of args).
 		result = strings.Replace(cmd, target+" ", "", 1)
+	}
+	if result == cmd {
+		return cmd
 	}
 	return strings.TrimSpace(result)
 }
@@ -73,14 +95,22 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	if b.Metadata["session_key"] == "" {
 		return false, nil
 	}
-	freshCmd := stripResumeFlag(resumeCommand, b.Metadata["resume_flag"], b.Metadata["session_key"])
+	resumeFlag := b.Metadata["resume_flag"]
+	freshCmd := stripResumeFlag(resumeCommand, resumeFlag, b.Metadata["session_key"])
 	if err := m.clearStaleResumeMetadata(id, b); err != nil {
 		if unroute != nil {
 			unroute()
 		}
 		return false, err
 	}
-	if freshCmd == resumeCommand {
+	// An empty resume_flag means the command was never resume-capable
+	// (e.g. a named-always session whose start command carries no
+	// --resume-style flag). stripResumeFlag is intentionally a no-op in
+	// that case, so refusing to retry would leave the session stuck.
+	// Only treat the no-op as an error when resume_flag was non-empty
+	// but the strip still found nothing — that signals an inconsistency
+	// between the bead metadata and the actual resume command.
+	if resumeFlag != "" && freshCmd == resumeCommand {
 		if unroute != nil {
 			unroute()
 		}
@@ -103,6 +133,8 @@ var (
 	ErrSessionClosed = errors.New("session is closed")
 	// ErrSessionInactive reports that the requested session has no live runtime.
 	ErrSessionInactive = errors.New("session is not active")
+	// ErrSessionActive reports that the requested session currently has or is starting a live runtime.
+	ErrSessionActive = errors.New("session is active")
 	// ErrResumeRequired reports that the session cannot be resumed without an
 	// explicit resume command.
 	ErrResumeRequired = errors.New("session requires resume command")
@@ -129,6 +161,11 @@ var (
 	sessionMutationLocksMu sync.Mutex
 	sessionMutationLocks   = map[string]*sessionMutationLockEntry{}
 )
+
+// WithSessionMutationLock serializes metadata mutations for one session bead.
+func WithSessionMutationLock(id string, fn func() error) error {
+	return withSessionMutationLock(id, fn)
+}
 
 func withSessionMutationLock(id string, fn func() error) error {
 	lock := acquireSessionMutationLock(id)
@@ -405,6 +442,7 @@ func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
 	}
 	if strings.TrimSpace(b.Metadata["pending_create_claim"]) != "" {
 		batch["pending_create_claim"] = ""
+		batch["pending_create_started_at"] = ""
 	}
 	if len(batch) == 0 {
 		return nil
@@ -743,6 +781,10 @@ func (m *Manager) Pending(id string) (*runtime.PendingInteraction, bool, error) 
 		if errors.Is(err, runtime.ErrInteractionUnsupported) {
 			return nil, false, nil
 		}
+		if errors.Is(err, runtime.ErrSessionNotFound) {
+			log.Printf("session: pending interaction runtime session gone for %q: %v", sessName, err)
+			return nil, true, nil
+		}
 		return nil, true, fmt.Errorf("getting pending interaction: %w", err)
 	}
 	return pending, true, nil
@@ -764,6 +806,10 @@ func (m *Manager) Respond(id string, response runtime.InteractionResponse) error
 			if errors.Is(err, runtime.ErrInteractionUnsupported) {
 				return ErrInteractionUnsupported
 			}
+			if errors.Is(err, runtime.ErrSessionNotFound) {
+				log.Printf("session: respond pending probe runtime session gone for %q: %v", sessName, err)
+				return ErrNoPendingInteraction
+			}
 			return fmt.Errorf("getting pending interaction: %w", err)
 		}
 		if pending == nil {
@@ -781,6 +827,10 @@ func (m *Manager) Respond(id string, response runtime.InteractionResponse) error
 		if err := ip.Respond(sessName, response); err != nil {
 			if errors.Is(err, runtime.ErrInteractionUnsupported) {
 				return ErrInteractionUnsupported
+			}
+			if errors.Is(err, runtime.ErrSessionNotFound) {
+				log.Printf("session: respond runtime session gone for %q: %v", sessName, err)
+				return ErrNoPendingInteraction
 			}
 			return fmt.Errorf("responding to pending interaction: %w", err)
 		}
@@ -812,7 +862,8 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 	}
 
 	all, err := m.store.List(beads.ListQuery{
-		Label: LabelSession,
+		Label:         LabelSession,
+		IncludeClosed: b.Status == "closed",
 	})
 	if err != nil {
 		return "", fmt.Errorf("listing sessions: %w", err)
@@ -822,12 +873,17 @@ func (m *Manager) TranscriptPath(id string, searchPaths []string) (string, error
 		if !IsSessionBeadOrRepairable(other) {
 			continue
 		}
-		// Only count active sessions — closed historical sessions should not
-		// make the lookup ambiguous for the one live session.
-		if other.Status == "closed" {
+		// For a live target, closed historical sessions should not make the
+		// lookup ambiguous. For a closed target, historical siblings sharing
+		// the same workdir are the ambiguity we need to preserve.
+		if b.Status != "closed" && other.Status == "closed" {
 			continue
 		}
-		if provider != "" && strings.TrimSpace(other.Metadata["provider"]) != provider {
+		otherProvider := strings.TrimSpace(other.Metadata["provider_kind"])
+		if otherProvider == "" {
+			otherProvider = strings.TrimSpace(other.Metadata["provider"])
+		}
+		if provider != "" && otherProvider != provider {
 			continue
 		}
 		if other.Metadata["work_dir"] == workDir {

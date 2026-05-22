@@ -94,6 +94,52 @@ path = "frontend"
 	assertCallNotContains(t, result.callLog, "gc bd --rig 'frontend' init -p 'fr' --skip-hooks")
 }
 
+func TestControllerScriptDeployParsesWorkspaceSectionOnlyForBootstrapPrefix(t *testing.T) {
+	clearDoltAndCityEnv(t)
+	result := runControllerScriptDeploy(t, controllerScriptDeployOptions{
+		CityToml: `[workspace]
+name = "sample-city"
+prefix = "gc"
+
+[[rigs]]
+name = "frontend"
+prefix = "fe"
+path = "frontend"
+`,
+		ResolvedConfig: strings.Join([]string{
+			`name = "wrong-top-level"`,
+			`prefix = "bad-top-level"`,
+			``,
+			`[workspace.extra]`,
+			`name = "wrong-subtable"`,
+			`prefix = "bad-subtable"`,
+			``,
+			`[workspace]   `,
+			`  # Comments and whitespace in this section should not hide the real values.`,
+			`  name = "sample-city"   # trailing comment`,
+			`  prefix = "hqx"   `,
+			`  prefix = "duplicate-ignored"`,
+			``,
+			`[orders]`,
+			`prefix = "bad-next-section"`,
+			``,
+			`[[rigs]]`,
+			`name = "frontend"`,
+			`prefix = "ui"`,
+			`path = "frontend"`,
+		}, "\n") + "\n",
+	})
+	if result.err != nil {
+		t.Fatalf("gc-controller-k8s deploy error = %v\noutput:\n%s", result.err, result.output)
+	}
+	assertCallContains(t, result.callLog, "gc bd init -p 'hqx' --skip-hooks")
+	assertCallContains(t, result.callLog, "gc bd --rig 'frontend' init -p 'ui' --skip-hooks")
+	assertCallNotContains(t, result.callLog, "bad-top-level")
+	assertCallNotContains(t, result.callLog, "bad-subtable")
+	assertCallNotContains(t, result.callLog, "duplicate-ignored")
+	assertCallNotContains(t, result.callLog, "bad-next-section")
+}
+
 func TestControllerScriptDeployBootstrapsAfterStartSignalAndLogProbe(t *testing.T) {
 	result := runControllerScriptDeploy(t, controllerScriptDeployOptions{
 		LogOutputs: []string{"still starting", "City started."},
@@ -317,6 +363,12 @@ exit 1
 	cmd.Env = append(os.Environ(),
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"CLAUDE_DIR="+claudeDir,
+		"GC_BIN="+fakeGC,
+		"GC_DOLT_HOST=",
+		"GC_DOLT_PORT=",
+		"GC_K8S_DOLT_HOST=",
+		"GC_K8S_DOLT_PORT=",
+		"GC_CITY_PATH=",
 	)
 	for key, value := range opts.Env {
 		cmd.Env = append(cmd.Env, key+"="+value)

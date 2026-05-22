@@ -7,10 +7,13 @@ import "github.com/gastownhall/gascity/internal/runtime"
 // through to runtime.Config. All fields are optional — zero values mean
 // no special startup handling (fire-and-forget).
 type StartupHints struct {
+	// Lifecycle describes whether the command is long-lived or expected to exit.
+	Lifecycle              runtime.Lifecycle
 	ReadyPromptPrefix      string
 	ReadyDelayMs           int
 	ProcessNames           []string
 	EmitsPermissionWarning bool
+	AcceptStartupDialogs   *bool
 	// Nudge is text typed into the session after the agent is ready.
 	// Used for CLI agents that don't accept command-line prompts.
 	Nudge string
@@ -28,9 +31,13 @@ type StartupHints struct {
 	// ProviderName is the resolved provider name (e.g., "claude", "codex").
 	// Used for per-provider overlay filtering in V2.
 	ProviderName string
+	// ProviderOverlayName is the concrete provider whose per-provider overlay
+	// should be staged. It differs from ProviderName when a provider inherits
+	// launch behavior from another built-in family.
+	ProviderOverlayName string
 	// InstallAgentHooks lists additional provider slots whose
 	// per-provider/<slot>/ overlay content should be staged alongside
-	// ProviderName's. Populated from the agent's install_agent_hooks
+	// ProviderOverlayName's. Populated from the agent's install_agent_hooks
 	// config (or the workspace default).
 	InstallAgentHooks []string
 	// PackOverlayDirs lists overlay directories from packs. Copied to

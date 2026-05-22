@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 func TestParseOrdersFeedLimitCapsLargeValues(t *testing.T) {
@@ -29,6 +30,36 @@ func TestOrderTrackingStatusTreatsWispFailedAsFailed(t *testing.T) {
 	}
 	if got := orderTrackingStatus(bead); got != "failed" {
 		t.Fatalf("orderTrackingStatus = %q, want failed", got)
+	}
+}
+
+func TestOrderTrackingExecEnvFailedClassifiesAsFailedExec(t *testing.T) {
+	bead := beads.Bead{
+		Status: "closed",
+		Labels: []string{"order-tracking", "order-run:nightly", "exec-env-failed"},
+	}
+	if got := orderTrackingStatus(bead); got != "failed" {
+		t.Fatalf("orderTrackingStatus = %q, want failed", got)
+	}
+	if got := orderTrackingTarget(orders.Order{}, false, bead); got != "exec" {
+		t.Fatalf("orderTrackingTarget = %q, want exec", got)
+	}
+	if got := orderTrackingType(orders.Order{}, false, bead); got != "exec" {
+		t.Fatalf("orderTrackingType = %q, want exec", got)
+	}
+}
+
+func TestOrderTrackingTriggerEnvFailedClassifiesOpenAndClosedAsFailed(t *testing.T) {
+	for _, status := range []string{"open", "closed"} {
+		t.Run(status, func(t *testing.T) {
+			bead := beads.Bead{
+				Status: status,
+				Labels: []string{"order-tracking", "order-run:nightly", "trigger-env-failed"},
+			}
+			if got := orderTrackingStatus(bead); got != "failed" {
+				t.Fatalf("orderTrackingStatus(%s) = %q, want failed", status, got)
+			}
+		})
 	}
 }
 
@@ -98,6 +129,39 @@ func TestBuildWorkflowRunProjectionsKeepsInProgressChildrenOnHistoryFailure(t *t
 	}
 	if !got.Items[0].UpdatedAt.Equal(child.CreatedAt) {
 		t.Fatalf("updatedAt = %s, want %s", got.Items[0].UpdatedAt, child.CreatedAt)
+	}
+}
+
+func TestBuildOrderRunFeedItemsUsesAllOrdersForDisabledExecMetadata(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	disabled := false
+	state.allOrders = []orders.Order{
+		{Name: "digest", Exec: "scripts/digest.sh", Trigger: "cooldown", Interval: "1h", Enabled: &disabled},
+	}
+
+	tracking, err := state.cityBeadStore.Create(beads.Bead{
+		Title:  "order:digest",
+		Status: "closed",
+		Labels: []string{"order-tracking", "order-run:digest", "wisp"},
+	})
+	if err != nil {
+		t.Fatalf("create tracking bead: %v", err)
+	}
+
+	got, err := buildOrderRunFeedItems(state, "city", "test-city")
+	if err != nil {
+		t.Fatalf("buildOrderRunFeedItems: %v", err)
+	}
+	if len(got.Items) != 1 {
+		t.Fatalf("items = %d, want 1", len(got.Items))
+	}
+	item := got.Items[0]
+	if item.BeadID != tracking.ID {
+		t.Fatalf("bead_id = %q, want %q", item.BeadID, tracking.ID)
+	}
+	if item.Type != "exec" || item.Target != "exec" || !item.DetailAvailable || !item.RunDetailAvailable {
+		t.Fatalf("item = %+v, want disabled exec order metadata", item)
 	}
 }
 

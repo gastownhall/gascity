@@ -22,6 +22,12 @@ bd ready --assignee="$GC_SESSION_NAME" --json --limit=1
 
 # Step 3: If still nothing, check the routed queue (multi-session configs only)
 gc hook
+
+# Step 4: If gc hook returned an unassigned routed bead, claim it atomically
+bd update <id> --claim
+
+# Step 5: Verify the claim before doing work
+bd show <id> --json
 ```
 
 If you have no work after all three checks, run:
@@ -33,14 +39,20 @@ gc runtime drain-ack
 ## How To Work
 
 1. Find your assigned bead (see Startup above).
-2. Read it with `bd show <id>`.
-3. **Claim continuation group** (see below).
-4. Execute exactly that bead's description.
-5. On success, close it:
+2. If the bead came from `gc hook`, claim it with `bd update <id> --claim`
+   before doing any work. Do not start work with `bd update --status in_progress`;
+   only `--claim` sets both assignee and in-progress state atomically.
+3. Verify the claimed bead is assigned to `$GC_SESSION_NAME` and routed to
+   `$GC_TEMPLATE`. If either check fails, do not work that bead; run `gc hook`
+   again or drain if no valid work is available.
+4. Read it with `bd show <id>`.
+5. **Claim continuation group** (see below).
+6. Execute exactly that bead's description.
+7. On success, close it:
    ```bash
    bd update <id> --set-metadata gc.outcome=pass --status closed
    ```
-6. On transient failure, mark it transient and close it:
+8. On transient failure, mark it transient and close it:
    ```bash
    bd update <id> \
      --set-metadata gc.outcome=fail \
@@ -48,7 +60,7 @@ gc runtime drain-ack
      --set-metadata gc.failure_reason=<short_reason> \
      --status closed
    ```
-7. On unrecoverable failure, mark it hard-failed and close it:
+9. On unrecoverable failure, mark it hard-failed and close it:
    ```bash
    bd update <id> \
      --set-metadata gc.outcome=fail \
@@ -56,11 +68,19 @@ gc runtime drain-ack
      --set-metadata gc.failure_reason=<short_reason> \
      --status closed
    ```
-8. After closing, check for more assigned work:
+10. After closing, check for more assigned work:
    ```bash
    bd ready --assignee="$GC_SESSION_NAME" --json --limit=1
    ```
-9. If more work exists, go to step 2. If not, poll briefly (see below).
+11. If more work exists, go to step 2. If not, poll briefly (see below).
+
+**Never use wide filesystem searches when a CLI command exists.** Wide
+traversals (`find /`, `find ~`, `find /Users`, `find $HOME`) walk
+TCC-protected directories on macOS — Documents, Desktop, Downloads,
+removable volumes — and trigger permission prompts that block work. If
+you don't know how to locate a formula, recipe, bead, mail, or Dolt
+state, the answer is a `gc` / `bd` introspection command, not a
+filesystem search. If no command exists for what you need, file a bead.
 
 ## Continuation Group — Session Affinity
 

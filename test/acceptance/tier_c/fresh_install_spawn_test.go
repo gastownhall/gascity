@@ -61,7 +61,9 @@ func TestFreshInit_ClaudeUnrestricted(t *testing.T) {
 	}
 
 	result := runFreshInitSlingClaudeWork(t, "Write the current time to permission-check.txt", "permission-check.txt")
-	command := metaString(result.SpawnedSessionBead.Metadata, "command")
+	spawnedSessionBead, err := showBeadJSON(result.CityDir, result.SpawnedSessionBead.ID)
+	require.NoError(t, err, "refresh spawned session bead %s", result.SpawnedSessionBead.ID)
+	command := metaString(spawnedSessionBead.Metadata, "command")
 	require.NotEmpty(t, command, "spawned worker should persist the resolved launch command")
 	require.Contains(t, command, "--dangerously-skip-permissions", "fresh claude worker should launch unrestricted")
 	require.NotContains(t, command, "--permission-mode auto-edit", "fresh claude worker should not launch in auto-edit mode")
@@ -73,6 +75,9 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 	c := helpers.NewCity(t, testEnvC)
 	c.Init("claude")
 	applyTierCAcceptanceConfig(c)
+	// The built-in maintenance dog pool is auto-included; this fixture needs
+	// a generic claude pool target for mol-do-work.
+	configureFreshInitClaudePool(t, c)
 
 	initialSessionBeadsOut, err := bdCmd(testEnvC, c.Dir, "list", "--include-infra", "--label", "gc:session", "--json", "--limit=20")
 	require.NoError(t, err, "bd list session beads before sling: %s", initialSessionBeadsOut)
@@ -222,6 +227,20 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 		OutputPath:         outputPath,
 		OutputContents:     strings.TrimSpace(string(outputContents)),
 	}
+}
+
+func configureFreshInitClaudePool(t *testing.T, c *helpers.City) {
+	t.Helper()
+	c.AppendToConfig(`
+
+[[agent]]
+name = "claude"
+provider = "claude"
+prompt_template = ".gc/system/packs/core/assets/prompts/pool-worker.md"
+default_sling_formula = "mol-do-work"
+min_active_sessions = 0
+max_active_sessions = 1
+`)
 }
 
 func runGCWithTimeout(timeout time.Duration, env *helpers.Env, dir string, args ...string) (string, error) {

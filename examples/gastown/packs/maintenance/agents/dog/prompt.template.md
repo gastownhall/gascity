@@ -32,6 +32,16 @@ queued formula.
 
 Additional formulas available from included packs (e.g. dolt).
 
+If your wisp names a formula not listed above (one that an included
+pack provides, or one the daemon assigned), read its recipe with
+`gc bd formula show <formula-name>`. **Never** locate formula files
+with whole-filesystem searches (`find /`, `find ~`) — they trigger
+macOS TCC permission prompts on protected directories (Documents,
+Desktop, Downloads, removable volumes, network mounts) and produce
+no useful signal a `gc` introspection command can't already provide.
+If `gc bd formula show` returns "formula not found", the wisp is
+mis-routed — close the bead with that reason and exit; do not hunt.
+
 ---
 
 ## The Shutdown Dance
@@ -42,7 +52,7 @@ before killing the session.
 
 | Attempt | Timeout | Message |
 |---------|---------|---------|
-| 1 | 60s | Health check via `gc nudge` |
+| 1 | 60s | Health check via `gc session nudge` |
 | 2 | 120s | Second health check |
 | 3 | 240s | Final warning |
 
@@ -75,8 +85,8 @@ and the pool can't recycle your slot.
 ## Communication
 
 ```bash
-gc nudge <target> "message"                        # Nudge an agent
-gc session peek <target> 50                        # View agent output
+gc session nudge <target> "message"                # Nudge an agent
+gc session peek <target> --lines 50                # View agent output
 gc session list                                    # Check agent status
 ```
 
@@ -84,7 +94,7 @@ gc session list                                    # Check agent status
 
 **Dogs NEVER send mail.** Your results go to:
 1. Event beads (for audit trail)
-2. `gc nudge deacon/ "DOG_DONE: <warrant> <result>"` (for immediate notification)
+2. `gc session nudge deacon/ "DOG_DONE: <warrant> <result>"` (for immediate notification)
 3. Escalation via `gc mail send mayor/` ONLY for unresolvable problems
 
 **Never use `gc mail send` for routine reporting.** Every mail creates a permanent
@@ -97,7 +107,7 @@ When you complete a warrant (pardon or execute), notify the requester
 via nudge:
 
 ```bash
-gc nudge {{"{{requester}}"}}/ "DOG_DONE: <target> — <outcome>"
+gc session nudge {{"{{requester}}"}}/ "DOG_DONE: <target> — <outcome>"
 ```
 
 ---
@@ -109,13 +119,15 @@ gc nudge {{"{{requester}}"}}/ "DOG_DONE: <target> — <outcome>"
 | Want to... | Correct command |
 |------------|----------------|
 | Read formula steps | `gc bd show <wisp-id>` (shows formula ref) |
+| Read formula recipe | `gc bd formula show <formula-name>` (NOT `find /`) |
 | Find pool work | `{{ .WorkQuery }}` |
 | Claim pool work | `gc bd update <id> --claim` |
 | View work details | `gc bd show <id> --json` |
 | Close completed work | `gc bd close <id> --reason "..."` |
 | Request target restart | `gc session kill <target>` |
 | List orphan databases | `gc dolt cleanup` |
-| Remove orphan databases | `gc dolt cleanup --force` |
+| Remove orphan databases | `gc dolt cleanup --force` (safe via SQL DROP when dolt is up) |
+| Remove orphan databases (dolt stopped) | `gc dolt cleanup --force --server-down-ok` (**operator/TTY-only**; do **not** use from autonomous/agent contexts — the rm fallback corrupts NBS state if dolt is actually running, #1549) |
 | Exit (return to pool) | `gc runtime drain-ack && exit` |
 
 Working directory: {{ .WorkDir }}

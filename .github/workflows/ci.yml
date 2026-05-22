@@ -2,18 +2,55 @@ name: CI
 
 on:
   workflow_call:
+    inputs:
+      force_blacksmith:
+        description: Force all jobs in the reusable CI graph onto Blacksmith runners.
+        required: false
+        type: boolean
+        default: false
   push:
     branches: [main]
   pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  runner-policy:
+    name: Runner policy
+    runs-on: ${{ inputs.force_blacksmith && 'blacksmith-2vcpu-ubuntu-2404' || (github.event_name == 'pull_request' && contains(fromJSON('["julianknutsen","csells","sjarmak","quad341"]'), github.event.pull_request.user.login) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest') }}
+    outputs:
+      use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
+      reason: ${{ steps.policy.outputs.reason }}
+      runner_2vcpu: ${{ steps.policy.outputs.runner_2vcpu }}
+      runner_8vcpu: ${{ steps.policy.outputs.runner_8vcpu }}
+      runner_16vcpu: ${{ steps.policy.outputs.runner_16vcpu }}
+      runner_32vcpu: ${{ steps.policy.outputs.runner_32vcpu }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Select runner backend
+        id: policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          FORCE_BLACKSMITH: ${{ inputs.force_blacksmith }}
+        run: |
+          python3 .github/workflows/scripts/runner_policy.py
+
   # Detect which paths changed to gate conditional jobs.
   changes:
     name: Detect changes
-    runs-on: ubuntu-latest
+    needs: runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     outputs:
       mail: ${{ steps.filter.outputs.mail }}
       docker: ${{ steps.filter.outputs.docker }}
@@ -23,9 +60,10 @@ jobs:
       worker: ${{ steps.filter.outputs.worker }}
       worker_phase2: ${{ steps.filter.outputs.worker_phase2 }}
       cmd_gc_process: ${{ steps.filter.outputs.cmd_gc_process }}
+      integration: ${{ steps.filter.outputs.integration }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
         id: filter
         with:
           filters: |
@@ -79,93 +117,188 @@ jobs:
               - 'cmd/gc/**'
               - 'internal/**'
               - 'examples/gastown/packs/**'
+            integration:
+              - 'go.mod'
+              - 'go.sum'
+              - '.github/workflows/**'
+              - 'Makefile'
+              - '**/*.go'
+              - 'scripts/test-integration-shard'
+              - 'scripts/test-go-test-shard'
+              - 'scripts/go-test-observable'
+              - 'examples/gastown/packs/**'
 
-  # Always runs: lint, fmt, vet, unit tests, docs, acceptance, coverage.
-  check:
-    name: Check
-    runs-on: ubuntu-latest
+  preflight-static:
+    name: Preflight / static checks
+    needs: runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
-      # Pinned dependency versions — keep in sync with deps.env.
-      DOLT_VERSION: "1.86.1"
-      BD_VERSION: "v1.0.0"
-      # Make TestGeneratedClientInSync fatal on missing oapi-codegen so the
-      # spec→client drift check can never silently skip in CI.
-      GC_REQUIRE_OAPI_CODEGEN: "1"
+      DOLT_VERSION: "2.0.3"
+      BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
         with:
-          go-version: "1.25.8"
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22"
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y tmux jq
-
-      - name: Install dolt v${{ env.DOLT_VERSION }}
-        run: |
-          curl -fsSL https://github.com/dolthub/dolt/releases/download/v${{ env.DOLT_VERSION }}/install.sh | sudo bash
-          dolt version
-
-      - name: Install released bd v${{ env.BD_VERSION }}
-        run: |
-          archive="beads_${BD_VERSION#v}_linux_amd64.tar.gz"
-          mkdir -p "$RUNNER_TEMP/beads"
-          curl -fsSL -o "$RUNNER_TEMP/$archive" \
-            "https://github.com/gastownhall/beads/releases/download/${BD_VERSION}/${archive}"
-          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/beads" bd
-          sudo install -m 0755 "$RUNNER_TEMP/beads/bd" /usr/local/bin/bd
-          bd version
-
-      - name: Install Claude CLI
-        run: npm install -g @anthropic-ai/claude-code
-
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "false"
       - name: Install tools
         run: make install-tools
-
+      - name: Restore golangci-lint cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .cache/golangci-lint
+          key: ${{ runner.os }}-golangci-lint-${{ hashFiles('go.sum', '.golangci.yml', 'Makefile') }}
+          restore-keys: |
+            ${{ runner.os }}-golangci-lint-
       - name: Lint
+        env:
+          GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
         run: make lint
-
       - name: Format
         run: make fmt-check
-
       - name: Vet
         run: make vet
-
-      - name: Test
-        run: make test-cover
-
       - name: Docs
         run: make check-docs
 
-      - name: Acceptance tests (Tier A)
-        run: make test-acceptance
-
-      - name: Dashboard bundle drift check
-        run: make dashboard-ci
-
-      - name: OpenAPI spec + client drift check
-        run: make spec-ci
-
+  preflight-unit-cover:
+    name: Preflight / unit cover
+    needs:
+      - runner-policy
+    # Coverage reporting only matters on the main branch — codecov regression
+    # info doesn't need to gate every PR, and the full ./... unit suite is
+    # already covered by integration-shards, cmd-gc-process, and acceptance A.
+    if: github.event_name == 'push'
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    env:
+      DOLT_VERSION: "2.0.3"
+      BD_VERSION: "v1.0.4"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "false"
+      - name: Install tools
+        run: make install-tools
+      - name: Test
+        run: make test-cover
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5
+        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
         with:
           files: coverage.txt
           token: ${{ secrets.CODECOV_TOKEN }}
           verbose: true
 
-  cmd-gc-process:
-    name: cmd/gc process suite
-    needs: changes
-    if: needs.changes.outputs.cmd_gc_process == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+  preflight-acceptance:
+    name: Preflight / acceptance A
+    needs:
+      - runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
-      DOLT_VERSION: "1.86.1"
-      BD_VERSION: "v1.0.0"
+      DOLT_VERSION: "2.0.3"
+      BD_VERSION: "v1.0.4"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
+      - name: Acceptance tests (Tier A)
+        run: make test-acceptance
+
+  preflight-generated:
+    name: Preflight / generated artifacts
+    needs:
+      - runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
+    env:
+      # Make TestGeneratedClientInSync fatal on missing oapi-codegen so the
+      # spec->client drift check can never silently skip in CI.
+      GC_REQUIRE_OAPI_CODEGEN: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Dashboard bundle drift check
+        run: make dashboard-ci
+      - name: OpenAPI spec + client drift check
+        run: make spec-ci
+
+  # Historical fan-in name. During the Blacksmith proof, branch protection can
+  # move to `CI / required`; this job keeps the old name meaningful.
+  check:
+    name: Check
+    needs:
+      - runner-policy
+      - preflight-static
+      - preflight-acceptance
+      - preflight-generated
+    if: ${{ always() }}
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
+    env:
+      NEEDS_JSON: ${{ toJSON(needs) }}
+    steps:
+      - name: Summarize preflight result
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          failures = {
+              job: meta.get("result", "unknown")
+              for job, meta in sorted(needs.items())
+              if meta.get("result") != "success"
+          }
+          summary_path = os.environ["GITHUB_STEP_SUMMARY"]
+          with open(summary_path, "a", encoding="utf-8") as handle:
+              handle.write("## CI Preflight\n\n")
+              handle.write("| Job | Result |\n| --- | --- |\n")
+              for job, meta in sorted(needs.items()):
+                  handle.write(f"| {job} | {meta.get('result', 'unknown')} |\n")
+          if failures:
+              for job, result in failures.items():
+                  print(f"{job}: {result}", file=sys.stderr)
+              sys.exit(1)
+          PY
+
+  release-config:
+    name: Release config
+    needs: runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Check GoReleaser configuration
+        uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8 # v7
+        with:
+          version: "~> v2"
+          args: check
+
+  cmd-gc-process:
+    name: cmd/gc process / shard ${{ matrix.shard }} of 12
+    needs:
+      - runner-policy
+      - changes
+    if: needs.changes.outputs.cmd_gc_process == 'true'
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    env:
+      DOLT_VERSION: "2.0.3"
+      BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -175,34 +308,129 @@ jobs:
           install-claude-cli: "true"
       - name: Install tools
         run: make install-tools
-      - name: Run cmd/gc process suite
-        run: make test-cmd-gc-process
+      - name: Run cmd/gc process shard
+        run: make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12
 
-  # Runs always, but remains non-blocking while integration/provider paths are still stabilizing.
   integration-shards:
     name: Integration / ${{ matrix.shard_name }}
-    runs-on: ubuntu-latest
-    continue-on-error: true
+    needs:
+      - runner-policy
+      - changes
+    if: needs.changes.outputs.integration == 'true'
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - shard_name: packages
-            timeout_minutes: 35
-            command: make test-integration-packages
-          - shard_name: review-formulas
-            timeout_minutes: 45
-            command: make test-integration-review-formulas
+          - shard_name: packages-core-1-of-4
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-core-1-of-4
+          - shard_name: packages-core-2-of-4
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-core-2-of-4
+          - shard_name: packages-core-3-of-4
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-core-3-of-4
+          - shard_name: packages-core-4-of-4
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-core-4-of-4
+          - shard_name: packages-cmd-gc-1-of-6
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-cmd-gc-1-of-6
+          - shard_name: packages-cmd-gc-2-of-6
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-cmd-gc-2-of-6
+          - shard_name: packages-cmd-gc-3-of-6
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-cmd-gc-3-of-6
+          - shard_name: packages-cmd-gc-4-of-6
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-cmd-gc-4-of-6
+          - shard_name: packages-cmd-gc-5-of-6
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-cmd-gc-5-of-6
+          - shard_name: packages-cmd-gc-6-of-6
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard packages-cmd-gc-6-of-6
+          - shard_name: packages-runtime-tmux-1-of-6
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard packages-runtime-tmux-1-of-6
+          - shard_name: packages-runtime-tmux-2-of-6
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard packages-runtime-tmux-2-of-6
+          - shard_name: packages-runtime-tmux-3-of-6
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard packages-runtime-tmux-3-of-6
+          - shard_name: packages-runtime-tmux-4-of-6
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard packages-runtime-tmux-4-of-6
+          - shard_name: packages-runtime-tmux-5-of-6
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard packages-runtime-tmux-5-of-6
+          - shard_name: packages-runtime-tmux-6-of-6
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard packages-runtime-tmux-6-of-6
           - shard_name: bdstore
             timeout_minutes: 15
             command: make test-integration-bdstore
-          - shard_name: rest
-            timeout_minutes: 35
-            command: make test-integration-rest
+          - shard_name: rest-smoke-1-of-2
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard rest-smoke-1-of-2
+          - shard_name: rest-smoke-2-of-2
+            timeout_minutes: 15
+            command: ./scripts/test-integration-shard rest-smoke-2-of-2
+          - shard_name: rest-full-1-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-1-of-16
+          - shard_name: rest-full-2-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-2-of-16
+          - shard_name: rest-full-3-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-3-of-16
+          - shard_name: rest-full-4-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-4-of-16
+          - shard_name: rest-full-5-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-5-of-16
+          - shard_name: rest-full-6-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-6-of-16
+          - shard_name: rest-full-7-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-7-of-16
+          - shard_name: rest-full-8-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-8-of-16
+          - shard_name: rest-full-9-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-9-of-16
+          - shard_name: rest-full-10-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-10-of-16
+          - shard_name: rest-full-11-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-11-of-16
+          - shard_name: rest-full-12-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-12-of-16
+          - shard_name: rest-full-13-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-13-of-16
+          - shard_name: rest-full-14-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-14-of-16
+          - shard_name: rest-full-15-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-15-of-16
+          - shard_name: rest-full-16-of-16
+            timeout_minutes: 10
+            command: ./scripts/test-integration-shard rest-full-16-of-16
     env:
-      DOLT_VERSION: "1.86.1"
-      BD_VERSION: "v1.0.0"
+      DOLT_VERSION: "2.0.3"
+      BD_VERSION: "v1.0.4"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -217,15 +445,17 @@ jobs:
 
   worker-core-claude:
     name: Worker core (Claude)
-    needs: changes
+    needs:
+      - runner-policy
+      - changes
     if: needs.changes.outputs.worker == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
       PROFILE: claude/tmux-cli
       WORKER_REPORT_DIR: /tmp/worker-core-claude-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
       - name: Prepare worker report dir
@@ -249,15 +479,17 @@ jobs:
 
   worker-core-codex:
     name: Worker core (Codex)
-    needs: changes
+    needs:
+      - runner-policy
+      - changes
     if: needs.changes.outputs.worker == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
       PROFILE: codex/tmux-cli
       WORKER_REPORT_DIR: /tmp/worker-core-codex-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
       - name: Prepare worker report dir
@@ -281,15 +513,17 @@ jobs:
 
   worker-core-gemini:
     name: Worker core (Gemini)
-    needs: changes
+    needs:
+      - runner-policy
+      - changes
     if: needs.changes.outputs.worker == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
       PROFILE: gemini/tmux-cli
       WORKER_REPORT_DIR: /tmp/worker-core-gemini-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
       - name: Prepare worker report dir
@@ -314,12 +548,13 @@ jobs:
   worker-core-summary:
     name: Worker core summary
     needs:
+      - runner-policy
       - changes
       - worker-core-claude
       - worker-core-codex
       - worker-core-gemini
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
       WORKER_ROLLUP_DIR: /tmp/worker-core-summary-reports
       WORKER_ROLLUP_JSON: /tmp/worker-core-summary-reports/worker-core-summary.json
@@ -378,9 +613,9 @@ jobs:
         run: |
           CHANGES_RESULT='${{ needs.changes.result }}'
           CHANGED='${{ needs.changes.outputs.worker }}'
-          CLAUDE_RESULT='${{ needs.worker-core-claude.result }}'
-          CODEX_RESULT='${{ needs.worker-core-codex.result }}'
-          GEMINI_RESULT='${{ needs.worker-core-gemini.result }}'
+          CLAUDE_RESULT='${{ needs['worker-core-claude'].result }}'
+          CODEX_RESULT='${{ needs['worker-core-codex'].result }}'
+          GEMINI_RESULT='${{ needs['worker-core-gemini'].result }}'
           CLAUDE_DOWNLOAD='${{ steps.download_worker_core_claude.outcome }}'
           CODEX_DOWNLOAD='${{ steps.download_worker_core_codex.outcome }}'
           GEMINI_DOWNLOAD='${{ steps.download_worker_core_gemini.outcome }}'
@@ -421,15 +656,17 @@ jobs:
 
   worker-core-phase2-claude:
     name: Worker core phase 2 (Claude)
-    needs: changes
+    needs:
+      - runner-policy
+      - changes
     if: needs.changes.outputs.worker_phase2 == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
       PROFILE: claude/tmux-cli
       WORKER_REPORT_DIR: /tmp/worker-core-phase2-claude-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
       - name: Install system dependencies
@@ -457,15 +694,17 @@ jobs:
 
   worker-core-phase2-codex:
     name: Worker core phase 2 (Codex)
-    needs: changes
+    needs:
+      - runner-policy
+      - changes
     if: needs.changes.outputs.worker_phase2 == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
       PROFILE: codex/tmux-cli
       WORKER_REPORT_DIR: /tmp/worker-core-phase2-codex-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
       - name: Install system dependencies
@@ -493,15 +732,17 @@ jobs:
 
   worker-core-phase2-gemini:
     name: Worker core phase 2 (Gemini)
-    needs: changes
+    needs:
+      - runner-policy
+      - changes
     if: needs.changes.outputs.worker_phase2 == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
       PROFILE: gemini/tmux-cli
       WORKER_REPORT_DIR: /tmp/worker-core-phase2-gemini-reports
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
       - name: Install system dependencies
@@ -530,12 +771,13 @@ jobs:
   worker-core-phase2-summary:
     name: Worker core phase 2 summary
     needs:
+      - runner-policy
       - changes
       - worker-core-phase2-claude
       - worker-core-phase2-codex
       - worker-core-phase2-gemini
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     env:
       WORKER_ROLLUP_DIR: /tmp/worker-core-phase2-summary-reports
       WORKER_ROLLUP_JSON: /tmp/worker-core-phase2-summary-reports/worker-core-phase2-summary.json
@@ -594,9 +836,9 @@ jobs:
         run: |
           CHANGES_RESULT='${{ needs.changes.result }}'
           CHANGED='${{ needs.changes.outputs.worker_phase2 }}'
-          CLAUDE_RESULT='${{ needs.worker-core-phase2-claude.result }}'
-          CODEX_RESULT='${{ needs.worker-core-phase2-codex.result }}'
-          GEMINI_RESULT='${{ needs.worker-core-phase2-gemini.result }}'
+          CLAUDE_RESULT='${{ needs['worker-core-phase2-claude'].result }}'
+          CODEX_RESULT='${{ needs['worker-core-phase2-codex'].result }}'
+          GEMINI_RESULT='${{ needs['worker-core-phase2-gemini'].result }}'
           CLAUDE_DOWNLOAD='${{ steps.download_worker_core_phase2_claude.outcome }}'
           CODEX_DOWNLOAD='${{ steps.download_worker_core_phase2_codex.outcome }}'
           GEMINI_DOWNLOAD='${{ steps.download_worker_core_phase2_gemini.outcome }}'
@@ -635,228 +877,29 @@ jobs:
             exit 1
           fi
 
-  worker-inference-phase3-claude:
-    name: Worker inference phase 3 (Claude)
-    needs: changes
-    if: needs.changes.outputs.worker == 'true'
-    runs-on: ubuntu-latest
-    env:
-      PROFILE: claude/tmux-cli
-      WORKER_REPORT_DIR: /tmp/worker-inference-phase3-claude-reports
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - name: Prepare worker report dir
-        run: mkdir -p "$WORKER_REPORT_DIR"
-      - name: Emit manual-only WorkerInference phase-3 report
-        run: python3 .github/workflows/scripts/worker_report_manual_only.py "$WORKER_REPORT_DIR" "worker-inference-phase3"
-      - name: WorkerInference phase-3 report summary
-        if: ${{ always() }}
-        run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
-      - name: Upload WorkerInference phase-3 reports
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: worker-inference-phase3-claude-reports
-          path: ${{ env.WORKER_REPORT_DIR }}/*.json
-          if-no-files-found: error
-
-  worker-inference-phase3-codex:
-    name: Worker inference phase 3 (Codex)
-    needs: changes
-    if: needs.changes.outputs.worker == 'true'
-    runs-on: ubuntu-latest
-    env:
-      PROFILE: codex/tmux-cli
-      WORKER_REPORT_DIR: /tmp/worker-inference-phase3-codex-reports
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - name: Prepare worker report dir
-        run: mkdir -p "$WORKER_REPORT_DIR"
-      - name: Emit manual-only WorkerInference phase-3 report
-        run: python3 .github/workflows/scripts/worker_report_manual_only.py "$WORKER_REPORT_DIR" "worker-inference-phase3"
-      - name: WorkerInference phase-3 report summary
-        if: ${{ always() }}
-        run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
-      - name: Upload WorkerInference phase-3 reports
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: worker-inference-phase3-codex-reports
-          path: ${{ env.WORKER_REPORT_DIR }}/*.json
-          if-no-files-found: error
-
-  worker-inference-phase3-gemini:
-    name: Worker inference phase 3 (Gemini)
-    needs: changes
-    if: needs.changes.outputs.worker == 'true'
-    runs-on: ubuntu-latest
-    env:
-      PROFILE: gemini/tmux-cli
-      WORKER_REPORT_DIR: /tmp/worker-inference-phase3-gemini-reports
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - name: Prepare worker report dir
-        run: mkdir -p "$WORKER_REPORT_DIR"
-      - name: Emit manual-only WorkerInference phase-3 report
-        run: python3 .github/workflows/scripts/worker_report_manual_only.py "$WORKER_REPORT_DIR" "worker-inference-phase3"
-      - name: WorkerInference phase-3 report summary
-        if: ${{ always() }}
-        run: python3 .github/workflows/scripts/worker_report_summary.py "$WORKER_REPORT_DIR"
-      - name: Upload WorkerInference phase-3 reports
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: worker-inference-phase3-gemini-reports
-          path: ${{ env.WORKER_REPORT_DIR }}/*.json
-          if-no-files-found: error
-
-  worker-inference-phase3-summary:
-    name: Worker inference phase 3 summary
-    needs:
-      - changes
-      - worker-inference-phase3-claude
-      - worker-inference-phase3-codex
-      - worker-inference-phase3-gemini
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
-    env:
-      WORKER_ROLLUP_DIR: /tmp/worker-inference-phase3-summary-reports
-      WORKER_ROLLUP_JSON: /tmp/worker-inference-phase3-summary-reports/worker-inference-phase3-summary.json
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - name: Prepare worker rollup dir
-        if: ${{ needs.changes.outputs.worker == 'true' }}
-        run: mkdir -p "$WORKER_ROLLUP_DIR"
-      - name: Download WorkerInference phase-3 Claude reports
-        id: download_worker_inference_phase3_claude
-        if: ${{ needs.changes.outputs.worker == 'true' }}
-        continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: worker-inference-phase3-claude-reports
-          path: ${{ env.WORKER_ROLLUP_DIR }}/claude
-      - name: Download WorkerInference phase-3 Codex reports
-        id: download_worker_inference_phase3_codex
-        if: ${{ needs.changes.outputs.worker == 'true' }}
-        continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: worker-inference-phase3-codex-reports
-          path: ${{ env.WORKER_ROLLUP_DIR }}/codex
-      - name: Download WorkerInference phase-3 Gemini reports
-        id: download_worker_inference_phase3_gemini
-        if: ${{ needs.changes.outputs.worker == 'true' }}
-        continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: worker-inference-phase3-gemini-reports
-          path: ${{ env.WORKER_ROLLUP_DIR }}/gemini
-      - name: WorkerInference phase-3 rollup summary
-        if: ${{ needs.changes.outputs.worker == 'true' }}
-        env:
-          CLAUDE_DOWNLOAD: ${{ steps.download_worker_inference_phase3_claude.outcome }}
-          CODEX_DOWNLOAD: ${{ steps.download_worker_inference_phase3_codex.outcome }}
-          GEMINI_DOWNLOAD: ${{ steps.download_worker_inference_phase3_gemini.outcome }}
-        run: |
-          python3 .github/workflows/scripts/worker_report_rollup.py \
-            "$WORKER_ROLLUP_DIR" \
-            --title "Worker inference phase 3 summary" \
-            --require-reports \
-            --expected-profile "claude/tmux-cli=$CLAUDE_DOWNLOAD" \
-            --expected-profile "codex/tmux-cli=$CODEX_DOWNLOAD" \
-            --expected-profile "gemini/tmux-cli=$GEMINI_DOWNLOAD" \
-            --output "$WORKER_ROLLUP_JSON"
-      - name: Upload WorkerInference phase-3 rollup
-        if: ${{ always() && needs.changes.outputs.worker == 'true' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: worker-inference-phase3-summary-reports
-          path: ${{ env.WORKER_ROLLUP_JSON }}
-          if-no-files-found: error
-      - name: Assert worker-inference phase-3 matrix reported
-        run: |
-          CHANGES_RESULT='${{ needs.changes.result }}'
-          CHANGED='${{ needs.changes.outputs.worker }}'
-          CLAUDE_RESULT='${{ needs.worker-inference-phase3-claude.result }}'
-          CODEX_RESULT='${{ needs.worker-inference-phase3-codex.result }}'
-          GEMINI_RESULT='${{ needs.worker-inference-phase3-gemini.result }}'
-          CLAUDE_DOWNLOAD='${{ steps.download_worker_inference_phase3_claude.outcome }}'
-          CODEX_DOWNLOAD='${{ steps.download_worker_inference_phase3_codex.outcome }}'
-          GEMINI_DOWNLOAD='${{ steps.download_worker_inference_phase3_gemini.outcome }}'
-          if [ -f "$WORKER_ROLLUP_JSON" ]; then
-            ROLLUP_STATUS="$(python3 -c "import json, sys; print(json.load(open(sys.argv[1], encoding='utf-8')).get('summary', {}).get('status', 'unknown'))" "$WORKER_ROLLUP_JSON")"
-          else
-            ROLLUP_STATUS='missing'
-          fi
-          printf 'changes-result=%s\n' "$CHANGES_RESULT"
-          printf 'worker-changes=%s\n' "$CHANGED"
-          printf 'worker-inference-phase3-claude=%s\n' "$CLAUDE_RESULT"
-          printf 'worker-inference-phase3-codex=%s\n' "$CODEX_RESULT"
-          printf 'worker-inference-phase3-gemini=%s\n' "$GEMINI_RESULT"
-          printf 'download-worker-inference-phase3-claude=%s\n' "$CLAUDE_DOWNLOAD"
-          printf 'download-worker-inference-phase3-codex=%s\n' "$CODEX_DOWNLOAD"
-          printf 'download-worker-inference-phase3-gemini=%s\n' "$GEMINI_DOWNLOAD"
-          printf 'worker-inference-phase3-rollup=%s\n' "$ROLLUP_STATUS"
-          if [ "$CHANGES_RESULT" != "success" ]; then
-            echo "changes job did not complete successfully" >&2
-            exit 1
-          fi
-          if [ "$CHANGED" != "true" ]; then
-            echo "No phase-3 worker changes detected; passing summary without fan-in."
-            exit 0
-          fi
-          if [ "$CLAUDE_DOWNLOAD" != "success" ] || [ "$CODEX_DOWNLOAD" != "success" ] || [ "$GEMINI_DOWNLOAD" != "success" ]; then
-            echo "worker-inference phase-3 summary is missing one or more expected profile artifacts" >&2
-            exit 1
-          fi
-          if [ "$ROLLUP_STATUS" != "pass" ] && [ "$ROLLUP_STATUS" != "unsupported" ]; then
-            echo "worker-inference phase-3 rollup reported an unexpected status" >&2
-            exit 1
-          fi
-          if [ "$ROLLUP_STATUS" = "unsupported" ]; then
-            echo "worker-inference phase-3 is catalog-only until executable inference scenarios land."
-          fi
-          if [ "$CLAUDE_RESULT" != "success" ] || [ "$CODEX_RESULT" != "success" ] || [ "$GEMINI_RESULT" != "success" ]; then
-            echo "worker-inference phase-3 matrix failed" >&2
-            exit 1
-          fi
-
   # Runs when pack-related files change — full gastown integration suite.
   pack-gate:
     name: Pack compatibility gate
-    needs: [changes, check]
+    needs:
+      - runner-policy
+      - changes
+      - check
     if: needs.changes.outputs.packs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
         with:
-          go-version: "1.25.8"
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22"
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y tmux jq
-      - name: Install dolt
-        run: |
-          curl -fsSL https://github.com/dolthub/dolt/releases/download/v${{ env.DOLT_VERSION }}/install.sh | sudo bash
-      - name: Install released bd v${{ env.BD_VERSION }}
-        run: |
-          archive="beads_${BD_VERSION#v}_linux_amd64.tar.gz"
-          mkdir -p "$RUNNER_TEMP/beads"
-          curl -fsSL -o "$RUNNER_TEMP/$archive" \
-            "https://github.com/gastownhall/beads/releases/download/${BD_VERSION}/${archive}"
-          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/beads" bd
-          sudo install -m 0755 "$RUNNER_TEMP/beads/bd" /usr/local/bin/bd
-      - name: Install Claude CLI
-        run: npm install -g @anthropic-ai/claude-code
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "true"
       - name: Install tools
         run: make install-tools
       - name: Pack compatibility tests
         run: make test-acceptance
     env:
-      DOLT_VERSION: "1.86.1"
-      BD_VERSION: "v1.0.0"
+      DOLT_VERSION: "2.0.3"
+      BD_VERSION: "v1.0.4"
 
   # Dashboard SPA typecheck + tests + build. Runs on every push/PR
   # so TS drift against the spec (e.g. a query param tightening from
@@ -866,14 +909,19 @@ jobs:
   # load-bearing discipline step.
   dashboard:
     name: Dashboard SPA
-    runs-on: ubuntu-latest
+    needs:
+      - runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
       - name: Install SPA dependencies
-        run: npm install --silent
+        run: npm ci --silent
         working-directory: cmd/gc/dashboard/web
       - name: Verify generated TS schema is in sync
         run: |
@@ -896,14 +944,16 @@ jobs:
   # Runs when mail-related source paths change.
   mcp-mail:
     name: MCP mail conformance
-    needs: changes
+    needs:
+      - runner-policy
+      - changes
     if: needs.changes.outputs.mail == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
     continue-on-error: true  # upstream mcp_agent_mail API may drift
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
 
@@ -915,7 +965,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install mcp_agent_mail
-        run: pip install 'mcp-agent-mail==0.1.0'
+        run: python -m pip install --no-deps --require-hashes -r .github/requirements/mcp-agent-mail.txt
 
       - name: MCP mail conformance test
         run: make test-mcp-mail
@@ -923,13 +973,15 @@ jobs:
   # Runs when session/Docker-related source paths change.
   docker-session:
     name: Docker session
-    needs: changes
+    needs:
+      - runner-policy
+      - changes
     if: needs.changes.outputs.docker == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
 
@@ -949,13 +1001,15 @@ jobs:
   # Requires K8s CI infrastructure — no-op until secrets are configured.
   k8s-session:
     name: K8s session
-    needs: changes
+    needs:
+      - runner-policy
+      - changes
     if: needs.changes.outputs.k8s == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.runner-policy.outputs.runner_8vcpu }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
 
@@ -967,3 +1021,124 @@ jobs:
         env:
           GC_K8S_AVAILABLE: ${{ secrets.GC_K8S_AVAILABLE }}
         run: make test-k8s
+
+  ci-preflight:
+    name: CI / preflight
+    needs:
+      - runner-policy
+      - check
+      - release-config
+      - dashboard
+    if: ${{ always() }}
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
+    env:
+      NEEDS_JSON: ${{ toJSON(needs) }}
+    steps:
+      - name: Summarize preflight gates
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          failed = {
+              job: meta.get("result", "unknown")
+              for job, meta in sorted(needs.items())
+              if meta.get("result") != "success"
+          }
+          if failed:
+              for job, result in failed.items():
+                  print(f"{job}: {result}", file=sys.stderr)
+              sys.exit(1)
+          PY
+
+  ci-integration:
+    name: CI / integration
+    needs:
+      - runner-policy
+      - integration-shards
+    if: ${{ always() }}
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
+    env:
+      NEEDS_JSON: ${{ toJSON(needs) }}
+    steps:
+      - name: Summarize integration gates
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          # integration-shards is gated on path filters; a "skipped" result
+          # means the change didn't touch any Go code or shard scripts, which
+          # is the expected pass case for docs-only PRs.
+          allow_skipped = {"integration-shards"}
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          failed = {}
+          for job, meta in sorted(needs.items()):
+              result = meta.get("result", "unknown")
+              if result == "success":
+                  continue
+              if result == "skipped" and job in allow_skipped:
+                  continue
+              failed[job] = result
+          if failed:
+              for job, result in failed.items():
+                  print(f"{job}: {result}", file=sys.stderr)
+              sys.exit(1)
+          PY
+
+  ci-required:
+    name: CI / required
+    needs:
+      - runner-policy
+      - changes
+      - ci-preflight
+      - ci-integration
+      - cmd-gc-process
+      - worker-core-summary
+      - worker-core-phase2-summary
+      - pack-gate
+      - docker-session
+      - k8s-session
+    if: ${{ always() }}
+    runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
+    env:
+      NEEDS_JSON: ${{ toJSON(needs) }}
+    steps:
+      - name: Summarize required gates
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          allow_skipped = {
+              "cmd-gc-process",
+              "pack-gate",
+              "docker-session",
+              "k8s-session",
+          }
+          failed = {}
+          for job, meta in sorted(needs.items()):
+              result = meta.get("result", "unknown")
+              if result == "success":
+                  continue
+              if result == "skipped" and job in allow_skipped:
+                  continue
+              failed[job] = result
+
+          summary_path = os.environ["GITHUB_STEP_SUMMARY"]
+          with open(summary_path, "a", encoding="utf-8") as handle:
+              handle.write("## CI Required\n\n")
+              handle.write("| Job | Result |\n| --- | --- |\n")
+              for job, meta in sorted(needs.items()):
+                  handle.write(f"| {job} | {meta.get('result', 'unknown')} |\n")
+
+          if failed:
+              for job, result in failed.items():
+                  print(f"{job}: {result}", file=sys.stderr)
+              sys.exit(1)
+          PY

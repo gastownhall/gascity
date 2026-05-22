@@ -174,6 +174,20 @@ func (m *MemStore) Close(id string) error {
 	return fmt.Errorf("closing bead %q: %w", id, ErrNotFound)
 }
 
+// Reopen sets a bead's status to "open". Returns a wrapped ErrNotFound if the
+// ID does not exist.
+func (m *MemStore) Reopen(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.beads {
+		if m.beads[i].ID == id {
+			m.beads[i].Status = "open"
+			return nil
+		}
+	}
+	return fmt.Errorf("reopening bead %q: %w", id, ErrNotFound)
+}
+
 // CloseAll closes multiple beads in a single batch and sets metadata on each.
 func (m *MemStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	m.mu.Lock()
@@ -231,7 +245,8 @@ func (m *MemStore) ListOpen(status ...string) ([]Bead, error) {
 
 // Ready returns all open beads with no open blocking dependencies, in
 // creation order.
-func (m *MemStore) Ready() ([]Bead, error) {
+func (m *MemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
+	q := readyQueryFromArgs(query)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -245,7 +260,13 @@ func (m *MemStore) Ready() ([]Bead, error) {
 		if b.Status != "open" {
 			continue
 		}
+		if b.Ephemeral {
+			continue
+		}
 		if IsReadyExcludedType(b.Type) {
+			continue
+		}
+		if q.Assignee != "" && b.Assignee != q.Assignee {
 			continue
 		}
 		blocked := false
@@ -265,6 +286,9 @@ func (m *MemStore) Ready() ([]Bead, error) {
 		}
 		if !blocked {
 			result = append(result, cloneBead(b))
+			if q.Limit > 0 && len(result) >= q.Limit {
+				break
+			}
 		}
 	}
 	return result, nil
@@ -303,6 +327,7 @@ func (m *MemStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bea
 		Limit:         limit,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedDesc,
+		TierMode:      TierModeFromOpts(opts),
 	})
 }
 
@@ -326,6 +351,7 @@ func (m *MemStore) ListByMetadata(filters map[string]string, limit int, opts ...
 		Limit:         limit,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedDesc,
+		TierMode:      TierModeFromOpts(opts),
 	})
 }
 
@@ -362,6 +388,11 @@ func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
 		}
 	}
 	return fmt.Errorf("setting metadata batch on %q: %w", id, ErrNotFound)
+}
+
+// Tx executes fn sequentially against the MemStore.
+func (m *MemStore) Tx(_ string, fn func(Tx) error) error {
+	return runSequentialTx(m, fn)
 }
 
 // Delete removes a bead from the in-memory store.

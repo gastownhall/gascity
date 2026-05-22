@@ -457,7 +457,7 @@ Two rules help a lot:
 | `gt` | Closest in Gas City | Notes |
 |---|---|---|
 | `gt mail` | `gc mail` | Near-direct mapping. |
-| `gt nudge` | `gc session nudge` or `gc nudge` | Use `gc session nudge` for a specific live session, `gc nudge` for deferred delivery controls. |
+| `gt nudge` | `gc session nudge` | Use `gc session nudge <target> "msg"` to send messages to a live session. The `gc nudge` subcommand only exposes deferred-delivery controls (`drain`, `status`, `poll`); it does not accept a positional `<target> "msg"` form. |
 | `gt peek` | `gc session peek` | Near-direct mapping. |
 | `gt broadcast` | no single direct equivalent | Usually modeled as `gc mail send` to a group or multiple explicit targets. |
 | `gt notify` | no direct equivalent | Notification policy is not a top-level SDK command family. |
@@ -526,9 +526,11 @@ in Gas City:
    formulas are resolved by Gas City but executed by the configured beads
    backend.
 5. Look at [examples/gastown/city.toml](https://github.com/gastownhall/gascity/blob/main/examples/gastown/city.toml)
-   first, then [examples/gastown/packs/gastown/pack.toml](https://github.com/gastownhall/gascity/blob/main/examples/gastown/packs/gastown/pack.toml).
-   The city file is the normal starting point; the pack defines the reusable
-   defaults behind it.
+   first, then [examples/gastown/pack.toml](https://github.com/gastownhall/gascity/blob/main/examples/gastown/pack.toml),
+   then [examples/gastown/packs/gastown/pack.toml](https://github.com/gastownhall/gascity/blob/main/examples/gastown/packs/gastown/pack.toml).
+   The city file is the normal starting point; the root pack wires the
+   copyable example and default rig binding; the nested pack defines the
+   reusable defaults behind it.
 
 If you keep those five points straight, most of the Gas Town to Gas City ramp
 goes quickly.

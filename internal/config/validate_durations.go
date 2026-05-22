@@ -42,13 +42,19 @@ func ValidateDurations(cfg *City, source string) []string {
 	// Daemon config durations.
 	check("[daemon]", "patrol_interval", cfg.Daemon.PatrolInterval)
 	check("[daemon]", "restart_window", cfg.Daemon.RestartWindow)
+	check("[daemon]", "session_circuit_breaker_window", cfg.Daemon.SessionCircuitBreakerWindow)
+	check("[daemon]", "session_circuit_breaker_reset_after", cfg.Daemon.SessionCircuitBreakerResetAfter)
 	check("[daemon]", "shutdown_timeout", cfg.Daemon.ShutdownTimeout)
 	check("[daemon]", "wisp_gc_interval", cfg.Daemon.WispGCInterval)
 	check("[daemon]", "wisp_ttl", cfg.Daemon.WispTTL)
 	check("[daemon]", "drift_drain_timeout", cfg.Daemon.DriftDrainTimeout)
+	check("[daemon]", "start_ready_timeout", cfg.Daemon.StartReadyTimeout)
 
 	// Orders config durations.
 	check("[orders]", "max_timeout", cfg.Orders.MaxTimeout)
+
+	// Events config durations.
+	check("[events.rotation]", "archive_retain_age", cfg.Events.Rotation.ArchiveRetainAge)
 
 	// Chat sessions config durations.
 	check("[chat_sessions]", "idle_timeout", cfg.ChatSessions.IdleTimeout)
@@ -74,4 +80,54 @@ func ValidateDurations(cfg *City, source string) []string {
 	}
 
 	return warnings
+}
+
+// ValidateNonNegativeDurations checks duration fields that must not be
+// negative and returns a hard error for the first violation. Unlike
+// ValidateDurations (which only warns on unparseable typos), a negative
+// duration that parses cleanly is silently destructive — e.g. a negative
+// dolt_stop_timeout collapses the managed-dolt SIGTERM→SIGKILL grace to an
+// immediate kill, risking journal corruption (gastownhall/gascity#2090).
+// Such values are rejected at config load rather than at runtime.
+//
+// Empty and unparseable values are left to ValidateDurations; this function
+// only rejects values that parse to a negative time.Duration.
+func ValidateNonNegativeDurations(cfg *City, source string) error {
+	if cfg == nil {
+		return nil
+	}
+	checkNonNegative := func(context, field, value string) error {
+		if value == "" {
+			return nil
+		}
+		dur, err := time.ParseDuration(value)
+		if err != nil {
+			// Parse errors are reported as warnings by ValidateDurations.
+			return nil
+		}
+		if dur < 0 {
+			return fmt.Errorf("%s: %s %s must not be negative: got %q",
+				source, context, field, value)
+		}
+		return nil
+	}
+
+	return checkNonNegative("[daemon]", "dolt_stop_timeout", cfg.Daemon.DoltStopTimeout)
+}
+
+// ValidateEventsRotation returns non-fatal warnings for risky but intentional
+// events rotation settings.
+func ValidateEventsRotation(cfg *City) []string {
+	if cfg == nil {
+		return nil
+	}
+	raw := cfg.Events.Rotation.ArchiveRetainAge
+	if raw == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 || d >= 168*time.Hour {
+		return nil
+	}
+	return []string{fmt.Sprintf("events.rotation: warning: archive_retain_age=%s may delete recent archives", raw)}
 }

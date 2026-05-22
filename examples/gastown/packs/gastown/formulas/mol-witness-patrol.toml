@@ -1,7 +1,7 @@
 description = """
 Witness patrol loop. Poured as a root-only wisp on startup:
 
-  gc bd mol wisp mol-witness-patrol --root-only
+  gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{binding_prefix}}'
   gc bd update $WISP --assignee=$GC_AGENT
 
 Each wisp is ONE iteration: check for work, patrol, pour the next
@@ -11,8 +11,11 @@ you left off from context (bead state, mail state, last action).
 Formula steps are NOT materialized as child beads. Read the step
 descriptions below and work through them in order.
 
-The loop mechanism: every exit path (happy or early) pours the next
-wisp before burning this one. The prompt only bootstraps the first wisp.
+The loop mechanism: EVERY step is one leg of the same wisp. Never exit
+the wisp from an intermediate step — either continue to the next step
+or jump directly to `next-iteration` to pour and burn. Exiting without
+burning leaks wisps (see #1884). The prompt only bootstraps the first
+wisp.
 
 ## Witness Role
 
@@ -55,12 +58,16 @@ the worktree. This makes the work schedulable again.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-witness-patrol"
-version = 7
+version = 10
 
 [vars]
+[vars.binding_prefix]
+description = "Import binding prefix for gastown agent identities, including trailing dot when bound."
+default = ""
+
 [vars.event_timeout]
-description = "Seconds to wait for events before re-checking (exponential backoff)"
-default = "30"
+description = "Seconds to sleep before re-checking. Replaces former event-watch loop which hot-spun on cache-reconcile firehose."
+default = "60"
 
 [[steps]]
 id = "check-inbox"
@@ -117,7 +124,9 @@ Archive after reading.
 **Hygiene principle**: Archive messages after they're fully processed.
 Inbox should be near-empty after this step.
 
-Close this step and proceed."""
+Close this step and continue to `recover-orphaned-beads` — do NOT exit
+the wisp here. The `next-iteration` step is the only place that pours
+the next wisp and burns this one."""
 
 [[steps]]
 id = "recover-orphaned-beads"
@@ -134,7 +143,7 @@ This happens when:
 - An agent was removed from config
 - An agent crashed and the controller decided not to restart it (quarantine)
 
-**Step 1: Find orphaned beads.**
+**Step 1: Find orphaned beads via session-ID liveness.**
 
 List beads assigned to agents in YOUR rig:
 ```bash
@@ -142,25 +151,84 @@ gc bd list --status=in_progress --json --limit=0
 gc bd list --status=open --json --limit=0
 ```
 
-Filter for beads assigned to polecat-pattern agents (e.g., `<rig>/polecats/<name>`).
+Filter for beads with an assignee (skip unassigned beads). This pass does not
+solve the controller race where orphaned work may already have been released to
+open/unassigned before witness observes it; that requires a separate
+worktree-salvage scan keyed by `metadata.work_dir`. Bound Gastown polecat
+assignees use the shape `<rig>/{{binding_prefix}}<polecat-suffix>`.
 
-Cross-reference against running sessions and configured (desired) agents:
+Get the full session roster for liveness checks:
 ```bash
-gc session list --json   # running sessions
-gc config show           # configured agents (includes pool templates)
+gc session list --state=all --json
+gc bd list --type=session --label=gc:session --include-infra --include-gates --all --json --limit=0
 ```
 
-For each bead with a polecat assignee:
-- If the assigned agent has a running session → not orphaned, skip
-- If the assigned agent matches a configured agent name (or is a pool
-  instance like worker-3 matching template worker) → controller will
-  restart it, skip
-- If the agent is neither running nor configured → **orphaned bead**
+For each bead with an assignee, check **session-ID liveness** — NOT
+template pattern matching. Pool instances get new IDs on restart, so
+matching against a template pattern (e.g., `worker-3` matches template
+`worker`) gives false negatives: the old session ID is dead but the
+witness skips it thinking "the pool will restart it." The pool creates
+a NEW session with a different ID — the old one never comes back.
 
-**Important**: Do NOT recover beads assigned to agents that are simply
-restarting (crash recovery). The controller restarts crashed agents,
-and the fresh session resumes work from context. Only recover
-beads when the agent genuinely won't come back.
+**Liveness check procedure:**
+
+1. Resolve the bead assignee by exact identifier lookup. Do not extract a
+   session ID with a regex or fixed prefix list: rig prefixes are
+   configuration-derived, and assignees may be a session bead ID, session
+   name, alias, concrete agent name, or configured named identity. Build the
+   lookup from `gc session list --state=all --json` plus session bead metadata:
+   ```bash
+   SESSIONS_JSON=$(gc session list --state=all --json)
+   SESSION_BEADS_JSON=$(gc bd list --type=session --label=gc:session --include-infra --include-gates --all --json --limit=0)
+
+   MATCH_JSON=$(jq -n \
+     --arg assignee "$ASSIGNEE" \
+     --argjson sessions "$SESSIONS_JSON" \
+     --argjson session_beads "$SESSION_BEADS_JSON" '
+       def add($m; $key; $state; $closed):
+         if (($key // "") | length) == 0 then $m
+         else $m + {($key): {
+           state: (if $closed then "closed" else ($state // "") end)
+         }}
+         end;
+
+       (reduce $sessions[] as $s ({};
+         add(.; $s.ID; $s.State; ($s.Closed // false))
+         | add(.; $s.SessionName; $s.State; ($s.Closed // false))
+         | add(.; $s.Alias; $s.State; ($s.Closed // false))
+         | add(.; $s.AgentName; $s.State; ($s.Closed // false))
+       )) as $from_session_list
+       | reduce $session_beads[] as $b ($from_session_list;
+           add(.; $b.metadata.configured_named_identity; $b.metadata.state; ($b.status == "closed")))
+       | .[$assignee] // empty')
+   ```
+
+2. Classify an absent exact match separately from a dead resolved session:
+   ```bash
+   if [ -z "$MATCH_JSON" ]; then
+     STATE=absent
+   else
+     STATE=$(echo "$MATCH_JSON" | jq -r '.state // "absent"')
+   fi
+   ```
+   An absent match is orphaned only for pool/ephemeral work identities. If the
+   assignee is a refinery, witness, or other configured infrastructure identity,
+   skip it instead of recovering it.
+
+3. Classify:
+   - `active` or `awake` → **not orphaned** (may be stuck —
+     `check-polecat-health` handles that separately)
+   - `creating`, `asleep`, `drained`, `suspended`, `draining`, or
+     `quarantined` → **not orphaned** (controller or operator state still owns
+     the session)
+   - `archived`, `closed`, or `absent` after the exact lookup → **orphaned
+     bead** for pool/ephemeral work — the owning session is gone and will never
+     come back, regardless of whether the pool template still exists
+
+**Important**: Beads assigned to the refinery, witness, or other
+infrastructure agents (not pool instances) should be skipped — those
+agents have persistent identity and the controller manages their
+lifecycle directly.
 
 **Step 2: For each orphaned bead, salvage work from the worktree.**
 
@@ -295,7 +363,9 @@ gc bd update <bead> --set-metadata recovered=true
 ```
 
 **Exit criteria:** All orphaned beads recovered, worktrees cleaned.
-Or no orphans found."""
+Or no orphans found. Continue to `check-refinery` — do NOT exit the
+wisp here. The `next-iteration` step is the only place that pours the
+next wisp and burns this one."""
 
 [[steps]]
 id = "check-refinery"
@@ -306,7 +376,7 @@ Ensure the refinery is processing work and the queue is healthy.
 
 **Step 1: Check work beads assigned to refinery:**
 ```bash
-gc bd list --assignee=<rig>/refinery --status=open --json
+gc bd list --assignee=<rig>/{{binding_prefix}}refinery --status=open --json
 ```
 
 These are work beads with `metadata.branch` and `metadata.target` that
@@ -326,7 +396,7 @@ wisp is stale, the refinery may be stuck.
 
 **Step 3: Nudge if needed:**
 ```bash
-gc nudge <rig>/refinery "Work beads waiting for merge. Please check queue."
+gc session nudge <rig>/{{binding_prefix}}refinery "Work beads waiting for merge. Please check queue."
 ```
 
 **Step 4: Escalate if needed:**
@@ -337,7 +407,10 @@ Observation: <what you found>
 Recommendation: <what should happen>"
 ```
 
-Close this step after assessment."""
+**Exit criteria:** Queue health assessed; nudge sent or escalation
+filed if needed. Continue to `check-polecat-health` — do NOT exit the
+wisp here. The `next-iteration` step is the only place that pours the
+next wisp and burns this one."""
 
 [[steps]]
 id = "check-polecat-health"
@@ -375,10 +448,10 @@ Do NOT kill the agent directly. File a warrant bead and let the dog pool
 handle the shutdown dance (multi-stage interrogation with due process):
 
 ```bash
-gc bd create --type=warrant \
+gc bd create --type=task \
   --title="Stuck: <agent>" \
-  --metadata '{"target":"<session-name>","reason":"No progress on <bead> for <duration>","requester":"witness"}' \
-  --label=pool:dog
+  --metadata '{"target":"<session-name>","reason":"No progress on <bead> for <duration>","requester":"witness","gc.routed_to":"{{binding_prefix}}dog"}' \
+  --label=warrant
 ```
 
 The dog pool picks up the warrant and runs `mol-shutdown-dance`, which
@@ -392,7 +465,9 @@ system handles it. Only escalate if you see a pattern (many stuck
 polecats, systemic issue).
 
 **Exit criteria:** All active polecat work beads assessed. Warrants
-filed for stuck agents. Or no stuck polecats found."""
+filed for stuck agents. Or no stuck polecats found. Continue to
+`next-iteration` — do NOT exit the wisp here. The `next-iteration` step
+is the only place that pours the next wisp and burns this one."""
 
 [[steps]]
 id = "next-iteration"
@@ -414,19 +489,16 @@ is already assigned — the new session resumes from context.
 
 **2. Pour next iteration BEFORE burning:**
 ```bash
-NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --json | jq -r '.new_epic_id')
+NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id')
 gc bd update "$NEXT" --assignee=$GC_AGENT
 ```
 
-**3. Wait for activity (exponential backoff):**
+**3. Wait before next cycle:**
 ```bash
-SEQ=$(gc events --seq)
-gc events --watch --type=bead.updated \
-  --after=$SEQ --timeout {{event_timeout}}s
+sleep {{event_timeout}}
 ```
 
-On event: proceed immediately.
-On timeout: double the timeout (cap 300s) and proceed anyway.
+Previous implementation watched `gc events --type=bead.updated` for fast wake-up, but cache-reconcile fires that event constantly, turning the watch into a tight loop with no useful backoff. Fixed sleep gives predictable idle cost.
 
 **4. Burn this wisp:**
 ```bash

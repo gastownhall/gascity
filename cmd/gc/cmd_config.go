@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -16,24 +15,27 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func jsonEncoder(w io.Writer) *json.Encoder {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc
-}
-
 func loadConfigCommandCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
 	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
 }
 
 func loadCityConfigWithBuiltinPacks(cityPath string, includes ...string) (*config.City, *config.Provenance, error) {
-	if err := MaterializeBuiltinPacks(cityPath); err != nil {
-		return nil, nil, fmt.Errorf("materializing builtin packs: %w", err)
+	allIncludes, err := cityConfigIncludesWithBuiltinPacks(cityPath, includes...)
+	if err != nil {
+		return nil, nil, err
 	}
-	allIncludes := make([]string, 0, len(includes)+3)
-	allIncludes = append(allIncludes, includes...)
-	allIncludes = append(allIncludes, builtinPackIncludes(cityPath)...)
 	return config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), allIncludes...)
+}
+
+func cityConfigIncludesWithBuiltinPacks(cityPath string, includes ...string) ([]string, error) {
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		return nil, fmt.Errorf("materializing builtin packs: %w", err)
+	}
+	builtinIncludes := builtinPackIncludes(cityPath)
+	allIncludes := make([]string, 0, len(includes)+len(builtinIncludes))
+	allIncludes = append(allIncludes, includes...)
+	allIncludes = append(allIncludes, builtinIncludes...)
+	return allIncludes, nil
 }
 
 func newConfigCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -58,6 +60,7 @@ config and "explain" to see where each value originated.`,
 func newConfigShowCmd(stdout, stderr io.Writer) *cobra.Command {
 	var validate bool
 	var showProvenance bool
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "show",
 		Short: "Dump the resolved city configuration as TOML",
@@ -70,10 +73,11 @@ config element. Use -f to layer additional config files.`,
 		Example: `  gc config show
   gc config show --validate
   gc config show --provenance
+  gc config show --json
   gc config show -f overlay.toml`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doConfigShow(validate, showProvenance, stdout, stderr) != 0 {
+			if doConfigShow(validate, showProvenance, asJSON, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -81,6 +85,7 @@ config element. Use -f to layer additional config files.`,
 	}
 	cmd.Flags().BoolVar(&validate, "validate", false, "validate config and exit (0 = valid, 1 = errors)")
 	cmd.Flags().BoolVar(&showProvenance, "provenance", false, "show where each config element originated")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON")
 	cmd.Flags().StringArrayVarP(&extraConfigFiles, "file", "f", nil,
 		"additional config files to layer (can be repeated)")
 	return cmd
@@ -88,7 +93,7 @@ config element. Use -f to layer additional config files.`,
 
 // doConfigShow loads city.toml (with includes) and dumps the resolved
 // config, validates it, or shows provenance.
-func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
+func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc config show: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -106,9 +111,11 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Composition warnings.
-	for _, w := range prov.Warnings {
-		fmt.Fprintf(stderr, "gc config show: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+	compositionWarnings := append([]string(nil), prov.Warnings...)
+	if !asJSON {
+		for _, w := range compositionWarnings {
+			fmt.Fprintf(stderr, "gc config show: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+		}
 	}
 
 	// Run validation.
@@ -128,6 +135,15 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 	validationWarnings := singletonSessionMigrationWarnings(cfg)
 
 	if validate {
+		if asJSON {
+			if code := writeConfigShowJSON(stdout, cityPath, cfg, compositionWarnings, validationWarnings, validationErrors, nil); code != 0 {
+				return code
+			}
+			if len(validationErrors) > 0 {
+				return 1
+			}
+			return 0
+		}
 		for _, w := range validationWarnings {
 			fmt.Fprintf(stderr, "gc config show: warning: %s\n", w) //nolint:errcheck // best-effort stderr
 		}
@@ -139,6 +155,14 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintln(stdout, "Config valid.") //nolint:errcheck // best-effort stdout
 		return 0
+	}
+
+	if asJSON {
+		var provenance any
+		if showProvenance {
+			provenance = prov
+		}
+		return writeConfigShowJSON(stdout, cityPath, cfg, compositionWarnings, validationWarnings, validationErrors, provenance)
 	}
 
 	// Print validation warnings even in show mode.
@@ -168,6 +192,34 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprint(stdout, string(data)) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func writeConfigShowJSON(stdout io.Writer, cityPath string, cfg *config.City, warnings, validationWarnings, validationErrors []string, provenance any) int {
+	payload := map[string]any{
+		"schema_version": "1",
+		"city_path":      cityPath,
+		"config":         configForDisplay(cfg),
+		"warnings":       nonNilStrings(warnings),
+		"validation": map[string]any{
+			"ok":       len(validationErrors) == 0,
+			"warnings": nonNilStrings(validationWarnings),
+			"errors":   nonNilStrings(validationErrors),
+		},
+	}
+	if provenance != nil {
+		payload["provenance"] = provenance
+	}
+	if err := writeCLIJSONLine(stdout, payload); err != nil {
+		return 1
+	}
+	return 0
+}
+
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
 }
 
 func configForDisplay(cfg *config.City) *config.City {
@@ -310,14 +362,14 @@ func singletonSessionMigrationWarnings(cfg *config.City) []string {
 	var warnings []string
 	for i := range cfg.Agents {
 		agentCfg := &cfg.Agents[i]
-		if m := agentCfg.EffectiveMaxActiveSessions(); m == nil || *m != 1 {
+		if !agentCfg.UsesCanonicalSingletonPoolIdentity() {
 			continue
 		}
 		if namedByTemplate[agentCfg.QualifiedName()] {
 			continue
 		}
 		warnings = append(warnings,
-			fmt.Sprintf("agent %q: max_active_sessions=1 now limits ephemeral capacity but does not create a persistent singleton; declare [[named_session]] for a canonical session identity", agentCfg.QualifiedName()))
+			fmt.Sprintf("agent %q: max_active_sessions=1 creates a canonical singleton that drains when scale_check returns 0; declare [[named_session]] only if you need a session that survives empty-demand windows", agentCfg.QualifiedName()))
 	}
 	sort.Strings(warnings)
 	return warnings
@@ -530,6 +582,9 @@ func explainAgent(w io.Writer, a *config.Agent, prov *config.Provenance) {
 	if a.StartCommand != "" {
 		explainField(w, "start_command", a.StartCommand, source)
 	}
+	if a.Lifecycle != "" {
+		explainField(w, "lifecycle", a.Lifecycle, source)
+	}
 	if a.Nudge != "" {
 		explainField(w, "nudge", a.Nudge, source)
 	}
@@ -642,6 +697,7 @@ func renderProviderExplainText(w io.Writer, r config.ResolvedProvider, name stri
 	explainResolvedBool(w, "supports_hooks", r.SupportsHooks, r.Provenance.FieldLayer["supports_hooks"])
 	explainResolvedBool(w, "supports_acp", r.SupportsACP, r.Provenance.FieldLayer["supports_acp"])
 	explainResolvedBool(w, "emits_permission_warning", r.EmitsPermissionWarning, r.Provenance.FieldLayer["emits_permission_warning"])
+	explainResolvedBoolPtr(w, "accept_startup_dialogs", r.AcceptStartupDialogs, r.Provenance.FieldLayer["accept_startup_dialogs"])
 
 	explainProviderMap(w, "env", r.Env, r.Provenance.MapKeyLayer["env"])
 	explainProviderMap(w, "permission_modes", r.PermissionModes, r.Provenance.MapKeyLayer["permission_modes"])
@@ -676,6 +732,17 @@ func explainResolvedBool(w io.Writer, key string, value bool, layer string) {
 	}
 	v := "false"
 	if value {
+		v = "true"
+	}
+	explainProviderField(w, key, v, layer)
+}
+
+func explainResolvedBoolPtr(w io.Writer, key string, value *bool, layer string) {
+	if layer == "" || value == nil {
+		return
+	}
+	v := "false"
+	if *value {
 		v = "true"
 	}
 	explainProviderField(w, key, v, layer)
@@ -736,6 +803,7 @@ func renderProviderExplainJSON(r config.ResolvedProvider, name string, stdout, s
 			"supports_hooks":           triStateFromProvenance("supports_hooks", r.SupportsHooks),
 			"supports_acp":             triStateFromProvenance("supports_acp", r.SupportsACP),
 			"emits_permission_warning": triStateFromProvenance("emits_permission_warning", r.EmitsPermissionWarning),
+			"accept_startup_dialogs":   r.AcceptStartupDialogs,
 			"env":                      r.Env,
 			"permission_modes":         r.PermissionModes,
 			"option_defaults":          r.EffectiveDefaults,
@@ -745,8 +813,7 @@ func renderProviderExplainJSON(r config.ResolvedProvider, name string, stdout, s
 			"map_key_layer": r.Provenance.MapKeyLayer,
 		},
 	}
-	enc := jsonEncoder(stdout)
-	if err := enc.Encode(payload); err != nil {
+	if err := writeCLIJSONLine(stdout, payload); err != nil {
 		fmt.Fprintf(stderr, "gc config explain: json encode: %v\n", err) //nolint:errcheck
 		return 1
 	}

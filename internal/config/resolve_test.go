@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -35,7 +36,17 @@ func lookPathOnly(bins ...string) LookPathFunc {
 // --- ResolveProvider tests ---
 
 func TestResolveProviderAgentStartCommand(t *testing.T) {
-	agent := &Agent{Name: "mayor", StartCommand: "my-custom-cli --flag"}
+	delay := 1250
+	emitsPermissionWarning := true
+	agent := &Agent{
+		Name:                   "worker",
+		StartCommand:           "my-custom-cli --flag",
+		ReadyDelayMs:           &delay,
+		ReadyPromptPrefix:      "ready> ",
+		ProcessNames:           []string{"my-custom-cli"},
+		EmitsPermissionWarning: &emitsPermissionWarning,
+		ResumeCommand:          "my-custom-cli --resume {{.SessionKey}}",
+	}
 	rp, err := ResolveProvider(agent, nil, nil, lookPathNone)
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
@@ -45,6 +56,21 @@ func TestResolveProviderAgentStartCommand(t *testing.T) {
 	}
 	if rp.PromptMode != "none" {
 		t.Errorf("PromptMode = %q, want %q", rp.PromptMode, "none")
+	}
+	if !reflect.DeepEqual(rp.ProcessNames, []string{"my-custom-cli"}) {
+		t.Errorf("ProcessNames = %v, want [my-custom-cli]", rp.ProcessNames)
+	}
+	if rp.ReadyDelayMs != delay {
+		t.Errorf("ReadyDelayMs = %d, want %d", rp.ReadyDelayMs, delay)
+	}
+	if rp.ReadyPromptPrefix != "ready> " {
+		t.Errorf("ReadyPromptPrefix = %q, want %q", rp.ReadyPromptPrefix, "ready> ")
+	}
+	if !rp.EmitsPermissionWarning {
+		t.Error("EmitsPermissionWarning = false, want true")
+	}
+	if rp.ResumeCommand != "my-custom-cli --resume {{.SessionKey}}" {
+		t.Errorf("ResumeCommand = %q, want agent resume command", rp.ResumeCommand)
 	}
 }
 
@@ -137,6 +163,35 @@ func TestResolveProviderWorkspaceProvider(t *testing.T) {
 	}
 }
 
+func TestAgentProcessNamesResolvesProviderlessDetectedProvider(t *testing.T) {
+	cfg := &City{
+		Workspace: Workspace{Name: "city"},
+	}
+
+	got := AgentProcessNames(cfg, Agent{Name: "worker"}, lookPathOnly("codex"))
+	want := []string{"codex"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("AgentProcessNames() = %v, want %v", got, want)
+	}
+}
+
+func TestAgentProcessNamesPrefersAgentOverride(t *testing.T) {
+	agent := Agent{Name: "worker", ProcessNames: []string{"custom-agent"}}
+	cfg := &City{
+		Workspace: Workspace{Name: "city", Provider: "codex"},
+	}
+
+	got := AgentProcessNames(cfg, agent, lookPathNone)
+	want := []string{"custom-agent"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("AgentProcessNames() = %v, want %v", got, want)
+	}
+	got[0] = "mutated"
+	if agent.ProcessNames[0] != "custom-agent" {
+		t.Fatalf("agent process name mutated to %q", agent.ProcessNames[0])
+	}
+}
+
 func TestResolveProviderWorkspaceStartCommand(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{Name: "city", StartCommand: "my-agent --flag"}
@@ -195,6 +250,21 @@ func TestResolveProviderAgentStartCommandWinsOverWorkspace(t *testing.T) {
 	}
 	if rp.Command != "my-agent --custom" {
 		t.Errorf("Command = %q, want %q (agent.StartCommand should win)", rp.Command, "my-agent --custom")
+	}
+}
+
+func TestResolveProviderAgentLifecycleSurvivesStartCommandEscapeHatch(t *testing.T) {
+	agent := &Agent{
+		Name:         "scripted",
+		StartCommand: "env GC_LOG_LEVEL=debug custom-once --work",
+		Lifecycle:    AgentLifecycleOneShot,
+	}
+	rp, err := ResolveProvider(agent, &Workspace{Name: "city", Provider: "claude"}, nil, lookPathNone)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if got, want := rp.Lifecycle, AgentLifecycleOneShot; got != want {
+		t.Fatalf("Lifecycle = %q, want %q", got, want)
 	}
 }
 
@@ -270,25 +340,359 @@ func TestResolveProviderUserDefinedProvider(t *testing.T) {
 	agent := &Agent{Name: "scout", Provider: "kiro"}
 	cityProviders := map[string]ProviderSpec{
 		"kiro": {
-			Command:      "kiro",
-			Args:         []string{"--autonomous"},
-			PromptMode:   "arg",
-			ReadyDelayMs: 5000,
-			ProcessNames: []string{"kiro", "node"},
+			Command:          "kiro-cli",
+			Args:             []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+			PromptMode:       "arg",
+			ReadyDelayMs:     5000,
+			ProcessNames:     []string{"kiro", "node"},
+			SupportsHooks:    boolPtr(true),
+			InstructionsFile: "AGENTS.md",
+			ResumeFlag:       "--resume",
+			ResumeStyle:      "flag",
+			Env:              map[string]string{"KIRO_AGENT_MODE": "headless"},
+			PermissionModes:  map[string]string{"unrestricted": "--trust-mode full"},
 		},
 	}
-	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro"))
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
 	if rp.Name != "kiro" {
 		t.Errorf("Name = %q, want %q", rp.Name, "kiro")
 	}
-	if rp.CommandString() != "kiro --autonomous" {
-		t.Errorf("CommandString() = %q, want %q", rp.CommandString(), "kiro --autonomous")
+	if rp.CommandString() != "kiro-cli chat --no-interactive --agent gascity --trust-all-tools" {
+		t.Errorf("CommandString() = %q, want %q", rp.CommandString(), "kiro-cli chat --no-interactive --agent gascity --trust-all-tools")
 	}
 	if rp.ReadyDelayMs != 5000 {
 		t.Errorf("ReadyDelayMs = %d, want 5000", rp.ReadyDelayMs)
+	}
+	if len(rp.ProcessNames) != 2 || rp.ProcessNames[0] != "kiro" || rp.ProcessNames[1] != "node" {
+		t.Errorf("ProcessNames = %v, want [kiro node]", rp.ProcessNames)
+	}
+	if !rp.SupportsHooks {
+		t.Error("SupportsHooks = false, want true")
+	}
+	if rp.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q", rp.InstructionsFile, "AGENTS.md")
+	}
+	if rp.ResumeFlag != "--resume" {
+		t.Errorf("ResumeFlag = %q, want %q", rp.ResumeFlag, "--resume")
+	}
+	if rp.ResumeStyle != "flag" {
+		t.Errorf("ResumeStyle = %q, want %q", rp.ResumeStyle, "flag")
+	}
+	if rp.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want %q", rp.Env["KIRO_AGENT_MODE"], "headless")
+	}
+	if rp.PermissionModes["unrestricted"] != "--trust-mode full" {
+		t.Errorf("PermissionModes[unrestricted] = %q, want %q", rp.PermissionModes["unrestricted"], "--trust-mode full")
+	}
+}
+
+func TestResolveProviderKimiStartupDialogPolicyInheritedByWrapper(t *testing.T) {
+	base := "builtin:kimi"
+	agent := &Agent{Name: "scout", Provider: "wrapped-kimi"}
+	cityProviders := map[string]ProviderSpec{
+		"wrapped-kimi": {
+			Base:      &base,
+			Command:   "sh",
+			Args:      []string{"-c", "exec kimi --yolo --no-thinking"},
+			PathCheck: "kimi",
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kimi"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.BuiltinAncestor != "kimi" {
+		t.Fatalf("BuiltinAncestor = %q, want kimi", rp.BuiltinAncestor)
+	}
+	if rp.AcceptStartupDialogs == nil || *rp.AcceptStartupDialogs {
+		t.Fatalf("AcceptStartupDialogs = %v, want false inherited from builtin kimi", rp.AcceptStartupDialogs)
+	}
+}
+
+func TestResolveProviderKiroAgentArgsOverride(t *testing.T) {
+	agent := &Agent{
+		Name:     "scout",
+		Provider: "kiro",
+		Args:     []string{"chat", "--no-interactive", "--agent", "gascity", "--verbose"},
+	}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {
+			Command:      "kiro-cli",
+			Args:         []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+			PromptMode:   "arg",
+			ReadyDelayMs: 5000,
+			ProcessNames: []string{"kiro", "node"},
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if len(rp.Args) != 5 || rp.Args[4] != "--verbose" {
+		t.Errorf("Args = %v, want [chat --no-interactive --agent gascity --verbose]", rp.Args)
+	}
+	if rp.ReadyDelayMs != 5000 {
+		t.Errorf("ReadyDelayMs = %d, want 5000 (provider default preserved)", rp.ReadyDelayMs)
+	}
+}
+
+func TestResolveProviderKiroProviderArgsOverrideOmitsTrustAllTools(t *testing.T) {
+	agent := &Agent{
+		Name:     "scout",
+		Provider: "kiro",
+	}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {
+			Command:    "kiro-cli",
+			Args:       []string{"chat", "--no-interactive", "--agent", "gascity"},
+			PromptMode: "arg",
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	wantArgs := []string{"chat", "--no-interactive", "--agent", "gascity"}
+	if !reflect.DeepEqual(rp.Args, wantArgs) {
+		t.Fatalf("Args = %v, want %v", rp.Args, wantArgs)
+	}
+	if strings.Contains(rp.CommandString(), "--trust-all-tools") {
+		t.Fatalf("CommandString() = %q, want provider override without --trust-all-tools", rp.CommandString())
+	}
+	cmd, err := BuildProviderLaunchCommand("/city", rp, nil, SessionTransportTmux)
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand(tmux): %v", err)
+	}
+	if strings.Contains(cmd.Command, "--trust-all-tools") {
+		t.Fatalf("tmux launch command = %q, want provider override without --trust-all-tools", cmd.Command)
+	}
+}
+
+func TestResolveProviderBuiltinKiroACPCommand(t *testing.T) {
+	agent := &Agent{Name: "scout", Provider: "kiro"}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if !rp.SupportsACP {
+		t.Fatal("SupportsACP = false, want true")
+	}
+	if got := rp.ACPCommandString(); got != "kiro-cli acp --agent gascity" {
+		t.Errorf("ACPCommandString() = %q, want %q", got, "kiro-cli acp --agent gascity")
+	}
+	if got := ResolveSessionCreateTransport("", rp); got != "" {
+		t.Errorf("ResolveSessionCreateTransport(empty) = %q, want empty default transport", got)
+	}
+	cmd, err := BuildProviderLaunchCommand("/city", rp, nil, SessionTransportTmux)
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand(tmux): %v", err)
+	}
+	if cmd.Command != "kiro-cli chat --no-interactive --agent gascity --trust-all-tools" {
+		t.Errorf("tmux launch command = %q, want kiro-cli chat --no-interactive --agent gascity --trust-all-tools", cmd.Command)
+	}
+	acp, err := BuildProviderLaunchCommand("/city", rp, nil, SessionTransportACP)
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand(acp): %v", err)
+	}
+	if acp.Command != "kiro-cli acp --agent gascity" {
+		t.Errorf("acp launch command = %q, want kiro-cli acp --agent gascity", acp.Command)
+	}
+}
+
+func TestResolveProviderKiroAgentEnvMerges(t *testing.T) {
+	agent := &Agent{
+		Name:     "scout",
+		Provider: "kiro",
+		Env:      map[string]string{"EXTRA": "yes"},
+	}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {
+			Command: "kiro-cli",
+			Env:     map[string]string{"KIRO_AGENT_MODE": "headless"},
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want %q (provider env preserved)", rp.Env["KIRO_AGENT_MODE"], "headless")
+	}
+	if rp.Env["EXTRA"] != "yes" {
+		t.Errorf("Env[EXTRA] = %q, want %q (agent env merged)", rp.Env["EXTRA"], "yes")
+	}
+}
+
+func TestResolveProviderKiroDefaultPromptMode(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "kiro"}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {Command: "kiro-cli"},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.PromptMode != "arg" {
+		t.Errorf("PromptMode = %q, want %q (default)", rp.PromptMode, "arg")
+	}
+}
+
+func TestResolveProviderKiroInstructionsFileDefault(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "kiro"}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {Command: "kiro-cli"},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q (default)", rp.InstructionsFile, "AGENTS.md")
+	}
+}
+
+func TestResolveProviderKiroOptionsSchemaResolveDefaultArgs(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "kiro"}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {
+			Command:    "kiro-cli",
+			Args:       []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+			PromptMode: "arg",
+			OptionDefaults: map[string]string{
+				"permission_mode": "unrestricted",
+			},
+			OptionsSchema: []ProviderOption{
+				{
+					Key:     "permission_mode",
+					Label:   "Trust Mode",
+					Type:    "select",
+					Default: "default",
+					Choices: []OptionChoice{
+						{Value: "default", Label: "Default", FlagArgs: []string{"--trust-mode", "default"}},
+						{Value: "unrestricted", Label: "Full trust", FlagArgs: []string{"--trust-mode", "full"}},
+					},
+				},
+			},
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	defaultArgs := rp.ResolveDefaultArgs()
+	wantArgs := []string{"--trust-mode", "full"}
+	if !reflect.DeepEqual(defaultArgs, wantArgs) {
+		t.Errorf("ResolveDefaultArgs() = %v, want %v", defaultArgs, wantArgs)
+	}
+}
+
+func TestResolveProviderKiroAgentOptionDefaultsOverride(t *testing.T) {
+	agent := &Agent{
+		Name:           "worker",
+		Provider:       "kiro",
+		OptionDefaults: map[string]string{"permission_mode": "default"},
+	}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {
+			Command:    "kiro-cli",
+			PromptMode: "arg",
+			OptionDefaults: map[string]string{
+				"permission_mode": "unrestricted",
+			},
+			OptionsSchema: []ProviderOption{
+				{
+					Key:     "permission_mode",
+					Label:   "Trust Mode",
+					Type:    "select",
+					Default: "unrestricted",
+					Choices: []OptionChoice{
+						{Value: "default", Label: "Default", FlagArgs: []string{"--trust-mode", "default"}},
+						{Value: "unrestricted", Label: "Full trust", FlagArgs: []string{"--trust-mode", "full"}},
+					},
+				},
+			},
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.EffectiveDefaults["permission_mode"] != "default" {
+		t.Errorf("EffectiveDefaults[permission_mode] = %q, want %q (agent override)", rp.EffectiveDefaults["permission_mode"], "default")
+	}
+	defaultArgs := rp.ResolveDefaultArgs()
+	wantArgs := []string{"--trust-mode", "default"}
+	if !reflect.DeepEqual(defaultArgs, wantArgs) {
+		t.Errorf("ResolveDefaultArgs() = %v, want %v", defaultArgs, wantArgs)
+	}
+}
+
+func TestResolveProviderKiroPermissionModesDeepCopy(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "kiro"}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {
+			Command: "kiro-cli",
+			PermissionModes: map[string]string{
+				"unrestricted": "--trust-mode full",
+				"default":      "--trust-mode default",
+			},
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if len(rp.PermissionModes) != 2 {
+		t.Fatalf("got %d permission modes, want 2", len(rp.PermissionModes))
+	}
+	rp.PermissionModes["injected"] = "malicious"
+	if _, ok := cityProviders["kiro"].PermissionModes["injected"]; ok {
+		t.Error("mutating ResolvedProvider.PermissionModes leaked into city provider")
+	}
+}
+
+func TestAgentHasHooks_KiroViaInstallHooks(t *testing.T) {
+	agent := &Agent{Name: "worker"}
+	ws := &Workspace{InstallAgentHooks: []string{"kiro"}}
+	if !AgentHasHooks(agent, ws, "kiro", nil) {
+		t.Error("kiro in install_agent_hooks should have hooks")
+	}
+}
+
+func TestAgentHasHooks_KiroDefault(t *testing.T) {
+	agent := &Agent{Name: "worker"}
+	ws := &Workspace{Name: "test"}
+	if AgentHasHooks(agent, ws, "kiro", nil) {
+		t.Error("kiro without install_agent_hooks or explicit override should not have hooks by default")
+	}
+}
+
+func TestAgentHasHooks_KiroExplicitOverride(t *testing.T) {
+	yes := true
+	agent := &Agent{Name: "worker", HooksInstalled: &yes}
+	ws := &Workspace{Name: "test"}
+	if !AgentHasHooks(agent, ws, "kiro", nil) {
+		t.Error("kiro with hooks_installed=true should have hooks")
+	}
+}
+
+func TestBuiltinFamilyKiroIsKiro(t *testing.T) {
+	family := BuiltinFamily("kiro", nil)
+	if family != "kiro" {
+		t.Errorf("BuiltinFamily(kiro, nil) = %q, want \"kiro\"", family)
+	}
+}
+
+func TestBuiltinFamilyKiroWithCityProviders(t *testing.T) {
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {Command: "kiro-cli"},
+	}
+	family := BuiltinFamily("kiro", cityProviders)
+	if family != "kiro" {
+		t.Errorf("BuiltinFamily(kiro, city) = %q, want \"kiro\"", family)
 	}
 }
 
@@ -630,6 +1034,48 @@ func TestResolveProviderBaseChainEmitsDangerousBypass(t *testing.T) {
 	}
 }
 
+func TestResolveProviderBaseChainStripsCodexAliases(t *testing.T) {
+	b := "builtin:codex"
+	city := map[string]ProviderSpec{
+		"codex-max": {
+			Base:    &b,
+			Command: "aimux",
+			Args: []string{
+				"run", "codex", "--",
+				"--dangerously-bypass-approvals-and-sandbox",
+				"-m", "gpt-5.5",
+				"-c", "model_reasoning_effort=\"xhigh\"",
+			},
+			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 resume {{.SessionKey}}",
+		},
+	}
+	agent := &Agent{Name: "codex-max", Provider: "codex-max"}
+	resolved, err := ResolveProvider(agent, nil, city, lookPathAll)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	wantArgs := []string{"run", "codex", "--"}
+	if !reflect.DeepEqual(resolved.Args, wantArgs) {
+		t.Fatalf("Args = %v, want %v", resolved.Args, wantArgs)
+	}
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.5" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want gpt-5.5", got)
+	}
+	if got := resolved.EffectiveDefaults["effort"]; got != "xhigh" {
+		t.Fatalf("EffectiveDefaults[effort] = %q, want xhigh", got)
+	}
+	command := resolved.CommandString()
+	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
+		command = command + " " + strings.Join(defaultArgs, " ")
+	}
+	if strings.Count(command, "gpt-5.5") != 1 {
+		t.Fatalf("resolved launch command = %q, want one model flag", command)
+	}
+	if strings.Count(command, "model_reasoning_effort") != 1 {
+		t.Fatalf("resolved launch command = %q, want one effort flag", command)
+	}
+}
+
 func TestResolveProviderChainArgsAppendAffectsResolvedArgs(t *testing.T) {
 	custom := map[string]ProviderSpec{
 		"codex": {
@@ -650,6 +1096,309 @@ func TestResolveProviderChainArgsAppendAffectsResolvedArgs(t *testing.T) {
 	want := []string{"run", "codex", "--", "-m", "gpt-5.4"}
 	if !reflect.DeepEqual(resolved.Args, want) {
 		t.Fatalf("Args = %v, want %v", resolved.Args, want)
+	}
+}
+
+func TestResolveProviderChainLeafArgsOverrideInheritedCodexDefaults(t *testing.T) {
+	b := "builtin:codex"
+	city := map[string]ProviderSpec{
+		"codex-mini": {
+			Base:    &b,
+			Command: "aimux",
+			Args: []string{
+				"run", "codex", "--",
+				"--dangerously-bypass-approvals-and-sandbox",
+				"-m", "gpt-5.3-codex-spark",
+				"-c", "model_reasoning_effort=\"medium\"",
+			},
+			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume {{.SessionKey}}",
+		},
+	}
+	agent := &Agent{Name: "codex-min", Provider: "codex-mini"}
+	resolved, err := ResolveProvider(agent, nil, city, lookPathAll)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	wantArgs := []string{"run", "codex", "--"}
+	if !reflect.DeepEqual(resolved.Args, wantArgs) {
+		t.Fatalf("Args = %v, want %v", resolved.Args, wantArgs)
+	}
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex-spark" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want gpt-5.3-codex-spark", got)
+	}
+	if got := resolved.EffectiveDefaults["effort"]; got != "medium" {
+		t.Fatalf("EffectiveDefaults[effort] = %q, want medium", got)
+	}
+	command := resolved.CommandString()
+	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
+		command = command + " " + strings.Join(defaultArgs, " ")
+	}
+	if strings.Contains(command, "model_reasoning_effort=xhigh") {
+		t.Fatalf("resolved launch command = %q, inherited max effort leaked into mini provider", command)
+	}
+	if strings.Contains(command, "gpt-5.5") {
+		t.Fatalf("resolved launch command = %q, inherited max model leaked into mini provider", command)
+	}
+	if strings.Count(command, "gpt-5.3-codex-spark") != 1 {
+		t.Fatalf("resolved launch command = %q, want one spark model flag", command)
+	}
+	if strings.Count(command, "model_reasoning_effort=medium") != 1 {
+		t.Fatalf("resolved launch command = %q, want one medium effort flag", command)
+	}
+	resumeCommand := strings.ReplaceAll(resolved.ResumeCommand, "{{.SessionKey}}", "session-123")
+	if !strings.Contains(resumeCommand, "resume -c model_reasoning_effort=medium session-123") {
+		t.Fatalf("resolved resume command = %q, missing medium effort default before session key", resumeCommand)
+	}
+}
+
+func TestResolveProviderExplicitBaseArgsOverrideSameLayerOptionDefaults(t *testing.T) {
+	builtinCodex := "builtin:codex"
+	providers := map[string]ProviderSpec{
+		"codex-mini": {
+			Base: &builtinCodex,
+			Args: []string{
+				"-m",
+				"gpt-5.3-codex-spark",
+			},
+			OptionDefaults: map[string]string{
+				"model": "gpt-5.5",
+			},
+		},
+	}
+	agent := &Agent{Name: "codex-min", Provider: "codex-mini"}
+
+	resolved, err := ResolveProvider(agent, nil, providers, lookPathOnly("codex"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex-spark" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want args-inferred gpt-5.3-codex-spark", got)
+	}
+	defaultLine := strings.Join(resolved.ResolveDefaultArgs(), " ")
+	if strings.Contains(defaultLine, "gpt-5.5") {
+		t.Fatalf("ResolveDefaultArgs() = %v, preserved stale same-layer option_defaults", resolved.ResolveDefaultArgs())
+	}
+	if !strings.Contains(defaultLine, "gpt-5.3-codex-spark") {
+		t.Fatalf("ResolveDefaultArgs() = %v, missing args-inferred model", resolved.ResolveDefaultArgs())
+	}
+}
+
+func TestResolveProviderChainChildOptionDefaultsBeatInheritedArgs(t *testing.T) {
+	builtinCodex := "builtin:codex"
+	city := map[string]ProviderSpec{
+		"codex-base": {
+			Base:    &builtinCodex,
+			Command: "aimux",
+			Args: []string{
+				"run", "codex", "--",
+				"-m", "gpt-5.5",
+			},
+			ResumeCommand: "aimux run codex -- resume {{.SessionKey}}",
+		},
+		"codex-mini": {
+			Base: basePtr("codex-base"),
+			OptionDefaults: map[string]string{
+				"model": "gpt-5.3-codex-spark",
+			},
+		},
+	}
+	resolved, err := ResolveProviderChain("codex-mini", city["codex-mini"], city)
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex-spark" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want child option default gpt-5.3-codex-spark", got)
+	}
+	if strings.Contains(strings.Join(resolved.ResolveDefaultArgs(), " "), "gpt-5.5") {
+		t.Fatalf("ResolveDefaultArgs() = %v, inherited parent arg overrode child option_defaults", resolved.ResolveDefaultArgs())
+	}
+}
+
+func TestResolveProviderChainArgsAppendInfersSchemaDefaults(t *testing.T) {
+	builtinCodex := "builtin:codex"
+	providers := map[string]ProviderSpec{
+		"codex-wrapper": {
+			Base:          &builtinCodex,
+			Command:       "aimux",
+			Args:          []string{"run", "codex", "--"},
+			ResumeCommand: "aimux run codex -- resume {{.SessionKey}}",
+		},
+		"codex-mini": {
+			Base: basePtr("codex-wrapper"),
+			ArgsAppend: []string{
+				"-m",
+				"gpt-5.3-codex-spark",
+			},
+		},
+	}
+
+	resolved, err := ResolveProviderChain("codex-mini", providers["codex-mini"], providers)
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	wantArgs := []string{"run", "codex", "--"}
+	if !reflect.DeepEqual(resolved.Args, wantArgs) {
+		t.Fatalf("Args = %v, want schema-managed args_append stripped to %v", resolved.Args, wantArgs)
+	}
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex-spark" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want gpt-5.3-codex-spark", got)
+	}
+	defaultLine := strings.Join(resolved.ResolveDefaultArgs(), " ")
+	if !strings.Contains(defaultLine, "--model gpt-5.3-codex-spark") {
+		t.Fatalf("ResolveDefaultArgs() = %v, missing args_append-inferred model", resolved.ResolveDefaultArgs())
+	}
+	optKeys := resolved.Provenance.MapKeyLayer["option_defaults"]
+	if optKeys == nil {
+		t.Fatal("option_defaults provenance missing")
+	}
+	if got := optKeys["model"]; got != "providers.codex-mini" {
+		t.Fatalf("option_defaults[model] layer = %q, want providers.codex-mini", got)
+	}
+}
+
+func TestResolveProviderChainSchemaOnlyChildArgsReplaceInheritedArgs(t *testing.T) {
+	builtinCodex := "builtin:codex"
+	providers := map[string]ProviderSpec{
+		"codex-wrapper": {
+			Base:    &builtinCodex,
+			Command: "aimux",
+			Args: []string{
+				"run",
+				"codex",
+				"--",
+				"--parent-non-schema",
+			},
+			ResumeCommand: "aimux run codex -- resume {{.SessionKey}}",
+		},
+		"codex-mini": {
+			Base: basePtr("codex-wrapper"),
+			Args: []string{
+				"-m",
+				"gpt-5.3-codex-spark",
+			},
+		},
+	}
+
+	resolved, err := ResolveProviderChain("codex-mini", providers["codex-mini"], providers)
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if resolved.Args == nil {
+		t.Fatalf("Args = nil, want non-nil empty slice to preserve child replacement")
+	}
+	if len(resolved.Args) != 0 {
+		t.Fatalf("Args = %v, want empty slice with no inherited parent args", resolved.Args)
+	}
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex-spark" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want gpt-5.3-codex-spark", got)
+	}
+}
+
+func TestResolveProviderChainCodexSuggestArgsReplaceInheritedUnrestricted(t *testing.T) {
+	builtinCodex := "builtin:codex"
+	providers := map[string]ProviderSpec{
+		"codex-suggest": {
+			Base: &builtinCodex,
+			Args: []string{
+				"--ask-for-approval",
+				"untrusted",
+				"--sandbox",
+				"read-only",
+			},
+		},
+	}
+
+	resolved, err := ResolveProviderChain("codex-suggest", providers["codex-suggest"], providers)
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if len(resolved.Args) != 0 {
+		t.Fatalf("Args = %v, want schema-managed args stripped", resolved.Args)
+	}
+	if got := resolved.EffectiveDefaults["permission_mode"]; got != "suggest" {
+		t.Fatalf("EffectiveDefaults[permission_mode] = %q, want suggest", got)
+	}
+	defaultArgs := resolved.ResolveDefaultArgs()
+	defaultLine := strings.Join(defaultArgs, " ")
+	if strings.Contains(defaultLine, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("ResolveDefaultArgs() = %v, preserved inherited unrestricted flag", defaultArgs)
+	}
+	if !strings.Contains(defaultLine, "--ask-for-approval untrusted --sandbox read-only") {
+		t.Fatalf("ResolveDefaultArgs() = %v, missing suggest permission flags", defaultArgs)
+	}
+	if strings.Count(defaultLine, "--sandbox read-only") != 1 {
+		t.Fatalf("ResolveDefaultArgs() = %v, want one read-only sandbox flag sequence", defaultArgs)
+	}
+}
+
+func TestResolveProviderAgentOptionDefaultsUpdateWrappedResumeDefaults(t *testing.T) {
+	builtinCodex := "builtin:codex"
+	providers := map[string]ProviderSpec{
+		"codex-mini": {
+			Base:    &builtinCodex,
+			Command: "aimux",
+			Args: []string{
+				"run", "codex", "--",
+				"--dangerously-bypass-approvals-and-sandbox",
+				"-m", "gpt-5.3-codex-spark",
+				"-c", "model_reasoning_effort=\"medium\"",
+			},
+			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex-spark resume {{.SessionKey}}",
+		},
+	}
+	agent := &Agent{
+		Name:     "worker",
+		Provider: "codex-mini",
+		OptionDefaults: map[string]string{
+			"effort": "high",
+		},
+	}
+	resolved, err := ResolveProvider(agent, nil, providers, lookPathOnly("aimux"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	resumeCommand := strings.ReplaceAll(resolved.ResumeCommand, "{{.SessionKey}}", "session-123")
+	if !strings.Contains(resumeCommand, "resume -c model_reasoning_effort=high session-123") {
+		t.Fatalf("resolved resume command = %q, missing agent effort default before session key", resumeCommand)
+	}
+	if strings.Contains(resumeCommand, "model_reasoning_effort=medium") {
+		t.Fatalf("resolved resume command = %q, retained provider effort default after agent override", resumeCommand)
+	}
+	defaultArgs := strings.Join(resolved.ResolveDefaultArgs(), " ")
+	if !strings.Contains(defaultArgs, "model_reasoning_effort=high") {
+		t.Fatalf("ResolveDefaultArgs() = %v, missing agent effort default", resolved.ResolveDefaultArgs())
+	}
+}
+
+func TestResolveProviderFlagStyleResumeCommandAppendsDefaults(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "custom"}
+	providers := map[string]ProviderSpec{
+		"custom": {
+			Command:       "custom-agent",
+			ResumeFlag:    "--resume",
+			ResumeStyle:   "flag",
+			ResumeCommand: "custom-agent --resume {{.SessionKey}} --safe",
+			OptionDefaults: map[string]string{
+				"model": "opus",
+			},
+			OptionsSchema: []ProviderOption{
+				{
+					Key: "model",
+					Choices: []OptionChoice{
+						{Value: "opus", FlagArgs: []string{"--model", "claude-opus-4-7"}},
+					},
+				},
+			},
+		},
+	}
+
+	resolved, err := ResolveProvider(agent, nil, providers, lookPathOnly("custom-agent"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	want := "custom-agent --resume {{.SessionKey}} --safe --model claude-opus-4-7"
+	if resolved.ResumeCommand != want {
+		t.Fatalf("ResumeCommand = %q, want %q", resolved.ResumeCommand, want)
 	}
 }
 
@@ -715,7 +1464,7 @@ func TestLookupProviderNotInPath(t *testing.T) {
 
 func TestLookupProviderCityNotInPath(t *testing.T) {
 	city := map[string]ProviderSpec{
-		"kiro": {Command: "kiro"},
+		"kiro": {Command: "kiro-cli"},
 	}
 	_, err := lookupProvider("kiro", city, lookPathNone)
 	if err == nil {
@@ -1250,6 +1999,7 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		ReadyPromptPrefix:      "$ ",
 		ProcessNames:           []string{"custom"},
 		EmitsPermissionWarning: boolPtr(true),
+		AcceptStartupDialogs:   boolPtr(true),
 		Env:                    map[string]string{"K": "V"},
 		PathCheck:              "custom-bin",
 		SupportsACP:            boolPtr(true),

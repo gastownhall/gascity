@@ -8,6 +8,13 @@
         "timeoutSec": 30
       }
     ],
+    "preCompact": [
+      {
+        "type": "command",
+        "bash": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc handoff --auto \"context cycle\"",
+        "timeoutSec": 30
+      }
+    ],
     "userPromptSubmitted": [
       {
         "type": "command",
@@ -17,13 +24,6 @@
       {
         "type": "command",
         "bash": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc mail check --inject",
-        "timeoutSec": 10
-      }
-    ],
-    "sessionEnd": [
-      {
-        "type": "command",
-        "bash": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc hook --inject",
         "timeoutSec": 10
       }
     ]

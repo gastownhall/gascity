@@ -25,6 +25,9 @@ lives in the [Architecture](../architecture/index.md) section.
 | `named-configured-sessions` | Accepted | Explicit canonical named sessions backed by reusable templates; partially superseded by `session-model-unification` |
 | `session-model-unification` | Accepted | Unified post-pool session model: config factories, canonical named identities, exact session ownership, and `scale_check`-only controller demand |
 | `session-lifecycle-domain-cleanup-plan` | Implemented with hardening | Red-green-refactor plan for centralizing session lifecycle projection and transition writes behind typed abstractions |
+| `pack-import-export-surface` | Proposed | Replace `transitive` / `export` with explicit imports plus exports |
 | `external-messaging-fabric` | Implemented | Provider-neutral external conversation bindings, delivery context, and group sessions |
 | `external-messaging-shared-threads` | Implemented | Transcript-backed shared-thread model with membership replay and speaker-only group routing |
 | `worker-conformance` | Proposed | Canonical WorkerCore/WorkerInference contract, transcript-first conformance, and migration toward `internal/worker` |
+| `two-minute-ci-blacksmith` | Proposed | Planner-driven Blacksmith CI architecture targeting two-minute required PR feedback |
+| `packv2/` | Historical / rollout ledger | PackV2 engineering design notes moved out of public docs; use user-facing guides and generated reference for current authoring guidance |

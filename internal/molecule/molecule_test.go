@@ -21,9 +21,7 @@ import (
 // graph will be missing the dep — which is exactly what we saw in
 // production.
 func TestBuildRecipeApplyPlanBugReportFlowV2(t *testing.T) {
-	prev := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+	formulatest.EnableV2ForTest(t)
 
 	const toolingPath = "/home/ubuntu/tooling/formulas"
 	if _, err := os.Stat(filepath.Join(toolingPath, "mol-bug-report-flow-v2.formula.toml")); err != nil {
@@ -78,6 +76,100 @@ func TestBuildRecipeApplyPlanBugReportFlowV2(t *testing.T) {
 	}
 }
 
+func TestBuildRecipeApplyPlanReviewQuorumSubstitutesSynthesisTarget(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	repoRoot := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	searchDir := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core", "formulas")
+	recipe, err := formula.Compile(context.Background(), "mol-review-quorum", []string{searchDir}, map[string]string{
+		"subject":           "PR-123",
+		"lane_one_id":       "primary",
+		"lane_one_provider": "provider-a",
+		"lane_one_model":    "model-a",
+		"lane_one_target":   "target-a",
+		"lane_two_id":       "secondary",
+		"lane_two_provider": "provider-b",
+		"lane_two_model":    "model-b",
+		"lane_two_target":   "target-b",
+		"synthesis_target":  "custom-review-synthesis",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	plan, _, _, err := buildRecipeApplyPlan(recipe, Options{Vars: map[string]string{
+		"lane_one_id":       "primary",
+		"lane_one_provider": "provider-a",
+		"lane_one_model":    "model-a",
+		"lane_one_target":   "target-a",
+		"lane_two_id":       "secondary",
+		"lane_two_provider": "provider-b",
+		"lane_two_model":    "model-b",
+		"lane_two_target":   "target-b",
+		"synthesis_target":  "custom-review-synthesis",
+	}})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+	var synthesisNode *beads.GraphApplyNode
+	for i := range plan.Nodes {
+		if plan.Nodes[i].Key == "mol-review-quorum.synthesize-review-quorum" {
+			synthesisNode = &plan.Nodes[i]
+			break
+		}
+	}
+	if synthesisNode == nil {
+		t.Fatal("synthesis node missing")
+	}
+	if got := synthesisNode.Metadata["gc.run_target"]; got != "custom-review-synthesis" {
+		t.Fatalf("synthesis gc.run_target = %q, want custom-review-synthesis", got)
+	}
+	wantNodes := map[string]map[string]string{
+		"mol-review-quorum.review-lane-one.attempt.1": {
+			"gc.run_target":         "target-a",
+			"gc.provider":           "provider-a",
+			"gc.model":              "model-a",
+			"gc.review_quorum_lane": "primary",
+		},
+		"mol-review-quorum.review-lane-two.attempt.1": {
+			"gc.run_target":         "target-b",
+			"gc.provider":           "provider-b",
+			"gc.model":              "model-b",
+			"gc.review_quorum_lane": "secondary",
+		},
+	}
+	for key, wantMetadata := range wantNodes {
+		node := nodeByKey(plan.Nodes, key)
+		if node == nil {
+			t.Fatalf("node %s missing", key)
+		}
+		for name, want := range wantMetadata {
+			if got := node.Metadata[name]; got != want {
+				t.Fatalf("%s %s = %q, want %q", key, name, got, want)
+			}
+		}
+		if got := node.Metadata["gc.output_json"]; got != "" {
+			t.Fatalf("%s gc.output_json = %q, want empty until worker writes JSON", key, got)
+		}
+		if got := node.Metadata["gc.output_json_schema"]; got != "review-quorum.lane.v1" {
+			t.Fatalf("%s gc.output_json_schema = %q, want review-quorum.lane.v1", key, got)
+		}
+	}
+}
+
+func nodeByKey(nodes []beads.GraphApplyNode, key string) *beads.GraphApplyNode {
+	for i := range nodes {
+		if nodes[i].Key == key {
+			return &nodes[i]
+		}
+	}
+	return nil
+}
+
 // TestCookTeardownRetryBlocksOnAttempt exercises the end-to-end Cook
 // path (compile → instantiate) to confirm that a teardown-scoped retry
 // control bead ends up with a blocks dep on its attempt bead. Without
@@ -85,9 +177,7 @@ func TestBuildRecipeApplyPlanBugReportFlowV2(t *testing.T) {
 // soon as its non-attempt blockers (body scope) close, trips the
 // "latest attempt ... is open, not closed" invariant, and crash-loops.
 func TestCookTeardownRetryBlocksOnAttempt(t *testing.T) {
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	prevGraphApply := IsGraphApplyEnabled()
 	SetGraphApplyEnabled(true)
 	t.Cleanup(func() { SetGraphApplyEnabled(prevGraphApply) })
@@ -172,6 +262,9 @@ type graphApplySpyStore struct {
 	*beads.MemStore
 	plan   *beads.GraphApplyPlan
 	result *beads.GraphApplyResult
+	err    error
+	errs   []error
+	calls  int
 }
 
 func priorityPtr(v int) *int {
@@ -180,6 +273,17 @@ func priorityPtr(v int) *int {
 
 func (s *graphApplySpyStore) ApplyGraphPlan(_ context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
 	s.plan = plan
+	s.calls++
+	if len(s.errs) > 0 {
+		err := s.errs[0]
+		s.errs = s.errs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
+	if s.err != nil {
+		return nil, s.err
+	}
 	if s.result != nil {
 		return s.result, nil
 	}
@@ -317,6 +421,129 @@ func TestInstantiateUsesGraphApplyStoreWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestInstantiateRetriesTransientGraphApplyBeforeFallback(t *testing.T) {
+	store := &graphApplySpyStore{
+		MemStore: beads.NewMemStore(),
+		errs: []error{
+			fmt.Errorf("bd create --graph: exit status 1: [mysql] packets.go:58 read tcp 127.0.0.1:41442->127.0.0.1:50546: i/o timeout: graph create: adding edge bd-1->bd-2: failed to check for dependency cycle: invalid connection"),
+			nil,
+		},
+	}
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.step", Title: "Work", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.step", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	if store.calls != 2 {
+		t.Fatalf("ApplyGraphPlan calls = %d, want 2", store.calls)
+	}
+	if result.RootID != "bd-1" {
+		t.Fatalf("RootID = %q, want graph apply ID bd-1", result.RootID)
+	}
+	beads, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(beads) != 0 {
+		t.Fatalf("fallback created %d beads after retry succeeded", len(beads))
+	}
+}
+
+func TestInstantiateFallsBackWhenGraphApplyDoltConnectionTimesOut(t *testing.T) {
+	store := &graphApplySpyStore{
+		MemStore: beads.NewMemStore(),
+		err:      fmt.Errorf("bd create --graph: exit status 1: [mysql] packets.go:58 read tcp 127.0.0.1:41442->127.0.0.1:50546: i/o timeout: graph create: adding edge bd-1->bd-2: failed to check for dependency cycle: invalid connection"),
+	}
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.step", Title: "Work", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.step", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	if store.plan == nil {
+		t.Fatal("ApplyGraphPlan was not attempted")
+	}
+	if store.calls != 2 {
+		t.Fatalf("ApplyGraphPlan calls = %d, want 2", store.calls)
+	}
+	if result.Created != 2 {
+		t.Fatalf("Created = %d, want 2", result.Created)
+	}
+	if result.RootID == "" || result.RootID == "bd-1" {
+		t.Fatalf("RootID = %q, want sequential store ID", result.RootID)
+	}
+	if _, err := store.Get(result.RootID); err != nil {
+		t.Fatalf("fallback root missing from store: %v", err)
+	}
+}
+
+func TestInstantiateDoesNotFallbackForNonTransientGraphApplyError(t *testing.T) {
+	store := &graphApplySpyStore{
+		MemStore: beads.NewMemStore(),
+		err:      fmt.Errorf("bd create --graph: graph apply result missing IDs for keys: wf.step"),
+	}
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true},
+			{ID: "wf.step", Title: "Work", Type: "task"},
+		},
+	}
+
+	_, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err == nil {
+		t.Fatal("Instantiate error = nil, want graph apply error")
+	}
+	if !strings.Contains(err.Error(), "missing IDs") {
+		t.Fatalf("error = %v, want graph apply validation detail", err)
+	}
+	if store.calls != 1 {
+		t.Fatalf("ApplyGraphPlan calls = %d, want 1", store.calls)
+	}
+	beads, listErr := store.ListOpen()
+	if listErr != nil {
+		t.Fatalf("ListOpen: %v", listErr)
+	}
+	if len(beads) != 0 {
+		t.Fatalf("fallback created %d beads for non-transient graph apply error", len(beads))
+	}
+}
+
+func TestIsTransientGraphApplyErrorTreatsCommandTimeoutAsTransient(t *testing.T) {
+	err := fmt.Errorf("bd create --graph: timed out after 45s")
+	if !isTransientGraphApplyError(err) {
+		t.Fatalf("isTransientGraphApplyError(%v) = false, want true", err)
+	}
+}
+
 func TestBuildRecipeApplyPlan_GraphWorkflowOwnershipUsesTracks(t *testing.T) {
 	recipe := &formula.Recipe{
 		Name: "wf",
@@ -447,6 +674,27 @@ func TestInstantiateSequentialPathPreservesStepMetadata(t *testing.T) {
 	}
 	if got := stepBead.Metadata["gc.root_store_ref"]; got != "store-ref" {
 		t.Fatalf("gc.root_store_ref = %q, want store-ref; full metadata = %v", got, stepBead.Metadata)
+	}
+}
+
+func TestStepToBeadSubstitutesMetadataAndNotes(t *testing.T) {
+	bead := stepToBead(formula.RecipeStep{
+		Title: "Work",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.routed_to": "{{agent}}",
+		},
+		Notes: "retry {{attempt}}",
+	}, map[string]string{
+		"agent":   "worker",
+		"attempt": "1",
+	}, nil)
+
+	if got := bead.Metadata["gc.routed_to"]; got != "worker" {
+		t.Fatalf("gc.routed_to = %q, want worker", got)
+	}
+	if got := bead.Metadata["notes"]; got != "retry 1" {
+		t.Fatalf("notes = %q, want retry 1", got)
 	}
 }
 
@@ -1238,6 +1486,43 @@ func TestInstantiateRootOnly(t *testing.T) {
 	all, _ := store.ListOpen()
 	if len(all) != 1 {
 		t.Errorf("store has %d beads, want 1", len(all))
+	}
+}
+
+func TestInstantiateRunnableWispRootPreservesTaskType(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name:     "patrol",
+		RootOnly: true,
+		Steps: []formula.RecipeStep{
+			{ID: "patrol", Title: "Patrol", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "wisp"}},
+			{ID: "patrol.scan", Title: "Scan", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "patrol.scan", DependsOnID: "patrol", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	root, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", result.RootID, err)
+	}
+	if root.Type != "task" {
+		t.Fatalf("root Type = %q, want task", root.Type)
+	}
+	if got := root.Metadata["gc.kind"]; got != "wisp" {
+		t.Fatalf("root gc.kind = %q, want wisp", got)
+	}
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != result.RootID {
+		t.Fatalf("Ready() = %+v, want only root %s", ready, result.RootID)
 	}
 }
 
@@ -2131,5 +2416,317 @@ func TestBuildRecipeApplyPlan_PreserveRootTypeKeepsTaskRoot(t *testing.T) {
 	}
 	if plan.Nodes[0].Type != "task" {
 		t.Fatalf("plan root type = %q, want task", plan.Nodes[0].Type)
+	}
+}
+
+// TestInstantiate_NonRootStepsGetStepType verifies that non-root step beads
+// defaulting to "task" (empty or explicit) get coerced to "step" so Ready()
+// and `bd ready` skip them (#1039). Explicit non-"task" types ("bug",
+// "epic", ...) are preserved. The root still becomes "molecule".
+func TestInstantiate_NonRootStepsGetStepType(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name: "mol-demo",
+		Steps: []formula.RecipeStep{
+			{ID: "mol-demo", Title: "Root", IsRoot: true},
+			// step-a: no explicit type -> "step"
+			{ID: "mol-demo.step-a", Title: "Step A"},
+			// step-b: explicit "task" (mirrors the compiler's default) -> "step"
+			{ID: "mol-demo.step-b", Title: "Step B", Type: "task"},
+			// step-c: explicit non-"task" type is preserved
+			{ID: "mol-demo.step-c", Title: "Step C", Type: "bug"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "mol-demo.step-a", DependsOnID: "mol-demo", Type: "parent-child"},
+			{StepID: "mol-demo.step-b", DependsOnID: "mol-demo", Type: "parent-child"},
+			{StepID: "mol-demo.step-c", DependsOnID: "mol-demo", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	cases := map[string]string{
+		"mol-demo":        "molecule",
+		"mol-demo.step-a": "step",
+		"mol-demo.step-b": "step",
+		"mol-demo.step-c": "bug",
+	}
+	for stepID, wantType := range cases {
+		beadID := result.IDMapping[stepID]
+		b, err := store.Get(beadID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", stepID, err)
+		}
+		if b.Type != wantType {
+			t.Errorf("%s.Type = %q, want %q", stepID, b.Type, wantType)
+		}
+	}
+}
+
+// TestInstantiate_StepBeadsExcludedFromReady verifies the end-to-end intent:
+// after instantiating a formula, Ready() skips every step bead whose type
+// defaulted (#1039). The root is already "molecule" and excluded.
+func TestInstantiate_StepBeadsExcludedFromReady(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name: "mol-demo",
+		Steps: []formula.RecipeStep{
+			{ID: "mol-demo", Title: "Root", IsRoot: true},
+			{ID: "mol-demo.step-a", Title: "Load context"},
+			{ID: "mol-demo.step-b", Title: "Run tests"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "mol-demo.step-a", DependsOnID: "mol-demo", Type: "parent-child"},
+			{StepID: "mol-demo.step-b", DependsOnID: "mol-demo", Type: "parent-child"},
+		},
+	}
+
+	if _, err := Instantiate(context.Background(), store, recipe, Options{}); err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	// Add a real actionable task alongside the formula to confirm Ready() still
+	// returns genuine work.
+	if _, err := store.Create(beads.Bead{Title: "real work", Type: "task"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if len(ready) != 1 {
+		titles := make([]string, 0, len(ready))
+		for _, b := range ready {
+			titles = append(titles, b.Title+"/"+b.Type)
+		}
+		t.Fatalf("Ready() returned %d beads, want 1 (only the real task); got %v", len(ready), titles)
+	}
+	if ready[0].Title != "real work" || ready[0].Type != "task" {
+		t.Errorf("Ready()[0] = %q/%q, want %q/%q", ready[0].Title, ready[0].Type, "real work", "task")
+	}
+}
+
+// TestBuildRecipeApplyPlan_NonRootStepsGetStepType mirrors
+// TestInstantiate_NonRootStepsGetStepType for the graph-apply plan path.
+func TestBuildRecipeApplyPlan_NonRootStepsGetStepType(t *testing.T) {
+	recipe := &formula.Recipe{
+		Name: "mol-demo",
+		Steps: []formula.RecipeStep{
+			{ID: "mol-demo", Title: "Root", IsRoot: true},
+			{ID: "mol-demo.step-a", Title: "Step A"},
+			{ID: "mol-demo.step-b", Title: "Step B", Type: "task"},
+			{ID: "mol-demo.step-c", Title: "Step C", Type: "bug"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "mol-demo.step-a", DependsOnID: "mol-demo", Type: "parent-child"},
+			{StepID: "mol-demo.step-b", DependsOnID: "mol-demo", Type: "parent-child"},
+			{StepID: "mol-demo.step-c", DependsOnID: "mol-demo", Type: "parent-child"},
+		},
+	}
+
+	plan, _, _, err := buildRecipeApplyPlan(recipe, Options{})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+
+	typesByKey := make(map[string]string, len(plan.Nodes))
+	for _, n := range plan.Nodes {
+		typesByKey[n.Key] = n.Type
+	}
+	cases := map[string]string{
+		"mol-demo":        "molecule",
+		"mol-demo.step-a": "step",
+		"mol-demo.step-b": "step",
+		"mol-demo.step-c": "bug",
+	}
+	for key, wantType := range cases {
+		if got := typesByKey[key]; got != wantType {
+			t.Errorf("plan node %q Type = %q, want %q", key, got, wantType)
+		}
+	}
+}
+
+// TestInstantiate_GraphWorkflowSkipsStepCoercion verifies that non-root
+// steps of a graph.v2 workflow (recipe.Steps[0] marked with
+// gc.kind=workflow) retain their original type rather than being
+// coerced to "step". Graph workflows use step beads as independently
+// claimable actionable work; coercing them would hide real work from
+// `bd ready` and stall the workflow (#1039 regression guard).
+func TestInstantiate_GraphWorkflowSkipsStepCoercion(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{
+				ID: "wf", Title: "Workflow root", Type: "task", IsRoot: true,
+				Metadata: map[string]string{"gc.kind": "workflow"},
+			},
+			{ID: "wf.body", Title: "Body work", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.body", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	body, err := store.Get(result.IDMapping["wf.body"])
+	if err != nil {
+		t.Fatalf("Get(body): %v", err)
+	}
+	if body.Type != "task" {
+		t.Errorf("graph-workflow step.Type = %q, want %q (must stay actionable)", body.Type, "task")
+	}
+}
+
+func TestBuildRecipeApplyPlan_GraphWorkflowSkipsStepCoercion(t *testing.T) {
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{
+				ID: "wf", Title: "Workflow root", Type: "task", IsRoot: true,
+				Metadata: map[string]string{"gc.kind": "workflow"},
+			},
+			{ID: "wf.body", Title: "Body work", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.body", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+
+	plan, _, _, err := buildRecipeApplyPlan(recipe, Options{})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+	for _, n := range plan.Nodes {
+		if n.Key == "wf.body" && n.Type != "task" {
+			t.Errorf("graph-workflow node.Type = %q, want %q (must stay actionable)", n.Type, "task")
+		}
+	}
+}
+
+func TestInstantiate_GraphAttemptRecipeSkipsStepCoercion(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := graphAttemptRecipeForStepTypeTest()
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	body, err := store.Get(result.IDMapping["wf.review.iteration.1.body"])
+	if err != nil {
+		t.Fatalf("Get(body): %v", err)
+	}
+	if body.Type != "task" {
+		t.Errorf("graph-attempt child Type = %q, want %q (must stay actionable)", body.Type, "task")
+	}
+}
+
+func TestBuildRecipeApplyPlan_GraphAttemptRecipeSkipsStepCoercion(t *testing.T) {
+	recipe := graphAttemptRecipeForStepTypeTest()
+
+	plan, _, _, err := buildRecipeApplyPlan(recipe, Options{})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+	for _, n := range plan.Nodes {
+		if n.Key == "wf.review.iteration.1.body" && n.Type != "task" {
+			t.Errorf("graph-attempt child node Type = %q, want %q (must stay actionable)", n.Type, "task")
+		}
+	}
+}
+
+func graphAttemptRecipeForStepTypeTest() *formula.Recipe {
+	return &formula.Recipe{
+		Name: "wf.review.iteration.1",
+		Steps: []formula.RecipeStep{
+			{
+				ID:     "wf.review.iteration.1",
+				Title:  "Review iteration",
+				Type:   "task",
+				IsRoot: true,
+				Metadata: map[string]string{
+					"gc.kind":     "scope",
+					"gc.attempt":  "1",
+					"gc.step_ref": "wf.review.iteration.1",
+				},
+			},
+			{
+				ID:    "wf.review.iteration.1.body",
+				Title: "Body work",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.scope_ref": "wf.review.iteration.1",
+					"gc.step_ref":  "wf.review.iteration.1.body",
+				},
+			},
+		},
+		Deps: []formula.RecipeDep{
+			{
+				StepID:      "wf.review.iteration.1",
+				DependsOnID: "wf.review.iteration.1.body",
+				Type:        "blocks",
+			},
+		},
+	}
+}
+
+func TestNonRootStepBeadType(t *testing.T) {
+	cases := []struct {
+		name        string
+		currentType string
+		want        string
+	}{
+		{"task becomes step", "task", "step"},
+		{"explicit bug stays bug", "bug", "bug"},
+		{"epic stays epic", "epic", "epic"},
+		{"gate from deferBeadRouting stays gate", "gate", "gate"},
+		{"empty stays empty", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nonRootStepBeadType(tc.currentType); got != tc.want {
+				t.Errorf("nonRootStepBeadType(%q) = %q, want %q", tc.currentType, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestInstantiate_DeferredStepsStayGate verifies that deferBeadRouting's
+// "gate" type is preserved for deferred non-root steps in non-graph
+// workflows and is not coerced to "step" by the #1039 non-root type coercion.
+func TestInstantiate_DeferredStepsStayGate(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name: "mol-demo",
+		Steps: []formula.RecipeStep{
+			{ID: "mol-demo", Title: "Root", IsRoot: true},
+			{ID: "mol-demo.step", Title: "Step", Assignee: "worker"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "mol-demo.step", DependsOnID: "mol-demo", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{DeferAssignees: true})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	stepID := result.IDMapping["mol-demo.step"]
+	b, err := store.Get(stepID)
+	if err != nil {
+		t.Fatalf("Get(step): %v", err)
+	}
+	if b.Type != "gate" {
+		t.Errorf("deferred step.Type = %q, want %q", b.Type, "gate")
 	}
 }

@@ -48,19 +48,40 @@ func applyFreshWakeConversationReset(patch MetadataPatch) {
 	patch[startupDialogVerifiedKey] = ""
 }
 
-// RequestWakePatch records a controller-owned one-shot create claim.
-func RequestWakePatch(reason string) MetadataPatch {
+func pendingCreateStartedAt(now time.Time) string {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return now.UTC().Format(time.RFC3339)
+}
+
+// RequestExplicitWakePatch records durable wake intent without claiming a
+// concrete start. The reconciler consumes the request when it prepares the
+// runtime start.
+func RequestExplicitWakePatch(reason string, now time.Time) MetadataPatch {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
 	return MetadataPatch{
-		"state":                string(StateCreating),
-		"state_reason":         reason,
-		"pending_create_claim": "true",
-		"held_until":           "",
-		"quarantined_until":    "",
-		"sleep_reason":         "",
-		"wait_hold":            "",
-		"sleep_intent":         "",
-		"wake_attempts":        "0",
-		"churn_count":          "0",
+		"wake_request":      reason,
+		"wake_requested_at": now.UTC().Format(time.RFC3339),
+	}
+}
+
+// RequestWakePatch records a controller-owned one-shot create claim.
+func RequestWakePatch(reason string, now time.Time) MetadataPatch {
+	return MetadataPatch{
+		"state":                     string(StateCreating),
+		"state_reason":              reason,
+		"pending_create_claim":      "true",
+		"pending_create_started_at": pendingCreateStartedAt(now),
+		"held_until":                "",
+		"quarantined_until":         "",
+		"sleep_reason":              "",
+		"wait_hold":                 "",
+		"sleep_intent":              "",
+		"wake_attempts":             "0",
+		"churn_count":               "0",
 	}
 }
 
@@ -89,6 +110,8 @@ func PreWakePatch(input PreWakePatchInput) MetadataPatch {
 		"sleep_reason":               input.SleepReason,
 		"sleep_intent":               "",
 		"generation":                 fmt.Sprintf("%d", input.Generation),
+		"wake_request":               "",
+		"wake_requested_at":          "",
 	}
 	if input.FreshWake {
 		patch["session_key"] = ""
@@ -113,7 +136,7 @@ func ClearWakeBlockersPatch(state State, sleepReason string) MetadataPatch {
 		patch["state"] = string(StateAsleep)
 	}
 	switch sleepReason {
-	case "user-hold", "wait-hold", "quarantine", "context-churn", string(StateDrained):
+	case "user-hold", "wait-hold", "quarantine", "context-churn", "rate_limit", string(StateDrained):
 		patch["sleep_reason"] = ""
 	}
 	return patch
@@ -131,8 +154,8 @@ func ClearExpiredHoldPatch(sleepReason string) MetadataPatch {
 	return patch
 }
 
-// ClearExpiredQuarantinePatch clears an expired quarantine or context churn
-// timer and resets retry counters associated with that blocker.
+// ClearExpiredQuarantinePatch clears an expired quarantine-like timer and
+// resets retry counters associated with that blocker.
 func ClearExpiredQuarantinePatch(sleepReason string) MetadataPatch {
 	patch := MetadataPatch{
 		"quarantined_until": "",
@@ -140,7 +163,7 @@ func ClearExpiredQuarantinePatch(sleepReason string) MetadataPatch {
 		"churn_count":       "0",
 	}
 	switch sleepReason {
-	case "quarantine", "context-churn":
+	case "quarantine", "context-churn", "rate_limit":
 		patch["sleep_reason"] = ""
 	}
 	return patch
@@ -152,11 +175,12 @@ func ClearExpiredQuarantinePatch(sleepReason string) MetadataPatch {
 // bead whose last_woke_at was later cleared by crash/churn recovery.
 func ConfirmStartedPatch(now time.Time) MetadataPatch {
 	return MetadataPatch{
-		"state":                string(StateActive),
-		"state_reason":         "creation_complete",
-		"creation_complete_at": now.UTC().Format(time.RFC3339),
-		"pending_create_claim": "",
-		"sleep_reason":         "",
+		"state":                     string(StateActive),
+		"state_reason":              "creation_complete",
+		"creation_complete_at":      now.UTC().Format(time.RFC3339),
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+		"sleep_reason":              "",
 	}
 }
 
@@ -209,6 +233,7 @@ func CommitStartedPatch(input CommitStartedPatchInput) MetadataPatch {
 	}
 	if input.ClearPendingCreateClaim {
 		patch["pending_create_claim"] = ""
+		patch["pending_create_started_at"] = ""
 	}
 	return patch
 }
@@ -222,15 +247,31 @@ func BeginDrainPatch(now time.Time, reason string) MetadataPatch {
 	}
 }
 
+// DrainAckStopPendingReason marks a drain-acked runtime whose provider stop is
+// running asynchronously and waiting for controller finalization.
+const DrainAckStopPendingReason = "drain-ack-stop-pending"
+
+// DrainAckStopPendingPatch records that a drain-acked session has moved into
+// durable stop-pending state. The provider stop itself is asynchronous; the
+// controller finalizes the bead with the normal drain completion patches after
+// observing the runtime stopped.
+func DrainAckStopPendingPatch(now time.Time) MetadataPatch {
+	patch := BeginDrainPatch(now, DrainAckStopPendingReason)
+	patch["pending_create_claim"] = ""
+	patch["pending_create_started_at"] = ""
+	return patch
+}
+
 // SleepPatch records a non-terminal sleep/drain result.
 func SleepPatch(now time.Time, reason string) MetadataPatch {
 	return MetadataPatch{
-		"state":                string(StateAsleep),
-		"sleep_reason":         reason,
-		"last_woke_at":         "",
-		"pending_create_claim": "",
-		"sleep_intent":         "",
-		"slept_at":             now.UTC().Format(time.RFC3339),
+		"state":                     string(StateAsleep),
+		"sleep_reason":              reason,
+		"last_woke_at":              "",
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+		"sleep_intent":              "",
+		"slept_at":                  now.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -239,9 +280,11 @@ func SleepPatch(now time.Time, reason string) MetadataPatch {
 // reselect it, but explicit attach or work can.
 func AcknowledgeDrainPatch(freshWake bool) MetadataPatch {
 	patch := MetadataPatch{
-		"state":                string(StateDrained),
-		"last_woke_at":         "",
-		"pending_create_claim": "",
+		"state":                     string(StateDrained),
+		"state_reason":              "",
+		"last_woke_at":              "",
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
 	}
 	if freshWake {
 		patch["session_key"] = ""
@@ -254,6 +297,7 @@ func AcknowledgeDrainPatch(freshWake bool) MetadataPatch {
 // CompleteDrainPatch records a completed controller drain as ordinary asleep.
 func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPatch {
 	patch := SleepPatch(now, reason)
+	patch["state_reason"] = ""
 	if freshWake {
 		patch["session_key"] = ""
 		applyFreshWakeConversationReset(patch)
@@ -275,6 +319,7 @@ func RestartRequestPatch(sessionKey string) MetadataPatch {
 		"continuation_reset_pending": "true",
 		"last_woke_at":               "",
 		"pending_create_claim":       "",
+		"pending_create_started_at":  "",
 	}
 	if sessionKey != "" {
 		patch["session_key"] = sessionKey
@@ -285,17 +330,19 @@ func RestartRequestPatch(sessionKey string) MetadataPatch {
 // ConfigDriftResetPatch records an in-place named-session repair after core
 // config drift. Creating claims a new runtime start; asleep stays dormant
 // until the next normal wake reason.
-func ConfigDriftResetPatch(nextState State, sessionKey string) MetadataPatch {
+func ConfigDriftResetPatch(nextState State, sessionKey string, now time.Time) MetadataPatch {
 	patch := MetadataPatch{
 		"state":                      string(nextState),
 		"last_woke_at":               "",
 		"restart_requested":          "",
 		"continuation_reset_pending": "true",
 		"pending_create_claim":       "",
+		"pending_create_started_at":  "",
 	}
 	applyFreshWakeConversationReset(patch)
 	if nextState == StateCreating {
 		patch["pending_create_claim"] = "true"
+		patch["pending_create_started_at"] = pendingCreateStartedAt(now)
 	}
 	if sessionKey != "" {
 		patch["session_key"] = sessionKey
@@ -310,23 +357,68 @@ func ArchivePatch(now time.Time, reason string, continuityEligible bool) Metadat
 		continuity = "true"
 	}
 	return MetadataPatch{
-		"state":                string(StateArchived),
-		"state_reason":         reason,
-		"archived_at":          now.UTC().Format(time.RFC3339),
-		"continuity_eligible":  continuity,
-		"pending_create_claim": "",
+		"state":                     string(StateArchived),
+		"state_reason":              reason,
+		"archived_at":               now.UTC().Format(time.RFC3339),
+		"continuity_eligible":       continuity,
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
 	}
 }
 
 // ClosePatch records terminal close metadata before the bead status is closed.
-func ClosePatch(now time.Time, reason string) MetadataPatch {
+//
+// state retains the canonical short stateCode (used by reconciler logic and
+// closedNamedSessionReopenEligible). close_reason is expanded via
+// CanonicalCloseReason so cities running with validation.on-close=error
+// (which rejects close reasons under 20 characters) accept the close.
+// Without the expansion, every short-code session-close call (gc_swept,
+// orphaned, drained, failed-create, ...) is silently rejected by the
+// validator, leaving close_reason/closed_at stamped on an OPEN bead and
+// triggering reconciler flap as the next tick clears them.
+func ClosePatch(now time.Time, stateCode string) MetadataPatch {
 	ts := now.UTC().Format(time.RFC3339)
 	return MetadataPatch{
-		"state":        reason,
-		"close_reason": reason,
+		"state":        stateCode,
+		"close_reason": CanonicalCloseReason(stateCode),
 		"closed_at":    ts,
 		"synced_at":    ts,
 	}
+}
+
+// CanonicalCloseReason maps a short session stateCode to a human-readable
+// close reason of at least 20 characters, suitable for use as
+// `bd close --reason` under validation.on-close=error.
+//
+// Unknown non-empty codes fall back to "session terminated: <code>".
+// Codes already 20+ characters pass through unchanged.
+func CanonicalCloseReason(stateCode string) string {
+	switch stateCode {
+	case "":
+		return "session terminated: unknown state"
+	case "gc_swept":
+		return "session swept: no assigned work in any rig"
+	case "orphaned":
+		return "session orphaned: configured agent removed"
+	case "drained":
+		return "session drained: pool slot retired by reconciler"
+	case "failed-create":
+		return "session create failed: aborted before creation_complete"
+	case "stale-session":
+		return "session stale: no liveness signal beyond threshold"
+	case "duplicate":
+		return "session retired: duplicate of canonical bead"
+	case "duplicate-repair":
+		return "session retired: duplicate-repair canonicalization"
+	case "reconfigured":
+		return "session reconfigured: superseded by new agent config"
+	case "suspended":
+		return "session suspended: agent disabled in city config"
+	}
+	if len(stateCode) >= 20 {
+		return stateCode
+	}
+	return fmt.Sprintf("session terminated: %s", stateCode)
 }
 
 // RetireNamedSessionPatch archives a named-session bead without closing it so
@@ -368,12 +460,13 @@ func ReactivatePatch(continuityEligible bool) MetadataPatch {
 		continuity = "true"
 	}
 	return MetadataPatch{
-		"state":                string(StateAsleep),
-		"state_reason":         "reactivated",
-		"pending_create_claim": "",
-		"continuity_eligible":  continuity,
-		"quarantined_until":    "",
-		"crash_count":          "0",
-		"archived_at":          "",
+		"state":                     string(StateAsleep),
+		"state_reason":              "reactivated",
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+		"continuity_eligible":       continuity,
+		"quarantined_until":         "",
+		"crash_count":               "0",
+		"archived_at":               "",
 	}
 }

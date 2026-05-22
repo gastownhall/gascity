@@ -2,21 +2,102 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
+
+func putExecutableOnPath(t *testing.T, name string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write executable %s: %v", name, err)
+	}
+	t.Setenv("PATH", dir)
+}
 
 // fakeAdoptionProvider implements runtime.Provider for adoption barrier tests.
 type fakeAdoptionProvider struct {
 	runtime.Provider
-	running []string
-	alive   map[string]bool
-	listErr error
+	running          []string
+	alive            map[string]bool
+	processNameCalls map[string][]string
+	listErr          error
+}
+
+type adoptionLockProbeStore struct {
+	beads.Store
+
+	targetSessionName string
+	listed            chan struct{}
+	createAttempted   chan struct{}
+	allowCreate       <-chan struct{}
+}
+
+type adoptionListFailureStore struct {
+	beads.Store
+}
+
+type adoptionClockAdvanceStore struct {
+	beads.Store
+
+	advance  func()
+	advanced bool
+}
+
+func (s *adoptionLockProbeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	result, err := s.Store.List(query)
+	if query.Label == sessionBeadLabel {
+		select {
+		case s.listed <- struct{}{}:
+		default:
+		}
+	}
+	return result, err
+}
+
+func (s *adoptionListFailureStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if strings.TrimSpace(query.Metadata["session_name"]) != "" {
+		return nil, errors.New("live list failed")
+	}
+	return s.Store.List(query)
+}
+
+func (s *adoptionClockAdvanceStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	result, err := s.Store.List(query)
+	if strings.TrimSpace(query.Metadata["session_name"]) != "" && !s.advanced {
+		s.advanced = true
+		s.advance()
+	}
+	return result, err
+}
+
+func (s *adoptionLockProbeStore) Create(b beads.Bead) (beads.Bead, error) {
+	if b.Type == sessionBeadType && b.Metadata["session_name"] == s.targetSessionName {
+		select {
+		case s.createAttempted <- struct{}{}:
+		default:
+		}
+		<-s.allowCreate
+	}
+	return s.Store.Create(b)
+}
+
+type adoptionBarrierOutcome struct {
+	result adoptionResult
+	passed bool
 }
 
 func (f *fakeAdoptionProvider) ListRunning(_ string) ([]string, error) {
@@ -32,7 +113,11 @@ func (f *fakeAdoptionProvider) IsRunning(name string) bool {
 	return false
 }
 
-func (f *fakeAdoptionProvider) ProcessAlive(name string, _ []string) bool {
+func (f *fakeAdoptionProvider) ProcessAlive(name string, processNames []string) bool {
+	if f.processNameCalls == nil {
+		f.processNameCalls = make(map[string][]string)
+	}
+	f.processNameCalls[name] = append([]string(nil), processNames...)
 	if f.alive == nil {
 		return true
 	}
@@ -51,7 +136,7 @@ func TestAdoptionBarrier_NoRunning(t *testing.T) {
 	cfg := &config.City{}
 	var stderr bytes.Buffer
 
-	result, passed := runAdoptionBarrier(store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if !passed {
 		t.Error("barrier should pass with no running sessions")
 	}
@@ -69,7 +154,7 @@ func TestAdoptionBarrier_PartialListUsesVisibleSessionsButFailsBarrier(t *testin
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	var stderr bytes.Buffer
 
-	result, passed := runAdoptionBarrier(store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if passed {
 		t.Fatal("barrier should fail closed on partial session listing")
 	}
@@ -93,7 +178,7 @@ func TestAdoptionBarrier_AdoptsRunning(t *testing.T) {
 	var stderr bytes.Buffer
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
 
-	result, passed := runAdoptionBarrier(store, sp, cfg, "test-city", clk, &stderr, false)
+	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clk, &stderr, false)
 	if !passed {
 		t.Errorf("barrier should pass, stderr: %s", stderr.String())
 	}
@@ -155,7 +240,7 @@ func TestAdoptionBarrier_SkipsExistingBead(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	result, passed := runAdoptionBarrier(store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if !passed {
 		t.Error("barrier should pass")
 	}
@@ -190,7 +275,7 @@ func TestAdoptionBarrier_ClosedBeadDoesNotBlock(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}}}
 	var stderr bytes.Buffer
 
-	result, passed := runAdoptionBarrier(store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if !passed {
 		t.Error("barrier should pass")
 	}
@@ -206,13 +291,13 @@ func TestAdoptionBarrier_Rerunnable(t *testing.T) {
 	var stderr bytes.Buffer
 
 	// First run: adopts.
-	r1, _ := runAdoptionBarrier(store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	r1, _ := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if r1.Adopted != 1 {
 		t.Fatalf("first run Adopted = %d, want 1", r1.Adopted)
 	}
 
 	// Second run: dedup prevents duplicates.
-	r2, passed := runAdoptionBarrier(store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	r2, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if !passed {
 		t.Error("second run: barrier should pass")
 	}
@@ -221,6 +306,187 @@ func TestAdoptionBarrier_Rerunnable(t *testing.T) {
 	}
 	if r2.AlreadyHadBead != 1 {
 		t.Errorf("second run AlreadyHadBead = %d, want 1", r2.AlreadyHadBead)
+	}
+}
+
+func TestAdoptionBarrier_IgnoresNonRepairableSessionBeadsInConfigSnapshot(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(1)}}}
+	sessionName := agent.SessionNameFor("test-city", "worker", cfg.Workspace.SessionTemplate)
+	if _, err := store.Create(beads.Bead{
+		Title:  "stale malformed worker",
+		Type:   "task",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"agent_name":   "worker",
+			"session_name": "stale-worker",
+			"template":     "worker",
+			"state":        "active",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sp := &fakeAdoptionProvider{running: []string{sessionName}}
+	var stderr bytes.Buffer
+
+	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	if !passed {
+		t.Fatalf("barrier should pass, result=%+v stderr=%q", result, stderr.String())
+	}
+	beadList, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing session beads: %v", err)
+	}
+	for _, b := range beadList {
+		if b.Type != sessionBeadType {
+			continue
+		}
+		if got := b.Metadata["agent_name"]; got != "worker" {
+			t.Fatalf("adopted bead agent_name = %q, want configured agent name", got)
+		}
+		if got := b.Metadata["session_name"]; got != sessionName {
+			t.Fatalf("adopted bead session_name = %q, want %q", got, sessionName)
+		}
+		return
+	}
+	t.Fatalf("adopted session bead not found; beads=%+v", beadList)
+}
+
+func TestAdoptionBarrier_SerializesCreateWithSessionIdentifierLock(t *testing.T) {
+	const agentName = "worker-3"
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)}}}
+	sessionName := agent.SessionNameFor("test-city", "worker", cfg.Workspace.SessionTemplate) + "-3"
+	cityPath := t.TempDir()
+	baseStore := beads.NewMemStore()
+	allowCreate := make(chan struct{})
+	var releaseCreate sync.Once
+	t.Cleanup(func() {
+		releaseCreate.Do(func() {
+			close(allowCreate)
+		})
+	})
+	store := &adoptionLockProbeStore{
+		Store:             baseStore,
+		targetSessionName: sessionName,
+		listed:            make(chan struct{}, 1),
+		createAttempted:   make(chan struct{}, 1),
+		allowCreate:       allowCreate,
+	}
+	sp := &fakeAdoptionProvider{running: []string{sessionName}}
+	var stderr bytes.Buffer
+	done := make(chan adoptionBarrierOutcome, 1)
+
+	err := session.WithCitySessionAliasLock(cityPath, agentName, func() error {
+		go func() {
+			result, passed := runAdoptionBarrier(cityPath, store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+			done <- adoptionBarrierOutcome{result: result, passed: passed}
+		}()
+
+		select {
+		case <-store.listed:
+		case <-time.After(time.Second):
+			t.Fatal("adoption barrier did not list existing session beads")
+		}
+
+		_, createErr := baseStore.Create(beads.Bead{
+			Title:  agentName,
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel, "agent:" + agentName},
+			Metadata: map[string]string{
+				"agent_name":   agentName,
+				"session_name": sessionName,
+				"state":        "active",
+			},
+		})
+		return createErr
+	})
+	if err != nil {
+		t.Fatalf("holding session identifier lock: %v", err)
+	}
+	releaseCreate.Do(func() {
+		close(allowCreate)
+	})
+
+	var outcome adoptionBarrierOutcome
+	select {
+	case outcome = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("adoption barrier did not finish after session_name lock released")
+	}
+	if !outcome.passed {
+		t.Fatalf("barrier should pass, stderr: %s", stderr.String())
+	}
+	if outcome.result.Adopted != 0 {
+		t.Fatalf("Adopted = %d, want 0 after locked peer created the bead", outcome.result.Adopted)
+	}
+	if outcome.result.AlreadyHadBead != 1 {
+		t.Fatalf("AlreadyHadBead = %d, want 1", outcome.result.AlreadyHadBead)
+	}
+	select {
+	case <-store.createAttempted:
+		t.Fatalf("adoption barrier attempted a duplicate create; outcome=%+v stderr=%q", outcome, stderr.String())
+	default:
+	}
+
+	beadList, err := baseStore.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing session beads: %v", err)
+	}
+	if len(beadList) != 1 {
+		t.Fatalf("session bead count = %d, want 1", len(beadList))
+	}
+	if got := beadList[0].Metadata["session_name"]; got != sessionName {
+		t.Fatalf("session_name = %q, want %q", got, sessionName)
+	}
+}
+
+func TestAdoptionBarrier_ReportsInLockListFailuresAsChecks(t *testing.T) {
+	store := &adoptionListFailureStore{Store: beads.NewMemStore()}
+	sp := &fakeAdoptionProvider{running: []string{"test-city-worker"}}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(1)}}}
+	var stderr bytes.Buffer
+
+	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	if passed {
+		t.Fatal("barrier should fail when the in-lock bead check fails")
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("Skipped = %d, want 1", result.Skipped)
+	}
+	log := stderr.String()
+	if !strings.Contains(log, `listing session beads for "test-city-worker"`) {
+		t.Fatalf("stderr %q does not mention the failing session-bead check", log)
+	}
+	if strings.Contains(log, "creating bead for") {
+		t.Fatalf("stderr %q should not report a list failure as a create failure", log)
+	}
+}
+
+func TestAdoptionBarrier_StampsSyncedAtAtCreateTime(t *testing.T) {
+	fakeClock := &clock.Fake{Time: time.Date(2026, 5, 15, 8, 0, 0, 0, time.UTC)}
+	store := &adoptionClockAdvanceStore{
+		Store: beads.NewMemStore(),
+		advance: func() {
+			fakeClock.Advance(time.Hour)
+		},
+	}
+	sp := &fakeAdoptionProvider{running: []string{"test-city-worker"}}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(1)}}}
+	var stderr bytes.Buffer
+
+	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", fakeClock, &stderr, false)
+	if !passed {
+		t.Fatalf("barrier should pass, result=%+v stderr=%q", result, stderr.String())
+	}
+	beadList, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing session beads: %v", err)
+	}
+	if len(beadList) != 1 {
+		t.Fatalf("session bead count = %d, want 1", len(beadList))
+	}
+	if got, want := beadList[0].Metadata["synced_at"], "2026-05-15T09:00:00Z"; got != want {
+		t.Fatalf("synced_at = %q, want %q", got, want)
 	}
 }
 
@@ -235,7 +501,7 @@ func TestAdoptionBarrier_DryRun(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	result, passed := runAdoptionBarrier(store, sp, cfg, "test-city", clock.Real{}, &stderr, true)
+	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, true)
 	if !passed {
 		t.Error("dry run barrier should pass")
 	}
@@ -260,14 +526,15 @@ func TestAdoptionBarrier_SkipsDeadSessions(t *testing.T) {
 		},
 	}
 	cfg := &config.City{
+		Workspace: config.Workspace{SessionTemplate: "{{.City}}-{{.Agent}}"},
 		Agents: []config.Agent{
-			{Name: "mayor", MaxActiveSessions: intPtr(1)},
-			{Name: "worker"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1), ProcessNames: []string{"agent-cli"}},
+			{Name: "worker", ProcessNames: []string{"agent-cli"}},
 		},
 	}
 	var stderr bytes.Buffer
 
-	result, passed := runAdoptionBarrier(store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if !passed {
 		t.Fatalf("barrier should pass, stderr: %s", stderr.String())
 	}
@@ -286,12 +553,81 @@ func TestAdoptionBarrier_SkipsDeadSessions(t *testing.T) {
 	}
 }
 
+func TestAdoptionBarrier_UsesResolvedProviderProcessNames(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := &fakeAdoptionProvider{
+		running: []string{"test-city-worker"},
+		alive: map[string]bool{
+			"test-city-worker": true,
+		},
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Provider:        "custom-provider",
+			SessionTemplate: "{{.City}}-{{.Agent}}",
+		},
+		Providers: map[string]config.ProviderSpec{
+			"custom-provider": {ProcessNames: []string{"custom-agent", "node"}},
+		},
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	var stderr bytes.Buffer
+
+	_, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	if !passed {
+		t.Fatalf("barrier should pass, stderr: %s", stderr.String())
+	}
+	got := sp.processNameCalls["test-city-worker"]
+	want := []string{"custom-agent", "node"}
+	if len(got) != len(want) {
+		t.Fatalf("process names = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("process names = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestAdoptionBarrier_UsesProviderlessDetectedProcessNames(t *testing.T) {
+	putExecutableOnPath(t, "codex")
+	store := beads.NewMemStore()
+	sp := &fakeAdoptionProvider{
+		running: []string{"test-city-worker"},
+		alive: map[string]bool{
+			"test-city-worker": true,
+		},
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			SessionTemplate: "{{.City}}-{{.Agent}}",
+		},
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	var stderr bytes.Buffer
+
+	_, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	if !passed {
+		t.Fatalf("barrier should pass, stderr: %s", stderr.String())
+	}
+	got := sp.processNameCalls["test-city-worker"]
+	want := []string{"codex"}
+	if len(got) != len(want) {
+		t.Fatalf("process names = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("process names = %v, want %v", got, want)
+		}
+	}
+}
+
 func TestAdoptionBarrier_NilStore(t *testing.T) {
 	sp := &fakeAdoptionProvider{running: []string{"test-city-mayor"}}
 	cfg := &config.City{}
 	var stderr bytes.Buffer
 
-	_, passed := runAdoptionBarrier(nil, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	_, passed := runAdoptionBarrier("", nil, sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if passed {
 		t.Error("nil store: barrier should not pass")
 	}
@@ -309,7 +645,7 @@ func TestAdoptionBarrier_PoolSlotDetection(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	result, _ := runAdoptionBarrier(store, sp, cfg, "test-city", clock.Real{}, &stderr, true)
+	result, _ := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, true)
 	// Pool instance "worker-3" should resolve to config agent "worker"
 	// via resolvePoolBase, with pool slot 3. AgentName should be the
 	// expanded instance name "worker-3" (matching syncSessionBeads).
@@ -336,7 +672,7 @@ func TestAdoptionBarrier_PoolOutOfBounds(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	result, _ := runAdoptionBarrier(store, sp, cfg, "test-city", clock.Real{}, &stderr, true)
+	result, _ := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, true)
 	found := false
 	for _, d := range result.Details {
 		if d.SessionName == "worker-7" && d.PoolSlot == 7 && d.OutOfBounds {
@@ -378,7 +714,7 @@ func TestAdoptionBarrier_SingletonWithNumericSuffix(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 
-	result, passed := runAdoptionBarrier(store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if !passed {
 		t.Errorf("barrier should pass, stderr: %s", stderr.String())
 	}
@@ -394,6 +730,43 @@ func TestAdoptionBarrier_SingletonWithNumericSuffix(t *testing.T) {
 	}
 }
 
+func TestAdoptionBarrier_StaleDashNSingletonAdoptsCanonicalIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	// "refinery-1" looks like a pool instance but the base "refinery" agent
+	// has max_active_sessions=1, so it should be treated as stale singleton
+	// state rather than a live pool slot.
+	sp := &fakeAdoptionProvider{running: []string{"refinery-1"}}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "refinery", MaxActiveSessions: intPtr(1), ScaleCheck: "printf 1"},
+		},
+	}
+	var stderr bytes.Buffer
+
+	result, _ := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	if result.Adopted != 1 {
+		t.Errorf("Adopted = %d, want 1", result.Adopted)
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("adopting stale singleton suffix session refinery-1")) {
+		t.Errorf("stderr missing stale singleton adoption warning; got: %s", stderr.String())
+	}
+	beadList, _ := store.ListByLabel(sessionBeadLabel, 0)
+	for _, b := range beadList {
+		if b.Metadata["agent_name"] != "refinery" {
+			t.Errorf("stale singleton agent_name = %q, want canonical refinery", b.Metadata["agent_name"])
+		}
+		if !containsString(b.Labels, "agent:refinery") {
+			t.Errorf("stale singleton labels = %v, want canonical agent label", b.Labels)
+		}
+		if containsString(b.Labels, "agent:refinery-1") {
+			t.Errorf("stale singleton labels = %v, must not include phantom pool identity", b.Labels)
+		}
+		if b.Metadata["pool_slot"] != "" {
+			t.Errorf("stale singleton session should not have pool_slot metadata, got %q", b.Metadata["pool_slot"])
+		}
+	}
+}
+
 func TestAdoptionBarrier_UnknownSession(t *testing.T) {
 	store := beads.NewMemStore()
 	// Running session that doesn't match any config agent.
@@ -401,7 +774,7 @@ func TestAdoptionBarrier_UnknownSession(t *testing.T) {
 	cfg := &config.City{} // no agents configured
 	var stderr bytes.Buffer
 
-	result, passed := runAdoptionBarrier(store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
+	result, passed := runAdoptionBarrier("", store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
 	if !passed {
 		t.Error("barrier should pass (adopt permissively)")
 	}

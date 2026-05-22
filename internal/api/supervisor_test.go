@@ -19,11 +19,14 @@ import (
 
 // fakeCityResolver implements CityResolver for testing.
 type fakeCityResolver struct {
-	cities map[string]*fakeState // keyed by city name
+	cities             map[string]*fakeState // keyed by city name
+	listed             []CityInfo
+	pending            map[string]string
+	supervisorRecorder events.Recorder
 }
 
 func (f *fakeCityResolver) ListCities() []CityInfo {
-	var out []CityInfo
+	out := append([]CityInfo(nil), f.listed...)
 	for name := range f.cities {
 		s := f.cities[name]
 		out = append(out, CityInfo{
@@ -42,10 +45,36 @@ func (f *fakeCityResolver) CityState(name string) State {
 	return nil
 }
 
+func (f *fakeCityResolver) StorePendingRequestID(cityPath, requestID string) error {
+	if f.pending == nil {
+		f.pending = make(map[string]string)
+	}
+	if _, exists := f.pending[cityPath]; exists {
+		return ErrPendingRequestExists
+	}
+	f.pending[cityPath] = requestID
+	return nil
+}
+
+func (f *fakeCityResolver) ConsumePendingRequestID(cityPath string) (string, bool, error) {
+	id, ok := f.pending[cityPath]
+	delete(f.pending, cityPath)
+	return id, ok, nil
+}
+
+func (f *fakeCityResolver) SupervisorEventRecorder() events.Recorder {
+	return f.supervisorRecorder
+}
+
 func newTestSupervisorMux(t *testing.T, cities map[string]*fakeState) *SupervisorMux {
 	t.Helper()
+	return newTestSupervisorMuxWithBuildID(t, cities, "")
+}
+
+func newTestSupervisorMuxWithBuildID(t *testing.T, cities map[string]*fakeState, buildID string) *SupervisorMux {
+	t.Helper()
 	resolver := &fakeCityResolver{cities: cities}
-	return NewSupervisorMux(resolver, nil, false, "test", time.Now())
+	return NewSupervisorMux(resolver, nil, false, "test", buildID, time.Now())
 }
 
 func TestSupervisorCitiesList(t *testing.T) {
@@ -80,6 +109,22 @@ func TestSupervisorCitiesList(t *testing.T) {
 	// Sorted by name.
 	if resp.Items[0].Name != "alpha" || resp.Items[1].Name != "beta" {
 		t.Errorf("items = %v, want alpha then beta", resp.Items)
+	}
+}
+
+func TestSupervisorCityServiceProxy404sUntilCityRunning(t *testing.T) {
+	sm := newTestSupervisorMux(t, map[string]*fakeState{})
+	req := httptest.NewRequest(http.MethodGet, "/v0/city/starting/svc/review-intake/healthz", nil)
+	rec := httptest.NewRecorder()
+
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+	const want = `{"status":404,"title":"Not Found","detail":"not_found: city not found or not running"}`
+	if strings.TrimSpace(rec.Body.String()) != want {
+		t.Fatalf("body = %s, want %s", rec.Body.String(), want)
 	}
 }
 
@@ -196,6 +241,30 @@ func TestSupervisorCityNamespacedRoute(t *testing.T) {
 	}
 	if resp.Total != 1 {
 		t.Errorf("Total = %d, want 1 (one agent in fakeState)", resp.Total)
+	}
+}
+
+func TestSupervisorCityScopedRoute404sUntilCityRunning(t *testing.T) {
+	resolver := &fakeCityResolver{
+		cities: map[string]*fakeState{},
+		listed: []CityInfo{{
+			Name:    "bright-lights",
+			Path:    "/tmp/bright-lights",
+			Running: false,
+			Status:  "starting_agents",
+		}},
+	}
+	sm := NewSupervisorMux(resolver, nil, false, "test", "", time.Now())
+
+	req := httptest.NewRequest("GET", "/v0/city/bright-lights/agents", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), CityNotFoundOrNotRunningDetail("bright-lights")) {
+		t.Fatalf("body missing not-running detail: %s", rec.Body.String())
 	}
 }
 
@@ -334,6 +403,53 @@ func TestSupervisorHealth(t *testing.T) {
 	}
 }
 
+// TestSupervisorHealthIncludesBuildID asserts /health surfaces the
+// supervisor's build identity. Drift detection in `gc start` reads this
+// field to compare against the local gc binary's build hash; an empty
+// or missing field disables binary-drift detection.
+func TestSupervisorHealthIncludesBuildID(t *testing.T) {
+	const wantBuildID = "abc123ef"
+	s := newFakeState(t)
+	sm := newTestSupervisorMuxWithBuildID(t, map[string]*fakeState{"test-city": s}, wantBuildID)
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got, _ := resp["build_id"].(string); got != wantBuildID {
+		t.Fatalf("build_id = %q, want %q\nbody: %s", got, wantBuildID, rec.Body.String())
+	}
+}
+
+// TestSupervisorHealthEmptyBuildID confirms that when the supervisor
+// has no buildID (e.g., `go run`-style launches that lack VCS info),
+// the field is omitted rather than surfacing a misleading empty
+// string. This matches `omitempty` JSON semantics — an empty buildID
+// is the same as "no buildID known."
+func TestSupervisorHealthEmptyBuildID(t *testing.T) {
+	s := newFakeState(t)
+	sm := newTestSupervisorMuxWithBuildID(t, map[string]*fakeState{"test-city": s}, "")
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, present := resp["build_id"]; present {
+		t.Fatalf("build_id key present in response despite empty buildID; got: %v", resp["build_id"])
+	}
+}
+
 func TestSupervisorEmptyCityName(t *testing.T) {
 	sm := newTestSupervisorMux(t, map[string]*fakeState{})
 
@@ -384,6 +500,46 @@ func TestSupervisorPerCityEventStream(t *testing.T) {
 	ct := rec.Header().Get("Content-Type")
 	if ct != "text/event-stream" {
 		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+	}
+}
+
+func TestSupervisorEventStreamsFlushHeadersBeforeFirstEvent(t *testing.T) {
+	s := newFakeState(t)
+	s.cityName = "gc-work"
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{
+		"gc-work": s,
+	})
+	srv := httptest.NewServer(sm)
+	t.Cleanup(srv.Close)
+
+	for _, path := range []string{
+		"/v0/events/stream",
+		"/v0/city/gc-work/events/stream",
+	} {
+		t.Run(path, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+path, nil)
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+			req.Header.Set("Accept", "text/event-stream")
+
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatalf("GET %s: %v", path, err)
+			}
+			defer resp.Body.Close() //nolint:errcheck
+
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+			}
+			if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+				t.Fatalf("Content-Type = %q, want text/event-stream", ct)
+			}
+		})
 	}
 }
 
@@ -468,6 +624,28 @@ func TestSupervisorPerCityEventStreamEmitsNoPayloadObject(t *testing.T) {
 	}
 }
 
+func TestSupervisorPerCityEventStreamWithoutCursorStartsAtHead(t *testing.T) {
+	s := newFakeState(t)
+	s.cityName = "gc-work"
+	ep := s.eventProv.(*events.Fake)
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "old"})
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{
+		"gc-work": s,
+	})
+
+	frame := firstSSEFrameAfterRecord(t, sm, "/v0/city/gc-work/events/stream", "event", func() {
+		ep.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "new"})
+	})
+	if frame.ID != "2" {
+		t.Fatalf("SSE id = %q, want 2; body=%s", frame.ID, frame.Data)
+	}
+	data := decodeSSETestData(t, frame)
+	if data["subject"] != "new" {
+		t.Fatalf("data.subject = %v, want new; data=%v", data["subject"], data)
+	}
+}
+
 func TestSupervisorGlobalEventList(t *testing.T) {
 	s1 := newFakeState(t)
 	s1.cityName = "alpha"
@@ -492,14 +670,18 @@ func TestSupervisorGlobalEventList(t *testing.T) {
 	}
 
 	var resp struct {
-		Items []events.TaggedEvent `json:"items"`
-		Total int                  `json:"total"`
+		EventCursor string               `json:"event_cursor"`
+		Items       []events.TaggedEvent `json:"items"`
+		Total       int                  `json:"total"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if resp.Total != 2 {
 		t.Errorf("total = %d, want 2", resp.Total)
+	}
+	if resp.EventCursor != "alpha:1,beta:1" {
+		t.Fatalf("event_cursor = %q, want alpha:1,beta:1", resp.EventCursor)
 	}
 
 	// Verify events are tagged with city names.
@@ -577,6 +759,68 @@ func TestSupervisorEventListsEmitTypedPayloadObjects(t *testing.T) {
 	}
 }
 
+func TestSupervisorEventListsIncludeCustomEventTypes(t *testing.T) {
+	s := newFakeState(t)
+	s.cityName = "alpha"
+	s.eventProv.(*events.Fake).Record(events.Event{Type: "custom.untyped", Actor: "tester", Payload: json.RawMessage(`{"source":"test"}`)})
+	s.eventProv.(*events.Fake).Record(events.Event{Type: events.SessionWoke, Actor: "tester"})
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{"alpha": s})
+
+	req := httptest.NewRequest("GET", "/v0/events", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []map[string]any `json:"items"`
+		Total int              `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 2 || len(resp.Items) != 2 {
+		t.Fatalf("response = %+v, want custom and registered events", resp)
+	}
+	custom := eventListItemByType(t, resp.Items, "custom.untyped")
+	if custom["city"] != "alpha" {
+		t.Fatalf("custom city = %v, want alpha; item=%v", custom["city"], custom)
+	}
+	payload := assertJSONPayloadObject(t, custom["payload"])
+	if payload["source"] != "test" {
+		t.Fatalf("custom payload = %v, want source=test", payload)
+	}
+}
+
+func TestSupervisorEventListFilterIsEmptyMatchesEventsFilterZeroValue(t *testing.T) {
+	if !supervisorEventListFilterIsEmpty(events.Filter{}) {
+		t.Fatal("zero-value filter reported non-empty")
+	}
+
+	tests := []struct {
+		name   string
+		filter events.Filter
+	}{
+		{name: "type", filter: events.Filter{Type: events.BeadCreated}},
+		{name: "actor", filter: events.Filter{Actor: "human"}},
+		{name: "subject", filter: events.Filter{Subject: "gc-1"}},
+		{name: "since", filter: events.Filter{Since: time.Unix(1, 0)}},
+		{name: "until", filter: events.Filter{Until: time.Unix(1, 0)}},
+		{name: "after_seq", filter: events.Filter{AfterSeq: 1}},
+		{name: "limit", filter: events.Filter{Limit: 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if supervisorEventListFilterIsEmpty(tt.filter) {
+				t.Fatalf("filter %+v reported empty", tt.filter)
+			}
+		})
+	}
+}
+
 func TestSupervisorGlobalEventListWithFilter(t *testing.T) {
 	s1 := newFakeState(t)
 	s1.cityName = "alpha"
@@ -605,6 +849,123 @@ func TestSupervisorGlobalEventListWithFilter(t *testing.T) {
 	}
 	if resp.Items[0].Type != events.SessionWoke {
 		t.Errorf("type = %q, want %q", resp.Items[0].Type, events.SessionWoke)
+	}
+}
+
+func TestSupervisorGlobalEventListLimitReturnsTail(t *testing.T) {
+	s1 := newFakeState(t)
+	s1.cityName = "alpha"
+	ep := s1.eventProv.(*events.Fake)
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "a1", Subject: "old"})
+	ep.Record(events.Event{Type: events.SessionStopped, Actor: "a1", Subject: "middle"})
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "a1", Subject: "new"})
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{"alpha": s1})
+
+	req := httptest.NewRequest("GET", "/v0/events?limit=1", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []events.TaggedEvent `json:"items"`
+		Total int                  `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 3 {
+		t.Fatalf("total = %d, want 3", resp.Total)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(resp.Items))
+	}
+	if resp.Items[0].Subject != "new" {
+		t.Fatalf("subject = %q, want new", resp.Items[0].Subject)
+	}
+}
+
+func TestSupervisorGlobalEventListLimitReturnsTailAcrossCitiesWithHeadTotal(t *testing.T) {
+	s1 := newFakeState(t)
+	s1.cityName = "alpha"
+	alpha := s1.eventProv.(*events.Fake)
+	alpha.Record(events.Event{Type: events.SessionWoke, Actor: "a1", Subject: "alpha-old", Ts: time.Unix(1, 0)})
+	alpha.Record(events.Event{Type: events.SessionWoke, Actor: "a1", Subject: "alpha-new", Ts: time.Unix(4, 0)})
+
+	s2 := newFakeState(t)
+	s2.cityName = "beta"
+	beta := s2.eventProv.(*events.Fake)
+	beta.Record(events.Event{Type: events.SessionWoke, Actor: "b1", Subject: "beta-old", Ts: time.Unix(2, 0)})
+	beta.Record(events.Event{Type: events.SessionStopped, Actor: "b1", Subject: "beta-middle", Ts: time.Unix(3, 0)})
+	beta.Record(events.Event{Type: events.SessionWoke, Actor: "b1", Subject: "beta-new", Ts: time.Unix(5, 0)})
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{
+		"alpha": s1,
+		"beta":  s2,
+	})
+
+	req := httptest.NewRequest("GET", "/v0/events?limit=2", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []events.TaggedEvent `json:"items"`
+		Total int                  `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 5 {
+		t.Fatalf("total = %d, want 5", resp.Total)
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("items len = %d, want 2", len(resp.Items))
+	}
+	if resp.Items[0].Subject != "alpha-new" || resp.Items[1].Subject != "beta-new" {
+		t.Fatalf("subjects = [%s %s], want [alpha-new beta-new]", resp.Items[0].Subject, resp.Items[1].Subject)
+	}
+}
+
+func TestSupervisorGlobalEventListLimitWithFilterReportsFilteredTotal(t *testing.T) {
+	s1 := newFakeState(t)
+	s1.cityName = "alpha"
+	ep := s1.eventProv.(*events.Fake)
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "a1", Subject: "old", Ts: time.Unix(1, 0)})
+	ep.Record(events.Event{Type: events.SessionStopped, Actor: "a1", Subject: "ignored", Ts: time.Unix(2, 0)})
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "a1", Subject: "new", Ts: time.Unix(3, 0)})
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{"alpha": s1})
+
+	req := httptest.NewRequest("GET", "/v0/events?type=session.woke&limit=1", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []events.TaggedEvent `json:"items"`
+		Total int                  `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 2 {
+		t.Fatalf("total = %d, want 2 filtered matches", resp.Total)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(resp.Items))
+	}
+	if resp.Items[0].Subject != "new" {
+		t.Fatalf("subject = %q, want new", resp.Items[0].Subject)
 	}
 }
 
@@ -829,6 +1190,91 @@ func TestSupervisorGlobalEventStreamEmitsNoPayloadObject(t *testing.T) {
 	payloadObject := assertJSONPayloadObject(t, data["payload"])
 	if len(payloadObject) != 0 {
 		t.Fatalf("data.payload = %v, want empty object for NoPayload", payloadObject)
+	}
+}
+
+func TestSupervisorGlobalEventStreamWithoutCursorStartsAtHead(t *testing.T) {
+	s := newFakeState(t)
+	s.cityName = "alpha"
+	ep := s.eventProv.(*events.Fake)
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "old"})
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{
+		"alpha": s,
+	})
+
+	frame := firstSSEFrameAfterRecord(t, sm, "/v0/events/stream", "tagged_event", func() {
+		ep.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "new"})
+	})
+	if frame.ID != "alpha:2" {
+		t.Fatalf("SSE id = %q, want alpha:2; body=%s", frame.ID, frame.Data)
+	}
+	data := decodeSSETestData(t, frame)
+	if data["subject"] != "new" {
+		t.Fatalf("data.subject = %v, want new; data=%v", data["subject"], data)
+	}
+}
+
+func TestSupervisorGlobalEventStreamAfterCursorReplaysFromCursor(t *testing.T) {
+	s := newFakeState(t)
+	s.cityName = "alpha"
+	ep := s.eventProv.(*events.Fake)
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "tester", Subject: "old"})
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{
+		"alpha": s,
+	})
+
+	frame := firstSSEFrameAfterRecord(t, sm, "/v0/events/stream?after_cursor=alpha:0", "tagged_event", func() {})
+	if frame.ID != "alpha:1" {
+		t.Fatalf("SSE id = %q, want alpha:1; body=%s", frame.ID, frame.Data)
+	}
+	data := decodeSSETestData(t, frame)
+	if data["subject"] != "old" {
+		t.Fatalf("data.subject = %v, want old; data=%v", data["subject"], data)
+	}
+}
+
+func TestCurrentSupervisorEventCursorReturnsProviderErrors(t *testing.T) {
+	s := newFakeState(t)
+	s.cityName = "alpha"
+	s.eventProv = events.NewFailFake()
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{
+		"alpha": s,
+	})
+
+	if got, err := sm.currentSupervisorEventCursor(); err == nil {
+		t.Fatalf("currentSupervisorEventCursor() = %q, nil error; want provider error", got)
+	}
+}
+
+func TestCurrentSupervisorEventCursorIsStrictOnPartialProviderFailure(t *testing.T) {
+	healthy := newFakeState(t)
+	healthy.cityName = "alpha"
+	healthy.eventProv.(*events.Fake).Record(events.Event{
+		Type:    events.SessionWoke,
+		Actor:   "tester",
+		Subject: "healthy",
+	})
+	broken := newFakeState(t)
+	broken.cityName = "bravo"
+	broken.eventProv = events.NewFailFake()
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{
+		"alpha": healthy,
+		"bravo": broken,
+	})
+
+	got, err := sm.currentSupervisorEventCursor()
+	if err == nil {
+		t.Fatalf("currentSupervisorEventCursor() = %q, nil error; want strict partial-provider failure", got)
+	}
+	if got != "" {
+		t.Fatalf("currentSupervisorEventCursor() returned partial cursor %q with error; want empty cursor", got)
+	}
+	if !strings.Contains(err.Error(), "bravo") {
+		t.Fatalf("currentSupervisorEventCursor() error = %v, want broken city name", err)
 	}
 }
 

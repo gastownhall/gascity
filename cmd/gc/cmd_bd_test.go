@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pgauth"
 )
 
 func TestExtractRigFlag(t *testing.T) {
@@ -300,6 +302,10 @@ func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
 }
 
 func TestBdCommandEnvUsesCanonicalRigTarget(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	_ = os.Unsetenv("BEADS_ACTOR")
+
 	cityDir := t.TempDir()
 	wantPort := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
 	rigDir := filepath.Join(t.TempDir(), "repo")
@@ -314,12 +320,16 @@ dolt.auto-start: false
 		t.Fatal(err)
 	}
 	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}
-	env := listToMap(bdCommandEnv(cityDir, cfg, execStoreTarget{
+	envList, err := bdCommandEnv(cityDir, cfg, execStoreTarget{
 		ScopeRoot: rigDir,
 		ScopeKind: "rig",
 		Prefix:    "repo",
 		RigName:   "repo",
-	}))
+	})
+	if err != nil {
+		t.Fatalf("bdCommandEnv: %v", err)
+	}
+	env := listToMap(envList)
 	if got := env["GC_DOLT_PORT"]; got != wantPort {
 		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, wantPort)
 	}
@@ -340,6 +350,79 @@ dolt.auto-start: false
 	}
 	if got := env["GC_BEADS_PREFIX"]; got != "repo" {
 		t.Fatalf("GC_BEADS_PREFIX = %q, want %q", got, "repo")
+	}
+	if _, present := env["BEADS_ACTOR"]; present {
+		t.Fatalf("BEADS_ACTOR = %q, want absent for direct gc bd env without explicit actor", env["BEADS_ACTOR"])
+	}
+}
+
+func TestBdCommandEnvSurfacesPostgresProjectionError(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(cityDir, "rigs", "pg")
+	writePGScopeFixture(t, rigDir, "")
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "pg", Path: "rigs/pg", Prefix: "pg"}}}
+
+	_, err := bdCommandEnv(cityDir, cfg, execStoreTarget{
+		ScopeRoot: rigDir,
+		ScopeKind: "rig",
+		Prefix:    "pg",
+		RigName:   "pg",
+	})
+	if err == nil {
+		t.Fatal("bdCommandEnv err = nil, want postgres projection error")
+	}
+	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
+		t.Errorf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
+	}
+}
+
+func TestBdCommandRunnerForCityDoesNotDefaultBeadsActorWhenUnset(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	_ = os.Unsetenv("BEADS_ACTOR")
+
+	origRunner := beadsExecCommandRunnerWithEnv
+	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = origRunner })
+
+	var captured map[string]string
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+		captured = map[string]string{}
+		for key, value := range env {
+			captured[key] = value
+		}
+		return func(_ string, _ string, _ ...string) ([]byte, error) {
+			return []byte("ok"), nil
+		}
+	}
+
+	cityPath := t.TempDir()
+	runner := bdCommandRunnerForCity(cityPath)
+	if _, err := runner(cityPath, "bd", "list", "--json"); err != nil {
+		t.Fatalf("bd runner error = %v, want nil", err)
+	}
+
+	if _, present := captured["BEADS_ACTOR"]; present {
+		t.Fatalf("BEADS_ACTOR = %q, want absent for normal bd runner without explicit actor", captured["BEADS_ACTOR"])
 	}
 }
 
@@ -408,7 +491,8 @@ set -eu
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
 	t.Setenv("CAPTURE_PATH", capture)
 	t.Setenv("GC_CITY_PATH", cityDir)
-	t.Setenv("GC_DOLT_HOST", "ambient-dolt.example.com")
+	t.Setenv("GC_DOLT_HOST", "")
+	_ = os.Unsetenv("GC_DOLT_HOST")
 	t.Setenv("GC_DOLT_PORT", "9999")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient-beads.example.com")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
@@ -468,7 +552,124 @@ set -eu
 	}
 }
 
+func TestGcBdSuppressesBdAutoExportInChildEnv(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	defer func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	}()
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(script, []byte(`#!/bin/sh
+set -eu
+if [ "${BD_EXPORT_AUTO:-}" != "false" ]; then
+  echo "BD_EXPORT_AUTO=${BD_EXPORT_AUTO:-}" >&2
+  exit 73
+fi
+case "${1:-}" in
+  show)
+    printf '[{"id":"gc-1","title":"ok"}]\n'
+    ;;
+  update)
+    printf '{"id":"gc-1","status":"in_progress"}\n'
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("BD_EXPORT_AUTO", "true")
+
+	for _, args := range [][]string{
+		{"show", "gc-1", "--json"},
+		{"update", "gc-1", "--claim", "--json"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if got := doBd(args, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd(%v) = %d, want 0; stdout=%q stderr=%q", args, got, stdout.String(), stderr.String())
+		}
+		if strings.TrimSpace(stdout.String()) == "" {
+			t.Fatalf("doBd(%v) produced empty stdout", args)
+		}
+		if stderr.String() != "" {
+			t.Fatalf("doBd(%v) stderr = %q, want empty", args, stderr.String())
+		}
+	}
+}
+
+func TestGcBdReapsStaleBdExportJSONLBeforeDirectCommand(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	defer func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	}()
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	beadsDir := filepath.Join(cityDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"_type":"issue","id":"gc-1"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(script, []byte(`#!/bin/sh
+set -eu
+printf '[{"id":"gc-1","title":"ok"}]\n'
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"show", "gc-1", "--json"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd() = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
+		t.Fatalf("issues.jsonl present after direct gc bd command; stat err = %v, want IsNotExist", err)
+	}
+}
+
 func TestGcBdDoesNotAutoRouteHyphenatedFlagValue(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
 	origProbe := bdBeadExists
@@ -566,6 +767,13 @@ func TestGcBdRejectsGCBeadsFileOverride(t *testing.T) {
 	cityFlag = ""
 	rigFlag = ""
 
+	// Scrub inherited beads env (notably GC_BEADS_SCOPE_ROOT from a
+	// gc agent's outer city) so the explicit GC_BEADS override below
+	// is honored by configuredBeadsProviderValue. Without this, a leaked
+	// GC_BEADS_SCOPE_ROOT disqualifies the override and the provider
+	// resolution falls back to city.toml peek (which has no [beads]
+	// section here) → defaults to "bd" → rejection never fires.
+	clearInheritedBeadsEnv(t)
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
 name = "demo"
@@ -574,6 +782,11 @@ name = "demo"
 	}
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_BEADS", "file")
+	// Clear any inherited scope pin so the GC_BEADS override applies to
+	// this test's city. When run from a polecat session, the ambient
+	// GC_BEADS_SCOPE_ROOT points at the rig repo and would suppress the
+	// override before the provider check could fire.
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
 	var stdout, stderr bytes.Buffer
 	if got := doBd([]string{"list"}, &stdout, &stderr); got == 0 {
@@ -611,6 +824,61 @@ provider = "file"
 	}
 	if !strings.Contains(stderr.String(), "only supported for bd-backed beads providers") {
 		t.Fatalf("stderr = %q, want provider error", stderr.String())
+	}
+}
+
+// TestGcBdRejectsStaleFileMarkerWithDiagnosticHint asserts the error when
+// a scope has a stale .gc/beads.json (file-store marker) but no
+// .beads/metadata.json (bd-store marker): gc rejects with a hint that
+// names the offending marker and suggests the fix. Regression for the
+// post-#899 behavior change where stale migration artifacts silently
+// reclassified rigs as file-backed with no diagnostic.
+func TestGcBdRejectsStaleFileMarkerWithDiagnosticHint(t *testing.T) {
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	defer func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	}()
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "legacy-rig")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "bd"
+
+[[rigs]]
+name = "legacy-rig"
+path = "legacy-rig"
+prefix = "lg"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".gc", "beads.json"), []byte(`{"seq":1,"beads":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"--rig", "legacy-rig", "list"}, &stdout, &stderr); got == 0 {
+		t.Fatalf("doBd() = %d, want non-zero", got)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, `resolved "file"`) {
+		t.Fatalf("stderr = %q, want named provider in error", out)
+	}
+	if !strings.Contains(out, ".gc/beads.json") {
+		t.Fatalf("stderr = %q, want named marker in hint", out)
+	}
+	if !strings.Contains(out, ".beads/metadata.json") {
+		t.Fatalf("stderr = %q, want named fix in hint", out)
 	}
 }
 
@@ -831,7 +1099,7 @@ func TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind(t *testing.T) 
 	if err != nil {
 		t.Fatalf("providerStore.Create after rebind: %v", err)
 	}
-	if got := beadPrefix(rebound.ID); got != "fe" {
+	if got := beadPrefix(nil, rebound.ID); got != "fe" {
 		t.Fatalf("provider rebind bead prefix = %q, want %q", got, "fe")
 	}
 
@@ -882,7 +1150,7 @@ func TestManagedBdRigStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.T
 	if err != nil {
 		t.Fatalf("providerStore.Create: %v", err)
 	}
-	if got := beadPrefix(providerBead.ID); got != "fe" {
+	if got := beadPrefix(nil, providerBead.ID); got != "fe" {
 		t.Fatalf("provider rig bead prefix = %q, want %q", got, "fe")
 	}
 	rawShow := runRawBDFromDir(t, bdPath, rawDir, "show", "--json", providerBead.ID)
@@ -1010,7 +1278,7 @@ func TestManagedBdCityStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.
 	}
 
 	rawID := parseCreatedBeadID(t, runRawBDFromDir(t, bdPath, rawDir, "create", "--json", "raw city bead", "-t", "task"))
-	if got := beadPrefix(rawID); got != "gc" {
+	if got := beadPrefix(nil, rawID); got != "gc" {
 		t.Fatalf("raw city bead prefix = %q, want %q", got, "gc")
 	}
 	providerStore, err := openStoreAtForCity(cityPath, cityPath)
@@ -1036,7 +1304,7 @@ func TestManagedBdCityStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.
 	if err != nil {
 		t.Fatalf("providerStore.Create: %v", err)
 	}
-	if got := beadPrefix(providerBead.ID); got != "gc" {
+	if got := beadPrefix(nil, providerBead.ID); got != "gc" {
 		t.Fatalf("provider city bead prefix = %q, want %q", got, "gc")
 	}
 	rawShow := runRawBDFromDir(t, bdPath, rawDir, "show", "--json", providerBead.ID)
@@ -1072,7 +1340,7 @@ func TestFreshManagedBdCityInitSeedsPinnedHQDatabaseAndKeepsGCPrefix(t *testing.
 		t.Fatalf("MkdirAll(rawDir): %v", err)
 	}
 	rawID := parseCreatedBeadID(t, runRawBDFromDir(t, bdPath, rawDir, "create", "--json", "fresh city bead", "-t", "task"))
-	if got := beadPrefix(rawID); got != "gc" {
+	if got := beadPrefix(nil, rawID); got != "gc" {
 		t.Fatalf("raw city bead prefix = %q, want %q", got, "gc")
 	}
 	providerStore, err := openStoreAtForCity(cityPath, cityPath)
@@ -1083,7 +1351,7 @@ func TestFreshManagedBdCityInitSeedsPinnedHQDatabaseAndKeepsGCPrefix(t *testing.
 	if err != nil {
 		t.Fatalf("providerStore.Create: %v", err)
 	}
-	if got := beadPrefix(providerBead.ID); got != "gc" {
+	if got := beadPrefix(nil, providerBead.ID); got != "gc" {
 		t.Fatalf("provider city bead prefix = %q, want %q", got, "gc")
 	}
 }
@@ -1283,7 +1551,41 @@ func TestResolveBdScopeTargetUsesEnclosingRig(t *testing.T) {
 	}
 }
 
+func TestResolveBdScopeTargetRoutesExistingCityBeadFromRigCwd(t *testing.T) {
+	origProbe := bdBeadExists
+	defer func() { bdBeadExists = origProbe }()
+	bdBeadExists = func(_ string, target execStoreTarget, beadID string) bool {
+		return target.ScopeKind == "city" && beadID == "mc-city1"
+	}
+
+	cityDir := filepath.Join(t.TempDir(), "city")
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "maintainer-city", Prefix: "mc"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: "frontend", Prefix: "fr"}},
+	}
+	setCwd(t, filepath.Join(rigDir, "nested"))
+
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"show", "mc-city1"})
+	if err != nil {
+		t.Fatalf("resolveBdScopeTarget() error = %v", err)
+	}
+	want := execStoreTarget{
+		ScopeRoot: cityDir,
+		ScopeKind: "city",
+		Prefix:    "mc",
+	}
+	if got != want {
+		t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
+	}
+}
+
 func TestGcBdRespectsRawCityFlag(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
 	origProbe := bdBeadExists
@@ -1356,6 +1658,8 @@ set -eu
 }
 
 func TestGcBdUsesEnclosingRigWhenNoFlag(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
 	origProbe := bdBeadExists
@@ -1441,6 +1745,8 @@ set -eu
 }
 
 func TestGcBdWarnsOnExternalOverrideDrift(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
 	defer func() {
@@ -1490,6 +1796,8 @@ set -eu
 	origPath := os.Getenv("PATH")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
 	t.Setenv("CAPTURE_PATH", capture)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	t.Setenv("GC_DOLT_PORT", "9999")
 
 	var stdout, stderr bytes.Buffer
@@ -1510,4 +1818,234 @@ set -eu
 	if !strings.Contains(stderr.String(), "GC_DOLT_PORT=9999 (canonical 3307)") {
 		t.Fatalf("stderr = %q, want canonical drift detail", stderr.String())
 	}
+}
+
+// silentFallbackFakeBdScript builds a fake `bd` shell script that emits the
+// silent-fallback marker pair on stderr ("auto-importing ... into empty
+// database") and exits 0 — the exact shape bd produces when it loses the
+// managed Dolt server and falls back to opening the on-disk store. doBd
+// should treat this as a hard failure regardless of bd's exit code.
+const silentFallbackFakeBdScript = `#!/bin/sh
+echo "auto-importing 220929 bytes from .beads/issues.jsonl into empty database... auto-imported 123 issues" >&2
+echo "$@"
+exit 0
+`
+
+// silentFallbackTestSetup writes a fake bd binary that emits the silent-
+// fallback marker, prepends it to PATH, and configures a minimal city as a
+// bd-backed scope (via GC_CITY_PATH) so doBd will dispatch through it.
+func silentFallbackTestSetup(t *testing.T, fakeBdScript string) {
+	t.Helper()
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	t.Cleanup(func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	})
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	port := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
+
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "issue_prefix: demo\n" +
+		"gc.endpoint_origin: city_canonical\n" +
+		"gc.endpoint_status: verified\n" +
+		"dolt.auto-start: false\n" +
+		"dolt.host: 127.0.0.1\n" +
+		"dolt.port: " + port + "\n"
+	// writeReachableManagedDoltState already creates .beads, but don't rely
+	// on that side-effect — make the directory explicit before writing.
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_DOLT_PORT", port)
+}
+
+// TestGcBdSurfacesSilentFallbackAsLoudError_UpdatePath pins the #2080 fix:
+// when bd's update path silently falls back to the on-disk store, gc bd must
+// convert that into a non-zero exit with an operator-facing message instead
+// of letting the silent write loss reach the operator as success.
+func TestGcBdSurfacesSilentFallbackAsLoudError_UpdatePath(t *testing.T) {
+	silentFallbackTestSetup(t, silentFallbackFakeBdScript)
+
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"update", "demo-abc", "--set-metadata", "k=v"}, &stdout, &stderr)
+	if got != bdSilentFallbackExitCode {
+		t.Fatalf("doBd(update) = %d, want %d (silent-fallback exit code); stderr=%q",
+			got, bdSilentFallbackExitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "managed Dolt unreachable") {
+		t.Fatalf("stderr missing loud-fail message; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "auto-importing") {
+		t.Fatalf("original bd stderr not passed through; stderr=%q", stderr.String())
+	}
+}
+
+// TestGcBdSurfacesSilentFallbackAsLoudError_ClosePath pins the #2079 half of
+// the bd-write-persistence quad: bd close goes through the same doBd
+// handoff, so the silent-fallback detection must fire identically. Pre-fix,
+// gc bd close would have exited 0 even when the close never persisted to
+// JSONL (the behavior #2079 documents).
+func TestGcBdSurfacesSilentFallbackAsLoudError_ClosePath(t *testing.T) {
+	silentFallbackTestSetup(t, silentFallbackFakeBdScript)
+
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"close", "demo-abc", "-r", "duplicate"}, &stdout, &stderr)
+	if got != bdSilentFallbackExitCode {
+		t.Fatalf("doBd(close) = %d, want %d (silent-fallback exit code); stderr=%q",
+			got, bdSilentFallbackExitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "managed Dolt unreachable") {
+		t.Fatalf("stderr missing loud-fail message; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "auto-importing") {
+		t.Fatalf("original bd stderr not passed through; stderr=%q", stderr.String())
+	}
+}
+
+// TestGcBdHappyPathExitsZeroWithoutFallbackMarker is the inverse: a clean
+// bd run that produces no auto-import marker must NOT be converted into the
+// loud-fail. This guards against false positives where bd's stderr happens
+// to contain unrelated content.
+func TestGcBdHappyPathExitsZeroWithoutFallbackMarker(t *testing.T) {
+	// Fake bd that exits 0 with normal output and an unrelated stderr line.
+	const happyPathFakeBdScript = `#!/bin/sh
+echo "some normal bd output"
+echo "some unrelated stderr line" >&2
+exit 0
+`
+	silentFallbackTestSetup(t, happyPathFakeBdScript)
+
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"list"}, &stdout, &stderr)
+	if got != 0 {
+		t.Fatalf("doBd(list) = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "managed Dolt unreachable") {
+		t.Fatalf("loud-fail message fired on a happy-path run; stderr=%q", stderr.String())
+	}
+}
+
+// TestGcBdProcessExitCodeMatchesSilentFallbackContract pins the process-
+// level exit code contract that the bdSilentFallbackExitCode = 4 doc
+// comment promises operators and CI. PR #2327 review found the previous
+// RunE used `return errExit` on any non-zero, which collapsed every code
+// to 1 in commandExitCode — defeating the operator/CI signal the loud-
+// fail was meant to provide. Plumbing doBd's numeric code through
+// exitForCode ensures the process exit code matches what doBd computed.
+func TestGcBdProcessExitCodeMatchesSilentFallbackContract(t *testing.T) {
+	silentFallbackTestSetup(t, silentFallbackFakeBdScript)
+
+	var stdout, stderr bytes.Buffer
+	got := run([]string{"bd", "update", "demo-abc", "--set-metadata", "k=v"}, &stdout, &stderr)
+	if got != bdSilentFallbackExitCode {
+		t.Fatalf("run(bd update) = %d, want %d (silent-fallback exit code); stderr=%q",
+			got, bdSilentFallbackExitCode, stderr.String())
+	}
+}
+
+// TestGcBdProcessExitCodePreservesBdNonZero is the inverse case: when bd
+// returns a non-zero code that isn't the silent-fallback case (e.g., bd
+// itself rejected the command), gc bd must preserve bd's exit code rather
+// than collapsing it to 1. exitForCode encodes ≥2 codes via
+// commandExitError so commandExitCode reads them back faithfully.
+func TestGcBdProcessExitCodePreservesBdNonZero(t *testing.T) {
+	const bdRejectsScript = `#!/bin/sh
+echo "bd: simulated usage error" >&2
+exit 3
+`
+	silentFallbackTestSetup(t, bdRejectsScript)
+
+	var stdout, stderr bytes.Buffer
+	got := run([]string{"bd", "list"}, &stdout, &stderr)
+	if got != 3 {
+		t.Fatalf("run(bd list) = %d, want 3 (preserved bd exit code); stderr=%q",
+			got, stderr.String())
+	}
+}
+
+// TestBdOutputIndicatesSilentFallback covers the marker-detection helper
+// directly with table-driven cases so the source-of-truth for what counts
+// as "silent fallback" is unit-pinned.
+func TestBdOutputIndicatesSilentFallback(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"empty", "", false},
+		{"single marker only auto-importing", "auto-importing 100 bytes from foo", false},
+		{"single marker only into-empty-database", "into empty database", false},
+		{"both markers same line", "auto-importing 100 bytes into empty database", true},
+		{"both markers reversed order", "into empty database <- auto-importing 100 bytes", true},
+		{"both markers across newlines", "auto-importing 100 bytes\n  into empty database\n  done", true},
+		{"case insensitive uppercase", "AUTO-IMPORTING INTO EMPTY DATABASE", true},
+		{"case insensitive mixed", "Auto-Importing 200 bytes Into Empty Database", true},
+		{"unrelated transport error", "dial tcp 127.0.0.1:3306: connect: connection refused", false},
+		{"unrelated server-unreachable error", "server unreachable", false},
+		{"both markers buried in long output", "starting bd\n... \nauto-importing 220929 bytes from .beads/issues.jsonl into empty database... \n... \nauto-imported 123 issues\n", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := bdOutputIndicatesSilentFallback(tt.input); got != tt.want {
+				t.Errorf("bdOutputIndicatesSilentFallback(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHeadLimitedWriter pins the bounded-prefix behavior used to scan bd's
+// stderr: writes past the limit are reported as fully consumed (so it is
+// safe behind io.MultiWriter) but only the first limit bytes are retained.
+func TestHeadLimitedWriter(t *testing.T) {
+	t.Run("retains only the first limit bytes of an oversized write", func(t *testing.T) {
+		w := &headLimitedWriter{limit: 5}
+		n, err := w.Write([]byte("abcdefgh"))
+		if err != nil || n != 8 {
+			t.Fatalf("Write = (%d, %v), want (8, nil)", n, err)
+		}
+		if got := w.String(); got != "abcde" {
+			t.Fatalf("String() = %q, want %q", got, "abcde")
+		}
+	})
+	t.Run("accumulates across writes and stops at the limit", func(t *testing.T) {
+		w := &headLimitedWriter{limit: 5}
+		for _, chunk := range []string{"ab", "cdef", "ghi"} {
+			if n, err := w.Write([]byte(chunk)); err != nil || n != len(chunk) {
+				t.Fatalf("Write(%q) = (%d, %v), want (%d, nil)", chunk, n, err, len(chunk))
+			}
+		}
+		if got := w.String(); got != "abcde" {
+			t.Fatalf("String() = %q, want %q", got, "abcde")
+		}
+	})
+	t.Run("zero limit retains nothing but still consumes the write", func(t *testing.T) {
+		w := &headLimitedWriter{limit: 0}
+		n, err := w.Write([]byte("xyz"))
+		if err != nil || n != 3 {
+			t.Fatalf("Write = (%d, %v), want (3, nil)", n, err)
+		}
+		if got := w.String(); got != "" {
+			t.Fatalf("String() = %q, want empty", got)
+		}
+	})
 }

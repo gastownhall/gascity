@@ -169,6 +169,7 @@ func (w *beadWire) toBead() beads.Bead {
 		Description: w.Description,
 		Labels:      w.Labels,
 		Metadata:    coerceMetadata(w.Metadata),
+		Ephemeral:   w.Ephemeral,
 	}
 }
 
@@ -255,6 +256,18 @@ func (s *Store) Close(id string) error {
 	return nil
 }
 
+// Reopen sets a bead's status to "open": script reopen <id>
+func (s *Store) Reopen(id string) error {
+	_, err := s.run(nil, "reopen", id)
+	if err != nil {
+		if isNotFoundError(err) {
+			return fmt.Errorf("reopening bead %q: %w", id, beads.ErrNotFound)
+		}
+		return fmt.Errorf("reopening bead %q: %w", id, err)
+	}
+	return nil
+}
+
 // CloseAll closes multiple beads and sets metadata on each.
 func (s *Store) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	closed := 0
@@ -323,7 +336,7 @@ func (s *Store) ListOpen(status ...string) ([]beads.Bead, error) {
 
 // Ready returns actionable open beads (excluding infrastructure types):
 // script ready
-func (s *Store) Ready() ([]beads.Bead, error) {
+func (s *Store) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 	out, err := s.run(nil, "ready")
 	if err != nil {
 		return nil, fmt.Errorf("exec beads ready: %w", err)
@@ -334,11 +347,15 @@ func (s *Store) Ready() ([]beads.Bead, error) {
 	}
 	result := all[:0]
 	for _, b := range all {
-		if !beads.IsReadyExcludedType(b.Type) {
+		if !b.Ephemeral && !beads.IsReadyExcludedType(b.Type) {
 			result = append(result, b)
 		}
 	}
-	return result, nil
+	if len(query) == 0 {
+		return result, nil
+	}
+	q := query[0]
+	return beads.ApplyListQuery(result, beads.ListQuery{Assignee: q.Assignee, Limit: q.Limit}), nil
 }
 
 // Children returns non-closed beads whose ParentID matches by default:
@@ -359,6 +376,7 @@ func (s *Store) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]
 		Limit:         limit,
 		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
 		Sort:          beads.SortCreatedDesc,
+		TierMode:      beads.TierModeFromOpts(opts),
 	})
 }
 
@@ -381,6 +399,7 @@ func (s *Store) ListByMetadata(filters map[string]string, limit int, opts ...bea
 		Limit:         limit,
 		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
 		Sort:          beads.SortCreatedDesc,
+		TierMode:      beads.TierModeFromOpts(opts),
 	})
 }
 
@@ -402,6 +421,14 @@ func (s *Store) SetMetadataBatch(id string, kvs map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// Tx executes fn sequentially against the exec store.
+func (s *Store) Tx(_ string, fn func(beads.Tx) error) error {
+	if fn == nil {
+		return errors.New("beads tx: nil callback")
+	}
+	return fn(s)
 }
 
 // Delete permanently removes a bead by calling the "delete" subcommand.

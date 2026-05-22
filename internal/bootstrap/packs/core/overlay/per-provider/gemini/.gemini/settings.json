@@ -38,21 +38,6 @@
           {
             "type": "command",
             "command": "gc mail check --inject --hook-format gemini"
-          },
-          {
-            "type": "command",
-            "command": "gc hook --inject --hook-format gemini"
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "gc hook --inject --hook-format gemini"
           }
         ]
       }

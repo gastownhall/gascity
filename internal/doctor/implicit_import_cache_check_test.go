@@ -23,10 +23,17 @@ commit = "abc123"
 
 	check := &ImplicitImportCacheCheck{}
 	result := check.Run(&CheckContext{})
-	if result.Status != StatusOK {
-		t.Fatalf("status = %v, want OK; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	if result.Status != StatusWarning {
+		t.Fatalf("status = %v, want warning; msg = %s; details = %v", result.Status, result.Message, result.Details)
 	}
 	if err := check.Fix(&CheckContext{}); err != nil {
 		t.Fatalf("Fix(): %v", err)
+	}
+	data, err := os.ReadFile(implicitPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", implicitPath, err)
+	}
+	if string(data) != "schema = 1\n" {
+		t.Fatalf("implicit import file after Fix() = %q, want only schema", string(data))
 	}
 }

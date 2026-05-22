@@ -22,49 +22,17 @@ import (
 // Idempotent: correct symlinks are left alone, stale ones are updated,
 // and symlinks for formulas no longer in any layer are removed. Real files
 // (non-symlinks) in the target directory are never overwritten.
+//
+// Per-name precedence (last-wins across layers, canonical-beats-legacy
+// within a layer) is delegated to formula.ResolveAll — the same source of
+// truth used by parser.loadFormula so the symlink view and the in-process
+// loader cannot disagree on which file wins.
 func ResolveFormulas(targetDir string, layers []string) error {
 	if len(layers) == 0 {
 		return nil
 	}
 
-	// Build winner map keyed by formula NAME (not filename). Later layers
-	// overwrite earlier ones (higher priority). Within a single layer, the
-	// canonical .toml form wins over the legacy .formula.toml form so a
-	// partially-migrated layer does not shadow its own canonical file.
-	winners := make(map[string]string)
-	for _, layerDir := range layers {
-		entries, err := os.ReadDir(layerDir)
-		if err != nil {
-			continue // Layer dir doesn't exist — skip (not an error).
-		}
-		// Resolve within-layer winners first so canonical beats legacy
-		// sibling regardless of ReadDir order, then merge into the
-		// cross-layer winners map (overwriting lower layers).
-		layerPick := make(map[string]string)
-		layerLegacy := make(map[string]bool)
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			name, ok := formula.TrimTOMLFilename(e.Name())
-			if !ok {
-				continue
-			}
-			legacy := e.Name() == name+formula.LegacyTOMLExt
-			if _, exists := layerPick[name]; exists && legacy && !layerLegacy[name] {
-				continue // Canonical already picked in this layer — skip legacy sibling.
-			}
-			abs, err := filepath.Abs(filepath.Join(layerDir, e.Name()))
-			if err != nil {
-				continue
-			}
-			layerPick[name] = abs
-			layerLegacy[name] = legacy
-		}
-		for name, abs := range layerPick {
-			winners[name] = abs
-		}
-	}
+	winners := formula.ResolveAll(layers)
 
 	// Build the set of formula link names we will emit. Each winning formula
 	// gets a canonical link plus a legacy compatibility alias.

@@ -277,26 +277,20 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	return merged, nil
 }
 
-// loadFormula loads a formula by name from search paths.
-// Tries canonical TOML first (.toml), then legacy infixed TOML, then JSON.
+// loadFormula loads a formula by name from search paths. Search paths are
+// ordered lowest→highest priority (matching ComputeFormulaLayers); the
+// highest-priority path containing the formula wins. Within a single path,
+// canonical .toml beats legacy .formula.toml beats legacy .formula.json.
 func (p *Parser) loadFormula(name string) (*Formula, error) {
-	// Check cache first
 	if cached, ok := p.cache[name]; ok {
 		return cached, nil
 	}
 
-	// Search for the formula file - try TOML first, then JSON
-	extensions := []string{FormulaExtTOML, FormulaLegacyExtTOML, FormulaExtJSON}
-	for _, dir := range p.searchPaths {
-		for _, ext := range extensions {
-			path := filepath.Join(dir, name+ext)
-			if _, err := os.Stat(path); err == nil {
-				return p.ParseFile(path)
-			}
-		}
+	path, ok := Resolve(p.searchPaths, name)
+	if !ok {
+		return nil, fmt.Errorf("formula %q not found in search paths", name)
 	}
-
-	return nil, fmt.Errorf("formula %q not found in search paths", name)
+	return p.ParseFile(path)
 }
 
 // LoadByName loads a formula by name from search paths.

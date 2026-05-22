@@ -158,16 +158,22 @@ type ListBody[T any] struct {
 
 // ListOutput is a generic output type for list endpoints. It sets the
 // X-GC-Index header and returns items in the standard list envelope.
+// CacheAgeS reports the age of the CachingStore snapshot that produced
+// the response (0 if the handler did not read from a caching store or
+// the age is unknown); read-path CLI commands surface this as
+// _cache_age_s in --json output and as a stale-read banner > 30 s.
 type ListOutput[T any] struct {
-	Index uint64 `header:"X-GC-Index" doc:"Latest event sequence number."`
-	Body  ListBody[T]
+	Index     uint64  `header:"X-GC-Index" doc:"Latest event sequence number."`
+	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
+	Body      ListBody[T]
 }
 
 // IndexOutput is a generic output type for single-resource endpoints
-// that include the X-GC-Index header.
+// that include the X-GC-Index header. CacheAgeS mirrors ListOutput.
 type IndexOutput[T any] struct {
-	Index uint64 `header:"X-GC-Index" doc:"Latest event sequence number."`
-	Body  T
+	Index     uint64  `header:"X-GC-Index" doc:"Latest event sequence number."`
+	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
+	Body      T
 }
 
 // --- Health / Status output types ---

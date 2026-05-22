@@ -41,7 +41,8 @@ gc bd update <work-bead> \
   --set-metadata branch=$(git branch --show-current) \
   --set-metadata target={{ .DefaultBranch }} \
   --notes "Implemented: <brief summary>"
-gc bd update <work-bead> --status=open --assignee={{ .RigName }}/refinery --set-metadata gc.routed_to={{ .RigName }}/refinery
+REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"
+gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"
 gc runtime drain-ack
 exit
 ```
@@ -63,7 +64,21 @@ There is no "idle" state. There is no "waiting for more work."
 
 **Polecats do NOT:**
 - Push directly to main (Refinery merges)
-- Close the work bead (Refinery closes after merge)
+- **EVER run `bd close`** (Refinery closes after merge — see below)
 - Create MR beads (metadata on the work bead replaces this)
 - Wait around after running the done sequence
+
+### ABSOLUTE RESTRICTION: No Bead Closing
+
+**You MUST NOT close beads. EVER. Under ANY circumstances.**
+
+Do not run `bd close`, `gc bd close`, or set `--status=closed` on any bead.
+This applies even if you believe the code is "already merged" or "already on
+the target branch." Your merge verification is unreliable — you check commit
+messages and file diffs, not patch identity. Only the Refinery can verify a
+true merge via PR state or `git cherry`.
+
+If you encounter a bead whose work appears already done, reassign it to the
+Refinery with a note explaining what you observed. The Refinery will verify
+and close if appropriate.
 {{ end }}

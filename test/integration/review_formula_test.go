@@ -24,6 +24,11 @@ import (
 // contention without letting a genuinely stuck workflow loiter.
 const reviewWorkflowTimeout = 18 * time.Minute
 
+// reviewWorkflowSlingTimeout only covers formula instantiation and source
+// routing. The personal-work graph is large enough that bd-backed graph apply
+// can exceed the generic 2-minute Dolt command budget on busy CI runners.
+const reviewWorkflowSlingTimeout = 5 * time.Minute
+
 const testAdoptPRReviewCheck = `#!/usr/bin/env bash
 set -euo pipefail
 
@@ -173,7 +178,7 @@ func TestPersonalWorkFormulaCompileAndRun(t *testing.T) {
 	issueID, workflowID := startReviewWorkflow(t, cityDir, "mol-personal-work-v2", map[string]string{
 		"issue":         "", // filled after create
 		"base_branch":   "main",
-		"skip_gemini":   "false",
+		"skip_gemini":   "true",
 		"setup_command": "true",
 		"test_command":  "true",
 	})
@@ -188,8 +193,11 @@ func TestPersonalWorkFormulaCompileAndRun(t *testing.T) {
 	steps := listWorkflowSteps(t, cityDir, workflowID)
 	wantSuffixes := []string{
 		"design-review-loop.iteration.1",
+		"design-review-pipeline.persona-gen-claude",
+		"design-review-pipeline.persona-gen-codex",
 		"code-review-loop.iteration.1",
 		"review-pipeline.review-claude",
+		"review-pipeline.review-codex",
 		"review-pipeline.synthesize",
 	}
 	for _, suffix := range wantSuffixes {
@@ -223,7 +231,11 @@ func TestAdoptPRFormulaRetriesTransientReviewerStep(t *testing.T) {
 
 	steps := listWorkflowSteps(t, cityDir, workflowID)
 	if !hasStepWithSuffix(steps, "review-pipeline.review-codex.attempt.2") {
-		t.Fatalf("missing retry attempt for codex reviewer; got: %v", steps)
+		trace := readOptionalFile(filepath.Join(cityDir, "graph-workflow-trace.log"))
+		if !traceShowsSameAttemptTransientRetry(trace, "review-loop.iteration.1.review-pipeline.review-codex.attempt.1") {
+			dumpWorkflowState(t, cityDir, workflowID)
+			t.Fatalf("missing retry attempt for codex reviewer; got: %v", steps)
+		}
 	}
 
 	logical := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, "review-loop.iteration.1.review-pipeline.review-codex")
@@ -234,7 +246,11 @@ func TestAdoptPRFormulaRetriesTransientReviewerStep(t *testing.T) {
 
 func TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries(t *testing.T) {
 	cityDir := setupReviewFormulaCity(t, "success", map[string]string{
-		"GC_GRAPH_ALWAYS_TRANSIENT_SUFFIXES": "review-loop.iteration.1.review-pipeline.review-gemini.attempt.",
+		"GC_GRAPH_ALWAYS_TRANSIENT_SUFFIXES": strings.Join([]string{
+			"review-loop.iteration.1.review-pipeline.review-gemini.attempt.1",
+			"review-loop.iteration.1.review-pipeline.review-gemini.attempt.2",
+			"review-loop.iteration.1.review-pipeline.review-gemini.attempt.3",
+		}, ","),
 	})
 	_, workflowID := startReviewWorkflow(t, cityDir, "mol-adopt-pr-v2", map[string]string{
 		"issue":       "",
@@ -255,6 +271,7 @@ func TestAdoptPRFormulaSoftFailsGeminiAfterTransientRetries(t *testing.T) {
 		"review-pipeline.review-gemini.attempt.3",
 	} {
 		if !hasStepWithSuffix(steps, suffix) {
+			dumpWorkflowState(t, cityDir, workflowID)
 			t.Fatalf("missing Gemini retry attempt %q; got: %v", suffix, steps)
 		}
 	}
@@ -321,7 +338,7 @@ on_exhausted = "hard_fail"
 	if !traceHasLineWithAll(trace, "exit-after-claim bead="+attempt2.ID, "ref="+attempt2.Ref) {
 		t.Fatalf("worker trace missing forced crash evidence:\n%s", trace)
 	}
-	if countTraceLinesWithAll(trace, "claim bead="+attempt2.ID) < 2 {
+	if countTraceLinesWithAll(trace, "claim bead="+attempt2.ID)+countTraceLinesWithAll(trace, "resume bead="+attempt2.ID) < 2 {
 		t.Fatalf("worker trace missing reclaim evidence for %s:\n%s", attempt2.ID, trace)
 	}
 	if !traceHasLineWithAll(trace, "run bead="+attempt2.ID, "ref="+attempt2.Ref) {
@@ -347,12 +364,13 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 	cityDir := filepath.Join(t.TempDir(), cityName)
 
 	startCommand := workflowAgentStartCommand(mode, extraEnv)
+	polecatScaleCheck := `ready_json=$(bd ready --metadata-field gc.routed_to=polecat --unassigned --exclude-type=epic --json --limit=0) && printf '%s\n' "$ready_json" | jq 'length'`
 	cityToml := fmt.Sprintf(
 		"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n"+
 			"[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n"+
 			"[[named_session]]\ntemplate = \"worker\"\nmode = \"always\"\n\n"+
-			"[[agent]]\nname = \"polecat\"\nstart_command = %q\nmin_active_sessions = 0\nmax_active_sessions = 3\n",
-		cityName, startCommand, startCommand,
+			"[[agent]]\nname = \"polecat\"\nstart_command = %q\nmin_active_sessions = 0\nmax_active_sessions = 3\nscale_check = %q\n",
+		cityName, startCommand, startCommand, polecatScaleCheck,
 	)
 	configPath := filepath.Join(t.TempDir(), "review-formula.toml")
 	if err := os.WriteFile(configPath, []byte(cityToml), 0o644); err != nil {
@@ -450,8 +468,9 @@ func startReviewWorkflow(t *testing.T, cityDir, formula string, vars map[string]
 	for k, v := range vars {
 		args = append(args, "--var", k+"="+v)
 	}
-	out, err = gcDolt(cityDir, args...)
+	out, err = gcDoltWithTimeout(cityDir, reviewWorkflowSlingTimeout, args...)
 	if err != nil {
+		dumpReviewFormulaCityState(t, cityDir)
 		t.Fatalf("gc sling failed: %v\noutput: %s", err, out)
 	}
 	slingOutput := out
@@ -501,7 +520,28 @@ func hasStepWithSuffix(steps []string, suffix string) bool {
 	return false
 }
 
+func traceShowsSameAttemptTransientRetry(trace, stepRef string) bool {
+	runCount := 0
+	sawTransientClose := false
+	for _, line := range strings.Split(trace, "\n") {
+		if strings.Contains(line, " run bead=") && strings.Contains(line, "ref="+stepRef) {
+			runCount++
+		}
+		if strings.Contains(line, " close-fail bead=") &&
+			strings.Contains(line, "ref="+stepRef) &&
+			strings.Contains(line, "class=transient") {
+			sawTransientClose = true
+		}
+	}
+	return sawTransientClose && runCount >= 2
+}
+
 func dumpWorkflowState(t *testing.T, cityDir, workflowID string) {
+	t.Helper()
+	dumpReviewFormulaCityState(t, cityDir)
+}
+
+func dumpReviewFormulaCityState(t *testing.T, cityDir string) {
 	t.Helper()
 	out, _ := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
 	t.Logf("all beads:\n%s", out)
@@ -533,6 +573,8 @@ func installReviewFormulaFixtures(t *testing.T, cityDir string) {
 
 	writeLocalFormula(t, cityDir, "expansion-review-pr", reviewworkflows.ExpansionReviewPR)
 	writeLocalFormula(t, cityDir, "expansion-design-review", reviewworkflows.ExpansionDesignReview)
+	writeLocalFormula(t, cityDir, "expansion-review-pr-lite", reviewworkflows.ExpansionReviewPRLite)
+	writeLocalFormula(t, cityDir, "expansion-design-review-lite", reviewworkflows.ExpansionDesignReviewLite)
 	writeLocalFormula(t, cityDir, "mol-adopt-pr-v2", reviewworkflows.AdoptPR)
 	writeLocalFormula(t, cityDir, "mol-personal-work-v2", reviewworkflows.PersonalWork)
 

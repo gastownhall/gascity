@@ -12,8 +12,20 @@ import (
 )
 
 const (
-	nudgeBeadType  = "chore"
-	nudgeBeadLabel = "gc:nudge"
+	nudgeBeadType    = "chore"
+	nudgeBeadLabel   = "gc:nudge"
+	nudgeLookupLimit = nudgequeue.NudgeLookupLimit
+
+	// nudgeEnqueueRollbackCloseReason is the close_reason metadata value
+	// stamped on partially-created nudge beads when enqueueQueuedNudgeWithStore's
+	// withNudgeQueueState transaction returns an error after the backing
+	// bead was successfully created. The rollback path closes the bead to
+	// avoid leaking it; BdStore.Close forwards metadata.close_reason as
+	// `bd close --reason`. Without this stamp, cities running with
+	// validation.on-close=error reject the rollback close and the bead leaks
+	// open with metadata.state="queued".
+	// The 42-character form satisfies the >=20 char validator floor.
+	nudgeEnqueueRollbackCloseReason = "nudge rollback: enqueue transaction failed"
 )
 
 type nudgeReference = nudgequeue.Reference
@@ -45,11 +57,13 @@ func findNudgeBead(store beads.Store, nudgeID string, includeClosed bool) (beads
 	items, err := store.List(beads.ListQuery{
 		Label:         "nudge:" + nudgeID,
 		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
+		Limit:         nudgeLookupLimit + 1,
 		Sort:          beads.SortCreatedDesc,
 	})
 	if err != nil {
 		return beads.Bead{}, false, err
 	}
+	capped := len(items) > nudgeLookupLimit
 	var fallback beads.Bead
 	hasFallback := false
 	for _, item := range items {
@@ -62,10 +76,13 @@ func findNudgeBead(store beads.Store, nudgeID string, includeClosed bool) (beads
 		if isTerminalNudgeState(item.Metadata["state"]) {
 			return item, true, nil
 		}
-		if !hasFallback {
+		if !capped && !hasFallback {
 			fallback = item
 			hasFallback = true
 		}
+	}
+	if capped {
+		return beads.Bead{}, false, beads.LookupLimitError{Kind: "nudge", Label: "nudge:" + nudgeID, Limit: nudgeLookupLimit}
 	}
 	if includeClosed && hasFallback {
 		return fallback, true, nil
@@ -129,6 +146,7 @@ func markQueuedNudgeTerminal(store beads.Store, item queuedNudge, state, reason,
 		"terminal_reason": reason,
 		"commit_boundary": commitBoundary,
 		"terminal_at":     now.UTC().Format(time.RFC3339),
+		"close_reason":    nudgeCanonicalCloseReason(state),
 	}
 
 	tryTerminalize := func(beadID string) error {
@@ -169,6 +187,45 @@ func markQueuedNudgeTerminal(store beads.Store, item queuedNudge, state, reason,
 	return nil
 }
 
+// nudgeCanonicalCloseReason maps a nudge queue terminalization state code
+// to a human-readable close_reason of at least 20 characters, suitable for
+// use as `bd close --reason` under validation.on-close=error.
+//
+// markQueuedNudgeTerminal stamps the result in metadata.close_reason
+// before invoking store.Close. BdStore.Close and CloseAll forward
+// metadata.close_reason as the --reason argument, which allows cities
+// running with validation.on-close=error to accept the close.
+// Without the canonical reason, the validator rejects close calls with
+// reason <20 chars, the close fails, the entire withNudgeQueueState
+// transaction rolls back, and the nudge bounces between InFlight and
+// Pending forever (one bead.updated event per claim attempt) until
+// expires_at cuts in.
+//
+// Unknown codes fall back to a descriptive phrase that remains >=20
+// characters after bd's validator trims whitespace. Codes already 20+
+// chars pass through unchanged.
+func nudgeCanonicalCloseReason(stateCode string) string {
+	switch stateCode {
+	case "failed":
+		return "nudge failed: queue terminalization rejected delivery"
+	case "expired":
+		return "nudge expired past deliver-by deadline"
+	case "superseded":
+		return "nudge superseded by newer queued entry"
+	case "injected":
+		return "nudge delivered via provider injection"
+	case "accepted_for_injection":
+		return "nudge accepted for hook-transport injection"
+	}
+	if len(stateCode) >= 20 {
+		return stateCode
+	}
+	if stateCode == "" {
+		return "nudge terminalized: unknown-state"
+	}
+	return "nudge terminalized: " + stateCode
+}
+
 func isMissingQueuedNudgeBeadErr(err error, beadID string) bool {
 	if err == nil {
 		return false
@@ -182,7 +239,9 @@ func isMissingQueuedNudgeBeadErr(err error, beadID string) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "no issue found matching "+strings.ToLower(strconv.Quote(beadID))) ||
-		strings.Contains(msg, "error resolving "+beadID+": no issue found")
+		strings.Contains(msg, "error resolving "+beadID+": no issue found") ||
+		strings.Contains(msg, "ambiguous id") ||
+		strings.Contains(msg, "use more characters to disambiguate")
 }
 
 func marshalNudgeReference(ref *nudgeReference) string {

@@ -122,6 +122,42 @@ derive_prefix() {
   fi
 }
 
+strip_leading_space() {
+  local value="$1"
+  printf '%s\n' "${value#"${value%%[![:space:]]*}"}"
+}
+
+extract_quoted_value() {
+  local value="${1#*=}"
+  value="$(strip_leading_space "$value")"
+  value="${value#\"}"
+  printf '%s\n' "${value%%\"*}"
+}
+
+extract_section_quoted_value() {
+  local section="$1"
+  local key="$2"
+  awk -v section="$section" -v key="$key" '
+    {
+      section_line = $0
+      sub(/^[[:space:]]*/, "", section_line)
+      sub(/[[:space:]]*(#.*)?$/, "", section_line)
+    }
+    section_line == "[" section "]" { in_section = 1; next }
+    section_line ~ /^\[/ && in_section { in_section = 0 }
+    in_section {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      if (!found && line ~ ("^" key "[[:space:]]*=")) {
+        sub(/^[^=]*=[[:space:]]*"/, "", line)
+        sub(/".*$/, "", line)
+        print line
+        found = 1
+      }
+    }
+  '
+}
+
 bootstrap_controller_scope() {
   local label="$1"
   local command="$2"
@@ -161,13 +197,13 @@ init_controller_beads() {
   fi
 
   local ws_name
-  ws_name=$(printf '%s\n' "$resolved_config" | sed -n '/^\[workspace\]/,/^\[/{ s/^name *= *"\([^"]*\)".*/\1/p; }' | head -1)
+  ws_name=$(printf '%s\n' "$resolved_config" | extract_section_quoted_value "workspace" "name")
   if [ -z "$ws_name" ]; then
     ws_name=$(basename "$city_path")
   fi
 
   local hq_prefix
-  hq_prefix=$(printf '%s\n' "$resolved_config" | sed -n '/^\[workspace\]/,/^\[/{ s/^prefix *= *"\([^"]*\)".*/\1/p; }' | head -1)
+  hq_prefix=$(printf '%s\n' "$resolved_config" | extract_section_quoted_value "workspace" "prefix")
   if [ -z "$hq_prefix" ]; then
     hq_prefix=$(derive_prefix "$ws_name")
   fi
@@ -184,7 +220,7 @@ init_controller_beads() {
   }
 
   while IFS= read -r line; do
-    line=$(echo "$line" | sed 's/^[[:space:]]*//')
+    line="$(strip_leading_space "$line")"
     if [ "$line" = "[[rigs]]" ]; then
       flush_rig
       in_rig=true
@@ -197,9 +233,9 @@ init_controller_beads() {
     esac
     if $in_rig; then
       case "$line" in
-        name\ =*|name=*) rig_name=$(echo "$line" | sed 's/.*= *"\([^"]*\)".*/\1/') ;;
-        prefix\ =*|prefix=*) rig_prefix=$(echo "$line" | sed 's/.*= *"\([^"]*\)".*/\1/') ;;
-        beads_prefix\ =*|beads_prefix=*) rig_prefix=$(echo "$line" | sed 's/.*= *"\([^"]*\)".*/\1/') ;;
+        name\ =*|name=*) rig_name="$(extract_quoted_value "$line")" ;;
+        prefix\ =*|prefix=*) rig_prefix="$(extract_quoted_value "$line")" ;;
+        beads_prefix\ =*|beads_prefix=*) rig_prefix="$(extract_quoted_value "$line")" ;;
       esac
     fi
   done <<< "$resolved_config"
@@ -259,6 +295,13 @@ case "$op" in
         spec: {
           serviceAccountName: $sa,
           restartPolicy: "Never",
+          securityContext: {
+            runAsNonRoot: true,
+            runAsUser: 1000,
+            runAsGroup: 1000,
+            fsGroup: 1000,
+            seccompProfile: {type: "RuntimeDefault"}
+          },
           containers: [{
             name: "controller",
             image: $image,
@@ -282,16 +325,30 @@ case "$op" in
               + (if $dolt_host != "" then [{name: "GC_DOLT_HOST", value: $dolt_host}] else [] end)
               + (if $dolt_port != "" then [{name: "GC_DOLT_PORT", value: $dolt_port}] else [] end)
             ),
+            securityContext: {
+              allowPrivilegeEscalation: false,
+              capabilities: {drop: ["ALL"]},
+              readOnlyRootFilesystem: true
+            },
             resources: {
               requests: {cpu: $cpu_req, memory: $mem_req},
               limits: {cpu: $cpu_lim, memory: $mem_lim}
             },
-            volumeMounts: [{name: "city", mountPath: "/city"}]
+            volumeMounts: [
+              {name: "city", mountPath: "/city"},
+              {name: "tmp", mountPath: "/tmp"}
+            ]
           }],
-          volumes: [{
-            name: "city",
-            emptyDir: {}
-          }]
+          volumes: [
+            {
+              name: "city",
+              emptyDir: {}
+            },
+            {
+              name: "tmp",
+              emptyDir: {}
+            }
+          ]
         }
       }')
 

@@ -10,8 +10,8 @@ import (
 // SupportsIDLookup reports whether the provider family exposes a stable
 // transcript identifier that should be preferred over workdir-only discovery.
 func SupportsIDLookup(provider string) bool {
-	switch providerFamily(provider) {
-	case "codex", "gemini":
+	switch sessionlog.ProviderFamily(provider) {
+	case "codex", "gemini", "opencode":
 		return false
 	default:
 		return true
@@ -26,6 +26,9 @@ func DiscoverPath(searchPaths []string, provider, workDir, gcSessionID string) s
 	if strings.TrimSpace(gcSessionID) != "" && SupportsIDLookup(provider) {
 		return ""
 	}
+	if sessionlog.ProviderFamily(provider) == "kimi" {
+		return sessionlog.FindKimiSessionFileIfUnambiguous(searchPaths, workDir)
+	}
 	return sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
 }
 
@@ -34,26 +37,29 @@ func DiscoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID stri
 	if strings.TrimSpace(gcSessionID) == "" || !SupportsIDLookup(provider) {
 		return ""
 	}
+	switch sessionlog.ProviderFamily(provider) {
+	case "kimi":
+		return sessionlog.FindKimiSessionFileByID(searchPaths, workDir, gcSessionID)
+	case "pi":
+		return sessionlog.FindPiSessionFileByID(searchPaths, workDir, gcSessionID)
+	}
 	return sessionlog.FindSessionFileByID(searchPaths, workDir, gcSessionID)
 }
 
 // DiscoverFallbackPath resolves the narrow provider-specific fallback path to
 // use when a keyed transcript lookup misses.
 func DiscoverFallbackPath(searchPaths []string, provider, workDir, gcSessionID string) string {
+	if strings.TrimSpace(gcSessionID) != "" && sessionlog.ProviderFamily(provider) == "pi" {
+		return ""
+	}
 	if strings.TrimSpace(gcSessionID) != "" && SupportsIDLookup(provider) {
+		if sessionlog.ProviderFamily(provider) == "kimi" {
+			return ""
+		}
 		return sessionlog.FindProviderFallbackSessionFile(searchPaths, provider, workDir)
 	}
-	return sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
-}
-
-func providerFamily(provider string) string {
-	lower := strings.ToLower(strings.TrimSpace(provider))
-	switch {
-	case strings.Contains(lower, "codex"):
-		return "codex"
-	case strings.Contains(lower, "gemini"):
-		return "gemini"
-	default:
-		return "claude"
+	if sessionlog.ProviderFamily(provider) == "kimi" {
+		return sessionlog.FindKimiSessionFileIfUnambiguous(searchPaths, workDir)
 	}
+	return sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
 }

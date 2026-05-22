@@ -20,38 +20,44 @@ func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
 	var hookFormat string
 	cmd := &cobra.Command{
 		Use:   "hook [agent]",
-		Short: "Check for available work (use --inject for Stop hook output)",
+		Short: "Check for available work",
 		Long: `Checks for available work using the agent's work_query config.
 
-Without --inject: prints raw output, exits 0 if work exists, 1 if empty.
-With --inject: wraps output in <system-reminder> for hook injection, always exits 0.
+Without --inject: prints normalized ready-only output, exits 0 if work exists, 1 if empty.
+With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
 
 		The agent is determined from $GC_AGENT or a positional argument.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			code := cmdHook(args, inject, stdout, stderr)
-			if hookFormat != "" {
-				code = cmdHookWithFormat(args, inject, hookFormat, stdout, stderr)
-			}
-			if code != 0 {
+			if cmdHookWithFormat(args, inject, hookFormat, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&inject, "inject", false, "output <system-reminder> block for hook injection")
+	cmd.Flags().BoolVar(&inject, "inject", false, "silent legacy Stop-hook compatibility; skip work query and exit 0")
 	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
+	if flag := cmd.Flags().Lookup("hook-format"); flag != nil {
+		flag.Hidden = true
+	}
 	return cmd
 }
 
 // cmdHook is the CLI entry point for gc hook. Resolves the agent from
 // $GC_AGENT or a positional argument, loads the city config, and runs
 // the agent's work query.
-func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
-	return cmdHookWithFormat(args, inject, "", stdout, stderr)
+func cmdHook(args []string, stdout, stderr io.Writer) int {
+	return cmdHookWithFormat(args, false, "", stdout, stderr)
 }
 
 func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
+	if inject {
+		return 0
+	}
+	// Accepted for compatibility with installed hook commands; non-inject
+	// gc hook output ignores provider-specific formatting.
+	_ = hookFormat
+
 	agentName := os.Getenv("GC_ALIAS")
 	if agentName == "" {
 		agentName = os.Getenv("GC_AGENT")
@@ -70,26 +76,17 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 		agentName = args[0]
 	}
 	if agentName == "" {
-		if inject {
-			return 0 // --inject always exits 0
-		}
 		fmt.Fprintln(stderr, "gc hook: agent not specified (set $GC_AGENT or pass as argument)") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	cityPath, err := resolveCity()
 	if err != nil {
-		if inject {
-			return 0
-		}
 		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
-		if inject {
-			return 0
-		}
 		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -100,26 +97,17 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 	resolveRigPaths(cityPath, cfg.Rigs)
 
 	if citySuspended(cfg) {
-		if inject {
-			return 0
-		}
 		fmt.Fprintln(stderr, "gc hook: city is suspended") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	a, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
 	if !ok {
-		if inject {
-			return 0
-		}
 		fmt.Fprintf(stderr, "gc hook: agent %q not found in config\n", agentName) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	if isAgentEffectivelySuspended(cfg, &a) {
-		if inject {
-			return 0
-		}
 		fmt.Fprintf(stderr, "gc hook: agent %q is suspended\n", agentName) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -140,9 +128,8 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 	// names; named-session context preserves the runtime-supplied owner
 	// env while selecting the backing config through GC_TEMPLATE.
 	resolvedAgentName := a.QualifiedName()
-	resolvedSessionName := cliSessionName(cityPath, cityName, resolvedAgentName, cfg.Workspace.SessionTemplate)
 	agentForQuery := resolvedAgentName
-	sessionForQuery := resolvedSessionName
+	sessionForQuery := ""
 	if sessionTemplateContext {
 		agentForQuery = os.Getenv("GC_ALIAS")
 		if agentForQuery == "" {
@@ -152,8 +139,14 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 			agentForQuery = os.Getenv("GC_AGENT")
 		}
 		sessionForQuery = os.Getenv("GC_SESSION_NAME")
+	} else {
+		sessionForQuery = cliSessionName(cityPath, cityName, resolvedAgentName, cfg.Workspace.SessionTemplate)
 	}
-	overrides := hookQueryEnv(cityPath, cfg, &a)
+	overrides, err := hookQueryEnv(cityPath, cfg, &a)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook: building work query env: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	overrides["GC_AGENT"] = agentForQuery
 	overrides["GC_SESSION_NAME"] = sessionForQuery
 	if sessionTemplateContext {
@@ -163,45 +156,87 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 		overrides["GC_TEMPLATE"] = os.Getenv("GC_TEMPLATE")
 	}
 	queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
+	failureTemplate, emitFailureEvent := hookWorkQueryFailureTemplate(len(args) > 0, sessionTemplateContext, a.QualifiedName())
 	runner := func(command, dir string) (string, error) {
-		return shellWorkQueryWithEnv(command, dir, queryEnv)
+		out, err := shellWorkQueryWithEnv(command, dir, queryEnv)
+		if err != nil && emitFailureEvent {
+			// A killed/timed-out work query strands the session with no
+			// output and no cause on the event bus; emit one so the
+			// reconciler can escalate instead of skipping it forever
+			// (issues #1496/#1497). Ordinary command errors are ignored
+			// by emitWorkQueryFailure and stay on the stderr path below.
+			emitCityWorkQueryFailure(cityPath, stderr,
+				os.Getenv("GC_SESSION_ID"), failureTemplate, command, err)
+		}
+		return out, err
 	}
-	return doHookWithFormat(workQuery, workDir, inject, hookFormat, runner, stdout, stderr)
+	return doHook(workQuery, workDir, inject, runner, stdout, stderr)
+}
+
+func hookWorkQueryFailureTemplate(explicitTarget, sessionTemplateContext bool, resolvedAgentName string) (string, bool) {
+	currentTemplate := strings.TrimSpace(os.Getenv("GC_TEMPLATE"))
+	resolvedAgentName = strings.TrimSpace(resolvedAgentName)
+	if explicitTarget {
+		if currentTemplate == "" || currentTemplate != resolvedAgentName {
+			return "", false
+		}
+		return currentTemplate, true
+	}
+	if currentTemplate != "" && (sessionTemplateContext || strings.TrimSpace(os.Getenv("GC_SESSION_ID")) != "") {
+		return currentTemplate, true
+	}
+	return resolvedAgentName, true
 }
 
 // hookQueryEnv returns the full work-query environment for a hook subprocess.
 // It includes scope metadata (store root/scope/prefix) plus any rig-scoped
 // runtime overrides so hook queries observe the same routing contract as the
 // controller probes.
-func hookQueryEnv(cityPath string, cfg *config.City, a *config.Agent) map[string]string {
-	env := controllerWorkQueryEnv(cityPath, cfg, a)
+func hookQueryEnv(cityPath string, cfg *config.City, a *config.Agent) (map[string]string, error) {
+	env, err := controllerWorkQueryEnv(cityPath, cfg, a)
+	if err != nil {
+		return nil, err
+	}
 	if env == nil {
 		env = map[string]string{}
 	}
-	return env
+	return env, nil
 }
 
 // WorkQueryRunner runs a work query command and returns its stdout.
 // dir sets the command's working directory.
 type WorkQueryRunner func(command, dir string) (string, error)
 
+// hookWorkQueryTimeout caps the work-query subprocess. Default matches
+// the pre-bounded behavior (30s) so existing tests that legitimately
+// take >15s don't regress; the package-level var lets us lower it in
+// follow-up work after slow paths are identified and optimized.
+var hookWorkQueryTimeout = 30 * time.Second
+
 // shellWorkQueryWithEnv runs a work query command via sh -c and returns
 // stdout. If env is non-nil it is used as the subprocess environment
 // (including any rig-scoped BEADS_DIR / GC_RIG_ROOT overrides); otherwise
-// the child inherits the parent process environment. Times out after 30
-// seconds.
+// the child inherits the parent process environment. Times out after a
+// short bounded interval so startup hooks cannot strand sessions behind a
+// wedged data-plane command.
 func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.WaitDelay = 2 * time.Second
+	prepareProviderOpCommand(cmd)
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	if env != nil {
-		cmd.Env = workQueryEnvForDir(env, dir)
-	}
+	cmd.Env = workQueryEnvForDir(env, dir)
 	out, err := cmd.Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			return string(out), fmt.Errorf("running work query %q: timed out after %s with partial stdout %q", command, hookWorkQueryTimeout, msg)
+		}
+		return "", fmt.Errorf("running work query %q: timed out after %s", command, hookWorkQueryTimeout)
+	}
 	if err != nil {
 		return "", fmt.Errorf("running work query %q: %w", command, err)
 	}
@@ -215,7 +250,7 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 // that inspect $PWD.
 func workQueryEnvForDir(env []string, dir string) []string {
 	if env == nil {
-		return nil
+		env = mergeRuntimeEnv(os.Environ(), nil)
 	}
 	if dir == "" {
 		return env
@@ -225,17 +260,18 @@ func workQueryEnvForDir(env []string, dir string) []string {
 }
 
 // doHook is the pure logic for gc hook. Runs the work query and outputs
-// results based on mode. Without inject: prints raw output, returns 0 if
-// work, 1 if empty. With inject: wraps in <system-reminder>, always returns 0.
+// results based on mode. Without inject: prints normalized ready-only output,
+// returns 0 if work exists, 1 if empty. With inject: skips the work query and
+// returns 0.
 func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, stderr io.Writer) int {
-	return doHookWithFormat(workQuery, dir, inject, "", runner, stdout, stderr)
-}
+	if inject {
+		return 0
+	}
 
-func doHookWithFormat(workQuery, dir string, inject bool, hookFormat string, runner WorkQueryRunner, stdout, stderr io.Writer) int {
 	output, err := runner(workQuery, dir)
 	if err != nil {
-		if inject {
-			return 0 // --inject always exits 0
+		if normalized := normalizeWorkQueryOutput(strings.TrimSpace(output)); normalized != "" {
+			fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
 		}
 		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -243,17 +279,10 @@ func doHookWithFormat(workQuery, dir string, inject bool, hookFormat string, run
 
 	trimmed := strings.TrimSpace(output)
 	normalized := normalizeWorkQueryOutput(trimmed)
+	normalized = filterUnreadyHookCandidates(normalized, time.Now())
 	hasWork := workQueryHasReadyWork(normalized)
 
-	if inject {
-		if hasWork {
-			content := formatHookInjectReminder(normalized)
-			_ = writeProviderHookContext(stdout, hookFormat, content)
-		}
-		return 0 // --inject always exits 0
-	}
-
-	// Non-inject mode: print raw output. Return 0 only when work exists.
+	// Non-inject mode: print normalized, ready-only output. Return 0 only when work exists.
 	if !hasWork {
 		if normalized != "" {
 			fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
@@ -262,23 +291,6 @@ func doHookWithFormat(workQuery, dir string, inject bool, hookFormat string, run
 	}
 	fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
 	return 0
-}
-
-func formatHookInjectReminder(normalizedWork string) string {
-	return fmt.Sprintf(`<system-reminder>
-You have pending work. Pick up the next item:
-
-<work-items>
-%s
-</work-items>
-
-Use the bead id from the work item:
-- If the item is not assigned to you yet, run `+"`bd update <id> --claim`"+`.
-- Do the requested work.
-- When done, run `+"`bd close <id>`"+`.
-Run `+"`gc hook`"+` to see the full queue.
-</system-reminder>
-`, normalizedWork)
 }
 
 func workQueryHasReadyWork(output string) bool {
@@ -302,6 +314,84 @@ func workQueryHasReadyWork(output string) bool {
 		}
 	}
 	return true
+}
+
+// filterUnreadyHookCandidates strips beads from work_query output that fail
+// bd ready semantics: future defer_until, or any open blocking dep in the
+// row's blocked_by array. The work_query is expected to gate these, but
+// defensive filtering here prevents a single broken query from cascading
+// into agent action on a bead it cannot progress.
+// Pure function over JSON; takes time.Time so tests stay deterministic.
+func filterUnreadyHookCandidates(output string, now time.Time) string {
+	if output == "" {
+		return output
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(output), &decoded); err != nil {
+		return output
+	}
+	arr, ok := decoded.([]any)
+	if !ok {
+		return output
+	}
+	filtered := make([]any, 0, len(arr))
+	for _, item := range arr {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			filtered = append(filtered, item)
+			continue
+		}
+		if isFutureDeferredHookCandidate(obj, now) {
+			continue
+		}
+		if isDepBlockedHookCandidate(obj) {
+			continue
+		}
+		filtered = append(filtered, obj)
+	}
+	reencoded, err := json.Marshal(filtered)
+	if err != nil {
+		return output
+	}
+	return string(reencoded)
+}
+
+func isFutureDeferredHookCandidate(item map[string]any, now time.Time) bool {
+	raw, ok := item["defer_until"].(string)
+	if !ok {
+		return false
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	deferAt, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return false
+	}
+	return deferAt.After(now)
+}
+
+func isDepBlockedHookCandidate(item map[string]any) bool {
+	blockedBy, ok := item["blocked_by"].([]any)
+	if !ok || len(blockedBy) == 0 {
+		return false
+	}
+	for _, b := range blockedBy {
+		dep, ok := b.(map[string]any)
+		if !ok {
+			continue
+		}
+		status, ok := dep["status"].(string)
+		if !ok {
+			continue
+		}
+		status = strings.TrimSpace(status)
+		if status != "" && !strings.EqualFold(status, "closed") {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeWorkQueryOutput(output string) string {

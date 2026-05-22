@@ -14,7 +14,11 @@ import (
 // - session-context execution / gc hook
 
 func TestPhase0Hook_UsesGCTemplateForConfigLookupInSessionContext(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedBeadsEnv(t)
+	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
+	requireNoLeakedDoltAfterForPaths(t, cityDir)
 	workDir := t.TempDir()
 
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
@@ -49,7 +53,7 @@ work_query = "printf 'pwd=%s|agent=%s|template=%s|session=%s|origin=%s' \"$PWD\"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook(nil, false, &stdout, &stderr)
+	code := cmdHook(nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -72,7 +76,11 @@ work_query = "printf 'pwd=%s|agent=%s|template=%s|session=%s|origin=%s' \"$PWD\"
 }
 
 func TestPhase0Hook_AliaslessOrdinarySessionUsesGCTemplateForConfigLookup(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedBeadsEnv(t)
+	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
+	requireNoLeakedDoltAfterForPaths(t, cityDir)
 	workDir := t.TempDir()
 
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
@@ -107,7 +115,7 @@ work_query = "printf 'agent=%s|template=%s|session=%s|origin=%s' \"$GC_AGENT\" \
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook(nil, false, &stdout, &stderr)
+	code := cmdHook(nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -125,7 +133,11 @@ work_query = "printf 'agent=%s|template=%s|session=%s|origin=%s' \"$GC_AGENT\" \
 }
 
 func TestPhase0Hook_NamedSessionContextPreservesExactOwnerEnv(t *testing.T) {
+	clearGCEnv(t)
+	clearInheritedBeadsEnv(t)
+	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
+	requireNoLeakedDoltAfterForPaths(t, cityDir)
 	workDir := t.TempDir()
 	fakeBin := t.TempDir()
 
@@ -169,7 +181,7 @@ start_command = "true"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdHook(nil, false, &stdout, &stderr)
+	code := cmdHook(nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
 	}

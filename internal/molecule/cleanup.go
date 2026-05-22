@@ -6,7 +6,16 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/closeorder"
 )
+
+// SubtreeClosedReason is the canonical close_reason stamped on every
+// bead in a molecule subtree when CloseSubtree force-closes it. Without
+// an explicit reason of >=20 chars, bd's validation.on-close=error
+// rejects the close, the subtree stays open, and downstream cleanup
+// (sling.CloseAttachedSubtree, formula teardown, etc.) is silently
+// incomplete.
+const SubtreeClosedReason = "molecule cleanup: subtree force-closed by CloseSubtree"
 
 // ListSubtree returns the root bead and all transitive parent-child
 // descendants, including already-closed beads so nested open descendants are
@@ -64,9 +73,14 @@ func ListSubtree(store beads.Store, rootID string) ([]beads.Bead, error) {
 	return out, nil
 }
 
-// CloseSubtree closes the root bead and every open descendant. Descendants are
-// closed before the root so stores with stricter parent/child close rules can
-// still accept the operation.
+// CloseSubtree closes the root bead and every open descendant.
+// Descendants are closed before the root so stores with stricter
+// parent/child close rules can still accept the operation. Within the
+// open set, closes are emitted in topological order honoring "blocks"
+// dependency edges between subtree members (blockers first), so strict
+// stores do not reject a bead while its in-batch blocker is still open.
+// Parent/child depth (deepest first) is used as the tie-breaker when no
+// blocks edge constrains the order.
 func CloseSubtree(store beads.Store, rootID string) (int, error) {
 	matched, err := ListSubtree(store, rootID)
 	if err != nil {
@@ -122,5 +136,11 @@ func CloseSubtree(store beads.Store, rootID string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	return store.CloseAll(ids, nil)
+	ordered, err := closeorder.Order(store, ids)
+	if err != nil {
+		return 0, err
+	}
+	return store.CloseAll(ordered, map[string]string{
+		"close_reason": SubtreeClosedReason,
+	})
 }

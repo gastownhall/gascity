@@ -21,10 +21,12 @@ type Fake struct {
 	broken                  bool                         // when true, all ops fail
 	Zombies                 map[string]bool              // sessions with dead agent processes
 	Attached                map[string]bool              // sessions with attached terminals
+	AttachedSequence        map[string][]bool            // scripted IsAttached results by session
 	PeekOutput              map[string]string            // session → canned peek output
 	Activity                map[string]time.Time         // session → last activity time
 	StartErrors             map[string]error             // per-session Start errors for testing
 	StopErrors              map[string]error             // per-session Stop errors for testing
+	StopLeavesRunning       map[string]bool              // per-session Stop returns nil without deleting the session
 	PendingInteractions     map[string]*PendingInteraction
 	Responses               map[string][]InteractionResponse
 	SleepCapabilityValue    SessionSleepCapability
@@ -60,6 +62,19 @@ type Call struct {
 	Action    string         // only set for Respond calls
 }
 
+// CountCalls returns the number of recorded calls matching method and name.
+func (f *Fake) CountCalls(method, name string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	count := 0
+	for _, call := range f.Calls {
+		if call.Method == method && call.Name == name {
+			count++
+		}
+	}
+	return count
+}
+
 // NewFake returns a ready-to-use [Fake].
 func NewFake() *Fake {
 	return &Fake{
@@ -67,8 +82,10 @@ func NewFake() *Fake {
 		meta:                    make(map[string]map[string]string),
 		Zombies:                 make(map[string]bool),
 		Attached:                make(map[string]bool),
+		AttachedSequence:        make(map[string][]bool),
 		StartErrors:             make(map[string]error),
 		StopErrors:              make(map[string]error),
+		StopLeavesRunning:       make(map[string]bool),
 		PendingInteractions:     make(map[string]*PendingInteraction),
 		Responses:               make(map[string][]InteractionResponse),
 		SleepCapabilityValue:    SessionSleepCapabilityFull,
@@ -93,6 +110,7 @@ func NewFailFake() *Fake {
 		Attached:                make(map[string]bool),
 		StartErrors:             make(map[string]error),
 		StopErrors:              make(map[string]error),
+		StopLeavesRunning:       make(map[string]bool),
 		PendingInteractions:     make(map[string]*PendingInteraction),
 		Responses:               make(map[string][]InteractionResponse),
 		SleepCapabilityValue:    SessionSleepCapabilityFull,
@@ -137,6 +155,9 @@ func (f *Fake) Stop(name string) error {
 	}
 	if err, ok := f.StopErrors[name]; ok {
 		return err
+	}
+	if f.StopLeavesRunning[name] {
+		return nil
 	}
 	delete(f.sessions, name)
 	return nil
@@ -225,6 +246,16 @@ func (f *Fake) SetAttached(name string, val bool) {
 	f.Attached[name] = val
 }
 
+// SetAttachedSequence scripts successive IsAttached results for a session.
+func (f *Fake) SetAttachedSequence(name string, values ...bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.AttachedSequence == nil {
+		f.AttachedSequence = make(map[string][]bool)
+	}
+	f.AttachedSequence[name] = append([]bool(nil), values...)
+}
+
 // IsAttached reports whether the fake session has an attached terminal.
 // When broken, always returns false.
 func (f *Fake) IsAttached(name string) bool {
@@ -233,6 +264,15 @@ func (f *Fake) IsAttached(name string) bool {
 	f.Calls = append(f.Calls, Call{Method: "IsAttached", Name: name})
 	if f.broken {
 		return false
+	}
+	if seq := f.AttachedSequence[name]; len(seq) > 0 {
+		next := seq[0]
+		if len(seq) == 1 {
+			delete(f.AttachedSequence, name)
+		} else {
+			f.AttachedSequence[name] = seq[1:]
+		}
+		return next
 	}
 	return f.Attached[name]
 }
