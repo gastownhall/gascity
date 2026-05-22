@@ -5593,6 +5593,77 @@ func TestDryRunConvoyUsesTracksMembers(t *testing.T) {
 	}
 }
 
+// TestDryRunLeafTaskViaBatchDispatchOnFormula is a regression test for
+// the dry-run mismatch where `gc sling --dry-run <pool> <leaf-task>
+// --on <formula>` rendered the batch ("container with zero children")
+// preview even though a real run would wrap-and-route the bead itself.
+//
+// The live CLI dispatches every sling invocation through
+// doSlingBatchWithJSON (cmd_sling.go calls it unconditionally from the
+// command handler). Inside, sling.DoSling decides single-vs-batch by
+// bead type. For non-container types (task, bug, feature, etc.) it
+// returns a single-bead result with ContainerType unset. The dry-run
+// rendering then has to honour that signal — otherwise it falls into
+// the batch preview and reports "Children (0 total, 0 open)" plus an
+// empty route list, which is the opposite of what the real run does.
+//
+// The fix in cmd_sling.go gates the dryRunBatch dispatch on
+// result.ContainerType being non-empty.
+func TestDryRunLeafTaskViaBatchDispatchOnFormula(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{
+		Name:              "polecat",
+		Dir:               "hw",
+		MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+	}
+	q := newFakeChildQuerier()
+	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open", Title: "Implement login page"}
+	q.childrenOf["BL-42"] = []beads.Bead{} // no molecule children
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "code-review"
+	opts.DryRun = true
+	// Mirror the live CLI: every sling invocation goes through
+	// doSlingBatchWithJSON; the function decides single-vs-batch
+	// internally from the bead type.
+	code := doSlingBatch(opts, deps, q, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("dry-run returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	// Must render the single-bead preview, NOT the batch container preview.
+	if strings.Contains(out, "Children (0 total, 0 open)") {
+		t.Errorf("stdout rendered misleading container preview for a leaf task; got: %s", out)
+	}
+	if strings.Contains(out, "is a container bead that groups related work") {
+		t.Errorf("stdout claimed leaf task is a container; got: %s", out)
+	}
+	if strings.Contains(out, "Attach formula (per open child):") {
+		t.Errorf("stdout rendered per-child attach section for a leaf task; got: %s", out)
+	}
+	// Should render the single-bead attach + route preview.
+	if !strings.Contains(out, "Attach formula:") {
+		t.Errorf("stdout missing single-bead attach section: %s", out)
+	}
+	if !strings.Contains(out, "Would run: bd mol cook --formula=code-review --on=BL-42") {
+		t.Errorf("stdout missing cook command: %s", out)
+	}
+	if !strings.Contains(out, "bd update 'BL-42' --set-metadata gc.routed_to=hw/polecat") {
+		t.Errorf("stdout missing route command: %s", out)
+	}
+	if !strings.Contains(out, "No side effects executed (--dry-run).") {
+		t.Errorf("stdout missing footer: %s", out)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("got %d runner calls, want 0 (dry-run): %v", len(runner.calls), runner.calls)
+	}
+}
+
 func TestDryRunBatchOnFormula(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()

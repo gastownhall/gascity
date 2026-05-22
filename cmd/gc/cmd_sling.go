@@ -882,7 +882,14 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 			return writeSlingJSONResult(result, jsonStdout, stderr)
 		}
 		// For batch dry-run, look up the container bead for display.
-		if querier != nil {
+		// DoSling sets ContainerType on the result only when it actually
+		// went down the batch path (i.e. the bead is a container type
+		// like convoy). For leaf tasks it returns the single-bead result
+		// with ContainerType unset — so the dry-run preview must use
+		// dryRunSingle, otherwise it renders the misleading "container
+		// with zero children" output even though the real run would
+		// route the bead itself.
+		if result.ContainerType != "" && querier != nil {
 			if b, getErr := querier.Get(opts.BeadOrFormula); getErr == nil {
 				children, _ := dryRunBatchChildren(querier, b.ID)
 				var open []beads.Bead
