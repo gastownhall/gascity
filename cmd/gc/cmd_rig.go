@@ -912,11 +912,12 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 			CityName:      cityName,
 			CacheAgeS:     &cacheAgeS,
 			Rigs: []RigListItem{{
-				Name:   cityName,
-				Path:   cityPath,
-				Prefix: hqPrefix,
-				HQ:     true,
-				Beads:  rigBeadsStatus(fs, cityPath),
+				Name:    cityName,
+				Path:    cityPath,
+				Prefix:  hqPrefix,
+				HQ:      true,
+				Running: true,
+				Beads:   rigBeadsStatus(fs, cityPath),
 			}},
 		}
 		for _, rig := range cr.Body {

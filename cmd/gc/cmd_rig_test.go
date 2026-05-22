@@ -3066,6 +3066,13 @@ default_sling_target = "frontend/worker"
 	if !ok || len(rigs) != 2 {
 		t.Fatalf("rigs = %#v, want HQ + frontend", out["rigs"])
 	}
+	hq, ok := rigs[0].(map[string]any)
+	if !ok {
+		t.Fatalf("HQ row = %#v", rigs[0])
+	}
+	if got := hq["running"]; got != true {
+		t.Fatalf("HQ running = %#v, want true; row=%#v", got, hq)
+	}
 	frontend, ok := rigs[1].(map[string]any)
 	if !ok {
 		t.Fatalf("frontend row = %#v", rigs[1])

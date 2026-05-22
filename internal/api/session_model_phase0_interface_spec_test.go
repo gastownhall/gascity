@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -339,6 +340,65 @@ func TestPhase0APIMailQuery_BareNamedSessionUsesTargetedRecipientLookup(t *testi
 	want := []string{live.ID, closed.ID, "live-worker", "worker"}
 	if strings.Join(recipients, ",") != strings.Join(want, ",") {
 		t.Fatalf("recipients = %#v, want %#v", recipients, want)
+	}
+}
+
+func TestPhase0APIMailQuery_UnmaterializedNamedSessionUsesConfiguredMailboxOnly(t *testing.T) {
+	fs := newPhase0APINamedWorkerState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	for _, msg := range []struct {
+		to   string
+		body string
+	}{
+		{to: "myrig/worker", body: "configured mailbox"},
+		{to: "worker", body: "raw compatibility mailbox"},
+		{to: "unrelated", body: "must not leak"},
+	} {
+		if _, err := fs.cityMailProv.Send("human", msg.to, "test", msg.body); err != nil {
+			t.Fatalf("Send(%q): %v", msg.to, err)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(fs, "/mail?agent=worker"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("inbox status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var inbox struct {
+		Items []struct {
+			To   string `json:"to"`
+			Body string `json:"body"`
+		} `json:"items"`
+		Total int `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&inbox); err != nil {
+		t.Fatalf("decode inbox: %v", err)
+	}
+	if inbox.Total != 2 {
+		t.Fatalf("inbox Total = %d, want 2; items=%#v", inbox.Total, inbox.Items)
+	}
+	for _, item := range inbox.Items {
+		if item.To == "unrelated" || item.Body == "must not leak" {
+			t.Fatalf("inbox leaked unrelated recipient message: %#v", inbox.Items)
+		}
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(fs, "/mail/count?agent=worker"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("count status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var count struct {
+		Total  int `json:"total"`
+		Unread int `json:"unread"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&count); err != nil {
+		t.Fatalf("decode count: %v", err)
+	}
+	if count.Total != inbox.Total || count.Unread != inbox.Total {
+		t.Fatalf("count = (%d total, %d unread), want (%d total, %d unread)", count.Total, count.Unread, inbox.Total, inbox.Total)
 	}
 }
 

@@ -130,8 +130,11 @@ func (s *Server) resolveMailQueryRecipientsWithContext(ctx context.Context, reci
 		return []string{recipient}
 	}
 	if spec, ok, err := s.findNamedSessionSpecForTarget(store, recipient); err == nil && ok {
-		if recipients, listErr := s.mailRecipientsForNamedSession(store, spec); listErr == nil && len(recipients) > 0 {
-			return append(recipients, recipient)
+		if recipients, listErr := s.mailRecipientsForNamedSession(store, spec); listErr == nil {
+			recipients = uniqueNonEmptyMailRecipients(append(recipients, recipient))
+			if len(recipients) > 0 {
+				return recipients
+			}
 		}
 	}
 	resolved, err := s.resolveSessionTargetIDWithContext(ctx, store, recipient, apiSessionResolveOptions{})
@@ -174,7 +177,10 @@ func (s *Server) mailRecipientsForNamedSession(store beads.Store, spec apiNamedS
 		seen[b.ID] = true
 		recipients = append(recipients, apiSessionMailboxAddresses(b)...)
 	}
-	recipients = uniqueMailRecipients(recipients)
+	if len(recipients) == 0 {
+		recipients = append(recipients, identity)
+	}
+	recipients = uniqueNonEmptyMailRecipients(recipients)
 	sort.Strings(recipients)
 	return recipients, nil
 }
@@ -383,6 +389,20 @@ func uniqueMailRecipients(recipients []string) []string {
 	}
 	if len(unique) == 0 {
 		return []string{""}
+	}
+	return unique
+}
+
+func uniqueNonEmptyMailRecipients(recipients []string) []string {
+	seen := make(map[string]bool, len(recipients))
+	unique := recipients[:0]
+	for _, recipient := range recipients {
+		recipient = strings.TrimSpace(recipient)
+		if recipient == "" || seen[recipient] {
+			continue
+		}
+		seen[recipient] = true
+		unique = append(unique, recipient)
 	}
 	return unique
 }
