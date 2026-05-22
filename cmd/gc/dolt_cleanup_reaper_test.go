@@ -71,6 +71,18 @@ func TestIsTestConfigPath_KnownGCTestPrefix(t *testing.T) {
 	}
 }
 
+func TestIsTestConfigPath_IntegrationTempPrefixes(t *testing.T) {
+	cases := []string{
+		"/tmp/gcit-123/cities/x/.gc/runtime/packs/dolt/dolt-config.yaml",
+		"/tmp/gc-int-env-123/.gc/runtime/packs/dolt/dolt-config.yaml",
+	}
+	for _, p := range cases {
+		if !isTestConfigPath(p, "/home/u", "") {
+			t.Errorf("isTestConfigPath(%q) = false, want true", p)
+		}
+	}
+}
+
 func TestIsTestConfigPath_NotTest(t *testing.T) {
 	cases := []string{
 		"/tmp/be-s9d-bench-dolt/config.yaml", // benchmark
@@ -119,6 +131,27 @@ func TestClassifyDoltProcess_OrphanByTestPath(t *testing.T) {
 	}
 }
 
+func TestClassifyDoltProcess_ReapsIntegrationTempRoots(t *testing.T) {
+	cases := []string{
+		"/tmp/gcit-123/cities/x/.gc/runtime/packs/dolt/dolt-config.yaml",
+		"/tmp/gc-int-env-123/.gc/runtime/packs/dolt/dolt-config.yaml",
+	}
+	for _, cfg := range cases {
+		p := DoltProcInfo{
+			PID:   2224,
+			Argv:  []string{"dolt", "sql-server", "--config", cfg},
+			Ports: []int{},
+		}
+		got := classifyDoltProcess(p, nil, "/home/u", "", nil)
+		if got.Action != "reap" {
+			t.Errorf("classifyDoltProcess(%q).Action = %q, want reap", cfg, got.Action)
+		}
+		if got.ConfigPath != cfg {
+			t.Errorf("classifyDoltProcess(%q).ConfigPath = %q, want %q", cfg, got.ConfigPath, cfg)
+		}
+	}
+}
+
 func TestClassifyDoltProcess_ProtectsActiveTestRoot(t *testing.T) {
 	p := DoltProcInfo{
 		PID:   2223,
@@ -153,6 +186,22 @@ func TestClassifyDoltProcess_ProtectedByPathNotOnAllowlist(t *testing.T) {
 	// Reason should echo the actual config path so operators can see it.
 	if !strings.Contains(got.Reason, "/tmp/be-s9d-bench-dolt") {
 		t.Errorf("Reason = %q, want config path echoed (architect Open Q 0)", got.Reason)
+	}
+}
+
+func TestClassifyDoltProcess_ProtectsRealManagedConfig(t *testing.T) {
+	cfg := "/home/u/projects/foo/.gc/runtime/packs/dolt/dolt-config.yaml"
+	p := DoltProcInfo{
+		PID:   3334,
+		Argv:  []string{"dolt", "sql-server", "--config", cfg},
+		Ports: []int{},
+	}
+	got := classifyDoltProcess(p, nil, "/home/u", "", nil)
+	if got.Action != "protect" {
+		t.Errorf("Action = %q, want protect", got.Action)
+	}
+	if !strings.Contains(got.Reason, "allowlist") || !strings.Contains(got.Reason, cfg) {
+		t.Errorf("Reason = %q, want allowlist reason containing config path", got.Reason)
 	}
 }
 

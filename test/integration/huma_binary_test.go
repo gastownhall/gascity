@@ -58,6 +58,7 @@ func TestHumaBinary_SupervisorBootsAndServesSpec(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, bin, "supervisor", "run")
+	configureIntegrationSupervisorCommand(cmd)
 	cmd.Env = env
 	// Capture supervisor stderr for triage on failure.
 	stderr, err := cmd.StderrPipe()
@@ -260,6 +261,7 @@ func shortTempDir(t *testing.T) string {
 		t.Fatalf("short tmp dir: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	registerIntegrationDoltSQLServerCleanup(t, dir)
 	return dir
 }
 
@@ -327,6 +329,7 @@ func TestHumaBinary_CityCreateAsync(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, bin, "supervisor", "run")
+	configureIntegrationSupervisorCommand(cmd)
 	cmd.Env = env
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -517,6 +520,7 @@ func TestHumaBinary_CityUnregisterAsync(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, bin, "supervisor", "run")
+	configureIntegrationSupervisorCommand(cmd)
 	cmd.Env = env
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -777,6 +781,7 @@ func TestHumaBinary_SessionMessageAsync(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, bin, "supervisor", "run")
+	configureIntegrationSupervisorCommand(cmd)
 	cmd.Env = env
 	stderr, err := cmd.StderrPipe()
 	if err != nil {

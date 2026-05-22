@@ -107,6 +107,8 @@ func testConfigPathPrefixes() []string {
 		"gc-supervisor-city-",
 		"gc-reload-invalid-",
 		"gc-rename-",
+		"gcit-",
+		"gc-int-env-",
 	}
 }
 

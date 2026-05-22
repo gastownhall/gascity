@@ -53,6 +53,7 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, bin, "supervisor", "run")
+	configureIntegrationSupervisorCommand(cmd)
 	cmd.Env = env
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
