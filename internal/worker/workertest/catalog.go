@@ -28,6 +28,8 @@ const ( //nolint:revive // exported requirement IDs are documented by the catalo
 	RequirementInputInitialMessageFirstStart       RequirementCode = "WC-INPUT-001"
 	RequirementInputInitialMessageResume           RequirementCode = "WC-INPUT-002"
 	RequirementInputOverrideDefaults               RequirementCode = "WC-INPUT-003"
+	RequirementInputInProgressResumeRestart        RequirementCode = "WC-INPUT-004"
+	RequirementInputPreClaimResumeRestart          RequirementCode = "WC-INPUT-005"
 	RequirementInferenceFreshSpawn                 RequirementCode = "WI-START-001"
 	RequirementInferenceTemplateStartup            RequirementCode = "WI-START-002"
 	RequirementInferenceFreshTask                  RequirementCode = "WI-TASK-001"

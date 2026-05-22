@@ -831,9 +831,15 @@ func buildPreparedStartWithWorkDirResolver(
 	if !firstStart && !forceFresh && hasResumeKey {
 		agentCfg.PromptSuffix = ""
 		agentCfg.PromptFlag = ""
-		agentCfg.Nudge = tp.Hints.Nudge
+		agentCfg.Nudge = restartPromptNudge(tp.Prompt, tp.Hints.Nudge)
 		if agentCfg.Env != nil {
 			delete(agentCfg.Env, startupPromptDeliveredEnv)
+		}
+		if strings.TrimSpace(tp.Prompt) != "" {
+			if agentCfg.Env == nil {
+				agentCfg.Env = map[string]string{}
+			}
+			agentCfg.Env[startupPromptDeliveredEnv] = "1"
 		}
 	}
 	// Initial message: append to prompt on first start only.
@@ -1124,6 +1130,13 @@ func appendInitialMessageToStartupNudge(nudge, msg string) string {
 		return nudge + startupPromptNudgeSeparator + userMessage
 	}
 	return userMessage
+}
+
+func restartPromptNudge(prompt, nudge string) string {
+	if strings.TrimSpace(prompt) == "" {
+		return nudge
+	}
+	return prependStartupPromptToNudge(prompt, nudge)
 }
 
 func startupRateLimitScreenDetected(
