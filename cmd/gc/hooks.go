@@ -106,6 +106,10 @@ title=$(echo "$DATA" | grep -o '"title":"[^"]*"' | head -1 | cut -d'"' -f4)
   "$GC_BIN" wisp autoclose "$1" 2>>"$HOOK_LOG" \
     || echo "[$(date -u +%%FT%%TZ)] on_close $1: gc wisp autoclose failed (gc=$GC_BIN)" >>"$HOOK_LOG" 2>/dev/null \
     || true
+  # Auto-close parent molecule when all step children are terminal (#1039).
+  "$GC_BIN" molecule autoclose "$1" 2>>"$HOOK_LOG" \
+    || echo "[$(date -u +%%FT%%TZ)] on_close $1: gc molecule autoclose failed (gc=$GC_BIN)" >>"$HOOK_LOG" 2>/dev/null \
+    || true
 ) </dev/null >/dev/null 2>&1 &
 `, hookStampLine())
 }
