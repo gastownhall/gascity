@@ -442,7 +442,9 @@ func TestInstallBeadHooksRigAddIntegration(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--city", cityPath, "rig", "add", rigPath}, &stdout, &stderr)
+	// --allow-pre-init: this test exercises hook installation, not git
+	// presence; the post-gco-1ly `gc rig add` default refuses non-git paths.
+	code := run([]string{"--city", cityPath, "rig", "add", rigPath, "--allow-pre-init"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("gc rig add = %d; stderr: %s", code, stderr.String())
 	}

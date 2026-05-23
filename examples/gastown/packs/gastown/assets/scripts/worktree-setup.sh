@@ -61,6 +61,18 @@ if [ -d "$WT/.git" ] || [ -f "$WT/.git" ]; then
     exit 0
 fi
 
+# Refuse to proceed if the rig root is not a git repo. Without this guard the
+# script silently produces a worktree dir that lacks .git (because git worktree
+# add fails), and the agent then loops on `fatal: not a git repository`. See
+# hq:gc-aeh / gco-1ly. The recovery is for the operator to `git init` the rig
+# root and respawn — a later invocation of this script will rebuild the
+# worktree (the WT exists / no .git path below preserves any boilerplate
+# already laid down by the provider).
+if [ ! -e "$RIG_ROOT/.git" ]; then
+    echo "worktree-setup: $RIG_ROOT has no .git — initialize the rig repo first (git init && git commit), then respawn $AGENT" >&2
+    exit 1
+fi
+
 mkdir -p "$(dirname "$WT")"
 
 STAGE=""
@@ -141,6 +153,16 @@ else
         restore_stage
         exit 1
     fi
+fi
+
+# Defense in depth: even if `git worktree add` reported success, confirm the
+# linked-worktree .git pointer landed. Without this check a partial failure
+# leaves the agent loop tripping over `fatal: not a git repository` on every
+# fetch. See hq:gc-aeh / gco-1ly.
+if [ ! -e "$WT/.git" ]; then
+    echo "worktree-setup: $WT has no .git after worktree add — refusing to hand off a broken worktree" >&2
+    restore_stage
+    exit 1
 fi
 
 if [ -n "$STAGE" ]; then

@@ -10,6 +10,7 @@ package acceptance_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -342,6 +343,8 @@ func TestRegression_GastownWithRigs(t *testing.T) {
 
 	rig1 := t.TempDir()
 	rig2 := t.TempDir()
+	initEmptyGitRepo(t, rig1)
+	initEmptyGitRepo(t, rig2)
 	c.RigAdd(rig1, "packs/gastown")
 	c.RigAdd(rig2, "packs/gastown")
 
@@ -430,4 +433,22 @@ func relPath(base, path string) string {
 		return path
 	}
 	return rel
+}
+
+// initEmptyGitRepo turns dir into a minimal git repo. Used to satisfy the
+// `gc rig add` git-presence check in tests whose intent is to exercise rig
+// registration and not the worktree-setup flow itself.
+func initEmptyGitRepo(t *testing.T, dir string) {
+	t.Helper()
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test"},
+		{"commit", "--allow-empty", "-m", "init"},
+	} {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+		}
+	}
 }

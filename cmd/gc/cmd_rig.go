@@ -64,6 +64,7 @@ func newRigAddCmd(stdout, stderr io.Writer) *cobra.Command {
 	var prefixFlag string
 	var defaultBranchFlag string
 	var adoptFlag bool
+	var allowPreInitFlag bool
 	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "add <path>",
@@ -86,6 +87,12 @@ refinery target the right branch without manual metadata patching.
 Use --start-suspended to add the rig in a suspended state (dormant-by-default).
 The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
+By default, gc rig add refuses to register a directory that has no .git, since
+the agent worktree-setup hook needs a git repo to clone from and silently
+produces broken (.git-less) worktrees otherwise. Pass --allow-pre-init to
+register a directory you intend to git-init shortly; agents spawned before
+that init will still fail until the repo exists.
+
 Use --adopt to register a directory that already has a fully initialized
 .beads/ directory (must include both metadata.json and config.yaml).
 Skips beads init; the git repo check remains informational.`,
@@ -96,7 +103,8 @@ Skips beads init; the git repo check remains informational.`,
   gc rig add ./my-project --include packs/gastown
   gc rig add ./my-project --include packs/planner --include packs/architect
   gc rig add ./my-project --include packs/gastown --start-suspended
-  gc rig add /path/to/existing --adopt`,
+  gc rig add /path/to/existing --adopt
+  gc rig add /path/to/pre-init --allow-pre-init`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if jsonOutput {
@@ -114,13 +122,17 @@ Skips beads init; the git repo check remains informational.`,
 					fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 					return errExit
 				}
+				if err := validateRigPathForAdd(rigPath, adoptFlag, allowPreInitFlag); err != nil {
+					fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
+					return errExit
+				}
 				rig, code := doRigAddWithResult(fsys.OSFS{}, cityPath, rigPath, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, io.Discard, stderr)
 				if code != 0 {
 					return errExit
 				}
 				return writeManagementActionJSON(stdout, rigAddJSONSummary(rigPath, rig))
 			}
-			if cmdRigAdd(args, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, stdout, stderr) != 0 {
+			if cmdRigAdd(args, includes, nameFlag, prefixFlag, defaultBranchFlag, startSuspended, adoptFlag, allowPreInitFlag, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -132,6 +144,7 @@ Skips beads init; the git repo check remains informational.`,
 	cmd.Flags().StringVar(&defaultBranchFlag, "default-branch", "", "mainline branch (default: auto-detect from origin/HEAD or current branch)")
 	cmd.Flags().BoolVar(&startSuspended, "start-suspended", false, "add rig in suspended state (dormant-by-default)")
 	cmd.Flags().BoolVar(&adoptFlag, "adopt", false, "adopt existing .beads/ directory (skip init)")
+	cmd.Flags().BoolVar(&allowPreInitFlag, "allow-pre-init", false, "register a directory that has no .git yet (defaults to refusing)")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
 	return cmd
 }
@@ -159,7 +172,7 @@ its beads database is initialized.`,
 }
 
 // cmdRigAdd registers an external project directory as a rig in the city.
-func cmdRigAdd(args []string, includes []string, nameOverride, prefixOverride, defaultBranchOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) int {
+func cmdRigAdd(args []string, includes []string, nameOverride, prefixOverride, defaultBranchOverride string, startSuspended, adopt, allowPreInit bool, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc rig add: missing path") //nolint:errcheck // best-effort stderr
 		return 1
@@ -176,7 +189,42 @@ func cmdRigAdd(args []string, includes []string, nameOverride, prefixOverride, d
 		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if err := validateRigPathForAdd(rigPath, adopt, allowPreInit); err != nil {
+		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	return doRigAdd(fsys.OSFS{}, cityPath, rigPath, includes, nameOverride, prefixOverride, defaultBranchOverride, startSuspended, adopt, stdout, stderr)
+}
+
+// validateRigPathForAdd refuses to register a path that has no .git unless
+// the caller opted in via --adopt (an existing .beads/ store implies the user
+// knows what they are doing) or --allow-pre-init. Without this guard, the
+// worktree-setup hook silently produces a worktree dir that lacks .git on the
+// first agent spawn, and the agent loops on `fatal: not a git repository`.
+// See hq:gc-aeh / gco-1ly.
+//
+// An existing path that fails Stat for any reason other than "not exist" is
+// reported as an error; a missing rigPath is fine here (mkdir happens later
+// in doRigAdd) — the worktree script also checks the rig root, so the
+// downstream pre_start invocation surfaces a clearer error if the user
+// never actually creates the directory.
+func validateRigPathForAdd(rigPath string, adopt, allowPreInit bool) error {
+	if adopt || allowPreInit {
+		return nil
+	}
+	if _, err := os.Stat(rigPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("checking %s: %w", rigPath, err)
+	}
+	if _, err := os.Stat(filepath.Join(rigPath, ".git")); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%s has no .git: initialize the repo first (cd %s && git init && git commit --allow-empty -m init), or pass --allow-pre-init to register a path you plan to git-init later", rigPath, rigPath)
+		}
+		return fmt.Errorf("checking %s/.git: %w", rigPath, err)
+	}
+	return nil
 }
 
 func resolveRigAddPath(cityPath, rigArg string) (string, error) {

@@ -252,6 +252,78 @@ func TestDoRigAdd_NonGitDirOmitsDefaultBranch(t *testing.T) {
 	}
 }
 
+// TestValidateRigPathForAdd_RefusesNonGit guards the regression in
+// hq:gc-aeh / gco-1ly: `gc rig add` against a path without .git silently
+// produced a broken worktree on first agent spawn. The new default refuses
+// the add and points the operator at `git init` or --allow-pre-init.
+func TestValidateRigPathForAdd_RefusesNonGit(t *testing.T) {
+	rigPath := filepath.Join(t.TempDir(), "no-git")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := validateRigPathForAdd(rigPath, false, false)
+	if err == nil {
+		t.Fatalf("validateRigPathForAdd should reject a non-git rig path")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "no .git") {
+		t.Errorf("error should mention 'no .git', got: %q", msg)
+	}
+	if !strings.Contains(msg, "--allow-pre-init") {
+		t.Errorf("error should mention --allow-pre-init, got: %q", msg)
+	}
+	if !strings.Contains(msg, "git init") {
+		t.Errorf("error should mention 'git init', got: %q", msg)
+	}
+}
+
+func TestValidateRigPathForAdd_AllowPreInit(t *testing.T) {
+	rigPath := filepath.Join(t.TempDir(), "no-git")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := validateRigPathForAdd(rigPath, false, true); err != nil {
+		t.Fatalf("validateRigPathForAdd with --allow-pre-init should accept non-git path, got: %v", err)
+	}
+}
+
+func TestValidateRigPathForAdd_Adopt(t *testing.T) {
+	// adopt is a separate opt-in (existing .beads/ store implies intent).
+	// The git check is informational on the adopt path, so validate should
+	// not block it even without --allow-pre-init.
+	rigPath := filepath.Join(t.TempDir(), "no-git")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := validateRigPathForAdd(rigPath, true, false); err != nil {
+		t.Fatalf("validateRigPathForAdd with --adopt should accept non-git path, got: %v", err)
+	}
+}
+
+func TestValidateRigPathForAdd_AcceptsGitPath(t *testing.T) {
+	rigPath := filepath.Join(t.TempDir(), "has-git")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := validateRigPathForAdd(rigPath, false, false); err != nil {
+		t.Fatalf("validateRigPathForAdd should accept a git rig path, got: %v", err)
+	}
+}
+
+func TestValidateRigPathForAdd_MissingPath(t *testing.T) {
+	// A path that doesn't exist yet is fine — doRigAdd creates it later, and
+	// the worktree-setup script will catch the no-.git case on first spawn.
+	rigPath := filepath.Join(t.TempDir(), "does-not-exist")
+
+	if err := validateRigPathForAdd(rigPath, false, false); err != nil {
+		t.Fatalf("validateRigPathForAdd should accept a missing rig path (mkdir runs later), got: %v", err)
+	}
+}
+
 func TestResolveRigAddPath(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "city")
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {

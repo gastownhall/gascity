@@ -2323,6 +2323,12 @@ refinery target the right branch without manual metadata patching.
 Use --start-suspended to add the rig in a suspended state (dormant-by-default).
 The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
+By default, gc rig add refuses to register a directory that has no .git, since
+the agent worktree-setup hook needs a git repo to clone from and silently
+produces broken (.git-less) worktrees otherwise. Pass --allow-pre-init to
+register a directory you intend to git-init shortly; agents spawned before
+that init will still fail until the repo exists.
+
 Use --adopt to register a directory that already has a fully initialized
 .beads/ directory (must include both metadata.json and config.yaml).
 Skips beads init; the git repo check remains informational.
@@ -2342,11 +2348,13 @@ gc rig add /path/to/project
   gc rig add ./my-project --include packs/planner --include packs/architect
   gc rig add ./my-project --include packs/gastown --start-suspended
   gc rig add /path/to/existing --adopt
+  gc rig add /path/to/pre-init --allow-pre-init
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
+| `--allow-pre-init` | bool |  | register a directory that has no .git yet (defaults to refusing) |
 | `--default-branch` | string |  | mainline branch (default: auto-detect from origin/HEAD or current branch) |
 | `--include` | stringArray |  | pack source for rig agents (repeatable; writes canonical rig imports) |
 | `--json` | bool |  | Output in JSONL format |
