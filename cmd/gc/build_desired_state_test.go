@@ -387,25 +387,13 @@ func TestDefaultScaleCheckCountsUsesCachedReadyReadModel(t *testing.T) {
 	}
 }
 
-// TestDefaultScaleCheckCountsCountsBeadsAssignedToPoolTemplate pins the
-// regression fix for gastownhall/gascity#1991: a bead with status=open and
-// assignee==<pool-template> + gc.routed_to==<pool-template> (the pool→pool
-// handoff write pattern used by gas-town pack formulas, e.g.
-// mol-polecat-work.toml's submit-and-exit) must produce non-zero demand for
-// the matching template. Before the fix, the Assignee!="" filter in
-// defaultScaleCheckCounts dropped this bead, leaving "assignedWorkBeads: 0"
-// indefinitely and stranding the next pool in the handoff chain. After the
-// fix, assignee==template is treated as pool demand because no session by
-// that name exists; only session-identity assignees (which Path 1 counts)
-// are excluded here.
-func TestDefaultScaleCheckCountsCountsBeadsAssignedToPoolTemplate(t *testing.T) {
+func TestDefaultScaleCheckCountsCountsUnassignedRoutedPoolWork(t *testing.T) {
 	const template = "gascity/reviewer"
 	backing := beads.NewMemStore()
 	if _, err := backing.Create(beads.Bead{
-		Title:    "pool→pool handoff routed work",
-		Type:     "task",
-		Status:   "open",
-		Assignee: template,
+		Title:  "routed pool work",
+		Type:   "task",
+		Status: "open",
 		Metadata: map[string]string{
 			"gc.routed_to": template,
 		},
@@ -426,16 +414,46 @@ func TestDefaultScaleCheckCountsCountsBeadsAssignedToPoolTemplate(t *testing.T) 
 		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
 	}
 	if got := counts[template]; got != 1 {
-		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1 (#1991 regression: pool→pool handoff bead must count as demand)", template, got)
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1", template, got)
+	}
+}
+
+func TestDefaultScaleCheckCountsDoesNotTreatTemplateAssigneeAsDemand(t *testing.T) {
+	const template = "gascity/reviewer"
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{
+		Title:    "assigned routed work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: template,
+		Metadata: map[string]string{
+			"gc.routed_to": template,
+		},
+	}); err != nil {
+		t.Fatalf("create assigned bead: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 (assignee must be a concrete session identity, never pool demand)", template, got)
 	}
 }
 
 // TestDefaultScaleCheckCountsExcludesBeadsAssignedToSession pins the
 // invariant that beads with assignee==<session-id> (Path 1 territory) are
 // NOT counted by defaultScaleCheckCounts, to avoid double-counting when
-// collectAssignedWorkBeadsWithStores has already counted them. Companion to
-// TestDefaultScaleCheckCountsCountsBeadsAssignedToPoolTemplate: together
-// they cover the asymmetry table from issue #1991.
+// collectAssignedWorkBeadsWithStores has already counted them.
 func TestDefaultScaleCheckCountsExcludesBeadsAssignedToSession(t *testing.T) {
 	const template = "gascity/reviewer"
 	backing := beads.NewMemStore()
@@ -4069,6 +4087,99 @@ func TestBuildDesiredState_OnDemandNamedSession_DirectAssigneeMaterializes(t *te
 	}
 	if !found {
 		t.Fatal("direct assignee should materialize on-demand named session")
+	}
+}
+
+func TestBuildDesiredState_RigOnDemandNamedSessionAssigneeWithRouteMaterializesNamedOnly(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]string
+	}{
+		{
+			name: "retained route metadata",
+			metadata: map[string]string{
+				"gc.routed_to": "riga/refinery",
+			},
+		},
+		{
+			name: "cleared route metadata",
+			metadata: map[string]string{
+				"gc.routed_to": "",
+			},
+		},
+		{
+			name: "absent route metadata",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			rigPath := filepath.Join(cityPath, "riga")
+			if err := os.MkdirAll(rigPath, 0o755); err != nil {
+				t.Fatalf("create rig dir: %v", err)
+			}
+			cityStore := beads.NewMemStore()
+			rigStore := beads.NewMemStore()
+			if _, err := rigStore.Create(beads.Bead{
+				Title:    "refinery handoff",
+				Type:     "task",
+				Status:   "open",
+				Assignee: "riga/refinery",
+				Metadata: tc.metadata,
+			}); err != nil {
+				t.Fatalf("create rig work: %v", err)
+			}
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Rigs:      []config.Rig{{Name: "riga", Path: rigPath}},
+				Agents: []config.Agent{{
+					Name:              "refinery",
+					Dir:               "riga",
+					StartCommand:      "true",
+					MaxActiveSessions: intPtr(1),
+					WorkQuery:         "printf ''",
+				}},
+				NamedSessions: []config.NamedSession{{
+					Template: "refinery",
+					Dir:      "riga",
+					Mode:     "on_demand",
+				}},
+			}
+
+			dsResult := buildDesiredStateWithSessionBeads(
+				"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
+				cityStore, map[string]beads.Store{"riga": rigStore}, nil, nil, io.Discard,
+			)
+			if !dsResult.NamedSessionDemand["riga/refinery"] {
+				t.Fatal("NamedSessionDemand[riga/refinery] = false for direct named-session assignee")
+			}
+			if got := dsResult.ScaleCheckCounts["riga/refinery"]; got != 0 {
+				t.Fatalf("ScaleCheckCounts[riga/refinery] = %d, want 0 for assigned named-session handoff", got)
+			}
+			var refineryEntries []TemplateParams
+			for _, tp := range dsResult.State {
+				if tp.ConfiguredNamedIdentity == "riga/refinery" || tp.TemplateName == "riga/refinery" {
+					refineryEntries = append(refineryEntries, tp)
+				}
+			}
+			if len(refineryEntries) != 1 {
+				t.Fatalf("refinery desired entries = %d, want exactly one named session: %+v", len(refineryEntries), refineryEntries)
+			}
+			refinery := refineryEntries[0]
+			if refinery.ConfiguredNamedIdentity != "riga/refinery" {
+				t.Fatalf("ConfiguredNamedIdentity = %q, want riga/refinery", refinery.ConfiguredNamedIdentity)
+			}
+			if refinery.PoolSlot != 0 {
+				t.Fatalf("PoolSlot = %d, want 0 for named session", refinery.PoolSlot)
+			}
+			if got := refinery.Env["GC_ALIAS"]; got != "riga/refinery" {
+				t.Fatalf("GC_ALIAS = %q, want riga/refinery", got)
+			}
+			if got := refinery.Env["GC_TEMPLATE"]; got != "riga/refinery" {
+				t.Fatalf("GC_TEMPLATE = %q, want riga/refinery", got)
+			}
+		})
 	}
 }
 
