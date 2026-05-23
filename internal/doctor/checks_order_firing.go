@@ -185,10 +185,10 @@ func computeExpectedIntervalForCronSchedule(schedule string) (time.Duration, err
 	// schedule (results are cached at the caller).
 	base := time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC)
 	windowsMinutes := []int{
-		1440,           // 24h — covers sub-daily and daily schedules
-		7 * 1440,       // 7d  — covers weekly and weekday-set schedules
-		31 * 1440,      // 31d — covers monthly schedules (longest month)
-		366 * 1440,     // 366d — covers yearly and leap-year schedules
+		1440,       // 24h — covers sub-daily and daily schedules
+		7 * 1440,   // 7d  — covers weekly and weekday-set schedules
+		31 * 1440,  // 31d — covers monthly schedules (longest month)
+		366 * 1440, // 366d — covers yearly and leap-year schedules
 	}
 	for _, windowMinutes := range windowsMinutes {
 		matches := make([]time.Time, 0, 16)
