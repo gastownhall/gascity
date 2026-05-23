@@ -4345,6 +4345,32 @@ session_live = ["echo global"]
 	}
 }
 
+func TestPackGlobal_DedupesPackAcrossCityAndRigScopes(t *testing.T) {
+	cfg := &City{
+		PackGlobals: []ResolvedPackGlobal{
+			{PackName: "gastown", SessionLive: []string{"theme.sh", "keys.sh"}},
+		},
+		RigPackGlobals: map[string][]ResolvedPackGlobal{
+			"my-rig": {{PackName: "gastown", SessionLive: []string{"theme.sh", "keys.sh"}}},
+		},
+		Agents: []Agent{
+			{Name: "city-agent"},
+			{Name: "rig-agent", Dir: "my-rig"},
+		},
+	}
+
+	applyPackGlobals(cfg)
+
+	for _, a := range cfg.Agents {
+		if len(a.SessionLive) != 2 {
+			t.Fatalf("agent %q SessionLive = %v, want one gastown global application", a.Name, a.SessionLive)
+		}
+		if a.SessionLive[0] != "theme.sh" || a.SessionLive[1] != "keys.sh" {
+			t.Fatalf("agent %q SessionLive = %v, want [theme.sh keys.sh]", a.Name, a.SessionLive)
+		}
+	}
+}
+
 func TestPackDefinesAgent_Found(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/gastown/pack.toml", `

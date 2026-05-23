@@ -2195,11 +2195,25 @@ func legacyPackDoctors(fs fsys.FS, entries []PackDoctorEntry, packDir, packName 
 // to matching agents. City-level globals affect ALL agents. Rig-level
 // globals affect only agents in that rig.
 func applyPackGlobals(cfg *City) {
+	applied := make([]map[string]bool, len(cfg.Agents))
+	apply := func(agentIndex int, g ResolvedPackGlobal) {
+		if g.PackName != "" {
+			if applied[agentIndex] == nil {
+				applied[agentIndex] = make(map[string]bool)
+			}
+			if applied[agentIndex][g.PackName] {
+				return
+			}
+			applied[agentIndex][g.PackName] = true
+		}
+		cfg.Agents[agentIndex].SessionLive = append(
+			cfg.Agents[agentIndex].SessionLive, g.SessionLive...)
+	}
+
 	// City-level globals → all agents.
 	for _, g := range cfg.PackGlobals {
 		for i := range cfg.Agents {
-			cfg.Agents[i].SessionLive = append(
-				cfg.Agents[i].SessionLive, g.SessionLive...)
+			apply(i, g)
 		}
 	}
 	// Rig-level globals → only that rig's agents.
@@ -2207,8 +2221,7 @@ func applyPackGlobals(cfg *City) {
 		for _, g := range globals {
 			for i := range cfg.Agents {
 				if cfg.Agents[i].Dir == rigName {
-					cfg.Agents[i].SessionLive = append(
-						cfg.Agents[i].SessionLive, g.SessionLive...)
+					apply(i, g)
 				}
 			}
 		}
