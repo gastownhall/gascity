@@ -163,7 +163,9 @@ func (s *Server) mailRecipientsForNamedSession(store beads.Store, spec apiNamedS
 	if err != nil {
 		return nil, fmt.Errorf("listing named session mail recipients: %w", err)
 	}
-	recipients := make([]string, 0)
+	// The configured identity is a durable mailbox address even after a
+	// materialized session bead adds aliases, IDs, or runtime session names.
+	recipients := []string{identity}
 	seen := make(map[string]bool)
 	for _, b := range candidates {
 		if !session.IsSessionBeadOrRepairable(b) ||
@@ -176,9 +178,6 @@ func (s *Server) mailRecipientsForNamedSession(store beads.Store, spec apiNamedS
 		}
 		seen[b.ID] = true
 		recipients = append(recipients, apiSessionMailboxAddresses(b)...)
-	}
-	if len(recipients) == 0 {
-		recipients = append(recipients, identity)
 	}
 	recipients = uniqueNonEmptyMailRecipients(recipients)
 	sort.Strings(recipients)
