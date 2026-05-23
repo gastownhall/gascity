@@ -970,15 +970,26 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 	w(fmt.Sprintf("    Beads:  %s", hqBeads))
 
 	for _, rig := range cr.Body {
-		beads := rigBeadsStatus(fs, rig.Path)
+		path := rig.Path
+		prefix := rig.Prefix
+		defaultBranch := rig.DefaultBranch
+		if cfgRig, ok := rigsByName[rig.Name]; ok {
+			path = cfgRig.Path
+			prefix = cfgRig.EffectivePrefix()
+			defaultBranch = cfgRig.EffectiveDefaultBranch()
+		}
+		beads := rigBeadsStatus(fs, path)
 		header := rig.Name
 		if rig.Suspended {
 			header += " (suspended)"
 		}
 		w("")
 		w(fmt.Sprintf("  %s:", header))
-		w(fmt.Sprintf("    Path:   %s", rig.Path))
-		w(fmt.Sprintf("    Prefix: %s", rig.Prefix))
+		w(fmt.Sprintf("    Path:   %s", path))
+		w(fmt.Sprintf("    Prefix: %s", prefix))
+		if defaultBranch != "" {
+			w(fmt.Sprintf("    Default branch: %s", defaultBranch))
+		}
 		w(fmt.Sprintf("    Beads:  %s", beads))
 	}
 
