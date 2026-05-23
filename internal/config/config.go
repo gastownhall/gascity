@@ -1973,6 +1973,14 @@ type DaemonConfig struct {
 	// behavior. Duration string (e.g., "250ms", "500ms"). Trade-off:
 	// adds tick latency up to this value when set.
 	TickDebounce string `toml:"tick_debounce,omitempty"`
+	// AutoPruneWorkerDir controls whether the reconciler removes a
+	// pool-managed session's worker_dir (agent worktree) after the session
+	// bead is closed. Removal is gated on: path lives under the city's
+	// .gc/worktrees/ tree, clean working tree, no unpushed commits, no
+	// stashed work. Nil (unset) defaults to true so pool worktrees do not
+	// accumulate without bound across pool recycles. Set to false to
+	// retain worktrees for post-session diagnostics.
+	AutoPruneWorkerDir *bool `toml:"auto_prune_worker_dir,omitempty" jsonschema:"default=true"`
 }
 
 // AutoRestartOnDriftEnabled reports whether the supervisor should be
@@ -1985,6 +1993,18 @@ func (d *DaemonConfig) AutoRestartOnDriftEnabled() bool {
 		return true
 	}
 	return *d.AutoRestartOnDrift
+}
+
+// AutoPruneWorkerDirEnabled reports whether the reconciler should remove a
+// pool-managed session's worker_dir after the session bead is closed. The
+// default is true: pool worktrees are transient by design and accumulate
+// without bound otherwise. Removal is still gated on per-worktree safety
+// probes (clean tree, no unpushed commits, no stashes).
+func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
+	if d.AutoPruneWorkerDir == nil {
+		return true
+	}
+	return *d.AutoPruneWorkerDir
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.

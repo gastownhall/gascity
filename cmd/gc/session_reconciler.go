@@ -2279,7 +2279,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if closeReason == "" {
 				closeReason = "drained"
 			}
-			closeBead(store, target.session.ID, closeReason, clk.Now().UTC(), stderr)
+			if closeBead(store, target.session.ID, closeReason, clk.Now().UTC(), stderr) {
+				// Pool worktrees are transient by design — reclaim disk
+				// when the session bead is retired. Skipped under safety
+				// gates (uncommitted, unpushed, stashed) and overridable
+				// via cfg.Daemon.AutoPruneWorkerDir.
+				pruneAgentHomeWorktreeIfSafe(*target.session, cityPath, cfg, stderr)
+			}
 		}
 	}
 	recordPhase(TraceSiteSessionReconcileWakeSleep, "session_reconcile.apply_wake_sleep_decisions", phaseStart, map[string]any{
