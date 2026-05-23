@@ -771,6 +771,7 @@ func (cr *CityRuntime) startupReadinessWatchdog(ctx context.Context, ready <-cha
 	fmt.Fprintf(cr.stderr, //nolint:errcheck // best-effort stderr
 		"%s: startup watchdog: city %q not ready after %s (half of [daemon].start_ready_timeout=%s); goroutine dump follows:\n%s\n",
 		cr.logPrefix, cr.cityName, delay, total, buf[:n])
+}
 
 // tickDebouncer coalesces bursty event-driven tick signals into a
 // single delayed fire. The first arm() call in a quiet period schedules
