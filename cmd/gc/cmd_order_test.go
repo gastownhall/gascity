@@ -1152,6 +1152,51 @@ prefix = "fe"
 	}
 }
 
+func TestCmdOrderSweepTrackingFailsWhenTargetedRigStoreOpenFails(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_ROOT", cityDir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Chdir(cityDir)
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`)
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepTracking(time.Nanosecond, false, false, []string{"rig-digest:rig:frontend"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdOrderSweepTracking = 0, want failure; stdout: %s stderr: %s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "opening rig \"frontend\" order store") {
+		t.Fatalf("stderr = %q, want rig-open warning", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "target store was not swept for rig-digest:rig:frontend") {
+		t.Fatalf("stderr = %q, want targeted-store failure", stderr.String())
+	}
+}
+
 func TestOrderRunEventFormulaLatestSeqErrorDoesNotInstantiate(t *testing.T) {
 	aa := []orders.Order{{
 		Name:         "release-watch",

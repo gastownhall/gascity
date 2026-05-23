@@ -1258,6 +1258,7 @@ type orderTrackingSweepResult struct {
 	trackingClosed int
 	wispClosed     int
 	storesSwept    int
+	sweptStoreKeys map[string]struct{}
 }
 
 // sweepStaleOrderTracking closes open order-tracking beads whose creation
@@ -1289,8 +1290,24 @@ func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, now time.Time, st
 			continue
 		}
 		result.storesSwept++
+		if key := orderTrackingSweepStoreKey(store); key != "" {
+			if result.sweptStoreKeys == nil {
+				result.sweptStoreKeys = make(map[string]struct{})
+			}
+			result.sweptStoreKeys[key] = struct{}{}
+		}
 	}
 	return result, errors.Join(errs...)
+}
+
+func orderTrackingSweepStoreKey(store beads.Store) string {
+	type keyed interface {
+		orderTrackingSweepKey() string
+	}
+	if keyedStore, ok := store.(keyed); ok {
+		return strings.TrimSpace(keyedStore.orderTrackingSweepKey())
+	}
+	return ""
 }
 
 func orderTrackingSweepStoreLabel(store beads.Store, index int) string {

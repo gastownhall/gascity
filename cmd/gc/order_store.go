@@ -31,10 +31,15 @@ type orderTrackingSweepTarget struct {
 type orderTrackingSweepScopedStore struct {
 	beads.Store
 	label string
+	key   string
 }
 
 func (s orderTrackingSweepScopedStore) orderTrackingSweepLabel() string {
 	return s.label
+}
+
+func (s orderTrackingSweepScopedStore) orderTrackingSweepKey() string {
+	return s.key
 }
 
 func openCityOrderStore(stderr io.Writer, cmdName string) (beads.Store, int) {
@@ -522,7 +527,11 @@ func orderTrackingSweepStoresFromTargets(targets []orderTrackingSweepTarget, ope
 			errs = append(errs, fmt.Errorf("opening %s order store: %w", sweepTarget.label, err))
 			continue
 		}
-		stores = append(stores, orderTrackingSweepScopedStore{Store: store, label: sweepTarget.label})
+		stores = append(stores, orderTrackingSweepScopedStore{
+			Store: store,
+			label: sweepTarget.label,
+			key:   key,
+		})
 	}
 	return stores, errors.Join(errs...)
 }
