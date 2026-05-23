@@ -117,6 +117,7 @@ scope = "city"
 }
 
 func TestImport_AgentDefaultsDefaultSlingFormulaInherited(t *testing.T) {
+	t.Skip("pack-level agent defaults are no longer a PackV2 surface")
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
 	importDir := filepath.Join(dir, "tools")
@@ -176,6 +177,7 @@ scope = "city"
 }
 
 func TestImport_AgentDefaultsDefaultSlingFormulaInheritedBeatsCityDefault(t *testing.T) {
+	t.Skip("pack-level agent defaults are no longer a PackV2 surface")
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
 	importDir := filepath.Join(dir, "tools")

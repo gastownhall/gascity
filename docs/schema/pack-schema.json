@@ -286,64 +286,6 @@
       ],
       "description": "Agent defines a configured agent in the city."
     },
-    "AgentDefaults": {
-      "properties": {
-        "model": {
-          "type": "string",
-          "description": "Model is the parsed/composed default model name for agents\n(e.g., \"claude-sonnet-4-6\"), but it is not yet auto-applied at\nruntime. Agents with their own model override would take precedence."
-        },
-        "wake_mode": {
-          "type": "string",
-          "enum": [
-            "resume",
-            "fresh"
-          ],
-          "description": "WakeMode is the parsed/composed default wake mode (\"resume\" or\n\"fresh\"), but it is not yet auto-applied at runtime."
-        },
-        "default_sling_formula": {
-          "type": "string",
-          "description": "DefaultSlingFormula is the city-level default formula used for agents\nthat inherit [agent_defaults]. Explicit agents only receive this value\nwhen agent_defaults.default_sling_formula is set; implicit multi-session\nconfigs are seeded with \"mol-do-work\" elsewhere when no explicit default is set."
-        },
-        "allow_overlay": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "AllowOverlay is parsed and composed as a city-level allowlist for\nsession overlays, but it is not yet inherited onto agents\nautomatically at runtime."
-        },
-        "allow_env_override": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "AllowEnvOverride is parsed and composed as a city-level allowlist for\nsession env overrides, but it is not yet inherited onto agents\nautomatically at runtime. Names must match ^[A-Z][A-Z0-9_]{0,127}$."
-        },
-        "append_fragments": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "AppendFragments lists named template fragments to auto-append to\n.template.md prompts after rendering. Legacy .md.tmpl prompts are\nstill supported during the transition; plain .md remains inert.\nV2 migration convenience — replaces global_fragments/inject_fragments\nfor city-wide defaults."
-        },
-        "skills": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Skills is a tombstone field retained for v0.15.1 backwards\ncompatibility. Parsed and composed for migration visibility, but\nattachment-list fields are accepted but ignored by the active\nmaterializer."
-        },
-        "mcp": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "MCP is a tombstone field retained for v0.15.1 backwards compatibility.\nParsed and composed for migration visibility, but attachment-list\nfields are accepted but ignored by the active materializer."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "description": "AgentDefaults provides city-level agent defaults declared via [agent_defaults] in city.toml."
-    },
     "AgentPatch": {
       "properties": {
         "dir": {
@@ -607,18 +549,6 @@
       ],
       "description": "AgentPatch modifies an existing agent identified by (Dir, Name)."
     },
-    "FormulasConfig": {
-      "properties": {
-        "dir": {
-          "type": "string",
-          "description": "Dir is the path to the formulas directory. Defaults to \"formulas\".",
-          "default": "formulas"
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "description": "FormulasConfig holds formula directory settings."
-    },
     "Import": {
       "properties": {
         "source": {
@@ -795,12 +725,6 @@
           },
           "type": "object"
         },
-        "agent_defaults": {
-          "$ref": "#/$defs/AgentDefaults"
-        },
-        "defaults": {
-          "$ref": "#/$defs/PackDefaults"
-        },
         "agent": {
           "items": {
             "$ref": "#/$defs/Agent"
@@ -825,11 +749,8 @@
           },
           "type": "object"
         },
-        "formulas": {
-          "$ref": "#/$defs/FormulasConfig"
-        },
         "patches": {
-          "$ref": "#/$defs/Patches"
+          "$ref": "#/$defs/PackPatches"
         },
         "doctor": {
           "items": {
@@ -859,16 +780,6 @@
         "pack"
       ],
       "description": "PackConfig is the TOML structure of a pack.toml file."
-    },
-    "PackDefaults": {
-      "properties": {
-        "rig": {
-          "$ref": "#/$defs/PackRigDefaults"
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "description": "PackDefaults holds [defaults] entries declared by a pack — used by cities that compose this pack to seed rig configuration."
     },
     "PackDoctorEntry": {
       "properties": {
@@ -960,6 +871,19 @@
       ],
       "description": "PackMeta holds metadata from a pack's [pack] header."
     },
+    "PackPatches": {
+      "properties": {
+        "agent": {
+          "items": {
+            "$ref": "#/$defs/AgentPatch"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "PackPatches holds the patch operations valid in pack.toml."
+    },
     "PackRequirement": {
       "properties": {
         "scope": {
@@ -982,47 +906,6 @@
         "agent"
       ],
       "description": "PackRequirement declares an agent that must exist in the expanded config for this pack's formulas/orders to function."
-    },
-    "PackRigDefaults": {
-      "properties": {
-        "imports": {
-          "additionalProperties": {
-            "$ref": "#/$defs/Import"
-          },
-          "type": "object"
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "description": "PackRigDefaults holds the [defaults.rig] block — defaults applied to rigs created from this pack."
-    },
-    "Patches": {
-      "properties": {
-        "agent": {
-          "items": {
-            "$ref": "#/$defs/AgentPatch"
-          },
-          "type": "array",
-          "description": "Agents targets agents by (dir, name)."
-        },
-        "rigs": {
-          "items": {
-            "$ref": "#/$defs/RigPatch"
-          },
-          "type": "array",
-          "description": "Rigs targets rigs by name."
-        },
-        "providers": {
-          "items": {
-            "$ref": "#/$defs/ProviderPatch"
-          },
-          "type": "array",
-          "description": "Providers targets providers by name."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "description": "Patches holds all patch blocks from composition."
     },
     "PoolOverride": {
       "properties": {
@@ -1093,97 +976,6 @@
         "choices"
       ],
       "description": "ProviderOption declares a single configurable option for a provider."
-    },
-    "ProviderPatch": {
-      "properties": {
-        "name": {
-          "type": "string",
-          "description": "Name is the targeting key (required). Must match an existing provider's name."
-        },
-        "base": {
-          "type": "string",
-          "description": "Base overrides the provider's inheritance parent (presence-aware).\nPointer to a pointer so the patch can distinguish \"no change\"\n(double-nil) from \"clear to inherit default\" (single-nil value in\nouter pointer) from \"set to explicit empty opt-out\" (value \"\" in\ninner pointer) from \"set to \u003cname\u003e\". Callers use:\n  nil          = patch does not touch Base\n  \u0026(*string)(nil) = patch clears Base to absent\n  \u0026(\u0026\"\")       = patch sets Base = \"\" (explicit opt-out)\n  \u0026(\u0026\"builtin:codex\") = patch sets Base to that value"
-        },
-        "command": {
-          "type": "string",
-          "description": "Command overrides the provider command."
-        },
-        "acp_command": {
-          "type": "string",
-          "description": "ACPCommand overrides the provider command for ACP transport sessions."
-        },
-        "args": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Args overrides the provider args."
-        },
-        "acp_args": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "ACPArgs overrides the provider args for ACP transport sessions."
-        },
-        "args_append": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "ArgsAppend overrides the provider args_append list."
-        },
-        "options_schema_merge": {
-          "type": "string",
-          "description": "OptionsSchemaMerge overrides the options_schema merge mode."
-        },
-        "prompt_mode": {
-          "type": "string",
-          "enum": [
-            "arg",
-            "flag",
-            "none"
-          ],
-          "description": "PromptMode overrides prompt delivery mode."
-        },
-        "prompt_flag": {
-          "type": "string",
-          "description": "PromptFlag overrides the prompt flag."
-        },
-        "ready_delay_ms": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "ReadyDelayMs overrides the ready delay in milliseconds."
-        },
-        "accept_startup_dialogs": {
-          "type": "boolean",
-          "description": "AcceptStartupDialogs overrides startup dialog acceptance behavior."
-        },
-        "env": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "type": "object",
-          "description": "Env adds or overrides environment variables."
-        },
-        "env_remove": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "EnvRemove lists env var keys to remove."
-        },
-        "_replace": {
-          "type": "boolean",
-          "description": "Replace replaces the entire provider block instead of deep-merging."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "name"
-      ],
-      "description": "ProviderPatch modifies an existing provider identified by Name."
     },
     "ProviderSpec": {
       "properties": {
@@ -1345,43 +1137,6 @@
       "additionalProperties": false,
       "type": "object",
       "description": "ProviderSpec defines a named provider's startup parameters."
-    },
-    "RigPatch": {
-      "properties": {
-        "name": {
-          "type": "string",
-          "description": "Name is the targeting key (required). Must match an existing rig's name."
-        },
-        "path": {
-          "type": "string",
-          "description": "Path overrides the rig's filesystem path."
-        },
-        "prefix": {
-          "type": "string",
-          "description": "Prefix overrides the bead ID prefix."
-        },
-        "default_branch": {
-          "type": "string",
-          "description": "DefaultBranch overrides the rig's recorded mainline branch."
-        },
-        "suspended": {
-          "type": "boolean",
-          "description": "Suspended overrides the rig's suspended state."
-        },
-        "formula_vars": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "type": "object",
-          "description": "FormulaVars adds or overrides rig-scoped formula var defaults.\nAdditive merge: patch keys win over existing rig keys, unspecified\nkeys are preserved."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "name"
-      ],
-      "description": "RigPatch modifies an existing rig identified by Name."
     },
     "Service": {
       "properties": {

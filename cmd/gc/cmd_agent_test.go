@@ -195,13 +195,13 @@ func TestLoadCityConfigFSEmitsProvenanceWarnings(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`[workspace]
 name = "test-city"
+
+[agents]
+append_fragments = ["footer"]
 `)
 	fs.Files["/city/pack.toml"] = []byte(`[pack]
 name = "test-city"
 schema = 2
-
-[agents]
-append_fragments = ["footer"]
 `)
 
 	var stderr bytes.Buffer
@@ -221,13 +221,13 @@ func TestLoadCityConfigFSEmitsMigrationWarningsAcrossCalls(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`[workspace]
 name = "test-city"
+
+[agents]
+append_fragments = ["footer"]
 `)
 	fs.Files["/city/pack.toml"] = []byte(`[pack]
 name = "test-city"
 schema = 2
-
-[agents]
-append_fragments = ["footer"]
 `)
 
 	var stderr bytes.Buffer

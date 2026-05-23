@@ -852,6 +852,7 @@ func TestResolveTemplateWrappedClaudeProjectsSettings(t *testing.T) {
 }
 
 func TestResolveTemplateImportedPackAppendFragmentsLayerBeforeCityDefaults(t *testing.T) {
+	t.Skip("pack-level agent defaults are no longer a PackV2 authoring surface")
 	cityPath := t.TempDir()
 	write := func(rel, data string) {
 		path := filepath.Join(cityPath, rel)
@@ -1004,6 +1005,7 @@ func TestResolveTemplateConventionAgentAppendFragments(t *testing.T) {
 }
 
 func TestResolveTemplateNestedIncludedPackAppendFragmentsLayerBeforeCityDefaults(t *testing.T) {
+	t.Skip("pack-level agent defaults are no longer a PackV2 authoring surface")
 	cityPath := t.TempDir()
 	write := func(rel, data string) {
 		path := filepath.Join(cityPath, rel)
@@ -1093,6 +1095,7 @@ prompt_template = "agents/mayor/prompt.template.md"
 }
 
 func TestResolveTemplateWrapperPackDefaultsDoNotBleedAcrossImports(t *testing.T) {
+	t.Skip("pack-level agent defaults are no longer a PackV2 authoring surface")
 	cityPath := t.TempDir()
 	write := func(rel, data string) {
 		path := filepath.Join(cityPath, rel)
@@ -1186,6 +1189,7 @@ prompt_template = "agents/mayor/prompt.template.md"
 }
 
 func TestResolveTemplateIncludingPackDefaultsDoNotBleedAcrossNestedImportBoundaries(t *testing.T) {
+	t.Skip("pack-level agent defaults are no longer a PackV2 authoring surface")
 	cityPath := t.TempDir()
 	write := func(rel, data string) {
 		path := filepath.Join(cityPath, rel)

@@ -3,18 +3,24 @@ title: "Config System"
 ---
 
 
-> Last verified against code: 2026-03-01
+> Last verified against code: 2026-05-22
+
+> **PackV2 format source of truth:** The public PackV2 format and loader
+> semantics are specified in
+> [Gas City Pack Specification (2.0)](../../docs/specs/pack-spec.md). This
+> page describes config loading and should defer to that specification for
+> PackV2 file-format details.
 
 ## Summary
 
 The Config system is a Layer 0-1 primitive that serves as Gas City's
 universal activation mechanism. It loads, composes, and resolves TOML
-configuration from `city.toml`, included fragments, pack directories,
-and preinstalled import metadata into a single flat `City` struct that
+configuration from `city.toml`, included fragments, PackV2 directories,
+and materialized import metadata into a single flat `City` struct that
 drives all other subsystems. Capabilities activate progressively based
 on which config sections are present (Levels 0-8), and multi-layer
-override resolution ensures that pack defaults can be customized
-per-rig without forking.
+patch/override resolution lets city and rig policy customize imported
+agents without forking their packs.
 
 ## Key Concepts
 
@@ -31,18 +37,19 @@ per-rig without forking.
   concatenate, providers deep-merge per-field, workspace fields merge
   with collision warnings.
 
-- **Pack**: A reusable agent configuration directory containing
-  `pack.toml`, prompts, formulas, and orders. City-level
-  packs stamp city-scoped agents (dir=""). Rig-level packs
-  stamp rig-scoped agents (dir=rig-name). The `city_agents` metadata
-  field partitions which agents from a shared pack are city-scoped
-  vs rig-scoped.
+- **Pack**: A reusable configuration directory with `pack.toml` and
+  well-known content directories such as `agents/`, `formulas/`,
+  `commands/`, `skills/`, `assets/`, and `defaults/`. PackV2 imports
+  are source-first (`source`, optional `version`) and are described in
+  the public pack specification. City-owned config such as
+  `[agent_defaults]`, `[defaults.rig.imports]`, and city/rig patches
+  belongs in `city.toml`, not normal imported `pack.toml` files.
 
-- **Override Resolution**: A four-layer chain that allows progressively
+- **Override Resolution**: A layered chain that allows progressively
   more specific customization: builtin provider presets < city-level
-  `[providers]` < workspace defaults < per-agent fields. For pack
-  agents, rig-level `[[overrides]]` and city-level `[patches]` provide
-  additional override points without forking the pack.
+  `[providers]` < workspace defaults < per-agent fields. City-level
+  `[patches]` and rig-scoped `[[overrides]]` provide additional
+  modification points for imported agents without forking the pack.
 
 - **Provenance**: Every config element (agent, rig, workspace field) is
   tracked back to the source file that defined it. Built into the
@@ -55,7 +62,9 @@ per-rig without forking.
 
 - **FormulaLayers**: Ordered formula directory lists per scope
   (city-scoped and per-rig) that control formula symlink
-  materialization. Higher-priority layers shadow lower ones by filename.
+  materialization. Pack and city formulas use the well-known
+  `formulas/` directory; `rigs[].formulas_dir` remains the rig-local
+  escape hatch. Higher-priority layers shadow lower ones by filename.
 
 ## Architecture
 
@@ -73,34 +82,51 @@ complete config resolution pipeline:
 city.toml
     |
     v
-1. Parse root TOML          (parseWithMeta)
+1. Parse root city.toml     (parseWithMeta)
     |
     v
-2. Load & merge fragments    (mergeFragment for each include)
+2. Read city defaults       ([defaults.rig.imports])
     |
     v
-3. Resolve named packs  (resolveNamedPacks: name -> cache path)
+3. Load root pack layer     (pack.toml, if present)
     |
     v
-4. Expand city packs    (ExpandCityPacks: stamp dir="" agents)
+4. Load & merge fragments   (mergeFragment for each include)
     |
     v
-5. Apply patches             (ApplyPatches: targeted field modifications)
+5. Expand city imports      (ExpandCityPacks / PackV2 imports)
     |
     v
-6. Expand rig packs     (ExpandPacks: stamp dir=rig-name agents)
+6. Expand rig imports       (ExpandPacks, defer rig overrides)
     |
     v
-7. Compute formula layers    (ComputeFormulaLayers: build priority stacks)
+7. Apply city patches       (ApplyPatches)
+    |
+    v
+8. Apply rig overrides       (deferred per-rig overrides)
+    |
+    v
+9. Apply pack globals        (commands, skills, MCP config, defaults)
+    |
+    v
+10. Compute formula layers   (ComputeFormulaLayers)
+    |
+    v
+11. Inject implicit agents
+    |
+    v
+12. Apply agent defaults
     |
     v
 Flat City struct + Provenance
 ```
 
-Steps 4 and 6 are ordered deliberately: city packs expand before
-patches so that patches can target city-pack agents. Rig packs
-expand after patches so that rig-level overrides apply to the final
-stamped agents.
+City imports and rig imports are both expanded before city-level
+patches are applied, so patches can target imported agents in either
+scope. Rig overrides are deferred until after city-level patches so
+rig-local policy wins when both set the same field. Pack-level agent
+patches are applied inside recursive pack loading and do not expose
+city-only patch targets such as rigs or providers.
 
 Provider resolution happens later, at agent startup time, via
 `ResolveProvider`:
@@ -146,14 +172,18 @@ Provider resolution happens later, at agent startup time, via
   `ResolveProvider`. All fields populated after resolution through the
   builtin + city + agent override chain.
 
-- **`PackSource`** (`internal/config/config.go`): Defines a remote
-  pack repository with git URL, ref, and optional subdirectory path.
-  Referenced by name in workspace/rig pack fields.
+- **`ImportSpec` / `PackSource`** (`internal/config/config.go`):
+  `ImportSpec` is the authored PackV2 import shape (`source`, optional
+  `version`). `PackSource` remains as legacy/internal plumbing for
+  cached or older pack references. Registry handles such as
+  `main:gascity` are command-time lookup handles and should not be
+  persisted in authored `pack.toml`.
 
 - **`PackMeta`** (`internal/config/config.go`): Metadata header from
   `pack.toml`. Contains name, version, schema version, optional
-  `requires_gc` constraint, and `city_agents` list for partitioning
-  agents between city and rig scopes.
+  `requires_gc` constraint, and import/export metadata. Agent
+  city-vs-rig availability is declared on agent definitions rather
+  than partitioned through legacy `city_agents` metadata.
 
 - **`Provenance`** (`internal/config/compose.go`): Tracks the source
   file origin of every agent, rig, and workspace field. Built during
@@ -161,8 +191,9 @@ Provider resolution happens later, at agent startup time, via
 
 - **`FormulaLayers`** (`internal/config/config.go`): Holds resolved
   formula directory stacks for city-scoped agents and per-rig agents.
-  Priority order (lowest to highest): city-pack < city-local <
-  rig-pack < rig-local.
+  Priority order (lowest to highest): imported/root pack formulas <
+  city-local `formulas/` < rig-imported pack formulas <
+  `rigs[].formulas_dir`.
 
 ## Invariants
 
@@ -184,12 +215,14 @@ Provider resolution happens later, at agent startup time, via
   returns an error. Patches never create new resources.
 
 - **Pack schema compatibility.** `loadPack` rejects any
-  pack with `schema` > `currentPackSchema` (currently 1).
+  pack with `schema` > `currentPackSchema` (currently 2).
   Forward-incompatible packs fail loudly.
 
-- **city_agents names must exist.** Every name listed in a pack's
-  `city_agents` must match an agent defined in that pack.
-  `loadPack` validates this before any agent stamping.
+- **Imported pack files have a narrower authoring surface.** Normal
+  PackV2 `pack.toml` files may define source-first imports and pack
+  content, but city-owned constructs such as `[agent_defaults]`,
+  `[defaults.rig.imports]`, `[formulas].dir`, `[[patches.rigs]]`, and
+  `[[patches.providers]]` are rejected during pack loading.
 
 - **Pool query symmetry.** Pool agents must set both `sling_query` and
   `work_query`, or neither. `ValidateAgents` rejects mismatched pairs.
@@ -236,10 +269,10 @@ All implementation lives in `internal/config/`:
 
 | File | Purpose |
 |---|---|
-| `internal/config/config.go` | Core types: `City`, `Workspace`, `Agent`, `Rig`, `AgentOverride`, `PackSource`, `PackMeta`, `FormulaLayers`, `PoolConfig`, subsystem configs. Load/Parse/Marshal. Validation functions. |
+| `internal/config/config.go` | Core types: `City`, `Workspace`, `Agent`, `Rig`, `AgentOverride`, `ImportSpec`, `PackSource`, `PackMeta`, `FormulaLayers`, `PoolConfig`, subsystem configs. Load/Parse/Marshal. Validation functions. |
 | `internal/config/compose.go` | `LoadWithIncludes`: the main entry point. Fragment merging, path resolution, provenance tracking. Orchestrates the full load pipeline. |
 | `internal/config/patch.go` | `Patches`, `AgentPatch`, `RigPatch`, `ProviderPatch`, `PoolOverride` types. `ApplyPatches` and per-type apply functions. |
-| `internal/config/pack.go` | `ExpandPacks`, `ExpandCityPacks`, `ComputeFormulaLayers`. Pack loading, agent stamping, city_agents partitioning, override application, collision detection. |
+| `internal/config/pack.go` | `ExpandPacks`, `ExpandCityPacks`, `ComputeFormulaLayers`. Pack loading, agent stamping, scope handling, override application, collision detection. |
 | `internal/config/pack_fetch.go` | Legacy V1 remote-pack fetch and lock helpers. Schema-2 import bootstrap/repair belongs to `gc import`; config load consumes already-materialized imports. |
 | `internal/config/provider.go` | `ProviderSpec`, `ResolvedProvider`, `BuiltinProviders`. Built-in provider presets for seven CLI agents. |
 | `internal/config/resolve.go` | `ResolveProvider`: the five-step provider resolution chain. `AgentHasHooks` for hook detection. Auto-detection via PATH scanning. |
@@ -268,17 +301,18 @@ Multi-rig with pack and overrides (Level 5+):
 [workspace]
 name = "my-city"
 provider = "claude"
-pack = "packs/my-pack"
 
-[packs.shared]
-source = "https://github.com/example/packs.git"
-ref = "v1.0"
-path = "my-pack"
+[imports.shared]
+source = "https://github.com/example/packs/my-pack"
+version = "^1"
 
 [[rigs]]
 name = "project-a"
 path = "/home/user/project-a"
-pack = "shared"
+
+[rigs.imports.shared]
+source = "https://github.com/example/packs/my-pack"
+version = "^1"
 
 [[rigs.overrides]]
 agent = "worker"
@@ -302,10 +336,10 @@ name = "my-city"
 
 FormulaLayers priority (lowest to highest):
 
-1. City pack formulas (from `workspace.pack` or `workspace.packs`)
-2. City local formulas (from `[formulas] dir`)
-3. Rig pack formulas (from `rigs[].pack` or `rigs[].packs`)
-4. Rig local formulas (from `rigs[].formulas_dir`)
+1. Imported/root pack formulas from well-known `formulas/` directories
+2. City local formulas from the city root `formulas/` directory
+3. Rig-imported pack formulas from well-known `formulas/` directories
+4. Rig local formulas from `rigs[].formulas_dir`
 
 ## Testing
 
@@ -316,7 +350,7 @@ Each source file has a companion `_test.go`:
 | `internal/config/config_test.go` | Parse, Marshal, Load, DefaultCity, ValidateAgents, ValidateRigs, DeriveBeadsPrefix, QualifiedName |
 | `internal/config/compose_test.go` | LoadWithIncludes, fragment merging, collision warnings, path resolution, provenance tracking, recursive include rejection |
 | `internal/config/patch_test.go` | ApplyPatches for agents/rigs/providers, targeting errors, env merge/remove, pool sub-field patching, provider replace mode |
-| `internal/config/pack_test.go` | ExpandPacks, ExpandCityPacks, city_agents partitioning, agent collision detection, override application, formula layer computation |
+| `internal/config/pack_test.go` | ExpandPacks, ExpandCityPacks, agent scope handling, agent collision detection, override application, formula layer computation |
 | `internal/config/pack_fetch_test.go` | Legacy fetch/lock helper coverage for the V1 `[packs]` path |
 | `internal/config/provider_test.go` | BuiltinProviders completeness, BuiltinProviderOrder coverage |
 | `internal/config/resolve_test.go` | ResolveProvider chain (all five steps), escape hatches, auto-detect, agent-level overrides, env additive merge |

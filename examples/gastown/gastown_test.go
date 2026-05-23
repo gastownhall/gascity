@@ -247,12 +247,20 @@ func TestCityPackTomlParses(t *testing.T) {
 	if gastownImp.Source != "packs/gastown" {
 		t.Errorf("pack.toml imports[\"gastown\"].Source = %q, want %q", gastownImp.Source, "packs/gastown")
 	}
-	gastownDefault, ok := tc.Defaults.Rig.Imports["gastown"]
+	cityData, err := os.ReadFile(filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("reading city.toml: %v", err)
+	}
+	var cityCfg config.City
+	if _, err := toml.Decode(string(cityData), &cityCfg); err != nil {
+		t.Fatalf("parsing city.toml: %v", err)
+	}
+	gastownDefault, ok := cityCfg.Defaults.Rig.Imports["gastown"]
 	if !ok {
-		t.Fatalf("pack.toml defaults.rig.imports = %v, want entry for \"gastown\"", tc.Defaults.Rig.Imports)
+		t.Fatalf("city.toml defaults.rig.imports = %v, want entry for \"gastown\"", cityCfg.Defaults.Rig.Imports)
 	}
 	if gastownDefault.Source != "packs/gastown" {
-		t.Errorf("pack.toml defaults.rig.imports[\"gastown\"].Source = %q, want %q", gastownDefault.Source, "packs/gastown")
+		t.Errorf("city.toml defaults.rig.imports[\"gastown\"].Source = %q, want %q", gastownDefault.Source, "packs/gastown")
 	}
 }
 

@@ -37,23 +37,35 @@ type deferredRigPatches struct {
 type PackConfig struct {
 	Pack           PackMeta                `toml:"pack" jsonschema:"required"`
 	Imports        map[string]Import       `toml:"imports,omitempty"`
-	AgentDefaults  AgentDefaults           `toml:"agent_defaults,omitempty"`
+	AgentDefaults  AgentDefaults           `toml:"agent_defaults,omitempty" jsonschema:"-"`
 	AgentsDefaults AgentDefaults           `toml:"agents,omitempty" jsonschema:"-"`
-	Defaults       PackDefaults            `toml:"defaults,omitempty"`
+	Defaults       PackDefaults            `toml:"defaults,omitempty" jsonschema:"-"`
 	Agents         []Agent                 `toml:"agent,omitempty"`
 	NamedSessions  []NamedSession          `toml:"named_session,omitempty"`
 	Services       []Service               `toml:"service,omitempty"`
 	Providers      map[string]ProviderSpec `toml:"providers,omitempty"`
-	Formulas       FormulasConfig          `toml:"formulas,omitempty"`
-	Patches        Patches                 `toml:"patches,omitempty"`
+	Formulas       FormulasConfig          `toml:"formulas,omitempty" jsonschema:"-"`
+	Patches        PackPatches             `toml:"patches,omitempty"`
 	Doctor         []PackDoctorEntry       `toml:"doctor,omitempty"`
 	Commands       []PackCommandEntry      `toml:"commands,omitempty"`
 	Global         PackGlobal              `toml:"global,omitempty"`
 	Pricing        []pricing.ModelPricing  `toml:"pricing,omitempty"`
 }
 
-// PackDefaults holds [defaults] entries declared by a pack — used by
-// cities that compose this pack to seed rig configuration.
+// PackPatches holds the patch operations valid in pack.toml. City
+// configuration may patch agents, rigs, and providers; packs may only patch
+// agents visible within that pack load.
+type PackPatches struct {
+	Agents []AgentPatch `toml:"agent,omitempty"`
+}
+
+// IsEmpty reports whether the pack declares no supported patch entries.
+func (p *PackPatches) IsEmpty() bool {
+	return p == nil || len(p.Agents) == 0
+}
+
+// PackDefaults holds [defaults] entries used to seed generated rig
+// configuration.
 type PackDefaults struct {
 	Rig PackRigDefaults `toml:"rig,omitempty"`
 }
@@ -1094,7 +1106,7 @@ func LoadPackForLint(fs fsys.FS, packDir string) (*LintPackLoad, error) {
 	topoPath := filepath.Join(absDir, packFile)
 	cache := &packLoadCache{results: make(map[string]*packLoadResult)}
 	agents, namedSessions, providers, _, topoDirs, _, _, err := loadPackWithCacheOptions(
-		fs, topoPath, absDir, absDir, "", nil, cache, LoadOptions{AllowRootDefaultRigImports: true})
+		fs, topoPath, absDir, absDir, "", nil, cache, LoadOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -1132,21 +1144,6 @@ func loadPackWithCacheOptions(fs fsys.FS, topoPath, topoDir, cityRoot, rigName s
 		return loadErr
 	})
 	return agents, namedSessions, providers, services, topoDirs, requirements, globals, err
-}
-
-func allowRootDefaultRigImports(opts LoadOptions, topoDir, cityRoot string) bool {
-	if !opts.AllowRootDefaultRigImports {
-		return false
-	}
-	absTopoDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absTopoDir = topoDir
-	}
-	absCityRoot, err := filepath.Abs(cityRoot)
-	if err != nil {
-		absCityRoot = cityRoot
-	}
-	return absTopoDir == absCityRoot
 }
 
 func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, seen map[string]bool, cache *packLoadCache, opts LoadOptions) ([]Agent, []NamedSession, map[string]ProviderSpec, []Service, []string, []PackRequirement, []ResolvedPackGlobal, error) {
@@ -1196,8 +1193,8 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	if fatalWarnings := fatalUndecodedWarnings(md, topoPath); len(fatalWarnings) > 0 {
 		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("parsing %s: %s", packFile, strings.Join(fatalWarnings, "; "))
 	}
-	if len(tc.Defaults.Rig.Imports) > 0 && !allowRootDefaultRigImports(opts, topoDir, cityRoot) {
-		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("parsing %s: [defaults.rig.imports] is only supported in a city root pack.toml", packFile)
+	if err := validatePackAuthoringSurface(md, packFile); err != nil {
+		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("parsing %s: %w", packFile, err)
 	}
 
 	if err := validatePackMeta(&tc.Pack); err != nil {
@@ -2247,7 +2244,7 @@ func resolveConfigDirInCommands(cmds []string, configDir string) []string {
 // absolute path because patches do not retain independent source provenance
 // after application; prompt_template and overlay_dir keep the existing
 // city-root-relative representation used elsewhere in composition.
-func adjustPackPatchPaths(patches *Patches, topoDir, cityRoot string) {
+func adjustPackPatchPaths(patches *PackPatches, topoDir, cityRoot string) {
 	for i := range patches.Agents {
 		p := &patches.Agents[i]
 		if p.SessionSetupScript != nil && *p.SessionSetupScript != "" {

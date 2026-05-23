@@ -599,9 +599,10 @@ func newInitPackConfig(cityName string) initPackConfig {
 //
 //   - pack.toml owns the portable definition: [pack], explicit [[agent]]
 //     entries when the caller keeps them, [[named_session]], [imports.*],
-//     [providers.*], agent/service patches, formulas, and agent_defaults.
+//     [providers.*], agent/service patches, and formulas.
 //   - city.toml keeps only runtime-local deployment settings (e.g.
-//     workspace.provider, workspace.start_command, api, daemon, beads).
+//     workspace.provider, workspace.start_command, agent_defaults, api,
+//     daemon, beads).
 //   - workspace.name and workspace.prefix migrate to .gc/site.toml via
 //     persistInitWorkspaceIdentity, so they are cleared here to avoid
 //     duplicating the city's machine-local identity in city.toml.
@@ -619,8 +620,8 @@ func splitInitConfig(cityName string, cfg *config.City) (initPackConfig, config.
 	cityCfg.Services = nil
 	cityCfg.Formulas = config.FormulasConfig{}
 	cityCfg.Patches = config.Patches{}
-	cityCfg.AgentDefaults = config.AgentDefaults{}
 	cityCfg.AgentsDefaults = config.AgentDefaults{}
+	cityCfg.Defaults = config.PackDefaults{}
 	cityCfg.Workspace.Name = ""
 	cityCfg.Workspace.Prefix = ""
 
@@ -637,10 +638,6 @@ func splitInitConfig(cityName string, cfg *config.City) (initPackConfig, config.
 		for name, spec := range cfg.Providers {
 			packCfg.Providers[name] = spec
 		}
-	}
-	packCfg.AgentDefaults = cfg.AgentDefaults
-	if isZeroValue(packCfg.AgentDefaults) && !isZeroValue(cfg.AgentsDefaults) {
-		packCfg.AgentDefaults = cfg.AgentsDefaults
 	}
 	packCfg.Formulas = cfg.Formulas
 	packCfg.Patches = cfg.Patches
@@ -660,15 +657,15 @@ func splitInitConfig(cityName string, cfg *config.City) (initPackConfig, config.
 		cityCfg.Workspace.SetLegacyIncludes(nil)
 	}
 	if len(cfg.DefaultRigImports) > 0 {
-		defaults := packDefaults{
-			Rig: packRigDefaults{
+		defaults := config.PackDefaults{
+			Rig: config.PackRigDefaults{
 				Imports: make(map[string]config.Import, len(cfg.DefaultRigImports)),
 			},
 		}
 		for name, imp := range cfg.DefaultRigImports {
 			defaults.Rig.Imports[name] = imp
 		}
-		packCfg.Defaults = defaults
+		cityCfg.Defaults = defaults
 		cityCfg.Workspace.SetLegacyDefaultRigIncludes(nil)
 	}
 	return packCfg, cityCfg

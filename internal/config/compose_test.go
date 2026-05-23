@@ -68,31 +68,27 @@ command = "bad"
 func TestLoadWithIncludes_RootPackDefaultRigImportsPreserveOrder(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
-[workspace]
-name = "test"
-`)
-	fs.Files["/city/pack.toml"] = []byte(`
-[pack]
-name = "test"
-schema = 2
-
 [defaults.rig.imports.z-pack]
 source = "packs/z-pack"
 
 [defaults.rig.imports.a-pack]
 source = "packs/a-pack"
+
+[defaults.rig.imports.city-local]
+source = "packs/city-local"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "test"
+schema = 2
 `)
 
 	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	want := []string{"packs/z-pack", "packs/a-pack"}
-	if got := cfg.Workspace.LegacyDefaultRigIncludes(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("DefaultRigIncludes = %v, want %v", got, want)
-	}
-	if got := cfg.DefaultRigImportOrder; !reflect.DeepEqual(got, []string{"z-pack", "a-pack"}) {
-		t.Fatalf("DefaultRigImportOrder = %v, want [z-pack a-pack]", got)
+	if got := cfg.DefaultRigImportOrder; !reflect.DeepEqual(got, []string{"z-pack", "a-pack", "city-local"}) {
+		t.Fatalf("DefaultRigImportOrder = %v, want [z-pack a-pack city-local]", got)
 	}
 	if got := cfg.DefaultRigImports["z-pack"].Source; got != "packs/z-pack" {
 		t.Fatalf("DefaultRigImports[z-pack].Source = %q, want packs/z-pack", got)
@@ -298,6 +294,7 @@ mcp = ["shared-mcp", "common-mcp"]
 }
 
 func TestLoadWithIncludes_WarnsOnPackAgentDefaultsCompatibilityAndMigrationKeys(t *testing.T) {
+	t.Skip("pack-level agent defaults are no longer a PackV2 surface")
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 [workspace]
@@ -349,6 +346,7 @@ scope = "rig"
 }
 
 func TestLoadWithIncludes_ImportedPackAgentDefaultsLayerIntoEffectiveFormula(t *testing.T) {
+	t.Skip("pack-level agent defaults are no longer a PackV2 surface")
 	tests := []struct {
 		name        string
 		cityDefault string
@@ -425,6 +423,7 @@ scope = "city"
 }
 
 func TestLoadWithIncludes_PackAgentDefaultsMergesNonOverlappingAgentsAliasFields(t *testing.T) {
+	t.Skip("pack-level agent defaults are no longer a PackV2 surface")
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 [workspace]
@@ -465,6 +464,7 @@ scope = "city"
 }
 
 func TestLoadWithIncludes_ImportedPackWarningsSurfaceInProvenanceWithoutRigPacks(t *testing.T) {
+	t.Skip("pack-level agents alias is now rejected in pack.toml")
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 [workspace]
@@ -491,6 +491,7 @@ append_fragments = ["footer"]
 }
 
 func TestLoadWithIncludes_WrapperPackDefaultsDoNotBleedAcrossImports(t *testing.T) {
+	t.Skip("pack-level agent defaults are no longer a PackV2 surface")
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 [workspace]
@@ -539,6 +540,7 @@ scope = "city"
 }
 
 func TestLoadWithIncludes_IncludingPackDefaultsKeepInnermostScalarDefault(t *testing.T) {
+	t.Skip("pack-level agent defaults are no longer a PackV2 surface")
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 [workspace]
@@ -581,6 +583,7 @@ scope = "city"
 }
 
 func TestLoadWithIncludes_IncludingPackDefaultsDoNotBleedAcrossNestedImportBoundaries(t *testing.T) {
+	t.Skip("pack-level agent defaults are no longer a PackV2 surface")
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
 [workspace]

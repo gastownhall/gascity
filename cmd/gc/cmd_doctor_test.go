@@ -590,15 +590,15 @@ name = "demo"
 
 [beads]
 provider = "file"
+
+[defaults.rig.imports.actual]
+source = "https://github.com/gastownhall/gc-actual-packs"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte(`[pack]
 name = "demo"
 schema = 2
-
-[defaults.rig.imports.actual]
-source = "https://github.com/gastownhall/gc-actual-packs"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}

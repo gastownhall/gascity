@@ -182,20 +182,32 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 		cityCfg.Workspace.SetLegacyIncludes(nil)
 	}
 
-	if len(cityCfg.Workspace.LegacyDefaultRigIncludes()) > 0 {
-		if packCfg.Defaults.Rig.Imports == nil {
-			packCfg.Defaults.Rig.Imports = make(map[string]config.Import)
+	if len(packCfg.Defaults.Rig.Imports) > 0 {
+		if cityCfg.Defaults.Rig.Imports == nil {
+			cityCfg.Defaults.Rig.Imports = make(map[string]config.Import, len(packCfg.Defaults.Rig.Imports))
 		}
-		var changed bool
-		packCfg.defaultRigImportOrder, changed = addOrderedImports(
-			packCfg.Defaults.Rig.Imports,
-			packCfg.defaultRigImportOrder,
+		for _, name := range orderedPackDefaultRigImportNames(packCfg.Defaults.Rig.Imports, packCfg.defaultRigImportOrder) {
+			if _, exists := cityCfg.Defaults.Rig.Imports[name]; exists {
+				continue
+			}
+			cityCfg.Defaults.Rig.Imports[name] = packCfg.Defaults.Rig.Imports[name]
+		}
+		packCfg.Defaults.Rig.Imports = nil
+		packCfg.defaultRigImportOrder = nil
+		packChanged = true
+	}
+
+	if len(cityCfg.Workspace.LegacyDefaultRigIncludes()) > 0 {
+		if cityCfg.Defaults.Rig.Imports == nil {
+			cityCfg.Defaults.Rig.Imports = make(map[string]config.Import)
+		}
+		_, changed := addOrderedImports(
+			cityCfg.Defaults.Rig.Imports,
+			nil,
 			cityCfg.Workspace.LegacyDefaultRigIncludes(),
 			cityCfg.Packs,
 		)
-		if changed {
-			packChanged = true
-		}
+		_ = changed
 		cityCfg.Workspace.SetLegacyDefaultRigIncludes(nil)
 	}
 

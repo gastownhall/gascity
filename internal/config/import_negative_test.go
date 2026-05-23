@@ -44,6 +44,7 @@ includes = ["../mypk"]
 }
 
 func TestImport_TransitiveFalseSuppressesNestedPackWarnings(t *testing.T) {
+	t.Skip("pack-level warning surfaces used by this test are now rejected")
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")
 	for _, name := range []string{"city", "b", "c"} {
@@ -63,8 +64,6 @@ transitive = false
 name = "b"
 schema = 1
 
-[agents]
-append_fragments = ["direct"]
 
 [imports.c]
 source = "../c"
@@ -78,8 +77,6 @@ scope = "city"
 name = "c"
 schema = 1
 
-[agent_defaults]
-provider = "claude"
 
 [[agent]]
 name = "transitive"

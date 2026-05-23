@@ -105,8 +105,8 @@ func (v2DefaultRigImportFormatCheck) Run(ctx *doctor.CheckContext) *doctor.Check
 		return okCheck("v2-default-rig-import-format", "workspace.default_rig_includes already migrated")
 	}
 	return errorCheck("v2-default-rig-import-format",
-		"unsupported PackV1 workspace.default_rig_includes found; migrate to root pack.toml [defaults.rig.imports.<binding>]",
-		`move each entry into root pack.toml [defaults.rig.imports.<binding>]`,
+		"unsupported PackV1 workspace.default_rig_includes found; migrate to city.toml [defaults.rig.imports.<binding>]",
+		`move each entry into city.toml [defaults.rig.imports.<binding>]`,
 		doctorKeyDetails(cityTomlPath, "workspace", "default_rig_includes", "workspace.default_rig_includes", cfg.Workspace.LegacyDefaultRigIncludes()))
 }
 

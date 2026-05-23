@@ -1219,8 +1219,6 @@ func TestExpandCityPacks_FormulaDirsStacked(t *testing.T) {
 name = "alpha"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "agent-a"
@@ -1231,8 +1229,6 @@ name = "agent-a"
 name = "beta"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "agent-b"
@@ -1421,8 +1417,6 @@ func TestExpandPacks_RigFormulaDirsMultiple(t *testing.T) {
 name = "alpha"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "worker-a"
@@ -1433,8 +1427,6 @@ name = "worker-a"
 name = "beta"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "worker-b"
@@ -1621,8 +1613,6 @@ name = "gastown"
 version = "1.0.0"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "mayor"
@@ -1796,8 +1786,6 @@ name = "gastown"
 version = "1.0.0"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "witness"
@@ -2427,8 +2415,6 @@ func TestPackIncludesFormulas(t *testing.T) {
 name = "maintenance"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "dog"
@@ -2442,8 +2428,6 @@ name = "gastown"
 schema = 1
 includes = ["../maintenance"]
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "mayor"
@@ -2586,8 +2570,6 @@ func TestExpandCityPacksWithIncludes(t *testing.T) {
 name = "maintenance"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "dog"
@@ -2602,8 +2584,6 @@ name = "gastown"
 schema = 1
 includes = ["../maintenance"]
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "mayor"

@@ -967,6 +967,10 @@
           "type": "object",
           "description": "Imports defines named pack imports (V2 mechanism). Each key is a\nbinding name; the value specifies the source and optional version,\nexport, and transitive controls. Processed during ExpandCityPacks."
         },
+        "defaults": {
+          "$ref": "#/$defs/PackDefaults",
+          "description": "Defaults holds city-level defaults that seed generated config. The\ncanonical default-rig import table is [defaults.rig.imports]."
+        },
         "agent": {
           "items": {
             "$ref": "#/$defs/Agent"
@@ -1285,16 +1289,10 @@
       "description": "EventsRotationConfig holds file-backed events rotation settings."
     },
     "FormulasConfig": {
-      "properties": {
-        "dir": {
-          "type": "string",
-          "description": "Dir is the path to the formulas directory. Defaults to \"formulas\".",
-          "default": "formulas"
-        }
-      },
+      "properties": {},
       "additionalProperties": false,
       "type": "object",
-      "description": "FormulasConfig holds formula directory settings."
+      "description": "FormulasConfig holds legacy formula directory settings."
     },
     "Import": {
       "properties": {
@@ -1566,6 +1564,29 @@
       "additionalProperties": false,
       "type": "object",
       "description": "OrdersConfig holds order settings."
+    },
+    "PackDefaults": {
+      "properties": {
+        "rig": {
+          "$ref": "#/$defs/PackRigDefaults"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "PackDefaults holds [defaults] entries used to seed generated rig configuration."
+    },
+    "PackRigDefaults": {
+      "properties": {
+        "imports": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Import"
+          },
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "PackRigDefaults holds the [defaults.rig] block — defaults applied to rigs created from this pack."
     },
     "PackSource": {
       "properties": {
@@ -2326,7 +2347,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "DefaultRigIncludes is the legacy city.toml default-rig pack list.\n\nDeprecated: use root pack.toml [defaults.rig.imports.\u003cbinding\u003e] instead.\nRun gc doctor to inspect; gc doctor --fix handles the safe mechanical\nrewrites available in this release wave."
+          "description": "DefaultRigIncludes is the legacy city.toml default-rig pack list.\n\nDeprecated: use city.toml [defaults.rig.imports.\u003cbinding\u003e] instead.\nRun gc doctor to inspect; gc doctor --fix handles the safe mechanical\nrewrites available in this release wave."
         },
         "env": {
           "additionalProperties": {
@@ -2342,5 +2363,5 @@
     }
   },
   "title": "Gas City Configuration",
-  "description": "Schema for city.toml — the PackV2 deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for PackV2 composition; legacy includes, [packs.*], and [[agent]] fields remain visible for migration compatibility."
+  "description": "Schema for city.toml — the PackV2 deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for PackV2 composition; legacy includes, [packs.*], and [[agent]] fields remain visible for migration compatibility.\n\n\u003e **PackV2 format source of truth:** The public PackV2 format and loader semantics are specified in [Gas City Pack Specification (2.0)](/specs/pack-spec)."
 }
