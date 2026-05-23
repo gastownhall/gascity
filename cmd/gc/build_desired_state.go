@@ -819,6 +819,9 @@ func defaultScaleCheckTargetForAgent(
 	return target
 }
 
+// defaultScaleCheckCounts reports ready, unassigned, routed work as fresh
+// generic pool demand. Assigned beads are handled by assigned-work collection
+// and named-session demand so they are intentionally excluded here.
 func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int, map[string]bool, []error) {
 	counts := make(map[string]int, len(targets))
 	if len(targets) == 0 {

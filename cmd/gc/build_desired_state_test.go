@@ -4091,72 +4091,95 @@ func TestBuildDesiredState_OnDemandNamedSession_DirectAssigneeMaterializes(t *te
 }
 
 func TestBuildDesiredState_RigOnDemandNamedSessionAssigneeWithRouteMaterializesNamedOnly(t *testing.T) {
-	cityPath := t.TempDir()
-	rigPath := filepath.Join(cityPath, "riga")
-	if err := os.MkdirAll(rigPath, 0o755); err != nil {
-		t.Fatalf("create rig dir: %v", err)
-	}
-	cityStore := beads.NewMemStore()
-	rigStore := beads.NewMemStore()
-	if _, err := rigStore.Create(beads.Bead{
-		Title:    "refinery handoff",
-		Type:     "task",
-		Status:   "open",
-		Assignee: "riga/refinery",
-		Metadata: map[string]string{
-			"gc.routed_to": "riga/refinery",
+	tests := []struct {
+		name     string
+		metadata map[string]string
+	}{
+		{
+			name: "retained route metadata",
+			metadata: map[string]string{
+				"gc.routed_to": "riga/refinery",
+			},
 		},
-	}); err != nil {
-		t.Fatalf("create rig work: %v", err)
-	}
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test-city"},
-		Rigs:      []config.Rig{{Name: "riga", Path: rigPath}},
-		Agents: []config.Agent{{
-			Name:              "refinery",
-			Dir:               "riga",
-			StartCommand:      "true",
-			MaxActiveSessions: intPtr(1),
-			WorkQuery:         "printf ''",
-		}},
-		NamedSessions: []config.NamedSession{{
-			Template: "refinery",
-			Dir:      "riga",
-			Mode:     "on_demand",
-		}},
+		{
+			name: "cleared route metadata",
+			metadata: map[string]string{
+				"gc.routed_to": "",
+			},
+		},
+		{
+			name: "absent route metadata",
+		},
 	}
 
-	dsResult := buildDesiredStateWithSessionBeads(
-		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
-		cityStore, map[string]beads.Store{"riga": rigStore}, nil, nil, io.Discard,
-	)
-	if !dsResult.NamedSessionDemand["riga/refinery"] {
-		t.Fatal("NamedSessionDemand[riga/refinery] = false for direct named-session assignee")
-	}
-	if got := dsResult.ScaleCheckCounts["riga/refinery"]; got != 0 {
-		t.Fatalf("ScaleCheckCounts[riga/refinery] = %d, want 0 for assigned named-session handoff", got)
-	}
-	var refineryEntries []TemplateParams
-	for _, tp := range dsResult.State {
-		if tp.ConfiguredNamedIdentity == "riga/refinery" || tp.TemplateName == "riga/refinery" {
-			refineryEntries = append(refineryEntries, tp)
-		}
-	}
-	if len(refineryEntries) != 1 {
-		t.Fatalf("refinery desired entries = %d, want exactly one named session: %+v", len(refineryEntries), refineryEntries)
-	}
-	refinery := refineryEntries[0]
-	if refinery.ConfiguredNamedIdentity != "riga/refinery" {
-		t.Fatalf("ConfiguredNamedIdentity = %q, want riga/refinery", refinery.ConfiguredNamedIdentity)
-	}
-	if refinery.PoolSlot != 0 {
-		t.Fatalf("PoolSlot = %d, want 0 for named session", refinery.PoolSlot)
-	}
-	if got := refinery.Env["GC_ALIAS"]; got != "riga/refinery" {
-		t.Fatalf("GC_ALIAS = %q, want riga/refinery", got)
-	}
-	if got := refinery.Env["GC_TEMPLATE"]; got != "riga/refinery" {
-		t.Fatalf("GC_TEMPLATE = %q, want riga/refinery", got)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			rigPath := filepath.Join(cityPath, "riga")
+			if err := os.MkdirAll(rigPath, 0o755); err != nil {
+				t.Fatalf("create rig dir: %v", err)
+			}
+			cityStore := beads.NewMemStore()
+			rigStore := beads.NewMemStore()
+			if _, err := rigStore.Create(beads.Bead{
+				Title:    "refinery handoff",
+				Type:     "task",
+				Status:   "open",
+				Assignee: "riga/refinery",
+				Metadata: tc.metadata,
+			}); err != nil {
+				t.Fatalf("create rig work: %v", err)
+			}
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Rigs:      []config.Rig{{Name: "riga", Path: rigPath}},
+				Agents: []config.Agent{{
+					Name:              "refinery",
+					Dir:               "riga",
+					StartCommand:      "true",
+					MaxActiveSessions: intPtr(1),
+					WorkQuery:         "printf ''",
+				}},
+				NamedSessions: []config.NamedSession{{
+					Template: "refinery",
+					Dir:      "riga",
+					Mode:     "on_demand",
+				}},
+			}
+
+			dsResult := buildDesiredStateWithSessionBeads(
+				"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(),
+				cityStore, map[string]beads.Store{"riga": rigStore}, nil, nil, io.Discard,
+			)
+			if !dsResult.NamedSessionDemand["riga/refinery"] {
+				t.Fatal("NamedSessionDemand[riga/refinery] = false for direct named-session assignee")
+			}
+			if got := dsResult.ScaleCheckCounts["riga/refinery"]; got != 0 {
+				t.Fatalf("ScaleCheckCounts[riga/refinery] = %d, want 0 for assigned named-session handoff", got)
+			}
+			var refineryEntries []TemplateParams
+			for _, tp := range dsResult.State {
+				if tp.ConfiguredNamedIdentity == "riga/refinery" || tp.TemplateName == "riga/refinery" {
+					refineryEntries = append(refineryEntries, tp)
+				}
+			}
+			if len(refineryEntries) != 1 {
+				t.Fatalf("refinery desired entries = %d, want exactly one named session: %+v", len(refineryEntries), refineryEntries)
+			}
+			refinery := refineryEntries[0]
+			if refinery.ConfiguredNamedIdentity != "riga/refinery" {
+				t.Fatalf("ConfiguredNamedIdentity = %q, want riga/refinery", refinery.ConfiguredNamedIdentity)
+			}
+			if refinery.PoolSlot != 0 {
+				t.Fatalf("PoolSlot = %d, want 0 for named session", refinery.PoolSlot)
+			}
+			if got := refinery.Env["GC_ALIAS"]; got != "riga/refinery" {
+				t.Fatalf("GC_ALIAS = %q, want riga/refinery", got)
+			}
+			if got := refinery.Env["GC_TEMPLATE"]; got != "riga/refinery" {
+				t.Fatalf("GC_TEMPLATE = %q, want riga/refinery", got)
+			}
+		})
 	}
 }
 
