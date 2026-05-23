@@ -1865,11 +1865,12 @@ func cleanupDeadRuntimeSessionCorpses(
 		// contexts that don't wire a real store.
 		if store != nil {
 			hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, b, cfg)
-			if err != nil {
+			switch {
+			case err != nil:
 				fmt.Fprintf(stderr, "session reconciler: dead-runtime close guard for %s: %v\n", b.ID, err) //nolint:errcheck
-			} else if !hasAssignedWork {
+			case !hasAssignedWork:
 				closeBead(store, b.ID, "dead-runtime", time.Now().UTC(), stderr)
-			} else {
+			default:
 				fmt.Fprintf(stderr, "session reconciler: dead runtime session %s retained — open assigned work blocks alias release\n", name) //nolint:errcheck
 			}
 		}
