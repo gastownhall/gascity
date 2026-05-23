@@ -699,9 +699,9 @@ func TestDefaultScaleCheckCountsReportsMissingRigStore(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create city routed bead: %v", err)
 	}
-	target := defaultScaleCheckTargetForAgent(cityPath, cfg, agent, cityStore, nil)
+	targets := defaultScaleCheckTargetsForAgent(cityPath, cfg, agent, cityStore, nil)
 
-	counts, partialTemplates, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{target})
+	counts, partialTemplates, errs := defaultScaleCheckCounts(targets)
 	if got := counts["repos/repo/worker"]; got != 0 {
 		t.Fatalf("defaultScaleCheckCounts = %d, want 0", got)
 	}
@@ -760,6 +760,170 @@ func TestBuildDesiredStateDefaultScaleCheckMissingRigStoreReportsZeroDemand(t *t
 	}
 	if !strings.Contains(stderr.String(), `rig store "repo" unavailable`) {
 		t.Fatalf("stderr = %q, want missing rig-store diagnostic", stderr.String())
+	}
+}
+
+// Regression for gco-scs / hq:gc-7tl: a city-scoped pool agent with no
+// explicit ScaleCheck must still spawn a session when an unassigned bead
+// is routed to it via gc.routed_to. Previously the scale-check path
+// silently returned zero new demand even though the routed bead was
+// present in the city store, leaving the polecat queue stalled.
+func TestBuildDesiredStateDefaultScaleCheckSpawnsForCityScopedRoutedPool(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "routed maintenance work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "gastown.dog",
+		},
+	}); err != nil {
+		t.Fatalf("create routed bead: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "dog",
+			BindingName:       "gastown",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(3),
+		}},
+	}
+
+	var stderr strings.Builder
+	got := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+	if demand := got.ScaleCheckCounts["gastown.dog"]; demand != 1 {
+		t.Fatalf("ScaleCheckCounts[gastown.dog] = %d, want 1 (one unassigned routed bead): stderr=%q", demand, stderr.String())
+	}
+	dogSessions := 0
+	for _, tp := range got.State {
+		if tp.TemplateName == "gastown.dog" || tp.TemplateName == "dog" {
+			dogSessions++
+		}
+	}
+	if dogSessions != 1 {
+		t.Fatalf("dog desired sessions = %d, want 1: state=%v stderr=%q", dogSessions, got.State, stderr.String())
+	}
+}
+
+// Regression for gco-scs / hq:gc-7tl, multi-store variant: a city-scoped
+// pool agent must count unassigned routed work that lives in *rig* stores,
+// not only the city store. Mayor dispatches from a rig context, so the
+// `gc.routed_to` metadata gets stamped on a bead in that rig's store while
+// the recipient (e.g. `gastown.dog`) is scoped to the city. Counting only
+// the city store leaves rig-filed pool demand invisible to scale_check.
+// City-scoped agents must emit one target per (city store + each rig store)
+// so default scale_check sees pool demand wherever the routed bead landed.
+// Rig-scoped agents keep their single-store target so cross-rig isolation
+// of work queues is preserved.
+func TestDefaultScaleCheckTargetsForAgentScopeFanout(t *testing.T) {
+	cityPath := t.TempDir()
+	cityStore := beads.NewMemStore()
+	rigStoreA := beads.NewMemStore()
+	rigStoreB := beads.NewMemStore()
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "hq", Path: filepath.Join(cityPath, "repos", "hq")},
+			{Name: "shop", Path: filepath.Join(cityPath, "repos", "shop")},
+		},
+	}
+	rigStores := map[string]beads.Store{"hq": rigStoreA, "shop": rigStoreB}
+
+	cityAgent := &config.Agent{Name: "dog", BindingName: "gastown"}
+	cityTargets := defaultScaleCheckTargetsForAgent(cityPath, cfg, cityAgent, cityStore, rigStores)
+	if len(cityTargets) != 3 {
+		t.Fatalf("city-scoped targets = %d, want 3 (city + 2 rigs): %#v", len(cityTargets), cityTargets)
+	}
+	wantKeys := map[string]bool{"city": false, "rig:hq": false, "rig:shop": false}
+	for _, target := range cityTargets {
+		if target.template != "gastown.dog" {
+			t.Fatalf("template = %q, want gastown.dog", target.template)
+		}
+		if _, ok := wantKeys[target.storeKey]; !ok {
+			t.Fatalf("unexpected storeKey %q", target.storeKey)
+		}
+		wantKeys[target.storeKey] = true
+		if target.store == nil || target.err != nil {
+			t.Fatalf("city-scoped target %s missing store: store=%v err=%v", target.storeKey, target.store, target.err)
+		}
+	}
+	for key, seen := range wantKeys {
+		if !seen {
+			t.Fatalf("missing target for storeKey %q", key)
+		}
+	}
+
+	rigAgent := &config.Agent{Name: "worker", Dir: filepath.Join("repos", "hq")}
+	rigTargets := defaultScaleCheckTargetsForAgent(cityPath, cfg, rigAgent, cityStore, rigStores)
+	if len(rigTargets) != 1 {
+		t.Fatalf("rig-scoped targets = %d, want 1: %#v", len(rigTargets), rigTargets)
+	}
+	if rigTargets[0].storeKey != "rig:hq" || rigTargets[0].store != rigStoreA {
+		t.Fatalf("rig-scoped target = %#v, want rig:hq store=rigStoreA", rigTargets[0])
+	}
+}
+
+func TestBuildDesiredStateDefaultScaleCheckCityScopedAgentSeesRigStoreDemand(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	if _, err := rigStore.Create(beads.Bead{
+		Title:  "routed dog work filed in rig store",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "gastown.dog",
+		},
+	}); err != nil {
+		t.Fatalf("create rig-store routed bead: %v", err)
+	}
+
+	rigPath := filepath.Join(cityPath, "repos", "hq")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{{
+			Name: "hq",
+			Path: rigPath,
+		}},
+		Agents: []config.Agent{{
+			Name:              "dog",
+			BindingName:       "gastown",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(3),
+		}},
+	}
+
+	var stderr strings.Builder
+	got := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(),
+		cfg, runtime.NewFake(),
+		cityStore, map[string]beads.Store{"hq": rigStore},
+		nil, nil, &stderr,
+	)
+	if demand := got.ScaleCheckCounts["gastown.dog"]; demand != 1 {
+		t.Fatalf("ScaleCheckCounts[gastown.dog] = %d, want 1 (rig-store routed bead): stderr=%q", demand, stderr.String())
+	}
+	dogSessions := 0
+	for _, tp := range got.State {
+		if tp.TemplateName == "gastown.dog" || tp.TemplateName == "dog" {
+			dogSessions++
+		}
+	}
+	if dogSessions != 1 {
+		t.Fatalf("dog desired sessions = %d, want 1: state=%v stderr=%q", dogSessions, got.State, stderr.String())
 	}
 }
 

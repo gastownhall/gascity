@@ -278,7 +278,7 @@ func buildDesiredStateWithSessionBeads(
 			// not create a parallel generic worker for the same backing template.
 			poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
 			if store != nil && strings.TrimSpace(cfg.Agents[i].ScaleCheck) == "" {
-				defaultNamedScaleTargets = append(defaultNamedScaleTargets, defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores))
+				defaultNamedScaleTargets = append(defaultNamedScaleTargets, defaultScaleCheckTargetsForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores)...)
 				continue
 			}
 			pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, newDemand: store != nil})
@@ -294,7 +294,7 @@ func buildDesiredStateWithSessionBeads(
 		// new unassigned demand while assigned work drives resume requests.
 		poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
 		if store != nil && strings.TrimSpace(cfg.Agents[i].ScaleCheck) == "" {
-			defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores))
+			defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTargetsForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores)...)
 			continue
 		}
 		env, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[i])
@@ -791,32 +791,61 @@ func readyAssignedWorkAssignees(cfg *config.City, sessionBeads *sessionBeadSnaps
 	return result
 }
 
-func defaultScaleCheckTargetForAgent(
+// defaultScaleCheckTargetsForAgent enumerates the bead stores the default
+// scale_check must query for an agent. Rig-scoped agents only see their own
+// rig store. City-scoped agents see the city store plus every configured rig
+// store, because mayors dispatching from a rig stamp gc.routed_to onto a bead
+// that lives in that rig store; a city-scoped agent counting only the city
+// store would miss this rig-filed pool demand and never spawn a session to
+// drain it. The widened scope mirrors collectAssignedWorkBeadsWithStores,
+// which already crawls every store before filtering by ownership.
+func defaultScaleCheckTargetsForAgent(
 	cityPath string,
 	cfg *config.City,
 	agentCfg *config.Agent,
 	cityStore beads.Store,
 	rigStores map[string]beads.Store,
-) defaultScaleCheckTarget {
-	target := defaultScaleCheckTarget{
-		template: agentCfg.QualifiedName(),
+) []defaultScaleCheckTarget {
+	template := agentCfg.QualifiedName()
+	rigName := configuredRigName(cityPath, agentCfg, cfg.Rigs)
+	if rigName != "" {
+		target := defaultScaleCheckTarget{
+			template: template,
+			storeKey: "rig:" + rigName,
+		}
+		if rigStores != nil {
+			if rigStore := rigStores[rigName]; rigStore != nil {
+				target.store = rigStore
+				return []defaultScaleCheckTarget{target}
+			}
+		}
+		target.err = fmt.Errorf("default scale_check %s: rig store %q unavailable", template, rigName)
+		return []defaultScaleCheckTarget{target}
+	}
+	targets := []defaultScaleCheckTarget{{
+		template: template,
 		storeKey: "city",
 		store:    cityStore,
-	}
-	rigName := configuredRigName(cityPath, agentCfg, cfg.Rigs)
-	if rigName == "" {
-		return target
-	}
-	target.storeKey = "rig:" + rigName
-	if rigStores != nil {
-		if rigStore := rigStores[rigName]; rigStore != nil {
-			target.store = rigStore
-			return target
+	}}
+	for _, rig := range cfg.Rigs {
+		rigTarget := defaultScaleCheckTarget{
+			template: template,
+			storeKey: "rig:" + rig.Name,
 		}
+		if rigStores != nil {
+			if rigStore := rigStores[rig.Name]; rigStore != nil {
+				rigTarget.store = rigStore
+				targets = append(targets, rigTarget)
+				continue
+			}
+		}
+		// Skip silently rather than emit a partial diagnostic per rig: a
+		// city-scoped agent reads opportunistically from every rig, and a
+		// transiently missing rig store should not mask demand visible in
+		// the other stores by flagging the whole template partial.
+		_ = rigTarget
 	}
-	target.store = nil
-	target.err = fmt.Errorf("default scale_check %s: rig store %q unavailable", target.template, rigName)
-	return target
+	return targets
 }
 
 func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int, map[string]bool, []error) {

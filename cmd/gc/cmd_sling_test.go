@@ -999,9 +999,9 @@ func TestBuiltInSlingPoolRouteContractUsesMetadataOnly(t *testing.T) {
 		}
 	}
 
-	counts, partials, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{
-		defaultScaleCheckTargetForAgent(sharedTestCityDir, cfg, &cfg.Agents[0], nil, map[string]beads.Store{"saitoc": store}),
-	})
+	counts, partials, errs := defaultScaleCheckCounts(
+		defaultScaleCheckTargetsForAgent(sharedTestCityDir, cfg, &cfg.Agents[0], nil, map[string]beads.Store{"saitoc": store}),
+	)
 	if len(errs) != 0 {
 		t.Fatalf("defaultScaleCheckCounts errors: %v", errs)
 	}
@@ -1050,10 +1050,9 @@ func TestBuiltInSlingPoolRouteContractUsesMetadataOnly(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("handoff update: %v", err)
 	}
-	counts, partials, errs = defaultScaleCheckCounts([]defaultScaleCheckTarget{
-		defaultScaleCheckTargetForAgent(sharedTestCityDir, cfg, &cfg.Agents[0], nil, map[string]beads.Store{"saitoc": store}),
-		defaultScaleCheckTargetForAgent(sharedTestCityDir, cfg, &cfg.Agents[1], nil, map[string]beads.Store{"saitoc": store}),
-	})
+	mergedTargets := defaultScaleCheckTargetsForAgent(sharedTestCityDir, cfg, &cfg.Agents[0], nil, map[string]beads.Store{"saitoc": store})
+	mergedTargets = append(mergedTargets, defaultScaleCheckTargetsForAgent(sharedTestCityDir, cfg, &cfg.Agents[1], nil, map[string]beads.Store{"saitoc": store})...)
+	counts, partials, errs = defaultScaleCheckCounts(mergedTargets)
 	if len(errs) != 0 {
 		t.Fatalf("post-handoff defaultScaleCheckCounts errors: %v", errs)
 	}
