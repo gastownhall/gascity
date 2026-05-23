@@ -1465,8 +1465,9 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 	if a.SupportsInstanceExpansion() {
 		// Find a running multi-session instance to nudge.
 		sp0 := scaleParamsFor(a)
-		for _, qn := range discoverPoolInstances(a.Name, a.Dir, sp0, a, cityName, st, sp) {
-			sn := lookupSessionNameOrLegacy(store, cityName, qn, st)
+		for _, ref := range resolvePoolSessionRefs(store, cfg, a.Name, a.Dir, sp0, a, cityName, st, sp, stderr) {
+			qn := ref.qualifiedInstance
+			sn := ref.sessionName
 			running, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, sn)
 			if err == nil && running {
 				member, ok := resolveAgentIdentity(cfg, qn, currentRigContext(cfg))

@@ -934,6 +934,74 @@ func TestDoSlingNudgePoolMember(t *testing.T) {
 	}
 }
 
+func TestDoSlingNudgePoolMemberUsesBeadDerivedSessionName(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	const sessionName = "gm-glz06f"
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatalf("Start(%q): %v", sessionName, err)
+	}
+	sp.WaitForIdleErrors[sessionName] = nil
+	sp.Calls = nil
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name: "polecat",
+			Dir:  "hw",
+		}},
+	}
+	a := cfg.Agents[0]
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.CityPath = t.TempDir()
+	store := newSlingTestStore()
+	deps.Store = store
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "pool session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":      "hw/polecat",
+			"agent_name":    "hw/polecat",
+			"provider_kind": "claude",
+			"session_name":  sessionName,
+			"pool_slot":     "7",
+			"state":         "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session bead): %v", err)
+	}
+
+	opts := testOpts(a, "BL-1")
+	opts.Nudge = true
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	for _, c := range sp.Calls {
+		if (c.Method == "Nudge" || c.Method == "NudgeNow") && c.Name == sessionName {
+			if !strings.Contains(stdout.String(), "Nudged hw/polecat") {
+				t.Fatalf("stdout = %q, want delivered nudge confirmation", stdout.String())
+			}
+			if strings.Contains(stdout.String(), "No running sessions") || strings.Contains(stderr.String(), "poke failed") {
+				t.Fatalf("stdout=%q stderr=%q, want no controller wake fallback", stdout.String(), stderr.String())
+			}
+			updated, err := store.Get(sessionBead.ID)
+			if err != nil {
+				t.Fatalf("Get(session bead): %v", err)
+			}
+			if got := updated.Metadata["last_nudge_delivered_at"]; got == "" {
+				t.Fatalf("last_nudge_delivered_at = %q, want delivered nudge stamp", got)
+			}
+			return
+		}
+	}
+	t.Fatalf("runtime calls = %+v, want Nudge/NudgeNow on bead-derived session %q", sp.Calls, sessionName)
+}
+
 func TestDoSlingNudgePoolNoMembers(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
