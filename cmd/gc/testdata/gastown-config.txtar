@@ -89,9 +89,6 @@ max_restarts = 5
 restart_window = "1h"
 shutdown_timeout = "5s"
 
-[formulas]
-dir = "formulas"
-
 [[agent]]
 name = "mayor"
 start_command = "echo hello"

@@ -28,8 +28,8 @@ multi-agent orchestration system.
    activity
 5. **[Config System](./config.md)** — TOML loading, progressive activation,
    multi-layer override resolution
-6. **[Sessions](./session.md)** — agent lifecycle backed by session providers
-   (tmux, subprocess, k8s)
+6. **[Session](./session.md)** — session lifecycle backed by runtime
+   providers (tmux, subprocess, exec, k8s)
 7. **[Prompt Templates](./prompt-templates.md)** — Go `text/template` in
    Markdown defining role behavior
 
@@ -38,6 +38,7 @@ multi-agent orchestration system.
 Each is provably composable from the primitives.
 
 8. **[Messaging](./messaging.md)** — inter-agent mail via beads + nudge
+   via the Session primitive
 9. **[Formulas & Molecules](./formulas.md)** — work definitions (TOML) and
    their runtime instances (bead trees)
 10. **[Dispatch](./dispatch.md)** — sling: agent selection + formula
@@ -47,11 +48,14 @@ Each is provably composable from the primitives.
 
 ### Infrastructure
 
-12. **[Controller](./controller.md)** — the main loop: config watch,
+12. **[API Control Plane](./api-control-plane.md)** — CLI/API projections,
+    typed HTTP + SSE wire contract, generated clients, and event payload
+    registry
+13. **[Controller](./controller.md)** — the main loop: config watch,
     reconciliation tick, order dispatch
-13. **[Orders](./orders.md)** — gate-conditioned formula/exec
+14. **[Orders](./orders.md)** — trigger-conditioned formula/exec
     dispatch, rig-scoped labels
-14. **[Gas City Pack Specification (2.0)](../../docs/specs/pack-spec.md)** —
+15. **[Gas City Pack Specification (2.0)](../../docs/specs/pack-spec.md)** —
     authoritative pack data model, file format, and loader semantics
 
 ### End-to-End Traces
@@ -59,9 +63,9 @@ Each is provably composable from the primitives.
 These trace a concrete operation through all layers. The most effective
 way to understand how the system fits together.
 
-15. **[Life of a Bead](./life-of-a-bead.md)** — create → hook → claim →
+16. **[Life of a Bead](./life-of-a-bead.md)** — create → hook → claim →
     execute → close
-16. **[Life of a Molecule](./life-of-a-molecule.md)** — formula parse →
+17. **[Life of a Molecule](./life-of-a-molecule.md)** — formula parse →
     dispatch → molecule create → step execution → completion
 
 ## Document Types

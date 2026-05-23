@@ -174,11 +174,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		if decErr != nil {
 			return nil, nil, fmt.Errorf("parsing city pack.toml: %w", decErr)
 		}
-		if fatalWarnings := fatalUndecodedWarnings(md, packPath); len(fatalWarnings) > 0 {
-			return nil, nil, fmt.Errorf("parsing city pack.toml: %s", strings.Join(fatalWarnings, "; "))
-		}
 		if err := validatePackAuthoringSurface(md, packPath); err != nil {
 			return nil, nil, fmt.Errorf("parsing city pack.toml: %w", err)
+		}
+		if fatalWarnings := fatalUndecodedWarnings(md, packPath); len(fatalWarnings) > 0 {
+			return nil, nil, fmt.Errorf("parsing city pack.toml: %s", strings.Join(fatalWarnings, "; "))
 		}
 		prov.Warnings = append(prov.Warnings, packWarnings...)
 		if err := validatePackMeta(&pc.Pack); err != nil {

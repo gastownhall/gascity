@@ -599,10 +599,10 @@ func newInitPackConfig(cityName string) initPackConfig {
 //
 //   - pack.toml owns the portable definition: [pack], explicit [[agent]]
 //     entries when the caller keeps them, [[named_session]], [imports.*],
-//     [providers.*], agent/service patches, and formulas.
+//     [providers.*], services, and agent patches.
 //   - city.toml keeps only runtime-local deployment settings (e.g.
-//     workspace.provider, workspace.start_command, agent_defaults, api,
-//     daemon, beads).
+//     workspace.provider, workspace.start_command, agent_defaults,
+//     default-rig imports, rig/provider patches, api, daemon, beads).
 //   - workspace.name and workspace.prefix migrate to .gc/site.toml via
 //     persistInitWorkspaceIdentity, so they are cleared here to avoid
 //     duplicating the city's machine-local identity in city.toml.
@@ -619,7 +619,10 @@ func splitInitConfig(cityName string, cfg *config.City) (initPackConfig, config.
 	cityCfg.Providers = nil
 	cityCfg.Services = nil
 	cityCfg.Formulas = config.FormulasConfig{}
-	cityCfg.Patches = config.Patches{}
+	cityCfg.Patches = config.Patches{
+		Rigs:      append([]config.RigPatch(nil), cfg.Patches.Rigs...),
+		Providers: append([]config.ProviderPatch(nil), cfg.Patches.Providers...),
+	}
 	cityCfg.AgentsDefaults = config.AgentDefaults{}
 	cityCfg.Defaults = config.PackDefaults{}
 	cityCfg.Workspace.Name = ""
@@ -639,8 +642,9 @@ func splitInitConfig(cityName string, cfg *config.City) (initPackConfig, config.
 			packCfg.Providers[name] = spec
 		}
 	}
-	packCfg.Formulas = cfg.Formulas
-	packCfg.Patches = cfg.Patches
+	packCfg.Patches = config.Patches{
+		Agents: append([]config.AgentPatch(nil), cfg.Patches.Agents...),
+	}
 	for _, svc := range cfg.Services {
 		if svc.PublishMode == "direct" {
 			cityCfg.Services = append(cityCfg.Services, svc)
@@ -656,19 +660,30 @@ func splitInitConfig(cityName string, cfg *config.City) (initPackConfig, config.
 		)
 		cityCfg.Workspace.SetLegacyIncludes(nil)
 	}
-	if len(cfg.DefaultRigImports) > 0 {
+	defaultRigImports := initDefaultRigImports(cfg)
+	if len(defaultRigImports) > 0 {
 		defaults := config.PackDefaults{
 			Rig: config.PackRigDefaults{
-				Imports: make(map[string]config.Import, len(cfg.DefaultRigImports)),
+				Imports: make(map[string]config.Import, len(defaultRigImports)),
 			},
 		}
-		for name, imp := range cfg.DefaultRigImports {
+		for name, imp := range defaultRigImports {
 			defaults.Rig.Imports[name] = imp
 		}
 		cityCfg.Defaults = defaults
 		cityCfg.Workspace.SetLegacyDefaultRigIncludes(nil)
 	}
 	return packCfg, cityCfg
+}
+
+func initDefaultRigImports(cfg *config.City) map[string]config.Import {
+	if cfg == nil {
+		return nil
+	}
+	if len(cfg.Defaults.Rig.Imports) > 0 {
+		return cfg.Defaults.Rig.Imports
+	}
+	return cfg.DefaultRigImports
 }
 
 func decodeInitPackTemplate(data []byte, cityName string) (initPackConfig, error) {
@@ -752,6 +767,10 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 	cfg, err := config.Parse(data)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if cfg.Formulas.Dir != "" {
+		fmt.Fprintln(stderr, "gc init: [formulas].dir is no longer supported; use the well-known formulas/ directory") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

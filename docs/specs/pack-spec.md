@@ -198,7 +198,7 @@ The `[pack]` table defines pack metadata.
 ```toml
 [pack]
 name = "gascity"
-schema = 1
+schema = 2
 version = "1.4.0"
 requires_gc = ">=0.13.0"
 ```
@@ -206,7 +206,7 @@ requires_gc = ">=0.13.0"
 | Field | Type | Required | Rule |
 |---|---|---|---|
 | `name` | string | yes | Pack identifier and provenance label. Must not be empty. |
-| `schema` | integer | yes | Pack format version. Must be `1` for this specification. |
+| `schema` | integer | yes | Pack format version. Must be `2` for this specification. |
 | `version` | string | no | Pack version metadata. |
 | `requires_gc` | string | no | Minimum compatible `gc` version metadata. |
 | `includes` | array of string | legacy | Legacy pack composition list. New packs should use `[imports.<binding>]`. |

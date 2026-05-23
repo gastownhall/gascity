@@ -59,9 +59,6 @@ stderr 'unknown subcommand "blorp"'
 [workspace]
 name = "ordertown"
 
-[formulas]
-dir = "formulas"
-
 [[agent]]
 name = "deacon"
 start_command = "echo hello"

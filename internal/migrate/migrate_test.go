@@ -354,6 +354,99 @@ source = "../packs/a-pack"
 	}
 }
 
+func TestMigrateMovesPackV2RejectedSurfacesThenLoads(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[rigs]]
+name = "app"
+
+[formulas]
+dir = "city-formulas"
+
+[providers.local]
+command = "true"
+`)
+	writeFile(t, cityDir, "pack.toml", `
+[pack]
+name = "legacy-city"
+schema = 2
+
+[agent_defaults]
+default_sling_formula = "mol-canonical"
+
+[agents]
+append_fragments = ["legacy-footer"]
+
+[formulas]
+dir = "legacy-formulas"
+
+[defaults.rig.imports.ops]
+source = "../packs/ops"
+
+[[patches.rigs]]
+name = "app"
+prefix = "ga"
+
+[[patches.providers]]
+name = "local"
+command = "false"
+
+[[agent]]
+name = "worker"
+provider = "local"
+`)
+
+	report, err := Apply(cityDir, Options{})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	packToml := readFile(t, filepath.Join(cityDir, "pack.toml"))
+	for _, forbidden := range []string{
+		"[agent_defaults]",
+		"[agents]",
+		"[formulas]",
+		"[defaults.rig.imports.",
+		"[[patches.rigs]]",
+		"[[patches.providers]]",
+	} {
+		if strings.Contains(packToml, forbidden) {
+			t.Fatalf("pack.toml still contains rejected surface %q:\n%s", forbidden, packToml)
+		}
+	}
+
+	cityToml := readFile(t, filepath.Join(cityDir, "city.toml"))
+	for _, want := range []string{
+		"[agent_defaults]",
+		`default_sling_formula = "mol-canonical"`,
+		`append_fragments = ["legacy-footer"]`,
+		"[defaults.rig.imports.ops]",
+		"[[patches.rigs]]",
+		`prefix = "ga"`,
+		"[[patches.providers]]",
+		`command = "false"`,
+	} {
+		if !strings.Contains(cityToml, want) {
+			t.Fatalf("city.toml missing migrated surface %q:\n%s", want, cityToml)
+		}
+	}
+	if strings.Contains(cityToml, "[formulas]") {
+		t.Fatalf("city.toml should not gain unsupported [formulas].dir:\n%s", cityToml)
+	}
+	if len(report.Warnings) == 0 || !strings.Contains(strings.Join(report.Warnings, "\n"), "formulas.dir") {
+		t.Fatalf("expected formulas.dir migration warning, got %v", report.Warnings)
+	}
+
+	if _, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml")); err != nil {
+		t.Fatalf("LoadWithIncludes after migration: %v", err)
+	}
+}
+
 func TestMigrateCreatesFreshBindingWhenExistingImportHasNonDefaultSemantics(t *testing.T) {
 	t.Parallel()
 

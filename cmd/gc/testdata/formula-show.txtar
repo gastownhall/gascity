@@ -24,9 +24,6 @@ stdout 'cook'
 name = "my-city"
 provider = "claude"
 
-[formulas]
-dir = "formulas"
-
 [[agent]]
 name = "chef"
 start_command = "echo hello"

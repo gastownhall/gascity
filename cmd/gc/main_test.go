@@ -4548,6 +4548,150 @@ schema = 2
 	}
 }
 
+func TestInitFilePreservesDefaultRigImportsInCityToml(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source.toml")
+	if err := os.WriteFile(src, []byte(`[workspace]
+provider = "claude"
+
+[defaults.rig.imports.zeta]
+source = "./packs/zeta"
+
+[defaults.rig.imports.alpha]
+source = "./packs/alpha"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(dir, "bright-lights")
+	var stdout, stderr bytes.Buffer
+	code := cmdInitFromTOMLFileWithOptions(fsys.OSFS{}, src, cityPath, "", &stdout, &stderr, true, false)
+	if code != 0 {
+		t.Fatalf("cmdInitFromTOMLFileWithOptions = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	packText := string(mustReadFile(t, filepath.Join(cityPath, "pack.toml")))
+	if strings.Contains(packText, "[defaults.rig.imports.") {
+		t.Fatalf("pack.toml should not contain default-rig imports:\n%s", packText)
+	}
+
+	cityText := string(mustReadFile(t, filepath.Join(cityPath, "city.toml")))
+	for _, want := range []string{
+		"[defaults.rig.imports.alpha]",
+		`source = "./packs/alpha"`,
+		"[defaults.rig.imports.zeta]",
+		`source = "./packs/zeta"`,
+	} {
+		if !strings.Contains(cityText, want) {
+			t.Fatalf("city.toml missing default-rig import %q:\n%s", want, cityText)
+		}
+	}
+	if _, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); err != nil {
+		t.Fatalf("LoadWithIncludes written city: %v", err)
+	}
+}
+
+func TestInitFileKeepsCityOnlyPatchesOutOfPackToml(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source.toml")
+	if err := os.WriteFile(src, []byte(`[workspace]
+provider = "claude"
+
+[providers.local]
+command = "true"
+
+[[agent]]
+name = "worker"
+provider = "local"
+
+[[rigs]]
+name = "app"
+path = "app"
+
+[[patches.agent]]
+name = "worker"
+suspended = true
+
+[[patches.rigs]]
+name = "app"
+prefix = "ga"
+
+[[patches.providers]]
+name = "local"
+command = "false"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(dir, "bright-lights")
+	var stdout, stderr bytes.Buffer
+	code := cmdInitFromTOMLFileWithOptions(fsys.OSFS{}, src, cityPath, "", &stdout, &stderr, true, false)
+	if code != 0 {
+		t.Fatalf("cmdInitFromTOMLFileWithOptions = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	packText := string(mustReadFile(t, filepath.Join(cityPath, "pack.toml")))
+	if !strings.Contains(packText, "[[patches.agent]]") {
+		t.Fatalf("pack.toml missing pack-supported agent patch:\n%s", packText)
+	}
+	for _, forbidden := range []string{"[[patches.rigs]]", "[[patches.providers]]"} {
+		if strings.Contains(packText, forbidden) {
+			t.Fatalf("pack.toml contains city-only patch %q:\n%s", forbidden, packText)
+		}
+	}
+
+	cityText := string(mustReadFile(t, filepath.Join(cityPath, "city.toml")))
+	for _, want := range []string{"[[patches.rigs]]", `prefix = "ga"`, "[[patches.providers]]", `command = "false"`} {
+		if !strings.Contains(cityText, want) {
+			t.Fatalf("city.toml missing city-only patch %q:\n%s", want, cityText)
+		}
+	}
+	if strings.Contains(cityText, "[[patches.agent]]") {
+		t.Fatalf("city.toml should not contain pack-supported agent patch:\n%s", cityText)
+	}
+	if _, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); err != nil {
+		t.Fatalf("LoadWithIncludes written city: %v", err)
+	}
+}
+
+func TestInitFileRejectsLegacyFormulasDir(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source.toml")
+	if err := os.WriteFile(src, []byte(`[workspace]
+provider = "claude"
+
+[formulas]
+dir = "legacy-formulas"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(dir, "bright-lights")
+	var stdout, stderr bytes.Buffer
+	code := cmdInitFromTOMLFileWithOptions(fsys.OSFS{}, src, cityPath, "", &stdout, &stderr, true, false)
+	if code == 0 {
+		t.Fatalf("cmdInitFromTOMLFileWithOptions succeeded, want formulas.dir rejection; stdout: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "[formulas].dir is no longer supported") {
+		t.Fatalf("stderr missing formulas.dir rejection:\n%s", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, "pack.toml")); !os.IsNotExist(err) {
+		t.Fatalf("pack.toml should not be written after formulas.dir rejection, err=%v", err)
+	}
+}
+
 func TestInitFromCopiesLegacyAgentDefaultsAliasToCityToml(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
