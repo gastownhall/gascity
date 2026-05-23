@@ -507,8 +507,26 @@ ensure_types_custom_in_yaml() {
     [ -f "$config_yaml" ] || return 0
     [ -n "$types" ] || return 0
 
+    # Capture the current types.custom value from anywhere in the file —
+    # including mid-line. Upstream bd writers (for example
+    # `bd config set sync.remote ...`) have been observed appending a key
+    # without a trailing newline, which left a later
+    # `types.custom: ...` glued onto the prior key's line. A line-anchored
+    # `^types\.custom:` lookup misses that shape and the function used to
+    # then re-append a second copy, producing the malformed YAML in
+    # hq:gc-5fq / gco-aht.
     local current
-    current=$(sed -n 's/^types\.custom: *//p' "$config_yaml" 2>/dev/null | head -1)
+    current=$(awk '
+        {
+            i = index($0, "types.custom:")
+            if (i > 0) {
+                rest = substr($0, i + length("types.custom:"))
+                sub(/^[ \t]+/, "", rest)
+                print rest
+                exit
+            }
+        }
+    ' "$config_yaml" 2>/dev/null)
 
     local merged
     merged=$(printf '%s,%s' "$current" "$types" | awk -F, '
@@ -527,17 +545,53 @@ ensure_types_custom_in_yaml() {
         }
     ')
 
-    # Short-circuit when the merged set already equals what's on disk:
-    # avoids mtime churn that downstream watchers might misread as a real
-    # change. Includes the case where current is already a superset of
-    # the baseline (operator/pack types appended to the GC list).
-    if [ "$current" = "$merged" ]; then
-        return 0
+    # Short-circuit only when the on-disk line is already on its own line
+    # (no concatenated predecessor) AND the merged set matches it. The
+    # concat-repair path must rewrite even when the type values are equal,
+    # otherwise the malformed YAML survives.
+    if [ "$current" = "$merged" ] && grep -q '^types\.custom:' "$config_yaml"; then
+        if ! awk '
+            {
+                i = index($0, "types.custom:")
+                if (i > 1) {
+                    # types.custom appears mid-line — concatenation defect.
+                    found = 1
+                    exit
+                }
+            }
+            END { exit (found ? 0 : 1) }
+        ' "$config_yaml"; then
+            return 0
+        fi
     fi
 
     local tmp
     tmp=$(mktemp "$config_yaml.tmp.XXXXXX") || return 0
-    sed '/^types\.custom:/d' "$config_yaml" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    # Strip every types.custom occurrence — line-leading OR glued onto the
+    # end of an unterminated predecessor key. When glued, emit the
+    # predecessor on its own line so the file stays well-formed YAML.
+    awk '
+        {
+            i = index($0, "types.custom:")
+            if (i > 0) {
+                prefix = substr($0, 1, i - 1)
+                sub(/[ \t]+$/, "", prefix)
+                if (prefix != "") {
+                    print prefix
+                }
+                next
+            }
+            print
+        }
+    ' "$config_yaml" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    # Defensive: guarantee the stripped body ends with a newline before we
+    # append types.custom, so a missing trailing newline on the last surviving
+    # line cannot re-create the same glue defect we just repaired.
+    # Command substitution drops a trailing newline, so a missing newline at
+    # end-of-file leaves the captured value non-empty.
+    if [ -s "$tmp" ] && [ -n "$(tail -c1 "$tmp")" ]; then
+        printf '\n' >> "$tmp"
+    fi
     printf 'types.custom: %s\n' "$merged" >> "$tmp"
     mv -f "$tmp" "$config_yaml" || rm -f "$tmp"
 }
