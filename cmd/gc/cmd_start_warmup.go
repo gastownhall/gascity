@@ -171,7 +171,7 @@ func RunWarmupChecks(ctx context.Context, cityPath string, cfg *config.City, opt
 	} else {
 		report.MailSent = true
 	}
-	writeWarmupStderr(settings.Stderr, report)
+	writeWarmupStderr(settings.Stderr, settings.MailTo, report)
 	return report, nil
 }
 
@@ -429,7 +429,7 @@ func warmupIcon(status doctor.CheckStatus) string {
 	}
 }
 
-func writeWarmupStderr(stderr io.Writer, report *WarmupReport) {
+func writeWarmupStderr(stderr io.Writer, mailTo string, report *WarmupReport) {
 	if len(report.Failures) == 0 {
 		return
 	}
@@ -437,7 +437,7 @@ func writeWarmupStderr(stderr io.Writer, report *WarmupReport) {
 		fmt.Fprintf(stderr, "gc start: warmup: %d check(s) failed (%s); mail send error: %v\n", len(report.Failures), warmupStatusString(report.HighestSeverity), report.MailSendError) //nolint:errcheck // best-effort stderr
 		return
 	}
-	fmt.Fprintf(stderr, "gc start: warmup: %d check(s) failed (%s); see mail to %s and `gc doctor` for details\n", len(report.Failures), warmupStatusString(report.HighestSeverity), defaultWarmupMailTo) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "gc start: warmup: %d check(s) failed (%s); see mail to %s and `gc doctor` for details\n", len(report.Failures), warmupStatusString(report.HighestSeverity), mailTo) //nolint:errcheck // best-effort stderr
 }
 
 func warmupStatusString(status doctor.CheckStatus) string {
