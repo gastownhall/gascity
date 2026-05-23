@@ -1779,6 +1779,8 @@ func reapStaleSessionBeads(
 
 func cleanupDeadRuntimeSessionCorpses(
 	store beads.Store,
+	rigStores map[string]beads.Store,
+	cfg *config.City,
 	sessionBeads *sessionBeadSnapshot,
 	dt *drainTracker,
 	sp runtime.Provider,
@@ -1847,11 +1849,29 @@ func cleanupDeadRuntimeSessionCorpses(
 		// and the next reconciler tick spawns a successor that fails
 		// EnsureAliasAvailable with ErrSessionAliasExists, accumulating
 		// asleep/runtime-missing ghosts on the same slot indefinitely
-		// (gastownhall/gascity#2437). closeBead is idempotent and a nil
-		// store is tolerated so the corpse-cleanup side effect still
-		// runs in test contexts that don't wire a real store.
+		// (gastownhall/gascity#2437).
+		//
+		// Gate the close on a live assigned-work check using the same
+		// predicate as closeSessionBeadIfRuntimeStoppedAndUnassigned —
+		// snapshots can be stale and work can be assigned by bead ID,
+		// runtime session_name, or configured named-session identity
+		// across the primary store and any rig stores. Closing while a
+		// session bead still owns open or in-progress work would
+		// orphan the assignment, remove the session from future
+		// snapshots, and starve the session.stranded diagnostic path
+		// (#1425) and normal wake/recovery flows of the session record
+		// they rely on. closeBead is idempotent and a nil store is
+		// tolerated so the runtime-Stop side effect still runs in test
+		// contexts that don't wire a real store.
 		if store != nil {
-			closeBead(store, b.ID, "dead-runtime", time.Now().UTC(), stderr)
+			hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, b, cfg)
+			if err != nil {
+				fmt.Fprintf(stderr, "session reconciler: dead-runtime close guard for %s: %v\n", b.ID, err) //nolint:errcheck
+			} else if !hasAssignedWork {
+				closeBead(store, b.ID, "dead-runtime", time.Now().UTC(), stderr)
+			} else {
+				fmt.Fprintf(stderr, "session reconciler: dead runtime session %s retained — open assigned work blocks alias release\n", name) //nolint:errcheck
+			}
 		}
 		cleaned++
 	}
