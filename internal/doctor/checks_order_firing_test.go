@@ -129,22 +129,48 @@ func TestOrderFiringCurrent_IgnoresManualAndEventTriggers(t *testing.T) {
 
 func TestComputeExpectedIntervalForCronSchedules(t *testing.T) {
 	tests := []struct {
+		name     string
 		schedule string
 		want     time.Duration
 	}{
-		{"0 */4 * * *", 4 * time.Hour},
-		{"*/15 * * * *", 15 * time.Minute},
-		{"0 3 * * *", 24 * time.Hour},
-		{"0 9-17 * * *", time.Hour},
+		{"every-4h", "0 */4 * * *", 4 * time.Hour},
+		{"every-15min", "*/15 * * * *", 15 * time.Minute},
+		{"daily-0300", "0 3 * * *", 24 * time.Hour},
+		{"hourly-business", "0 9-17 * * *", time.Hour},
+		// #2499: schedules coarser than daily must compute an honest interval
+		// instead of erroring on an empty 24h scan window. Weekly, biweekly,
+		// monthly, and yearly are the common shapes; the progressive-widen
+		// algorithm walks 24h → 7d → 31d → 366d until it finds at least one
+		// match.
+		{"weekly-monday-0830", "30 8 * * 1", 7 * 24 * time.Hour},
+		{"weekly-sunday", "0 0 * * 0", 7 * 24 * time.Hour},
+		{"mon-wed-fri-0830", "30 8 * * 1,3,5", 2 * 24 * time.Hour},   // min(Mon→Wed, Wed→Fri, Fri-wrap→Mon)
+		{"monthly-first-midnight", "0 0 1 * *", 31 * 24 * time.Hour}, // 31d window from May 12 sees only June 1 → returns window length (longest-month upper bound; suits staleness checks)
+		{"yearly-new-year", "0 0 1 1 *", 366 * 24 * time.Hour},       // single match in 366d window → returns window length
 	}
 	for _, tt := range tests {
-		got, err := computeExpectedIntervalForCronSchedule(tt.schedule)
-		if err != nil {
-			t.Fatalf("computeExpectedIntervalForCronSchedule(%q): %v", tt.schedule, err)
-		}
-		if got != tt.want {
-			t.Fatalf("computeExpectedIntervalForCronSchedule(%q) = %s, want %s", tt.schedule, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := computeExpectedIntervalForCronSchedule(tt.schedule)
+			if err != nil {
+				t.Fatalf("computeExpectedIntervalForCronSchedule(%q): %v", tt.schedule, err)
+			}
+			if got != tt.want {
+				t.Fatalf("computeExpectedIntervalForCronSchedule(%q) = %s, want %s", tt.schedule, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestComputeExpectedIntervalForCronSchedule_NoMatchInAYear pins the only
+// remaining error path now that coarse schedules widen the scan up to 366
+// days: a schedule that cannot match any minute in a year (here, an
+// impossible day-of-month) still returns an explicit error so doctor
+// surfaces it rather than silently mis-classifying the order.
+func TestComputeExpectedIntervalForCronSchedule_NoMatchInAYear(t *testing.T) {
+	const impossible = "0 0 31 2 *" // Feb 31 — never matches
+	_, err := computeExpectedIntervalForCronSchedule(impossible)
+	if err == nil {
+		t.Fatalf("computeExpectedIntervalForCronSchedule(%q) returned no error; want diagnostic for unmatched schedule", impossible)
 	}
 }
 

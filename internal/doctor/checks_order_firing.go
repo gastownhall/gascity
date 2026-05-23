@@ -176,38 +176,53 @@ func computeExpectedIntervalForCronSchedule(schedule string) (time.Duration, err
 		return 0, fmt.Errorf("invalid cron schedule: want 5 fields, got %d", len(fields))
 	}
 
-	const day = 24 * time.Hour
+	// Scan minute-by-minute from a fixed base so the result is deterministic
+	// and independent of when the check runs. Widen the scan progressively so
+	// weekly, monthly, and yearly schedules are computed honestly instead of
+	// erroring out: the typical 24h window has zero matches for any schedule
+	// coarser than daily (#2499). The 24h fast-path stays cheap for the
+	// common case; coarser schedules pay the larger scan once per unique
+	// schedule (results are cached at the caller).
 	base := time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC)
-	matches := make([]time.Time, 0, 1440)
-	for i := 0; i < 1440; i++ {
-		ts := base.Add(time.Duration(i) * time.Minute)
-		matched, err := cronScheduleMatchesAt(fields, ts)
-		if err != nil {
-			return 0, err
+	windowsMinutes := []int{
+		1440,           // 24h — covers sub-daily and daily schedules
+		7 * 1440,       // 7d  — covers weekly and weekday-set schedules
+		31 * 1440,      // 31d — covers monthly schedules (longest month)
+		366 * 1440,     // 366d — covers yearly and leap-year schedules
+	}
+	for _, windowMinutes := range windowsMinutes {
+		matches := make([]time.Time, 0, 16)
+		for i := 0; i < windowMinutes; i++ {
+			ts := base.Add(time.Duration(i) * time.Minute)
+			matched, err := cronScheduleMatchesAt(fields, ts)
+			if err != nil {
+				return 0, err
+			}
+			if matched {
+				matches = append(matches, ts)
+			}
 		}
-		if matched {
-			matches = append(matches, ts)
+		if len(matches) == 0 {
+			continue
 		}
-	}
-	switch len(matches) {
-	case 0:
-		return 0, fmt.Errorf("cron schedule %q has no firing minutes in a 24h window", schedule)
-	case 1:
-		return day, nil
-	}
-
-	minGap := day
-	for i := 1; i < len(matches); i++ {
-		gap := matches[i].Sub(matches[i-1])
-		if gap < minGap {
-			minGap = gap
+		window := time.Duration(windowMinutes) * time.Minute
+		if len(matches) == 1 {
+			return window, nil
 		}
+		minGap := window
+		for i := 1; i < len(matches); i++ {
+			gap := matches[i].Sub(matches[i-1])
+			if gap < minGap {
+				minGap = gap
+			}
+		}
+		wrapGap := matches[0].Add(window).Sub(matches[len(matches)-1])
+		if wrapGap < minGap {
+			minGap = wrapGap
+		}
+		return minGap, nil
 	}
-	wrapGap := matches[0].Add(day).Sub(matches[len(matches)-1])
-	if wrapGap < minGap {
-		minGap = wrapGap
-	}
-	return minGap, nil
+	return 0, fmt.Errorf("cron schedule %q has no firing minutes in a 366-day window", schedule)
 }
 
 func cronScheduleMatchesAt(fields []string, ts time.Time) (bool, error) {
