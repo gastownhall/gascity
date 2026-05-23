@@ -5,6 +5,7 @@ package beads
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -123,6 +124,36 @@ var readyExcludeTypes = map[string]bool{
 // Ready() results by default.
 func IsReadyExcludedType(t string) bool {
 	return readyExcludeTypes[t]
+}
+
+// readyTypeIncluded reports whether a bead's type allows it into Ready()
+// results. Excluded types (molecule, step, ...) normally stay out because
+// they're workflow-container bookkeeping rather than actionable work.
+//
+// The single carve-out: STEPS that carry gc.routed_to ARE actionable
+// units for a pool agent. Cron-fired pool orders (gc order run with
+// pool = "<name>") create a molecule wisp container plus step children
+// that inherit the routing via stampLegacyRecipeRouting. The molecule
+// stays excluded (matches TestDefaultScaleCheckCountsIgnoresOpenMoleculeContainers
+// in cmd/gc/build_desired_state_test.go — workflow containers are not
+// pool demand). The steps need to be surfaced so the supervisor's
+// defaultScaleCheckCounts can see them; without that, pool demand
+// stays at 0 for cron-fired orders and dog/polecat pools never spawn.
+//
+// All four Ready paths use this helper — CachingStore.Ready,
+// CachingStore.CachedReady, MemStore.Ready, BdStore.Ready — so the
+// behavior is uniform across store implementations.
+func readyTypeIncluded(b Bead) bool {
+	if !IsReadyExcludedType(b.Type) {
+		return true
+	}
+	if b.Type != "step" {
+		return false
+	}
+	if b.Metadata == nil {
+		return false
+	}
+	return strings.TrimSpace(b.Metadata["gc.routed_to"]) != ""
 }
 
 // Dep represents a dependency relationship between two beads. The IssueID

@@ -1908,6 +1908,135 @@ func TestCachingStoreBdPrimeActiveUsesListDependenciesForCachedReady(t *testing.
 	}
 }
 
+// TestCachingStoreCachedReadyIncludesPoolRoutedSteps guards the
+// pool-demand path in cmd/gc/build_desired_state.go::defaultScaleCheckCounts,
+// which queries CachedReady() to count routed pool work. Cron-fired pool
+// orders (e.g. mol-dog-stale-db with pool = "dog") create a molecule
+// wisp plus step children carrying gc.routed_to=<pool>; without this
+// carve-out CachedReady would filter the steps out via IsReadyExcludedType
+// (since "step" is in readyExcludeTypes) and the supervisor would report
+// 0 pool demand even when the queue has matching work. The carve-out is
+// deliberately narrow:
+//
+//   - Steps with gc.routed_to ARE included — they're the actionable
+//     units a pool worker claims and runs (the parent molecule is just
+//     the formula's container; cmd/gc/cmd_order.go writes routing onto
+//     the steps via stampLegacyRecipeRouting in graphroute.go).
+//   - Steps without gc.routed_to remain excluded — those are graph
+//     workflow step bookkeeping, processed via named-session demand
+//     against the parent agent, not pool scale_check.
+//   - Molecules stay excluded regardless of routing — that's the
+//     existing contract guarded by
+//     TestDefaultScaleCheckCountsIgnoresOpenMoleculeContainers in
+//     cmd/gc/build_desired_state_test.go (workflow containers are not
+//     pool demand).
+//   - Other excluded types (gate, message, session, agent, role, rig,
+//     merge-request) stay excluded regardless of routing.
+//
+// The same parity check on Ready() asserts the live path agrees with
+// the cached path so callers can swap between them without behavior
+// change.
+func TestCachingStoreCachedReadyIncludesPoolRoutedSteps(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	// Plain task — actionable, no exclusion, no carve-out needed.
+	task, err := cache.Create(Bead{Title: "task", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create task: %v", err)
+	}
+	// Pool-routed step (cron-fired order's child) — must be visible to
+	// CachedReady so defaultScaleCheckCounts can count it.
+	routedStep, err := cache.Create(Bead{
+		Title:    "scan-step",
+		Type:     "step",
+		Metadata: map[string]string{"gc.routed_to": "dog"},
+	})
+	if err != nil {
+		t.Fatalf("Create routed step: %v", err)
+	}
+	// Pool-routed molecule (cron-fired order's wisp) — stays excluded
+	// as a workflow container; the steps below it carry the demand.
+	routedMol, err := cache.Create(Bead{
+		Title:    "mol-dog-stale-db",
+		Type:     "molecule",
+		Metadata: map[string]string{"gc.routed_to": "dog"},
+	})
+	if err != nil {
+		t.Fatalf("Create routed molecule: %v", err)
+	}
+	// Non-pool step (graph workflow step, no routing) — stays excluded
+	// because graph workflows drive named-session demand via Assignee,
+	// not pool scale_check via gc.routed_to.
+	plainStep, err := cache.Create(Bead{
+		Title: "graph-step",
+		Type:  "step",
+	})
+	if err != nil {
+		t.Fatalf("Create plain step: %v", err)
+	}
+	// Non-pool molecule — stays excluded as workflow container.
+	plainMol, err := cache.Create(Bead{
+		Title: "workflow-container",
+		Type:  "molecule",
+	})
+	if err != nil {
+		t.Fatalf("Create plain molecule: %v", err)
+	}
+
+	assertIncludes := func(label string, beads []Bead, ids ...string) {
+		t.Helper()
+		got := make(map[string]bool, len(beads))
+		for _, b := range beads {
+			got[b.ID] = true
+		}
+		for _, id := range ids {
+			if !got[id] {
+				t.Errorf("%s missing %s; got=%v", label, id, poolDemandBeadIDs(beads))
+			}
+		}
+	}
+	assertExcludes := func(label string, beads []Bead, ids ...string) {
+		t.Helper()
+		got := make(map[string]bool, len(beads))
+		for _, b := range beads {
+			got[b.ID] = true
+		}
+		for _, id := range ids {
+			if got[id] {
+				t.Errorf("%s should not contain %s; got=%v", label, id, poolDemandBeadIDs(beads))
+			}
+		}
+	}
+
+	cached, ok := cache.CachedReady()
+	if !ok {
+		t.Fatal("CachedReady reported cache unavailable")
+	}
+	assertIncludes("CachedReady", cached, task.ID, routedStep.ID)
+	assertExcludes("CachedReady", cached, routedMol.ID, plainStep.ID, plainMol.ID)
+
+	live, err := cache.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	assertIncludes("Ready", live, task.ID, routedStep.ID)
+	assertExcludes("Ready", live, routedMol.ID, plainStep.ID, plainMol.ID)
+}
+
+func poolDemandBeadIDs(beads []Bead) []string {
+	out := make([]string, 0, len(beads))
+	for _, b := range beads {
+		out = append(out, b.ID)
+	}
+	return out
+}
+
 func TestCachingStoreReadySkipsEphemeralOpenTasks(t *testing.T) {
 	t.Parallel()
 

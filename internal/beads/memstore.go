@@ -263,7 +263,7 @@ func (m *MemStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		if b.Ephemeral {
 			continue
 		}
-		if IsReadyExcludedType(b.Type) {
+		if !readyTypeIncluded(b) {
 			continue
 		}
 		if q.Assignee != "" && b.Assignee != q.Assignee {
