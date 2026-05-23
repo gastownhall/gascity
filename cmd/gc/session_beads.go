@@ -1784,10 +1784,14 @@ func cleanupDeadRuntimeSessionCorpses(
 	sessionBeads *sessionBeadSnapshot,
 	dt *drainTracker,
 	sp runtime.Provider,
+	clk clock.Clock,
 	stderr io.Writer,
 ) int {
 	if sessionBeads == nil || sp == nil {
 		return 0
+	}
+	if clk == nil {
+		clk = clock.Real{}
 	}
 	deadChecker, ok := sp.(runtime.DeadRuntimeSessionChecker)
 	if !ok {
@@ -1860,16 +1864,17 @@ func cleanupDeadRuntimeSessionCorpses(
 		// orphan the assignment, remove the session from future
 		// snapshots, and starve the session.stranded diagnostic path
 		// (#1425) and normal wake/recovery flows of the session record
-		// they rely on. closeBead is idempotent and a nil store is
-		// tolerated so the runtime-Stop side effect still runs in test
-		// contexts that don't wire a real store.
+		// they rely on. The outer `if store != nil` guard tolerates a
+		// nil store so the runtime-Stop side effect still runs in
+		// test contexts that don't wire a real store; closeBead is
+		// idempotent against repeated calls on the same bead.
 		if store != nil {
 			hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, b, cfg)
 			switch {
 			case err != nil:
 				fmt.Fprintf(stderr, "session reconciler: dead-runtime close guard for %s: %v\n", b.ID, err) //nolint:errcheck
 			case !hasAssignedWork:
-				closeBead(store, b.ID, "dead-runtime", time.Now().UTC(), stderr)
+				closeBead(store, b.ID, "dead-runtime", clk.Now().UTC(), stderr)
 			default:
 				fmt.Fprintf(stderr, "session reconciler: dead runtime session %s retained — open assigned work blocks alias release\n", name) //nolint:errcheck
 			}

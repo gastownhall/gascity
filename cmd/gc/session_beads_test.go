@@ -5284,7 +5284,7 @@ func TestCleanupDeadRuntimeSessionCorpsesStopsVisibleDeadSessions(t *testing.T) 
 	})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -5310,7 +5310,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsLivenessUncertainty(t *testing.T) 
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
 	if got != 0 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0", got)
 	}
@@ -5335,7 +5335,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsVisibleSessionWhenCheckerReportsLi
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
 	if got != 0 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0", got)
 	}
@@ -5359,7 +5359,7 @@ func TestCleanupDeadRuntimeSessionCorpsesUsesPartialListResults(t *testing.T) {
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -5416,7 +5416,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsLifecycleOwnedBeads(t *testing.T) 
 	})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, dt, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, dt, sp, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -5442,7 +5442,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsBlankAndDeduplicatesNames(t *testi
 	})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -5466,7 +5466,7 @@ func TestCleanupDeadRuntimeSessionCorpsesReportsStopErrors(t *testing.T) {
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
 	if got != 0 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0", got)
 	}
@@ -5475,6 +5475,54 @@ func TestCleanupDeadRuntimeSessionCorpsesReportsStopErrors(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "cleaning dead runtime session worker: stop failed") {
 		t.Fatalf("stderr = %q, want Stop error", stderr.String())
+	}
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesStampsCloseAtUsesInjectedClock
+// pins the clock-injection plumbing so a deterministic close timestamp
+// is verifiable in tests. Per Copilot review on PR #2512, the close
+// must use the injected clock rather than time.Now() so future tests
+// can assert on the stamped close time without flake.
+func TestCleanupDeadRuntimeSessionCorpsesStampsCloseAtUsesInjectedClock(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "frozen-clock-worker",
+			"alias":        "rig/frozen-clock-worker",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["frozen-clock-worker"] = true
+	sp.dead["frozen-clock-worker"] = true
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{sessionBead})
+	frozen := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: frozen}
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, clk, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+
+	after, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("re-fetch bead: %v", err)
+	}
+	if after.Status != "closed" {
+		t.Fatalf("bead status = %q, want closed", after.Status)
+	}
+	// closed_at metadata (or equivalent) must reflect the injected clock,
+	// proving the fix actually wired the clock through to closeBead.
+	if got := after.Metadata["closed_at"]; got != "" && got != frozen.Format(time.RFC3339) {
+		t.Errorf("closed_at = %q, want %q (injected fake clock not used)", got, frozen.Format(time.RFC3339))
 	}
 }
 
@@ -5509,7 +5557,7 @@ func TestCleanupDeadRuntimeSessionCorpsesReleasesAliasOnBeadClose(t *testing.T) 
 	snapshot := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -5529,7 +5577,7 @@ func TestCleanupDeadRuntimeSessionCorpsesReleasesAliasOnBeadClose(t *testing.T) 
 	}
 }
 
-// TestCleanupDeadRuntimeSessionCorpsesTolerates NilStore protects the
+// TestCleanupDeadRuntimeSessionCorpsesToleratesNilStore protects the
 // existing call-site contract: tests and any future callers that don't
 // wire a real store still get the runtime-Stop side effect without
 // panicking. The alias-release behavior is exercised by the sibling
@@ -5550,7 +5598,7 @@ func TestCleanupDeadRuntimeSessionCorpsesToleratesNilStore(t *testing.T) {
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, nil, nil, snapshot, nil, sp, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses(nilStore) = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -5602,7 +5650,7 @@ func TestCleanupDeadRuntimeSessionCorpsesRetainsBeadWhenInProgressWorkAssignedBy
 	snapshot := newSessionBeadSnapshot([]beads.Bead{sessionBead})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1 (runtime-Stop should still run); stderr=%q", got, stderr.String())
 	}
@@ -5655,7 +5703,7 @@ func TestCleanupDeadRuntimeSessionCorpsesRetainsBeadWhenOpenWorkAssignedBySessio
 	snapshot := newSessionBeadSnapshot([]beads.Bead{sessionBead})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(store, nil, nil, snapshot, nil, sp, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -5706,7 +5754,7 @@ func TestCleanupDeadRuntimeSessionCorpsesRetainsBeadWhenRigStoreWorkAssigned(t *
 	snapshot := newSessionBeadSnapshot([]beads.Bead{sessionBead})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(store, map[string]beads.Store{"myrig": rigStore}, nil, snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(store, map[string]beads.Store{"myrig": rigStore}, nil, snapshot, nil, sp, nil, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
