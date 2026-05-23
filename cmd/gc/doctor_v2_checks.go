@@ -18,15 +18,23 @@ import (
 )
 
 func registerV2DeprecationChecks(d *doctor.Doctor) {
-	d.Register(v2AgentFormatCheck{})
-	d.Register(v2ImportFormatCheck{})
-	d.Register(v2DefaultRigImportFormatCheck{})
-	d.Register(v2PackSourcesCheck{})
-	d.Register(v2RigPathSiteBindingCheck{})
-	d.Register(v2LegacyOrderLayoutCheck{})
-	d.Register(v2ScriptsLayoutCheck{})
-	d.Register(v2WorkspaceNameCheck{})
-	d.Register(v2PromptTemplateSuffixCheck{})
+	for _, c := range v2DeprecationChecks() {
+		d.Register(c)
+	}
+}
+
+func v2DeprecationChecks() []doctor.Check {
+	return []doctor.Check{
+		v2AgentFormatCheck{},
+		v2ImportFormatCheck{},
+		v2DefaultRigImportFormatCheck{},
+		v2PackSourcesCheck{},
+		v2RigPathSiteBindingCheck{},
+		v2LegacyOrderLayoutCheck{},
+		v2ScriptsLayoutCheck{},
+		v2WorkspaceNameCheck{},
+		v2PromptTemplateSuffixCheck{},
+	}
 }
 
 type v2AgentFormatCheck struct{}
