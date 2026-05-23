@@ -58,7 +58,7 @@ func buildFormulaCatalog(paths []string) ([]formulaSummaryResponse, error) {
 		return []formulaSummaryResponse{}, nil
 	}
 	names := discoverFormulaNames(paths)
-	parser := formula.NewParser(paths...)
+	parser := formula.NewParser(paths...).SetSource(formula.SourceFromEnv())
 	items := make([]formulaSummaryResponse, 0, len(names))
 	for _, name := range names {
 		resolved, err := loadResolvedWorkflowFormula(parser, name)
@@ -175,7 +175,7 @@ func buildFormulaDetail(ctx context.Context, name string, paths []string, _ stri
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("%w: %q not in search paths", errFormulaNotFound, name)
 	}
-	parser := formula.NewParser(paths...)
+	parser := formula.NewParser(paths...).SetSource(formula.SourceFromEnv())
 	resolved, err := loadResolvedWorkflowFormula(parser, name)
 	if err != nil {
 		return nil, err

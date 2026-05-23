@@ -30,6 +30,11 @@ type Parser struct {
 	// searchPaths are directories to search for formulas (in order).
 	searchPaths []string
 
+	// source reads formula files. Defaults to FSSource (working-tree
+	// state). Callers that want ref-stable resolution pass a
+	// GitRefSource (or FallbackSource) via WithSource. See #2030.
+	source Source
+
 	// cache stores loaded formulas by name.
 	cache map[string]*Formula
 
@@ -43,6 +48,10 @@ type Parser struct {
 // NewParser creates a new formula parser.
 // searchPaths are directories to search for formulas when resolving extends.
 // Default paths are: .beads/formulas, ~/.beads/formulas, $GT_ROOT/.beads/formulas
+//
+// The Parser starts with FSSource (working-tree resolution, the historical
+// behavior). Callers that want ref-stable resolution call SetSource with a
+// GitRefSource (typically via formula.SourceFromEnv).
 func NewParser(searchPaths ...string) *Parser {
 	paths := searchPaths
 	if len(paths) == 0 {
@@ -50,11 +59,27 @@ func NewParser(searchPaths ...string) *Parser {
 	}
 	return &Parser{
 		searchPaths:    paths,
+		source:         FSSource{},
 		cache:          make(map[string]*Formula),
 		resolvingSet:   make(map[string]bool),
 		resolvingChain: nil,
 	}
 }
+
+// SetSource swaps the formula-file Source used by the Parser. A nil
+// argument is ignored so callers can pass conditional sources without
+// guarding. Returns the Parser for chained construction.
+func (p *Parser) SetSource(s Source) *Parser {
+	if s != nil {
+		p.source = s
+	}
+	return p
+}
+
+// Source returns the active Source. Useful for diagnostics and for
+// derived parsers (compile.go, fragment.go) that need to propagate
+// the same Source to child constructions.
+func (p *Parser) Source() Source { return p.source }
 
 // defaultSearchPaths returns the default formula search paths.
 func defaultSearchPaths() []string {
@@ -92,9 +117,10 @@ func (p *Parser) ParseFile(path string) (*Formula, error) {
 		return cached, nil
 	}
 
-	// Read and parse the file
-	// #nosec G304 -- absPath comes from controlled search paths or explicit user input
-	data, err := os.ReadFile(absPath)
+	// Read via the configured Source so ref-stable resolution honors
+	// the committed file at p.source's ref rather than working-tree
+	// state. See #2030.
+	data, err := p.source.ReadFile(absPath)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
@@ -282,12 +308,17 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 // ordered lowest→highest priority (matching ComputeFormulaLayers); the
 // highest-priority path containing the formula wins. Within a single path,
 // plain .toml beats infixed .formula.toml beats legacy .formula.json.
+//
+// Both the existence probe and the read use p.source so ref-stable
+// callers (Source set via SetSource) observe a single coherent ref —
+// the existence check and the content read cannot diverge across
+// working-tree vs. committed state. See #2030.
 func (p *Parser) loadFormula(name string) (*Formula, error) {
 	if cached, ok := p.cache[name]; ok {
 		return cached, nil
 	}
 
-	path, ok := Resolve(p.searchPaths, name)
+	path, ok := ResolveWithSource(p.source, p.searchPaths, name)
 	if !ok {
 		return nil, fmt.Errorf("formula %q not found in search paths", name)
 	}

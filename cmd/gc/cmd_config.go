@@ -383,7 +383,7 @@ func validateLegacyFormulaConfigRoutes(cfg *config.City) []string {
 	if len(paths) == 0 {
 		return nil
 	}
-	parser := formula.NewParser(paths...)
+	parser := formula.NewParser(paths...).SetSource(formula.SourceFromEnv())
 	formulaNames := discoverFormulaNames(paths)
 	agentTargets, namedTargets := formulaValidationTargets(cfg)
 	var errs []string
