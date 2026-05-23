@@ -1895,8 +1895,10 @@ func requireNoError(t *testing.T, err error) {
 }
 
 // ---------------------------------------------------------------------------
-// Six-row read-path routing matrix for `gc convoy list/status/check`
-// (ADR 0001, ga-h6w). Each command gets the six mandatory rows:
+// Six-row read-path routing matrix for `gc convoy list/status` (ADR 0001,
+// ga-h6w). `gc convoy check` keeps the same route-log coverage below, but it
+// is deliberately excluded from API routing because it may mutate state.
+// Each API-routed command gets the six mandatory rows:
 //
 //   api-happy-path       API returns 200 with items         route=api, exit 0
 //   api-cache-not-live   API returns 503 cache_not_live     fallback, exit 0
@@ -2192,7 +2194,7 @@ func TestRouteConvoyStatus_SixRowMatrix(t *testing.T) {
 	}
 }
 
-func TestRouteConvoyCheck_SixRowMatrix(t *testing.T) {
+func TestRouteConvoyCheckAlwaysFallsBackForLiveMutation(t *testing.T) {
 	tests := []struct {
 		name         string
 		handler      convoyMatrixHandler
@@ -2205,31 +2207,33 @@ func TestRouteConvoyCheck_SixRowMatrix(t *testing.T) {
 		wantStdout   string
 	}{
 		{
-			name:       "api-happy-path",
+			name:       "api-happy-path-ignored-for-live-mutation",
 			handler:    okConvoyCheckHandler,
 			wantExit:   0,
-			wantRoute:  "api",
+			wantRoute:  "fallback",
+			wantReason: "requires-live-read",
 			wantStdout: "0 convoy(s) auto-closed",
 		},
 		{
-			name:       "api-cache-not-live",
+			name:       "api-cache-not-live-ignored-for-live-mutation",
 			handler:    convoyProblemHandler(http.StatusServiceUnavailable, "cache_not_live: supervisor cache is priming"),
 			wantExit:   0,
 			wantRoute:  "fallback",
-			wantReason: "cache-not-live",
+			wantReason: "requires-live-read",
 		},
 		{
-			name:       "api-500-fallback",
+			name:       "api-500-ignored-for-live-mutation",
 			handler:    convoyProblemHandler(http.StatusInternalServerError, "internal: something exploded"),
 			wantExit:   0,
 			wantRoute:  "fallback",
-			wantReason: "conn-refused",
+			wantReason: "requires-live-read",
 		},
 		{
-			name:       "api-404-error",
+			name:       "api-404-ignored-for-live-mutation",
 			handler:    convoyProblemHandler(http.StatusNotFound, "not_found: city not configured"),
-			wantExit:   1,
-			wantStderr: "not_found",
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "requires-live-read",
 		},
 		{
 			name:         "controller-down",
@@ -2281,6 +2285,69 @@ func TestRouteConvoyCheck_SixRowMatrix(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRouteConvoyCheckUsesLiveStoreForAutoCloseDecision(t *testing.T) {
+	cityPath := writeConvoyTestCity(t)
+	t.Setenv("GC_DEBUG", "1")
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(): %v", err)
+	}
+	convoy, err := store.Create(beads.Bead{Title: "batch", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{Title: "still open", ParentID: convoy.ID}); err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-GC-Cache-Age-S", "25")
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/convoys"):
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"items": []map[string]any{
+					{"id": convoy.ID, "title": convoy.Title, "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T10:00:00Z"},
+				},
+				"total": 1,
+			})
+		case strings.HasSuffix(r.URL.Path, "/check"):
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"convoy_id": convoy.ID,
+				"total":     1,
+				"closed":    1,
+				"complete":  true,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	code := routeConvoyCheck(cityPath, c, "", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("routeConvoyCheck = %d, want 0; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	assertRouteLog(t, stderr.String(), "fallback", "requires-live-read")
+	if strings.Contains(stdout.String(), "Auto-closed") {
+		t.Fatalf("stdout should not auto-close from API progress:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "0 convoy(s) auto-closed") {
+		t.Fatalf("stdout = %q, want zero auto-close summary", stdout.String())
+	}
+
+	got, err := store.Get(convoy.ID)
+	if err != nil {
+		t.Fatalf("get convoy: %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("convoy status = %q, want open; stdout=%q stderr=%q", got.Status, stdout.String(), stderr.String())
 	}
 }
 
