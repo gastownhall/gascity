@@ -20,6 +20,37 @@ gc doctor --verbose   # extra detail
 gc doctor --fix       # attempt automatic repairs
 ```
 
+## Add City-Local Doctor Checks
+
+Use `[[doctor.check]]` in `city.toml` for a workspace-specific health check
+that does not need to be packaged as a reusable pack doctor. Provide the bare
+check name; `gc doctor` adds the `local:` prefix in output.
+
+```toml
+[doctor]
+
+[[doctor.check]]
+name = "gopath-symlink"
+description = "Verify the GOPATH symlink used by local build scripts"
+script = "scripts/check-gopath.sh"
+fix = "scripts/fix-gopath.sh"
+```
+
+The `script` and optional `fix` paths are relative to the city root. Absolute
+paths and paths that escape the city directory are rejected and reported as
+named `StatusError` check results.
+
+Local checks reuse the same script protocol as pack doctor checks:
+
+| Exit code | Result |
+|-----------|--------|
+| 0 | OK |
+| 1 | Warning |
+| 2 or higher | Error |
+
+The first stdout line becomes the check message. Additional stdout lines are
+shown by `gc doctor --verbose`.
+
 ## "command not found" After Install
 
 If `gc` is installed but your shell cannot find it, the binary is not on your
