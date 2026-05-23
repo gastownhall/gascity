@@ -387,6 +387,87 @@ func TestDefaultScaleCheckCountsUsesCachedReadyReadModel(t *testing.T) {
 	}
 }
 
+// TestDefaultScaleCheckCountsCountsBeadsAssignedToPoolTemplate pins the
+// regression fix for gastownhall/gascity#1991: a bead with status=open and
+// assignee==<pool-template> + gc.routed_to==<pool-template> (the pool→pool
+// handoff write pattern used by gas-town pack formulas, e.g.
+// mol-polecat-work.toml's submit-and-exit) must produce non-zero demand for
+// the matching template. Before the fix, the Assignee!="" filter in
+// defaultScaleCheckCounts dropped this bead, leaving "assignedWorkBeads: 0"
+// indefinitely and stranding the next pool in the handoff chain. After the
+// fix, assignee==template is treated as pool demand because no session by
+// that name exists; only session-identity assignees (which Path 1 counts)
+// are excluded here.
+func TestDefaultScaleCheckCountsCountsBeadsAssignedToPoolTemplate(t *testing.T) {
+	const template = "gascity/reviewer"
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{
+		Title:    "pool→pool handoff routed work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: template,
+		Metadata: map[string]string{
+			"gc.routed_to": template,
+		},
+	}); err != nil {
+		t.Fatalf("create handoff bead: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1 (#1991 regression: pool→pool handoff bead must count as demand)", template, got)
+	}
+}
+
+// TestDefaultScaleCheckCountsExcludesBeadsAssignedToSession pins the
+// invariant that beads with assignee==<session-id> (Path 1 territory) are
+// NOT counted by defaultScaleCheckCounts, to avoid double-counting when
+// collectAssignedWorkBeadsWithStores has already counted them. Companion to
+// TestDefaultScaleCheckCountsCountsBeadsAssignedToPoolTemplate: together
+// they cover the asymmetry table from issue #1991.
+func TestDefaultScaleCheckCountsExcludesBeadsAssignedToSession(t *testing.T) {
+	const template = "gascity/reviewer"
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{
+		Title:    "in-flight session work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "reviewer-gc-12345",
+		Metadata: map[string]string{
+			"gc.routed_to": template,
+		},
+	}); err != nil {
+		t.Fatalf("create in-flight bead: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 (session-identity assignee is Path 1's territory; counting here would double-count)", template, got)
+	}
+}
+
 func TestDefaultScaleCheckCountsIgnoresOpenMoleculeContainers(t *testing.T) {
 	backing := &demandListCountingStore{Store: beads.NewMemStore()}
 	if _, err := backing.Create(beads.Bead{

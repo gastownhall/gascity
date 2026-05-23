@@ -871,13 +871,22 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 			}
 		}
 		for _, b := range ready {
-			if strings.TrimSpace(b.Assignee) != "" {
+			template := strings.TrimSpace(b.Metadata["gc.routed_to"])
+			if _, ok := group.templates[template]; !ok {
 				continue
 			}
-			template := strings.TrimSpace(b.Metadata["gc.routed_to"])
-			if _, ok := group.templates[template]; ok {
-				counts[template]++
+			// Beads with assignee=="" (newly-slung routed work) or
+			// assignee==template (pool→pool handoff pattern, where the
+			// pool template name is written into Assignee but no session
+			// by that name exists) are genuine pool demand for this
+			// template. Beads with a session-identity assignee are
+			// already counted by collectAssignedWorkBeadsWithStores
+			// (Path 1) and must be skipped here to avoid double-counting.
+			assignee := strings.TrimSpace(b.Assignee)
+			if assignee != "" && assignee != template {
+				continue
 			}
+			counts[template]++
 		}
 	}
 	return counts, partialTemplates, errs
