@@ -470,7 +470,7 @@ func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
 	assertContainsInOrder(t, body,
 		"**5. Reassign to refinery:**",
 		refineryTarget,
-		`gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"`,
+		`gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""`,
 		"**6. Signal refinery to check for work immediately",
 		refineryTarget,
 		`gc session wake "$REFINERY_TARGET" || true`,
@@ -486,6 +486,9 @@ func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
 		if strings.Contains(body, bad) {
 			t.Fatalf("polecat formula must preserve refinery handoff diagnostics and pass a nudge message; found %q", bad)
 		}
+	}
+	if strings.Contains(body, `--assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"`) {
+		t.Fatal("polecat formula must clear gc.routed_to instead of routing to the refinery named session")
 	}
 }
 
@@ -554,11 +557,14 @@ func TestPolecatPromptDoneSequenceSignalsRefinery(t *testing.T) {
 	assertContainsInOrder(t, body,
 		"## FINAL REMINDER: RUN THE DONE SEQUENCE",
 		`REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"`,
-		`gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"`,
+		`gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""`,
 		`gc session wake "$REFINERY_TARGET" || true`,
 		`gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true`,
 		`gc runtime drain-ack`,
 	)
+	if strings.Contains(body, `--assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"`) {
+		t.Fatal("polecat prompt must clear gc.routed_to instead of routing to the refinery named session")
+	}
 	if !strings.Contains(body, "Done sequence (push, set metadata, reassign, wake refinery, nudge refinery, `gc runtime drain-ack`, exit)") {
 		t.Fatalf("polecat quick reference must include the refinery wake+nudge handoff")
 	}
@@ -1766,9 +1772,7 @@ func TestGastownPromptRoutedToHandoffIsFullyQualifiedUnderBinding(t *testing.T) 
 			rel:          "packs/gastown/agents/polecat/prompt.template.md",
 			agentName:    rigName + "/" + bindingPrefix + "furiosa",
 			templateName: "polecat",
-			wantRoutes: map[string]string{
-				`"${GC_RIG:+$GC_RIG/}gastown.refinery"`: rigName + "/" + bindingPrefix + "refinery",
-			},
+			wantRoutes:   map[string]string{},
 		},
 		{
 			rel:          "packs/gastown/agents/witness/prompt.template.md",

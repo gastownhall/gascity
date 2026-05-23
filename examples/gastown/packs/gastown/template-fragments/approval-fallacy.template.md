@@ -42,7 +42,7 @@ gc bd update <work-bead> \
   --set-metadata target={{ .DefaultBranch }} \
   --notes "Implemented: <brief summary>"
 REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"
-gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"
+gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""
 gc runtime drain-ack
 exit
 ```

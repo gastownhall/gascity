@@ -1063,13 +1063,11 @@ func TestBuiltInSlingPoolRouteContractUsesMetadataOnly(t *testing.T) {
 	if got := counts["saitoc/polecat"]; got != 0 {
 		t.Fatalf("polecat scale count after refinery handoff with stale pool label = %d, want 0", got)
 	}
-	// #1991: a bead with assignee==<pool-template> + gc.routed_to==<pool-template>
-	// is the documented pool→pool handoff pattern (no session by the pool template
-	// name exists), so it MUST register as demand for that template. The earlier
-	// "want 0" pinned the broken pre-#1991 behavior where defaultScaleCheckCounts
-	// filtered out any non-empty Assignee and stranded the next pool.
-	if got := counts["saitoc/refinery"]; got != 1 {
-		t.Fatalf("refinery generic scale count for pool→pool handoff = %d, want 1 (#1991)", got)
+	// A pool-template assignee is not concrete ownership. Generic scale demand
+	// stays strictly unassigned+routed; callers that want pool demand must clear
+	// Assignee and set gc.routed_to.
+	if got := counts["saitoc/refinery"]; got != 0 {
+		t.Fatalf("refinery generic scale count for assigned handoff = %d, want 0", got)
 	}
 }
 
