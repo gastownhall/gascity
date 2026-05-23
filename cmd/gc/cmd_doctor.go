@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/spf13/cobra"
 )
 
@@ -297,6 +298,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 				Warmup:    entry.Warmup,
 			})
 		}
+		registerLocalDoctorChecksTo(register, cityPath, cfg.Doctor.Checks)
 	}
 
 	return checks
@@ -363,6 +365,71 @@ func (expandedConfigLoadCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult
 			nil)
 	}
 	return okCheck("expanded-config-load", "expanded config loaded")
+}
+
+func registerLocalDoctorChecks(d *doctor.Doctor, cityPath string, checks []config.LocalDoctorCheck) {
+	registerLocalDoctorChecksTo(d.Register, cityPath, checks)
+}
+
+func registerLocalDoctorChecksTo(register func(doctor.Check), cityPath string, checks []config.LocalDoctorCheck) {
+	for _, check := range checks {
+		checkName := "local:" + check.Name
+		script, err := resolveLocalDoctorScript(cityPath, check.Script)
+		if err != nil {
+			register(doctor.ErrorCheck(checkName, err.Error()))
+			continue
+		}
+
+		packCheck := &doctor.PackScriptCheck{
+			CheckName: checkName,
+			Script:    script,
+			PackDir:   cityPath,
+		}
+		if check.Fix != "" {
+			fixScript, err := resolveLocalDoctorFixScript(cityPath, check.Fix)
+			if err != nil {
+				register(doctor.ErrorCheck(checkName, err.Error()))
+				continue
+			}
+			packCheck.FixScript = fixScript
+		}
+		register(packCheck)
+	}
+}
+
+func resolveLocalDoctorScript(cityPath, scriptPath string) (string, error) {
+	return resolveLocalDoctorPath("script", cityPath, scriptPath)
+}
+
+func resolveLocalDoctorFixScript(cityPath, fixPath string) (string, error) {
+	return resolveLocalDoctorPath("fix path", cityPath, fixPath)
+}
+
+func resolveLocalDoctorPath(kind, cityPath, relPath string) (string, error) {
+	if relPath == "" {
+		return "", fmt.Errorf("%s must not be empty", kind)
+	}
+	if filepath.IsAbs(relPath) {
+		return "", fmt.Errorf("%s %q must be relative to the city root", kind, relPath)
+	}
+
+	candidate := filepath.Clean(filepath.Join(cityPath, relPath))
+	absCityPath, err := filepath.Abs(cityPath)
+	if err != nil {
+		return "", err
+	}
+	absCandidate, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(absCityPath, absCandidate)
+	if err != nil {
+		return "", err
+	}
+	if pathutil.IsOutsideDir(rel) {
+		return "", fmt.Errorf("%s %q escapes the city directory", kind, relPath)
+	}
+	return candidate, nil
 }
 
 // doctorJSONResult mirrors doctor.CheckResult for JSON output. Keeping the
