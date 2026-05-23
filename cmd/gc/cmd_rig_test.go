@@ -3089,6 +3089,7 @@ default_sling_target = "frontend/worker"
 	if _, ok := out["_cache_age_s"]; !ok {
 		t.Fatalf("_cache_age_s missing; output=%s", stdout.String())
 	}
+	validateJSONResultSchema(t, []string{"rig", "list"}, stdout.Bytes())
 }
 
 func TestRouteRigList_StaleBannerOver30s(t *testing.T) {

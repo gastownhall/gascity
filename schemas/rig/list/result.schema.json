@@ -28,6 +28,10 @@
       "type": "string",
       "description": "Configured or inferred city name."
     },
+    "_cache_age_s": {
+      "type": "number",
+      "description": "Age in seconds of the supervisor read-model cache for API-routed output."
+    },
     "rigs": {
       "type": "array",
       "items": {
