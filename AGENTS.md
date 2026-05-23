@@ -86,16 +86,16 @@ mechanism is provably composable from the primitives.
 
 Capabilities activate progressively via config presence.
 
-| Level | Adds                    |
-| ----- | ----------------------- |
-| 0-1   | Session + tasks         |
-| 2     | Task loop               |
-| 3     | Multiple agents + pool  |
-| 4     | Messaging               |
-| 5     | Formulas & molecules    |
-| 6     | Health monitoring       |
-| 7     | Orders                  |
-| 8     | Full orchestration      |
+| Level | Adds                   |
+| ----- | ---------------------- |
+| 0-1   | Session + tasks        |
+| 2     | Task loop              |
+| 3     | Multiple agents + pool |
+| 4     | Messaging              |
+| 5     | Formulas & molecules   |
+| 6     | Health monitoring      |
+| 7     | Orders                 |
+| 8     | Full orchestration     |
 
 ## Architecture docs
 
@@ -116,7 +116,7 @@ Load-bearing invariants enforced by CI (violating any fails the
 build; full rationale is in the architecture docs):
 
 - **Object model at the center.** `internal/{beads, mail, convoy,
-  formula, events, session, worker, sling, ...}` is the canonical
+formula, events, session, worker, sling, ...}` is the canonical
   domain. The CLI (`cmd/gc/`) and the HTTP+SSE API
   (`internal/api/`) are projections over it. Neither re-implements
   domain logic. `internal/agent/` is a small helper package
@@ -369,7 +369,7 @@ These apply to all code in this project — frontend and server:
 - **Leverage Types** using statically typed languages (TypeScript, Rust, etc) so
   that we can leverage the power of the compiler as guardrails and immediate
   feedback on our code at build-time instead of waiting until run-time.
-- **DRY (Don't Repeat Yourself)** – eliminate duplicated logic by extracting
+- **DRY (Don’t Repeat Yourself)** – eliminate duplicated logic by extracting
   shared utilities and modules.
 - **Separation of Concerns** – each module should handle one distinct
   responsibility.
@@ -398,8 +398,8 @@ These apply to all code in this project — frontend and server:
   requirements only.
 - **Layered Architecture** - organize code into clear tiers where each layer
   depends only on the one(s) below it, keeping logic cleanly separated.
-- **Use Non-Nullable Variables** when possible; use nullability only when
-  there is NO other possiblity.
+- **Use Non-Nullable Variables** when possible; use nullability only when there
+  is NO other possiblity.
 - **Use Async Notifications** when possible over inefficient polling.
 - **Eliminate Race Conditions** that might cause dropped or corrupted data
 - **Write for Maintainability** so that the code is clear and readable and easy
@@ -417,3 +417,5 @@ These apply to all code in this project — frontend and server:
   static checking (linting, compilers, etc) is that they surface issues at
   build-time so that they can be fixed now instead of lead to errors at runtime.
   Take advantage of that feedback to fix those errors!
+- **Use Centralized Semantic Constant Values** using enums and constants instead
+  of spreading magic numbers through-out the code.
