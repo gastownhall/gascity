@@ -1778,6 +1778,7 @@ func reapStaleSessionBeads(
 }
 
 func cleanupDeadRuntimeSessionCorpses(
+	store beads.Store,
 	sessionBeads *sessionBeadSnapshot,
 	dt *drainTracker,
 	sp runtime.Provider,
@@ -1841,6 +1842,17 @@ func cleanupDeadRuntimeSessionCorpses(
 			continue
 		}
 		fmt.Fprintf(stderr, "session reconciler: cleaned dead runtime session %s\n", name) //nolint:errcheck
+		// Close the bead so its `alias` metadata (and session_name) is
+		// released. Otherwise the slot stays claimed by a dead session
+		// and the next reconciler tick spawns a successor that fails
+		// EnsureAliasAvailable with ErrSessionAliasExists, accumulating
+		// asleep/runtime-missing ghosts on the same slot indefinitely
+		// (gastownhall/gascity#2437). closeBead is idempotent and a nil
+		// store is tolerated so the corpse-cleanup side effect still
+		// runs in test contexts that don't wire a real store.
+		if store != nil {
+			closeBead(store, b.ID, "dead-runtime", time.Now().UTC(), stderr)
+		}
 		cleaned++
 	}
 	return cleaned

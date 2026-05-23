@@ -5284,7 +5284,7 @@ func TestCleanupDeadRuntimeSessionCorpsesStopsVisibleDeadSessions(t *testing.T) 
 	})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, snapshot, nil, sp, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -5310,7 +5310,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsLivenessUncertainty(t *testing.T) 
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, snapshot, nil, sp, &stderr)
 	if got != 0 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0", got)
 	}
@@ -5335,7 +5335,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsVisibleSessionWhenCheckerReportsLi
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, snapshot, nil, sp, &stderr)
 	if got != 0 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0", got)
 	}
@@ -5359,7 +5359,7 @@ func TestCleanupDeadRuntimeSessionCorpsesUsesPartialListResults(t *testing.T) {
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, snapshot, nil, sp, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -5416,7 +5416,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsLifecycleOwnedBeads(t *testing.T) 
 	})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(snapshot, dt, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, snapshot, dt, sp, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -5442,7 +5442,7 @@ func TestCleanupDeadRuntimeSessionCorpsesSkipsBlankAndDeduplicatesNames(t *testi
 	})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, snapshot, nil, sp, &stderr)
 	if got != 1 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
 	}
@@ -5466,7 +5466,7 @@ func TestCleanupDeadRuntimeSessionCorpsesReportsStopErrors(t *testing.T) {
 	}})
 
 	var stderr bytes.Buffer
-	got := cleanupDeadRuntimeSessionCorpses(snapshot, nil, sp, &stderr)
+	got := cleanupDeadRuntimeSessionCorpses(nil, snapshot, nil, sp, &stderr)
 	if got != 0 {
 		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 0", got)
 	}
@@ -5475,6 +5475,87 @@ func TestCleanupDeadRuntimeSessionCorpsesReportsStopErrors(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "cleaning dead runtime session worker: stop failed") {
 		t.Fatalf("stderr = %q, want Stop error", stderr.String())
+	}
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesReleasesAliasOnBeadClose pins the fix
+// for gastownhall/gascity#2437: when a session's runtime is confirmed dead,
+// the cleanup must also close the session bead so its `alias` metadata is
+// released. Without this, the bead stays open with the alias claimed, the
+// pool reconciler tries to spawn a successor on the same slot, and
+// EnsureAliasAvailable fails with ErrSessionAliasExists — repeating every
+// tick until the operator manually closes the corpse (see the issue's
+// 176-ghosts-over-2-days dogfooded repro).
+func TestCleanupDeadRuntimeSessionCorpsesReleasesAliasOnBeadClose(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "codex-gc-230515",
+			"alias":        "gascity-packs/codex-1",
+			"template":     "gascity-packs/codex",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["codex-gc-230515"] = true
+	sp.dead["codex-gc-230515"] = true
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{bead})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(store, snapshot, nil, sp, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+
+	// Bead must transition to closed so its alias is released.
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("re-fetch bead: %v", err)
+	}
+	if after.Status != "closed" {
+		t.Fatalf("bead status = %q, want closed (alias not released — successors will fail EnsureAliasAvailable)", after.Status)
+	}
+
+	// The freed alias must now be available for a successor on the same slot.
+	if err := session.EnsureAliasAvailable(store, "gascity-packs/codex-1", ""); err != nil {
+		t.Fatalf("EnsureAliasAvailable after cleanup = %v, want nil (alias still held by closed corpse)", err)
+	}
+}
+
+// TestCleanupDeadRuntimeSessionCorpsesTolerates NilStore protects the
+// existing call-site contract: tests and any future callers that don't
+// wire a real store still get the runtime-Stop side effect without
+// panicking. The alias-release behavior is exercised by the sibling
+// TestCleanupDeadRuntimeSessionCorpsesReleasesAliasOnBeadClose with a
+// real store.
+func TestCleanupDeadRuntimeSessionCorpsesToleratesNilStore(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["dead-worker"] = true
+	sp.dead["dead-worker"] = true
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{{
+		ID:     "s1",
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name": "dead-worker",
+			"alias":        "rig/dead-worker",
+		},
+	}})
+
+	var stderr bytes.Buffer
+	got := cleanupDeadRuntimeSessionCorpses(nil, snapshot, nil, sp, &stderr)
+	if got != 1 {
+		t.Fatalf("cleanupDeadRuntimeSessionCorpses(nilStore) = %d, want 1; stderr=%q", got, stderr.String())
+	}
+	if sp.stopCalls["dead-worker"] != 1 {
+		t.Fatalf("Stop calls = %d, want 1 (runtime side effect must still run with nil store)", sp.stopCalls["dead-worker"])
 	}
 }
 
