@@ -76,6 +76,15 @@ func TestRawBeadsProviderNormalizesManagedExecEnv(t *testing.T) {
 	}
 }
 
+func TestRawBeadsProviderNormalizesLegacyManagedExecEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityPath, ".gc", "scripts", "gc-beads-bd.sh"))
+
+	if got := rawBeadsProvider(cityPath); got != "bd" {
+		t.Fatalf("rawBeadsProvider() = %q, want bd", got)
+	}
+}
+
 func TestRawBeadsProviderPreservesCustomExecOverride(t *testing.T) {
 	t.Setenv("GC_BEADS", "exec:/tmp/custom-beads")
 

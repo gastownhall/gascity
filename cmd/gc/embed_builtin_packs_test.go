@@ -667,6 +667,45 @@ func TestMaterializeBuiltinPacks_PrunesLegacyOrderDirs(t *testing.T) {
 	}
 }
 
+func TestMaterializeBuiltinPacks_RepairsLegacyGcBeadsBdScript(t *testing.T) {
+	dir := t.TempDir()
+	legacyScript := filepath.Join(dir, ".gc", "scripts", "gc-beads-bd.sh")
+	if err := os.MkdirAll(filepath.Dir(legacyScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := `#!/bin/sh
+# gc-beads-bd - exec: beads provider for Dolt-backed beads (bd).
+run_bd_pinned "$dir" config set issue_prefix "$prefix" 2>/dev/null || true
+run_bd_pinned "$dir" config set types.custom "$custom_types" 2>/dev/null || true
+`
+	if err := os.WriteFile(legacyScript, []byte(stale), 0o755); err != nil {
+		t.Fatalf("write legacy script: %v", err)
+	}
+
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	data, err := os.ReadFile(legacyScript)
+	if err != nil {
+		t.Fatalf("read repaired legacy script: %v", err)
+	}
+	body := string(data)
+	if strings.Contains(body, "config set") {
+		t.Fatalf("legacy script still contains config mutation:\n%s", body)
+	}
+	if !strings.Contains(body, ".gc/system/packs/bd/assets/scripts/gc-beads-bd.sh") {
+		t.Fatalf("legacy script was not repaired to system-pack shim:\n%s", body)
+	}
+	info, err := os.Stat(legacyScript)
+	if err != nil {
+		t.Fatalf("stat repaired legacy script: %v", err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Fatalf("repaired legacy script is not executable: mode %v", info.Mode())
+	}
+}
+
 func TestMaterializeBuiltinPacks_PrunesStaleGeneratedPackFiles(t *testing.T) {
 	dir := t.TempDir()
 

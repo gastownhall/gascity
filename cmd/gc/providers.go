@@ -483,7 +483,7 @@ func normalizeRawBeadsProvider(cityPath, provider string) string {
 		return provider
 	}
 	script := strings.TrimSpace(strings.TrimPrefix(provider, "exec:"))
-	if samePath(script, gcBeadsBdScriptPath(cityPath)) {
+	if samePath(script, gcBeadsBdScriptPath(cityPath)) || samePath(script, legacyGcBeadsBdScriptPath(cityPath)) {
 		return "bd"
 	}
 	return provider
@@ -632,6 +632,10 @@ func beadsProvider(cityPath string) string {
 // inside the materialized bd pack (.gc/system/packs/bd/assets/scripts/).
 func gcBeadsBdScriptPath(cityPath string) string {
 	return filepath.Join(cityPath, citylayout.SystemPacksRoot, "bd", "assets", "scripts", "gc-beads-bd.sh")
+}
+
+func legacyGcBeadsBdScriptPath(cityPath string) string {
+	return filepath.Join(cityPath, ".gc", "scripts", "gc-beads-bd.sh")
 }
 
 // mailProviderName returns the mail provider name.
