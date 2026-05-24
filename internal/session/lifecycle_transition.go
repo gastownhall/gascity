@@ -99,7 +99,9 @@ type PreWakePatchInput struct {
 }
 
 // PreWakePatch records the metadata transition for a concrete runtime wake
-// attempt.
+// attempt. It intentionally owns the StateStartPending to StateCreating
+// provider-start boundary outside Transition because this patch is the atomic
+// reconciler commit made immediately before runtime start.
 func PreWakePatch(input PreWakePatchInput) MetadataPatch {
 	patch := MetadataPatch{
 		"instance_token":             input.InstanceToken,

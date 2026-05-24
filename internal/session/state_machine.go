@@ -47,6 +47,10 @@ const (
 	CmdCreate TransitionCommand = "create"
 
 	// CmdReady confirms the runtime process is alive.
+	// The provider-start boundary from StateStartPending to StateCreating is
+	// intentionally owned by PreWakePatch, not this advisory command table,
+	// because it is an internal reconciler metadata commit immediately before
+	// runtime start rather than an operator/API command.
 	// Transitions: StateCreating → StateActive.
 	CmdReady TransitionCommand = "ready"
 
