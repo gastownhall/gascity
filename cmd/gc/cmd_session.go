@@ -1251,7 +1251,7 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 	if lifecycle.BaseState == session.BaseStateArchived && !lifecycle.ContinuityEligible {
 		return "-"
 	}
-	if resetPendingReasonVisible(s, b, sp) {
+	if resetPendingReasonVisible(s, b, sp, now) {
 		return resetPendingReason
 	}
 
@@ -1278,15 +1278,14 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 	return "-"
 }
 
-func resetPendingReasonVisible(s session.Info, b beads.Bead, sp runtime.Provider) bool {
-	if strings.TrimSpace(b.Metadata["restart_requested"]) != "true" || sp == nil {
-		return false
+// resetPendingReasonVisible keeps the fallback renderer aligned with the API
+// lifecycle reason rules for live reset requests.
+func resetPendingReasonVisible(s session.Info, b beads.Bead, sp runtime.Provider, now time.Time) bool {
+	var isRunning func(string) bool
+	if sp != nil {
+		isRunning = sp.IsRunning
 	}
-	sessionName := strings.TrimSpace(s.SessionName)
-	if sessionName == "" {
-		sessionName = strings.TrimSpace(b.Metadata["session_name"])
-	}
-	return sessionName != "" && sp.IsRunning(sessionName)
+	return session.LifecycleResetPendingReasonVisible(b.Status, b.Metadata, now, s.SessionName, isRunning)
 }
 
 func pinAwakeWakeReasonVisible(b beads.Bead, cfg *config.City, now time.Time) bool {

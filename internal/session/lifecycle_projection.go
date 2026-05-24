@@ -211,6 +211,8 @@ func (v LifecycleView) HasWakeCause(cause WakeCause) bool {
 	return false
 }
 
+const lifecycleResetPendingReason = "reset-pending"
+
 // LifecycleDisplayReason returns the user-facing reason for a non-closed
 // session's current lifecycle posture.
 func LifecycleDisplayReason(status string, metadata map[string]string, now time.Time) string {
@@ -222,6 +224,41 @@ func LifecycleDisplayReason(status string, metadata map[string]string, now time.
 		Metadata: metadata,
 		Now:      now,
 	})
+	return lifecycleDisplayReasonFromView(view, metadata)
+}
+
+// LifecycleDisplayReasonWithLiveness returns the lifecycle display reason,
+// preferring reset-pending while a reset marker is still live in the runtime.
+func LifecycleDisplayReasonWithLiveness(status string, metadata map[string]string, now time.Time, sessionName string, isRunning func(string) bool) string {
+	if metadata == nil {
+		return ""
+	}
+	view := ProjectLifecycle(LifecycleInput{
+		Status:   status,
+		Metadata: metadata,
+		Now:      now,
+	})
+	if lifecycleResetPendingReasonVisible(view, metadata, sessionName, isRunning) {
+		return lifecycleResetPendingReason
+	}
+	return lifecycleDisplayReasonFromView(view, metadata)
+}
+
+// LifecycleResetPendingReasonVisible reports whether reset-pending should
+// replace other display reasons for an in-flight requested or continuation reset.
+func LifecycleResetPendingReasonVisible(status string, metadata map[string]string, now time.Time, sessionName string, isRunning func(string) bool) bool {
+	if metadata == nil {
+		return false
+	}
+	view := ProjectLifecycle(LifecycleInput{
+		Status:   status,
+		Metadata: metadata,
+		Now:      now,
+	})
+	return lifecycleResetPendingReasonVisible(view, metadata, sessionName, isRunning)
+}
+
+func lifecycleDisplayReasonFromView(view LifecycleView, metadata map[string]string) string {
 	if view.Terminal {
 		return ""
 	}
@@ -249,6 +286,24 @@ func LifecycleDisplayReason(status string, metadata map[string]string, now time.
 		return "user-hold"
 	}
 	return ""
+}
+
+func lifecycleResetPendingReasonVisible(view LifecycleView, metadata map[string]string, sessionName string, isRunning func(string) bool) bool {
+	if view.Terminal || (view.BaseState == BaseStateArchived && !view.ContinuityEligible) {
+		return false
+	}
+	if isRunning == nil {
+		return false
+	}
+	if strings.TrimSpace(metadata["restart_requested"]) != "true" &&
+		strings.TrimSpace(metadata["continuation_reset_pending"]) != "true" {
+		return false
+	}
+	sessionName = strings.TrimSpace(sessionName)
+	if sessionName == "" {
+		sessionName = strings.TrimSpace(metadata["session_name"])
+	}
+	return sessionName != "" && isRunning(sessionName)
 }
 
 // LifecycleWakeConflictState reports terminal lifecycle states that should

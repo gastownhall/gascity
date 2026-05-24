@@ -717,6 +717,45 @@ func TestLifecycleDisplayReasonSuppressesTerminalStatus(t *testing.T) {
 	}
 }
 
+func TestLifecycleDisplayReasonWithLivenessShowsResetPending(t *testing.T) {
+	got := LifecycleDisplayReasonWithLiveness("open", map[string]string{
+		"restart_requested": "true",
+		"session_name":      "worker-live",
+		"sleep_reason":      "user-hold",
+	}, time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC), "", func(name string) bool {
+		return name == "worker-live"
+	})
+	if got != "reset-pending" {
+		t.Fatalf("LifecycleDisplayReasonWithLiveness = %q, want reset-pending", got)
+	}
+}
+
+func TestLifecycleDisplayReasonWithLivenessShowsContinuationResetPending(t *testing.T) {
+	got := LifecycleDisplayReasonWithLiveness("open", map[string]string{
+		"continuation_reset_pending": "true",
+		"session_name":               "worker-live",
+		"sleep_reason":               "user-hold",
+	}, time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC), "", func(name string) bool {
+		return name == "worker-live"
+	})
+	if got != "reset-pending" {
+		t.Fatalf("LifecycleDisplayReasonWithLiveness = %q, want reset-pending", got)
+	}
+}
+
+func TestLifecycleDisplayReasonWithLivenessSuppressesTerminalResetPending(t *testing.T) {
+	got := LifecycleDisplayReasonWithLiveness("closed", map[string]string{
+		"restart_requested": "true",
+		"session_name":      "worker-live",
+		"sleep_reason":      "user-hold",
+	}, time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC), "", func(string) bool {
+		return true
+	})
+	if got != "" {
+		t.Fatalf("LifecycleDisplayReasonWithLiveness = %q, want empty for closed status", got)
+	}
+}
+
 func TestLifecycleWakeConflictStateUsesProjectedTerminalStates(t *testing.T) {
 	tests := []struct {
 		name   string
