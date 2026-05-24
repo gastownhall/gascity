@@ -334,7 +334,15 @@ func buildDesiredStateWithSessionBeads(
 		if len(defaultScaleTargets) > 0 {
 			defaultCounts, partialTemplates, errs := defaultScaleCheckCounts(defaultScaleTargets)
 			for _, err := range errs {
-				fmt.Fprintf(stderr, "buildDesiredState: %v (using new demand=0)\n", err) //nolint:errcheck
+				// defaultScaleCheckCounts can fail on either of two
+				// demand sources (Ready iteration or pool-demand list);
+				// the wrapped error message names which one ("Ready()"
+				// vs "List(gc.pool_demand)") so this generic outer log
+				// stays honest about the partial nature without
+				// claiming the demand is necessarily zero. A failing
+				// pool-demand list does not zero the Ready-source
+				// contributions to scaleCheckCounts[template].
+				fmt.Fprintf(stderr, "buildDesiredState: %v (counts above may be a partial of one demand source)\n", err) //nolint:errcheck
 			}
 			poolScaleCheckPartialTemplates = mergeScaleCheckPartialTemplates(poolScaleCheckPartialTemplates, partialTemplates)
 			for template, count := range defaultCounts {
@@ -865,12 +873,23 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 	}
 
 	for key, group := range groups {
-		ready, err := readyForControllerDemand(group.store)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), err))
+		// counted dedups across the two demand sources below so a bead
+		// surfaced by both Ready() and the gc.pool_demand list (rare —
+		// only if a task-shaped routed bead also happens to carry the
+		// flag) is counted exactly once per template.
+		counted := make(map[string]struct{})
+
+		// Source 1: Ready()/CachedReady() iteration. Surfaces the
+		// actionable-type set (task, etc.) matched against gc.routed_to.
+		// Legacy formula step beads are NOT here because PR #1154 added
+		// "step" to readyExcludeTypes; molecule wisps are NOT here
+		// because workflow containers were already excluded.
+		ready, readyErr := readyForControllerDemand(group.store)
+		if readyErr != nil {
+			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: Ready(): %w", key, strings.Join(sortedStringSet(group.templates), ","), readyErr))
 			partialTemplates = markScaleCheckPartialSet(partialTemplates, group.templates)
-			if !beads.IsPartialResult(err) || len(ready) == 0 {
-				continue
+			if !beads.IsPartialResult(readyErr) {
+				ready = nil
 			}
 		}
 		for _, b := range ready {
@@ -878,9 +897,62 @@ func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int,
 				continue
 			}
 			template := strings.TrimSpace(b.Metadata["gc.routed_to"])
-			if _, ok := group.templates[template]; ok {
-				counts[template]++
+			if _, ok := group.templates[template]; !ok {
+				continue
 			}
+			if _, dup := counted[b.ID]; dup {
+				continue
+			}
+			counted[b.ID] = struct{}{}
+			counts[template]++
+		}
+
+		// Source 2: explicit pool-demand path. Two writers stamp the wisp
+		// when a.Pool != "" — doOrderRunWithJSON (cmd_order.go, the
+		// gc order run CLI path) and memoryOrderDispatcher.dispatchOne
+		// (order_dispatch.go, the supervisor's in-process cron path).
+		// Both write poolDemandMetadataPair() alongside the routing key,
+		// so cron-fired pool orders surface scale_check demand even when
+		// the wisp lands as a molecule that readyExcludeTypes filters out
+		// (per PR #1154 / issue #1039 — formula steps are not actionable
+		// work, the molecule is the container). The list filter is
+		// metadata-only (open + gc.pool_demand=<sentinel>); the
+		// unassigned + matching-routed_to checks apply below as for the
+		// Ready source.
+		//
+		// Live: true skips the CachingStore in-memory snapshot and reads
+		// the backing store directly. The cache populates from PrimeActive
+		// at supervisor startup and is maintained by the event stream, but
+		// gc order run is a sibling subprocess so the cache lag would
+		// otherwise stretch demand observation by an unbounded number of
+		// reconcile ticks. Mirrors openSessionBeadExists in
+		// adoption_barrier.go, which uses Live: true for the same
+		// cross-process freshness reason.
+		demand, demandErr := group.store.List(beads.ListQuery{
+			Status:   "open",
+			Metadata: poolDemandMetadataPair(),
+			Live:     true,
+		})
+		if demandErr != nil {
+			errs = append(errs, fmt.Errorf("default scale_check %s templates=%s: List(%s): %w", key, strings.Join(sortedStringSet(group.templates), ","), poolDemandMetadataKey, demandErr))
+			partialTemplates = markScaleCheckPartialSet(partialTemplates, group.templates)
+			if !beads.IsPartialResult(demandErr) {
+				demand = nil
+			}
+		}
+		for _, b := range demand {
+			if strings.TrimSpace(b.Assignee) != "" {
+				continue
+			}
+			template := strings.TrimSpace(b.Metadata["gc.routed_to"])
+			if _, ok := group.templates[template]; !ok {
+				continue
+			}
+			if _, dup := counted[b.ID]; dup {
+				continue
+			}
+			counted[b.ID] = struct{}{}
+			counts[template]++
 		}
 	}
 	return counts, partialTemplates, errs
@@ -943,6 +1015,18 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, cfg *config.Ci
 		identitiesByTemplate[template] = append(identitiesByTemplate[template], spec.Identity)
 	}
 
+	// NOTE: this loop intentionally only consults Ready(), not the
+	// gc.pool_demand list path that defaultScaleCheckCounts uses for
+	// pool agents. All current pack-shipped cron orders route to pool
+	// agents (none target named on_demand sessions), so this function
+	// is never the load-bearing demand source for cron-fired wisps in
+	// practice. If a future named on_demand cron order surfaces — i.e.
+	// a wisp lands with gc.routed_to=<named-identity> AND the molecule
+	// type filters it out of Ready() — mirror the Source-2 List path
+	// from defaultScaleCheckCounts here (query open + poolDemandMetadataPair()
+	// from the same group.store, apply the unassigned + routed-to
+	// match, dedup against the Ready source) and add a parallel test
+	// next to TestDefaultScaleCheckCountsCountsCronPoolDemandViaMetadataFlag.
 	for key, group := range groups {
 		ready, err := readyForControllerDemand(group.store)
 		if err != nil {

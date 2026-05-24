@@ -120,6 +120,7 @@ type demandListCountingStore struct {
 	beads.Store
 	liveInProgressLists int
 	liveOpenMolecules   int
+	livePoolDemand      int
 }
 
 func (s *demandListCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -128,6 +129,9 @@ func (s *demandListCountingStore) List(query beads.ListQuery) ([]beads.Bead, err
 	}
 	if query.Live && query.Status == "open" && query.Type == "molecule" {
 		s.liveOpenMolecules++
+	}
+	if query.Live && query.Status == "open" && query.Metadata[poolDemandMetadataKey] == poolDemandMetadataValue {
+		s.livePoolDemand++
 	}
 	return s.Store.List(query)
 }
@@ -516,6 +520,266 @@ func TestDefaultScaleCheckCountsIgnoresOpenMoleculeContainers(t *testing.T) {
 	}
 	if backing.liveOpenMolecules != 0 {
 		t.Fatalf("live open molecule list calls = %d, want no molecule demand query", backing.liveOpenMolecules)
+	}
+}
+
+// TestDefaultScaleCheckCountsCountsCronPoolDemandViaMetadataFlag asserts the
+// gc.pool_demand path end-to-end: cmd/gc/cmd_order.go and
+// cmd/gc/order_dispatch.go both write the pair from
+// poolDemandMetadataPair() onto the wisp when a.Pool != "", and
+// defaultScaleCheckCounts must count such beads regardless of type. The
+// molecule type itself is still excluded from Ready()/CachedReady() per
+// PR #1154 + the TestDefaultScaleCheckCountsIgnoresOpenMoleculeContainers
+// invariant above, so without the explicit metadata-list path cron pool
+// orders generate zero scale_check demand and the pool never spawns.
+// Regression for https://github.com/gastownhall/gascity/pull/2531
+// → https://github.com/gastownhall/gascity/pull/2556.
+//
+// Also asserts the Live: true cache-bypass behavior is load-bearing:
+// the demandListCountingStore's livePoolDemand counter must increment,
+// proving defaultScaleCheckCounts goes through to the backing store
+// rather than the CachingStore snapshot (which can lag for wisps
+// created by sibling subprocesses like gc order run).
+func TestDefaultScaleCheckCountsCountsCronPoolDemandViaMetadataFlag(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	if _, err := backing.Create(beads.Bead{
+		Title:    "mol-dog-stale-db",
+		Type:     "molecule",
+		Status:   "open",
+		Metadata: poolWispMetadata("dog"),
+	}); err != nil {
+		t.Fatalf("create pool-order wisp: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "dog",
+		storeKey: "city",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["dog"]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1 (gc.pool_demand wisp must count as cron pool demand)", "dog", got)
+	}
+	if backing.livePoolDemand == 0 {
+		t.Fatalf("livePoolDemand list calls = 0, want >0 (defaultScaleCheckCounts must use Live: true to bypass the CachingStore snapshot, since cron pool orders fire from sibling subprocesses and the cache lags)")
+	}
+}
+
+// poolWispMetadata builds the metadata map a pool-order wisp carries —
+// gc.routed_to + the poolDemandMetadataPair pair — for fixture use.
+// Mirrors the production composition in cmd/gc/cmd_order.go and
+// cmd/gc/order_dispatch.go so tests drift with the production
+// contract instead of duplicating string literals.
+func poolWispMetadata(pool string) map[string]string {
+	m := map[string]string{"gc.routed_to": pool}
+	for k, v := range poolDemandMetadataPair() {
+		m[k] = v
+	}
+	return m
+}
+
+// TestDefaultScaleCheckCountsIgnoresMoleculeWithoutPoolDemand asserts that a
+// molecule carrying gc.routed_to but NO gc.pool_demand flag stays excluded
+// from the count — the workflow-container invariant from PR #1154 / the
+// existing TestDefaultScaleCheckCountsIgnoresOpenMoleculeContainers test
+// holds even after the metadata-list path is added.
+func TestDefaultScaleCheckCountsIgnoresMoleculeWithoutPoolDemand(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	if _, err := backing.Create(beads.Bead{
+		Title:  "graph workflow root",
+		Type:   "molecule",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "gascity/workflows.codex-min",
+		},
+	}); err != nil {
+		t.Fatalf("create molecule: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "gascity/workflows.codex-min",
+		storeKey: "rig:gascity",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["gascity/workflows.codex-min"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts = %d, want 0 (molecule without gc.pool_demand is a workflow container, not pool demand)", got)
+	}
+}
+
+// TestDefaultScaleCheckCountsIgnoresAssignedCronPoolDemand asserts that even
+// with gc.pool_demand="order", a bead that has already been claimed (Assignee
+// non-empty) is not double-counted alongside the worker session itself.
+// Mirrors the existing TestDefaultScaleCheckCountsExcludesBeadsAssignedToSession
+// invariant for the new metadata path.
+func TestDefaultScaleCheckCountsIgnoresAssignedCronPoolDemand(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	wisp := poolWispMetadata("dog")
+	if _, err := backing.Create(beads.Bead{
+		Title:    "mol-dog-stale-db",
+		Type:     "molecule",
+		Status:   "open",
+		Assignee: "dog-1",
+		Metadata: wisp,
+	}); err != nil {
+		t.Fatalf("create assigned pool wisp: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "dog",
+		storeKey: "city",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["dog"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 (assigned bead is a worker's territory, not pool demand)", "dog", got)
+	}
+}
+
+// TestDefaultScaleCheckCountsIgnoresGraphV2StepRoutedToPool pins the
+// "graph.v2 step → not counted" invariant @sjarmak enumerated in the
+// Option B design discussion on PR #2531. The trifecta defense:
+//   - readyExcludeTypes filters Type:"step" out of Ready() per PR #1154.
+//   - The metadata-list source only matches beads carrying
+//     poolDemandMetadataPair(), which only cmd_order.go and
+//     order_dispatch.go write (and only on the wisp ROOT, never on
+//     step children stamped by stampLegacyRecipeRouting).
+//   - graph.v2 steps carry gc.kind=workflow plus gc.routed_to to the
+//     pool but no gc.pool_demand, so neither source counts them.
+//
+// Guards against future regressions where (a) step gets removed from
+// readyExcludeTypes, or (b) stampLegacyRecipeRouting or its graph.v2
+// equivalent starts propagating gc.pool_demand to step children.
+func TestDefaultScaleCheckCountsIgnoresGraphV2StepRoutedToPool(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	if _, err := backing.Create(beads.Bead{
+		Title:  "graph.v2 step routed to dog",
+		Type:   "step",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to": "dog",
+			"gc.kind":      "workflow",
+		},
+	}); err != nil {
+		t.Fatalf("create graph.v2 step: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "dog",
+		storeKey: "city",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["dog"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 (graph.v2 step routed to a pool is not pool demand — it's workflow scaffolding handled by the parent agent)", "dog", got)
+	}
+}
+
+// TestDefaultScaleCheckCountsIgnoresNumericPoolDemand pins the value
+// choice in poolDemandMetadataValue against future drift to a
+// numeric-looking string. bd's --set-metadata write path infers JSON
+// type from string content, so a bead created with "1" (or any digit
+// string) lands in storage as a JSON integer, and the cache's
+// matchesMetadata does strict string equality — so a "1" writer paired
+// with a "1" reader silently misses every bead. Pins:
+//
+//   - Whatever sentinel we ship, a bead with the numeric "1" must NOT
+//     match the count predicate. If this test starts failing because
+//     someone changed poolDemandMetadataValue to "1", they are
+//     reintroducing the trap.
+//   - If they fixed the bd cast bug upstream and want to use "1",
+//     they should also delete this test and add a parallel one
+//     asserting "1" DOES match.
+func TestDefaultScaleCheckCountsIgnoresNumericPoolDemand(t *testing.T) {
+	if poolDemandMetadataValue == "1" {
+		t.Skip("poolDemandMetadataValue is now \"1\"; this regression guard no longer applies — see test comment")
+	}
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	if _, err := backing.Create(beads.Bead{
+		Title:  "wisp with numeric pool_demand",
+		Type:   "molecule",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.routed_to":        "dog",
+			poolDemandMetadataKey: "1",
+		},
+	}); err != nil {
+		t.Fatalf("create numeric-flagged wisp: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "dog",
+		storeKey: "city",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["dog"]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 (a numeric-string pool_demand must not match the non-numeric sentinel — see cmd/gc/pool_demand.go for the rationale)", "dog", got)
+	}
+}
+
+// TestDefaultScaleCheckCountsDedupsBeadInBothSources pins the dedup
+// map at defaultScaleCheckCounts: a task-shaped routed bead that also
+// happens to carry gc.pool_demand would be visible to BOTH the Ready
+// iteration (task is not in readyExcludeTypes) and the metadata-list
+// source. Without the counted-by-ID dedup it would be counted twice.
+// Documents the defensive shape so future refactors don't drop the
+// dedup when "the two sources can't overlap" looks self-evident.
+func TestDefaultScaleCheckCountsDedupsBeadInBothSources(t *testing.T) {
+	backing := &demandListCountingStore{Store: beads.NewMemStore()}
+	if _, err := backing.Create(beads.Bead{
+		Title:    "task with both signals",
+		Type:     "task",
+		Status:   "open",
+		Metadata: poolWispMetadata("dog"),
+	}); err != nil {
+		t.Fatalf("create dual-source bead: %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: "dog",
+		storeKey: "city",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts["dog"]; got != 1 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1 (bead visible to BOTH Ready and gc.pool_demand list must count exactly once)", "dog", got)
 	}
 }
 

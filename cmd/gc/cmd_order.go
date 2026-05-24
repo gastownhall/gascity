@@ -686,7 +686,20 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		)
 	}
 	if a.Pool != "" {
+		// poolDemandMetadataPair() returns the explicit, type-independent
+		// signal that this wisp counts as scale_check demand for the
+		// routed pool — see cmd/gc/pool_demand.go for the value-choice
+		// rationale (bd's --set-metadata write path infers JSON type
+		// from the string, so a numeric-looking value would round-trip
+		// as an integer and silently miss the supervisor's metadata
+		// equality match). Same pair is written by
+		// memoryOrderDispatcher.dispatchOne in order_dispatch.go so
+		// both the CLI (gc order run) and supervisor cron paths land
+		// matching beads.
 		update.Metadata = map[string]string{"gc.routed_to": pool}
+		for k, v := range poolDemandMetadataPair() {
+			update.Metadata[k] = v
+		}
 	}
 	if err := store.Update(rootID, update); err != nil {
 		fmt.Fprintf(stderr, "gc order run: labeling wisp: %v\n", err) //nolint:errcheck // best-effort stderr
