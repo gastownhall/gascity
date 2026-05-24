@@ -1,9 +1,11 @@
 # Release Gate: detached work stranded diagnostic suppression
 
 Bead: ga-fbai2
+Post-rebase review bead: ga-eqhao
+PR: https://github.com/gastownhall/gascity/pull/2539
 Branch: builder/ga-d457b
-Reviewed head: 2b324e31a9c05c07b995da635aaee56be7791848
-Base: origin/main @ 8fe54229572b539ad7e5e2d3fe236ab621b565b6
+Reviewed rebased head: f9455e7e738e5c35ab299994f4ac9d1877bb6a7d
+Base: origin/main @ 3268ee094b2d7b5f7f753029a929ac5f88691c1e
 
 Note: `docs/PROJECT_MANIFEST.md` is not present in this worktree, so this gate
 uses the release criteria from the deployer instructions.
@@ -12,47 +14,50 @@ uses the release criteria from the deployer instructions.
 
 | Commit | Subject |
 |--------|---------|
-| d7b434137 | fix(doctor): guard local-only dolt remotes |
-| 7eb789d6d | fix(session): clear breaker on kill |
-| 7483229bd | fix(sling): nudge bead-named pool sessions |
-| 5c14613c1 | feat(gc): add detached tmux probe primitive |
-| f31b167b6 | fix(gc): protect orphan release for detached work |
-| 2b324e31a | fix(gc): suppress stranded diagnostics for live detached work |
+| 95ea97d6b | fix(doctor): guard local-only dolt remotes |
+| 5e0acc1d3 | feat(gc): add detached tmux probe primitive |
+| 23f8e8051 | fix(gc): protect orphan release for detached work |
+| 40f63157e | fix(gc): suppress stranded diagnostics for live detached work |
+| f9455e7e7 | chore: release gate PASS for ga-fbai2 |
+
+The rebase intentionally dropped duplicate upstream session-breaker and sling
+nudge patches that were present in the earlier reviewed stack.
 
 ## Gate Checklist
 
 | # | Criterion | Result | Evidence |
 |---|-----------|--------|----------|
-| 1 | Review PASS present | PASS | `bd show ga-fbai2` contains reviewer verdict `PASS` for reviewed head `2b324e31a`; minor findings are explicitly non-blocking. |
-| 2 | Acceptance criteria met | PASS | Branch implements the reviewed behavior: detached tmux probe primitive, detached orphan-release protection, stranded diagnostic suppression for live detached work, circuit-breaker clear on session kill, sling nudge resolution through bead session names, and local-only Dolt remote doctor guard/fix. Tests cover these surfaces in `cmd/gc` and `internal/doctor`. |
-| 3 | Tests pass | PASS | `TMPDIR=/tmp make test-fast-parallel`; `TMPDIR=/tmp go vet ./...`. |
-| 4 | No high-severity review findings open | PASS | Reviewer notes list three minor non-blocking findings and no HIGH findings. |
-| 5 | Final branch is clean | PASS | `git status --short` was empty before writing this gate file; deployer rechecks after the gate commit before opening the PR. |
-| 6 | Branch diverges cleanly from main | PASS | `git merge-tree --write-tree origin/main HEAD` succeeded before and after the gate commit; no content conflicts with `origin/main`. |
+| 1 | Review PASS present | PASS | `bd show ga-fbai2` contains reviewer verdict `PASS` for the original feature stack. `bd show ga-eqhao` contains `REVIEWER VERDICT: PASS` for the rebased PR head `f9455e7e7`; low/info findings are explicitly non-blocking. |
+| 2 | Acceptance criteria met | PASS | The rebased branch preserves the reviewed behavior: detached tmux probe primitive, detached orphan-release protection, stranded diagnostic suppression for live detached work, and local-only Dolt remote doctor guard/fix. Duplicate session-breaker and sling-nudge commits were dropped because those changes are already in `origin/main`. Focused tests remain in `cmd/gc` and `internal/doctor`. |
+| 3 | Tests pass | PASS | From isolated worktree `/home/jaword/.gotmp/gascity-pr2539-gate.uDdSKk`: `TMPDIR=/home/jaword/.gotmp/gc-pr2539-gate LOCAL_TEST_JOBS=2 CMD_GC_PROCESS_TOTAL=6 make test-fast-parallel` passed; `TMPDIR=/home/jaword/.gotmp/gc-pr2539-gate go vet ./...` passed. GitHub PR checks for PR #2539 are also green. |
+| 4 | No high-severity review findings open | PASS | Rebase review notes list two LOW findings and one INFO note; no HIGH or BLOCKING findings. Original feature review listed only minor non-blocking findings. |
+| 5 | Final branch is clean | PASS | `git status --short` was empty before writing this refreshed gate file; deployer rechecks after the gate commit before pushing. |
+| 6 | Branch diverges cleanly from main | PASS | `gh pr view 2539` reports merge state `CLEAN`; `git merge-tree origin/main f9455e7e738e5c35ab299994f4ac9d1877bb6a7d` succeeded with tree `770490ce176ad0c9815da1406dfd11e7c40f5c1c`. |
 
 ## Changed Surface
 
-- `cmd/gc`: detached session probing, stranded diagnostic filtering, session
-  reset/circuit behavior, and sling nudge session-name resolution.
+- `cmd/gc`: detached session probing, stranded diagnostic filtering, and
+  detached orphan-release protection.
 - `internal/doctor`: local-only Dolt remote check and explicit-fix guard.
 - `internal/beads/contract`: file helper support used by the doctor check.
-- `examples/gastown`: prompt/template cleanup for detached-work guidance.
+- `AGENTS.md`: tmux safety guidance aligned with the detached-work behavior.
 
 ## Test Output Summary
 
 ```text
-TMPDIR=/tmp make test-fast-parallel
+TMPDIR=/home/jaword/.gotmp/gc-pr2539-gate LOCAL_TEST_JOBS=2 CMD_GC_PROCESS_TOTAL=6 make test-fast-parallel
 All fast jobs passed
 
-TMPDIR=/tmp go vet ./...
+TMPDIR=/home/jaword/.gotmp/gc-pr2539-gate go vet ./...
 PASS (no output)
 ```
 
 ## Diagnostic Notes
 
-An initial monolithic `go test ./cmd/gc ./internal/doctor ./internal/beads/contract -count=1`
-run was discarded as gate evidence because it hit local environment issues:
-`/home/jaword/.local/bin/bd` was unavailable for a slow provider path, the
-shared `/tmp` root was under pressure, and an unrelated controller socket test
-timed out. The official sharded fast baseline was rerun with `/tmp` after
-space recovered and passed.
+An initial `make test-fast-parallel` from the deployer worktree failed in
+`TestRigAnywhere_ResolveRigToContext` because the test discovered the parent
+`/home/jaword/projects/gc-management` city and parsed its local
+`packs/maintainer-pr-review/pack.toml`, which still uses the deprecated
+`[formulas].dir` field. The same branch passed from the isolated worktree above,
+so the parent-city failure is treated as environmental contamination rather than
+release-gate evidence for PR #2539.
