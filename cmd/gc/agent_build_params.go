@@ -50,8 +50,9 @@ type agentBuildParams struct {
 	// that already own work as available generic capacity.
 	assignedWorkBeads []beads.Bead
 
-	// poolSessionCreateBudget caps fresh pool session bead materialization in a
-	// single desired-state build. Existing session beads may still be reused.
+	// poolSessionCreateBudget caps ordinary fresh pool session bead
+	// materialization in a single desired-state build. Existing session beads
+	// may still be reused, and dependency-floor prerequisites are exempt.
 	poolSessionCreateBudget *poolSessionCreateBudget
 
 	// beadNames caches qualifiedName → session_name mappings resolved

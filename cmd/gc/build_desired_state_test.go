@@ -2630,6 +2630,205 @@ func TestRealizePoolDesiredSessionsBudgetExhaustionStillAllowsLaterReuse(t *test
 	}
 }
 
+func TestRealizePoolDesiredSessionsRefundsFreshCreateBudgetAfterFailure(t *testing.T) {
+	maxWakes := 1
+	store := &failingPoolCreateStore{MemStore: beads.NewMemStore(), failuresRemaining: 1}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents: []config.Agent{
+			{
+				Name:              "alpha",
+				StartCommand:      "true",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(10),
+			},
+			{
+				Name:              "zulu",
+				StartCommand:      "true",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(10),
+			},
+		},
+	}
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = &sessionBeadSnapshot{}
+	desired := map[string]TemplateParams{}
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "alpha",
+		Requests: []SessionRequest{{
+			Template: "alpha",
+			Tier:     "new",
+		}},
+	}, desired, &stderr)
+	realizePoolDesiredSessions(bp, &cfg.Agents[1], PoolDesiredState{
+		Template: "zulu",
+		Requests: []SessionRequest{{
+			Template: "zulu",
+			Tier:     "new",
+		}},
+	}, desired, &stderr)
+
+	if got := len(desired); got != 1 {
+		t.Fatalf("desired sessions = %d, want later pool create after refund; desired=%v stderr=%q", got, desired, stderr.String())
+	}
+	for _, tp := range desired {
+		if tp.TemplateName != "zulu" {
+			t.Fatalf("created template = %q, want zulu after alpha create failure; stderr=%q", tp.TemplateName, stderr.String())
+		}
+	}
+	if !strings.Contains(stderr.String(), "injected pool create failure") {
+		t.Fatalf("stderr = %q, want injected create failure diagnostic", stderr.String())
+	}
+}
+
+func TestBuildDesiredStateFairSharesFreshPoolCreatesAcrossPools(t *testing.T) {
+	maxWakes := 2
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents: []config.Agent{
+			{
+				Name:              "alpha",
+				StartCommand:      "true",
+				ScaleCheck:        "printf 5",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(5),
+			},
+			{
+				Name:              "zulu",
+				StartCommand:      "true",
+				ScaleCheck:        "printf 5",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(5),
+			},
+		},
+	}
+	var stderr bytes.Buffer
+
+	result := buildDesiredState("test-city", t.TempDir(), time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	counts := map[string]int{}
+	for _, tp := range result.State {
+		counts[tp.TemplateName]++
+	}
+	if got := counts["alpha"]; got != 1 {
+		t.Fatalf("alpha fresh creates = %d, want 1 under fair shared budget; counts=%v stderr=%q", got, counts, stderr.String())
+	}
+	if got := counts["zulu"]; got != 1 {
+		t.Fatalf("zulu fresh creates = %d, want 1 under fair shared budget; counts=%v stderr=%q", got, counts, stderr.String())
+	}
+}
+
+func TestBuildDesiredStateFairShareIgnoresInFlightPoolCreates(t *testing.T) {
+	maxWakes := 2
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "alpha-1",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:alpha-1", "template:alpha"},
+		Metadata: map[string]string{
+			"template":             "alpha",
+			"agent_name":           "alpha-1",
+			"alias":                "alpha-1",
+			"session_name":         "s-alpha-creating",
+			"state":                "creating",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents: []config.Agent{
+			{
+				Name:              "alpha",
+				StartCommand:      "true",
+				ScaleCheck:        "printf 1",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(5),
+			},
+			{
+				Name:              "zulu",
+				StartCommand:      "true",
+				ScaleCheck:        "printf 2",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(5),
+			},
+		},
+	}
+	var stderr bytes.Buffer
+
+	result := buildDesiredState("test-city", t.TempDir(), time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	counts := map[string]int{}
+	for _, tp := range result.State {
+		counts[tp.TemplateName]++
+	}
+	if got := counts["alpha"]; got != 1 {
+		t.Fatalf("alpha desired sessions = %d, want reused in-flight create; counts=%v stderr=%q", got, counts, stderr.String())
+	}
+	if got := counts["zulu"]; got != 2 {
+		t.Fatalf("zulu fresh creates = %d, want full budget after alpha in-flight reuse; counts=%v stderr=%q", got, counts, stderr.String())
+	}
+}
+
+func TestBuildDesiredStateDependencyFloorExemptFromFreshCreateBudget(t *testing.T) {
+	maxWakes := 1
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents: []config.Agent{
+			{
+				Name:              "db",
+				Dir:               "svc",
+				StartCommand:      "true",
+				ScaleCheck:        "printf 0",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(3),
+			},
+			{
+				Name:              "api",
+				Dir:               "svc",
+				StartCommand:      "true",
+				ScaleCheck:        "printf 2",
+				DependsOn:         []string{"svc/db"},
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(3),
+			},
+		},
+	}
+	var stderr bytes.Buffer
+
+	result := buildDesiredState("test-city", t.TempDir(), time.Now().UTC(), cfg, runtime.NewFake(), store, &stderr)
+
+	var apiCreates, dbFloors int
+	for _, tp := range result.State {
+		switch {
+		case tp.TemplateName == "svc/api" && !tp.DependencyOnly:
+			apiCreates++
+		case tp.TemplateName == "svc/db" && tp.DependencyOnly:
+			dbFloors++
+		}
+	}
+	if apiCreates != 1 {
+		t.Fatalf("api fresh creates = %d, want one budgeted root create; stderr=%q", apiCreates, stderr.String())
+	}
+	if dbFloors != 1 {
+		t.Fatalf("db dependency floors = %d, want one exempt dependency floor; stderr=%q", dbFloors, stderr.String())
+	}
+	if got := len(result.State); got != 2 {
+		t.Fatalf("desired entries = %d, want root plus dependency floor; state=%v stderr=%q", got, result.State, stderr.String())
+	}
+}
+
 func TestSyncSessionBeads_ReclaimsDeferredSingletonAliasAfterConflictClears(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -3516,6 +3715,29 @@ type delayingPoolCreateStore struct {
 	mu                      sync.Mutex
 	activeSessionCreates    int
 	maxActiveSessionCreates int
+}
+
+type failingPoolCreateStore struct {
+	*beads.MemStore
+	mu                sync.Mutex
+	failuresRemaining int
+}
+
+func (s *failingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
+	if bead.Type == sessionBeadType && s.claimFailure() {
+		return beads.Bead{}, errors.New("injected pool create failure")
+	}
+	return s.MemStore.Create(bead)
+}
+
+func (s *failingPoolCreateStore) claimFailure() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failuresRemaining <= 0 {
+		return false
+	}
+	s.failuresRemaining--
+	return true
 }
 
 func (s *delayingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
