@@ -672,20 +672,45 @@ fetch. STOP, fetch the latest branch, rebase your temp branch again, and
 retry with `--force-with-lease`. Do not use plain `--force`.
 
 **2. Reuse, create, or discover the pull request:**
+
+Read the bead's description and notes once and stage them into a PR body
+file (using `--body-file` avoids quoting/encoding hazards with multi-line
+markdown). The body always carries the bead's full description (the
+"why"), and includes the polecat's implementation notes (the "what")
+when present.
+
 ```bash
-EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')
-ISSUE_TITLE=$(gc bd show $WORK --json | jq -r '.[0].title')
-PR_BODY=$(cat <<EOF
-## Summary
+WORK_JSON=$(gc bd show $WORK --json)
+EXISTING_PR=$(printf '%s' "$WORK_JSON" | jq -r '.[0].metadata.existing_pr // empty')
+ISSUE_TITLE=$(printf '%s' "$WORK_JSON" | jq -r '.[0].title')
+ISSUE_DESC=$(printf '%s' "$WORK_JSON" | jq -r '.[0].description // empty')
+ISSUE_NOTES=$(printf '%s' "$WORK_JSON" | jq -r '.[0].notes // empty')
+ISSUE_TYPE=$(printf '%s' "$WORK_JSON" | jq -r '.[0].issue_type // "task"')
+ISSUE_PRIORITY=$(printf '%s' "$WORK_JSON" | jq -r '.[0].priority // empty')
 
-Automated pull request published by Gastown Refinery.
-
-- Issue: $WORK
-- Branch: $BRANCH
-- Target: $TARGET
-
-EOF
-)
+PR_BODY_FILE=$(mktemp)
+{
+  echo "## Summary"
+  echo
+  if [ -n "$ISSUE_DESC" ]; then
+    printf '%s\n' "$ISSUE_DESC"
+  else
+    printf 'Refinery handoff for `%s` (no bead description recorded).\n' "$WORK"
+  fi
+  if [ -n "$ISSUE_NOTES" ]; then
+    echo
+    echo "## Implementation notes"
+    echo
+    printf '%s\n' "$ISSUE_NOTES"
+  fi
+  echo
+  echo "## Refinery handoff"
+  echo
+  printf -- '- Issue: `%s` (%s%s)\n' "$WORK" "$ISSUE_TYPE" "${ISSUE_PRIORITY:+, $ISSUE_PRIORITY}"
+  printf -- '- Source branch: `%s`\n' "$BRANCH"
+  printf -- '- Target: `%s`\n' "$TARGET"
+  printf -- '- Rebased on `%s` via Gastown Refinery.\n' "$TARGET"
+} > "$PR_BODY_FILE"
 
 if [ -n "$EXISTING_PR" ]; then
   PR_REF="$EXISTING_PR"
@@ -695,7 +720,7 @@ else
       --base "$TARGET" \
       --head "$BRANCH" \
       --title "$ISSUE_TITLE ($WORK)" \
-      --body "$PR_BODY" 2>/dev/null || true)
+      --body-file "$PR_BODY_FILE" 2>/dev/null || true)
 
     if [ -z "$PR_URL" ]; then
       PR_URL=$(gh pr view "$BRANCH" --json url -q '.url')
@@ -728,7 +753,7 @@ else
         --arg title "$ISSUE_TITLE ($WORK)" \
         --arg head "$BRANCH" \
         --arg base "$TARGET" \
-        --arg body "$PR_BODY" \
+        --rawfile body "$PR_BODY_FILE" \
         '{title:$title, head:$head, base:$base, body:$body}')
       CREATED=$(curl_gh_api "$PR_ERR" \
         -X POST "$API/pulls" \
@@ -764,6 +789,8 @@ else
   fi
   PR_REF="$BRANCH"
 fi
+
+rm -f "$PR_BODY_FILE"
 ```
 
 **3. Verify the pull request exists:**
