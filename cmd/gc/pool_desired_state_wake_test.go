@@ -24,23 +24,20 @@ func closedPoolSessionBead(id, template string) beads.Bead {
 }
 
 // TestComputePoolDesiredStates_WakeKnownIdentityForClosedSession verifies that
-// an in-progress work bead assigned to a closed pool session whose template is
-// still configured and non-suspended produces a "wake-known-identity" request.
+// an in-progress work bead assigned to a configured, non-suspended pool
+// template produces a "wake-known-identity" request when no live session owns
+// it.
 //
 // This is the canonical "orphan recovery" case: a pool agent claimed work,
 // the city restarted (or the session was killed), and the session bead is now
 // closed — but the template is still live. The reconciler must revive the
-// session rather than leaving the work stranded.
-//
-// This test FAILS on current code because computePoolDesiredStates skips
-// all closed session beads without producing any request.
+// template rather than leaving the work stranded.
 func TestComputePoolDesiredStates_WakeKnownIdentityForClosedSession(t *testing.T) {
-	t.Skip("ga-6do4y.1: remove Skip and implement wake-known-identity tier in computePoolDesiredStates")
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "rig", nil, 0)},
 	}
 	work := []beads.Bead{
-		workBead("w1", "rig/claude", "sess-1", "in_progress", 5),
+		workBead("w1", "rig/claude", "rig/claude", "in_progress", 5),
 	}
 	closed := closedPoolSessionBead("sess-1", "rig/claude")
 
@@ -83,18 +80,15 @@ func TestComputePoolDesiredStates_WakeKnownIdentityUnknownAssigneeProducesNoRequ
 }
 
 // TestComputePoolDesiredStates_WakeKnownIdentityDedupsMultipleBeadsForSameSession
-// verifies that two work beads both assigned to the same closed session
+// verifies that two work beads both assigned to the same configured template
 // deduplicate to exactly one wake-known-identity request, not two.
-//
-// This test FAILS on current code because zero requests are produced.
 func TestComputePoolDesiredStates_WakeKnownIdentityDedupsMultipleBeadsForSameSession(t *testing.T) {
-	t.Skip("ga-6do4y.1: remove Skip and implement wake-known-identity dedup in computePoolDesiredStates")
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "rig", nil, 0)},
 	}
 	work := []beads.Bead{
-		workBead("w1", "rig/claude", "sess-1", "in_progress", 5),
-		workBead("w2", "rig/claude", "sess-1", "open", 3),
+		workBead("w1", "rig/claude", "rig/claude", "in_progress", 5),
+		workBead("w2", "rig/claude", "rig/claude", "open", 3),
 	}
 	closed := closedPoolSessionBead("sess-1", "rig/claude")
 
@@ -144,12 +138,7 @@ func TestComputePoolDesiredStates_LiveSessionContinuesAsResumeTier(t *testing.T)
 // request have equal priority, wake-known-identity is accepted. The sort
 // comparator in applyNestedCaps must treat "wake-known-identity" as a
 // resume-like tier that ranks ahead of "new" at the same bead priority.
-//
-// This test FAILS on current code: the comparator only checks
-// requests[i].Tier == "resume", so "wake-known-identity" and "new" are
-// treated as equal, and the first input (new) is accepted instead.
 func TestApplyNestedCaps_WakeKnownIdentityRanksBeforeNew(t *testing.T) {
-	t.Skip("ga-6do4y.1: remove Skip and fix applyNestedCaps sort to prefer wake-known-identity over new")
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "", intPtr(1), 0)},
 	}
