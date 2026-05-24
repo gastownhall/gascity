@@ -1261,8 +1261,12 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 		return circuitOpenReason
 	}
 
-	// If config is available, compute full wake reasons (including WakeConfig).
-	// Otherwise, only bead metadata (sleep/hold/quarantine) is shown.
+	if reason := session.LifecycleDisplayReason(b.Status, b.Metadata, now); reason != "" {
+		return reason
+	}
+
+	// If config is available and no lifecycle reason blocks display, compute
+	// full wake reasons (including WakeConfig).
 	if cfg != nil {
 		reasons := wakeReasons(b, cfg, sp, poolDesired, nil, readyWaitSet, clock.Real{})
 		if pinAwakeWakeReasonVisible(b, cfg, time.Now().UTC()) && !containsWakeReason(reasons, WakePin) {
@@ -1277,10 +1281,6 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 		}
 	}
 
-	// No wake reasons (or no config) — show why it's asleep from lifecycle metadata.
-	if reason := session.LifecycleDisplayReason(b.Status, b.Metadata, now); reason != "" {
-		return reason
-	}
 	return "-"
 }
 

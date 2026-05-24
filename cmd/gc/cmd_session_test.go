@@ -1351,7 +1351,6 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 			"template":     "worker",
 			"session_name": "sleeping-worker",
 			"state":        "asleep",
-			"sleep_reason": "idle-timeout",
 		},
 	}
 	info := session.Info{
@@ -1381,6 +1380,49 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 	}
 }
 
+func TestSessionReason_SleepReasonOverridesWakeReason(t *testing.T) {
+	provider := runtime.NewFake()
+	if err := provider.Start(context.Background(), "sleeping-worker", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	cfg := &config.City{}
+	bead := beads.Bead{
+		ID:     "gc-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "sleeping-worker",
+			"state":        "asleep",
+			"sleep_reason": "idle-timeout",
+		},
+	}
+	info := session.Info{
+		ID:          "gc-1",
+		Template:    "worker",
+		State:       session.StateAsleep,
+		SessionName: "sleeping-worker",
+		Attached:    false,
+	}
+	wrapped := &attachmentCachingProvider{
+		Provider: provider,
+		cache: buildAttachmentCache([]session.Info{info}, func(info session.Info) (bool, error) {
+			return info.SessionName == "sleeping-worker", nil
+		}),
+	}
+
+	reason := sessionReason(
+		info,
+		map[string]beads.Bead{bead.ID: bead},
+		cfg,
+		wrapped,
+		nil,
+		nil,
+	)
+	if reason != "idle-timeout" {
+		t.Fatalf("sessionReason = %q, want idle-timeout before wake reasons", reason)
+	}
+}
+
 func TestSessionReason_ResetPendingLiveRuntimeOverridesOtherReasons(t *testing.T) {
 	provider := runtime.NewFake()
 	if err := provider.Start(context.Background(), "worker-live", runtime.Config{Command: "echo"}); err != nil {
@@ -1396,12 +1438,13 @@ func TestSessionReason_ResetPendingLiveRuntimeOverridesOtherReasons(t *testing.T
 		ID:     "gc-1",
 		Status: "open",
 		Metadata: map[string]string{
-			"template":          "worker",
-			"session_name":      "worker-live",
-			"state":             "asleep",
-			"sleep_reason":      "user-hold",
-			"pin_awake":         "true",
-			"restart_requested": "true",
+			"template":                  "worker",
+			"session_name":              "worker-live",
+			"state":                     "asleep",
+			"sleep_reason":              "user-hold",
+			"pin_awake":                 "true",
+			"restart_requested":         "true",
+			sessionCircuitStateMetadata: circuitOpen.String(),
 		},
 	}
 	before := cloneSessionReasonMetadata(bead.Metadata)
