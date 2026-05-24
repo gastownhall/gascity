@@ -29,17 +29,19 @@ metadata that points back to `metadata.work_dir`.
 
 Stay in your worktree. Install deps there if needed (`npm install`). Commit and push from there.
 
-## CRITICAL: Branch Convention (REQUIRED — refinery scans for this)
+## CRITICAL: Branch Convention (REQUIRED — the refinery handoff contract)
 
 Every commit must land on a per-bead branch named `polecat/<bead-id>`,
-created from `origin/<base_branch>`. The refinery's standard scan only
-discovers `polecat/*` branches; anything else (your agent home branch,
-a stray local checkout) is invisible to the merge queue and the work
-is silently stranded.
+created from `origin/<base_branch>`. The refinery finds work by bead
+assignment (`gc bd list --assignee=...`) and merges the branch recorded
+in the bead's `metadata.branch`, which must follow the `polecat/<bead-id>`
+convention. Commit on anything else (your agent home branch, a stray
+local checkout) and the handoff contract is broken — `metadata.branch`
+has no valid merge target and the work is silently stranded.
 
 **Required shape for a bead with ID `vg-1jp`:**
 
-| | Value |
+| Field | Value |
 |---|---|
 | Branch name | `polecat/vg-1jp` |
 | Base | freshly-fetched `origin/<base_branch>` |
@@ -50,7 +52,7 @@ is silently stranded.
 The `workspace-setup` formula step creates this for you. **Do not skip
 that step.** The `submit-and-exit` step's first action is a fail-closed
 gate that refuses to reassign to refinery if the current branch isn't
-`polecat/<bead-id>`. Skipping branch-setup will halt the workflow at
+`polecat/<bead-id>`. Skipping `workspace-setup` will halt the workflow at
 submit time and require manual recovery
 (see gastownhall/gascity#2082).
 

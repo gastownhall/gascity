@@ -273,11 +273,11 @@ Hand off your work and self-clean. You cease to exist after this step.
 **1. Branch-shape gate (fails closed — non-negotiable).**
 
 Before anything else, verify you are on a per-bead branch. The refinery
-scans for `polecat/<bead-id>` branches; if you push from a different
+merges the branch recorded in your bead's `metadata.branch`, which must
+follow the `polecat/<bead-id>` convention; if you push from a different
 branch (your agent home branch, a stray local checkout, etc.), the
-refinery silently never finds your work and the bead is permanently
-stranded as "assigned to refinery, no merge target". See
-gastownhall/gascity#2082.
+handoff contract is broken and the bead is permanently stranded as
+"assigned to refinery, no merge target". See gastownhall/gascity#2082.
 
 ```bash
 CURRENT_BRANCH=$(git branch --show-current)
@@ -287,7 +287,7 @@ if [ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]; then
     echo "  current branch:  $CURRENT_BRANCH"
     echo "  expected branch: $EXPECTED_BRANCH"
     echo ""
-    echo "Refinery's standard scan only finds 'polecat/*' branches."
+    echo "Refinery handoff merges metadata.branch, which must be 'polecat/<bead-id>'."
     echo "Pushing this commit and reassigning to refinery would strand the work."
     echo ""
     echo "Recover by re-running the workspace-setup step:"

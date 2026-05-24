@@ -497,8 +497,9 @@ func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
 // a fail-closed gate that refuses to reassign to refinery when the
 // current branch isn't `polecat/<bead-id>`. Without this gate, a
 // provider that skipped workspace-setup (observed with codex)
-// silently strands work on its agent home branch — the refinery's
-// `polecat/*` scan never finds the commit.
+// silently strands work on its agent home branch — metadata.branch
+// never points at a valid polecat/<bead-id> merge target, so the
+// refinery's bead-driven handoff finds nothing to merge.
 func TestPolecatFormulaSubmitHasBranchShapeGate(t *testing.T) {
 	dir := exampleDir()
 	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
@@ -549,8 +550,8 @@ func TestPolecatPromptInlinesBranchConvention(t *testing.T) {
 	assertContainsInOrder(t, body,
 		"## CRITICAL: Branch Convention",
 		"`polecat/<bead-id>`",
-		"refinery's standard scan only",
-		"`polecat/*`",
+		"`metadata.branch`",
+		"handoff contract is broken",
 		"gastownhall/gascity#2082",
 	)
 }
