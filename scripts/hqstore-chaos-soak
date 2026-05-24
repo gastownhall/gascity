@@ -1,0 +1,326 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+city=""
+bin="gc"
+api="http://127.0.0.1:37763"
+pprof="http://127.0.0.1:6060"
+cycles=1
+min_interval=60
+max_interval=300
+restart_timeout=30
+rss_budget_kb=10240
+goroutine_budget=2
+settle_seconds=5
+log=""
+service="gascity-supervisor"
+
+usage() {
+  cat <<'EOF'
+Usage: hqstore-chaos-soak --city <path> [options]
+
+Inject SIGKILL faults into the machine-wide Gas City supervisor while
+verifying HQStore durability and bounded recovery metrics for one city.
+
+Options:
+  --city <path>             City directory using the HQStore provider. Required.
+  --bin <path>              gc binary used for status reads. Default: gc.
+  --api <url>               Supervisor API base URL. Default: http://127.0.0.1:37763.
+  --pprof <url>             Supervisor pprof base URL. Default: http://127.0.0.1:6060.
+  --cycles <n>              Number of kill/recovery cycles. Default: 1.
+  --min-interval <seconds>  Minimum delay before each kill. Default: 60.
+  --max-interval <seconds>  Maximum delay before each kill. Default: 300.
+  --restart-timeout <sec>   Seconds to wait for supervisor health. Default: 30.
+  --rss-budget-kb <kb>      Allowed post-restart RSS increase. Default: 10240.
+  --goroutine-budget <n>    Allowed post-restart goroutine increase. Default: 2.
+  --settle-seconds <sec>    Seconds to wait after health returns. Default: 5.
+  --log <path>              Log path. Default: <city>/hqstore-soak/chaos/chaos.log.
+  --service <name>          systemd user service to kill. Default: gascity-supervisor.
+  --help                    Show this help.
+EOF
+}
+
+die() {
+  printf 'FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+log_line() {
+  local ts
+  ts=$(date -Is)
+  printf '%s %s\n' "$ts" "$*" | tee -a "$log"
+}
+
+need_command() {
+  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+parse_positive_int() {
+  local name=$1
+  local value=$2
+  [[ "$value" =~ ^[0-9]+$ ]] || die "$name must be a non-negative integer, got $value"
+  printf '%s' "$value"
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --city)
+      [ "$#" -ge 2 ] || die "--city requires a value"
+      city=$2
+      shift 2
+      ;;
+    --bin)
+      [ "$#" -ge 2 ] || die "--bin requires a value"
+      bin=$2
+      shift 2
+      ;;
+    --api)
+      [ "$#" -ge 2 ] || die "--api requires a value"
+      api=${2%/}
+      shift 2
+      ;;
+    --pprof)
+      [ "$#" -ge 2 ] || die "--pprof requires a value"
+      pprof=${2%/}
+      shift 2
+      ;;
+    --cycles)
+      [ "$#" -ge 2 ] || die "--cycles requires a value"
+      cycles=$(parse_positive_int "--cycles" "$2")
+      shift 2
+      ;;
+    --min-interval)
+      [ "$#" -ge 2 ] || die "--min-interval requires a value"
+      min_interval=$(parse_positive_int "--min-interval" "$2")
+      shift 2
+      ;;
+    --max-interval)
+      [ "$#" -ge 2 ] || die "--max-interval requires a value"
+      max_interval=$(parse_positive_int "--max-interval" "$2")
+      shift 2
+      ;;
+    --restart-timeout)
+      [ "$#" -ge 2 ] || die "--restart-timeout requires a value"
+      restart_timeout=$(parse_positive_int "--restart-timeout" "$2")
+      shift 2
+      ;;
+    --rss-budget-kb)
+      [ "$#" -ge 2 ] || die "--rss-budget-kb requires a value"
+      rss_budget_kb=$(parse_positive_int "--rss-budget-kb" "$2")
+      shift 2
+      ;;
+    --goroutine-budget)
+      [ "$#" -ge 2 ] || die "--goroutine-budget requires a value"
+      goroutine_budget=$(parse_positive_int "--goroutine-budget" "$2")
+      shift 2
+      ;;
+    --settle-seconds)
+      [ "$#" -ge 2 ] || die "--settle-seconds requires a value"
+      settle_seconds=$(parse_positive_int "--settle-seconds" "$2")
+      shift 2
+      ;;
+    --log)
+      [ "$#" -ge 2 ] || die "--log requires a value"
+      log=$2
+      shift 2
+      ;;
+    --service)
+      [ "$#" -ge 2 ] || die "--service requires a value"
+      service=$2
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+[ -n "$city" ] || die "--city is required"
+[ "$cycles" -gt 0 ] || die "--cycles must be greater than zero"
+[ "$restart_timeout" -gt 0 ] || die "--restart-timeout must be greater than zero"
+[ "$max_interval" -ge "$min_interval" ] || die "--max-interval must be >= --min-interval"
+
+need_command curl
+need_command awk
+need_command gzip
+need_command jq
+need_command ps
+need_command readlink
+need_command sed
+need_command seq
+need_command systemctl
+need_command timeout
+
+city=$(readlink -f "$city")
+[ -d "$city" ] || die "city directory does not exist: $city"
+bin_resolved=$(command -v "$bin" 2>/dev/null || true)
+if [ -z "$bin_resolved" ] && [ -x "$bin" ]; then
+  bin_resolved=$bin
+fi
+[ -n "$bin_resolved" ] || die "gc binary not found: $bin"
+bin_resolved=$(readlink -f "$bin_resolved")
+[ -x "$bin_resolved" ] || die "gc binary is not executable: $bin_resolved"
+
+if [ -z "$log" ]; then
+  log="$city/hqstore-soak/chaos/chaos.log"
+fi
+mkdir -p "$(dirname "$log")"
+touch "$log"
+
+status_json=$("$bin_resolved" status --city "$city" --json)
+city_name=$(jq -r '.city_name // empty' <<<"$status_json")
+[ -n "$city_name" ] || die "could not determine city name from gc status"
+base="$api/v0/city/$city_name"
+snapshot="$city/.gc/hqstore/snapshot.jsonl.gz"
+
+supervisor_pid() {
+  systemctl --user show -p MainPID --value "$service" 2>/dev/null || true
+}
+
+assert_supervisor_binary() {
+  local pid=$1
+  [ -n "$pid" ] && [ "$pid" != "0" ] || die "supervisor service $service has no MainPID"
+  [ -e "/proc/$pid/exe" ] || die "supervisor pid $pid has no /proc exe"
+  local exe
+  exe=$(readlink -f "/proc/$pid/exe")
+  [ "$exe" = "$bin_resolved" ] || die "refusing to kill pid $pid: exe $exe != expected $bin_resolved"
+}
+
+health_ok() {
+  timeout 5s curl -fsS "$api/health" >/dev/null 2>&1
+}
+
+city_ready() {
+  local status
+  if ! status=$("$bin_resolved" status --city "$city" --json 2>/dev/null); then
+    return 1
+  fi
+  jq -e '.running == true and (.health.usable == true)' >/dev/null <<<"$status"
+}
+
+goroutine_count() {
+  local profile
+  if ! profile=$(timeout 5s curl -fsS "$pprof/debug/pprof/goroutine?debug=1" 2>/dev/null); then
+    printf '0\n'
+    return
+  fi
+  awk '/^goroutine profile/ {print $4; found=1; exit} END {if (!found) print "0"}' <<<"$profile"
+}
+
+rss_kb() {
+  local pid=$1
+  ps -o rss= -p "$pid" 2>/dev/null | awk '{print $1 + 0; found=1} END {if (!found) print "0"}'
+}
+
+store_health() {
+  "$bin_resolved" status --city "$city" --json |
+    jq -r '[.summary.store_health.live_rows, .summary.store_health.size_bytes] | @tsv'
+}
+
+snapshot_meta() {
+  if [ ! -s "$snapshot" ]; then
+    printf '0\t0\n'
+    return
+  fi
+  local first
+  first=$(gzip -dc "$snapshot" 2>/dev/null | sed -n '1p')
+  if [ -z "$first" ]; then
+    printf '0\t0\n'
+    return
+  fi
+  jq -r '[.seq // 0, .count // 0] | @tsv' <<<"$first"
+}
+
+create_acked_bead() {
+  local cycle=$1
+  local ts=$2
+  local title body created id
+  title="ga-m3ha9 hqstore chaos soak ${ts} cycle ${cycle}"
+  body=$(jq -nc \
+    --arg title "$title" \
+    --arg cycle "$cycle" \
+    --arg ts "$ts" \
+    '{title:$title,type:"task",labels:["soak:ga-m3ha9","source:hqstore-chaos"],metadata:{"gc.soak":"ga-m3ha9","gc.soak.cycle":$cycle,"gc.soak.ts":$ts}}')
+  created=$(timeout 15s curl -fsS -H "Content-Type: application/json" -H "X-GC-Request: true" -d "$body" "$base/beads")
+  id=$(jq -r '.body.id // .id // empty' <<<"$created")
+  [ -n "$id" ] || die "create bead returned no id: $created"
+  timeout 15s curl -fsS -H "X-GC-Request: true" -X POST "$base/bead/$id/close" >/dev/null
+  printf '%s' "$id"
+}
+
+verify_bead_present() {
+  local id=$1
+  timeout 15s curl -fsS "$base/bead/$id" >/dev/null
+}
+
+wait_for_restart() {
+  local old_pid=$1
+  local deadline=$(( $(date +%s) + restart_timeout ))
+  local pid=""
+  while [ "$(date +%s)" -le "$deadline" ]; do
+    pid=$(supervisor_pid)
+    if [ -n "$pid" ] && [ "$pid" != "0" ] && [ "$pid" != "$old_pid" ] && health_ok && city_ready; then
+      assert_supervisor_binary "$pid"
+      printf '%s' "$pid"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+random_sleep_seconds() {
+  if [ "$min_interval" -eq "$max_interval" ]; then
+    printf '%s' "$min_interval"
+    return
+  fi
+  local span=$(( max_interval - min_interval + 1 ))
+  printf '%s' "$(( min_interval + RANDOM % span ))"
+}
+
+log_line "chaos_start city=$city city_name=$city_name bin=$bin_resolved api=$api cycles=$cycles min_interval=$min_interval max_interval=$max_interval restart_timeout=$restart_timeout rss_budget_kb=$rss_budget_kb goroutine_budget=$goroutine_budget"
+
+for cycle in $(seq 1 "$cycles"); do
+  delay=$(random_sleep_seconds)
+  log_line "cycle=$cycle delay=${delay}s"
+  sleep "$delay"
+
+  ts=$(date -Is)
+  pid=$(supervisor_pid)
+  assert_supervisor_binary "$pid"
+  acked_id=$(create_acked_bead "$cycle" "$ts")
+  read -r live_rows_before size_before < <(store_health)
+  read -r snap_seq_before snap_count_before < <(snapshot_meta)
+  goroutines_before=$(goroutine_count)
+  rss_before=$(rss_kb "$pid")
+
+  log_line "cycle=$cycle pre pid=$pid acked_id=$acked_id goroutines=$goroutines_before rss_kb=$rss_before live_rows=$live_rows_before size_bytes=$size_before snap_seq=$snap_seq_before snap_count=$snap_count_before"
+  kill -9 "$pid"
+
+  new_pid=$(wait_for_restart "$pid") || die "cycle=$cycle restart timeout after killing pid $pid"
+  sleep "$settle_seconds"
+
+  verify_bead_present "$acked_id" || die "cycle=$cycle data loss: $acked_id missing post-restart"
+  read -r live_rows_after size_after < <(store_health)
+  read -r snap_seq_after snap_count_after < <(snapshot_meta)
+  goroutines_after=$(goroutine_count)
+  rss_after=$(rss_kb "$new_pid")
+
+  if [ "$goroutines_after" -gt $(( goroutines_before + goroutine_budget )) ]; then
+    die "cycle=$cycle goroutine leak: before=$goroutines_before after=$goroutines_after budget=$goroutine_budget"
+  fi
+  if [ "$rss_after" -gt $(( rss_before + rss_budget_kb )) ]; then
+    die "cycle=$cycle RSS did not recover: before=${rss_before}KB after=${rss_after}KB budget=${rss_budget_kb}KB"
+  fi
+  if [ "$snap_seq_after" -lt "$snap_seq_before" ]; then
+    die "cycle=$cycle snapshot seq regressed: before=$snap_seq_before after=$snap_seq_after"
+  fi
+
+  log_line "cycle=$cycle pass old_pid=$pid new_pid=$new_pid acked_id=$acked_id goroutines=${goroutines_before}->${goroutines_after} rss_kb=${rss_before}->${rss_after} live_rows=${live_rows_before}->${live_rows_after} size_bytes=${size_before}->${size_after} snap_seq=${snap_seq_before}->${snap_seq_after} snap_count=${snap_count_before}->${snap_count_after}"
+done
+
+log_line "chaos_pass cycles=$cycles"
