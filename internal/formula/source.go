@@ -144,15 +144,24 @@ func (g *GitRefSource) repoTopAndRelPath(path string) (string, string, bool) {
 // Stat reports whether a regular blob exists at the configured ref
 // for the given path. Returns false for any non-git path (callers
 // must compose with a fallback Source if they want filesystem
-// resolution for non-git layers).
+// resolution for non-git layers), and false for subtrees/directories
+// (the Source contract requires Stat to report only regular files).
 func (g *GitRefSource) Stat(path string) bool {
 	top, rel, ok := g.repoTopAndRelPath(path)
 	if !ok {
 		return false
 	}
-	cmd := exec.Command("git", "cat-file", "-e", g.ref+":"+rel)
+	// Verify the object exists AND is a blob (symlinks are blobs;
+	// directories are trees and must report false per the contract).
+	// --end-of-options guards against a GC_FORMULA_REF beginning with
+	// '-' being parsed as an option.
+	cmd := exec.Command("git", "cat-file", "-t", "--end-of-options", g.ref+":"+rel)
 	cmd.Dir = top
-	return cmd.Run() == nil
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "blob"
 }
 
 // ReadFile returns the file content at the configured ref.
@@ -161,7 +170,9 @@ func (g *GitRefSource) ReadFile(path string) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("read %s @ %s: path is not inside a git repository", path, g.ref)
 	}
-	cmd := exec.Command("git", "cat-file", "blob", g.ref+":"+rel)
+	// --end-of-options guards against a GC_FORMULA_REF beginning with
+	// '-' being parsed as an option.
+	cmd := exec.Command("git", "cat-file", "blob", "--end-of-options", g.ref+":"+rel)
 	cmd.Dir = top
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -173,9 +184,11 @@ func (g *GitRefSource) ReadFile(path string) ([]byte, error) {
 }
 
 // ListDir returns the file-only entries directly under dir at the
-// configured ref. Subtrees are filtered out; symlinks are reported by
-// their name (git ls-tree returns blob entries for symlinks). The
-// caller is responsible for further filename filtering.
+// configured ref. Subtrees (subdirectories) are filtered out by
+// matching on object type — `git ls-tree`'s default output includes
+// the type column, which lets us drop trees while keeping blobs
+// (including symlinks, which git stores as blobs). The caller is
+// responsible for further filename filtering.
 func (g *GitRefSource) ListDir(dir string) ([]string, error) {
 	top, rel, ok := g.repoTopAndRelPath(dir)
 	if !ok {
@@ -185,7 +198,12 @@ func (g *GitRefSource) ListDir(dir string) ([]string, error) {
 	if rel == "." {
 		tree = g.ref
 	}
-	cmd := exec.Command("git", "ls-tree", "--name-only", "-z", tree)
+	// `git ls-tree -z <tree>` emits records of the form
+	//   <mode> SP <type> SP <object> TAB <path> NUL
+	// We split on NUL, then parse the leading type field and keep only
+	// blob entries. --end-of-options blocks option-injection via a
+	// GC_FORMULA_REF that begins with '-'.
+	cmd := exec.Command("git", "ls-tree", "-z", "--end-of-options", tree)
 	cmd.Dir = top
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -196,9 +214,20 @@ func (g *GitRefSource) ListDir(dir string) ([]string, error) {
 	}
 	raw := strings.Split(strings.TrimRight(stdout.String(), "\x00"), "\x00")
 	out := make([]string, 0, len(raw))
-	for _, name := range raw {
-		if name == "" {
+	for _, record := range raw {
+		if record == "" {
 			continue
+		}
+		// Format: "<mode> <type> <object>\t<path>"
+		tab := strings.IndexByte(record, '\t')
+		if tab < 0 {
+			continue
+		}
+		meta := record[:tab]
+		name := record[tab+1:]
+		fields := strings.Fields(meta)
+		if len(fields) < 2 || fields[1] != "blob" {
+			continue // subtrees and other object types are not files
 		}
 		out = append(out, name)
 	}
@@ -236,8 +265,10 @@ func (f FallbackSource) ReadFile(path string) ([]byte, error) {
 }
 
 // ListDir returns the union of entries from both Sources, primary
-// names first, de-duplicated. An error from the fallback is suppressed
-// if the primary succeeded; if both fail, the primary's error wins.
+// names first, de-duplicated. An error from either side alone is
+// suppressed as long as the other returned successfully; only when
+// both sides fail does ListDir return an error (the primary's, by
+// convention).
 func (f FallbackSource) ListDir(dir string) ([]string, error) {
 	primary, primaryErr := f.Primary.ListDir(dir)
 	fallback, fallbackErr := f.Fallback.ListDir(dir)
@@ -263,14 +294,57 @@ func (f FallbackSource) ListDir(dir string) ([]string, error) {
 	return out, nil
 }
 
+// gitRepoAwareFallback composes a GitRefSource with FSSource in a way
+// that preserves ref-stability: paths INSIDE a git repository are
+// resolved strictly through the ref (no fallback — an uncommitted or
+// untracked file is treated as absent, matching the documented
+// "committed state only" contract); paths OUTSIDE any git repository
+// fall back to FSSource so user-level formula layers
+// (e.g. ~/.beads/formulas) and ad-hoc test directories continue to
+// work under opt-in GC_FORMULA_REF. See gastownhall/gascity#2030
+// (PR #2537 Copilot finding on FallbackSource weakening ref-stability).
+type gitRepoAwareFallback struct {
+	git *GitRefSource
+	fs  FSSource
+}
+
+// Stat preserves ref-stability inside the git repo and only consults
+// the filesystem fallback for paths that are not inside any git repo.
+func (g gitRepoAwareFallback) Stat(path string) bool {
+	if _, _, inRepo := g.git.repoTopAndRelPath(path); inRepo {
+		return g.git.Stat(path)
+	}
+	return g.fs.Stat(path)
+}
+
+// ReadFile mirrors Stat: in-repo reads go through the ref; out-of-repo
+// reads hit the filesystem.
+func (g gitRepoAwareFallback) ReadFile(path string) ([]byte, error) {
+	if _, _, inRepo := g.git.repoTopAndRelPath(path); inRepo {
+		return g.git.ReadFile(path)
+	}
+	return g.fs.ReadFile(path)
+}
+
+// ListDir mirrors Stat: in-repo directories list the ref's tree;
+// out-of-repo directories list the filesystem.
+func (g gitRepoAwareFallback) ListDir(dir string) ([]string, error) {
+	if _, _, inRepo := g.git.repoTopAndRelPath(dir); inRepo {
+		return g.git.ListDir(dir)
+	}
+	return g.fs.ListDir(dir)
+}
+
 // SourceFromEnv returns the Source implied by the GC_FORMULA_REF
 // environment variable:
 //
 //   - unset, empty, "working-tree", or "HEAD" → FSSource (no
 //     behavior change vs. pre-#2030).
-//   - any other value → GitRefSource at that ref, with FSSource as
-//     a fallback for paths outside any git repository (e.g. ad-hoc
-//     test directories or non-checked-in user formula layers).
+//   - any other value → gitRepoAwareFallback wrapping a GitRefSource
+//     at that ref. Paths INSIDE a git repo are resolved strictly via
+//     the ref (preserving ref-stability); paths OUTSIDE any git repo
+//     fall back to FSSource so user-level layers and ad-hoc test
+//     directories keep working.
 //
 // Default is FSSource (opt-in to ref-stable resolution). Callers that
 // want a hard-coded default ref regardless of env should construct
@@ -281,9 +355,9 @@ func SourceFromEnv() Source {
 	case "", "working-tree", "HEAD":
 		return FSSource{}
 	default:
-		return FallbackSource{
-			Primary:  NewGitRefSource(ref),
-			Fallback: FSSource{},
+		return gitRepoAwareFallback{
+			git: NewGitRefSource(ref),
+			fs:  FSSource{},
 		}
 	}
 }

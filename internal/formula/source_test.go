@@ -145,6 +145,52 @@ func TestGitRefSourceListDirReflectsRef(t *testing.T) {
 	}
 }
 
+// TestGitRefSourceStatRejectsCommittedDirectory is the regression
+// test for the PR #2537 Copilot finding: Stat must report `false` for
+// directories (subtrees in git) per the Source contract — even when
+// the tree at the configured ref contains a directory by that name.
+// Earlier the implementation used `git cat-file -e` which succeeds
+// for trees as well as blobs, leaking subtrees through.
+func TestGitRefSourceStatRejectsCommittedDirectory(t *testing.T) {
+	gitOK(t)
+	root := initRepo(t)
+	commitFile(t, root, "sub/inner.toml", "x = 1\n")
+	commitOnBranch(t, root, "main", "init with subdir")
+
+	src := NewGitRefSource("main")
+	subDir := filepath.Join(root, "sub")
+	if src.Stat(subDir) {
+		t.Fatal("Stat reported a committed directory as a regular file; must filter to blobs only")
+	}
+	if !src.Stat(filepath.Join(subDir, "inner.toml")) {
+		t.Fatal("Stat missed a committed blob under a subdirectory")
+	}
+}
+
+// TestGitRefSourceListDirSkipsSubtrees is the regression test for the
+// PR #2537 Copilot finding: ListDir must filter subdirectories out
+// of its results, not return them alongside blob entries. Earlier
+// the implementation used `git ls-tree --name-only` which emits
+// subtree names without a type distinction.
+func TestGitRefSourceListDirSkipsSubtrees(t *testing.T) {
+	gitOK(t)
+	root := initRepo(t)
+	commitFile(t, root, "formulas/a.toml", "x = 1\n")
+	commitFile(t, root, "formulas/sub/inner.toml", "y = 2\n")
+	commitOnBranch(t, root, "main", "mixed entries")
+
+	src := NewGitRefSource("main")
+	names, err := src.ListDir(filepath.Join(root, "formulas"))
+	if err != nil {
+		t.Fatalf("ListDir: %v", err)
+	}
+	sort.Strings(names)
+	want := []string{"a.toml"}
+	if !equalStringSlices(names, want) {
+		t.Fatalf("ListDir = %v, want %v (subtree 'sub' must not appear in results)", names, want)
+	}
+}
+
 // TestGitRefSourceMissOutsideRepo asserts paths outside any git repo
 // surface as misses (callers fall back via FallbackSource or report
 // not-found). This must NOT panic or hang.
@@ -222,26 +268,77 @@ func TestSourceFromEnvUnsetReturnsFSSource(t *testing.T) {
 	}
 }
 
-// TestSourceFromEnvWithRefReturnsFallbackComposition asserts a non-
-// sentinel env value produces a GitRefSource → FSSource fallback, so
-// non-git layers (user dirs, ad-hoc test dirs) keep working under
-// opt-in.
-func TestSourceFromEnvWithRefReturnsFallbackComposition(t *testing.T) {
+// TestSourceFromEnvWithRefReturnsRepoAwareFallback asserts a non-
+// sentinel env value produces a repo-aware fallback wrapping a
+// GitRefSource. The composition must preserve ref-stability for
+// paths inside a git repo while letting out-of-repo paths (user
+// dirs, ad-hoc test dirs) fall back to the filesystem.
+func TestSourceFromEnvWithRefReturnsRepoAwareFallback(t *testing.T) {
 	t.Setenv("GC_FORMULA_REF", "main")
 	src := SourceFromEnv()
-	fb, ok := src.(FallbackSource)
+	fb, ok := src.(gitRepoAwareFallback)
 	if !ok {
-		t.Fatalf("SourceFromEnv returned %T, want FallbackSource", src)
+		t.Fatalf("SourceFromEnv returned %T, want gitRepoAwareFallback", src)
 	}
-	primary, ok := fb.Primary.(*GitRefSource)
-	if !ok {
-		t.Fatalf("Primary = %T, want *GitRefSource", fb.Primary)
+	if fb.git == nil || fb.git.Ref() != "main" {
+		t.Fatalf("primary ref = %v, want a GitRefSource pinned to %q", fb.git, "main")
 	}
-	if primary.Ref() != "main" {
-		t.Fatalf("primary ref = %q, want %q", primary.Ref(), "main")
+}
+
+// TestGitRepoAwareFallbackPreservesRefStabilityForInRepoPaths is the
+// regression test for the PR #2537 Copilot finding on
+// FallbackSource: an uncommitted file inside the git repo must NOT
+// be visible via the env-built Source, because the documented
+// contract is "ref-stable for in-repo paths". The previous
+// FallbackSource composition leaked uncommitted state through.
+func TestGitRepoAwareFallbackPreservesRefStabilityForInRepoPaths(t *testing.T) {
+	gitOK(t)
+	root := initRepo(t)
+	commitFile(t, root, "committed.toml", "x = 1\n")
+	commitOnBranch(t, root, "main", "init")
+
+	// Working-tree-only file inside the repo — must be INVISIBLE
+	// through the env-built Source.
+	if err := os.WriteFile(filepath.Join(root, "uncommitted.toml"), []byte("y = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := fb.Fallback.(FSSource); !ok {
-		t.Fatalf("Fallback = %T, want FSSource", fb.Fallback)
+
+	t.Setenv("GC_FORMULA_REF", "main")
+	src := SourceFromEnv()
+
+	if !src.Stat(filepath.Join(root, "committed.toml")) {
+		t.Fatal("ref-pinned Source missed a committed file")
+	}
+	if src.Stat(filepath.Join(root, "uncommitted.toml")) {
+		t.Fatal("ref-pinned Source leaked an uncommitted in-repo file via working-tree fallback")
+	}
+}
+
+// TestGitRepoAwareFallbackUsesFilesystemForOutOfRepoPaths asserts the
+// fallback path: a file outside any git repo must remain reachable
+// via FSSource semantics, so user-level formula layers
+// (~/.beads/formulas) and ad-hoc test directories keep working
+// under opt-in GC_FORMULA_REF.
+func TestGitRepoAwareFallbackUsesFilesystemForOutOfRepoPaths(t *testing.T) {
+	gitOK(t)
+	outsideDir := t.TempDir()
+	loose := filepath.Join(outsideDir, "loose.toml")
+	if err := os.WriteFile(loose, []byte("z = 3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_FORMULA_REF", "main")
+	src := SourceFromEnv()
+
+	if !src.Stat(loose) {
+		t.Fatal("ref-pinned Source missed an out-of-repo file (FS fallback should apply)")
+	}
+	data, err := src.ReadFile(loose)
+	if err != nil {
+		t.Fatalf("ReadFile out-of-repo path: %v", err)
+	}
+	if string(data) != "z = 3\n" {
+		t.Fatalf("out-of-repo ReadFile = %q, want %q", string(data), "z = 3\n")
 	}
 }
 

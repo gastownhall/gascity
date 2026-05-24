@@ -32,7 +32,8 @@ type Parser struct {
 
 	// source reads formula files. Defaults to FSSource (working-tree
 	// state). Callers that want ref-stable resolution pass a
-	// GitRefSource (or FallbackSource) via WithSource. See #2030.
+	// GitRefSource (typically via SourceFromEnv) using SetSource.
+	// See #2030.
 	source Source
 
 	// cache stores loaded formulas by name.
