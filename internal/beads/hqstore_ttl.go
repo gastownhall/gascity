@@ -7,6 +7,7 @@ import (
 // PurgeExpired removes expired ephemeral beads and closed main-tier beads whose
 // retention window has elapsed. It returns the number of beads removed.
 func (s *HQStore) PurgeExpired() (int, error) {
+	s.counters.PurgeExpired.Add(1)
 	now := time.Now()
 
 	s.mu.Lock()
@@ -31,6 +32,9 @@ func (s *HQStore) PurgeExpired() (int, error) {
 	}
 	for _, id := range ids {
 		s.deleteLocked(id)
+	}
+	if len(ids) > 0 {
+		s.counters.PurgeExpiredN.Add(int64(len(ids)))
 	}
 	return len(ids), nil
 }

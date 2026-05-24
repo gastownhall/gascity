@@ -97,6 +97,7 @@ func (s *HQStore) LastSnapshotErr() error {
 // snapshot is published atomically. Returns an error if the store is closed or
 // the write fails.
 func (s *HQStore) Snapshot() error {
+	s.counters.Snapshot.Add(1)
 	s.mu.RLock()
 	closed := s.closed
 	s.mu.RUnlock()
@@ -110,7 +111,12 @@ func (s *HQStore) Snapshot() error {
 // to a gzip-compressed JSONL file, then atomically renames it into place. Only
 // one snapshot writes at a time (guarded by snapWriteMu) so periodic and final
 // flushes cannot interleave on the same temp file.
-func (s *HQStore) writeSnapshot() error {
+func (s *HQStore) writeSnapshot() (err error) {
+	defer func() {
+		if err != nil {
+			s.counters.SnapshotWriteErr.Add(1)
+		}
+	}()
 	s.snapWriteMu.Lock()
 	defer s.snapWriteMu.Unlock()
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,6 +15,43 @@ const (
 
 	hqDefaultClosedTaskRetention = 7 * 24 * time.Hour
 )
+
+// EntryCounters records HQStore entry-point and error-path hits. Tests use the
+// counters to make comprehensive coverage gaps observable as zero rows.
+type EntryCounters struct {
+	Create           atomic.Int64
+	Get              atomic.Int64
+	Update           atomic.Int64
+	Close            atomic.Int64
+	Reopen           atomic.Int64
+	CloseAll         atomic.Int64
+	List             atomic.Int64
+	ListOpen         atomic.Int64
+	Ready            atomic.Int64
+	Children         atomic.Int64
+	ListByLabel      atomic.Int64
+	ListByAssignee   atomic.Int64
+	ListByMetadata   atomic.Int64
+	SetMetadata      atomic.Int64
+	SetMetadataBatch atomic.Int64
+	Delete           atomic.Int64
+	DepAdd           atomic.Int64
+	DepRemove        atomic.Int64
+	DepList          atomic.Int64
+	PurgeExpired     atomic.Int64
+	Ping             atomic.Int64
+	Tx               atomic.Int64
+	Snapshot         atomic.Int64
+	Shutdown         atomic.Int64
+
+	DuplicateCreate  atomic.Int64
+	GetNotFound      atomic.Int64
+	UpdateNotFound   atomic.Int64
+	CloseNotFound    atomic.Int64
+	DeleteNotFound   atomic.Int64
+	SnapshotWriteErr atomic.Int64
+	PurgeExpiredN    atomic.Int64
+}
 
 // HQStore is a dormant, snapshot-backed in-process Store implementation for the
 // coordination-store migration experiments. Writes mutate an in-memory indexed
@@ -50,6 +88,8 @@ type HQStore struct {
 	snapWriteMu      sync.Mutex // serializes concurrent snapshot writers
 	snapErrMu        sync.Mutex
 	snapErr          error
+
+	counters EntryCounters
 }
 
 type hqStoreOptions struct {
@@ -129,9 +169,19 @@ func OpenHQStore(dir string, opts ...HQStoreOption) (*HQStore, error) {
 	return store, nil
 }
 
+// Counters returns the live HQStore entry counters for test and diagnostic
+// coverage checks.
+func (s *HQStore) Counters() *EntryCounters {
+	if s == nil {
+		return nil
+	}
+	return &s.counters
+}
+
 // Shutdown stops the background goroutines, flushes a final snapshot, and marks
 // the store closed. It is idempotent.
 func (s *HQStore) Shutdown() error {
+	s.counters.Shutdown.Add(1)
 	s.stopTTLSweeper()
 	s.stopSnapshotter()
 
@@ -154,6 +204,7 @@ func (s *HQStore) Shutdown() error {
 
 // Ping verifies that the store is open.
 func (s *HQStore) Ping() error {
+	s.counters.Ping.Add(1)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.closed {
@@ -164,6 +215,7 @@ func (s *HQStore) Ping() error {
 
 // Tx executes fn against the HQStore write surface.
 func (s *HQStore) Tx(_ string, fn func(tx Tx) error) error {
+	s.counters.Tx.Add(1)
 	return runSequentialTx(s, fn)
 }
 

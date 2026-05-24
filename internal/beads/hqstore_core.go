@@ -39,6 +39,7 @@ func (s *HQStore) resetCoreLocked() {
 
 // Create persists a new bead.
 func (s *HQStore) Create(b Bead) (Bead, error) {
+	s.counters.Create.Add(1)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureOpenLocked(); err != nil {
@@ -47,6 +48,7 @@ func (s *HQStore) Create(b Bead) (Bead, error) {
 
 	stored := s.normalizeCreateLocked(b)
 	if _, ok := s.findLocked(stored.ID); ok {
+		s.counters.DuplicateCreate.Add(1)
 		return Bead{}, fmt.Errorf("creating bead %q: duplicate id", stored.ID)
 	}
 
@@ -79,6 +81,7 @@ func (s *HQStore) normalizeCreateLocked(b Bead) Bead {
 
 // Get retrieves a bead by ID.
 func (s *HQStore) Get(id string) (Bead, error) {
+	s.counters.Get.Add(1)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if b, ok := s.main[id]; ok {
@@ -87,11 +90,13 @@ func (s *HQStore) Get(id string) (Bead, error) {
 	if b, ok := s.wisps[id]; ok {
 		return cloneBead(b), nil
 	}
+	s.counters.GetNotFound.Add(1)
 	return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
 }
 
 // Update modifies fields of an existing bead.
 func (s *HQStore) Update(id string, opts UpdateOpts) error {
+	s.counters.Update.Add(1)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureOpenLocked(); err != nil {
@@ -99,6 +104,7 @@ func (s *HQStore) Update(id string, opts UpdateOpts) error {
 	}
 	b, ok := s.findLocked(id)
 	if !ok {
+		s.counters.UpdateNotFound.Add(1)
 		return fmt.Errorf("updating bead %q: %w", id, ErrNotFound)
 	}
 	wasClosed := b.Status == "closed"
@@ -117,6 +123,7 @@ func (s *HQStore) Update(id string, opts UpdateOpts) error {
 
 // Close sets a bead's status to closed.
 func (s *HQStore) Close(id string) error {
+	s.counters.Close.Add(1)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureOpenLocked(); err != nil {
@@ -124,6 +131,7 @@ func (s *HQStore) Close(id string) error {
 	}
 	b, ok := s.findLocked(id)
 	if !ok {
+		s.counters.CloseNotFound.Add(1)
 		return fmt.Errorf("closing bead %q: %w", id, ErrNotFound)
 	}
 	if b.Status == "closed" {
@@ -137,6 +145,7 @@ func (s *HQStore) Close(id string) error {
 
 // Reopen sets a bead's status to open.
 func (s *HQStore) Reopen(id string) error {
+	s.counters.Reopen.Add(1)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureOpenLocked(); err != nil {
@@ -157,6 +166,7 @@ func (s *HQStore) Reopen(id string) error {
 
 // CloseAll closes multiple beads and applies metadata to each closed bead.
 func (s *HQStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	s.counters.CloseAll.Add(1)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureOpenLocked(); err != nil {
@@ -191,6 +201,7 @@ func (s *HQStore) CloseAll(ids []string, metadata map[string]string) (int, error
 
 // List returns beads matching the query.
 func (s *HQStore) List(query ListQuery) ([]Bead, error) {
+	s.counters.List.Add(1)
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
@@ -227,6 +238,7 @@ func (s *HQStore) List(query ListQuery) ([]Bead, error) {
 
 // ListOpen returns non-closed beads in creation order by default.
 func (s *HQStore) ListOpen(status ...string) ([]Bead, error) {
+	s.counters.ListOpen.Add(1)
 	query := ListQuery{AllowScan: true}
 	if len(status) > 0 {
 		query.Status = status[0]
@@ -236,6 +248,7 @@ func (s *HQStore) ListOpen(status ...string) ([]Bead, error) {
 
 // Ready returns all open, unblocked actionable main-tier beads.
 func (s *HQStore) Ready(query ...ReadyQuery) ([]Bead, error) {
+	s.counters.Ready.Add(1)
 	q := readyQueryFromArgs(query)
 	s.mu.RLock()
 
@@ -274,7 +287,7 @@ func (s *HQStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		if IsReadyExcludedType(b.Type) || hqBlockedBySnapshot(b.ID, deps, statusByID) {
 			continue
 		}
-		result = append(result, cloneBead(b))
+		result = append(result, b)
 		if q.Limit > 0 && len(result) >= q.Limit {
 			break
 		}
@@ -319,6 +332,7 @@ func (s *HQStore) readyCandidateIDsLocked(q ReadyQuery) []string {
 
 // Children returns children of parentID.
 func (s *HQStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
+	s.counters.Children.Add(1)
 	return s.List(ListQuery{
 		ParentID:      parentID,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
@@ -328,6 +342,7 @@ func (s *HQStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 
 // ListByLabel returns beads matching a label.
 func (s *HQStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead, error) {
+	s.counters.ListByLabel.Add(1)
 	return s.List(ListQuery{
 		Label:         label,
 		Limit:         limit,
@@ -339,6 +354,7 @@ func (s *HQStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead
 
 // ListByAssignee returns beads assigned to assignee with status.
 func (s *HQStore) ListByAssignee(assignee, status string, limit int) ([]Bead, error) {
+	s.counters.ListByAssignee.Add(1)
 	return s.List(ListQuery{
 		Assignee: assignee,
 		Status:   status,
@@ -349,6 +365,7 @@ func (s *HQStore) ListByAssignee(assignee, status string, limit int) ([]Bead, er
 
 // ListByMetadata returns beads whose metadata contains all filters.
 func (s *HQStore) ListByMetadata(filters map[string]string, limit int, opts ...QueryOpt) ([]Bead, error) {
+	s.counters.ListByMetadata.Add(1)
 	return s.List(ListQuery{
 		Metadata:      filters,
 		Limit:         limit,
@@ -360,11 +377,13 @@ func (s *HQStore) ListByMetadata(filters map[string]string, limit int, opts ...Q
 
 // SetMetadata sets a single metadata key-value pair.
 func (s *HQStore) SetMetadata(id, key, value string) error {
+	s.counters.SetMetadata.Add(1)
 	return s.SetMetadataBatch(id, map[string]string{key: value})
 }
 
 // SetMetadataBatch atomically merges metadata into a bead.
 func (s *HQStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.counters.SetMetadataBatch.Add(1)
 	if len(kvs) == 0 {
 		return nil
 	}
@@ -389,12 +408,14 @@ func (s *HQStore) SetMetadataBatch(id string, kvs map[string]string) error {
 
 // Delete permanently removes a bead and dependency edges touching it.
 func (s *HQStore) Delete(id string) error {
+	s.counters.Delete.Add(1)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureOpenLocked(); err != nil {
 		return err
 	}
 	if _, ok := s.findLocked(id); !ok {
+		s.counters.DeleteNotFound.Add(1)
 		return fmt.Errorf("deleting bead %q: %w", id, ErrNotFound)
 	}
 	s.deleteLocked(id)
@@ -403,6 +424,7 @@ func (s *HQStore) Delete(id string) error {
 
 // DepAdd records a dependency.
 func (s *HQStore) DepAdd(issueID, dependsOnID, depType string) error {
+	s.counters.DepAdd.Add(1)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureOpenLocked(); err != nil {
@@ -417,6 +439,7 @@ func (s *HQStore) DepAdd(issueID, dependsOnID, depType string) error {
 
 // DepRemove removes a dependency between two beads.
 func (s *HQStore) DepRemove(issueID, dependsOnID string) error {
+	s.counters.DepRemove.Add(1)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureOpenLocked(); err != nil {
@@ -428,6 +451,7 @@ func (s *HQStore) DepRemove(issueID, dependsOnID string) error {
 
 // DepList returns dependencies in the requested direction.
 func (s *HQStore) DepList(id, direction string) ([]Dep, error) {
+	s.counters.DepList.Add(1)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var result []Dep
