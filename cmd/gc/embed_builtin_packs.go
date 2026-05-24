@@ -311,6 +311,18 @@ func peekEventsProvider(tomlPath string) string {
 
 // materializeFS walks an embed.FS rooted at root, writes all files to dstDir,
 // and returns the relative file paths that belong in the generated directory.
+//
+// Existing regular files with the correct mode are preserved verbatim —
+// content is NOT overwritten even when it differs from the embedded bytes.
+// This protects operator-authored edits to pack files (formula TOMLs, command
+// scripts, etc.) from being silently reverted on every gc subcommand
+// invocation (see gastownhall/gascity#2429).
+//
+// The remaining repair semantics are preserved: missing files are written
+// (initial scaffolding), wrong-mode files are rewritten (e.g., script that
+// lost its +x bit), and non-regular files (symlinks, etc.) are replaced with
+// the embedded content. Operators who want to pick up a fresh embedded
+// version after a binary upgrade must delete the on-disk file first.
 func materializeFS(embedded fs.FS, root, dstDir string) (map[string]struct{}, error) {
 	desired := make(map[string]struct{})
 	err := fs.WalkDir(embedded, root, func(path string, d fs.DirEntry, err error) error {
@@ -334,6 +346,21 @@ func materializeFS(embedded fs.FS, root, dstDir string) (map[string]struct{}, er
 		}
 		desired[filepath.ToSlash(rel)] = struct{}{}
 
+		perm := builtinpacks.MaterializedFileMode(path)
+
+		// Preserve operator-authored content. Skip the embedded write only
+		// when the existing on-disk entry is a regular file with the
+		// correct mode — that's a file the operator might have edited.
+		// Non-regular files (symlinks) and wrong-mode files still get
+		// repaired below, matching the prior contract.
+		if info, statErr := os.Lstat(dst); statErr == nil {
+			if info.Mode().IsRegular() && info.Mode().Perm() == perm.Perm() {
+				return nil
+			}
+		} else if !os.IsNotExist(statErr) {
+			return fmt.Errorf("stat %s: %w", dst, statErr)
+		}
+
 		data, err := fs.ReadFile(embedded, path)
 		if err != nil {
 			return fmt.Errorf("reading embedded %s: %w", path, err)
@@ -343,7 +370,6 @@ func materializeFS(embedded fs.FS, root, dstDir string) (map[string]struct{}, er
 			return err
 		}
 
-		perm := builtinpacks.MaterializedFileMode(path)
 		return fsys.WriteFileIfContentOrModeChangedAtomic(fsys.OSFS{}, dst, data, perm)
 	})
 	if err != nil {

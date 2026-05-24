@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/builtinpacks"
@@ -461,7 +462,19 @@ func TestMaterializeBuiltinPacksPiHookUsesCurrentExtensionAPI(t *testing.T) {
 	}
 }
 
-func TestMaterializeBuiltinPacksReplacesStaleMaterializedPiHook(t *testing.T) {
+// TestMaterializeBuiltinPacksPreservesStaleMaterializedPiHook pins the
+// operator-edit-protection contract introduced for gastownhall/gascity#2429:
+// once a regular file with the correct mode exists on disk, materializeFS
+// leaves the content alone. Operators who want to pick up a fresh embedded
+// version after a binary upgrade must delete the on-disk file first (the
+// next materialize call then rewrites it from scratch).
+//
+// This replaces the prior canonical-sync test
+// (TestMaterializeBuiltinPacksReplacesStaleMaterializedPiHook) which
+// asserted the opposite behavior. The trade-off — disk wins over the
+// embedded binary — is what protects operator-authored formula TOMLs and
+// command scripts from being silently reverted on every `gc bd` call.
+func TestMaterializeBuiltinPacksPreservesStaleMaterializedPiHook(t *testing.T) {
 	dir := t.TempDir()
 	hookPath := materializedPiHookPath(dir)
 	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
@@ -482,12 +495,23 @@ module.exports = {
 		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
 	}
 
+	// Existing regular file with correct mode is preserved verbatim.
 	data := readMaterializedPiHook(t, dir)
-	if data == string(stale) {
-		t.Fatal("stale materialized Pi hook was preserved; expected core pack materialization to repair it")
+	if data != string(stale) {
+		t.Fatalf("stale Pi hook was overwritten — operator edits would have been lost.\ngot:\n%s\nwant (stale preserved):\n%s", data, stale)
 	}
+
+	// After the operator removes the file, the next materialize rewrites
+	// the embedded content (missing-file scaffolding still applies).
+	if err := os.Remove(hookPath); err != nil {
+		t.Fatalf("remove hook: %v", err)
+	}
+	if err := MaterializeBuiltinPacks(dir); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error after remove: %v", err)
+	}
+	data = readMaterializedPiHook(t, dir)
 	if !strings.Contains(data, `pi.on("session_start"`) {
-		t.Fatalf("repaired materialized Pi hook does not use current extension API:\n%s", data)
+		t.Fatalf("rescaffolded Pi hook does not use current extension API:\n%s", data)
 	}
 }
 
@@ -1372,5 +1396,87 @@ func TestBuiltinPackIncludes_AlwaysIncludesMaintenance(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("maintenance pack not found in bd includes: %v", includes)
+	}
+}
+
+// TestMaterializeFS_PreservesExistingFiles asserts that an existing on-disk
+// file is not overwritten by a subsequent materialize call. This is the
+// regression guard for gastownhall/gascity#2429 — `gc bd …` subcommands
+// were silently reverting operator-edited pack files via materializeFS's
+// blind overwrite on every invocation.
+//
+// Without the fix, the second materializeFS call rewrites b.txt back to
+// the embedded "embedded-b" bytes and the assertion fails.
+func TestMaterializeFS_PreservesExistingFiles(t *testing.T) {
+	dst := t.TempDir()
+	embedded := fstest.MapFS{
+		"a.txt":     {Data: []byte("embedded-a"), Mode: 0o644},
+		"b.txt":     {Data: []byte("embedded-b"), Mode: 0o644},
+		"sub/c.txt": {Data: []byte("embedded-c"), Mode: 0o644},
+	}
+
+	// Initial materialize: writes all three files since dst is empty.
+	desired, err := materializeFS(embedded, ".", dst)
+	if err != nil {
+		t.Fatalf("first materializeFS: %v", err)
+	}
+	for _, want := range []string{"a.txt", "b.txt", "sub/c.txt"} {
+		if _, ok := desired[want]; !ok {
+			t.Fatalf("desired set missing %q", want)
+		}
+		got, err := os.ReadFile(filepath.Join(dst, filepath.FromSlash(want)))
+		if err != nil {
+			t.Fatalf("read %s after first materialize: %v", want, err)
+		}
+		if want := []byte("embedded-" + strings.TrimSuffix(filepath.Base(want), ".txt")); !bytes.Equal(got, want) {
+			t.Fatalf("first materialize content %s = %q, want %q", want, got, want)
+		}
+	}
+
+	// Operator edits b.txt — the data-loss scenario in the bug report.
+	const operatorBytes = "OPERATOR EDIT — must survive next materializeFS"
+	if err := os.WriteFile(filepath.Join(dst, "b.txt"), []byte(operatorBytes), 0o644); err != nil {
+		t.Fatalf("operator edit: %v", err)
+	}
+
+	// Second materialize: should NOT overwrite the operator's edit.
+	if _, err := materializeFS(embedded, ".", dst); err != nil {
+		t.Fatalf("second materializeFS: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "b.txt"))
+	if err != nil {
+		t.Fatalf("read b.txt after second materialize: %v", err)
+	}
+	if !bytes.Equal(got, []byte(operatorBytes)) {
+		t.Fatalf("operator edit lost: got %q, want %q", got, operatorBytes)
+	}
+
+	// Unchanged files (a.txt, sub/c.txt) remain present and intact.
+	for _, want := range []string{"a.txt", "sub/c.txt"} {
+		got, err := os.ReadFile(filepath.Join(dst, filepath.FromSlash(want)))
+		if err != nil {
+			t.Fatalf("read %s after second materialize: %v", want, err)
+		}
+		expected := []byte("embedded-" + strings.TrimSuffix(filepath.Base(want), ".txt"))
+		if !bytes.Equal(got, expected) {
+			t.Fatalf("unrelated file %s content drifted: got %q, want %q", want, got, expected)
+		}
+	}
+
+	// Delete the operator-edited file; the next materialize should rewrite
+	// the embedded content (initial-scaffolding semantics still apply when
+	// a file is missing).
+	if err := os.Remove(filepath.Join(dst, "b.txt")); err != nil {
+		t.Fatalf("remove b.txt: %v", err)
+	}
+	if _, err := materializeFS(embedded, ".", dst); err != nil {
+		t.Fatalf("third materializeFS: %v", err)
+	}
+	got, err = os.ReadFile(filepath.Join(dst, "b.txt"))
+	if err != nil {
+		t.Fatalf("read b.txt after third materialize: %v", err)
+	}
+	if !bytes.Equal(got, []byte("embedded-b")) {
+		t.Fatalf("missing-file rescaffold failed: got %q, want %q", got, "embedded-b")
 	}
 }
