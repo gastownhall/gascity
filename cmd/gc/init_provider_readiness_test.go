@@ -388,8 +388,8 @@ func TestFinalizeInitSeedsDefaultPackRegistry(t *testing.T) {
 	if got := cfg.Registries[0]; got.Name != packregistry.DefaultRegistryName || got.Source != packregistry.DefaultRegistrySource {
 		t.Fatalf("default registry = %+v", got)
 	}
-	if _, err := os.Stat(filepath.Join(gcHome, "registry-cache", packregistry.DefaultRegistryName, "registry.toml")); !os.IsNotExist(err) {
-		t.Fatalf("finalizeInit should not refresh registry cache during init, stat err = %v", err)
+	if _, _, err := packregistry.ReadCachedRegistryCatalog(gcHome, cfg.Registries[0]); err != nil {
+		t.Fatalf("finalizeInit should pre-seed default registry cache: %v", err)
 	}
 }
 

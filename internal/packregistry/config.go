@@ -2,6 +2,7 @@ package packregistry
 
 import (
 	"bytes"
+	_ "embed"
 	"errors"
 	"fmt"
 	"os"
@@ -25,6 +26,9 @@ const DefaultRegistryName = "main"
 const DefaultRegistrySource = "https://raw.githubusercontent.com/gastownhall/gascity-packs/main/registry.toml"
 
 var registryNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+
+//go:embed default_registry.toml
+var defaultRegistryCatalogData []byte
 
 // Config is the parsed registry configuration stored under the Gas City home.
 type Config struct {
@@ -134,32 +138,84 @@ func AddRegistryWithCache(home string, reg Registry, catalogData []byte) error {
 	})
 }
 
+// DefaultRegistryCatalogData returns the bundled first-party registry catalog.
+func DefaultRegistryCatalogData() []byte {
+	return append([]byte(nil), defaultRegistryCatalogData...)
+}
+
 // SeedDefaultConfigIfAbsent writes the first-party registry configuration when
-// the user has no registry configuration file yet.
+// the user has no registry configuration file yet and seeds its bundled cache
+// when the configured default registry points at the first-party catalog.
 func SeedDefaultConfigIfAbsent(home string) (bool, error) {
+	configSeeded, _, err := SeedDefaultConfigAndCacheIfAbsent(home)
+	return configSeeded, err
+}
+
+// SeedDefaultConfigAndCacheIfAbsent writes the first-party registry
+// configuration when absent and pre-seeds the first-party registry cache from
+// the catalog bundled into the gc binary. Existing registry configuration is
+// preserved, and existing cache files are not overwritten.
+func SeedDefaultConfigAndCacheIfAbsent(home string) (configSeeded, cacheSeeded bool, err error) {
 	path := ConfigPath(home)
-	if _, err := os.Stat(path); err == nil {
-		return false, nil
-	} else if !os.IsNotExist(err) {
-		return false, fmt.Errorf("checking registries.toml: %w", err)
-	}
-	seeded := false
-	err := WithConfigLock(home, func() error {
+	err = WithConfigLock(home, func() error {
+		var cfg Config
 		if _, err := os.Stat(path); err == nil {
-			return nil
+			cfg, err = LoadConfig(home)
+			if err != nil {
+				return err
+			}
 		} else if !os.IsNotExist(err) {
 			return fmt.Errorf("checking registries.toml: %w", err)
+		} else {
+			cfg = Config{Registries: []Registry{{
+				Name:   DefaultRegistryName,
+				Source: DefaultRegistrySource,
+			}}}
+			if err := SaveConfig(home, cfg); err != nil {
+				return err
+			}
+			configSeeded = true
 		}
-		if err := SaveConfig(home, Config{Registries: []Registry{{
-			Name:   DefaultRegistryName,
-			Source: DefaultRegistrySource,
-		}}}); err != nil {
+
+		if !hasDefaultRegistry(cfg) {
+			return nil
+		}
+		cachePath := CachePath(home, DefaultRegistryName)
+		if _, err := os.Stat(cachePath); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("checking default registry cache: %w", err)
+		}
+		if err := validateDefaultRegistryCatalog(); err != nil {
 			return err
 		}
-		seeded = true
+		if err := WriteCatalogCache(home, DefaultRegistryName, defaultRegistryCatalogData); err != nil {
+			return err
+		}
+		cacheSeeded = true
 		return nil
 	})
-	return seeded, err
+	return configSeeded, cacheSeeded, err
+}
+
+func hasDefaultRegistry(cfg Config) bool {
+	for _, reg := range cfg.Registries {
+		if reg.Name == DefaultRegistryName && reg.Source == DefaultRegistrySource {
+			return true
+		}
+	}
+	return false
+}
+
+func validateDefaultRegistryCatalog() error {
+	catalog, err := ParseCatalog(defaultRegistryCatalogData)
+	if err != nil {
+		return fmt.Errorf("parsing bundled default registry catalog: %w", err)
+	}
+	if err := ValidateCatalog(catalog, true); err != nil {
+		return fmt.Errorf("validating bundled default registry catalog: %w", err)
+	}
+	return nil
 }
 
 // RemoveRegistry removes a registry from the registry configuration.

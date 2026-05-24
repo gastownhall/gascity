@@ -135,6 +135,43 @@ func TestPackRegistryAddListSearchShowRemove(t *testing.T) {
 	}
 }
 
+func TestPackRegistryDefaultSeedSupportsOfflineListSearchShow(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GC_HOME", home)
+
+	var stdout, stderr bytes.Buffer
+	if code := doPackRegistryList(false, &stdout, &stderr); code != 0 {
+		t.Fatalf("list code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), packregistry.DefaultRegistryName) || !strings.Contains(stdout.String(), packregistry.DefaultRegistrySource) {
+		t.Fatalf("list output missing default registry: %q", stdout.String())
+	}
+	if _, err := os.Stat(packregistry.ConfigPath(home)); err != nil {
+		t.Fatalf("default registries.toml not seeded: %v", err)
+	}
+	if _, err := os.Stat(packregistry.CachePath(home, packregistry.DefaultRegistryName)); err != nil {
+		t.Fatalf("default registry cache not seeded: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := doPackRegistrySearch("gastown", "", false, 50, false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("search code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "gastown") {
+		t.Fatalf("search output missing bundled pack: %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := doPackRegistryShow("main:gastown", false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("show code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "main:gastown") || !strings.Contains(stdout.String(), "gascity-packs.git//gastown#codex/public-builtins-wave1") {
+		t.Fatalf("show output missing bundled pack details: %q", stdout.String())
+	}
+}
+
 func TestPackRegistryShowBareNameAmbiguous(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)

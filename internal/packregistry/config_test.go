@@ -71,12 +71,15 @@ func TestAddRegistryWithCacheDoesNotConfigureWhenCacheWriteFails(t *testing.T) {
 
 func TestSeedDefaultConfigIfAbsentWritesMainRegistry(t *testing.T) {
 	home := t.TempDir()
-	seeded, err := SeedDefaultConfigIfAbsent(home)
+	seeded, cacheSeeded, err := SeedDefaultConfigAndCacheIfAbsent(home)
 	if err != nil {
-		t.Fatalf("SeedDefaultConfigIfAbsent: %v", err)
+		t.Fatalf("SeedDefaultConfigAndCacheIfAbsent: %v", err)
 	}
 	if !seeded {
-		t.Fatal("SeedDefaultConfigIfAbsent seeded=false, want true")
+		t.Fatal("SeedDefaultConfigAndCacheIfAbsent seeded=false, want true")
+	}
+	if !cacheSeeded {
+		t.Fatal("SeedDefaultConfigAndCacheIfAbsent cacheSeeded=false, want true")
 	}
 	cfg, err := LoadConfig(home)
 	if err != nil {
@@ -90,6 +93,16 @@ func TestSeedDefaultConfigIfAbsentWritesMainRegistry(t *testing.T) {
 	}
 	if got := cfg.Registries[0]; got.Name != DefaultRegistryName || got.Source != DefaultRegistrySource {
 		t.Fatalf("default registry = %+v, want %s %s", got, DefaultRegistryName, DefaultRegistrySource)
+	}
+	catalog, data, err := ReadCachedRegistryCatalog(home, cfg.Registries[0])
+	if err != nil {
+		t.Fatalf("ReadCachedRegistryCatalog(default): %v", err)
+	}
+	if len(catalog.Packs) == 0 {
+		t.Fatal("default cached catalog has no packs")
+	}
+	if len(data) == 0 {
+		t.Fatal("default cached catalog data is empty")
 	}
 }
 
@@ -115,6 +128,53 @@ func TestSeedDefaultConfigIfAbsentPreservesExistingFile(t *testing.T) {
 	}
 	if string(after) != string(before) {
 		t.Fatalf("existing registries.toml changed:\nbefore=%s\nafter=%s", before, after)
+	}
+	if _, err := os.Stat(CachePath(home, DefaultRegistryName)); !os.IsNotExist(err) {
+		t.Fatalf("custom registry config should not seed default cache, stat err = %v", err)
+	}
+}
+
+func TestSeedDefaultConfigIfAbsentSeedsMissingCacheForExistingDefault(t *testing.T) {
+	home := t.TempDir()
+	if err := SaveConfig(home, Config{Registries: []Registry{{
+		Name:   DefaultRegistryName,
+		Source: DefaultRegistrySource,
+	}}}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	configSeeded, cacheSeeded, err := SeedDefaultConfigAndCacheIfAbsent(home)
+	if err != nil {
+		t.Fatalf("SeedDefaultConfigAndCacheIfAbsent: %v", err)
+	}
+	if configSeeded {
+		t.Fatal("configSeeded=true, want false for existing config")
+	}
+	if !cacheSeeded {
+		t.Fatal("cacheSeeded=false, want true for missing default cache")
+	}
+	cfg, err := LoadConfig(home)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if _, _, err := ReadCachedRegistryCatalog(home, cfg.Registries[0]); err != nil {
+		t.Fatalf("ReadCachedRegistryCatalog(default): %v", err)
+	}
+}
+
+func TestBundledDefaultRegistryCatalogIsValid(t *testing.T) {
+	data := DefaultRegistryCatalogData()
+	if len(data) == 0 {
+		t.Fatal("DefaultRegistryCatalogData returned empty catalog")
+	}
+	catalog, err := ParseCatalog(data)
+	if err != nil {
+		t.Fatalf("ParseCatalog(default): %v", err)
+	}
+	if err := ValidateCatalog(catalog, true); err != nil {
+		t.Fatalf("ValidateCatalog(default): %v", err)
+	}
+	if len(catalog.Packs) == 0 {
+		t.Fatal("default catalog has no packs")
 	}
 }
 

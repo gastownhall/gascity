@@ -1,0 +1,31 @@
+schema = 1
+
+[[pack]]
+name = "gascity"
+description = "Gas City planning and implementation workflow pack."
+source = "https://github.com/gastownhall/gascity-packs.git//gascity#codex/public-builtins-wave1"
+source_kind = "git"
+
+[[pack]]
+name = "gastown"
+description = "Default Gas Town coding workflow pack."
+source = "https://github.com/gastownhall/gascity-packs.git//gastown#codex/public-builtins-wave1"
+source_kind = "git"
+
+[[pack]]
+name = "discord"
+description = "Discord services, commands, and prompt fragments for Gas City."
+source = "https://github.com/gastownhall/gascity-packs.git//discord#codex/public-builtins-wave1"
+source_kind = "git"
+
+[[pack]]
+name = "github-intake"
+description = "GitHub webhook intake services and commands for Gas City."
+source = "https://github.com/gastownhall/gascity-packs.git//github-intake#codex/public-builtins-wave1"
+source_kind = "git"
+
+[[pack]]
+name = "slack"
+description = "Slack services, commands, and adapter integration for Gas City."
+source = "https://github.com/gastownhall/gascity-packs.git//slack-pack#codex/public-builtins-wave1"
+source_kind = "git"
