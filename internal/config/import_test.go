@@ -746,8 +746,8 @@ fetched = "2026-04-10T00:00:00Z"
 	if err == nil {
 		t.Fatal("expected dirty shared cache error")
 	}
-	if !strings.Contains(err.Error(), "local worktree changes") || !strings.Contains(err.Error(), `run "gc import install"`) {
-		t.Fatalf("error = %v, want dirty-cache install hint", err)
+	if !strings.Contains(err.Error(), "local worktree changes") || !strings.Contains(err.Error(), `run "gc pack sync"`) {
+		t.Fatalf("error = %v, want dirty-cache sync hint", err)
 	}
 }
 
@@ -785,8 +785,8 @@ fetched = "2026-04-10T00:00:00Z"
 	if err == nil {
 		t.Fatal("expected missing shared cache error")
 	}
-	if !strings.Contains(err.Error(), "locked but not cached") || !strings.Contains(err.Error(), `run "gc import install"`) {
-		t.Fatalf("error = %v, want locked-but-not-cached install hint", err)
+	if !strings.Contains(err.Error(), "locked but not cached") || !strings.Contains(err.Error(), `run "gc pack sync"`) {
+		t.Fatalf("error = %v, want locked-but-not-cached sync hint", err)
 	}
 }
 
@@ -860,7 +860,7 @@ func TestValidateLockedRemoteCacheRequiresGit(t *testing.T) {
 	}
 }
 
-func TestImport_RootPackRemoteImportMissingLockfileSuggestsInstall(t *testing.T) {
+func TestImport_RootPackRemoteImportMissingLockfileSuggestsSync(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	t.Setenv("HOME", home)
@@ -886,8 +886,8 @@ version = "^1.2"
 	if err == nil {
 		t.Fatal("expected missing lockfile error")
 	}
-	if !strings.Contains(err.Error(), "missing packs.lock") || !strings.Contains(err.Error(), `run "gc import install"`) {
-		t.Fatalf("error = %v, want missing packs.lock install hint", err)
+	if !strings.Contains(err.Error(), "missing packs.lock") || !strings.Contains(err.Error(), `run "gc pack sync"`) {
+		t.Fatalf("error = %v, want missing packs.lock sync hint", err)
 	}
 }
 

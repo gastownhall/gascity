@@ -239,8 +239,8 @@ go test ./cmd/gc -run 'TestPackRegistry'
 - `GC_REGISTRY_FRESHNESS` valid and invalid parsing
 - `--no-validate` skips add-time fetch only; first real use still validates
   schema and transport
-- `gc init` registry seeding is idempotent when the real first-party registry
-  URL is available
+- `gc init` does not seed a default registry; registry configuration stays
+  explicit until a first-party registry bootstrap wave opts in.
 
 ### PR Boundary
 
@@ -675,8 +675,8 @@ docgen, and examples must include both successful and failure JSON shapes.
 - Legacy migration paths: `[packs]` only, mixed `[packs]`/`[imports]`, partial
   doctor report-only, and doctor fix parity with the former
   `gc import migrate` golden corpus.
-- First-party registry seeding uses the real URL, enforced by
-  `TestSeedRegistryURLNotPlaceholder`.
+- No implicit first-party registry seeding; fresh installs stay registry-empty
+  until an explicit `gc pack registry add`.
 - Two-clone reproducibility: clone A adds/syncs/commits, clone B pulls/syncs,
   and lockfile bytes plus verified cache content match.
 - Runtime network boundary: load/start/config paths do not perform registry or
@@ -695,7 +695,7 @@ go test ./...
 
 Release-blocking gate bundle:
 
-- `TestSeedRegistryURLNotPlaceholder`
+- `TestPackRegistryCommandsDoNotImplicitlySeedDefaultRegistry`
 - `TestDeprecationReleasesNotPlaceholder`
 - `TestDoctorFixCoversEveryMigrateGoldenCase`
 - `TestRegistryFetchVerifiesTLS`

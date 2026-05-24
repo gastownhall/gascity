@@ -442,6 +442,7 @@ trigger = "manual"
 func TestV2LegacyOrderLayoutReportsRemoteImportedPackEvaluatedByLoader(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
 
 	cityDir := t.TempDir()
 	source := "https://github.com/example/orders-pack.git"

@@ -9,7 +9,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
-func TestDoConfigShowMissingRemoteImportSuggestsInstall(t *testing.T) {
+func TestDoConfigShowMissingRemoteImportSuggestsSync(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -31,8 +31,8 @@ version = "^1.4"
 	if code == 0 {
 		t.Fatal("expected failure for missing remote import")
 	}
-	if got := stderr.String(); !bytes.Contains([]byte(got), []byte(`run "gc import install"`)) {
-		t.Fatalf("stderr = %q, want install remediation", got)
+	if got := stderr.String(); !bytes.Contains([]byte(got), []byte(`run "gc pack sync"`)) {
+		t.Fatalf("stderr = %q, want sync remediation", got)
 	}
 }
 
