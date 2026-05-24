@@ -1381,6 +1381,106 @@ func TestSessionReason_FallsThroughToProviderForSleepingAttachment(t *testing.T)
 	}
 }
 
+func TestSessionReason_ResetPendingLiveRuntimeOverridesOtherReasons(t *testing.T) {
+	provider := runtime.NewFake()
+	if err := provider.Start(context.Background(), "worker-live", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:         "worker",
+			StartCommand: "true",
+		}},
+	}
+	bead := beads.Bead{
+		ID:     "gc-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":          "worker",
+			"session_name":      "worker-live",
+			"state":             "asleep",
+			"sleep_reason":      "user-hold",
+			"pin_awake":         "true",
+			"restart_requested": "true",
+		},
+	}
+	before := cloneSessionReasonMetadata(bead.Metadata)
+	info := session.Info{
+		ID:          bead.ID,
+		Template:    "worker",
+		State:       session.StateAsleep,
+		SessionName: "worker-live",
+	}
+
+	reason := sessionReason(
+		info,
+		map[string]beads.Bead{bead.ID: bead},
+		cfg,
+		provider,
+		nil,
+		nil,
+	)
+	if reason != resetPendingReason {
+		t.Fatalf("sessionReason = %q, want %q", reason, resetPendingReason)
+	}
+	assertStringMapEqual(t, bead.Metadata, before)
+}
+
+func TestSessionReason_ResetPendingNotLiveFallsBack(t *testing.T) {
+	provider := runtime.NewFake()
+	bead := beads.Bead{
+		ID:     "gc-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":          "worker",
+			"session_name":      "worker-not-live",
+			"state":             "asleep",
+			"sleep_reason":      "user-hold",
+			"restart_requested": "true",
+		},
+	}
+	before := cloneSessionReasonMetadata(bead.Metadata)
+	info := session.Info{
+		ID:          bead.ID,
+		Template:    "worker",
+		State:       session.StateAsleep,
+		SessionName: "worker-not-live",
+	}
+
+	reason := sessionReason(
+		info,
+		map[string]beads.Bead{bead.ID: bead},
+		nil,
+		provider,
+		nil,
+		nil,
+	)
+	if reason != "user-hold" {
+		t.Fatalf("sessionReason = %q, want user-hold for non-live runtime", reason)
+	}
+	assertStringMapEqual(t, bead.Metadata, before)
+}
+
+func cloneSessionReasonMetadata(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func assertStringMapEqual(t *testing.T, got, want map[string]string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("metadata length = %d, want %d; got=%v want=%v", len(got), len(want), got, want)
+	}
+	for k, wantValue := range want {
+		if got[k] != wantValue {
+			t.Fatalf("metadata[%q] = %q, want %q; got=%v want=%v", k, got[k], wantValue, got, want)
+		}
+	}
+}
+
 func TestSessionReason_OmitsExpiredLifecycleHold(t *testing.T) {
 	bead := beads.Bead{
 		ID:     "gc-1",
