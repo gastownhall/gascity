@@ -921,8 +921,8 @@ func initFileStoreForDir(cityPath, dir string) error {
 
 // healthBeadsProvider checks the bead store's backing service health.
 // For exec providers, fires the "health" operation. For bd (dolt), runs
-// a three-layer health check and attempts recovery on failure. For file
-// provider, always healthy (no-op).
+// a three-layer health check and attempts recovery only for failures that
+// indicate a restart can help. For file provider, always healthy (no-op).
 //
 // Acquires a per-city semaphore to prevent concurrent health/recovery
 // operations from causing a thundering herd when dolt bounces.
@@ -952,6 +952,9 @@ func healthBeadsProvider(cityPath string) error {
 				if !owned {
 					return err
 				}
+				if !managedDoltHealthFailureShouldRecover(err) {
+					return fmt.Errorf("unhealthy (%w); not restarting managed dolt for non-recoverable health failure", err)
+				}
 			}
 			if recErr := runProviderOpWithEnv(script, providerEnv, "recover"); recErr != nil {
 				return fmt.Errorf("unhealthy (%w) and recovery failed: %w", err, recErr)
@@ -980,6 +983,30 @@ func healthBeadsProvider(cityPath string) error {
 		return nil
 	}
 	return nil // file: always healthy
+}
+
+func managedDoltHealthFailureShouldRecover(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "dolt server is in read-only mode") {
+		return true
+	}
+	if strings.Contains(msg, "dolt server not reachable") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "no route to host") {
+		return true
+	}
+	if strings.Contains(msg, "dolt query probe failed") ||
+		strings.Contains(msg, "context canceled") ||
+		strings.Contains(msg, "deadline exceeded") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "connection was closed") ||
+		strings.Contains(msg, "socket state is broken") {
+		return false
+	}
+	return false
 }
 
 func waitForAllBeadsScopesReadyAfterRecovery(cityPath string, timeout time.Duration) error {

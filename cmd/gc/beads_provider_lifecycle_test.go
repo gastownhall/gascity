@@ -4555,7 +4555,7 @@ set -eu
 printf '%%s\n' "$1" >> %q
 case "$1" in
   health)
-    echo unhealthy >&2
+    echo "dolt server is in read-only mode" >&2
     exit 1
     ;;
   recover)
@@ -4625,6 +4625,60 @@ exit 2
 	opLines := strings.Fields(strings.TrimSpace(string(ops)))
 	if len(opLines) < 2 || opLines[0] != "health" || opLines[1] != "recover" {
 		t.Fatalf("provider ops = %q, want first health then recover", string(ops))
+	}
+}
+
+func TestHealthBeadsProviderDoesNotRecoverManagedDoltQueryProbeFailure(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMinimalCityToml(t, cityPath)
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "issue_prefix: gc\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	opsFile := filepath.Join(t.TempDir(), "provider-ops.log")
+	script := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptBody := fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s\n' "$1" >> %q
+case "$1" in
+  health)
+    echo "dolt query probe failed (SELECT active_branch())" >&2
+    exit 1
+    ;;
+  recover)
+    echo "recover should not run" >&2
+    exit 0
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+`, opsFile)
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+
+	err := healthBeadsProvider(cityPath)
+	if err == nil || !strings.Contains(err.Error(), "not restarting managed dolt") {
+		t.Fatalf("healthBeadsProvider() error = %v, want non-recoverable query probe failure", err)
+	}
+
+	ops, err := os.ReadFile(opsFile)
+	if err != nil {
+		t.Fatalf("read provider ops: %v", err)
+	}
+	opLines := strings.Fields(strings.TrimSpace(string(ops)))
+	if len(opLines) != 1 || opLines[0] != "health" {
+		t.Fatalf("provider ops = %q, want only health", string(ops))
 	}
 }
 
