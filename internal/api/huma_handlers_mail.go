@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 )
@@ -477,9 +476,18 @@ func (s *Server) humaHandleMailArchive(_ context.Context, input *MailArchiveInpu
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
 	if mp == nil {
-		return nil, huma.Error404NotFound("message " + id + " not found")
+		// Idempotent: archive removes the bead, so a repeat call finds no
+		// owning provider. Matches mail.ErrAlreadyArchived at the CLI/provider layer.
+		resp := &OKResponse{}
+		resp.Body.Status = "archived"
+		return resp, nil
 	}
 	if err := mp.Archive(id); err != nil {
+		if errors.Is(err, mail.ErrAlreadyArchived) {
+			resp := &OKResponse{}
+			resp.Body.Status = "archived"
+			return resp, nil
+		}
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
 	s.recordMailEvent(events.MailArchived, "api", id, resolvedRig, nil)
@@ -523,12 +531,13 @@ func (s *Server) humaHandleMailDelete(_ context.Context, input *MailDeleteInput)
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
 	if mp == nil {
-		return nil, huma.Error404NotFound("message " + id + " not found")
+		// Idempotent: delete removes the bead, so a repeat call finds no
+		// owning provider. Matches mail.ErrAlreadyArchived at the CLI/provider layer.
+		resp := &OKResponse{}
+		resp.Body.Status = "deleted"
+		return resp, nil
 	}
 	if err := mp.Delete(id); err != nil {
-		if errors.Is(err, mail.ErrNotFound) || errors.Is(err, beads.ErrNotFound) {
-			return nil, huma.Error404NotFound("message " + id + " not found")
-		}
 		if errors.Is(err, mail.ErrAlreadyArchived) {
 			resp := &OKResponse{}
 			resp.Body.Status = "deleted"

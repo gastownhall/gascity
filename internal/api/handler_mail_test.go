@@ -470,7 +470,7 @@ func TestMailDelete(t *testing.T) {
 	}
 }
 
-func TestMailDeleteNotFound(t *testing.T) {
+func TestMailDeleteMissingIsIdempotent(t *testing.T) {
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
 
@@ -479,8 +479,8 @@ func TestMailDeleteNotFound(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 }
 
