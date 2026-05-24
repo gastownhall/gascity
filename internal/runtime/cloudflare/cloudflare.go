@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -101,28 +100,25 @@ func NewProviderWithConfig(cfg Config) (*Provider, error) {
 	}, nil
 }
 
-// Start creates a new remote session.
+// Start creates a new remote session. Maps to POST /session.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
-	body := startConfigFromRuntime(cfg)
-	if err := p.do(ctx, p.startTimeout, http.MethodPost, []string{"sessions", name, "start"}, body, nil); err != nil {
-		return err
-	}
-	return nil
+	body := startRequest{SessionID: name, Config: startConfigFromRuntime(cfg)}
+	return p.do(ctx, p.startTimeout, http.MethodPost, []string{"session"}, body, nil)
 }
 
 // Stop destroys the named remote session. Missing sessions are treated as
 // already stopped.
 func (p *Provider) Stop(name string) error {
-	err := p.do(context.Background(), p.timeout, http.MethodPost, []string{"sessions", name, "stop"}, nil, nil)
+	err := p.do(context.Background(), p.timeout, http.MethodPost, []string{"session", name, "stop"}, nil, nil)
 	if runtime.IsSessionGone(err) {
 		return nil
 	}
 	return err
 }
 
-// Interrupt sends a best-effort interrupt to the named remote session.
+// Interrupt sends a best-effort SIGINT to the named remote session via exec.
 func (p *Provider) Interrupt(name string) error {
-	err := p.do(context.Background(), p.timeout, http.MethodPost, []string{"sessions", name, "interrupt"}, nil, nil)
+	err := p.exec(context.Background(), name, "pkill -INT -f . 2>/dev/null; true", nil)
 	if runtime.IsSessionGone(err) {
 		return nil
 	}
@@ -131,20 +127,17 @@ func (p *Provider) Interrupt(name string) error {
 
 // IsRunning reports whether the named remote session is running.
 func (p *Provider) IsRunning(name string) bool {
-	var out statusResponse
-	if err := p.do(context.Background(), p.timeout, http.MethodGet, []string{"sessions", name, "running"}, nil, &out); err != nil {
+	var out sessionStatusResponse
+	if err := p.do(context.Background(), p.timeout, http.MethodGet, []string{"session", name, "status"}, nil, &out); err != nil {
 		return false
 	}
-	return out.Running
+	return out.Alive
 }
 
-// IsAttached reports whether an operator is attached to the named remote session.
-func (p *Provider) IsAttached(name string) bool {
-	var out statusResponse
-	if err := p.do(context.Background(), p.timeout, http.MethodGet, []string{"sessions", name, "attached"}, nil, &out); err != nil {
-		return false
-	}
-	return out.Attached
+// IsAttached always returns false: the Cloudflare runtime has no local TTY and
+// CanReportAttachment is false in Capabilities.
+func (p *Provider) IsAttached(_ string) bool {
+	return false
 }
 
 // Attach is not supported because the Cloudflare runtime API has no local TTY.
@@ -152,34 +145,40 @@ func (p *Provider) Attach(_ string) error {
 	return fmt.Errorf("cloudflare provider does not support attach")
 }
 
-// ProcessAlive reports whether the expected process is alive in the remote
-// session.
+// ProcessAlive reports whether any of the named processes are alive in the
+// remote session via a pgrep exec.
 func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	if len(processNames) == 0 {
 		return true
 	}
-	var out statusResponse
-	body := processAliveRequest{ProcessNames: processNames}
-	if err := p.do(context.Background(), p.timeout, http.MethodPost, []string{"sessions", name, "process-alive"}, body, &out); err != nil {
+	pattern := shellQuoteSingle(strings.Join(processNames, "|"))
+	var out execResponse
+	if err := p.exec(context.Background(), name, "pgrep -f "+pattern, &out); err != nil {
 		return false
 	}
-	return out.Alive
+	return out.ExitCode == 0
 }
 
-// Nudge sends structured content to the named remote session.
+// Nudge sends text content blocks to the named remote session.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	return p.do(context.Background(), p.timeout, http.MethodPost, []string{"sessions", name, "nudge"}, nudgeRequest{Content: content}, nil)
+	var sb strings.Builder
+	for _, block := range content {
+		if block.Type == "text" {
+			sb.WriteString(block.Text)
+		}
+	}
+	return p.do(context.Background(), p.timeout, http.MethodPost, []string{"session", name, "nudge"}, nudgeRequest{Text: sb.String()}, nil)
 }
 
 // SetMeta stores session metadata in the remote runtime.
 func (p *Provider) SetMeta(name, key, value string) error {
-	return p.do(context.Background(), p.timeout, http.MethodPost, []string{"sessions", name, "meta", key}, metaRequest{Value: value}, nil)
+	return p.do(context.Background(), p.timeout, http.MethodPost, []string{"session", name, "meta", key}, metaRequest{Value: value}, nil)
 }
 
 // GetMeta retrieves session metadata from the remote runtime.
 func (p *Provider) GetMeta(name, key string) (string, error) {
 	var out metaResponse
-	err := p.do(context.Background(), p.timeout, http.MethodGet, []string{"sessions", name, "meta", key}, nil, &out)
+	err := p.do(context.Background(), p.timeout, http.MethodGet, []string{"session", name, "meta", key}, nil, &out)
 	if runtime.IsSessionGone(err) {
 		return "", nil
 	}
@@ -191,7 +190,7 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 
 // RemoveMeta removes session metadata from the remote runtime.
 func (p *Provider) RemoveMeta(name, key string) error {
-	err := p.do(context.Background(), p.timeout, http.MethodDelete, []string{"sessions", name, "meta", key}, nil, nil)
+	err := p.do(context.Background(), p.timeout, http.MethodDelete, []string{"session", name, "meta", key}, nil, nil)
 	if runtime.IsSessionGone(err) {
 		return nil
 	}
@@ -201,80 +200,63 @@ func (p *Provider) RemoveMeta(name, key string) error {
 // Peek captures recent output from the named remote session.
 func (p *Provider) Peek(name string, lines int) (string, error) {
 	var out peekResponse
-	err := p.do(context.Background(), p.timeout, http.MethodPost, []string{"sessions", name, "peek"}, peekRequest{Lines: lines}, &out)
+	err := p.do(context.Background(), p.timeout, http.MethodPost, []string{"session", name, "peek"}, peekRequest{Lines: lines}, &out)
 	if err != nil {
 		return "", err
 	}
 	return out.Output, nil
 }
 
-// ListRunning returns remote session names with the given prefix.
-func (p *Provider) ListRunning(prefix string) ([]string, error) {
-	var out listResponse
-	err := p.doList(context.Background(), prefix, &out)
-	if err != nil {
-		return nil, err
-	}
-	return out.Names, nil
+// ListRunning is not supported: the Cloudflare Worker has no session index endpoint.
+func (p *Provider) ListRunning(_ string) ([]string, error) {
+	return nil, fmt.Errorf("cloudflare provider does not support ListRunning")
 }
 
-// GetLastActivity returns the last remote activity timestamp.
+// GetLastActivity returns the session creation time from the status record.
+// The Cloudflare Worker embeds this in GET /session/:name/status as record.createdAt.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
-	var out activityResponse
-	err := p.do(context.Background(), p.timeout, http.MethodGet, []string{"sessions", name, "last-activity"}, nil, &out)
-	if err != nil {
+	var out sessionStatusResponse
+	if err := p.do(context.Background(), p.timeout, http.MethodGet, []string{"session", name, "status"}, nil, &out); err != nil {
 		return time.Time{}, err
 	}
-	if strings.TrimSpace(out.LastActivity) == "" {
+	ts := strings.TrimSpace(out.Record.CreatedAt)
+	if ts == "" {
 		return time.Time{}, nil
 	}
-	t, err := time.Parse(time.RFC3339Nano, out.LastActivity)
+	t, err := time.Parse(time.RFC3339Nano, ts)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("parsing cloudflare last activity for %q: %w", name, err)
 	}
 	return t, nil
 }
 
-// ClearScrollback clears the remote output buffer.
+// ClearScrollback clears the remote output buffer via exec.
 func (p *Provider) ClearScrollback(name string) error {
-	err := p.do(context.Background(), p.timeout, http.MethodPost, []string{"sessions", name, "clear-scrollback"}, nil, nil)
+	err := p.exec(context.Background(), name, "truncate -s0 /workspace/.gc-scrollback 2>/dev/null || true", nil)
 	if runtime.IsSessionGone(err) {
 		return nil
 	}
 	return err
 }
 
-// CopyTo asks the remote runtime to copy a host-visible path into the session.
-func (p *Provider) CopyTo(name, src, relDst string) error {
-	if _, err := os.Stat(src); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("stat copy source %q: %w", src, err)
-	}
-	err := p.do(context.Background(), p.timeout, http.MethodPost, []string{"sessions", name, "copy-to"}, copyRequest{Src: src, RelDst: relDst}, nil)
-	if runtime.IsSessionGone(err) {
-		return nil
-	}
-	return err
+// CopyTo is not supported: the Cloudflare runtime has no host-to-sandbox file
+// transfer endpoint in this version of the Worker API.
+func (p *Provider) CopyTo(_, _, _ string) error {
+	return fmt.Errorf("cloudflare provider does not support CopyTo")
 }
 
 // SendKeys sends raw key tokens to the remote session.
 func (p *Provider) SendKeys(name string, keys ...string) error {
-	err := p.do(context.Background(), p.timeout, http.MethodPost, []string{"sessions", name, "send-keys"}, sendKeysRequest{Keys: keys}, nil)
+	err := p.do(context.Background(), p.timeout, http.MethodPost, []string{"session", name, "keys"}, sendKeysRequest{Keys: keys}, nil)
 	if runtime.IsSessionGone(err) {
 		return nil
 	}
 	return err
 }
 
-// RunLive reapplies live session commands to the remote session.
-func (p *Provider) RunLive(name string, cfg runtime.Config) error {
-	err := p.do(context.Background(), p.timeout, http.MethodPost, []string{"sessions", name, "run-live"}, runLiveRequest{Config: startConfigFromRuntime(cfg)}, nil)
-	if runtime.IsSessionGone(err) {
-		return nil
-	}
-	return err
+// RunLive is not supported: the Cloudflare Worker has no session-live replay endpoint.
+func (p *Provider) RunLive(_ string, _ runtime.Config) error {
+	return fmt.Errorf("cloudflare provider does not support RunLive")
 }
 
 // Capabilities reports Cloudflare runtime observation support.
@@ -284,14 +266,9 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	}
 }
 
-func (p *Provider) doList(ctx context.Context, prefix string, out any) error {
-	u := p.urlFor("sessions")
-	q := u.Query()
-	if prefix != "" {
-		q.Set("prefix", prefix)
-	}
-	u.RawQuery = q.Encode()
-	return p.doURL(ctx, p.timeout, http.MethodGet, u.String(), nil, out)
+// exec posts a shell command to POST /session/:name/exec and decodes the result into out (may be nil).
+func (p *Provider) exec(ctx context.Context, name, cmd string, out any) error {
+	return p.do(ctx, p.timeout, http.MethodPost, []string{"session", name, "exec"}, execRequest{Cmd: cmd}, out)
 }
 
 func (p *Provider) do(ctx context.Context, timeout time.Duration, method string, parts []string, body any, out any) error {
@@ -396,6 +373,11 @@ func statusText(status int, data []byte) string {
 	return http.StatusText(status)
 }
 
+// shellQuoteSingle wraps s in single quotes, escaping any embedded single quotes.
+func shellQuoteSingle(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
 type errorResponse struct {
 	Error   string `json:"error,omitempty"`
 	Message string `json:"message,omitempty"`
@@ -429,6 +411,12 @@ type startConfig struct {
 	FingerprintExtra       map[string]string         `json:"fingerprint_extra,omitempty"`
 	PromptSuffix           string                    `json:"prompt_suffix,omitempty"`
 	PromptFlag             string                    `json:"prompt_flag,omitempty"`
+}
+
+// startRequest is the body for POST /session.
+type startRequest struct {
+	SessionID string      `json:"sessionId"`
+	Config    startConfig `json:"config,omitempty"`
 }
 
 func startConfigFromRuntime(cfg runtime.Config) startConfig {
@@ -465,18 +453,25 @@ func startConfigFromRuntime(cfg runtime.Config) startConfig {
 	}
 }
 
-type statusResponse struct {
-	Running  bool `json:"running,omitempty"`
-	Attached bool `json:"attached,omitempty"`
-	Alive    bool `json:"alive,omitempty"`
+type execRequest struct {
+	Cmd string `json:"cmd"`
 }
 
-type processAliveRequest struct {
-	ProcessNames []string `json:"process_names,omitempty"`
+type execResponse struct {
+	ExitCode int  `json:"exitCode"`
+	Success  bool `json:"success"`
+}
+
+// sessionStatusResponse is the shape of GET /session/:name/status.
+type sessionStatusResponse struct {
+	Alive  bool `json:"alive"`
+	Record struct {
+		CreatedAt string `json:"createdAt"`
+	} `json:"record"`
 }
 
 type nudgeRequest struct {
-	Content []runtime.ContentBlock `json:"content,omitempty"`
+	Text string `json:"text"`
 }
 
 type metaRequest struct {
@@ -495,27 +490,6 @@ type peekResponse struct {
 	Output string `json:"output"`
 }
 
-type listResponse struct {
-	Names []string `json:"names"`
-}
-
-type activityResponse struct {
-	LastActivity string `json:"last_activity,omitempty"`
-}
-
-type copyRequest struct {
-	Src    string `json:"src"`
-	RelDst string `json:"rel_dst,omitempty"`
-}
-
 type sendKeysRequest struct {
 	Keys []string `json:"keys,omitempty"`
-}
-
-type runLiveRequest struct {
-	Config startConfig `json:"config"`
-}
-
-func isSessionGone(err error) bool {
-	return err != nil && (runtime.IsSessionGone(err) || errors.Is(err, runtime.ErrSessionNotFound))
 }
