@@ -4773,6 +4773,33 @@ func writeIssuesPayloadDoltStub(t *testing.T, binDir, issuesPayload string) {
 	writeExecutable(t, filepath.Join(binDir, "dolt"), body)
 }
 
+func writeIssuesPayloadWithSourceCountDoltStub(t *testing.T, binDir, issuesPayload string, sourceCount int) {
+	t.Helper()
+	body := "#!/bin/sh\n" +
+		"if [ -n \"${DOLT_ARGS_LOG:-}\" ]; then\n" +
+		"  printf '%s\\n' \"$*\" >> \"$DOLT_ARGS_LOG\"\n" +
+		"fi\n" +
+		"case \"$*\" in\n" +
+		"  *\"SHOW TABLES FROM\"*\"LIKE 'wisps'\"*)\n" +
+		"    printf 'Tables_in_db\\nwisps\\n'\n" +
+		"    ;;\n" +
+		"  *\"SHOW DATABASES\"*)\n" +
+		"    printf 'Database\\nbeads\\n'\n" +
+		"    ;;\n" +
+		"  *\"COUNT(\"*\"FROM \\`beads\\`.issues\"*)\n" +
+		"    printf 'row_count\\n" + strconv.Itoa(sourceCount) + "\\n'\n" +
+		"    ;;\n" +
+		"  *\"FROM \\`beads\\`.issues\"*)\n" +
+		"    printf '%s\\n' '" + issuesPayload + "'\n" +
+		"    ;;\n" +
+		"  *\"SELECT *\"*)\n" +
+		"    printf '{\"rows\":[]}\\n'\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	writeExecutable(t, filepath.Join(binDir, "dolt"), body)
+}
+
 func writeIssueRowsDoltStub(t *testing.T, binDir string, rows []string) {
 	t.Helper()
 	writeIssuesPayloadDoltStub(t, binDir, `{"rows":[`+strings.Join(rows, ",")+`]}`)
@@ -5136,6 +5163,75 @@ func TestJsonlExportSkipsSpikeCheckBelowMinPrev(t *testing.T) {
 	}
 	if strings.Contains(string(mailData), "ESCALATION: JSONL spike") {
 		t.Fatalf("spike escalation fired despite prev<MIN_PREV; mail log:\n%s", mailData)
+	}
+}
+
+func TestJsonlExportSuppressesDropSpikeWhenDoltSourceCountHealthy(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+
+	initSeedArchive(t, archiveRepo, 100)
+	writeIssuesPayloadWithSourceCountDoltStub(t, binDir, `{"rows":[]}`, 120)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	mailData, err := os.ReadFile(mailLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(mail log): %v", err)
+	}
+	if strings.Contains(string(mailData), "ESCALATION: JSONL spike") {
+		t.Fatalf("spike escalation fired despite healthy Dolt source-of-truth count; mail log:\n%s", mailData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(gcData), "HALTED on spike detection") {
+		t.Fatalf("healthy Dolt source-of-truth count should suppress HALT; gc log:\n%s", gcData)
+	}
+	if !strings.Contains(string(gcData), "DOG_DONE: jsonl — exported") {
+		t.Fatalf("expected normal export summary after source-of-truth suppression; gc log:\n%s", gcData)
+	}
+}
+
+func TestJsonlExportPreservesDropSpikeWhenDoltSourceCountAlsoShrank(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+
+	initSeedArchive(t, archiveRepo, 100)
+	writeIssuesPayloadWithSourceCountDoltStub(t, binDir, `{"rows":[]}`, 10)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	mailData, err := os.ReadFile(mailLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(mail log): %v", err)
+	}
+	if !strings.Contains(string(mailData), "ESCALATION: JSONL spike") {
+		t.Fatalf("expected spike escalation when Dolt source-of-truth count also shrank; mail log:\n%s", mailData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "HALTED on spike detection") {
+		t.Fatalf("expected HALT when source-of-truth also confirms the drop; gc log:\n%s", gcData)
 	}
 }
 

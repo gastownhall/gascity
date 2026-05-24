@@ -773,6 +773,56 @@ valid_database_identifier() {
     return 0
 }
 
+read_source_issue_count() {
+    local db="$1"
+    local output
+    local count
+
+    if ! output=$(dolt_sql -r csv -q "SELECT COUNT(*) AS row_count FROM \`$db\`.issues $SCRUB_FILTER" 2>/dev/null); then
+        return 1
+    fi
+    count=$(printf '%s\n' "$output" | tail -n 1 | tr -d '\r')
+    case "$count" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+    printf '%s\n' "$count"
+}
+
+should_halt_for_jsonl_spike() {
+    local db="$1"
+    local prev_count="$2"
+    local current_count="$3"
+    local threshold="$4"
+    local source_count
+    local source_drop
+
+    # Growth spikes are still suspicious. Only drop spikes can be suppressed by
+    # checking the Dolt source-of-truth behind the passive JSONL export.
+    if [ "$current_count" -ge "$prev_count" ]; then
+        return 0
+    fi
+
+    if ! source_count=$(read_source_issue_count "$db"); then
+        echo "jsonl-export: source-of-truth count unavailable for $db; preserving JSONL spike halt" >&2
+        return 0
+    fi
+
+    if [ "$source_count" -ge "$prev_count" ]; then
+        echo "jsonl-export: suppressing JSONL drop spike for $db; source count $source_count >= previous $prev_count" >&2
+        return 1
+    fi
+
+    source_drop=$(( (prev_count - source_count) * 100 / prev_count ))
+    if [ "$source_drop" -le "$threshold" ]; then
+        echo "jsonl-export: suppressing JSONL drop spike for $db; source drop ${source_drop}% <= ${threshold}%" >&2
+        return 1
+    fi
+
+    return 0
+}
+
 while IFS= read -r DB; do
     [ -z "$DB" ] && continue
     TOTAL_DBS=$((TOTAL_DBS + 1))
@@ -893,7 +943,7 @@ while IFS= read -r DB; do
         if [ "$DELTA" -lt 0 ]; then
             DELTA=$(( -DELTA ))
         fi
-        if [ "$DELTA" -gt "$SPIKE_THRESHOLD" ]; then
+        if [ "$DELTA" -gt "$SPIKE_THRESHOLD" ] && should_halt_for_jsonl_spike "$DB" "$PREV_COUNT" "$FILTERED_COUNT" "$SPIKE_THRESHOLD"; then
             HALTED=1
             HALT_DB="$DB"
             HALT_PREV_COUNT="$PREV_COUNT"
