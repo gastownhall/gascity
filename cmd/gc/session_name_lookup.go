@@ -22,6 +22,10 @@ type poolSessionCreateIdentity struct {
 	Slot      int
 }
 
+type explicitBeadIDStore interface {
+	IDPrefix() string
+}
+
 func isPoolManagedSessionBead(bead beads.Bead) bool {
 	if isEphemeralSessionBead(bead) {
 		return true
@@ -177,6 +181,11 @@ func createPoolSessionBeadWithAlias(
 	} else {
 		title = agentName
 	}
+	explicitID := poolSessionExplicitBeadID(store, instanceToken)
+	sessionName := pendingPoolSessionName(template, instanceToken)
+	if explicitID != "" {
+		sessionName = PoolSessionName(template, explicitID)
+	}
 	meta := map[string]string{
 		"template":                  template,
 		"agent_name":                agentName,
@@ -187,7 +196,7 @@ func createPoolSessionBeadWithAlias(
 		"generation":                "1",
 		"continuation_epoch":        "1",
 		"instance_token":            instanceToken,
-		"session_name":              pendingPoolSessionName(template, instanceToken),
+		"session_name":              sessionName,
 		poolManagedMetadataKey:      boolMetadata(true),
 	}
 	if alias := strings.TrimSpace(identity.Alias); alias != "" {
@@ -197,6 +206,7 @@ func createPoolSessionBeadWithAlias(
 		meta["pool_slot"] = strconv.Itoa(identity.Slot)
 	}
 	bead, err := store.Create(beads.Bead{
+		ID:       explicitID,
 		Title:    title,
 		Type:     sessionBeadType,
 		Labels:   []string{sessionBeadLabel, "agent:" + agentName},
@@ -205,20 +215,41 @@ func createPoolSessionBeadWithAlias(
 	if err != nil {
 		return beads.Bead{}, err
 	}
-	sessionName, err := derivePoolSessionName(store, cfg, template, bead.ID, resolvedTmuxAlias, sessionBeads)
+	sessionName, err = derivePoolSessionName(store, cfg, template, bead.ID, resolvedTmuxAlias, sessionBeads)
 	if err != nil {
 		_ = store.Close(bead.ID)
 		return beads.Bead{}, err
 	}
-	if err := store.SetMetadata(bead.ID, "session_name", sessionName); err != nil {
-		_ = store.Close(bead.ID)
-		return beads.Bead{}, err
+	if bead.Metadata == nil {
+		bead.Metadata = map[string]string{}
 	}
-	bead.Metadata["session_name"] = sessionName
+	if bead.Metadata["session_name"] != sessionName {
+		if err := store.SetMetadata(bead.ID, "session_name", sessionName); err != nil {
+			_ = store.Close(bead.ID)
+			return beads.Bead{}, err
+		}
+		bead.Metadata["session_name"] = sessionName
+	}
 	if sessionBeads != nil {
 		sessionBeads.add(bead)
 	}
 	return bead, nil
+}
+
+func poolSessionExplicitBeadID(store beads.Store, instanceToken string) string {
+	prefixStore, ok := store.(explicitBeadIDStore)
+	if !ok {
+		return ""
+	}
+	prefix := strings.TrimSpace(prefixStore.IDPrefix())
+	if prefix == "" {
+		return ""
+	}
+	instanceToken = strings.TrimSpace(instanceToken)
+	if instanceToken == "" {
+		return ""
+	}
+	return prefix + "-session-" + instanceToken
 }
 
 // derivePoolSessionName picks the session_name for a fresh pool bead. When

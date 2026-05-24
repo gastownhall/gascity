@@ -617,6 +617,9 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 		typ = "task"
 	}
 	args := []string{"create", "--json", b.Title, "-t", typ}
+	if id := strings.TrimSpace(b.ID); id != "" {
+		args = append(args, "--id", id)
+	}
 	if b.Priority != nil {
 		args = append(args, "--priority", strconv.Itoa(*b.Priority))
 	}

@@ -106,6 +106,27 @@ func TestBdStoreCreatePreservesExplicitType(t *testing.T) {
 	}
 }
 
+func TestBdStoreCreatePassesExplicitID(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"id":"mc-session-abc123","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+
+	created, err := s.Create(beads.Bead{ID: "mc-session-abc123", Title: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--id mc-session-abc123") {
+		t.Fatalf("args = %q, want explicit --id", args)
+	}
+	if created.ID != "mc-session-abc123" {
+		t.Fatalf("created.ID = %q, want mc-session-abc123", created.ID)
+	}
+}
+
 func TestBdStoreCreatePassesDeps(t *testing.T) {
 	var gotArgs []string
 	runner := func(_, _ string, args ...string) ([]byte, error) {
