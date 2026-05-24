@@ -615,6 +615,10 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		return nil, nil, err
 	}
 
+	if err := ValidateGitHubPRMonitors(root); err != nil {
+		return nil, nil, err
+	}
+
 	// Validate all duration strings in the fully-merged config.
 	prov.Warnings = append(prov.Warnings, ValidateDurations(root, path)...)
 	prov.Warnings = append(prov.Warnings, ValidateEventsRotation(root)...)
@@ -910,6 +914,10 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	// Services: concatenate.
 	base.Services = append(base.Services, fragment.Services...)
 
+	// GitHub PR monitors: concatenate. Validation rejects duplicate repo/base
+	// ownership after patches have had a chance to adjust declarations.
+	base.GitHub.PRMonitors = append(base.GitHub.PRMonitors, fragment.GitHub.PRMonitors...)
+
 	// Providers: deep-merge per-field.
 	mergeProviders(base, fragment, fragMeta, fragPath, prov)
 
@@ -929,6 +937,7 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	base.Patches.Agents = append(base.Patches.Agents, fragment.Patches.Agents...)
 	base.Patches.Rigs = append(base.Patches.Rigs, fragment.Patches.Rigs...)
 	base.Patches.Providers = append(base.Patches.Providers, fragment.Patches.Providers...)
+	base.Patches.GitHubPRMonitors = append(base.Patches.GitHubPRMonitors, fragment.Patches.GitHubPRMonitors...)
 
 	// Simple sections: last-writer-wins if fragment defines them.
 	if fragMeta.IsDefined("beads") {
