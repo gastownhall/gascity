@@ -1226,7 +1226,10 @@ func buildAttachmentCache(sessions []session.Info, observe ...func(session.Info)
 	return cache
 }
 
-const resetPendingReason = "reset-pending"
+const (
+	resetPendingReason = "reset-pending"
+	circuitOpenReason  = "circuit-open"
+)
 
 // sessionReason computes the REASON column for a session in gc session list.
 // For awake sessions, shows wake reasons (e.g., "config", "attached").
@@ -1253,6 +1256,9 @@ func sessionReason(s session.Info, beadIndex map[string]beads.Bead, cfg *config.
 	}
 	if resetPendingReasonVisible(s, b, sp, now) {
 		return resetPendingReason
+	}
+	if circuitOpenReasonVisible(b) {
+		return circuitOpenReason
 	}
 
 	// If config is available, compute full wake reasons (including WakeConfig).
@@ -1286,6 +1292,10 @@ func resetPendingReasonVisible(s session.Info, b beads.Bead, sp runtime.Provider
 		isRunning = sp.IsRunning
 	}
 	return session.LifecycleResetPendingReasonVisible(b.Status, b.Metadata, now, s.SessionName, isRunning)
+}
+
+func circuitOpenReasonVisible(b beads.Bead) bool {
+	return strings.TrimSpace(b.Metadata[sessionCircuitStateMetadata]) == circuitOpen.String()
 }
 
 func pinAwakeWakeReasonVisible(b beads.Bead, cfg *config.City, now time.Time) bool {

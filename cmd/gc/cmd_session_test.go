@@ -1461,6 +1461,75 @@ func TestSessionReason_ResetPendingNotLiveFallsBack(t *testing.T) {
 	assertStringMapEqual(t, bead.Metadata, before)
 }
 
+func TestSessionReason_CircuitOpenMetadataVisible(t *testing.T) {
+	bead := beads.Bead{
+		ID:     "gc-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":                     "worker",
+			"session_name":                 "worker-circuit",
+			"state":                        "asleep",
+			"sleep_reason":                 "user-hold",
+			sessionCircuitStateMetadata:    circuitOpen.String(),
+			sessionCircuitRestartsMetadata: `["2026-04-10T12:00:00Z"]`,
+		},
+	}
+	before := cloneSessionReasonMetadata(bead.Metadata)
+	info := session.Info{
+		ID:          bead.ID,
+		Template:    "worker",
+		State:       session.StateAsleep,
+		SessionName: "worker-circuit",
+	}
+
+	reason := sessionReason(
+		info,
+		map[string]beads.Bead{bead.ID: bead},
+		nil,
+		runtime.NewFake(),
+		nil,
+		nil,
+	)
+	if reason != "circuit-open" {
+		t.Fatalf("sessionReason = %q, want circuit-open", reason)
+	}
+	assertStringMapEqual(t, bead.Metadata, before)
+}
+
+func TestSessionReason_CircuitOpenNonMatchingMetadataFallsBack(t *testing.T) {
+	bead := beads.Bead{
+		ID:     "gc-1",
+		Status: "open",
+		Metadata: map[string]string{
+			"template":                  "worker",
+			"session_name":              "worker-circuit",
+			"state":                     "asleep",
+			"sleep_reason":              "user-hold",
+			sessionCircuitStateMetadata: "open",
+		},
+	}
+	before := cloneSessionReasonMetadata(bead.Metadata)
+	info := session.Info{
+		ID:          bead.ID,
+		Template:    "worker",
+		State:       session.StateAsleep,
+		SessionName: "worker-circuit",
+	}
+
+	reason := sessionReason(
+		info,
+		map[string]beads.Bead{bead.ID: bead},
+		nil,
+		runtime.NewFake(),
+		nil,
+		nil,
+	)
+	if reason != "user-hold" {
+		t.Fatalf("sessionReason = %q, want user-hold for non-matching circuit metadata", reason)
+	}
+	assertStringMapEqual(t, bead.Metadata, before)
+}
+
 func cloneSessionReasonMetadata(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
 	for k, v := range in {
