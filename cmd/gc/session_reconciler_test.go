@@ -2296,8 +2296,8 @@ func TestReconcileSessionBeads_SuspendedCloseIgnoresUnreachableRigAssignedWork(t
 
 // TestReconcileSessionBeads_CloseGatePreservesSleepReason verifies that the
 // close gate carries the session's existing sleep_reason (idle,
-// idle-timeout, drained) into the closed bead's close reason. Losing this
-// distinction in closed records erases the forensic difference between an
+// idle-timeout, drained, city-stop) into the closed bead's close reason. Losing
+// this distinction in closed records erases the forensic difference between an
 // idle-timeout recycle and an explicit drain.
 func TestReconcileSessionBeads_CloseGatePreservesSleepReason(t *testing.T) {
 	cases := []struct {
@@ -2307,6 +2307,7 @@ func TestReconcileSessionBeads_CloseGatePreservesSleepReason(t *testing.T) {
 	}{
 		{"idle", "idle", "idle"},
 		{"idle-timeout", "idle-timeout", "idle-timeout"},
+		{"city-stop", sleepReasonCityStop, sleepReasonCityStop},
 		{"drained-reason", "drained", "drained"},
 		{"missing-reason", "", "drained"}, // fallback
 	}
