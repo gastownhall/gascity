@@ -117,6 +117,7 @@ func providerStateDir(providerName, cityPath string) string {
 //   - "acp" → ACP (Agent Client Protocol) JSON-RPC over stdio
 //   - "exec:<script>" → user-supplied script (absolute path or PATH lookup)
 //   - "k8s" → native Kubernetes provider (client-go)
+//   - "cloudflare" → Cloudflare Worker runtime (city.toml [session.cloudflare]; env vars GC_CLOUDFLARE_RUNTIME_URL/TOKEN override)
 //   - default → real tmux provider
 func newSessionProviderByName(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 	if strings.HasPrefix(name, "exec:") {
@@ -143,7 +144,17 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName, ci
 		}
 		return sessionacp.NewProvider(cfg), nil
 	case "cloudflare":
-		return sessioncloudflare.NewProvider()
+		cfg := sessioncloudflare.Config{
+			Endpoint: sc.Cloudflare.URL,
+			Token:    sc.Cloudflare.Token,
+		}
+		if v := os.Getenv("GC_CLOUDFLARE_RUNTIME_URL"); v != "" {
+			cfg.Endpoint = v
+		}
+		if v := os.Getenv("GC_CLOUDFLARE_RUNTIME_TOKEN"); v != "" {
+			cfg.Token = v
+		}
+		return sessioncloudflare.NewProviderWithConfig(cfg)
 	case "k8s":
 		return sessionk8s.NewProvider()
 	case "hybrid":

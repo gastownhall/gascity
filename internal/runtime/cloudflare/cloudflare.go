@@ -76,6 +76,9 @@ func NewProviderWithConfig(cfg Config) (*Provider, error) {
 	if parsed.Scheme == "" || parsed.Host == "" {
 		return nil, fmt.Errorf("cloudflare runtime endpoint must be an absolute URL")
 	}
+	if cfg.Token != "" && parsed.Scheme != "https" {
+		return nil, fmt.Errorf("cloudflare runtime endpoint must use https when a token is configured")
+	}
 
 	timeout := cfg.Timeout
 	if timeout <= 0 {

@@ -1125,12 +1125,15 @@ type BeadsConfig struct {
 // SessionConfig holds session provider settings.
 type SessionConfig struct {
 	// Provider selects the session backend: "fake", "fail", "subprocess",
-	// "acp", "exec:<script>", "k8s", or "" (default: tmux).
+	// "acp", "exec:<script>", "k8s", "cloudflare", or "" (default: tmux).
 	Provider string `toml:"provider,omitempty"`
 	// K8s holds Kubernetes-specific settings for the native K8s provider.
 	K8s K8sConfig `toml:"k8s,omitempty"`
 	// ACP holds settings for the ACP (Agent Client Protocol) session provider.
 	ACP ACPSessionConfig `toml:"acp,omitempty"`
+	// Cloudflare holds settings for the Cloudflare Worker session provider.
+	// Env vars (GC_CLOUDFLARE_RUNTIME_URL, GC_CLOUDFLARE_RUNTIME_TOKEN) override TOML values.
+	Cloudflare CloudflareConfig `toml:"cloudflare,omitempty"`
 	// SetupTimeout is the per-command/script timeout for session setup and
 	// pre_start commands. Duration string (e.g., "10s", "30s"). Defaults to "10s".
 	SetupTimeout string `toml:"setup_timeout,omitempty" jsonschema:"default=10s"`
@@ -1316,6 +1319,17 @@ type K8sConfig struct {
 	// Prebaked skips init container staging and EmptyDir volumes when true.
 	// Use with images built by `gc build-image` that have city content baked in.
 	Prebaked bool `toml:"prebaked,omitempty"`
+}
+
+// CloudflareConfig holds Cloudflare Worker session provider settings.
+// Env vars (GC_CLOUDFLARE_RUNTIME_URL, GC_CLOUDFLARE_RUNTIME_TOKEN) override TOML values.
+type CloudflareConfig struct {
+	// URL is the base URL for the Cloudflare Worker runtime API.
+	// Overridden by GC_CLOUDFLARE_RUNTIME_URL.
+	URL string `toml:"url,omitempty"`
+	// Token is a bearer token sent to the Cloudflare Worker runtime API.
+	// Overridden by GC_CLOUDFLARE_RUNTIME_TOKEN.
+	Token string `toml:"token,omitempty"`
 }
 
 // MailConfig holds mail provider settings.

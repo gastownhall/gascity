@@ -22,12 +22,24 @@ func TestNewProviderRequiresAbsoluteEndpoint(t *testing.T) {
 	}
 }
 
+func TestNewProviderRequiresHTTPSWithToken(t *testing.T) {
+	if _, err := NewProviderWithConfig(Config{Endpoint: "http://example.com", Token: "secret"}); err == nil {
+		t.Fatal("NewProviderWithConfig succeeded with http endpoint and token, want error")
+	}
+	if _, err := NewProviderWithConfig(Config{Endpoint: "https://example.com", Token: "secret"}); err != nil {
+		t.Fatalf("NewProviderWithConfig failed for https endpoint with token: %v", err)
+	}
+	if _, err := NewProviderWithConfig(Config{Endpoint: "http://example.com"}); err != nil {
+		t.Fatalf("NewProviderWithConfig failed for http endpoint without token: %v", err)
+	}
+}
+
 func TestStartPostsToSessionCollection(t *testing.T) {
 	var gotPath string
 	var gotAuth string
 	var got startRequest
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.EscapedPath()
 		gotAuth = r.Header.Get("Authorization")
 		if r.Method != http.MethodPost {
@@ -43,6 +55,7 @@ func TestStartPostsToSessionCollection(t *testing.T) {
 	p, err := NewProviderWithConfig(Config{
 		Endpoint: server.URL + "/runtime",
 		Token:    "secret",
+		Client:   server.Client(),
 	})
 	if err != nil {
 		t.Fatalf("NewProviderWithConfig: %v", err)
