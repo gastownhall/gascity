@@ -3,6 +3,7 @@ package cloudflare
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -241,10 +242,16 @@ func (p *Provider) ClearScrollback(name string) error {
 	return err
 }
 
-// CopyTo is not supported: the Cloudflare runtime has no host-to-sandbox file
-// transfer endpoint in this version of the Worker API.
-func (p *Provider) CopyTo(_, _, _ string) error {
-	return fmt.Errorf("cloudflare provider does not support CopyTo")
+// CopyTo copies a local file into the named remote session by base64-encoding
+// its content and posting it to POST /session/:name/copy. The Worker enforces a
+// ~1 MiB decoded size limit and rejects path traversal in relDst.
+func (p *Provider) CopyTo(name, src, relDst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return fmt.Errorf("cloudflare CopyTo: reading %s: %w", src, err)
+	}
+	encoded := base64.StdEncoding.EncodeToString(data)
+	return p.do(context.Background(), p.timeout, http.MethodPost, []string{"session", name, "copy"}, copyRequest{RelDst: relDst, Content: encoded}, nil)
 }
 
 // SendKeys sends raw key tokens to the remote session.
@@ -496,4 +503,9 @@ type peekResponse struct {
 
 type sendKeysRequest struct {
 	Keys []string `json:"keys,omitempty"`
+}
+
+type copyRequest struct {
+	RelDst  string `json:"relDst"`
+	Content string `json:"content"`
 }

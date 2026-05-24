@@ -2,10 +2,12 @@ package cloudflare
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -485,6 +487,120 @@ func TestNudgeDropsEmptyContent(t *testing.T) {
 	}
 	if called {
 		t.Fatal("Nudge made HTTP call for empty content, want no-op")
+	}
+}
+
+func TestCopyToPostsBase64Content(t *testing.T) {
+	var gotPath string
+	var gotBody copyRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	p, err := NewProviderWithConfig(Config{Endpoint: server.URL})
+	if err != nil {
+		t.Fatalf("NewProviderWithConfig: %v", err)
+	}
+
+	f, err := os.CreateTemp(t.TempDir(), "copyto-*.txt")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	content := []byte("hello cloudflare")
+	if _, err := f.Write(content); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	f.Close()
+
+	if err := p.CopyTo("sess-one", f.Name(), "sub/hello.txt"); err != nil {
+		t.Fatalf("CopyTo: %v", err)
+	}
+	if gotPath != "/session/sess-one/copy" {
+		t.Fatalf("path = %q, want /session/sess-one/copy", gotPath)
+	}
+	if gotBody.RelDst != "sub/hello.txt" {
+		t.Fatalf("relDst = %q, want sub/hello.txt", gotBody.RelDst)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(gotBody.Content)
+	if err != nil {
+		t.Fatalf("decode content: %v", err)
+	}
+	if string(decoded) != string(content) {
+		t.Fatalf("content = %q, want %q", decoded, content)
+	}
+}
+
+func TestCopyToBinaryContent(t *testing.T) {
+	var gotBody copyRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	p, err := NewProviderWithConfig(Config{Endpoint: server.URL})
+	if err != nil {
+		t.Fatalf("NewProviderWithConfig: %v", err)
+	}
+
+	f, err := os.CreateTemp(t.TempDir(), "copyto-bin-*")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	binary := []byte{0x00, 0xFF, 0xFE, 0x80, 0x01, 0x02, 0x03}
+	if _, err := f.Write(binary); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	f.Close()
+
+	if err := p.CopyTo("sess-one", f.Name(), "bin.dat"); err != nil {
+		t.Fatalf("CopyTo: %v", err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(gotBody.Content)
+	if err != nil {
+		t.Fatalf("decode content: %v", err)
+	}
+	if string(decoded) != string(binary) {
+		t.Fatalf("binary round-trip mismatch: got %x, want %x", decoded, binary)
+	}
+}
+
+func TestCopyToSurfacesWorkerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		_, _ = w.Write([]byte(`{"error":"content exceeds 1 MiB limit"}`))
+	}))
+	defer server.Close()
+
+	p, err := NewProviderWithConfig(Config{Endpoint: server.URL})
+	if err != nil {
+		t.Fatalf("NewProviderWithConfig: %v", err)
+	}
+
+	f, err := os.CreateTemp(t.TempDir(), "copyto-*.txt")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	f.Close()
+
+	if err := p.CopyTo("sess-one", f.Name(), "file.txt"); err == nil {
+		t.Fatal("CopyTo: want error on 413, got nil")
+	}
+}
+
+func TestCopyToMissingFileReturnsError(t *testing.T) {
+	p, err := NewProviderWithConfig(Config{Endpoint: "http://unused.example"})
+	if err != nil {
+		t.Fatalf("NewProviderWithConfig: %v", err)
+	}
+	if err := p.CopyTo("sess-one", "/nonexistent/file.txt", "file.txt"); err == nil {
+		t.Fatal("CopyTo succeeded for missing file, want error")
 	}
 }
 
