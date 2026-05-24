@@ -318,6 +318,14 @@
             "fresh"
           ],
           "description": "WakeMode controls context freshness across sleep/wake cycles.\n\"resume\" (default): reuse provider session key for conversation continuity.\n\"fresh\": start a new provider session on every wake (polecat pattern)."
+        },
+        "mouse_mode": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off"
+          ],
+          "description": "MouseMode controls whether tmux mouse mode is preserved for this agent.\n\"on\" leaves the session's mouse setting alone for human-attached\nsessions; \"off\" or empty preserves the SDK's default mouse-off startup\nbehavior for headless sessions."
         }
       },
       "additionalProperties": false,
@@ -613,6 +621,14 @@
           ],
           "description": "WakeMode overrides the agent's wake mode (\"resume\" or \"fresh\")."
         },
+        "mouse_mode": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off"
+          ],
+          "description": "MouseMode overrides whether tmux mouse mode is preserved (\"on\" or \"off\")."
+        },
         "inject_fragments_append": {
           "items": {
             "type": "string"
@@ -846,6 +862,14 @@
             "fresh"
           ],
           "description": "WakeMode overrides the agent's wake mode (\"resume\" or \"fresh\")."
+        },
+        "mouse_mode": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off"
+          ],
+          "description": "MouseMode overrides whether tmux mouse mode is preserved (\"on\" or \"off\")."
         },
         "pre_start_append": {
           "items": {

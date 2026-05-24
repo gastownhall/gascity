@@ -1106,6 +1106,7 @@ name = "bright-lights"
 name = "scout"
 provider = "claude"
 args = ["--dangerously-skip-permissions", "--verbose"]
+mouse_mode = "on"
 ready_delay_ms = 15000
 prompt_mode = "flag"
 prompt_flag = "--prompt"
@@ -1137,6 +1138,12 @@ emits_permission_warning = false
 	}
 	if a.PromptFlag != "--prompt" {
 		t.Errorf("PromptFlag = %q, want %q", a.PromptFlag, "--prompt")
+	}
+	if a.MouseMode != "on" {
+		t.Errorf("MouseMode = %q, want %q", a.MouseMode, "on")
+	}
+	if !a.MouseModeOn() {
+		t.Error("MouseModeOn() = false, want true")
 	}
 	if a.EmitsPermissionWarning == nil || *a.EmitsPermissionWarning != false {
 		t.Errorf("EmitsPermissionWarning = %v, want false", a.EmitsPermissionWarning)
@@ -2349,6 +2356,24 @@ func TestValidateAgentsValid(t *testing.T) {
 	}
 	if err := ValidateAgents(agents); err != nil {
 		t.Errorf("ValidateAgents: unexpected error: %v", err)
+	}
+}
+
+func TestValidateAgentsMouseMode(t *testing.T) {
+	for _, mode := range []string{"", "on", "off"} {
+		t.Run("valid_"+mode, func(t *testing.T) {
+			if err := ValidateAgents([]Agent{{Name: "worker", MouseMode: mode}}); err != nil {
+				t.Fatalf("ValidateAgents mouse_mode %q: %v", mode, err)
+			}
+		})
+	}
+
+	err := ValidateAgents([]Agent{{Name: "worker", MouseMode: "auto"}})
+	if err == nil {
+		t.Fatal("ValidateAgents invalid mouse_mode: got nil error")
+	}
+	if !strings.Contains(err.Error(), "mouse_mode") {
+		t.Fatalf("ValidateAgents error = %v, want mouse_mode context", err)
 	}
 }
 

@@ -2672,6 +2672,9 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if ov.WakeMode != nil {
 		a.WakeMode = *ov.WakeMode
 	}
+	if ov.MouseMode != nil {
+		a.MouseMode = *ov.MouseMode
+	}
 	if ov.InjectFragments != nil {
 		a.InjectFragments = append([]string(nil), (*ov.InjectFragments)...)
 	}

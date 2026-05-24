@@ -2018,6 +2018,7 @@ export interface components {
             MaxSessionAgeJitter: string | null;
             /** Format: int64 */
             MinActiveSessions: number | null;
+            MouseMode: string | null;
             Name: string;
             Nudge: string | null;
             OptionDefaults: {

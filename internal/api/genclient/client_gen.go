@@ -350,6 +350,7 @@ type AgentPatch struct {
 	MaxSessionAge           *string           `json:"MaxSessionAge"`
 	MaxSessionAgeJitter     *string           `json:"MaxSessionAgeJitter"`
 	MinActiveSessions       *int64            `json:"MinActiveSessions"`
+	MouseMode               *string           `json:"MouseMode"`
 	Name                    string            `json:"Name"`
 	Nudge                   *string           `json:"Nudge"`
 	OptionDefaults          map[string]string `json:"OptionDefaults"`

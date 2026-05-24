@@ -811,6 +811,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		DependsOn:              []string{"other-agent"},
 		ResumeCommand:          "claude --resume {{.SessionKey}} --dangerously",
 		WakeMode:               "fresh",
+		MouseMode:              "on",
 	}
 
 	omitted := map[string]bool{

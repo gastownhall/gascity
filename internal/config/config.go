@@ -655,6 +655,8 @@ type AgentOverride struct {
 	ResumeCommand *string `toml:"resume_command,omitempty"`
 	// WakeMode overrides the agent's wake mode ("resume" or "fresh").
 	WakeMode *string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
+	// MouseMode overrides whether tmux mouse mode is preserved ("on" or "off").
+	MouseMode *string `toml:"mouse_mode,omitempty" jsonschema:"enum=on,enum=off"`
 	// InjectFragmentsAppend appends to the agent's inject_fragments list.
 	InjectFragmentsAppend []string `toml:"inject_fragments_append,omitempty"`
 	// MaxActiveSessions overrides the agent-level cap on concurrent sessions.
@@ -2453,6 +2455,11 @@ type Agent struct {
 	// "resume" (default): reuse provider session key for conversation continuity.
 	// "fresh": start a new provider session on every wake (polecat pattern).
 	WakeMode string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
+	// MouseMode controls whether tmux mouse mode is preserved for this agent.
+	// "on" leaves the session's mouse setting alone for human-attached
+	// sessions; "off" or empty preserves the SDK's default mouse-off startup
+	// behavior for headless sessions.
+	MouseMode string `toml:"mouse_mode,omitempty" jsonschema:"enum=on,enum=off"`
 	// SleepAfterIdleSource records which config layer supplied SleepAfterIdle.
 	// Runtime-only — not persisted to TOML or JSON.
 	SleepAfterIdleSource string `toml:"-" json:"-"`
@@ -2590,6 +2597,11 @@ func (a *Agent) EffectiveWakeMode() string {
 		return "fresh"
 	}
 	return "resume"
+}
+
+// MouseModeOn reports whether tmux mouse mode should be preserved for this agent.
+func (a *Agent) MouseModeOn() bool {
+	return a.MouseMode == "on"
 }
 
 // AttachEnabled reports whether the agent supports interactive attachment.
@@ -3345,6 +3357,13 @@ func ValidateAgents(agents []Agent) error {
 			// valid
 		default:
 			return fmt.Errorf("agent %q: wake_mode must be \"resume\", \"fresh\", or empty, got %q", a.QualifiedName(), a.WakeMode)
+		}
+		// MouseMode enum.
+		switch a.MouseMode {
+		case "", "on", "off":
+			// valid
+		default:
+			return fmt.Errorf("agent %q: mouse_mode must be \"on\", \"off\", or empty, got %q", a.QualifiedName(), a.MouseMode)
 		}
 		if a.MinActiveSessions != nil && *a.MinActiveSessions < 0 {
 			return fmt.Errorf("agent %q: min_active_sessions must be >= 0", a.Name)

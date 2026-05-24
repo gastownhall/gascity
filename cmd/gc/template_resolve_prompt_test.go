@@ -505,6 +505,35 @@ func TestResolveTemplateCarriesOneShotLifecycleToRuntimeConfig(t *testing.T) {
 	}
 }
 
+func TestResolveTemplateCarriesMouseModeToRuntimeConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	params := &agentBuildParams{
+		fs:         fsys.NewFake(),
+		cityName:   "bright-lights",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Name: "bright-lights"},
+		beaconTime: testBeaconTime,
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{
+		Name:         "operator",
+		StartCommand: "claude",
+		MouseMode:    "on",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !tp.Hints.MouseOn {
+		t.Fatal("TemplateParams.Hints.MouseOn = false, want true")
+	}
+	if !templateParamsToConfig(tp).MouseOn {
+		t.Fatal("runtime config MouseOn = false, want true")
+	}
+}
+
 func TestResolveTemplateFlagModeRetainsPromptForStartupDelivery(t *testing.T) {
 	cityPath := t.TempDir()
 	fs := fsys.NewFake()

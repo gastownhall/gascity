@@ -302,6 +302,12 @@
               "null"
             ]
           },
+          "MouseMode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "Name": {
             "type": "string"
           },
@@ -516,6 +522,7 @@
           "DependsOn",
           "ResumeCommand",
           "WakeMode",
+          "MouseMode",
           "PreStartAppend",
           "SessionSetupAppend",
           "SessionLiveAppend",

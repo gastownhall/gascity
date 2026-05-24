@@ -668,6 +668,7 @@ type startOps interface {
 	hasSession(name string) (bool, error)
 	sendKeys(name, text string) error
 	setRemainOnExit(name string) error
+	disableMouseAndActivity(name string) error
 	runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error
 }
 
@@ -732,6 +733,12 @@ func (o *tmuxStartOps) sendKeys(name, text string) error {
 
 func (o *tmuxStartOps) setRemainOnExit(name string) error {
 	return o.tm.SetRemainOnExit(name, true)
+}
+
+func (o *tmuxStartOps) disableMouseAndActivity(name string) error {
+	o.tm.run("set-option", "-t", name, "mouse", "off")             //nolint:errcheck
+	o.tm.run("set-option", "-wt", name, "monitor-activity", "off") //nolint:errcheck
+	return nil
 }
 
 func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error {
@@ -808,6 +815,11 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 
 	// Enable remain-on-exit for crash forensics. Best-effort.
 	_ = ops.setRemainOnExit(name)
+	// Headless sessions disable mouse tracking and monitor-activity to avoid
+	// terminal escape sequences leaking into agent stdin during controller polls.
+	if !cfg.MouseOn {
+		_ = ops.disableMouseAndActivity(name)
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
