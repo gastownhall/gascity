@@ -308,7 +308,7 @@ the PR is open and matches the branch, base, and origin repository.
 **5. Reassign to refinery:**
 ```bash
 REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery"
-gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"
+gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""
 ```
 
 `${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery` resolves to
@@ -317,10 +317,10 @@ or `{{binding_prefix}}refinery` when running in an HQ-only city where
 the workspace is the rig. Writing a rendered empty rig prefix produces
 `/{{binding_prefix}}refinery` and strands beads outside the refinery pool.
 
-Update both `assignee` AND `gc.routed_to` so the reconciler stops
-counting this bead for the polecat pool and starts counting it for
-the refinery pool. Without updating `gc.routed_to`, the reconciler
-spawns phantom polecats that can't claim the bead.
+Set `assignee` to the configured refinery named-session identity and clear
+`gc.routed_to` because the direct assignment is the handoff. Generic pool
+demand is represented by unassigned work with `gc.routed_to=<target>`, so
+named-session work should not retain pool-demand metadata.
 
 The refinery will pick this up, rebase onto {{base_branch}}, run tests,
 merge, and close the bead. If there's a conflict, the refinery puts the

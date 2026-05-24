@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -30,9 +31,9 @@ import (
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
-// newCityRuntimeOpenSweepStore opens the city store used for the orphaned
-// order-tracking sweep in newCityRuntime. Test code can swap this to return
-// an in-memory store and skip spawning managed dolt.
+// newCityRuntimeOpenSweepStore opens stores used by order-tracking sweeps.
+// Test code can swap this to return in-memory stores and skip spawning
+// managed dolt.
 var newCityRuntimeOpenSweepStore = openStoreAtForCity
 
 // reloadOrderDrainTimeout bounds how long config reload will wait for
@@ -1194,23 +1195,57 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	}
 	cr.orderSweepWatchdogLast = now
 
-	store := cr.cityBeadStore()
-	if store == nil {
-		return
-	}
-	onlyOrders := map[string]struct{}{
-		orderTrackingSweepOrder: {},
-	}
-	n, err := sweepStaleOrderTracking(store, now, orderTrackingSweepWatchdogStaleAfter, onlyOrders, orderTrackingWatchdogMetadataInitiator)
-	if err != nil {
-		if cr.stderr != nil {
-			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+	stores, targets, storeErr := cr.orderTrackingSweepStores()
+	if len(stores) == 0 {
+		if storeErr != nil && cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, storeErr) //nolint:errcheck // best-effort stderr
 		}
 		return
 	}
+	onlyOrders := orderTrackingSweepOrderFilterForTargets(targets)
+	result, sweepErr := sweepStaleOrderTrackingAcrossStores(stores, now, orderTrackingSweepWatchdogStaleAfter, onlyOrders, orderTrackingWatchdogMetadataInitiator, false)
+	if err := errors.Join(storeErr, sweepErr); err != nil {
+		if cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		}
+	}
+	n := result.trackingClosed
 	if n > 0 && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog closed %d stale tracking bead(s)\n", cr.logPrefix, n) //nolint:errcheck // best-effort stderr
 	}
+}
+
+func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackingSweepTarget, error) {
+	targets := orderTrackingSweepTargetsForConfig(cr.cityPath, cr.cfg)
+	rigStores := cr.rigBeadStores()
+	stores, err := orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {
+		var store beads.Store
+		switch sweepTarget.target.ScopeKind {
+		case "city":
+			store = cr.cityBeadStore()
+		case "rig":
+			store = rigStores[sweepTarget.target.RigName]
+		}
+		if store == nil {
+			return newCityRuntimeOpenSweepStore(sweepTarget.target.ScopeRoot, cr.cityPath)
+		}
+		return store, nil
+	})
+	return stores, targets, err
+}
+
+func orderTrackingSweepOrderFilterForTargets(targets []orderTrackingSweepTarget) map[string]struct{} {
+	onlyOrders := map[string]struct{}{
+		orderTrackingSweepOrder: {},
+	}
+	for _, sweepTarget := range targets {
+		if sweepTarget.target.ScopeKind != "rig" || strings.TrimSpace(sweepTarget.target.RigName) == "" {
+			continue
+		}
+		scoped := (&orders.Order{Name: orderTrackingSweepOrder, Rig: sweepTarget.target.RigName}).ScopedName()
+		onlyOrders[scoped] = struct{}{}
+	}
+	return onlyOrders
 }
 
 func (cr *CityRuntime) handleReloadRequest(req *reloadRequest) {

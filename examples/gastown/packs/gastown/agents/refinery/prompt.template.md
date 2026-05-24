@@ -147,7 +147,21 @@ is how a refinery once self-polled for 13h42m with seven queued beads
 without catching the mismatch (upstream #1833).
 
 ```bash
-# Check for an in-progress patrol wisp
+# Step 0: Orphan-merge scan (mail-loss fallback).
+# Polecats sometimes die between commit and MERGE_READY mail
+# (e.g. controller restart, host wake, claim race). Their branch ships
+# but you never see the mail. Scan metadata for orphans before the
+# normal patrol — these are real merge candidates that need rescuing.
+ORPHANS=$(gc bd list --metadata-field gc.routed_to="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery" --status=open --json 2>/dev/null \
+  | jq -r '.[] | select(.metadata.branch != null) | .id')
+for ORPHAN in $ORPHANS; do
+  echo "orphan-merge candidate: $ORPHAN"
+  # Treat each like a normal mail-driven merge: read metadata, run gates,
+  # ff-merge, close the bead. This is just the regular work — scan only
+  # surfaces beads the inbox missed.
+done
+
+# Step 1: Check for an in-progress patrol wisp
 gc bd list --assignee="$GC_AGENT" --status=in_progress
 
 # If none found, pour one (root-only — no child step beads) and assign it

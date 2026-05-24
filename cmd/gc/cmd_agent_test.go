@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -246,7 +247,7 @@ append_fragments = ["footer"]
 	}
 }
 
-func TestLoadCityConfigFSEmitsLegacyV1SurfaceWarnings(t *testing.T) {
+func TestLoadCityConfigFSHardErrorsOnUnsupportedLegacyV1Surfaces(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Dirs["/city/legacy-pack"] = true
 	fs.Files["/city/legacy-pack/pack.toml"] = []byte(`[pack]
@@ -270,22 +271,19 @@ schema = 2
 `)
 
 	var stderr bytes.Buffer
-	cfg, err := loadCityConfigFS(fs, "/city/city.toml", &stderr)
-	if err != nil {
-		t.Fatalf("loadCityConfigFS: %v", err)
+	_, err := loadCityConfigFS(fs, "/city/city.toml", &stderr)
+	if err == nil {
+		t.Fatal("loadCityConfigFS unexpectedly accepted unsupported legacy PackV1 surfaces")
 	}
-	if cfg == nil {
-		t.Fatal("loadCityConfigFS returned nil config")
-	}
-	output := stderr.String()
+	output := err.Error()
 	for _, want := range []string{
-		"[[agent]] tables are deprecated",
-		"[packs] is deprecated",
-		"workspace.includes is deprecated",
-		"workspace.default_rig_includes is deprecated",
+		"unsupported PackV1 [[agent]] tables",
+		"unsupported PackV1 [packs] entries",
+		"unsupported PackV1 workspace.includes",
+		"unsupported PackV1 workspace.default_rig_includes",
 	} {
 		if !strings.Contains(output, want) {
-			t.Fatalf("stderr missing %q: %q", want, output)
+			t.Fatalf("error missing %q: %q", want, output)
 		}
 	}
 }
@@ -572,12 +570,12 @@ func TestNonTestLoadCityConfigCallersPassWarningWriter(t *testing.T) {
 func v2CityWithPack(t *testing.T) *fsys.Fake {
 	t.Helper()
 	fs := fsys.NewFake()
-	fs.Files["/city/city.toml"] = []byte(`[workspace]
-name = "test-city"
-`)
+	fs.Files["/city/city.toml"] = []byte("")
 	fs.Files["/city/pack.toml"] = []byte(`[pack]
 name = "test-city"
 schema = 2
+`)
+	fs.Files["/city/.gc/site.toml"] = []byte(`workspace_name = "test-city"
 `)
 	return fs
 }
@@ -611,6 +609,11 @@ func TestDoAgentAddScaffoldsAgentDirectory(t *testing.T) {
 	}
 	if !strings.Contains(string(gotPrompt), "{{ .AgentName }}") {
 		t.Errorf("prompt scaffold = %q, want template placeholder", gotPrompt)
+	}
+	if got, ok := fs.Files["/city/agents/worker/agent.toml"]; !ok {
+		t.Fatal("agent.toml missing; gc agent add should use the shared convention scaffold writer")
+	} else if strings.TrimSpace(string(got)) != "" {
+		t.Fatalf("agent.toml = %q, want empty convention config for default scaffold", got)
 	}
 
 	cfg, err := loadCityConfigFS(fs, "/city/city.toml")
@@ -651,20 +654,17 @@ func TestDoAgentAddCopiesPromptTemplate(t *testing.T) {
 	}
 }
 
-func TestDoAgentAddWritesAgentTomlForDirAndSuspended(t *testing.T) {
+func TestDoAgentAddWritesAgentTomlForSuspended(t *testing.T) {
 	fs := v2CityWithPack(t)
 
 	var stdout, stderr bytes.Buffer
-	code := doAgentAdd(fs, "/city", "hello-world/worker", "", "", true, &stdout, &stderr)
+	code := doAgentAdd(fs, "/city", "worker", "", "", true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
 	agentToml, ok := fs.Files["/city/agents/worker/agent.toml"]
 	if !ok {
 		t.Fatal("agent.toml missing")
-	}
-	if !strings.Contains(string(agentToml), "dir = \"hello-world\"") {
-		t.Errorf("agent.toml = %q, want dir", agentToml)
 	}
 	if !strings.Contains(string(agentToml), "suspended = true") {
 		t.Errorf("agent.toml = %q, want suspended", agentToml)
@@ -680,8 +680,8 @@ func TestDoAgentAddWritesAgentTomlForDirAndSuspended(t *testing.T) {
 			continue
 		}
 		found = true
-		if a.Dir != "hello-world" {
-			t.Errorf("Dir = %q, want hello-world", a.Dir)
+		if a.Dir != "" {
+			t.Errorf("Dir = %q, want empty", a.Dir)
 		}
 		if !a.Suspended {
 			t.Error("Suspended = false, want true")
@@ -689,6 +689,193 @@ func TestDoAgentAddWritesAgentTomlForDirAndSuspended(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("explicit agents = %#v, want worker", explicit)
+	}
+}
+
+type failAgentTomlRenameFS struct {
+	*fsys.Fake
+	target string
+}
+
+func (f *failAgentTomlRenameFS) Rename(oldpath, newpath string) error {
+	if filepath.Clean(newpath) == filepath.Clean(f.target) {
+		return errors.New("injected agent.toml write failure")
+	}
+	return f.Fake.Rename(oldpath, newpath)
+}
+
+func TestDoAgentAddRemovesFreshScaffoldWhenConventionConfigWriteFails(t *testing.T) {
+	fs := &failAgentTomlRenameFS{
+		Fake:   v2CityWithPack(t),
+		target: "/city/agents/worker/agent.toml",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentAdd(fs, "/city", "worker", "", "", false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "injected agent.toml write failure") {
+		t.Fatalf("stderr = %q, want injected failure", stderr.String())
+	}
+	for _, path := range []string{
+		"/city/agents/worker/prompt.template.md",
+		"/city/agents/worker/agent.toml",
+	} {
+		if _, ok := fs.Files[path]; ok {
+			t.Fatalf("%s remains after failed add", path)
+		}
+	}
+	if fs.Dirs["/city/agents/worker"] {
+		t.Fatal("fresh agent scaffold directory remains after failed add")
+	}
+}
+
+func TestDoAgentAddRejectsSymlinkedScaffoldPathBeforeWriting(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		setup            func(t *testing.T, cityDir string) string
+		outsideWritePath string
+	}{
+		{
+			name: "agents root",
+			setup: func(t *testing.T, cityDir string) string {
+				t.Helper()
+				outsideAgentsDir := filepath.Join(t.TempDir(), "agents")
+				if err := os.MkdirAll(outsideAgentsDir, 0o755); err != nil {
+					t.Fatalf("mkdir outside agents: %v", err)
+				}
+				agentsLink := filepath.Join(cityDir, "agents")
+				if err := os.Symlink(outsideAgentsDir, agentsLink); err != nil {
+					t.Skipf("symlink unsupported: %v", err)
+				}
+				return agentsLink
+			},
+			outsideWritePath: filepath.Join("agents", "worker"),
+		},
+		{
+			name: "agent dir",
+			setup: func(t *testing.T, cityDir string) string {
+				t.Helper()
+				agentsDir := filepath.Join(cityDir, "agents")
+				if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+					t.Fatalf("mkdir agents: %v", err)
+				}
+				outsideAgentDir := filepath.Join(t.TempDir(), "worker")
+				if err := os.MkdirAll(outsideAgentDir, 0o755); err != nil {
+					t.Fatalf("mkdir outside agent: %v", err)
+				}
+				agentLink := filepath.Join(agentsDir, "worker")
+				if err := os.Symlink(outsideAgentDir, agentLink); err != nil {
+					t.Skipf("symlink unsupported: %v", err)
+				}
+				return agentLink
+			},
+			outsideWritePath: "worker",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+				t.Fatalf("write city.toml: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(cityDir, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nschema = 2\n"), 0o644); err != nil {
+				t.Fatalf("write pack.toml: %v", err)
+			}
+			linkPath := tc.setup(t, cityDir)
+			outsidePath := filepath.Join(filepath.Dir(linkPath), tc.outsideWritePath)
+
+			var stdout, stderr bytes.Buffer
+			code := doAgentAdd(fsys.OSFS{}, cityDir, "worker", "", "", false, &stdout, &stderr)
+			if code != 1 {
+				t.Fatalf("code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "not a symlink") {
+				t.Fatalf("stderr = %q, want symlink rejection", stderr.String())
+			}
+			for _, path := range []string{
+				filepath.Join(outsidePath, "prompt.template.md"),
+				filepath.Join(outsidePath, "agent.toml"),
+			} {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("%s stat err = %v, want no write through symlink", path, err)
+				}
+			}
+			info, err := os.Lstat(linkPath)
+			if err != nil {
+				t.Fatalf("lstat symlink: %v", err)
+			}
+			if info.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("link mode = %v, want symlink preserved", info.Mode())
+			}
+		})
+	}
+}
+
+func TestDoAgentAddRejectsSchema2RigScopedConventionAgent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		dir  string
+	}{
+		{name: "hello-world/worker"},
+		{name: "worker", dir: "hello-world"},
+	} {
+		t.Run(tc.name+" "+tc.dir, func(t *testing.T) {
+			fs := v2CityWithPack(t)
+
+			var stdout, stderr bytes.Buffer
+			code := doAgentAdd(fs, "/city", tc.name, "", tc.dir, false, &stdout, &stderr)
+			if code != 1 {
+				t.Fatalf("code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "schema-2 convention agents are city-scoped") {
+				t.Fatalf("stderr = %q, want schema-2 city-scoped validation message", stderr.String())
+			}
+			for _, path := range []string{
+				"/city/agents/worker/agent.toml",
+				"/city/agents/worker/prompt.template.md",
+			} {
+				if _, ok := fs.Files[path]; ok {
+					t.Fatalf("%s was created for rejected input", path)
+				}
+			}
+		})
+	}
+}
+
+func TestDoAgentAddAllowsCityLocalNameSharedWithImportedAgent(t *testing.T) {
+	fs := v2CityWithPack(t)
+	fs.Files["/city/city.toml"] = []byte(`[imports.helper]
+source = "../helper"
+`)
+	fs.Files["/helper/pack.toml"] = []byte(`[pack]
+name = "helper"
+schema = 2
+
+[[agent]]
+name = "worker"
+provider = "claude"
+scope = "city"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentAdd(fs, "/city", "worker", "", "", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+
+	cfg, err := loadCityConfigFS(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("loadCityConfigFS: %v", err)
+	}
+	qualified := map[string]bool{}
+	for _, agent := range explicitAgents(cfg.Agents) {
+		qualified[agent.QualifiedName()] = true
+	}
+	for _, want := range []string{"helper.worker", "worker"} {
+		if !qualified[want] {
+			t.Fatalf("qualified agents = %v, want %q", qualified, want)
+		}
 	}
 }
 
@@ -706,6 +893,37 @@ func TestDoAgentAddDuplicateScaffold(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "already exists") {
 		t.Errorf("stderr = %q, want 'already exists'", stderr.String())
+	}
+}
+
+func TestDoAgentAddRejectsInvalidNamesBeforeFilesystemWrites(t *testing.T) {
+	for _, name := range []string{
+		"..",
+		".hidden",
+		"-worker",
+		"_worker",
+		"worker with space",
+		"worker.dotted",
+		"rig/worker.dotted",
+	} {
+		t.Run(name, func(t *testing.T) {
+			fs := v2CityWithPack(t)
+
+			var stdout, stderr bytes.Buffer
+			code := doAgentAdd(fs, "/city", name, "", "", false, &stdout, &stderr)
+			if code != 1 {
+				t.Fatalf("code = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "name must match") {
+				t.Fatalf("stderr = %q, want validation message", stderr.String())
+			}
+			for _, call := range fs.Calls {
+				switch call.Method {
+				case "MkdirAll", "WriteFile":
+					t.Fatalf("unexpected filesystem mutation before validation: %#v", call)
+				}
+			}
+		})
 	}
 }
 

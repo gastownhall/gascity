@@ -448,7 +448,7 @@ contract = "graph.v2"
 id = "{target}.work"
 title = "Work"
 `
-	if err := os.WriteFile(filepath.Join(dir, "needs-v2-fragment.formula.toml"), []byte(expansion), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "needs-v2-fragment.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion: %v", err)
 	}
 

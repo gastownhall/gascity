@@ -148,10 +148,9 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 		Agent  string `json:"agent"`
 	}](t, baseURL, validator, http.MethodPost, cityBase+"/agents", map[string]string{
 		"name":     "worker",
-		"dir":      rigName,
 		"provider": "contract-agent",
 	}, http.StatusCreated)
-	targetAgent := rigName + "/worker"
+	targetAgent := "worker"
 	waitForLiveContractAgent(t, baseURL, validator, cityBase, targetAgent, 30*time.Second)
 
 	publicProviders := liveContractJSON[struct {
@@ -167,7 +166,7 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	cfg := liveContractJSON[struct {
 		Agents []contractConfigAgent `json:"agents"`
 	}](t, baseURL, validator, http.MethodGet, cityBase+"/config", nil, http.StatusOK)
-	if !liveContractConfigHasAgent(cfg.Agents, "worker", rigName) {
+	if !liveContractConfigHasAgent(cfg.Agents, "worker", "") {
 		t.Fatalf("GET config missing created agent %q; agents=%+v", targetAgent, cfg.Agents)
 	}
 
@@ -684,8 +683,12 @@ func createLiveContractAgentSession(t *testing.T, baseURL string, v openapivalid
 	if result.Session.Title != "real-world app contract "+label {
 		t.Fatalf("%s session title = %q", label, result.Session.Title)
 	}
-	if result.Session.Rig != rigName {
-		t.Fatalf("%s session rig = %q, want %q", label, result.Session.Rig, rigName)
+	expectedSessionRig := ""
+	if dir, _, ok := strings.Cut(targetAgent, "/"); ok {
+		expectedSessionRig = dir
+	}
+	if result.Session.Rig != expectedSessionRig {
+		t.Fatalf("%s session rig = %q, want %q", label, result.Session.Rig, expectedSessionRig)
 	}
 	if result.Session.Alias == "" {
 		t.Fatalf("%s session missing controller-managed alias", label)
@@ -1490,11 +1493,13 @@ func liveContractRigList(baseURL string, v openapivalidator.Validator, cityBase 
 
 func waitForLiveContractAgent(t *testing.T, baseURL string, v openapivalidator.Validator, cityBase, targetAgent string, timeout time.Duration) {
 	t.Helper()
-	dir, base, ok := strings.Cut(targetAgent, "/")
-	if !ok || dir == "" || base == "" {
-		t.Fatalf("target agent %q is not a qualified rig agent", targetAgent)
+	path := cityBase + "/agent/" + url.PathEscape(targetAgent)
+	if dir, base, ok := strings.Cut(targetAgent, "/"); ok {
+		if dir == "" || base == "" {
+			t.Fatalf("target agent %q has an empty qualifier", targetAgent)
+		}
+		path = cityBase + "/agent/" + url.PathEscape(dir) + "/" + url.PathEscape(base)
 	}
-	path := cityBase + "/agent/" + url.PathEscape(dir) + "/" + url.PathEscape(base)
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {

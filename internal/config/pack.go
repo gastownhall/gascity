@@ -1431,13 +1431,16 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	}
 
 	// V2 convention-based order discovery: top-level orders/ flat files are the
-	// standard layout. Deprecated locations are still discovered so pack loads
-	// surface migration warnings consistently.
-	if _, err := orders.ScanRootsWithOptions(fs, []orders.ScanRoot{{
-		Dir:          filepath.Join(topoDir, "orders"),
-		FormulaLayer: filepath.Join(topoDir, "formulas"),
-	}}, nil, orders.ScanOptions{SuppressDeprecatedPathWarnings: opts.SuppressDeprecatedOrderWarnings}); err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, err
+	// standard layout. Deprecated subdirectory order paths are a filesystem
+	// layout cutover, not a city.toml PackV1 authoring surface, so they are
+	// rejected for all pack schemas.
+	if !opts.allowLegacyOrderLayouts {
+		if _, err := orders.ScanRoots(fs, []orders.ScanRoot{{
+			Dir:          filepath.Join(topoDir, "orders"),
+			FormulaLayer: filepath.Join(topoDir, "formulas"),
+		}}, nil); err != nil {
+			return nil, nil, nil, nil, nil, nil, nil, err
+		}
 	}
 
 	// Stamp parent agents: set dir = rigName (unless already set), adjust paths.
@@ -2195,11 +2198,25 @@ func legacyPackDoctors(fs fsys.FS, entries []PackDoctorEntry, packDir, packName 
 // to matching agents. City-level globals affect ALL agents. Rig-level
 // globals affect only agents in that rig.
 func applyPackGlobals(cfg *City) {
+	applied := make([]map[string]bool, len(cfg.Agents))
+	apply := func(agentIndex int, g ResolvedPackGlobal) {
+		if g.PackName != "" {
+			if applied[agentIndex] == nil {
+				applied[agentIndex] = make(map[string]bool)
+			}
+			if applied[agentIndex][g.PackName] {
+				return
+			}
+			applied[agentIndex][g.PackName] = true
+		}
+		cfg.Agents[agentIndex].SessionLive = append(
+			cfg.Agents[agentIndex].SessionLive, g.SessionLive...)
+	}
+
 	// City-level globals → all agents.
 	for _, g := range cfg.PackGlobals {
 		for i := range cfg.Agents {
-			cfg.Agents[i].SessionLive = append(
-				cfg.Agents[i].SessionLive, g.SessionLive...)
+			apply(i, g)
 		}
 	}
 	// Rig-level globals → only that rig's agents.
@@ -2207,8 +2224,7 @@ func applyPackGlobals(cfg *City) {
 		for _, g := range globals {
 			for i := range cfg.Agents {
 				if cfg.Agents[i].Dir == rigName {
-					cfg.Agents[i].SessionLive = append(
-						cfg.Agents[i].SessionLive, g.SessionLive...)
+					apply(i, g)
 				}
 			}
 		}

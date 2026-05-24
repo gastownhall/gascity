@@ -163,6 +163,13 @@ the work-query form appends
 `Agent.PoolName` when set and `Agent.QualifiedName()` otherwise, so
 pool instances and pool templates land on the same routed queue.
 
+Supported handoff forms are intentionally distinct. Generic pool demand is
+ready work with `assignee=""` and `gc.routed_to=<target>`; assigning the
+pool template itself is not pool demand. Direct named-session delivery is
+ready work with `assignee=<named-session-identity>` and no generic route
+metadata, so the reconciler does not also treat the handoff as generic pool
+demand.
+
 The shared predicate is the agreement substrate. Failure envelopes
 intentionally differ: the worker path suppresses `bd ready` stderr and
 returns `[]` so a session exits cleanly, while the count form propagates

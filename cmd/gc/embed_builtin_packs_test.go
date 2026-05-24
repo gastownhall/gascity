@@ -754,14 +754,14 @@ func TestLoadCityConfigMaterializesBuiltinPacks(t *testing.T) {
 	}
 }
 
-func TestLoadCityConfigSuppressDeprecatedOrderWarningsMaterializesBuiltinPacks(t *testing.T) {
+func TestLoadCityConfigForRegistryMaterializesBuiltinPacks(t *testing.T) {
 	dir := t.TempDir()
 	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := loadCityConfigSuppressDeprecatedOrderWarnings(dir); err != nil {
-		t.Fatalf("loadCityConfigSuppressDeprecatedOrderWarnings() error: %v", err)
+	if _, err := loadCityConfig(dir, io.Discard); err != nil {
+		t.Fatalf("loadCityConfig() error: %v", err)
 	}
 
 	for _, path := range []string{
@@ -906,7 +906,7 @@ func TestLoadCityConfigDeduplicatesBuiltinPackRefreshWarningsPerProcess(t *testi
 	}
 }
 
-func TestLoadCityConfigSuppressDeprecatedOrderWarningsDoesNotSuppressBuiltinPackRefreshWarnings(t *testing.T) {
+func TestLoadCityConfigForRegistryDoesNotSuppressBuiltinPackRefreshWarnings(t *testing.T) {
 	dir := t.TempDir()
 	if err := writeBuiltinPackLoadTestCity(dir); err != nil {
 		t.Fatal(err)
@@ -934,8 +934,8 @@ func TestLoadCityConfigSuppressDeprecatedOrderWarningsDoesNotSuppressBuiltinPack
 		loadCityConfigDefaultWarningWriter = origDefaultWarningWriter
 	})
 
-	if _, err := loadCityConfigSuppressDeprecatedOrderWarnings(dir); err != nil {
-		t.Fatalf("loadCityConfigSuppressDeprecatedOrderWarnings() fallback error: %v", err)
+	if _, err := loadCityConfig(dir); err != nil {
+		t.Fatalf("loadCityConfig() fallback error: %v", err)
 	}
 	if !strings.Contains(stderr.String(), "builtin pack refresh incomplete") {
 		t.Fatalf("expected builtin pack refresh warning, got %q", stderr.String())

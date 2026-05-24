@@ -50,6 +50,10 @@ func (v2ImportFormatCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
+func (v2PackSourcesCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
 func (v2PromptTemplateSuffixCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the

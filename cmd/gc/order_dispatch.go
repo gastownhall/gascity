@@ -25,14 +25,11 @@ import (
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/processgroup"
 )
-
-var startDeprecatedOrderWarningDedup = logutil.NewDedup(logutil.DefaultDedupCapacity)
 
 const (
 	labelOrderTracking    = "order-tracking"
@@ -45,6 +42,8 @@ const (
 	orderTrackingSweepMetadataReason       = "stale-order-tracking"
 	orderTrackingSweepMetadataInitiator    = "order-tracking-sweep"
 	orderTrackingWatchdogMetadataInitiator = "controller-watchdog"
+	orderTrackingCloseVerifyAttempts       = 3
+	orderTrackingCloseVerifyRetryDelay     = 25 * time.Millisecond
 
 	// orphanedOrderTrackingCloseReason is the canonical close_reason
 	// stamped on orphan-sweep closes. It satisfies bd's
@@ -277,11 +276,7 @@ func buildOrderDispatcher(cityPath string, cfg *config.City, rec events.Recorder
 }
 
 func buildOrderDispatcherWithSnapshot(cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer, cmdName string) (orderDispatcher, orderSetSnapshot) {
-	snapshot, err := scanOrderSetSnapshotFSWithOptions(fsys.OSFS{}, cityPath, cfg, stderr, cmdName, orders.ScanOptions{
-		DeprecatedPathWarningDedup:    startDeprecatedOrderWarningDedup,
-		DeprecatedPathWarningWriter:   stderr,
-		VerboseDeprecatedPathWarnings: startVerboseMode,
-	})
+	snapshot, err := scanOrderSetSnapshotFS(fsys.OSFS{}, cityPath, cfg, stderr, cmdName)
 	if err != nil {
 		logDispatchError(stderr, "%s: %v", cmdName, err)
 		return nil, orderSetSnapshot{}
@@ -290,16 +285,11 @@ func buildOrderDispatcherWithSnapshot(cityPath string, cfg *config.City, rec eve
 }
 
 func scanOrderSetSnapshotFS(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string) (orderSetSnapshot, error) {
-	return scanOrderSetSnapshotFSWithOptions(fs, cityPath, cfg, stderr, cmdName, orders.ScanOptions{})
-}
-
-func scanOrderSetSnapshotFSWithOptions(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string, opts orders.ScanOptions) (orderSetSnapshot, error) {
 	if cfg == nil {
 		cfg = &config.City{}
 	}
 	allAA, err := orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{
-		FS:               fs,
-		OrderScanOptions: opts,
+		FS: fs,
 		OnRigScanError: func(rigName string, err error) error {
 			fmt.Fprintf(stderr, "%s: rig %s: %v\n", cmdName, rigName, err) //nolint:errcheck // best-effort stderr
 			return nil
@@ -682,7 +672,11 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	// Defer order matters: doneInflight runs last, after Close makes the
 	// tracking bead outcome observable to a waiting drain.
 	defer m.doneInflight()
-	defer closeOrderTrackingBead(store, trackingID) //nolint:errcheck // best-effort close
+	defer func() {
+		if err := closeOrderTrackingBead(ctx, store, trackingID); err != nil {
+			logDispatchError(m.stderr, "gc: order %s: closing tracking bead %s: %v", a.ScopedName(), trackingID, err)
+		}
+	}()
 
 	timeout := effectiveTimeout(a, m.maxTimeout)
 	childCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -702,11 +696,108 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	}
 }
 
-func closeOrderTrackingBead(store beads.Store, trackingID string) error {
-	_, err := store.CloseAll([]string{trackingID}, map[string]string{
+func closeOrderTrackingBead(ctx context.Context, store beads.Store, trackingID string) error {
+	_, err := closeAndVerifyOrderTrackingBeads(ctx, store, []string{trackingID}, map[string]string{
 		"close_reason": completedOrderTrackingCloseReason,
 	})
 	return err
+}
+
+func closeAndVerifyOrderTrackingBeads(ctx context.Context, store beads.Store, ids []string, metadata map[string]string) (int, error) {
+	ids = uniqueNonEmptyOrderTrackingIDs(ids)
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if store == nil {
+		return 0, fmt.Errorf("order-tracking close: nil store")
+	}
+
+	closed := 0
+	var lastErr error
+	for attempt := 1; attempt <= orderTrackingCloseVerifyAttempts; attempt++ {
+		n, err := store.CloseAll(ids, metadata)
+		closed += n
+		if closed > len(ids) {
+			closed = len(ids)
+		}
+		if err != nil {
+			lastErr = fmt.Errorf("closing order-tracking beads %s: %w", strings.Join(ids, ", "), err)
+			if attempt < orderTrackingCloseVerifyAttempts {
+				if waitErr := waitOrderTrackingCloseRetry(ctx); waitErr != nil {
+					return closed, errors.Join(lastErr, waitErr)
+				}
+			}
+			continue
+		}
+		openIDs, err := openOrderTrackingIDs(store, ids)
+		if err != nil {
+			lastErr = fmt.Errorf("verifying order-tracking close for %s: %w", strings.Join(ids, ", "), err)
+			if attempt < orderTrackingCloseVerifyAttempts {
+				if waitErr := waitOrderTrackingCloseRetry(ctx); waitErr != nil {
+					return closed, errors.Join(lastErr, waitErr)
+				}
+			}
+			continue
+		}
+		if len(openIDs) == 0 {
+			return closed, nil
+		}
+		lastErr = fmt.Errorf("verifying order-tracking close: still open: %s", strings.Join(openIDs, ", "))
+		if attempt < orderTrackingCloseVerifyAttempts {
+			if waitErr := waitOrderTrackingCloseRetry(ctx); waitErr != nil {
+				return closed, errors.Join(lastErr, waitErr)
+			}
+		}
+	}
+	return closed, lastErr
+}
+
+func waitOrderTrackingCloseRetry(ctx context.Context) error {
+	timer := time.NewTimer(orderTrackingCloseVerifyRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func uniqueNonEmptyOrderTrackingIDs(ids []string) []string {
+	out := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func openOrderTrackingIDs(store beads.Store, ids []string) ([]string, error) {
+	var openIDs []string
+	for _, id := range ids {
+		b, err := store.Get(id)
+		if errors.Is(err, beads.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return openIDs, err
+		}
+		if b.Status != "closed" {
+			openIDs = append(openIDs, id)
+		}
+	}
+	return openIDs, nil
 }
 
 // dispatchExec runs an exec order's shell command.
@@ -1133,7 +1224,7 @@ func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	n, err := store.CloseAll(ids, map[string]string{
+	n, err := closeAndVerifyOrderTrackingBeads(context.Background(), store, ids, map[string]string{
 		"close_reason": orphanedOrderTrackingCloseReason,
 	})
 	if err != nil {
@@ -1154,6 +1245,8 @@ func beadLabelsContain(labels []string, want string) bool {
 type orderTrackingSweepResult struct {
 	trackingClosed int
 	wispClosed     int
+	storesSwept    int
+	sweptStoreKeys map[string]struct{}
 }
 
 // sweepStaleOrderTracking closes open order-tracking beads whose creation
@@ -1162,6 +1255,59 @@ type orderTrackingSweepResult struct {
 func sweepStaleOrderTracking(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string) (int, error) {
 	result, err := sweepStaleOrderTrackingWithOptions(store, now, staleAfter, onlyOrders, initiator, false)
 	return result.trackingClosed, err
+}
+
+func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
+	if staleAfter <= 0 {
+		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
+	}
+	if includeWispSubtrees && len(onlyOrders) == 0 {
+		return orderTrackingSweepResult{}, fmt.Errorf("include-wisps requires at least one order name")
+	}
+	result := orderTrackingSweepResult{}
+	var errs []error
+	for i, store := range stores {
+		if store == nil {
+			continue
+		}
+		partial, err := sweepStaleOrderTrackingWithOptions(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees)
+		result.trackingClosed += partial.trackingClosed
+		result.wispClosed += partial.wispClosed
+		if err != nil {
+			errs = append(errs, fmt.Errorf("sweeping order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
+			continue
+		}
+		result.storesSwept++
+		if key := orderTrackingSweepStoreKey(store); key != "" {
+			if result.sweptStoreKeys == nil {
+				result.sweptStoreKeys = make(map[string]struct{})
+			}
+			result.sweptStoreKeys[key] = struct{}{}
+		}
+	}
+	return result, errors.Join(errs...)
+}
+
+func orderTrackingSweepStoreKey(store beads.Store) string {
+	type keyed interface {
+		orderTrackingSweepKey() string
+	}
+	if keyedStore, ok := store.(keyed); ok {
+		return strings.TrimSpace(keyedStore.orderTrackingSweepKey())
+	}
+	return ""
+}
+
+func orderTrackingSweepStoreLabel(store beads.Store, index int) string {
+	type labeled interface {
+		orderTrackingSweepLabel() string
+	}
+	if labeledStore, ok := store.(labeled); ok {
+		if label := strings.TrimSpace(labeledStore.orderTrackingSweepLabel()); label != "" {
+			return label
+		}
+	}
+	return fmt.Sprintf("store %d", index+1)
 }
 
 func sweepStaleOrderTrackingWithOptions(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
@@ -1206,7 +1352,7 @@ func sweepStaleOrderTrackingWithOptions(store beads.Store, now time.Time, staleA
 		if initiator != "" {
 			metadata["order_tracking_sweep_by"] = initiator
 		}
-		n, err := store.CloseAll(ids, metadata)
+		n, err := closeAndVerifyOrderTrackingBeads(context.Background(), store, ids, metadata)
 		result.trackingClosed = n
 		if err != nil {
 			return result, fmt.Errorf("closing stale order-tracking beads: %w", err)

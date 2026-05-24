@@ -693,6 +693,14 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		// Non-fatal warning — server may recover by the time agents need it.
 	}
 
+	// Warm-up doctor scan. Fail-open: startup continues regardless of check,
+	// mail, or runner failures.
+	warmupOpts := WarmupOpts{
+		Mailer: defaultMailProvider(cityPath),
+		Stderr: stderr,
+	}
+	_, _ = RunWarmupChecks(context.Background(), cityPath, cfg, warmupOpts)
+
 	// Materialize formula symlinks before agent startup.
 	// System formulas/orders now arrive via the core bootstrap pack.
 	if len(cfg.FormulaLayers.City) > 0 {

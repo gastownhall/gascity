@@ -87,33 +87,43 @@ func newDoltLeakGuardedTestingM(m *testing.M, tempRoot string, cleanupPaths ...s
 }
 
 func (g *doltLeakGuardedTestingM) Run() int {
-	_ = g.sweepStaleCmdGCTestDoltProcesses("startup")
+	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, reapManagedDoltTestProcesses, reapDoltLeakProcesses)
+}
+
+func (g *doltLeakGuardedTestingM) runWith(
+	runTests func() int,
+	enumerate func() ([]DoltProcInfo, error),
+	sweepStale func(string) bool,
+	reapRegistered func(),
+	reapLeaks func([]DoltProcInfo),
+) int {
+	_ = sweepStale("startup")
 	stopSignalHandler := g.installSignalHandler()
 	defer stopSignalHandler()
 
-	initial, initialErr := snapshotDoltProcessesForConfigRoot(discoverDoltProcesses, g.tempRoot)
+	initial, initialErr := snapshotDoltProcessesForConfigRoot(enumerate, g.tempRoot)
 	if initialErr != nil {
 		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: initial scan failed: %v\n", initialErr) //nolint:errcheck
 	}
 
-	code := g.m.Run()
-
-	g.cleanupTemporaryPaths()
-	reapManagedDoltTestProcesses()
+	code := runTests()
 
 	guardFailed := initialErr != nil
 	if initialErr == nil {
-		final, finalErr := snapshotDoltProcessesForConfigRoot(discoverDoltProcesses, g.tempRoot)
+		final, finalErr := snapshotDoltProcessesForConfigRoot(enumerate, g.tempRoot)
 		if finalErr != nil {
 			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: final scan failed: %v\n", finalErr) //nolint:errcheck
 			guardFailed = true
 		} else if leaked := diffDoltProcessSnapshots(initial, final); len(leaked) > 0 {
 			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: leaked %d dolt sql-server process(es) under %s\n", len(leaked), g.tempRoot) //nolint:errcheck
 			writeDoltLeakReport(os.Stderr, leaked)
-			reapDoltLeakProcesses(leaked)
+			reapLeaks(leaked)
 			guardFailed = true
 		}
 	}
+
+	g.cleanupTemporaryPaths()
+	reapRegistered()
 
 	if guardFailed && code == 0 {
 		return 1

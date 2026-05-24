@@ -6,16 +6,16 @@ import (
 )
 
 // extOrder is the within-layer extension precedence used by Resolve:
-// canonical TOML beats legacy infixed TOML beats legacy JSON. JSON is
-// included here because Resolve drives the in-process parser, which still
-// loads .formula.json formulas. ResolveAll deliberately excludes JSON
-// (its caller stages symlinks the bd CLI consumes — TOML-only).
+// plain TOML beats infixed TOML beats legacy JSON. JSON is included here
+// because Resolve drives the in-process parser, which still loads
+// .formula.json formulas. ResolveAll deliberately excludes JSON (its caller
+// stages symlinks the bd CLI consumes — TOML-only).
 var extOrder = []string{CanonicalTOMLExt, LegacyTOMLExt, FormulaExtJSON}
 
 // Resolve returns the path of the highest-priority layer that contains a
 // formula by this name. layers are ordered lowest→highest priority,
 // matching ComputeFormulaLayers; the highest-priority layer present wins
-// (last-wins). Within a single layer, canonical .toml beats legacy
+// (last-wins). Within a single layer, plain .toml beats infixed
 // .formula.toml beats legacy .formula.json.
 //
 // Returns ("", false) if no layer contains the formula.
@@ -33,8 +33,8 @@ func Resolve(layers []string, name string) (string, bool) {
 
 // ResolveAll returns name→winning-path for every TOML formula reachable
 // across layers. Same precedence rules as Resolve: layers ordered
-// lowest→highest priority (last-wins across layers), canonical beats
-// legacy within a layer.
+// lowest→highest priority (last-wins across layers), plain .toml beats
+// infixed .formula.toml within a layer.
 //
 // JSON formulas are excluded — they are loader-only fallback and not
 // suitable for symlink staging by callers that consume this map.
@@ -45,7 +45,7 @@ func ResolveAll(layers []string) map[string]string {
 		if err != nil {
 			continue
 		}
-		// Resolve within-layer winners first so canonical beats legacy
+		// Resolve within-layer winners first so plain .toml beats an infixed
 		// sibling regardless of ReadDir order, then merge into the
 		// cross-layer winners map (overwriting lower layers).
 		layerPick := make(map[string]string)
@@ -60,7 +60,7 @@ func ResolveAll(layers []string) map[string]string {
 			}
 			legacy := e.Name() == name+LegacyTOMLExt
 			if _, exists := layerPick[name]; exists && legacy && !layerLegacy[name] {
-				continue // Canonical already picked in this layer — skip legacy sibling.
+				continue // Plain .toml already picked in this layer — skip infixed sibling.
 			}
 			abs, err := filepath.Abs(filepath.Join(layerDir, e.Name()))
 			if err != nil {

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 
 	"github.com/BurntSushi/toml"
@@ -98,20 +99,8 @@ func (e *Editor) Edit(fn func(cfg *config.City) error) error {
 		return err
 	}
 
-	if err := config.ValidateAgents(cfg.Agents); err != nil {
-		return fmt.Errorf("%w: agents: %w", ErrValidation, err)
-	}
-	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
-		return fmt.Errorf("%w: rigs: %w", ErrValidation, err)
-	}
-	if err := config.ValidateServices(cfg.Services); err != nil {
-		return fmt.Errorf("%w: services: %w", ErrValidation, err)
-	}
-	if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {
-		return fmt.Errorf("%w: services: %w", ErrValidation, err)
-	}
-	if err := validateProviders(cfg.Providers); err != nil {
-		return fmt.Errorf("%w: providers: %w", ErrValidation, err)
+	if err := validateCityForEdit(cfg); err != nil {
+		return err
 	}
 
 	return e.write(cfg)
@@ -146,23 +135,30 @@ func (e *Editor) EditExpanded(fn func(raw, expanded *config.City) error) error {
 		return err
 	}
 
-	if err := config.ValidateAgents(raw.Agents); err != nil {
-		return fmt.Errorf("%w: agents: %w", ErrValidation, err)
-	}
-	if err := config.ValidateRigs(raw.Rigs, config.EffectiveHQPrefix(raw)); err != nil {
-		return fmt.Errorf("%w: rigs: %w", ErrValidation, err)
-	}
-	if err := config.ValidateServices(raw.Services); err != nil {
-		return fmt.Errorf("%w: services: %w", ErrValidation, err)
-	}
-	if err := workspacesvc.ValidateRuntimeSupport(raw.Services); err != nil {
-		return fmt.Errorf("%w: services: %w", ErrValidation, err)
-	}
-	if err := validateProviders(raw.Providers); err != nil {
-		return fmt.Errorf("%w: providers: %w", ErrValidation, err)
+	if err := validateCityForEdit(raw); err != nil {
+		return err
 	}
 
 	return e.write(raw)
+}
+
+func validateCityForEdit(cfg *config.City) error {
+	if err := config.ValidateAgents(cfg.Agents); err != nil {
+		return fmt.Errorf("%w: agents: %w", ErrValidation, err)
+	}
+	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
+		return fmt.Errorf("%w: rigs: %w", ErrValidation, err)
+	}
+	if err := config.ValidateServices(cfg.Services); err != nil {
+		return fmt.Errorf("%w: services: %w", ErrValidation, err)
+	}
+	if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {
+		return fmt.Errorf("%w: services: %w", ErrValidation, err)
+	}
+	if err := validateProviders(cfg.Providers); err != nil {
+		return fmt.Errorf("%w: providers: %w", ErrValidation, err)
+	}
+	return nil
 }
 
 func (e *Editor) loadForEdit() (*config.City, error) {
@@ -187,22 +183,11 @@ func (e *Editor) loadForEdit() (*config.City, error) {
 // writeCityConfigForEditFS so repeated no-op mutations don't churn
 // watcher mtime or break debounce.
 func (e *Editor) write(cfg *config.City) error {
-	cityPath := filepath.Dir(e.tomlPath)
-	content, err := cfg.MarshalForWrite()
-	if err != nil {
-		return fmt.Errorf("marshaling config: %w", err)
-	}
-	if err := fsys.WriteFileIfChangedAtomic(e.fs, e.tomlPath, content, 0o644); err != nil {
-		return err
-	}
-	if err := config.PersistRigSiteBindings(e.fs, cityPath, cfg.Rigs); err != nil {
-		// Surface the half-migrated state: city.toml has been rewritten
-		// without rig paths, but the site binding wasn't persisted, so
-		// any previously-bound rigs whose path came only from city.toml
-		// are now unbound.
-		return fmt.Errorf("writing .gc/site.toml failed after city.toml was rewritten — rigs may be unbound; re-run the command or `gc doctor --fix` to retry: %w", err)
-	}
-	return nil
+	return config.WriteCityAndRigSiteBindingsForEdit(e.fs, e.tomlPath, cfg)
+}
+
+func (e *Editor) writeRemovingRigs(cfg *config.City, removedRigNames ...string) error {
+	return config.WriteCityAndRigSiteBindingsForEditRemovingRigs(e.fs, e.tomlPath, cfg, removedRigNames...)
 }
 
 // AgentOrigin determines whether an agent is defined inline in the raw
@@ -326,7 +311,11 @@ func mutateAgentSuspended(fs fsys.FS, cityRoot string, raw, expanded *config.Cit
 	case OriginInline:
 		return SetAgentSuspended(raw, name, suspended)
 	case OriginDerived:
-		if agent, ok := findLocalDiscoveredAgent(fs, expanded, cityRoot, name); ok {
+		agent, ok, err := findLocalDiscoveredAgent(fs, expanded, cityRoot, name)
+		if err != nil {
+			return err
+		}
+		if ok {
 			if err := WriteLocalDiscoveredAgentSuspended(fs, cityRoot, agent, suspended); err != nil {
 				return err
 			}
@@ -350,24 +339,28 @@ func mutateAgentSuspended(fs fsys.FS, cityRoot string, raw, expanded *config.Cit
 	return fmt.Errorf("agent %q: unknown origin", name)
 }
 
-func findLocalDiscoveredAgent(fs fsys.FS, expanded *config.City, cityRoot, name string) (config.Agent, bool) {
+func findLocalDiscoveredAgent(fs fsys.FS, expanded *config.City, cityRoot, name string) (config.Agent, bool, error) {
 	cityRoot = filepath.Clean(cityRoot)
 	for _, a := range expanded.Agents {
 		if !config.AgentMatchesIdentity(&a, name) {
 			continue
 		}
-		if !LocalDiscoveredAgent(fs, cityRoot, a) {
+		local, err := LocalDiscoveredAgent(fs, cityRoot, a)
+		if err != nil {
+			return config.Agent{}, false, err
+		}
+		if !local {
 			continue
 		}
-		return a, true
+		return a, true, nil
 	}
-	return config.Agent{}, false
+	return config.Agent{}, false, nil
 }
 
 // LocalDiscoveredAgent reports whether an agent's durable configuration
-// lives in agents/<name>/agent.toml. Such agents are scaffolded purely by
-// the convention layout (a prompt file under agents/<name>/) and are not
-// declared in either city.toml [[agent]] or the city's pack.toml [[agent]].
+// lives in agents/<name>/agent.toml. Such agents are scaffolded by the
+// convention layout or created through the schema-2 API, and are not declared
+// in either city.toml [[agent]] or the city's pack.toml [[agent]].
 //
 // Pack-declared [[agent]] entries that happen to point at a conventional
 // prompt template are intentionally excluded — for those, [[patches.agent]]
@@ -375,10 +368,14 @@ func findLocalDiscoveredAgent(fs fsys.FS, expanded *config.City, cityRoot, name 
 // precedence over agent.toml during composition. The pack-declared check
 // matches on the agent's full (Dir, Name) identity so that a city-scoped
 // discovered agent and a pack rig-scoped agent that happen to share a
-// bare Name remain distinct.
-func LocalDiscoveredAgent(fs fsys.FS, cityRoot string, agent config.Agent) bool {
+// bare Name remain distinct. The agent.toml marker is sufficient for
+// city-scoped convention ownership even when the prompt template lives at a
+// custom path. If the city's pack.toml exists but cannot be read or decoded,
+// the error is returned instead of treating the pack declaration check as
+// positive ownership evidence.
+func LocalDiscoveredAgent(fs fsys.FS, cityRoot string, agent config.Agent) (bool, error) {
 	if agent.BindingName != "" {
-		return false
+		return false, nil
 	}
 	// Convention discovery scans <cityRoot>/agents/<Name>/, which is
 	// strictly city-scoped (Agent.Dir == ""). A rig-scoped agent that
@@ -387,19 +384,31 @@ func LocalDiscoveredAgent(fs fsys.FS, cityRoot string, agent config.Agent) bool 
 	// as local-discovered — writing agent.toml there would corrupt the
 	// city agent's durable state.
 	if agent.Dir != "" {
-		return false
+		return false, nil
 	}
 	cityRoot = filepath.Clean(cityRoot)
 	agentDir := filepath.Join(cityRoot, "agents", agent.Name)
+	declared, err := agentDeclaredInCityPack(fs, cityRoot, agent.Dir, agent.Name)
+	if err != nil {
+		return false, err
+	}
+	if declared {
+		return false, nil
+	}
+	if _, err := fs.Stat(filepath.Join(agentDir, "agent.toml")); err == nil {
+		return true, nil
+	} else if !os.IsNotExist(err) {
+		return false, nil
+	}
 	switch filepath.Clean(agent.PromptTemplate) {
 	case filepath.Join(agentDir, "prompt.template.md"),
 		filepath.Join(agentDir, "prompt.md.tmpl"),
 		filepath.Join(agentDir, "prompt.md"):
-		// Conventional layout — eligible unless explicitly declared.
+		// Conventional prompt layout — eligible unless explicitly declared.
 	default:
-		return false
+		return false, nil
 	}
-	return !agentDeclaredInCityPack(fs, cityRoot, agent.Dir, agent.Name)
+	return true, nil
 }
 
 // agentDeclaredInCityPack reports whether (dir, name) appears as an
@@ -408,11 +417,14 @@ func LocalDiscoveredAgent(fs fsys.FS, cityRoot string, agent config.Agent) bool 
 // Matching uses the full (Dir, Name) identity so that, for example, a
 // rig-scoped pack agent (dir="rig", name="worker") does not shadow a
 // city-scoped discovered agent of the same bare name.
-func agentDeclaredInCityPack(fs fsys.FS, cityRoot, dir, name string) bool {
+func agentDeclaredInCityPack(fs fsys.FS, cityRoot, dir, name string) (bool, error) {
 	packPath := filepath.Join(cityRoot, "pack.toml")
 	data, err := fs.ReadFile(packPath)
 	if err != nil {
-		return false
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading %s: %w", packPath, err)
 	}
 	var pc struct {
 		Agents []struct {
@@ -421,14 +433,14 @@ func agentDeclaredInCityPack(fs fsys.FS, cityRoot, dir, name string) bool {
 		} `toml:"agent"`
 	}
 	if _, err := toml.Decode(string(data), &pc); err != nil {
-		return false
+		return false, fmt.Errorf("parsing %s: %w", packPath, err)
 	}
 	for _, a := range pc.Agents {
 		if a.Dir == dir && a.Name == name {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // StripAgentPatchSuspended clears the Suspended override from any
@@ -448,6 +460,57 @@ func StripAgentPatchSuspended(cfg *config.City, name string) bool {
 			if isAgentPatchOnlyIdentity(p) {
 				continue
 			}
+		}
+		kept = append(kept, p)
+	}
+	if modified {
+		cfg.Patches.Agents = kept
+	}
+	return modified
+}
+
+func stripAgentPatchUpdate(cfg *config.City, name string, patch AgentUpdate) bool {
+	dir, base := config.ParseQualifiedName(name)
+	modified := false
+	kept := cfg.Patches.Agents[:0:0]
+	for _, p := range cfg.Patches.Agents {
+		patchModified := false
+		if p.Dir == dir && p.Name == base {
+			if patch.Provider != "" && p.Provider != nil {
+				p.Provider = nil
+				patchModified = true
+			}
+			if patch.Scope != "" && p.Scope != nil {
+				p.Scope = nil
+				patchModified = true
+			}
+			if patch.Suspended != nil && p.Suspended != nil {
+				p.Suspended = nil
+				patchModified = true
+			}
+		}
+		if patchModified {
+			modified = true
+			if isAgentPatchOnlyIdentity(p) {
+				continue
+			}
+		}
+		kept = append(kept, p)
+	}
+	if modified {
+		cfg.Patches.Agents = kept
+	}
+	return modified
+}
+
+func removeAgentPatch(cfg *config.City, name string) bool {
+	dir, base := config.ParseQualifiedName(name)
+	modified := false
+	kept := cfg.Patches.Agents[:0:0]
+	for _, p := range cfg.Patches.Agents {
+		if p.Dir == dir && p.Name == base {
+			modified = true
+			continue
 		}
 		kept = append(kept, p)
 	}
@@ -525,6 +588,17 @@ func WriteLocalDiscoveredAgentSuspended(fs fsys.FS, cityRoot string, agent confi
 	return nil
 }
 
+func removeLocalDiscoveredAgentConfig(fs fsys.FS, cityRoot string, agent config.Agent) error {
+	agentDir, err := LocalDiscoveredAgentDir(cityRoot, agent.Name)
+	if err != nil {
+		return err
+	}
+	if err := fsys.RemoveAll(fs, agentDir); err != nil {
+		return fmt.Errorf("removing agents/%s: %w", agent.Name, err)
+	}
+	return nil
+}
+
 // SuspendRig suspends a rig by setting suspended=true in city.toml.
 func (e *Editor) SuspendRig(name string) error {
 	return e.Edit(func(cfg *config.City) error {
@@ -555,19 +629,249 @@ func (e *Editor) ResumeCity() error {
 	})
 }
 
-// CreateAgent adds a new agent to the config. Returns an error if an
+// CreateAgent adds a new city-local convention agent. Returns an error if an
 // agent with the same qualified name already exists.
 func (e *Editor) CreateAgent(a config.Agent) error {
-	return e.Edit(func(cfg *config.City) error {
+	return e.EditExpanded(func(raw, expanded *config.City) error {
 		qn := a.QualifiedName()
-		for _, existing := range cfg.Agents {
+		for _, existing := range expanded.Agents {
 			if existing.QualifiedName() == qn {
 				return fmt.Errorf("%w: agent %q", ErrAlreadyExists, qn)
 			}
 		}
-		cfg.Agents = append(cfg.Agents, a)
-		return nil
+
+		cityRoot := filepath.Dir(e.tomlPath)
+		schema2Pack, err := HasSchema2RootPack(e.fs, cityRoot)
+		if err != nil {
+			return err
+		}
+		if !schema2Pack {
+			raw.Agents = append(raw.Agents, a)
+			return nil
+		}
+
+		if err := WriteLocalDiscoveredAgentConfig(e.fs, cityRoot, a); err != nil {
+			return err
+		}
+		return ErrUnmodified
 	})
+}
+
+// HasSchema2RootPack reports whether cityRoot contains a root pack.toml with
+// [pack].schema set to 2 or later.
+func HasSchema2RootPack(fs fsys.FS, cityRoot string) (bool, error) {
+	data, err := fs.ReadFile(filepath.Join(cityRoot, "pack.toml"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading pack.toml: %w", err)
+	}
+
+	var header struct {
+		Pack struct {
+			Schema int `toml:"schema"`
+		} `toml:"pack"`
+	}
+	if _, err := toml.Decode(string(data), &header); err != nil {
+		return false, fmt.Errorf("parsing pack.toml: %w", err)
+	}
+	return header.Pack.Schema >= 2, nil
+}
+
+// WriteLocalDiscoveredAgentConfig writes the supported durable config for a
+// city-local convention agent under agents/<name>/agent.toml. The scaffold's
+// directory name is the agent identity; the file intentionally persists only
+// description, scope, provider, and suspended. Richer config.Agent fields must
+// come from pack config or [[patches.agent]] so the scaffold writer cannot
+// silently become a partial full-agent serializer. It returns ErrValidation
+// when agent.Dir is set; rig-scoped agents must also come from pack config or
+// [[patches.agent]].
+func WriteLocalDiscoveredAgentConfig(fs fsys.FS, cityRoot string, agent config.Agent) error {
+	if err := validateLocalDiscoveredAgent(agent); err != nil {
+		return err
+	}
+	if unsupported := unsupportedLocalDiscoveredAgentFields(agent); len(unsupported) > 0 {
+		return fmt.Errorf("%w: schema-2 convention agent config only persists description, scope, provider, and suspended; unsupported fields: %s", ErrValidation, strings.Join(unsupported, ", "))
+	}
+
+	agentDir, agentDirExisted, err := EnsureLocalDiscoveredAgentDir(fs, cityRoot, agent.Name)
+	if err != nil {
+		return err
+	}
+	cleanupFreshScaffold := func(err error) error {
+		if agentDirExisted {
+			return err
+		}
+		if removeErr := fsys.RemoveAll(fs, agentDir); removeErr != nil {
+			return errors.Join(err, fmt.Errorf("removing fresh agents/%s scaffold: %w", agent.Name, removeErr))
+		}
+		return err
+	}
+
+	values := make(map[string]any)
+	if agent.Description != "" {
+		values["description"] = agent.Description
+	}
+	if agent.Scope != "" {
+		values["scope"] = agent.Scope
+	}
+	if agent.Provider != "" {
+		values["provider"] = agent.Provider
+	}
+	if agent.Suspended {
+		values["suspended"] = true
+	}
+
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(values); err != nil {
+		return cleanupFreshScaffold(fmt.Errorf("encoding agents/%s/agent.toml: %w", agent.Name, err))
+	}
+	if err := fsys.WriteFileAtomic(fs, filepath.Join(agentDir, "agent.toml"), buf.Bytes(), 0o644); err != nil {
+		return cleanupFreshScaffold(fmt.Errorf("writing agents/%s/agent.toml: %w", agent.Name, err))
+	}
+	return nil
+}
+
+// EnsureLocalDiscoveredAgentDir creates the agents/<name> scaffold directory
+// without following a symlink at the agents root or final agent directory.
+// It returns whether the final agent directory existed before the call.
+func EnsureLocalDiscoveredAgentDir(fs fsys.FS, cityRoot, name string) (string, bool, error) {
+	agentsDir := filepath.Join(cityRoot, "agents")
+	if _, err := ensureExistingDirectoryIsNotSymlink(fs, agentsDir, "agents"); err != nil {
+		return "", false, err
+	}
+
+	agentDir, err := LocalDiscoveredAgentDir(cityRoot, name)
+	if err != nil {
+		return "", false, err
+	}
+	agentDirExisted, err := ensureExistingDirectoryIsNotSymlink(fs, agentDir, filepath.Join("agents", name))
+	if err != nil {
+		return "", false, err
+	}
+	if err := fs.MkdirAll(agentDir, 0o755); err != nil {
+		return "", false, fmt.Errorf("creating agents/%s: %w", name, err)
+	}
+	return agentDir, agentDirExisted, nil
+}
+
+func ensureExistingDirectoryIsNotSymlink(fs fsys.FS, path, label string) (bool, error) {
+	info, err := fs.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("checking %s: %w", label, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("%w: %s must be a real directory, not a symlink", ErrValidation, label)
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("%w: %s must be a directory", ErrValidation, label)
+	}
+	return true, nil
+}
+
+func writeLocalDiscoveredAgentUpdate(fs fsys.FS, cityRoot string, agent config.Agent, patch AgentUpdate) error {
+	if err := validateLocalDiscoveredAgent(agent); err != nil {
+		return err
+	}
+
+	agentTomlPath := filepath.Join(cityRoot, "agents", agent.Name, "agent.toml")
+	values := make(map[string]any)
+	data, err := fs.ReadFile(agentTomlPath)
+	switch {
+	case err == nil:
+		if len(bytes.TrimSpace(data)) > 0 {
+			if _, decodeErr := toml.Decode(string(data), &values); decodeErr != nil {
+				return fmt.Errorf("reading agents/%s/agent.toml: %w", agent.Name, decodeErr)
+			}
+		}
+	case os.IsNotExist(err):
+	default:
+		return fmt.Errorf("reading agents/%s/agent.toml: %w", agent.Name, err)
+	}
+
+	if patch.Provider != "" {
+		values["provider"] = patch.Provider
+	}
+	if patch.Scope != "" {
+		values["scope"] = patch.Scope
+	}
+	if patch.Suspended != nil {
+		values["suspended"] = *patch.Suspended
+	}
+
+	// An empty merged convention config means there is no durable agent.toml
+	// content to preserve; the prompt scaffold still defines the agent.
+	if len(values) == 0 {
+		if err := fs.Remove(agentTomlPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing agents/%s/agent.toml: %w", agent.Name, err)
+		}
+		return nil
+	}
+
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(values); err != nil {
+		return fmt.Errorf("encoding agents/%s/agent.toml: %w", agent.Name, err)
+	}
+	if err := fsys.WriteFileAtomic(fs, agentTomlPath, buf.Bytes(), 0o644); err != nil {
+		return fmt.Errorf("writing agents/%s/agent.toml: %w", agent.Name, err)
+	}
+	return nil
+}
+
+func validateLocalDiscoveredAgent(agent config.Agent) error {
+	if agent.Dir != "" || agent.Scope == "rig" {
+		return fmt.Errorf("%w: schema-2 convention agents are city-scoped; create rig-scoped agents in pack config or use [[patches.agent]]", ErrValidation)
+	}
+	if err := config.ValidateAgents([]config.Agent{agent}); err != nil {
+		return fmt.Errorf("%w: agent: %w", ErrValidation, err)
+	}
+	return nil
+}
+
+func unsupportedLocalDiscoveredAgentFields(agent config.Agent) []string {
+	allowed := map[string]bool{
+		"Name":        true,
+		"Description": true,
+		"Scope":       true,
+		"Provider":    true,
+		"Suspended":   true,
+	}
+	v := reflect.ValueOf(agent)
+	t := v.Type()
+	var unsupported []string
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if allowed[field.Name] {
+			continue
+		}
+		if strings.Split(field.Tag.Get("toml"), ",")[0] == "-" {
+			continue
+		}
+		if !v.Field(i).IsZero() {
+			unsupported = append(unsupported, field.Name)
+		}
+	}
+	return unsupported
+}
+
+// LocalDiscoveredAgentDir returns the agents/<name> scaffold directory for a
+// city-local convention agent. It returns ErrValidation if name would resolve
+// outside the city's agents directory.
+func LocalDiscoveredAgentDir(cityRoot, name string) (string, error) {
+	agentsDir := filepath.Join(cityRoot, "agents")
+	agentDir := filepath.Join(agentsDir, name)
+	rel, err := filepath.Rel(agentsDir, agentDir)
+	if err != nil {
+		return "", fmt.Errorf("resolving agents/%s: %w", name, err)
+	}
+	if rel == "." || rel == ".." || filepath.IsAbs(rel) || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("%w: agent name %q resolves outside agents directory", ErrValidation, name)
+	}
+	return agentDir, nil
 }
 
 // AgentUpdate holds optional fields for a partial agent update.
@@ -577,54 +881,158 @@ type AgentUpdate struct {
 	Suspended *bool
 }
 
-// UpdateAgent partially updates an existing agent. Uses EditExpanded for
-// provenance detection — pack-derived agents return a clear error.
-func (e *Editor) UpdateAgent(name string, patch AgentUpdate) error {
-	return e.EditExpanded(func(raw, expanded *config.City) error {
-		origin := AgentOrigin(raw, expanded, name)
-		switch origin {
-		case OriginDerived:
-			return fmt.Errorf("%w: agent %q cannot be updated directly (use patches)", ErrPackDerived, name)
-		case OriginNotFound:
-			return fmt.Errorf("%w: agent %q", ErrNotFound, name)
+func (e *Editor) loadExpandedForEdit() (*config.City, *config.City, error) {
+	raw, err := e.loadForEdit()
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading raw config: %w", err)
+	}
+	expanded, _, err := config.LoadWithIncludes(e.fs, e.tomlPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading expanded config: %w", err)
+	}
+	return raw, expanded, nil
+}
+
+func (e *Editor) commitLocalDiscoveredAgentMutation(cityRoot string, agent config.Agent, mutateLocal func() error, commit func() error) error {
+	agentDir, err := LocalDiscoveredAgentDir(cityRoot, agent.Name)
+	if err != nil {
+		return err
+	}
+	snapshot, err := fsys.SnapshotTree(e.fs, agentDir)
+	if err != nil {
+		return err
+	}
+	if err := mutateLocal(); err != nil {
+		if restoreErr := snapshot.Restore(e.fs); restoreErr != nil {
+			return fmt.Errorf("updating agents/%s: %w", agent.Name, errors.Join(err, fmt.Errorf("restoring agents/%s: %w", agent.Name, restoreErr)))
 		}
-		for i := range raw.Agents {
-			if config.AgentMatchesIdentity(&raw.Agents[i], name) {
-				if patch.Provider != "" {
-					raw.Agents[i].Provider = patch.Provider
-				}
-				if patch.Scope != "" {
-					raw.Agents[i].Scope = patch.Scope
-				}
-				if patch.Suspended != nil {
-					raw.Agents[i].Suspended = *patch.Suspended
-				}
-				return nil
-			}
+		return err
+	}
+	if commit == nil {
+		return nil
+	}
+	if err := commit(); err != nil {
+		if restoreErr := snapshot.Restore(e.fs); restoreErr != nil {
+			return fmt.Errorf("writing config after updating agents/%s: %w", agent.Name, errors.Join(err, fmt.Errorf("restoring agents/%s: %w", agent.Name, restoreErr)))
 		}
-		return fmt.Errorf("%w: agent %q", ErrNotFound, name)
+		return err
+	}
+	return nil
+}
+
+func (e *Editor) commitLocalDiscoveredAgentUpdate(cityRoot string, agent config.Agent, mutateLocal func() error, raw *config.City) error {
+	return e.commitLocalDiscoveredAgentMutation(cityRoot, agent, mutateLocal, func() error {
+		return e.write(raw)
 	})
+}
+
+// UpdateAgent partially updates an existing agent. It loads raw and expanded
+// config for provenance detection; pack-derived agents return a clear error.
+func (e *Editor) UpdateAgent(name string, patch AgentUpdate) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	raw, expanded, err := e.loadExpandedForEdit()
+	if err != nil {
+		return err
+	}
+
+	cityRoot := filepath.Dir(e.tomlPath)
+	switch AgentOrigin(raw, expanded, name) {
+	case OriginDerived:
+		agent, ok, err := findLocalDiscoveredAgent(e.fs, expanded, cityRoot, name)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%w: agent %q cannot be updated directly (use patches)", ErrPackDerived, name)
+		}
+		updated := agent
+		applyAgentUpdate(&updated, patch)
+		if err := validateLocalDiscoveredAgent(updated); err != nil {
+			return err
+		}
+		if !stripAgentPatchUpdate(raw, agent.QualifiedName(), patch) {
+			return writeLocalDiscoveredAgentUpdate(e.fs, cityRoot, updated, patch)
+		}
+		if err := validateCityForEdit(raw); err != nil {
+			return err
+		}
+		return e.commitLocalDiscoveredAgentUpdate(cityRoot, agent, func() error {
+			return writeLocalDiscoveredAgentUpdate(e.fs, cityRoot, updated, patch)
+		}, raw)
+	case OriginNotFound:
+		return fmt.Errorf("%w: agent %q", ErrNotFound, name)
+	}
+	for i := range raw.Agents {
+		if config.AgentMatchesIdentity(&raw.Agents[i], name) {
+			applyAgentUpdate(&raw.Agents[i], patch)
+			if err := validateCityForEdit(raw); err != nil {
+				return err
+			}
+			return e.write(raw)
+		}
+	}
+	return fmt.Errorf("%w: agent %q", ErrNotFound, name)
+}
+
+func applyAgentUpdate(agent *config.Agent, patch AgentUpdate) {
+	if patch.Provider != "" {
+		agent.Provider = patch.Provider
+	}
+	if patch.Scope != "" {
+		agent.Scope = patch.Scope
+	}
+	if patch.Suspended != nil {
+		agent.Suspended = *patch.Suspended
+	}
 }
 
 // DeleteAgent removes an inline agent from the config.
 // Returns an error if the agent is not found.
 func (e *Editor) DeleteAgent(name string) error {
-	return e.EditExpanded(func(raw, expanded *config.City) error {
-		origin := AgentOrigin(raw, expanded, name)
-		switch origin {
-		case OriginDerived:
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	raw, expanded, err := e.loadExpandedForEdit()
+	if err != nil {
+		return err
+	}
+
+	cityRoot := filepath.Dir(e.tomlPath)
+	switch AgentOrigin(raw, expanded, name) {
+	case OriginDerived:
+		agent, ok, err := findLocalDiscoveredAgent(e.fs, expanded, cityRoot, name)
+		if err != nil {
+			return err
+		}
+		if !ok {
 			return fmt.Errorf("%w: agent %q cannot be deleted (use patches to override)", ErrPackDerived, name)
-		case OriginNotFound:
-			return fmt.Errorf("%w: agent %q", ErrNotFound, name)
 		}
-		for i := range raw.Agents {
-			if config.AgentMatchesIdentity(&raw.Agents[i], name) {
-				raw.Agents = append(raw.Agents[:i], raw.Agents[i+1:]...)
-				return nil
-			}
+		if !removeAgentPatch(raw, agent.QualifiedName()) {
+			return e.commitLocalDiscoveredAgentMutation(cityRoot, agent, func() error {
+				return removeLocalDiscoveredAgentConfig(e.fs, cityRoot, agent)
+			}, nil)
 		}
+		if err := validateCityForEdit(raw); err != nil {
+			return err
+		}
+		return e.commitLocalDiscoveredAgentUpdate(cityRoot, agent, func() error {
+			return removeLocalDiscoveredAgentConfig(e.fs, cityRoot, agent)
+		}, raw)
+	case OriginNotFound:
 		return fmt.Errorf("%w: agent %q", ErrNotFound, name)
-	})
+	}
+	for i := range raw.Agents {
+		if config.AgentMatchesIdentity(&raw.Agents[i], name) {
+			raw.Agents = append(raw.Agents[:i], raw.Agents[i+1:]...)
+			if err := validateCityForEdit(raw); err != nil {
+				return err
+			}
+			return e.write(raw)
+		}
+	}
+	return fmt.Errorf("%w: agent %q", ErrNotFound, name)
 }
 
 // CreateRig adds a new rig to the config. Returns an error if a rig with
@@ -679,28 +1087,39 @@ func (e *Editor) UpdateRig(name string, patch RigUpdate) error {
 // DeleteRig removes a rig and all its scoped agents from the config.
 // Returns an error if the rig is not found.
 func (e *Editor) DeleteRig(name string) error {
-	return e.Edit(func(cfg *config.City) error {
-		found := false
-		for i := range cfg.Rigs {
-			if cfg.Rigs[i].Name == name {
-				cfg.Rigs = append(cfg.Rigs[:i], cfg.Rigs[i+1:]...)
-				found = true
-				break
-			}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	cfg, err := e.loadForEdit()
+	if err != nil {
+		return err
+	}
+
+	found := false
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name == name {
+			cfg.Rigs = append(cfg.Rigs[:i], cfg.Rigs[i+1:]...)
+			found = true
+			break
 		}
-		if !found {
-			return fmt.Errorf("%w: rig %q", ErrNotFound, name)
+	}
+	if !found {
+		return fmt.Errorf("%w: rig %q", ErrNotFound, name)
+	}
+	// Remove rig-scoped agents.
+	var kept []config.Agent
+	for _, a := range cfg.Agents {
+		if a.Dir != name {
+			kept = append(kept, a)
 		}
-		// Remove rig-scoped agents.
-		var kept []config.Agent
-		for _, a := range cfg.Agents {
-			if a.Dir != name {
-				kept = append(kept, a)
-			}
-		}
-		cfg.Agents = kept
-		return nil
-	})
+	}
+	cfg.Agents = kept
+
+	if err := validateCityForEdit(cfg); err != nil {
+		return err
+	}
+
+	return e.writeRemovingRigs(cfg, name)
 }
 
 // ProviderUpdate holds optional fields for a partial provider update.

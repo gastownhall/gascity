@@ -18,6 +18,7 @@ func TestPackV2ImportedFormulasAndOrdersVisibleToCityAndRig(t *testing.T) {
 	sidecarPackDir := filepath.Join(cityDir, "packs", "sidecar")
 
 	for _, dir := range []string{
+		filepath.Join(cityDir, ".gc"),
 		rigDir,
 		filepath.Join(opsPackDir, "formulas"),
 		filepath.Join(opsPackDir, "orders"),
@@ -39,14 +40,19 @@ source = "./packs/ops"
 `)
 	writeFile(t, filepath.Join(cityDir, "city.toml"), `
 [workspace]
-name = "testcity"
 
 [[rigs]]
 name = "frontend"
-path = "./frontend"
 
 [rigs.imports.sidecar]
 source = "./packs/sidecar"
+`)
+	writeFile(t, filepath.Join(cityDir, ".gc", "site.toml"), `
+workspace_name = "testcity"
+
+[[rig]]
+name = "frontend"
+path = "./frontend"
 `)
 	writeFile(t, filepath.Join(opsPackDir, "pack.toml"), `
 [pack]
@@ -118,6 +124,9 @@ func TestTransitiveGastownPackDigestOrderResolvesAndRuns(t *testing.T) {
 	if err := os.MkdirAll(wrapperPackDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	gastownRoot, err := filepath.Abs(filepath.Join("..", "..", "examples", "gastown"))
 	if err != nil {
@@ -129,11 +138,11 @@ func TestTransitiveGastownPackDigestOrderResolvesAndRuns(t *testing.T) {
 	digestFormulaFile := filepath.Join(digestFormulaLayer, "mol-digest-generate.toml")
 
 	writeFile(t, filepath.Join(cityDir, "city.toml"), `
-[workspace]
-name = "wrapper-city"
-
 [daemon]
 formula_v2 = true
+`)
+	writeFile(t, filepath.Join(cityDir, ".gc", "site.toml"), `
+workspace_name = "wrapper-city"
 `)
 	writeFile(t, filepath.Join(cityDir, "pack.toml"), `
 [pack]
@@ -270,10 +279,12 @@ func TestPackV2OrdersOnlyPackVisibleToCity(t *testing.T) {
 [pack]
 name = "testcity"
 schema = 2
+
+[imports.pr_audit]
+source = "./packs/pr-audit"
 `)
 	writeFile(t, filepath.Join(cityDir, "city.toml"), `
 [workspace]
-includes = ["packs/pr-audit"]
 `)
 	writeFile(t, filepath.Join(packDir, "pack.toml"), `
 [pack]
@@ -313,6 +324,7 @@ func TestPackV2OrdersOnlyPackVisibleToRig(t *testing.T) {
 	packDir := filepath.Join(cityDir, "packs", "watcher")
 
 	for _, dir := range []string{
+		filepath.Join(cityDir, ".gc"),
 		rigDir,
 		filepath.Join(packDir, "orders"),
 	} {
@@ -332,10 +344,16 @@ name = "testcity"
 
 [[rigs]]
 name = "frontend"
-path = "./frontend"
 
 [rigs.imports.watcher]
 source = "./packs/watcher"
+`)
+	writeFile(t, filepath.Join(cityDir, ".gc", "site.toml"), `
+workspace_name = "testcity"
+
+[[rig]]
+name = "frontend"
+path = "./frontend"
 `)
 	writeFile(t, filepath.Join(packDir, "pack.toml"), `
 [pack]

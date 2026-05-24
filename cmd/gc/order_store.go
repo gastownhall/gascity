@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -21,6 +22,25 @@ type (
 	orderStoreResolver  func(orders.Order) (beads.Store, error)
 	orderStoresResolver func(orders.Order) ([]beads.Store, error)
 )
+
+type orderTrackingSweepTarget struct {
+	target execStoreTarget
+	label  string
+}
+
+type orderTrackingSweepScopedStore struct {
+	beads.Store
+	label string
+	key   string
+}
+
+func (s orderTrackingSweepScopedStore) orderTrackingSweepLabel() string {
+	return s.label
+}
+
+func (s orderTrackingSweepScopedStore) orderTrackingSweepKey() string {
+	return s.key
+}
 
 func openCityOrderStore(stderr io.Writer, cmdName string) (beads.Store, int) {
 	cityPath, err := resolveCity()
@@ -458,6 +478,62 @@ func cachedOrderStoresResolver(cityPath string, cfg *config.City) orderStoresRes
 		}
 		return out, nil
 	}
+}
+
+func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []orderTrackingSweepTarget {
+	targets := []orderTrackingSweepTarget{{
+		target: legacyOrderCityTarget(cityPath, cfg),
+		label:  "city",
+	}}
+	if cfg != nil {
+		resolveRigPaths(cityPath, cfg.Rigs)
+		for _, rig := range cfg.Rigs {
+			if strings.TrimSpace(rig.Path) == "" {
+				continue
+			}
+			targets = append(targets, orderTrackingSweepTarget{
+				target: execStoreTarget{
+					ScopeRoot: rig.Path,
+					ScopeKind: "rig",
+					Prefix:    rig.EffectivePrefix(),
+					RigName:   rig.Name,
+				},
+				label: fmt.Sprintf("rig %q", rig.Name),
+			})
+		}
+	}
+	return targets
+}
+
+func orderTrackingSweepStoresForConfig(cityPath string, cfg *config.City) ([]beads.Store, error) {
+	targets := orderTrackingSweepTargetsForConfig(cityPath, cfg)
+	return orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {
+		return openStoreAtForCity(sweepTarget.target.ScopeRoot, cityPath)
+	})
+}
+
+func orderTrackingSweepStoresFromTargets(targets []orderTrackingSweepTarget, openStore func(orderTrackingSweepTarget) (beads.Store, error)) ([]beads.Store, error) {
+	stores := make([]beads.Store, 0, len(targets))
+	seen := make(map[string]struct{}, len(targets))
+	var errs []error
+	for _, sweepTarget := range targets {
+		key := orderStoreTargetKey(sweepTarget.target)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		store, err := openStore(sweepTarget)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("opening %s order store: %w", sweepTarget.label, err))
+			continue
+		}
+		stores = append(stores, orderTrackingSweepScopedStore{
+			Store: store,
+			label: sweepTarget.label,
+			key:   key,
+		})
+	}
+	return stores, errors.Join(errs...)
 }
 
 func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr io.Writer) orderStoresResolver {

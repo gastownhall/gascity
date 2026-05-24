@@ -92,14 +92,12 @@ type Provenance struct {
 
 // LoadOptions controls optional config-loading behavior.
 type LoadOptions struct {
-	// SuppressDeprecatedOrderWarnings suppresses only legacy order-path
-	// migration warnings produced while discovering pack orders.
-	SuppressDeprecatedOrderWarnings bool
 	// AllowRootDefaultRigImports permits [defaults.rig.imports] only on the
 	// root pack.toml being loaded. Normal pack imports still reject it.
 	AllowRootDefaultRigImports bool
 	deferRigPatches            bool
 	deferredRigPatches         *[]deferredRigPatches
+	allowLegacyOrderLayouts    bool
 }
 
 // LoadWithIncludes loads a city.toml and merges all included fragments.
@@ -148,7 +146,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	var rootPackRequires []PackRequirement
 	packPath := filepath.Join(cityRoot, packFile)
 	legacyV1SurfaceWarningsEnabled := false
-	if packData, pErr := fs.ReadFile(packPath); pErr == nil {
+	packData, pErr := fs.ReadFile(packPath)
+	if pErr != nil && !os.IsNotExist(pErr) {
+		return nil, nil, fmt.Errorf("loading city pack.toml: %w", pErr)
+	}
+	if pErr == nil {
 		packExists = true
 		pc, md, packWarnings, decErr := parsePackConfigWithMetadata(packData, packPath)
 		if decErr != nil {
@@ -163,11 +165,18 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 		legacyV1SurfaceWarningsEnabled = pc.Pack.Schema >= 2
 		if legacyV1SurfaceWarningsEnabled {
-			// Detect v1 surfaces on the freshly-parsed city.toml, before
-			// pack.toml merging or fragment processing can inject
-			// pack-discovered agents or pack-default rig includes into the
-			// same fields.
-			prov.Warnings = append(prov.Warnings, DetectLegacyV1Surfaces(root, path)...)
+			// Wave 2 hard-stop: schema=2 city packs no longer tolerate PackV1
+			// city.toml authoring surfaces. Check the freshly-parsed city.toml
+			// before pack merging or fragment processing can inject
+			// pack-discovered agents or pack-default rig includes into the same
+			// fields.
+			if err := LegacyV1SurfaceError(root, path, data); err != nil {
+				return nil, nil, err
+			}
+			prov.Warnings = append(prov.Warnings, legacyWorkspaceIdentitySurfaceWarnings(root, path)...)
+			if err := LegacySiteBindingSurfaceError(root, path, data); err != nil {
+				return nil, nil, err
+			}
 		}
 		// Preserve the city.toml agents so they can override pack-defined
 		// and convention-discovered agents.
@@ -384,7 +393,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 		prov.Warnings = append(prov.Warnings, fragWarnings...)
 		if legacyV1SurfaceWarningsEnabled {
-			prov.Warnings = append(prov.Warnings, DetectLegacyV1Surfaces(frag, fragPath)...)
+			if err := LegacyV1SurfaceError(frag, fragPath, fragData); err != nil {
+				return nil, nil, err
+			}
+			prov.Warnings = append(prov.Warnings, legacyWorkspaceIdentitySurfaceWarnings(frag, fragPath)...)
+			prov.Warnings = append(prov.Warnings, legacyRigPathSurfaceWarnings(frag, fragPath)...)
 		}
 
 		// Fragments cannot include other fragments.
@@ -1343,6 +1356,78 @@ func LoadRootPackDefaultRigImports(fs fsys.FS, cityRoot string) ([]BoundImport, 
 		return nil, fmt.Errorf("parsing city pack.toml: %s", strings.Join(warnings, "; "))
 	}
 	return defaultRigImportsFromPackDefaults(pc.Defaults, md)
+}
+
+// LoadPackGraphDirsForDoctor returns the pack directories the canonical city
+// loader would evaluate while allowing legacy PackV1 order layouts to remain
+// on disk for doctor diagnostics and migration.
+func LoadPackGraphDirsForDoctor(fs fsys.FS, cityTomlPath string) ([]string, error) {
+	cfg, _, err := LoadWithIncludesOptions(fs, cityTomlPath, LoadOptions{allowLegacyOrderLayouts: true})
+	if err != nil {
+		return nil, err
+	}
+
+	var dirs []string
+	dirs = appendUnique(dirs, cfg.PackDirs...)
+
+	rigNames := make([]string, 0, len(cfg.RigPackDirs))
+	for name := range cfg.RigPackDirs {
+		rigNames = append(rigNames, name)
+	}
+	sort.Strings(rigNames)
+	for _, name := range rigNames {
+		dirs = appendUnique(dirs, cfg.RigPackDirs[name]...)
+	}
+
+	defaultNames := make([]string, 0, len(cfg.DefaultRigImports))
+	seenDefaults := make(map[string]bool, len(cfg.DefaultRigImports))
+	for _, name := range cfg.DefaultRigImportOrder {
+		if _, ok := cfg.DefaultRigImports[name]; !ok || seenDefaults[name] {
+			continue
+		}
+		seenDefaults[name] = true
+		defaultNames = append(defaultNames, name)
+	}
+	var missingDefaults []string
+	for name := range cfg.DefaultRigImports {
+		if !seenDefaults[name] {
+			missingDefaults = append(missingDefaults, name)
+		}
+	}
+	sort.Strings(missingDefaults)
+	defaultNames = append(defaultNames, missingDefaults...)
+	if len(defaultNames) == 0 {
+		return dirs, nil
+	}
+
+	cityRoot := filepath.Dir(cityTomlPath)
+	cache := &packLoadCache{results: make(map[string]*packLoadResult)}
+	for _, name := range defaultNames {
+		imp := cfg.DefaultRigImports[name]
+		topoDirs, err := loadImportPackGraphDirsForDoctor(fs, imp, cityRoot, cityRoot, cache)
+		if err != nil {
+			return nil, fmt.Errorf("default rig import %q: %w", name, err)
+		}
+		dirs = appendUnique(dirs, topoDirs...)
+	}
+	return dirs, nil
+}
+
+func loadImportPackGraphDirsForDoctor(fs fsys.FS, imp Import, declDir, cityRoot string, cache *packLoadCache) ([]string, error) {
+	impDir, err := resolveImportPackRef(imp.Source, declDir, cityRoot)
+	if err != nil {
+		return nil, err
+	}
+	topoPath := filepath.Join(impDir, packFile)
+	_, _, _, _, topoDirs, _, _, err := loadPackWithCacheOptions(
+		fs, topoPath, impDir, cityRoot, "", nil, cache, LoadOptions{allowLegacyOrderLayouts: true})
+	if err != nil {
+		return nil, err
+	}
+	if !imp.ImportIsTransitive() {
+		return cachedPackLocalTopoDirs(cache, impDir), nil
+	}
+	return topoDirs, nil
 }
 
 func defaultRigImportsFromPackDefaults(defaults PackDefaults, md toml.MetaData) ([]BoundImport, error) {

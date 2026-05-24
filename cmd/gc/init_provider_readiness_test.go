@@ -892,6 +892,7 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlock(t *testing
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	stubInitDependencyChecks(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
@@ -1422,6 +1423,7 @@ func TestInitRunDoltConfigGetTreatsSilentEmptyExitAsMissingKey(t *testing.T) {
 func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkip(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	configureIsolatedRuntimeEnv(t)
+	stubInitDependencyChecks(t)
 	stubInitDoltAuthorIdentity(t, map[string]string{
 		"user.name":  "gc-test",
 		"user.email": "gc-test@test.local",
@@ -1475,6 +1477,7 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkip
 func TestFinalizeInitDoesNotRunBdProviderBeforeProviderReadinessBlock(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("GC_DOLT", "")
+	stubInitDependencyChecks(t)
 	stubInitDoltAuthorIdentity(t, map[string]string{
 		"user.name":  "gc-test",
 		"user.email": "gc-test@test.local",

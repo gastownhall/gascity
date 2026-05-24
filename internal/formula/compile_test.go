@@ -1320,7 +1320,7 @@ func TestCompileBugReportFlowV2(t *testing.T) {
 	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
 
 	const toolingPath = "/home/ubuntu/tooling/formulas"
-	if _, err := os.Stat(filepath.Join(toolingPath, "mol-bug-report-flow-v2.formula.toml")); err != nil {
+	if _, err := os.Stat(filepath.Join(toolingPath, "mol-bug-report-flow-v2.toml")); err != nil {
 		t.Skipf("tooling formula not present: %v", err)
 	}
 
@@ -2038,7 +2038,7 @@ contract = "graph.v2"
 id = "work"
 title = "Do work"
 `
-		if err := os.WriteFile(filepath.Join(dir, "needs-v2.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "needs-v2.toml"), []byte(formulaContent), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -2060,7 +2060,7 @@ version = 8
 id = "work"
 title = "Do work"
 `
-		if err := os.WriteFile(filepath.Join(dir, "legacy-v8.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "legacy-v8.toml"), []byte(formulaContent), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -2082,7 +2082,7 @@ version = 1
 id = "work"
 title = "Do work"
 `
-		if err := os.WriteFile(filepath.Join(dir, "still-v1.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "still-v1.toml"), []byte(formulaContent), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -2108,7 +2108,7 @@ max_attempts = 1
 mode = "exec"
 path = "check.sh"
 `
-		if err := os.WriteFile(filepath.Join(dir, "legacy-check.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "legacy-check.toml"), []byte(formulaContent), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -2124,6 +2124,29 @@ path = "check.sh"
 			t.Fatalf("root = %+v, want legacy molecule root", root)
 		}
 	})
+}
+
+func TestCompileAcceptsLegacyFormulaFilename(t *testing.T) {
+	dir := t.TempDir()
+	formulaContent := `
+formula = "legacy-name"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Do work"
+`
+	if err := os.WriteFile(filepath.Join(dir, "legacy-name.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Compile(context.Background(), "legacy-name", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if got.Name != "legacy-name" {
+		t.Fatalf("Name = %q, want legacy-name", got.Name)
+	}
 }
 
 func TestCompileValidatesRequiredVars(t *testing.T) {

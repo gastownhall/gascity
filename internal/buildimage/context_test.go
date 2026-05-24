@@ -114,7 +114,7 @@ name = "test-city"
 	writeFile(t, cityDir, filepath.Join(citylayout.CachePacksRoot, "remote", ".git", "HEAD"), "ref: refs/heads/main\n")
 	writeFile(t, cityDir, filepath.Join(citylayout.RuntimeRoot, "runtime", "artifact.txt"), "runtime")
 	writeFile(t, cityDir, filepath.Join(".gc", "prompts", "mayor.md"), "old prompt")
-	writeFile(t, cityDir, filepath.Join(".gc", "formulas", "legacy.formula.toml"), "name = \"legacy\"\n")
+	writeFile(t, cityDir, filepath.Join(".gc", "formulas", "legacy.toml"), "name = \"legacy\"\n")
 	writeFile(t, cityDir, filepath.Join(".gc", "settings.json"), "{}")
 	writeFile(t, cityDir, filepath.Join(".gc", "scripts", "setup.sh"), "#!/bin/sh\n")
 
@@ -131,7 +131,7 @@ name = "test-city"
 	assertFileNotExists(t, outputDir, filepath.Join("workspace", citylayout.CachePacksRoot, "remote", ".git", "HEAD"))
 	assertFileNotExists(t, outputDir, filepath.Join("workspace", citylayout.RuntimeRoot, "runtime", "artifact.txt"))
 	assertFileNotExists(t, outputDir, filepath.Join("workspace", ".gc", "prompts", "mayor.md"))
-	assertFileNotExists(t, outputDir, filepath.Join("workspace", ".gc", "formulas", "legacy.formula.toml"))
+	assertFileNotExists(t, outputDir, filepath.Join("workspace", ".gc", "formulas", "legacy.toml"))
 	assertFileNotExists(t, outputDir, filepath.Join("workspace", ".gc", "scripts", "setup.sh"))
 	assertFileNotExists(t, outputDir, filepath.Join("workspace", ".gc", "settings.json"))
 }

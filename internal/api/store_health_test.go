@@ -59,6 +59,31 @@ func TestCachedStoreHealthRefreshesAfterTTL(t *testing.T) {
 	}
 }
 
+func TestCachedStoreHealthDoesNotHoldMutexDuringRefreshCompute(t *testing.T) {
+	s := &Server{}
+	canLockDuringCompute := make(chan bool, 1)
+	s.storeHealthComputer = func() *StatusStoreHealth {
+		locked := make(chan struct{})
+		go func() {
+			s.storeHealthMu.Lock()
+			defer s.storeHealthMu.Unlock()
+			close(locked)
+		}()
+		select {
+		case <-locked:
+			canLockDuringCompute <- true
+		case <-time.After(100 * time.Millisecond):
+			canLockDuringCompute <- false
+		}
+		return &StatusStoreHealth{SizeBytes: 1}
+	}
+
+	_ = s.cachedStoreHealth(time.Unix(1_000_000, 0))
+	if !<-canLockDuringCompute {
+		t.Fatal("cachedStoreHealth held storeHealthMu while running the refresh computer")
+	}
+}
+
 func TestStatusStoreHealthFromDomainOmitsEmptyLastGC(t *testing.T) {
 	h := storehealth.Health{Path: "/c/.beads/dolt"}
 	out := statusStoreHealthFromDomain(h)
@@ -135,6 +160,24 @@ func TestComputeStoreHealthEmptyCityPath(t *testing.T) {
 func TestCountBeadStoreRowsNil(t *testing.T) {
 	if got := countBeadStoreRows(nil); got != 0 {
 		t.Fatalf("countBeadStoreRows(nil) = %d, want 0", got)
+	}
+}
+
+func TestCountBeadStoreRowsIncludesClosedBeads(t *testing.T) {
+	store := beads.NewMemStore()
+	open, err := store.Create(beads.Bead{Title: "open"})
+	if err != nil {
+		t.Fatalf("Create open: %v", err)
+	}
+	closed, err := store.Create(beads.Bead{Title: "closed"})
+	if err != nil {
+		t.Fatalf("Create closed: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := countBeadStoreRows(store); got != 2 {
+		t.Fatalf("countBeadStoreRows = %d, want 2 including closed bead %s and open bead %s", got, closed.ID, open.ID)
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -1436,14 +1437,35 @@ func cmdOrderSweepTracking(staleAfter time.Duration, includeWisps, quiet bool, o
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	store, err := openStoreAtForCity(cityPath, cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	result, err := sweepStaleOrderTrackingWithOptions(store, time.Now(), staleAfter, orderNameFilter(orderNames), orderTrackingSweepMetadataInitiator, includeWisps)
+	onlyOrders := orderNameFilter(orderNames)
+	requiredTargets, err := orderTrackingSweepRequiredTargetKeysForOrders(cityPath, cfg, onlyOrders)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	stores, openErr := orderTrackingSweepStoresForConfig(cityPath, cfg)
+	if len(stores) == 0 {
+		if openErr != nil {
+			fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", openErr) //nolint:errcheck // best-effort stderr
+		} else {
+			fmt.Fprintln(stderr, "gc order sweep-tracking: no order stores available") //nolint:errcheck // best-effort stderr
+		}
+		return 1
+	}
+	result, sweepErr := sweepStaleOrderTrackingAcrossStores(stores, time.Now(), staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWisps)
+	if err := errors.Join(openErr, sweepErr); err != nil {
+		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
+		if result.storesSwept == 0 {
+			return 1
+		}
+	}
+	if missing := missingOrderTrackingSweepTargetOrders(requiredTargets, result.sweptStoreKeys); len(missing) > 0 {
+		fmt.Fprintf(stderr, "gc order sweep-tracking: target store was not swept for %s\n", strings.Join(missing, ", ")) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !quiet {
@@ -1454,6 +1476,64 @@ func cmdOrderSweepTracking(staleAfter time.Duration, includeWisps, quiet bool, o
 		}
 	}
 	return 0
+}
+
+func orderTrackingSweepRequiredTargetKeysForOrders(cityPath string, cfg *config.City, onlyOrders map[string]struct{}) (map[string][]string, error) {
+	if len(onlyOrders) == 0 {
+		return nil, nil
+	}
+	required := make(map[string][]string, len(onlyOrders))
+	for scopedName := range onlyOrders {
+		name, rig := splitOrderScopedName(scopedName)
+		if rig == "" {
+			key := orderStoreTargetKey(legacyOrderCityTarget(cityPath, cfg))
+			required[key] = append(required[key], scopedName)
+			continue
+		}
+		target, err := resolveOrderStoreTarget(cityPath, cfg, orders.Order{Name: name, Rig: rig})
+		if err != nil {
+			return nil, fmt.Errorf("resolving target store for %s: %w", scopedName, err)
+		}
+		key := orderStoreTargetKey(target)
+		required[key] = append(required[key], scopedName)
+		if legacyOrderCityFallbackNeeded(cityPath, target) {
+			legacyKey := orderStoreTargetKey(legacyOrderCityTarget(cityPath, cfg))
+			required[legacyKey] = append(required[legacyKey], scopedName)
+		}
+	}
+	return required, nil
+}
+
+func splitOrderScopedName(scopedName string) (name, rig string) {
+	name, rig, ok := strings.Cut(strings.TrimSpace(scopedName), ":rig:")
+	if ok && name != "" && rig != "" {
+		return name, rig
+	}
+	return strings.TrimSpace(scopedName), ""
+}
+
+func missingOrderTrackingSweepTargetOrders(requiredTargets map[string][]string, sweptTargets map[string]struct{}) []string {
+	if len(requiredTargets) == 0 {
+		return nil
+	}
+	missing := make(map[string]struct{})
+	for key, scopedNames := range requiredTargets {
+		if _, ok := sweptTargets[key]; ok {
+			continue
+		}
+		for _, scopedName := range scopedNames {
+			missing[scopedName] = struct{}{}
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(missing))
+	for scopedName := range missing {
+		out = append(out, scopedName)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func orderNameFilter(orderNames []string) map[string]struct{} {

@@ -381,7 +381,7 @@ func renderMailCheckFromAPI(cr api.CachedRead[[]mail.Message], recipient string,
 	messages := cr.Body
 	if inject {
 		if len(messages) > 0 {
-			_ = writeProviderHookContext(stdout, hookFormat, formatInjectOutput(messages))
+			_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatInjectOutput(messages))
 		}
 		return 0
 	}

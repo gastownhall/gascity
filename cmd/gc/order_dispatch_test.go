@@ -1347,7 +1347,7 @@ func TestOrderDispatchExecDue(t *testing.T) {
 		Trigger:  "cooldown",
 		Interval: "2m",
 		Exec:     "$ORDER_DIR/scripts/poll.sh",
-		Source:   "/city/formulas/orders/wasteland-poll/order.toml",
+		Source:   "/city/orders/wasteland-poll.toml",
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, &rec)
 	if ad == nil {
@@ -1588,7 +1588,7 @@ func TestOrderDispatchReportsAllMissingRequiredVarsAtOnce(t *testing.T) {
 	var rec memRecorder
 
 	formulaDir := t.TempDir()
-	writeFile(t, filepath.Join(formulaDir, "order-required-vars.formula.toml"), `
+	writeFile(t, filepath.Join(formulaDir, "order-required-vars.toml"), `
 formula = "order-required-vars"
 version = 1
 
@@ -1909,7 +1909,7 @@ func TestOrderDispatchExecOrderDir(t *testing.T) {
 		Trigger:  "cooldown",
 		Interval: "1m",
 		Exec:     "$ORDER_DIR/scripts/poll.sh",
-		Source:   "/city/formulas/orders/poll/order.toml",
+		Source:   "/city/orders/poll.toml",
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 
@@ -1921,7 +1921,7 @@ func TestOrderDispatchExecOrderDir(t *testing.T) {
 	foundCityPath := false
 	foundRuntime := false
 	for _, e := range gotEnv {
-		if e == "ORDER_DIR=/city/formulas/orders/poll" {
+		if e == "ORDER_DIR=/city/orders" {
 			foundDir = true
 		}
 		if e == "GC_CITY=/city-root" {
@@ -1962,7 +1962,7 @@ func TestOrderDispatchExecPackDir(t *testing.T) {
 		Trigger:      "cooldown",
 		Interval:     "1m",
 		Exec:         "$PACK_DIR/scripts/gate-sweep.sh",
-		Source:       "/city/packs/maintenance/formulas/orders/gate-sweep/order.toml",
+		Source:       "/city/packs/maintenance/orders/gate-sweep.toml",
 		FormulaLayer: "/city/packs/maintenance/formulas",
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
@@ -1978,7 +1978,7 @@ func TestOrderDispatchExecPackDir(t *testing.T) {
 		if e == "PACK_DIR=/city/packs/maintenance" {
 			foundPackDir = true
 		}
-		if e == "ORDER_DIR=/city/packs/maintenance/formulas/orders/gate-sweep" {
+		if e == "ORDER_DIR=/city/packs/maintenance/orders" {
 			foundAutoDir = true
 		}
 		if e == "GC_PACK_NAME=maintenance" {
@@ -2051,7 +2051,7 @@ prefix = "ct"
 		Trigger:      "cooldown",
 		Interval:     "1m",
 		Exec:         "$PACK_DIR/scripts/gate-sweep.sh",
-		Source:       filepath.Join(cityDir, "packs", "maintenance", "formulas", "orders", "gate-sweep", "order.toml"),
+		Source:       filepath.Join(cityDir, "packs", "maintenance", "orders", "gate-sweep.toml"),
 		FormulaLayer: filepath.Join(cityDir, "packs", "maintenance", "formulas"),
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
@@ -2223,7 +2223,7 @@ func TestOrderDispatchExecPackDirEmpty(t *testing.T) {
 		Trigger:  "cooldown",
 		Interval: "1m",
 		Exec:     "scripts/test.sh",
-		Source:   "/city/formulas/orders/no-layer/order.toml",
+		Source:   "/city/orders/no-layer.toml",
 		// FormulaLayer intentionally empty.
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
@@ -2263,7 +2263,7 @@ func TestOrderDispatchExecRigUsesScopedWorkdirAndStoreEnv(t *testing.T) {
 		Trigger:  "cooldown",
 		Interval: "1m",
 		Exec:     "$ORDER_DIR/scripts/poll.sh",
-		Source:   "/city/formulas/orders/poll/order.toml",
+		Source:   "/city/orders/poll.toml",
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 	mad := ad.(*memoryOrderDispatcher)
@@ -2291,7 +2291,7 @@ func TestOrderDispatchExecRigUsesScopedWorkdirAndStoreEnv(t *testing.T) {
 		"GC_BEADS_PREFIX": "fe",
 		"GC_RIG":          "frontend",
 		"GC_RIG_ROOT":     rigDir,
-		"ORDER_DIR":       "/city/formulas/orders/poll",
+		"ORDER_DIR":       "/city/orders",
 	}
 	for key, want := range checks {
 		entry := key + "=" + want
@@ -3167,6 +3167,321 @@ func TestSweepStaleOrderTracking_ClosesOnlyOldOpenTrackingBeads(t *testing.T) {
 	}
 }
 
+type noopCloseAllStore struct {
+	beads.Store
+	closeCalls int
+}
+
+func (s *noopCloseAllStore) CloseAll(_ []string, _ map[string]string) (int, error) {
+	s.closeCalls++
+	return 1, nil
+}
+
+func TestCloseOrderTrackingBeadErrorsWhenVerificationStillOpen(t *testing.T) {
+	base := beads.NewMemStore()
+	tracking, err := base.Create(beads.Bead{
+		Title:     "order:stuck",
+		Labels:    []string{"order-run:stuck", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(tracking): %v", err)
+	}
+	store := &noopCloseAllStore{Store: base}
+
+	err = closeOrderTrackingBead(context.Background(), store, tracking.ID)
+	if err == nil {
+		t.Fatal("closeOrderTrackingBead err = nil, want read-after-close verification error")
+	}
+	if !strings.Contains(err.Error(), tracking.ID) {
+		t.Fatalf("err = %q, want stuck tracking bead id %q", err, tracking.ID)
+	}
+	if store.closeCalls < 2 {
+		t.Fatalf("CloseAll calls = %d, want retry before verification failure", store.closeCalls)
+	}
+}
+
+type flakyCloseAllStore struct {
+	beads.Store
+	failuresRemaining int
+	closeCalls        int
+}
+
+func (s *flakyCloseAllStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	s.closeCalls++
+	if s.failuresRemaining > 0 {
+		s.failuresRemaining--
+		return 0, fmt.Errorf("transient close conflict")
+	}
+	return s.Store.CloseAll(ids, metadata)
+}
+
+func TestCloseOrderTrackingBeadRetriesTransientCloseConflict(t *testing.T) {
+	base := beads.NewMemStore()
+	tracking, err := base.Create(beads.Bead{
+		Title:     "order:retry",
+		Labels:    []string{"order-run:retry", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(tracking): %v", err)
+	}
+	store := &flakyCloseAllStore{Store: base, failuresRemaining: 1}
+
+	if err := closeOrderTrackingBead(context.Background(), store, tracking.ID); err != nil {
+		t.Fatalf("closeOrderTrackingBead: %v", err)
+	}
+	if store.closeCalls != 2 {
+		t.Fatalf("CloseAll calls = %d, want 2", store.closeCalls)
+	}
+	got, err := base.Get(tracking.ID)
+	if err != nil {
+		t.Fatalf("Get(tracking): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("tracking status = %q, want closed", got.Status)
+	}
+}
+
+func TestSweepStaleOrderTrackingAcrossStoresClosesRigStoreAndUnblocksDispatch(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rigStore := beads.NewMemStore()
+	legacyStore := beads.NewMemStore()
+	ran := false
+	m := &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:     "rig-digest",
+			Rig:      "frontend",
+			Trigger:  "cooldown",
+			Interval: "1m",
+			Exec:     "true",
+			Timeout:  "1m",
+		}},
+		storeFn: func(target execStoreTarget) (beads.Store, error) {
+			if target.ScopeKind == "city" {
+				return legacyStore, nil
+			}
+			return rigStore, nil
+		},
+		execRun: func(context.Context, string, string, []string) ([]byte, error) {
+			ran = true
+			return nil, nil
+		},
+		rec:    events.Discard,
+		stderr: &bytes.Buffer{},
+		cfg: &config.City{
+			Rigs: []config.Rig{{
+				Name: "frontend",
+				Path: rigDir,
+			}},
+		},
+	}
+	stale, err := rigStore.Create(beads.Bead{
+		Title:     "order:rig-digest:rig:frontend",
+		Labels:    []string{"order-run:rig-digest:rig:frontend", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(stale): %v", err)
+	}
+
+	m.dispatch(context.Background(), cityDir, stale.CreatedAt.Add(time.Hour))
+	m.drain(context.Background())
+	if ran {
+		t.Fatal("dispatch ran before stale rig tracking bead was cleaned")
+	}
+
+	result, err := sweepStaleOrderTrackingAcrossStores(
+		[]beads.Store{rigStore, legacyStore},
+		stale.CreatedAt.Add(time.Hour),
+		time.Minute,
+		orderFilterForTest("rig-digest:rig:frontend"),
+		orderTrackingSweepMetadataInitiator,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingAcrossStores: %v", err)
+	}
+	if result.trackingClosed != 1 {
+		t.Fatalf("trackingClosed = %d, want 1", result.trackingClosed)
+	}
+
+	m.dispatch(context.Background(), cityDir, stale.CreatedAt.Add(2*time.Hour))
+	m.drain(context.Background())
+	if !ran {
+		t.Fatal("dispatch did not run after stale rig tracking bead was closed")
+	}
+}
+
+type failingListOrderTrackingStore struct {
+	beads.Store
+	err error
+}
+
+func (s *failingListOrderTrackingStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	if label == labelOrderTracking {
+		return nil, s.err
+	}
+	return s.Store.ListByLabel(label, limit, opts...)
+}
+
+func TestSweepStaleOrderTrackingAcrossStoresContinuesAfterStoreError(t *testing.T) {
+	failingStore := &failingListOrderTrackingStore{
+		Store: beads.NewMemStore(),
+		err:   fmt.Errorf("store unavailable"),
+	}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	cityStale, err := cityStore.Create(beads.Bead{
+		Title:     "order:cleanup",
+		Labels:    []string{"order-run:cleanup", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(city stale): %v", err)
+	}
+	rigStale, err := rigStore.Create(beads.Bead{
+		Title:     "order:cleanup:rig:frontend",
+		Labels:    []string{"order-run:cleanup:rig:frontend", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(rig stale): %v", err)
+	}
+
+	result, err := sweepStaleOrderTrackingAcrossStores(
+		[]beads.Store{failingStore, cityStore, rigStore},
+		cityStale.CreatedAt.Add(time.Hour),
+		time.Minute,
+		nil,
+		orderTrackingSweepMetadataInitiator,
+		false,
+	)
+	if err == nil {
+		t.Fatal("sweepStaleOrderTrackingAcrossStores err = nil, want aggregate store error")
+	}
+	if result.trackingClosed != 2 {
+		t.Fatalf("trackingClosed = %d, want 2", result.trackingClosed)
+	}
+	if result.storesSwept != 2 {
+		t.Fatalf("storesSwept = %d, want 2", result.storesSwept)
+	}
+	for _, tc := range []struct {
+		name  string
+		store beads.Store
+		id    string
+	}{
+		{name: "city", store: cityStore, id: cityStale.ID},
+		{name: "rig", store: rigStore, id: rigStale.ID},
+	} {
+		got, err := tc.store.Get(tc.id)
+		if err != nil {
+			t.Fatalf("%s Get(%s): %v", tc.name, tc.id, err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("%s stale tracking status = %q, want closed", tc.name, got.Status)
+		}
+	}
+}
+
+func TestSweepStaleOrderTrackingClosesTriggerEnvFailedBeadsAndUnblocksDispatch(t *testing.T) {
+	store := beads.NewMemStore()
+	failed, err := store.Create(beads.Bead{
+		Title:     "order:pg-cooldown",
+		Labels:    []string{"order-run:pg-cooldown", labelOrderTracking, labelTriggerEnvFailed},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(trigger-env failed): %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	normal, err := store.Create(beads.Bead{
+		Title:     "order:pg-cooldown",
+		Labels:    []string{"order-run:pg-cooldown", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(normal tracking): %v", err)
+	}
+
+	result, err := sweepStaleOrderTrackingWithOptions(
+		store,
+		normal.CreatedAt.Add(time.Hour),
+		time.Minute,
+		nil,
+		orderTrackingSweepMetadataInitiator,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingWithOptions: %v", err)
+	}
+	if result.trackingClosed != 2 {
+		t.Fatalf("trackingClosed = %d, want 2", result.trackingClosed)
+	}
+	gotFailed, err := store.Get(failed.ID)
+	if err != nil {
+		t.Fatalf("Get(trigger-env failed): %v", err)
+	}
+	if gotFailed.Status != "closed" {
+		t.Fatalf("trigger-env failed status = %s, want closed", gotFailed.Status)
+	}
+	gotNormal, err := store.Get(normal.ID)
+	if err != nil {
+		t.Fatalf("Get(normal tracking): %v", err)
+	}
+	if gotNormal.Status != "closed" {
+		t.Fatalf("normal tracking status = %s, want closed", gotNormal.Status)
+	}
+
+	ran := false
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:     "pg-cooldown",
+		Trigger:  "cooldown",
+		Interval: "1s",
+		Exec:     "true",
+	}}, store, nil, func(context.Context, string, string, []string) ([]byte, error) {
+		ran = true
+		return nil, nil
+	}, nil)
+	ad.dispatch(context.Background(), t.TempDir(), normal.CreatedAt.Add(2*time.Hour))
+	ad.drain(context.Background())
+	if !ran {
+		t.Fatal("dispatch did not run after stale trigger-env marker was closed")
+	}
+}
+
+func TestCloseAndVerifyOrderTrackingBeadsStopsRetryOnContextCancel(t *testing.T) {
+	base := beads.NewMemStore()
+	tracking, err := base.Create(beads.Bead{
+		Title:     "order:canceled",
+		Labels:    []string{"order-run:canceled", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(tracking): %v", err)
+	}
+	store := &noopCloseAllStore{Store: base}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = closeAndVerifyOrderTrackingBeads(ctx, store, []string{tracking.ID}, map[string]string{
+		"close_reason": completedOrderTrackingCloseReason,
+	})
+	if err == nil {
+		t.Fatal("closeAndVerifyOrderTrackingBeads err = nil, want context cancellation")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if store.closeCalls != 1 {
+		t.Fatalf("CloseAll calls = %d, want 1", store.closeCalls)
+	}
+}
+
 func orderFilterForTest(names ...string) map[string]struct{} {
 	out := make(map[string]struct{}, len(names))
 	for _, name := range names {
@@ -3981,12 +4296,15 @@ func orderDispatchTestEnv(t *testing.T, envCh <-chan []string) map[string]string
 func TestBuildOrderDispatcherWithRigs(t *testing.T) {
 	// Build a config with rig formula layers that include orders.
 	rigDir := t.TempDir()
+	rigLayer := filepath.Join(rigDir, "formulas")
 	// Create an order in the rig-exclusive layer.
-	orderDir := rigDir + "/orders/rig-health"
-	if err := mkdirAll(orderDir); err != nil {
-		t.Fatal(err)
+	orderDir := filepath.Join(rigDir, "orders")
+	for _, dir := range []string{rigLayer, orderDir} {
+		if err := mkdirAll(dir); err != nil {
+			t.Fatal(err)
+		}
 	}
-	writeFile(t, orderDir+"/order.toml", `[order]
+	writeFile(t, filepath.Join(orderDir, "rig-health.toml"), `[order]
 formula = "mol-rig-health"
 trigger = "cooldown"
 interval = "5m"
@@ -3997,7 +4315,7 @@ pool = "polecat"
 		FormulaLayers: config.FormulaLayers{
 			City: []string{"/nonexistent/city-layer"}, // no city orders
 			Rigs: map[string][]string{
-				"demo": {"/nonexistent/city-layer", rigDir},
+				"demo": {"/nonexistent/city-layer", rigLayer},
 			},
 		},
 	}
@@ -4227,21 +4545,23 @@ func TestBuildOrderDispatcherUsesProviderAwareFileStore(t *testing.T) {
 
 	cityDir := t.TempDir()
 	layerDir := filepath.Join(cityDir, "formulas")
-	orderDir := filepath.Join(layerDir, "orders", "file-order")
-	if err := mkdirAll(orderDir); err != nil {
-		t.Fatal(err)
+	orderDir := filepath.Join(cityDir, "orders")
+	for _, dir := range []string{layerDir, orderDir} {
+		if err := mkdirAll(dir); err != nil {
+			t.Fatal(err)
+		}
 	}
-	writeFile(t, filepath.Join(orderDir, "order.toml"), `[order]
+	writeFile(t, filepath.Join(orderDir, "file-order.toml"), `[order]
 formula = "test-formula"
 trigger = "cooldown"
 interval = "1m"
 pool = "worker"
 `)
-	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.formula.toml"))
+	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.toml"))
 	if err != nil {
 		t.Fatalf("ReadFile(test-formula): %v", err)
 	}
-	writeFile(t, filepath.Join(layerDir, "test-formula.formula.toml"), string(formulaText))
+	writeFile(t, filepath.Join(layerDir, "test-formula.toml"), string(formulaText))
 
 	cfg := &config.City{
 		FormulaLayers: config.FormulaLayers{
@@ -4276,23 +4596,23 @@ func TestBuildOrderDispatcherRigOrderUsesRigFileStore(t *testing.T) {
 	rigDir := filepath.Join(cityDir, "frontend")
 	cityLayer := filepath.Join(cityDir, "formulas")
 	rigLayer := filepath.Join(rigDir, "formulas")
-	orderDir := filepath.Join(rigDir, "orders", "rig-digest")
+	orderDir := filepath.Join(rigDir, "orders")
 	for _, dir := range []string{cityLayer, rigLayer, orderDir} {
 		if err := mkdirAll(dir); err != nil {
 			t.Fatal(err)
 		}
 	}
-	writeFile(t, filepath.Join(orderDir, "order.toml"), `[order]
+	writeFile(t, filepath.Join(orderDir, "rig-digest.toml"), `[order]
 formula = "test-formula"
 trigger = "cooldown"
 interval = "1m"
 pool = "worker"
 `)
-	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.formula.toml"))
+	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.toml"))
 	if err != nil {
 		t.Fatalf("ReadFile(test-formula): %v", err)
 	}
-	writeFile(t, filepath.Join(rigLayer, "test-formula.formula.toml"), string(formulaText))
+	writeFile(t, filepath.Join(rigLayer, "test-formula.toml"), string(formulaText))
 	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
 		t.Fatal(err)
 	}
@@ -4354,23 +4674,23 @@ func TestBuildOrderDispatcherRigOrderHonorsLegacyCityRunHistory(t *testing.T) {
 	rigDir := filepath.Join(cityDir, "frontend")
 	cityLayer := filepath.Join(cityDir, "formulas")
 	rigLayer := filepath.Join(rigDir, "formulas")
-	orderDir := filepath.Join(rigDir, "orders", "rig-digest")
+	orderDir := filepath.Join(rigDir, "orders")
 	for _, dir := range []string{cityLayer, rigLayer, orderDir} {
 		if err := mkdirAll(dir); err != nil {
 			t.Fatal(err)
 		}
 	}
-	writeFile(t, filepath.Join(orderDir, "order.toml"), `[order]
+	writeFile(t, filepath.Join(orderDir, "rig-digest.toml"), `[order]
 formula = "test-formula"
 trigger = "cooldown"
 interval = "24h"
 pool = "worker"
 `)
-	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.formula.toml"))
+	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.toml"))
 	if err != nil {
 		t.Fatalf("ReadFile(test-formula): %v", err)
 	}
-	writeFile(t, filepath.Join(rigLayer, "test-formula.formula.toml"), string(formulaText))
+	writeFile(t, filepath.Join(rigLayer, "test-formula.toml"), string(formulaText))
 	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
 		t.Fatal(err)
 	}
@@ -4659,21 +4979,23 @@ func TestBuildOrderDispatcherReopensStoreForScopedFileReads(t *testing.T) {
 
 	cityDir := t.TempDir()
 	layerDir := filepath.Join(cityDir, "formulas")
-	orderDir := filepath.Join(layerDir, "orders", "file-order")
-	if err := mkdirAll(orderDir); err != nil {
-		t.Fatal(err)
+	orderDir := filepath.Join(cityDir, "orders")
+	for _, dir := range []string{layerDir, orderDir} {
+		if err := mkdirAll(dir); err != nil {
+			t.Fatal(err)
+		}
 	}
-	writeFile(t, filepath.Join(orderDir, "order.toml"), `[order]
+	writeFile(t, filepath.Join(orderDir, "file-order.toml"), `[order]
 formula = "test-formula"
 trigger = "cooldown"
 interval = "1m"
 pool = "worker"
 `)
-	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.formula.toml"))
+	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.toml"))
 	if err != nil {
 		t.Fatalf("ReadFile(test-formula): %v", err)
 	}
-	writeFile(t, filepath.Join(layerDir, "test-formula.formula.toml"), string(formulaText))
+	writeFile(t, filepath.Join(layerDir, "test-formula.toml"), string(formulaText))
 
 	cfg := &config.City{
 		FormulaLayers: config.FormulaLayers{
@@ -4716,24 +5038,31 @@ func TestBuildOrderDispatcherCityPackLayers(t *testing.T) {
 	// Simulate system formulas + pack formulas as two city layers.
 	sysDir := t.TempDir()
 	topoDir := t.TempDir()
+	sysLayer := filepath.Join(sysDir, "formulas")
+	topoLayer := filepath.Join(topoDir, "formulas")
+	for _, dir := range []string{sysLayer, topoLayer} {
+		if err := mkdirAll(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	// System dir: beads-health order.
-	sysAutoDir := sysDir + "/orders/beads-health"
-	if err := mkdirAll(sysAutoDir); err != nil {
+	sysOrderDir := filepath.Join(sysDir, "orders")
+	if err := mkdirAll(sysOrderDir); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, sysAutoDir+"/order.toml", `[order]
+	writeFile(t, filepath.Join(sysOrderDir, "beads-health.toml"), `[order]
 exec = "scripts/beads-health.sh"
 trigger = "cooldown"
 interval = "30s"
 `)
 
 	// Pack dir: wasteland-poll order.
-	topoAutoDir := topoDir + "/orders/wasteland-poll"
-	if err := mkdirAll(topoAutoDir); err != nil {
+	topoOrderDir := filepath.Join(topoDir, "orders")
+	if err := mkdirAll(topoOrderDir); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, topoAutoDir+"/order.toml", `[order]
+	writeFile(t, filepath.Join(topoOrderDir, "wasteland-poll.toml"), `[order]
 exec = "scripts/wasteland-poll.sh"
 trigger = "cooldown"
 interval = "2m"
@@ -4741,7 +5070,7 @@ interval = "2m"
 
 	cfg := &config.City{
 		FormulaLayers: config.FormulaLayers{
-			City: []string{sysDir, topoDir},
+			City: []string{sysLayer, topoLayer},
 		},
 	}
 
@@ -4772,22 +5101,29 @@ func TestBuildOrderDispatcherCityPackWithOverride(t *testing.T) {
 	// Same two-layer setup, plus a config override on wasteland-poll interval.
 	sysDir := t.TempDir()
 	topoDir := t.TempDir()
+	sysLayer := filepath.Join(sysDir, "formulas")
+	topoLayer := filepath.Join(topoDir, "formulas")
+	for _, dir := range []string{sysLayer, topoLayer} {
+		if err := mkdirAll(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
 
-	sysAutoDir := sysDir + "/orders/beads-health"
-	if err := mkdirAll(sysAutoDir); err != nil {
+	sysOrderDir := filepath.Join(sysDir, "orders")
+	if err := mkdirAll(sysOrderDir); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, sysAutoDir+"/order.toml", `[order]
+	writeFile(t, filepath.Join(sysOrderDir, "beads-health.toml"), `[order]
 exec = "scripts/beads-health.sh"
 trigger = "cooldown"
 interval = "30s"
 `)
 
-	topoAutoDir := topoDir + "/orders/wasteland-poll"
-	if err := mkdirAll(topoAutoDir); err != nil {
+	topoOrderDir := filepath.Join(topoDir, "orders")
+	if err := mkdirAll(topoOrderDir); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, topoAutoDir+"/order.toml", `[order]
+	writeFile(t, filepath.Join(topoOrderDir, "wasteland-poll.toml"), `[order]
 exec = "scripts/wasteland-poll.sh"
 trigger = "cooldown"
 interval = "2m"
@@ -4796,7 +5132,7 @@ interval = "2m"
 	tenSec := "10s"
 	cfg := &config.City{
 		FormulaLayers: config.FormulaLayers{
-			City: []string{sysDir, topoDir},
+			City: []string{sysLayer, topoLayer},
 		},
 		Orders: config.OrdersConfig{
 			Overrides: []config.OrderOverride{
@@ -4841,21 +5177,29 @@ func TestBuildOrderDispatcherOverrideDisablesDropsFromDispatcher(t *testing.T) {
 	sysDir := t.TempDir()
 	topoDir := t.TempDir()
 
-	sysAutoDir := sysDir + "/orders/beads-health"
-	if err := mkdirAll(sysAutoDir); err != nil {
+	sysFormulaDir := sysDir + "/formulas"
+	sysOrdersDir := sysDir + "/orders"
+	if err := mkdirAll(sysFormulaDir); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, sysAutoDir+"/order.toml", `[order]
+	if err := mkdirAll(sysOrdersDir); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, sysOrdersDir+"/beads-health.toml", `[order]
 exec = "scripts/beads-health.sh"
 trigger = "cooldown"
 interval = "30s"
 `)
 
-	topoAutoDir := topoDir + "/orders/wasteland-poll"
-	if err := mkdirAll(topoAutoDir); err != nil {
+	topoFormulaDir := topoDir + "/formulas"
+	topoOrdersDir := topoDir + "/orders"
+	if err := mkdirAll(topoFormulaDir); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, topoAutoDir+"/order.toml", `[order]
+	if err := mkdirAll(topoOrdersDir); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, topoOrdersDir+"/wasteland-poll.toml", `[order]
 exec = "scripts/wasteland-poll.sh"
 trigger = "cooldown"
 interval = "2m"
@@ -4864,7 +5208,7 @@ interval = "2m"
 	disabled := false
 	cfg := &config.City{
 		FormulaLayers: config.FormulaLayers{
-			City: []string{sysDir, topoDir},
+			City: []string{sysFormulaDir, topoFormulaDir},
 		},
 		Orders: config.OrdersConfig{
 			Overrides: []config.OrderOverride{
@@ -4902,12 +5246,14 @@ func TestBuildOrderDispatcherOverrideNotFoundNonFatal(t *testing.T) {
 	// Override targets wasteland-poll (nonexistent).
 	// Verify beads-health is still dispatched and stderr contains warning.
 	sysDir := t.TempDir()
-
-	sysAutoDir := sysDir + "/orders/beads-health"
-	if err := mkdirAll(sysAutoDir); err != nil {
-		t.Fatal(err)
+	sysLayer := filepath.Join(sysDir, "formulas")
+	sysOrderDir := filepath.Join(sysDir, "orders")
+	for _, dir := range []string{sysLayer, sysOrderDir} {
+		if err := mkdirAll(dir); err != nil {
+			t.Fatal(err)
+		}
 	}
-	writeFile(t, sysAutoDir+"/order.toml", `[order]
+	writeFile(t, filepath.Join(sysOrderDir, "beads-health.toml"), `[order]
 exec = "scripts/beads-health.sh"
 trigger = "cooldown"
 interval = "30s"
@@ -4916,7 +5262,7 @@ interval = "30s"
 	tenSec := "10s"
 	cfg := &config.City{
 		FormulaLayers: config.FormulaLayers{
-			City: []string{sysDir},
+			City: []string{sysLayer},
 		},
 		Orders: config.OrdersConfig{
 			Overrides: []config.OrderOverride{
@@ -4981,7 +5327,7 @@ scope = "city"
 	}
 	writeFile(t, filepath.Join(cityDir, "city.toml"), cityToml)
 
-	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.formula.toml"))
+	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.toml"))
 	if err != nil {
 		t.Fatalf("ReadFile(test-formula): %v", err)
 	}
@@ -5019,7 +5365,7 @@ trigger = "cooldown"
 interval = "24h"
 pool = "dog"
 `)
-			writeFile(t, filepath.Join(packDir, "formulas", "test-formula.formula.toml"), string(formulaText))
+			writeFile(t, filepath.Join(packDir, "formulas", "test-formula.toml"), string(formulaText))
 		}
 		packToml.WriteString(`
 [imports.` + binding + `]

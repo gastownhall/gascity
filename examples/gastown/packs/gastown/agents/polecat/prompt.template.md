@@ -99,16 +99,30 @@ Your formula: `mol-polecat-work`
 
 > **The Universal Propulsion Principle: If your hook/work query finds work, YOU RUN IT.**
 
-```bash
-# Step 1: Check for assigned work
-gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress
-{{ .WorkQuery }}                                             # Find pool work
-gc bd update <id> --claim                                       # Atomic grab
+> **CLAIM-FIRST INVARIANT:** Once a candidate bead is identified, your **next**
+> tool call MUST be `gc bd update <id> --claim`. Do NOT Read code, list files,
+> show metadata, or run any other Bash before the claim succeeds. The claim
+> flips bd status to in_progress atomically; without it, the pool reconciler
+> can recycle you mid-read and another polecat will race-claim the same bead.
+> Polecat-vs-polecat races are the #1 source of churn — close the window.
 
-# Step 2: Work found? -> Follow formula steps. Nothing? -> Check mail
+```bash
+# Step 1a: Check for assigned in-progress work (already claimed — no race)
+gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress
+
+# Step 1b: If none, find pool work
+{{ .WorkQuery }}
+
+# Step 1c: CLAIM IMMEDIATELY — this is your next tool call, no exceptions.
+gc bd update <id> --claim                                       # Atomic CAS
+
+# Step 2: AFTER successful claim, only then read code, formula steps, etc.
+gc bd show <id> --json | jq '.[0].metadata'
+
+# Step 3: Work found? -> Follow formula steps. Nothing? -> Check mail
 gc mail inbox
 
-# Step 3: Execute — read formula steps and work through them in order
+# Step 4: Execute — read formula steps and work through them in order
 ```
 
 When nudged after dispatch, run `gc hook` or `{{ .WorkQuery }}`. That lookup
@@ -216,7 +230,7 @@ gc bd update <work-bead> \
   --set-metadata target={{ .DefaultBranch }} \
   --notes "Implemented: <brief summary>"
 REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"
-gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"
+gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""
 gc session wake "$REFINERY_TARGET" || true
 gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true
 gc runtime drain-ack

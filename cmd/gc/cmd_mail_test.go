@@ -3581,6 +3581,34 @@ func TestRouteMailCheck_StaleBannerOver30s(t *testing.T) {
 	}
 }
 
+func TestRenderMailCheckFromAPIInjectCodexUsesUserPromptSubmit(t *testing.T) {
+	cr := api.CachedRead[[]mail.Message]{
+		Body: []mail.Message{{
+			ID:        "msg-1",
+			From:      "human",
+			To:        "mayor",
+			Body:      "review this",
+			CreatedAt: time.Date(2026, 4, 23, 10, 0, 0, 0, time.UTC),
+		}},
+	}
+
+	var stdout bytes.Buffer
+	if code := renderMailCheckFromAPI(cr, "mayor", true, hookOutputFormatCodex, &stdout); code != 0 {
+		t.Fatalf("renderMailCheckFromAPI = %d, want 0", code)
+	}
+	var out struct {
+		HookSpecificOutput struct {
+			HookEventName string `json:"hookEventName"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("decode codex hook JSON: %v\n%s", err, stdout.String())
+	}
+	if out.HookSpecificOutput.HookEventName != "UserPromptSubmit" {
+		t.Fatalf("hookEventName = %q, want UserPromptSubmit; output=%s", out.HookSpecificOutput.HookEventName, stdout.String())
+	}
+}
+
 func TestRouteMailPeek_StaleBannerOver30s(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeMailTestCity(t)
