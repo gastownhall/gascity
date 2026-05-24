@@ -133,6 +133,9 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 }
 
 func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, bool, error) {
+	if bead.Metadata["gc.kind"] == "workflow-finalize" {
+		return ControlResult{}, false, nil
+	}
 	rootID := strings.TrimSpace(bead.Metadata["gc.root_bead_id"])
 	rootStoreRef := strings.TrimSpace(bead.Metadata["gc.root_store_ref"])
 	if rootID == "" || rootStoreRef == "" || rootID == bead.ID {

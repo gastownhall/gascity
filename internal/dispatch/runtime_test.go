@@ -836,6 +836,50 @@ func TestProcessFanoutReturnsMalformedForInvalidSourceOutputJSON(t *testing.T) {
 	}
 }
 
+func TestProcessFanoutReturnsMalformedForInvalidBondVars(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "prepare review items",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.prepare-review-items",
+			"gc.outcome":      "pass",
+			"gc.output_json":  `{"personas":[{"name":"architect"}]}`,
+		},
+	})
+	fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Fan out review items",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "fanout",
+			"gc.root_bead_id": workflow.ID,
+			"gc.control_for":  "demo.prepare-review-items",
+			"gc.for_each":     "output.personas",
+			"gc.bond":         "expansion-review",
+			"gc.bond_vars":    "{not-json",
+			"gc.fanout_mode":  "parallel",
+		},
+	})
+	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
+
+	_, err := ProcessControl(store, fanout, ProcessOptions{FormulaSearchPaths: []string{t.TempDir()}})
+	if !errors.Is(err, ErrControlGraphMalformed) {
+		t.Fatalf("ProcessControl(fanout invalid bond vars) err = %v, want %v", err, ErrControlGraphMalformed)
+	}
+}
+
 func TestReconcileTerminalScopedMemberReusesResolvedBodyForFailingScope(t *testing.T) {
 	t.Parallel()
 
@@ -1373,8 +1417,9 @@ func TestProcessWorkflowFinalizeOrphanedRootClosesFinalizerWithoutError(t *testi
 		Title: "Finalize workflow",
 		Type:  "task",
 		Metadata: map[string]string{
-			"gc.kind":         "workflow-finalize",
-			"gc.root_bead_id": "missing-root-id",
+			"gc.kind":           "workflow-finalize",
+			"gc.root_bead_id":   "missing-root-id",
+			"gc.root_store_ref": "rig:gascity",
 		},
 	})
 
