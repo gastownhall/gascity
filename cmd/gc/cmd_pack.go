@@ -358,7 +358,7 @@ func resolvePackRegistryAddLocator(classification packsource.Classification) (pa
 
 func resolveBarePackRegistryLocator(packName string) (packsource.RegistryLocator, error) {
 	home := gchome.Default()
-	cfg, err := loadPackRegistryConfigWithDefaultSeed(home)
+	cfg, err := packregistry.LoadConfig(home)
 	if err != nil {
 		return packsource.RegistryLocator{}, err
 	}
@@ -390,13 +390,6 @@ func resolveBarePackRegistryLocator(packName string) (packsource.RegistryLocator
 		return packsource.RegistryLocator{}, fmt.Errorf("pack %q was not found and registry cache(s) unavailable: %s", packName, strings.Join(unavailable, ", "))
 	}
 	return packsource.RegistryLocator{}, fmt.Errorf("pack %q not found in cached registries", packName)
-}
-
-func loadPackRegistryConfigWithDefaultSeed(home string) (packregistry.Config, error) {
-	if _, _, err := packregistry.SeedDefaultConfigAndCacheIfAbsent(home); err != nil {
-		return packregistry.Config{}, err
-	}
-	return packregistry.LoadConfig(home)
 }
 
 func newPackRegistryCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -670,7 +663,7 @@ type packOutdatedItemJSON struct {
 }
 
 func doPackRegistryList(jsonOutput bool, stdout, stderr io.Writer) int {
-	cfg, err := loadPackRegistryConfigWithDefaultSeed(gchome.Default())
+	cfg, err := packregistry.LoadConfig(gchome.Default())
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack registry list: %v\n", err) //nolint:errcheck
 		return 1
@@ -766,7 +759,7 @@ func doPackRegistryRemove(name string, jsonOutput bool, stdout, stderr io.Writer
 
 func doPackRegistryRefresh(name string, jsonOutput bool, stdout, stderr io.Writer) int {
 	home := gchome.Default()
-	cfg, err := loadPackRegistryConfigWithDefaultSeed(home)
+	cfg, err := packregistry.LoadConfig(home)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack registry refresh: %v\n", err) //nolint:errcheck
 		return 1
@@ -841,7 +834,7 @@ type registrySearchResult struct {
 
 func doPackRegistrySearch(query, registry string, refresh bool, limit int, all bool, jsonOutput bool, stdout, stderr io.Writer) int {
 	home := gchome.Default()
-	cfg, err := loadPackRegistryConfigWithDefaultSeed(home)
+	cfg, err := packregistry.LoadConfig(home)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack registry search: %v\n", err) //nolint:errcheck
 		return 1
@@ -946,7 +939,7 @@ func doPackRegistrySearch(query, registry string, refresh bool, limit int, all b
 
 func doPackRegistryShow(target string, refresh bool, jsonOutput bool, stdout, stderr io.Writer) int {
 	home := gchome.Default()
-	cfg, err := loadPackRegistryConfigWithDefaultSeed(home)
+	cfg, err := packregistry.LoadConfig(home)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack registry show: %v\n", err) //nolint:errcheck
 		return 1
@@ -1502,7 +1495,7 @@ func resolveLatestPackDependency(node *importGraphNode, constraint string) (pack
 
 func refreshPackDependencyRegistries(nodes []*importGraphNode, stderr io.Writer) error {
 	home := gchome.Default()
-	cfg, err := loadPackRegistryConfigWithDefaultSeed(home)
+	cfg, err := packregistry.LoadConfig(home)
 	if err != nil {
 		return err
 	}

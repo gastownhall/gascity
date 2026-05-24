@@ -714,8 +714,8 @@ Releases:
 
 - there is no `default` registry
 - first-party registry name is `main`
-- `main` is simply the conventional name seeded at installation time; no CLI
-  behavior depends on its continued presence
+- `main` is the conventional first-party registry name when a registry is
+  configured; no CLI behavior depends on its continued presence
 - unqualified names only resolve when exactly one configured registry has a
   matching cached entry and all relevant registries were reachable at the last
   refresh used by the command
@@ -724,15 +724,11 @@ Releases:
 - collisions fail with an actionable error listing qualified names such as
   `main:lighthouse` and `acme:lighthouse`
 
-### Initial Registry Seeding
+### Initial Registry State
 
-`gc init` seeds a `main` registry entry when `$GC_HOME/registries.toml` does not
-already exist. Installers do not mutate user state. Tests that override
-`GC_HOME` start with no registry entries and must add `main` explicitly.
-
-The first-party registry URL is a release-blocking constant for this design. It
-must be defined before implementation ships; examples use
-`https://registries.gascity.example/main/registry.toml` as a placeholder.
+`gc init` does not seed a registry entry. Installers do not mutate user state.
+Tests that override `GC_HOME` start with no registry entries and must add
+registries explicitly.
 
 ## Lockfile and Cache Rules
 

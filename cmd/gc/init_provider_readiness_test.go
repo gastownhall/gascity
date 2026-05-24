@@ -349,7 +349,7 @@ func TestFinalizeInitDoesNotWriteImplicitImportState(t *testing.T) {
 	}
 }
 
-func TestFinalizeInitSeedsDefaultPackRegistry(t *testing.T) {
+func TestFinalizeInitDoesNotSeedPackRegistry(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
@@ -378,18 +378,8 @@ func TestFinalizeInitSeedsDefaultPackRegistry(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("finalizeInit = %d, want 0: %s", code, stderr.String())
 	}
-	cfg, err := packregistry.LoadConfig(gcHome)
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if len(cfg.Registries) != 1 {
-		t.Fatalf("registries = %+v, want default registry", cfg.Registries)
-	}
-	if got := cfg.Registries[0]; got.Name != packregistry.DefaultRegistryName || got.Source != packregistry.DefaultRegistrySource {
-		t.Fatalf("default registry = %+v", got)
-	}
-	if _, _, err := packregistry.ReadCachedRegistryCatalog(gcHome, cfg.Registries[0]); err != nil {
-		t.Fatalf("finalizeInit should pre-seed default registry cache: %v", err)
+	if _, err := os.Stat(packregistry.ConfigPath(gcHome)); !os.IsNotExist(err) {
+		t.Fatalf("finalizeInit should not seed registries.toml, stat err = %v", err)
 	}
 }
 

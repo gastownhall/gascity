@@ -199,10 +199,9 @@ depends on them.
   root `--json` flag, not command-local `--format json`.
 - Add typed registry JSON structs, result schemas, and golden tests in the Wave
   1 PRs, not as a trailing docs-only cleanup.
-- Add `gc init` seeding hook for `main` when `$GC_HOME/registries.toml` does
-  not exist, guarded behind the final first-party URL constant.
-- Add a release-blocking test such as `TestSeedRegistryURLNotPlaceholder` so
-  the placeholder first-party registry URL cannot ship.
+- Do not add an implicit `gc init` registry seed in this PR; first-party
+  registry bootstrap belongs in the pack-publication follow-up once the
+  registry repository and release ref are stable.
 
 ### Dependencies
 

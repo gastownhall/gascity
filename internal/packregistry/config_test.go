@@ -69,18 +69,8 @@ func TestAddRegistryWithCacheDoesNotConfigureWhenCacheWriteFails(t *testing.T) {
 	}
 }
 
-func TestSeedDefaultConfigIfAbsentWritesMainRegistry(t *testing.T) {
+func TestLoadConfigAbsentReturnsEmptyConfig(t *testing.T) {
 	home := t.TempDir()
-	seeded, cacheSeeded, err := SeedDefaultConfigAndCacheIfAbsent(home)
-	if err != nil {
-		t.Fatalf("SeedDefaultConfigAndCacheIfAbsent: %v", err)
-	}
-	if !seeded {
-		t.Fatal("SeedDefaultConfigAndCacheIfAbsent seeded=false, want true")
-	}
-	if !cacheSeeded {
-		t.Fatal("SeedDefaultConfigAndCacheIfAbsent cacheSeeded=false, want true")
-	}
 	cfg, err := LoadConfig(home)
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
@@ -88,25 +78,12 @@ func TestSeedDefaultConfigIfAbsentWritesMainRegistry(t *testing.T) {
 	if cfg.Schema != ConfigSchema {
 		t.Fatalf("schema = %d, want %d", cfg.Schema, ConfigSchema)
 	}
-	if len(cfg.Registries) != 1 {
-		t.Fatalf("registries = %+v, want one default registry", cfg.Registries)
-	}
-	if got := cfg.Registries[0]; got.Name != DefaultRegistryName || got.Source != DefaultRegistrySource {
-		t.Fatalf("default registry = %+v, want %s %s", got, DefaultRegistryName, DefaultRegistrySource)
-	}
-	catalog, data, err := ReadCachedRegistryCatalog(home, cfg.Registries[0])
-	if err != nil {
-		t.Fatalf("ReadCachedRegistryCatalog(default): %v", err)
-	}
-	if len(catalog.Packs) == 0 {
-		t.Fatal("default cached catalog has no packs")
-	}
-	if len(data) == 0 {
-		t.Fatal("default cached catalog data is empty")
+	if len(cfg.Registries) != 0 {
+		t.Fatalf("registries = %+v, want none", cfg.Registries)
 	}
 }
 
-func TestSeedDefaultConfigIfAbsentPreservesExistingFile(t *testing.T) {
+func TestLoadConfigPreservesExistingFile(t *testing.T) {
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Dir(ConfigPath(home)), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -115,12 +92,12 @@ func TestSeedDefaultConfigIfAbsentPreservesExistingFile(t *testing.T) {
 	if err := os.WriteFile(ConfigPath(home), before, 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	seeded, err := SeedDefaultConfigIfAbsent(home)
+	cfg, err := LoadConfig(home)
 	if err != nil {
-		t.Fatalf("SeedDefaultConfigIfAbsent: %v", err)
+		t.Fatalf("LoadConfig: %v", err)
 	}
-	if seeded {
-		t.Fatal("SeedDefaultConfigIfAbsent seeded=true, want false")
+	if len(cfg.Registries) != 1 || cfg.Registries[0].Name != "custom" {
+		t.Fatalf("registries = %+v, want custom registry", cfg.Registries)
 	}
 	after, err := os.ReadFile(ConfigPath(home))
 	if err != nil {
@@ -128,67 +105,6 @@ func TestSeedDefaultConfigIfAbsentPreservesExistingFile(t *testing.T) {
 	}
 	if string(after) != string(before) {
 		t.Fatalf("existing registries.toml changed:\nbefore=%s\nafter=%s", before, after)
-	}
-	if _, err := os.Stat(CachePath(home, DefaultRegistryName)); !os.IsNotExist(err) {
-		t.Fatalf("custom registry config should not seed default cache, stat err = %v", err)
-	}
-}
-
-func TestSeedDefaultConfigIfAbsentSeedsMissingCacheForExistingDefault(t *testing.T) {
-	home := t.TempDir()
-	if err := SaveConfig(home, Config{Registries: []Registry{{
-		Name:   DefaultRegistryName,
-		Source: DefaultRegistrySource,
-	}}}); err != nil {
-		t.Fatalf("SaveConfig: %v", err)
-	}
-	configSeeded, cacheSeeded, err := SeedDefaultConfigAndCacheIfAbsent(home)
-	if err != nil {
-		t.Fatalf("SeedDefaultConfigAndCacheIfAbsent: %v", err)
-	}
-	if configSeeded {
-		t.Fatal("configSeeded=true, want false for existing config")
-	}
-	if !cacheSeeded {
-		t.Fatal("cacheSeeded=false, want true for missing default cache")
-	}
-	cfg, err := LoadConfig(home)
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if _, _, err := ReadCachedRegistryCatalog(home, cfg.Registries[0]); err != nil {
-		t.Fatalf("ReadCachedRegistryCatalog(default): %v", err)
-	}
-}
-
-func TestBundledDefaultRegistryCatalogIsValid(t *testing.T) {
-	data := DefaultRegistryCatalogData()
-	if len(data) == 0 {
-		t.Fatal("DefaultRegistryCatalogData returned empty catalog")
-	}
-	catalog, err := ParseCatalog(data)
-	if err != nil {
-		t.Fatalf("ParseCatalog(default): %v", err)
-	}
-	if err := ValidateCatalog(catalog, true); err != nil {
-		t.Fatalf("ValidateCatalog(default): %v", err)
-	}
-	if len(catalog.Packs) == 0 {
-		t.Fatal("default catalog has no packs")
-	}
-}
-
-func TestDefaultRegistrySourceIsReleaseURL(t *testing.T) {
-	const want = "https://raw.githubusercontent.com/gastownhall/gascity-packs/main/registry.toml"
-	if DefaultRegistrySource != want {
-		t.Fatalf("DefaultRegistrySource = %q, want %q", DefaultRegistrySource, want)
-	}
-	source, err := NormalizeSource(DefaultRegistrySource)
-	if err != nil {
-		t.Fatalf("DefaultRegistrySource does not normalize: %v", err)
-	}
-	if !source.Remote {
-		t.Fatalf("DefaultRegistrySource normalized as local source: %+v", source)
 	}
 }
 
