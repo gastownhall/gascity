@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -238,5 +239,275 @@ func TestGetMetaNotFoundReturnsEmpty(t *testing.T) {
 	}
 	if got != "" {
 		t.Fatalf("GetMeta = %q, want empty", got)
+	}
+}
+
+func TestGetMetaReturnsValue(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/session/sess-one/meta/mykey" {
+			t.Fatalf("path = %q, want /session/sess-one/meta/mykey", r.URL.EscapedPath())
+		}
+		_, _ = w.Write([]byte(`{"value":"myval"}`))
+	}))
+	defer server.Close()
+
+	p, err := NewProviderWithConfig(Config{Endpoint: server.URL})
+	if err != nil {
+		t.Fatalf("NewProviderWithConfig: %v", err)
+	}
+
+	got, err := p.GetMeta("sess-one", "mykey")
+	if err != nil {
+		t.Fatalf("GetMeta: %v", err)
+	}
+	if got != "myval" {
+		t.Fatalf("GetMeta = %q, want myval", got)
+	}
+}
+
+func TestSetMetaPostsKeyAndValue(t *testing.T) {
+	var gotPath, gotValue string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		var body metaRequest
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotValue = body.Value
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	p, err := NewProviderWithConfig(Config{Endpoint: server.URL})
+	if err != nil {
+		t.Fatalf("NewProviderWithConfig: %v", err)
+	}
+
+	if err := p.SetMeta("sess-one", "mykey", "myval"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	if gotPath != "/session/sess-one/meta/mykey" {
+		t.Fatalf("path = %q, want /session/sess-one/meta/mykey", gotPath)
+	}
+	if gotValue != "myval" {
+		t.Fatalf("value = %q, want myval", gotValue)
+	}
+}
+
+func TestRemoveMetaTreatsNotFoundAsIdempotent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Fatalf("method = %s, want DELETE", r.Method)
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	p, err := NewProviderWithConfig(Config{Endpoint: server.URL})
+	if err != nil {
+		t.Fatalf("NewProviderWithConfig: %v", err)
+	}
+
+	if err := p.RemoveMeta("sess-one", "gone"); err != nil {
+		t.Fatalf("RemoveMeta not-found: %v", err)
+	}
+}
+
+func TestPeekDecodesOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/session/sess-one/peek" {
+			t.Fatalf("path = %q, want /session/sess-one/peek", r.URL.EscapedPath())
+		}
+		var body peekRequest
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Lines != 20 {
+			t.Fatalf("lines = %d, want 20", body.Lines)
+		}
+		_, _ = w.Write([]byte(`{"output":"hello\nworld"}`))
+	}))
+	defer server.Close()
+
+	p, err := NewProviderWithConfig(Config{Endpoint: server.URL})
+	if err != nil {
+		t.Fatalf("NewProviderWithConfig: %v", err)
+	}
+
+	got, err := p.Peek("sess-one", 20)
+	if err != nil {
+		t.Fatalf("Peek: %v", err)
+	}
+	if got != "hello\nworld" {
+		t.Fatalf("output = %q, want hello\\nworld", got)
+	}
+}
+
+func TestProcessAliveUsesExtendedRegex(t *testing.T) {
+	var gotBody execRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/session/sess-one/exec" {
+			t.Fatalf("path = %q, want /session/sess-one/exec", r.URL.EscapedPath())
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_, _ = w.Write([]byte(`{"exitCode":0,"success":true}`))
+	}))
+	defer server.Close()
+
+	p, err := NewProviderWithConfig(Config{Endpoint: server.URL})
+	if err != nil {
+		t.Fatalf("NewProviderWithConfig: %v", err)
+	}
+
+	if !p.ProcessAlive("sess-one", []string{"codex", "claude"}) {
+		t.Fatal("ProcessAlive = false, want true")
+	}
+	if !strings.Contains(gotBody.Cmd, "pgrep -Ef --") {
+		t.Fatalf("cmd = %q, want pgrep -Ef -- flag", gotBody.Cmd)
+	}
+	if !strings.Contains(gotBody.Cmd, "codex|claude") {
+		t.Fatalf("cmd = %q, want pattern with alternation", gotBody.Cmd)
+	}
+}
+
+func TestProcessAliveNonZeroExitMeansDead(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"exitCode":1,"success":false}`))
+	}))
+	defer server.Close()
+
+	p, err := NewProviderWithConfig(Config{Endpoint: server.URL})
+	if err != nil {
+		t.Fatalf("NewProviderWithConfig: %v", err)
+	}
+
+	if p.ProcessAlive("sess-one", []string{"codex"}) {
+		t.Fatal("ProcessAlive = true, want false for non-zero exit")
+	}
+}
+
+func TestInterruptPostsToExec(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	p, err := NewProviderWithConfig(Config{Endpoint: server.URL})
+	if err != nil {
+		t.Fatalf("NewProviderWithConfig: %v", err)
+	}
+
+	if err := p.Interrupt("sess-one"); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+	if gotPath != "/session/sess-one/exec" {
+		t.Fatalf("path = %q, want /session/sess-one/exec", gotPath)
+	}
+}
+
+func TestInterruptTreatsNotFoundAsIdempotent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	p, err := NewProviderWithConfig(Config{Endpoint: server.URL})
+	if err != nil {
+		t.Fatalf("NewProviderWithConfig: %v", err)
+	}
+
+	if err := p.Interrupt("gone"); err != nil {
+		t.Fatalf("Interrupt missing session: %v", err)
+	}
+}
+
+func TestClearScrollbackPostsToExec(t *testing.T) {
+	var gotBody execRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/session/sess-one/exec" {
+			t.Fatalf("path = %q, want /session/sess-one/exec", r.URL.EscapedPath())
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	p, err := NewProviderWithConfig(Config{Endpoint: server.URL})
+	if err != nil {
+		t.Fatalf("NewProviderWithConfig: %v", err)
+	}
+
+	if err := p.ClearScrollback("sess-one"); err != nil {
+		t.Fatalf("ClearScrollback: %v", err)
+	}
+	if !strings.Contains(gotBody.Cmd, ".gc-scrollback") {
+		t.Fatalf("cmd = %q, want scrollback truncate command", gotBody.Cmd)
+	}
+}
+
+func TestSendKeysPostsToKeysEndpoint(t *testing.T) {
+	var gotBody sendKeysRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/session/sess-one/keys" {
+			t.Fatalf("path = %q, want /session/sess-one/keys", r.URL.EscapedPath())
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	p, err := NewProviderWithConfig(Config{Endpoint: server.URL})
+	if err != nil {
+		t.Fatalf("NewProviderWithConfig: %v", err)
+	}
+
+	if err := p.SendKeys("sess-one", "Up", "Enter"); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+	if len(gotBody.Keys) != 2 || gotBody.Keys[0] != "Up" || gotBody.Keys[1] != "Enter" {
+		t.Fatalf("keys = %v, want [Up Enter]", gotBody.Keys)
+	}
+}
+
+func TestNudgeDropsEmptyContent(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	p, err := NewProviderWithConfig(Config{Endpoint: server.URL})
+	if err != nil {
+		t.Fatalf("NewProviderWithConfig: %v", err)
+	}
+
+	if err := p.Nudge("sess-one", nil); err != nil {
+		t.Fatalf("Nudge nil: %v", err)
+	}
+	if called {
+		t.Fatal("Nudge made HTTP call for empty content, want no-op")
+	}
+}
+
+func TestRunLiveReturnsNil(t *testing.T) {
+	p, err := NewProviderWithConfig(Config{Endpoint: "http://unused.example"})
+	if err != nil {
+		t.Fatalf("NewProviderWithConfig: %v", err)
+	}
+	if err := p.RunLive("sess-one", runtime.Config{}); err != nil {
+		t.Fatalf("RunLive = %v, want nil", err)
+	}
+}
+
+func TestCapabilitiesReflectsConfig(t *testing.T) {
+	p, err := NewProviderWithConfig(Config{Endpoint: "http://unused.example", ReportActivity: true})
+	if err != nil {
+		t.Fatalf("NewProviderWithConfig: %v", err)
+	}
+	caps := p.Capabilities()
+	if !caps.CanReportActivity {
+		t.Fatal("CanReportActivity = false, want true when configured")
+	}
+	if caps.CanReportAttachment {
+		t.Fatal("CanReportAttachment = true, want always false")
 	}
 }
