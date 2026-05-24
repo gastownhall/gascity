@@ -218,6 +218,8 @@ type City struct {
 	// Services declares workspace-owned HTTP services mounted on the
 	// controller edge under /svc/{name}.
 	Services []Service `toml:"service,omitempty"`
+	// GitHub configures GitHub-facing repository monitors.
+	GitHub GitHubConfig `toml:"github,omitempty"`
 	// AgentDefaults provides city-level defaults for agents that don't
 	// override them (canonical TOML key: agent_defaults). The runtime
 	// currently applies default_sling_formula and append_fragments; the
@@ -3642,6 +3644,9 @@ func Load(fs fsys.FS, path string) (*City, error) {
 	// direct named-session declarations without requiring pack-provided
 	// backing templates to be present yet.
 	if err := validateNamedSessions(cfg, false); err != nil {
+		return nil, err
+	}
+	if err := ValidateGitHubPRMonitors(cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil
