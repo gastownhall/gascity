@@ -362,6 +362,7 @@ func TestSupervisorHandlerAllowsCityScopedDirectServiceMutationWithoutCSRF(t *te
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v0/city/bright-lights/svc/github-webhook/v0/github/webhook", strings.NewReader(`{}`))
+	req.Host = "localhost"
 	req.RemoteAddr = "198.51.100.10:9000"
 	rec := httptest.NewRecorder()
 	sm.Handler().ServeHTTP(rec, req)

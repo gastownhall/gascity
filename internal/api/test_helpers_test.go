@@ -32,6 +32,10 @@ func newTestCityHandlerReadOnly(t *testing.T, state State) http.Handler {
 // wrapTestSupervisorMiddleware applies the same middleware the supervisor's
 // production Handler() does.
 func wrapTestSupervisorMiddleware(sm *SupervisorMux) http.Handler {
+	// httptest.NewRequest with a relative target uses example.com as Host.
+	// Permit that synthetic host here so production Host allowlisting stays
+	// enabled without forcing every handler test to set req.Host manually.
+	sm.WithAllowedHosts([]string{"example.com"})
 	return sm.Handler()
 }
 

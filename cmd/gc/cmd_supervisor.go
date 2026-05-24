@@ -953,7 +953,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	// lock-free (atomic pointer load); mutations go through citiesMu.
 	registry := newCityRegistry()
 	supEvPath := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
-	if supFR, supErr := events.NewFileRecorder(supEvPath, stderr); supErr == nil {
+	if supFR, supErr := newFileEventsRecorder(supEvPath, config.EventsConfig{}, stderr); supErr == nil {
 		registry.SetSupervisorRecorder(supFR)
 		defer supFR.Close() //nolint:errcheck
 	}
@@ -1009,6 +1009,9 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	apiMux := api.NewSupervisorMux(registry, cityInitSvc, readOnly, version, commit, startedAt)
 	if len(supCfg.Supervisor.AllowedOrigins) > 0 {
 		apiMux.WithAllowedOrigins(supCfg.Supervisor.AllowedOrigins)
+	}
+	if len(supCfg.Supervisor.AllowedHosts) > 0 {
+		apiMux.WithAllowedHosts(supCfg.Supervisor.AllowedHosts)
 	}
 
 	pprofSrv, pprofErr := api.StartPprof("")

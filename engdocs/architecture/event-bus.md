@@ -285,6 +285,7 @@ API/SSE projection:
 | `ControllerStarted` | `controller.started` | Per-city controller startup |
 | `ControllerStopped` | `controller.stopped` | Per-city controller shutdown |
 | `SupervisorShutdownRequested` | `supervisor.shutdown_requested` | Machine-wide supervisor process: emitted when a shutdown trigger is observed (SIGINT/SIGTERM or socket `stop`), before the cascade of per-city `controller.stopped` events. Carries trigger attribution (source, signal, client addr, mode). |
+| `SupervisorRequest` | `supervisor.request` | Machine-wide supervisor API bounded request audit. Omits request bodies, raw origins, raw remote addresses, and query strings. |
 | `CitySuspended` | `city.suspended` | City suspend command |
 | `CityResumed` | `city.resumed` | City resume command |
 | `RequestResultCityCreate` | `request.result.city.create` | Supervisor/API city create completion |

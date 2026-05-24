@@ -5,10 +5,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"log"
+	"net"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -54,12 +57,26 @@ var (
 		status: http.StatusForbidden,
 		body:   []byte(`{"status":403,"title":"Forbidden","detail":"csrf: X-GC-Request header required on private service mutation endpoints"}`),
 	}
+	problemHostNotAllowed = problemBody{
+		status: http.StatusMisdirectedRequest,
+		body:   []byte(`{"status":421,"title":"Misdirected Request","detail":"host_not_allowed: supervisor Host header is not allowed"}`),
+	}
 )
 
 type dataSourceKey struct{}
 
+type requestAuditConfig struct {
+	recorder       events.Recorder
+	allowedOrigins []string
+}
+
+const (
+	supervisorRequestPhaseStart    = "start"
+	supervisorRequestPhaseComplete = "complete"
+)
+
 // withLogging wraps a handler with request logging and OTel metrics.
-func withLogging(next http.Handler) http.Handler {
+func withLogging(next http.Handler, audit requestAuditConfig) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		// Inject a mutable data source slot into the context so handlers
@@ -78,6 +95,24 @@ func withLogging(next http.Handler) http.Handler {
 		}
 		log.Printf("api: %s %s %d %s [%s]", r.Method, r.URL.Path, rw.status, dur.Round(time.Microsecond), source)
 		telemetry.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, rw.status, durMs, source)
+		recordSupervisorRequest(audit, r, rw.status, dur, supervisorRequestPhaseComplete)
+	})
+}
+
+func recordSupervisorRequest(audit requestAuditConfig, r *http.Request, status int, dur time.Duration, phase string) {
+	if audit.recorder == nil {
+		return
+	}
+	path := sanitizeAuditString(r.URL.Path, 256)
+	EmitTypedEvent(audit.recorder, events.SupervisorRequest, path, SupervisorRequestPayload{
+		Method:          sanitizeAuditString(r.Method, 16),
+		Path:            path,
+		Status:          status,
+		DurationMs:      dur.Milliseconds(),
+		RemoteAddrClass: remoteAddrClass(r.RemoteAddr),
+		Host:            sanitizeAuditString(canonicalHostName(r.Host), 128),
+		OriginAllowed:   originAllowed(r.Header.Get("Origin"), audit.allowedOrigins),
+		Phase:           sanitizeAuditString(phase, 16),
 	})
 }
 
@@ -103,7 +138,7 @@ func withRecovery(next http.Handler) http.Handler {
 func withCORSAllowing(extra []string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if isLocalhostOrigin(origin) || isAllowedExtraOrigin(origin, extra) {
+		if originAllowed(origin, extra) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Last-Event-ID, X-GC-Request")
@@ -117,6 +152,32 @@ func withCORSAllowing(extra []string, next http.Handler) http.Handler {
 	})
 }
 
+// withHostAllowing rejects DNS-rebinding style requests whose Host header is
+// neither loopback nor explicitly configured by the operator.
+func withHostAllowing(allowAny bool, extra []string, audit requestAuditConfig, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !allowAny && !isAllowedSupervisorHost(r.Host, extra) {
+			problemHostNotAllowed.writeTo(w)
+			return
+		}
+		if isSupervisorEventsStreamRequest(r) {
+			recordSupervisorRequest(audit, r, 0, 0, supervisorRequestPhaseStart)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isSupervisorEventsStreamRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	path := r.URL.Path
+	if path == "/v0/events/stream" {
+		return true
+	}
+	return strings.HasPrefix(path, "/v0/city/") && strings.HasSuffix(path, "/events/stream")
+}
+
 // isMutationMethod returns true for HTTP methods that modify state.
 func isMutationMethod(method string) bool {
 	switch method {
@@ -124,6 +185,10 @@ func isMutationMethod(method string) bool {
 		return true
 	}
 	return false
+}
+
+func originAllowed(origin string, extra []string) bool {
+	return isLocalhostOrigin(origin) || isAllowedExtraOrigin(origin, extra)
 }
 
 // isAllowedExtraOrigin reports whether origin is in the explicit allowlist.
@@ -178,6 +243,83 @@ func isNumeric(s string) bool {
 		}
 	}
 	return true
+}
+
+func isAllowedSupervisorHost(hostHeader string, extra []string) bool {
+	host := canonicalHostName(hostHeader)
+	if host == "" {
+		return false
+	}
+	if isLoopbackHost(host) {
+		return true
+	}
+	for _, allowed := range extra {
+		if canonicalHostName(allowed) == host {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalHostName(hostHeader string) string {
+	hostHeader = strings.TrimSpace(hostHeader)
+	if hostHeader == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(hostHeader); err == nil {
+		return strings.ToLower(strings.Trim(host, "[]"))
+	}
+	if strings.HasPrefix(hostHeader, "[") && strings.HasSuffix(hostHeader, "]") {
+		hostHeader = strings.TrimPrefix(strings.TrimSuffix(hostHeader, "]"), "[")
+	}
+	return strings.ToLower(hostHeader)
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func remoteAddrClass(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return "unknown"
+	}
+	switch {
+	case ip.IsLoopback():
+		return "loopback"
+	case ip.IsPrivate():
+		return "private"
+	default:
+		return "public"
+	}
+}
+
+func sanitizeAuditString(value string, maxRunes int) string {
+	value = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, value)
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	if maxRunes <= 3 {
+		return string(runes[:maxRunes])
+	}
+	return string(runes[:maxRunes-3]) + "..."
 }
 
 // withRequestID adds a unique X-GC-Request-Id header to every response.

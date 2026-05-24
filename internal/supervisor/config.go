@@ -37,6 +37,7 @@ type Section struct {
 	PatrolInterval string   `toml:"patrol_interval,omitempty"`
 	AllowMutations bool     `toml:"allow_mutations,omitempty"`
 	AllowedOrigins []string `toml:"allowed_origins,omitempty"`
+	AllowedHosts   []string `toml:"allowed_hosts,omitempty"`
 }
 
 // PublicationConfig holds machine-wide publication policy for workspace

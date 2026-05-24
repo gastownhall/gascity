@@ -111,6 +111,8 @@ type SupervisorMux struct {
 	buildID        string
 	startedAt      time.Time
 	allowedOrigins []string
+	allowedHosts   []string
+	allowAnyHost   bool
 	server         *http.Server
 
 	// Single Huma API (Phase 3.5 — Topology 1). Owns every typed
@@ -199,7 +201,11 @@ func (sm *SupervisorMux) serveCitySvcProxy(w http.ResponseWriter, r *http.Reques
 //     their own publication rules).
 func (sm *SupervisorMux) Handler() http.Handler {
 	root := http.HandlerFunc(sm.ServeHTTP)
-	return withLogging(withRecovery(withRequestID(withCORSAllowing(sm.allowedOrigins, root))))
+	audit := requestAuditConfig{
+		recorder:       sm.supervisorEventRecorder(),
+		allowedOrigins: sm.allowedOrigins,
+	}
+	return withLogging(withRecovery(withRequestID(withHostAllowing(sm.allowAnyHost, sm.allowedHosts, audit, withCORSAllowing(sm.allowedOrigins, root)))), audit)
 }
 
 // WithAllowedOrigins sets extra CORS origins accepted beyond localhost and
@@ -208,6 +214,31 @@ func (sm *SupervisorMux) WithAllowedOrigins(origins []string) *SupervisorMux {
 	sm.allowedOrigins = origins
 	sm.server = &http.Server{Handler: sm.Handler()}
 	return sm
+}
+
+// WithAllowedHosts sets extra HTTP Host header names accepted beyond loopback
+// hosts and rebuilds the internal http.Server handler. Must be called before
+// Serve.
+func (sm *SupervisorMux) WithAllowedHosts(hosts []string) *SupervisorMux {
+	sm.allowedHosts = hosts
+	sm.server = &http.Server{Handler: sm.Handler()}
+	return sm
+}
+
+// WithAnyHostAllowed disables Host header validation. This preserves the
+// legacy standalone city API behavior; machine-wide supervisor mode should
+// keep Host validation enabled and use WithAllowedHosts for explicit names.
+func (sm *SupervisorMux) WithAnyHostAllowed() *SupervisorMux {
+	sm.allowAnyHost = true
+	sm.server = &http.Server{Handler: sm.Handler()}
+	return sm
+}
+
+func (sm *SupervisorMux) supervisorEventRecorder() events.Recorder {
+	if supSrc, ok := sm.resolver.(SupervisorEventSource); ok {
+		return supSrc.SupervisorEventRecorder()
+	}
+	return nil
 }
 
 // StartPprof starts a pprof HTTP server on 127.0.0.1:<port> if GC_PPROF=1

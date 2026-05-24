@@ -74,8 +74,12 @@ const (
 	// answer "why did the supervisor exit" without scraping macOS/launchd
 	// logs.
 	SupervisorShutdownRequested = "supervisor.shutdown_requested"
-	CitySuspended               = "city.suspended"
-	CityResumed                 = "city.resumed"
+	// SupervisorRequest records one bounded audit entry for a request handled
+	// by the machine-wide supervisor API. Payloads omit request bodies and
+	// query strings.
+	SupervisorRequest = "supervisor.request"
+	CitySuspended     = "city.suspended"
+	CityResumed       = "city.resumed"
 	// Typed async request result events. 5 success types (one per
 	// operation, fully typed payload) + 1 shared failure type.
 	RequestResultCityCreate     = "request.result.city.create"
@@ -142,7 +146,7 @@ var KnownEventTypes = []string{
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
-	SupervisorShutdownRequested,
+	SupervisorShutdownRequested, SupervisorRequest,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,
