@@ -33,6 +33,16 @@ PUSH_RETRY_DELAY_MIN="${GC_JSONL_PUSH_RETRY_DELAY_MIN:-1}"
 PUSH_RETRY_DELAY_SPAN="${GC_JSONL_PUSH_RETRY_DELAY_SPAN:-4}"
 SCRUB="${GC_JSONL_SCRUB:-true}"
 ARCHIVE_REPO="${GC_JSONL_ARCHIVE_REPO:-$PACK_STATE_DIR/jsonl-archive}"
+# Re-log the archive mode at least this often (seconds) even without a mode
+# transition, so operators who missed the first line still see the current
+# configuration. Default one week.
+WEEKLY_RELOG_SECONDS="${GC_JSONL_MODE_RELOG_INTERVAL:-604800}"
+
+# Cached archive mode ("push" or "local-only"). Resolved once on the first
+# get_archive_mode call and reused thereafter so every push checkpoint in a
+# single run sees a consistent value even if an operator adds or removes the
+# origin remote mid-run.
+ARCHIVE_MODE=""
 
 # Count records in a `dolt sql -r json` payload. The output is `{"rows":[...]}`
 # on (typically) a single physical line, so `wc -l` measures formatting, not
@@ -273,14 +283,21 @@ archive_has_local_only_commits() {
 # Detect the archive's push mode from the live state of its remotes rather
 # than from a cached state field. Operators opt into off-box backup by adding
 # an `origin` remote; removing it reverts to local-only on the next run with
-# no extra command.
+# no extra command. The result is memoized in ARCHIVE_MODE on first call so
+# every push checkpoint within a single run agrees, even if the remote changes
+# mid-run.
 get_archive_mode() {
+    if [ -n "$ARCHIVE_MODE" ]; then
+        echo "$ARCHIVE_MODE"
+        return
+    fi
     if [ -d "$ARCHIVE_REPO/.git" ] \
         && git -C "$ARCHIVE_REPO" remote get-url origin >/dev/null 2>&1; then
-        echo "push"
+        ARCHIVE_MODE="push"
     else
-        echo "local-only"
+        ARCHIVE_MODE="local-only"
     fi
+    echo "$ARCHIVE_MODE"
 }
 
 should_attempt_push() {
@@ -318,7 +335,7 @@ log_archive_mode_if_needed() {
         should_log=1
     else
         last_ts=$(jq -n -r --arg ts "$last_logged_at" '$ts | try fromdateiso8601 catch 0')
-        if [ "$last_ts" = "0" ] || [ "$((now_ts - last_ts))" -gt 604800 ]; then
+        if [ "$last_ts" = "0" ] || [ "$((now_ts - last_ts))" -gt "$WEEKLY_RELOG_SECONDS" ]; then
             should_log=1
         fi
     fi
@@ -476,6 +493,15 @@ retry_pending_spike_alert() {
     fi
 }
 
+# Retain only the last ~20 lines of stderr so an extremely chatty failure
+# doesn't drown the escalation body.
+truncate_stderr_context() {
+    local raw="$1"
+
+    [ -z "$raw" ] && return 0
+    printf '%s\n' "$raw" | tail -n 20
+}
+
 push_archive_main() {
     local consecutive
     local fetch_err
@@ -483,15 +509,6 @@ push_archive_main() {
     local push_err
     local push_attempt
     local push_succeeded
-
-    # Retain only the last ~20 lines of stderr so an extremely chatty failure
-    # doesn't drown the escalation body.
-    truncate_stderr_context() {
-        local raw="$1"
-
-        [ -z "$raw" ] && return 0
-        printf '%s\n' "$raw" | tail -n 20
-    }
 
     record_archive_push_failure() {
         local message="$1"
