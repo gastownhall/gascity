@@ -1362,6 +1362,67 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 
+		// Restart-requested: agent asked for a fresh session
+		// (gc runtime request-restart / gc handoff). This runs after
+		// drain-ack handling, but before autonomous rate-limit,
+		// stability, and churn gates so an explicit operator/model reset
+		// is not swallowed by crash heuristics. Use provider-session
+		// liveness (running), not process liveness (alive), so a zombie
+		// tmux/container session is still stopped before the next wake.
+		{
+			runtimeRunning := running || alive
+			tmuxRequested := false
+			if runtimeRunning && dops != nil {
+				tmuxRequested, _ = dops.isRestartRequested(name)
+			}
+			beadRequested := session.Metadata["restart_requested"] == "true"
+			if tmuxRequested || beadRequested {
+				if runtimeRunning {
+					if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
+						fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
+						continue
+					}
+				}
+				// Providers that can inject a fresh session ID get a
+				// rotated key here so the next wake starts a brand-new
+				// conversation. Providers without SessionIDFlag must
+				// clear any stored key and wake fresh without resume.
+				// Clearing started_config_hash forces firstStart=true in
+				// resolveSessionCommand. Clearing last_woke_at masks the
+				// intentional death from crash and churn trackers (both
+				// check last_woke_at first).
+				newSessionKey, hasCapability := freshRestartSessionKey(tp, session.Metadata)
+				batch := sessionpkg.RestartRequestPatch(newSessionKey)
+				if hasCapability && newSessionKey == "" {
+					batch["session_key"] = ""
+				}
+				if err := store.SetMetadataBatch(session.ID, batch); err != nil {
+					fmt.Fprintf(stderr, "session reconciler: recording restart handoff for %s: %v\n", name, err) //nolint:errcheck
+					continue
+				}
+				if session.Metadata == nil {
+					session.Metadata = make(map[string]string, len(batch))
+				}
+				for key, value := range batch {
+					session.Metadata[key] = value
+				}
+				if runtimeRunning {
+					if tmuxRequested && dops != nil {
+						_ = dops.clearRestartRequested(name)
+					}
+					fmt.Fprintf(stdout, "Stopped restart-requested session '%s'\n", name) //nolint:errcheck
+					// Yield this tick so the kill and the next wake run
+					// on separate reconciler passes; the new start should
+					// not race the tmux alias release.
+					continue
+				}
+				// Runtime was already dead — no kill happened, no alias
+				// release to wait on. Fall through so the wake decision
+				// can pick up the freshly cleared metadata and emit a
+				// start_candidate on this same tick. See #2345.
+			}
+		}
+
 		policy := resolveSessionSleepPolicy(*session, cfg, sp)
 
 		rateLimitHit, rateLimitErr := checkRateLimitStability(session, cfg, alive, dt, store, clk, peek)
@@ -1422,81 +1483,6 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 			if !recoverRunningPendingCreate(session, tp, cfg, store, clk, trace) {
 				fmt.Fprintf(stderr, "session reconciler: recovering pending create %s: metadata repair incomplete\n", name) //nolint:errcheck
-			}
-		}
-
-		// Restart-requested: agent asked for a fresh session
-		// (gc runtime request-restart / gc handoff). Rotate session_key
-		// to a fresh value and clear started_config_hash so the next wake
-		// builds a first-start command (--session-id <new_key>). Also set
-		// continuation_reset_pending so the next wake bumps the continuation
-		// epoch instead of silently reusing the prior continuation lineage.
-		//
-		// When the runtime is alive, stop it and yield this tick so the
-		// kill and the next wake run on separate reconciler passes; that
-		// keeps the start from racing the tmux alias release. When the
-		// runtime is already dead — for example, a named-always session
-		// whose tmux was killed by `gc handoff --target` before the bead's
-		// restart_requested flag was processed — there is no live runtime
-		// to stop. Apply the patch and fall through to the wake decision
-		// on this same tick instead of waiting for the next reconciler
-		// interval. The yield-a-tick rule existed to protect a live kill;
-		// extending it to the already-dead case is what caused the
-		// patrol_interval-sized post-handoff wake delay in #2345.
-		//
-		// Check both tmux metadata (dops) and bead metadata. The bead
-		// metadata flag survives tmux session death, so this works even
-		// when the session is already dead.
-		{
-			tmuxRequested := false
-			if alive && dops != nil {
-				tmuxRequested, _ = dops.isRestartRequested(name)
-			}
-			beadRequested := session.Metadata["restart_requested"] == "true"
-			if tmuxRequested || beadRequested {
-				if alive {
-					if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
-						fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
-						continue
-					}
-				}
-				// Providers that can inject a fresh session ID get a
-				// rotated key here so the next wake starts a brand-new
-				// conversation. Providers without SessionIDFlag must
-				// clear any stored key and wake fresh without resume.
-				// Clearing started_config_hash forces firstStart=true in
-				// resolveSessionCommand. Clearing last_woke_at masks the
-				// intentional death from crash and churn trackers (both
-				// check last_woke_at first).
-				newSessionKey, hasCapability := freshRestartSessionKey(tp, session.Metadata)
-				batch := sessionpkg.RestartRequestPatch(newSessionKey)
-				if hasCapability && newSessionKey == "" {
-					batch["session_key"] = ""
-				}
-				if err := store.SetMetadataBatch(session.ID, batch); err != nil {
-					fmt.Fprintf(stderr, "session reconciler: recording restart handoff for %s: %v\n", name, err) //nolint:errcheck
-					continue
-				}
-				if session.Metadata == nil {
-					session.Metadata = make(map[string]string, len(batch))
-				}
-				for key, value := range batch {
-					session.Metadata[key] = value
-				}
-				if alive {
-					if tmuxRequested && dops != nil {
-						_ = dops.clearRestartRequested(name)
-					}
-					fmt.Fprintf(stdout, "Stopped restart-requested session '%s'\n", name) //nolint:errcheck
-					// Yield this tick so the kill and the next wake run
-					// on separate reconciler passes; the new start should
-					// not race the tmux alias release.
-					continue
-				}
-				// Runtime was already dead — no kill happened, no alias
-				// release to wait on. Fall through so the wake decision
-				// can pick up the freshly cleared metadata and emit a
-				// start_candidate on this same tick. See #2345.
 			}
 		}
 
