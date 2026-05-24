@@ -116,9 +116,11 @@ func (p *Provider) Stop(name string) error {
 	return err
 }
 
-// Interrupt sends a best-effort SIGINT to the named remote session via exec.
+// Interrupt sends a best-effort SIGINT to user-owned processes in the remote
+// session. Targets the current user only to avoid signalling system daemons in
+// the shared container environment.
 func (p *Provider) Interrupt(name string) error {
-	err := p.exec(context.Background(), name, "pkill -INT -f . 2>/dev/null; true", nil)
+	err := p.exec(context.Background(), name, `pkill -INT -u "$(id -u)" 2>/dev/null; true`, nil)
 	if runtime.IsSessionGone(err) {
 		return nil
 	}
@@ -146,28 +148,28 @@ func (p *Provider) Attach(_ string) error {
 }
 
 // ProcessAlive reports whether any of the named processes are alive in the
-// remote session via a pgrep exec.
+// remote session via a pgrep exec. Uses -E (extended regex) so the | alternation
+// is interpreted correctly, and -- to guard against process names starting with -.
 func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	if len(processNames) == 0 {
 		return true
 	}
 	pattern := shellQuoteSingle(strings.Join(processNames, "|"))
 	var out execResponse
-	if err := p.exec(context.Background(), name, "pgrep -f "+pattern, &out); err != nil {
+	if err := p.exec(context.Background(), name, "pgrep -Ef -- "+pattern, &out); err != nil {
 		return false
 	}
 	return out.ExitCode == 0
 }
 
-// Nudge sends text content blocks to the named remote session.
+// Nudge sends content blocks to the named remote session. Uses FlattenText so
+// file_path blocks emit a visible placeholder rather than being silently dropped.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	var sb strings.Builder
-	for _, block := range content {
-		if block.Type == "text" {
-			sb.WriteString(block.Text)
-		}
+	text := runtime.FlattenText(content)
+	if text == "" {
+		return nil
 	}
-	return p.do(context.Background(), p.timeout, http.MethodPost, []string{"session", name, "nudge"}, nudgeRequest{Text: sb.String()}, nil)
+	return p.do(context.Background(), p.timeout, http.MethodPost, []string{"session", name, "nudge"}, nudgeRequest{Text: text}, nil)
 }
 
 // SetMeta stores session metadata in the remote runtime.
@@ -254,9 +256,11 @@ func (p *Provider) SendKeys(name string, keys ...string) error {
 	return err
 }
 
-// RunLive is not supported: the Cloudflare Worker has no session-live replay endpoint.
+// RunLive is a best-effort no-op: the Cloudflare Worker has no session-live
+// replay endpoint. Returns nil so the reconciler can persist the live-hash and
+// stop re-triggering on every tick.
 func (p *Provider) RunLive(_ string, _ runtime.Config) error {
-	return fmt.Errorf("cloudflare provider does not support RunLive")
+	return nil
 }
 
 // Capabilities reports Cloudflare runtime observation support.
