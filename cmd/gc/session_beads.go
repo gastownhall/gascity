@@ -63,6 +63,8 @@ func syncSessionCachedState(sessionName string, existing beads.Bead, exists bool
 		switch session.State(strings.TrimSpace(existing.Metadata["state"])) {
 		case "", session.StateActive, session.StateAwake:
 			return string(session.StateActive)
+		case session.StateStartPending:
+			return string(session.StateStartPending)
 		case session.StateCreating:
 			return string(session.StateCreating)
 		case session.StateAsleep, session.StateSuspended, session.StateDraining, session.StateArchived, session.StateQuarantined:
@@ -984,7 +986,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			// Create a new session bead.
 			createState := state
 			if createState != "active" {
-				createState = "creating"
+				createState = string(session.StateStartPending)
 			}
 			instanceToken := session.NewInstanceToken()
 			meta := map[string]string{

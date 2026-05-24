@@ -1184,7 +1184,7 @@ func retainScaleCheckPartialPoolDesired(counts map[string]int, sessionBeads *ses
 // failures, but do not count them as awake demand.
 func scaleCheckPartialSessionPreservable(b beads.Bead) bool {
 	switch strings.TrimSpace(b.Metadata["state"]) {
-	case "", "active", "awake", "creating", "asleep", "stopped", "suspended", "quarantined", "draining", "drained", "archived":
+	case "", "active", "awake", "start-pending", "creating", "asleep", "stopped", "suspended", "quarantined", "draining", "drained", "archived":
 		return true
 	default:
 		return isPendingPoolCreate(b)
@@ -1193,7 +1193,7 @@ func scaleCheckPartialSessionPreservable(b beads.Bead) bool {
 
 func scaleCheckPartialSessionRetainable(b beads.Bead) bool {
 	switch strings.TrimSpace(b.Metadata["state"]) {
-	case "active", "awake", "creating":
+	case "active", "awake", "start-pending", "creating":
 		return true
 	default:
 		return isPendingPoolCreate(b)
@@ -1438,7 +1438,7 @@ func discoverSessionBeadsWithRoots(
 		// no work.
 		if isEphemeralSessionBeadForAgent(b, cfgAgent) {
 			manualSession := isManualSessionBeadForAgent(b, cfgAgent)
-			creating := b.Metadata["state"] == "creating"
+			creating := b.Metadata["state"] == "creating" || b.Metadata["state"] == string(session.StateStartPending)
 			pendingCreate := isPendingPoolCreate(b)
 			templateDesired := desiredHasTemplate(desired, template)
 			// Pool-managed beads are controller-created capacity. A pending
@@ -1924,7 +1924,8 @@ func poolRuntimeAliasIsDeferred(sessionBead beads.Bead) bool {
 	if strings.TrimSpace(sessionBead.Metadata["pending_create_claim"]) == boolMetadata(true) {
 		return true
 	}
-	return strings.TrimSpace(sessionBead.Metadata["state"]) == "creating"
+	state := strings.TrimSpace(sessionBead.Metadata["state"])
+	return state == "creating" || state == string(session.StateStartPending)
 }
 
 func normalizeNonExpandingPoolSessionBead(

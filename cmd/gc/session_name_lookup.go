@@ -180,7 +180,7 @@ func createPoolSessionBeadWithAlias(
 	meta := map[string]string{
 		"template":                  template,
 		"agent_name":                agentName,
-		"state":                     "creating",
+		"state":                     string(sessionpkg.StateStartPending),
 		"pending_create_claim":      "true",
 		"pending_create_started_at": pendingCreateStartedAtNow(now),
 		"session_origin":            "ephemeral",
@@ -485,7 +485,7 @@ func poolLookupCandidateStateRank(b beads.Bead) int {
 	switch sessionMetadataState(b) {
 	case "active":
 		return 2
-	case "creating":
+	case "creating", string(sessionpkg.StateStartPending):
 		return 1
 	default:
 		return 0

@@ -632,9 +632,9 @@ func TestCreateBeadOnly(t *testing.T) {
 		t.Error("runtime session should not be started in bead-only mode")
 	}
 
-	// Verify bead was created with state "creating" (not "active").
-	if b.Metadata["state"] != "creating" {
-		t.Errorf("bead state = %q, want %q", b.Metadata["state"], "creating")
+	// Verify bead was created with state "start-pending" (not "active").
+	if b.Metadata["state"] != string(StateStartPending) {
+		t.Errorf("bead state = %q, want %q", b.Metadata["state"], StateStartPending)
 	}
 	if b.Metadata["session_name"] == "" {
 		t.Error("bead missing session_name metadata")

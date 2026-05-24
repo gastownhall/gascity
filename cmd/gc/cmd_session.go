@@ -2236,7 +2236,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 
 func sessionKillRuntimeAlreadyInactive(bead beads.Bead, sp runtime.Provider) bool {
 	switch session.State(strings.TrimSpace(bead.Metadata["state"])) {
-	case session.StateActive, session.StateCreating, session.StateDraining, session.StateAwake:
+	case session.StateActive, session.StateStartPending, session.StateCreating, session.StateDraining, session.StateAwake:
 		return false
 	}
 	sessionName := strings.TrimSpace(bead.Metadata["session_name"])
