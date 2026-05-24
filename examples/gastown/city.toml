@@ -54,7 +54,7 @@ formula_v2 = true
 #        work_dir = ".gc/worktrees/myproject/crew/wolf"
 #        idle_timeout = "4h"
 #        prompt_template = "packs/gastown/assets/prompts/crew.template.md"
-#        pre_start = ["packs/gastown/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+#        pre_start = ["{{.CityRoot}}/packs/gastown/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
 #
 #      tmux theming comes from the gastown pack's [global] session_live hooks,
 #      so crew members need no session_setup wiring of their own.
