@@ -21,10 +21,10 @@ func TestNewProviderRequiresAbsoluteEndpoint(t *testing.T) {
 	}
 }
 
-func TestStartPostsTypedConfig(t *testing.T) {
+func TestStartPostsToSessionCollection(t *testing.T) {
 	var gotPath string
 	var gotAuth string
-	var got startConfig
+	var got startRequest
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.EscapedPath()
@@ -70,23 +70,26 @@ func TestStartPostsTypedConfig(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	if gotPath != "/runtime/sessions/sess-one/start" {
-		t.Fatalf("path = %q, want /runtime/sessions/sess-one/start", gotPath)
+	if gotPath != "/runtime/session" {
+		t.Fatalf("path = %q, want /runtime/session", gotPath)
 	}
 	if gotAuth != "Bearer secret" {
 		t.Fatalf("authorization = %q, want bearer token", gotAuth)
 	}
-	if got.WorkDir != "/work" || got.Command != "codex exec" {
-		t.Fatalf("start config = %+v, missing workdir/command", got)
+	if got.SessionID != "sess-one" {
+		t.Fatalf("sessionId = %q, want sess-one", got.SessionID)
 	}
-	if got.Env["GC_CITY"] != "/city" {
-		t.Fatalf("env = %#v, missing GC_CITY", got.Env)
+	if got.Config.WorkDir != "/work" || got.Config.Command != "codex exec" {
+		t.Fatalf("config = %+v, missing workdir/command", got.Config)
 	}
-	if len(got.ProcessNames) != 1 || got.ProcessNames[0] != "codex" {
-		t.Fatalf("process_names = %#v, want codex", got.ProcessNames)
+	if got.Config.Env["GC_CITY"] != "/city" {
+		t.Fatalf("env = %#v, missing GC_CITY", got.Config.Env)
 	}
-	if len(got.CopyFiles) != 1 || got.CopyFiles[0].Src != "/host/file" || got.CopyFiles[0].RelDst != "file" {
-		t.Fatalf("copy_files = %#v, want stable copy entry", got.CopyFiles)
+	if len(got.Config.ProcessNames) != 1 || got.Config.ProcessNames[0] != "codex" {
+		t.Fatalf("process_names = %#v, want codex", got.Config.ProcessNames)
+	}
+	if len(got.Config.CopyFiles) != 1 || got.Config.CopyFiles[0].Src != "/host/file" || got.Config.CopyFiles[0].RelDst != "file" {
+		t.Fatalf("copy_files = %#v, want stable copy entry", got.Config.CopyFiles)
 	}
 }
 
@@ -124,15 +127,15 @@ func TestStopTreatsNotFoundAsIdempotent(t *testing.T) {
 	}
 }
 
-func TestIsRunningDecodesRemoteState(t *testing.T) {
+func TestIsRunningDecodesStatusEndpoint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("method = %s, want GET", r.Method)
 		}
-		if r.URL.EscapedPath() != "/sessions/sess-one/running" {
-			t.Fatalf("path = %q, want running endpoint", r.URL.EscapedPath())
+		if r.URL.EscapedPath() != "/session/sess-one/status" {
+			t.Fatalf("path = %q, want /session/sess-one/status", r.URL.EscapedPath())
 		}
-		_, _ = w.Write([]byte(`{"running":true}`))
+		_, _ = w.Write([]byte(`{"alive":true}`))
 	}))
 	defer server.Close()
 
@@ -146,38 +149,34 @@ func TestIsRunningDecodesRemoteState(t *testing.T) {
 	}
 }
 
-func TestListRunningUsesPrefixQuery(t *testing.T) {
-	var gotPrefix string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPrefix = r.URL.Query().Get("prefix")
-		if r.URL.EscapedPath() != "/sessions" {
-			t.Fatalf("path = %q, want /sessions", r.URL.EscapedPath())
-		}
-		_, _ = w.Write([]byte(`{"names":["alpha-1","alpha-2"]}`))
-	}))
-	defer server.Close()
-
-	p, err := NewProviderWithConfig(Config{Endpoint: server.URL})
+func TestIsAttachedAlwaysReturnsFalse(t *testing.T) {
+	p, err := NewProviderWithConfig(Config{Endpoint: "http://unused.example"})
 	if err != nil {
 		t.Fatalf("NewProviderWithConfig: %v", err)
 	}
-
-	names, err := p.ListRunning("alpha")
-	if err != nil {
-		t.Fatalf("ListRunning: %v", err)
-	}
-	if gotPrefix != "alpha" {
-		t.Fatalf("prefix = %q, want alpha", gotPrefix)
-	}
-	if len(names) != 2 || names[0] != "alpha-1" || names[1] != "alpha-2" {
-		t.Fatalf("names = %#v, want alpha sessions", names)
+	if p.IsAttached("any") {
+		t.Fatal("IsAttached = true, want false (unsupported)")
 	}
 }
 
-func TestGetLastActivityParsesRFC3339Nano(t *testing.T) {
-	want := time.Date(2026, 5, 24, 2, 14, 25, 123, time.UTC)
+func TestListRunningNotSupported(t *testing.T) {
+	p, err := NewProviderWithConfig(Config{Endpoint: "http://unused.example"})
+	if err != nil {
+		t.Fatalf("NewProviderWithConfig: %v", err)
+	}
+	names, err := p.ListRunning("any")
+	if err == nil {
+		t.Fatalf("ListRunning succeeded, want error")
+	}
+	if names != nil {
+		t.Fatalf("ListRunning names = %v, want nil", names)
+	}
+}
+
+func TestGetLastActivityParsesCreatedAt(t *testing.T) {
+	want := time.Date(2026, 5, 24, 2, 14, 25, 0, time.UTC)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(activityResponse{LastActivity: want.Format(time.RFC3339Nano)})
+		_, _ = w.Write([]byte(`{"alive":true,"record":{"createdAt":"` + want.Format(time.RFC3339Nano) + `"}}`))
 	}))
 	defer server.Close()
 
@@ -195,11 +194,11 @@ func TestGetLastActivityParsesRFC3339Nano(t *testing.T) {
 	}
 }
 
-func TestNudgePostsContentBlocks(t *testing.T) {
+func TestNudgePostsText(t *testing.T) {
 	var got nudgeRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.EscapedPath() != "/sessions/sess-one/nudge" {
-			t.Fatalf("path = %q, want nudge endpoint", r.URL.EscapedPath())
+		if r.URL.EscapedPath() != "/session/sess-one/nudge" {
+			t.Fatalf("path = %q, want /session/sess-one/nudge", r.URL.EscapedPath())
 		}
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Fatalf("decode body: %v", err)
@@ -217,8 +216,8 @@ func TestNudgePostsContentBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Nudge: %v", err)
 	}
-	if len(got.Content) != 1 || got.Content[0].Text != "hello" {
-		t.Fatalf("content = %#v, want text block", got.Content)
+	if got.Text != "hello" {
+		t.Fatalf("text = %q, want hello", got.Text)
 	}
 }
 
