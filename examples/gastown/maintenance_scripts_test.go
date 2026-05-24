@@ -888,10 +888,16 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 func writeStrictOrphanSweepGCStub(t *testing.T, path string) {
 	t.Helper()
 	writeExecutable(t, path, `#!/bin/sh
+rig=""
 if [ "$1" = "--rig" ]; then
+  rig="$2"
   shift 2
 fi
-printf '%s\n' "$*" >> "$GC_CALL_LOG"
+if [ -n "$rig" ]; then
+  printf '--rig %s %s\n' "$rig" "$*" >> "$GC_CALL_LOG"
+else
+  printf '%s\n' "$*" >> "$GC_CALL_LOG"
+fi
 if [ "$*" = "bd list --status=in_progress --json --limit=0" ]; then
   printf '%s\n' "$ORPHAN_SWEEP_HQ_JSON"
   exit 0
@@ -908,10 +914,14 @@ if [ "$*" = "config explain" ]; then
   printf 'Agent: %s\n  source: pack\n' "$ORPHAN_SWEEP_CONFIGURED_IDENTITY"
   exit 0
 fi
-	if [ "$*" = "session list --json" ]; then
-	  printf '{"sessions":[{"id":"mc-live","session_name":"project__worker-gc-abc123","alias":"%s","agent_name":"%s","closed":false}],"summary":{},"filters":{},"schema_version":"1"}\n' "$ORPHAN_SWEEP_CONFIGURED_IDENTITY" "$ORPHAN_SWEEP_CONFIGURED_IDENTITY"
-	  exit 0
-	fi
+if [ "$*" = "session list --json" ]; then
+  if [ "$rig" = "project-alpha" ]; then
+    printf '%s\n' "$ORPHAN_SWEEP_RIG_SESSIONS_JSON"
+  else
+    printf '%s\n' "$ORPHAN_SWEEP_HQ_SESSIONS_JSON"
+  fi
+  exit 0
+fi
 if [ "$*" = "bd update $ORPHAN_SWEEP_ORPHAN_ID --status=open --assignee=" ]; then
   exit 0
 fi
@@ -952,8 +962,65 @@ func orphanSweepProtectedWispBeadsJSON(t *testing.T, protectedID, protectedAssig
 	return string(data)
 }
 
-func orphanSweepCleanroomEnv(t *testing.T, root, binDir, gcLog, hqJSON, rigJSON, configuredIdentity, orphanID string) []string {
+func orphanSweepSessionListJSON(t *testing.T, liveSessionNames ...string) string {
 	t.Helper()
+	type session struct {
+		ID          string `json:"id"`
+		SessionName string `json:"session_name"`
+		Alias       string `json:"alias,omitempty"`
+		AgentName   string `json:"agent_name,omitempty"`
+		Closed      bool   `json:"closed"`
+	}
+	type response struct {
+		SchemaVersion string         `json:"schema_version"`
+		Filters       map[string]any `json:"filters"`
+		Sessions      []session      `json:"sessions"`
+		Summary       map[string]any `json:"summary"`
+	}
+	sessions := make([]session, 0, len(liveSessionNames)+1)
+	for i, name := range liveSessionNames {
+		sessions = append(sessions, session{
+			ID:          fmt.Sprintf("mc-live-%d", i),
+			SessionName: name,
+			Closed:      false,
+		})
+	}
+	sessions = append(sessions, session{
+		ID:          "mc-closed",
+		SessionName: "closed-session",
+		Closed:      true,
+	})
+	data, err := json.Marshal(response{
+		SchemaVersion: "1",
+		Filters:       map[string]any{},
+		Sessions:      sessions,
+		Summary:       map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Marshal(orphan-sweep sessions): %v", err)
+	}
+	return string(data)
+}
+
+func orphanSweepCleanroomEnv(t *testing.T, root, binDir, gcLog, hqJSON, rigJSON, configuredIdentity, orphanID string, extra ...string) []string {
+	t.Helper()
+	hqSessionsJSON := orphanSweepSessionListJSON(t)
+	rigSessionsJSON := orphanSweepSessionListJSON(t)
+	rigList := `{"rigs":[{"name":"hq","hq":true},{"name":"project-alpha","hq":false}]}`
+	switch len(extra) {
+	case 0:
+	case 1:
+		rigList = extra[0]
+	case 2:
+		hqSessionsJSON = extra[0]
+		rigSessionsJSON = extra[1]
+	case 3:
+		hqSessionsJSON = extra[0]
+		rigSessionsJSON = extra[1]
+		rigList = extra[2]
+	default:
+		t.Fatalf("orphanSweepCleanroomEnv: unexpected extra arg count %d", len(extra))
+	}
 	dirs := map[string]string{
 		"HOME":              filepath.Join(root, "home"),
 		"XDG_CONFIG_HOME":   filepath.Join(root, "xdg-config"),
@@ -990,6 +1057,9 @@ func orphanSweepCleanroomEnv(t *testing.T, root, binDir, gcLog, hqJSON, rigJSON,
 		"GIT_CONFIG_NOSYSTEM=1",
 		"ORPHAN_SWEEP_HQ_JSON=" + hqJSON,
 		"ORPHAN_SWEEP_RIG_JSON=" + rigJSON,
+		"ORPHAN_SWEEP_RIG_LIST_JSON=" + rigList,
+		"ORPHAN_SWEEP_HQ_SESSIONS_JSON=" + hqSessionsJSON,
+		"ORPHAN_SWEEP_RIG_SESSIONS_JSON=" + rigSessionsJSON,
 		"ORPHAN_SWEEP_CONFIGURED_IDENTITY=" + configuredIdentity,
 		"ORPHAN_SWEEP_ORPHAN_ID=" + orphanID,
 		"PATH=" + binDir,
@@ -1033,18 +1103,6 @@ func countExactLine(lines []string, want string) int {
 		}
 	}
 	return count
-}
-
-func equalStringSlices(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for i := range left {
-		if left[i] != right[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func TestMaintenanceDoltScriptsUseManagedRuntimePorts(t *testing.T) {
