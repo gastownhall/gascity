@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
 	detachedProbeMetadataKey    = "gc.detached"
 	detachedProbeDefaultTimeout = time.Second
+	detachedProbeErrorThreshold = 3
 )
 
 type detachedProbeStatus string
@@ -33,6 +35,13 @@ type detachedProbeResult struct {
 	Status detachedProbeStatus
 	Spec   detachedProbeSpec
 	Err    error
+}
+
+var detachedProbeErrorCounts = struct {
+	sync.Mutex
+	byBead map[string]int
+}{
+	byBead: make(map[string]int),
 }
 
 func parseDetachedProbeSpec(spec string) (detachedProbeSpec, error) {
@@ -83,4 +92,26 @@ func probeDetachedWorkWithTimeout(ctx context.Context, spec string, timeout time
 		return detachedProbeResult{Status: detachedProbeError, Spec: parsed, Err: err}
 	}
 	return detachedProbeResult{Status: detachedProbeAlive, Spec: parsed}
+}
+
+func incrementDetachedProbeErrorCount(id string) int {
+	detachedProbeErrorCounts.Lock()
+	defer detachedProbeErrorCounts.Unlock()
+	if detachedProbeErrorCounts.byBead == nil {
+		detachedProbeErrorCounts.byBead = make(map[string]int)
+	}
+	detachedProbeErrorCounts.byBead[id]++
+	return detachedProbeErrorCounts.byBead[id]
+}
+
+func clearDetachedProbeErrorCount(id string) {
+	detachedProbeErrorCounts.Lock()
+	defer detachedProbeErrorCounts.Unlock()
+	delete(detachedProbeErrorCounts.byBead, id)
+}
+
+func resetDetachedProbeErrorCountsForTest() {
+	detachedProbeErrorCounts.Lock()
+	defer detachedProbeErrorCounts.Unlock()
+	detachedProbeErrorCounts.byBead = make(map[string]int)
 }
