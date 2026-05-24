@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/spf13/cobra"
 )
 
@@ -109,4 +111,19 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	}
 	fmt.Fprintf(stdout, "Session %s reset requested. Controller will restart it fresh.\n", sessionID) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+func resetSessionCircuitBreakerAfterExplicitKill(cityPath string, store beads.Store, sessionID, identity string) error {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return nil
+	}
+	if strings.TrimSpace(cityPath) != "" && cityUsesManagedReconciler(cityPath) {
+		if err := resetSessionCircuitBreakerOnController(cityPath, sessionID, identity); err != nil {
+			return err
+		}
+		_ = pokeController(cityPath)
+		return nil
+	}
+	return resetSessionCircuitBreakerState(store, sessionID, identity, defaultSessionCircuitBreaker())
 }

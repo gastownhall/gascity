@@ -305,6 +305,94 @@ func TestReconcileSessionBeads_RestartRequestPreservesIntentWhenKillFails(t *tes
 	}
 }
 
+func TestReconcileSessionBeads_RestartRequestClearsCircuitBreakerForNextWake(t *testing.T) {
+	env := newRestartRequestTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon: config.DaemonConfig{
+			SessionCircuitBreaker:            true,
+			SessionCircuitBreakerMaxRestarts: restartRequestTestIntPtr(3),
+			SessionCircuitBreakerWindow:      "30m",
+		},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "worker",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+
+	const identity = "worker"
+	cb := breakerAt(30*time.Minute, 3)
+	base := env.clk.Now().UTC()
+	for i := 0; i < 4; i++ {
+		cb.RecordRestart(identity, base.Add(time.Duration(i)*time.Second))
+	}
+	if !cb.IsOpen(identity, base.Add(time.Minute)) {
+		t.Fatalf("precondition: breaker should be OPEN for %q", identity)
+	}
+	restore := setSessionCircuitBreakerForTest(cb)
+	defer restore()
+
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: identity,
+		namedSessionModeMetadata:     "always",
+		"state":                      "active",
+		"restart_requested":          "true",
+		"session_key":                "original-key",
+		"started_config_hash":        "hash-before-restart",
+	})
+	if err := persistSessionCircuitBreakerMetadata(env.store, &session, cb, identity, base); err != nil {
+		t.Fatalf("persist circuit metadata: %v", err)
+	}
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	env.reconcile([]beads.Bead{session})
+
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q still running after restart-requested kill", sessionName)
+	}
+	if cb.IsOpen(identity, base.Add(time.Minute)) {
+		t.Fatalf("breaker still OPEN for %q after restart-requested kill", identity)
+	}
+	stopped, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	if got := stopped.Metadata[sessionCircuitStateMetadata]; got != "" {
+		t.Fatalf("persisted circuit state = %q, want cleared", got)
+	}
+	if got := stopped.Metadata[sessionCircuitRestartsMetadata]; got != "" {
+		t.Fatalf("persisted restart history = %q, want cleared", got)
+	}
+	if got := stopped.Metadata[sessionCircuitResetGenerationMetadata]; got == "" {
+		t.Fatal("persisted reset generation is empty, want explicit reset generation")
+	}
+
+	env.stdout.Reset()
+	env.stderr.Reset()
+	env.reconcile([]beads.Bead{stopped})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q did not wake after explicit reset cleared the circuit breaker", sessionName)
+	}
+	if got := env.stderr.String(); strings.Contains(got, "CIRCUIT_OPEN") {
+		t.Fatalf("stderr = %q, want no circuit-open block after explicit reset", got)
+	}
+}
+
 func TestReconcileSessionBeads_RestartRequestPreemptsRateLimitGate(t *testing.T) {
 	env, session, sessionName := newRestartRequestedZombieSession(t)
 	env.sp.SetPeekOutput(sessionName, "You've hit your limit, Pro plan\n\n/rate-limit-options")

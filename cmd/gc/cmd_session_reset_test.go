@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"net"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -103,6 +106,111 @@ func TestCmdSessionReset_ClearsCircuitBreaker(t *testing.T) {
 	}
 	if got := updated.Metadata[sessionCircuitRestartsMetadata]; got != "" {
 		t.Fatalf("persisted restart history = %q, want cleared", got)
+	}
+}
+
+func TestCmdSessionKill_ClearsCircuitBreaker(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := shortSocketTempDir(t, "gc-session-kill-cb-")
+	t.Setenv("GC_CITY", cityDir)
+	writeGenericNamedSessionCityTOML(t, cityDir)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+
+	fakeProvider := runtime.NewFake()
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return fakeProvider, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	const identity = "session-a"
+	const sessionName = "s-gc-kill-cb-test"
+	bead, err := store.Create(beads.Bead{
+		Title:  "named session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession, "template:worker"},
+		Metadata: map[string]string{
+			"alias":                        identity,
+			"template":                     "worker",
+			"session_name":                 sessionName,
+			"state":                        "awake",
+			namedSessionMetadataKey:        "true",
+			namedSessionIdentityMetadata:   identity,
+			sessionCircuitStateMetadata:    circuitOpen.String(),
+			sessionCircuitRestartsMetadata: `["2026-04-10T12:00:00Z"]`,
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+	if err := fakeProvider.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("fakeProvider.Start: %v", err)
+	}
+	if err := fakeProvider.SetMeta(sessionName, "GC_SESSION_ID", bead.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	cb := newSessionCircuitBreaker(sessionCircuitBreakerConfig{
+		Window:      30 * time.Minute,
+		MaxRestarts: 3,
+	})
+	restore := setSessionCircuitBreakerForTest(cb)
+	defer restore()
+	now := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 4; i++ {
+		cb.RecordRestart(identity, now.Add(time.Duration(i)*time.Second))
+	}
+	if !cb.IsOpen(identity, now.Add(time.Minute)) {
+		t.Fatalf("precondition: expected breaker OPEN for %q after 4 restarts", identity)
+	}
+
+	lis, err := startControllerSocket(
+		cityDir,
+		func() {},
+		nil,
+		nil,
+		make(chan reloadRequest),
+		make(chan convergenceRequest, 1),
+		make(chan struct{}, 1),
+		make(chan struct{}, 1),
+	)
+	if err != nil {
+		t.Fatalf("startControllerSocket: %v", err)
+	}
+	defer lis.Close()                              //nolint:errcheck
+	defer os.Remove(controllerSocketPath(cityDir)) //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionKill([]string{identity}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionKill = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	if fakeProvider.IsRunning(sessionName) {
+		t.Fatalf("session %q still running after kill", sessionName)
+	}
+	if cb.IsOpen(identity, now.Add(time.Minute)) {
+		t.Fatalf("breaker still OPEN for %q after `gc session kill %s`", identity, identity)
+	}
+	updated, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(session bead): %v", err)
+	}
+	if got := updated.Metadata[sessionCircuitStateMetadata]; got != "" {
+		t.Fatalf("persisted circuit state = %q, want cleared", got)
+	}
+	if got := updated.Metadata[sessionCircuitRestartsMetadata]; got != "" {
+		t.Fatalf("persisted restart history = %q, want cleared", got)
+	}
+	if got := updated.Metadata[sessionCircuitResetGenerationMetadata]; got == "" {
+		t.Fatal("persisted reset generation is empty, want explicit reset generation")
 	}
 }
 

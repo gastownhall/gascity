@@ -1383,6 +1383,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						continue
 					}
 				}
+				if identity := namedSessionIdentity(*session); identity != "" {
+					if err := resetSessionCircuitBreakerState(store, session.ID, identity, cb); err != nil {
+						fmt.Fprintf(stderr, "session reconciler: clearing session circuit breaker for restart-requested %s: %v\n", name, err) //nolint:errcheck
+						continue
+					}
+				}
 				// Providers that can inject a fresh session ID get a
 				// rotated key here so the next wake starts a brand-new
 				// conversation. Providers without SessionIDFlag must
