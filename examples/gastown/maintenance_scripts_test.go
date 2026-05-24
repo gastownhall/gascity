@@ -4580,6 +4580,49 @@ exec "$real_git" "$@"
 `, strconv.Quote(countFile), strconv.Quote(logFile), strconv.Quote(mode), strconv.Quote(realGit)))
 }
 
+func writeGitPushRemoteAdvanceRaceStub(t *testing.T, binDir, realGit, remoteRepo, logFile string) {
+	t.Helper()
+	countFile := filepath.Join(t.TempDir(), "push-count")
+	writeExecutable(t, filepath.Join(binDir, "git"), fmt.Sprintf(`#!/bin/sh
+count_file=%s
+log_file=%s
+remote_repo=%s
+real_git=%s
+advance_dir=""
+cleanup_advance() {
+    if [ -n "$advance_dir" ]; then
+        rm -rf "$advance_dir"
+    fi
+}
+trap cleanup_advance EXIT
+for arg in "$@"; do
+    if [ "$arg" = "push" ]; then
+        count=0
+        if [ -f "$count_file" ]; then
+            count="$(cat "$count_file")"
+        fi
+        count=$((count + 1))
+        printf '%%s\n' "$count" > "$count_file"
+        printf '%%s\n' "$count" >> "$log_file"
+        if [ "$count" -eq 1 ]; then
+            advance_dir="$(mktemp -d)"
+            "$real_git" clone -q "$remote_repo" "$advance_dir" || exit $?
+            "$real_git" -C "$advance_dir" checkout -q main || exit $?
+            "$real_git" -C "$advance_dir" config user.email test@example.invalid || exit $?
+            "$real_git" -C "$advance_dir" config user.name test || exit $?
+            printf 'remote advance during push\n' > "$advance_dir/remote-push-race.txt" || exit $?
+            "$real_git" -C "$advance_dir" add -A || exit $?
+            "$real_git" -C "$advance_dir" commit -q -m "remote advance during push" || exit $?
+            "$real_git" -C "$advance_dir" push -q origin main || exit $?
+        fi
+        break
+    fi
+done
+"$real_git" "$@"
+exit $?
+`, strconv.Quote(countFile), strconv.Quote(logFile), strconv.Quote(remoteRepo), strconv.Quote(realGit)))
+}
+
 func writeSleepLogStub(t *testing.T, binDir, logFile string) {
 	t.Helper()
 	writeExecutable(t, filepath.Join(binDir, "sleep"), fmt.Sprintf(`#!/bin/sh
@@ -6096,6 +6139,91 @@ func TestJsonlExportPushRetriesAndRecordsSuccessAfterTransientFailure(t *testing
 	}
 	if got := strings.TrimSpace(string(remoteHeadOut)); got == priorHead {
 		t.Fatalf("expected retry success to advance remote main from %s", priorHead)
+	}
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got := state["consecutive_push_failures"]; got != float64(0) {
+		t.Fatalf("consecutive_push_failures = %v, want 0\nstate: %s", got, stateData)
+	}
+	if got := state["pending_archive_push"]; got == true {
+		t.Fatalf("pending_archive_push should clear after retry success\nstate: %s", stateData)
+	}
+	if _, ok := state["last_push_at"].(string); !ok {
+		t.Fatalf("last_push_at should be set after retry success:\n%s", stateData)
+	}
+	if _, has := state["last_push_stderr"]; has {
+		t.Fatalf("last_push_stderr should clear after retry success:\n%s", stateData)
+	}
+}
+
+func TestJsonlExportPushRetryRebasesAfterRemoteAdvanceRace(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+	pushLog := filepath.Join(t.TempDir(), "git-push.log")
+	sleepLog := filepath.Join(t.TempDir(), "sleep.log")
+
+	remoteRepo, priorHead := initSeedArchiveWithRemote(t, archiveRepo)
+	writeMultiRecordDoltStub(t, binDir, 101)
+	writeJsonlExportGCStub(t, binDir)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("LookPath(git): %v", err)
+	}
+	writeGitPushRemoteAdvanceRaceStub(t, binDir, realGit, remoteRepo, pushLog)
+	writeSleepLogStub(t, binDir, sleepLog)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "push succeeded on retry attempt 2") {
+		t.Fatalf("expected retry success after remote advance, got:\n%s", out)
+	}
+
+	pushData, err := os.ReadFile(pushLog)
+	if err != nil {
+		t.Fatalf("ReadFile(push log): %v", err)
+	}
+	if got := strings.Count(string(pushData), "\n"); got != 2 {
+		t.Fatalf("expected first non-fast-forward push plus one retry, got %d attempts:\n%s", got, pushData)
+	}
+	sleepData, err := os.ReadFile(sleepLog)
+	if err != nil {
+		t.Fatalf("ReadFile(sleep log): %v", err)
+	}
+	if got := strings.TrimSpace(string(sleepData)); got != "0.00" {
+		t.Fatalf("retry delay override must produce one zero-second sleep, got %q", got)
+	}
+
+	remoteHeadOut, err := exec.Command("git", "--git-dir", remoteRepo, "rev-parse", "refs/heads/main").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse remote main: %v\n%s", err, remoteHeadOut)
+	}
+	if got := strings.TrimSpace(string(remoteHeadOut)); got == priorHead {
+		t.Fatalf("expected retry success to advance remote main from %s", priorHead)
+	}
+
+	logOut, err := exec.Command("git", "--git-dir", remoteRepo, "log", "--format=%s", "-3", "refs/heads/main").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git log remote main: %v\n%s", err, logOut)
+	}
+	remoteLog := string(logOut)
+	if !strings.Contains(remoteLog, "remote advance during push") || !strings.Contains(remoteLog, "records=101") {
+		t.Fatalf("expected remote history to contain both sibling advance and rebased export commit, got:\n%s", remoteLog)
 	}
 
 	stateData, err := os.ReadFile(stateFile)
