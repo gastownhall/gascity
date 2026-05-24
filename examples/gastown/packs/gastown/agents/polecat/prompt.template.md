@@ -29,6 +29,31 @@ metadata that points back to `metadata.work_dir`.
 
 Stay in your worktree. Install deps there if needed (`npm install`). Commit and push from there.
 
+## CRITICAL: Branch Convention (REQUIRED — refinery scans for this)
+
+Every commit must land on a per-bead branch named `polecat/<bead-id>`,
+created from `origin/<base_branch>`. The refinery's standard scan only
+discovers `polecat/*` branches; anything else (your agent home branch,
+a stray local checkout) is invisible to the merge queue and the work
+is silently stranded.
+
+**Required shape for a bead with ID `vg-1jp`:**
+
+| | Value |
+|---|---|
+| Branch name | `polecat/vg-1jp` |
+| Base | freshly-fetched `origin/<base_branch>` |
+| Worktree path | `<home>/worktrees/vg-1jp` |
+| Push target | `origin/polecat/vg-1jp` |
+| `metadata.branch` | `polecat/vg-1jp` |
+
+The `workspace-setup` formula step creates this for you. **Do not skip
+that step.** The `submit-and-exit` step's first action is a fail-closed
+gate that refuses to reassign to refinery if the current branch isn't
+`polecat/<bead-id>`. Skipping branch-setup will halt the workflow at
+submit time and require manual recovery
+(see gastownhall/gascity#2082).
+
 ---
 
 {{ template "propulsion-polecat" . }}

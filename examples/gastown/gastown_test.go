@@ -468,14 +468,14 @@ func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
 	nudge := `gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true`
 
 	assertContainsInOrder(t, body,
-		"**5. Reassign to refinery:**",
+		"**6. Reassign to refinery:**",
 		refineryTarget,
 		`gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""`,
-		"**6. Signal refinery to check for work immediately",
+		"**7. Signal refinery to check for work immediately",
 		refineryTarget,
 		`gc session wake "$REFINERY_TARGET" || true`,
 		nudge,
-		"**7. Signal reconciler and exit.**",
+		"**8. Signal reconciler and exit.**",
 	)
 
 	for _, bad := range []string{
@@ -490,6 +490,69 @@ func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
 	if strings.Contains(body, `--assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"`) {
 		t.Fatal("polecat formula must clear gc.routed_to instead of routing to the refinery named session")
 	}
+}
+
+// TestPolecatFormulaSubmitHasBranchShapeGate is the regression test
+// for gastownhall/gascity#2082: the submit-and-exit step must include
+// a fail-closed gate that refuses to reassign to refinery when the
+// current branch isn't `polecat/<bead-id>`. Without this gate, a
+// provider that skipped workspace-setup (observed with codex)
+// silently strands work on its agent home branch — the refinery's
+// `polecat/*` scan never finds the commit.
+func TestPolecatFormulaSubmitHasBranchShapeGate(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat formula: %v", err)
+	}
+	body := string(data)
+
+	// The gate body must appear before the push (so a divergent
+	// branch never reaches origin) and before the refinery reassign
+	// (so a divergent branch never advances the bead state).
+	assertContainsInOrder(t, body,
+		"**1. Branch-shape gate (fails closed",
+		`CURRENT_BRANCH=$(git branch --show-current)`,
+		`EXPECTED_BRANCH="polecat/{{issue}}"`,
+		`if [ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]; then`,
+		`BRANCH SHAPE GATE FAILED`,
+		`gc runtime drain-ack`,
+		`exit 1`,
+		"**2. Final clean-state verification (safeguard):**",
+		"**3. Push your branch:**",
+		"**6. Reassign to refinery:**",
+	)
+
+	// The metadata.branch reconciliation must also be present so a
+	// workspace-setup step that ran but failed to record the branch
+	// is repaired before refinery handoff.
+	assertContainsInOrder(t, body,
+		`METADATA_BRANCH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.branch // empty')`,
+		`gc bd update {{issue}} --set-metadata branch="$EXPECTED_BRANCH"`,
+	)
+}
+
+// TestPolecatPromptInlinesBranchConvention asserts the polecat agent
+// prompt embeds the polecat/<bead-id> convention verbatim in a
+// CRITICAL section, so a provider that skips reading the formula
+// (observed with codex on #2082) still sees the rule inline.
+func TestPolecatPromptInlinesBranchConvention(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "polecat", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat prompt: %v", err)
+	}
+	body := string(data)
+
+	assertContainsInOrder(t, body,
+		"## CRITICAL: Branch Convention",
+		"`polecat/<bead-id>`",
+		"refinery's standard scan only",
+		"`polecat/*`",
+		"gastownhall/gascity#2082",
+	)
 }
 
 func TestPolecatFormulaSelfReviewRendersAffectedTestModes(t *testing.T) {
