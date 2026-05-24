@@ -83,6 +83,56 @@ type defaultScaleCheckTarget struct {
 	err      error
 }
 
+var errPoolSessionCreateBudgetExhausted = errors.New("pool session create budget exhausted")
+
+type poolSessionCreateBudget struct {
+	mu        sync.Mutex
+	remaining int
+}
+
+func newPoolSessionCreateBudget(limit int) *poolSessionCreateBudget {
+	if limit <= 0 {
+		return nil
+	}
+	return &poolSessionCreateBudget{remaining: limit}
+}
+
+func (b *poolSessionCreateBudget) tryClaim() bool {
+	if b == nil {
+		return true
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.remaining <= 0 {
+		return false
+	}
+	b.remaining--
+	return true
+}
+
+func (b *poolSessionCreateBudget) release() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.remaining++
+}
+
+func (bp *agentBuildParams) tryClaimPoolSessionCreate() bool {
+	if bp == nil || bp.poolSessionCreateBudget == nil {
+		return true
+	}
+	return bp.poolSessionCreateBudget.tryClaim()
+}
+
+func (bp *agentBuildParams) releasePoolSessionCreate() {
+	if bp == nil || bp.poolSessionCreateBudget == nil {
+		return
+	}
+	bp.poolSessionCreateBudget.release()
+}
+
 func evaluatePendingPools(
 	cfg *config.City,
 	pendingPools []poolEvalWork,
@@ -1609,7 +1659,11 @@ func realizePoolDesiredSessions(
 			}
 			sessionBead, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, used, usedSlots)
 			if err != nil {
-				fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
+				if errors.Is(err, errPoolSessionCreateBudgetExhausted) {
+					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (fresh create deferred)\n", qualifiedName, err) //nolint:errcheck
+				} else {
+					fmt.Fprintf(stderr, "buildDesiredState: pool %q request: %v (skipping)\n", qualifiedName, err) //nolint:errcheck
+				}
 				item.skip = true
 				return item
 			}
@@ -2360,6 +2414,10 @@ func selectOrPlanPoolSessionBead(
 	}
 	slot := claimDesiredPoolSlot(bp.city, cfgAgent, beads.Bead{}, usedSlots)
 	_, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(cfgAgent, slot)
+	if !bp.tryClaimPoolSessionCreate() {
+		delete(usedSlots, slot)
+		return beads.Bead{}, 0, nil, errPoolSessionCreateBudgetExhausted
+	}
 	plan := &poolSessionCreatePlan{
 		qualifiedInstance: qualifiedInstance,
 		slot:              slot,
@@ -2379,7 +2437,11 @@ func executePlannedPoolSessionBeadCreate(
 	template string,
 	plan poolSessionCreatePlan,
 ) (beads.Bead, error) {
-	return createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, template, plan.qualifiedInstance, plan.slot)
+	bead, err := createPoolSessionBeadWithGuardedAlias(bp, cfgAgent, template, plan.qualifiedInstance, plan.slot)
+	if err != nil {
+		bp.releasePoolSessionCreate()
+	}
+	return bead, err
 }
 
 func claimDesiredPoolSlot(cfg *config.City, cfgAgent *config.Agent, sessionBead beads.Bead, used map[int]bool) int {

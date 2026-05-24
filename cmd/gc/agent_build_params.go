@@ -50,6 +50,10 @@ type agentBuildParams struct {
 	// that already own work as available generic capacity.
 	assignedWorkBeads []beads.Bead
 
+	// poolSessionCreateBudget caps fresh pool session bead materialization in a
+	// single desired-state build. Existing session beads may still be reused.
+	poolSessionCreateBudget *poolSessionCreateBudget
+
 	// beadNames caches qualifiedName → session_name mappings resolved
 	// during this build cycle. Populated lazily by resolveSessionName.
 	beadNames map[string]string
@@ -108,6 +112,9 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		beadNames:       make(map[string]string),
 		stderr:          stderr,
 		sessionProvider: cfg.Session.Provider,
+	}
+	if store != nil {
+		params.poolSessionCreateBudget = newPoolSessionCreateBudget(cfg.Daemon.MaxWakesPerTickOrDefault())
 	}
 	// Load the shared skill catalog once per build cycle. Transient load
 	// failures (filesystem race during dolt sync / heavy I/O) used to

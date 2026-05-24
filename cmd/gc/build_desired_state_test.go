@@ -2537,6 +2537,99 @@ func TestRealizePoolDesiredSessionsDefersAliasWhenNormalizationCollides(t *testi
 	}
 }
 
+func TestRealizePoolDesiredSessionsLimitsFreshCreatesToWakeBudget(t *testing.T) {
+	maxWakes := 2
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = &sessionBeadSnapshot{}
+	requests := make([]SessionRequest, 5)
+	for i := range requests {
+		requests[i] = SessionRequest{Template: "worker", Tier: "new"}
+	}
+	desired := map[string]TemplateParams{}
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "worker",
+		Requests: requests,
+	}, desired, &stderr)
+
+	if got := len(bp.sessionBeads.Open()); got != maxWakes {
+		t.Fatalf("created session beads = %d, want wake budget %d; stderr=%q", got, maxWakes, stderr.String())
+	}
+	if got := len(desired); got != maxWakes {
+		t.Fatalf("desired sessions = %d, want wake budget %d; stderr=%q", got, maxWakes, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "pool session create budget exhausted") {
+		t.Fatalf("stderr = %q, want budget exhaustion diagnostic", stderr.String())
+	}
+}
+
+func TestRealizePoolDesiredSessionsBudgetExhaustionStillAllowsLaterReuse(t *testing.T) {
+	maxWakes := 1
+	store := beads.NewMemStore()
+	reusable, err := store.Create(beads.Bead{
+		Title:  "worker reusable",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":             "worker",
+			"agent_name":           "worker-7",
+			"alias":                "worker-7",
+			"session_name":         "worker-reusable",
+			"state":                "awake",
+			"pool_slot":            "7",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(10),
+		}},
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.add(reusable)
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = snapshot
+	desired := map[string]TemplateParams{}
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "worker",
+		Requests: []SessionRequest{
+			{Template: "worker", Tier: "new"},
+			{Template: "worker", Tier: "new"},
+			{Template: "worker", Tier: "resume", SessionBeadID: reusable.ID},
+		},
+	}, desired, &stderr)
+
+	if got := len(bp.sessionBeads.Open()); got != 2 {
+		t.Fatalf("open session beads = %d, want one fresh plus one reused; stderr=%q", got, stderr.String())
+	}
+	if _, ok := desired["worker-reusable"]; !ok {
+		t.Fatalf("desired missing reusable session after budget exhaustion; keys=%v stderr=%q", mapKeys(desired), stderr.String())
+	}
+}
+
 func TestSyncSessionBeads_ReclaimsDeferredSingletonAliasAfterConflictClears(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -3475,8 +3568,10 @@ func TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates(t *testing.
 	)
 	store := &delayingPoolCreateStore{MemStore: beads.NewMemStore(), delay: createDelay}
 	cityPath := t.TempDir()
+	maxWakes := requestCount
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
 		Agents: []config.Agent{{
 			Name:              "claude",
 			StartCommand:      "true",
