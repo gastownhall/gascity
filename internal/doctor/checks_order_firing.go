@@ -183,14 +183,20 @@ func computeExpectedIntervalForCronSchedule(schedule string) (time.Duration, err
 	// coarser than daily (#2499). The 24h fast-path stays cheap for the
 	// common case; coarser schedules pay the larger scan once per unique
 	// schedule (results are cached at the caller).
-	base := time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC)
+	//
+	// Base is the start of a leap year so the 366d window can include a
+	// Feb 29 occurrence — `0 0 29 2 *` (leap-day schedules) would otherwise
+	// produce a permanent doctor-red on cities whose check started outside
+	// a leap-year window (Copilot review on #2525).
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	windowsMinutes := []int{
 		1440,       // 24h — covers sub-daily and daily schedules
 		7 * 1440,   // 7d  — covers weekly and weekday-set schedules
 		31 * 1440,  // 31d — covers monthly schedules (longest month)
-		366 * 1440, // 366d — covers yearly and leap-year schedules
+		366 * 1440, // 366d — covers yearly + leap-year (Feb 29) schedules
 	}
-	for _, windowMinutes := range windowsMinutes {
+	lastWindowIndex := len(windowsMinutes) - 1
+	for windowIndex, windowMinutes := range windowsMinutes {
 		matches := make([]time.Time, 0, 16)
 		for i := 0; i < windowMinutes; i++ {
 			ts := base.Add(time.Duration(i) * time.Minute)
@@ -207,6 +213,17 @@ func computeExpectedIntervalForCronSchedule(schedule string) (time.Duration, err
 		}
 		window := time.Duration(windowMinutes) * time.Minute
 		if len(matches) == 1 {
+			// Don't fix the interval on the first window that happens to
+			// catch one match: a yearly schedule whose firing minute
+			// coincidentally falls inside the 24h or 7d window (e.g.
+			// `0 0 12 5 *` from a base near May 5) would otherwise be
+			// mis-classified as sub-daily. Keep widening until either a
+			// second match lands (use the real minGap) or we exhaust the
+			// horizon — only then is the window length a defensible
+			// conservative interval (Copilot review on #2525).
+			if windowIndex < lastWindowIndex {
+				continue
+			}
 			return window, nil
 		}
 		minGap := window
@@ -216,10 +233,12 @@ func computeExpectedIntervalForCronSchedule(schedule string) (time.Duration, err
 				minGap = gap
 			}
 		}
-		wrapGap := matches[0].Add(window).Sub(matches[len(matches)-1])
-		if wrapGap < minGap {
-			minGap = wrapGap
-		}
+		// Do not include a wrap-around gap (matches[0]+window - matches[last]).
+		// It is only meaningful when the schedule's natural period divides the
+		// window evenly, and produces wrong results for schedules whose period
+		// does not — e.g. a weekly schedule in the 31d window would report a
+		// bogus 3d "wrap" from Mon to Mon-of-next-month-mod-31d, drowning out
+		// the real 7d gap from the loop above.
 		return minGap, nil
 	}
 	return 0, fmt.Errorf("cron schedule %q has no firing minutes in a 366-day window", schedule)
