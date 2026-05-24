@@ -4352,21 +4352,23 @@ func mergeTestEnv(overrides map[string]string) []string {
 func jsonlExportEnv(t *testing.T, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog string) map[string]string {
 	t.Helper()
 	return map[string]string{
-		"GC_CALL_LOG":                gcLog,
-		"GC_MAIL_LOG":                mailLog,
-		"GC_CITY":                    cityDir,
-		"GC_CITY_PATH":               cityDir,
-		"GC_PACK_STATE_DIR":          stateDir,
-		"GC_DOLT_HOST":               "127.0.0.1",
-		"GC_DOLT_PORT":               "3307",
-		"GC_DOLT_USER":               "root",
-		"GC_DOLT_PASSWORD":           "",
-		"GC_JSONL_ARCHIVE_REPO":      archiveRepo,
-		"GC_JSONL_MAX_PUSH_FAILURES": "99",
-		"GC_JSONL_SCRUB":             "false",
-		"GIT_CONFIG_GLOBAL":          filepath.Join(t.TempDir(), "gitconfig"),
-		"GIT_CONFIG_NOSYSTEM":        "1",
-		"PATH":                       binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_CALL_LOG":                    gcLog,
+		"GC_MAIL_LOG":                    mailLog,
+		"GC_CITY":                        cityDir,
+		"GC_CITY_PATH":                   cityDir,
+		"GC_PACK_STATE_DIR":              stateDir,
+		"GC_DOLT_HOST":                   "127.0.0.1",
+		"GC_DOLT_PORT":                   "3307",
+		"GC_DOLT_USER":                   "root",
+		"GC_DOLT_PASSWORD":               "",
+		"GC_JSONL_ARCHIVE_REPO":          archiveRepo,
+		"GC_JSONL_MAX_PUSH_FAILURES":     "99",
+		"GC_JSONL_PUSH_RETRY_DELAY_MIN":  "0",
+		"GC_JSONL_PUSH_RETRY_DELAY_SPAN": "0",
+		"GC_JSONL_SCRUB":                 "false",
+		"GIT_CONFIG_GLOBAL":              filepath.Join(t.TempDir(), "gitconfig"),
+		"GIT_CONFIG_NOSYSTEM":            "1",
+		"PATH":                           binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 }
 
@@ -4544,6 +4546,46 @@ for arg in "$@"; do
 done
 exec '%s' "$@"
 `, subcommand, subcommand, realGit))
+}
+
+func writeGitPushAttemptStub(t *testing.T, binDir, realGit, mode, logFile string) {
+	t.Helper()
+	countFile := filepath.Join(t.TempDir(), "push-count")
+	writeExecutable(t, filepath.Join(binDir, "git"), fmt.Sprintf(`#!/bin/sh
+count_file=%s
+log_file=%s
+mode=%s
+real_git=%s
+for arg in "$@"; do
+    if [ "$arg" = "push" ]; then
+        count=0
+        if [ -f "$count_file" ]; then
+            count="$(cat "$count_file")"
+        fi
+        count=$((count + 1))
+        printf '%%s\n' "$count" > "$count_file"
+        printf '%%s\n' "$count" >> "$log_file"
+        if [ "$mode" = "fail-first" ] && [ "$count" -eq 1 ]; then
+            echo "simulated git push failure on attempt $count" >&2
+            exit 1
+        fi
+        if [ "$mode" = "always-fail" ]; then
+            echo "simulated git push failure on attempt $count" >&2
+            exit 1
+        fi
+        break
+    fi
+done
+exec "$real_git" "$@"
+`, strconv.Quote(countFile), strconv.Quote(logFile), strconv.Quote(mode), strconv.Quote(realGit)))
+}
+
+func writeSleepLogStub(t *testing.T, binDir, logFile string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "sleep"), fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %s
+exit 0
+`, strconv.Quote(logFile)))
 }
 
 func initSeedArchiveWithoutLocalIdentity(t *testing.T, archiveRepo string, prevCount int) string {
@@ -5977,6 +6019,163 @@ func TestJsonlExportPushFailureWritesLastPushStderr(t *testing.T) {
 	stderrVal, ok := state["last_push_stderr"].(string)
 	if !ok || stderrVal == "" {
 		t.Fatalf("last_push_stderr missing from state after push failure:\n%s", stateData)
+	}
+}
+
+func TestJsonlExportPushRetriesAndRecordsSuccessAfterTransientFailure(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+	pushLog := filepath.Join(t.TempDir(), "git-push.log")
+	sleepLog := filepath.Join(t.TempDir(), "sleep.log")
+
+	remoteRepo, priorHead := initSeedArchiveWithRemote(t, archiveRepo)
+	writeMultiRecordDoltStub(t, binDir, 100)
+	writeJsonlExportGCStub(t, binDir)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("LookPath(git): %v", err)
+	}
+	writeGitPushAttemptStub(t, binDir, realGit, "fail-first", pushLog)
+	writeSleepLogStub(t, binDir, sleepLog)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["GC_JSONL_PUSH_RETRY_DELAY_MIN"] = "0"
+	env["GC_JSONL_PUSH_RETRY_DELAY_SPAN"] = "0"
+
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "push succeeded on retry attempt 2") {
+		t.Fatalf("expected successful retry to be operator-visible, got:\n%s", out)
+	}
+
+	pushData, err := os.ReadFile(pushLog)
+	if err != nil {
+		t.Fatalf("ReadFile(push log): %v", err)
+	}
+	if got := strings.Count(string(pushData), "\n"); got != 2 {
+		t.Fatalf("expected exactly 2 push attempts, got %d:\n%s", got, pushData)
+	}
+	sleepData, err := os.ReadFile(sleepLog)
+	if err != nil {
+		t.Fatalf("ReadFile(sleep log): %v", err)
+	}
+	if got := strings.TrimSpace(string(sleepData)); got != "0.00" {
+		t.Fatalf("retry delay override must produce one zero-second sleep, got %q", got)
+	}
+
+	remoteHeadOut, err := exec.Command("git", "--git-dir", remoteRepo, "rev-parse", "refs/heads/main").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse remote main: %v\n%s", err, remoteHeadOut)
+	}
+	if got := strings.TrimSpace(string(remoteHeadOut)); got == priorHead {
+		t.Fatalf("expected retry success to advance remote main from %s", priorHead)
+	}
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got := state["consecutive_push_failures"]; got != float64(0) {
+		t.Fatalf("consecutive_push_failures = %v, want 0\nstate: %s", got, stateData)
+	}
+	if got := state["pending_archive_push"]; got == true {
+		t.Fatalf("pending_archive_push should clear after retry success\nstate: %s", stateData)
+	}
+	if _, ok := state["last_push_at"].(string); !ok {
+		t.Fatalf("last_push_at should be set after retry success:\n%s", stateData)
+	}
+	if _, has := state["last_push_stderr"]; has {
+		t.Fatalf("last_push_stderr should clear after retry success:\n%s", stateData)
+	}
+}
+
+func TestJsonlExportPushRetriesThreeTimesBeforeRecordingFailure(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+	pushLog := filepath.Join(t.TempDir(), "git-push.log")
+	sleepLog := filepath.Join(t.TempDir(), "sleep.log")
+
+	remoteRepo, priorHead := initSeedArchiveWithRemote(t, archiveRepo)
+	writeMultiRecordDoltStub(t, binDir, 100)
+	writeJsonlExportGCStub(t, binDir)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("LookPath(git): %v", err)
+	}
+	writeGitPushAttemptStub(t, binDir, realGit, "always-fail", pushLog)
+	writeSleepLogStub(t, binDir, sleepLog)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["GC_JSONL_PUSH_RETRY_DELAY_MIN"] = "0"
+	env["GC_JSONL_PUSH_RETRY_DELAY_SPAN"] = "0"
+
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh should report push failure in summary without exiting non-zero: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "pushing archive main failed after 3 attempts") {
+		t.Fatalf("expected terminal retry message, got:\n%s", out)
+	}
+
+	pushData, err := os.ReadFile(pushLog)
+	if err != nil {
+		t.Fatalf("ReadFile(push log): %v", err)
+	}
+	if got := strings.Count(string(pushData), "\n"); got != 3 {
+		t.Fatalf("expected exactly 3 push attempts, got %d:\n%s", got, pushData)
+	}
+	sleepData, err := os.ReadFile(sleepLog)
+	if err != nil {
+		t.Fatalf("ReadFile(sleep log): %v", err)
+	}
+	if got := strings.TrimSpace(string(sleepData)); got != "0.00\n0.00" {
+		t.Fatalf("retry delay override must produce two zero-second sleeps, got %q", got)
+	}
+
+	remoteHeadOut, err := exec.Command("git", "--git-dir", remoteRepo, "rev-parse", "refs/heads/main").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse remote main: %v\n%s", err, remoteHeadOut)
+	}
+	if got := strings.TrimSpace(string(remoteHeadOut)); got != priorHead {
+		t.Fatalf("terminal push failure must leave remote unchanged: got %s want %s", got, priorHead)
+	}
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got := state["consecutive_push_failures"]; got != float64(1) {
+		t.Fatalf("consecutive_push_failures = %v, want 1\nstate: %s", got, stateData)
+	}
+	if got := state["pending_archive_push"]; got != true {
+		t.Fatalf("pending_archive_push = %v, want true\nstate: %s", got, stateData)
+	}
+	stderrVal, ok := state["last_push_stderr"].(string)
+	if !ok || !strings.Contains(stderrVal, "simulated git push failure on attempt 3") {
+		t.Fatalf("last_push_stderr should capture final push failure, got %q\nstate: %s", stderrVal, stateData)
+	}
+	if _, has := state["last_push_at"]; has {
+		t.Fatalf("last_push_at should not be set after terminal push failure:\n%s", stateData)
 	}
 }
 

@@ -29,6 +29,8 @@ SPIKE_THRESHOLD="${GC_JSONL_SPIKE_THRESHOLD:-20}"  # percentage (0-100)
 # this absolute floor — small-N percentages are noise. Set to 0 to disable.
 MIN_PREV_FOR_SPIKE_CHECK="${GC_JSONL_MIN_PREV_FOR_SPIKE:-10}"
 MAX_PUSH_FAILURES="${GC_JSONL_MAX_PUSH_FAILURES:-3}"
+PUSH_RETRY_DELAY_MIN="${GC_JSONL_PUSH_RETRY_DELAY_MIN:-1}"
+PUSH_RETRY_DELAY_SPAN="${GC_JSONL_PUSH_RETRY_DELAY_SPAN:-4}"
 SCRUB="${GC_JSONL_SCRUB:-true}"
 ARCHIVE_REPO="${GC_JSONL_ARCHIVE_REPO:-$PACK_STATE_DIR/jsonl-archive}"
 
@@ -39,6 +41,11 @@ ARCHIVE_REPO="${GC_JSONL_ARCHIVE_REPO:-$PACK_STATE_DIR/jsonl-archive}"
 # instead of being silently scored as zero rows.
 count_jsonl_rows() {
     jq -s -r 'if length == 0 then 0 else ((.[0].rows // []) | length) end' || echo "0"
+}
+
+push_retry_delay_seconds() {
+    awk -v seed="$RANDOM$$" -v min="$PUSH_RETRY_DELAY_MIN" -v span="$PUSH_RETRY_DELAY_SPAN" \
+        'BEGIN{srand(seed); printf "%.2f", min + rand() * span}'
 }
 
 # Scrub test-only rows and ephemeral system rows while preserving the JSON
@@ -574,17 +581,21 @@ ESCALATION
     # Retry-with-backoff for transient push failures. Concurrent rigs pushing
     # to the same local bare archive can race on the ref-update lock or produce
     # non-fast-forward (a sibling rig commits between our fetch and our push).
-    # Retry up to 3 times with 1-5s jitter; re-fetch and rebase before each
-    # retry to absorb any new commits.
+    # Retry up to 3 times with jitter; re-fetch and rebase before each retry to
+    # absorb any new commits. Delay bounds default to 1-5s and are overridden
+    # in tests to keep failure-path coverage fast.
     push_succeeded=false
     for push_attempt in 1 2 3; do
         if push_err=$(git push origin main -q 2>&1 >/dev/null); then
             push_succeeded=true
+            if [ "$push_attempt" -gt 1 ]; then
+                echo "jsonl-export: push succeeded on retry attempt $push_attempt" >&2
+            fi
             break
         fi
 
         if [ "$push_attempt" -lt 3 ]; then
-            sleep "$(awk 'BEGIN{srand(); printf "%.2f", 1 + rand() * 4}')"
+            sleep "$(push_retry_delay_seconds)"
 
             # Refresh origin tracking before retry — a sibling rig may have
             # moved the ref while we slept.
