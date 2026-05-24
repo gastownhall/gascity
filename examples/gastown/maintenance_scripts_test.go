@@ -831,7 +831,14 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 				t.Fatalf("unsupported scope %q", tt.scope)
 			}
 
-			env := orphanSweepCleanroomEnv(t, root, binDir, gcLog, hqJSON, rigJSON, hqSessionsJSON, rigSessionsJSON, tt.configuredIdentity, tt.orphanID)
+			env := orphanSweepCleanroomEnv(t, root, binDir, gcLog, orphanSweepCleanroomEnvConfig{
+				hqJSON:             hqJSON,
+				rigJSON:            rigJSON,
+				hqSessionsJSON:     hqSessionsJSON,
+				rigSessionsJSON:    rigSessionsJSON,
+				configuredIdentity: tt.configuredIdentity,
+				orphanID:           tt.orphanID,
+			})
 			assertOrphanSweepFakeGC(t, env, filepath.Join(binDir, "bash"), fakeGC, gcLog)
 
 			script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
@@ -867,6 +874,7 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 			if got := countExactLine(lines, "session list --json"); got < 2 {
 				t.Fatalf("HQ session probe count = %d, want at least 2\n%s", got, orphanSweepFailureContext(out, gcLog))
 			}
+			// Keep before/after rig liveness probes covered on the protected-wisp path.
 			if got := countExactLine(lines, "--rig project-alpha session list --json"); got < 2 {
 				t.Fatalf("rig session probe count = %d, want at least 2\n%s", got, orphanSweepFailureContext(out, gcLog))
 			}
@@ -888,13 +896,14 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 func writeStrictOrphanSweepGCStub(t *testing.T, path string) {
 	t.Helper()
 	writeExecutable(t, path, `#!/bin/sh
+set -eu
 rig=""
-if [ "$1" = "--rig" ]; then
+if [ "${1:-}" = "--rig" ]; then
   rig="$2"
   shift 2
 fi
 if [ -n "$rig" ]; then
-  printf '--rig %s %s\n' "$rig" "$*" >> "$GC_CALL_LOG"
+  printf '%s %s %s\n' "--rig" "$rig" "$*" >> "$GC_CALL_LOG"
 else
   printf '%s\n' "$*" >> "$GC_CALL_LOG"
 fi
@@ -929,6 +938,15 @@ printf 'UNEXPECTED: %s\n' "$*" >> "$GC_CALL_LOG"
 printf 'UNEXPECTED: %s\n' "$*" >&2
 exit 2
 `)
+}
+
+type orphanSweepCleanroomEnvConfig struct {
+	hqJSON             string
+	rigJSON            string
+	hqSessionsJSON     string
+	rigSessionsJSON    string
+	configuredIdentity string
+	orphanID           string
 }
 
 func orphanSweepProtectedWispBeadsJSON(t *testing.T, protectedID, protectedAssignee, orphanID, orphanAssignee string) string {
@@ -1002,25 +1020,9 @@ func orphanSweepSessionListJSON(t *testing.T, liveSessionNames ...string) string
 	return string(data)
 }
 
-func orphanSweepCleanroomEnv(t *testing.T, root, binDir, gcLog, hqJSON, rigJSON, configuredIdentity, orphanID string, extra ...string) []string {
+func orphanSweepCleanroomEnv(t *testing.T, root, binDir, gcLog string, cfg orphanSweepCleanroomEnvConfig) []string {
 	t.Helper()
-	hqSessionsJSON := orphanSweepSessionListJSON(t)
-	rigSessionsJSON := orphanSweepSessionListJSON(t)
 	rigList := `{"rigs":[{"name":"hq","hq":true},{"name":"project-alpha","hq":false}]}`
-	switch len(extra) {
-	case 0:
-	case 1:
-		rigList = extra[0]
-	case 2:
-		hqSessionsJSON = extra[0]
-		rigSessionsJSON = extra[1]
-	case 3:
-		hqSessionsJSON = extra[0]
-		rigSessionsJSON = extra[1]
-		rigList = extra[2]
-	default:
-		t.Fatalf("orphanSweepCleanroomEnv: unexpected extra arg count %d", len(extra))
-	}
 	dirs := map[string]string{
 		"HOME":              filepath.Join(root, "home"),
 		"XDG_CONFIG_HOME":   filepath.Join(root, "xdg-config"),
@@ -1055,13 +1057,13 @@ func orphanSweepCleanroomEnv(t *testing.T, root, binDir, gcLog, hqJSON, rigJSON,
 		"BEADS_DIR=" + dirs["BEADS_DIR"],
 		"GIT_CONFIG_GLOBAL=" + dirs["GIT_CONFIG_GLOBAL"],
 		"GIT_CONFIG_NOSYSTEM=1",
-		"ORPHAN_SWEEP_HQ_JSON=" + hqJSON,
-		"ORPHAN_SWEEP_RIG_JSON=" + rigJSON,
+		"ORPHAN_SWEEP_HQ_JSON=" + cfg.hqJSON,
+		"ORPHAN_SWEEP_RIG_JSON=" + cfg.rigJSON,
 		"ORPHAN_SWEEP_RIG_LIST_JSON=" + rigList,
-		"ORPHAN_SWEEP_HQ_SESSIONS_JSON=" + hqSessionsJSON,
-		"ORPHAN_SWEEP_RIG_SESSIONS_JSON=" + rigSessionsJSON,
-		"ORPHAN_SWEEP_CONFIGURED_IDENTITY=" + configuredIdentity,
-		"ORPHAN_SWEEP_ORPHAN_ID=" + orphanID,
+		"ORPHAN_SWEEP_HQ_SESSIONS_JSON=" + cfg.hqSessionsJSON,
+		"ORPHAN_SWEEP_RIG_SESSIONS_JSON=" + cfg.rigSessionsJSON,
+		"ORPHAN_SWEEP_CONFIGURED_IDENTITY=" + cfg.configuredIdentity,
+		"ORPHAN_SWEEP_ORPHAN_ID=" + cfg.orphanID,
 		"PATH=" + binDir,
 	}
 }
