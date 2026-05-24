@@ -85,9 +85,8 @@ type expandedAgent struct {
 // provider prefix matching — the same approach as discoverPoolInstances.
 func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister) []expandedAgent {
 	maxSess := a.EffectiveMaxActiveSessions()
-	isMultiSession := maxSess == nil || *maxSess != 1
 
-	if !isMultiSession {
+	if !isMultiSessionAgent(a) {
 		return []expandedAgent{{
 			qualifiedName: a.QualifiedName(),
 			rig:           a.Dir,
@@ -220,8 +219,7 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 		}
 		// Check multi-session instance members.
 		maxSess := a.EffectiveMaxActiveSessions()
-		isMultiSession := maxSess == nil || *maxSess != 1
-		if isMultiSession && a.Dir == dir {
+		if isMultiSessionAgent(a) && a.Dir == dir {
 			isUnlimited := maxSess == nil || *maxSess < 0
 			if isUnlimited {
 				// Unlimited: match "{name}-{N}" or "{binding.name}-{N}" where N >= 1.
@@ -252,7 +250,14 @@ func findAgent(cfg *config.City, name string) (config.Agent, bool) {
 			}
 			for i := 1; i <= poolMax; i++ {
 				memberName := poolInstanceNameForAPI(a.Name, i, a)
+				// V2 agents address instances with the binding prefix
+				// (matching Agent.QualifiedInstanceName), so accept both
+				// the bare and binding-qualified forms — same shape the
+				// unlimited path applies above.
 				if memberName == baseName {
+					return a, true
+				}
+				if a.BindingName != "" && a.BindingName+"."+memberName == baseName {
 					return a, true
 				}
 			}
@@ -532,18 +537,45 @@ func poolQualifiedNameForSlot(a config.Agent, slot int) string {
 // isMultiSessionAgent reports whether the agent can have more than one
 // concurrent session. This is the replacement for the removed IsPool() method.
 func isMultiSessionAgent(a config.Agent) bool {
-	maxSess := a.EffectiveMaxActiveSessions()
-	return maxSess == nil || *maxSess != 1
+	return a.SupportsExpandedSessionIdentities()
+}
+
+// classifyAgentKind labels an agent so dashboards can route its sessions to
+// the correct panel without referencing specific role names. The signal is
+// purely structural:
+//   - "crew" when the agent's identity Dir ends in a "crew" segment, the
+//     convention for persistent named workspaces under <rig>/crew/<name>.
+//   - "pool" when the agent can host more than one concurrent session.
+//   - "role" otherwise — a singleton agent (e.g. mayor, witness) that lives
+//     outside the crew dir. The classifier never inspects role names.
+func classifyAgentKind(a config.Agent) string {
+	if isCrewDir(a.Dir) {
+		return "crew"
+	}
+	if isMultiSessionAgent(a) {
+		return "pool"
+	}
+	return "role"
+}
+
+// isCrewDir reports whether dir is a "crew" segment (e.g. "crew" or
+// "<rig>/crew"). Crew agents organize themselves under this convention so
+// the dashboard can list them as named workers separate from role agents.
+func isCrewDir(dir string) bool {
+	return dir == "crew" || strings.HasSuffix(dir, "/crew")
 }
 
 func poolInstanceNameForAPI(base string, slot int, a config.Agent) string {
-	maxSess := a.EffectiveMaxActiveSessions()
-	isMultiInstance := maxSess != nil && (*maxSess > 1 || *maxSess < 0)
-	if !isMultiInstance {
+	if a.UsesCanonicalSingletonPoolIdentity() {
 		return base
 	}
 	if slot >= 1 && slot <= len(a.NamepoolNames) {
 		return a.NamepoolNames[slot-1]
+	}
+	maxSess := a.EffectiveMaxActiveSessions()
+	isMultiInstance := maxSess != nil && (*maxSess > 1 || *maxSess < 0)
+	if !isMultiInstance {
+		return base
 	}
 	return fmt.Sprintf("%s-%d", base, slot)
 }

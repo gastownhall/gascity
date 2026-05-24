@@ -41,13 +41,13 @@ func generateTitle(provider *config.ResolvedProvider, message, workDir string) s
 		return truncateTitle(message)
 	}
 
-	// Build args: <provider_args> <print_args> <model_args> <prompt+message>
+	// Build args: <provider_args> <model_args> <print_args> <prompt+message>
 	var args []string
 	args = append(args, provider.Args...)
-	args = append(args, provider.PrintArgs...)
 	if modelArgs := provider.TitleModelFlagArgs(); len(modelArgs) > 0 {
 		args = append(args, modelArgs...)
 	}
+	args = append(args, provider.PrintArgs...)
 	args = append(args, titlePrompt+message)
 
 	ctx, cancel := context.WithTimeout(context.Background(), titleGenerateTimeout)

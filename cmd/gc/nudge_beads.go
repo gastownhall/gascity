@@ -12,8 +12,9 @@ import (
 )
 
 const (
-	nudgeBeadType  = "chore"
-	nudgeBeadLabel = "gc:nudge"
+	nudgeBeadType    = "chore"
+	nudgeBeadLabel   = "gc:nudge"
+	nudgeLookupLimit = nudgequeue.NudgeLookupLimit
 
 	// nudgeEnqueueRollbackCloseReason is the close_reason metadata value
 	// stamped on partially-created nudge beads when enqueueQueuedNudgeWithStore's
@@ -56,11 +57,13 @@ func findNudgeBead(store beads.Store, nudgeID string, includeClosed bool) (beads
 	items, err := store.List(beads.ListQuery{
 		Label:         "nudge:" + nudgeID,
 		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
+		Limit:         nudgeLookupLimit + 1,
 		Sort:          beads.SortCreatedDesc,
 	})
 	if err != nil {
 		return beads.Bead{}, false, err
 	}
+	capped := len(items) > nudgeLookupLimit
 	var fallback beads.Bead
 	hasFallback := false
 	for _, item := range items {
@@ -73,10 +76,13 @@ func findNudgeBead(store beads.Store, nudgeID string, includeClosed bool) (beads
 		if isTerminalNudgeState(item.Metadata["state"]) {
 			return item, true, nil
 		}
-		if !hasFallback {
+		if !capped && !hasFallback {
 			fallback = item
 			hasFallback = true
 		}
+	}
+	if capped {
+		return beads.Bead{}, false, beads.LookupLimitError{Kind: "nudge", Label: "nudge:" + nudgeID, Limit: nudgeLookupLimit}
 	}
 	if includeClosed && hasFallback {
 		return fallback, true, nil

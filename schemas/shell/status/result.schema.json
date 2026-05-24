@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gc-jsonl": {},
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "installed",
+    "shells"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
+    "installed": {
+      "type": "boolean"
+    },
+    "shells": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "shell",
+          "status",
+          "installed",
+          "completion_script_path",
+          "completion_script_exists",
+          "rc_path",
+          "rc_hook_present"
+        ],
+        "properties": {
+          "shell": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "installed": {
+            "type": "boolean"
+          },
+          "completion_script_path": {
+            "type": "string"
+          },
+          "completion_script_exists": {
+            "type": "boolean"
+          },
+          "rc_path": {
+            "type": "string"
+          },
+          "rc_hook_present": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

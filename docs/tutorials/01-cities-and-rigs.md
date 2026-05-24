@@ -86,8 +86,6 @@ Created minimal config (Level 1) in "my-city".
 Registered city 'my-city' (/Users/csells/my-city)
 Installed launchd service: /Users/csells/Library/LaunchAgents/com.gascity.supervisor.plist
 [8/8] Waiting for supervisor to start city
-  Adopting sessions...
-  Starting agents...
 
 ~
 $ gc cities
@@ -142,10 +140,6 @@ $ cat pack.toml
 name = "my-city"
 schema = 2
 
-[[agent]]
-name = "mayor"
-prompt_template = "agents/mayor/prompt.template.md"
-
 [[named_session]]
 template = "mayor"
 mode = "always"
@@ -156,10 +150,10 @@ the provider. The machine-local workspace identity lives in `.gc/site.toml`
 instead, which is how `gc cities`, `gc status`, and other commands still know
 this city is named `my-city`.
 
-The `[[agent]]` entry in `pack.toml` defines the built-in `mayor`, and
+The built-in `mayor` comes from the scaffolded `agents/mayor/` content, and
 `[[named_session]]` keeps a `mayor` session running so you can talk to it at
-any time. When you add more agents later, Gas City creates `agents/<name>/`, with
-`prompt.template.md` for the prompt and `agent.toml` for any per-agent
+any time. When you add more agents later, Gas City creates `agents/<name>/`,
+with `prompt.template.md` for the prompt and `agent.toml` for any per-agent
 overrides.
 
 Gas City also gives you an implicit agent for each supported provider — so
@@ -173,19 +167,37 @@ To check on the status of your city, use `gc status`:
 ~/my-city
 $ gc status
 my-city  /Users/csells/my-city
-  Controller: standalone-managed (PID 83621)
-  Authority: standalone controller PID 83621
-  Next: gc stop /Users/csells/my-city && gc start /Users/csells/my-city to hand ownership to the supervisor
+  Controller: supervisor-managed (PID 83621)
+  Authority: supervisor process PID 83621
   Suspended:  no
 
 Agents:
-  mayor                   pool (min=0, max=unlimited)
-  claude                  pool (min=0, max=unlimited)
+  dog                     scaled (min=0, max=3)
+    dog-1                 stopped
+    dog-2                 stopped
+    dog-3                 stopped
 
-Sessions: 1 active, 0 suspended
+0/3 agents running
+
+Named sessions:
+  mayor                   reserved-unmaterialized (always)
 ```
 
+Depending on your version, `gc status` may list named sessions by state as
+`awake` or `active` — the two are equivalent.
+
+The `dog` pool is a background utility agent from the built-in maintenance
+pack. It handles internal housekeeping like shutdown coordination. You don't
+need to interact with it — ignore it for now.
+
 ## Adding a rig
+
+<Note>
+If another Gas City workspace is already registered (check `gc cities`),
+commands inside `~/my-city` may resolve to that city and fail. Pass `--city
+~/my-city` explicitly when that happens. These examples assume a single
+registered city.
+</Note>
 
 In Gas City, a project directory registered with a city is called a "rig."
 Rigging a project's directory lets agents work in it.
@@ -298,9 +310,9 @@ Success! You just dispatched work to an AI agent and gotten results back.
 You've created a city, slung work to agents, added a project as a rig, and slung
 work to that rig. From here:
 
-- **[Agents](/tutorials/02-agents)** — go deeper on agent configuration:
+- **[Agents](./02-agents.md)** — go deeper on agent configuration:
   prompts, sessions, scope, working directories
-- **[Sessions](/tutorials/03-sessions)** — interactive conversations with
+- **[Sessions](./03-sessions.md)** — interactive conversations with
   agents, polecats and crew
-- **[Formulas](/tutorials/05-formulas)** — multi-step workflow templates with
+- **[Formulas](./05-formulas.md)** — multi-step workflow templates with
   dependencies and variables

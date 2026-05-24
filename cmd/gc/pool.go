@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -102,10 +101,16 @@ type scaleParams struct {
 }
 
 // scaleParamsFor extracts scaling parameters from an Agent's fields.
+//
+// Check is the count-form pool-demand query (EffectivePoolDemandQuery).
+// It shares the bd ready predicate with EffectiveWorkQuery's Tier 3 via
+// bdReadyPoolDemandShell, keeping reconciler spawn decisions and worker
+// claim decisions structurally symmetric. See engdocs/architecture/dispatch.md
+// "scale_check ↔ work_query correspondence".
 func scaleParamsFor(a *config.Agent) scaleParams {
 	sp := scaleParams{
 		Min:   a.EffectiveMinActiveSessions(),
-		Check: a.EffectiveScaleCheck(),
+		Check: a.EffectivePoolDemandQuery(),
 	}
 	if m := a.EffectiveMaxActiveSessions(); m != nil {
 		sp.Max = *m
@@ -209,46 +214,6 @@ func expandSessionSetup(cmds []string, ctx SessionSetupContext) []string {
 	return result
 }
 
-// resolveSetupScript resolves a session_setup_script path for runtime use.
-// Absolute paths pass through unchanged. "//" paths resolve against cityPath.
-// Other relative paths resolve against sourceDir when present; otherwise they
-// resolve against cityPath. City-root-relative strings produced by older
-// composition code remain supported during the transition.
-func resolveSetupScript(script, sourceDir, cityPath string) string {
-	if strings.HasPrefix(script, "//") {
-		return filepath.Join(cityPath, strings.TrimPrefix(script, "//"))
-	}
-	if script == "" || filepath.IsAbs(script) {
-		return script
-	}
-	if sourceDir != "" {
-		relSource, err := filepath.Rel(cityPath, sourceDir)
-		if err == nil {
-			relSource = filepath.Clean(relSource)
-			cleanScript := filepath.Clean(script)
-			if relSource != "." && relSource != "" && !strings.HasPrefix(relSource, "..") &&
-				(cleanScript == relSource || strings.HasPrefix(cleanScript, relSource+string(os.PathSeparator))) {
-				return filepath.Join(cityPath, cleanScript)
-			}
-		}
-		sourceCandidate := filepath.Join(sourceDir, script)
-		cityCandidate := filepath.Join(cityPath, filepath.Clean(script))
-		if fileExists(cityCandidate) && !fileExists(sourceCandidate) {
-			return cityCandidate
-		}
-		return sourceCandidate
-	}
-	return filepath.Join(cityPath, script)
-}
-
-func fileExists(path string) bool {
-	if path == "" {
-		return false
-	}
-	_, err := os.Stat(path)
-	return err == nil
-}
-
 // deepCopyAgent creates a deep copy of a config.Agent with a new name and dir.
 // Slice and map fields are independently allocated so mutations to the copy
 // don't affect the original.
@@ -258,12 +223,14 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		Description:       src.Description,
 		Dir:               dir,
 		WorkDir:           src.WorkDir,
+		TmuxAlias:         src.TmuxAlias,
 		Scope:             src.Scope,
 		Session:           src.Session,
 		Provider:          src.Provider,
 		PromptTemplate:    src.PromptTemplate,
 		Nudge:             src.Nudge,
 		StartCommand:      src.StartCommand,
+		Lifecycle:         src.Lifecycle,
 		PromptMode:        src.PromptMode,
 		PromptFlag:        src.PromptFlag,
 		ReadyPromptPrefix: src.ReadyPromptPrefix,
@@ -276,6 +243,8 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		// InheritedDefaultSlingFormula: deep-copied below with other pointer fields.
 		Fallback:             src.Fallback,
 		IdleTimeout:          src.IdleTimeout,
+		MaxSessionAge:        src.MaxSessionAge,
+		MaxSessionAgeJitter:  src.MaxSessionAgeJitter,
 		SleepAfterIdle:       src.SleepAfterIdle,
 		SleepAfterIdleSource: src.SleepAfterIdleSource,
 		Suspended:            src.Suspended,
@@ -408,14 +377,20 @@ func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, s
 		}
 		cmd = expandAgentCommandTemplate(cityPath, cityName, &a, cfg.Rigs, "on_boot", cmd, stderr)
 		dir := agentCommandDir(cityPath, &a, cfg.Rigs)
-		if _, err := runner(cmd, dir, controllerQueryRuntimeEnv(cityPath, cfg, &a)); err != nil {
+		env, err := controllerQueryRuntimeEnv(cityPath, cfg, &a)
+		if err != nil {
+			fmt.Fprintf(stderr, "on_boot %s env: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
+			continue
+		}
+		if _, err := runner(cmd, dir, env); err != nil {
 			fmt.Fprintf(stderr, "on_boot %s: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
 		}
 	}
 }
 
-// discoverPoolInstances returns qualified instance names for a multi-instance pool.
-// For bounded pools (max > 1), generates static names {name}-1..{name}-{max}.
+// discoverPoolInstances returns qualified runtime identities for a pool-shaped
+// agent. Canonical singleton pools use the configured qualified name. Bounded
+// multi-instance pools generate static names {name}-1..{name}-{max}.
 // For unlimited pools (max < 0), discovers running instances via session provider
 // prefix matching.
 func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *config.Agent,
@@ -423,6 +398,9 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 ) []string {
 	isUnlimited := sp0.Max < 0
 	if !isUnlimited {
+		if a.UsesCanonicalSingletonPoolIdentity() {
+			return discoverCanonicalSingletonPoolInstances(a, cityName, st, sp)
+		}
 		// Bounded pool: static enumeration.
 		var names []string
 		for i := 1; i <= sp0.Max; i++ {
@@ -472,6 +450,42 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 		}
 	}
 	return names
+}
+
+func discoverCanonicalSingletonPoolInstances(a *config.Agent, cityName, st string, sp runtime.Provider) []string {
+	if a == nil {
+		return nil
+	}
+	canonical := a.QualifiedName()
+	names := []string{canonical}
+	if sp == nil {
+		return names
+	}
+	prefix := agent.SessionNameFor(cityName, canonical+"-", st)
+	running, err := sp.ListRunning("")
+	if err != nil {
+		return names
+	}
+	templatePrefix := agent.SessionNameFor(cityName, "", st)
+	stale := make([]string, 0, len(running))
+	seen := map[string]bool{canonical: true}
+	for _, sn := range running {
+		if !strings.HasPrefix(sn, prefix) {
+			continue
+		}
+		qnSanitized := sn
+		if templatePrefix != "" && strings.HasPrefix(qnSanitized, templatePrefix) {
+			qnSanitized = qnSanitized[len(templatePrefix):]
+		}
+		qn := agent.UnsanitizeQualifiedNameFromSession(qnSanitized)
+		if seen[qn] || nonExpandingPoolIdentitySlot(a, qn) <= 0 {
+			continue
+		}
+		seen[qn] = true
+		stale = append(stale, qn)
+	}
+	sort.Strings(stale)
+	return append(names, stale...)
 }
 
 func resolvePoolSessionRefs(

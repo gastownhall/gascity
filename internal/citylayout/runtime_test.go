@@ -102,6 +102,113 @@ func TestCityRuntimeEnvForRuntimeDir(t *testing.T) {
 	})
 }
 
+func TestCityIdentityEnvMap(t *testing.T) {
+	cityRoot := "/city"
+	got := CityIdentityEnvMap(cityRoot)
+
+	want := map[string]string{
+		"GC_CITY":             cityRoot,
+		"GC_CITY_PATH":        cityRoot,
+		"GC_CITY_RUNTIME_DIR": "/city/.gc/runtime",
+	}
+	for key, expected := range want {
+		if got[key] != expected {
+			t.Fatalf("%s = %q, want %q", key, got[key], expected)
+		}
+	}
+	if _, ok := got["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"]; ok {
+		t.Fatal("GC_CONTROL_DISPATCHER_TRACE_DEFAULT present, want identity-only env")
+	}
+}
+
+func TestCityIdentityEnvMapSkipsEmptyCityRoot(t *testing.T) {
+	if got := CityIdentityEnvMap(" \t\n "); got != nil {
+		t.Fatalf("CityIdentityEnvMap(empty) = %#v, want nil", got)
+	}
+}
+
+func TestControlDispatcherTraceLogFileName(t *testing.T) {
+	cases := []struct {
+		name          string
+		qualifiedName string
+		want          string
+	}{
+		{
+			name:          "city dispatcher (no rig)",
+			qualifiedName: "control-dispatcher",
+			want:          "control-dispatcher-trace.log",
+		},
+		{
+			name:          "rig dispatcher uses double-dash",
+			qualifiedName: "app/control-dispatcher",
+			want:          "app--control-dispatcher-trace.log",
+		},
+		{
+			name:          "rig name with hyphen preserved",
+			qualifiedName: "my-rig/control-dispatcher",
+			want:          "my-rig--control-dispatcher-trace.log",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ControlDispatcherTraceLogFileName(tc.qualifiedName); got != tc.want {
+				t.Fatalf("ControlDispatcherTraceLogFileName(%q) = %q, want %q", tc.qualifiedName, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestControlDispatcherTraceDefaultPathFor(t *testing.T) {
+	cases := []struct {
+		name          string
+		cityRoot      string
+		qualifiedName string
+		want          string
+	}{
+		{
+			name:          "city dispatcher",
+			cityRoot:      "/city",
+			qualifiedName: "control-dispatcher",
+			want:          "/city/.gc/runtime/control-dispatcher-trace.log",
+		},
+		{
+			name:          "rig dispatcher",
+			cityRoot:      "/city",
+			qualifiedName: "app/control-dispatcher",
+			want:          "/city/.gc/runtime/app--control-dispatcher-trace.log",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ControlDispatcherTraceDefaultPathFor(tc.cityRoot, tc.qualifiedName); got != tc.want {
+				t.Fatalf("ControlDispatcherTraceDefaultPathFor(%q, %q) = %q, want %q", tc.cityRoot, tc.qualifiedName, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestControlDispatcherTraceDefaultPathForRuntimeDirAndName(t *testing.T) {
+	t.Run("external runtime root preserved", func(t *testing.T) {
+		cityRoot := "/city"
+		runtimeDir := "/var/tmp/gascity-runtime"
+		got := ControlDispatcherTraceDefaultPathForRuntimeDirAndName(cityRoot, runtimeDir, "app/control-dispatcher")
+		want := "/var/tmp/gascity-runtime/app--control-dispatcher-trace.log"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("watcher-visible in-city root coerced", func(t *testing.T) {
+		cityRoot := "/city"
+		runtimeDir := "/city/rigs/alpha"
+		got := ControlDispatcherTraceDefaultPathForRuntimeDirAndName(cityRoot, runtimeDir, "app/control-dispatcher")
+		want := "/city/.gc/runtime/app--control-dispatcher-trace.log"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+}
+
 func TestTrustedAmbientCityRuntimeDirAcceptsLegacyCityRootAnchor(t *testing.T) {
 	cityRoot := t.TempDir()
 	runtimeDir := filepath.Join(cityRoot, ".gc", "runtime")

@@ -70,9 +70,14 @@ type State interface {
 	// Returns nil if no store is available.
 	CityBeadStore() beads.Store
 
-	// Orders returns the current set of scanned orders.
+	// Orders returns the current active set of scanned orders.
 	// Returns nil if orders are not configured.
 	Orders() []orders.Order
+
+	// OrdersAll returns the current set of scanned orders after overrides,
+	// including disabled orders that management endpoints still need to address.
+	// Returns nil if orders are not configured.
+	OrdersAll() []orders.Order
 
 	// Poke signals the controller to trigger an immediate reconciler tick.
 	// Used after sling assigns work so WakeWork wakes the target without
@@ -104,9 +109,10 @@ type AgentUpdate struct {
 // RigUpdate holds optional fields for a partial rig update. Pointer fields
 // distinguish "not set" from "set to zero value."
 type RigUpdate struct {
-	Path      string
-	Prefix    string
-	Suspended *bool
+	Path          string
+	Prefix        string
+	DefaultBranch string
+	Suspended     *bool
 }
 
 // ProviderUpdate holds optional fields for a partial provider update.

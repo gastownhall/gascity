@@ -16,6 +16,8 @@ import (
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
+func boolPtr(b bool) *bool { return &b }
+
 func fallbackPromptDir(tmpRoot string) string {
 	return filepath.Join(tmpRoot, fmt.Sprintf(".gc-%d", os.Getuid()), "tmux-prompts")
 }
@@ -59,6 +61,7 @@ type fakeStartOps struct {
 	hasSessionErr            error
 	setRemainOnExitErr       error
 	runSetupCommandErr       error
+	sendKeysErr              error
 }
 
 type errReader struct{}
@@ -154,7 +157,7 @@ func (f *fakeStartOps) sendKeys(name, text string) error {
 	if f.sendKeysHook != nil {
 		f.sendKeysHook()
 	}
-	return nil
+	return f.sendKeysErr
 }
 
 func (f *fakeStartOps) setRemainOnExit(name string) error {
@@ -253,6 +256,24 @@ func TestInjectSessionRuntimeHintsEnvAddsReadyPromptPrefix(t *testing.T) {
 	}
 	if got := env["GC_PROVIDER"]; got != "gemini" {
 		t.Fatalf("GC_PROVIDER = %q, want %q", got, "gemini")
+	}
+}
+
+func TestInjectSessionRuntimeHintsEnvAddsProviderName(t *testing.T) {
+	env := injectSessionRuntimeHintsEnv(nil, runtime.Config{
+		ProviderName: "kimi",
+	})
+	if got := env["GC_PROVIDER"]; got != "kimi" {
+		t.Fatalf("GC_PROVIDER = %q, want %q", got, "kimi")
+	}
+}
+
+func TestInjectSessionRuntimeHintsEnvPreservesExplicitProvider(t *testing.T) {
+	env := injectSessionRuntimeHintsEnv(map[string]string{"GC_PROVIDER": "custom"}, runtime.Config{
+		ProviderName: "kimi",
+	})
+	if got := env["GC_PROVIDER"]; got != "custom" {
+		t.Fatalf("GC_PROVIDER = %q, want %q", got, "custom")
 	}
 }
 
@@ -494,6 +515,9 @@ func TestDoStartSession_SessionDiesDuringStartup(t *testing.T) {
 	if !strings.Contains(err.Error(), "died during startup") {
 		t.Errorf("error = %q, want 'died during startup'", err)
 	}
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Errorf("error = %v, want ErrSessionDiedDuringStartup", err)
+	}
 }
 
 func TestDoStartSession_HasSessionError(t *testing.T) {
@@ -547,6 +571,142 @@ func TestDoStartSession_ProcessNamesOnly(t *testing.T) {
 
 	// Verify isRuntimeRunning sees the process names in zombie detection path.
 	// (Here create succeeded, so isRuntimeRunning isn't called.)
+}
+
+func TestDoStartSession_KimiSkipsStartupDialogAcceptance(t *testing.T) {
+	ops := &fakeStartOps{
+		hasSessionResult: true,
+	}
+
+	cfg := runtime.Config{
+		Command:              "sh -c 'exec kimi --yolo --no-thinking'",
+		ProviderName:         "wrapped-kimi",
+		ProcessNames:         []string{"kimi", "python"},
+		ReadyDelayMs:         5000,
+		AcceptStartupDialogs: boolPtr(false),
+	}
+
+	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"waitForCommand",
+		"waitForReady",
+		"hasSession",
+	})
+}
+
+func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
+	ops := &fakeStartOps{
+		hasSessionResult: true,
+		sendKeysErr:      errors.New("command too long"),
+	}
+
+	cfg := runtime.Config{
+		Command: "kimi",
+		Nudge:   strings.Repeat("startup prompt\n", 100),
+	}
+
+	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected startup nudge delivery error, got nil")
+	}
+	if !strings.Contains(err.Error(), "sending startup nudge") {
+		t.Fatalf("error = %v, want startup nudge context", err)
+	}
+	if !strings.Contains(err.Error(), "command too long") {
+		t.Fatalf("error = %v, want original nudge error", err)
+	}
+
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"hasSession",
+		"sendKeys",
+	})
+}
+
+func TestDoStartSession_AcceptStartupDialogsOnly(t *testing.T) {
+	ops := &fakeStartOps{
+		hasSessionResult: true,
+	}
+
+	cfg := runtime.Config{
+		Command:              "custom-agent",
+		AcceptStartupDialogs: boolPtr(true),
+	}
+
+	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"acceptStartupDialogs",
+		"acceptStartupDialogs",
+		"hasSession",
+	})
+}
+
+func TestShouldAcceptStartupDialogsProviderResolution(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  runtime.Config
+		want bool
+	}{
+		{
+			name: "explicit runtime config skips startup dialogs",
+			cfg: runtime.Config{
+				ProviderName:         "custom-kimi",
+				Command:              "sh -c 'kimi --yolo'",
+				ProcessNames:         []string{"kimi"},
+				AcceptStartupDialogs: boolPtr(false),
+			},
+			want: false,
+		},
+		{
+			name: "explicit runtime config accepts startup dialogs",
+			cfg: runtime.Config{
+				ProviderName:         "custom-provider",
+				ProcessNames:         []string{"custom"},
+				AcceptStartupDialogs: boolPtr(true),
+			},
+			want: true,
+		},
+		{
+			name: "empty command keeps conservative dialog acceptance",
+			cfg: runtime.Config{
+				ProcessNames: []string{"unknown"},
+			},
+			want: true,
+		},
+		{
+			name: "explicit non-kimi accepts startup dialogs",
+			cfg: runtime.Config{
+				ProviderName: "codex",
+				ProcessNames: []string{"codex"},
+			},
+			want: true,
+		},
+		{
+			name: "no startup dialog hint skips acceptance",
+			cfg:  runtime.Config{},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldAcceptStartupDialogs(tt.cfg); got != tt.want {
+				t.Fatalf("shouldAcceptStartupDialogs() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestDoStartSession_ReadyPromptPrefixOnly(t *testing.T) {
@@ -759,6 +919,25 @@ func TestDoStartSession_SetRemainOnExitErrorIgnored(t *testing.T) {
 	err := doStartSession(context.Background(), ops, "test", runtime.Config{
 		WorkDir: "/w",
 		Command: "sleep 300",
+	}, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertCallSequence(t, ops, []string{"createSession", "setRemainOnExit"})
+}
+
+func TestDoStartSession_OneShotLifecycleSkipsPostStartNudgeChecks(t *testing.T) {
+	ops := &fakeStartOps{
+		hasSessionResult:   false,
+		setRemainOnExitErr: ErrNoServer,
+	}
+
+	err := doStartSession(context.Background(), ops, "test", runtime.Config{
+		WorkDir:   "/w",
+		Command:   "true",
+		Lifecycle: runtime.LifecycleOneShot,
+		Nudge:     "start working",
 	}, DefaultConfig().SetupTimeout)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

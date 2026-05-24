@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 type codexHooksDriftCheck struct {
@@ -19,36 +19,158 @@ type codexHooksDriftCheck struct {
 }
 
 func newCodexHooksDriftCheck(dirs []string) *codexHooksDriftCheck {
-	seen := map[string]struct{}{}
-	var cleaned []string
-	for _, dir := range dirs {
-		dir = strings.TrimSpace(dir)
-		if dir == "" {
-			continue
-		}
-		dir = filepath.Clean(dir)
-		if _, ok := seen[dir]; ok {
-			continue
-		}
-		seen[dir] = struct{}{}
-		cleaned = append(cleaned, dir)
-	}
-	sort.Strings(cleaned)
-	return &codexHooksDriftCheck{dirs: cleaned}
+	return &codexHooksDriftCheck{dirs: cleanCodexHookDirs(dirs)}
 }
 
 func codexHookWorkDirs(cityPath string, cfg *config.City) []string {
-	dirs := []string{cityPath}
+	var dirs []string
+	addCodexHookDir(&dirs, cityPath)
 	if cfg == nil {
 		return dirs
 	}
+	suspendedRigPaths := map[string]bool{}
 	for _, rig := range cfg.Rigs {
 		if rig.Suspended || strings.TrimSpace(rig.Path) == "" {
+			if rig.Suspended && strings.TrimSpace(rig.Path) != "" {
+				suspendedRigPaths[filepath.Clean(rig.Path)] = true
+			}
 			continue
 		}
-		dirs = append(dirs, rig.Path)
+		addCodexHookDir(&dirs, rig.Path)
+	}
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if agent.Suspended || agentInSuspendedRig(cityPath, agent, cfg.Rigs, suspendedRigPaths) {
+			continue
+		}
+		if !agentUsesCodexHookSurface(cfg, agent) {
+			continue
+		}
+		addCodexHookAgentWorkDirs(&dirs, cityPath, cfg, agent)
 	}
 	return dirs
+}
+
+func cleanCodexHookDirs(dirs []string) []string {
+	var cleaned []string
+	for _, dir := range dirs {
+		addCodexHookDir(&cleaned, dir)
+	}
+	sort.Strings(cleaned)
+	return cleaned
+}
+
+func addCodexHookDir(dirs *[]string, dir string) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return
+	}
+	dir = filepath.Clean(dir)
+	for _, existing := range *dirs {
+		if existing == dir {
+			return
+		}
+	}
+	*dirs = append(*dirs, dir)
+}
+
+func agentUsesCodexHookSurface(cfg *config.City, agent *config.Agent) bool {
+	if cfg == nil || agent == nil {
+		return false
+	}
+	if codexHookProviderName(codexHookEffectiveAgentProvider(cfg, agent), cfg.Providers) {
+		return true
+	}
+	for _, provider := range config.ResolveInstallHooks(agent, &cfg.Workspace) {
+		if codexHookProviderName(provider, cfg.Providers) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexHookEffectiveAgentProvider(cfg *config.City, agent *config.Agent) string {
+	if agent == nil {
+		return ""
+	}
+	if provider := strings.TrimSpace(agent.Provider); provider != "" {
+		return provider
+	}
+	if cfg != nil {
+		return strings.TrimSpace(cfg.Workspace.Provider)
+	}
+	return ""
+}
+
+func codexHookProviderName(name string, providers map[string]config.ProviderSpec) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	return name == "codex" || config.BuiltinFamily(name, providers) == "codex"
+}
+
+func addCodexHookAgentWorkDirs(dirs *[]string, cityPath string, cfg *config.City, agent *config.Agent) {
+	addCodexHookAgentWorkDir(dirs, cityPath, cfg, agent, agent.QualifiedName())
+	for _, slot := range codexHookPoolSlots(agent) {
+		instanceAgent, qualifiedInstance, _ := poolDesiredRequestIdentity(agent, slot)
+		if qualifiedInstance == agent.QualifiedName() {
+			continue
+		}
+		addCodexHookAgentWorkDir(dirs, cityPath, cfg, instanceAgent, qualifiedInstance)
+	}
+}
+
+func addCodexHookAgentWorkDir(dirs *[]string, cityPath string, cfg *config.City, agent *config.Agent, qualifiedName string) {
+	workDir, err := resolveCodexHookAgentWorkDir(cityPath, cfg, agent, qualifiedName)
+	if err != nil {
+		return
+	}
+	addCodexHookDir(dirs, workDir)
+}
+
+func resolveCodexHookAgentWorkDir(cityPath string, cfg *config.City, agent *config.Agent, qualifiedName string) (string, error) {
+	if agent == nil {
+		return "", nil
+	}
+	cityName := loadedCityName(cfg, cityPath)
+	var rigs []config.Rig
+	if cfg != nil {
+		rigs = cfg.Rigs
+	}
+	if strings.TrimSpace(qualifiedName) == "" {
+		qualifiedName = agent.QualifiedName()
+	}
+	workDir, err := workdirutil.ResolveWorkDirPathStrict(cityPath, cityName, qualifiedName, *agent, rigs)
+	if err != nil {
+		return "", err
+	}
+	if err := workdirutil.ValidateAncestorWorktreesNotStale(workDir); err != nil {
+		return "", err
+	}
+	return workDir, nil
+}
+
+func codexHookPoolSlots(agent *config.Agent) []int {
+	if agent == nil || !agent.SupportsInstanceExpansion() {
+		return nil
+	}
+	limit := 1
+	if len(agent.NamepoolNames) > 0 {
+		limit = len(agent.NamepoolNames)
+	} else if maxSessions := agent.EffectiveMaxActiveSessions(); maxSessions != nil {
+		if *maxSessions <= 1 {
+			return nil
+		}
+		limit = *maxSessions
+	} else if minSessions := agent.EffectiveMinActiveSessions(); minSessions > 1 {
+		limit = minSessions
+	}
+	slots := make([]int, 0, limit)
+	for slot := 1; slot <= limit; slot++ {
+		slots = append(slots, slot)
+	}
+	return slots
 }
 
 func (c *codexHooksDriftCheck) Name() string { return "codex-hooks-drift" }
@@ -89,52 +211,5 @@ func codexHooksMissingPreCompact(path string) bool {
 	if err != nil {
 		return false
 	}
-	var doc map[string]any
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return false
-	}
-	hooksMap, ok := doc["hooks"].(map[string]any)
-	if !ok {
-		return false
-	}
-	if _, ok := hooksMap["PreCompact"]; ok {
-		return false
-	}
-	return codexHookDocHasManagedCommand(doc)
-}
-
-func codexHookDocHasManagedCommand(v any) bool {
-	switch node := v.(type) {
-	case map[string]any:
-		if command, ok := node["command"].(string); ok && codexHookCommandLooksManaged(command) {
-			return true
-		}
-		for _, val := range node {
-			if codexHookDocHasManagedCommand(val) {
-				return true
-			}
-		}
-	case []any:
-		for _, val := range node {
-			if codexHookDocHasManagedCommand(val) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func codexHookCommandLooksManaged(command string) bool {
-	for _, needle := range []string{
-		"gc prime --hook",
-		"gc nudge drain --inject",
-		"gc mail check --inject",
-		"gc hook --inject",
-		"gc handoff --auto",
-	} {
-		if strings.Contains(command, needle) {
-			return true
-		}
-	}
-	return false
+	return hooks.CodexHooksMissingManagedPreCompact(data)
 }

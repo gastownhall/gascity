@@ -7,8 +7,9 @@ description, implements the solution in the current working directory,
 and closes the bead when done.
 
 Use this for demos and simple single-agent workflows. For production
-multi-agent setups with branch isolation and merge review, use
-mol-polecat-work instead.
+multi-agent setups with worktree isolation, use mol-polecat-commit
+instead (or mol-polecat-work from the gastown pack for full refinery
+review).
 
 ## Variables
 
@@ -26,9 +27,10 @@ required = true
 
 [[steps]]
 id = "do-work"
-title = "Read assignment, implement, and close"
+title = "Read assignment, implement, verify, commit, and close"
 description = """
-You have been assigned a work bead. Read it, do the work, and close it.
+You have been assigned a work bead. Read it, do the work, verify it,
+commit relevant changes, and close it.
 
 **1. Read your assignment:**
 ```bash
@@ -37,18 +39,45 @@ bd show {{issue}}
 
 Read the bead's title and description carefully. This is your task.
 
-**2. Implement the solution:**
+**2. Implement the solution and verify it:**
 
 Do exactly what the bead describes. Follow existing codebase conventions.
-Make atomic, focused commits as you work:
+Run the verification commands requested by the bead. If the bead does not
+name verification commands, run the smallest relevant local test/build check
+you can identify.
+
+Before closing, inspect the working tree:
+```bash
+git status --short
+```
+
+If you changed product/source files, documentation, tests, configs, or other
+repo-owned artifacts for the task, commit those changes before closing the bead:
 ```bash
 git add <files>
 git commit -m "<type>: <description>"
 ```
 
-**3. Close the bead when done:**
+Do not commit unrelated runtime metadata, local agent directories, caches, or
+bead database churn unless the bead explicitly required those files. If the
+only remaining dirty files are unrelated runtime/bead metadata, leave them
+uncommitted and mention that in your close notes.
+
+**3. Close the target bead when done:**
 ```bash
-bd update {{issue}} --status=closed --notes "Done: <brief summary of what you did>"
+COMMIT=$(git rev-parse --short HEAD 2>/dev/null || true)
+bd update {{issue}} --set-metadata gc.outcome=pass --status=closed --notes "Done: <brief summary of what you did>. Verification: <commands run>. Commit: ${COMMIT:-none}."
+```
+
+**4. Close this formula step:**
+
+If `GC_BEAD_ID` is set and is different from `{{issue}}`, close it too. This
+prevents `mol-do-work` wrapper beads from remaining ready after the real work
+is complete.
+```bash
+if [ -n "${GC_BEAD_ID:-}" ] && [ "$GC_BEAD_ID" != "{{issue}}" ]; then
+  bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Target {{issue}} completed. Commit: ${COMMIT:-none}."
+fi
 ```
 
 If you get stuck or need clarification, check your inbox:
@@ -56,17 +85,23 @@ If you get stuck or need clarification, check your inbox:
 gc mail inbox
 ```
 
-**Exit criteria:** The work described in the bead is complete and the bead is closed."""
+**Exit criteria:** The work described in the bead is complete, relevant changes
+are committed, the target bead is closed, and the claimed formula step is
+closed when `GC_BEAD_ID` is available."""
 
 [[steps]]
 id = "drain"
-title = "Signal completion"
+title = "Close drain step and signal completion"
 needs = ["do-work"]
 description = """
-Work is done. Signal the controller to reclaim this session:
+Work is done. Close this drain step, then signal the controller to reclaim this
+session:
 
 ```bash
+if [ -n "${GC_BEAD_ID:-}" ]; then
+  bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Drain acknowledged."
+fi
 gc runtime drain-ack
 ```
 
-Run this command and nothing else."""
+Run exactly these commands and nothing else."""

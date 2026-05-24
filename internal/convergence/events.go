@@ -74,6 +74,7 @@ func EventIDManualStop(beadID string) string {
 type CreatedPayload struct {
 	Formula       string  `json:"formula"`
 	Target        string  `json:"target"`
+	Rig           string  `json:"rig,omitempty"`
 	GateMode      string  `json:"gate_mode"`
 	MaxIterations int     `json:"max_iterations"`
 	Title         string  `json:"title"`
@@ -92,6 +93,7 @@ type GateResultPayload struct {
 
 // IterationPayload is the structured payload for ConvergenceIteration events.
 type IterationPayload struct {
+	Rig                  string             `json:"rig,omitempty"`
 	Iteration            int                `json:"iteration"`
 	WispID               string             `json:"wisp_id"`
 	AgentVerdict         string             `json:"agent_verdict"`
@@ -110,6 +112,7 @@ type IterationPayload struct {
 
 // TerminatedPayload is the structured payload for ConvergenceTerminated events.
 type TerminatedPayload struct {
+	Rig                  string `json:"rig,omitempty"`
 	TerminalReason       string `json:"terminal_reason"` // approved|no_convergence|stopped
 	TotalIterations      int    `json:"total_iterations"`
 	FinalStatus          string `json:"final_status"` // always "closed"
@@ -119,6 +122,7 @@ type TerminatedPayload struct {
 
 // WaitingManualPayload is the structured payload for ConvergenceWaitingManual events.
 type WaitingManualPayload struct {
+	Rig                  string             `json:"rig,omitempty"`
 	Iteration            int                `json:"iteration"`
 	WispID               string             `json:"wisp_id"`
 	AgentVerdict         string             `json:"agent_verdict"`
@@ -133,6 +137,7 @@ type WaitingManualPayload struct {
 // ManualActionPayload is the structured payload for ConvergenceManualApprove,
 // ConvergenceManualIterate, and ConvergenceManualStop events.
 type ManualActionPayload struct {
+	Rig        string  `json:"rig,omitempty"`
 	Actor      string  `json:"actor"` // operator:<username>
 	PriorState string  `json:"prior_state"`
 	NewState   string  `json:"new_state"`

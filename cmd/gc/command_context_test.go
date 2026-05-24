@@ -229,7 +229,7 @@ func TestRigAnywhere_CmdRigStatusFromRigDir(t *testing.T) {
 			setCwd(t, fx.workDir)
 
 			var stdout, stderr bytes.Buffer
-			code := cmdRigStatus(nil, &stdout, &stderr)
+			code := cmdRigStatus(nil, false, &stdout, &stderr)
 			if code != 0 {
 				t.Fatalf("cmdRigStatus() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 			}

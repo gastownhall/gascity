@@ -1,4 +1,63 @@
 vulnerabilities:
+  # Go stdlib CVEs disclosed 2026-05-12 (Go 1.26.2). Fixed in Go 1.25.10
+  # and 1.26.3 upstream. Our own gc binary builds against Go 1.25.10 (see
+  # go.mod), but the upstream gh and dolt distributions still ship a
+  # 1.26.2 stdlib until cli/cli and dolthub/dolt cut new releases.
+  - id: CVE-2026-33811
+    paths:
+      - "usr/bin/gh"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/br"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-06-12
+    statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
+  - id: CVE-2026-33814
+    paths:
+      - "usr/bin/gh"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/br"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-06-12
+    statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
+  - id: CVE-2026-39820
+    paths:
+      - "usr/bin/gh"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/br"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-06-12
+    statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
+  - id: CVE-2026-39836
+    paths:
+      - "usr/bin/gh"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/br"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-06-12
+    statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
+  - id: CVE-2026-42499
+    paths:
+      - "usr/bin/gh"
+      - "usr/local/bin/bd"
+      - "usr/local/bin/br"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-06-12
+    statement: Upstream gh, bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+).
+  - id: CVE-2026-44431
+    paths:
+      - "usr/local/lib/python3.12/site-packages/urllib3-2.6.3.dist-info/METADATA"
+    expired_at: 2026-06-12
+    statement: mcp-agent-mail v0.3.2 transitive pin keeps urllib3 on 2.6.3; remove after upstream accepts urllib3 2.7.0 or later.
+  - id: CVE-2026-44432
+    paths:
+      - "usr/local/lib/python3.12/site-packages/urllib3-2.6.3.dist-info/METADATA"
+    expired_at: 2026-06-12
+    statement: mcp-agent-mail v0.3.2 transitive pin keeps urllib3 on 2.6.3; remove after upstream accepts urllib3 2.7.0 or later.
   - id: CVE-2026-41602
     paths:
       - "usr/local/bin/dolt"
@@ -14,48 +73,3 @@ vulnerabilities:
       - "usr/local/bin/bd"
     expired_at: 2026-06-07
     statement: Latest bd v1.0.3 still embeds github.com/apache/thrift v0.19.0; remove after a beads release includes thrift 0.23.0 or later.
-  - id: CVE-2026-27962
-    paths:
-      - "usr/local/lib/python3.12/site-packages/authlib-1.5.2.dist-info/METADATA"
-    expired_at: 2026-05-13
-    statement: mcp-agent-mail v0.3.2 still requires authlib <1.6; remove after upstream accepts Authlib 1.6.9 or later.
-  - id: CVE-2025-59420
-    paths:
-      - "usr/local/lib/python3.12/site-packages/authlib-1.5.2.dist-info/METADATA"
-    expired_at: 2026-05-13
-    statement: mcp-agent-mail v0.3.2 still requires authlib <1.6; remove after upstream accepts Authlib 1.6.4 or later.
-  - id: CVE-2025-61920
-    paths:
-      - "usr/local/lib/python3.12/site-packages/authlib-1.5.2.dist-info/METADATA"
-    expired_at: 2026-05-13
-    statement: mcp-agent-mail v0.3.2 still requires authlib <1.6; remove after upstream accepts Authlib 1.6.5 or later.
-  - id: CVE-2026-28490
-    paths:
-      - "usr/local/lib/python3.12/site-packages/authlib-1.5.2.dist-info/METADATA"
-    expired_at: 2026-05-13
-    statement: mcp-agent-mail v0.3.2 still requires authlib <1.6; remove after upstream accepts Authlib 1.6.9 or later.
-  - id: CVE-2026-28498
-    paths:
-      - "usr/local/lib/python3.12/site-packages/authlib-1.5.2.dist-info/METADATA"
-    expired_at: 2026-05-13
-    statement: mcp-agent-mail v0.3.2 still requires authlib <1.6; remove after upstream accepts Authlib 1.6.9 or later.
-  - id: CVE-2026-32871
-    paths:
-      - "usr/local/lib/python3.12/site-packages/fastmcp-2.13.0.2.dist-info/METADATA"
-    expired_at: 2026-05-13
-    statement: mcp-agent-mail v0.3.2 Authlib constraint keeps FastMCP on 2.13.0.2; remove after upstream accepts FastMCP 3.2.0 or later.
-  - id: CVE-2025-69196
-    paths:
-      - "usr/local/lib/python3.12/site-packages/fastmcp-2.13.0.2.dist-info/METADATA"
-    expired_at: 2026-05-13
-    statement: mcp-agent-mail v0.3.2 Authlib constraint keeps FastMCP on 2.13.0.2; remove after upstream accepts FastMCP 2.14.2 or later.
-  - id: CVE-2026-27124
-    paths:
-      - "usr/local/lib/python3.12/site-packages/fastmcp-2.13.0.2.dist-info/METADATA"
-    expired_at: 2026-05-13
-    statement: mcp-agent-mail v0.3.2 Authlib constraint keeps FastMCP on 2.13.0.2; remove after upstream accepts FastMCP 3.2.0 or later.
-  - id: GHSA-rcfx-77hg-w2wv
-    paths:
-      - "usr/local/lib/python3.12/site-packages/fastmcp-2.13.0.2.dist-info/METADATA"
-    expired_at: 2026-05-13
-    statement: mcp-agent-mail v0.3.2 Authlib constraint keeps FastMCP on 2.13.0.2; remove after upstream accepts FastMCP 2.14.0 or later.

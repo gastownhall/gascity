@@ -11,7 +11,25 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
+
+// shortenStaleKeyDetectDelayForTest zeroes both the cmd/gc and internal/session
+// stale-key detection delays for the duration of t. Tests that loop through
+// the reconciler start path many times (the circuit-breaker tests below) would
+// otherwise pay 2s per iteration on each layer, dominating test wall time.
+// The Fake runtime is synchronous so the post-start IsRunning check always
+// succeeds — no real wait is needed.
+func shortenStaleKeyDetectDelayForTest(t *testing.T) {
+	t.Helper()
+	prevLocal := staleKeyDetectDelay
+	staleKeyDetectDelay = 0
+	restoreSession := sessionpkg.SetStaleKeyDetectDelayForTest(0)
+	t.Cleanup(func() {
+		staleKeyDetectDelay = prevLocal
+		restoreSession()
+	})
+}
 
 // breakerAt is a tiny helper that returns a breaker with explicit config
 // for tests so we can use fake clocks freely.
@@ -762,6 +780,16 @@ func TestComputeNamedSessionProgressSignaturesSkipsAmbiguousBareKeys(t *testing.
 
 func intPtrCircuit(n int) *int { return &n }
 
+func circuitTestAgent(name string) config.Agent {
+	return config.Agent{
+		Name:         name,
+		Dir:          "rig-a",
+		Provider:     "codex",
+		StartCommand: "test-cmd",
+		PromptMode:   "none",
+	}
+}
+
 func configureAlwaysNamedSession(env *reconcilerTestEnv) {
 	env.cfg = &config.City{
 		Daemon: config.DaemonConfig{
@@ -769,7 +797,7 @@ func configureAlwaysNamedSession(env *reconcilerTestEnv) {
 			SessionCircuitBreakerMaxRestarts: intPtrCircuit(5),
 			SessionCircuitBreakerWindow:      "30m",
 		},
-		Agents: []config.Agent{{Name: "template-a", Dir: "rig-a"}},
+		Agents: []config.Agent{circuitTestAgent("template-a")},
 		NamedSessions: []config.NamedSession{{
 			Name:     "session-a",
 			Template: "template-a",
@@ -781,7 +809,7 @@ func configureAlwaysNamedSession(env *reconcilerTestEnv) {
 
 func configureAlwaysNamedSessionWithoutCircuit(env *reconcilerTestEnv) {
 	env.cfg = &config.City{
-		Agents: []config.Agent{{Name: "template-a", Dir: "rig-a"}},
+		Agents: []config.Agent{circuitTestAgent("template-a")},
 		NamedSessions: []config.NamedSession{{
 			Name:     "session-a",
 			Template: "template-a",
@@ -827,6 +855,7 @@ func createCircuitTestNamedSessionWithIdentity(
 }
 
 func TestReconciler_CircuitDisabledByDefaultAllowsRepeatedWakeAttempts(t *testing.T) {
+	shortenStaleKeyDetectDelayForTest(t)
 	env := newReconcilerTestEnv()
 	configureAlwaysNamedSessionWithoutCircuit(env)
 	env.addDesired("session-a", "template-a", false)
@@ -851,6 +880,7 @@ func TestReconciler_CircuitDisabledByDefaultAllowsRepeatedWakeAttempts(t *testin
 }
 
 func TestReconciler_CircuitUsesConfiguredDaemonThresholds(t *testing.T) {
+	shortenStaleKeyDetectDelayForTest(t)
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
 		Daemon: config.DaemonConfig{
@@ -858,7 +888,7 @@ func TestReconciler_CircuitUsesConfiguredDaemonThresholds(t *testing.T) {
 			SessionCircuitBreakerMaxRestarts: intPtrCircuit(2),
 			SessionCircuitBreakerWindow:      "30m",
 		},
-		Agents: []config.Agent{{Name: "template-a", Dir: "rig-a"}},
+		Agents: []config.Agent{circuitTestAgent("template-a")},
 		NamedSessions: []config.NamedSession{{
 			Name:     "session-a",
 			Template: "template-a",
@@ -896,6 +926,7 @@ func TestReconciler_CircuitUsesConfiguredDaemonThresholds(t *testing.T) {
 }
 
 func TestReconciler_CircuitOpenStatePersistsAcrossControllerRestart(t *testing.T) {
+	shortenStaleKeyDetectDelayForTest(t)
 	env := newReconcilerTestEnv()
 	configureAlwaysNamedSession(env)
 	env.addDesired("session-a", "template-a", false)
@@ -1023,8 +1054,8 @@ func TestReconciler_CircuitDoesNotRecordRestartForDependencyBlockedNamedSession(
 			SessionCircuitBreakerWindow:      "30m",
 		},
 		Agents: []config.Agent{
-			{Name: "template-a", DependsOn: []string{"db"}},
-			{Name: "db"},
+			{Name: "template-a", Provider: "codex", StartCommand: "test-cmd", PromptMode: "none", DependsOn: []string{"db"}},
+			{Name: "db", Provider: "codex", StartCommand: "test-cmd", PromptMode: "none"},
 		},
 		NamedSessions: []config.NamedSession{{
 			Name:     "session-a",
@@ -1062,8 +1093,8 @@ func TestReconciler_CircuitDoesNotRecordRestartForWakeBudgetDeferredNamedSession
 			SessionCircuitBreakerWindow:      "30m",
 		},
 		Agents: []config.Agent{
-			{Name: "template-a", Dir: "rig-a"},
-			{Name: "template-b", Dir: "rig-a"},
+			circuitTestAgent("template-a"),
+			circuitTestAgent("template-b"),
 		},
 		NamedSessions: []config.NamedSession{
 			{Name: "session-a", Template: "template-a", Dir: "rig-a", Mode: "always"},
@@ -1100,6 +1131,7 @@ func TestReconciler_CircuitDoesNotRecordRestartForWakeBudgetDeferredNamedSession
 }
 
 func TestReconciler_CircuitTripsThroughRepeatedWakeAttempts(t *testing.T) {
+	shortenStaleKeyDetectDelayForTest(t)
 	env := newReconcilerTestEnv()
 	configureAlwaysNamedSession(env)
 	env.addDesired("session-a", "template-a", false)
@@ -1148,6 +1180,7 @@ func TestReconciler_CircuitTripsThroughRepeatedWakeAttempts(t *testing.T) {
 }
 
 func TestReconciler_CircuitStaysClosedWhenAssignedWorkStatusProgresses(t *testing.T) {
+	shortenStaleKeyDetectDelayForTest(t)
 	env := newReconcilerTestEnv()
 	configureAlwaysNamedSession(env)
 	env.addDesired("session-a", "template-a", false)

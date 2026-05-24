@@ -204,7 +204,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityPost(sm, "/convoy/{id}/close", (*Server).humaHandleConvoyClose)
 	cityDelete(sm, "/convoy/{id}", (*Server).humaHandleConvoyDelete)
 
-	// Events (list/emit — stream is a separate SSE registration below).
+	// Events (list/emit/rotate — stream is a separate SSE registration below).
 	cityGet(sm, "/events", (*Server).humaHandleEventList)
 	cityRegister(sm, huma.Operation{
 		OperationID:   "emit-event",
@@ -213,6 +213,12 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Summary:       "Emit an event",
 		DefaultStatus: http.StatusCreated,
 	}, (*Server).humaHandleEventEmit)
+	cityRegister(sm, huma.Operation{
+		OperationID: "rotate-events",
+		Method:      http.MethodPost,
+		Path:        "/events/rotate",
+		Summary:     "Force rotate the city event log",
+	}, (*Server).humaHandleEventRotate)
 
 	// Orders.
 	cityGet(sm, "/orders", (*Server).humaHandleOrderList)
@@ -259,6 +265,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/session/{id}/transcript", (*Server).humaHandleSessionTranscript)
 	cityGet(sm, "/session/{id}/pending", (*Server).humaHandleSessionPending)
 	cityPatch(sm, "/session/{id}", (*Server).humaHandleSessionPatch)
+	cityPost(sm, "/session/{id}/permission-mode", (*Server).humaHandleSessionPermissionMode)
 	cityRegister(sm, huma.Operation{
 		OperationID:   "submit-session",
 		Method:        http.MethodPost,

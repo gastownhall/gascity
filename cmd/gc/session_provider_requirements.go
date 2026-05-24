@@ -259,4 +259,6 @@ func (c *binaryDependencyCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult 
 
 func (c *binaryDependencyCheck) CanFix() bool { return false }
 
+func (c *binaryDependencyCheck) WarmupEligible() bool { return false }
+
 func (c *binaryDependencyCheck) Fix(_ *doctor.CheckContext) error { return nil }

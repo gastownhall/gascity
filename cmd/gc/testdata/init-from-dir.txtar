@@ -17,8 +17,8 @@ exec grep 'workspace_name = "my-city"' $WORK/my-city/.gc/site.toml
 exec grep 'name = "my-city"' $WORK/my-city/pack.toml
 ! exec grep 'name = "template"' $WORK/my-city/pack.toml
 
-# Verify prompts were copied.
-exists $WORK/my-city/prompts/mayor.md
+# Verify agent prompt assets were copied.
+exists $WORK/my-city/agents/mayor/prompt.template.md
 
 # Verify .gc/ was created.
 exists $WORK/my-city/.gc
@@ -72,16 +72,12 @@ exists $WORK/v2-shim-city/pack.toml
 [workspace]
 provider = "claude"
 
-[[agent]]
-name = "mayor"
-prompt_template = "prompts/mayor.md"
-
 -- template/pack.toml --
 [pack]
 name = "template"
 schema = 2
 
--- template/prompts/mayor.md --
+-- template/agents/mayor/prompt.template.md --
 You are the mayor.
 
 -- template/example_test.go --
@@ -95,16 +91,12 @@ package test
 name = "mining"
 provider = "claude"
 
-[[agent]]
-name = "mayor"
-prompt_template = "prompts/mayor.md"
-
 -- named-template/pack.toml --
 [pack]
 name = "mining"
 schema = 2
 
--- named-template/prompts/mayor.md --
+-- named-template/agents/mayor/prompt.template.md --
 You are the mayor.
 
 -- v2-template/city.toml --

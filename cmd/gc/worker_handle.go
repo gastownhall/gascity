@@ -99,10 +99,12 @@ func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config 
 		return runtime.Config{}
 	}
 	return runtime.Config{
+		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 		ReadyDelayMs:           resolved.ReadyDelayMs,
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
+		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
 	}
 }
 
@@ -211,6 +213,7 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 		return nil, err
 	}
 	sessionCfg, err := resolvedWorkerSessionConfigWithConfig(
+		cityPath,
 		command,
 		provider,
 		workDir,
@@ -230,6 +233,7 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 }
 
 func resolvedWorkerSessionConfigWithConfig(
+	cityPath string,
 	command string,
 	provider string,
 	workDir string,
@@ -271,6 +275,19 @@ func resolvedWorkerSessionConfigWithConfig(
 	if command == "" {
 		command = providerName
 	}
+	// Seed the city-anchored identity vars on top of the provider env
+	// for the CLI create-mode path. Without this, `gc session` /
+	// `gc session start` style direct creates land with SessionEnv
+	// lacking GC_CITY / GC_CITY_PATH / GC_CITY_RUNTIME_DIR, and the
+	// spawned shell cannot locate its city. Rig-scoped env remains a
+	// create-time contract owned by template_resolve.go. Matches the resume-path
+	// reseed at resolvedWorkerRuntimeWithConfigAndMetadata and the
+	// API-side seeding in internal/api/session_resolved_config.go.
+	// Regression for upstream gastownhall/gascity#101 (re-opened).
+	sessionEnv := resolved.Env
+	if strings.TrimSpace(cityPath) != "" {
+		sessionEnv = mergeEnv(resolved.Env, cityIdentityAnchorsForCity(cityPath))
+	}
 	return worker.NormalizeResolvedSessionConfig(worker.ResolvedSessionConfig{
 		Alias:        alias,
 		ExplicitName: explicitName,
@@ -282,7 +299,7 @@ func resolvedWorkerSessionConfigWithConfig(
 			Command:    command,
 			WorkDir:    workDir,
 			Provider:   providerName,
-			SessionEnv: resolved.Env,
+			SessionEnv: sessionEnv,
 			Resume: session.ProviderResume{
 				ResumeFlag:    resolved.ResumeFlag,
 				ResumeStyle:   resolved.ResumeStyle,
@@ -462,7 +479,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	if cfg == nil {
 		return nil, nil
 	}
-	resolved, configuredTransport := resolveWorkerRuntimeProviderWithConfig(cfg, info, sessionKind)
+	resolved, configuredTransport := resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, sessionKind, metadata)
 	if resolved == nil {
 		return nil, nil
 	}
@@ -484,23 +501,65 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	if err != nil {
 		return nil, err
 	}
+	resumeCommand := firstNonEmptyGCString(resolved.ResumeCommand, info.ResumeCommand)
+	if overrides, err := session.ParseTemplateOverrides(metadata); err == nil && strings.TrimSpace(resumeCommand) != "" {
+		resumeProvider := *resolved
+		resumeProvider.ResumeCommand = resumeCommand
+		if command, err := config.BuildProviderResumeCommand(&resumeProvider, overrides); err == nil && strings.TrimSpace(command) != "" {
+			resumeCommand = command
+		}
+	}
+	// Reseed the city-anchored identity vars (GC_CITY, GC_CITY_PATH,
+	// GC_CITY_RUNTIME_DIR) on top of the provider env. Without this,
+	// session restart paths drop the city anchor and the spawned shell
+	// cannot locate its city. Rig-scoped env remains a create-time
+	// contract owned by template_resolve.go.
+	// Regression for upstream gastownhall/gascity#101 (re-opened).
+	//
+	// Identity-only (no GC_CONTROL_DISPATCHER_TRACE_DEFAULT): the
+	// dispatcher trace path is per-dispatcher-qualified and must not be
+	// overwritten with the city-uniform default here. template_resolve.go
+	// owns the qualified override for the CLI create path.
+	sessionEnv := mergeEnv(resolved.Env, cityIdentityAnchorsForCity(cityPath))
+	// Resolve session_live so resumed sessions get re-themed (status bar,
+	// keybindings) the same way reconciler-started sessions do. Without this,
+	// `gc session attach` recreates the tmux runtime with an empty
+	// Hints.SessionLive, doStartSession's runSessionLive early-returns, and
+	// the session_live theme/keybinding hooks never run. The setup context is
+	// built via the reconciler's own sessionSetupContextForAgent() so
+	// {{.Rig}}/{{.RigRoot}}/{{.AgentBase}} expand correctly. See ga-vtkhi.
+	qualifiedName := firstNonEmptyGCString(info.AgentName, info.Template)
+	var sessionLive []string
+	if agentCfg := findAgentByTemplate(cfg, info.Template); agentCfg != nil && len(agentCfg.SessionLive) > 0 {
+		setupCtx := sessionSetupContextForAgent(cityPath, cfg.EffectiveCityName(), qualifiedName, agentCfg, cfg.Rigs)
+		setupCtx.Session = info.SessionName
+		setupCtx.WorkDir = workDir
+		setupCtx.ConfigDir = cityPath
+		if agentCfg.SourceDir != "" {
+			setupCtx.ConfigDir = agentCfg.SourceDir
+		}
+		sessionLive = expandSessionSetup(agentCfg.SessionLive, setupCtx)
+	}
 	return &worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    workDir,
 		Provider:   firstNonEmptyGCString(info.Provider, resolved.Name),
-		SessionEnv: resolved.Env,
+		SessionEnv: sessionEnv,
 		Hints: runtime.Config{
 			WorkDir:                workDir,
+			Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 			ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
 			ReadyDelayMs:           resolved.ReadyDelayMs,
 			ProcessNames:           resolved.ProcessNames,
 			EmitsPermissionWarning: resolved.EmitsPermissionWarning,
+			AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
 			MCPServers:             mcpServers,
+			SessionLive:            sessionLive,
 		},
 		Resume: session.ProviderResume{
 			ResumeFlag:    firstNonEmptyGCString(resolved.ResumeFlag, info.ResumeFlag),
 			ResumeStyle:   firstNonEmptyGCString(resolved.ResumeStyle, info.ResumeStyle),
-			ResumeCommand: firstNonEmptyGCString(resolved.ResumeCommand, info.ResumeCommand),
+			ResumeCommand: resumeCommand,
 			SessionIDFlag: resolved.SessionIDFlag,
 		},
 	}, nil
@@ -663,12 +722,14 @@ func startedConfigHashProvesWorkerACPTransport(
 	}
 	acpHash := runtime.CoreFingerprint(runtime.Config{
 		Command:    acpCommand,
+		Lifecycle:  runtime.Lifecycle(resolved.Lifecycle),
 		Env:        resolved.Env,
 		MCPServers: mcpServers,
 	})
 	defaultHash := runtime.CoreFingerprint(runtime.Config{
-		Command: defaultCommand,
-		Env:     resolved.Env,
+		Command:   defaultCommand,
+		Lifecycle: runtime.Lifecycle(resolved.Lifecycle),
+		Env:       resolved.Env,
 	})
 	if acpHash == defaultHash {
 		return false
@@ -693,21 +754,32 @@ func resolvedWorkerRuntimeTransport(info session.Info, resolved *config.Resolved
 }
 
 func resolveWorkerRuntimeProviderWithConfig(cfg *config.City, info session.Info, sessionKind string) (*config.ResolvedProvider, string) {
+	return resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg, info, sessionKind, nil)
+}
+
+func resolveWorkerRuntimeProviderWithConfigAndMetadata(cfg *config.City, info session.Info, sessionKind string, metadata map[string]string) (*config.ResolvedProvider, string) {
 	if cfg == nil {
 		return nil, ""
 	}
-	if sessionKind != "provider" {
-		if found, ok := resolveAgentIdentity(cfg, info.Template, ""); ok {
+	found, foundAgent := resolveAgentIdentity(cfg, info.Template, "")
+	if session.UseAgentTemplateForProviderResolution(sessionKind, metadata, info.Provider, found.Provider, foundAgent) {
+		if foundAgent {
 			if resolved, err := config.ResolveProvider(&found, &cfg.Workspace, cfg.Providers, exec.LookPath); err == nil {
 				return resolved, config.ResolveSessionCreateTransport(found.Session, resolved)
 			}
 		}
 	}
-	resolved, err := config.ResolveProvider(&config.Agent{Provider: info.Template}, &cfg.Workspace, cfg.Providers, exec.LookPath)
-	if err != nil {
-		return nil, ""
+	for _, providerName := range []string{info.Provider, info.Template} {
+		providerName = strings.TrimSpace(providerName)
+		if providerName == "" {
+			continue
+		}
+		resolved, err := config.ResolveProvider(&config.Agent{Provider: providerName}, &cfg.Workspace, cfg.Providers, exec.LookPath)
+		if err == nil {
+			return resolved, strings.TrimSpace(resolved.ProviderSessionCreateTransport())
+		}
 	}
-	return resolved, strings.TrimSpace(resolved.ProviderSessionCreateTransport())
+	return nil, ""
 }
 
 func workerDeliveryIntentForSubmitIntent(intent session.SubmitIntent) worker.DeliveryIntent {

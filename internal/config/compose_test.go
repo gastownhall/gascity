@@ -36,8 +36,8 @@ name = "mayor"
 	if len(prov.Sources) != 1 {
 		t.Errorf("len(Sources) = %d, want 1", len(prov.Sources))
 	}
-	if len(prov.Warnings) != 0 {
-		t.Errorf("unexpected warnings: %v", prov.Warnings)
+	if other := warningsExcludingV1Surfaces(prov.Warnings); len(other) != 0 {
+		t.Errorf("unexpected non-v1-surface warnings: %v", other)
 	}
 	// Include should be cleared from the result.
 	if cfg.Include != nil {
@@ -88,8 +88,14 @@ source = "packs/a-pack"
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
 	want := []string{"packs/z-pack", "packs/a-pack"}
-	if !reflect.DeepEqual(cfg.Workspace.DefaultRigIncludes, want) {
-		t.Fatalf("DefaultRigIncludes = %v, want %v", cfg.Workspace.DefaultRigIncludes, want)
+	if got := cfg.Workspace.LegacyDefaultRigIncludes(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("DefaultRigIncludes = %v, want %v", got, want)
+	}
+	if got := cfg.DefaultRigImportOrder; !reflect.DeepEqual(got, []string{"z-pack", "a-pack"}) {
+		t.Fatalf("DefaultRigImportOrder = %v, want [z-pack a-pack]", got)
+	}
+	if got := cfg.DefaultRigImports["z-pack"].Source; got != "packs/z-pack" {
+		t.Fatalf("DefaultRigImports[z-pack].Source = %q, want packs/z-pack", got)
 	}
 }
 
@@ -299,8 +305,12 @@ name = "test"
 
 [[rigs]]
 name = "hw"
-path = "/tmp/hw"
 includes = ["packs/rigpack"]
+`)
+	fs.Files["/city/.gc/site.toml"] = []byte(`
+[[rig]]
+name = "hw"
+path = "/tmp/hw"
 `)
 	fs.Files["/city/pack.toml"] = []byte(`
 [pack]
@@ -317,9 +327,8 @@ schema = 2
 
 [agent_defaults]
 provider = "claude"
-
-[[agent]]
-name = "worker"
+`)
+	fs.Files["/city/packs/rigpack/agents/worker/agent.toml"] = []byte(`
 scope = "rig"
 `)
 
@@ -1137,8 +1146,8 @@ ref = "main"
 	if cfg.Packs["ralph"].Source != "https://github.com/example/ralph" {
 		t.Errorf("ralph source = %q", cfg.Packs["ralph"].Source)
 	}
-	if len(prov.Warnings) != 0 {
-		t.Errorf("unexpected warnings: %v", prov.Warnings)
+	if other := warningsExcludingV1Surfaces(prov.Warnings); len(other) != 0 {
+		t.Errorf("unexpected non-v1-surface warnings: %v", other)
 	}
 }
 
@@ -1319,6 +1328,58 @@ session_setup_script = "scripts/theme.sh"
 	}
 }
 
+func TestLoadWithIncludes_FragmentPatchPromptTemplateAndOverlayDirResolvedFromFragmentDir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	writeFile("city.toml", `
+include = ["fragments/patch.toml"]
+
+[workspace]
+name = "test"
+includes = ["packs/base"]
+`)
+	writeFile("packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+	writeFile("fragments/patch.toml", `
+[[patches.agent]]
+name = "worker"
+prompt_template = "prompts/theme.md"
+overlay_dir = "overlays/theme"
+`)
+	writeFile("fragments/prompts/theme.md", "fragment prompt\n")
+	writeFile("fragments/overlays/theme/.keep", "")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("len(cfg.Agents) = %d, want 1", len(cfg.Agents))
+	}
+	if cfg.Agents[0].PromptTemplate != "fragments/prompts/theme.md" {
+		t.Fatalf("PromptTemplate = %q, want fragments/prompts/theme.md", cfg.Agents[0].PromptTemplate)
+	}
+	if cfg.Agents[0].OverlayDir != "fragments/overlays/theme" {
+		t.Fatalf("OverlayDir = %q, want fragments/overlays/theme", cfg.Agents[0].OverlayDir)
+	}
+}
+
 func TestLoadWithIncludes_RootPatchSessionSetupScriptResolvedFromCityDir(t *testing.T) {
 	dir := t.TempDir()
 	writeFile := func(rel, data string) {
@@ -1361,6 +1422,113 @@ scope = "city"
 	want := filepath.Join(dir, "scripts/local.sh")
 	if cfg.Agents[0].SessionSetupScript != want {
 		t.Fatalf("SessionSetupScript = %q, want %q", cfg.Agents[0].SessionSetupScript, want)
+	}
+}
+
+func TestLoadWithIncludes_RootPatchPromptTemplateAndOverlayDirResolvedFromCityDir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	writeFile("city.toml", `
+[workspace]
+name = "test"
+includes = ["packs/base"]
+
+[[patches.agent]]
+name = "worker"
+prompt_template = "prompts/local.md"
+overlay_dir = "overlays/local"
+`)
+	writeFile("packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+	writeFile("prompts/local.md", "city prompt\n")
+	writeFile("overlays/local/.keep", "")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("len(cfg.Agents) = %d, want 1", len(cfg.Agents))
+	}
+	if cfg.Agents[0].PromptTemplate != "prompts/local.md" {
+		t.Fatalf("PromptTemplate = %q, want prompts/local.md", cfg.Agents[0].PromptTemplate)
+	}
+	if cfg.Agents[0].OverlayDir != "overlays/local" {
+		t.Fatalf("OverlayDir = %q, want overlays/local", cfg.Agents[0].OverlayDir)
+	}
+}
+
+func TestLoadWithIncludes_FragmentRigOverridePromptTemplateAndOverlayDirApplyEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	writeFile("city.toml", `
+include = ["fragments/rig.toml"]
+
+[workspace]
+name = "test"
+`)
+	writeFile("fragments/rig.toml", `
+[[rigs]]
+name = "hw"
+path = "rig"
+includes = ["packs/base"]
+
+  [[rigs.overrides]]
+  agent = "worker"
+  prompt_template = "prompts/rig-worker.md"
+  overlay_dir = "overlays/rig-worker"
+`)
+	writeFile("packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "rig"
+prompt_template = "prompts/base-worker.md"
+overlay_dir = "overlays/base-worker"
+`)
+	writeFile("fragments/prompts/rig-worker.md", "rig override prompt\n")
+	writeFile("fragments/overlays/rig-worker/.keep", "")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("len(cfg.Agents) = %d, want 1", len(cfg.Agents))
+	}
+	if cfg.Agents[0].PromptTemplate != "fragments/prompts/rig-worker.md" {
+		t.Fatalf("PromptTemplate = %q, want fragments/prompts/rig-worker.md", cfg.Agents[0].PromptTemplate)
+	}
+	if cfg.Agents[0].OverlayDir != "fragments/overlays/rig-worker" {
+		t.Fatalf("OverlayDir = %q, want fragments/overlays/rig-worker", cfg.Agents[0].OverlayDir)
 	}
 }
 
@@ -1484,6 +1652,65 @@ func TestAdjustAgentPaths_OverlayDirAdjusted(t *testing.T) {
 	// Empty: unchanged.
 	if agents[2].OverlayDir != "" {
 		t.Errorf("plain overlay = %q, want empty", agents[2].OverlayDir)
+	}
+}
+
+func TestAdjustAgentOverridePaths_AllFields(t *testing.T) {
+	promptRel := "prompts/custom.md"
+	overlayRel := "overlays/custom"
+	scriptRel := "scripts/setup.sh"
+	promptAbs := "/abs/prompt.md"
+	overlayAbs := "/abs/overlay"
+	scriptAbs := "/abs/setup.sh"
+	promptCity := "//prompts/global.md"
+	overlayCity := "//overlays/global"
+
+	overrides := []AgentOverride{
+		// Relative paths should be adjusted.
+		{Agent: "worker", PromptTemplate: &promptRel, OverlayDir: &overlayRel, SessionSetupScript: &scriptRel},
+		// Absolute paths pass through unchanged.
+		{Agent: "abs", PromptTemplate: &promptAbs, OverlayDir: &overlayAbs, SessionSetupScript: &scriptAbs},
+		// "//" paths resolve to city root.
+		{Agent: "city", PromptTemplate: &promptCity, OverlayDir: &overlayCity},
+		// Nil fields: unchanged.
+		{Agent: "empty"},
+	}
+	adjustAgentOverridePaths(overrides, "/city/packs/mypack", "/city")
+
+	// Relative paths: prompt_template/overlay_dir → city-root-relative via adjustFragmentPath.
+	if *overrides[0].PromptTemplate != "packs/mypack/prompts/custom.md" {
+		t.Errorf("worker prompt = %q, want packs/mypack/prompts/custom.md", *overrides[0].PromptTemplate)
+	}
+	if *overrides[0].OverlayDir != "packs/mypack/overlays/custom" {
+		t.Errorf("worker overlay = %q, want packs/mypack/overlays/custom", *overrides[0].OverlayDir)
+	}
+	// session_setup_script → absolute via resolveConfigPath.
+	if *overrides[0].SessionSetupScript != "/city/packs/mypack/scripts/setup.sh" {
+		t.Errorf("worker script = %q, want /city/packs/mypack/scripts/setup.sh", *overrides[0].SessionSetupScript)
+	}
+
+	// Absolute paths unchanged.
+	if *overrides[1].PromptTemplate != "/abs/prompt.md" {
+		t.Errorf("abs prompt = %q, want /abs/prompt.md", *overrides[1].PromptTemplate)
+	}
+	if *overrides[1].OverlayDir != "/abs/overlay" {
+		t.Errorf("abs overlay = %q, want /abs/overlay", *overrides[1].OverlayDir)
+	}
+
+	// "//" paths resolve to city root.
+	if *overrides[2].PromptTemplate != "prompts/global.md" {
+		t.Errorf("city prompt = %q, want prompts/global.md", *overrides[2].PromptTemplate)
+	}
+	if *overrides[2].OverlayDir != "overlays/global" {
+		t.Errorf("city overlay = %q, want overlays/global", *overrides[2].OverlayDir)
+	}
+
+	// Nil fields stay nil.
+	if overrides[3].PromptTemplate != nil {
+		t.Errorf("empty prompt = %v, want nil", overrides[3].PromptTemplate)
+	}
+	if overrides[3].OverlayDir != nil {
+		t.Errorf("empty overlay = %v, want nil", overrides[3].OverlayDir)
 	}
 }
 
@@ -2184,5 +2411,203 @@ func TestPopulateAgentLocalAssetDirsPreservesExisting(t *testing.T) {
 	}
 	if cfg.Agents[0].MCPDir != "/already/set/mcp" {
 		t.Errorf("MCPDir overwritten: %q", cfg.Agents[0].MCPDir)
+	}
+}
+
+func TestLoadWithIncludes_KiroProviderBaseClaudeThroughResolve(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[providers.kiro]
+base = "builtin:claude"
+command = "kiro-cli"
+args = ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"]
+ready_delay_ms = 5000
+process_names = ["kiro-cli", "kiro", "node"]
+instructions_file = "AGENTS.md"
+
+[providers.kiro.env]
+KIRO_AGENT_MODE = "headless"
+
+[[agent]]
+name = "worker"
+provider = "kiro"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	spec, ok := cfg.Providers["kiro"]
+	if !ok {
+		t.Fatal("kiro provider not loaded")
+	}
+	if spec.Base == nil || *spec.Base != "builtin:claude" {
+		t.Fatalf("Base = %v, want builtin:claude", spec.Base)
+	}
+
+	var worker *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "worker" {
+			worker = &cfg.Agents[i]
+			break
+		}
+	}
+	if worker == nil {
+		t.Fatal("worker agent not found")
+	}
+
+	rp, err := ResolveProvider(worker, &cfg.Workspace, cfg.Providers, lookPathAll)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Command != "kiro-cli" {
+		t.Errorf("Command = %q, want kiro", rp.Command)
+	}
+	if rp.BuiltinAncestor != "claude" {
+		t.Errorf("BuiltinAncestor = %q, want claude", rp.BuiltinAncestor)
+	}
+	if rp.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want AGENTS.md (kiro override)", rp.InstructionsFile)
+	}
+	if rp.ResumeFlag != "--resume" {
+		t.Errorf("ResumeFlag = %q, want --resume (inherited from claude)", rp.ResumeFlag)
+	}
+	if rp.SessionIDFlag != "--session-id" {
+		t.Errorf("SessionIDFlag = %q, want --session-id (inherited from claude)", rp.SessionIDFlag)
+	}
+	if !rp.SupportsHooks {
+		t.Error("SupportsHooks = false, want true (inherited from claude)")
+	}
+	if rp.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want headless", rp.Env["KIRO_AGENT_MODE"])
+	}
+	if rp.PermissionModes == nil || rp.PermissionModes["unrestricted"] != "--dangerously-skip-permissions" {
+		t.Errorf("PermissionModes[unrestricted] = %q, want --dangerously-skip-permissions (inherited)", rp.PermissionModes["unrestricted"])
+	}
+}
+
+func TestLoadWithIncludes_KiroStandaloneProviderThroughResolve(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[providers.kiro]
+command = "kiro-cli"
+args = ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"]
+prompt_mode = "arg"
+ready_delay_ms = 5000
+process_names = ["kiro-cli", "kiro", "node"]
+supports_hooks = true
+instructions_file = "AGENTS.md"
+resume_flag = "--resume"
+resume_style = "flag"
+
+[providers.kiro.env]
+KIRO_AGENT_MODE = "headless"
+
+[providers.kiro.permission_modes]
+unrestricted = "--trust-mode full"
+default = "--trust-mode default"
+
+[[agent]]
+name = "worker"
+provider = "kiro"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var worker *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "worker" {
+			worker = &cfg.Agents[i]
+			break
+		}
+	}
+	if worker == nil {
+		t.Fatal("worker agent not found")
+	}
+
+	rp, err := ResolveProvider(worker, &cfg.Workspace, cfg.Providers, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Name != "kiro" {
+		t.Errorf("Name = %q, want kiro", rp.Name)
+	}
+	if rp.BuiltinAncestor != "kiro" {
+		t.Errorf("BuiltinAncestor = %q, want \"kiro\"", rp.BuiltinAncestor)
+	}
+	if rp.CommandString() != "kiro-cli chat --no-interactive --agent gascity --trust-all-tools" {
+		t.Errorf("CommandString() = %q, want kiro-cli chat --no-interactive --agent gascity --trust-all-tools", rp.CommandString())
+	}
+	if rp.ReadyDelayMs != 5000 {
+		t.Errorf("ReadyDelayMs = %d, want 5000", rp.ReadyDelayMs)
+	}
+	if !rp.SupportsHooks {
+		t.Error("SupportsHooks = false, want true")
+	}
+	if rp.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want AGENTS.md", rp.InstructionsFile)
+	}
+	if rp.ResumeFlag != "--resume" {
+		t.Errorf("ResumeFlag = %q, want --resume", rp.ResumeFlag)
+	}
+	if rp.ResumeStyle != "flag" {
+		t.Errorf("ResumeStyle = %q, want flag", rp.ResumeStyle)
+	}
+	if rp.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want headless", rp.Env["KIRO_AGENT_MODE"])
+	}
+	if rp.PermissionModes["unrestricted"] != "--trust-mode full" {
+		t.Errorf("PermissionModes[unrestricted] = %q, want --trust-mode full", rp.PermissionModes["unrestricted"])
+	}
+}
+
+func TestLoadWithIncludes_KiroFragmentOverlay(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["kiro-overlay.toml"]
+
+[workspace]
+name = "test"
+
+[providers.kiro]
+command = "kiro-cli"
+args = ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"]
+prompt_mode = "arg"
+ready_delay_ms = 5000
+
+[[agent]]
+name = "worker"
+provider = "kiro"
+`)
+	fs.Files["/city/kiro-overlay.toml"] = []byte(`
+[providers.kiro]
+ready_delay_ms = 8000
+
+[providers.kiro.env]
+KIRO_AGENT_MODE = "headless"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	kiro, ok := cfg.Providers["kiro"]
+	if !ok {
+		t.Fatal("kiro provider not loaded")
+	}
+	if kiro.ReadyDelayMs != 8000 {
+		t.Errorf("ReadyDelayMs = %d, want 8000 (fragment override)", kiro.ReadyDelayMs)
+	}
+	if kiro.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want headless (from fragment)", kiro.Env["KIRO_AGENT_MODE"])
+	}
+	if kiro.Command != "kiro-cli" {
+		t.Errorf("Command = %q, want kiro (from root)", kiro.Command)
 	}
 }

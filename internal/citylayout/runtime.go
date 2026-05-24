@@ -40,6 +40,32 @@ func ControlDispatcherTraceDefaultPathForRuntimeDir(cityRoot, runtimeDir string)
 	return filepath.Join(runtimeDir, "control-dispatcher-trace.log")
 }
 
+// ControlDispatcherTraceLogFileName returns the per-dispatcher trace log
+// filename for a qualified agent name. The "/" → "--" mapping mirrors how
+// rig-qualified agent names are encoded in tmux session aliases (e.g., the
+// "app/control-dispatcher" dispatcher runs in the "app--control-dispatcher"
+// tmux session). Closes #1650 when used as a per-dispatcher TRACE_DEFAULT.
+func ControlDispatcherTraceLogFileName(qualifiedName string) string {
+	safe := strings.ReplaceAll(qualifiedName, "/", "--")
+	return safe + "-trace.log"
+}
+
+// ControlDispatcherTraceDefaultPathFor returns the per-dispatcher default
+// trace file under cityRoot's canonical runtime root. Each dispatcher
+// resolves to a distinct file so operators can attribute every trace line
+// without correlating against process titles or session lists.
+func ControlDispatcherTraceDefaultPathFor(cityRoot, qualifiedName string) string {
+	return filepath.Join(RuntimeDataDir(cityRoot), ControlDispatcherTraceLogFileName(qualifiedName))
+}
+
+// ControlDispatcherTraceDefaultPathForRuntimeDirAndName returns the
+// per-dispatcher default trace file for the provided runtime root. Same
+// runtime-dir normalization rules as ControlDispatcherTraceDefaultPathForRuntimeDir.
+func ControlDispatcherTraceDefaultPathForRuntimeDirAndName(cityRoot, runtimeDir, qualifiedName string) string {
+	runtimeDir = normalizeRuntimeDir(cityRoot, runtimeDir)
+	return filepath.Join(runtimeDir, ControlDispatcherTraceLogFileName(qualifiedName))
+}
+
 // RuntimePacksDir returns the canonical root for pack-owned runtime state.
 func RuntimePacksDir(cityRoot string) string {
 	return RuntimePath(cityRoot, "runtime", "packs")
@@ -115,6 +141,22 @@ func CityRuntimeEnvMapForRuntimeDir(cityRoot, runtimeDir string) map[string]stri
 		"GC_CITY_PATH":                        cityRoot,
 		"GC_CITY_RUNTIME_DIR":                 runtimeDir,
 		"GC_CONTROL_DISPATCHER_TRACE_DEFAULT": ControlDispatcherTraceDefaultPathForRuntimeDir(cityRoot, runtimeDir),
+	}
+}
+
+// CityIdentityEnvMap returns the city identity anchors without dispatcher
+// trace defaults. Empty city roots return nil so callers do not inject empty
+// GC_CITY values or relative runtime paths on unanchored code paths.
+func CityIdentityEnvMap(cityRoot string) map[string]string {
+	cityRoot = strings.TrimSpace(cityRoot)
+	if cityRoot == "" {
+		return nil
+	}
+	full := CityRuntimeEnvMapForRuntimeDir(cityRoot, TrustedAmbientCityRuntimeDir(cityRoot))
+	return map[string]string{
+		"GC_CITY":             full["GC_CITY"],
+		"GC_CITY_PATH":        full["GC_CITY_PATH"],
+		"GC_CITY_RUNTIME_DIR": full["GC_CITY_RUNTIME_DIR"],
 	}
 }
 

@@ -18,7 +18,9 @@ CITY_BEADS_DIR="$CITY_ABS/.beads"
 MAX_AGE="${GC_REAPER_MAX_AGE:-24h}"
 PURGE_AGE="${GC_REAPER_PURGE_AGE:-168h}"
 STALE_ISSUE_AGE="${GC_REAPER_STALE_ISSUE_AGE:-720h}"
+SESSION_PURGE_AGE="${GC_REAPER_SESSION_PURGE_AGE:-720h}"
 ALERT_THRESHOLD="${GC_REAPER_ALERT_THRESHOLD:-500}"
+MAIL_ALERT_THRESHOLD="${GC_REAPER_MAIL_ALERT_THRESHOLD:-0}"  # 0 = disabled
 DRY_RUN="${GC_REAPER_DRY_RUN:-}"
 
 # Convert Go durations to SQL INTERVAL hours for Dolt.
@@ -103,16 +105,21 @@ DATABASES=$(
         fi
     done < <(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2)
 )
+HAD_DATABASES=1
 if [ -z "$DATABASES" ]; then
-    # No databases accessible — nothing to do.
-    exit 0
+    # The Dolt-backed cleanup loop has no work, but the session-bead
+    # prune below still operates through bd's configured task store.
+    HAD_DATABASES=0
 fi
 
 TOTAL_STALE_WISPS=0
 TOTAL_CLOSED_WISPS=0
 TOTAL_PURGED=0
+TOTAL_MAIL_WISPS=0
 TOTAL_ISSUES_CLOSED=0
 TOTAL_STALE_ISSUES_SKIPPED=0
+TOTAL_SESSIONS_PRUNED=0
+SESSION_PRUNE_ATTEMPTED=0
 ANOMALIES=""
 
 sanitize_output() {
@@ -242,6 +249,24 @@ get_sql_rows() {
     SQL_ROWS_RESULT=$(printf '%s\n' "$output" | tail -n +2 | tr -d '\r')
 }
 
+has_split_dependency_target_columns() {
+    local db="$1"
+    local output
+    local fields
+
+    if ! output=$(dolt_sql -r csv -q "SHOW COLUMNS FROM \`$db\`.dependencies" 2>/dev/null); then
+        return 0
+    fi
+
+    fields=$(printf '%s\n' "$output" | tail -n +2 | cut -d, -f1 | tr -d '\r')
+    if [ -z "$fields" ]; then
+        return 0
+    fi
+
+    printf '%s\n' "$fields" | grep -qx 'depends_on_issue_id' || return 1
+    printf '%s\n' "$fields" | grep -qx 'depends_on_wisp_id' || return 1
+}
+
 SQL_CHANGE_ROWS_RESULT=0
 close_city_issue() {
     local issue_id="$1"
@@ -306,6 +331,12 @@ while IFS= read -r DB; do
         # server into noise. See gastownhall/gascity#1816.
         continue
     fi
+    if ! has_split_dependency_target_columns "$DB"; then
+        # Legacy dependency schema (pre-#2399). Skip silently like the
+        # has_wisps_table gate above; the only fix is the schema migration,
+        # which the reaper cannot perform. See gastownhall/gascity#2456.
+        continue
+    fi
 
     DB_MUTATIONS=0
 
@@ -332,8 +363,8 @@ while IFS= read -r DB; do
             INNER JOIN \`$DB\`.dependencies d
                 ON d.issue_id = w.id
                 AND d.type = 'parent-child'
-            LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_id = parent_wisp.id
-            LEFT JOIN \`$DB\`.issues parent_issue ON d.depends_on_id = parent_issue.id
+            LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_wisp_id = parent_wisp.id
+            LEFT JOIN \`$DB\`.issues parent_issue ON d.depends_on_issue_id = parent_issue.id
             WHERE w.status IN ('open', 'hooked', 'in_progress')
             AND w.created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
             AND (
@@ -356,8 +387,8 @@ while IFS= read -r DB; do
                     INNER JOIN \`$DB\`.dependencies d
                         ON d.issue_id = w.id
                         AND d.type = 'parent-child'
-                    LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_id = parent_wisp.id
-                    LEFT JOIN \`$DB\`.issues parent_issue ON d.depends_on_id = parent_issue.id
+                    LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_wisp_id = parent_wisp.id
+                    LEFT JOIN \`$DB\`.issues parent_issue ON d.depends_on_issue_id = parent_issue.id
                     WHERE w.status IN ('open', 'hooked', 'in_progress')
                     AND w.created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
                     AND (
@@ -386,10 +417,10 @@ while IFS= read -r DB; do
         WHERE status = 'closed'
         AND closed_at < DATE_SUB(NOW(), INTERVAL $PURGE_AGE_H HOUR)
         AND id NOT IN (
-            SELECT DISTINCT d.depends_on_id FROM \`$DB\`.dependencies d
+            SELECT DISTINCT d.depends_on_wisp_id FROM \`$DB\`.dependencies d
             INNER JOIN \`$DB\`.wisps child_wisp ON d.issue_id = child_wisp.id
             WHERE d.type = 'parent-child'
-            AND d.depends_on_id IS NOT NULL
+            AND d.depends_on_wisp_id IS NOT NULL
             AND child_wisp.status IN ('open', 'hooked', 'in_progress')
         )
     "
@@ -401,10 +432,10 @@ while IFS= read -r DB; do
             WHERE status = 'closed'
             AND closed_at < DATE_SUB(NOW(), INTERVAL $PURGE_AGE_H HOUR)
             AND id NOT IN (
-                SELECT DISTINCT d.depends_on_id FROM \`$DB\`.dependencies d
+                SELECT DISTINCT d.depends_on_wisp_id FROM \`$DB\`.dependencies d
                 INNER JOIN \`$DB\`.wisps child_wisp ON d.issue_id = child_wisp.id
                 WHERE d.type = 'parent-child'
-                AND d.depends_on_id IS NOT NULL
+                AND d.depends_on_wisp_id IS NOT NULL
                 AND child_wisp.status IN ('open', 'hooked', 'in_progress')
             )
         "; then
@@ -425,12 +456,13 @@ while IFS= read -r DB; do
         AND issue_type != 'epic'
         AND id NOT IN (
             SELECT DISTINCT d.issue_id FROM \`$DB\`.dependencies d
-            INNER JOIN \`$DB\`.issues i ON d.depends_on_id = i.id
+            INNER JOIN \`$DB\`.issues i ON d.depends_on_issue_id = i.id
             WHERE i.status IN ('open', 'in_progress')
             UNION
-            SELECT DISTINCT d.depends_on_id FROM \`$DB\`.dependencies d
+            SELECT DISTINCT d.depends_on_issue_id FROM \`$DB\`.dependencies d
             INNER JOIN \`$DB\`.issues i ON d.issue_id = i.id
             WHERE i.status IN ('open', 'in_progress')
+            AND d.depends_on_issue_id IS NOT NULL
         )
     "
     STALE_IDS=$SQL_ROWS_RESULT
@@ -460,15 +492,29 @@ while IFS= read -r DB; do
         fi
     fi
 
-    # Step 5: Anomaly check — open wisp count.
-    get_sql_count "$DB" "open wisp" "
+    # Step 5a: Anomaly check — reapable open wisp count.
+    get_sql_count "$DB" "reapable open wisp" "
         SELECT COUNT(*) FROM \`$DB\`.wisps
         WHERE status IN ('open', 'hooked', 'in_progress')
+        AND issue_type NOT IN ('message')
     "
-    OPEN_WISPS=$SQL_COUNT_RESULT
+    REAPABLE_WISPS=$SQL_COUNT_RESULT
 
-    if [ "$OPEN_WISPS" -gt "$ALERT_THRESHOLD" ]; then
-        ANOMALIES="${ANOMALIES}$DB: $OPEN_WISPS open wisps (threshold: $ALERT_THRESHOLD)\n"
+    if [ "$REAPABLE_WISPS" -gt "$ALERT_THRESHOLD" ]; then
+        ANOMALIES="${ANOMALIES}$DB: $REAPABLE_WISPS open wisps (threshold: $ALERT_THRESHOLD)\n"
+    fi
+
+    # Step 5b: Mail-wisp backlog count, observed separately from reapable wisps.
+    get_sql_count "$DB" "open mail wisp" "
+        SELECT COUNT(*) FROM \`$DB\`.wisps
+        WHERE status IN ('open', 'hooked', 'in_progress')
+        AND issue_type = 'message'
+    "
+    MAIL_WISPS=$SQL_COUNT_RESULT
+    TOTAL_MAIL_WISPS=$((TOTAL_MAIL_WISPS + MAIL_WISPS))
+
+    if [ "$MAIL_ALERT_THRESHOLD" -gt 0 ] && [ "$MAIL_WISPS" -gt "$MAIL_ALERT_THRESHOLD" ]; then
+        ANOMALIES="${ANOMALIES}$DB: $MAIL_WISPS open mail-wisps (mail threshold: $MAIL_ALERT_THRESHOLD)\n"
     fi
 
     # Commit Dolt changes. Must use CALL (not SELECT) and have an active
@@ -494,13 +540,41 @@ done <<EOF
 $DATABASES
 EOF
 
+# Step 6: prune closed gm session beads from the city's primary bead store.
+if [ -d "$CITY_BEADS_DIR" ] && command -v bd >/dev/null 2>&1; then
+    SESSION_PRUNE_ATTEMPTED=1
+    BD_PRUNE_ARGS=(prune --pattern 'gm-*' --older-than "$SESSION_PURGE_AGE")
+    if [ -z "$DRY_RUN" ]; then
+        BD_PRUNE_ARGS+=(--force)
+    fi
+    BD_PRUNE_ARGS+=(--json)
+
+    if PRUNE_JSON=$((
+        cd "$CITY_ABS" && BEADS_DIR="$CITY_BEADS_DIR" bd "${BD_PRUNE_ARGS[@]}"
+    ) 2>/dev/null); then
+        :
+    else
+        PRUNE_JSON='{"pruned_count":0}'
+    fi
+    PRUNE_COUNT=$(printf '%s' "$PRUNE_JSON" | sed -n 's/.*"pruned_count"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+    [ -z "$PRUNE_COUNT" ] && PRUNE_COUNT=0
+    TOTAL_SESSIONS_PRUNED=$PRUNE_COUNT
+    if [ "$PRUNE_COUNT" -gt 1000 ]; then
+        record_anomaly "gm" "$PRUNE_COUNT closed session beads pruned in one run (threshold: 1000)"
+    fi
+fi
+
+if [ "$HAD_DATABASES" -eq 0 ] && [ "$SESSION_PRUNE_ATTEMPTED" -eq 0 ]; then
+    exit 0
+fi
+
 # Report.
 if [ -n "$ANOMALIES" ]; then
     gc mail send mayor/ -s "ESCALATION: Reaper anomalies detected [MEDIUM]" \
         -m "$ANOMALIES" 2>/dev/null || true
 fi
 
-SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, purged:$TOTAL_PURGED, closed:$TOTAL_ISSUES_CLOSED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED"
+SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
 if [ -n "$DRY_RUN" ]; then
     SUMMARY="$SUMMARY (dry run)"
 fi

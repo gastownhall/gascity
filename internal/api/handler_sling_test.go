@@ -384,7 +384,7 @@ func TestSlingProblemTypesDocumentedInOpenAPI(t *testing.T) {
 
 func TestDocumentProblemTypesIsIdempotent(t *testing.T) {
 	state := newFakeMutatorState(t)
-	sm := NewSupervisorMux(&stateCityResolver{state: state}, nil, false, "test", time.Now())
+	sm := NewSupervisorMux(&stateCityResolver{state: state}, nil, false, "test", "", time.Now())
 	oapi := sm.humaAPI.OpenAPI()
 
 	documentProblemTypes(oapi)
@@ -593,7 +593,7 @@ func TestSlingConflictReturns409ForExistingLiveWorkflow(t *testing.T) {
 		config.Agent{Name: config.ControlDispatcherAgentName, MaxActiveSessions: intPtr(1)},
 		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "myrig", MaxActiveSessions: intPtr(1)},
 	)
-	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.toml"), []byte(`
 formula = "graph-work"
 version = 2
 contract = "graph.v2"

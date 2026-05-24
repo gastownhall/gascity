@@ -616,6 +616,41 @@ func TestResolveSessionIDMaterializingNamed_MaterializesConfiguredNamedSession(t
 	}
 }
 
+func TestResolveSessionIDMaterializingNamedIgnoresAgentTmuxAlias(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+
+	store := beads.NewMemStore()
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:         "mayor",
+			StartCommand: "true",
+			TmuxAlias:    "crew--{{.CityName}}",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+		}},
+	}
+
+	id, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, "mayor")
+	if err != nil {
+		t.Fatalf("resolveSessionIDMaterializingNamed(mayor): %v", err)
+	}
+	bead, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", id, err)
+	}
+	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
+	wantSessionName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, "mayor")
+	if got := bead.Metadata["session_name"]; got != wantSessionName {
+		t.Fatalf("session_name = %q, want configured named runtime name %q", got, wantSessionName)
+	}
+	if got := bead.Metadata["session_name"]; got == "crew--test-city" {
+		t.Fatalf("session_name = %q, want configured named sessions to ignore tmux_alias", got)
+	}
+}
+
 // TestResolveSessionIDMaterializingNamed_BareNameResolvesV2BoundNamedSession
 // guards against the regression reported in #800: after packs V2, imported
 // named sessions carry a BindingName (e.g. "gastown.mayor"). Users who

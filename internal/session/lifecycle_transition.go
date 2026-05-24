@@ -55,6 +55,19 @@ func pendingCreateStartedAt(now time.Time) string {
 	return now.UTC().Format(time.RFC3339)
 }
 
+// RequestExplicitWakePatch records durable wake intent without claiming a
+// concrete start. The reconciler consumes the request when it prepares the
+// runtime start.
+func RequestExplicitWakePatch(reason string, now time.Time) MetadataPatch {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return MetadataPatch{
+		"wake_request":      reason,
+		"wake_requested_at": now.UTC().Format(time.RFC3339),
+	}
+}
+
 // RequestWakePatch records a controller-owned one-shot create claim.
 func RequestWakePatch(reason string, now time.Time) MetadataPatch {
 	return MetadataPatch{
@@ -97,6 +110,8 @@ func PreWakePatch(input PreWakePatchInput) MetadataPatch {
 		"sleep_reason":               input.SleepReason,
 		"sleep_intent":               "",
 		"generation":                 fmt.Sprintf("%d", input.Generation),
+		"wake_request":               "",
+		"wake_requested_at":          "",
 	}
 	if input.FreshWake {
 		patch["session_key"] = ""
@@ -232,6 +247,21 @@ func BeginDrainPatch(now time.Time, reason string) MetadataPatch {
 	}
 }
 
+// DrainAckStopPendingReason marks a drain-acked runtime whose provider stop is
+// running asynchronously and waiting for controller finalization.
+const DrainAckStopPendingReason = "drain-ack-stop-pending"
+
+// DrainAckStopPendingPatch records that a drain-acked session has moved into
+// durable stop-pending state. The provider stop itself is asynchronous; the
+// controller finalizes the bead with the normal drain completion patches after
+// observing the runtime stopped.
+func DrainAckStopPendingPatch(now time.Time) MetadataPatch {
+	patch := BeginDrainPatch(now, DrainAckStopPendingReason)
+	patch["pending_create_claim"] = ""
+	patch["pending_create_started_at"] = ""
+	return patch
+}
+
 // SleepPatch records a non-terminal sleep/drain result.
 func SleepPatch(now time.Time, reason string) MetadataPatch {
 	return MetadataPatch{
@@ -251,6 +281,7 @@ func SleepPatch(now time.Time, reason string) MetadataPatch {
 func AcknowledgeDrainPatch(freshWake bool) MetadataPatch {
 	patch := MetadataPatch{
 		"state":                     string(StateDrained),
+		"state_reason":              "",
 		"last_woke_at":              "",
 		"pending_create_claim":      "",
 		"pending_create_started_at": "",
@@ -266,6 +297,7 @@ func AcknowledgeDrainPatch(freshWake bool) MetadataPatch {
 // CompleteDrainPatch records a completed controller drain as ordinary asleep.
 func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPatch {
 	patch := SleepPatch(now, reason)
+	patch["state_reason"] = ""
 	if freshWake {
 		patch["session_key"] = ""
 		applyFreshWakeConversationReset(patch)
@@ -335,14 +367,58 @@ func ArchivePatch(now time.Time, reason string, continuityEligible bool) Metadat
 }
 
 // ClosePatch records terminal close metadata before the bead status is closed.
-func ClosePatch(now time.Time, reason string) MetadataPatch {
+//
+// state retains the canonical short stateCode (used by reconciler logic and
+// closedNamedSessionReopenEligible). close_reason is expanded via
+// CanonicalCloseReason so cities running with validation.on-close=error
+// (which rejects close reasons under 20 characters) accept the close.
+// Without the expansion, every short-code session-close call (gc_swept,
+// orphaned, drained, failed-create, ...) is silently rejected by the
+// validator, leaving close_reason/closed_at stamped on an OPEN bead and
+// triggering reconciler flap as the next tick clears them.
+func ClosePatch(now time.Time, stateCode string) MetadataPatch {
 	ts := now.UTC().Format(time.RFC3339)
 	return MetadataPatch{
-		"state":        reason,
-		"close_reason": reason,
+		"state":        stateCode,
+		"close_reason": CanonicalCloseReason(stateCode),
 		"closed_at":    ts,
 		"synced_at":    ts,
 	}
+}
+
+// CanonicalCloseReason maps a short session stateCode to a human-readable
+// close reason of at least 20 characters, suitable for use as
+// `bd close --reason` under validation.on-close=error.
+//
+// Unknown non-empty codes fall back to "session terminated: <code>".
+// Codes already 20+ characters pass through unchanged.
+func CanonicalCloseReason(stateCode string) string {
+	switch stateCode {
+	case "":
+		return "session terminated: unknown state"
+	case "gc_swept":
+		return "session swept: no assigned work in any rig"
+	case "orphaned":
+		return "session orphaned: configured agent removed"
+	case "drained":
+		return "session drained: pool slot retired by reconciler"
+	case "failed-create":
+		return "session create failed: aborted before creation_complete"
+	case "stale-session":
+		return "session stale: no liveness signal beyond threshold"
+	case "duplicate":
+		return "session retired: duplicate of canonical bead"
+	case "duplicate-repair":
+		return "session retired: duplicate-repair canonicalization"
+	case "reconfigured":
+		return "session reconfigured: superseded by new agent config"
+	case "suspended":
+		return "session suspended: agent disabled in city config"
+	}
+	if len(stateCode) >= 20 {
+		return stateCode
+	}
+	return fmt.Sprintf("session terminated: %s", stateCode)
 }
 
 // RetireNamedSessionPatch archives a named-session bead without closing it so

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,6 +41,49 @@ func TestSkillListCityCatalog(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("skill list output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestSkillListJSON(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+	writeCatalogFile(t, cityDir, "skills/code-review/SKILL.md", "city skill")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"skill", "list", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc skill list --json exited %d: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+
+	var payload struct {
+		SchemaVersion string `json:"schema_version"`
+		Count         int    `json:"count"`
+		Entries       []struct {
+			Name   string `json:"name"`
+			Source string `json:"source"`
+			Path   string `json:"path"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.SchemaVersion != "1" || payload.Count == 0 || len(payload.Entries) == 0 {
+		t.Fatalf("payload = %+v", payload)
+	}
+	found := false
+	for _, got := range payload.Entries {
+		if got.Name == "code-review" && got.Source == "city" && got.Path == "skills/code-review/SKILL.md" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("city skill missing from %+v", payload.Entries)
 	}
 }
 
@@ -171,29 +215,10 @@ func TestSkillListAgentShowsFullCityCatalog(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
-	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
-		t.Fatalf("MkdirAll(.gc): %v", err)
-	}
+	writeNamedSessionCityTOML(t, cityDir)
 	// mayor declares an attachment list — this is a v0.15.0 tombstone and
 	// must be ignored; other-skill should still appear in the agent's view.
-	toml := `[workspace]
-name = "test-city"
-
-[beads]
-provider = "file"
-
-[[agent]]
-name = "mayor"
-provider = "codex"
-start_command = "echo"
-skills = ["attached-skill"]
-
-[[named_session]]
-template = "mayor"
-`
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
+	writeCatalogFile(t, cityDir, "agents/mayor/agent.toml", "provider = \"codex\"\nstart_command = \"echo\"\nskills = [\"attached-skill\"]\n")
 	writeCatalogFile(t, cityDir, "skills/attached-skill/SKILL.md", "attached")
 	writeCatalogFile(t, cityDir, "skills/other-skill/SKILL.md", "other")
 	writeCatalogFile(t, cityDir, "agents/mayor/skills/private-workflow/SKILL.md", "agent-local")

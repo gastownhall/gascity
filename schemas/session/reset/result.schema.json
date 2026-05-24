@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gc-jsonl": {},
+  "type": "object",
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "session reset" },
+    "action": { "const": "reset" },
+    "session_id": { "type": "string", "minLength": 1 },
+    "identity": { "type": "string" }
+  },
+  "required": ["schema_version", "ok", "command", "action", "session_id"],
+  "additionalProperties": true
+}

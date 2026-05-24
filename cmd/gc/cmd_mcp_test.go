@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,9 +26,7 @@ provider = "file"
 [providers.gemini]
 command = "echo"
 prompt_mode = "none"
-
-[[agent]]
-name = "mayor"
+`, `
 provider = "gemini"
 scope = "city"
 max_active_sessions = 1
@@ -47,10 +46,7 @@ func TestMcpListAgentProjectedSummary(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
 	t.Setenv("GC_CITY", cityDir)
-	writeProjectedMCPCity(t, cityDir, `[workspace]
-name = "test-city"
-
-[beads]
+	writeProjectedMCPCity(t, cityDir, `[beads]
 provider = "file"
 
 [session]
@@ -59,9 +55,7 @@ provider = "tmux"
 [providers.gemini]
 command = "echo"
 prompt_mode = "none"
-
-[[agent]]
-name = "mayor"
+`, `
 provider = "gemini"
 scope = "city"
 `)
@@ -97,6 +91,69 @@ API_TOKEN = "super-secret"
 	}
 }
 
+func TestMcpListAgentJSON(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeProjectedMCPCity(t, cityDir, `[beads]
+provider = "file"
+
+[session]
+provider = "tmux"
+
+[providers.gemini]
+command = "echo"
+prompt_mode = "none"
+`)
+	agentDir := filepath.Join(cityDir, "agents", "mayor")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(agentDir): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte("provider = \"gemini\"\nscope = \"city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(agent.toml): %v", err)
+	}
+	writeCatalogFile(t, cityDir, "mcp/notes.toml", `
+name = "notes"
+command = "npx"
+args = ["@acme/notes"]
+
+[env]
+API_TOKEN = "super-secret"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"mcp", "list", "--agent", "mayor", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc mcp list --agent --json exited %d: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stdout lines = %d, want 1: %q", len(lines), stdout.String())
+	}
+	var got projectedMCPJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || got.CityPath != cityDir || got.Query.Agent != "mayor" {
+		t.Fatalf("metadata = %+v", got)
+	}
+	if got.Projection.Provider != "gemini" || got.Projection.Target == "" {
+		t.Fatalf("projection = %+v", got.Projection)
+	}
+	if len(got.Servers) != 1 {
+		t.Fatalf("servers len = %d, want 1: %+v", len(got.Servers), got.Servers)
+	}
+	if got.Servers[0].Name != "notes" || strings.Join(got.Servers[0].EnvKeys, ",") != "API_TOKEN" {
+		t.Fatalf("server = %+v", got.Servers[0])
+	}
+	if strings.Contains(stdout.String(), "super-secret") {
+		t.Fatalf("mcp list JSON leaked env value:\n%s", stdout.String())
+	}
+}
+
 func TestMcpListAgentRequiresSessionForMultiSessionTargets(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
@@ -110,9 +167,7 @@ provider = "file"
 [providers.gemini]
 command = "echo"
 prompt_mode = "none"
-
-[[agent]]
-name = "mayor"
+`, `
 provider = "gemini"
 scope = "city"
 max_active_sessions = 2
@@ -150,9 +205,7 @@ provider = "tmux"
 [providers.claude]
 command = "echo"
 prompt_mode = "none"
-
-[[agent]]
-name = "mayor"
+`, `
 provider = "claude"
 scope = "city"
 max_active_sessions = 1
@@ -229,9 +282,7 @@ provider = "subprocess"
 [providers.gemini]
 command = "echo"
 prompt_mode = "none"
-
-[[agent]]
-name = "mayor"
+`, `
 provider = "gemini"
 scope = "city"
 work_dir = "worktrees/mayor"
@@ -252,7 +303,7 @@ command = "npx"
 	}
 }
 
-func writeProjectedMCPCity(t *testing.T, dir, cityTOML string) {
+func writeProjectedMCPCity(t *testing.T, dir, cityTOML string, agentTOML ...string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
@@ -262,6 +313,9 @@ func writeProjectedMCPCity(t *testing.T, dir, cityTOML string) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nversion = \"0.1.0\"\nschema = 2\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+	if len(agentTOML) > 0 && strings.TrimSpace(agentTOML[0]) != "" {
+		writeCatalogFile(t, dir, "agents/mayor/agent.toml", strings.TrimLeft(agentTOML[0], "\n"))
 	}
 }
 

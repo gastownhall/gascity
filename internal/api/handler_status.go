@@ -2,10 +2,12 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -30,7 +32,17 @@ type StatusInput struct {
 }
 
 // humaHandleStatus is the Huma-typed handler for GET /v0/status.
+//
+// Read-path gate: refuses to serve while the city-scope CachingStore is
+// priming (cacheLiveOr503 → typed 503) so the CLI falls back to its local
+// snapshot instead of rendering partial/empty data. CacheAgeS surfaces the
+// age of the latest fresh observation so `gc status` can append a staleness
+// banner when the supervisor is lagging.
 func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*IndexOutput[StatusBody], error) {
+	store := s.state.CityBeadStore()
+	if err := cacheLiveOr503(store); err != nil {
+		return nil, err
+	}
 	bp := input.toBlockingParams()
 	if bp.isBlocking() {
 		waitForChange(ctx, s.state.EventProvider(), bp)
@@ -40,65 +52,123 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	// Check typed response cache (Fix 3l).
 	cacheKey := "status"
 	if body, ok := cachedResponseAs[StatusBody](s, cacheKey, index); ok {
-		return &IndexOutput[StatusBody]{Index: index, Body: body}, nil
+		return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
 	}
 
 	resp := s.buildStatusBody()
 	s.storeResponse(cacheKey, index, resp)
 
-	return &IndexOutput[StatusBody]{Index: index, Body: resp}, nil
+	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
 }
 
 // buildStatusBody constructs the status response body.
 func (s *Server) buildStatusBody() StatusBody {
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
+	store := s.state.CityBeadStore()
 	cityName := s.state.CityName()
 	sessTmpl := cfg.Workspace.SessionTemplate
 	sessionSnapshot := s.statusSessionSnapshot()
 	partialErrors := append([]string(nil), sessionSnapshot.partialErrors...)
 
-	// Count agents by state.
+	// Count agents by state and collect per-agent detail rows in a single
+	// pass. Pool expansion emits one detail row per instance with a
+	// once-per-group ScaleLabel so the CLI's text formatter can indent the
+	// expanded rows the same way it does in the fallback path.
 	var ac agentCounts
 	var rawRunning int
-	rigAgentCounts := make(map[string]int)
-	rigSuspendedCounts := make(map[string]int)
+	agentDetails := make([]StatusAgentDetail, 0, len(cfg.Agents))
+	suspendedRigs := make(map[string]bool, len(cfg.Rigs))
+	for _, r := range cfg.Rigs {
+		if r.Suspended {
+			suspendedRigs[r.Name] = true
+		}
+	}
+	perRigAgentTotals := make(map[string]int, len(cfg.Rigs))
+	perRigAgentsSuspended := make(map[string]int, len(cfg.Rigs))
 	for _, a := range cfg.Agents {
 		rigName := workdirutil.ConfiguredRigName(s.state.CityPath(), a, cfg.Rigs)
-		for _, slot := range statusAgentSlots(a, cityName, sessTmpl, sessionSnapshot) {
+		scope := "city"
+		if rigName != "" {
+			scope = "rig"
+		}
+		expanded := expandAgent(a, cityName, sessTmpl, sp)
+		expanded = appendUnlimitedPoolSessionBeads(expanded, a, cityName, sessTmpl, sessionSnapshot)
+		isPool := len(expanded) > 1 || a.SupportsInstanceExpansion()
+		groupName := a.QualifiedName()
+		scaleLabelEmitted := false
+		for _, ea := range expanded {
 			ac.Total++
 			if rigName != "" {
-				rigAgentCounts[rigName]++
+				perRigAgentTotals[rigName]++
 			}
-			running := statusProviderRunning(sp, slot.sessionName)
+			sessName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
+			info, hasInfo := sessionSnapshot.bySessionName[sessName]
+			running := statusProviderRunning(sp, sessName)
 			if running {
 				rawRunning++
 			}
-			suspended := a.Suspended || slot.suspended
+			suspended := ea.suspended || a.Suspended || (rigName != "" && suspendedRigs[rigName]) || (hasInfo && info.state == session.StateSuspended)
 			if suspended && rigName != "" {
-				rigSuspendedCounts[rigName]++
+				perRigAgentsSuspended[rigName]++
 			}
 			switch {
 			case suspended:
 				ac.Suspended++
-			case s.state.IsQuarantined(slot.sessionName):
+			case s.state.IsQuarantined(sessName):
 				ac.Quarantined++
 			case running:
 				ac.Running++
 			}
+
+			detail := StatusAgentDetail{
+				QualifiedName: ea.qualifiedName,
+				Scope:         scope,
+				Running:       running,
+				Suspended:     suspended,
+				SessionName:   sessName,
+				GroupName:     groupName,
+				Expanded:      isPool,
+			}
+			if isPool {
+				_, instanceName := config.ParseQualifiedName(ea.qualifiedName)
+				detail.Name = instanceName
+				if !scaleLabelEmitted {
+					detail.ScaleLabel = poolScaleLabel(a)
+					scaleLabelEmitted = true
+				}
+			} else {
+				detail.Name = a.Name
+			}
+			agentDetails = append(agentDetails, detail)
+			if a.Dir != "" {
+				perRigAgentTotals[a.Dir]++
+				if suspended {
+					perRigAgentsSuspended[a.Dir]++
+				}
+			}
 		}
 	}
 
-	// Count rigs by state.
+	// Count rigs by state + collect per-rig detail rows.
 	rc := rigCounts{Total: len(cfg.Rigs)}
+	rigDetails := make([]StatusRigDetail, 0, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
-		if rig.Suspended {
-			rc.Suspended++
-			continue
+		rigSuspended := rig.Suspended
+		if !rigSuspended {
+			if total := perRigAgentTotals[rig.Name]; total > 0 && total == perRigAgentsSuspended[rig.Name] {
+				rigSuspended = true
+			}
 		}
-		if total := rigAgentCounts[rig.Name]; total > 0 && total == rigSuspendedCounts[rig.Name] {
+		if rigSuspended {
 			rc.Suspended++
+			suspendedRigs[rig.Name] = true
 		}
+		rigDetails = append(rigDetails, StatusRigDetail{
+			Name:      rig.Name,
+			Path:      rig.Path,
+			Suspended: rigSuspended,
+		})
 	}
 
 	// Count work items (best-effort).
@@ -150,24 +220,162 @@ func (s *Server) buildStatusBody() StatusBody {
 		}
 	}
 
+	// Collect named sessions (best-effort; skip when unavailable).
+	var namedSessionDetails []StatusNamedSessionDetail
+	for _, ns := range cfg.NamedSessions {
+		identity := ns.QualifiedName()
+		mode := ns.ModeOrDefault()
+		status := s.namedSessionStatus(cfg, store, cityName, identity, mode, suspendedRigs)
+		namedSessionDetails = append(namedSessionDetails, StatusNamedSessionDetail{
+			Identity: identity,
+			Status:   status,
+			Mode:     mode,
+		})
+	}
+
+	// Session counts: walk the city bead store for session beads.
+	var sessionCounts *StatusSessionCountsDetail
+	if store != nil {
+		active, suspended := s.countSessions(store)
+		if active > 0 || suspended > 0 {
+			sessionCounts = &StatusSessionCountsDetail{Active: active, Suspended: suspended}
+		}
+	}
+
 	uptime := int(time.Since(s.state.StartedAt()).Seconds())
 
 	return StatusBody{
-		Name:          cityName,
-		Path:          s.state.CityPath(),
-		Version:       s.state.Version(),
-		UptimeSec:     uptime,
-		Suspended:     cfg.Workspace.Suspended,
-		AgentCount:    ac.Total,
-		RigCount:      rc.Total,
-		Running:       rawRunning,
-		Agents:        ac,
-		Rigs:          rc,
-		Work:          wc,
-		Mail:          mc,
-		Partial:       len(partialErrors) > 0,
-		PartialErrors: partialErrors,
+		Name:                cityName,
+		Path:                s.state.CityPath(),
+		Version:             s.state.Version(),
+		UptimeSec:           uptime,
+		Suspended:           cfg.Workspace.Suspended,
+		AgentCount:          ac.Total,
+		RigCount:            rc.Total,
+		Running:             rawRunning,
+		Agents:              ac,
+		Rigs:                rc,
+		Work:                wc,
+		Mail:                mc,
+		Partial:             len(partialErrors) > 0,
+		PartialErrors:       partialErrors,
+		StoreHealth:         s.cachedStoreHealth(time.Now()),
+		AgentDetails:        agentDetails,
+		RigDetails:          rigDetails,
+		NamedSessionDetails: namedSessionDetails,
+		SessionCountsDetail: sessionCounts,
 	}
+}
+
+// poolScaleLabel renders the "scaled (min=N, max=M)" banner the CLI emits
+// once per pool group. Mirrors the label buildCityStatusSnapshot emits
+// client-side so human output is identical whether served via API or
+// fallback.
+func poolScaleLabel(a config.Agent) string {
+	minSessions := 0
+	if a.MinActiveSessions != nil {
+		minSessions = *a.MinActiveSessions
+	}
+	maxSessions := 1
+	maxLabel := fmt.Sprintf("max=%d", maxSessions)
+	if a.MaxActiveSessions != nil {
+		maxSessions = *a.MaxActiveSessions
+		if maxSessions < 0 {
+			maxLabel = "max=unlimited"
+		} else {
+			maxLabel = fmt.Sprintf("max=%d", maxSessions)
+		}
+	}
+	return fmt.Sprintf("scaled (min=%d, %s)", minSessions, maxLabel)
+}
+
+// namedSessionStatus classifies a named session for the StatusBody detail
+// block. Mirrors the CLI's namedSessionStatusForCity: reserved when the
+// session bead does not resolve, "degraded blocked" when the session is
+// always-on but its agent template is blocked by suspension, or the
+// session's state metadata when a bead is present.
+func (s *Server) namedSessionStatus(
+	cfg *config.City,
+	store beads.Store,
+	cityName, identity, mode string,
+	suspendedRigs map[string]bool,
+) string {
+	status := "reserved-unmaterialized"
+	if spec := config.FindNamedSession(cfg, identity); spec != nil {
+		if mode == "always" && namedSessionTemplateBlocked(cfg, spec, suspendedRigs) {
+			status = "degraded blocked"
+		}
+	}
+	if store == nil {
+		return status
+	}
+
+	runtimeName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity)
+	id, err := session.ResolveSessionIDAllowClosed(store, runtimeName)
+	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return status
+		}
+		return "lookup error: " + err.Error()
+	}
+	bead, err := store.Get(id)
+	if err != nil {
+		return "lookup error: " + err.Error()
+	}
+	if state := strings.TrimSpace(bead.Metadata["state"]); state != "" {
+		return state
+	}
+	return "materialized"
+}
+
+// namedSessionTemplateBlocked reports whether a named-session's target
+// agent template is blocked by suspension (city suspended, agent template
+// suspended, or the template's rig is suspended).
+func namedSessionTemplateBlocked(cfg *config.City, ns *config.NamedSession, suspendedRigs map[string]bool) bool {
+	if cfg == nil {
+		return false
+	}
+	if cfg.Workspace.Suspended {
+		return true
+	}
+	if ns == nil {
+		return false
+	}
+	for _, a := range cfg.Agents {
+		if a.Name != ns.Template {
+			continue
+		}
+		if ns.Dir != "" && a.Dir != ns.Dir {
+			continue
+		}
+		if a.Suspended {
+			return true
+		}
+		if a.Dir != "" && suspendedRigs[a.Dir] {
+			return true
+		}
+		return false
+	}
+	return false
+}
+
+// countSessions walks the city bead store and tallies active / suspended
+// session beads. Errors from the underlying List are silently swallowed —
+// partial counts are better than a full read failure for a status endpoint.
+func (s *Server) countSessions(store beads.Store) (active, suspended int) {
+	list, err := store.List(beads.ListQuery{Type: "session", IncludeClosed: false, AllowScan: true})
+	if err != nil {
+		return 0, 0
+	}
+	for _, b := range list {
+		switch strings.TrimSpace(b.Metadata["state"]) {
+		case string(session.StateActive):
+			active++
+		case string(session.StateSuspended):
+			suspended++
+		}
+	}
+	return active, suspended
 }
 
 type statusSessionSnapshot struct {
@@ -178,13 +386,9 @@ type statusSessionSnapshot struct {
 
 type statusSessionInfo struct {
 	sessionName string
+	agentName   string
 	template    string
 	state       session.State
-}
-
-type statusAgentSlot struct {
-	sessionName string
-	suspended   bool
 }
 
 func (s *Server) statusSessionSnapshot() statusSessionSnapshot {
@@ -213,6 +417,7 @@ func (s *Server) statusSessionSnapshot() statusSessionSnapshot {
 		}
 		info := statusSessionInfo{
 			sessionName: strings.TrimSpace(b.Metadata["session_name"]),
+			agentName:   strings.TrimSpace(b.Metadata["agent_name"]),
 			template:    strings.TrimSpace(b.Metadata["template"]),
 			state:       statusSessionState(b),
 		}
@@ -234,6 +439,51 @@ func (s *Server) statusSessionSnapshot() statusSessionSnapshot {
 	return snapshot
 }
 
+func appendUnlimitedPoolSessionBeads(expanded []expandedAgent, a config.Agent, cityName, sessTmpl string, snapshot statusSessionSnapshot) []expandedAgent {
+	maxSess := a.EffectiveMaxActiveSessions()
+	if !a.SupportsInstanceExpansion() || (maxSess != nil && *maxSess >= 0) {
+		return expanded
+	}
+
+	seenSessionNames := make(map[string]bool, len(expanded))
+	for _, ea := range expanded {
+		seenSessionNames[agentSessionName(cityName, ea.qualifiedName, sessTmpl)] = true
+	}
+
+	poolName := a.QualifiedName()
+	for _, info := range snapshot.byTemplate[poolName] {
+		if seenSessionNames[info.sessionName] {
+			continue
+		}
+		qn := statusSessionQualifiedName(cityName, sessTmpl, info)
+		if qn == "" {
+			continue
+		}
+		expanded = append(expanded, expandedAgent{
+			qualifiedName: qn,
+			rig:           a.Dir,
+			pool:          poolName,
+			suspended:     a.Suspended,
+			provider:      a.Provider,
+			description:   a.Description,
+		})
+		seenSessionNames[info.sessionName] = true
+	}
+	return expanded
+}
+
+func statusSessionQualifiedName(cityName, sessTmpl string, info statusSessionInfo) string {
+	if info.agentName != "" && info.agentName != info.template {
+		return info.agentName
+	}
+	qnSanitized := info.sessionName
+	templatePrefix := agent.SessionNameFor(cityName, "", sessTmpl)
+	if templatePrefix != "" && strings.HasPrefix(qnSanitized, templatePrefix) {
+		qnSanitized = qnSanitized[len(templatePrefix):]
+	}
+	return agent.UnsanitizeQualifiedNameFromSession(qnSanitized)
+}
+
 func statusSessionState(b beads.Bead) session.State {
 	state := session.State(strings.TrimSpace(b.Metadata["state"]))
 	switch state {
@@ -244,47 +494,6 @@ func statusSessionState(b beads.Bead) session.State {
 	default:
 		return state
 	}
-}
-
-func statusAgentSlots(a config.Agent, cityName, sessTmpl string, snapshot statusSessionSnapshot) []statusAgentSlot {
-	maxSess := a.EffectiveMaxActiveSessions()
-	isMultiSession := maxSess == nil || *maxSess != 1
-	if isMultiSession && (maxSess == nil || *maxSess < 0) {
-		sessions := snapshot.byTemplate[a.QualifiedName()]
-		slots := make([]statusAgentSlot, 0, len(sessions))
-		for _, info := range sessions {
-			slots = append(slots, statusAgentSlot{
-				sessionName: info.sessionName,
-				suspended:   info.state == session.StateSuspended,
-			})
-		}
-		return slots
-	}
-
-	if !isMultiSession {
-		sessionName := agentSessionName(cityName, a.QualifiedName(), sessTmpl)
-		info, ok := snapshot.bySessionName[sessionName]
-		return []statusAgentSlot{{
-			sessionName: sessionName,
-			suspended:   ok && info.state == session.StateSuspended,
-		}}
-	}
-
-	poolMax := 1
-	if maxSess != nil && *maxSess > 1 {
-		poolMax = *maxSess
-	}
-	slots := make([]statusAgentSlot, 0, poolMax)
-	for i := 1; i <= poolMax; i++ {
-		memberName := poolInstanceNameForAPI(a.Name, i, a)
-		sessionName := agentSessionName(cityName, a.QualifiedInstanceName(memberName), sessTmpl)
-		info, ok := snapshot.bySessionName[sessionName]
-		slots = append(slots, statusAgentSlot{
-			sessionName: sessionName,
-			suspended:   ok && info.state == session.StateSuspended,
-		})
-	}
-	return slots
 }
 
 func statusProviderRunning(sp interface{ IsRunning(string) bool }, sessionName string) bool {

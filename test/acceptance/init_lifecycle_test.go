@@ -142,11 +142,7 @@ source = ".gc/system/packs/gastown"
 	if err != nil && containsSubstr(out, "pack.toml: no such file or directory") {
 		t.Fatalf("gc init resume failed with missing packs — Bug 4 regression:\n%s", out)
 	}
-	t.Cleanup(func() {
-		helpers.RunGC(c.Env, c.Dir, "stop", c.Dir)               //nolint:errcheck
-		helpers.RunGC(c.Env, c.Dir, "unregister", c.Dir)         //nolint:errcheck
-		helpers.RunGC(c.Env, "", "supervisor", "stop", "--wait") //nolint:errcheck
-	})
+	t.Cleanup(c.CleanupRuntime)
 	// Positive assertion: packs must have been materialized.
 	if !c.HasFile(".gc/system/packs/gastown/pack.toml") {
 		t.Fatal(".gc/system/packs/gastown/pack.toml not materialized after resume — Bug 4 regression")

@@ -1,74 +1,133 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/migrate"
 )
 
 func registerV2DeprecationChecks(d *doctor.Doctor) {
-	d.Register(v2AgentFormatCheck{})
-	d.Register(v2ImportFormatCheck{})
-	d.Register(v2DefaultRigImportFormatCheck{})
-	d.Register(v2RigPathSiteBindingCheck{})
-	d.Register(v2ScriptsLayoutCheck{})
-	d.Register(v2WorkspaceNameCheck{})
-	d.Register(v2PromptTemplateSuffixCheck{})
+	for _, c := range v2DeprecationChecks() {
+		d.Register(c)
+	}
+}
+
+func v2DeprecationChecks() []doctor.Check {
+	return []doctor.Check{
+		v2AgentFormatCheck{},
+		v2ImportFormatCheck{},
+		v2DefaultRigImportFormatCheck{},
+		v2PackSourcesCheck{},
+		v2RigPathSiteBindingCheck{},
+		v2LegacyOrderLayoutCheck{},
+		v2ScriptsLayoutCheck{},
+		v2WorkspaceNameCheck{},
+		v2PromptTemplateSuffixCheck{},
+	}
 }
 
 type v2AgentFormatCheck struct{}
 
-func (v2AgentFormatCheck) Name() string                     { return "v2-agent-format" }
-func (v2AgentFormatCheck) CanFix() bool                     { return false }
-func (v2AgentFormatCheck) Fix(_ *doctor.CheckContext) error { return nil }
+func (v2AgentFormatCheck) Name() string { return "v2-agent-format" }
+func (v2AgentFormatCheck) CanFix() bool { return true }
+func (v2AgentFormatCheck) Fix(ctx *doctor.CheckContext) error {
+	return runV2PackMigration(ctx, v2MigrationWarnSink(ctx))
+}
+
 func (v2AgentFormatCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
-	files := legacyAgentFiles(ctx.CityPath)
-	if len(files) == 0 {
+	cityLegacy, packLegacy := legacyAgentFiles(ctx.CityPath)
+	cityHasLegacy := len(cityLegacy) > 0
+	packHasLegacy := len(packLegacy) > 0
+	switch {
+	case !cityHasLegacy && !packHasLegacy:
 		return okCheck("v2-agent-format", "no legacy [[agent]] tables found")
+	case cityHasLegacy && packHasLegacy:
+		return errorCheck("v2-agent-format",
+			"unsupported PackV1 [[agent]] tables found in city.toml; pack.toml also still uses deferred legacy [[agent]] tables",
+			"run `gc doctor --fix` to move each city.toml [[agent]] definition into agents/<name>/agent.toml; pack.toml [[agent]] enforcement remains deferred until doctor/remediation support exists",
+			append(cityLegacy, packLegacy...))
+	case cityHasLegacy:
+		return errorCheck("v2-agent-format",
+			"unsupported PackV1 [[agent]] tables found in city.toml",
+			"run `gc doctor --fix` to move each city.toml [[agent]] definition into agents/<name>/agent.toml",
+			cityLegacy)
+	default:
+		return warnCheck("v2-agent-format",
+			"legacy [[agent]] tables still present in pack.toml; enforcement is deferred until doctor/remediation support exists",
+			"leave this as-is for now or migrate to agents/<name>/agent.toml ahead of the follow-on enforcement pass",
+			packLegacy)
 	}
-	return warnCheck("v2-agent-format",
-		fmt.Sprintf("legacy [[agent]] tables found in %s", strings.Join(files, ", ")),
-		v2MigrationHint(),
-		files)
 }
 
 type v2ImportFormatCheck struct{}
 
-func (v2ImportFormatCheck) Name() string                     { return "v2-import-format" }
-func (v2ImportFormatCheck) CanFix() bool                     { return false }
-func (v2ImportFormatCheck) Fix(_ *doctor.CheckContext) error { return nil }
+func (v2ImportFormatCheck) Name() string { return "v2-import-format" }
+func (v2ImportFormatCheck) CanFix() bool { return true }
+func (v2ImportFormatCheck) Fix(ctx *doctor.CheckContext) error {
+	return runV2PackMigration(ctx, v2MigrationWarnSink(ctx))
+}
+
 func (v2ImportFormatCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
-	cfg, ok := parseCityConfig(filepath.Join(ctx.CityPath, "city.toml"))
-	if !ok || len(cfg.Workspace.Includes) == 0 {
+	cityTomlPath := filepath.Join(ctx.CityPath, "city.toml")
+	cfg, ok := parseCityConfig(cityTomlPath)
+	if !ok || len(cfg.Workspace.LegacyIncludes()) == 0 {
 		return okCheck("v2-import-format", "workspace.includes already migrated")
 	}
-	return warnCheck("v2-import-format",
-		"workspace.includes is deprecated; migrate this city to [imports] before gc can load it from pack.toml and city.toml",
-		v2MigrationHint(),
-		cfg.Workspace.Includes)
+	return errorCheck("v2-import-format",
+		"unsupported PackV1 workspace.includes found; migrate this city to [imports] before gc can load it",
+		"run `gc doctor --fix` to replace workspace.includes with [imports.<binding>] entries",
+		doctorKeyDetails(cityTomlPath, "workspace", "includes", "workspace.includes", cfg.Workspace.LegacyIncludes()))
 }
 
 type v2DefaultRigImportFormatCheck struct{}
 
-func (v2DefaultRigImportFormatCheck) Name() string                     { return "v2-default-rig-import-format" }
-func (v2DefaultRigImportFormatCheck) CanFix() bool                     { return false }
-func (v2DefaultRigImportFormatCheck) Fix(_ *doctor.CheckContext) error { return nil }
+func (v2DefaultRigImportFormatCheck) Name() string { return "v2-default-rig-import-format" }
+func (v2DefaultRigImportFormatCheck) CanFix() bool { return true }
+func (v2DefaultRigImportFormatCheck) Fix(ctx *doctor.CheckContext) error {
+	return runV2PackMigration(ctx, v2MigrationWarnSink(ctx))
+}
+
 func (v2DefaultRigImportFormatCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
-	cfg, ok := parseCityConfig(filepath.Join(ctx.CityPath, "city.toml"))
-	if !ok || len(cfg.Workspace.DefaultRigIncludes) == 0 {
+	cityTomlPath := filepath.Join(ctx.CityPath, "city.toml")
+	cfg, ok := parseCityConfig(cityTomlPath)
+	if !ok || len(cfg.Workspace.LegacyDefaultRigIncludes()) == 0 {
 		return okCheck("v2-default-rig-import-format", "workspace.default_rig_includes already migrated")
 	}
-	return warnCheck("v2-default-rig-import-format",
-		"workspace.default_rig_includes is deprecated; migrate to root pack.toml [defaults.rig.imports.<binding>]",
+	return errorCheck("v2-default-rig-import-format",
+		"unsupported PackV1 workspace.default_rig_includes found; migrate to root pack.toml [defaults.rig.imports.<binding>]",
 		`move each entry into root pack.toml [defaults.rig.imports.<binding>]`,
-		cfg.Workspace.DefaultRigIncludes)
+		doctorKeyDetails(cityTomlPath, "workspace", "default_rig_includes", "workspace.default_rig_includes", cfg.Workspace.LegacyDefaultRigIncludes()))
+}
+
+type v2PackSourcesCheck struct{}
+
+func (v2PackSourcesCheck) Name() string { return "v2-pack-sources" }
+func (v2PackSourcesCheck) CanFix() bool { return true }
+func (v2PackSourcesCheck) Fix(ctx *doctor.CheckContext) error {
+	return runV2PackMigration(ctx, v2MigrationWarnSink(ctx))
+}
+
+func (v2PackSourcesCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+	cityTomlPath := filepath.Join(ctx.CityPath, "city.toml")
+	cfg, ok := parseCityConfig(cityTomlPath)
+	if !ok || len(cfg.Packs) == 0 {
+		return okCheck("v2-pack-sources", "root [packs] entries already absent")
+	}
+	return errorCheck("v2-pack-sources",
+		"unsupported PackV1 [packs] entries found in city.toml",
+		"run `gc doctor --fix` to migrate entries referenced by workspace include lists; remove or rewrite any remaining [packs] entries manually as [imports]",
+		doctorPackSourceDetails(cityTomlPath, cfg))
 }
 
 type v2RigPathSiteBindingCheck struct{}
@@ -84,7 +143,11 @@ func (v2RigPathSiteBindingCheck) Fix(ctx *doctor.CheckContext) error {
 	}
 	legacyByName := make(map[string]string, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
-		legacyByName[rig.Name] = strings.TrimSpace(rig.Path)
+		name := strings.TrimSpace(rig.Name)
+		if name == "" {
+			continue
+		}
+		legacyByName[name] = strings.TrimSpace(rig.Path)
 	}
 	existing, err := config.LoadSiteBinding(fsys.OSFS{}, ctx.CityPath)
 	if err != nil {
@@ -97,6 +160,18 @@ func (v2RigPathSiteBindingCheck) Fix(ctx *doctor.CheckContext) error {
 			continue
 		}
 		existingByName[name] = strings.TrimSpace(rig.Path)
+	}
+	var orphans []string
+	for name, site := range existingByName {
+		if _, ok := legacyByName[name]; ok {
+			continue
+		}
+		orphans = append(orphans, fmt.Sprintf("rig %q: .gc/site.toml=%q", name, site))
+	}
+	if len(orphans) > 0 {
+		sort.Strings(orphans)
+		return fmt.Errorf("refusing to migrate rig paths because .gc/site.toml contains bindings for unknown rig names; remove or rename the stale entries and re-run `gc doctor --fix`:\n  %s",
+			strings.Join(orphans, "\n  "))
 	}
 	var conflicts []string
 	for name, legacy := range legacyByName {
@@ -117,16 +192,9 @@ func (v2RigPathSiteBindingCheck) Fix(ctx *doctor.CheckContext) error {
 	if _, err := config.ApplySiteBindingsForEdit(fsys.OSFS{}, ctx.CityPath, cfg); err != nil {
 		return err
 	}
-	content, err := cfg.MarshalForWrite()
-	if err != nil {
-		return err
-	}
 	cityTomlPath := filepath.Join(ctx.CityPath, "city.toml")
-	if err := fsys.WriteFileIfChangedAtomic(fsys.OSFS{}, cityTomlPath, content, 0o644); err != nil {
+	if err := config.WriteCityAndRigSiteBindingsForEdit(fsys.OSFS{}, cityTomlPath, cfg); err != nil {
 		return err
-	}
-	if err := config.PersistRigSiteBindings(fsys.OSFS{}, ctx.CityPath, cfg.Rigs); err != nil {
-		return fmt.Errorf("writing .gc/site.toml failed after city.toml was rewritten — rigs are now unbound; re-run `gc doctor --fix` to retry: %w", err)
 	}
 	return nil
 }
@@ -157,15 +225,17 @@ func sameRigPath(cityPath, a, b string) bool {
 }
 
 func (v2RigPathSiteBindingCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
-	cfg, ok := parseCityConfig(filepath.Join(ctx.CityPath, "city.toml"))
+	cityTomlPath := filepath.Join(ctx.CityPath, "city.toml")
+	cfg, ok := parseCityConfig(cityTomlPath)
 	if !ok {
 		return okCheck("v2-rig-path-site-binding", "rig path migration skipped until city.toml parses")
 	}
+	locator := newDoctorConfigLocator(cityTomlPath)
 
 	var legacy []string
 	for _, rig := range cfg.Rigs {
 		if strings.TrimSpace(rig.Path) != "" {
-			legacy = append(legacy, rig.Name)
+			legacy = append(legacy, doctorRigPathDetail(locator, rig.Name))
 		}
 	}
 
@@ -230,10 +300,386 @@ func (v2RigPathSiteBindingCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResu
 	if len(messages) == 0 {
 		return okCheck("v2-rig-path-site-binding", "rig paths already managed in .gc/site.toml")
 	}
+	if len(legacy) > 0 {
+		return errorCheck("v2-rig-path-site-binding",
+			strings.Join(messages, "; "),
+			strings.Join(hints, "; "),
+			details)
+	}
 	return warnCheck("v2-rig-path-site-binding",
 		strings.Join(messages, "; "),
 		strings.Join(hints, "; "),
 		details)
+}
+
+type v2LegacyOrderLayoutCheck struct{}
+
+func (v2LegacyOrderLayoutCheck) Name() string { return "v2-legacy-order-layout" }
+
+func (v2LegacyOrderLayoutCheck) CanFix() bool { return true }
+
+func (v2LegacyOrderLayoutCheck) WarmupEligible() bool { return false }
+
+func (v2LegacyOrderLayoutCheck) Fix(ctx *doctor.CheckContext) error {
+	if ctx == nil || strings.TrimSpace(ctx.CityPath) == "" {
+		return fmt.Errorf("city path is required")
+	}
+	return fixLegacyOrderLayouts(ctx.CityPath)
+}
+
+func (v2LegacyOrderLayoutCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+	details := legacyOrderLayoutDetails(ctx.CityPath)
+	if len(details) == 0 {
+		return okCheck("v2-legacy-order-layout", "no PackV1 order subdirectory layouts found")
+	}
+	return errorCheck("v2-legacy-order-layout",
+		"unsupported PackV1 order subdirectory layouts found",
+		"run `gc doctor --fix` to migrate collision-free legacy order layouts, or rename each orders/<name>/order.toml or formulas/orders/<name>/order.toml file to the flat orders/<name>.toml layout manually",
+		details)
+}
+
+type legacyOrderRoot struct {
+	dir       string
+	targetDir string
+	hint      string
+	fixable   bool
+}
+
+func legacyOrderLayoutDetails(cityPath string) []string {
+	roots := legacyOrderLayoutRoots(cityPath)
+	var details []string
+	seen := make(map[string]bool)
+	for _, root := range roots {
+		for _, detail := range scanLegacyOrderRoot(root) {
+			if seen[detail] {
+				continue
+			}
+			seen[detail] = true
+			details = append(details, detail)
+		}
+	}
+	sort.Strings(details)
+	return details
+}
+
+func legacyOrderLayoutRoots(cityPath string) []legacyOrderRoot {
+	cityTomlPath := filepath.Join(cityPath, "city.toml")
+	cfg, cfgOK := parseCityConfig(cityTomlPath)
+	formulasDir := ""
+	if cfgOK {
+		formulasDir = cfg.FormulasDir()
+	}
+	orderDir := citylayout.OrdersPath(cityPath)
+	formulaOrderDir := filepath.Join(citylayout.ResolveFormulasDir(cityPath, formulasDir), "orders")
+	formulaOrderDirFixable := doctorPathWithinCity(cityPath, formulaOrderDir) && doctorPathWithinCity(cityPath, orderDir)
+	roots := []legacyOrderRoot{
+		{dir: orderDir, targetDir: orderDir, hint: "rename to orders/%s.toml", fixable: doctorPathWithinCity(cityPath, orderDir)},
+		{dir: formulaOrderDir, targetDir: orderDir, hint: legacyOrderRootHint(formulaOrderDirFixable, "move"), fixable: formulaOrderDirFixable},
+	}
+	if packDirs, err := config.LoadPackGraphDirsForDoctor(fsys.OSFS{}, cityTomlPath); err == nil {
+		return appendLegacyOrderRootsForPackDirs(roots, cityPath, packDirs)
+	}
+
+	seenPacks := map[string]bool{absDoctorPathKey(cityPath): true}
+	if cfgOK {
+		for _, ref := range cfg.Workspace.LegacyIncludes() {
+			if packDir, ok := localDoctorPackPath(cityPath, ref); ok {
+				roots = appendLegacyOrderRootsForPackGraph(roots, cityPath, packDir, seenPacks)
+			}
+		}
+		for _, imp := range cfg.Imports {
+			if packDir, ok := localDoctorPackPath(cityPath, imp.Source); ok {
+				roots = appendLegacyOrderRootsForPackGraph(roots, cityPath, packDir, seenPacks)
+			}
+		}
+		for _, rig := range cfg.Rigs {
+			for _, ref := range rig.Includes {
+				if packDir, ok := localDoctorPackPath(cityPath, ref); ok {
+					roots = appendLegacyOrderRootsForPackGraph(roots, cityPath, packDir, seenPacks)
+				}
+			}
+			for _, source := range sortedDoctorImportSources(rig.Imports) {
+				if packDir, ok := localDoctorPackPath(cityPath, source); ok {
+					roots = appendLegacyOrderRootsForPackGraph(roots, cityPath, packDir, seenPacks)
+				}
+			}
+		}
+	}
+	return appendLegacyOrderRootsForRootPackRefs(roots, cityPath, seenPacks)
+}
+
+func appendLegacyOrderRootsForPackDirs(roots []legacyOrderRoot, cityPath string, packDirs []string) []legacyOrderRoot {
+	seenPacks := map[string]bool{absDoctorPathKey(cityPath): true}
+	for _, packDir := range packDirs {
+		key := absDoctorPathKey(packDir)
+		if seenPacks[key] {
+			continue
+		}
+		seenPacks[key] = true
+		roots = append(roots, legacyOrderRootsForPack(cityPath, packDir)...)
+	}
+	return roots
+}
+
+func legacyOrderRootsForPack(cityPath, packDir string) []legacyOrderRoot {
+	orderDir := filepath.Join(packDir, "orders")
+	formulaOrderDir := filepath.Join(packDir, "formulas", "orders")
+	orderDirFixable := doctorPathWithinCity(cityPath, orderDir)
+	formulaOrderDirFixable := doctorPathWithinCity(cityPath, formulaOrderDir) && orderDirFixable
+	return []legacyOrderRoot{
+		{dir: orderDir, targetDir: orderDir, hint: legacyOrderRootHint(orderDirFixable, "rename"), fixable: orderDirFixable},
+		{dir: formulaOrderDir, targetDir: orderDir, hint: legacyOrderRootHint(formulaOrderDirFixable, "move"), fixable: formulaOrderDirFixable},
+	}
+}
+
+func legacyOrderRootHint(fixable bool, action string) string {
+	if fixable {
+		return action + " to orders/%s.toml"
+	}
+	return "manually " + action + " to orders/%s.toml; gc doctor --fix only changes files under the city"
+}
+
+func localDoctorPackPath(cityPath, ref string) (string, bool) {
+	return localDoctorPackPathFromBase(cityPath, ref)
+}
+
+func localDoctorPackPathFromBase(baseDir, ref string) (string, bool) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" || strings.Contains(ref, "://") || strings.HasPrefix(ref, "github.com/") || strings.HasPrefix(ref, "git@") {
+		return "", false
+	}
+	if filepath.IsAbs(ref) {
+		return filepath.Clean(ref), true
+	}
+	return filepath.Clean(filepath.Join(baseDir, ref)), true
+}
+
+type doctorPackRefsConfig struct {
+	Pack struct {
+		Includes []string `toml:"includes"`
+	} `toml:"pack"`
+	Imports  map[string]config.Import `toml:"imports"`
+	Defaults config.PackDefaults      `toml:"defaults"`
+}
+
+func appendLegacyOrderRootsForRootPackRefs(roots []legacyOrderRoot, cityPath string, seenPacks map[string]bool) []legacyOrderRoot {
+	return appendLegacyOrderRootsForPackRefs(roots, cityPath, cityPath, true, seenPacks)
+}
+
+func appendLegacyOrderRootsForPackGraph(roots []legacyOrderRoot, cityPath, packDir string, seenPacks map[string]bool) []legacyOrderRoot {
+	key := absDoctorPathKey(packDir)
+	if seenPacks[key] {
+		return roots
+	}
+	seenPacks[key] = true
+	roots = append(roots, legacyOrderRootsForPack(cityPath, packDir)...)
+	return appendLegacyOrderRootsForPackRefs(roots, cityPath, packDir, false, seenPacks)
+}
+
+func appendLegacyOrderRootsForPackRefs(roots []legacyOrderRoot, cityPath, packDir string, includeDefaultRigImports bool, seenPacks map[string]bool) []legacyOrderRoot {
+	cfg, ok := parseDoctorPackRefs(filepath.Join(packDir, "pack.toml"))
+	if !ok {
+		return roots
+	}
+	for _, ref := range doctorPackRefSources(cfg, includeDefaultRigImports) {
+		nextDir, ok := localDoctorPackPathFromBase(packDir, ref)
+		if !ok {
+			continue
+		}
+		roots = appendLegacyOrderRootsForPackGraph(roots, cityPath, nextDir, seenPacks)
+	}
+	return roots
+}
+
+func parseDoctorPackRefs(path string) (*doctorPackRefsConfig, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	var cfg doctorPackRefsConfig
+	if _, err := toml.Decode(string(data), &cfg); err != nil {
+		return nil, false
+	}
+	return &cfg, true
+}
+
+func doctorPackRefSources(cfg *doctorPackRefsConfig, includeDefaultRigImports bool) []string {
+	var refs []string
+	refs = append(refs, cfg.Pack.Includes...)
+	refs = append(refs, sortedDoctorImportSources(cfg.Imports)...)
+	if includeDefaultRigImports {
+		refs = append(refs, sortedDoctorImportSources(cfg.Defaults.Rig.Imports)...)
+	}
+	return refs
+}
+
+func sortedDoctorImportSources(imports map[string]config.Import) []string {
+	if len(imports) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(imports))
+	for name := range imports {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	sources := make([]string, 0, len(names))
+	for _, name := range names {
+		sources = append(sources, imports[name].Source)
+	}
+	return sources
+}
+
+func absDoctorPathKey(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return filepath.Clean(abs)
+}
+
+func doctorPathWithinCity(cityPath, path string) bool {
+	cityAbs := absDoctorPathKey(cityPath)
+	pathAbs := absDoctorPathKey(path)
+	if !cleanedPathWithin(cityAbs, pathAbs) {
+		return false
+	}
+	cityReal, cityErr := filepath.EvalSymlinks(cityAbs)
+	pathReal, pathErr := filepath.EvalSymlinks(pathAbs)
+	if cityErr == nil && pathErr == nil {
+		return cleanedPathWithin(filepath.Clean(cityReal), filepath.Clean(pathReal))
+	}
+	return true
+}
+
+func cleanedPathWithin(base, path string) bool {
+	rel, err := filepath.Rel(base, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel))
+}
+
+func scanLegacyOrderRoot(root legacyOrderRoot) []string {
+	entries, err := os.ReadDir(root.dir)
+	if err != nil {
+		return nil
+	}
+	var details []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		source := filepath.Join(root.dir, name, "order.toml")
+		if _, err := os.Stat(source); err != nil {
+			continue
+		}
+		details = append(details, fmt.Sprintf("%s; "+root.hint, source, name))
+	}
+	return details
+}
+
+type legacyOrderMove struct {
+	source string
+	target string
+}
+
+func fixLegacyOrderLayouts(cityPath string) error {
+	moves, err := planLegacyOrderMoves(legacyOrderLayoutRoots(cityPath))
+	if err != nil {
+		return err
+	}
+	var applied []legacyOrderMove
+	for _, move := range moves {
+		if err := os.MkdirAll(filepath.Dir(move.target), 0o755); err != nil {
+			return rollbackLegacyOrderMoves(applied, fmt.Errorf("creating %s: %w", filepath.Dir(move.target), err))
+		}
+		if _, err := os.Stat(move.target); err == nil {
+			return rollbackLegacyOrderMoves(applied, fmt.Errorf("target already exists: %s", move.target))
+		} else if !os.IsNotExist(err) {
+			return rollbackLegacyOrderMoves(applied, fmt.Errorf("checking target %s: %w", move.target, err))
+		}
+		if err := os.Rename(move.source, move.target); err != nil {
+			return rollbackLegacyOrderMoves(applied, fmt.Errorf("moving %s to %s: %w", move.source, move.target, err))
+		}
+		applied = append(applied, move)
+		_ = os.Remove(filepath.Dir(move.source))
+	}
+	return nil
+}
+
+func planLegacyOrderMoves(roots []legacyOrderRoot) ([]legacyOrderMove, error) {
+	targetSources := make(map[string]string)
+	var moves []legacyOrderMove
+	var problems []string
+	for _, root := range roots {
+		if !root.fixable {
+			continue
+		}
+		entries, err := os.ReadDir(root.dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			problems = append(problems, fmt.Sprintf("reading %s: %v", root.dir, err))
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			source := filepath.Join(root.dir, entry.Name(), "order.toml")
+			info, err := os.Stat(source)
+			if err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				problems = append(problems, fmt.Sprintf("checking source %s: %v", source, err))
+				continue
+			}
+			if info.IsDir() {
+				problems = append(problems, fmt.Sprintf("source is a directory, not an order file: %s", source))
+				continue
+			}
+			target := filepath.Join(root.targetDir, entry.Name()+".toml")
+			if prior, ok := targetSources[target]; ok {
+				problems = append(problems, fmt.Sprintf("multiple legacy order files would migrate to %s: %s and %s", target, prior, source))
+				continue
+			}
+			targetSources[target] = source
+			if _, err := os.Stat(target); err == nil {
+				problems = append(problems, fmt.Sprintf("target already exists: %s", target))
+				continue
+			} else if !os.IsNotExist(err) {
+				problems = append(problems, fmt.Sprintf("checking target %s: %v", target, err))
+				continue
+			}
+			moves = append(moves, legacyOrderMove{source: source, target: target})
+		}
+	}
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		return nil, fmt.Errorf("refusing to migrate legacy order layouts:\n  %s", strings.Join(problems, "\n  "))
+	}
+	return moves, nil
+}
+
+func rollbackLegacyOrderMoves(applied []legacyOrderMove, cause error) error {
+	var restoreErr error
+	for i := len(applied) - 1; i >= 0; i-- {
+		move := applied[i]
+		if err := os.MkdirAll(filepath.Dir(move.source), 0o755); err != nil {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("recreating %s: %w", filepath.Dir(move.source), err))
+			continue
+		}
+		if err := os.Rename(move.target, move.source); err != nil && !os.IsNotExist(err) {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("restoring %s to %s: %w", move.target, move.source, err))
+		}
+	}
+	if restoreErr != nil {
+		return errors.Join(cause, restoreErr)
+	}
+	return cause
 }
 
 type v2ScriptsLayoutCheck struct{}
@@ -386,7 +832,8 @@ func (v2WorkspaceNameCheck) Fix(ctx *doctor.CheckContext) error {
 }
 
 func (v2WorkspaceNameCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
-	cfg, ok := parseCityConfig(filepath.Join(ctx.CityPath, "city.toml"))
+	cityTomlPath := filepath.Join(ctx.CityPath, "city.toml")
+	cfg, ok := parseCityConfig(cityTomlPath)
 	if !ok {
 		return okCheck("v2-workspace-name", "workspace identity migration skipped until city.toml parses")
 	}
@@ -396,13 +843,14 @@ func (v2WorkspaceNameCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 		return okCheck("v2-workspace-name", "workspace identity already absent from city.toml")
 	}
 	var details []string
+	locator := newDoctorConfigLocator(cityTomlPath)
 	if rawName != "" {
-		details = append(details, "workspace.name="+rawName)
+		details = append(details, doctorKeyDetail(locator, "workspace", "name", "workspace.name="+rawName))
 	}
 	if rawPrefix != "" {
-		details = append(details, "workspace.prefix="+rawPrefix)
+		details = append(details, doctorKeyDetail(locator, "workspace", "prefix", "workspace.prefix="+rawPrefix))
 	}
-	return warnCheck("v2-workspace-name",
+	return errorCheck("v2-workspace-name",
 		"workspace identity still lives in city.toml",
 		"run `gc doctor --fix` to migrate workspace.name/workspace.prefix into .gc/site.toml",
 		details)
@@ -438,9 +886,53 @@ func warnCheck(name, message, hint string, details []string) *doctor.CheckResult
 	}
 }
 
-func v2MigrationHint() string {
-	return `run "gc doctor --fix" to rewrite safe mechanical cases, then rerun "gc doctor"`
+func errorCheck(name, message, hint string, details []string) *doctor.CheckResult {
+	return &doctor.CheckResult{
+		Name:    name,
+		Status:  doctor.StatusError,
+		Message: message,
+		FixHint: hint,
+		Details: details,
+	}
 }
+
+// runV2PackMigration applies the pack-shape migration (legacy [[agent]]
+// tables, workspace.includes, default_rig_includes) for a doctor --fix run.
+// It is safe to call from multiple checks: migrate.Apply is idempotent on a
+// city that has already been migrated (it returns an empty change set).
+//
+// migrate.Apply can return warnings about behavior-affecting fields it had
+// to drop (e.g. legacy [[agent]] entries with fallback = true — the
+// fallback field has no v2 counterpart and shadowing must be reviewed by
+// hand). doctor --fix must not silently swallow those, otherwise the next
+// gc doctor run reports a green check and the manual follow-up is lost
+// forever. The warnings are emitted to warnSink so Doctor.Run callers see
+// them in the same captured output stream as the check results.
+func runV2PackMigration(ctx *doctor.CheckContext, warnSink io.Writer) error {
+	report, err := migrate.Apply(ctx.CityPath, migrate.Options{})
+	if err != nil {
+		return err
+	}
+	if warnSink == nil {
+		warnSink = io.Discard
+	}
+	for _, w := range report.Warnings {
+		fmt.Fprintf(warnSink, "      gc doctor --fix: %s\n", w) //nolint:errcheck // best-effort diagnostic
+	}
+	return nil
+}
+
+func v2MigrationWarnSink(ctx *doctor.CheckContext) io.Writer {
+	if ctx != nil && ctx.Output != nil {
+		return ctx.Output
+	}
+	return defaultV2MigrationWarnSink
+}
+
+// defaultV2MigrationWarnSink is the production warning sink for
+// direct Fix calls outside Doctor.Run. Doctor.Run sets CheckContext.Output,
+// and production doctor commands normally use that writer instead.
+var defaultV2MigrationWarnSink io.Writer = os.Stderr
 
 func parseCityConfig(path string) (*config.City, bool) {
 	data, err := os.ReadFile(path)
@@ -454,10 +946,118 @@ func parseCityConfig(path string) (*config.City, bool) {
 	return cfg, true
 }
 
-func legacyAgentFiles(cityPath string) []string {
-	var files []string
-	if cfg, ok := parseCityConfig(filepath.Join(cityPath, "city.toml")); ok && len(cfg.Agents) > 0 {
-		files = append(files, "city.toml")
+type doctorConfigLocator struct {
+	path    string
+	locator config.DiagnosticLocator
+}
+
+func newDoctorConfigLocator(path string) doctorConfigLocator {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return doctorConfigLocator{path: path}
+	}
+	return doctorConfigLocator{path: path, locator: config.NewDiagnosticLocator(data)}
+}
+
+func (l doctorConfigLocator) source(line int) string {
+	source := filepath.Base(l.path)
+	if line <= 0 {
+		return source
+	}
+	return fmt.Sprintf("%s:%d", source, line)
+}
+
+func (l doctorConfigLocator) lineForTable(table string) int {
+	return l.locator.LineForTable(table)
+}
+
+func (l doctorConfigLocator) lineForKey(table, key string) int {
+	return l.locator.LineForKey(table, key)
+}
+
+func (l doctorConfigLocator) lineForRigPath(rigName string) int {
+	return l.locator.LineForRigPath(rigName)
+}
+
+func doctorTableDetail(locator doctorConfigLocator, table, label string) string {
+	return fmt.Sprintf("%s: %s", locator.source(locator.lineForTable(table)), label)
+}
+
+func doctorKeyDetail(locator doctorConfigLocator, table, key, detail string) string {
+	return fmt.Sprintf("%s: %s", locator.source(locator.lineForKey(table, key)), detail)
+}
+
+func doctorKeyDetails(path, table, key, label string, values []string) []string {
+	locator := newDoctorConfigLocator(path)
+	if len(values) == 0 {
+		return []string{doctorKeyDetail(locator, table, key, label)}
+	}
+	details := make([]string, 0, len(values))
+	for _, value := range values {
+		details = append(details, doctorKeyDetail(locator, table, key, fmt.Sprintf("%s includes %q", label, value)))
+	}
+	return details
+}
+
+func doctorRigPathDetail(locator doctorConfigLocator, rigName string) string {
+	if strings.TrimSpace(rigName) == "" {
+		rigName = "<unnamed>"
+	}
+	return fmt.Sprintf("%s: rig %q path", locator.source(locator.lineForRigPath(rigName)), rigName)
+}
+
+func doctorPackSourceDetails(path string, cfg *config.City) []string {
+	if cfg == nil || len(cfg.Packs) == 0 {
+		return nil
+	}
+	locator := newDoctorConfigLocator(path)
+	names := make([]string, 0, len(cfg.Packs))
+	for name := range cfg.Packs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	workspaceRefs := make(map[string]struct{})
+	for _, include := range cfg.Workspace.LegacyIncludes() {
+		workspaceRefs[include] = struct{}{}
+	}
+	for _, include := range cfg.Workspace.LegacyDefaultRigIncludes() {
+		workspaceRefs[include] = struct{}{}
+	}
+	rigRefs := make(map[string]struct{})
+	for _, rig := range cfg.Rigs {
+		for _, include := range rig.Includes {
+			rigRefs[include] = struct{}{}
+		}
+	}
+
+	details := make([]string, 0, len(names))
+	for _, name := range names {
+		line := locator.locator.LineForTable("packs." + name)
+		if line == 0 {
+			line = locator.locator.LineForPacksTable()
+		}
+		remediation := "manual cleanup required"
+		if _, ok := workspaceRefs[name]; ok {
+			remediation = "gc doctor --fix can migrate this workspace/default-rig include reference"
+			if _, rigReferenced := rigRefs[name]; rigReferenced {
+				remediation = "manual cleanup required after gc doctor --fix because a rig include still references this pack"
+			}
+		}
+		src := strings.TrimSpace(cfg.Packs[name].Source)
+		if src == "" {
+			src = "<empty source>"
+		}
+		details = append(details, fmt.Sprintf("%s: [packs.%s] source=%q (%s)",
+			locator.source(line), name, src, remediation))
+	}
+	return details
+}
+
+func legacyAgentFiles(cityPath string) (cityLegacy, packLegacy []string) {
+	cityTomlPath := filepath.Join(cityPath, "city.toml")
+	if cfg, ok := parseCityConfig(cityTomlPath); ok && len(cfg.Agents) > 0 {
+		cityLegacy = append(cityLegacy, doctorTableDetail(newDoctorConfigLocator(cityTomlPath), "agent", "city.toml [[agent]]"))
 	}
 	type rawPack struct {
 		Agents []config.Agent `toml:"agent"`
@@ -466,10 +1066,10 @@ func legacyAgentFiles(cityPath string) []string {
 	if data, err := os.ReadFile(packPath); err == nil {
 		var pack rawPack
 		if _, err := toml.Decode(string(data), &pack); err == nil && len(pack.Agents) > 0 {
-			files = append(files, "pack.toml")
+			packLegacy = append(packLegacy, doctorTableDetail(newDoctorConfigLocator(packPath), "agent", "pack.toml [[agent]]"))
 		}
 	}
-	return files
+	return cityLegacy, packLegacy
 }
 
 func templatedMarkdownPrompts(cityPath string) []string {

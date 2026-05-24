@@ -75,6 +75,15 @@ type Server struct {
 	responseCacheMu      sync.Mutex
 	responseCacheEntries map[string]responseCacheEntry
 
+	// storeHealth caches the on-disk size walk and maintenance-log read
+	// for /v0/status's StoreHealth block. Refreshed on expiry; missing
+	// store directories produce a zero-value entry so repeated requests
+	// don't re-walk a fresh city between maintenance runs.
+	storeHealthMu       sync.Mutex
+	storeHealthEntry    *StatusStoreHealth
+	storeHealthExpires  time.Time
+	storeHealthComputer func() *StatusStoreHealth
+
 	// LookPathFunc can be overridden in tests. Defaults to exec.LookPath.
 	LookPathFunc func(string) (string, error)
 
@@ -206,6 +215,7 @@ func (s *Server) legacySessionHandler() http.Handler {
 	mux.HandleFunc("GET /v0/session/{id}/stream", s.handleSessionStream)
 	mux.HandleFunc("PATCH /v0/session/{id}", s.handleSessionPatch)
 	mux.HandleFunc("POST /v0/session/{id}/messages", s.handleSessionMessage)
+	mux.HandleFunc("POST /v0/session/{id}/permission-mode", s.handleSessionPermissionMode)
 	mux.HandleFunc("POST /v0/session/{id}/stop", s.handleSessionStop)
 	mux.HandleFunc("POST /v0/session/{id}/kill", s.handleSessionKill)
 	mux.HandleFunc("POST /v0/session/{id}/respond", s.handleSessionRespond)
@@ -262,7 +272,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sm := NewSupervisorMux(&singleStateResolver{state: s.state}, nil, s.readOnly, "test", time.Now())
+	sm := NewSupervisorMux(&singleStateResolver{state: s.state}, nil, s.readOnly, "test", "", time.Now())
 	sm.cacheMu.Lock()
 	sm.cache[s.state.CityName()] = cachedCityServer{state: s.state, srv: s}
 	sm.cacheMu.Unlock()

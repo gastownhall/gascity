@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -203,7 +204,7 @@ func TestResolveConditionPath(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		got, err := ResolveConditionPath("/some/city", script)
+		got, err := ResolveConditionPath("/some/city", "/some/city", script)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -220,7 +221,7 @@ func TestResolveConditionPath(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		got, err := ResolveConditionPath(dir, "gates/check.sh")
+		got, err := ResolveConditionPath(dir, dir, "gates/check.sh")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -239,7 +240,7 @@ func TestResolveConditionPath(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		got, err := ResolveConditionPath(dir, "link.sh")
+		got, err := ResolveConditionPath(dir, dir, "link.sh")
 		if err != nil {
 			t.Fatalf("unexpected error for symlink: %v", err)
 		}
@@ -256,7 +257,7 @@ func TestResolveConditionPath(t *testing.T) {
 		}
 		defer func() { _ = os.Remove(script) }()
 
-		_, err := ResolveConditionPath(dir, "../outside.sh")
+		_, err := ResolveConditionPath(dir, dir, "../outside.sh")
 		if err == nil {
 			t.Fatal("expected error for path traversal, got nil")
 		}
@@ -266,16 +267,254 @@ func TestResolveConditionPath(t *testing.T) {
 	})
 
 	t.Run("empty path", func(t *testing.T) {
-		_, err := ResolveConditionPath("/some/city", "")
+		_, err := ResolveConditionPath("/some/city", "/some/city", "")
 		if err == nil {
 			t.Fatal("expected error for empty path, got nil")
 		}
 	})
 
 	t.Run("nonexistent file", func(t *testing.T) {
-		_, err := ResolveConditionPath("/some/city", "/nonexistent/file.sh")
+		_, err := ResolveConditionPath("/some/city", "/some/city", "/nonexistent/file.sh")
 		if err == nil {
 			t.Fatal("expected error for nonexistent file, got nil")
+		}
+	})
+
+	// Pins gastownhall/gascity#2320: a relative path that escapes the base
+	// (the rig subtree) upward but stays inside the envelope (the city tree)
+	// must resolve successfully. This is the exact case the envelope/base
+	// split fixes — and the only one that genuinely distinguishes the new
+	// behavior from the old single-arg API. Pre-fix, base and envelope were
+	// the same value (the rig), so `../scripts/check.sh` was validated
+	// against the rig and the traversal check wrongly rejected it.
+	t.Run("rig-scoped: relative path escapes base but stays inside envelope", func(t *testing.T) {
+		cityDir := t.TempDir()
+		rigDir := filepath.Join(cityDir, "frontend")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Script lives under the city tree, not under the rig base.
+		scriptDir := filepath.Join(cityDir, "scripts")
+		if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		script := filepath.Join(scriptDir, "check.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		// envelope = cityDir (security boundary), base = rigDir (join target).
+		// `../scripts/check.sh` climbs out of base into the city tree; it
+		// stays inside envelope, so it resolves.
+		got, err := ResolveConditionPath(cityDir, rigDir, "../scripts/check.sh")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		testutil.AssertSamePath(t, got, script)
+	})
+
+	// Pins the security contract: when envelope and base diverge, a
+	// relative path that escapes both declared roots must still be rejected.
+	t.Run("rig-scoped: traversal outside envelope and base rejected", func(t *testing.T) {
+		cityDir := t.TempDir()
+		rigDir := filepath.Join(cityDir, "frontend")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Script lives outside both envelope and base; traversal should reject.
+		parent := filepath.Dir(cityDir)
+		script := filepath.Join(parent, "outside.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Remove(script) }()
+
+		_, err := ResolveConditionPath(cityDir, rigDir, "../../outside.sh")
+		if err == nil {
+			t.Fatal("expected traversal rejection, got nil")
+		}
+		if !strings.Contains(err.Error(), "traversal") {
+			t.Errorf("expected path traversal error, got: %v", err)
+		}
+	})
+
+	// Pins gastownhall/gascity#2354: when the rig store is a sibling of
+	// the city (neither a subtree of the other), a relative conditionPath
+	// that resolves under `base` must succeed even though it lands
+	// outside `envelope`. Passing storePath as `base` is the dispatcher's
+	// explicit declaration that storePath is an operator-controlled root
+	// (callers are expected to validate base — see
+	// internal/dispatch/ralph.go).
+	t.Run("sibling layout: relative path under base stays inside base", func(t *testing.T) {
+		parent := t.TempDir()
+		cityDir := filepath.Join(parent, "city")
+		rigDir := filepath.Join(parent, "rig")
+		if err := os.MkdirAll(cityDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		scriptDir := filepath.Join(rigDir, "assets", "pack", "scripts")
+		if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		script := filepath.Join(scriptDir, "check.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := ResolveConditionPath(cityDir, rigDir, "assets/pack/scripts/check.sh")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		testutil.AssertSamePath(t, got, script)
+	})
+
+	// Pins the security contract for the sibling layout: a relative path
+	// that escapes BOTH envelope and base must still be rejected.
+	t.Run("sibling layout: traversal outside both envelope and base rejected", func(t *testing.T) {
+		parent := t.TempDir()
+		cityDir := filepath.Join(parent, "city")
+		rigDir := filepath.Join(parent, "rig")
+		if err := os.MkdirAll(cityDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		script := filepath.Join(parent, "evil.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := ResolveConditionPath(cityDir, rigDir, "../evil.sh")
+		if err == nil {
+			t.Fatal("expected traversal rejection, got nil")
+		}
+		if !strings.Contains(err.Error(), "traversal") {
+			t.Errorf("expected path traversal error, got: %v", err)
+		}
+	})
+
+	// Symlink-escape contract: a script that lives under base (so the
+	// pre-resolution containment check passes) but points via symlink to
+	// a file outside both envelope and base must be rejected by the
+	// post-EvalSymlinks containment check. Pre-fix, the lexical check on
+	// absPath accepted such a path and the resolved target was returned
+	// verbatim. This is the regression test for the symlink half of the
+	// gastownhall/gascity#2354 review.
+	t.Run("symlink under base targeting outside both roots is rejected", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("symlink semantics differ on Windows")
+		}
+		parent := t.TempDir()
+		cityDir := filepath.Join(parent, "city")
+		rigDir := filepath.Join(parent, "rig")
+		if err := os.MkdirAll(cityDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		scriptDir := filepath.Join(rigDir, "scripts")
+		if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Real target lives in the common parent, outside both roots.
+		outsideScript := filepath.Join(parent, "outside.sh")
+		if err := os.WriteFile(outsideScript, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Symlink under base points to the outside target.
+		link := filepath.Join(scriptDir, "check.sh")
+		if err := os.Symlink(outsideScript, link); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := ResolveConditionPath(cityDir, rigDir, "scripts/check.sh")
+		if err == nil {
+			t.Fatal("expected symlink-escape rejection, got nil")
+		}
+		if !strings.Contains(err.Error(), "symlink target outside containment") {
+			t.Errorf("expected symlink-escape error, got: %v", err)
+		}
+	})
+
+	// Empty base falls back to envelope for backward compatibility with
+	// callers that have no rig/city distinction to make.
+	t.Run("empty base falls back to envelope", func(t *testing.T) {
+		dir := t.TempDir()
+		scriptDir := filepath.Join(dir, "gates")
+		if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		script := filepath.Join(scriptDir, "check.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := ResolveConditionPath(dir, "", "gates/check.sh")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		testutil.AssertSamePath(t, got, script)
+	})
+
+	// Pins gastownhall/gascity#2354: when the rig store is a sibling of the
+	// city (neither is a subtree of the other), a relative conditionPath that
+	// resolves under `base` must succeed even though it lands outside
+	// `envelope`. The dispatcher passing storePath as `base` is an explicit
+	// declaration that storePath is a legitimate join target; rejecting paths
+	// that stay inside it would make sibling layouts unusable.
+	t.Run("sibling layout: relative path under base stays inside base", func(t *testing.T) {
+		parent := t.TempDir()
+		cityDir := filepath.Join(parent, "city")
+		rigDir := filepath.Join(parent, "rig")
+		if err := os.MkdirAll(cityDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Script lives under the rig (pack assets), at the path that
+		// runRalphCheck would synthesize for a pack-shipped check.
+		scriptDir := filepath.Join(rigDir, "assets", "pack", "scripts")
+		if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		script := filepath.Join(scriptDir, "check.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		// envelope = cityDir, base = rigDir (sibling, not a subtree).
+		// `assets/pack/scripts/check.sh` joins under base and lands inside
+		// base — outside envelope, but base itself is a declared root.
+		got, err := ResolveConditionPath(cityDir, rigDir, "assets/pack/scripts/check.sh")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		testutil.AssertSamePath(t, got, script)
+	})
+
+	// Pins the security contract for the sibling layout: a relative path
+	// that escapes BOTH envelope and base must still be rejected. The
+	// expansion above only legitimizes paths that stay inside one of the
+	// two declared roots.
+	t.Run("sibling layout: traversal outside both envelope and base rejected", func(t *testing.T) {
+		parent := t.TempDir()
+		cityDir := filepath.Join(parent, "city")
+		rigDir := filepath.Join(parent, "rig")
+		if err := os.MkdirAll(cityDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Script lives in the common parent, outside both city and rig.
+		script := filepath.Join(parent, "evil.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := ResolveConditionPath(cityDir, rigDir, "../evil.sh")
+		if err == nil {
+			t.Fatal("expected traversal rejection, got nil")
+		}
+		if !strings.Contains(err.Error(), "traversal") {
+			t.Errorf("expected path traversal error, got: %v", err)
 		}
 	})
 }
@@ -332,6 +571,41 @@ func TestRunConditionFail(t *testing.T) {
 	}
 	if !strings.Contains(result.Stderr, "failing") {
 		t.Errorf("Stderr = %q, want to contain 'failing'", result.Stderr)
+	}
+}
+
+func TestRunConditionRetriesTextFileBusy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not return text-file-busy for executing an open script")
+	}
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "busy.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	hold, err := os.OpenFile(script, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan struct{})
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		_ = hold.Close()
+		close(closed)
+	}()
+	defer func() {
+		_ = hold.Close()
+		<-closed
+	}()
+
+	result := RunCondition(context.Background(), script, ConditionEnv{CityPath: dir}, 5*time.Second, 0)
+	if result.Outcome != GatePass {
+		t.Fatalf("Outcome = %q, stderr = %q, want pass after text-file-busy retry", result.Outcome, result.Stderr)
+	}
+	if strings.TrimSpace(result.Stdout) != "ok" {
+		t.Fatalf("Stdout = %q, want ok", result.Stdout)
 	}
 }
 

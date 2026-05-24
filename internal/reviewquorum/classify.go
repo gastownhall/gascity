@@ -20,6 +20,9 @@ func IsTransientFailure(failureClass, failureReason string) bool {
 	if class == FailureClassTransient {
 		return true
 	}
+	if class != "" {
+		return false
+	}
 	_, ok := transientFailureReasons[reason]
 	return ok
 }
@@ -34,16 +37,19 @@ func ClassifyFailure(failureClass, failureReason string) (class, reason string) 
 	if reason == "" {
 		reason = "unspecified"
 	}
-	if IsTransientFailure(class, reason) {
+	switch class {
+	case FailureClassTransient:
 		return FailureClassTransient, reason
-	}
-	if class == FailureClassHard {
+	case FailureClassHard:
 		return FailureClassHard, reason
-	}
-	if class == "" {
+	case "":
+		if IsTransientFailure(class, reason) {
+			return FailureClassTransient, reason
+		}
 		return FailureClassHard, reason
+	default:
+		return FailureClassHard, "invalid_failure_class_" + normalizeFailureFragment(reason, "unspecified")
 	}
-	return FailureClassHard, "invalid_failure_class"
 }
 
 func normalizeToken(value string) string {

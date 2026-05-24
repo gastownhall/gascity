@@ -276,6 +276,12 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	restoreTraceWarnings := useWorkflowTraceWarnings(stderr)
 	defer restoreTraceWarnings()
 
+	if follow {
+		if err := requireWorkflowServeFollowSessionEnv(); err != nil {
+			return err
+		}
+	}
+
 	cityPath, err := resolveCity()
 	if err != nil {
 		return err
@@ -308,7 +314,10 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 		return fmt.Errorf("agent %q not found in config", agentName)
 	}
 	workDir := agentCommandDir(cityPath, &agentCfg, cfg.Rigs)
-	workEnv := controllerWorkQueryEnv(cityPath, cfg, &agentCfg)
+	workEnv, err := controllerWorkQueryEnv(cityPath, cfg, &agentCfg)
+	if err != nil {
+		return fmt.Errorf("building work query env: %w", err)
+	}
 	cityName := loadedCityName(cfg, cityPath)
 	// Expand {{.Rig}}/{{.AgentBase}} once so the long-poll drain reuses the
 	// rig-scoped command instead of passing the literal template to the shell
@@ -323,6 +332,19 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 		return err
 	}
 	return runWorkflowServeFollow(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
+}
+
+func requireWorkflowServeFollowSessionEnv() error {
+	var missing []string
+	for _, key := range []string{"GC_SESSION_ID", "GC_SESSION_NAME"} {
+		if strings.TrimSpace(os.Getenv(key)) == "" {
+			missing = append(missing, key)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("control dispatcher follow mode requires managed session env (%s not set)", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 func legacyWorkflowTracePaths(cityPath string, rigs []config.Rig) []string {
@@ -412,9 +434,15 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 	result := workflowServeDrainResult{}
 	idlePolls := 0
 	for {
-		queue, err := workflowServeList(workflowServeWorkQuery(agentCfg, workQuery), storePath, workEnv)
+		serveQuery := workflowServeWorkQuery(agentCfg, workQuery)
+		queue, err := workflowServeList(serveQuery, storePath, workEnv)
 		if err != nil {
 			workflowTracef("serve query-error agent=%s err=%v", agentCfg.QualifiedName(), err)
+			// Surface a killed/timed-out control work query on the event
+			// bus so the reconciler has a named cause to escalate on
+			// rather than the session dying silently (issues #1496/#1497).
+			emitCityWorkQueryFailure(cityPath, stderr,
+				os.Getenv("GC_SESSION_ID"), os.Getenv("GC_TEMPLATE"), serveQuery, err)
 			return result, fmt.Errorf("querying control work for %s: %w", agentCfg.QualifiedName(), err)
 		}
 		if len(queue) == 0 {
@@ -431,12 +459,14 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 		processedThisCycle := false
 		pendingCount := 0
 		legacyOversizedCount := 0
+		unexpectedKindCount := 0
 		for _, candidate := range queue {
 			beadID := candidate.ID
 			kind := strings.TrimSpace(candidate.Metadata["gc.kind"])
 			if !isControlDispatcherKind(kind) {
-				workflowTracef("serve unexpected-kind bead=%s kind=%s", beadID, kind)
-				return result, fmt.Errorf("bead %s has unexpected non-control kind %q", beadID, kind)
+				unexpectedKindCount++
+				workflowTracef("serve unexpected-kind-skip bead=%s kind=%s", beadID, kind)
+				continue
 			}
 			workflowTracef("serve process bead=%s kind=%s store=%s", beadID, kind, storePath)
 			// controlDispatcherServe currently returns nil both when it
@@ -456,6 +486,12 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 					continue
 				}
 				workflowTracef("serve process-error bead=%s kind=%s err=%v", beadID, kind, err)
+				if dispatch.IsTransientControllerError(err) {
+					pendingCount++
+					result.pendingAny = true
+					workflowTracef("serve transient-error-pending bead=%s kind=%s err=%v", beadID, kind, err)
+					continue
+				}
 				if isLegacyOversizedControlEventError(err) {
 					legacyOversizedCount++
 					continue
@@ -475,6 +511,10 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 		}
 		if legacyOversizedCount > 0 {
 			workflowTracef("serve legacy-oversized-queue agent=%s count=%d", agentCfg.QualifiedName(), legacyOversizedCount)
+			return result, nil
+		}
+		if unexpectedKindCount > 0 {
+			workflowTracef("serve unexpected-kind-queue agent=%s count=%d", agentCfg.QualifiedName(), unexpectedKindCount)
 			return result, nil
 		}
 	}

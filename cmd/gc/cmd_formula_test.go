@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -8,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/formula"
 )
 
 // TestResolveFormulaScope_RigFlagWins verifies that an explicit --rig flag
@@ -165,6 +168,56 @@ func TestResolveFormulaScope_UnboundRigErrors(t *testing.T) {
 	}
 }
 
+// TestRigFormulaVarsForScope verifies that rig-scoped formula_vars flow
+// through the scope resolver so `gc formula show --rig <name>` can surface
+// them as "(rig default=...)" annotations.
+func TestRigFormulaVarsForScope(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "mo")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{
+				Name: "mo",
+				Path: rigPath,
+				FormulaVars: map[string]string{
+					"test_command": "make test-fast",
+				},
+			},
+		},
+	}
+
+	t.Run("--rig populates FormulaVars via rigByName", func(t *testing.T) {
+		prev := rigFlag
+		t.Cleanup(func() { rigFlag = prev })
+		rigFlag = "mo"
+
+		r, ok := rigByName(cfg, "mo")
+		if !ok {
+			t.Fatalf("rigByName(mo) not found")
+		}
+		if got := r.FormulaVars["test_command"]; got != "make test-fast" {
+			t.Errorf("FormulaVars[test_command] = %q, want %q", got, "make test-fast")
+		}
+	})
+
+	t.Run("no --rig yields empty FormulaVars", func(t *testing.T) {
+		prev := rigFlag
+		t.Cleanup(func() { rigFlag = prev })
+		rigFlag = ""
+
+		t.Chdir(cityPath)
+		// Without --rig and outside a rig cwd, formula_vars are not injected.
+		vars := rigFormulaVarsForScope(cfg, cityPath)
+		if len(vars) != 0 {
+			t.Errorf("rigFormulaVarsForScope = %v, want empty (no rig context)", vars)
+		}
+	})
+}
+
 // TestResolveFormulaScope_RigFallsBackToCityLayers covers the case where a
 // rig is resolved but has no rig-specific FormulaLayers entry; SearchPaths
 // should fall back to city layers.
@@ -193,5 +246,69 @@ func TestResolveFormulaScope_RigFallsBackToCityLayers(t *testing.T) {
 	want := []string{"/city/formulas"}
 	if !reflect.DeepEqual(scope.searchPaths, want) {
 		t.Errorf("searchPaths = %v, want %v (city fallback)", scope.searchPaths, want)
+	}
+}
+
+func TestFormulaShowJSONFromRecipe(t *testing.T) {
+	defaultValue := "main"
+	priority := 1
+	recipe := &formula.Recipe{
+		Name:        "mol-build",
+		Description: "Build {{branch}}",
+		Phase:       "liquid",
+		Vars: map[string]*formula.VarDef{
+			"branch": {
+				Description: "branch to build",
+				Default:     &defaultValue,
+			},
+			"target": {
+				Description: "target name",
+				Required:    true,
+			},
+		},
+		Steps: []formula.RecipeStep{
+			{ID: "mol-build", Title: "Build", Type: "molecule", IsRoot: true},
+			{ID: "mol-build.test", Title: "Test {{target}}", Type: "task", Priority: &priority, Labels: []string{"ci"}},
+		},
+		Deps: []formula.RecipeDep{{StepID: "mol-build.test", DependsOnID: "mol-build", Type: "parent-child"}},
+	}
+
+	var stdout bytes.Buffer
+	payload := formulaShowJSONFromRecipe(
+		recipe,
+		"/city",
+		formulaScope{searchPaths: []string{"/city/formulas"}},
+		map[string]string{"target": "fast"},
+		map[string]string{"target": "unit"},
+		map[string]string{"branch": "main", "target": "unit"},
+	)
+	if err := writeCLIJSONLine(&stdout, payload); err != nil {
+		t.Fatalf("writeCLIJSONLine: %v", err)
+	}
+
+	var got struct {
+		SchemaVersion string `json:"schema_version"`
+		Name          string `json:"name"`
+		Description   string `json:"description"`
+		Vars          []struct {
+			Name       string  `json:"name"`
+			RigDefault *string `json:"rig_default"`
+		} `json:"vars"`
+		Steps []struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+		} `json:"steps"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("formula show JSON is invalid: %v\n%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || got.Name != "mol-build" || got.Description != "Build main" {
+		t.Fatalf("payload = %+v", got)
+	}
+	if len(got.Vars) != 2 || got.Vars[1].Name != "target" || got.Vars[1].RigDefault == nil || *got.Vars[1].RigDefault != "fast" {
+		t.Fatalf("vars = %+v", got.Vars)
+	}
+	if len(got.Steps) != 2 || got.Steps[1].Title != "Test unit" {
+		t.Fatalf("steps = %+v", got.Steps)
 	}
 }

@@ -12,9 +12,30 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
+// Options controls optional behavior of the Store conformance suite.
+// Each opt-out should reference an external bead/escalation explaining
+// why a conforming implementation cannot pass the affected subtest.
+type Options struct {
+	// SkipTxApplyConformance skips the TxRunsCallbackAndAppliesWriteSurface
+	// subtest. Use only when the backing implementation has a known defect
+	// outside the Store contract (e.g., an external CLI bug). The other Tx
+	// subtests still run.
+	SkipTxApplyConformance bool
+	// SkipTxApplyReason is reported via t.Skipf when SkipTxApplyConformance
+	// is true. Should name the escalation bead or upstream issue.
+	SkipTxApplyReason string
+}
+
 // RunStoreTests runs the full conformance suite against a Store implementation.
 // The newStore function must return a fresh, empty store for each call.
 func RunStoreTests(t *testing.T, newStore func() beads.Store) {
+	RunStoreTestsWithOptions(t, newStore, Options{})
+}
+
+// RunStoreTestsWithOptions runs the conformance suite with optional opt-outs
+// for subtests that exercise behavior known to be broken in an underlying
+// dependency rather than in the Store implementation itself.
+func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Options) {
 	t.Helper()
 
 	t.Run("CreateAssignsUniqueNonEmptyID", func(t *testing.T) {
@@ -575,7 +596,7 @@ func RunStoreTests(t *testing.T, newStore func() beads.Store) {
 			t.Fatal(err)
 		}
 		// Create beads with types that bd ready excludes.
-		for _, typ := range []string{"molecule", "message", "gate", "merge-request", "session", "agent", "role", "rig"} {
+		for _, typ := range []string{"molecule", "step", "message", "gate", "merge-request", "session", "agent", "role", "rig"} {
 			if _, err := s.Create(beads.Bead{Title: typ, Type: typ}); err != nil {
 				t.Fatal(err)
 			}
@@ -651,6 +672,82 @@ func RunStoreTests(t *testing.T, newStore func() beads.Store) {
 		}
 		if len(got) != 0 {
 			t.Errorf("ListByLabel on empty store returned %d beads, want 0", len(got))
+		}
+	})
+
+	t.Run("TxRunsCallbackAndAppliesWriteSurface", func(t *testing.T) {
+		if opts.SkipTxApplyConformance {
+			t.Skipf("skipping: %s", opts.SkipTxApplyReason)
+		}
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "before"})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		updatedDescription := "after"
+		called := false
+		err = s.Tx("conformance tx", func(tx beads.Tx) error {
+			called = true
+			if err := tx.Update(b.ID, beads.UpdateOpts{Description: &updatedDescription}); err != nil {
+				return err
+			}
+			if err := tx.SetMetadataBatch(b.ID, map[string]string{"tx": "applied"}); err != nil {
+				return err
+			}
+			if err := tx.SetMetadataBatch(b.ID, map[string]string{"close_reason": "conformance tx closed after preserving fields"}); err != nil {
+				return err
+			}
+			return tx.Close(b.ID)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !called {
+			t.Fatal("Tx callback was not called")
+		}
+
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Description != updatedDescription {
+			t.Errorf("Description after Tx = %q, want %q", got.Description, updatedDescription)
+		}
+		if got.Title != "before" {
+			t.Errorf("Title after Tx = %q, want before", got.Title)
+		}
+		if got.Metadata["tx"] != "applied" {
+			t.Errorf("Metadata[tx] after Tx = %q, want applied", got.Metadata["tx"])
+		}
+		if got.Metadata["close_reason"] != "conformance tx closed after preserving fields" {
+			t.Errorf("Metadata[close_reason] after Tx = %q, want conformance tx closed after preserving fields", got.Metadata["close_reason"])
+		}
+		if got.Status != "closed" {
+			t.Errorf("Status after Tx = %q, want closed", got.Status)
+		}
+	})
+
+	t.Run("TxPropagatesCallbackError", func(t *testing.T) {
+		s := newStore()
+		wantErr := errors.New("stop tx")
+		called := false
+		err := s.Tx("conformance tx error", func(_ beads.Tx) error {
+			called = true
+			return wantErr
+		})
+		if !called {
+			t.Fatal("Tx callback was not called")
+		}
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("Tx error = %v, want %v", err, wantErr)
+		}
+	})
+
+	t.Run("TxRejectsNilCallback", func(t *testing.T) {
+		s := newStore()
+		if err := s.Tx("conformance nil tx", nil); err == nil {
+			t.Fatal("Tx(nil) returned nil, want error")
 		}
 	})
 }

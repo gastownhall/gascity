@@ -42,7 +42,7 @@ func (s *Server) humaHandleOrderGet(_ context.Context, input *OrderGetInput) (*s
 	Body orderResponse
 }, error,
 ) {
-	a, err := resolveOrder(s.state.Orders(), input.Name)
+	a, err := resolveOrder(s.state.OrdersAll(), input.Name)
 	if err != nil {
 		if errors.Is(err, errOrderAmbiguous) {
 			return nil, huma.Error409Conflict(err.Error())
@@ -170,11 +170,16 @@ type OrderHistoryListBody struct {
 
 // OrderHistoryListOutput is the response envelope for GET /v0/orders/history.
 type OrderHistoryListOutput struct {
-	Body OrderHistoryListBody
+	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
+	Body      OrderHistoryListBody
 }
 
 // humaHandleOrderHistory is the Huma-typed handler for GET /v0/orders/history.
 func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryInput) (*OrderHistoryListOutput, error) {
+	store := s.state.CityBeadStore()
+	if err := cacheLiveOr503(store); err != nil {
+		return nil, err
+	}
 	scopedName := input.ScopedName
 	if scopedName == "" {
 		return nil, huma.Error400BadRequest("scoped_name is required")
@@ -194,7 +199,7 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 		beforeTime = t
 	}
 
-	aa := s.state.Orders()
+	aa := s.state.OrdersAll()
 	var auto *orders.Order
 	var orderDef orders.Order
 	for i, a := range aa {
@@ -265,7 +270,9 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 		}
 	}
 
-	out := &OrderHistoryListOutput{}
+	out := &OrderHistoryListOutput{
+		CacheAgeS: cacheAgeSeconds(store),
+	}
 	out.Body.Entries = entries
 	return out, nil
 }
@@ -422,6 +429,7 @@ func orderHistoryBeadsAcrossStoreInfosCachedFirst(infos []workflowStoreInfo, sco
 			Limit:         limit,
 			IncludeClosed: true,
 			Sort:          beads.SortCreatedDesc,
+			TierMode:      beads.TierBoth,
 		}
 		var (
 			rows []beads.Bead
@@ -437,11 +445,13 @@ func orderHistoryBeadsAcrossStoreInfosCachedFirst(infos []workflowStoreInfo, sco
 			rows, err = info.store.List(query)
 		}
 		if err != nil {
-			if i == 0 {
+			if i == 0 && len(rows) == 0 {
 				return nil, err
 			}
 			log.Printf("api: order history list failed for %s: %v", info.ref, err)
-			continue
+			if len(rows) == 0 {
+				continue
+			}
 		}
 		for _, row := range rows {
 			if !beforeTime.IsZero() && !row.CreatedAt.Before(beforeTime) {
@@ -483,13 +493,16 @@ func orderHistoryBeadsAcrossStoreInfos(infos []workflowStoreInfo, scopedName str
 			Limit:         limit,
 			IncludeClosed: true,
 			Sort:          beads.SortCreatedDesc,
+			TierMode:      beads.TierBoth,
 		})
 		if err != nil {
-			if i == 0 {
+			if i == 0 && len(rows) == 0 {
 				return nil, err
 			}
 			log.Printf("api: order history list failed for %s: %v", info.ref, err)
-			continue
+			if len(rows) == 0 {
+				continue
+			}
 		}
 		for _, row := range rows {
 			if !beforeTime.IsZero() && !row.CreatedAt.Before(beforeTime) {
@@ -648,7 +661,7 @@ func (s *Server) setOrderEnabledHuma(name string, enabled bool) (*OKResponse, er
 		return nil, errMutationsNotSupported
 	}
 
-	a, err := resolveOrder(s.state.Orders(), name)
+	a, err := resolveOrder(s.state.OrdersAll(), name)
 	if err != nil {
 		if errors.Is(err, errOrderAmbiguous) {
 			return nil, huma.Error409Conflict(err.Error())

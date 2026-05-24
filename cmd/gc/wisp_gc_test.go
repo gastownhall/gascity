@@ -365,6 +365,29 @@ func TestWispGC_PurgesExpiredTrackingBeads(t *testing.T) {
 	assertDeletedIDs(t, store.deletedIDs, "mol-1", "track-old")
 }
 
+func TestWispGC_PurgesLegacyIssuesTierTrackingBeads(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		{
+			ID:        "track-legacy",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-3 * time.Hour),
+			Labels:    []string{labelOrderTracking},
+		},
+	})
+
+	wg := newWispGC(5*time.Minute, time.Hour)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
+	}
+	assertDeletedIDs(t, store.deletedIDs, "track-legacy")
+}
+
 func TestWispGC_TrackingListErrorIsSurfacedAndMoleculePurgeContinues(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
@@ -474,12 +497,22 @@ func makeGCBead(id string, createdAt time.Time, status, beadType string) beads.B
 }
 
 func makeGCBeadWithLabels(id string, createdAt time.Time, status, beadType string, labels ...string) beads.Bead {
+	// Order-tracking beads live in the ephemeral (wisps) tier in production;
+	// mirror that here so wisp_gc's tier-aware queries see them.
+	ephemeral := false
+	for _, l := range labels {
+		if l == labelOrderTracking {
+			ephemeral = true
+			break
+		}
+	}
 	return beads.Bead{
 		ID:        id,
 		Status:    status,
 		Type:      beadType,
 		CreatedAt: createdAt,
 		Labels:    labels,
+		Ephemeral: ephemeral,
 	}
 }
 

@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -117,6 +120,44 @@ func TestCityStatusReportsObservationErrors(t *testing.T) {
 	}
 }
 
+func TestCityStatusObservationTimesOut(t *testing.T) {
+	oldTimeout := statusObservationTimeout
+	statusObservationTimeout = 20 * time.Millisecond
+	t.Cleanup(func() {
+		statusObservationTimeout = oldTimeout
+	})
+
+	release := make(chan struct{})
+	defer close(release)
+	oldObserve := observeSessionTargetForStatus
+	observeSessionTargetForStatus = func(string, beads.Store, runtime.Provider, *config.City, string) (worker.LiveObservation, error) {
+		<-release
+		return worker.LiveObservation{Running: true}, nil
+	}
+	t.Cleanup(func() { observeSessionTargetForStatus = oldObserve })
+
+	var stderr bytes.Buffer
+	start := time.Now()
+	obs := observeSessionTargetWithWarning(
+		"gc status",
+		"/city",
+		nil,
+		runtime.NewFake(),
+		&config.City{},
+		statusObservationTarget{runtimeSessionName: "slow-session"},
+		&stderr,
+	)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("observeSessionTargetWithWarning elapsed %s, want bounded timeout", elapsed)
+	}
+	if obs.Running {
+		t.Fatal("observation should not report running after timeout")
+	}
+	if !strings.Contains(stderr.String(), "observing \"slow-session\" timed out") {
+		t.Fatalf("stderr = %q, want timeout warning", stderr.String())
+	}
+}
+
 func TestCityStatusSuspended(t *testing.T) {
 	sp := runtime.NewFake()
 	dops := newFakeDrainOps()
@@ -126,7 +167,7 @@ func TestCityStatusSuspended(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doCityStatus(sp, dops, cfg, "/tmp/city", &stdout, &stderr)
+	code := doCityStatus(sp, dops, cfg, t.TempDir(), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0", code)
 	}
@@ -156,7 +197,7 @@ func TestCityStatusPoolExpansion(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doCityStatus(sp, dops, cfg, "/tmp/city", &stdout, &stderr)
+	code := doCityStatus(sp, dops, cfg, t.TempDir(), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -186,6 +227,36 @@ func TestCityStatusPoolExpansion(t *testing.T) {
 	}
 }
 
+func TestCityStatusCanonicalSingletonPoolUsesCanonicalName(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "hw--refinery", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+	dops := newFakeDrainOps()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{
+			{Name: "refinery", Dir: "hw", MaxActiveSessions: intPtr(1), ScaleCheck: "echo 1"},
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doCityStatus(sp, dops, cfg, t.TempDir(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "hw/refinery") || !strings.Contains(out, "running") {
+		t.Fatalf("stdout missing canonical running singleton status, got:\n%s", out)
+	}
+	if strings.Contains(out, "hw/refinery-1") {
+		t.Fatalf("stdout contains phantom singleton instance, got:\n%s", out)
+	}
+	if !strings.Contains(out, "1/1 agents running") {
+		t.Fatalf("stdout missing canonical singleton running summary, got:\n%s", out)
+	}
+}
+
 func TestCityStatusRigs(t *testing.T) {
 	sp := runtime.NewFake()
 	dops := newFakeDrainOps()
@@ -199,7 +270,7 @@ func TestCityStatusRigs(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doCityStatus(sp, dops, cfg, "/tmp/city", &stdout, &stderr)
+	code := doCityStatus(sp, dops, cfg, t.TempDir(), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0", code)
 	}
@@ -325,6 +396,9 @@ func TestCityStatusJSONWithAgents(t *testing.T) {
 }
 
 func TestCityStatusJSONReportsObservationErrors(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "mayor", runtime.Config{Command: "echo"}); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -372,9 +446,13 @@ func TestCityStatusJSONReportsStoreOpenError(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city"},
 	}
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.beads): %v", err)
+	}
 
 	var stdout, stderr bytes.Buffer
-	code := doCityStatusJSON(sp, cfg, t.TempDir(), &stdout, &stderr)
+	code := doCityStatusJSON(sp, cfg, cityPath, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -383,6 +461,12 @@ func TestCityStatusJSONReportsStoreOpenError(t *testing.T) {
 	}
 }
 
+// TestCityStatusJSONReportsCatalogListError asserts the pre-#2005 contract:
+// when the bead store fails to list session beads, `gc status --json` still
+// emits the JSON payload (so callers can parse partial status) but exits
+// rc=1 so monitoring scripts using `$?` can detect the degraded state. See
+// #2147 for the regression history — PR #2005 inadvertently flipped this
+// from rc=1 to rc=0 along with renaming the test.
 func TestCityStatusJSONReportsCatalogListError(t *testing.T) {
 	sp := runtime.NewFake()
 	oldOpen := openCityStoreAtForStatus
@@ -393,14 +477,110 @@ func TestCityStatusJSONReportsCatalogListError(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city"},
 	}
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.beads): %v", err)
+	}
 
 	var stdout, stderr bytes.Buffer
-	code := doCityStatusJSON(sp, cfg, t.TempDir(), &stdout, &stderr)
+	code := doCityStatusJSON(sp, cfg, cityPath, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (degraded session snapshot); stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc status: loading session snapshot") || !strings.Contains(stderr.String(), "catalog unavailable") {
+		t.Fatalf("stderr = %q, want session snapshot warning", stderr.String())
+	}
+	// JSON payload must still be emitted so callers can parse the partial
+	// status — only the exit code signals the degraded state.
+	var status StatusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
+		t.Fatalf("unmarshal: %v; output: %s", err, stdout.String())
+	}
+}
+
+func TestCmdCityStatusJSONConfigErrorIsStructured(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := cmdCityStatus([]string{filepath.Join(t.TempDir(), "missing-city")}, true, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
-	if !strings.Contains(stderr.String(), "gc status: building session catalog") || !strings.Contains(stderr.String(), "catalog unavailable") {
-		t.Fatalf("stderr = %q, want catalog list error", stderr.String())
+
+	var payload cliJSONErrorOutput
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON error: %v\n%s", err, stdout.String())
+	}
+	if payload.OK {
+		t.Fatalf("ok = true, want false; payload=%+v", payload)
+	}
+	if payload.Error.Code != "city_resolve_failed" || payload.Error.ExitCode != code {
+		t.Fatalf("error = %+v, want city_resolve_failed with exit code %d", payload.Error, code)
+	}
+	if strings.Contains(stderr.String(), "gc status: loading") {
+		t.Fatalf("stderr contains human diagnostic: %q", stderr.String())
+	}
+	var diagnostic cliJSONDiagnostic
+	if err := json.Unmarshal(bytes.TrimSpace(stderr.Bytes()), &diagnostic); err != nil {
+		t.Fatalf("stderr is not JSON diagnostic: %v\n%s", err, stderr.String())
+	}
+	if diagnostic.ExitCode != code {
+		t.Fatalf("stderr exit_code = %d, want %d", diagnostic.ExitCode, code)
+	}
+}
+
+func TestCityStatusReportsCatalogListError(t *testing.T) {
+	sp := runtime.NewFake()
+	dops := newFakeDrainOps()
+	oldOpen := openCityStoreAtForStatus
+	openCityStoreAtForStatus = func(string) (beads.Store, error) {
+		return &listErrorStore{Store: beads.NewMemStore()}, nil
+	}
+	t.Cleanup(func() { openCityStoreAtForStatus = oldOpen })
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{
+			{Name: "status-checker", MaxActiveSessions: intPtr(1)},
+		},
+	}
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.beads): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doCityStatus(sp, dops, cfg, cityPath, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (degraded session snapshot); stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc status: loading session snapshot") || !strings.Contains(stderr.String(), "catalog unavailable") {
+		t.Fatalf("stderr = %q, want session snapshot warning", stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Agents:") || !strings.Contains(out, "status-checker") {
+		t.Fatalf("stdout = %q, want partial text status report", out)
+	}
+}
+
+func TestCityStatusSkipsStoreOpenWhenNoPersistedStoreExists(t *testing.T) {
+	sp := runtime.NewFake()
+	dops := newFakeDrainOps()
+	oldOpen := openCityStoreAtForStatus
+	called := false
+	openCityStoreAtForStatus = func(string) (beads.Store, error) {
+		called = true
+		return nil, errors.New("unexpected store open")
+	}
+	t.Cleanup(func() { openCityStoreAtForStatus = oldOpen })
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doCityStatus(sp, dops, cfg, t.TempDir(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if called {
+		t.Fatal("status opened bead store without any persisted store state")
 	}
 }
 
@@ -418,7 +598,7 @@ func TestCityStatusAgentSuspendedByRig(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doCityStatus(sp, dops, cfg, "/tmp/city", &stdout, &stderr)
+	code := doCityStatus(sp, dops, cfg, t.TempDir(), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0", code)
 	}
@@ -664,6 +844,279 @@ type listErrorStore struct {
 
 func (s *listErrorStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	return nil, errors.New("catalog unavailable")
+}
+
+// ---------------------------------------------------------------------------
+// Six-row read-path routing matrix for `gc status` (ADR 0001, ga-h6w).
+// ---------------------------------------------------------------------------
+//
+// Each row exercises one branch of routeCityStatus:
+//
+//   api-happy-path       API returns 200 with items         route=api, exit 0
+//   api-cache-not-live   API returns 503 cache_not_live     fallback, exit 0
+//   api-500-fallback     API returns generic 500            fallback (conn-refused), exit 0
+//   api-404-error        API returns 404                    no fallback, exit 1
+//   controller-down      apiClient returns nil (no env)     fallback (controller-down), exit 0
+//   escape-hatch         GC_NO_API truthy                   fallback (escape-hatch), exit 0
+
+type cityStatusMatrixHandler func(t *testing.T) http.Handler
+
+func okCityStatusHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/status") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("X-GC-Cache-Age-S", "2")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name":        "test-city",
+			"path":        "/tmp/test-city",
+			"uptime_sec":  1,
+			"suspended":   false,
+			"agent_count": 1,
+			"rig_count":   0,
+			"running":     1,
+			"agents":      map[string]any{"total": 1, "running": 1},
+			"rigs":        map[string]any{"total": 0},
+			"work":        map[string]any{},
+			"mail":        map[string]any{},
+			"agent_details": []map[string]any{
+				{
+					"name":           "mayor",
+					"qualified_name": "mayor",
+					"scope":          "city",
+					"running":        true,
+					"suspended":      false,
+					"session_name":   "test-city--mayor",
+					"group_name":     "mayor",
+				},
+			},
+		})
+	})
+}
+
+func cityStatusProblemHandler(status int, detail string) cityStatusMatrixHandler {
+	return func(_ *testing.T) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": status,
+				"title":  http.StatusText(status),
+				"detail": detail,
+			})
+		})
+	}
+}
+
+func writeCityStatusTestCity(t *testing.T) string {
+	t.Helper()
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "mayor"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	return cityPath
+}
+
+func TestRouteCityStatus_SixRowMatrix(t *testing.T) {
+	tests := []struct {
+		name         string
+		handler      cityStatusMatrixHandler
+		useNilClient bool
+		nilReason    string
+		wantExit     int
+		wantRoute    string
+		wantReason   string
+		wantStderr   string
+	}{
+		{
+			name:      "api-happy-path",
+			handler:   okCityStatusHandler,
+			wantExit:  0,
+			wantRoute: "api",
+		},
+		{
+			name:       "api-cache-not-live",
+			handler:    cityStatusProblemHandler(http.StatusServiceUnavailable, "cache_not_live: priming"),
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "cache-not-live",
+		},
+		{
+			name:       "api-500-fallback",
+			handler:    cityStatusProblemHandler(http.StatusInternalServerError, "explode"),
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "conn-refused",
+		},
+		{
+			name:       "api-404-error",
+			handler:    cityStatusProblemHandler(http.StatusNotFound, "not_found: city missing"),
+			wantExit:   1,
+			wantStderr: "not_found",
+		},
+		{
+			name:         "controller-down",
+			useNilClient: true,
+			nilReason:    "controller-down",
+			wantExit:     0,
+			wantRoute:    "fallback",
+			wantReason:   "controller-down",
+		},
+		{
+			name:         "escape-hatch",
+			useNilClient: true,
+			nilReason:    "escape-hatch",
+			wantExit:     0,
+			wantRoute:    "fallback",
+			wantReason:   "escape-hatch",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_DEBUG", "1")
+			cityPath := writeCityStatusTestCity(t)
+			cfg, err := loadCityConfig(cityPath, new(bytes.Buffer))
+			if err != nil {
+				t.Fatalf("loadCityConfig: %v", err)
+			}
+
+			var c *api.Client
+			if !tc.useNilClient {
+				srv := httptest.NewServer(tc.handler(t))
+				defer srv.Close()
+				c = api.NewCityScopedClient(srv.URL, "test-city")
+			}
+
+			sp := runtime.NewFake()
+			dops := newFakeDrainOps()
+			var stdout, stderr bytes.Buffer
+			code := routeCityStatus(cityPath, cfg, sp, dops, c, tc.nilReason, false, &stdout, &stderr)
+
+			if code != tc.wantExit {
+				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
+			}
+			if tc.wantRoute != "" {
+				want := "route=" + tc.wantRoute
+				if tc.wantReason != "" {
+					want += " reason=" + tc.wantReason
+				}
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+				}
+				if n := strings.Count(stderr.String(), "route="); n != 1 {
+					t.Errorf("route=... lines = %d, want 1:\n%s", n, stderr.String())
+				}
+			}
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr missing %q:\n%s", tc.wantStderr, stderr.String())
+			}
+		})
+	}
+}
+
+// TestRouteCityStatus_APIJSONIncludesCacheAge verifies the API-path JSON
+// output carries the _cache_age_s envelope field while the fallback path
+// omits it. Enforces D5 from the gc-read-path design doc.
+func TestRouteCityStatus_APIJSONIncludesCacheAge(t *testing.T) {
+	cityPath := writeCityStatusTestCity(t)
+	cfg, err := loadCityConfig(cityPath, new(bytes.Buffer))
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	srv := httptest.NewServer(okCityStatusHandler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	sp := runtime.NewFake()
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	if code := routeCityStatus(cityPath, cfg, sp, dops, c, "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("unmarshal: %v; output: %s", err, stdout.String())
+	}
+	age, ok := envelope["_cache_age_s"].(float64)
+	if !ok {
+		t.Fatalf("_cache_age_s missing or wrong type; envelope=%v", envelope)
+	}
+	if age != 2.0 {
+		t.Errorf("_cache_age_s = %v, want 2.0", age)
+	}
+}
+
+func TestRouteCityStatus_FallbackJSONOmitsCacheAge(t *testing.T) {
+	cityPath := writeCityStatusTestCity(t)
+	cfg, err := loadCityConfig(cityPath, new(bytes.Buffer))
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	sp := runtime.NewFake()
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	if code := routeCityStatus(cityPath, cfg, sp, dops, nil, "controller-down", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("unmarshal: %v; output: %s", err, stdout.String())
+	}
+	if _, ok := envelope["_cache_age_s"]; ok {
+		t.Errorf("fallback JSON should omit _cache_age_s, got: %s", stdout.String())
+	}
+}
+
+// TestRouteCityStatus_APIStaleBanner verifies the human-output staleness
+// banner appears when the supervisor reports a cache age > 30 s.
+func TestRouteCityStatus_APIStaleBanner(t *testing.T) {
+	cityPath := writeCityStatusTestCity(t)
+	cfg, err := loadCityConfig(cityPath, new(bytes.Buffer))
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	staleHandler := func(_ *testing.T) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-GC-Cache-Age-S", "123")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name": "test-city", "path": "/tmp/test-city",
+				"uptime_sec": 1, "suspended": false,
+				"agent_count": 0, "rig_count": 0, "running": 0,
+				"agents": map[string]any{"total": 0},
+				"rigs":   map[string]any{"total": 0},
+				"work":   map[string]any{}, "mail": map[string]any{},
+			})
+		})
+	}
+	srv := httptest.NewServer(staleHandler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	sp := runtime.NewFake()
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	if code := routeCityStatus(cityPath, cfg, sp, dops, c, "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "cache age:") {
+		t.Errorf("human output should include stale banner, got:\n%s", stdout.String())
+	}
 }
 
 func TestControllerStatusGuidance(t *testing.T) {

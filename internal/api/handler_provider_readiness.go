@@ -45,6 +45,7 @@ var (
 	providerProbePathEnv        = "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
 	providerProbeGOOS           = runtime.GOOS
 	providerProbeCommandContext = exec.CommandContext
+	providerProbeExpandDirs     = searchpath.Expand
 	providerProbeCache          = newCachedProviderProbeStore()
 
 	defaultProviderReadinessItems = []string{"claude", "codex", "gemini"}
@@ -333,7 +334,7 @@ func probeClaude(ctx context.Context, homeDir string) providerProbeResult {
 		return providerProbeResult{status: probeStatusNotInstalled, detail: "claude executable not found in probe PATH"}
 	}
 
-	stdout, _, err := runProbeCommand(ctx, homeDir, 5*time.Second, path, "auth", "status", "--json")
+	stdout, _, err := runProbeCommandWithEnv(ctx, homeDir, 5*time.Second, claudeProbeCommandEnv(), path, "auth", "status", "--json")
 	if err != nil && strings.TrimSpace(stdout) == "" {
 		return providerProbeResult{status: probeStatusProbeError, detail: "claude auth status failed before returning JSON"}
 	}
@@ -490,10 +491,11 @@ func githubCLITokenConfigured() bool {
 }
 
 func probeGitHubCLIAuthStatus(ctx context.Context, homeDir, ghPath string) providerProbeResult {
-	stdout, stderr, err := runProbeCommand(
+	stdout, stderr, err := runProbeCommandWithEnv(
 		ctx,
 		homeDir,
 		5*time.Second,
+		gitHubCLIProbeCommandEnv(),
 		ghPath,
 		"auth",
 		"status",
@@ -533,17 +535,18 @@ func findProbeBinary(name, homeDir string) (string, bool) {
 }
 
 func providerProbeSearchDirs(homeDir, goos, basePath string) []string {
-	return searchpath.Expand(homeDir, goos, basePath)
+	return providerProbeExpandDirs(homeDir, goos, basePath)
 }
 
 func providerProbeSearchPath(homeDir string) string {
-	return searchpath.ExpandPath(homeDir, providerProbeGOOS, providerProbePathEnv)
+	return strings.Join(providerProbeSearchDirs(homeDir, providerProbeGOOS, providerProbePathEnv), string(os.PathListSeparator))
 }
 
-func runProbeCommand(
+func runProbeCommandWithEnv(
 	ctx context.Context,
 	homeDir string,
 	timeout time.Duration,
+	extraEnv []string,
 	path string,
 	args ...string,
 ) (string, string, error) {
@@ -552,7 +555,7 @@ func runProbeCommand(
 
 	cmd := providerProbeCommandContext(ctx, path, args...)
 	cmd.Dir = homeDir
-	cmd.Env = probeCommandEnv(homeDir)
+	cmd.Env = append(probeCommandEnv(homeDir), extraEnv...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -588,27 +591,30 @@ func probeCommandEnv(homeDir string) []string {
 	} else {
 		env = append(env, "XDG_STATE_HOME="+filepath.Join(homeDir, ".local", "state"))
 	}
-	if configDir := strings.TrimSpace(os.Getenv("GH_CONFIG_DIR")); configDir != "" {
-		env = append(env, "GH_CONFIG_DIR="+configDir)
-	}
-	for _, key := range []string{
+	return env
+}
+
+func claudeProbeCommandEnv() []string {
+	return probeEnvVars("CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN")
+}
+
+func gitHubCLIProbeCommandEnv() []string {
+	return probeEnvVars(
+		"GH_CONFIG_DIR",
 		"GH_HOST",
 		"GH_TOKEN",
 		"GITHUB_TOKEN",
 		"GH_ENTERPRISE_TOKEN",
 		"GITHUB_ENTERPRISE_TOKEN",
-	} {
+	)
+}
+
+func probeEnvVars(keys ...string) []string {
+	env := make([]string, 0, len(keys))
+	for _, key := range keys {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			env = append(env, key+"="+value)
 		}
-	}
-	// CLAUDE_CODE_OAUTH_TOKEN holds the long-lived first-party token from
-	// `claude setup-token`. In headless / containerised deployments it is
-	// the only authentication signal available, so it must be forwarded
-	// into the probe subprocess — otherwise `claude auth status --json`
-	// reports loggedIn: false and readiness falls through to needs_auth.
-	if value := strings.TrimSpace(os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")); value != "" {
-		env = append(env, "CLAUDE_CODE_OAUTH_TOKEN="+value)
 	}
 	return env
 }

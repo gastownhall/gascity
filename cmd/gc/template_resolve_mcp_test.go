@@ -122,13 +122,68 @@ args = ["notes-mcp"]
 	})
 
 	t.Run("unsupported provider hard errors when MCP exists", func(t *testing.T) {
-		agent := &config.Agent{Name: "worker", Scope: "city", Provider: "cursor"}
+		agent := &config.Agent{Name: "worker", Scope: "city", Provider: "copilot"}
 		_, err := resolveTemplate(buildParams("tmux"), agent, agent.QualifiedName(), nil)
 		if err == nil {
 			t.Fatal("expected unsupported provider error, got nil")
 		}
 		if !strings.Contains(err.Error(), "effective MCP requires a supported provider family") {
 			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("cursor provider accepts mcp", func(t *testing.T) {
+		agent := &config.Agent{Name: "worker", Scope: "city", Provider: "cursor"}
+		tp, err := resolveTemplate(buildParams("tmux"), agent, agent.QualifiedName(), nil)
+		if err != nil {
+			t.Fatalf("resolveTemplate: %v", err)
+		}
+		if tp.FPExtra["mcp:cursor"] == "" {
+			t.Fatalf("expected cursor mcp fingerprint entry, got %+v", tp.FPExtra)
+		}
+	})
+
+	t.Run("implicit control dispatcher skips inherited pack mcp", func(t *testing.T) {
+		cfg := &config.City{
+			Workspace:  config.Workspace{Provider: "claude"},
+			Providers:  map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none"}},
+			Daemon:     config.DaemonConfig{FormulaV2: true},
+			PackMCPDir: filepath.Join(cityPath, "mcp"),
+		}
+		config.InjectImplicitAgents(cfg)
+		var control *config.Agent
+		for i := range cfg.Agents {
+			if cfg.Agents[i].Name == config.ControlDispatcherAgentName {
+				control = &cfg.Agents[i]
+				break
+			}
+		}
+		if control == nil {
+			t.Fatal("InjectImplicitAgents did not create control-dispatcher")
+		}
+		params := &agentBuildParams{
+			city:            cfg,
+			cityName:        "city",
+			cityPath:        cityPath,
+			workspace:       &cfg.Workspace,
+			providers:       cfg.Providers,
+			lookPath:        stubLookPath,
+			fs:              fsys.OSFS{},
+			beaconTime:      time.Unix(0, 0),
+			beadNames:       make(map[string]string),
+			stderr:          io.Discard,
+			sessionProvider: "tmux",
+		}
+
+		tp, err := resolveTemplate(params, control, control.QualifiedName(), nil)
+		if err != nil {
+			t.Fatalf("resolveTemplate(control-dispatcher): %v", err)
+		}
+		if len(tp.MCPServers) != 0 {
+			t.Fatalf("control-dispatcher MCPServers len = %d, want 0", len(tp.MCPServers))
+		}
+		if got := tp.FPExtra["mcp:claude"]; got != "" {
+			t.Fatalf("control-dispatcher unexpectedly contributed MCP fingerprint %q", got)
 		}
 	})
 

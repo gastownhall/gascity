@@ -78,6 +78,9 @@ reviewer-created mutations.
 Persist durable structured output compatible with a future `dx-review
 summarize` consumer. The output must include these keys:
 
+- `lane_id`: `{{lane_one_id}}`
+- `provider`: `{{lane_one_provider}}`
+- `model`: `{{lane_one_model}}`
 - `verdict`: one of `pass`, `pass_with_findings`, `fail`, or `blocked`
 - `summary`: concise review summary
 - `findings_count`: integer count of findings
@@ -121,6 +124,9 @@ reviewer-created mutations.
 Persist durable structured output compatible with a future `dx-review
 summarize` consumer. The output must include these keys:
 
+- `lane_id`: `{{lane_two_id}}`
+- `provider`: `{{lane_two_provider}}`
+- `model`: `{{lane_two_model}}`
 - `verdict`: one of `pass`, `pass_with_findings`, `fail`, or `blocked`
 - `summary`: concise review summary
 - `findings_count`: integer count of findings
@@ -162,14 +168,16 @@ The synthesis output must preserve lane provenance and include:
   failure reasons, read-only enforcement, and mutation deltas
 - `verdict`: combined quorum verdict
 - `summary`: combined summary
-- `findings_count`: total actionable findings
+- `findings_count`: total deduplicated actionable findings
 - `findings`: deduplicated findings with lane evidence
 - `evidence`: lane outputs and any synthesis-only checks
 - `usage`: aggregate usage if available
 - `read_only_enforcement`: synthesis baseline/after delta and lane deltas
 - `mutations_delta`: synthesis-created delta only; empty if none
 - `failure_class`: `none`, `transient`, or `hard`
-- `failure_reason`: stable reason string or empty
+- `failure_reason`: stable reason string or empty. Go finalizer failures use
+  `lane=<lane_id> reason=<stable_reason>` entries joined by `; ` when a lane
+  is responsible. Unknown lane verdict values are hard contract failures.
 
 Propagate this JSON through `gc.output_json` when available, or store it in the
 bead notes/metadata exactly enough for future `dx-review summarize` ingestion.

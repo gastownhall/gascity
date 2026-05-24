@@ -91,6 +91,33 @@ func TestSamePathDifferent(t *testing.T) {
 	}
 }
 
+// IsOutsideDir is the post-Rel containment check used at every place
+// that derives a relative path from a base and needs to refuse paths
+// that would escape it. Cover all three branches: direct ".." escape,
+// "../foo" prefix escape, and contained paths (".", "foo", "foo/bar").
+func TestIsOutsideDir(t *testing.T) {
+	sep := string(filepath.Separator)
+	tests := []struct {
+		rel  string
+		want bool
+	}{
+		{"..", true},
+		{".." + sep + "outside", true},
+		{".." + sep + "deep" + sep + "escape", true},
+		{".", false},
+		{"foo", false},
+		{"foo" + sep + "bar", false},
+		{"", false},
+		{"..foo", false},     // prefix-only — not an escape.
+		{"..." + sep, false}, // three dots — not an escape.
+	}
+	for _, tt := range tests {
+		if got := IsOutsideDir(tt.rel); got != tt.want {
+			t.Errorf("IsOutsideDir(%q) = %v, want %v", tt.rel, got, tt.want)
+		}
+	}
+}
+
 func TestPathWithin(t *testing.T) {
 	root := t.TempDir()
 	child := filepath.Join(root, "nested", "child")

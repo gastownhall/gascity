@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "name", "rig", "path", "prefix"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "rig add" },
+    "action": { "const": "add" },
+    "name": { "type": "string" },
+    "rig": { "type": "string" },
+    "path": { "type": "string" },
+    "prefix": { "type": "string" },
+    "default_branch": { "type": "string" },
+    "suspended": { "type": "boolean" }
+  },
+  "additionalProperties": true
+}

@@ -38,6 +38,74 @@ func (m *mockCheck) Fix(_ *CheckContext) error {
 	return nil
 }
 
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
+func (m *mockCheck) WarmupEligible() bool { return false }
+
+func TestCheckWarmupEligibleDefaultsFalse(t *testing.T) {
+	checks := []Check{
+		&AgentSessionsCheck{},
+		&BDSplitStoreCheck{},
+		&BdBackupSizeCheck{},
+		&BeadsRoleCheck{},
+		&BeadsStoreCheck{},
+		&BinaryCheck{},
+		&BuiltinPackFamilyCheck{},
+		&CityConfigCheck{},
+		&CityStructureCheck{},
+		&ConfigRefsCheck{},
+		&ConfigSemanticsCheck{},
+		&ConfigValidCheck{},
+		&ControllerCheck{},
+		&CustomTypesCheck{},
+		&DeprecatedAttachmentFieldsCheck{},
+		&DoltConfigCheck{},
+		&DoltNomsSizeCheck{},
+		&DoltServerCheck{},
+		&DoltVersionCheck{},
+		&DurationRangeCheck{},
+		&EventLogSizeCheck{},
+		&EventsLogCheck{},
+		&ImplicitImportCacheCheck{},
+		&NestedWorktreePruneCheck{},
+		&OrphanSessionsCheck{},
+		&OrderFiringCurrentCheck{},
+		&PackCacheCheck{},
+		&PreStartScriptsCheck{},
+		&ProviderParityCheck{},
+		&RigBeadsCheck{},
+		&RigDoltServerCheck{},
+		&RigGitCheck{},
+		&RigPathCheck{},
+		&SkillCollisionCheck{},
+		&WorktreeCheck{},
+		&WorktreeDiskSizeCheck{},
+		&ZombieSessionsCheck{},
+	}
+
+	for _, c := range checks {
+		t.Run(fmt.Sprintf("%T", c), func(t *testing.T) {
+			if c.WarmupEligible() {
+				t.Errorf("%T.WarmupEligible() = true, want false", c)
+			}
+		})
+	}
+
+	t.Run("pack_script_check_default_false", func(t *testing.T) {
+		c := &PackScriptCheck{CheckName: "x:y"}
+		if c.WarmupEligible() {
+			t.Error("zero-value PackScriptCheck.WarmupEligible() = true, want false")
+		}
+	})
+
+	t.Run("pack_script_check_opted_in", func(t *testing.T) {
+		c := &PackScriptCheck{CheckName: "x:y", Warmup: true}
+		if !c.WarmupEligible() {
+			t.Error("PackScriptCheck{Warmup: true}.WarmupEligible() = false, want true")
+		}
+	})
+}
+
 func TestDoctor_AllPass(t *testing.T) {
 	d := &Doctor{}
 	d.Register(&mockCheck{name: "a", status: StatusOK, msg: "ok"})
@@ -221,6 +289,41 @@ func TestPrintSummary(t *testing.T) {
 	}
 }
 
+func TestDoctor_ReportResultsInOrder(t *testing.T) {
+	d := &Doctor{}
+	d.Register(&mockCheck{name: "first", status: StatusOK, msg: "fine"})
+	d.Register(&mockCheck{name: "second", status: StatusWarning, msg: "hmm"})
+	d.Register(&mockCheck{name: "third", status: StatusError, msg: "bad"})
+
+	var buf bytes.Buffer
+	r := d.Run(&CheckContext{CityPath: "/tmp"}, &buf, false)
+
+	if len(r.Results) != 3 {
+		t.Fatalf("Results length = %d, want 3", len(r.Results))
+	}
+	names := []string{r.Results[0].Name, r.Results[1].Name, r.Results[2].Name}
+	want := []string{"first", "second", "third"}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Errorf("Results[%d].Name = %q, want %q", i, names[i], want[i])
+		}
+	}
+}
+
+func TestDoctor_RunCollectSuppressesStreaming(t *testing.T) {
+	d := &Doctor{}
+	d.Register(&mockCheck{name: "silent", status: StatusError, msg: "bad"})
+
+	r := d.RunCollect(&CheckContext{CityPath: "/tmp"}, false)
+
+	if len(r.Results) != 1 || r.Results[0].Name != "silent" {
+		t.Fatalf("Results = %#v, want one result named 'silent'", r.Results)
+	}
+	if r.Failed != 1 {
+		t.Errorf("Failed = %d, want 1", r.Failed)
+	}
+}
+
 func TestDoctor_FixHint(t *testing.T) {
 	d := &Doctor{}
 	d.Register(&hintCheck{})
@@ -248,6 +351,10 @@ func (c *detailCheck) Run(_ *CheckContext) *CheckResult {
 func (c *detailCheck) CanFix() bool              { return false }
 func (c *detailCheck) Fix(_ *CheckContext) error { return nil }
 
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
+func (c *detailCheck) WarmupEligible() bool { return false }
+
 // hintCheck returns a failing result with a FixHint.
 type hintCheck struct{}
 
@@ -263,6 +370,10 @@ func (c *hintCheck) Run(_ *CheckContext) *CheckResult {
 func (c *hintCheck) CanFix() bool              { return false }
 func (c *hintCheck) Fix(_ *CheckContext) error { return nil }
 
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
+func (c *hintCheck) WarmupEligible() bool { return false }
+
 type unchangedFixCheck struct{}
 
 func (c *unchangedFixCheck) Name() string { return "unchanged-fix" }
@@ -275,3 +386,7 @@ func (c *unchangedFixCheck) Run(_ *CheckContext) *CheckResult {
 }
 func (c *unchangedFixCheck) CanFix() bool              { return true }
 func (c *unchangedFixCheck) Fix(_ *CheckContext) error { return nil }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
+func (c *unchangedFixCheck) WarmupEligible() bool { return false }

@@ -68,6 +68,7 @@ The `start` operation receives a JSON object on stdin:
   "work_dir": "/path/to/working/directory",
   "command": "claude --dangerously-skip-permissions",
   "env": {"GC_AGENT": "mayor", "GC_CITY": "/home/user/bright-lights"},
+  "lifecycle": "one_shot",
   "process_names": ["claude", "node"],
   "nudge": "initial prompt text",
   "pre_start": ["mkdir -p /workspace", "git clone repo /workspace"],
@@ -101,6 +102,10 @@ hints or ignore them:
   after the agent is ready. Scripts that support interactive input can
   handle this in `start` (send the text after session creation) or leave
   it to the separate `nudge` operation which gc calls after `start` returns.
+
+- **`lifecycle`** — `"one_shot"` marks a short-lived command that is
+  expected to exit after handling its prompt. Providers should not require
+  a persistent post-start process for one-shot starts.
 
 - **`pre_start`** — array of shell commands to run on the target
   filesystem **before** the session is created. Used for directory

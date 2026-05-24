@@ -24,6 +24,8 @@ func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agen
 	return storeRefs[index] == assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
 }
 
+// filterAssignedWorkBeadsForPoolDemand resolves work through the routed
+// backing template because pool scale decisions are per agent template.
 func filterAssignedWorkBeadsForPoolDemand(
 	cfg *config.City,
 	cityPath string,
@@ -50,12 +52,8 @@ func filterAssignedWorkBeadsForPoolDemand(
 		if template != "" {
 			sessionBeadTemplate[sb.ID] = template
 		}
-		assigneeToSessionBeadID[sb.ID] = sb.ID
-		if sessionName := strings.TrimSpace(sb.Metadata["session_name"]); sessionName != "" {
-			assigneeToSessionBeadID[sessionName] = sb.ID
-		}
-		if identity := strings.TrimSpace(sb.Metadata["configured_named_identity"]); identity != "" {
-			assigneeToSessionBeadID[identity] = sb.ID
+		for _, id := range sessionBeadAssigneeIdentities(sb) {
+			assigneeToSessionBeadID[id] = sb.ID
 		}
 	}
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
@@ -83,6 +81,8 @@ func filterAssignedWorkBeadsForPoolDemand(
 	return filtered
 }
 
+// filterAssignedWorkBeadsForSessionWake resolves work through assignment
+// identities because session wake decisions are per concrete session owner.
 func filterAssignedWorkBeadsForSessionWake(
 	cfg *config.City,
 	cityPath string,
@@ -131,9 +131,9 @@ func filterAssignedWorkBeadsForSessionWake(
 			continue
 		}
 		storeRef := assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
-		add(sb.ID, storeRef)
-		add(sb.Metadata["session_name"], storeRef)
-		add(sb.Metadata["configured_named_identity"], storeRef)
+		for _, id := range sessionBeadAssigneeIdentities(sb) {
+			add(id, storeRef)
+		}
 		add(template, storeRef)
 	}
 

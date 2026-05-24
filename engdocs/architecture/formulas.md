@@ -83,14 +83,20 @@ coverage instead of failing the whole formula. The synthesis step is hard-fail
 because it is responsible for persisting the final durable state.
 
 Reviewer output is structured for future automation. Lanes must write
-`verdict`, `summary`, `findings_count`, `findings`, `evidence`, `usage`,
-`read_only_enforcement`, `mutations_delta`, `failure_class`, and
-`failure_reason`; synthesis preserves lane provenance and writes a
+`lane_id`, `provider`, `model`, `verdict`, `summary`, `findings_count`,
+`findings`, `evidence`, `usage`, `read_only_enforcement`, `mutations_delta`,
+`failure_class`, and `failure_reason`; synthesis preserves lane provenance and
+writes a
 `review-quorum.summary.v1` output. `internal/reviewquorum` defines the durable
 Go contract and finalizer, but the current formula synthesis step is
 agent-executed and does not call `reviewquorum.Finalize` directly. Future
 `dx-review summarize` compatibility can consume that state, but `dx-review` is
 not the lifecycle owner.
+The summary `findings_count` is deduplicated, top-level `mutations_delta` is
+reserved for synthesis-created changes, and reviewer mutation deltas stay under
+the corresponding lane. Go finalizer lane failures use
+`lane=<lane_id> reason=<stable_reason>` entries joined by `; `; unknown lane
+verdict values are hard contract failures.
 
 Read-only enforcement is defined as a mutation baseline delta. A reviewer must
 record the workspace state before review with `git status --porcelain=v1 -z`
@@ -197,6 +203,31 @@ Formula layers are assembled from:
 - `[formulas].dir` in `city.toml`
 - rig packs
 - `[[rigs]].formulas_dir`
+
+Rig-scoped formula var defaults live on the rig entry itself:
+
+```toml
+[[rigs]]
+name = "mo"
+path = "/home/me/projects/mo"
+
+[rigs.formula_vars]
+test_command = "make test-fast"
+lint_command = "golangci-lint run"
+```
+
+When a formula runs with an agent bound to a rig (via `dir = "mo"` or an
+absolute filesystem path), `BuildSlingFormulaVars` folds these entries into
+the final var map. Precedence (highest wins):
+
+1. Explicit `--var key=value` on the CLI
+2. `rigs.<name>.formula_vars[key]`
+3. Routing-injected defaults (`issue`, `rig_name`, `base_branch`, `target_branch`, ...)
+4. Formula-declared `[vars.<name>].default`
+
+`gc formula show --rig <name>` surfaces active rig defaults as
+`(rig default="...")` next to the var description so operators can verify
+what will actually substitute before dispatch.
 
 Wisp cleanup is configured in `city.toml`:
 

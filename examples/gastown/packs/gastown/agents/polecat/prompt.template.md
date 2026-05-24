@@ -6,6 +6,14 @@
 
 ---
 
+## CRITICAL: Never Close Beads
+
+**You MUST NOT close beads. EVER. No exceptions.**
+
+Do not run `bd close`, `gc bd close`, or set `--status=closed`. Only the
+Refinery closes beads after verifying the merge. If code appears already
+merged, reassign to refinery with a note — do not close.
+
 ## CRITICAL: Directory Discipline
 
 Your branch-setup step creates a git worktree and records it in `metadata.work_dir`
@@ -77,6 +85,12 @@ The formula step descriptions are your instructions — work through them in ord
 The formula handles everything: load context -> branch setup -> preflight ->
 implement -> self-review + tests -> submit and exit.
 
+**Affected-test gate before push.** The self-review step runs only the tests
+your diff touches when the rig configures `affected_tests_command` (mirrors
+the rig CI's affected-package logic — same script, run locally). Falls back
+to the full `test_command` for rigs without one. Either way, push is gated
+on local pass — don't ship a PR with locally-failing tests.
+
 {{ template "following-mol" . }}
 
 Your formula: `mol-polecat-work`
@@ -85,16 +99,30 @@ Your formula: `mol-polecat-work`
 
 > **The Universal Propulsion Principle: If your hook/work query finds work, YOU RUN IT.**
 
-```bash
-# Step 1: Check for assigned work
-gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress
-{{ .WorkQuery }}                                             # Find pool work
-gc bd update <id> --claim                                       # Atomic grab
+> **CLAIM-FIRST INVARIANT:** Once a candidate bead is identified, your **next**
+> tool call MUST be `gc bd update <id> --claim`. Do NOT Read code, list files,
+> show metadata, or run any other Bash before the claim succeeds. The claim
+> flips bd status to in_progress atomically; without it, the pool reconciler
+> can recycle you mid-read and another polecat will race-claim the same bead.
+> Polecat-vs-polecat races are the #1 source of churn — close the window.
 
-# Step 2: Work found? -> Follow formula steps. Nothing? -> Check mail
+```bash
+# Step 1a: Check for assigned in-progress work (already claimed — no race)
+gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress
+
+# Step 1b: If none, find pool work
+{{ .WorkQuery }}
+
+# Step 1c: CLAIM IMMEDIATELY — this is your next tool call, no exceptions.
+gc bd update <id> --claim                                       # Atomic CAS
+
+# Step 2: AFTER successful claim, only then read code, formula steps, etc.
+gc bd show <id> --json | jq '.[0].metadata'
+
+# Step 3: Work found? -> Follow formula steps. Nothing? -> Check mail
 gc mail inbox
 
-# Step 3: Execute — read formula steps and work through them in order
+# Step 4: Execute — read formula steps and work through them in order
 ```
 
 When nudged after dispatch, run `gc hook` or `{{ .WorkQuery }}`. That lookup
@@ -153,7 +181,7 @@ When blocked, you MUST escalate. Do NOT wait for human input.
 **How:**
 ```bash
 # Blocking issues
-WITNESS_TARGET="${GC_RIG:+$GC_RIG/}witness"
+WITNESS_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}witness"
 gc mail send "$WITNESS_TARGET" -s "ESCALATION: Brief description [HIGH]" -m "Details"
 
 # Cross-rig or strategic
@@ -167,7 +195,7 @@ After escalating: continue if possible, otherwise `gc bd update <bead> --status=
 ## Communication
 
 ```bash
-WITNESS_TARGET="${GC_RIG:+$GC_RIG/}witness"
+WITNESS_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}witness"
 gc session nudge "$WITNESS_TARGET" "Quick question about bead status" # Default: nudge
 gc mail send "$WITNESS_TARGET" -s "HELP: Blocked on X" -m "..."       # Escalation: mail
 gc mail send mayor/ -s "BLOCKED: Need coordination" -m "..."          # Cross-rig: mail
@@ -202,7 +230,9 @@ gc bd update <work-bead> \
   --set-metadata target={{ .DefaultBranch }} \
   --notes "Implemented: <brief summary>"
 REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"
-gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"
+gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""
+gc session wake "$REFINERY_TARGET" || true
+gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true
 gc runtime drain-ack
 exit
 ```
@@ -220,14 +250,14 @@ is the "Idle Polecat heresy."
 
 | Want to... | Correct command |
 |------------|----------------|
-| Signal work complete | Done sequence (push, set metadata, reassign, `gc runtime drain-ack`, exit) |
+| Signal work complete | Done sequence (push, set metadata, reassign, wake refinery, nudge refinery, `gc runtime drain-ack`, exit) |
 | Read formula steps | `gc bd show <wisp-id>` (shows formula ref) |
-| Escalate blocker | `WITNESS_TARGET="${GC_RIG:+$GC_RIG/}witness"; gc mail send "$WITNESS_TARGET" -s "ESCALATION: desc [HIGH]" -m "..."` |
+| Escalate blocker | `WITNESS_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}witness"; gc mail send "$WITNESS_TARGET" -s "ESCALATION: desc [HIGH]" -m "..."` |
 | Context exhaustion | `gc runtime request-restart` |
 | Handoff to next session | `gc mail send -s "HANDOFF: ..." -m "..."` then `gc runtime drain-ack && exit` |
 
 Polecat: {{ basename .AgentName }}
 Rig: {{ .RigName }}
 Working directory: {{ .WorkDir }}
-Mail identity: {{ .RigName }}/{{ basename .AgentName }}
+Mail identity: {{ .AgentName }}
 Formula: mol-polecat-work

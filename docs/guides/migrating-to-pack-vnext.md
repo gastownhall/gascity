@@ -3,14 +3,8 @@ title: "PackV2: The New Package System for Gas City"
 description: How to move an existing Gas City 0.14.0 city or pack to the PackV2 schema and directory conventions.
 ---
 
-> [!IMPORTANT]
-> This document describes the pre-release Gas City v0.15.0 rollout.
-> Some PackV2 surfaces are still under active development; release-gated
-> caveats below use the form "As of release v0.15.0, ...".
-
 This guide is the practical migration companion for moving from the
-0.14.0 PackV1 world into the PackV2 model that first landed in 0.14.1
-and is being finished in the 0.15.0 wave.
+0.14.x PackV1 world into the PackV2 model.
 
 PackV2 was an initiative to address multiple problems in the way we
 write down how a city or a package works. There was a lot of
@@ -36,34 +30,40 @@ state. It matters to the model, but it is mostly not user migration
 work, so this guide keeps the focus on `pack.toml`, `city.toml`, and the
 pack directory tree.
 
-The target public migration flow is `gc doctor`, then
-`gc doctor --fix` for the safe mechanical rewrites, then `gc doctor`
-again to confirm the result. Some old cities may hard-break until
-migrated; that is intentional as of release v0.15.0.
+The public migration flow is:
 
-> **Current rollout note:** The doctor-first remediation slice lands
-> separately from the Skills/MCP, infix, and rig-path slices. Until that
-> remediation work is present on your branch, `gc import migrate` may
-> still exist as a transitional command surface even though the target
-> model is `gc doctor` followed by `gc doctor --fix`.
+1. run `gc doctor`
+2. run `gc doctor --fix` for the safe mechanical rewrites that are available
+3. run `gc doctor` again to confirm the result
+
+Some old cities may hard-break until migrated. That is intentional in
+this last-call-before-deprecation wave.
+
+> **Deprecation note:** `gc import migrate` is now a deprecated
+> compatibility shim. It no longer owns migration. Use `gc doctor` to
+> inspect legacy PackV1 surfaces and `gc doctor --fix` for the safe
+> mechanical rewrites. The shim exits with a non-zero status after printing
+> this guidance so scripts stop depending on the retired migration entry point.
+
+> **Compatibility note:** This wave is the last call before deprecation,
+> not a promise of seamless in-place PackV1 preservation. `gc doctor
+> --fix` handles the safe mechanical rewrites that are currently
+> available. Older cities and packs may still require manual
+> restructuring into PackV2 shape.
 
 > **Command ownership note:** In the current product, `gc import` is a
 > built-in Go CLI surface. Older bootstrap-pack experiments are legacy
 > compatibility material, not the target implementation model for PackV2.
 
-> **Scope note:** This guide describes the target PackV2 migration
-> shape. Some sections below point at surfaces that are only in the first
-> slice of the current rollout. When that is true, the guide calls it out
-> inline and links the tracking issue. For release-gated behavior, also
-> consult `docs/packv2/skew-analysis.md` and
-> `docs/packv2/doc-conformance-matrix.md`.
->
-> **First-slice note:** skills and MCP are current-city-pack only in this
-> wave. Imported-pack catalogs and provider projection are later slices.
-> The `.gc/site.toml` rig-path split from
-> [#588](https://github.com/gastownhall/gascity/issues/588) is now part of
-> the migration flow: `rig.path` leaves `city.toml`, while `rig.prefix` and
-> `rig.suspended` stay in `city.toml` for the current Phase A rollout.
+This guide stays focused on the high-probability migration work:
+
+- split portable pack definition from city deployment
+- move include-era composition to imports
+- move PackV1 file layouts into PackV2 directories
+- use `gc doctor` for the safe mechanical rewrites
+
+It does not try to be a rollout ledger. When a surface is still
+release-gated, this guide calls that out inline.
 
 ## Before you start
 
@@ -175,9 +175,12 @@ imports in `city.toml` when a pack should compose only into one rig.
 
 For remote imports, run `gc import install` after the import declarations
 are in place. That writes or repairs `packs.lock` and materializes the
-cache. Use `gc import check` when you want a read-only validation pass:
-it reports missing or stale lock/cache state and points back to
+local cache. Use `gc import check` when you want a read-only validation
+pass: it reports missing or stale lock/cache state and points back to
 `gc import install` for repair.
+
+Those commands are about pack acquisition and cache state, not PackV1 to
+PackV2 migration. Use `gc doctor` for migration work.
 
 Rigs are the main thing that remain in `city.toml`. As you migrate, the
 usual pattern is:
@@ -193,6 +196,15 @@ mechanical.
 ## Agents
 
 Agents move out of inline TOML inventories and into agent directories.
+The focused `[[agent]]` block split follows the same pattern: move the
+identity into `agents/<name>/agent.toml`, move prompt content beside it, and
+validate with `gc doctor`.
+
+> **Advanced details:** The historical step-by-step agent split notes now live
+> in the
+> [PackV2 migration design note](https://github.com/gastownhall/gascity/blob/main/engdocs/design/packv2/migration.mdx#agents).
+> Treat that page as design history; prefer this guide, `gc doctor`, and the
+> generated config reference when they disagree.
 
 ### Old shape
 
@@ -243,15 +255,42 @@ formulas/
 - stop treating formula location as configurable path wiring
 - move nested orders out of formula space
 
+Formula files may use either `formulas/<name>.toml` or
+`formulas/<name>.formula.toml`. In both cases, Gas City strips the optional
+`.formula` infix when computing the symbolic formula name, so
+`formulas/build-review.formula.toml` is named `build-review`. If both
+spellings exist for the same name in one directory, the plain `.toml` file wins.
+
 ## Orders
 
-Orders are being refactored to look more like formulas.
+Orders belong in top-level `orders/` and use flat files. They may use either
+`orders/<name>.toml` or `orders/<name>.order.toml`. In both cases, Gas City
+strips the optional `.order` infix when computing the symbolic order name, so
+`orders/nightly-sync.order.toml` is named `nightly-sync`. If both spellings
+exist for the same name in one directory, the plain `.toml` file wins.
 
-The current direction, also captured in the consistency audit, is:
+If your city still uses nested PackV1 order layouts such as
+`orders/<name>/order.toml` or `formulas/orders/.../order.toml`, migrate them
+now. Gas City rejects those shapes for all pack schemas, including schema-1
+packs; use flat files under top-level `orders/` instead.
 
-- move orders out of `formulas/orders/`
-- standardize on top-level `orders/`
-- use flat files `orders/<name>.toml`
+For the Wave 2 hard-error rollout, the maintained pack inventory was checked
+on May 22, 2026 before enabling this behavior:
+
+| Repository or pack set | Legacy nested order paths found | Status |
+|---|---:|---|
+| `gastownhall/gascity` | 0 | In-tree fixtures and built-in packs use flat order files. |
+| `gastownhall/gascity-packs` | 0 | Public Gas City pack collection has no `orders/<name>/order.toml` or `formulas/orders/<name>/order.toml` files. |
+| `gascity/gas-city-inc` pack roots | 0 | Maintained internal workflow and role packs use flat order files. |
+
+If another imported pack still ships nested order files, upgrade that pack or
+vendor it and rename each `orders/<name>/order.toml` file to
+`orders/<name>.toml` before upgrading `gc`.
+
+Flat order files are also treated as load-bearing configuration. If Gas City
+finds `orders/<name>.toml` or `orders/<name>.order.toml` but cannot read it,
+config loading fails instead of silently skipping the file. Fix permissions,
+remove the file, or complete the migration before rerunning normal commands.
 
 ### Old shape
 
@@ -333,9 +372,8 @@ commands/repo-sync/
 ```
 
 The default `commands/<name>/run.sh` discovery path is part of the
-current release surface. `command.toml` remains optional for metadata or
-explicit overrides. The remaining command manifest symmetry work is
-tracked in [#668](https://github.com/gastownhall/gascity/issues/668).
+current release surface. `command.toml` remains optional when you need
+metadata or explicit overrides.
 
 ## Doctor checks
 
@@ -365,9 +403,8 @@ The migration rule is the same as commands:
 - use local TOML only when the default mapping is not enough
 
 The default `doctor/<name>/run.sh` discovery path is part of the
-current release surface. `doctor.toml` remains optional for metadata or
-explicit overrides. The remaining command/doctor manifest symmetry work
-is tracked in [#668](https://github.com/gastownhall/gascity/issues/668).
+current release surface. `doctor.toml` remains optional when you need
+metadata or explicit overrides.
 
 ## Overlays
 
@@ -389,12 +426,12 @@ to `overlay/`.
 
 ## Skills, MCP, and template fragments
 
-These mostly follow the new directory structure directly.
+These follow the PackV2 directory structure directly.
 
 Use:
 
-- `skills/` for the current city pack's shared skills
-- `mcp/` for the current city pack's shared MCP assets
+- `skills/` for the city pack's shared skills
+- `mcp/` for the city pack's shared MCP assets
 - `template-fragments/` for pack-wide prompt fragments
 
 and:
@@ -405,59 +442,22 @@ and:
 
 when the asset belongs to one specific agent.
 
-### Skill materialization (new in v0.15.1)
+As of **Gas City 0.15.1**, skills are materialized automatically for
+supported providers from the shared pack catalog plus any agent-local
+skill directories. You do not need to keep per-agent attachment lists
+to opt into them.
 
-As of **Gas City 0.15.1**, skills are no longer list-only. Every
-supported-provider agent (`claude`, `codex`, `gemini`, `opencode`) sees
-every city-pack skill **and** every bootstrap implicit-import pack
-skill (e.g. `core`) materialized as symlinks into its provider-specific
-sink before session spawn. No attachment filtering — an agent does not
-declare which skills it wants; it gets the whole catalog plus its own
-`agents/<name>/skills/` directory on top.
+The old attachment-list fields — `skills`, `mcp`, `skills_append`,
+`mcp_append`, and the runtime-only `shared_skills` — are deprecated
+tombstones in v0.15.1. They still parse for compatibility, but they
+are ignored by the materializer. Migrate by deleting them from
+`city.toml` or `pack.toml`, or run `gc doctor --fix` to strip them
+automatically.
 
-**Sink paths** land at the agent's scope root (city-scoped) or rig
-path (rig-scoped):
-
-- Claude agents: `<scope-root>/.claude/skills/<name>`
-- Codex agents: `<scope-root>/.codex/skills/<name>`
-- Gemini agents: `<scope-root>/.gemini/skills/<name>`
-- OpenCode agents: `<scope-root>/.opencode/skills/<name>`
-
-Mixed-provider cities produce sibling sink directories at the same
-scope root. `copilot`, `cursor`, `pi`, and `omp` agents have no sink
-in v0.15.1 and get no materialization.
-
-**Precedence** on name collision:
-
-1. Agent-local (`agents/<name>/skills/<foo>`) wins over shared.
-2. City pack (`skills/<foo>`) wins over bootstrap implicit imports.
-3. Two agents at the same `(scope-root, vendor)` cannot both provide
-   the same agent-local name — `gc start` fails with a
-   skill-collision error; fix by renaming one.
-
-**Lifecycle:** adds, edits, renames, and removals all drain the
-affected agents via content-hash fingerprints. Every supervisor tick
-runs a cleanup + re-materialise pass, so in-place skill edits take
-effect without a full restart cycle. User-placed content at sink
-paths (a regular file or directory you put there yourself) is
-preserved — cleanup only removes symlinks whose targets live under
-known gc-managed catalog roots.
-
-### Removed in v0.15.1 — attachment-list tombstones
-
-The v0.15.0 attachment-list fields — `skills`, `mcp`, `skills_append`,
-`mcp_append`, and the runtime-only `shared_skills` — are **deprecated
-tombstones in v0.15.1**. They still parse so upgrading cities don't
-break, but they are ignored by the materializer (every agent gets
-everything). A one-time warning fires on config load when any of
-these fields is present.
-
-Migrate by deleting them from your `city.toml` / `pack.toml`. Run
-`gc doctor --fix` to strip them automatically. The fields become a
-hard parse error in **v0.16**.
-
-MCP activation (projecting MCP definitions into the agent's provider
-config) is tracked as a follow-up and lands on `main` after v0.15.1.
+MCP activation follows the same directory migration but remains on a
+separate implementation track. For migration purposes, the important
+step is still to move shared MCP assets into `mcp/` and
+agent-specific ones into `agents/<name>/mcp/`.
 
 ## Fragment injection migration
 
@@ -481,14 +481,12 @@ each prompt file:
 append_fragments = ["operational-awareness", "command-glossary"]
 ```
 
-Per-agent `append_fragments` is also supported, declared on an
-`[[agent]]` block or in `agents/<name>/agent.toml`, and layers in front
-of the `[agent_defaults]` list:
+Per-agent `append_fragments` is also supported in
+`agents/<name>/agent.toml`, and layers in front of the
+`[agent_defaults]` list:
 
 ```toml
-[[agent]]
-name = "mayor"
-prompt_template = "agents/mayor/prompt.template.md"
+# agents/mayor/agent.toml
 append_fragments = ["mayor-footer"]
 ```
 
@@ -620,6 +618,11 @@ schema, plus the qualified rows that matter most during migration.
 > `workspace.prefix`) and `rigs.path` now live in `.gc/site.toml` for newly
 > written or migrated cities. `rigs.prefix` and `rigs.suspended` remain in
 > `city.toml` in this release.
+>
+> Migrate in two passes when a city uses included fragments: first resolve
+> hard errors in the root `city.toml`, then address fragment warnings. Fragment
+> paths and workspace identity often need a hand edit because their machine-local
+> target is the root city's `.gc/site.toml`.
 
 | 0.14.0 element | What it did | New home or action |
 |---|---|---|
@@ -628,11 +631,6 @@ schema, plus the qualified rows that matter most during migration.
 | `workspace.name` | Workspace identity | Move to `.gc/site.toml` as `workspace_name`. Runtime identity resolves from registered alias (supervisor-managed flows), then site binding / legacy config, then directory basename. `pack.name` remains the portable definition identity and init-time default only. |
 | `workspace.prefix` | Workspace bead prefix | Move to `.gc/site.toml` as `workspace_prefix`. Runtime/API surfaces use the effective site-bound prefix when present and otherwise derive from the effective city name. |
 | `workspace.includes` | City-level pack composition | Move to `[imports.*]` in the root city `pack.toml`. |
-
-This rollout also changes the generated schema contract: checked-in
-`city.toml` files and downstream validators must no longer require
-`[workspace].name` once workspace identity has moved to `.gc/site.toml`.
-
 | `workspace.default_rig_includes` | Default pack composition for newly added rigs | Move each default include to `[defaults.rig.imports.<binding>]` entries in the root city `pack.toml`. |
 | `[providers.*]` | Named provider presets | Usually move to `[providers.*]` in the root city `pack.toml`, unless the setting is truly deployment-only. |
 | `[packs.*]` | Named remote pack sources used by includes | Collapse into `[imports.*]` entries. There should no longer be a separate `[packs.*]` registry in `city.toml`. |
@@ -643,7 +641,7 @@ This rollout also changes the generated schema contract: checked-in
 | `agent.namepool` | Path to names file | Move toward agent-local content such as `agents/<name>/namepool.txt` if retained. |
 | `[[named_session]]` | Named reusable sessions | Move to `[[named_session]]` in the root city `pack.toml`. |
 | `[[rigs]]` | Rig deployment entries | Keep in `city.toml`. |
-| `rigs.path` | Machine-local project binding | With the Phase A rig-binding slice, new writes stop persisting this in authored `city.toml`; older cities may still carry it until migrated. |
+| `rigs.path` | Machine-local project binding | Move to `.gc/site.toml`. Schema-2 root `city.toml` rejects this field; editor/init paths persist copied or edited bindings into `.gc/site.toml` and stop writing it back to authored `city.toml`. |
 | `rigs.prefix` | Derived rig prefix | Keep in `city.toml` in the current release wave. It is deployment state, but not yet extracted into separate site-binding storage. |
 | `rigs.suspended` | Operational toggle | Keep in `city.toml` in the current release wave. It remains deployment/runtime state rather than portable pack definition. |
 | `rigs.includes` | Rig-scoped pack composition | Move to rig-scoped imports in `city.toml`. |
@@ -664,6 +662,11 @@ This rollout also changes the generated schema contract: checked-in
 | `[convergence]` | Convergence limits | Keep in `city.toml`. |
 | `[[service]]` | Workspace-owned service declarations | Keep in `city.toml` if they are deployment-owned services. |
 | `[agent_defaults]` | Defaults applied to agents in this city | Lives in both `pack.toml` (pack-wide portable defaults) and `city.toml` (city-level deployment overrides). City layers on top of pack. As of release v0.15.0, the actively-applied defaults are still narrow: `default_sling_formula` plus `[agent_defaults].append_fragments`. |
+
+> **Schema contract note:** This rollout also changes the generated schema
+> contract: checked-in `city.toml` files and downstream validators must no
+> longer require `[workspace].name` once workspace identity has moved to
+> `.gc/site.toml`.
 
 ## Reference: Gas City 0.14.0 `pack.toml` elements to PackV2
 

@@ -96,7 +96,7 @@ func rigNameCandidates(toComplete string) []string {
 		if err != nil {
 			return
 		}
-		cfg, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), io.Discard)
+		cfg, err := loadCityConfigWithoutBuiltinPackRefreshFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), io.Discard)
 		if err != nil {
 			return
 		}
@@ -180,7 +180,7 @@ func loadOrdersForCompletion() []orders.Order {
 		if err != nil {
 			return
 		}
-		cfg, err := loadCityConfig(cityPath, io.Discard)
+		cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 		if err != nil {
 			return
 		}
@@ -207,14 +207,13 @@ func loadSessionsForCompletion() []session.Info {
 		if err != nil {
 			return
 		}
-		cfg, err := loadCityConfig(cityPath, io.Discard)
+		cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 		if err != nil {
 			return
 		}
 		providerCtx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
-		allSessionBeads, err := store.List(beads.ListQuery{
-			Label: session.LabelSession,
-			Sort:  beads.SortCreatedDesc,
+		allSessionBeads, err := session.ListAllSessionBeads(store, beads.ListQuery{
+			Sort: beads.SortCreatedDesc,
 		})
 		if err != nil {
 			return

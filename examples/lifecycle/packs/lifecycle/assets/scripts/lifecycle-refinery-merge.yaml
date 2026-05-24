@@ -1,0 +1,123 @@
+description: |
+  Lifecycle demo refinery — migrated from mock-refinery.sh.
+
+  Picks up a bead a polecat handed off (assignee = this refinery,
+  feature branch recorded in metadata.branch), merges that branch into
+  main, and closes the bead. The merge half of the lifecycle pipeline.
+
+  A refinery receives work already routed to it, so — unlike a polecat
+  — it never races to claim; it acts on the bead directly. One process
+  = one turn; gc's reconciler re-spawns it while the merge queue holds
+  work, replacing mock-refinery.sh's `while true` poll loop.
+
+  Happy-path merge only. A conflicting branch sends failure mail, aborts
+  the merge, and exits non-zero so the reconciler can retry after the
+  branch or base has changed.
+
+schema_version: v1
+
+setup:
+  # Containers lack the host GPG keys; never block a merge on signing.
+  - shell: "git config --global commit.gpgsign false 2>/dev/null || true"
+  # Fail fast: missing credential setup silently corrupts later git fetch/push operations.
+  - shell: >
+      set -eu;
+      if [ -n "${GITHUB_TOKEN:-}" ]; then
+        NETRC="$HOME/.netrc";
+        umask 077;
+        printf 'machine github.com login x-access-token password %s\n' "$GITHUB_TOKEN" > "$NETRC";
+        chmod 600 "$NETRC";
+      fi
+
+turns:
+  - when:
+      hook: has_work
+    do:
+      - log: "merging {bead.metadata.branch} for {bead.id}"
+      - mail_send:
+          to: "{rig}/lifecycle.polecat"
+          subject: "MERGING: {bead.metadata.branch} ({bead.id})"
+          body: "scripted refinery {alias} is merging {bead.metadata.branch}."
+      - shell: >
+          set -eu;
+          BRANCH="${GC_SCRIPT_BEAD_METADATA_BRANCH:-}";
+          BRANCH_HEAD="${GC_SCRIPT_BEAD_METADATA_BRANCH_HEAD:-}";
+          case "$BRANCH" in
+            ""|*[!A-Za-z0-9_./-]*) echo "unsafe branch metadata: $BRANCH" >&2; exit 1 ;;
+          esac;
+          case "$BRANCH_HEAD" in
+            *[!A-Fa-f0-9]*) echo "unsafe branch_head metadata: $BRANCH_HEAD" >&2; exit 1 ;;
+          esac;
+          git check-ref-format --branch "$BRANCH" >/dev/null ||
+          { echo "invalid branch metadata: $BRANCH" >&2; exit 1; };
+          ALREADY_MERGED=0;
+          if git remote | grep -q '^origin$'; then
+            git fetch origin main;
+            git checkout -B main origin/main;
+            if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+              git fetch origin "$BRANCH";
+              git update-ref "refs/heads/$BRANCH" FETCH_HEAD;
+            elif [ -n "$BRANCH_HEAD" ] &&
+                 git rev-parse --verify "$BRANCH_HEAD^{commit}" >/dev/null 2>&1 &&
+                 git merge-base --is-ancestor "$BRANCH_HEAD" HEAD; then
+              ALREADY_MERGED=1;
+            else
+              echo "branch $BRANCH missing and not recorded as already merged" >&2;
+              exit 1;
+            fi;
+          else
+            git checkout main ||
+            { echo "main branch is required when no origin remote is configured" >&2; exit 1; };
+            if ! git rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
+              if [ -n "$BRANCH_HEAD" ] &&
+                 git rev-parse --verify "$BRANCH_HEAD^{commit}" >/dev/null 2>&1 &&
+                 git merge-base --is-ancestor "$BRANCH_HEAD" HEAD; then
+                ALREADY_MERGED=1;
+              else
+                echo "branch $BRANCH missing and not recorded as already merged" >&2;
+                exit 1;
+              fi;
+            fi;
+          fi;
+          if [ "$ALREADY_MERGED" != "1" ] && ! git merge --no-edit "$BRANCH"; then
+            git merge --abort 2>/dev/null || true;
+            gc mail send --to "$GC_SCRIPT_RIG/lifecycle.polecat" -s "MERGE FAILED: $BRANCH ($GC_SCRIPT_BEAD_ID)" -m "scripted refinery $GC_SCRIPT_ALIAS could not merge $BRANCH." || true;
+            exit 1;
+          fi
+      - shell: >
+          set -eu;
+          if git remote | grep -q '^origin$'; then
+            git push origin HEAD:main;
+          fi
+      - bd_update:
+          id: "{bead.id}"
+          status: closed
+          metadata:
+            merge_result: "merged"
+          notes: "scripted refinery: merged {bead.metadata.branch} into main"
+      - shell: >
+          set -eu;
+          BRANCH="${GC_SCRIPT_BEAD_METADATA_BRANCH:-}";
+          case "$BRANCH" in
+            ""|main|master|*[!A-Za-z0-9_./-]*) echo "unsafe branch metadata: $BRANCH" >&2; exit 0 ;;
+          esac;
+          if git rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
+            git branch -d "$BRANCH" 2>/dev/null || git branch -D "$BRANCH" || true;
+          fi;
+          if git remote | grep -q '^origin$'; then
+            if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+              git push origin --delete "$BRANCH" || true;
+            fi;
+          fi
+      - sleep_ms: 25
+      - mail_send:
+          to: "{rig}/lifecycle.polecat"
+          subject: "MERGED: {bead.metadata.branch} ({bead.id})"
+          body: "scripted refinery {alias} merged {bead.metadata.branch} into main."
+      - log: "merged and closed {bead.id}"
+      - exit: 0
+  - when:
+      hook: empty
+    do:
+      - log: "hook empty; merge queue drained"
+      - exit: 0

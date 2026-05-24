@@ -7,7 +7,8 @@ git repository, and pushes to origin. This provides a human-readable,
 git-versioned backup of all durable work product.
 
 Current behavior:
-- Exports issues table with scrub filter (excludes messages, events, wisps, etc.)
+- Exports issues table with scrub filter (excludes messages, events, wisps,
+  agents, gc:/order: system titles, and auto-convoys titled sling-*)
 - Exports supplemental tables (comments, config, dependencies, labels, metadata)
 - Writes per-database subdirectories + legacy flat files
 - Commits with counts and pushes to git remote
@@ -96,10 +97,13 @@ needs = ["export"]
 description = """
 Verify export integrity before committing.
 
-**1. Filter test pollution:**
-Remove records matching test patterns from exported JSONL:
+**1. Filter test pollution and ephemeral system rows:**
+Remove records matching test and system patterns from exported JSONL:
 - Titles starting with "Test Issue" or "test_"
 - IDs matching test patterns: bd-1, bd-abc12, testdb_*, beads_t*, etc.
+- Issue types message, event, wisp, and agent
+- System task titles starting with "gc:" or "order:"
+- Auto-convoy rows with issue_type "convoy" and titles starting with "sling-"
 
 **2. Spike detection:**
 Compare current export record counts against previous commit.

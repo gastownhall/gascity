@@ -249,6 +249,11 @@ Lesson test — it becomes LESS useful as models improve.
   in `cmd/gc/pool.go`. `TestAgentFieldSync` enforces this for the struct
   definitions; the apply functions and pool deep-copy must be checked
   manually.
+- **Adding rig config fields:** When adding a field to `config.Rig`, also
+  add the corresponding optional field to `RigPatch` and wire the merge
+  into `applyRigPatch` so layered configs (fragments, patches) can
+  override it. No field-sync test exists for Rig today; the patch path
+  must be checked manually.
 
 - `TESTING.md` — testing philosophy, tier boundaries, and sharded local
   runners. Read before writing any test. For broad local sweeps, prefer the

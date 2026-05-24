@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 var testBeaconTime = time.Unix(1_700_000_000, 0)
@@ -197,6 +199,110 @@ func TestTemplateParamsToConfigNoneModeUsesNudge(t *testing.T) {
 	}
 }
 
+func TestResolveTemplateControlDispatcherSuppressesStartupPrompt(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeFS := fsys.NewFake()
+	promptPath := filepath.Join(cityPath, "prompts", "control-dispatcher.template.md")
+	if err := fakeFS.WriteFile(promptPath, []byte("startup prompt for {{.AgentName}}"), 0o644); err != nil {
+		t.Fatalf("write prompt template: %v", err)
+	}
+	params := &agentBuildParams{
+		fs:              fakeFS,
+		cityName:        "maintainer-city",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "maintainer-city"},
+		providers:       map[string]config.ProviderSpec{},
+		lookPath:        func(string) (string, error) { return "", fmt.Errorf("not found") },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           config.ControlDispatcherAgentName,
+		Dir:            "gascity",
+		PromptTemplate: "prompts/control-dispatcher.template.md",
+		StartCommand:   config.ControlDispatcherStartCommandFor("gascity/" + config.ControlDispatcherAgentName),
+		Nudge:          "configured startup nudge",
+		ProcessNames:   []string{"gc"},
+		Implicit:       true,
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if tp.Prompt != "" {
+		t.Fatalf("Prompt = %q, want empty for deterministic control dispatcher", tp.Prompt)
+	}
+	cfg := templateParamsToConfig(tp)
+	if cfg.PromptSuffix != "" {
+		t.Fatalf("PromptSuffix = %q, want empty", cfg.PromptSuffix)
+	}
+	if cfg.Nudge != "" {
+		t.Fatalf("Nudge = %q, want empty", cfg.Nudge)
+	}
+	if cfg.AcceptStartupDialogs == nil || *cfg.AcceptStartupDialogs {
+		t.Fatalf("AcceptStartupDialogs = %v, want false", cfg.AcceptStartupDialogs)
+	}
+	if !reflect.DeepEqual(cfg.ProcessNames, []string{"gc"}) {
+		t.Fatalf("ProcessNames = %v, want [gc]", cfg.ProcessNames)
+	}
+}
+
+func TestResolveTemplateExplicitControlDispatcherKeepsStartupPrompt(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeFS := fsys.NewFake()
+	promptPath := filepath.Join(cityPath, "prompts", "control-dispatcher.template.md")
+	if err := fakeFS.WriteFile(promptPath, []byte("startup prompt for {{.AgentName}}"), 0o644); err != nil {
+		t.Fatalf("write prompt template: %v", err)
+	}
+	params := &agentBuildParams{
+		fs:              fakeFS,
+		cityName:        "maintainer-city",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "maintainer-city"},
+		providers:       map[string]config.ProviderSpec{},
+		lookPath:        func(string) (string, error) { return "", fmt.Errorf("not found") },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           config.ControlDispatcherAgentName,
+		Dir:            "gascity",
+		PromptTemplate: "prompts/control-dispatcher.template.md",
+		StartCommand:   "custom-control-dispatcher --serve",
+		Nudge:          "configured startup nudge",
+		ProcessNames:   []string{"custom-control-dispatcher"},
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Prompt, "startup prompt for "+agent.QualifiedName()) {
+		t.Fatalf("Prompt = %q, want rendered startup prompt for explicit agent", tp.Prompt)
+	}
+	cfg := templateParamsToConfig(tp)
+	if cfg.PromptSuffix != "" {
+		t.Fatalf("PromptSuffix = %q, want prompt delivered by nudge for start_command prompt_mode=none", cfg.PromptSuffix)
+	}
+	if !strings.Contains(cfg.Nudge, "startup prompt for "+agent.QualifiedName()) {
+		t.Fatalf("Nudge = %q, want startup prompt for explicit agent", cfg.Nudge)
+	}
+	if !strings.Contains(cfg.Nudge, "configured startup nudge") {
+		t.Fatalf("Nudge = %q, want configured nudge preserved", cfg.Nudge)
+	}
+	if cfg.AcceptStartupDialogs != nil {
+		t.Fatalf("AcceptStartupDialogs = %v, want no deterministic suppression override", cfg.AcceptStartupDialogs)
+	}
+	if !reflect.DeepEqual(cfg.ProcessNames, []string{"custom-control-dispatcher"}) {
+		t.Fatalf("ProcessNames = %v, want [custom-control-dispatcher]", cfg.ProcessNames)
+	}
+}
+
 func TestTemplateParamsToConfigNoneModeWithHooksStillUsesStartupNudge(t *testing.T) {
 	tp := TemplateParams{
 		Command: "opencode",
@@ -369,6 +475,36 @@ func TestTemplateParamsToConfigNilResolvedProvider(t *testing.T) {
 	}
 }
 
+func TestResolveTemplateCarriesOneShotLifecycleToRuntimeConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	params := &agentBuildParams{
+		fs:         fsys.NewFake(),
+		cityName:   "bright-lights",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Name: "bright-lights"},
+		beaconTime: testBeaconTime,
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{
+		Name:         "scripted",
+		StartCommand: "env GC_LOG_LEVEL=debug custom-once --work",
+		Lifecycle:    config.AgentLifecycleOneShot,
+		Nudge:        "Check your hook for work.",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if got, want := tp.Hints.Lifecycle, runtime.LifecycleOneShot; got != want {
+		t.Fatalf("TemplateParams.Hints.Lifecycle = %q, want %q", got, want)
+	}
+	if got, want := templateParamsToConfig(tp).Lifecycle, runtime.LifecycleOneShot; got != want {
+		t.Fatalf("runtime config Lifecycle = %q, want %q", got, want)
+	}
+}
+
 func TestResolveTemplateFlagModeRetainsPromptForStartupDelivery(t *testing.T) {
 	cityPath := t.TempDir()
 	fs := fsys.NewFake()
@@ -523,6 +659,60 @@ func TestResolveTemplateHookEnabledOpencodeOmitsPrimeInstruction(t *testing.T) {
 	}
 	if strings.Contains(tp.Prompt, "Run `gc prime`") {
 		t.Fatalf("hook-enabled prompt should omit manual gc prime instruction: %q", tp.Prompt)
+	}
+}
+
+func TestResolveTemplateKeepsConcreteProviderForOverlays(t *testing.T) {
+	cityPath := t.TempDir()
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/worker.md"] = []byte("worker prompt body")
+
+	base := "builtin:claude"
+	providers := config.BuiltinProviders()
+	providers["kiro"] = config.ProviderSpec{
+		Base:             &base,
+		Command:          "kiro-cli",
+		Args:             []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+		PromptMode:       "arg",
+		ReadyDelayMs:     5000,
+		ProcessNames:     []string{"kiro-cli", "kiro", "node"},
+		InstructionsFile: "AGENTS.md",
+	}
+	params := &agentBuildParams{
+		fs:              fs,
+		cityName:        "bright-lights",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "bright-lights"},
+		providers:       providers,
+		lookPath:        func(string) (string, error) { return "/usr/bin/kiro-cli", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "worker",
+		PromptTemplate: "prompts/worker.md",
+		Provider:       "kiro",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if got, want := tp.Hints.ProviderName, "claude"; got != want {
+		t.Fatalf("ProviderName = %q, want launch family %q", got, want)
+	}
+	if got, want := tp.Hints.ProviderOverlayName, "kiro"; got != want {
+		t.Fatalf("ProviderOverlayName = %q, want concrete provider %q", got, want)
+	}
+
+	cfg := templateParamsToConfig(tp)
+	if got, want := cfg.ProviderName, "claude"; got != want {
+		t.Fatalf("runtime ProviderName = %q, want launch family %q", got, want)
+	}
+	if got, want := cfg.ProviderOverlayName, "kiro"; got != want {
+		t.Fatalf("runtime ProviderOverlayName = %q, want concrete provider %q", got, want)
 	}
 }
 

@@ -196,7 +196,7 @@ func TestEmitCityCreateSucceededFallsBackToDirectory(t *testing.T) {
 
 func TestClearPendingCityRequestIDOnlyConsumesStoredRequests(t *testing.T) {
 	resolver := &fakeCityResolver{cities: map[string]*fakeState{}}
-	sm := NewSupervisorMux(resolver, nil, false, "test", time.Now())
+	sm := NewSupervisorMux(resolver, nil, false, "test", "", time.Now())
 	const cityPath = "/tmp/mc-city"
 
 	if err := resolver.StorePendingRequestID(cityPath, "req-1"); err != nil {

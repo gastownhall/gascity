@@ -33,6 +33,7 @@ require manual installation of the rows that match your setup.
 | dolt           | Default beads backend only (`""`, `bd`)               | 1.86.2+     | `brew install dolt`  | [releases](https://github.com/dolthub/dolt/releases)      | Skip when `[beads].provider = "file"`                          |
 | bd (Beads CLI) | Default beads backend only (`""`, `bd`)               | 1.0.0       | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Skip when `[beads].provider = "file"`                          |
 | flock          | Default beads backend only (`""`, `bd`)               | —           | `brew install flock` | (built-in via util-linux)                                 | File locking for the `bd` backend                              |
+| gh             | Optional                                              | —           | `brew install gh`    | [cli.github.com](https://cli.github.com/)                 | GitHub gate checks                                             |
 | Go 1.25+       | Source only                                           | 1.25        | `brew install go`    | [golang.org](https://go.dev/dl/)                          | Compiler                                                       |
 | make           | Source only                                           | —           | (built-in)           | `apt install make` (or `build-essential`)                 | Drives `make install`                                          |
 
@@ -69,7 +70,8 @@ gc version
 <Warning>
 If you use Oh My Zsh with the `git` plugin, `gc` may already be an alias for
 `git commit --verbose`. Run `command gc version` once to bypass the alias. For
-a persistent fix, add `unalias gc 2>/dev/null` after Oh My Zsh loads in
+a persistent fix, add `unalias gc 2>/dev/null` or
+`zstyle ':omz:plugins:git' aliases no 'gc'` after Oh My Zsh loads in
 `~/.zshrc`, or put that line in a file such as
 `~/.oh-my-zsh/custom/gascity.zsh`.
 </Warning>
@@ -197,7 +199,14 @@ make build          # outputs bin/gc in the repo root
 ./bin/gc version
 ```
 
-On macOS, `make build` automatically ad-hoc code-signs the binary (`codesign -s -`).
+On macOS, `make build` signs the binary with a stable local codesigning
+identity when one is available, which helps macOS remember local permission
+grants across rebuilds. Without a stable identity, the build leaves Go's
+linker-produced signature unchanged. Set `GC_SIGN_IDENTITY=<certificate name>`
+to choose a specific certificate, `GC_SIGN_IDENTIFIER=<identifier>` to use a
+separate local TCC identity, or `GC_ADHOC_SIGN=1` to opt into ad-hoc signing
+for a local experiment. Successful local signing also removes stale
+`com.apple.provenance` metadata when present.
 
 ### Contributor setup
 
@@ -231,8 +240,14 @@ gc init ~/my-city
 cd ~/my-city
 ```
 
-`gc init` registers the city with the supervisor and starts it automatically.
+`gc init` registers the city with the supervisor, which then starts it. By the
+time the command returns, the city is running.
 See the [Quickstart](/getting-started/quickstart) for a complete walkthrough.
+
+Gas City ships a JSONL archive that snapshots every bead database for
+disaster recovery. By default it runs in local-only mode and keeps commits
+on this host. To enable off-box backup, see
+[JSONL archive push failures](/getting-started/troubleshooting#jsonl-archive-push-failures).
 
 ## Docs preview
 

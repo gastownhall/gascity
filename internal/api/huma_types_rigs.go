@@ -24,9 +24,10 @@ type RigGetInput struct {
 type RigCreateInput struct {
 	CityScope
 	Body struct {
-		Name   string `json:"name" doc:"Rig name." minLength:"1"`
-		Path   string `json:"path" doc:"Filesystem path." minLength:"1"`
-		Prefix string `json:"prefix,omitempty" doc:"Session name prefix."`
+		Name          string `json:"name" doc:"Rig name." minLength:"1"`
+		Path          string `json:"path" doc:"Filesystem path." minLength:"1"`
+		Prefix        string `json:"prefix,omitempty" doc:"Session name prefix."`
+		DefaultBranch string `json:"default_branch,omitempty" doc:"Mainline branch (e.g. main, master). Auto-detected when omitted."`
 	}
 }
 
@@ -35,9 +36,10 @@ type RigUpdateInput struct {
 	CityScope
 	Name string `path:"name" doc:"Rig name."`
 	Body struct {
-		Path      string `json:"path,omitempty" doc:"Filesystem path."`
-		Prefix    string `json:"prefix,omitempty" doc:"Session name prefix."`
-		Suspended *bool  `json:"suspended,omitempty" doc:"Whether rig is suspended."`
+		Path          string `json:"path,omitempty" doc:"Filesystem path."`
+		Prefix        string `json:"prefix,omitempty" doc:"Session name prefix."`
+		DefaultBranch string `json:"default_branch,omitempty" doc:"Mainline branch (e.g. main, master)."`
+		Suspended     *bool  `json:"suspended,omitempty" doc:"Whether rig is suspended."`
 	}
 }
 

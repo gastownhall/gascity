@@ -12,7 +12,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sling"
 )
 
 func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, children []beads.Bead) []beads.Bead {
@@ -328,6 +330,16 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 		upsert(child)
 	}
 
+	if root.Type == "convoy" {
+		members, err := convoycore.Members(store, root.ID, true)
+		if err != nil {
+			return nil, nil, fmt.Errorf("listing convoy members for bead %q: %w", root.ID, err)
+		}
+		for _, member := range members {
+			upsert(member)
+		}
+	}
+
 	parentEdges := make([]workflowDepResponse, 0)
 	seenEdges := make(map[string]bool)
 	addParentEdge := func(parentID, childID string) {
@@ -384,21 +396,9 @@ func mergeWorkflowDeps(primary, extra []workflowDepResponse) []workflowDepRespon
 	return primary
 }
 
-// beadPrefix extracts the configured prefix from a bead ID (e.g., "ga" from
-// "ga-5b8i"). bd prefixes may contain digits after the first character.
+// beadPrefix extracts the config-free heuristic prefix from a bead ID.
 func beadPrefix(id string) string {
-	for i, c := range id {
-		if c == '-' {
-			return id[:i]
-		}
-		if c < 'a' || c > 'z' {
-			if i > 0 && c >= '0' && c <= '9' {
-				continue
-			}
-			return ""
-		}
-	}
-	return ""
+	return sling.BeadPrefix(id)
 }
 
 // resolveRoutePrefix reads routes.jsonl from a rig's .beads/ directory and

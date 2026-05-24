@@ -1,9 +1,9 @@
 package runtime
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -101,6 +101,36 @@ func TestConfigFingerprintIgnoresEmitsPermissionWarning(t *testing.T) {
 	}
 }
 
+func TestConfigFingerprintIncludesAcceptStartupDialogs(t *testing.T) {
+	accept := true
+	reject := false
+	unset := Config{Command: "kimi"}
+	withAccept := Config{Command: "kimi", AcceptStartupDialogs: &accept}
+	withReject := Config{Command: "kimi", AcceptStartupDialogs: &reject}
+
+	if CoreFingerprint(unset) == CoreFingerprint(withAccept) {
+		t.Fatal("AcceptStartupDialogs=true should affect core fingerprint")
+	}
+	if CoreFingerprint(withAccept) == CoreFingerprint(withReject) {
+		t.Fatal("AcceptStartupDialogs true and false should produce different core fingerprints")
+	}
+	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(unset), withAccept); len(got) != 1 || got[0] != "AcceptStartupDialogs" {
+		t.Fatalf("CoreFingerprintDriftFields = %v, want [AcceptStartupDialogs]", got)
+	}
+}
+
+func TestConfigFingerprintIncludesLifecycle(t *testing.T) {
+	persistent := Config{Command: "custom-once"}
+	oneShot := Config{Command: "custom-once", Lifecycle: LifecycleOneShot}
+
+	if CoreFingerprint(persistent) == CoreFingerprint(oneShot) {
+		t.Fatal("Lifecycle should affect core fingerprint")
+	}
+	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(persistent), oneShot); len(got) != 1 || got[0] != "Lifecycle" {
+		t.Fatalf("CoreFingerprintDriftFields = %v, want [Lifecycle]", got)
+	}
+}
+
 func TestConfigFingerprintIgnoresWorkDir(t *testing.T) {
 	a := Config{Command: "claude", WorkDir: "/tmp"}
 	b := Config{Command: "claude", WorkDir: "/home/user"}
@@ -133,7 +163,7 @@ func TestConfigFingerprintIgnoresGCAlias(t *testing.T) {
 	if CoreFingerprint(base) != CoreFingerprint(withAlias) {
 		t.Error("GC_ALIAS should not affect core config fingerprint")
 	}
-	if CoreFingerprintBreakdown(base)["Env"] != CoreFingerprintBreakdown(withAlias)["Env"] {
+	if CoreFingerprintBreakdown(base).Fields["Env"] != CoreFingerprintBreakdown(withAlias).Fields["Env"] {
 		t.Error("GC_ALIAS should not affect core env fingerprint breakdown")
 	}
 }
@@ -198,6 +228,47 @@ func TestConfigFingerprintExtraDifferentValues(t *testing.T) {
 	b := Config{Command: "claude", FingerprintExtra: map[string]string{"pool.max": "10"}}
 	if ConfigFingerprint(a) == ConfigFingerprint(b) {
 		t.Error("different FingerprintExtra values should produce different hashes")
+	}
+}
+
+func TestCoreFingerprintIncludesOverlayProviderIdentity(t *testing.T) {
+	claudeFallback := Config{Command: "agent", ProviderName: "claude"}
+	kiroOverlay := Config{Command: "agent", ProviderName: "claude", ProviderOverlayName: "kiro"}
+	if CoreFingerprint(claudeFallback) == CoreFingerprint(kiroOverlay) {
+		t.Fatal("ProviderOverlayName should affect the core fingerprint")
+	}
+	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(claudeFallback), kiroOverlay); len(got) != 1 || got[0] != "OverlayProviders" {
+		t.Fatalf("drift fields = %v, want [OverlayProviders]", got)
+	}
+
+	withHooks := Config{
+		Command:             "agent",
+		ProviderName:        "claude",
+		ProviderOverlayName: "kiro",
+		InstallAgentHooks:   []string{"gemini"},
+		Env: map[string]string{
+			"GC_TEMPLATE": "gascity/worker",
+			"GC_AGENT":    "gascity/worker-1",
+			"GC_ALIAS":    "gascity/worker-1",
+		},
+	}
+	withoutHooks := withHooks
+	withoutHooks.InstallAgentHooks = nil
+	if CoreFingerprint(withHooks) == CoreFingerprint(withoutHooks) {
+		t.Fatal("InstallAgentHooks should affect the core fingerprint")
+	}
+
+	sameSessionNextTick := withHooks
+	sameSessionNextTick.Env = map[string]string{
+		"GC_TEMPLATE":           "gascity/worker",
+		"GC_AGENT":              "gascity/worker-1",
+		"GC_ALIAS":              "gascity/worker",
+		"GC_SESSION_NAME":       "gc-test-worker-1",
+		"GC_INSTANCE_TOKEN":     "next-tick",
+		"GC_CONTINUATION_EPOCH": "2",
+	}
+	if CoreFingerprint(withHooks) != CoreFingerprint(sameSessionNextTick) {
+		t.Fatal("overlay provider hashing should not reintroduce pool-instance env oscillation")
 	}
 }
 
@@ -378,8 +449,8 @@ func TestCoreFingerprintBreakdownConsistency(t *testing.T) {
 			}
 			// Core hashes differ — at least one breakdown field must differ.
 			anyDiff := false
-			for field, va := range bdA {
-				if va != bdB[field] {
+			for field, va := range bdA.Fields {
+				if va != bdB.Fields[field] {
 					anyDiff = true
 					break
 				}
@@ -673,26 +744,98 @@ func TestHashPathContentUnreadableChild(t *testing.T) {
 	}
 }
 
-func TestLogCoreFingerprintDriftCopyFiles(t *testing.T) {
-	stored := map[string]string{
-		"CopyFiles": "oldhash",
-		"Command":   "samehash",
+// TestFingerprintVersionedOutputFormat enforces FR-5/FR-7 from ga-s760.1:
+// every fingerprint helper emits "<FingerprintVersion>:<hex>" so the
+// reconciler can tell which binary produced a stored hash.
+func TestFingerprintVersionedOutputFormat(t *testing.T) {
+	if FingerprintVersion == "" {
+		t.Fatal("FingerprintVersion constant must be set (FR-7)")
 	}
-	current := Config{
-		Command:   "claude",
-		CopyFiles: []CopyEntry{{RelDst: "bar", ContentHash: "h1"}},
+	if !strings.HasPrefix(FingerprintVersion, "v") {
+		t.Errorf("FingerprintVersion = %q, want a 'v'-prefixed identifier", FingerprintVersion)
 	}
-	var buf bytes.Buffer
-	LogCoreFingerprintDrift(&buf, "test-agent", stored, current)
-	out := buf.String()
-	if out == "" {
-		t.Fatal("expected diagnostic output")
+	for _, r := range FingerprintVersion[1:] {
+		if r < '0' || r > '9' {
+			t.Errorf("FingerprintVersion = %q, want v<digits> shape", FingerprintVersion)
+			break
+		}
 	}
-	if !bytes.Contains([]byte(out), []byte("CopyFiles")) {
-		t.Errorf("expected CopyFiles in drift output, got: %s", out)
+
+	prefix := FingerprintVersion + ":"
+	cfg := Config{
+		Command: "claude --skip",
+		Env:     map[string]string{"GC_CITY": "/x", "GC_RIG": "r"},
+		SessionLive: []string{
+			"tmux set-option -t {{.Session}} remain-on-exit on",
+		},
 	}
-	if !bytes.Contains([]byte(out), []byte("RelDst")) {
-		t.Errorf("expected RelDst detail in CopyFiles drift output, got: %s", out)
+
+	cases := []struct {
+		name string
+		got  string
+	}{
+		{"ConfigFingerprint", ConfigFingerprint(cfg)},
+		{"CoreFingerprint", CoreFingerprint(cfg)},
+		{"LiveFingerprint", LiveFingerprint(cfg)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.HasPrefix(tc.got, prefix) {
+				t.Fatalf("%s = %q, want prefix %q", tc.name, tc.got, prefix)
+			}
+			tail := strings.TrimPrefix(tc.got, prefix)
+			if tail == "" {
+				t.Fatalf("%s = %q, no hex tail after prefix", tc.name, tc.got)
+			}
+			if strings.Contains(tail, ":") {
+				t.Errorf("%s = %q, hex tail must not contain ':'", tc.name, tc.got)
+			}
+			for _, r := range tail {
+				if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+					t.Errorf("%s = %q, non-hex character %q in tail", tc.name, tc.got, r)
+					break
+				}
+			}
+			// The previous bare-hex output was 64 chars (SHA-256). The
+			// versioned output keeps the same hex tail length.
+			if len(tail) != 64 {
+				t.Errorf("%s tail length = %d, want 64", tc.name, len(tail))
+			}
+		})
+	}
+}
+
+// TestIsLegacyOrMismatchedVersion enforces FR-1, FR-2: the reconciler
+// distinguishes legacy (no prefix) and mismatched-version stored hashes
+// from current-version hashes via this helper. Reconciler treats the
+// "true" cases as triggers for silent rebaseline (no drain, no event).
+func TestIsLegacyOrMismatchedVersion(t *testing.T) {
+	bareHex := strings.Repeat("a", 64)
+	current := FingerprintVersion + ":" + bareHex
+
+	cases := []struct {
+		name   string
+		stored string
+		want   bool
+	}{
+		{"bare hex (no prefix, legacy)", bareHex, true},
+		{"empty stored (handled by separate gate, not legacy/mismatch)", "", false},
+		{"current version prefix", current, false},
+		{"v0 prefix (older mismatched version)", "v0:" + bareHex, true},
+		{"v3 prefix (future mismatched version)", "v3:" + bareHex, true},
+		{"vX prefix (non-numeric, treated as legacy)", "vX:" + bareHex, true},
+		{"v01 prefix (different literal version, mismatch)", "v01:" + bareHex, true},
+		{"non-v prefix (e.g. xyz, treated as legacy)", "xyz:" + bareHex, true},
+		{"colon-only prefix (no version literal, legacy)", ":" + bareHex, true},
+		{"prefix without colon (looks like bare hex)", FingerprintVersion + bareHex, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := IsLegacyOrMismatchedVersion(tc.stored)
+			if got != tc.want {
+				t.Errorf("IsLegacyOrMismatchedVersion(%q) = %v, want %v", tc.stored, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -702,14 +845,14 @@ func TestCoreFingerprintDriftFields(t *testing.T) {
 		CopyFiles: []CopyEntry{{RelDst: "bar", Probed: true, ContentHash: "newhash"}},
 	}
 	stored := CoreFingerprintBreakdown(current)
-	stored["CopyFiles"] = "oldhash"
+	stored.Fields["CopyFiles"] = "oldhash"
 
 	got := CoreFingerprintDriftFields(stored, current)
 	if len(got) != 1 || got[0] != "CopyFiles" {
 		t.Fatalf("CoreFingerprintDriftFields = %v, want [CopyFiles]", got)
 	}
 
-	if got := CoreFingerprintDriftFields(nil, current); len(got) != 0 {
+	if got := CoreFingerprintDriftFields(BreakdownV1{}, current); len(got) != 0 {
 		t.Fatalf("CoreFingerprintDriftFields with missing breakdown = %v, want empty", got)
 	}
 }

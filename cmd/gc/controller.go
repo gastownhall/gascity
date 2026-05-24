@@ -390,6 +390,7 @@ func handleReloadSocketCmd(conn net.Conn, payload string, ch chan reloadRequest)
 	req := reloadRequest{
 		wait:       wire.Wait,
 		timeout:    timeout,
+		soft:       wire.Soft,
 		acceptedCh: make(chan reloadControlReply, 1),
 		doneCh:     make(chan reloadControlReply, 1),
 	}
@@ -1047,14 +1048,28 @@ func gracefulStopAllWithForceSignal(
 			}
 			fmt.Fprintf(stdout, "Agent '%s' exited gracefully\n", name) //nolint:errcheck // best-effort stdout
 			subject := name
-			if target, ok := targetByName[name]; ok && target.subject != "" {
-				subject = target.subject
-			}
-			if target, ok := targetByName[name]; ok && cityStopSessionMarked(store, target.sessionID) {
-				markCityStopSessionAsAsleep(store, target.sessionID, stderr)
+			// SessionLifecyclePayload.SessionID is contractually "always
+			// present" — when the targetByName lookup misses (or the
+			// bead's ID couldn't be filled) we fall back to the loop
+			// variable, which is the session_name. ResolveSessionID
+			// canonicalizes session_name → bead ID for any consumer.
+			sessionID := name
+			var template string
+			if target, ok := targetByName[name]; ok {
+				if target.subject != "" {
+					subject = target.subject
+				}
+				if target.sessionID != "" {
+					sessionID = target.sessionID
+				}
+				template = target.template
+				if cityStopSessionMarked(store, target.sessionID) {
+					markCityStopSessionAsAsleep(store, target.sessionID, stderr)
+				}
 			}
 			rec.Record(events.Event{
 				Type: events.SessionStopped, Actor: "gc", Subject: subject,
+				Payload: api.SessionLifecyclePayloadJSON(sessionID, template, "exited gracefully"),
 			})
 			continue
 		}
@@ -1317,7 +1332,7 @@ func runController(
 		// not own the supervisor registry/reconciler path required by
 		// async POST /v0/city, so leave the initializer nil and let the
 		// handler return 501 for create/unregister routes.
-		apiMux := api.NewSupervisorMux(&singleCityStateResolver{state: cs}, nil, readOnly, "controller", time.Now())
+		apiMux := api.NewSupervisorMux(&singleCityStateResolver{state: cs}, nil, readOnly, "controller", commit, time.Now())
 		addr := net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port))
 		apiLis, apiErr := net.Listen("tcp", addr)
 		if apiErr != nil {

@@ -3,7 +3,7 @@ title: "Session"
 ---
 
 
-> Last verified against code: 2026-04-25
+> Last verified against code: 2026-05-16
 
 ## Summary
 
@@ -191,6 +191,87 @@ Optional provider extensions also live in `runtime/runtime.go`:
 - `internal/session/manager_test.go` and `internal/session/manager_states_test.go`
   cover higher-level session bookkeeping layered on top of the runtime
 
+## Fingerprint Versioning
+
+### Versioning Model
+
+When the reconciler ticks, it compares the hash a session was started with
+against the hash the current binary produces from the session's resolved
+`runtime.Config`. A real same-version hash difference is config drift and can
+drain the session. A binary upgrade that changes the hash input set is not
+operator intent, so it must not mass-drain already-running sessions.
+
+Stored config hashes carry a `vN:` prefix. The version literal comes from
+`runtime.FingerprintVersion` in
+[`internal/runtime/fingerprint.go`](https://github.com/gastownhall/gascity/blob/main/internal/runtime/fingerprint.go).
+`ConfigFingerprint`, `CoreFingerprint`, and `LiveFingerprint` all emit
+`<FingerprintVersion>:<sha256-hex>`. The current version is `v1`.
+
+The reconciler treats two stored-hash cases as silent rebaseline rather than
+drift:
+
+1. The stored hash has no version prefix, which means it was written by a
+   pre-versioning binary.
+2. The stored hash has a prefix that differs from the current
+   `runtime.FingerprintVersion`.
+
+Silent rebaseline atomically overwrites `started_config_hash`,
+`started_live_hash`, `live_hash`, and `core_hash_breakdown` with values from
+the current binary. The session keeps running, no `SessionDraining` event is
+recorded, and the supervisor log shows one info line for the affected session.
+The `core_hash_breakdown` JSON shape is part of the same upgrade contract: a
+shape change must be paired with a fingerprint version bump.
+
+Implementation references:
+[`internal/runtime/fingerprint.go`](https://github.com/gastownhall/gascity/blob/main/internal/runtime/fingerprint.go)
+owns the version constant and hash helpers,
+[`cmd/gc/session_reconciler.go`](https://github.com/gastownhall/gascity/blob/main/cmd/gc/session_reconciler.go)
+owns the silent-rebaseline branches, and
+[`cmd/gc/build_desired_state_test.go`](https://github.com/gastownhall/gascity/blob/main/cmd/gc/build_desired_state_test.go)
+contains the cross-tick fingerprint stability gate.
+
+### When To Bump And When Not
+
+Rule: if the byte sequence written by `hashCoreFields`, `hashLiveFields`, or a
+helper they call would differ for any valid input, bump
+`runtime.FingerprintVersion`.
+
+Bump the version when a change:
+
+- Adds, removes, or reorders an input to `hashCoreFields`, `hashLiveFields`, or
+  `buildFingerprintExtra`.
+- Changes `envFingerprintAllow`.
+- Changes the on-disk JSON shape stored in `core_hash_breakdown`.
+- Changes the bytes emitted by an existing input, such as re-encoding
+  `CopyEntry` or changing the `HASH_UNAVAILABLE` sentinel used when probed
+  file hashing fails.
+
+Do not bump the version for:
+
+- Pure refactors that produce the same hash for the same input. Verify with the
+  cross-tick stability test for the affected surface.
+- Comments, tests, or documentation.
+- Changes to consumers such as `session_reconciler.go` or
+  `LogCoreFingerprintDrift` that do not change hash output.
+
+### PR Review Checklist
+
+For PRs that touch `internal/runtime/fingerprint.go`:
+
+- [ ] Does the change affect hash output for any valid input?
+      If unclear, compare the affected cross-tick stability fixture before and
+      after the change.
+- [ ] If yes, has `runtime.FingerprintVersion` been bumped?
+- [ ] If yes, is there a new row in the version changelog with the adoption
+      date and a one-line description?
+- [ ] Does the relevant cross-tick stability test still pass?
+
+### Version Changelog
+
+| Version | Adopted    | Change |
+|---|---|---|
+| `v1` | 2026-04-27 | Initial introduction of the `vN:` prefix. Pre-existing unversioned hashes are silently rebaselined to `v1` on the first reconciler tick after upgrade. |
+
 ## Known Limitations
 
 - Provider capabilities differ: interactive attach, idle waiting, and pending
@@ -203,5 +284,7 @@ Optional provider extensions also live in `runtime/runtime.go`:
 ## See Also
 
 - [Health Patrol](health-patrol.md) for liveness and drift handling
+- [Fingerprint Versioning](#fingerprint-versioning) for the version-bump and
+  silent-rebaseline contract
 - [Prompt Templates](prompt-templates.md) for what gets delivered into
   sessions once they start

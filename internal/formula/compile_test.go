@@ -1170,6 +1170,9 @@ func TestCompileReviewQuorumCoreFormula(t *testing.T) {
 				t.Fatalf("%s retry on_exhausted = %q, want soft_fail", step.ID, step.Retry.OnExhausted)
 			}
 			for _, required := range []string{
+				"lane_id",
+				"provider",
+				"model",
 				"verdict",
 				"findings_count",
 				"evidence",
@@ -1190,6 +1193,36 @@ func TestCompileReviewQuorumCoreFormula(t *testing.T) {
 	}
 	if got, want := strings.Join(reviewerLanes, ","), "{{lane_one_id}},{{lane_two_id}}"; got != want {
 		t.Fatalf("reviewer lanes = %q, want %q", got, want)
+	}
+	var synthesisPrompts int
+	for _, step := range parsed.Steps {
+		if step.Metadata["gc.review_quorum_role"] != "synthesis" {
+			continue
+		}
+		synthesisPrompts++
+		for _, required := range []string{
+			"subject",
+			"base_ref",
+			"lanes",
+			"verdict",
+			"summary",
+			"findings_count",
+			"findings",
+			"evidence",
+			"usage",
+			"read_only_enforcement",
+			"mutations_delta",
+			"failure_class",
+			"failure_reason",
+			"lane=<lane_id> reason=<stable_reason>",
+		} {
+			if !strings.Contains(step.Description, required) {
+				t.Fatalf("%s description missing synthesis contract key %q", step.ID, required)
+			}
+		}
+	}
+	if synthesisPrompts != 1 {
+		t.Fatalf("synthesis prompt count = %d, want 1", synthesisPrompts)
 	}
 	for _, name := range []string{
 		"lane_one_id",
@@ -1287,7 +1320,7 @@ func TestCompileBugReportFlowV2(t *testing.T) {
 	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
 
 	const toolingPath = "/home/ubuntu/tooling/formulas"
-	if _, err := os.Stat(filepath.Join(toolingPath, "mol-bug-report-flow-v2.formula.toml")); err != nil {
+	if _, err := os.Stat(filepath.Join(toolingPath, "mol-bug-report-flow-v2.toml")); err != nil {
 		t.Skipf("tooling formula not present: %v", err)
 	}
 
@@ -1856,6 +1889,75 @@ func TestCompileReviewWorkflowSkipGeminiFiltersExpansionLane(t *testing.T) {
 	}
 }
 
+func TestCompilePersonalWorkSkipGeminiFiltersExpansionLanes(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	writeReviewWorkflowFixtures(t, dir)
+
+	recipe, err := Compile(context.Background(), "mol-personal-work-v2", []string{dir}, map[string]string{
+		"issue":         "GC-1",
+		"base_branch":   "main",
+		"skip_gemini":   "true",
+		"setup_command": "true",
+		"test_command":  "true",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	for _, step := range recipe.Steps {
+		if strings.Contains(step.ID, "gemini") {
+			t.Fatalf("compiled recipe unexpectedly retained Gemini lane with skip_gemini=true: %s", step.ID)
+		}
+	}
+	for _, dep := range recipe.Deps {
+		if strings.Contains(dep.StepID, "gemini") || strings.Contains(dep.DependsOnID, "gemini") {
+			t.Fatalf("compiled recipe unexpectedly retained Gemini dependency with skip_gemini=true: %+v", dep)
+		}
+	}
+
+	for _, want := range []string{
+		"mol-personal-work-v2.design-review-loop.iteration.1.design-review-pipeline.persona-gen-claude",
+		"mol-personal-work-v2.design-review-loop.iteration.1.design-review-pipeline.persona-gen-codex",
+		"mol-personal-work-v2.design-review-loop.iteration.1.design-review-pipeline.persona-synthesis",
+		"mol-personal-work-v2.code-review-loop.iteration.1.review-pipeline.review-claude",
+		"mol-personal-work-v2.code-review-loop.iteration.1.review-pipeline.review-codex",
+		"mol-personal-work-v2.code-review-loop.iteration.1.review-pipeline.synthesize",
+	} {
+		if recipe.StepByID(want) == nil {
+			t.Fatalf("compiled recipe missing expected step %q", want)
+		}
+	}
+}
+
+func TestCompilePersonalWorkHappyPathDoesNotAddRetryWrappers(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	writeReviewWorkflowFixtures(t, dir)
+
+	recipe, err := Compile(context.Background(), "mol-personal-work-v2", []string{dir}, map[string]string{
+		"issue":         "GC-1",
+		"base_branch":   "main",
+		"skip_gemini":   "true",
+		"setup_command": "true",
+		"test_command":  "true",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	for _, step := range recipe.Steps {
+		if got := step.Metadata["gc.kind"]; got == "retry" {
+			t.Fatalf("personal-work happy path should not add retry control step %q", step.ID)
+		}
+		if strings.Contains(step.ID, ".attempt.") {
+			t.Fatalf("personal-work happy path should not add retry attempt step %q", step.ID)
+		}
+	}
+}
+
 func TestCompileReviewWorkflowAnnotatesNestedReviewerRetries(t *testing.T) {
 	enableV2ForTest(t)
 
@@ -1906,8 +2008,12 @@ func TestCompileReviewWorkflowAnnotatesNestedReviewerRetries(t *testing.T) {
 func writeReviewWorkflowFixtures(t *testing.T, dir string) {
 	t.Helper()
 	for name, content := range map[string]string{
-		"expansion-review-pr.toml": reviewworkflows.ExpansionReviewPR,
-		"mol-adopt-pr-v2.toml":     reviewworkflows.AdoptPR,
+		"expansion-design-review.toml":      reviewworkflows.ExpansionDesignReview,
+		"expansion-review-pr.toml":          reviewworkflows.ExpansionReviewPR,
+		"expansion-design-review-lite.toml": reviewworkflows.ExpansionDesignReviewLite,
+		"expansion-review-pr-lite.toml":     reviewworkflows.ExpansionReviewPRLite,
+		"mol-adopt-pr-v2.toml":              reviewworkflows.AdoptPR,
+		"mol-personal-work-v2.toml":         reviewworkflows.PersonalWork,
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
 			t.Fatalf("write %s: %v", name, err)
@@ -1932,7 +2038,7 @@ contract = "graph.v2"
 id = "work"
 title = "Do work"
 `
-		if err := os.WriteFile(filepath.Join(dir, "needs-v2.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "needs-v2.toml"), []byte(formulaContent), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1954,7 +2060,7 @@ version = 8
 id = "work"
 title = "Do work"
 `
-		if err := os.WriteFile(filepath.Join(dir, "legacy-v8.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "legacy-v8.toml"), []byte(formulaContent), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1976,7 +2082,7 @@ version = 1
 id = "work"
 title = "Do work"
 `
-		if err := os.WriteFile(filepath.Join(dir, "still-v1.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "still-v1.toml"), []byte(formulaContent), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -2002,7 +2108,7 @@ max_attempts = 1
 mode = "exec"
 path = "check.sh"
 `
-		if err := os.WriteFile(filepath.Join(dir, "legacy-check.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "legacy-check.toml"), []byte(formulaContent), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -2018,6 +2124,29 @@ path = "check.sh"
 			t.Fatalf("root = %+v, want legacy molecule root", root)
 		}
 	})
+}
+
+func TestCompileAcceptsLegacyFormulaFilename(t *testing.T) {
+	dir := t.TempDir()
+	formulaContent := `
+formula = "legacy-name"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Do work"
+`
+	if err := os.WriteFile(filepath.Join(dir, "legacy-name.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Compile(context.Background(), "legacy-name", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if got.Name != "legacy-name" {
+		t.Fatalf("Name = %q, want legacy-name", got.Name)
+	}
 }
 
 func TestCompileValidatesRequiredVars(t *testing.T) {

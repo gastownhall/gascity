@@ -39,6 +39,14 @@ are reproduced on a clean `origin/main` worktree by the reviewer and are
 unrelated to this branch — none touch `path_helpers_test.go` or
 `dolt_leak_helper_test.go`.
 
+## Post-merge remediation note
+
+Post-merge review of PR #1815 found that the landed diff also changed
+`internal/api/handler_provider_readiness.go` by making `providerProbeCacheTTL`
+mutable. The production default remains `2 * time.Second`; mutability exists
+only so `TestHandleProviderReadinessReturnsConfiguredStatuses` can isolate and
+extend the probe cache during the test.
+
 ## Commits in scope
 
 ```

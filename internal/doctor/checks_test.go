@@ -44,6 +44,32 @@ func setupCity(t *testing.T, tomlContent string) string {
 	return dir
 }
 
+// clearInheritedBeadsEnv scrubs GC_BEADS_SCOPE_ROOT (and related beads/dolt
+// env) before a test sets an explicit GC_BEADS override. The doctor provider
+// resolution honors an explicit GC_BEADS only when GC_BEADS_SCOPE_ROOT is
+// unset or points back to cityPath; an inherited GC_BEADS_SCOPE_ROOT from a
+// gc agent's outer city disqualifies the override and the provider falls back
+// to the test's city.toml peek, defeating the assertion.
+func clearInheritedBeadsEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"GC_BEADS",
+		"GC_BEADS_SCOPE_ROOT",
+		"GC_BIN",
+		"GC_DOLT",
+		"GC_DOLT_HOST",
+		"GC_DOLT_PORT",
+		"GC_DOLT_USER",
+		"GC_DOLT_PASSWORD",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_USER",
+		"BEADS_DOLT_PASSWORD",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
 // --- CityStructureCheck ---
 
 func TestCityStructureCheck_OK(t *testing.T) {
@@ -374,6 +400,136 @@ func TestConfigRefsCheck_AbsolutePaths(t *testing.T) {
 			}
 			if len(r.Details) != tc.wantIssues {
 				t.Errorf("got %d issues, want %d: %v", len(r.Details), tc.wantIssues, r.Details)
+			}
+		})
+	}
+}
+
+// City-root-relative paths (produced by adjustFragmentPath during
+// composition) resolve correctly against cityPath.
+func TestConfigRefsCheck_CityRootRelativePaths(t *testing.T) {
+	cityDir := t.TempDir()
+
+	// Create files at city-root-relative locations (as produced by pack composition).
+	promptDir := filepath.Join(cityDir, "packs", "mypack", "agents", "worker")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "prompt.template.md"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	overlayDir := filepath.Join(cityDir, "packs", "mypack", "overlays", "custom")
+	if err := os.MkdirAll(overlayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:           "worker",
+			PromptTemplate: "packs/mypack/agents/worker/prompt.template.md",
+			OverlayDir:     "packs/mypack/overlays/custom",
+		}},
+	}
+	c := NewConfigRefsCheck(cfg, cityDir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; msg = %s; details = %v", r.Status, r.Message, r.Details)
+	}
+}
+
+// session_setup_script is left as-authored (pack-relative) during
+// composition — resolving it against cityPath produces a false positive
+// when the script lives in the pack directory, not the city root.
+func TestConfigRefsCheck_SessionSetupScriptSourceDir(t *testing.T) {
+	cityDir := t.TempDir()
+	packDir := t.TempDir()
+
+	// Create a setup script inside the pack directory.
+	scriptPath := filepath.Join(packDir, "scripts", "setup.sh")
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name: "worker",
+			// As-authored: pack-relative, not city-root-relative.
+			SessionSetupScript: "scripts/setup.sh",
+			SourceDir:          packDir,
+		}},
+	}
+	c := NewConfigRefsCheck(cfg, cityDir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; msg = %s; details = %v", r.Status, r.Message, r.Details)
+	}
+}
+
+func TestConfigRefsCheck_SessionSetupScriptDoubleSlashUsesCityRoot(t *testing.T) {
+	cityDir := t.TempDir()
+	sourceDir := filepath.Join(cityDir, "packs", "feature")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(cityDir, "scripts", "setup.sh")
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:               "worker",
+			SessionSetupScript: "//scripts/setup.sh",
+			SourceDir:          sourceDir,
+		}},
+	}
+	c := NewConfigRefsCheck(cfg, cityDir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; msg = %s; details = %v", r.Status, r.Message, r.Details)
+	}
+}
+
+func TestConfigRefsCheck_SessionSetupScriptLegacyCityRelativeWithSourceDir(t *testing.T) {
+	cityDir := t.TempDir()
+	sourceDir := filepath.Join(cityDir, "packs", "feature")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		script string
+	}{
+		{name: "same pack", script: "packs/feature/scripts/setup.sh"},
+		{name: "shared pack", script: "packs/shared/scripts/setup.sh"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scriptPath := filepath.Join(cityDir, filepath.FromSlash(tc.script))
+			if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(scriptPath, []byte("#!/bin/sh"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg := &config.City{
+				Agents: []config.Agent{{
+					Name:               "worker",
+					SessionSetupScript: tc.script,
+					SourceDir:          sourceDir,
+				}},
+			}
+			c := NewConfigRefsCheck(cfg, cityDir)
+			r := c.Run(&CheckContext{})
+			if r.Status != StatusOK {
+				t.Errorf("status = %d, want OK; msg = %s; details = %v", r.Status, r.Message, r.Details)
 			}
 		})
 	}
@@ -1007,6 +1163,7 @@ func TestBDSplitStoreCheck_InvalidExternalCityConfigUsesNeutralGuidance(t *testi
 }
 
 func TestBDSplitStoreCheck_FileProviderUsesNeutralRecoveryGuidance(t *testing.T) {
+	clearInheritedBeadsEnv(t)
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 	fs := fsys.OSFS{}
@@ -1757,6 +1914,7 @@ provider = "exec:/tmp/gc-beads-bd"
 }
 
 func TestBeadsStoreCheck_GCBeadsExecOverrideExternalCityUnavailableFailsBeforePing(t *testing.T) {
+	clearInheritedBeadsEnv(t)
 	dir := setupCity(t, `[workspace]
 name = "test"
 [beads]
@@ -1795,6 +1953,7 @@ provider = "file"
 }
 
 func TestBeadsStoreCheck_GCBeadsFileOverrideSkipsBdPreflight(t *testing.T) {
+	clearInheritedBeadsEnv(t)
 	dir := setupCity(t, `[workspace]
 name = "test"
 `)

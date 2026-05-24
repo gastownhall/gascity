@@ -74,9 +74,12 @@ export type AgentPatch = {
     InjectFragmentsAppend: Array<string> | null;
     InstallAgentHooks: Array<string> | null;
     InstallAgentHooksAppend: Array<string> | null;
+    Lifecycle: string | null;
     MCP: Array<string> | null;
     MCPAppend: Array<string> | null;
     MaxActiveSessions: number | null;
+    MaxSessionAge: string | null;
+    MaxSessionAgeJitter: string | null;
     MinActiveSessions: number | null;
     Name: string;
     Nudge: string | null;
@@ -103,6 +106,7 @@ export type AgentPatch = {
     SleepAfterIdle: string | null;
     StartCommand: string | null;
     Suspended: boolean | null;
+    TmuxAlias: string | null;
     WakeMode: string | null;
     WorkDir: string | null;
 };
@@ -130,6 +134,10 @@ export type AgentPatchSetInputBody = {
      * Override suspended state.
      */
     suspended?: boolean;
+    /**
+     * Override tmux session name template.
+     */
+    tmux_alias?: string;
     /**
      * Override session working directory.
      */
@@ -249,6 +257,7 @@ export type Bead = {
     created_at: string;
     dependencies?: Array<Dep> | null;
     description?: string;
+    ephemeral?: boolean;
     from?: string;
     id: string;
     issue_type: string;
@@ -745,7 +754,60 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | RequestFailedPayload | SessionCreateSucceededPayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionSubmitSucceededPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
+
+export type EventRotateAnchor = {
+    /**
+     * Anchor event sequence.
+     */
+    seq: number;
+    /**
+     * Anchor event timestamp.
+     */
+    ts: string;
+    /**
+     * Anchor event type.
+     */
+    type: string;
+};
+
+export type EventRotateArchive = {
+    /**
+     * Archive compression status.
+     */
+    compression_status: 'pending' | 'complete';
+    /**
+     * First event sequence included in the archive.
+     */
+    first_seq: number;
+    /**
+     * Last event sequence included in the archive.
+     */
+    last_seq: number;
+    /**
+     * Absolute path to the archive.
+     */
+    path: string;
+};
+
+export type EventRotateResponse = {
+    /**
+     * Anchor event metadata when rotated is true.
+     */
+    anchor_event?: EventRotateAnchor;
+    /**
+     * Archive metadata when rotated is true.
+     */
+    archive?: EventRotateArchive;
+    /**
+     * No-op reason when rotated is false.
+     */
+    reason?: string;
+    /**
+     * Whether an archive was produced.
+     */
+    rotated: boolean;
+};
 
 export type EventStreamEnvelope = {
     actor: string;
@@ -1819,6 +1881,14 @@ export type PoolOverride = {
     OnDeath: string | null;
 };
 
+export type ProjectIdentityStampedPayload = {
+    layer: string;
+    new_id: string;
+    old_id?: string;
+    scope_root: string;
+    source: string;
+};
+
 export type ProviderCreateInputBody = {
     /**
      * ACP transport command arguments override.
@@ -1898,6 +1968,7 @@ export type ProviderOptionDto = {
 export type ProviderPatch = {
     ACPArgs: Array<string> | null;
     ACPCommand: string | null;
+    AcceptStartupDialogs: boolean | null;
     Args: Array<string> | null;
     ArgsAppend: Array<string> | null;
     Base: string | null;
@@ -1915,6 +1986,10 @@ export type ProviderPatch = {
 };
 
 export type ProviderPatchSetInputBody = {
+    /**
+     * Override startup dialog acceptance behavior.
+     */
+    accept_startup_dialogs?: boolean;
     /**
      * Override ACP transport command arguments.
      */
@@ -2146,6 +2221,10 @@ export type RigActionBody = {
 
 export type RigCreateInputBody = {
     /**
+     * Mainline branch (e.g. main, master). Auto-detected when omitted.
+     */
+    default_branch?: string;
+    /**
      * Rig name.
      */
     name: string;
@@ -2171,6 +2250,10 @@ export type RigCreatedOutputBody = {
 };
 
 export type RigPatch = {
+    DefaultBranch: string | null;
+    FormulaVars: {
+        [key: string]: string;
+    };
     Name: string;
     Path: string | null;
     Prefix: string | null;
@@ -2178,6 +2261,10 @@ export type RigPatch = {
 };
 
 export type RigPatchSetInputBody = {
+    /**
+     * Override mainline branch.
+     */
+    default_branch?: string;
     /**
      * Rig name.
      */
@@ -2198,6 +2285,7 @@ export type RigPatchSetInputBody = {
 
 export type RigResponse = {
     agent_count: number;
+    default_branch?: string;
     git?: GitStatus;
     last_activity?: string;
     name: string;
@@ -2208,6 +2296,10 @@ export type RigResponse = {
 };
 
 export type RigUpdateInputBody = {
+    /**
+     * Mainline branch (e.g. main, master).
+     */
+    default_branch?: string;
     /**
      * Filesystem path.
      */
@@ -2220,6 +2312,12 @@ export type RigUpdateInputBody = {
      * Whether rig is suspended.
      */
     suspended?: boolean;
+};
+
+export type RotatedPayload = {
+    prior_archive: string;
+    prior_first_seq: number;
+    prior_last_seq: number;
 };
 
 export type ScopeGroup = {
@@ -2323,10 +2421,48 @@ export type SessionCreateSucceededPayload = {
     session: SessionResponse;
 };
 
+export type SessionDrainAckedWithAssignedWorkPayload = {
+    /**
+     * ID of the work bead still holding this session as its assignee.
+     */
+    bead_id: string;
+    /**
+     * Status of the stranded bead at emission time (typically 'in_progress' for cap-hit, 'open' if recovery races claim).
+     */
+    bead_status?: string;
+    /**
+     * Short diagnostic context. Today both emission sites pass 'drain_acked_with_assigned_work'; reserved for finer-grained shape discriminators if later Shape-N variants land.
+     */
+    reason?: string;
+    /**
+     * Canonical session bead ID for the session that drain-acked.
+     */
+    session_id: string;
+    /**
+     * Pool template name when known at the emission site.
+     */
+    template?: string;
+};
+
 export type SessionInfo = {
     attached: boolean;
     last_activity?: string;
     name: string;
+};
+
+export type SessionLifecyclePayload = {
+    /**
+     * Short human-readable reason.
+     */
+    reason?: string;
+    /**
+     * Canonical session bead ID. Always present.
+     */
+    session_id: string;
+    /**
+     * Session template name when known at the emission site.
+     */
+    template?: string;
 };
 
 export type SessionMessageInputBody = {
@@ -2361,6 +2497,13 @@ export type SessionPatchBody = {
 export type SessionPendingResponse = {
     pending?: PendingInteraction;
     supported: boolean;
+};
+
+export type SessionPermissionModeBody = {
+    /**
+     * Provider schema value for the permission_mode option.
+     */
+    permission_mode: string;
 };
 
 /**
@@ -2412,6 +2555,7 @@ export type SessionRespondOutputBody = {
 export type SessionResponse = {
     active_bead?: string;
     activity?: string;
+    agent_kind?: string;
     alias?: string;
     attached: boolean;
     configured_named_session?: boolean;
@@ -2422,6 +2566,7 @@ export type SessionResponse = {
     id: string;
     kind?: string;
     last_active?: string;
+    last_nudge_delivered_at?: string;
     last_output?: string;
     metadata?: {
         [key: string]: string;
@@ -2622,11 +2767,58 @@ export type StatusAgentCounts = {
     total: number;
 };
 
+export type StatusAgentDetail = {
+    /**
+     * True when the pool is draining this instance.
+     */
+    draining?: boolean;
+    /**
+     * True when this row is a pool-expanded instance (renderer indents differently).
+     */
+    expanded?: boolean;
+    /**
+     * Pool group label for expanded rows; same as QualifiedName for singletons.
+     */
+    group_name?: string;
+    /**
+     * Unqualified agent name (for pool instances, the per-instance short name like 'polecat-1').
+     */
+    name: string;
+    /**
+     * Rig-qualified name when applicable, else the bare agent name.
+     */
+    qualified_name: string;
+    /**
+     * Observed running state of the agent's session.
+     */
+    running: boolean;
+    /**
+     * 'scaled (min=N, max=M)' header emitted once per pool group.
+     */
+    scale_label?: string;
+    /**
+     * city or rig.
+     */
+    scope: string;
+    /**
+     * tmux session name CLI drain-ops key on.
+     */
+    session_name?: string;
+    /**
+     * Whether the agent (or its rig) is suspended.
+     */
+    suspended: boolean;
+};
+
 export type StatusBody = {
     /**
      * Total agent count (deprecated, use agents.total).
      */
     agent_count: number;
+    /**
+     * Per-agent state (for CLI status views). Empty when none.
+     */
+    agent_details?: Array<StatusAgentDetail> | null;
     /**
      * Agent state counts.
      */
@@ -2639,6 +2831,10 @@ export type StatusBody = {
      * City name.
      */
     name: string;
+    /**
+     * Per-named-session detail. Empty when none configured.
+     */
+    named_session_details?: Array<StatusNamedSessionDetail> | null;
     /**
      * True when one or more status backing reads returned incomplete data.
      */
@@ -2656,6 +2852,10 @@ export type StatusBody = {
      */
     rig_count: number;
     /**
+     * Per-rig detail (for CLI status views). Empty when none.
+     */
+    rig_details?: Array<StatusRigDetail> | null;
+    /**
      * Rig state counts.
      */
     rigs: StatusRigCounts;
@@ -2663,6 +2863,14 @@ export type StatusBody = {
      * Number of running agent processes.
      */
     running: number;
+    /**
+     * Active/suspended session counts. Omitted when unavailable.
+     */
+    session_counts_detail?: StatusSessionCountsDetail;
+    /**
+     * Dolt bead store health summary. Omitted when unavailable.
+     */
+    store_health?: StatusStoreHealth;
     /**
      * Whether the city is suspended.
      */
@@ -2692,6 +2900,21 @@ export type StatusMailCounts = {
     unread: number;
 };
 
+export type StatusNamedSessionDetail = {
+    /**
+     * Qualified named-session identity.
+     */
+    identity: string;
+    /**
+     * Named-session mode (on-demand, always, etc.).
+     */
+    mode: string;
+    /**
+     * Lifecycle status string (materialized, reserved-unmaterialized, etc.).
+     */
+    status: string;
+};
+
 export type StatusRigCounts = {
     /**
      * Number of suspended rigs.
@@ -2701,6 +2924,67 @@ export type StatusRigCounts = {
      * Total number of rigs.
      */
     total: number;
+};
+
+export type StatusRigDetail = {
+    /**
+     * Rig name.
+     */
+    name: string;
+    /**
+     * Rig directory path.
+     */
+    path: string;
+    /**
+     * Whether the rig is suspended (either explicitly or because all its agents are suspended).
+     */
+    suspended: boolean;
+};
+
+export type StatusSessionCountsDetail = {
+    /**
+     * Number of active sessions.
+     */
+    active: number;
+    /**
+     * Number of suspended sessions.
+     */
+    suspended: number;
+};
+
+export type StatusStoreHealth = {
+    /**
+     * RFC3339 timestamp of last maintenance run.
+     */
+    last_gc_at?: string;
+    /**
+     * Status of last maintenance run ('success' or 'failed').
+     */
+    last_gc_status?: string;
+    /**
+     * Live bead row count.
+     */
+    live_rows: number;
+    /**
+     * On-disk path of the Dolt store.
+     */
+    path: string;
+    /**
+     * Derived megabytes per row.
+     */
+    ratio_mb_per_row: number;
+    /**
+     * Total bytes of the store directory.
+     */
+    size_bytes: number;
+    /**
+     * Ratio threshold; a ratio above this trips warning.
+     */
+    threshold_mb_per_row: number;
+    /**
+     * True when maintenance is overdue.
+     */
+    warning: boolean;
 };
 
 export type StatusWorkCounts = {
@@ -2716,6 +3000,20 @@ export type StatusWorkCounts = {
      * Number of ready work items.
      */
     ready: number;
+};
+
+export type StoreMaintenanceDonePayload = {
+    after_bytes: number;
+    before_bytes: number;
+    duration_s: number;
+    snapshot_path: string;
+};
+
+export type StoreMaintenanceFailedPayload = {
+    duration_s: number;
+    error_msg: string;
+    snapshot_path?: string;
+    stage: string;
 };
 
 export type SubmissionCapabilities = {
@@ -2748,7 +3046,38 @@ export type SupervisorEventListOutputBody = {
     total: number;
 };
 
+export type SupervisorFsPressureSkippedTickPayload = {
+    /**
+     * The Linux PSI some avg60 value observed for filesystem IO pressure.
+     */
+    avg60: number;
+    /**
+     * Number of consecutive pressure skips including this tick.
+     */
+    consecutive_skips: number;
+    /**
+     * Maximum consecutive skips before the supervisor forces one reconciliation tick.
+     */
+    max_consecutive_skips: number;
+    /**
+     * The pressure decision outcome: skipped for a shed tick or forced for the bounded liveness tick.
+     */
+    outcome: string;
+    /**
+     * The configured avg60 threshold that triggered the skip.
+     */
+    threshold: number;
+    /**
+     * The daemon tick trigger, such as patrol or poke.
+     */
+    trigger?: string;
+};
+
 export type SupervisorHealthOutputBody = {
+    /**
+     * Build identity (typically a short git commit hash, with "-dirty" suffix when built from an unclean tree). Empty when unavailable.
+     */
+    build_id?: string;
     /**
      * Cities currently running.
      */
@@ -2773,6 +3102,25 @@ export type SupervisorHealthOutputBody = {
      * Supervisor version.
      */
     version: string;
+};
+
+export type SupervisorShutdownPayload = {
+    /**
+     * For source=socket_stop, the address reported by the connecting client. Typically empty for unix-socket peers.
+     */
+    client_addr?: string;
+    /**
+     * Resulting shutdown mode.
+     */
+    mode: 'destructive' | 'preserve_sessions' | 'unknown';
+    /**
+     * For source=signal, the human-readable signal name (e.g. "terminated", "interrupt"). Empty for socket_stop.
+     */
+    signal?: string;
+    /**
+     * Which path triggered the shutdown.
+     */
+    source: 'signal' | 'socket_stop';
 };
 
 export type SupervisorStartup = {
@@ -2840,6 +3188,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeConvoyClosed) | ({
     type: 'convoy.created';
 } & TypedEventStreamEnvelopeConvoyCreated) | ({
+    type: 'events.rotated';
+} & TypedEventStreamEnvelopeEventsRotated) | ({
     type: 'extmsg.adapter_added';
 } & TypedEventStreamEnvelopeExtmsgAdapterAdded) | ({
     type: 'extmsg.adapter_removed';
@@ -2854,6 +3204,10 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeExtmsgOutbound) | ({
     type: 'extmsg.unbound';
 } & TypedEventStreamEnvelopeExtmsgUnbound) | ({
+    type: 'gc.store.maintenance.done';
+} & TypedEventStreamEnvelopeGcStoreMaintenanceDone) | ({
+    type: 'gc.store.maintenance.failed';
+} & TypedEventStreamEnvelopeGcStoreMaintenanceFailed) | ({
     type: 'mail.archived';
 } & TypedEventStreamEnvelopeMailArchived) | ({
     type: 'mail.deleted';
@@ -2874,6 +3228,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedEventStreamEnvelopeOrderFired) | ({
+    type: 'project.identity.stamped';
+} & TypedEventStreamEnvelopeProjectIdentityStamped) | ({
     type: 'provider.swapped';
 } & TypedEventStreamEnvelopeProviderSwapped) | ({
     type: 'request.failed';
@@ -2890,14 +3246,20 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeRequestResultSessionSubmit) | ({
     type: 'session.crashed';
 } & TypedEventStreamEnvelopeSessionCrashed) | ({
+    type: 'session.drain_acked_with_assigned_work';
+} & TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
     type: 'session.draining';
 } & TypedEventStreamEnvelopeSessionDraining) | ({
     type: 'session.idle_killed';
 } & TypedEventStreamEnvelopeSessionIdleKilled) | ({
+    type: 'session.max_age_killed';
+} & TypedEventStreamEnvelopeSessionMaxAgeKilled) | ({
     type: 'session.quarantined';
 } & TypedEventStreamEnvelopeSessionQuarantined) | ({
     type: 'session.stopped';
 } & TypedEventStreamEnvelopeSessionStopped) | ({
+    type: 'session.stranded';
+} & TypedEventStreamEnvelopeSessionStranded) | ({
     type: 'session.suspended';
 } & TypedEventStreamEnvelopeSessionSuspended) | ({
     type: 'session.undrained';
@@ -2906,6 +3268,12 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionUpdated) | ({
     type: 'session.woke';
 } & TypedEventStreamEnvelopeSessionWoke) | ({
+    type: 'session.work_query_failed';
+} & TypedEventStreamEnvelopeSessionWorkQueryFailed) | ({
+    type: 'supervisor.fs_pressure.skipped_tick';
+} & TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
+    type: 'supervisor.shutdown_requested';
+} & TypedEventStreamEnvelopeSupervisorShutdownRequested) | ({
     type: 'worker.operation';
 } & TypedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedEventStreamEnvelopeCustom';
@@ -3080,6 +3448,20 @@ export type TypedEventStreamEnvelopeCustom = {
 };
 
 /**
+ * TypedEventStreamEnvelope events.rotated
+ */
+export type TypedEventStreamEnvelopeEventsRotated = {
+    actor: string;
+    message?: string;
+    payload: RotatedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'events.rotated';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope extmsg.adapter_added
  */
 export type TypedEventStreamEnvelopeExtmsgAdapterAdded = {
@@ -3174,6 +3556,34 @@ export type TypedEventStreamEnvelopeExtmsgUnbound = {
     subject?: string;
     ts: string;
     type: 'extmsg.unbound';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope gc.store.maintenance.done
+ */
+export type TypedEventStreamEnvelopeGcStoreMaintenanceDone = {
+    actor: string;
+    message?: string;
+    payload: StoreMaintenanceDonePayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'gc.store.maintenance.done';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope gc.store.maintenance.failed
+ */
+export type TypedEventStreamEnvelopeGcStoreMaintenanceFailed = {
+    actor: string;
+    message?: string;
+    payload: StoreMaintenanceFailedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'gc.store.maintenance.failed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -3318,6 +3728,20 @@ export type TypedEventStreamEnvelopeOrderFired = {
 };
 
 /**
+ * TypedEventStreamEnvelope project.identity.stamped
+ */
+export type TypedEventStreamEnvelopeProjectIdentityStamped = {
+    actor: string;
+    message?: string;
+    payload: ProjectIdentityStampedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'project.identity.stamped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope provider.swapped
  */
 export type TypedEventStreamEnvelopeProviderSwapped = {
@@ -3421,11 +3845,25 @@ export type TypedEventStreamEnvelopeRequestResultSessionSubmit = {
 export type TypedEventStreamEnvelopeSessionCrashed = {
     actor: string;
     message?: string;
-    payload: NoPayload;
+    payload: SessionLifecyclePayload;
     seq: number;
     subject?: string;
     ts: string;
     type: 'session.crashed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope session.drain_acked_with_assigned_work
+ */
+export type TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork = {
+    actor: string;
+    message?: string;
+    payload: SessionDrainAckedWithAssignedWorkPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.drain_acked_with_assigned_work';
     workflow?: WorkflowEventProjection;
 };
 
@@ -3458,6 +3896,20 @@ export type TypedEventStreamEnvelopeSessionIdleKilled = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.max_age_killed
+ */
+export type TypedEventStreamEnvelopeSessionMaxAgeKilled = {
+    actor: string;
+    message?: string;
+    payload: NoPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.max_age_killed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.quarantined
  */
 export type TypedEventStreamEnvelopeSessionQuarantined = {
@@ -3477,11 +3929,25 @@ export type TypedEventStreamEnvelopeSessionQuarantined = {
 export type TypedEventStreamEnvelopeSessionStopped = {
     actor: string;
     message?: string;
-    payload: NoPayload;
+    payload: SessionLifecyclePayload;
     seq: number;
     subject?: string;
     ts: string;
     type: 'session.stopped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope session.stranded
+ */
+export type TypedEventStreamEnvelopeSessionStranded = {
+    actor: string;
+    message?: string;
+    payload: NoPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.stranded';
     workflow?: WorkflowEventProjection;
 };
 
@@ -3542,6 +4008,48 @@ export type TypedEventStreamEnvelopeSessionWoke = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.work_query_failed
+ */
+export type TypedEventStreamEnvelopeSessionWorkQueryFailed = {
+    actor: string;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.work_query_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope supervisor.fs_pressure.skipped_tick
+ */
+export type TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
+    actor: string;
+    message?: string;
+    payload: SupervisorFsPressureSkippedTickPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.fs_pressure.skipped_tick';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope supervisor.shutdown_requested
+ */
+export type TypedEventStreamEnvelopeSupervisorShutdownRequested = {
+    actor: string;
+    message?: string;
+    payload: SupervisorShutdownPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.shutdown_requested';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope worker.operation
  */
 export type TypedEventStreamEnvelopeWorkerOperation = {
@@ -3583,6 +4091,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeConvoyClosed) | ({
     type: 'convoy.created';
 } & TypedTaggedEventStreamEnvelopeConvoyCreated) | ({
+    type: 'events.rotated';
+} & TypedTaggedEventStreamEnvelopeEventsRotated) | ({
     type: 'extmsg.adapter_added';
 } & TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded) | ({
     type: 'extmsg.adapter_removed';
@@ -3597,6 +4107,10 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeExtmsgOutbound) | ({
     type: 'extmsg.unbound';
 } & TypedTaggedEventStreamEnvelopeExtmsgUnbound) | ({
+    type: 'gc.store.maintenance.done';
+} & TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone) | ({
+    type: 'gc.store.maintenance.failed';
+} & TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed) | ({
     type: 'mail.archived';
 } & TypedTaggedEventStreamEnvelopeMailArchived) | ({
     type: 'mail.deleted';
@@ -3617,6 +4131,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedTaggedEventStreamEnvelopeOrderFired) | ({
+    type: 'project.identity.stamped';
+} & TypedTaggedEventStreamEnvelopeProjectIdentityStamped) | ({
     type: 'provider.swapped';
 } & TypedTaggedEventStreamEnvelopeProviderSwapped) | ({
     type: 'request.failed';
@@ -3633,14 +4149,20 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit) | ({
     type: 'session.crashed';
 } & TypedTaggedEventStreamEnvelopeSessionCrashed) | ({
+    type: 'session.drain_acked_with_assigned_work';
+} & TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
     type: 'session.draining';
 } & TypedTaggedEventStreamEnvelopeSessionDraining) | ({
     type: 'session.idle_killed';
 } & TypedTaggedEventStreamEnvelopeSessionIdleKilled) | ({
+    type: 'session.max_age_killed';
+} & TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled) | ({
     type: 'session.quarantined';
 } & TypedTaggedEventStreamEnvelopeSessionQuarantined) | ({
     type: 'session.stopped';
 } & TypedTaggedEventStreamEnvelopeSessionStopped) | ({
+    type: 'session.stranded';
+} & TypedTaggedEventStreamEnvelopeSessionStranded) | ({
     type: 'session.suspended';
 } & TypedTaggedEventStreamEnvelopeSessionSuspended) | ({
     type: 'session.undrained';
@@ -3649,6 +4171,12 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionUpdated) | ({
     type: 'session.woke';
 } & TypedTaggedEventStreamEnvelopeSessionWoke) | ({
+    type: 'session.work_query_failed';
+} & TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed) | ({
+    type: 'supervisor.fs_pressure.skipped_tick';
+} & TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
+    type: 'supervisor.shutdown_requested';
+} & TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested) | ({
     type: 'worker.operation';
 } & TypedTaggedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedTaggedEventStreamEnvelopeCustom';
@@ -3835,6 +4363,21 @@ export type TypedTaggedEventStreamEnvelopeCustom = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope events.rotated
+ */
+export type TypedTaggedEventStreamEnvelopeEventsRotated = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: RotatedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'events.rotated';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope extmsg.adapter_added
  */
 export type TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded = {
@@ -3936,6 +4479,36 @@ export type TypedTaggedEventStreamEnvelopeExtmsgUnbound = {
     subject?: string;
     ts: string;
     type: 'extmsg.unbound';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope gc.store.maintenance.done
+ */
+export type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: StoreMaintenanceDonePayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'gc.store.maintenance.done';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope gc.store.maintenance.failed
+ */
+export type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: StoreMaintenanceFailedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'gc.store.maintenance.failed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4090,6 +4663,21 @@ export type TypedTaggedEventStreamEnvelopeOrderFired = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope project.identity.stamped
+ */
+export type TypedTaggedEventStreamEnvelopeProjectIdentityStamped = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: ProjectIdentityStampedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'project.identity.stamped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope provider.swapped
  */
 export type TypedTaggedEventStreamEnvelopeProviderSwapped = {
@@ -4201,11 +4789,26 @@ export type TypedTaggedEventStreamEnvelopeSessionCrashed = {
     actor: string;
     city: string;
     message?: string;
-    payload: NoPayload;
+    payload: SessionLifecyclePayload;
     seq: number;
     subject?: string;
     ts: string;
     type: 'session.crashed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.drain_acked_with_assigned_work
+ */
+export type TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SessionDrainAckedWithAssignedWorkPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.drain_acked_with_assigned_work';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4240,6 +4843,21 @@ export type TypedTaggedEventStreamEnvelopeSessionIdleKilled = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope session.max_age_killed
+ */
+export type TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: NoPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.max_age_killed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope session.quarantined
  */
 export type TypedTaggedEventStreamEnvelopeSessionQuarantined = {
@@ -4261,11 +4879,26 @@ export type TypedTaggedEventStreamEnvelopeSessionStopped = {
     actor: string;
     city: string;
     message?: string;
-    payload: NoPayload;
+    payload: SessionLifecyclePayload;
     seq: number;
     subject?: string;
     ts: string;
     type: 'session.stopped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.stranded
+ */
+export type TypedTaggedEventStreamEnvelopeSessionStranded = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: NoPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.stranded';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4326,6 +4959,51 @@ export type TypedTaggedEventStreamEnvelopeSessionWoke = {
     subject?: string;
     ts: string;
     type: 'session.woke';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.work_query_failed
+ */
+export type TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'session.work_query_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope supervisor.fs_pressure.skipped_tick
+ */
+export type TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SupervisorFsPressureSkippedTickPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.fs_pressure.skipped_tick';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope supervisor.shutdown_requested
+ */
+export type TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SupervisorShutdownPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.shutdown_requested';
     workflow?: WorkflowEventProjection;
 };
 
@@ -5654,6 +6332,10 @@ export type GetV0CityByCityNameBeadsData = {
          * Filter by rig.
          */
         rig?: string;
+        /**
+         * Include closed beads.
+         */
+        all?: boolean;
     };
     url: '/v0/city/{cityName}/beads';
 };
@@ -6284,6 +6966,47 @@ export type EmitEventResponses = {
 };
 
 export type EmitEventResponse = EmitEventResponses[keyof EmitEventResponses];
+
+export type RotateEventsData = {
+    body?: never;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: {
+        /**
+         * Wait for archive compression to complete before returning.
+         */
+        wait?: boolean;
+    };
+    url: '/v0/city/{cityName}/events/rotate';
+};
+
+export type RotateEventsErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type RotateEventsError = RotateEventsErrors[keyof RotateEventsErrors];
+
+export type RotateEventsResponses = {
+    /**
+     * OK
+     */
+    200: EventRotateResponse;
+};
+
+export type RotateEventsResponse = RotateEventsResponses[keyof RotateEventsResponses];
 
 export type StreamEventsData = {
     body?: never;
@@ -9108,6 +9831,10 @@ export type GetV0CityByCityNameSessionByIdData = {
          * Include last output preview.
          */
         peek?: boolean;
+        /**
+         * Number of lines to include in the last output preview when peek=true. Defaults to 5.
+         */
+        peek_lines?: number;
     };
     url: '/v0/city/{cityName}/session/{id}';
 };
@@ -9400,6 +10127,46 @@ export type GetV0CityByCityNameSessionByIdPendingResponses = {
 };
 
 export type GetV0CityByCityNameSessionByIdPendingResponse = GetV0CityByCityNameSessionByIdPendingResponses[keyof GetV0CityByCityNameSessionByIdPendingResponses];
+
+export type PostV0CityByCityNameSessionByIdPermissionModeData = {
+    body: SessionPermissionModeBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Session ID, alias, or runtime session_name.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/permission-mode';
+};
+
+export type PostV0CityByCityNameSessionByIdPermissionModeErrors = {
+    /**
+     * Error
+     */
+    default: ErrorModel;
+};
+
+export type PostV0CityByCityNameSessionByIdPermissionModeError = PostV0CityByCityNameSessionByIdPermissionModeErrors[keyof PostV0CityByCityNameSessionByIdPermissionModeErrors];
+
+export type PostV0CityByCityNameSessionByIdPermissionModeResponses = {
+    /**
+     * OK
+     */
+    200: SessionResponse;
+};
+
+export type PostV0CityByCityNameSessionByIdPermissionModeResponse = PostV0CityByCityNameSessionByIdPermissionModeResponses[keyof PostV0CityByCityNameSessionByIdPermissionModeResponses];
 
 export type PostV0CityByCityNameSessionByIdRenameData = {
     body: SessionRenameInputBody;

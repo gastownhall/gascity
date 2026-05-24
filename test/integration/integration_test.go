@@ -21,6 +21,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -57,11 +58,15 @@ var testRuntimeDir string
 
 var cityCommandEnv sync.Map
 
+var runIntegrationSupervisorStopCommand = exec.CommandContext
+
 const (
-	integrationGCCommandTimeout     = 60 * time.Second
-	integrationGCLifecycleTimeout   = 120 * time.Second
-	integrationGCDoltCommandTimeout = 120 * time.Second
-	integrationBDCommandTimeout     = 15 * time.Second
+	integrationGCCommandTimeout      = 60 * time.Second
+	integrationGCLifecycleTimeout    = 120 * time.Second
+	integrationGCDoltCommandTimeout  = 120 * time.Second
+	integrationBDCommandTimeout      = 15 * time.Second
+	integrationSupervisorStopTimeout = 10 * time.Second
+	integrationSupervisorWaitDelay   = 10 * time.Second
 )
 
 const (
@@ -69,6 +74,8 @@ const (
 	integrationRealBDBinaryEnv = "GC_INTEGRATION_REAL_BD"
 	integrationDoltBinaryEnv   = "GC_INTEGRATION_DOLT_BINARY"
 	integrationDoltIdentityEnv = "GC_INTEGRATION_DOLT_IDENTITY_MODE"
+	managedDoltTestModeEnv     = "GC_MANAGED_DOLT_TEST_MODE"
+	managedDoltTestParentEnv   = "GC_MANAGED_DOLT_TEST_PARENT_PID"
 	doltIdentityModeIsolated   = "isolated"
 	doltIdentityModeGlobal     = "global"
 	doltIdentityModeSkip       = "skip"
@@ -76,6 +83,10 @@ const (
 
 // TestMain builds the gc binary and runs pre/post sweeps of orphan sessions.
 func TestMain(m *testing.M) {
+	if os.Getenv("GC_INTEGRATION_SUPERVISOR_STOP_HELPER") == "1" {
+		select {}
+	}
+
 	subprocess := os.Getenv("GC_SESSION") == "subprocess"
 
 	// Tmux check: skip all tests if tmux not available AND not using subprocess.
@@ -90,6 +101,8 @@ func TestMain(m *testing.M) {
 		// their descendant pollers from prior interrupted runs.
 		sweepSubprocessTestProcesses()
 	}
+	stopSignalSweeper := installIntegrationSignalSweeper(subprocess)
+	defer stopSignalSweeper()
 
 	// Build gc binary to a temp directory.
 	tmpDir, err := os.MkdirTemp("", "gc-integration-*")
@@ -184,11 +197,7 @@ func TestMain(m *testing.M) {
 	// Use --wait so the sweep blocks until the supervisor and its managed
 	// cities have actually shut down, avoiding a race with process-table
 	// cleanup below.
-	if gcBinary != "" {
-		stopCmd := exec.Command(gcBinary, "supervisor", "stop", "--wait")
-		stopCmd.Env = integrationEnv()
-		_ = stopCmd.Run()
-	}
+	stopIntegrationSupervisorWithTimeout(integrationSupervisorStopTimeout)
 
 	// Post-sweep: clean up any sessions that survived individual test cleanup.
 	if !subprocess {
@@ -198,6 +207,96 @@ func TestMain(m *testing.M) {
 	}
 
 	os.Exit(code)
+}
+
+func installIntegrationSignalSweeper(subprocess bool) func() {
+	signals := make(chan os.Signal, 2)
+	done := make(chan struct{})
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		select {
+		case sig := <-signals:
+			sweepIntegrationProcesses(subprocess)
+			signal.Stop(signals)
+			if s, ok := sig.(syscall.Signal); ok {
+				signal.Reset(s)
+				_ = syscall.Kill(os.Getpid(), s)
+			}
+		case <-done:
+		}
+	}()
+	return func() {
+		signal.Stop(signals)
+		close(done)
+	}
+}
+
+func sweepIntegrationProcesses(subprocess bool) {
+	stopIntegrationSupervisorWithTimeout(integrationSupervisorStopTimeout)
+	if !subprocess {
+		tmuxtest.KillAllTestSessions(&mainTB{})
+		return
+	}
+	sweepSubprocessTestProcesses()
+}
+
+func stopIntegrationSupervisorWithTimeout(timeout time.Duration) {
+	if gcBinary == "" {
+		return
+	}
+	if timeout <= 0 {
+		timeout = integrationSupervisorStopTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	stopCmd := runIntegrationSupervisorStopCommand(ctx, gcBinary, "supervisor", "stop", "--wait")
+	stopCmd.Env = integrationEnv()
+	out, err := stopCmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		fmt.Fprintf(os.Stderr, "integration cleanup: supervisor stop timed out after %s; continuing cleanup\n%s", timeout, string(out)) //nolint:errcheck
+		return
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "integration cleanup: supervisor stop failed: %v; continuing cleanup\n%s", err, string(out)) //nolint:errcheck
+	}
+}
+
+func TestIntegrationSupervisorStopHelperProcess(t *testing.T) {
+	if os.Getenv("GC_INTEGRATION_SUPERVISOR_STOP_HELPER") != "1" {
+		return
+	}
+	select {}
+}
+
+func TestStopIntegrationSupervisorWithTimeoutReturnsAfterDeadline(t *testing.T) {
+	oldRunner := runIntegrationSupervisorStopCommand
+	oldGCBinary := gcBinary
+	oldGCHome := testGCHome
+	oldRuntimeDir := testRuntimeDir
+	oldToolBin := integrationToolBinDir
+	oldRealBD := realBDBinary
+	t.Cleanup(func() {
+		runIntegrationSupervisorStopCommand = oldRunner
+		gcBinary = oldGCBinary
+		testGCHome = oldGCHome
+		testRuntimeDir = oldRuntimeDir
+		integrationToolBinDir = oldToolBin
+		realBDBinary = oldRealBD
+	})
+
+	t.Setenv("GC_INTEGRATION_SUPERVISOR_STOP_HELPER", "1")
+	gcBinary = os.Args[0]
+	testGCHome = t.TempDir()
+	testRuntimeDir = t.TempDir()
+	integrationToolBinDir = filepath.Dir(os.Args[0])
+	realBDBinary = "bd"
+	runIntegrationSupervisorStopCommand = exec.CommandContext
+
+	start := time.Now()
+	stopIntegrationSupervisorWithTimeout(10 * time.Millisecond)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("stopIntegrationSupervisorWithTimeout took %s, want bounded return", elapsed)
+	}
 }
 
 func binaryOverride(envName string) (string, bool, error) {
@@ -253,6 +352,98 @@ func sweepSubprocessTestProcesses() {
 		return
 	}
 
+	for pid := range killSet {
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+	}
+	time.Sleep(150 * time.Millisecond)
+	for pid := range killSet {
+		if err := syscall.Kill(pid, syscall.Signal(0)); err == nil {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	}
+}
+
+func configureIntegrationSupervisorCommand(cmd *exec.Cmd) {
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		return cmd.Process.Signal(syscall.SIGTERM)
+	}
+	cmd.WaitDelay = integrationSupervisorWaitDelay
+}
+
+func registerIntegrationDoltSQLServerCleanup(t *testing.T, root string) {
+	t.Helper()
+	t.Cleanup(func() {
+		cleanupIntegrationDoltSQLServersUnderRoot(root)
+	})
+}
+
+func cleanupIntegrationDoltSQLServersUnderRoot(root string) {
+	procs := readProcessSnapshot()
+	if len(procs) == 0 {
+		return
+	}
+	terminateIntegrationPIDs(integrationDoltSQLServerKillSet(procs, root))
+}
+
+func integrationDoltSQLServerKillSet(procs map[int]procSnapshot, root string) map[int]bool {
+	killSet := make(map[int]bool)
+	for pid, info := range procs {
+		configPath := integrationDoltSQLServerConfigPath(info.cmd)
+		if configPath == "" || !pathWithinIntegrationRoot(root, configPath) {
+			continue
+		}
+		killSet[pid] = true
+	}
+	return killSet
+}
+
+func integrationDoltSQLServerConfigPath(cmd string) string {
+	fields := strings.Fields(cmd)
+	if !integrationLooksLikeDoltSQLServer(fields) {
+		return ""
+	}
+	for i, field := range fields {
+		if field == "--config" {
+			if i+1 < len(fields) {
+				return fields[i+1]
+			}
+			return ""
+		}
+		if strings.HasPrefix(field, "--config=") {
+			return strings.TrimPrefix(field, "--config=")
+		}
+	}
+	return ""
+}
+
+func integrationLooksLikeDoltSQLServer(fields []string) bool {
+	for i := 0; i+1 < len(fields); i++ {
+		if filepath.Base(fields[i]) == "dolt" && fields[i+1] == "sql-server" {
+			return true
+		}
+	}
+	return false
+}
+
+func pathWithinIntegrationRoot(root, path string) bool {
+	if root == "" || path == "" {
+		return false
+	}
+	cleanRoot := filepath.Clean(root)
+	if cleanRoot == "." || cleanRoot == string(os.PathSeparator) {
+		return false
+	}
+	cleanPath := filepath.Clean(path)
+	return cleanPath == cleanRoot || strings.HasPrefix(cleanPath, cleanRoot+string(os.PathSeparator))
+}
+
+func terminateIntegrationPIDs(killSet map[int]bool) {
+	if len(killSet) == 0 {
+		return
+	}
 	for pid := range killSet {
 		_ = syscall.Kill(pid, syscall.SIGTERM)
 	}
@@ -387,8 +578,12 @@ func gc(dir string, args ...string) (string, error) {
 // supervisor state, but without forcing GC_DOLT=skip. Use this for tests that
 // need the real bd+dolt-backed bead store.
 func gcDolt(dir string, args ...string) (string, error) {
+	return gcDoltWithTimeout(dir, gcDoltCommandTimeout(args), args...)
+}
+
+func gcDoltWithTimeout(dir string, timeout time.Duration, args ...string) (string, error) {
 	envDir := commandCityDirForArgs(dir, args)
-	return runCommand(dir, commandEnvForDir(envDir, true), integrationGCDoltCommandTimeout, gcBinary, args...)
+	return runCommand(dir, commandEnvForDir(envDir, true), timeout, gcBinary, args...)
 }
 
 // bd runs the bd binary with the given args. If dir is non-empty, it sets
@@ -507,7 +702,18 @@ func runGCWithEnv(env []string, dir string, args ...string) (string, error) {
 }
 
 func runGCDoltWithEnv(env []string, dir string, args ...string) (string, error) {
-	return runCommand(dir, env, integrationGCDoltCommandTimeout, gcBinary, args...)
+	return runCommand(dir, env, gcDoltCommandTimeout(args), gcBinary, args...)
+}
+
+func gcDoltCommandTimeout(args []string) time.Duration {
+	if len(args) > 0 && args[0] == "sling" {
+		for _, arg := range args[1:] {
+			if strings.HasPrefix(arg, "--on=") {
+				return 4 * time.Minute
+			}
+		}
+	}
+	return integrationGCDoltCommandTimeout
 }
 
 func gcCommandTimeout(args []string) time.Duration {
@@ -744,6 +950,8 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env = filterEnv(env, "GC_DOLT_PORT")
 	env = filterEnv(env, "GC_DOLT_USER")
 	env = filterEnv(env, "GC_DOLT_PASSWORD")
+	env = filterEnv(env, managedDoltTestModeEnv)
+	env = filterEnv(env, managedDoltTestParentEnv)
 	env = filterEnv(env, "BEADS_DOLT_SERVER_HOST")
 	env = filterEnv(env, "BEADS_DOLT_SERVER_PORT")
 	env = filterEnv(env, "BEADS_DOLT_SERVER_USER")
@@ -753,6 +961,8 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env = filterEnv(env, "BEADS_DOLT_DATABASE")
 	env = filterEnv(env, "BEADS_DOLT_DATA_DIR")
 	env = filterEnv(env, "BEADS_DOLT_PASSWORD")
+	env = filterEnv(env, "GC_SUPERVISOR_ENV")
+	env = filterEnv(env, "GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL")
 	env = filterEnv(env, "DOLT_HOST")
 	env = filterEnv(env, "DOLT_PORT")
 	env = filterEnv(env, "DOLT_USER")
@@ -765,6 +975,8 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	}
 	env = append(env, "GC_HOME="+gcHome)
 	env = append(env, "XDG_RUNTIME_DIR="+runtimeDir)
+	env = append(env, managedDoltTestModeEnv+"=1")
+	env = append(env, managedDoltTestParentEnv+"="+strconv.Itoa(os.Getpid()))
 	env = append(env, integrationRealBDBinaryEnv+"="+realBDBinary)
 	env = append(env, "DOLT_ROOT_PATH="+gcHome)
 	env = append(env, "PATH="+prependPath(integrationToolBinDir, os.Getenv("PATH")))
@@ -829,6 +1041,7 @@ func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
 	t.Cleanup(func() {
 		_ = os.RemoveAll(root)
 	})
+	registerIntegrationDoltSQLServerCleanup(t, root)
 	gcHome := filepath.Join(root, "gc-home")
 	runtimeDir := filepath.Join(root, "runtime")
 	if err := os.MkdirAll(gcHome, 0o755); err != nil {
@@ -1083,7 +1296,9 @@ func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
 		t.Fatalf("creating isolated supervisor log: %v", err)
 	}
 
-	cmd := exec.Command(gcBinary, "supervisor", "run")
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, gcBinary, "supervisor", "run")
+	configureIntegrationSupervisorCommand(cmd)
 	cmd.Dir = gcHome
 	cmd.Env = env
 	cmd.Stdout = logFile
@@ -1106,14 +1321,8 @@ func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
 				// --wait so runCommand blocks until the supervisor fully
 				// shut down, aligning with the cmd.Wait() synchronization below.
 				_, _ = runCommand("", env, 15*time.Second, gcBinary, "supervisor", "stop", "--wait")
-				select {
-				case <-done:
-				case <-time.After(10 * time.Second):
-					if cmd.Process != nil {
-						_ = cmd.Process.Kill()
-					}
-					<-done
-				}
+				cancel()
+				waitForIntegrationSupervisorDone(cmd, done, integrationSupervisorWaitDelay)
 				_ = logFile.Close()
 			})
 			return
@@ -1131,9 +1340,22 @@ func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
+	cancel()
+	waitForIntegrationSupervisorDone(cmd, done, integrationSupervisorWaitDelay)
 	_ = logFile.Close()
 	logData, _ := os.ReadFile(logPath)
 	t.Fatalf("isolated supervisor did not become ready:\n%s", string(logData))
+}
+
+func waitForIntegrationSupervisorDone(cmd *exec.Cmd, done <-chan error, timeout time.Duration) {
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		<-done
+	}
 }
 
 func restartIsolatedSupervisor(t *testing.T, env []string) {
@@ -1630,6 +1852,41 @@ func TestSubprocessTestKillSetIncludesRootsDescendantsAndLeaves(t *testing.T) {
 	}
 	if got[40] {
 		t.Fatalf("kill set unexpectedly included unrelated pid 40: %#v", got)
+	}
+}
+
+func TestConfigureIntegrationSupervisorCommandUsesGracefulCancel(t *testing.T) {
+	cmd := exec.CommandContext(context.Background(), "gc", "supervisor", "run")
+	configureIntegrationSupervisorCommand(cmd)
+
+	if cmd.Cancel == nil {
+		t.Fatal("supervisor command Cancel is nil, want SIGTERM cancel")
+	}
+	if cmd.WaitDelay != 10*time.Second {
+		t.Fatalf("supervisor command WaitDelay = %s, want 10s", cmd.WaitDelay)
+	}
+}
+
+func TestIntegrationDoltSQLServerKillSetMatchesOnlyRootedConfigs(t *testing.T) {
+	root := "/tmp/gcit-123"
+	procs := map[int]procSnapshot{
+		10: {pid: 10, ppid: 1, cmd: "dolt sql-server --config /tmp/gcit-123/cities/x/.gc/runtime/packs/dolt/dolt-config.yaml"},
+		11: {pid: 11, ppid: 1, cmd: "dolt sql-server --config=/tmp/gcit-123/cities/y/.gc/runtime/packs/dolt/dolt-config.yaml"},
+		12: {pid: 12, ppid: 1, cmd: "dolt sql-server --config /tmp/gcit-1234/cities/z/.gc/runtime/packs/dolt/dolt-config.yaml"},
+		13: {pid: 13, ppid: 1, cmd: "dolt sql-server --config /home/u/projects/foo/.gc/runtime/packs/dolt/dolt-config.yaml"},
+		14: {pid: 14, ppid: 1, cmd: "dolt sql --config /tmp/gcit-123/cities/x/.gc/runtime/packs/dolt/dolt-config.yaml"},
+	}
+
+	got := integrationDoltSQLServerKillSet(procs, root)
+	for _, pid := range []int{10, 11} {
+		if !got[pid] {
+			t.Fatalf("kill set missing pid %d: %#v", pid, got)
+		}
+	}
+	for _, pid := range []int{12, 13, 14} {
+		if got[pid] {
+			t.Fatalf("kill set unexpectedly included pid %d: %#v", pid, got)
+		}
 	}
 }
 

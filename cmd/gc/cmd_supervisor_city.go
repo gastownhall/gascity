@@ -18,8 +18,16 @@ import (
 )
 
 var (
-	supervisorCityReadyTimeout = 180 * time.Second
-	supervisorCityPollInterval = 100 * time.Millisecond
+	// supervisorCityReadyTimeout bounds how long `gc start` and
+	// `gc register` wait for the supervisor to report a city as Running.
+	// Sized for cities with up to ~40 sessions at the default per-tick
+	// wake budget; cities with more sessions bump it via
+	// [daemon].start_ready_timeout. Tests override this variable directly.
+	supervisorCityReadyTimeout = config.DefaultStartReadyTimeout
+	// supervisorCityStopTimeoutFloor preserves the historical default
+	// stop/unregister wait floor independently of start-ready sizing.
+	supervisorCityStopTimeoutFloor = 180 * time.Second
+	supervisorCityPollInterval     = 100 * time.Millisecond
 )
 
 // registerCityWithSupervisorTestHook lets tests intercept registration after
@@ -47,6 +55,16 @@ func supervisorCityStartTimeout(cityPath string) time.Duration {
 	if err != nil {
 		return timeout
 	}
+	// daemon.start_ready_timeout is the canonical operator knob for the
+	// start/register ready budget. Only honor an explicit value so tests
+	// can shrink the timeout via the package variable without the daemon
+	// default silently dominating.
+	if cfg.Daemon.StartReadyTimeout != "" {
+		timeout = cfg.Daemon.StartReadyTimeoutDuration()
+	}
+	// session.startup_timeout escape hatch: a single session that takes
+	// longer than the ready budget extends the wait so the supervisor
+	// has time to surface init failures from that slow session.
 	if startup := cfg.Session.StartupTimeoutDuration(); startup > timeout {
 		timeout = startup
 	}
@@ -54,7 +72,7 @@ func supervisorCityStartTimeout(cityPath string) time.Duration {
 }
 
 func supervisorCityStopTimeout(cityPath string) time.Duration {
-	timeout := supervisorCityReadyTimeout
+	timeout := supervisorCityStopTimeoutFloor
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return timeout
@@ -129,8 +147,25 @@ func cityUsesManagedReconciler(cityPath string) bool {
 	return supervisorAlive() != 0
 }
 
+// justRestartedSupervisorPID records the PID of a supervisor we just
+// auto-restarted in this invocation. Set by runStartDriftCheck after a
+// successful restart so that ensureNoStandaloneController can recognize
+// the new supervisor on the controller socket and not misclassify it as
+// a competing standalone during the brief window before the registry
+// reflects it managing the city. Zero when no restart has happened in
+// this process.
+var justRestartedSupervisorPID int
+
 func ensureNoStandaloneController(cityPath string) (int, error) {
 	if pid := controllerAlive(cityPath); pid != 0 {
+		// If we just auto-restarted the supervisor in this invocation,
+		// the new supervisor process is briefly visible on the controller
+		// socket before the registry catches up. Treat that as our own
+		// supervisor, not a competing standalone controller. Match by
+		// PID is deterministic — no polling or sleeping required.
+		if justRestartedSupervisorPID != 0 && pid == justRestartedSupervisorPID {
+			return 0, nil
+		}
 		return pid, errControllerAlreadyRunning
 	}
 	gcDir := filepath.Join(cityPath, ".gc")
@@ -238,7 +273,7 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 		} else if stdout != nil {
 			fmt.Fprintln(stdout, "Waiting for supervisor to start city...") //nolint:errcheck // best-effort stdout
 		}
-		if err := waitForSupervisorCity(cityPath, true, supervisorCityStartTimeout(cityPath), stdout); err != nil {
+		if err := waitForSupervisorCityHook(cityPath, true, supervisorCityStartTimeout(cityPath), stdout); err != nil {
 			if retried, retriedErr := retrySupervisorCityStartAfterControllerLock(cityPath, stdout, stderr, err); retried {
 				if retriedErr == nil {
 					return 0
@@ -307,7 +342,7 @@ func retrySupervisorCityStartAfterControllerLock(cityPath string, stdout, stderr
 	if reloadSupervisorHook(stdout, stderr) != 0 {
 		return true, fmt.Errorf("%w; reconcile retry failed", startErr)
 	}
-	if err := waitForSupervisorCity(cityPath, true, supervisorCityStartTimeout(cityPath), stdout); err != nil {
+	if err := waitForSupervisorCityHook(cityPath, true, supervisorCityStartTimeout(cityPath), stdout); err != nil {
 		return true, err
 	}
 	return true, nil
@@ -384,7 +419,7 @@ func waitForSupervisorCity(cityPath string, wantRunning bool, timeout time.Durat
 		}
 		if time.Now().After(deadline) {
 			if wantRunning {
-				return fmt.Errorf("city did not become ready under supervisor")
+				return fmt.Errorf("city did not become ready under supervisor within %s (increase [daemon].start_ready_timeout or [session].startup_timeout for cities with many or slow-starting sessions)", timeout)
 			}
 			return fmt.Errorf("city did not stop under supervisor")
 		}
@@ -434,11 +469,21 @@ func statusDisplayText(status string) string {
 	}
 }
 
+type supervisorUnregisterOptions struct {
+	Force bool
+}
+
 func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer) (bool, int) {
-	return unregisterCityFromSupervisorWithForce(cityPath, stdout, stderr, "gc unregister", false)
+	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, "gc unregister", supervisorUnregisterOptions{})
 }
 
 func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Writer, commandName string, force bool) (bool, int) {
+	return unregisterCityFromSupervisorWithOptions(cityPath, stdout, stderr, commandName, supervisorUnregisterOptions{
+		Force: force,
+	})
+}
+
+func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.Writer, commandName string, opts supervisorUnregisterOptions) (bool, int) {
 	cityPath = normalizePathForCompare(cityPath)
 	entry, registered, err := registeredCityEntry(cityPath)
 	if err != nil {
@@ -450,7 +495,7 @@ func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Wr
 	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-	if force && supervisorAliveHook() != 0 {
+	if opts.Force && supervisorAliveHook() != 0 {
 		tryStopControllerWithForce(cityPath, io.Discard, true)
 	}
 	if err := reg.Unregister(cityPath); err != nil {
@@ -481,7 +526,7 @@ func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Wr
 			}
 			return true, 1
 		}
-		if err := waitForSupervisorCity(cityPath, false, supervisorCityReadyTimeout, nil); err != nil {
+		if err := waitForSupervisorCityHook(cityPath, false, supervisorCityStopTimeout(cityPath), nil); err != nil {
 			if reErr := reg.Register(entry.Path, entry.EffectiveName()); reErr != nil {
 				fmt.Fprintf(stderr, "%s: %v; restore failed for '%s': %v\n", commandName, err, entry.EffectiveName(), reErr) //nolint:errcheck
 			} else {
@@ -502,6 +547,8 @@ func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Wr
 }
 
 var waitForSupervisorControllerStopHook = waitForStandaloneControllerStop
+
+var waitForSupervisorCityHook = waitForSupervisorCity
 
 func supervisorAPIBaseURL() (string, error) {
 	cfg, err := supervisor.LoadConfig(supervisor.ConfigPath())

@@ -24,6 +24,9 @@ type AgentPatch struct {
 	Name string `toml:"name" jsonschema:"required"`
 	// WorkDir overrides the agent's session working directory.
 	WorkDir *string `toml:"work_dir,omitempty"`
+	// TmuxAlias overrides the tmux session name template
+	// (see Agent.TmuxAlias for semantics).
+	TmuxAlias *string `toml:"tmux_alias,omitempty"`
 	// Scope overrides the agent's scope ("city" or "rig").
 	Scope *string `toml:"scope,omitempty"`
 	// Suspended overrides the agent's suspended state.
@@ -37,7 +40,8 @@ type AgentPatch struct {
 	// PreStart overrides the agent's pre_start commands.
 	PreStart []string `toml:"pre_start,omitempty"`
 	// PromptTemplate overrides the prompt template path.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the declaring config file's directory
+	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	PromptTemplate *string `toml:"prompt_template,omitempty"`
 	// Session overrides the session transport ("acp" or "tmux").
 	Session *string `toml:"session,omitempty"`
@@ -45,10 +49,16 @@ type AgentPatch struct {
 	Provider *string `toml:"provider,omitempty"`
 	// StartCommand overrides the start command.
 	StartCommand *string `toml:"start_command,omitempty"`
+	// Lifecycle overrides the runtime lifecycle ("one_shot" or empty).
+	Lifecycle *string `toml:"lifecycle,omitempty" jsonschema:"enum=one_shot"`
 	// Nudge overrides the nudge text.
 	Nudge *string `toml:"nudge,omitempty"`
 	// IdleTimeout overrides the idle timeout. Duration string (e.g., "30s", "5m", "1h").
 	IdleTimeout *string `toml:"idle_timeout,omitempty"`
+	// MaxSessionAge overrides the max session age. Duration string (e.g., "5h").
+	MaxSessionAge *string `toml:"max_session_age,omitempty"`
+	// MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., "15m").
+	MaxSessionAgeJitter *string `toml:"max_session_age_jitter,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
@@ -91,12 +101,16 @@ type AgentPatch struct {
 	SessionLive []string `toml:"session_live,omitempty"`
 	// OverlayDir overrides the agent's overlay_dir path. Copies contents
 	// additively into the agent's working directory at startup.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the declaring config file's directory
+	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	OverlayDir *string `toml:"overlay_dir,omitempty"`
 	// DefaultSlingFormula overrides the default sling formula.
 	DefaultSlingFormula *string `toml:"default_sling_formula,omitempty"`
-	// InjectFragments overrides the agent's inject_fragments list.
-	InjectFragments []string `toml:"inject_fragments,omitempty"`
+	// InjectFragments overrides the agent's inject_fragments list. Leave this
+	// field unset to keep inherited fragments; JSON callers may send null for
+	// the same no-op. Set an empty list to clear fragments; set a populated
+	// list to replace fragments.
+	InjectFragments *[]string `toml:"inject_fragments,omitempty"`
 	// AppendFragments overrides the agent's append_fragments list.
 	AppendFragments []string `toml:"append_fragments,omitempty"`
 	// Attach overrides the agent's attach setting.
@@ -160,8 +174,14 @@ type RigPatch struct {
 	Path *string `toml:"path,omitempty"`
 	// Prefix overrides the bead ID prefix.
 	Prefix *string `toml:"prefix,omitempty"`
+	// DefaultBranch overrides the rig's recorded mainline branch.
+	DefaultBranch *string `toml:"default_branch,omitempty"`
 	// Suspended overrides the rig's suspended state.
 	Suspended *bool `toml:"suspended,omitempty"`
+	// FormulaVars adds or overrides rig-scoped formula var defaults.
+	// Additive merge: patch keys win over existing rig keys, unspecified
+	// keys are preserved.
+	FormulaVars map[string]string `toml:"formula_vars,omitempty"`
 }
 
 // ProviderPatch modifies an existing provider identified by Name.
@@ -196,6 +216,8 @@ type ProviderPatch struct {
 	PromptFlag *string `toml:"prompt_flag,omitempty"`
 	// ReadyDelayMs overrides the ready delay in milliseconds.
 	ReadyDelayMs *int `toml:"ready_delay_ms,omitempty" jsonschema:"minimum=0"`
+	// AcceptStartupDialogs overrides startup dialog acceptance behavior.
+	AcceptStartupDialogs *bool `toml:"accept_startup_dialogs,omitempty"`
 	// Env adds or overrides environment variables.
 	Env map[string]string `toml:"env,omitempty"`
 	// EnvRemove lists env var keys to remove.
@@ -207,6 +229,31 @@ type ProviderPatch struct {
 // IsEmpty reports whether p has no patch operations.
 func (p *Patches) IsEmpty() bool {
 	return len(p.Agents) == 0 && len(p.Rigs) == 0 && len(p.Providers) == 0
+}
+
+// Fragments returns a pointer to the given inject_fragments list for use
+// in AgentPatch and AgentOverride literals. Mirrors the three
+// presence-aware states of InjectFragments:
+//
+//	Fragments()                 // empty list: clear
+//	Fragments("frag-a")         // single item: replace with one fragment
+//	Fragments("frag-a", "...")  // populated list: replace with all fragments
+//	nil                         // leave unchanged; do not call Fragments
+//
+// Calling Fragments() with no arguments is the canonical clear; it
+// makes the intent visible at the call site without ad-hoc
+// `&[]string{}` literals.
+func Fragments(items ...string) *[]string {
+	if items == nil {
+		items = []string{}
+	}
+	out := append([]string(nil), items...)
+	if out == nil {
+		// `append(nil, ...empty...)` returns nil; force a non-nil empty
+		// slice so the pointer dereferences to the clear signal.
+		out = []string{}
+	}
+	return &out
 }
 
 // ApplyPatches applies all patches to the config. Patches target existing
@@ -259,6 +306,9 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	if p.WorkDir != nil {
 		a.WorkDir = *p.WorkDir
 	}
+	if p.TmuxAlias != nil {
+		a.TmuxAlias = *p.TmuxAlias
+	}
 	if p.Scope != nil {
 		a.Scope = *p.Scope
 	}
@@ -283,11 +333,20 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	if p.StartCommand != nil {
 		a.StartCommand = *p.StartCommand
 	}
+	if p.Lifecycle != nil {
+		a.Lifecycle = *p.Lifecycle
+	}
 	if p.Nudge != nil {
 		a.Nudge = *p.Nudge
 	}
 	if p.IdleTimeout != nil {
 		a.IdleTimeout = *p.IdleTimeout
+	}
+	if p.MaxSessionAge != nil {
+		a.MaxSessionAge = *p.MaxSessionAge
+	}
+	if p.MaxSessionAgeJitter != nil {
+		a.MaxSessionAgeJitter = *p.MaxSessionAgeJitter
 	}
 	if p.SleepAfterIdle != nil {
 		a.SleepAfterIdle = NormalizeSleepAfterIdle(*p.SleepAfterIdle)
@@ -342,8 +401,21 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	if p.WakeMode != nil {
 		a.WakeMode = *p.WakeMode
 	}
-	if len(p.InjectFragments) > 0 {
-		a.InjectFragments = append([]string(nil), p.InjectFragments...)
+	// InjectFragments uses presence-aware semantics via *[]string: a nil
+	// pointer means "leave unchanged"; a non-nil pointer (even to an
+	// empty slice) means "replace the agent's list with exactly this
+	// value". The pointer travels through TOML write/read intact —
+	// `inject_fragments = []` in a [[patches.agent]] block survives
+	// round-trip and clears an inherited list. Without this, downstream
+	// editors that want to clear a pack-baseline inject_fragments
+	// silently no-op because TOML's omitempty drops `[]string{}` on
+	// encode. The existing `len > 0` pattern remains for `depends_on`,
+	// `pre_start`, `session_setup`, and other list fields whose UX
+	// hasn't asked for clearing yet (see TODO above) — the same
+	// presence-aware pattern can be adopted field by field as the need
+	// arises.
+	if p.InjectFragments != nil {
+		a.InjectFragments = append([]string(nil), (*p.InjectFragments)...)
 	}
 	if len(p.AppendFragments) > 0 {
 		a.AppendFragments = append([]string(nil), p.AppendFragments...)
@@ -424,8 +496,19 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			if patch.Prefix != nil {
 				r.Prefix = *patch.Prefix
 			}
+			if patch.DefaultBranch != nil {
+				r.DefaultBranch = *patch.DefaultBranch
+			}
 			if patch.Suspended != nil {
 				r.Suspended = *patch.Suspended
+			}
+			if len(patch.FormulaVars) > 0 {
+				if r.FormulaVars == nil {
+					r.FormulaVars = make(map[string]string, len(patch.FormulaVars))
+				}
+				for k, v := range patch.FormulaVars {
+					r.FormulaVars[k] = v
+				}
 			}
 			return nil
 		}
@@ -482,6 +565,9 @@ func applyProviderPatch(cfg *City, patch *ProviderPatch) error {
 		if patch.ReadyDelayMs != nil {
 			newSpec.ReadyDelayMs = *patch.ReadyDelayMs
 		}
+		if patch.AcceptStartupDialogs != nil {
+			newSpec.AcceptStartupDialogs = cloneBoolPtr(patch.AcceptStartupDialogs)
+		}
 		if len(patch.Env) > 0 {
 			newSpec.Env = make(map[string]string, len(patch.Env))
 			for k, v := range patch.Env {
@@ -524,6 +610,9 @@ func applyProviderPatch(cfg *City, patch *ProviderPatch) error {
 	}
 	if patch.ReadyDelayMs != nil {
 		spec.ReadyDelayMs = *patch.ReadyDelayMs
+	}
+	if patch.AcceptStartupDialogs != nil {
+		spec.AcceptStartupDialogs = cloneBoolPtr(patch.AcceptStartupDialogs)
 	}
 	// Env: additive merge.
 	if len(patch.Env) > 0 {

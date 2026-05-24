@@ -20,13 +20,27 @@ import (
 
 const (
 	bdParentProjectionPollInterval = 50 * time.Millisecond
+	bdTxProjectionTimeout          = 5 * time.Second
 )
 
 // CommandRunner executes a command in the given directory and returns stdout bytes.
 // The dir argument sets the working directory; name and args specify the command.
 type CommandRunner func(dir, name string, args ...string) ([]byte, error)
 
-var bdCommandTimeout = 120 * time.Second
+var (
+	bdCommandTimeout = 120 * time.Second
+	// bdReadCommandTimeout bounds bd read-only subcommands (count, list,
+	// ready, show, stats). Default matches bdCommandTimeout to preserve
+	// pre-bounded behavior; lowered in follow-up work after slow read
+	// paths are identified.
+	bdReadCommandTimeout = 120 * time.Second
+	// bdGraphApplyCommandTimeout bounds atomic graph creation below callers'
+	// outer command budgets so transient Dolt stalls can retry or fall back.
+	bdGraphApplyCommandTimeout = 45 * time.Second
+	// bdSlowTelemetryThreshold is fixed in production via telemetry.BDSlowThreshold:
+	// high enough to avoid normal bd list calls, but below the wrapper timeout.
+	bdSlowTelemetryThreshold = telemetry.BDSlowThreshold
+)
 
 // ExecCommandRunner returns a CommandRunner that uses os/exec to run commands.
 // Captures stdout for parsing and stderr for error diagnostics.
@@ -59,8 +73,18 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 				time.Now().UTC().Format(time.RFC3339Nano), status, time.Since(start), dir, name, args, msg)
 		}
 		trace("start", nil)
-		ctx, cancel := context.WithTimeout(context.Background(), bdCommandTimeout)
+		timeout := bdCommandTimeoutFor(name, args)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
+		var slowTimer *time.Timer
+		if name == "bd" {
+			bdArgs := append([]string(nil), args...)
+			agentID := bdTelemetryAgentID(env)
+			slowTimer = time.AfterFunc(bdSlowTelemetryThreshold, func() {
+				telemetry.RecordBDSlow(ctx, bdArgs, dir, agentID)
+			})
+			defer slowTimer.Stop()
+		}
 		cmd := exec.CommandContext(ctx, name, args...)
 		cmd.WaitDelay = 2 * time.Second
 		prepareCommandForTimeout(cmd)
@@ -80,7 +104,7 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 				err, out, stderr.String())
 		}
 		if ctx.Err() == context.DeadlineExceeded {
-			timeoutErr := fmt.Errorf("timed out after %s", bdCommandTimeout)
+			timeoutErr := fmt.Errorf("timed out after %s", timeout)
 			trace("timeout", timeoutErr)
 			if stderr.Len() > 0 {
 				return out, fmt.Errorf("%w: %s", timeoutErr, stderr.String())
@@ -103,6 +127,35 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 		}
 		trace("done", err)
 		return out, err
+	}
+}
+
+func bdTelemetryAgentID(env map[string]string) string {
+	for _, key := range []string{"GC_ALIAS", "GC_AGENT"} {
+		if env != nil {
+			if value := strings.TrimSpace(env[key]); value != "" {
+				return value
+			}
+		}
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func bdCommandTimeoutFor(name string, args []string) time.Duration {
+	if name != "bd" || len(args) == 0 {
+		return bdCommandTimeout
+	}
+	if len(args) >= 2 && args[0] == "create" && args[1] == "--graph" {
+		return bdGraphApplyCommandTimeout
+	}
+	switch args[0] {
+	case "count", "list", "ready", "show", "stats":
+		return bdReadCommandTimeout
+	default:
+		return bdCommandTimeout
 	}
 }
 
@@ -286,6 +339,17 @@ func extractJSON(data []byte) []byte {
 	}
 }
 
+// truncateRawOutput returns a trimmed slice of bd CLI output suitable for
+// embedding in error messages. Limits to maxBytes to keep error strings
+// bounded, marking truncation explicitly so the reader knows there's more.
+func truncateRawOutput(data []byte, maxBytes int) string {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) <= maxBytes {
+		return string(trimmed)
+	}
+	return string(trimmed[:maxBytes]) + "...(truncated)"
+}
+
 // envWithout returns a copy of environ with all entries for the given key removed.
 func envWithout(environ []string, key string) []string {
 	prefix := key + "="
@@ -360,6 +424,7 @@ type bdIssue struct {
 	Labels       []string     `json:"labels"`
 	Metadata     StringMap    `json:"metadata,omitempty"`
 	Dependencies []bdIssueDep `json:"dependencies,omitempty"`
+	Ephemeral    bool         `json:"ephemeral,omitempty"`
 }
 
 type bdIssueDep struct {
@@ -415,7 +480,12 @@ func parseIssuesTolerant(data []byte) ([]bdIssue, error) {
 	}
 	var raw []json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parsing JSON: %w", err)
+		// Include a snippet of the raw bd output so the failure surface is
+		// diagnosable. Historical case (gascity #1726): bd returned the
+		// literal string "None" and the unwrapped error was the opaque
+		// "invalid character 'N' looking for beginning of value" with no
+		// hint that the offending byte was a Python None text.
+		return nil, fmt.Errorf("parsing JSON: raw=%q: %w", truncateRawOutput(data, 200), err)
 	}
 	result := make([]bdIssue, 0, len(raw))
 	var parseErr error
@@ -479,6 +549,7 @@ func (b *bdIssue) toBead() Bead {
 		Labels:       b.Labels,
 		Metadata:     b.Metadata,
 		Dependencies: deps,
+		Ephemeral:    b.Ephemeral,
 	}
 }
 
@@ -563,6 +634,9 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 	}
 	if b.ParentID != "" {
 		args = append(args, "--parent", b.ParentID)
+	}
+	if b.Ephemeral {
+		args = append(args, "--ephemeral")
 	}
 	metadata := maps.Clone(b.Metadata)
 	if b.From != "" {
@@ -669,7 +743,7 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 	if len(args) == 3 {
 		return nil
 	}
-	_, err := s.runner(s.dir, "bd", args...)
+	err := s.runBDTransientWrite(args...)
 	if err != nil {
 		if isBdNotFound(err) {
 			return fmt.Errorf("updating bead %q: %w", id, ErrNotFound)
@@ -789,11 +863,308 @@ func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	return nil
 }
 
+// Tx executes fn against a staged BdStore transaction. BdStore reads each bead
+// on first touch, applies callback writes to that snapshot, and reasserts the
+// staged fields when fn returns; concurrent edits to the same bead fields made
+// during the callback may be overwritten.
+func (s *BdStore) Tx(_ string, fn func(Tx) error) error {
+	if fn == nil {
+		return errors.New("beads tx: nil callback")
+	}
+	tx := newBdStoreTx(s)
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.apply()
+}
+
+type bdStoreTx struct {
+	store *BdStore
+	items map[string]*bdStoreTxItem
+	order []string
+}
+
+type bdStoreTxItem struct {
+	original Bead
+	current  Bead
+	touched  bdStoreTxTouched
+	updated  bool
+	closed   bool
+}
+
+type bdStoreTxTouched struct {
+	title       bool
+	status      bool
+	beadType    bool
+	priority    bool
+	description bool
+	parentID    bool
+	assignee    bool
+}
+
+func newBdStoreTx(store *BdStore) *bdStoreTx {
+	return &bdStoreTx{
+		store: store,
+		items: make(map[string]*bdStoreTxItem),
+	}
+}
+
+func (tx *bdStoreTx) item(id string) (*bdStoreTxItem, error) {
+	if item, ok := tx.items[id]; ok {
+		return item, nil
+	}
+	bead, err := tx.store.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	item := &bdStoreTxItem{
+		original: snapshotBdStoreTxBead(bead),
+		current:  bead,
+	}
+	tx.items[id] = item
+	tx.order = append(tx.order, id)
+	return item, nil
+}
+
+func (tx *bdStoreTx) Update(id string, opts UpdateOpts) error {
+	if !hasUpdateOpts(opts) {
+		return nil
+	}
+	item, err := tx.item(id)
+	if err != nil {
+		return err
+	}
+	item.current = applyUpdateOptsToBead(item.current, opts)
+	item.touched.note(opts)
+	item.updated = true
+	return nil
+}
+
+func (tx *bdStoreTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	if len(kvs) == 0 {
+		return nil
+	}
+	return tx.Update(id, UpdateOpts{Metadata: kvs})
+}
+
+func (tx *bdStoreTx) Close(id string) error {
+	item, err := tx.item(id)
+	if err != nil {
+		return err
+	}
+	item.current.Status = "closed"
+	item.closed = true
+	return nil
+}
+
+func (tx *bdStoreTx) apply() error {
+	for _, id := range tx.order {
+		item := tx.items[id]
+		if item.closed {
+			if item.updated {
+				opts := item.preservedUpdateOpts(false)
+				if hasUpdateOpts(opts) {
+					if err := tx.store.Update(id, opts); err != nil {
+						return err
+					}
+					if err := tx.store.waitForUpdateProjection(id, opts); err != nil {
+						return err
+					}
+				}
+			}
+			if err := tx.store.close(id, strings.TrimSpace(item.current.Metadata["close_reason"])); err != nil {
+				return err
+			}
+			if !item.updated {
+				continue
+			}
+			opts := item.preservedUpdateOpts(true)
+			if hasUpdateOpts(opts) {
+				if err := tx.store.Update(id, opts); err != nil {
+					return err
+				}
+				if err := tx.store.waitForUpdateProjection(id, opts); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		opts := item.preservedUpdateOpts(true)
+		if !hasUpdateOpts(opts) {
+			continue
+		}
+		if err := tx.store.Update(id, opts); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *BdStore) waitForUpdateProjection(id string, opts UpdateOpts) error {
+	ctx, cancel := context.WithTimeout(context.Background(), bdTxProjectionTimeout)
+	defer cancel()
+
+	ticker := time.NewTicker(bdParentProjectionPollInterval)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		current, err := s.Get(id)
+		if err == nil {
+			if updateProjectionMatches(current, opts) {
+				return nil
+			}
+			lastErr = nil
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			if lastErr != nil {
+				return fmt.Errorf("updating bead %q: waiting for tx update projection: %w (last check error: %w)", id, ctx.Err(), lastErr)
+			}
+			return fmt.Errorf("updating bead %q: waiting for tx update projection: %w", id, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func updateProjectionMatches(current Bead, opts UpdateOpts) bool {
+	if opts.Title != nil && current.Title != *opts.Title {
+		return false
+	}
+	if opts.Status != nil && current.Status != *opts.Status {
+		return false
+	}
+	if opts.Type != nil && current.Type != *opts.Type {
+		return false
+	}
+	if opts.Priority != nil {
+		if current.Priority == nil || *current.Priority != *opts.Priority {
+			return false
+		}
+	}
+	if opts.Description != nil && current.Description != *opts.Description {
+		return false
+	}
+	if opts.ParentID != nil && current.ParentID != *opts.ParentID {
+		return false
+	}
+	if opts.Assignee != nil && current.Assignee != *opts.Assignee {
+		return false
+	}
+	for key, value := range opts.Metadata {
+		if current.Metadata[key] != value {
+			return false
+		}
+	}
+	for _, label := range opts.Labels {
+		if !bdStoreStringSliceContains(current.Labels, label) {
+			return false
+		}
+	}
+	for _, label := range opts.RemoveLabels {
+		if bdStoreStringSliceContains(current.Labels, label) {
+			return false
+		}
+	}
+	return true
+}
+
+func bdStoreStringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func (item *bdStoreTxItem) preservedUpdateOpts(includeStatus bool) UpdateOpts {
+	current := item.current
+	opts := UpdateOpts{}
+	if current.Title != "" || item.touched.title {
+		opts.Title = &current.Title
+	}
+	if includeStatus && (current.Status != "" || item.touched.status) {
+		opts.Status = &current.Status
+	}
+	if current.Type != "" || item.touched.beadType {
+		opts.Type = &current.Type
+	}
+	if current.Priority != nil || item.touched.priority {
+		opts.Priority = cloneIntPtr(current.Priority)
+	}
+	if current.Description != "" || item.touched.description {
+		opts.Description = &current.Description
+	}
+	if current.ParentID != "" || item.touched.parentID {
+		opts.ParentID = &current.ParentID
+	}
+	if current.Assignee != "" || item.touched.assignee {
+		opts.Assignee = &current.Assignee
+	}
+	if len(current.Metadata) > 0 {
+		opts.Metadata = maps.Clone(current.Metadata)
+	}
+	// bd update can clobber unspecified fields in dolt-server mode, so labels
+	// are re-emitted as a full post-mutation set for staged Tx applies.
+	opts.Labels = append([]string(nil), current.Labels...)
+	opts.RemoveLabels = removedLabels(item.original.Labels, current.Labels)
+	return opts
+}
+
+func snapshotBdStoreTxBead(bead Bead) Bead {
+	bead.Metadata = maps.Clone(bead.Metadata)
+	bead.Labels = append([]string(nil), bead.Labels...)
+	return bead
+}
+
+func (t *bdStoreTxTouched) note(opts UpdateOpts) {
+	t.title = t.title || opts.Title != nil
+	t.status = t.status || opts.Status != nil
+	t.beadType = t.beadType || opts.Type != nil
+	t.priority = t.priority || opts.Priority != nil
+	t.description = t.description || opts.Description != nil
+	t.parentID = t.parentID || opts.ParentID != nil
+	t.assignee = t.assignee || opts.Assignee != nil
+}
+
+func hasUpdateOpts(opts UpdateOpts) bool {
+	return opts.Title != nil ||
+		opts.Status != nil ||
+		opts.Type != nil ||
+		opts.Priority != nil ||
+		opts.Description != nil ||
+		opts.ParentID != nil ||
+		opts.Assignee != nil ||
+		len(opts.Metadata) > 0 ||
+		len(opts.Labels) > 0 ||
+		len(opts.RemoveLabels) > 0
+}
+
+func removedLabels(original, current []string) []string {
+	if len(original) == 0 {
+		return nil
+	}
+	kept := make(map[string]struct{}, len(current))
+	for _, label := range current {
+		kept[label] = struct{}{}
+	}
+	var removed []string
+	for _, label := range original {
+		if _, ok := kept[label]; !ok {
+			removed = append(removed, label)
+		}
+	}
+	return removed
+}
+
 func (s *BdStore) runBDTransientWrite(args ...string) error {
 	var err error
 	for attempt := 1; attempt <= bdTransientWriteAttempts; attempt++ {
 		_, err = s.runner(s.dir, "bd", args...)
-		if err == nil || !isBdTransientWriteConflict(err) || attempt == bdTransientWriteAttempts {
+		if err == nil || !isBdTransientWriteError(err) || attempt == bdTransientWriteAttempts {
 			return err
 		}
 		time.Sleep(time.Duration(attempt) * 25 * time.Millisecond)
@@ -801,13 +1172,20 @@ func (s *BdStore) runBDTransientWrite(args ...string) error {
 	return err
 }
 
-func isBdTransientWriteConflict(err error) bool {
+func isBdTransientWriteError(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "Error 1213 (40001): serialization failure") ||
-		strings.Contains(msg, "this transaction conflicts with a committed transaction")
+		strings.Contains(msg, "this transaction conflicts with a committed transaction") ||
+		strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "invalid connection") ||
+		strings.Contains(msg, "bad connection") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "timed out after") ||
+		strings.Contains(msg, "deadline exceeded")
 }
 
 // Ping verifies the bd binary is accessible by running a no-op command.
@@ -955,6 +1333,13 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
 	}
 
+	switch query.TierMode {
+	case TierWisps:
+		return s.listEphemeral(query)
+	case TierBoth:
+		return s.listBothTiers(query)
+	}
+
 	limit := query.Limit
 	if query.Sort == SortCreatedAsc {
 		limit = 0
@@ -1017,6 +1402,140 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	return filtered, nil
 }
 
+// listEphemeral reads only the wisps tier using `bd query "ephemeral=true AND
+// <filters>"`. bd list only scans the issues table; bd query is the canonical
+// way to reach the wisps table (mirrors gastown's internal/beads/beads.go
+// listEphemeral path).
+func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
+	clauses := []string{"ephemeral=true"}
+	serverFilteredOnly := true
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "label", query.Label)
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "status", query.Status)
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "type", query.Type)
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "assignee", query.Assignee)
+	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "parent", query.ParentID)
+
+	args := []string{"query", "--json", strings.Join(clauses, " AND ")}
+	if query.IncludeClosed || query.Status == "closed" {
+		args = append(args, "--all")
+	}
+	wispsLimit := 0
+	if query.Limit > 0 && serverFilteredOnly && canApplyWispsServerLimit(query) {
+		wispsLimit = query.Limit
+	}
+	args = append(args, "--limit", strconv.Itoa(wispsLimit))
+
+	out, err := s.runner(s.dir, "bd", args...)
+	if err != nil {
+		return nil, fmt.Errorf("bd query (wisps): %w", err)
+	}
+	issues, parseErr := parseIssuesTolerant(extractJSON(out))
+	result := make([]Bead, len(issues))
+	for i := range issues {
+		result[i] = issues[i].toBead()
+		// bd query against wisps returns ephemeral beads; tolerate older bd
+		// versions that omit the ephemeral field in JSON.
+		result[i].Ephemeral = true
+	}
+	// Re-apply filters client-side (defense in depth against bd-query DSL
+	// drift) and re-cap Limit after client-only filters/sorts.
+	filtered := applyListQuery(result, query)
+	if parseErr != nil {
+		if len(filtered) > 0 {
+			return filtered, &PartialResultError{Op: "bd query", Err: parseErr}
+		}
+		return filtered, fmt.Errorf("bd query: %w", parseErr)
+	}
+	return filtered, nil
+}
+
+func canApplyWispsServerLimit(query ListQuery) bool {
+	return query.Sort == SortDefault && query.CreatedBefore.IsZero() && len(query.Metadata) == 0
+}
+
+func appendBdQueryClause(clauses []string, serverFilteredOnly bool, field, value string) ([]string, bool) {
+	if value == "" {
+		return clauses, serverFilteredOnly
+	}
+	if !isBareBdQueryValue(value) {
+		return clauses, false
+	}
+	return append(clauses, field+"="+value), serverFilteredOnly
+}
+
+// isBareBdQueryValue reports whether value can be emitted unquoted into the bd
+// query DSL. Values outside this narrow token set are filtered client-side.
+func isBareBdQueryValue(value string) bool {
+	upper := strings.ToUpper(value)
+	if upper == "AND" || upper == "OR" || upper == "NOT" {
+		return false
+	}
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '_' || r == '-' || r == ':' || r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// listBothTiers unions the issues and wisps tiers in a single logical query.
+// Each tier is queried with its own TierMode; results are deduped by ID and
+// re-sorted under the caller-supplied Sort.
+//
+// Partial failure: if exactly one tier errors, the other tier's rows are
+// returned along with a non-nil error so callers can decide whether to
+// degrade or fail. Silently swallowing the failure would let dispatch paths
+// see "no in-flight work" and double-fire.
+func (s *BdStore) listBothTiers(query ListQuery) ([]Bead, error) {
+	issuesQ := query
+	issuesQ.TierMode = TierIssues
+	issuesResult, issuesErr := s.List(issuesQ)
+
+	wispsQ := query
+	wispsQ.TierMode = TierWisps
+	wispsResult, wispsErr := s.List(wispsQ)
+
+	if issuesErr != nil && wispsErr != nil {
+		return nil, errors.Join(issuesErr, wispsErr)
+	}
+
+	merged := make([]Bead, 0, len(issuesResult)+len(wispsResult))
+	seen := make(map[string]struct{}, len(issuesResult)+len(wispsResult))
+	for _, b := range issuesResult {
+		if _, ok := seen[b.ID]; ok {
+			continue
+		}
+		seen[b.ID] = struct{}{}
+		merged = append(merged, b)
+	}
+	for _, b := range wispsResult {
+		if _, ok := seen[b.ID]; ok {
+			continue
+		}
+		seen[b.ID] = struct{}{}
+		merged = append(merged, b)
+	}
+	sortBeadsForQuery(merged, query.Sort)
+	if query.Limit > 0 && len(merged) > query.Limit {
+		merged = merged[:query.Limit]
+	}
+
+	// Surface single-tier failure so callers don't mistake a partial
+	// result for a complete one.
+	switch {
+	case issuesErr != nil:
+		return merged, fmt.Errorf("bd list both tiers: issues tier: %w", issuesErr)
+	case wispsErr != nil:
+		return merged, fmt.Errorf("bd list both tiers: wisps tier: %w", wispsErr)
+	}
+	return merged, nil
+}
+
 // ListOpen returns non-closed beads via bd list. Pass a status to filter further.
 func (s *BdStore) ListOpen(status ...string) ([]Bead, error) {
 	query := ListQuery{AllowScan: true}
@@ -1035,6 +1554,7 @@ func (s *BdStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead
 		Limit:         limit,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedDesc,
+		TierMode:      TierModeFromOpts(opts),
 	})
 }
 
@@ -1058,6 +1578,7 @@ func (s *BdStore) ListByMetadata(filters map[string]string, limit int, opts ...Q
 		Limit:         limit,
 		IncludeClosed: HasOpt(opts, IncludeClosed),
 		Sort:          SortCreatedDesc,
+		TierMode:      TierModeFromOpts(opts),
 	})
 }
 
@@ -1094,6 +1615,9 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		if IsReadyExcludedType(bead.Type) {
 			continue
 		}
+		if bead.Ephemeral {
+			continue
+		}
 		if q.Assignee != "" && bead.Assignee != q.Assignee {
 			continue
 		}
@@ -1116,7 +1640,7 @@ func (s *BdStore) DepAdd(issueID, dependsOnID, depType string) error {
 			return nil
 		}
 	}
-	_, err := s.runner(s.dir, "bd", "dep", "add", issueID, dependsOnID, "--type", depType)
+	err := s.runBDTransientWrite("dep", "add", issueID, dependsOnID, "--type", depType)
 	if err != nil {
 		return fmt.Errorf("adding dep %s→%s: %w", issueID, dependsOnID, err)
 	}

@@ -4,7 +4,7 @@ sidebarTitle: 03 - Sessions
 description: See agent output, interact directly with agents, and learn about polecats and crew.
 ---
 
-In [Tutorial 02](/tutorials/02-agents), you worked with agents to produce work,
+In [Tutorial 02](./02-agents.md), you worked with agents to produce work,
 which created sessions with agents that we haven't seen yet. In this tutorial,
 you'll see and talk with agents via sessions as well as see how agents talk to
 each other. You'll also learn the difference between "polecats" (agents spun up
@@ -20,10 +20,6 @@ $ cat pack.toml
 [pack]
 name = "my-city"
 schema = 2
-
-[[agent]]
-name = "mayor"
-prompt_template = "agents/mayor/prompt.template.md"
 
 [[named_session]]
 template = "mayor"
@@ -72,8 +68,8 @@ then pass that to `gc session peek`:
 ```shell
 ~/my-project
 $ gc session list --template my-project/reviewer
-ID       TEMPLATE  STATE     REASON  TITLE     AGE  LAST ACTIVE
-mc-8sfd  my-project/reviewer  creating  create  reviewer  1s   -
+ID       TEMPLATE              STATE     REASON  TARGET        TITLE     AGE  LAST ACTIVE
+mc-8sfd  my-project/reviewer   creating  create  reviewer-a1b  reviewer  1s   -
 
 ~/my-project
 $ gc session peek mc-8sfd
@@ -152,9 +148,9 @@ active, you can see it in the list of sessions:
 ~/my-project
 $ gc session list
 2026/04/07 21:50:21 tmux state cache: refreshed 2 sessions in 3.82725ms
-ID       TEMPLATE  STATE     REASON          TITLE     AGE  LAST ACTIVE
-mc-8sfd  my-project/reviewer  creating  create          reviewer  1s   -
-mc-5o1   mayor     active    session,config  mayor     10h  14m ago
+ID       TEMPLATE              STATE     REASON          TARGET        TITLE     AGE  LAST ACTIVE
+mc-8sfd  my-project/reviewer   creating  create          reviewer-a1b  reviewer  1s   -
+mc-5o1   mayor                 active    session,config  mayor         mayor     10h  14m ago
 ```
 
 However, once the work is done, the reviewer will go idle and its session will
@@ -171,15 +167,12 @@ City is up and idle. No pending work, no agents running besides me. What would
   you like to do?
 ```
 
-So the mayor is clearly idle, but has not been shutdown. Why not? If you take a
-look again at your `pack.toml` file, you'll see why:
+So the mayor is clearly idle, but has not been shutdown. Why not? If you look
+again at your `pack.toml` file, you'll see the named session that keeps it
+alive:
 
 ```toml
 ...
-[[agent]]
-name = "mayor"
-prompt_template = "agents/mayor/prompt.template.md"
-
 [[named_session]]
 template = "mayor"
 mode = "always"
@@ -187,7 +180,7 @@ mode = "always"
 ```
 
 The mayor has a specially named session called "mayor" that is always running.
-It's kept up but the system so that you can have quick access to it for a chat
+It's kept up by the system so that you can have quick access to it for a chat
 or some planning or whatever you'd like to do. A polecat is designed to be
 transient, but an agent is a member of your "crew" (whether city-wide or
 rig-specific) if it's always around and ready to chat interactively or receive
@@ -233,8 +226,8 @@ sessions:
 ```shell
 ~/my-city
 $ gc session list
-ID      ALIAS  TEMPLATE  STATE
-my-4    —      mayor     active
+ID    TEMPLATE  STATE   REASON          TARGET  TITLE  AGE  LAST ACTIVE
+my-4  mayor     active  session,config  mayor   mayor  2m   5s ago
 ```
 
 ## Session logs
@@ -286,8 +279,8 @@ You've seen how sessions are created on demand for slung work, how named
 sessions keep crew agents alive, and how to peek, attach, nudge, and read logs.
 From here:
 
-- **[Agent-to-Agent Communication](/tutorials/04-communication)** — how agents
+- **[Agent-to-Agent Communication](./04-communication.md)** — how agents
   coordinate through mail, slung work, and hooks
-- **[Formulas](/tutorials/05-formulas)** — multi-step workflow templates with
+- **[Formulas](./05-formulas.md)** — multi-step workflow templates with
   dependencies and variables
-- **[Beads](/tutorials/06-beads)** — the work tracking system underneath it all
+- **[Beads](./06-beads.md)** — the work tracking system underneath it all

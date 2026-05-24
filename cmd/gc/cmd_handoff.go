@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -21,6 +22,7 @@ func newHandoffCmd(stdout, stderr io.Writer) *cobra.Command {
 	var target string
 	var auto bool
 	var hookFormat string
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "handoff [subject] [message]",
 		Short: "Send handoff mail and restart controller-managed sessions",
@@ -67,8 +69,22 @@ or ID. Subject is required unless --auto is set.`,
 			return cobra.RangeArgs(1, 2)(cmd, args)
 		},
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdHandoff(args, target, auto, hookFormat, stdout, stderr) != 0 {
+			out := stdout
+			if jsonOut {
+				out = io.Discard
+			}
+			if cmdHandoff(args, target, auto, hookFormat, out, stderr) != 0 {
 				return errExit
+			}
+			if jsonOut {
+				return writeCLIJSONLineOrErr(stdout, stderr, "gc handoff", handoffJSONResult{
+					SchemaVersion: "1",
+					OK:            true,
+					Mode:          handoffJSONMode(target, auto),
+					Target:        target,
+					Auto:          auto,
+					Subject:       handoffJSONSubject(args, auto),
+				})
 			}
 			return nil
 		},
@@ -76,7 +92,37 @@ or ID. Subject is required unless --auto is set.`,
 	cmd.Flags().StringVar(&target, "target", "", "Remote session alias or ID to handoff (kills only controller-restartable sessions)")
 	cmd.Flags().BoolVar(&auto, "auto", false, "Send handoff mail without requesting restart (for PreCompact hooks)")
 	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	return cmd
+}
+
+type handoffJSONResult struct {
+	SchemaVersion string `json:"schema_version"`
+	OK            bool   `json:"ok"`
+	Mode          string `json:"mode"`
+	Target        string `json:"target,omitempty"`
+	Auto          bool   `json:"auto"`
+	Subject       string `json:"subject,omitempty"`
+}
+
+func handoffJSONMode(target string, auto bool) string {
+	if target != "" {
+		return "remote"
+	}
+	if auto {
+		return "auto"
+	}
+	return "self"
+}
+
+func handoffJSONSubject(args []string, auto bool) string {
+	if len(args) > 0 {
+		return args[0]
+	}
+	if auto {
+		return "context cycle"
+	}
+	return "HANDOFF: context cycle"
 }
 
 func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdout, stderr io.Writer) int {
@@ -365,11 +411,19 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp runtime.Provider
 		fmt.Fprintf(stderr, "gc handoff: killing %s: %v\n", targetAddress, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	sessionID, resolveErr := resolveSessionID(store, sessionName)
+	if resolveErr != nil {
+		// The session was just killed; resolution can fail if its bead
+		// has been closed mid-flight. Fall back to the runtime name so
+		// subscribers still get a usable correlation key.
+		sessionID = sessionName
+	}
 	rec.Record(events.Event{
 		Type:    events.SessionStopped,
 		Actor:   sender,
 		Subject: targetAddress,
 		Message: "handoff",
+		Payload: api.SessionLifecyclePayloadJSON(sessionID, "", "handoff"),
 	})
 
 	fmt.Fprintf(stdout, "Handoff: sent mail %s to %s, killed session (reconciler will restart)\n", b.ID, targetAddress) //nolint:errcheck // best-effort stdout

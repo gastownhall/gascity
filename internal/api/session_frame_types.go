@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -55,16 +56,71 @@ func wrapRawFrameBytes(values []json.RawMessage) []SessionRawMessageFrame {
 	return out
 }
 
-// MarshalJSON emits Raw verbatim if set; otherwise json.Marshal(Value).
-// Emits `null` when both are empty.
+// MarshalJSON emits valid Raw verbatim if set; otherwise json.Marshal(Value).
+// Some provider transcript sources have historically produced frames with
+// literal control characters inside JSON strings. Repair that producer bug at
+// the API boundary so SSE streams never emit malformed JSON. Emits `null`
+// when both are empty.
 func (f SessionRawMessageFrame) MarshalJSON() ([]byte, error) {
 	if len(f.Raw) > 0 {
-		return f.Raw, nil
+		if json.Valid(f.Raw) {
+			return f.Raw, nil
+		}
+		if repaired := escapeRawControlsInJSONStringLiterals(f.Raw); json.Valid(repaired) {
+			return repaired, nil
+		}
+		return nil, fmt.Errorf("invalid raw session frame JSON")
 	}
 	if f.Value == nil {
 		return []byte("null"), nil
 	}
 	return json.Marshal(f.Value)
+}
+
+func escapeRawControlsInJSONStringLiterals(raw []byte) []byte {
+	out := make([]byte, 0, len(raw))
+	inString := false
+	escaped := false
+
+	for _, b := range raw {
+		if inString {
+			if escaped {
+				escaped = false
+				out = append(out, b)
+				continue
+			}
+
+			switch b {
+			case '\\':
+				escaped = true
+				out = append(out, b)
+			case '"':
+				inString = false
+				out = append(out, b)
+			case '\n':
+				out = append(out, '\\', 'n')
+			case '\r':
+				out = append(out, '\\', 'r')
+			case '\t':
+				out = append(out, '\\', 't')
+			default:
+				if b < 0x20 {
+					const hex = "0123456789abcdef"
+					out = append(out, '\\', 'u', '0', '0', hex[b>>4], hex[b&0x0f])
+				} else {
+					out = append(out, b)
+				}
+			}
+			continue
+		}
+
+		if b == '"' {
+			inString = true
+		}
+		out = append(out, b)
+	}
+
+	return out
 }
 
 // UnmarshalJSON stashes the raw JSON into Raw so round-tripping

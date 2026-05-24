@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "any_due", "orders_total", "due_total", "orders"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "any_due": { "type": "boolean" },
+    "orders_total": { "type": "integer", "minimum": 0 },
+    "due_total": { "type": "integer", "minimum": 0 },
+    "orders": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "scoped_name", "trigger", "due", "reason"],
+        "properties": {
+          "name": { "type": "string" },
+          "rig": { "type": "string" },
+          "scoped_name": { "type": "string" },
+          "trigger": { "type": "string" },
+          "due": { "type": "boolean" },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

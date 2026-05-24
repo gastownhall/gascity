@@ -134,8 +134,8 @@ Review boundary:
 After Slice 4, update docs that still describe MCP as list-only:
 
 - `docs/reference/cli.md`
-- `docs/packv2/doc-agent-v2.md`
-- `docs/packv2/doc-pack-v2.md`
+- `engdocs/design/packv2/doc-agent-v2.md`
+- `engdocs/design/packv2/doc-pack-v2.md`
 - `docs/guides/migrating-to-pack-vnext.md`
 - any conformance/skew docs that still mention deferred projection
 
