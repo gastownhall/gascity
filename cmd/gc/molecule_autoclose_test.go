@@ -146,7 +146,9 @@ func TestMoleculeAutocloseSoleChildClosesRoot(t *testing.T) {
 // TestMoleculeAutocloseRespectsTombstone asserts a tombstoned step
 // counts as terminal for completeness checking (mirrors
 // convoycore.IsTerminalStatus behavior — status=="closed" or
-// "tombstone"). Both children terminal → root closes.
+// "tombstone"). One child closed + one explicitly tombstoned → root
+// closes. Previously this test closed both children, which doesn't
+// actually exercise the tombstone branch of IsTerminalStatus.
 func TestMoleculeAutocloseRespectsTombstone(t *testing.T) {
 	store := beads.NewMemStore()
 	root, _ := store.Create(beads.Bead{Title: "mol", Type: "molecule"})
@@ -154,13 +156,115 @@ func TestMoleculeAutocloseRespectsTombstone(t *testing.T) {
 	stepB, _ := store.Create(beads.Bead{Title: "b", Type: "step", ParentID: root.ID})
 
 	_ = store.Close(stepA.ID)
-	_ = store.Close(stepB.ID)
+	tombstone := "tombstone"
+	if err := store.Update(stepB.ID, beads.UpdateOpts{Status: &tombstone}); err != nil {
+		t.Fatalf("set tombstone on stepB: %v", err)
+	}
 
 	var out bytes.Buffer
 	doMoleculeAutocloseWith(store, events.Discard, stepB.ID, &out)
 	r, _ := store.Get(root.ID)
 	if r.Status != "closed" {
-		t.Fatalf("root not auto-closed when all children terminal: status=%q out=%q", r.Status, out.String())
+		t.Fatalf("root not auto-closed when one child closed + one tombstoned: status=%q out=%q", r.Status, out.String())
+	}
+}
+
+// TestMoleculeAutocloseNestedStepUsesRootBeadIDMetadata pins the Copilot
+// finding on PR #2526 line 95: when a nested step (or a typed "gate" /
+// "epic" / non-step formula-scaffolded bead) closes, its ParentID does
+// not point at the molecule root. The autocloser must instead jump to
+// the molecule root via the gc.root_bead_id metadata that
+// molecule.Instantiate stamps onto every member, then evaluate
+// completeness over the full transitive subtree (Copilot finding on
+// line 118). Without both fixes, nested-step molecules never auto-close.
+func TestMoleculeAutocloseNestedStepUsesRootBeadIDMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	root, _ := store.Create(beads.Bead{Title: "nested-mol", Type: "molecule"})
+	intermediate, _ := store.Create(beads.Bead{
+		Title:    "intermediate epic step",
+		Type:     "step",
+		ParentID: root.ID,
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	nested, _ := store.Create(beads.Bead{
+		Title:    "deeply-nested step",
+		Type:     "step",
+		ParentID: intermediate.ID,
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+
+	_ = store.Close(intermediate.ID)
+	_ = store.Close(nested.ID)
+
+	var out bytes.Buffer
+	doMoleculeAutocloseWith(store, events.Discard, nested.ID, &out)
+	r, _ := store.Get(root.ID)
+	if r.Status != "closed" {
+		t.Fatalf("nested-step close did not auto-close molecule root (gc.root_bead_id path or ListSubtree traversal regressed): status=%q out=%q", r.Status, out.String())
+	}
+}
+
+// TestMoleculeAutocloseLeavesOpenWhenNestedDescendantStillOpen pins the
+// matching no-false-positive guard: when ListSubtree finds at least one
+// non-terminal descendant — even if all DIRECT children of the molecule
+// root are terminal — the autocloser must leave the root open. This is
+// the failure mode the previous store.Children-only path would not
+// catch.
+func TestMoleculeAutocloseLeavesOpenWhenNestedDescendantStillOpen(t *testing.T) {
+	store := beads.NewMemStore()
+	root, _ := store.Create(beads.Bead{Title: "nested-mol-partial", Type: "molecule"})
+	intermediate, _ := store.Create(beads.Bead{
+		Title:    "epic step",
+		Type:     "step",
+		ParentID: root.ID,
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	nestedOpen, _ := store.Create(beads.Bead{
+		Title:    "still-open nested step",
+		Type:     "step",
+		ParentID: intermediate.ID,
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	nestedClosed, _ := store.Create(beads.Bead{
+		Title:    "closed nested step",
+		Type:     "step",
+		ParentID: intermediate.ID,
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+
+	// Close the intermediate and one nested step. The other nested
+	// step stays open: direct-children-only would see all closed and
+	// fire, but transitive-subtree must see the open descendant.
+	_ = store.Close(intermediate.ID)
+	_ = store.Close(nestedClosed.ID)
+	_ = nestedOpen // keep open intentionally
+
+	var out bytes.Buffer
+	doMoleculeAutocloseWith(store, events.Discard, nestedClosed.ID, &out)
+	r, _ := store.Get(root.ID)
+	if r.Status == "closed" {
+		t.Fatalf("root closed despite nested descendant still open (ListSubtree regressed to direct-children-only): status=%q out=%q", r.Status, out.String())
+	}
+}
+
+// TestCloseMoleculeWithReasonTrimsWhitespace pins the Copilot finding
+// on PR #2526 line 148: whitespace-only reason must fall through to the
+// plain store.Close path, matching closeConvoyWithReason's behavior.
+// Without the trim, a whitespace-only reason would stamp a meaningless
+// close_reason metadata value and potentially trip downstream validators.
+func TestCloseMoleculeWithReasonTrimsWhitespace(t *testing.T) {
+	store := beads.NewMemStore()
+	mol, _ := store.Create(beads.Bead{Title: "mol", Type: "molecule"})
+
+	if err := closeMoleculeWithReason(store, mol.ID, "   \t\n"); err != nil {
+		t.Fatalf("closeMoleculeWithReason whitespace reason: %v", err)
+	}
+	r, _ := store.Get(mol.ID)
+	if r.Status != "closed" {
+		t.Fatalf("whitespace reason did not close molecule: status=%q", r.Status)
+	}
+	if got := r.Metadata["close_reason"]; got != "" {
+		t.Fatalf("close_reason = %q, want empty (whitespace-only reason should fall through to plain Close)", got)
 	}
 }
 

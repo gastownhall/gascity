@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 // moleculeAutocloseReason is the close_reason metadata value stamped on
@@ -64,33 +66,42 @@ func doMoleculeAutoclose(beadID string, stdout, stderr io.Writer) {
 	doMoleculeAutocloseWith(store, rec, beadID, stdout)
 }
 
-// doMoleculeAutocloseWith walks from the just-closed bead up to its
-// parent molecule (if any) and closes the molecule when every child is
-// terminal. Reacts to closes of typed "step" beads (the
-// nonRootStepBeadType-stamped formula scaffolding) — closes of other
-// child types are ignored to avoid surprising auto-close on user data.
-// All errors are silently swallowed; this is called from a bd hook
-// script and must not fail loudly. See gastownhall/gascity#1039.
+// doMoleculeAutocloseWith finds the molecule root the just-closed bead
+// belongs to and closes that root when every transitive descendant is
+// terminal. Reacts to formula-scaffolded members (steps, gates, epics,
+// nested steps) — identified by the gc.root_bead_id metadata that
+// molecule.Instantiate stamps onto every member — and falls back to a
+// type=="step" + direct-molecule-parent check for legacy beads that
+// predate the metadata convention. All errors are silently swallowed;
+// this is called from a bd hook script and must not fail loudly. See
+// gastownhall/gascity#1039.
 func doMoleculeAutocloseWith(store beads.Store, rec events.Recorder, beadID string, stdout io.Writer) {
 	bead, err := store.Get(beadID)
 	if err != nil {
 		return
 	}
-	// React only to formula-scaffolding step closes. Closes of "task"
-	// or other types attached to a molecule shouldn't trigger an
-	// auto-close (those represent real work; the user may legitimately
-	// close one without intending to close the parent).
-	if bead.Type != "step" {
+	rootID := strings.TrimSpace(bead.Metadata["gc.root_bead_id"])
+	if rootID == "" {
+		// Legacy fallback for pre-metadata beads: react only to typed
+		// "step" closes with a direct molecule parent. Mirrors prior
+		// behavior so molecules created before the metadata convention
+		// still auto-close, and so a user closing a "task" bead
+		// parented under a molecule does not trigger surprise close.
+		if bead.Type != "step" || bead.ParentID == "" {
+			return
+		}
+		parent, err := store.Get(bead.ParentID)
+		if err != nil {
+			return
+		}
+		autocloseMoleculeIfComplete(store, rec, parent, stdout)
 		return
 	}
-	if bead.ParentID == "" {
-		return
-	}
-	parent, err := store.Get(bead.ParentID)
+	root, err := store.Get(rootID)
 	if err != nil {
 		return
 	}
-	autocloseMoleculeIfComplete(store, rec, parent, stdout)
+	autocloseMoleculeIfComplete(store, rec, root, stdout)
 }
 
 func autocloseMoleculeIfComplete(store beads.Store, rec events.Recorder, mol beads.Bead, stdout io.Writer) {
@@ -101,18 +112,30 @@ func autocloseMoleculeIfComplete(store beads.Store, rec events.Recorder, mol bea
 		return
 	}
 
-	children, err := store.Children(mol.ID, beads.IncludeClosed)
+	// Walk the full transitive subtree (parent-child edges plus the
+	// gc.root_bead_id metadata link) so molecules whose steps fan out
+	// into nested children — formula compiler "epic" steps,
+	// gate-deferred sub-trees — are evaluated by descendant terminality,
+	// not just direct children. Closing on direct-children-only would
+	// either fire too early (descendants still open under a closed
+	// intermediate) or never (nested open child under a closed
+	// intermediate but recorded children look terminal).
+	subtree, err := molecule.ListSubtree(store, mol.ID)
 	if err != nil {
 		return
 	}
-	if len(children) == 0 {
-		// A molecule root with no step children is either still being
-		// instantiated or already-cleaned scaffolding; either way,
-		// closing here would race the instantiator. Leave it.
+	if len(subtree) <= 1 {
+		// Only the root itself was returned — no descendants. The
+		// molecule is either still being instantiated or already-cleaned
+		// scaffolding; either way, closing here would race the
+		// instantiator. Leave it.
 		return
 	}
-	for _, ch := range children {
-		if !convoycore.IsTerminalStatus(ch.Status) {
+	for _, b := range subtree {
+		if b.ID == mol.ID {
+			continue
+		}
+		if !convoycore.IsTerminalStatus(b.Status) {
 			return
 		}
 	}
@@ -135,6 +158,7 @@ func autocloseMoleculeIfComplete(store beads.Store, rec events.Recorder, mol bea
 // reason is auditable via bd show. Falls back to a plain Close when
 // the store has no explicit-reason close path.
 func closeMoleculeWithReason(store beads.Store, id, reason string) error {
+	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		return store.Close(id)
 	}
