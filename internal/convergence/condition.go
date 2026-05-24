@@ -62,6 +62,7 @@ type ConditionEnv struct {
 	WorkDir              string
 	WispID               string
 	DocPath              string // from var.doc_path, may be empty
+	MoleculeDir          string // molecule.Dir(CityPath, rootID); may be empty for non-molecule beads
 	ArtifactDir          string
 	IterationDurationMs  int64
 	CumulativeDurationMs int64
@@ -119,6 +120,9 @@ func (ce ConditionEnv) Environ() []string {
 	}
 	if ce.StorePath != "" {
 		env = append(env, "GC_STORE_PATH="+ce.StorePath)
+	}
+	if ce.MoleculeDir != "" {
+		env = append(env, "GC_MOLECULE_DIR="+ce.MoleculeDir)
 	}
 	if realBD := os.Getenv("GC_INTEGRATION_REAL_BD"); realBD != "" {
 		env = append(env, "GC_INTEGRATION_REAL_BD="+realBD)
