@@ -5993,6 +5993,7 @@ func TestJsonlExportPushFailureWritesLastPushStderr(t *testing.T) {
 	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
 	archiveRepo := filepath.Join(cityDir, "archive")
 	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+	pushLog := filepath.Join(t.TempDir(), "git-push.log")
 
 	// Must have an origin remote — auto-detect mode skips push (and therefore
 	// the failure path) when origin is unset. An unreachable remote triggers
@@ -6000,10 +6001,29 @@ func TestJsonlExportPushFailureWritesLastPushStderr(t *testing.T) {
 	initSeedArchiveWithUnreachableRemote(t, archiveRepo)
 	writeMultiRecordDoltStub(t, binDir, 5)
 	writeJsonlExportGCStub(t, binDir)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("LookPath(git): %v", err)
+	}
+	writeGitPushAttemptStub(t, binDir, realGit, "pass-through", pushLog)
 
 	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
 
-	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh should report push failure in summary without exiting non-zero: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "pushing archive main failed after 3 attempts") {
+		t.Fatalf("expected terminal retry message, got:\n%s", out)
+	}
+
+	pushData, err := os.ReadFile(pushLog)
+	if err != nil {
+		t.Fatalf("ReadFile(push log): %v", err)
+	}
+	if got := strings.Count(string(pushData), "\n"); got != 3 {
+		t.Fatalf("unreachable remote should be retried exactly 3 times, got %d:\n%s", got, pushData)
+	}
 
 	stateData, err := os.ReadFile(stateFile)
 	if err != nil {
