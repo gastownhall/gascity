@@ -1775,7 +1775,7 @@ gc mail peek <id> [flags]
 Display a message and mark it as read.
 
 Shows the full message details (ID, sender, recipient, subject, date, body).
-The message stays in the store — use "gc mail archive" to permanently close it.
+The message stays in the store — use "gc mail archive" to remove it.
 
 ```
 gc mail read <id> [flags]

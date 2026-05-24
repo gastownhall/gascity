@@ -35,6 +35,16 @@ func (s noBroadSessionRouteStore) List(query beads.ListQuery) ([]beads.Bead, err
 	return s.MemStore.List(query)
 }
 
+type noCloseAllStore struct {
+	*beads.MemStore
+	t *testing.T
+}
+
+func (s noCloseAllStore) CloseAll(_ []string, _ map[string]string) (int, error) {
+	s.t.Fatal("ArchiveMany used CloseAll; mail archive must delete each bead eagerly")
+	return 0, nil
+}
+
 func TestInboxDoesNotCallBroadList(t *testing.T) {
 	base := beads.NewMemStore()
 	p := New(noListScanStore{MemStore: base})
@@ -735,13 +745,8 @@ func TestArchive(t *testing.T) {
 		t.Fatalf("Archive: %v", err)
 	}
 
-	// Bead should be closed.
-	b, err := store.Get(sent.ID)
-	if err != nil {
-		t.Fatalf("store.Get: %v", err)
-	}
-	if b.Status != "closed" {
-		t.Errorf("bead Status = %q, want %q", b.Status, "closed")
+	if _, err := store.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", sent.ID, err)
 	}
 }
 
@@ -776,6 +781,27 @@ func TestArchiveAlreadyClosed(t *testing.T) {
 	if !errors.Is(err, mail.ErrAlreadyArchived) {
 		t.Errorf("Archive already closed: got %v, want ErrAlreadyArchived", err)
 	}
+	if _, err := store.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", sent.ID, err)
+	}
+}
+
+func TestArchiveAlreadyDeleted(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("human", "mayor", "", "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Archive(sent.ID); err != nil {
+		t.Fatalf("first Archive: %v", err)
+	}
+
+	err = p.Archive(sent.ID)
+	if !errors.Is(err, mail.ErrAlreadyArchived) {
+		t.Errorf("Archive already deleted: got %v, want ErrAlreadyArchived", err)
+	}
 }
 
 func TestArchiveNotFound(t *testing.T) {
@@ -783,20 +809,12 @@ func TestArchiveNotFound(t *testing.T) {
 	p := New(store)
 
 	err := p.Archive("gc-999")
-	if err == nil {
-		t.Error("Archive should fail for nonexistent ID")
+	if !errors.Is(err, mail.ErrAlreadyArchived) {
+		t.Errorf("Archive nonexistent ID: got %v, want ErrAlreadyArchived", err)
 	}
 }
 
-// TestArchiveStampsCloseReason verifies that Archive stamps
-// close_reason=MailArchivedCloseReason on the closed message bead.
-// Without this, bd's validation.on-close=error rejects the close and
-// leaves the message open silently.
-func TestArchiveStampsCloseReason(t *testing.T) {
-	if got := len(MailArchivedCloseReason); got < 20 {
-		t.Fatalf("MailArchivedCloseReason = %q (%d chars), want >=20", MailArchivedCloseReason, got)
-	}
-
+func TestArchiveReadAfterDeleteReturnsNotFound(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
@@ -808,18 +826,12 @@ func TestArchiveStampsCloseReason(t *testing.T) {
 		t.Fatalf("Archive: %v", err)
 	}
 
-	b, err := store.Get(sent.ID)
-	if err != nil {
-		t.Fatalf("store.Get: %v", err)
-	}
-	if got := b.Metadata["close_reason"]; got != MailArchivedCloseReason {
-		t.Errorf("close_reason = %q, want %q", got, MailArchivedCloseReason)
+	if _, err := p.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get(%s) err = %v, want ErrNotFound", sent.ID, err)
 	}
 }
 
-// TestArchiveManyStampsCloseReason verifies the batch-archive path also
-// stamps close_reason on every closed bead.
-func TestArchiveManyStampsCloseReason(t *testing.T) {
+func TestArchiveManyDeletesImmediately(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
@@ -842,15 +854,75 @@ func TestArchiveManyStampsCloseReason(t *testing.T) {
 		}
 	}
 	for _, id := range []string{a.ID, b.ID} {
-		got, err := store.Get(id)
-		if err != nil {
-			t.Fatalf("store.Get(%s): %v", id, err)
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", id, err)
 		}
-		if got.Status != "closed" {
-			t.Errorf("bead %s status = %q, want closed", id, got.Status)
+	}
+}
+
+func TestArchiveManyReportsPerIDResults(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	a, err := p.Send("human", "mayor", "", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.Create(beads.Bead{Title: "not mail", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := p.Send("human", "mayor", "", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := p.ArchiveMany([]string{a.ID, task.ID, b.ID})
+	if err != nil {
+		t.Fatalf("ArchiveMany: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("results = %d, want 3", len(results))
+	}
+	if results[0].Err != nil {
+		t.Errorf("results[0].Err = %v, want nil", results[0].Err)
+	}
+	if results[1].Err == nil || !strings.Contains(results[1].Err.Error(), "not a message") {
+		t.Errorf("results[1].Err = %v, want not a message", results[1].Err)
+	}
+	if results[2].Err != nil {
+		t.Errorf("results[2].Err = %v, want nil", results[2].Err)
+	}
+	for _, id := range []string{a.ID, b.ID} {
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", id, err)
 		}
-		if reason := got.Metadata["close_reason"]; reason != MailArchivedCloseReason {
-			t.Errorf("bead %s close_reason = %q, want %q", id, reason, MailArchivedCloseReason)
+	}
+	if _, err := store.Get(task.ID); err != nil {
+		t.Fatalf("task bead should remain after ArchiveMany partial error: %v", err)
+	}
+}
+
+func TestArchiveManyDoesNotUseCloseAll(t *testing.T) {
+	store := noCloseAllStore{MemStore: beads.NewMemStore(), t: t}
+	p := New(store)
+
+	a, err := p.Send("human", "mayor", "", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := p.Send("human", "mayor", "", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := p.ArchiveMany([]string{a.ID, b.ID})
+	if err != nil {
+		t.Fatalf("ArchiveMany: %v", err)
+	}
+	for i, r := range results {
+		if r.Err != nil {
+			t.Errorf("ArchiveMany[%d].Err = %v", i, r.Err)
 		}
 	}
 }
@@ -891,12 +963,8 @@ func TestArchiveMatchingSkipsPerMessageGet(t *testing.T) {
 		}
 	}
 	for _, id := range []string{matchingA.ID, matchingB.ID} {
-		got, err := base.Get(id)
-		if err != nil {
-			t.Fatalf("Get(%s): %v", id, err)
-		}
-		if got.Status != "closed" {
-			t.Fatalf("message %s status = %q, want closed", id, got.Status)
+		if _, err := base.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("Get(%s) err = %v, want ErrNotFound", id, err)
 		}
 	}
 	got, err := base.Get(other.ID)
@@ -934,12 +1002,8 @@ func TestDelete(t *testing.T) {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	b, err := store.Get(sent.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b.Status != "closed" {
-		t.Errorf("bead Status = %q, want %q", b.Status, "closed")
+	if _, err := store.Get(sent.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("store.Get(%s) err = %v, want ErrNotFound", sent.ID, err)
 	}
 }
 

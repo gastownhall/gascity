@@ -161,11 +161,11 @@ func newMailArchiveCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "archive <id>...",
 		Short: "Archive one or more messages without reading them",
-		Long: `Close one or more message beads without displaying their contents.
+		Long: `Remove one or more message beads without displaying their contents.
 
-Use this to dismiss messages without reading them. Each message is marked
-as closed and will no longer appear in mail check or inbox results. When
-multiple IDs are passed, they are archived in a single batch round-trip.
+Use this to dismiss messages without reading them. Each message is removed
+and will no longer appear in mail check or inbox results. When multiple IDs
+are passed, they are archived in input order.
 
 For large advisory backlogs, use --to with --subject-prefix, --subject-contains,
 or --from to archive a bounded matching slice without enumerating IDs by hand.`,
@@ -239,10 +239,9 @@ func cmdMailArchiveSelectedJSON(args []string, opts mailArchiveSelectOptions, js
 	return doMailArchiveSelectedJSON(mp, rec, args, opts, jsonOut, stdout, stderr)
 }
 
-// doMailArchive closes one or more message beads. For a single ID the
+// doMailArchive archives one or more message beads. For a single ID the
 // behavior matches the pre-batch CLI byte-for-byte; for two or more IDs it
-// delegates to mp.ArchiveMany for a single-round-trip close and prints one
-// result line per id.
+// delegates to mp.ArchiveMany and prints one result line per id.
 func doMailArchive(mp mail.Provider, rec events.Recorder, args []string, stdout, stderr io.Writer) int {
 	return doMailArchiveJSON(mp, rec, args, false, stdout, stderr)
 }
@@ -1370,7 +1369,7 @@ func newMailReadCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Display a message and mark it as read.
 
 Shows the full message details (ID, sender, recipient, subject, date, body).
-The message stays in the store — use "gc mail archive" to permanently close it.`,
+The message stays in the store — use "gc mail archive" to remove it.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdMailReadWithJSON(args, jsonOut, stdout, stderr) != 0 {
@@ -2219,7 +2218,7 @@ func cmdMailDeleteJSON(args []string, jsonOut bool, stdout, stderr io.Writer) in
 	return doMailDeleteJSON(mp, rec, args, jsonOut, stdout, stderr)
 }
 
-// doMailDelete closes one or more message beads (same as archive but
+// doMailDelete deletes one or more message beads (same as archive but
 // different intent). Single-id behavior matches the pre-batch CLI
 // byte-for-byte; multi-id uses mp.DeleteMany to preserve provider delete
 // semantics.
