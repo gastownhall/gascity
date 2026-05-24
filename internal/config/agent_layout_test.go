@@ -51,6 +51,54 @@ scope = "city"
 	}
 }
 
+func TestLoadPackV2AgentTomlInfersNameAndLoadsFields(t *testing.T) {
+	packDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(packDir, "pack.toml"), []byte(`
+[pack]
+name = "test-pack"
+schema = 1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(packDir, "agents", "reviewer")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte(`
+scope = "city"
+description = "Reviews changes"
+provider = "codex"
+prompt_template = "assets/prompts/reviewer.md"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	agents, _, _, _, _, _, _, err := loadPack(
+		fsys.OSFS{},
+		filepath.Join(packDir, "pack.toml"),
+		packDir,
+		packDir,
+		"test-rig",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("loadPack: %v", err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+	got := agents[0]
+	if got.Name != "reviewer" {
+		t.Fatalf("agent name = %q, want directory-derived reviewer", got.Name)
+	}
+	if got.layout != layoutV2Convention {
+		t.Fatalf("agent.layout = %v, want layoutV2Convention", got.layout)
+	}
+	if got.Description != "Reviews changes" || got.Provider != "codex" || got.PromptTemplate != "assets/prompts/reviewer.md" {
+		t.Fatalf("agent fields not loaded from agent.toml: %+v", got)
+	}
+}
+
 // TestLoadPack_StampsV1Layout asserts that agents declared as
 // [[agent]] blocks in a pack's pack.toml carry layout=layoutV1Inline.
 func TestLoadPack_StampsV1Layout(t *testing.T) {

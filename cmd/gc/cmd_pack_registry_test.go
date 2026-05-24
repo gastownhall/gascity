@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/packregistry"
@@ -192,6 +193,45 @@ func TestPackRegistryShowBareNameAmbiguous(t *testing.T) {
 	}
 }
 
+func TestPackAddBareRegistrySelectorAmbiguousDoesNotWriteImport(t *testing.T) {
+	clearGCEnv(t)
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", home)
+	t.Setenv("GC_CITY", city)
+	writeCityToml(t, city, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, city, "[pack]\nname = \"demo\"\nschema = 1\n")
+	mainDir := writeRegistryCatalog(t, packRegistryTestCatalog)
+	otherDir := writeRegistryCatalog(t, packRegistryOtherCatalog)
+
+	var stdout, stderr bytes.Buffer
+	if code := doPackRegistryAdd("main", mainDir, false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("add main: %d %s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := doPackRegistryAdd("other", otherDir, false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("add other: %d %s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"pack", "add", "lighthouse"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("pack add ambiguous succeeded stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "ambiguous") || !strings.Contains(stderr.String(), "main:lighthouse") || !strings.Contains(stderr.String(), "other:lighthouse") {
+		t.Fatalf("ambiguous add stderr missing choices: %q", stderr.String())
+	}
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(city, "pack.toml"))
+	if err != nil {
+		t.Fatalf("Load(pack.toml): %v", err)
+	}
+	if len(cfg.Imports) != 0 {
+		t.Fatalf("imports were written after ambiguous registry selector: %#v", cfg.Imports)
+	}
+}
+
 func TestPackRegistryAddDuplicateDoesNotPoisonCache(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GC_HOME", home)
@@ -370,6 +410,22 @@ func TestPackCommandTreeKeepsRegistryAndDependencySurfacesSeparate(t *testing.T)
 	}
 }
 
+func TestImportMigrateCommandRemainsRegisteredAsDeprecatedShim(t *testing.T) {
+	cmd := newImportCmd(&bytes.Buffer{}, &bytes.Buffer{})
+	found, _, err := cmd.Find([]string{"migrate"})
+	if err != nil || found == cmd {
+		t.Fatalf("gc import migrate not found: found=%v err=%v", found, err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doImportMigrate(false, &stdout, &stderr); code != 1 {
+		t.Fatalf("doImportMigrate code=%d stdout=%q stderr=%q, want deprecated nonzero shim", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gc import migrate has been deprecated") || !strings.Contains(stderr.String(), "gc doctor --fix") {
+		t.Fatalf("deprecated migrate stderr = %q", stderr.String())
+	}
+}
+
 func TestPackCheckCommandWrapsImportCheck(t *testing.T) {
 	clearGCEnv(t)
 	home := t.TempDir()
@@ -416,6 +472,69 @@ transitive = false
 	}
 	if !strings.Contains(stdout.String(), "Import state OK: 1 remote import(s) checked") {
 		t.Fatalf("import stdout = %q", stdout.String())
+	}
+}
+
+func TestPackCheckAndDoctorShareImportStateDiagnostics(t *testing.T) {
+	clearGCEnv(t)
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_CITY", city)
+	writeCityToml(t, city, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, city, `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.0"
+`)
+
+	prevCheck := checkInstalledImports
+	t.Cleanup(func() { checkInstalledImports = prevCheck })
+	checkInstalledImports = func(_ string, _ map[string]config.Import) (*packman.CheckReport, error) {
+		return &packman.CheckReport{
+			CheckedSources: 1,
+			Issues: []packman.CheckIssue{{
+				Severity:   packman.CheckSeverityError,
+				Code:       "missing-cache",
+				ImportName: "pack:tools",
+				Source:     "https://example.com/tools.git",
+				Commit:     "abc123",
+				Path:       filepath.Join(city, ".gc", "cache", "repos", "abc123"),
+				Message:    "locked import is missing from the local repo cache",
+				RepairHint: `run "gc pack sync"`,
+			}},
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"pack", "check"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("pack check code=0, want failure stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	packOut := stdout.String() + stderr.String()
+	for _, want := range []string{"missing-cache", "pack:tools", "https://example.com/tools.git", `gc pack sync`} {
+		if !strings.Contains(packOut, want) {
+			t.Fatalf("pack check output missing %q:\n%s", want, packOut)
+		}
+	}
+	if strings.Contains(packOut, `gc import install`) {
+		t.Fatalf("pack check output used stale hint:\n%s", packOut)
+	}
+
+	result := newImportStateDoctorCheck(city).Run(&doctor.CheckContext{CityPath: city, Verbose: true})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("doctor status = %v, want error; result=%#v", result.Status, result)
+	}
+	doctorOut := result.Message + "\n" + result.FixHint + "\n" + strings.Join(result.Details, "\n")
+	for _, want := range []string{"missing-cache", "pack:tools", "https://example.com/tools.git", `gc pack sync`} {
+		if !strings.Contains(doctorOut, want) {
+			t.Fatalf("doctor output missing %q:\n%s", want, doctorOut)
+		}
+	}
+	if strings.Contains(doctorOut, `gc import install`) {
+		t.Fatalf("doctor output used stale hint:\n%s", doctorOut)
 	}
 }
 
@@ -548,6 +667,74 @@ func TestPackAddRegistrySelectorWritesConcreteSourceAndRegistryLockMetadata(t *t
 	}
 	if !strings.Contains(stdout.String(), "registry source: "+catalogDir) {
 		t.Fatalf("pack why stdout missing registry source: %q", stdout.String())
+	}
+}
+
+func TestPackDependencyReadCommandsUseLockWithoutRegistryRefresh(t *testing.T) {
+	clearGCEnv(t)
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", home)
+	t.Setenv("GC_CITY", city)
+	source, commit, hash := writeGitPackRepo(t)
+	writeCityToml(t, city, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, city, `[pack]
+name = "demo"
+schema = 1
+
+[imports.lighthouse]
+source = "`+source+`"
+version = "^1.0"
+`)
+	if err := packregistry.SaveConfig(home, packregistry.Config{Registries: []packregistry.Registry{{
+		Name:   "main",
+		Source: filepath.Join(t.TempDir(), "missing"),
+	}}}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	if err := packman.WriteLockfile(fsys.OSFS{}, city, &packman.Lockfile{
+		Schema: packman.LockfileSchemaV2,
+		Packs: map[string]packman.LockedPack{
+			source: {
+				Version:        "1.2.0",
+				Commit:         commit,
+				Source:         source,
+				SourceKind:     "git",
+				Ref:            "v1.2.0",
+				Hash:           hash,
+				Registry:       "main",
+				RegistrySource: "https://registry.example/registry.toml",
+				RegistryPack:   "lighthouse",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+	cachePath, err := packman.RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	runGitCmd(t, "", "clone", strings.TrimPrefix(source, "file://"), cachePath)
+	runGitCmd(t, cachePath, "checkout", commit)
+
+	for _, args := range [][]string{
+		{"pack", "list"},
+		{"pack", "show", "lighthouse"},
+		{"pack", "why", "lighthouse"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := run(args, &stdout, &stderr); code != 0 {
+				t.Fatalf("%v code=%d stdout=%q stderr=%q", args, code, stdout.String(), stderr.String())
+			}
+			if strings.Contains(stderr.String(), "refresh failed") || strings.Contains(stderr.String(), "missing") {
+				t.Fatalf("%v attempted registry refresh or emitted registry diagnostics: %q", args, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "lighthouse") {
+				t.Fatalf("%v stdout missing dependency: %q", args, stdout.String())
+			}
+		})
 	}
 }
 
