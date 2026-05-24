@@ -23,6 +23,21 @@ func TestReadLockfileMissingReturnsEmpty(t *testing.T) {
 	}
 }
 
+func TestReadLockfileRejectsUnknownSchemaVersion(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, LockfileName), []byte("schema = 99\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, err := ReadLockfile(fsys.OSFS{}, dir)
+	if err == nil {
+		t.Fatal("ReadLockfile succeeded, want unsupported schema error")
+	}
+	if !strings.Contains(err.Error(), "unsupported packs.lock schema 99") {
+		t.Fatalf("ReadLockfile error = %v, want unsupported schema", err)
+	}
+}
+
 func TestWriteLockfileSortsKeys(t *testing.T) {
 	dir := t.TempDir()
 	lock := &Lockfile{

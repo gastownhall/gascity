@@ -515,6 +515,9 @@ func assertSingleIssue(t *testing.T, report *CheckReport, code string) {
 	if report.Issues[0].Severity != CheckSeverityError {
 		t.Fatalf("issue severity = %q, want error", report.Issues[0].Severity)
 	}
+	if report.Issues[0].RepairHint == `run "gc import install"` {
+		t.Fatalf("issue repair hint = %q, want gc pack sync remediation", report.Issues[0].RepairHint)
+	}
 	if report.ErrorCount() != 1 {
 		t.Fatalf("ErrorCount = %d, want 1", report.ErrorCount())
 	}

@@ -796,7 +796,7 @@ version = "^1.0"
 				Commit:     "abc123",
 				Path:       filepath.Join(dir, ".gc", "cache", "repos", "abc"),
 				Message:    "locked import is missing from the local repo cache",
-				RepairHint: `run "gc import install"`,
+				RepairHint: `run "gc pack sync"`,
 			}},
 		}, nil
 	}
@@ -811,7 +811,7 @@ version = "^1.0"
 		"Import state has 1 issue(s):",
 		"[error] missing-cache pack:tools",
 		"locked import is missing from the local repo cache",
-		`repair: run "gc import install"`,
+		`repair: run "gc pack sync"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stdout missing %q:\n%s\nstderr:\n%s", want, out, stderr.String())
