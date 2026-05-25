@@ -1444,7 +1444,13 @@ func TestCityRuntimeRunStartupOrderDispatchPanicIsRecovered(t *testing.T) {
 	}
 }
 
-func TestOrderTrackingSweepWatchdogOnlyClosesSweepOrderTracking(t *testing.T) {
+func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
+	// #2168: the watchdog must clear stale tracking beads for EVERY order, not
+	// just order-tracking-sweep's own. The old narrow scope only swept the
+	// sweep order's tracking to bootstrap it, relying on order-tracking-sweep
+	// to then clean the rest — a single-point-of-failure that jammed every
+	// order when slow reconciler cycles kept that one order from firing. The
+	// staleAfter cutoff still protects in-flight dispatches regardless of order.
 	store := beads.NewMemStore()
 	sweepTracking, err := store.Create(beads.Bead{
 		Title:  "order:" + orderTrackingSweepOrder,
@@ -1482,8 +1488,8 @@ func TestOrderTrackingSweepWatchdogOnlyClosesSweepOrderTracking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(merge): %v", err)
 	}
-	if gotMerge.Status != "open" {
-		t.Fatalf("merge tracking status = %s, want open", gotMerge.Status)
+	if gotMerge.Status != "closed" {
+		t.Fatalf("merge tracking status = %s, want closed (watchdog now sweeps all orders, not just order-tracking-sweep)", gotMerge.Status)
 	}
 }
 

@@ -1195,15 +1195,22 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	}
 	cr.orderSweepWatchdogLast = now
 
-	stores, targets, storeErr := cr.orderTrackingSweepStores()
+	stores, _, storeErr := cr.orderTrackingSweepStores()
 	if len(stores) == 0 {
 		if storeErr != nil && cr.stderr != nil {
 			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, storeErr) //nolint:errcheck // best-effort stderr
 		}
 		return
 	}
-	onlyOrders := orderTrackingSweepOrderFilterForTargets(targets)
-	result, sweepErr := sweepStaleOrderTrackingAcrossStores(stores, now, orderTrackingSweepWatchdogStaleAfter, onlyOrders, orderTrackingWatchdogMetadataInitiator, false)
+	// Sweep stale tracking beads for ALL orders (nil filter), not just
+	// order-tracking-sweep's own. The old narrow scope only swept the sweep
+	// order's tracking so that order could bootstrap and clean the rest — a
+	// single-point-of-failure: when slow reconciler cycles keep order-tracking-
+	// sweep from firing, every order's tracking jams and no order fires (#2168).
+	// The staleAfter cutoff still protects in-flight dispatches regardless of
+	// which order they belong to, so a direct all-orders sweep is safe and
+	// recovers the jam without depending on any single order being scheduled.
+	result, sweepErr := sweepStaleOrderTrackingAcrossStores(stores, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false)
 	if err := errors.Join(storeErr, sweepErr); err != nil {
 		if cr.stderr != nil {
 			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -1232,20 +1239,6 @@ func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackin
 		return store, nil
 	})
 	return stores, targets, err
-}
-
-func orderTrackingSweepOrderFilterForTargets(targets []orderTrackingSweepTarget) map[string]struct{} {
-	onlyOrders := map[string]struct{}{
-		orderTrackingSweepOrder: {},
-	}
-	for _, sweepTarget := range targets {
-		if sweepTarget.target.ScopeKind != "rig" || strings.TrimSpace(sweepTarget.target.RigName) == "" {
-			continue
-		}
-		scoped := (&orders.Order{Name: orderTrackingSweepOrder, Rig: sweepTarget.target.RigName}).ScopedName()
-		onlyOrders[scoped] = struct{}{}
-	}
-	return onlyOrders
 }
 
 func (cr *CityRuntime) handleReloadRequest(req *reloadRequest) {
