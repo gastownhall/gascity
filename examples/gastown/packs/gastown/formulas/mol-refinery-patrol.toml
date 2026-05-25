@@ -706,7 +706,7 @@ PR_BODY_FILE=$(mktemp)
   echo
   echo "## Refinery handoff"
   echo
-  printf -- '- Issue: `%s` (%s%s)\n' "$WORK" "$ISSUE_TYPE" "${ISSUE_PRIORITY:+, $ISSUE_PRIORITY}"
+  printf -- '- Issue: `%s` (%s%s)\n' "$WORK" "$ISSUE_TYPE" "${ISSUE_PRIORITY:+, P$ISSUE_PRIORITY}"
   printf -- '- Source branch: `%s`\n' "$BRANCH"
   printf -- '- Target: `%s`\n' "$TARGET"
   printf -- '- Rebased on `%s` via Gastown Refinery.\n' "$TARGET"

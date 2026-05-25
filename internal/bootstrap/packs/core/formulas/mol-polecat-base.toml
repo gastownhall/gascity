@@ -195,15 +195,15 @@ BODY
 Commit types: feat, fix, refactor, perf, test, docs, chore
 
 **Examples of strong subjects + bodies:**
-- `fix(boson): handle null pin_set in resolve_sdc_target_patterns (pa-xxxx)`
-  body: explains the iter-104 hang traceback, the input shape that
-  triggered the loop, the polars `is_in` fix, and the >1024-pin threshold
-- `perf(nucleus): vectorize _section_key fingerprint (pa-xxxx)`
-  body: cites the cProfile cumtime delta, names the call site that
-  drove the regression, notes why a Python dict still wins on small N
+- `fix(session): preserve lifecycle metadata during crash adoption (ga-xxxx)`
+  body: explains the stale session projection, the resume path that
+  lost metadata, the projection update, and the focused adoption test
+- `perf(events): batch typed payload registration lookups (ga-xxxx)`
+  body: cites the event fan-out profile, names the registry call site
+  that drove the regression, and notes why the cache stays read-only
 
 **Weak commits to avoid** (refinery/reviewer can't tell what's going on):
-- `fix: stuff (pa-xxxx)`
+- `fix: stuff (ga-xxxx)`
 - `perf: speed up the slow loop`
 - `refactor` with no body
 

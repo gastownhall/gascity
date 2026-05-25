@@ -253,9 +253,16 @@ git status                  # Must be clean
 git log origin/{{base_branch}}..HEAD --oneline  # Must show your commits
 ```
 
-If uncommitted changes exist:
+If uncommitted changes exist, commit them with a body explaining what
+slipped through the `implement` step (typically a self-review touch-up,
+test addition, or formatter run):
 ```bash
-git add -A && git commit -m "<type>: <description> ({{issue}})"
+git add -A
+git commit -m "<type>: <imperative subject> ({{issue}})" -m "$(cat <<'BODY'
+<Explain what these residual changes are: a self-review fix,
+test-only addition, formatter run, etc. Be specific.>
+BODY
+)"
 ```
 
 NEVER discard implementation changes with `git checkout -- .`
@@ -276,7 +283,12 @@ git status --porcelain
 ```
 If ANY output (untracked files, uncommitted changes):
 ```bash
-git add -A && git commit -m "chore: capture remaining work ({{issue}})"
+git add -A
+git commit -m "chore: capture remaining work ({{issue}})" -m "$(cat <<'BODY'
+<Explain the remaining changes discovered by final clean-state
+verification and why they are safe to hand off.>
+BODY
+)"
 ```
 This is a belt-and-suspenders check — self-review should have caught this,
 but we never push with untracked work left behind.
