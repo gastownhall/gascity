@@ -352,9 +352,11 @@ func materializeFS(embedded fs.FS, root, dstDir string) (map[string]struct{}, er
 		// when the existing on-disk entry is a regular file with the
 		// correct mode — that's a file the operator might have edited.
 		// Non-regular files (symlinks) and wrong-mode files still get
-		// repaired below, matching the prior contract.
+		// repaired below, matching the prior contract. Mode comparison uses
+		// fsys.ComparableMode (perm + setuid/setgid/sticky) so it agrees with
+		// the WriteFileIfContentOrModeChangedAtomic repair path below.
 		if info, statErr := os.Lstat(dst); statErr == nil {
-			if info.Mode().IsRegular() && info.Mode().Perm() == perm.Perm() {
+			if info.Mode().IsRegular() && fsys.ComparableMode(info.Mode()) == fsys.ComparableMode(perm) {
 				return nil
 			}
 		} else if !os.IsNotExist(statErr) {

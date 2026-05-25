@@ -1420,16 +1420,17 @@ func TestMaterializeFS_PreservesExistingFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first materializeFS: %v", err)
 	}
-	for _, want := range []string{"a.txt", "b.txt", "sub/c.txt"} {
-		if _, ok := desired[want]; !ok {
-			t.Fatalf("desired set missing %q", want)
+	for _, wantPath := range []string{"a.txt", "b.txt", "sub/c.txt"} {
+		if _, ok := desired[wantPath]; !ok {
+			t.Fatalf("desired set missing %q", wantPath)
 		}
-		got, err := os.ReadFile(filepath.Join(dst, filepath.FromSlash(want)))
+		got, err := os.ReadFile(filepath.Join(dst, filepath.FromSlash(wantPath)))
 		if err != nil {
-			t.Fatalf("read %s after first materialize: %v", want, err)
+			t.Fatalf("read %s after first materialize: %v", wantPath, err)
 		}
-		if want := []byte("embedded-" + strings.TrimSuffix(filepath.Base(want), ".txt")); !bytes.Equal(got, want) {
-			t.Fatalf("first materialize content %s = %q, want %q", want, got, want)
+		wantBytes := []byte("embedded-" + strings.TrimSuffix(filepath.Base(wantPath), ".txt"))
+		if !bytes.Equal(got, wantBytes) {
+			t.Fatalf("first materialize content %s = %q, want %q", wantPath, got, wantBytes)
 		}
 	}
 
