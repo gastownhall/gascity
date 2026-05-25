@@ -172,8 +172,23 @@ func IsReadyCandidateForTier(b Bead, now time.Time, tier TierMode) bool {
 		}
 	}
 	return b.Status == "open" &&
-		!IsReadyExcludedType(b.Type) &&
+		!IsReadyExcludedBead(b) &&
 		!IsDeferred(b, now)
+}
+
+// IsReadyExcludedBead reports whether a bead is infrastructure rather than
+// actionable Ready work.
+func IsReadyExcludedBead(b Bead) bool {
+	if IsReadyExcludedType(b.Type) {
+		return true
+	}
+	for _, label := range b.Labels {
+		switch label {
+		case "gc:session", "gc:order-tracking", "order-tracking":
+			return true
+		}
+	}
+	return false
 }
 
 // IsDeferred reports whether a bead is hidden by a future defer_until,

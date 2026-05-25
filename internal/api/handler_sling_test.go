@@ -635,7 +635,7 @@ func TestSlingSlotSuffixedPoolTargetNormalizesRoutedTo(t *testing.T) {
 	}
 }
 
-func TestSlingConflictReturns409ForExistingLiveWorkflow(t *testing.T) {
+func TestSlingGraphV2RejectsLegacySourceWorkflowConflict(t *testing.T) {
 	// The Huma migration moved sling to /v0/city/{cityName}/sling and
 	// replaced the old plain-JSON `{code, message, source_bead_id, ...}`
 	// error body with RFC 9457 Problem Details. The source-workflow
@@ -685,7 +685,7 @@ title = "Do work"
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, err := store.Create(beads.Bead{
+	if _, err := store.Create(beads.Bead{
 		Title:  "existing workflow",
 		Type:   "task",
 		Status: "in_progress",
@@ -694,8 +694,7 @@ title = "Do work"
 			"gc.formula_contract": "graph.v2",
 			"gc.source_bead_id":   source.ID,
 		},
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -706,41 +705,12 @@ title = "Do work"
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body = %s", rec.Code, rec.Body.String())
 	}
-
-	// Problem Details body: {title, status, detail, errors: [{location, value}, ...]}.
-	var resp struct {
-		Title  string `json:"title"`
-		Status int    `json:"status"`
-		Detail string `json:"detail"`
-		Errors []struct {
-			Location string `json:"location"`
-			Value    any    `json:"value"`
-		} `json:"errors"`
+	source, err = store.Get(source.ID)
+	if err != nil {
+		t.Fatalf("reload source: %v", err)
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Status != http.StatusConflict {
-		t.Fatalf("status field = %d, want 409", resp.Status)
-	}
-
-	// Build a location -> value lookup so assertions don't depend on
-	// the errors[] array order.
-	got := map[string]any{}
-	for _, e := range resp.Errors {
-		got[e.Location] = e.Value
-	}
-
-	if got["body.source_bead_id"] != source.ID {
-		t.Fatalf("source_bead_id = %#v, want %s", got["body.source_bead_id"], source.ID)
-	}
-	ids, ok := got["body.blocking_workflow_ids"].([]any)
-	if !ok || len(ids) != 1 || ids[0] != root.ID {
-		t.Fatalf("blocking_workflow_ids = %#v, want [%s]", got["body.blocking_workflow_ids"], root.ID)
-	}
-	hint, _ := got["body.hint"].(string)
-	if !strings.Contains(hint, "--store-ref rig:myrig --apply") {
-		t.Fatalf("hint = %q, want store-ref cleanup command", hint)
+	if source.Metadata["workflow_id"] != "" {
+		t.Fatalf("source workflow_id = %q, want graph.v2 launch to leave source metadata untouched", source.Metadata["workflow_id"])
 	}
 }
 

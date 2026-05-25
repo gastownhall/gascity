@@ -38,6 +38,7 @@ type ProcessOptions struct {
 	StorePath          string
 	FormulaSearchPaths []string
 	PrepareFragment    func(*formula.FragmentRecipe, beads.Bead) error
+	PrepareRecipe      func(*formula.Recipe, beads.Bead) error
 	RecycleSession     func(beads.Bead) error
 	// ResolveStoreRef opens the bead store identified by a gc.source_store_ref
 	// value (e.g. "city:foo", "rig:alpha"). Used by processWorkflowFinalize to
@@ -123,6 +124,8 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 		return processRetryEval(store, bead, opts)
 	case "fanout":
 		return processFanout(store, bead, opts)
+	case "drain":
+		return processDrain(store, bead, opts)
 	case "scope-check":
 		return processScopeCheck(store, bead, opts)
 	case "workflow-finalize":

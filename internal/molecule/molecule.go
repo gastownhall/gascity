@@ -998,11 +998,11 @@ func validateTimeoutMetadataVars(stepID string, metadata map[string]string) erro
 }
 
 func deferBeadRouting(b *beads.Bead) {
-	beadType := b.Type
-	if beadType == "" {
-		beadType = "task"
-	}
-	if !beads.IsReadyExcludedType(beadType) {
+	if !beads.IsReadyExcludedBead(*b) {
+		beadType := b.Type
+		if beadType == "" {
+			beadType = "task"
+		}
 		ensureBeadMetadata(b)
 		b.Metadata[DeferredTypeMetadataKey] = beadType
 		b.Type = "gate"

@@ -12,7 +12,6 @@ import (
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 func builtinFormulaDir(t *testing.T) string {
@@ -262,17 +261,25 @@ func startMemScopedWorkflow(t *testing.T) (*beads.MemStore, string, string) {
 
 	opts := testOpts(worker, issue.ID)
 	opts.OnFormula = "mol-scoped-work"
-	opts.Vars = []string{"issue=" + issue.ID}
 	if code := doSling(opts, deps, store, stdout, stderr); code != 0 {
 		t.Fatalf("doSling returned %d; stderr=%s", code, stderr.String())
 	}
 
-	source := mustGetMemBead(t, store, issue.ID)
-	workflowID := source.Metadata["workflow_id"]
-	if workflowID == "" {
-		t.Fatal("source bead workflow_id missing")
+	inputConvoys, err := store.ListByMetadata(map[string]string{"gc.input_bead_id": issue.ID}, 1)
+	if err != nil {
+		t.Fatalf("ListByMetadata(singleton convoy): %v", err)
 	}
-	return store, issue.ID, workflowID
+	if len(inputConvoys) != 1 {
+		t.Fatalf("singleton convoy count = %d, want 1", len(inputConvoys))
+	}
+	roots, err := store.ListByMetadata(map[string]string{"gc.input_convoy_id": inputConvoys[0].ID, "gc.kind": "workflow"}, 1)
+	if err != nil {
+		t.Fatalf("ListByMetadata(workflow root): %v", err)
+	}
+	if len(roots) != 1 {
+		t.Fatalf("workflow root count = %d, want 1", len(roots))
+	}
+	return store, issue.ID, roots[0].ID
 }
 
 func TestSelectExecutableGraphWorkerBeadRejectsControlKinds(t *testing.T) {
@@ -434,11 +441,11 @@ func TestGraphWorkflowInMemoryCreateExecuteWaitFlow(t *testing.T) {
 	if root.Status != "in_progress" {
 		t.Fatalf("root status = %q, want in_progress", root.Status)
 	}
-	if root.Metadata["gc.source_bead_id"] != issueID {
-		t.Fatalf("root source_bead_id = %q, want %q", root.Metadata["gc.source_bead_id"], issueID)
+	if root.Metadata["gc.source_bead_id"] != "" {
+		t.Fatalf("root source_bead_id = %q, want empty", root.Metadata["gc.source_bead_id"])
 	}
-	if got := root.Metadata[sourceworkflow.SourceStoreRefMetadataKey]; got != "city:test-city" {
-		t.Fatalf("root %s = %q, want city:test-city", sourceworkflow.SourceStoreRefMetadataKey, got)
+	if root.Metadata["gc.input_convoy_id"] == "" {
+		t.Fatalf("root input_convoy_id missing: %#v", root.Metadata)
 	}
 
 	runMemGraphWorkflowToCompletion(t, store, workflowID, issueID, "worker", t.TempDir(), "success")
@@ -525,7 +532,7 @@ func TestGraphWorkflowRoutingLeavesSpecBeadsUnrouted(t *testing.T) {
 		},
 	}
 
-	if err := applyGraphRouting(recipe, &worker, worker.QualifiedName(), nil, "", "", "", "city:test-city", store, cfg.Workspace.Name, cityPath, cfg); err != nil {
+	if err := applyGraphRouting(recipe, &worker, worker.QualifiedName(), nil, "", "", "city:test-city", store, cfg.Workspace.Name, cityPath, cfg); err != nil {
 		t.Fatalf("applyGraphRouting: %v", err)
 	}
 

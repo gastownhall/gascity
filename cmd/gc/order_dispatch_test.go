@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pgauth"
@@ -927,6 +928,58 @@ func TestOrderDispatchEventWispLatestSeqErrorDoesNotInstantiate(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "reading event cursor for release-watch") {
 		t.Fatalf("stderr = %q, want event cursor read failure", stderr.String())
+	}
+}
+
+func TestOrderDispatchGraphV2ConvoyReferenceFailsBeforeInstantiate(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	formulaBody := `
+formula = "graph-needs-convoy"
+version = 1
+contract = "graph.v2"
+type = "workflow"
+
+[[steps]]
+id = "step"
+title = "Do work"
+description = "Inspect convoy {{convoy_id}}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "graph-needs-convoy.formula.toml"), []byte(strings.TrimSpace(formulaBody)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := beads.NewMemStore()
+	tracking, err := store.Create(beads.Bead{
+		Title:  "order:convoy-patrol",
+		Labels: []string{"order-run:convoy-patrol", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec memRecorder
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:         "convoy-patrol",
+		Trigger:      "cooldown",
+		Interval:     "15m",
+		Formula:      "graph-needs-convoy",
+		FormulaLayer: dir,
+	}}, store, nil, successfulExec, &rec)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	mad := ad.(*memoryOrderDispatcher)
+
+	mad.dispatchWisp(context.Background(), store, mad.aa[0], t.TempDir(), tracking.ID)
+
+	all := trackingBeads(t, store, "order-run:convoy-patrol")
+	if len(all) != 1 {
+		t.Fatalf("tracking beads with order-run label = %d, want only tracking bead", len(all))
+	}
+	if !slicesContain(all[0].Labels, "wisp-failed") {
+		t.Fatalf("tracking bead labels = %v, want wisp-failed", all[0].Labels)
+	}
+	if !rec.hasType(events.OrderFailed) {
+		t.Fatal("missing order.failed event")
 	}
 }
 

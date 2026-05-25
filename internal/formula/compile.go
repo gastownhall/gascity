@@ -72,6 +72,11 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 	if err != nil {
 		return nil, fmt.Errorf("resolving formula %q: %w", name, err)
 	}
+	if declaresGraphV2Contract(resolved) {
+		if err := ValidateGraphV2ReservedSymbolsTransitively(resolved, parser, true); err != nil {
+			return nil, err
+		}
+	}
 	if validateRuntimeVars && len(vars) > 0 {
 		if err := ValidateVars(resolved, vars); err != nil {
 			return nil, err
@@ -190,6 +195,9 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 		return nil, err
 	}
 	if graphWorkflow {
+		if err := ValidateGraphV2ExpandedFormula(resolved, true); err != nil {
+			return nil, err
+		}
 		// Stage 12: Add graph-first control beads for graph workflow formulas.
 		ApplyGraphControls(resolved)
 	}
@@ -445,7 +453,9 @@ func flattenSteps(steps []*Step, parentID string, idMapping map[string]string, o
 		}
 
 		metadata := step.Metadata
-		if isSourceSpecStep(step) {
+		if step.Drain != nil {
+			metadata = metadataForDrainStep(step)
+		} else if isSourceSpecStep(step) {
 			metadata = maps.Clone(step.Metadata)
 			if specForRef := metadata["gc.spec_for_ref"]; specForRef != "" {
 				if mapped, ok := idMapping[specForRef]; ok {
@@ -529,6 +539,41 @@ func flattenSteps(steps []*Step, parentID string, idMapping map[string]string, o
 			flattenSteps(step.Children, issueID, idMapping, out, deps, graphWorkflow)
 		}
 	}
+}
+
+func metadataForDrainStep(step *Step) map[string]string {
+	metadata := maps.Clone(step.Metadata)
+	if metadata == nil {
+		metadata = make(map[string]string)
+	}
+	spec := step.Drain
+	metadata["gc.kind"] = "drain"
+	metadata["gc.drain_context"] = spec.Context
+	metadata["gc.drain_formula"] = spec.Formula
+	memberAccess := strings.TrimSpace(spec.MemberAccess)
+	if memberAccess == "" {
+		memberAccess = "read"
+	}
+	metadata["gc.drain_member_access"] = memberAccess
+	if spec.MaxUnits != nil {
+		metadata["gc.drain_max_units"] = fmt.Sprint(*spec.MaxUnits)
+	}
+	onItemFailure := strings.TrimSpace(spec.OnItemFailure)
+	if onItemFailure == "" {
+		if spec.Context == "shared" {
+			onItemFailure = "skip_remaining"
+		} else {
+			onItemFailure = "continue"
+		}
+	}
+	metadata["gc.drain_on_item_failure"] = onItemFailure
+	if spec.ContinuationGroup != "" {
+		metadata["gc.drain_continuation_group"] = spec.ContinuationGroup
+	}
+	if spec.Item != nil && spec.Item.SingleLane {
+		metadata["gc.drain_item_single_lane"] = "true"
+	}
+	return metadata
 }
 
 // formulaV2Enabled controls whether formula compiler capability v2 is allowed.

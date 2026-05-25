@@ -22,9 +22,36 @@ import (
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
+
+func TestDrainItemRecipeVarsIncludesRuntimeMetadata(t *testing.T) {
+	recipe := &formula.Recipe{
+		Steps: []formula.RecipeStep{{
+			ID:     "item",
+			IsRoot: true,
+			Metadata: map[string]string{
+				"gc.input_convoy_id":              "CONVOY-1",
+				graphv2.RuntimeVarsMetadataKey:    graphv2.RuntimeVarsMetadata(map[string]string{"region": "west", graphv2.ConvoyIDVar: "ignored"}),
+				"gc.unrelated_runtime_vars_noise": "ignored",
+			},
+		}},
+	}
+
+	vars, err := drainItemRecipeVars(recipe)
+	if err != nil {
+		t.Fatalf("drainItemRecipeVars: %v", err)
+	}
+	if vars["convoy_id"] != "CONVOY-1" || vars["region"] != "west" {
+		t.Fatalf("vars = %#v, want convoy_id and inherited region", vars)
+	}
+	if _, ok := vars["issue"]; ok {
+		t.Fatalf("vars = %#v, want reserved issue excluded", vars)
+	}
+}
 
 func TestOpenSourceWorkflowStoresSkipsBrokenRigs(t *testing.T) {
 	// Regression: when a single rig's bead store is unopenable (broken
@@ -413,6 +440,168 @@ func TestWorkflowFormulaSearchPathsUsesRoutedRigLayers(t *testing.T) {
 	})
 	if len(control) != 2 || control[1] != "/rig/frontend/formulas" {
 		t.Fatalf("workflowFormulaSearchPaths(control frontend) = %#v, want rig-specific layers", control)
+	}
+
+	directControl := workflowFormulaSearchPaths(cfg, beads.Bead{
+		Metadata: map[string]string{
+			"gc.routed_to":                  config.ControlDispatcherAgentName,
+			graphExecutionRouteMetaKey:      "session-123",
+			graphExecutionRigContextMetaKey: "frontend",
+		},
+	})
+	if len(directControl) != 2 || directControl[1] != "/rig/frontend/formulas" {
+		t.Fatalf("workflowFormulaSearchPaths(direct control frontend) = %#v, want rig-specific layers", directControl)
+	}
+}
+
+func TestDecorateDrainItemRecipeUsesDirectExecutionRoute(t *testing.T) {
+	store := beads.NewMemStore()
+	direct, err := store.Create(beads.Bead{
+		Title:  "direct session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "sky",
+			"session_name": "sky-session",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Daemon:    config.DaemonConfig{FormulaV2: true},
+	}
+	config.InjectImplicitAgents(cfg)
+	recipe := &formula.Recipe{
+		Name: "item",
+		Steps: []formula.RecipeStep{
+			{
+				ID:     "item",
+				IsRoot: true,
+				Type:   "task",
+				Metadata: map[string]string{
+					"gc.kind":             "workflow",
+					"gc.formula_contract": "graph.v2",
+				},
+			},
+			{
+				ID:    "item.work",
+				Title: "Work",
+				Type:  "task",
+			},
+			{
+				ID:    "item.check",
+				Title: "Check",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind": "check",
+				},
+			},
+		},
+	}
+	source := beads.Bead{
+		ID: "drain-control",
+		Metadata: map[string]string{
+			graphExecutionRouteMetaKey:      direct.ID,
+			graphExecutionRigContextMetaKey: "frontend",
+		},
+	}
+
+	if err := decorateDrainItemRecipe(recipe, source, store, "city:test", "test", t.TempDir(), cfg); err != nil {
+		t.Fatalf("decorateDrainItemRecipe: %v", err)
+	}
+	work := recipe.StepByID("item.work")
+	if work == nil {
+		t.Fatal("missing item.work")
+	}
+	if work.Assignee != direct.ID {
+		t.Fatalf("item.work assignee = %q, want direct session %s", work.Assignee, direct.ID)
+	}
+	if got := work.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("item.work gc.routed_to = %q, want direct session assignment without route metadata", got)
+	}
+	check := recipe.StepByID("item.check")
+	if check == nil {
+		t.Fatal("missing item.check")
+	}
+	if got := check.Metadata[graphExecutionRouteMetaKey]; got != direct.ID {
+		t.Fatalf("item.check execution route = %q, want direct session %s", got, direct.ID)
+	}
+	if got := check.Metadata[graphExecutionRigContextMetaKey]; got != "frontend" {
+		t.Fatalf("item.check execution rig context = %q, want frontend", got)
+	}
+}
+
+func TestDecorateDrainItemRecipeDoesNotFallbackToControllerAssignee(t *testing.T) {
+	store := beads.NewMemStore()
+	maxSessions := 2
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			MaxActiveSessions: &maxSessions,
+		}},
+	}
+	config.InjectImplicitAgents(cfg)
+	recipe := &formula.Recipe{
+		Name: "item",
+		Steps: []formula.RecipeStep{
+			{
+				ID:     "item",
+				IsRoot: true,
+				Type:   "task",
+				Metadata: map[string]string{
+					"gc.kind":             "workflow",
+					"gc.formula_contract": "graph.v2",
+				},
+			},
+			{
+				ID:    "item.work",
+				Title: "Work",
+				Type:  "task",
+			},
+			{
+				ID:    "item.explicit",
+				Title: "Explicit route",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.run_target": "worker",
+				},
+			},
+		},
+	}
+	source := beads.Bead{
+		ID:       "drain-control",
+		Assignee: config.ControlDispatcherAgentName,
+		Metadata: map[string]string{
+			"gc.kind": "drain",
+		},
+	}
+
+	if err := decorateDrainItemRecipe(recipe, source, store, "city:test", "test", t.TempDir(), cfg); err != nil {
+		t.Fatalf("decorateDrainItemRecipe: %v", err)
+	}
+	work := recipe.StepByID("item.work")
+	if work == nil {
+		t.Fatal("missing item.work")
+	}
+	if work.Assignee != "" {
+		t.Fatalf("item.work assignee = %q, want empty without execution route", work.Assignee)
+	}
+	if got := work.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("item.work gc.routed_to = %q, want empty without execution route", got)
+	}
+	explicit := recipe.StepByID("item.explicit")
+	if explicit == nil {
+		t.Fatal("missing item.explicit")
+	}
+	if got := explicit.Metadata["gc.routed_to"]; got != "worker" {
+		t.Fatalf("item.explicit gc.routed_to = %q, want explicit worker route", got)
+	}
+	if explicit.Assignee != "" {
+		t.Fatalf("item.explicit assignee = %q, want pool route without controller fallback", explicit.Assignee)
 	}
 }
 
@@ -1228,6 +1417,85 @@ func TestDecorateDynamicFragmentRecipePreservesPoolFallbackAndScopeMetadata(t *t
 	}
 	if control.Metadata[graphExecutionRouteMetaKey] != "frontend/reviewer" {
 		t.Fatalf("control execution route = %q, want frontend/reviewer", control.Metadata[graphExecutionRouteMetaKey])
+	}
+}
+
+func TestDecorateDynamicFragmentRecipeUsesDirectExecutionRoute(t *testing.T) {
+	store := beads.NewMemStore()
+	direct, err := store.Create(beads.Bead{
+		Title:  "direct session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "frontend/sky",
+			"session_name": "frontend-sky",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{FormulaV2: true},
+	}
+	config.InjectImplicitAgents(cfg)
+	source := beads.Bead{
+		ID:    "gc-source",
+		Title: "Source",
+		Metadata: map[string]string{
+			graphExecutionRouteMetaKey:      direct.ID,
+			graphExecutionRigContextMetaKey: "frontend",
+		},
+	}
+	fragment := &formula.FragmentRecipe{
+		Name: "expansion-review",
+		Steps: []formula.RecipeStep{
+			{
+				ID:    "expansion-review.review",
+				Title: "Review",
+			},
+			{
+				ID:    "expansion-review.check",
+				Title: "Check",
+				Metadata: map[string]string{
+					"gc.kind": "check",
+				},
+			},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "expansion-review.check", DependsOnID: "expansion-review.review", Type: "blocks"},
+		},
+	}
+
+	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, t.TempDir(), cfg); err != nil {
+		t.Fatalf("decorateDynamicFragmentRecipe: %v", err)
+	}
+	steps := map[string]formula.RecipeStep{}
+	for _, step := range fragment.Steps {
+		steps[step.ID] = step
+	}
+	review, ok := steps["expansion-review.review"]
+	if !ok {
+		t.Fatal("missing expansion-review.review")
+	}
+	if review.Assignee != direct.ID {
+		t.Fatalf("review assignee = %q, want direct session %s", review.Assignee, direct.ID)
+	}
+	if got := review.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("review gc.routed_to = %q, want direct session assignment without route metadata", got)
+	}
+	check, ok := steps["expansion-review.check"]
+	if !ok {
+		t.Fatal("missing expansion-review.check")
+	}
+	if check.Assignee != config.ControlDispatcherAgentName {
+		t.Fatalf("check assignee = %q, want %q", check.Assignee, config.ControlDispatcherAgentName)
+	}
+	if got := check.Metadata[graphExecutionRouteMetaKey]; got != direct.ID {
+		t.Fatalf("check execution route = %q, want direct session %s", got, direct.ID)
+	}
+	if got := check.Metadata[graphExecutionRigContextMetaKey]; got != "frontend" {
+		t.Fatalf("check execution rig context = %q, want frontend", got)
 	}
 }
 

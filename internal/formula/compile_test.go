@@ -1847,7 +1847,7 @@ func TestCompileReviewWorkflowSkipGeminiFiltersExpansionLane(t *testing.T) {
 	writeReviewWorkflowFixtures(t, dir)
 
 	recipe, err := Compile(context.Background(), "mol-adopt-pr-v2", []string{dir}, map[string]string{
-		"issue":       "GC-1",
+		"convoy_id":   "convoy-1",
 		"pr_ref":      "refs/heads/test",
 		"skip_gemini": "true",
 	})
@@ -1885,7 +1885,7 @@ func TestCompilePersonalWorkSkipGeminiFiltersExpansionLanes(t *testing.T) {
 	writeReviewWorkflowFixtures(t, dir)
 
 	recipe, err := Compile(context.Background(), "mol-personal-work-v2", []string{dir}, map[string]string{
-		"issue":         "GC-1",
+		"convoy_id":     "convoy-1",
 		"base_branch":   "main",
 		"skip_gemini":   "true",
 		"setup_command": "true",
@@ -1927,7 +1927,7 @@ func TestCompilePersonalWorkHappyPathDoesNotAddRetryWrappers(t *testing.T) {
 	writeReviewWorkflowFixtures(t, dir)
 
 	recipe, err := Compile(context.Background(), "mol-personal-work-v2", []string{dir}, map[string]string{
-		"issue":         "GC-1",
+		"convoy_id":     "convoy-1",
 		"base_branch":   "main",
 		"skip_gemini":   "true",
 		"setup_command": "true",
@@ -1954,7 +1954,7 @@ func TestCompileReviewWorkflowAnnotatesNestedReviewerRetries(t *testing.T) {
 	writeReviewWorkflowFixtures(t, dir)
 
 	recipe, err := Compile(context.Background(), "mol-adopt-pr-v2", []string{dir}, map[string]string{
-		"issue":       "GC-1",
+		"convoy_id":   "convoy-1",
 		"pr_ref":      "refs/heads/test",
 		"skip_gemini": "false",
 	})

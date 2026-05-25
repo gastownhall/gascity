@@ -217,19 +217,64 @@ func startScopedWorkflow(t *testing.T, cityDir string) (string, string) {
 		t.Fatalf("bd create returned empty issue id\njson: %s", out)
 	}
 
-	out, err = gcDolt(cityDir, "sling", "worker", issueID, "--on=mol-scoped-work", "--var", "issue="+issueID)
+	out, err = gcDolt(cityDir, "sling", "worker", issueID, "--on=mol-scoped-work")
 	if err != nil {
 		t.Fatalf("gc sling failed: %v\noutput: %s", err, out)
 	}
 	slingOutput := out
 
-	if _, workflowID, err := waitForBeadMetadataValue(t, cityDir, issueID, "workflow_id", 10*time.Second); err == nil {
-		return issueID, workflowID
-	} else {
-		issue := showBead(t, cityDir, issueID)
-		t.Fatalf("timed out waiting for workflow_id on source bead %s: %v\ngc sling output:\n%s\nsource bead:\n%+v", issueID, err, slingOutput, issue)
+	workflowID := waitForGraphWorkflowRootForSource(t, cityDir, issueID, slingOutput, 10*time.Second)
+	return issueID, workflowID
+}
+
+func waitForGraphWorkflowRootForSource(t *testing.T, cityDir, sourceID, slingOutput string, timeout time.Duration) string {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	var lastList string
+	for time.Now().Before(deadline) {
+		workflowID, rawList, err := findGraphWorkflowRootForSource(cityDir, sourceID)
+		if err == nil && workflowID != "" {
+			return workflowID
+		}
+		lastErr = err
+		lastList = rawList
+		time.Sleep(200 * time.Millisecond)
 	}
-	return "", ""
+	source := showBead(t, cityDir, sourceID)
+	t.Fatalf("timed out waiting for graph.v2 workflow root for source bead %s: %v\ngc sling output:\n%s\nsource bead:\n%+v\nbd list:\n%s", sourceID, lastErr, slingOutput, source, lastList)
+	return ""
+}
+
+func findGraphWorkflowRootForSource(cityDir, sourceID string) (string, string, error) {
+	out, err := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
+	if err != nil {
+		return "", out, fmt.Errorf("bd list --json failed: %w", err)
+	}
+	var beads []graphBead
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &beads); err != nil {
+		return "", out, fmt.Errorf("unmarshal bead list: %w", err)
+	}
+
+	inputConvoys := make(map[string]bool)
+	for _, bead := range beads {
+		if bead.Type == "convoy" && metaValue(bead, "gc.input_bead_id") == sourceID {
+			inputConvoys[bead.ID] = true
+		}
+	}
+	if len(inputConvoys) == 0 {
+		return "", out, fmt.Errorf("no input convoy found for source bead %s", sourceID)
+	}
+	for _, bead := range beads {
+		if metaValue(bead, "gc.kind") != "workflow" {
+			continue
+		}
+		if inputConvoys[metaValue(bead, "gc.input_convoy_id")] {
+			return bead.ID, out, nil
+		}
+	}
+	return "", out, fmt.Errorf("no workflow root found for source bead %s input convoy", sourceID)
 }
 
 func waitForBeadClosed(t *testing.T, cityDir, beadID string, timeout time.Duration) graphBead {

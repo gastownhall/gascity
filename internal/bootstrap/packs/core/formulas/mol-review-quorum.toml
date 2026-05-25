@@ -16,10 +16,6 @@ formula = "mol-review-quorum"
 formula_compiler = ">=2.0.0"
 
 [vars]
-[vars.subject]
-description = "The bead, PR, commit range, or artifact being reviewed"
-required = true
-
 [vars.base_ref]
 description = "Optional baseline ref used by reviewer prompts when inspecting a diff"
 default = "origin/main"
@@ -64,10 +60,10 @@ required = true
 id = "review-lane-one"
 title = "Review lane one"
 description = """
-Run a read-only review of `{{subject}}` as durable lane `{{lane_one_id}}` using
+Run a read-only review of convoy `{{convoy_id}}` as durable lane `{{lane_one_id}}` using
 provider `{{lane_one_provider}}` and model target `{{lane_one_model}}`.
 Use `{{base_ref}}` as the diff baseline when inspecting changes for
-`{{subject}}`.
+convoy `{{convoy_id}}`.
 
 You are one lane in a two-lane review quorum. Do not modify user files,
 branches, comments, external systems, or unrelated beads. Before reviewing,
@@ -110,10 +106,10 @@ on_exhausted = "soft_fail"
 id = "review-lane-two"
 title = "Review lane two"
 description = """
-Run a read-only review of `{{subject}}` as durable lane `{{lane_two_id}}` using
+Run a read-only review of convoy `{{convoy_id}}` as durable lane `{{lane_two_id}}` using
 provider `{{lane_two_provider}}` and model target `{{lane_two_model}}`.
 Use `{{base_ref}}` as the diff baseline when inspecting changes for
-`{{subject}}`.
+convoy `{{convoy_id}}`.
 
 You are one lane in a two-lane review quorum. Do not modify user files,
 branches, comments, external systems, or unrelated beads. Before reviewing,
@@ -158,12 +154,12 @@ title = "Synthesize review quorum"
 needs = ["review-lane-one", "review-lane-two"]
 description = """
 Read the durable outputs from reviewer lanes `{{lane_one_id}}` and
-`{{lane_two_id}}` for `{{subject}}`, including any soft-failed retry controls,
+`{{lane_two_id}}` for convoy `{{convoy_id}}`, including any soft-failed retry controls,
 then write the quorum summary as durable structured output.
 
 The synthesis output must preserve lane provenance and include:
 
-- `subject`: `{{subject}}`
+- `subject`: `{{convoy_id}}`
 - `base_ref`: `{{base_ref}}`
 - `lanes`: reviewer lane summaries, verdicts, findings counts, failure classes,
   failure reasons, read-only enforcement, and mutation deltas

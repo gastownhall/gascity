@@ -1109,6 +1109,36 @@ metadata = { "gc.routed_to" = "pool/worker", "gc.execution_routed_to" = "pool/wo
 	}
 }
 
+func TestConvergenceStoreRejectsGraphV2Wisp(t *testing.T) {
+	dir := t.TempDir()
+	formulaText := `formula = "graph-flow"
+version = 1
+contract = "graph.v2"
+
+[[steps]]
+id = "work"
+title = "Work {{convoy_id}}"
+`
+	if err := os.WriteFile(filepath.Join(dir, "graph-flow.toml"), []byte(formulaText), 0o644); err != nil {
+		t.Fatalf("writing formula: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	adapter := newConvergenceStoreAdapter(store, []string{dir})
+	parent, err := store.Create(beads.Bead{Title: "root", Type: "convergence"})
+	if err != nil {
+		t.Fatalf("creating parent: %v", err)
+	}
+
+	_, err = adapter.PourSpeculativeWisp(parent.ID, "graph-flow", convergence.IdempotencyKey(parent.ID, 1), nil, "")
+	if err == nil {
+		t.Fatal("PourSpeculativeWisp succeeded, want graph.v2 rejection")
+	}
+	if !strings.Contains(err.Error(), "do not support graph.v2") {
+		t.Fatalf("error = %q, want graph.v2 rejection", err)
+	}
+}
+
 // --- Active index tests ---
 
 func TestConvergenceIndex_PopulateAndQuery(t *testing.T) {

@@ -294,6 +294,11 @@ type Step struct {
 	// work is emitted as first-class graph steps.
 	Retry *RetrySpec `json:"retry,omitempty" toml:"retry,omitempty"`
 
+	// Drain scatters the input convoy into one-member unit convoys and runs an
+	// item formula for each unit. Drain is graph.v2-only and materializes as a
+	// controller-owned control bead.
+	Drain *DrainSpec `json:"drain,omitempty" toml:"drain,omitempty"`
+
 	// Timeout is the maximum duration for this step's Ralph check script.
 	// Gate condition scripts use gate.timeout instead.
 	// Format: Go duration string (e.g., "5m", "2m30s", "300s").
@@ -310,6 +315,41 @@ type Step struct {
 	// SourceLocation is the path within the source formula.
 	// Format: "steps[0]", "steps[2].children[1]", "advice[0].after", "loop.body[0]"
 	SourceLocation string `json:"-"` // Internal only, not serialized to JSON
+}
+
+// DrainSpec defines a graph.v2 drain control step.
+type DrainSpec struct {
+	// Context controls item execution isolation. "separate" creates one item
+	// root per member. "shared" materializes one single-lane item root at a time
+	// with continuation affinity metadata.
+	Context string `json:"context,omitempty" toml:"context,omitempty"`
+
+	// Formula is the graph.v2 formula to run for each one-member unit convoy.
+	Formula string `json:"formula,omitempty" toml:"formula,omitempty"`
+
+	// ContinuationGroup is the shared execution group suffix. It is valid only
+	// with context="shared"; the runtime also records the drain control id.
+	ContinuationGroup string `json:"continuation_group,omitempty" toml:"continuation_group,omitempty"`
+
+	// MemberAccess declares whether item work may mutate the underlying convoy
+	// member. "exclusive" records a per-member drain reservation before
+	// materializing item work.
+	MemberAccess string `json:"member_access,omitempty" toml:"member_access,omitempty"`
+
+	// MaxUnits caps one drain expansion to prevent accidental runaway materialization.
+	MaxUnits *int `json:"max_units,omitempty" toml:"max_units,omitempty"`
+
+	// OnItemFailure controls drain completion behavior when an item root fails.
+	OnItemFailure string `json:"on_item_failure,omitempty" toml:"on_item_failure,omitempty"`
+
+	// Item contains per-unit execution controls.
+	Item *DrainItemSpec `json:"item,omitempty" toml:"item,omitempty"`
+}
+
+// DrainItemSpec contains per-item drain execution controls.
+type DrainItemSpec struct {
+	// SingleLane is reserved for future shared drains.
+	SingleLane bool `json:"single_lane,omitempty" toml:"single_lane,omitempty"`
 }
 
 // UnmarshalJSON accepts the canonical public "check" spelling while keeping the
@@ -406,6 +446,7 @@ type stepTOMLAlias struct {
 	Check           json.RawMessage   `json:"check,omitempty"`
 	Ralph           json.RawMessage   `json:"ralph,omitempty"`
 	Retry           *RetrySpec        `json:"retry,omitempty"`
+	Drain           *DrainSpec        `json:"drain,omitempty"`
 	Timeout         string            `json:"timeout,omitempty"`
 }
 
@@ -480,6 +521,7 @@ func (a stepTOMLAlias) toStep() (Step, error) {
 		OnComplete:      a.OnComplete,
 		Ralph:           ralph,
 		Retry:           a.Retry,
+		Drain:           a.Drain,
 		Timeout:         a.Timeout,
 	}, nil
 }
@@ -943,7 +985,7 @@ func stepRequiresGraphCompiler(step *Step) bool {
 	if step == nil {
 		return false
 	}
-	if step.Ralph != nil || step.Retry != nil || step.OnComplete != nil || metadataRequiresGraphContract(step.Metadata) {
+	if step.Ralph != nil || step.Retry != nil || step.Drain != nil || step.OnComplete != nil || metadataRequiresGraphContract(step.Metadata) {
 		return true
 	}
 	if step.Loop != nil && stepsRequireGraphCompiler(step.Loop.Body) {
@@ -959,7 +1001,7 @@ func metadataRequiresGraphContract(metadata map[string]string) bool {
 		switch key {
 		case "gc.kind":
 			switch value {
-			case "scope", "cleanup", "scope-check", "workflow-finalize", "retry", "retry-run", "retry-eval", "ralph", "run", "check":
+			case "scope", "cleanup", "scope-check", "workflow-finalize", "retry", "retry-run", "retry-eval", "ralph", "run", "check", "drain":
 				return true
 			}
 		case "gc.scope_name", "gc.scope_role", "gc.scope_ref", "gc.continuation_group", "gc.on_fail":
@@ -972,6 +1014,7 @@ func metadataRequiresGraphContract(metadata map[string]string) bool {
 // Validate checks the formula for structural errors.
 func (f *Formula) Validate() error {
 	var errs []string
+	graphV2 := declaresGraphV2Contract(f)
 
 	if f.Formula == "" {
 		errs = append(errs, "formula: name is required")
@@ -1035,6 +1078,9 @@ func (f *Formula) Validate() error {
 		if step.Retry != nil {
 			validateRetry(step.Retry, &errs, fmt.Sprintf("%s (%s)", prefix, step.ID), step)
 		}
+		if step.Drain != nil {
+			validateDrain(step.Drain, &errs, fmt.Sprintf("%s (%s)", prefix, step.ID), step, graphV2)
+		}
 
 		// Collect child IDs (for dependency validation)
 		collectChildIDs(step.Children, stepIDLocations, &errs, prefix)
@@ -1066,6 +1112,10 @@ func (f *Formula) Validate() error {
 		}
 		// Validate children's depends_on and needs recursively
 		validateChildDependsOn(step.Children, stepIDLocations, &errs, fmt.Sprintf("steps[%d]", i))
+		validateChildDrains(step.Children, &errs, fmt.Sprintf("steps[%d]", i), graphV2)
+		if step.Loop != nil {
+			validateChildDrains(step.Loop.Body, &errs, fmt.Sprintf("steps[%d] (%s).loop.body", i, step.ID), graphV2)
+		}
 	}
 
 	// Validate compose rules
@@ -1412,6 +1462,98 @@ func validateRetry(spec *RetrySpec, errs *[]string, prefix string, step *Step) {
 	}
 	if len(step.Children) > 0 {
 		*errs = append(*errs, fmt.Sprintf("%s: retry cannot be combined with children", prefix))
+	}
+}
+
+func validateDrain(spec *DrainSpec, errs *[]string, prefix string, step *Step, graphV2 bool) {
+	if !graphV2 {
+		*errs = append(*errs, fmt.Sprintf("%s.drain: drain requires contract = \"graph.v2\"", prefix))
+	}
+	switch spec.Context {
+	case "", "separate":
+	case "shared":
+	default:
+		*errs = append(*errs, fmt.Sprintf("%s.drain: context must be separate or shared", prefix))
+	}
+	if strings.TrimSpace(spec.Formula) == "" {
+		*errs = append(*errs, fmt.Sprintf("%s.drain: formula is required", prefix))
+	}
+	if strings.Contains(spec.Formula, "{{") {
+		*errs = append(*errs, fmt.Sprintf("%s.drain: templated item formula names are not supported in v0", prefix))
+	}
+	switch spec.MemberAccess {
+	case "", "read":
+	case "exclusive":
+	default:
+		*errs = append(*errs, fmt.Sprintf("%s.drain: member_access must be read or exclusive", prefix))
+	}
+	if spec.MaxUnits != nil {
+		if *spec.MaxUnits < 1 {
+			*errs = append(*errs, fmt.Sprintf("%s.drain: max_units must be >= 1", prefix))
+		}
+		if *spec.MaxUnits > 100 {
+			*errs = append(*errs, fmt.Sprintf("%s.drain: max_units must be <= 100 in v0", prefix))
+		}
+	}
+	switch spec.OnItemFailure {
+	case "", "skip_remaining", "continue":
+	default:
+		*errs = append(*errs, fmt.Sprintf("%s.drain: on_item_failure must be skip_remaining or continue", prefix))
+	}
+	if spec.ContinuationGroup != "" && spec.Context != "shared" {
+		*errs = append(*errs, fmt.Sprintf("%s.drain: continuation_group is valid only with context = \"shared\"", prefix))
+	}
+	if spec.Context == "shared" {
+		if spec.Item == nil || !spec.Item.SingleLane {
+			*errs = append(*errs, fmt.Sprintf("%s.drain.item: shared drains require single_lane = true", prefix))
+		}
+	}
+
+	if step.Assignee != "" {
+		*errs = append(*errs, fmt.Sprintf("%s: drain cannot be combined with assignee", prefix))
+	}
+	if step.Expand != "" {
+		*errs = append(*errs, fmt.Sprintf("%s: drain cannot be combined with expand", prefix))
+	}
+	if step.Gate != nil {
+		*errs = append(*errs, fmt.Sprintf("%s: drain cannot be combined with gate", prefix))
+	}
+	if step.Loop != nil {
+		*errs = append(*errs, fmt.Sprintf("%s: drain cannot be combined with loop", prefix))
+	}
+	if step.OnComplete != nil {
+		*errs = append(*errs, fmt.Sprintf("%s: drain cannot be combined with on_complete", prefix))
+	}
+	if step.Ralph != nil {
+		*errs = append(*errs, fmt.Sprintf("%s: drain cannot be combined with check", prefix))
+	}
+	if step.Retry != nil {
+		*errs = append(*errs, fmt.Sprintf("%s: drain cannot be combined with retry", prefix))
+	}
+	if len(step.Children) > 0 {
+		*errs = append(*errs, fmt.Sprintf("%s: drain cannot be combined with children", prefix))
+	}
+	if step.Timeout != "" {
+		*errs = append(*errs, fmt.Sprintf("%s: drain cannot be combined with timeout", prefix))
+	}
+	if step.Metadata["gc.kind"] != "" {
+		*errs = append(*errs, fmt.Sprintf("%s.metadata.gc.kind: drain controls own gc.kind metadata", prefix))
+	}
+}
+
+func validateChildDrains(children []*Step, errs *[]string, prefix string, graphV2 bool) {
+	for i, child := range children {
+		if child == nil {
+			continue
+		}
+		childPrefix := fmt.Sprintf("%s.children[%d] (%s)", prefix, i, child.ID)
+		if child.Drain != nil {
+			validateDrain(child.Drain, errs, childPrefix, child, graphV2)
+		}
+		validateChildDrains(child.Children, errs, fmt.Sprintf("%s.children[%d]", prefix, i), graphV2)
+		if child.Loop != nil {
+			validateChildDrains(child.Loop.Body, errs, fmt.Sprintf("%s.children[%d] (%s).loop.body", prefix, i, child.ID), graphV2)
+		}
 	}
 }
 
