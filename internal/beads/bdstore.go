@@ -1303,6 +1303,15 @@ func (s *BdStore) close(id, reason string) error {
 		}
 		return fmt.Errorf("closing bead %q: %w", id, err)
 	}
+	// Honesty guard: bd close can exit 0 yet leave the bead un-closed when an
+	// import-revert race (gastownhall/beads#3948) rolls the committed close
+	// back to open after the CLI has already returned. Trust the store, not the
+	// exit code — re-read and confirm the status landed. A failed re-read is
+	// not positive evidence of a revert, so we keep trusting the reported
+	// success in that case rather than masking it with a synthetic failure.
+	if b, getErr := s.Get(id); getErr == nil && b.Status != "closed" {
+		return fmt.Errorf("closing bead %q: bd close exited 0 but status is %q, not closed; suspected gastownhall/beads#3948 import-revert race", id, b.Status)
+	}
 	return nil
 }
 
