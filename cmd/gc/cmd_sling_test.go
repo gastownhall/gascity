@@ -1095,6 +1095,53 @@ func TestDoSlingNudgePoolNoMembers(t *testing.T) {
 	}
 }
 
+// TestBuiltInSlingSlotSuffixedTargetNormalizesRoutedTo is the write-side guard
+// for #2592: resolving and slinging a slot-suffixed pool target ("saitoc/polecat-2")
+// must record the base pool qualified name in gc.routed_to, so the pool's
+// exact-match work_query (keyed on the base template) can see the bead.
+func TestBuiltInSlingSlotSuffixedTargetNormalizesRoutedTo(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	maxPolecats := 5
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "saitoc", Path: "/tmp/saitoc", Prefix: "gc"}},
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "saitoc", MaxActiveSessions: &maxPolecats},
+		},
+	}
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	store := newSlingTestStore()
+	deps.Store = store
+
+	created, err := store.Create(beads.Bead{Title: "slot-routed work", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Resolve the slot-suffixed target the way the CLI does, then sling it.
+	target, ok := resolveAgentIdentity(cfg, "saitoc/polecat-2", "")
+	if !ok {
+		t.Fatal("resolveAgentIdentity(saitoc/polecat-2) failed")
+	}
+	if target.QualifiedName() != "saitoc/polecat-2" {
+		t.Fatalf("resolved target QualifiedName = %q, want saitoc/polecat-2", target.QualifiedName())
+	}
+
+	opts := testOpts(target, created.ID)
+	code := doSling(opts, deps, &fakeQuerier{bead: created}, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("doSling returned %d; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	routed, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get routed bead: %v", err)
+	}
+	if got := routed.Metadata["gc.routed_to"]; got != "saitoc/polecat" {
+		t.Fatalf("gc.routed_to = %q, want saitoc/polecat (slot suffix should be normalized away)", got)
+	}
+}
+
 func TestBuiltInSlingPoolRouteContractUsesMetadataOnly(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
