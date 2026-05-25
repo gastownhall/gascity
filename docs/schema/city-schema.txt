@@ -1171,7 +1171,7 @@
         },
         "max_wakes_per_tick": {
           "type": "integer",
-          "description": "MaxWakesPerTick caps how many sessions the reconciler may start in a\nsingle tick. Nil (unset) defaults to 5. Values \u003c= 0 are treated as the\ndefault — set a positive integer to override.",
+          "description": "MaxWakesPerTick caps how many sessions the reconciler may start in a\nsingle tick. Fresh generic pool session-bead creation uses the same\nbudget so the controller does not materialize more ordinary pool sessions\nthan it can wake. Bounded dependency-floor prerequisites are exempt.\nNil (unset) defaults to 5. Values \u003c= 0 are treated as the default — set a\npositive integer to override.",
           "default": 5
         },
         "nudge_dispatcher": {

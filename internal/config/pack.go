@@ -98,6 +98,13 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 
 func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[string][]string, opts LoadOptions) error {
 	var expanded []Agent
+	// City-scoped agents and named sessions encountered through a rig-scope
+	// include/import are hoisted to city scope (deduped) rather than dropped,
+	// so a city-scoped agent that lives in a rig-included pack (e.g. a routing
+	// coordinator in a pack only ever rig-included) still registers. Collected
+	// here across all rigs and merged into cfg once below.
+	var hoistedAgents []Agent
+	var hoistedNamedSessions []NamedSession
 	for i := range cfg.Rigs {
 		rig := &cfg.Rigs[i]
 		cache := &packLoadCache{results: make(map[string]*packLoadResult)}
@@ -175,7 +182,10 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 			rigTopoDirs = appendUnique(rigTopoDirs, topoDirs...)
 			rigPackGraphOnlyDirs = appendUniqueLastWins(rigPackGraphOnlyDirs, topoDirs...)
 
-			// Keep only rig-scoped and unscoped agents for rig expansion.
+			// Keep only rig-scoped and unscoped agents for rig expansion;
+			// hoist city-scoped ones to city scope instead of dropping them.
+			hoistedAgents = append(hoistedAgents, hoistCityScopedAgents(agents)...)
+			hoistedNamedSessions = append(hoistedNamedSessions, hoistCityScopedNamedSessions(namedSessions)...)
 			agents = filterAgentsByScope(agents, false)
 			namedSessions = filterNamedSessionsByScope(namedSessions, false)
 
@@ -359,6 +369,10 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				rigTopoDirs = appendUnique(rigTopoDirs, topoDirs...)
 				rigImportPackDirs = prependUniqueBlock(rigImportPackDirs, mcpTopoDirs...)
 
+				// Hoist city-scoped agents/sessions to city scope instead of
+				// dropping them at the rig-import boundary.
+				hoistedAgents = append(hoistedAgents, hoistCityScopedAgents(agents)...)
+				hoistedNamedSessions = append(hoistedNamedSessions, hoistCityScopedNamedSessions(namedSessions)...)
 				agents = filterAgentsByScope(agents, false)
 				namedSessions = filterNamedSessionsByScope(namedSessions, false)
 
@@ -465,6 +479,14 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 		cfg.NamedSessions = append(cfg.NamedSessions, rigNamedSessions...)
 	}
 	cfg.Agents = append(cfg.Agents, expanded...)
+	// Merge hoisted city-scoped agents/sessions (from rig includes/imports)
+	// into the city set, deduped by qualified name. The same pack is commonly
+	// included by several rigs; without dedup the same city-scoped agent would
+	// be registered once per rig and collide (see duplicate_agent_error.go).
+	// Any name already present at city scope (city-scope expansion, a city-root
+	// agents/<name>/, or an earlier hoist) wins; the hoisted copy is skipped.
+	cfg.Agents = mergeHoistedCityAgents(cfg.Agents, hoistedAgents)
+	cfg.NamedSessions = mergeHoistedCityNamedSessions(cfg.NamedSessions, hoistedNamedSessions)
 	if opts.deferRigPatches && opts.deferredRigPatches != nil {
 		for i := range *opts.deferredRigPatches {
 			(*opts.deferredRigPatches)[i].expectedAgentCount = len(cfg.Agents)
@@ -2417,6 +2439,84 @@ func filterNamedSessionsByScope(sessions []NamedSession, cityExpansion bool) []N
 		}
 	}
 	return result
+}
+
+// hoistCityScopedAgents returns copies of the city-scoped agents in the
+// given slice, restamped for city scope (Dir cleared — it was stamped to the
+// rig name during pack load). Used at rig include/import boundaries so a
+// city-scoped agent that lives in a rig-included pack is hoisted to city
+// scope instead of being silently dropped. BindingName is preserved so a
+// city-scoped agent imported under a binding keeps its qualified identity.
+func hoistCityScopedAgents(agents []Agent) []Agent {
+	var hoisted []Agent
+	for _, a := range agents {
+		if a.Scope != "city" {
+			continue
+		}
+		a.Dir = ""
+		hoisted = append(hoisted, a)
+	}
+	return hoisted
+}
+
+// hoistCityScopedNamedSessions mirrors hoistCityScopedAgents for named
+// sessions.
+func hoistCityScopedNamedSessions(sessions []NamedSession) []NamedSession {
+	var hoisted []NamedSession
+	for _, s := range sessions {
+		if s.Scope != "city" {
+			continue
+		}
+		s.Dir = ""
+		hoisted = append(hoisted, s)
+	}
+	return hoisted
+}
+
+// mergeHoistedCityAgents appends hoisted city-scoped agents to the city
+// agent set, skipping any whose qualified name is already present (from
+// city-scope expansion, a city-root agent, or an earlier hoist of the same
+// agent via another rig). First occurrence wins, so an existing city-scope
+// or city-root definition is preferred over a hoisted one. Identical
+// definitions reached through multiple rigs register exactly once.
+func mergeHoistedCityAgents(agents, hoisted []Agent) []Agent {
+	if len(hoisted) == 0 {
+		return agents
+	}
+	seen := make(map[string]bool, len(agents))
+	for i := range agents {
+		seen[agents[i].QualifiedName()] = true
+	}
+	for _, a := range hoisted {
+		qn := a.QualifiedName()
+		if seen[qn] {
+			continue
+		}
+		seen[qn] = true
+		agents = append(agents, a)
+	}
+	return agents
+}
+
+// mergeHoistedCityNamedSessions mirrors mergeHoistedCityAgents for named
+// sessions.
+func mergeHoistedCityNamedSessions(sessions, hoisted []NamedSession) []NamedSession {
+	if len(hoisted) == 0 {
+		return sessions
+	}
+	seen := make(map[string]bool, len(sessions))
+	for i := range sessions {
+		seen[sessions[i].QualifiedName()] = true
+	}
+	for _, s := range hoisted {
+		qn := s.QualifiedName()
+		if seen[qn] {
+			continue
+		}
+		seen[qn] = true
+		sessions = append(sessions, s)
+	}
+	return sessions
 }
 
 func applyDeferredRigPatches(cfg *City, deferred []deferredRigPatches) error {

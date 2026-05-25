@@ -476,7 +476,8 @@ func pendingCreateSessionStillLeased(session beads.Bead, cfg *config.City, clk c
 }
 
 func pendingCreateStartInFlight(session beads.Bead, clk clock.Clock, startupTimeout time.Duration) bool {
-	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" {
+	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" &&
+		sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) != sessionpkg.StateCreating {
 		return false
 	}
 	lastWoke := strings.TrimSpace(session.Metadata["last_woke_at"])
@@ -528,7 +529,7 @@ func pendingCreateNeverStartedExpired(session beads.Bead, clk clock.Clock) bool 
 	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" {
 		return false
 	}
-	if strings.TrimSpace(session.Metadata["state"]) != "creating" {
+	if !pendingCreateRollbackState(session.Metadata["state"]) {
 		return false
 	}
 	return pendingCreateNeverStartedLeaseExpired(session, clk)
@@ -559,8 +560,15 @@ func pendingCreateLeaseExpiredForRollback(session beads.Bead, clk clock.Clock, s
 	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" {
 		return false
 	}
-	if strings.TrimSpace(session.Metadata["state"]) != "creating" {
+	state := sessionpkg.State(strings.TrimSpace(session.Metadata["state"]))
+	if !pendingCreateRollbackState(string(state)) {
 		return false
+	}
+	if state == sessionpkg.StateAsleep {
+		if strings.TrimSpace(session.Metadata["last_woke_at"]) == "" {
+			return pendingCreateNeverStartedExpired(session, clk)
+		}
+		return pendingCreateAttemptStale(session, clk)
 	}
 	if pendingCreateStartInFlight(session, clk, startupTimeout) {
 		return false
@@ -568,11 +576,29 @@ func pendingCreateLeaseExpiredForRollback(session beads.Bead, clk clock.Clock, s
 	if strings.TrimSpace(session.Metadata["last_woke_at"]) == "" {
 		return pendingCreateNeverStartedExpired(session, clk)
 	}
-	return staleCreatingState(session, clk)
+	return pendingCreateAttemptStale(session, clk)
+}
+
+func pendingCreateQueuedOrCreatingState(state string) bool {
+	switch sessionpkg.State(strings.TrimSpace(state)) {
+	case sessionpkg.StateStartPending, sessionpkg.StateCreating:
+		return true
+	default:
+		return false
+	}
+}
+
+func pendingCreateRollbackState(state string) bool {
+	if pendingCreateQueuedOrCreatingState(state) {
+		return true
+	}
+	return sessionpkg.State(strings.TrimSpace(state)) == sessionpkg.StateAsleep
 }
 
 func pendingResumePreservingNamedRestart(session beads.Bead, clk clock.Clock, startupTimeout time.Duration) bool {
-	if strings.TrimSpace(session.Metadata["state"]) != string(sessionpkg.StateCreating) {
+	switch sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) {
+	case sessionpkg.StateStartPending, sessionpkg.StateCreating:
+	default:
 		return false
 	}
 	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" {
@@ -1481,11 +1507,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			clearChurn(session, store)
 		}
 		if alive && shouldRollbackPendingCreate(session) {
-			if stateBeforeHeal == sessionpkg.StateCreating && pendingCreateStartInFlight(*session, clk, startupTimeout) {
-				if trace != nil {
-					trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, name, "pending_create_recovery_in_flight", "deferred", nil, nil, "")
+			switch stateBeforeHeal {
+			case sessionpkg.StateStartPending, sessionpkg.StateCreating:
+				if pendingCreateStartInFlight(*session, clk, startupTimeout) {
+					if trace != nil {
+						trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, name, "pending_create_recovery_in_flight", "deferred", nil, nil, "")
+					}
+					continue
 				}
-				continue
 			}
 			if !recoverRunningPendingCreate(session, tp, cfg, store, clk, trace) {
 				fmt.Fprintf(stderr, "session reconciler: recovering pending create %s: metadata repair incomplete\n", name) //nolint:errcheck
@@ -1592,7 +1621,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								}
 								continue
 							}
-							resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, alive, "creating", clk.Now().UTC(), stderr)
+							resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, alive, string(sessionpkg.StateStartPending), clk.Now().UTC(), stderr)
 							if trace != nil {
 								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "restart_in_place", configDriftTracePayload(storedHash, currentHash, driftedFields, nil), nil, "")
 							}
@@ -2816,7 +2845,7 @@ func traceHealClearedPendingCreateLease(
 	providerAlive bool,
 	batch map[string]string,
 ) {
-	if trace == nil || strings.TrimSpace(stateBeforeHeal) != string(sessionpkg.StateCreating) {
+	if trace == nil || !pendingCreateQueuedOrCreatingState(stateBeforeHeal) {
 		return
 	}
 	if cleared, ok := batch["pending_create_claim"]; !ok || cleared != "" {
@@ -2940,7 +2969,7 @@ func resetConfiguredNamedSessionForConfigDrift(
 	nextSessionState := sessionpkg.State(nextState)
 	priorSessionKey := strings.TrimSpace(session.Metadata["session_key"])
 	priorStartedConfigHash := strings.TrimSpace(session.Metadata["started_config_hash"])
-	preserveResume := nextSessionState == sessionpkg.StateCreating &&
+	preserveResume := (nextSessionState == sessionpkg.StateStartPending || nextSessionState == sessionpkg.StateCreating) &&
 		priorSessionKey != "" && priorStartedConfigHash != ""
 
 	rotatedSessionKey := ""

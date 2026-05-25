@@ -436,7 +436,7 @@ func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
 	}
 	batch := make(map[string]string)
 	switch State(b.Metadata["state"]) {
-	case "", StateCreating, StateAsleep, StateSuspended:
+	case "", StateStartPending, StateCreating, StateAsleep, StateSuspended:
 		batch["state"] = string(StateActive)
 		batch["state_reason"] = "creation_complete"
 	}

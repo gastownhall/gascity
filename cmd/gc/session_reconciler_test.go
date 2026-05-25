@@ -8473,8 +8473,8 @@ func TestReconcileSessionBeads_SyncReplacesFailedCreateNamedSession(t *testing.T
 	if fresh.ID == "" {
 		t.Fatalf("sync did not create a fresh named-session bead; open sessions=%#v stderr:\n%s", sessions, stderr.String())
 	}
-	if fresh.Metadata["state"] != string(sessionpkg.StateCreating) {
-		t.Fatalf("fresh named-session state = %q, want creating", fresh.Metadata["state"])
+	if fresh.Metadata["state"] != string(sessionpkg.StateStartPending) {
+		t.Fatalf("fresh named-session state = %q, want start-pending", fresh.Metadata["state"])
 	}
 
 	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessions, dsResult.ScaleCheckCounts))

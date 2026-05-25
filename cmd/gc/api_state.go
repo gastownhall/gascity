@@ -1200,7 +1200,7 @@ func (cs *controllerState) WaitForSessionCommandable(ctx context.Context, sessio
 		switch info.State {
 		case session.StateActive, session.StateAwake, session.StateAsleep, session.StateSuspended, session.StateQuarantined:
 			return info, nil
-		case session.StateCreating, "":
+		case session.StateStartPending, session.StateCreating, "":
 		default:
 			return session.Info{}, fmt.Errorf("session %s reached non-commandable state %q", sessionID, info.State)
 		}

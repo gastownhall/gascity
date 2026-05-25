@@ -253,9 +253,16 @@ git status                  # Must be clean
 git log origin/{{base_branch}}..HEAD --oneline  # Must show your commits
 ```
 
-If uncommitted changes exist:
+If uncommitted changes exist, commit them with a body explaining what
+slipped through the `implement` step (typically a self-review touch-up,
+test addition, or formatter run):
 ```bash
-git add -A && git commit -m "<type>: <description> ({{issue}})"
+git add -A
+git commit -m "<type>: <imperative subject> ({{issue}})" -m "$(cat <<'BODY'
+<Explain what these residual changes are: a self-review fix,
+test-only addition, formatter run, etc. Be specific.>
+BODY
+)"
 ```
 
 NEVER discard implementation changes with `git checkout -- .`
@@ -270,30 +277,92 @@ needs = ["self-review"]
 description = """
 Hand off your work and self-clean. You cease to exist after this step.
 
-**1. Final clean-state verification (safeguard):**
+**1. Branch-shape gate (fails closed — non-negotiable).**
+
+Before anything else, verify you are on a per-bead branch. The refinery
+merges the branch recorded in your bead's `metadata.branch`, which must
+follow the `polecat/<bead-id>` convention; if you push from a different
+branch (your agent home branch, a stray local checkout, etc.), the
+handoff contract is broken and the bead is permanently stranded as
+"assigned to refinery, no merge target". See gastownhall/gascity#2082.
+
+```bash
+CURRENT_BRANCH=$(git branch --show-current)
+EXPECTED_BRANCH="polecat/{{issue}}"
+if [ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]; then
+    echo "BRANCH SHAPE GATE FAILED"
+    echo "  current branch:  $CURRENT_BRANCH"
+    echo "  expected branch: $EXPECTED_BRANCH"
+    echo ""
+    echo "Refinery handoff merges metadata.branch, which must be 'polecat/<bead-id>'."
+    echo "Pushing this commit and reassigning to refinery would strand the work."
+    echo ""
+    echo "Recover by re-running the workspace-setup step:"
+    echo "  - Create the per-bead worktree at \\$(pwd)/worktrees/{{issue}}"
+    echo "  - Create branch '$EXPECTED_BRANCH' from origin/{{base_branch}}"
+    echo "  - Cherry-pick your commits from $CURRENT_BRANCH onto the new branch"
+    echo "  - Re-run submit-and-exit"
+    echo ""
+    echo "Do NOT proceed past this gate."
+    gc runtime drain-ack
+    exit 1
+fi
+```
+
+Also confirm `metadata.branch` reflects this branch (workspace-setup
+recorded it, but a divergent local state would be invisible to the
+refinery without this re-check):
+```bash
+METADATA_BRANCH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.branch // empty')
+if [ "$METADATA_BRANCH" != "$EXPECTED_BRANCH" ]; then
+    gc bd update {{issue}} --set-metadata branch="$EXPECTED_BRANCH"
+fi
+```
+
+**2. Final clean-state verification (safeguard):**
 ```bash
 git status --porcelain
 ```
 If ANY output (untracked files, uncommitted changes):
 ```bash
-git add -A && git commit -m "chore: capture remaining work ({{issue}})"
+git add -A
+git commit -m "chore: capture remaining work ({{issue}})" -m "$(cat <<'BODY'
+<Explain the remaining changes discovered by final clean-state
+verification and why they are safe to hand off.>
+BODY
+)"
 ```
 This is a belt-and-suspenders check — self-review should have caught this,
 but we never push with untracked work left behind.
 
-**2. Push your branch:**
+**3. Push your branch:**
 ```bash
+AUTO_PUSH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')
+if [ "$AUTO_PUSH" = "false" ]; then
+  echo "auto_push=false: halting at branch-ready (no push, no refinery handoff)"
+  BRANCH=$(git branch --show-current)
+  gc bd update {{issue}} \
+    --status=open --assignee="" \
+    --set-metadata branch="$BRANCH" \
+    --set-metadata target={{base_branch}} \
+    --set-metadata branch_ready=true \
+    --set-metadata halt_reason=auto_push_false \
+    --set-metadata gc.routed_to="" \
+    --notes "Branch ready: auto_push=false (no push, no refinery handoff)"
+  gc runtime drain-ack
+  exit 0
+fi
 git push origin HEAD
 ```
 
-**3. Clean up local branch (prevent stale branch accumulation):**
+**4. Clean up local branch (prevent stale branch accumulation):**
 ```bash
 BRANCH=$(git branch --show-current)
 git checkout --detach                 # Detach so we can delete the branch
 git branch -D "$BRANCH"              # Branch is pushed; refinery owns it now
 ```
 
-**4. Update metadata on the work bead:**
+**5. Update metadata on the work bead:**
 ```bash
 gc bd update {{issue}} \
   --set-metadata target={{base_branch}} \
@@ -305,7 +374,7 @@ provided by the caller, `metadata.existing_pr` is preserved for refinery
 validation. The refinery records canonical `pr_url` only after verifying
 the PR is open and matches the branch, base, and origin repository.
 
-**5. Reassign to refinery:**
+**6. Reassign to refinery:**
 ```bash
 REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery"
 gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""
@@ -327,20 +396,20 @@ merge, and close the bead. If there's a conflict, the refinery puts the
 bead back in the pool with `rejection_reason` metadata — a new polecat
 picks it up and resumes from the existing branch.
 
-**6. Signal refinery to check for work immediately (belt-and-suspenders):**
+**7. Signal refinery to check for work immediately (belt-and-suspenders):**
 ```bash
 REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery"
 gc session wake "$REFINERY_TARGET" || true
 gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true
 ```
 
-The `gc bd update` in step 5 generates a `bead.updated` event the refinery's
+The `gc bd update` in step 6 generates a `bead.updated` event the refinery's
 event-watch will see, but that can take up to `event_timeout` seconds. Wake
 starts a stopped on_demand session; nudge leaves a visible prompt for a running
 one as soon as it is ready for input. Failure is non-fatal: the refinery finds
 the work on its next poll.
 
-**7. Signal reconciler and exit.**
+**8. Signal reconciler and exit.**
 ```bash
 gc runtime drain-ack
 exit

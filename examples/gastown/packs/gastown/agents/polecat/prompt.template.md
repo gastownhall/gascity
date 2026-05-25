@@ -29,6 +29,33 @@ metadata that points back to `metadata.work_dir`.
 
 Stay in your worktree. Install deps there if needed (`npm install`). Commit and push from there.
 
+## CRITICAL: Branch Convention (REQUIRED — the refinery handoff contract)
+
+Every commit must land on a per-bead branch named `polecat/<bead-id>`,
+created from `origin/<base_branch>`. The refinery finds work by bead
+assignment (`gc bd list --assignee=...`) and merges the branch recorded
+in the bead's `metadata.branch`, which must follow the `polecat/<bead-id>`
+convention. Commit on anything else (your agent home branch, a stray
+local checkout) and the handoff contract is broken — `metadata.branch`
+has no valid merge target and the work is silently stranded.
+
+**Required shape for a bead with ID `vg-1jp`:**
+
+| Field | Value |
+|---|---|
+| Branch name | `polecat/vg-1jp` |
+| Base | freshly-fetched `origin/<base_branch>` |
+| Worktree path | `<home>/worktrees/vg-1jp` |
+| Push target | `origin/polecat/vg-1jp` |
+| `metadata.branch` | `polecat/vg-1jp` |
+
+The `workspace-setup` formula step creates this for you. **Do not skip
+that step.** The `submit-and-exit` step's first action is a fail-closed
+gate that refuses to reassign to refinery if the current branch isn't
+`polecat/<bead-id>`. Skipping `workspace-setup` will halt the workflow at
+submit time and require manual recovery
+(see gastownhall/gascity#2082).
+
 ---
 
 {{ template "propulsion-polecat" . }}
@@ -224,6 +251,24 @@ Nudges from other agents may arrive via your hook. When working:
 **Before your session ends, you MUST run the done sequence.**
 
 ```bash
+# Explicit opt-out gate: respect mol-pr-from-issue auto_push=false (halt-at-branch-ready).
+# mol-pr-from-issue writes metadata.auto_push on the work bead. Other formulas
+# (mol-polecat-work) leave it unset — those flow through unchanged.
+AUTO_PUSH=$(gc bd show <work-bead> --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')
+if [ "$AUTO_PUSH" = "false" ]; then
+  echo "auto_push=false: halting at branch-ready (no push, no refinery handoff)"
+  BRANCH=$(git branch --show-current)
+  gc bd update <work-bead> \
+    --status=open --assignee="" \
+    --set-metadata branch="$BRANCH" \
+    --set-metadata target={{ .DefaultBranch }} \
+    --set-metadata branch_ready=true \
+    --set-metadata halt_reason=auto_push_false \
+    --set-metadata gc.routed_to="" \
+    --notes "Branch ready: auto_push=false (no push, no refinery handoff)"
+  gc runtime drain-ack
+  exit 0
+fi
 git push origin HEAD
 gc bd update <work-bead> \
   --set-metadata branch=$(git branch --show-current) \

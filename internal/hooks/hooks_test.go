@@ -1377,6 +1377,9 @@ func TestInstallClaudeSurfacesMalformedOverride(t *testing.T) {
 	if !strings.Contains(err.Error(), ".claude/settings.json") {
 		t.Errorf("error must name the offending path: %v", err)
 	}
+	if !strings.Contains(err.Error(), "invalid Claude settings override") {
+		t.Errorf("error must identify the bad user-owned Claude settings override: %v", err)
+	}
 	if !strings.Contains(err.Error(), "invalid JSON") {
 		t.Errorf("error must clearly identify the file as invalid JSON (not bury it in a generic merge error): %v", err)
 	}
@@ -1412,8 +1415,11 @@ func TestInstallClaudeSurfacesNonObjectOverride(t *testing.T) {
 			if !strings.Contains(err.Error(), ".claude/settings.json") {
 				t.Errorf("error must name the offending path: %v", err)
 			}
-			if !strings.Contains(err.Error(), "invalid JSON") {
-				t.Errorf("error must clearly identify the file as invalid JSON (not bury it in a generic merge error): %v", err)
+			if !strings.Contains(err.Error(), "Claude settings override is not a JSON object") {
+				t.Errorf("error must identify the top-level shape issue distinctly: %v", err)
+			}
+			if strings.Contains(err.Error(), "invalid JSON") {
+				t.Errorf("error must not describe syntactically valid non-object JSON as invalid JSON: %v", err)
 			}
 			if !strings.Contains(err.Error(), "expected a JSON object") {
 				t.Errorf("error must explain the expected top-level shape: %v", err)

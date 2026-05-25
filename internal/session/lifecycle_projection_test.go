@@ -472,6 +472,7 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 					"session_name":         "s-worker",
 					"session_key":          "old-provider-conversation",
 					"pending_create_claim": "true",
+					"last_woke_at":         now.Add(-2 * time.Minute).UTC().Format(time.RFC3339),
 				},
 				Runtime:            RuntimeFacts{Observed: true, Alive: false},
 				CreatedAt:          now.Add(-2 * time.Minute),
@@ -481,6 +482,23 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 			wantRuntime:         RuntimeProjectionStaleCreating,
 			wantReconciledState: StateAsleep,
 			wantReset:           true,
+		},
+		{
+			name: "start-pending with pending_create_claim stays start-pending",
+			input: LifecycleInput{
+				Status: "open",
+				Metadata: map[string]string{
+					"state":                string(StateStartPending),
+					"session_name":         "s-worker",
+					"pending_create_claim": "true",
+				},
+				Runtime:            RuntimeFacts{Observed: true, Alive: false},
+				CreatedAt:          now.Add(-2 * time.Minute),
+				StaleCreatingAfter: time.Minute,
+				Now:                now,
+			},
+			wantRuntime:         RuntimeProjectionStartRequested,
+			wantReconciledState: StateStartPending,
 		},
 		{
 			// Counterpart: while the lease is still fresh, pending_create_claim
@@ -493,6 +511,7 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 					"state":                "creating",
 					"session_name":         "s-worker",
 					"pending_create_claim": "true",
+					"last_woke_at":         now.Add(-30 * time.Second).UTC().Format(time.RFC3339),
 				},
 				Runtime:            RuntimeFacts{Observed: true, Alive: false},
 				CreatedAt:          now.Add(-30 * time.Second),
@@ -532,7 +551,7 @@ func TestProjectLifecycleRuntimeLivenessProjection(t *testing.T) {
 				Now:     now,
 			},
 			wantRuntime:         RuntimeProjectionStartRequested,
-			wantReconciledState: StateCreating,
+			wantReconciledState: StateStartPending,
 		},
 	}
 

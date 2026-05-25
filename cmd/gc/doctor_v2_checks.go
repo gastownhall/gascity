@@ -25,6 +25,7 @@ func registerV2DeprecationChecks(d *doctor.Doctor) {
 
 func v2DeprecationChecks() []doctor.Check {
 	return []doctor.Check{
+		v2FormulasDirCheck{},
 		v2AgentFormatCheck{},
 		v2ImportFormatCheck{},
 		v2DefaultRigImportFormatCheck{},
@@ -35,6 +36,353 @@ func v2DeprecationChecks() []doctor.Check {
 		v2WorkspaceNameCheck{},
 		v2PromptTemplateSuffixCheck{},
 	}
+}
+
+type v2FormulasDirCheck struct{}
+
+type formulasDirHit struct {
+	Path       string
+	Line       int
+	Value      string
+	Fixable    bool
+	WithinCity bool
+}
+
+func (v2FormulasDirCheck) Name() string { return "v2-formulas-dir" }
+
+func (v2FormulasDirCheck) CanFix() bool { return true }
+
+func (v2FormulasDirCheck) Fix(ctx *doctor.CheckContext) error {
+	hits, err := scanFormulasDirDeclarations(ctx.CityPath)
+	if err != nil {
+		return err
+	}
+	for _, hit := range hits {
+		if !hit.Fixable || !hit.WithinCity {
+			continue
+		}
+		if err := rewriteWithoutDefaultFormulasDir(hit.Path); err != nil {
+			return fmt.Errorf("rewriting %s: %w", hit.Path, err)
+		}
+	}
+	return nil
+}
+
+func (v2FormulasDirCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+	hits, err := scanFormulasDirDeclarations(ctx.CityPath)
+	if err != nil {
+		return errorCheck("v2-formulas-dir",
+			fmt.Sprintf("inspecting [formulas].dir declarations: %v", err),
+			"fix the reported config file and rerun gc doctor",
+			nil)
+	}
+	if len(hits) == 0 {
+		return okCheck("v2-formulas-dir", "no deprecated [formulas].dir declarations found")
+	}
+
+	fixable := 0
+	details := make([]string, 0, len(hits))
+	for _, hit := range hits {
+		action := "remove manually or migrate formulas into the well-known formulas/ directory"
+		if hit.Fixable && hit.WithinCity {
+			action = "gc doctor --fix can remove this redundant default"
+			fixable++
+		} else if hit.Fixable {
+			action = "manual cleanup required; gc doctor --fix only changes files under the city"
+		}
+		details = append(details, fmt.Sprintf("%s: [formulas].dir=%q (%s)",
+			doctorFormulasDirSource(hit.Path, hit.Line), hit.Value, action))
+	}
+	sort.Strings(details)
+
+	hint := "remove custom [formulas].dir declarations or migrate formulas into the well-known formulas/ directory"
+	if fixable == len(hits) {
+		hint = "run `gc doctor --fix` to remove redundant [formulas].dir declarations"
+	} else if fixable > 0 {
+		hint = "run `gc doctor --fix` for redundant local defaults, then remove or migrate the remaining custom declarations manually"
+	}
+	return errorCheck("v2-formulas-dir",
+		fmt.Sprintf("unsupported [formulas].dir declarations found in %d file(s)", len(hits)),
+		hint,
+		details)
+}
+
+func scanFormulasDirDeclarations(cityPath string) ([]formulasDirHit, error) {
+	paths := formulasDirConfigPaths(cityPath)
+	hits := make([]formulasDirHit, 0, len(paths))
+	for _, path := range paths {
+		hit, ok, err := readFormulasDirDeclaration(cityPath, path)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			hits = append(hits, hit)
+		}
+	}
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].Path == hits[j].Path {
+			return hits[i].Line < hits[j].Line
+		}
+		return hits[i].Path < hits[j].Path
+	})
+	return hits, nil
+}
+
+func formulasDirConfigPaths(cityPath string) []string {
+	seen := make(map[string]bool)
+	var paths []string
+	addPath := func(path string) {
+		path = filepath.Clean(path)
+		if seen[path] {
+			return
+		}
+		seen[path] = true
+		paths = append(paths, path)
+	}
+
+	addPath(filepath.Join(cityPath, "city.toml"))
+
+	for _, ref := range cityConfigPackRefs(cityPath) {
+		if dir, ok := localDoctorPackPath(cityPath, ref); ok {
+			collectFormulasDirPackPaths(dir, seen, &paths)
+		}
+	}
+	collectFormulasDirPackPaths(cityPath, seen, &paths)
+	sort.Strings(paths)
+	return paths
+}
+
+func cityConfigPackRefs(cityPath string) []string {
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return nil
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		return nil
+	}
+	var refs []string
+	refs = append(refs, legacyPackSources(cfg.Workspace.LegacyIncludes(), cfg.Packs)...)
+	refs = append(refs, legacyPackSources(cfg.Workspace.LegacyDefaultRigIncludes(), cfg.Packs)...)
+	refs = append(refs, sortedDoctorImportSources(cfg.Imports)...)
+	refs = append(refs, sortedDoctorImportSources(cfg.Defaults.Rig.Imports)...)
+	for _, rig := range cfg.Rigs {
+		refs = append(refs, legacyPackSources(rig.Includes, cfg.Packs)...)
+		refs = append(refs, sortedDoctorImportSources(rig.Imports)...)
+	}
+	return refs
+}
+
+func legacyPackSources(refs []string, packs map[string]config.PackSource) []string {
+	out := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		source := ref
+		if pack, ok := packs[ref]; ok && strings.TrimSpace(pack.Source) != "" {
+			source = pack.Source
+			if strings.TrimSpace(pack.Path) != "" && !doctorPackRefIsRemote(source) {
+				source = filepath.Join(source, pack.Path)
+			}
+		}
+		out = append(out, source)
+	}
+	return out
+}
+
+func doctorPackRefIsRemote(ref string) bool {
+	ref = strings.TrimSpace(ref)
+	return strings.Contains(ref, "://") || strings.HasPrefix(ref, "github.com/") || strings.HasPrefix(ref, "git@")
+}
+
+func collectFormulasDirPackPaths(packDir string, seen map[string]bool, paths *[]string) {
+	packPath := filepath.Join(packDir, "pack.toml")
+	packPath = filepath.Clean(packPath)
+	if seen[packPath] {
+		return
+	}
+	seen[packPath] = true
+	*paths = append(*paths, packPath)
+
+	cfg, ok := parseDoctorPackRefs(packPath)
+	if !ok {
+		return
+	}
+	for _, ref := range doctorPackRefSources(cfg, true) {
+		nextDir, ok := localDoctorPackPathFromBase(packDir, ref)
+		if !ok {
+			continue
+		}
+		collectFormulasDirPackPaths(nextDir, seen, paths)
+	}
+}
+
+type formulasDirFile struct {
+	Formulas config.FormulasConfig `toml:"formulas"`
+}
+
+func readFormulasDirDeclaration(cityPath, path string) (formulasDirHit, bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return formulasDirHit{}, false, nil
+		}
+		return formulasDirHit{}, false, fmt.Errorf("stat %s: %w", path, err)
+	}
+	if info.IsDir() {
+		return formulasDirHit{}, false, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return formulasDirHit{}, false, fmt.Errorf("read %s: %w", path, err)
+	}
+	var cfg formulasDirFile
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
+		return formulasDirHit{}, false, nil
+	}
+	if !md.IsDefined("formulas", "dir") {
+		return formulasDirHit{}, false, nil
+	}
+	value := strings.TrimSpace(cfg.Formulas.Dir)
+	locator := config.NewDiagnosticLocator(data)
+	line := locator.LineForKey("formulas", "dir")
+	if line == 0 {
+		line = locator.LineForTable("formulas")
+	}
+	return formulasDirHit{
+		Path:       path,
+		Line:       line,
+		Value:      value,
+		Fixable:    isDefaultFormulasDir(value),
+		WithinCity: doctorPathWithinCity(cityPath, path),
+	}, true, nil
+}
+
+func isDefaultFormulasDir(value string) bool {
+	switch filepath.Clean(strings.TrimSpace(value)) {
+	case ".", citylayout.FormulasRoot:
+		return true
+	default:
+		return false
+	}
+}
+
+func rewriteWithoutDefaultFormulasDir(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var cfg formulasDirFile
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
+		return err
+	}
+	if !md.IsDefined("formulas", "dir") || !isDefaultFormulasDir(cfg.Formulas.Dir) {
+		return nil
+	}
+	rendered, changed := stripDefaultFormulasDirDeclaration(string(data))
+	if !changed {
+		return fmt.Errorf("could not locate [formulas].dir assignment")
+	}
+	return fsys.WriteFileIfChangedAtomic(fsys.OSFS{}, path, []byte(rendered), 0o644)
+}
+
+func stripDefaultFormulasDirDeclaration(source string) (string, bool) {
+	hadTrailingNewline := strings.HasSuffix(source, "\n")
+	lines := strings.Split(source, "\n")
+	if hadTrailingNewline {
+		lines = lines[:len(lines)-1]
+	}
+
+	remove := make(map[int]bool)
+	currentTable := ""
+	formulasTableLine := -1
+	formulasDirLine := -1
+	formulasHasOtherContent := false
+	flushFormulas := func() {
+		if formulasDirLine < 0 {
+			return
+		}
+		remove[formulasDirLine] = true
+		if !formulasHasOtherContent && formulasTableLine >= 0 {
+			remove[formulasTableLine] = true
+		}
+	}
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(stripTOMLInlineComment(line))
+		if trimmed == "" {
+			continue
+		}
+		if table, ok := parseDoctorTOMLTableHeader(trimmed); ok {
+			if currentTable == "formulas" {
+				flushFormulas()
+			}
+			currentTable = table
+			if table == "formulas" {
+				formulasTableLine = i
+				formulasDirLine = -1
+				formulasHasOtherContent = false
+			}
+			continue
+		}
+		key, _, ok := parseDoctorTOMLKeyValue(trimmed)
+		if !ok {
+			continue
+		}
+		switch {
+		case currentTable == "formulas" && key == "dir":
+			formulasDirLine = i
+		case currentTable == "formulas":
+			formulasHasOtherContent = true
+		case key == "formulas.dir":
+			remove[i] = true
+		}
+	}
+	if currentTable == "formulas" {
+		flushFormulas()
+	}
+	if len(remove) == 0 {
+		return source, false
+	}
+
+	out := make([]string, 0, len(lines)-len(remove))
+	for i, line := range lines {
+		if remove[i] {
+			continue
+		}
+		out = append(out, line)
+	}
+	rendered := strings.Join(out, "\n")
+	if hadTrailingNewline {
+		rendered += "\n"
+	}
+	return rendered, true
+}
+
+func parseDoctorTOMLTableHeader(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(trimmed, "[[") && strings.HasSuffix(trimmed, "]]") {
+		return strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "[["), "]]")), true
+	}
+	if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+		return strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]")), true
+	}
+	return "", false
+}
+
+func parseDoctorTOMLKeyValue(line string) (string, string, bool) {
+	before, after, ok := strings.Cut(line, "=")
+	if !ok {
+		return "", "", false
+	}
+	return strings.TrimSpace(before), strings.TrimSpace(after), true
+}
+
+func doctorFormulasDirSource(path string, line int) string {
+	if line <= 0 {
+		return path
+	}
+	return fmt.Sprintf("%s:%d", path, line)
 }
 
 type v2AgentFormatCheck struct{}

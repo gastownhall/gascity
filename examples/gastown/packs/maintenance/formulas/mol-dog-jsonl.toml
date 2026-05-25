@@ -153,20 +153,38 @@ git -C <git_repo> commit -m "backup <timestamp>: <db>=<count> ..." \\
 
 Include failed databases in commit message so staleness is visible.
 
-**4. Push to origin:**
+**4. Push to origin (push mode only):**
+The archive's mode is detected from the live remote state: with an `origin`
+remote configured on the archive repo it runs in **push** mode; without one it
+runs **local-only** and skips the push entirely (the commit above is the
+backup).
 ```bash
 git -C <git_repo> push origin main
 ```
 
-**5. Handle push failures:**
+**5. Handle push failures (push mode only):**
 Track consecutive failures. After {{max_push_failures}} consecutive failures,
-escalate:
+escalate once with an enriched body (archive path, failure count vs threshold,
+the last git push stderr, and remediation steps):
 ```bash
 gc mail send mayor/ -s "ESCALATION: JSONL push failed [HIGH]" \\
-  -m "Consecutive failures: {{max_push_failures}}"
-```
+  -m "Order: mol-dog-jsonl
+Archive: <archive_repo>
+Consecutive failures: <n> (threshold: {{max_push_failures}})
 
-**Exit criteria:** Changes committed and pushed (or no changes to commit)."""
+Last git push stderr:
+<truncated stderr>
+
+Remediation:
+- Check remote: git -C <archive_repo> remote -v
+- Verify remote is reachable and credentials are valid
+- Temporarily suppress: export GC_JSONL_MAX_PUSH_FAILURES=99
+- See docs/getting-started/troubleshooting.md#jsonl-archive-push-failures"
+```
+Local-only mode never escalates on push failure because it never pushes.
+
+**Exit criteria:** Changes committed, and pushed when in push mode (or no
+changes to commit)."""
 
 [[steps]]
 id = "report"

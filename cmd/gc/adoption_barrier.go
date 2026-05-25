@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -115,6 +116,7 @@ func runAdoptionBarrier(
 	}
 	agentBySession := make(map[string]*config.Agent, len(cfg.Agents))
 	agentByQN := make(map[string]*config.Agent, len(cfg.Agents))
+	agentBaseSessionName := make(map[string]string, len(cfg.Agents))
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
 		sn := snapshot.FindSessionNameByTemplate(a.QualifiedName())
@@ -123,6 +125,7 @@ func runAdoptionBarrier(
 		}
 		agentBySession[sn] = a
 		agentByQN[a.QualifiedName()] = a
+		agentBaseSessionName[a.QualifiedName()] = sn
 	}
 
 	// Step 3: For each running session, adopt if no open bead exists.
@@ -135,11 +138,11 @@ func runAdoptionBarrier(
 		isPoolInstance := false
 		staleSingletonSuffix := false
 		if !isConfigAgent {
-			if base := resolveCanonicalSingletonSuffixBase(sessionName, store, cityName, st, agentByQN); base != nil {
+			if base := resolveCanonicalSingletonSuffixBase(sessionName, agentBaseSessionName, agentByQN); base != nil {
 				cfgAgent = base
 				isConfigAgent = true
 				staleSingletonSuffix = true
-			} else if base := resolvePoolBase(sessionName, store, cityName, st, agentByQN); base != nil {
+			} else if base := resolvePoolBase(sessionName, agentBaseSessionName, agentByQN); base != nil {
 				cfgAgent = base
 				isConfigAgent = true
 				isPoolInstance = true
@@ -291,7 +294,7 @@ func openSessionBeadExists(store beads.Store, sessionName string) (bool, error) 
 // base template agent. It strips the numeric suffix (e.g., "worker-3" -> "worker")
 // and checks whether the resulting base name corresponds to a configured agent.
 // Returns nil if no match is found.
-func resolvePoolBase(sessionName string, store beads.Store, cityName, sessionTemplate string, agentByQN map[string]*config.Agent) *config.Agent {
+func resolvePoolBase(sessionName string, agentBaseSessionName map[string]string, agentByQN map[string]*config.Agent) *config.Agent {
 	slot := parsePoolSlot(sessionName)
 	if slot == 0 {
 		return nil
@@ -304,7 +307,7 @@ func resolvePoolBase(sessionName string, store beads.Store, cityName, sessionTem
 		if !a.SupportsInstanceExpansion() {
 			continue
 		}
-		sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), sessionTemplate)
+		sn := strings.TrimSpace(agentBaseSessionName[a.QualifiedName()])
 		if sn == baseSessName {
 			return a
 		}
@@ -312,7 +315,7 @@ func resolvePoolBase(sessionName string, store beads.Store, cityName, sessionTem
 	return nil
 }
 
-func resolveCanonicalSingletonSuffixBase(sessionName string, store beads.Store, cityName, sessionTemplate string, agentByQN map[string]*config.Agent) *config.Agent {
+func resolveCanonicalSingletonSuffixBase(sessionName string, agentBaseSessionName map[string]string, agentByQN map[string]*config.Agent) *config.Agent {
 	slot := parsePoolSlot(sessionName)
 	if slot == 0 {
 		return nil
@@ -323,7 +326,7 @@ func resolveCanonicalSingletonSuffixBase(sessionName string, store beads.Store, 
 		if !a.UsesCanonicalSingletonPoolIdentity() {
 			continue
 		}
-		sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), sessionTemplate)
+		sn := strings.TrimSpace(agentBaseSessionName[a.QualifiedName()])
 		if sn == baseSessName {
 			return a
 		}

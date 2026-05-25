@@ -1224,9 +1224,14 @@ scope = "city"
 	if !found["proj/gs.polecat"] {
 		t.Errorf("missing proj/gs.polecat; got: %v", found)
 	}
-	// City-scoped agent should NOT appear from rig import.
-	if found["gs.mayor"] || found["proj/gs.mayor"] {
-		t.Error("city-scoped mayor should not appear from rig-level import")
+	// City-scoped agent reached through a rig-level import is hoisted to city
+	// scope (rig dir cleared) rather than dropped, so it registers as the
+	// binding-qualified "gs.mayor" — not under the rig prefix "proj/gs.mayor".
+	if !found["gs.mayor"] {
+		t.Errorf("city-scoped mayor should be hoisted from rig import as gs.mayor; got: %v", found)
+	}
+	if found["proj/gs.mayor"] {
+		t.Errorf("hoisted mayor should not retain rig prefix proj/gs.mayor; got: %v", found)
 	}
 }
 

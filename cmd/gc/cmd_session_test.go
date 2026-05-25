@@ -1980,8 +1980,8 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 	if got := b.Metadata["alias"]; got != "mayor" {
 		t.Fatalf("alias = %q, want mayor", got)
 	}
-	if got := b.Metadata["state"]; got != "creating" {
-		t.Fatalf("state = %q, want creating", got)
+	if got := b.Metadata["state"]; got != string(session.StateStartPending) {
+		t.Fatalf("state = %q, want start-pending", got)
 	}
 }
 

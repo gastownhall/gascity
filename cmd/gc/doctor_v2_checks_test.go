@@ -118,6 +118,99 @@ schema = 2
 	}
 }
 
+func TestDoctorFixRemovesDefaultFormulasDirFromPackGraph(t *testing.T) {
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "formula-city"
+`)
+	writeDoctorFile(t, cityDir, "pack.toml", `
+[pack]
+name = "formula-city"
+schema = 2
+
+[imports.ops]
+source = "./packs/ops"
+
+[formulas]
+dir = "formulas"
+`)
+	writeDoctorFile(t, cityDir, "packs/ops/pack.toml", `
+[pack]
+name = "ops"
+schema = 2
+
+[formulas]
+dir = "formulas"
+`)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
+
+	var stdout, stderr bytes.Buffer
+	code := doDoctor(true, false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc doctor --fix = %d, want 0; stdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "✗ expanded-config-load") {
+		t.Fatalf("expanded-config-load reported stale pre-fix failure:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "✓ expanded-config-load") {
+		t.Fatalf("doctor output missing post-fix expanded-config-load success:\n%s", stdout.String())
+	}
+	for _, path := range []string{
+		filepath.Join(cityDir, "pack.toml"),
+		filepath.Join(cityDir, "packs/ops/pack.toml"),
+	} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%q): %v", path, err)
+		}
+		if strings.Contains(string(data), "[formulas]") || strings.Contains(string(data), `dir = "formulas"`) {
+			t.Fatalf("%s still contains deprecated formulas dir:\n%s", path, data)
+		}
+	}
+	if _, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml")); err != nil {
+		t.Fatalf("LoadWithIncludes after doctor --fix: %v", err)
+	}
+}
+
+func TestDoctorFixLeavesCustomFormulasDirFailing(t *testing.T) {
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "custom-formula-city"
+`)
+	packPath := filepath.Join(cityDir, "pack.toml")
+	writeDoctorFile(t, cityDir, "pack.toml", `
+[pack]
+name = "custom-formula-city"
+schema = 2
+
+[formulas]
+dir = "custom-formulas"
+`)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
+
+	var stdout, stderr bytes.Buffer
+	code := doDoctor(true, false, false, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc doctor --fix unexpectedly passed with custom formulas dir; stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "✗ v2-formulas-dir") {
+		t.Fatalf("doctor output missing v2-formulas-dir failure:\n%s", stdout.String())
+	}
+	data, err := os.ReadFile(packPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", packPath, err)
+	}
+	if !strings.Contains(string(data), `dir = "custom-formulas"`) {
+		t.Fatalf("custom formulas dir should remain for manual migration:\n%s", data)
+	}
+}
+
 func TestV2LegacyOrderLayoutCheckReportsSchema1NestedOrder(t *testing.T) {
 	t.Parallel()
 

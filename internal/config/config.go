@@ -1770,8 +1770,11 @@ type DaemonConfig struct {
 	// dedicated dolt server, or lower to reduce contention on slow storage.
 	ProbeConcurrency *int `toml:"probe_concurrency,omitempty" jsonschema:"default=8"`
 	// MaxWakesPerTick caps how many sessions the reconciler may start in a
-	// single tick. Nil (unset) defaults to 5. Values <= 0 are treated as the
-	// default — set a positive integer to override.
+	// single tick. Fresh generic pool session-bead creation uses the same
+	// budget so the controller does not materialize more ordinary pool sessions
+	// than it can wake. Bounded dependency-floor prerequisites are exempt.
+	// Nil (unset) defaults to 5. Values <= 0 are treated as the default — set a
+	// positive integer to override.
 	MaxWakesPerTick *int `toml:"max_wakes_per_tick,omitempty" jsonschema:"default=5"`
 	// NudgeDispatcher selects how queued nudges get delivered to running
 	// sessions. "legacy" (default) auto-spawns a per-session `gc nudge poll`

@@ -1512,14 +1512,14 @@ func commitStartResult(
 
 // confirmPendingStart reports whether a session in the given metadata
 // state should be transitioned to "active" after a successful runtime
-// spawn. Empty, "creating", "asleep", and "drained" all indicate the
+// spawn. Empty, "start-pending", "creating", "asleep", and "drained" all indicate the
 // session was pending a spawn; "awake" is treated by the reconciler as
 // equivalent to "active" and is intentionally NOT restamped (a no-op
 // metadata write on every spawn). Any other state ("draining",
 // "archived", "quarantined", ...) is left alone.
 func confirmPendingStart(currentState string) bool {
 	switch sessionpkg.State(strings.TrimSpace(currentState)) {
-	case "", sessionpkg.StateCreating, sessionpkg.StateAsleep, sessionpkg.State("drained"):
+	case "", sessionpkg.StateStartPending, sessionpkg.StateCreating, sessionpkg.StateAsleep, sessionpkg.State("drained"):
 		return true
 	}
 	return false

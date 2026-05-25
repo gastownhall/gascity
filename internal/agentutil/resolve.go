@@ -143,6 +143,50 @@ func resolvePoolInstanceQualified(cfg *config.City, input string) (config.Agent,
 	return config.Agent{}, false
 }
 
+// NormalizePoolRouteTarget collapses a slot-suffixed pool target qualified
+// name (e.g. "myrig/polecat-2") back to its base pool qualified name
+// ("myrig/polecat"). Slinging to a slot-suffixed target expresses a
+// load-balancing hint, not a hard pin: every slot in a pool shares the base
+// template, and pool work_query / nudgers key on that base via exact match.
+// Recording the slot-suffixed value in gc.routed_to therefore leaves the bead
+// structurally invisible to the pool. Normalizing at the routing write site
+// keeps slot-suffixed slings reachable by any slot.
+//
+// A target is collapsed only when it is exactly base.QualifiedName()+"-N" for
+// a configured multi-session pool agent and N is a valid slot (>=1, and within
+// the agent's max when bounded) — the inverse of resolvePoolInstanceQualified.
+// Any other target (base names, non-pool agents, out-of-range or non-numeric
+// suffixes, unknown agents) is returned unchanged.
+func NormalizePoolRouteTarget(cfg *config.City, target string) string {
+	if cfg == nil || target == "" {
+		return target
+	}
+	for i := range cfg.Agents {
+		a := cfg.Agents[i]
+		if !IsMultiSessionAgent(&a) {
+			continue
+		}
+		base := a.QualifiedName()
+		prefix := base + "-"
+		if !strings.HasPrefix(target, prefix) {
+			continue
+		}
+		suffix := target[len(prefix):]
+		n, err := strconv.Atoi(suffix)
+		if err != nil || n < 1 {
+			continue
+		}
+		if !a.HasUnlimitedSessionCapacity() {
+			maxSess := a.EffectiveMaxActiveSessions()
+			if maxSess == nil || n > *maxSess {
+				continue
+			}
+		}
+		return base
+	}
+	return target
+}
+
 // matchPoolInstanceBare checks if a bare input matches a multi-session
 // agent's instance pattern (e.g., "polecat-2" matches "polecat").
 func matchPoolInstanceBare(a config.Agent, input string) (config.Agent, bool) {

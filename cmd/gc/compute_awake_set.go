@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"time"
+
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // defaultOnDemandIdleTimeout is the fallback idle timeout for on-demand
@@ -536,11 +538,20 @@ func collectCreatingBeads(beads []AwakeSessionBead, template string) []AwakeSess
 	for _, b := range beads {
 		// See collectActiveBeads above for why ConfiguredNamedSession beads
 		// must be excluded even when NamedIdentity is empty.
-		if b.Template == template && b.State == "creating" &&
+		if b.Template == template && isCreatingCandidateState(b.State) &&
 			b.NamedIdentity == "" && !b.ConfiguredNamedSession &&
 			!b.ManualSession && !b.Drained && !b.DependencyOnly {
 			result = append(result, b)
 		}
 	}
 	return result
+}
+
+func isCreatingCandidateState(state string) bool {
+	switch sessionpkg.State(state) {
+	case sessionpkg.StateStartPending, sessionpkg.StateCreating:
+		return true
+	default:
+		return false
+	}
 }

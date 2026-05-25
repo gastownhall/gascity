@@ -552,6 +552,19 @@ func defaultMailIdentity() string {
 	return defaultMailIdentityCandidates()[0]
 }
 
+const controllerMailIdentity = "controller"
+
+func reservedMailSenderIdentity(identifier string) (string, bool) {
+	switch strings.TrimSpace(identifier) {
+	case "", "human":
+		return "human", true
+	case controllerMailIdentity:
+		return controllerMailIdentity, true
+	default:
+		return "", false
+	}
+}
+
 // defaultMailIdentityCandidates returns ordered non-empty identity candidates
 // (GC_SESSION_ID, GC_ALIAS, GC_AGENT), falling back to ["human"] when all are
 // unset. Multiple candidates preserve compatibility for sessions whose concrete
@@ -616,8 +629,8 @@ func sessionMailboxAddresses(b beads.Bead) []string {
 }
 
 func resolveMailIdentityCached(store beads.Store, identifier string, cache *mailIdentitySessionCache) (string, error) {
-	if identifier == "" || identifier == "human" {
-		return "human", nil
+	if sender, ok := reservedMailSenderIdentity(identifier); ok {
+		return sender, nil
 	}
 	sessionID, err := resolveSessionID(store, identifier)
 	if err != nil {
@@ -649,8 +662,8 @@ func resolveMailIdentityWithConfig(cityPath string, cfg *config.City, store bead
 }
 
 func resolveMailIdentityWithConfigCached(cityPath string, cfg *config.City, store beads.Store, identifier string, cache *mailIdentitySessionCache) (string, error) {
-	if identifier == "" || identifier == "human" {
-		return "human", nil
+	if sender, ok := reservedMailSenderIdentity(identifier); ok {
+		return sender, nil
 	}
 	if store != nil && cfg != nil {
 		sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, identifier)
@@ -692,6 +705,9 @@ func resolveMailRecipientIdentityCached(cityPath string, cfg *config.City, store
 		return "", targetErr
 	} else if matched {
 		return target.display, nil
+	}
+	if normalizeNamedSessionTarget(identifier) == controllerMailIdentity {
+		return "", session.ErrSessionNotFound
 	}
 	return resolveMailIdentityWithConfigCached(cityPath, cfg, store, identifier, cache)
 }

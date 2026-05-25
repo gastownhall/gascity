@@ -31,7 +31,10 @@ const (
 	StateAsleep State = "asleep"
 	// StateSuspended means the conversation is paused with no runtime resources.
 	StateSuspended State = "suspended"
-	// StateCreating means the session bead has been written but the runtime
+	// StateStartPending means the controller has reserved a session identity
+	// and should start it, but no provider Start call is currently in flight.
+	StateStartPending State = "start-pending"
+	// StateCreating means the provider Start call is in flight and the runtime
 	// process has not yet been confirmed alive. Counts against pool occupancy.
 	StateCreating State = "creating"
 	// StateFailedCreate means create rollback wrote terminal metadata but the
@@ -594,8 +597,9 @@ func runtimeSessionMatchesBead(sp runtime.Provider, sessionName, beadID, instanc
 }
 
 // CreateBeadOnly creates a session bead without starting the runtime process.
-// The bead is created with state "creating" — the controller's reconciler
-// will detect it in buildDesiredState and start the process on its next tick.
+// The bead is created with state "start-pending" — the controller's
+// reconciler will detect it in buildDesiredState and start the process on its
+// next tick.
 //
 // This is the Phase 2 path: CLI creates intent (bead), reconciler executes.
 func (m *Manager) CreateBeadOnly(template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume) (Info, error) {
@@ -651,7 +655,7 @@ func (m *Manager) createAliasedBeadOnlyNamed(alias, explicitName, template, titl
 
 		meta := map[string]string{
 			"template":           template,
-			"state":              "creating",
+			"state":              string(StateStartPending),
 			"provider":           provider,
 			"work_dir":           workDir,
 			"command":            command,
@@ -924,7 +928,7 @@ func (m *Manager) Kill(id string) error {
 	// state can lag behind reality, so also check provider liveness.
 	state := State(b.Metadata["state"])
 	switch state {
-	case StateActive, StateCreating, StateDraining, StateAwake:
+	case StateActive, StateStartPending, StateCreating, StateDraining, StateAwake:
 		// Known live states — proceed.
 	default:
 		if !m.sp.IsRunning(sessName) {
@@ -1178,7 +1182,7 @@ func (m *Manager) UpdateTemplateOverrides(id string, updates map[string]string) 
 // for template override changes that only apply on the next launch.
 func IsTemplateOverrideRuntimeActive(state State) bool {
 	switch state {
-	case StateActive, StateAwake, StateCreating, StateDraining, StateQuarantined:
+	case StateActive, StateAwake, StateStartPending, StateCreating, StateDraining, StateQuarantined:
 		return true
 	default:
 		return false

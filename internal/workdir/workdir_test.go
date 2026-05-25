@@ -461,3 +461,56 @@ func TestResolveTmuxAlias_ReturnsErrorOnBadTemplate(t *testing.T) {
 		t.Fatal("ResolveTmuxAlias: want error on unknown template field, got nil")
 	}
 }
+
+// TestPathContextRigScopedAgentResolvesRigFromQualifiedNamePrefix covers
+// gascity#2070: a scope="rig" agent whose Dir is not stamped (or points
+// outside any configured rig path) must still resolve its rig — and thus
+// GC_RIG/GC_RIG_ROOT — from the qualified-name prefix. Without this, the
+// rig keys leak through as empty values.
+func TestPathContextRigScopedAgentResolvesRigFromQualifiedNamePrefix(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "thriva")
+	rigs := []config.Rig{{Name: "thriva", Path: rigPath}}
+	// No Dir stamp; the rig association lives only in the qualified name.
+	a := config.Agent{Name: "my_impl", Scope: "rig", WorkDir: ".gc/worktrees/my_impl"}
+
+	ctx := PathContextForQualifiedName(cityPath, "city", "thriva/my_impl", a, rigs)
+	if ctx.Rig != "thriva" {
+		t.Fatalf("ctx.Rig = %q, want %q", ctx.Rig, "thriva")
+	}
+	if ctx.RigRoot != rigPath {
+		t.Fatalf("ctx.RigRoot = %q, want %q", ctx.RigRoot, rigPath)
+	}
+}
+
+// TestPathContextNonRigScopedAgentDoesNotInferRig guards against false
+// positives: a non-rig-scoped agent must not be assigned a rig from a
+// coincidental qualified-name prefix.
+func TestPathContextNonRigScopedAgentDoesNotInferRig(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{{Name: "thriva", Path: filepath.Join(cityPath, "rigs", "thriva")}}
+	a := config.Agent{Name: "my_impl", Scope: "city"}
+
+	ctx := PathContextForQualifiedName(cityPath, "city", "thriva/my_impl", a, rigs)
+	if ctx.Rig != "" {
+		t.Fatalf("ctx.Rig = %q, want empty for city-scoped agent", ctx.Rig)
+	}
+}
+
+// TestPathContextRigScopedAgentPrefersStampedDir confirms the existing
+// dir-based association still wins when Dir is stamped (no regression of
+// the working path).
+func TestPathContextRigScopedAgentPrefersStampedDir(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "thriva")
+	rigs := []config.Rig{{Name: "thriva", Path: rigPath}}
+	a := config.Agent{Name: "my_impl", Dir: "thriva", Scope: "rig"}
+
+	ctx := PathContextForQualifiedName(cityPath, "city", "thriva/my_impl", a, rigs)
+	if ctx.Rig != "thriva" {
+		t.Fatalf("ctx.Rig = %q, want %q", ctx.Rig, "thriva")
+	}
+	if ctx.RigRoot != rigPath {
+		t.Fatalf("ctx.RigRoot = %q, want %q", ctx.RigRoot, rigPath)
+	}
+}

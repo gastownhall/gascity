@@ -379,7 +379,24 @@ BRANCH=$(gc bd show $WORK --json | jq -r '.[0].metadata.branch')
 TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_branch}}"')
 MERGE_STRATEGY=$(gc bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // "direct"')
 EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')
-ORIGIN_REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')
+ORIGIN_REPO_ERROR=""
+if command -v gh >/dev/null 2>&1; then
+  if ! ORIGIN_REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>&1); then
+    ORIGIN_REPO_ERROR="gh repo view failed while resolving origin repository: $ORIGIN_REPO"
+    ORIGIN_REPO=""
+  fi
+else
+  ORIGIN_URL=$(git remote get-url origin)
+  case "$ORIGIN_URL" in
+    git@github.com:*|https://github.com/*)
+      ORIGIN_REPO=$(printf '%s\n' "$ORIGIN_URL" \
+        | sed -E 's#^git@github.com:##; s#^https://github.com/##; s#\\.git$##')
+      ;;
+    *)
+      ORIGIN_REPO_ERROR="GitHub REST fallback supports only github.com origin remotes; install gh for $ORIGIN_URL."
+      ;;
+  esac
+fi
 if [ "$MERGE_STRATEGY" = "pr" ]; then
   MERGE_STRATEGY="mr"
 fi
@@ -439,9 +456,98 @@ Target: $TARGET"
 
 pr_lookup_missing() {
   case "$1" in
-    *"Could not resolve to a PullRequest"*|*"could not resolve to a PullRequest"*|*"no pull requests found"*|*"Not Found"*|*"not found"*) return 0 ;;
+    *"Could not resolve to a PullRequest"*|*"could not resolve to a PullRequest"*|*"no pull requests found"*|*"Not Found"*|*"not found"*|*"404"*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+pr_lookup_repo_mismatch() {
+  case "$1" in
+    *" belongs to repo "*", want "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+resolve_github_token() {
+  TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-${GIT_TOKEN:-}}}"
+  if [ -n "$TOKEN" ]; then
+    printf '%s\n' "$TOKEN"
+    return
+  fi
+  printf 'protocol=https\nhost=github.com\n\n' \
+    | GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null \
+    | sed -n 's/^password=//p' \
+    | head -n 1
+}
+
+init_github_rest() {
+  if [ -n "${API:-}" ] && [ -n "${TOKEN:-}" ]; then
+    return 0
+  fi
+  if [ -n "$ORIGIN_REPO_ERROR" ]; then
+    echo "$ORIGIN_REPO_ERROR" >&2
+    return 1
+  fi
+  TOKEN=$(resolve_github_token)
+  if [ -z "$TOKEN" ]; then
+    echo "GitHub PR mode requires gh or a GitHub token available from env/git credential fill." >&2
+    return 1
+  fi
+  case "$ORIGIN_REPO" in
+    */*)
+      OWNER=${ORIGIN_REPO%%/*}
+      REPO=${ORIGIN_REPO#*/}
+      ;;
+    *)
+      echo "Could not resolve standard github.com origin repository for REST fallback." >&2
+      return 1
+      ;;
+  esac
+  API="https://api.github.com/repos/$OWNER/$REPO"
+}
+
+curl_gh_api() {
+  err_file="$1"
+  shift
+  curl -fsS \
+    -H "Accept: application/vnd.github+json" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "$@" 2>"$err_file"
+}
+
+lookup_pr_info() {
+  ref="$1"
+  err_file="$2"
+  if command -v gh >/dev/null 2>&1; then
+    gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$ref" 2>"$err_file"
+    return $?
+  fi
+  if ! init_github_rest 2>"$err_file"; then
+    return 1
+  fi
+  PR_REF_REPO=$(printf '%s\n' "$ref" | sed -nE 's#^[Hh][Tt][Tt][Pp][Ss]://github.com/([^/]+/[^/]+)/pull/[0-9]+/?$#\\1#p' | head -n 1)
+  if [ -n "$PR_REF_REPO" ] && [ "$PR_REF_REPO" != "$ORIGIN_REPO" ]; then
+    echo "Pull request $ref belongs to repo $PR_REF_REPO, want $ORIGIN_REPO." >"$err_file"
+    return 1
+  fi
+  PR_NUMBER=$(printf '%s\n' "$ref" | sed -nE 's#^[Hh][Tt][Tt][Pp][Ss]://github.com/[^/]+/[^/]+/pull/([0-9]+)/?$#\\1#p; s|^#([0-9]+)$|\\1|p; s|^([0-9]+)$|\\1|p' | head -n 1)
+  if [ -z "$PR_NUMBER" ]; then
+    PR_MATCHES=$(curl_gh_api "$err_file" \
+      --get "$API/pulls" \
+      --data-urlencode "state=open" \
+      --data-urlencode "head=$OWNER:$ref" \
+      --data-urlencode "base=$TARGET") || return 1
+    PR_NUMBER=$(printf '%s\n' "$PR_MATCHES" | jq -r '.[0].number // empty')
+  fi
+  if [ -z "$PR_NUMBER" ]; then
+    echo "Pull request $ref was not found." >"$err_file"
+    return 1
+  fi
+  PR_RAW=$(curl_gh_api "$err_file" "$API/pulls/$PR_NUMBER") || return 1
+  printf '%s\n' "$PR_RAW" \
+    | jq '{url:.html_url, number, state:(.state | ascii_upcase), headRefName:.head.ref, baseRefName:.base.ref, headRepositoryOwner:{login:.head.repo.owner.login}, headRepository:{name:.head.repo.name}}'
 }
 
 if [ "$MERGE_STRATEGY" = "mr" ] && [ -n "$EXISTING_PR" ]; then
@@ -450,17 +556,21 @@ if [ "$MERGE_STRATEGY" = "mr" ] && [ -n "$EXISTING_PR" ]; then
   fi
 
   if [ -z "$ORIGIN_REPO" ]; then
+    [ -n "$ORIGIN_REPO_ERROR" ] && echo "$ORIGIN_REPO_ERROR"
     echo "Could not resolve origin repository for existing PR validation. STOP. Debug and retry without mutating bead state."
     gc runtime drain-ack
     exit 1
   fi
 
   EXISTING_PR_ERR=$(mktemp)
-  EXISTING_PR_INFO=$(gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$EXISTING_PR" 2>"$EXISTING_PR_ERR")
+  EXISTING_PR_INFO=$(lookup_pr_info "$EXISTING_PR" "$EXISTING_PR_ERR")
   EXISTING_PR_STATUS=$?
   EXISTING_PR_ERROR=$(cat "$EXISTING_PR_ERR")
   rm -f "$EXISTING_PR_ERR"
   if [ "$EXISTING_PR_STATUS" -ne 0 ] || [ -z "$EXISTING_PR_INFO" ]; then
+    if pr_lookup_repo_mismatch "$EXISTING_PR_ERROR"; then
+      block_existing_pr "Existing PR $EXISTING_PR is not in $ORIGIN_REPO. $EXISTING_PR_ERROR"
+    fi
     if pr_lookup_missing "$EXISTING_PR_ERROR"; then
       block_existing_pr "Existing PR $EXISTING_PR was not found or is not accessible."
     fi
@@ -492,6 +602,13 @@ if [ "$MERGE_STRATEGY" = "mr" ] && [ -n "$EXISTING_PR" ]; then
   if [ "$EXISTING_PR_HEAD_REPO" != "$ORIGIN_REPO" ]; then
     block_existing_pr "Existing PR $EXISTING_PR head repo $EXISTING_PR_HEAD_REPO, want $ORIGIN_REPO."
   fi
+fi
+
+if [ "$MERGE_STRATEGY" = "mr" ] && [ -z "$ORIGIN_REPO" ]; then
+  [ -n "$ORIGIN_REPO_ERROR" ] && echo "$ORIGIN_REPO_ERROR"
+  echo "Could not resolve origin repository for pull-request handoff. STOP. Debug and retry without mutating bead state."
+  gc runtime drain-ack
+  exit 1
 fi
 ```
 
@@ -555,41 +672,131 @@ fetch. STOP, fetch the latest branch, rebase your temp branch again, and
 retry with `--force-with-lease`. Do not use plain `--force`.
 
 **2. Reuse, create, or discover the pull request:**
+
+Read the bead's description and notes once and stage them into a PR body
+file (using `--body-file` avoids quoting/encoding hazards with multi-line
+markdown). The body always carries the bead's full description (the
+"why"), and includes the polecat's implementation notes (the "what")
+when present.
+
 ```bash
-EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')
-ISSUE_TITLE=$(gc bd show $WORK --json | jq -r '.[0].title')
-PR_BODY=$(cat <<EOF
-## Summary
+WORK_JSON=$(gc bd show $WORK --json)
+EXISTING_PR=$(printf '%s' "$WORK_JSON" | jq -r '.[0].metadata.existing_pr // empty')
+ISSUE_TITLE=$(printf '%s' "$WORK_JSON" | jq -r '.[0].title')
+ISSUE_DESC=$(printf '%s' "$WORK_JSON" | jq -r '.[0].description // empty')
+ISSUE_NOTES=$(printf '%s' "$WORK_JSON" | jq -r '.[0].notes // empty')
+ISSUE_TYPE=$(printf '%s' "$WORK_JSON" | jq -r '.[0].issue_type // "task"')
+ISSUE_PRIORITY=$(printf '%s' "$WORK_JSON" | jq -r '.[0].priority // empty')
 
-Automated pull request published by Gastown Refinery.
-
-- Issue: $WORK
-- Branch: $BRANCH
-- Target: $TARGET
-
-EOF
-)
+PR_BODY_FILE=$(mktemp)
+{
+  echo "## Summary"
+  echo
+  if [ -n "$ISSUE_DESC" ]; then
+    printf '%s\n' "$ISSUE_DESC"
+  else
+    printf 'Refinery handoff for `%s` (no bead description recorded).\n' "$WORK"
+  fi
+  if [ -n "$ISSUE_NOTES" ]; then
+    echo
+    echo "## Implementation notes"
+    echo
+    printf '%s\n' "$ISSUE_NOTES"
+  fi
+  echo
+  echo "## Refinery handoff"
+  echo
+  printf -- '- Issue: `%s` (%s%s)\n' "$WORK" "$ISSUE_TYPE" "${ISSUE_PRIORITY:+, P$ISSUE_PRIORITY}"
+  printf -- '- Source branch: `%s`\n' "$BRANCH"
+  printf -- '- Target: `%s`\n' "$TARGET"
+  printf -- '- Rebased on `%s` via Gastown Refinery.\n' "$TARGET"
+} > "$PR_BODY_FILE"
 
 if [ -n "$EXISTING_PR" ]; then
   PR_REF="$EXISTING_PR"
 else
-  PR_URL=$(gh pr create \
-    --base "$TARGET" \
-    --head "$BRANCH" \
-    --title "$ISSUE_TITLE ($WORK)" \
-    --body "$PR_BODY" 2>/dev/null || true)
+  if command -v gh >/dev/null 2>&1; then
+    PR_URL=$(gh pr create \
+      --base "$TARGET" \
+      --head "$BRANCH" \
+      --title "$ISSUE_TITLE ($WORK)" \
+      --body-file "$PR_BODY_FILE" 2>/dev/null || true)
 
-  if [ -z "$PR_URL" ]; then
-    PR_URL=$(gh pr view "$BRANCH" --json url -q '.url')
+    if [ -z "$PR_URL" ]; then
+      PR_URL=$(gh pr view "$BRANCH" --json url -q '.url')
+    fi
+  else
+    PR_ERR=$(mktemp)
+    if ! init_github_rest 2>"$PR_ERR"; then
+      cat "$PR_ERR"
+      rm -f "$PR_ERR"
+      gc runtime drain-ack
+      exit 1
+    fi
+    EXISTING=$(curl_gh_api "$PR_ERR" \
+      --get "$API/pulls" \
+      --data-urlencode "state=open" \
+      --data-urlencode "head=$OWNER:$BRANCH" \
+      --data-urlencode "base=$TARGET")
+    PR_STATUS=$?
+    PR_ERROR=$(cat "$PR_ERR")
+    if [ "$PR_STATUS" -ne 0 ]; then
+      echo "GitHub API request failed while checking for an existing PR for $BRANCH."
+      [ -n "$PR_ERROR" ] && echo "$PR_ERROR"
+      rm -f "$PR_ERR"
+      gc runtime drain-ack
+      exit 1
+    fi
+    PR_NUMBER=$(printf '%s\n' "$EXISTING" | jq -r '.[0].number // empty')
+    if [ -z "$PR_NUMBER" ]; then
+      CREATE_PAYLOAD=$(jq -n \
+        --arg title "$ISSUE_TITLE ($WORK)" \
+        --arg head "$BRANCH" \
+        --arg base "$TARGET" \
+        --rawfile body "$PR_BODY_FILE" \
+        '{title:$title, head:$head, base:$base, body:$body}')
+      CREATED=$(curl_gh_api "$PR_ERR" \
+        -X POST "$API/pulls" \
+        -d "$CREATE_PAYLOAD")
+      PR_STATUS=$?
+      PR_ERROR=$(cat "$PR_ERR")
+      if [ "$PR_STATUS" -ne 0 ]; then
+        echo "GitHub API request failed while creating a PR for $BRANCH."
+        [ -n "$PR_ERROR" ] && echo "$PR_ERROR"
+        rm -f "$PR_ERR"
+        gc runtime drain-ack
+        exit 1
+      fi
+      PR_NUMBER=$(printf '%s\n' "$CREATED" | jq -r '.number // empty')
+      if [ -z "$PR_NUMBER" ]; then
+        echo "GitHub API response did not include a pull request number."
+        rm -f "$PR_ERR"
+        gc runtime drain-ack
+        exit 1
+      fi
+    fi
+    PR_RAW=$(curl_gh_api "$PR_ERR" "$API/pulls/$PR_NUMBER")
+    PR_STATUS=$?
+    PR_ERROR=$(cat "$PR_ERR")
+    rm -f "$PR_ERR"
+    if [ "$PR_STATUS" -ne 0 ]; then
+      echo "GitHub API request failed while reading PR $PR_NUMBER."
+      [ -n "$PR_ERROR" ] && echo "$PR_ERROR"
+      gc runtime drain-ack
+      exit 1
+    fi
+    PR_URL=$(printf '%s\n' "$PR_RAW" | jq -r '.html_url // empty')
   fi
   PR_REF="$BRANCH"
 fi
+
+rm -f "$PR_BODY_FILE"
 ```
 
 **3. Verify the pull request exists:**
 ```bash
 PR_ERR=$(mktemp)
-PR_INFO=$(gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$PR_REF" 2>"$PR_ERR")
+PR_INFO=$(lookup_pr_info "$PR_REF" "$PR_ERR")
 PR_STATUS=$?
 PR_ERROR=$(cat "$PR_ERR")
 rm -f "$PR_ERR"
