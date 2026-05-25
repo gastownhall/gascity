@@ -4751,10 +4751,30 @@ func writeMultiRecordDoltStub(t *testing.T, binDir string, currentCount int) {
 
 func writeIssuesPayloadDoltStub(t *testing.T, binDir, issuesPayload string) {
 	t.Helper()
+	writeIssuesPayloadDoltStubWithPrelude(t, binDir, issuesPayload, "")
+}
+
+func writeOriginRemovingMultiRecordDoltStub(t *testing.T, binDir string, currentCount int) {
+	t.Helper()
+	rows := make([]string, 0, currentCount)
+	for i := 0; i < currentCount; i++ {
+		rows = append(rows, fmt.Sprintf(`{"id":"c%d","title":"cur-%d"}`, i, i))
+	}
+	writeIssuesPayloadDoltStubWithPrelude(t, binDir, `{"rows":[`+strings.Join(rows, ",")+`]}`, `
+if [ -n "${DOLT_REMOVE_ORIGIN_FLAG:-}" ] && [ ! -e "$DOLT_REMOVE_ORIGIN_FLAG" ]; then
+  : > "$DOLT_REMOVE_ORIGIN_FLAG"
+  git -C "$GC_JSONL_ARCHIVE_REPO" remote remove origin 2>/dev/null || true
+fi
+`)
+}
+
+func writeIssuesPayloadDoltStubWithPrelude(t *testing.T, binDir, issuesPayload, prelude string) {
+	t.Helper()
 	body := "#!/bin/sh\n" +
 		"if [ -n \"${DOLT_ARGS_LOG:-}\" ]; then\n" +
 		"  printf '%s\\n' \"$*\" >> \"$DOLT_ARGS_LOG\"\n" +
 		"fi\n" +
+		prelude +
 		"case \"$*\" in\n" +
 		"  *\"SHOW TABLES FROM\"*\"LIKE 'wisps'\"*)\n" +
 		"    printf 'Tables_in_db\\nwisps\\n'\n" +
@@ -7080,6 +7100,105 @@ func TestJsonlExportPushModeAttemptsPushWhenOriginConfigured(t *testing.T) {
 	}
 	if got := state["last_logged_mode"]; got != "push" {
 		t.Fatalf("last_logged_mode = %v, want push\nstate: %s", got, stateData)
+	}
+}
+
+func TestJsonlExportPushModeMemoizesOriginForRun(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+	originRemovedFlag := filepath.Join(t.TempDir(), "origin-removed")
+
+	initSeedArchiveWithRemote(t, archiveRepo)
+	writeOriginRemovingMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["GC_JSONL_MIN_PREV_FOR_SPIKE"] = "1000"
+	env["DOLT_REMOVE_ORIGIN_FLAG"] = originRemovedFlag
+
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
+	}
+
+	if !strings.Contains(string(out), "archive running in push mode") {
+		t.Fatalf("expected first mode probe to log push mode, got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "push: failed") {
+		t.Fatalf("expected cached push mode to still attempt push after origin removal, got:\n%s", out)
+	}
+	if strings.Contains(string(out), "push: skipped (local-only)") {
+		t.Fatalf("cached push mode must not fall back to local-only mid-run, got:\n%s", out)
+	}
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got := state["last_logged_mode"]; got != "push" {
+		t.Fatalf("last_logged_mode = %v, want push\nstate: %s", got, stateData)
+	}
+	if got, ok := state["consecutive_push_failures"].(float64); !ok || got != 1 {
+		t.Fatalf("consecutive_push_failures = %v, want 1\nstate: %s", state["consecutive_push_failures"], stateData)
+	}
+}
+
+func TestJsonlExportModeRelogIntervalOverrideRelogsSameMode(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	initSeedArchive(t, archiveRepo, 3)
+	writeMultiRecordDoltStub(t, binDir, 3)
+	writeJsonlExportGCStub(t, binDir)
+
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(state dir): %v", err)
+	}
+	priorState := `{"last_logged_mode":"local-only","last_logged_at":"2026-05-01T00:00:00Z"}` + "\n"
+	if err := os.WriteFile(stateFile, []byte(priorState), 0o644); err != nil {
+		t.Fatalf("WriteFile(state file): %v", err)
+	}
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["GC_JSONL_MODE_RELOG_INTERVAL"] = "1"
+	delete(env, "GC_JSONL_MAX_PUSH_FAILURES")
+
+	out, err := runScriptResult(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+	if err != nil {
+		t.Fatalf("jsonl-export.sh: %v\n%s", err, out)
+	}
+
+	if !strings.Contains(string(out), "archive running in local-only mode") {
+		t.Fatalf("expected expired override interval to re-log local-only mode, got:\n%s", out)
+	}
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got := state["last_logged_mode"]; got != "local-only" {
+		t.Fatalf("last_logged_mode = %v, want local-only\nstate: %s", got, stateData)
+	}
+	if got := state["last_logged_at"]; got == "2026-05-01T00:00:00Z" {
+		t.Fatalf("last_logged_at not refreshed after interval expiry\nstate: %s", stateData)
 	}
 }
 

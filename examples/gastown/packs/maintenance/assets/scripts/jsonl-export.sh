@@ -36,7 +36,7 @@ ARCHIVE_REPO="${GC_JSONL_ARCHIVE_REPO:-$PACK_STATE_DIR/jsonl-archive}"
 # Re-log the archive mode at least this often (seconds) even without a mode
 # transition, so operators who missed the first line still see the current
 # configuration. Default one week.
-WEEKLY_RELOG_SECONDS="${GC_JSONL_MODE_RELOG_INTERVAL:-604800}"
+MODE_RELOG_INTERVAL_SECONDS="${GC_JSONL_MODE_RELOG_INTERVAL:-604800}"
 
 # Cached archive mode ("push" or "local-only"). Resolved once on the first
 # get_archive_mode call and reused thereafter so every push checkpoint in a
@@ -286,9 +286,8 @@ archive_has_local_only_commits() {
 # no extra command. The result is memoized in ARCHIVE_MODE on first call so
 # every push checkpoint within a single run agrees, even if the remote changes
 # mid-run.
-get_archive_mode() {
+resolve_archive_mode() {
     if [ -n "$ARCHIVE_MODE" ]; then
-        echo "$ARCHIVE_MODE"
         return
     fi
     if [ -d "$ARCHIVE_REPO/.git" ] \
@@ -297,11 +296,16 @@ get_archive_mode() {
     else
         ARCHIVE_MODE="local-only"
     fi
+}
+
+get_archive_mode() {
+    resolve_archive_mode
     echo "$ARCHIVE_MODE"
 }
 
 should_attempt_push() {
-    [ "$(get_archive_mode)" = "push" ]
+    resolve_archive_mode
+    [ "$ARCHIVE_MODE" = "push" ]
 }
 
 # Log the archive mode on transitions and re-log weekly so operators who
@@ -320,7 +324,8 @@ log_archive_mode_if_needed() {
     local should_log=0
     local message
 
-    current_mode=$(get_archive_mode)
+    resolve_archive_mode
+    current_mode="$ARCHIVE_MODE"
     state_json=$(read_state_json)
     last_logged_mode=$(printf '%s\n' "$state_json" | jq -r '.last_logged_mode // empty')
     last_logged_at=$(printf '%s\n' "$state_json" | jq -r '.last_logged_at // empty')
@@ -335,7 +340,7 @@ log_archive_mode_if_needed() {
         should_log=1
     else
         last_ts=$(jq -n -r --arg ts "$last_logged_at" '$ts | try fromdateiso8601 catch 0')
-        if [ "$last_ts" = "0" ] || [ "$((now_ts - last_ts))" -gt "$WEEKLY_RELOG_SECONDS" ]; then
+        if [ "$last_ts" = "0" ] || [ "$((now_ts - last_ts))" -gt "$MODE_RELOG_INTERVAL_SECONDS" ]; then
             should_log=1
         fi
     fi
