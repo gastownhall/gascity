@@ -316,14 +316,6 @@ append_fragments = ["footer"]
 			want: "[agents] is a city.toml compatibility alias for [agent_defaults], not a pack.toml field",
 		},
 		{
-			name: "default_rig_imports",
-			packBody: `
-[defaults.rig.imports.ops]
-source = "../ops"
-`,
-			want: "[defaults.rig.imports] belongs in city.toml, not pack.toml",
-		},
-		{
 			name: "formulas_dir",
 			packBody: `
 [formulas]
@@ -373,6 +365,82 @@ schema = 2
 			}
 		})
 	}
+}
+
+func TestLoadWithIncludesRejectsNestedPackDefaultRigImports(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "test"
+schema = 2
+
+[imports.ops]
+source = "packs/ops"
+`)
+	fs.Files["/city/packs/ops/pack.toml"] = []byte(`
+[pack]
+name = "ops"
+schema = 2
+
+[defaults.rig.imports.worker]
+source = "../worker"
+`)
+
+	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err == nil {
+		t.Fatal("expected LoadWithIncludes to reject nested pack default rig imports")
+	}
+	if !strings.Contains(err.Error(), "[defaults.rig.imports] belongs in city.toml, not pack.toml") {
+		t.Fatalf("error = %v, want nested default rig import rejection", err)
+	}
+}
+
+func TestLoadWithIncludesAllowsLegacyRootPackDefaultRigImports(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "test"
+schema = 2
+
+[defaults.rig.imports.ops]
+source = "packs/ops"
+`)
+	fs.Files["/city/packs/ops/pack.toml"] = []byte(`
+[pack]
+name = "ops"
+schema = 2
+`)
+
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if got := cfg.DefaultRigImports["ops"].Source; got != "packs/ops" {
+		t.Fatalf("DefaultRigImports[ops].Source = %q, want packs/ops", got)
+	}
+	if len(cfg.DefaultRigImportOrder) != 1 || cfg.DefaultRigImportOrder[0] != "ops" {
+		t.Fatalf("DefaultRigImportOrder = %#v, want [ops]", cfg.DefaultRigImportOrder)
+	}
+	if !configWarningsContain(prov.Warnings, "root pack.toml is deprecated") {
+		t.Fatalf("warnings = %#v, want root pack default-rig deprecation warning", prov.Warnings)
+	}
+}
+
+func configWarningsContain(warnings []string, substr string) bool {
+	for _, warning := range warnings {
+		if strings.Contains(warning, substr) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestLoadWithIncludes_ConcatRigs(t *testing.T) {

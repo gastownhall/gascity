@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"maps"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -55,6 +57,7 @@ func ExecCommandRunner() CommandRunner {
 func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		start := time.Now()
+		cmdEnv := bdSubprocessEnvForCommand(name, args, env)
 		trace := func(status string, err error) {
 			path := strings.TrimSpace(os.Getenv("GC_BD_TRACE"))
 			if path == "" {
@@ -92,11 +95,17 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 		cmd.Cancel = func() error {
 			return killCommandTree(cmd)
 		}
-		if len(env) > 0 {
-			cmd.Env = mergeEnv(os.Environ(), env)
+		if len(cmdEnv) > 0 {
+			cmd.Env = mergeEnv(os.Environ(), cmdEnv)
 		}
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
+		unlockBDList, lockErr := acquireBDListReadLock(ctx, dir, name, args, cmdEnv)
+		if lockErr != nil {
+			trace("error", lockErr)
+			return nil, lockErr
+		}
+		defer unlockBDList()
 		out, err := cmd.Output()
 		if name == "bd" {
 			telemetry.RecordBDCall(context.Background(),
@@ -144,6 +153,43 @@ func bdTelemetryAgentID(env map[string]string) string {
 	return ""
 }
 
+// BdSubprocessEnvForCommand applies GC's bd subprocess guard policy for a
+// command without mutating the caller's env map.
+func BdSubprocessEnvForCommand(name string, args []string, env map[string]string) map[string]string {
+	return bdSubprocessEnvForCommand(name, args, env)
+}
+
+// bdSubprocessEnvForCommand applies process-level guards around bd subprocesses
+// so GC callers do not depend solely on per-store bd config to suppress
+// expensive write-side effects.
+func bdSubprocessEnvForCommand(name string, args []string, env map[string]string) map[string]string {
+	if name != "bd" {
+		return env
+	}
+	cmdEnv := maps.Clone(env)
+	if cmdEnv == nil {
+		cmdEnv = map[string]string{}
+	}
+	for _, kv := range []struct {
+		key   string
+		value string
+	}{
+		{"BEADS_NO_AUTO_IMPORT", "1"},
+		{"BD_EXPORT_AUTO", "false"},
+		{"BD_BACKUP_ENABLED", "false"},
+		{"BD_DOLT_AUTO_PUSH", "false"},
+		{"BD_NO_PUSH", "true"},
+		{"BD_NO_GIT_OPS", "true"},
+	} {
+		cmdEnv[kv.key] = kv.value
+	}
+	if bdCommandReadOnly(args) {
+		cmdEnv["BD_DOLT_AUTO_COMMIT"] = "off"
+		cmdEnv["BD_READONLY"] = "true"
+	}
+	return cmdEnv
+}
+
 func bdCommandTimeoutFor(name string, args []string) time.Duration {
 	if name != "bd" || len(args) == 0 {
 		return bdCommandTimeout
@@ -151,12 +197,128 @@ func bdCommandTimeoutFor(name string, args []string) time.Duration {
 	if len(args) >= 2 && args[0] == "create" && args[1] == "--graph" {
 		return bdGraphApplyCommandTimeout
 	}
-	switch args[0] {
-	case "count", "list", "ready", "show", "stats":
+	if bdCommandReadOnly(args) {
 		return bdReadCommandTimeout
-	default:
-		return bdCommandTimeout
 	}
+	return bdCommandTimeout
+}
+
+func bdCommandReadOnly(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "count", "list", "query", "ready", "show", "stats":
+		return true
+	case "dep":
+		return len(args) >= 2 && args[1] == "list"
+	default:
+		return false
+	}
+}
+
+func bdCommandThrottleList(args []string) bool {
+	return len(args) > 0 && args[0] == "list"
+}
+
+// AcquireBdListReadLock serializes top-level bd list calls for the target
+// .beads directory and returns an unlock function. Non-bd-list commands return
+// a no-op unlock.
+func AcquireBdListReadLock(ctx context.Context, dir, name string, args []string, env map[string]string) (func(), error) {
+	return acquireBDListReadLock(ctx, dir, name, args, env)
+}
+
+// acquireBDListReadLock serializes top-level bd list calls for the target
+// .beads directory. bd list is the high-fanout read path during cache primes
+// and raw gc bd list invocations, so this throttles subprocess pileups without
+// blocking unrelated bd mutations.
+func acquireBDListReadLock(ctx context.Context, dir, name string, args []string, env map[string]string) (func(), error) {
+	if name != "bd" || !bdCommandThrottleList(args) {
+		return func() {}, nil
+	}
+	lockFile, lockPath, err := openBDListReadLockFile(dir, env)
+	if err != nil {
+		return nil, err
+	}
+	locked := false
+	defer func() {
+		if !locked {
+			_ = lockFile.Close()
+		}
+	}()
+
+	for {
+		err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			locked = true
+			return func() {
+				_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+				_ = lockFile.Close()
+			}, nil
+		}
+		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+			return nil, fmt.Errorf("bd list lock %s: %w", lockPath, err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("bd list lock %s: %w", lockPath, ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func openBDListReadLockFile(dir string, env map[string]string) (*os.File, string, error) {
+	primary := bdListReadLockPath(dir, env)
+	lockFile, err := createBDListReadLockFile(primary)
+	if err == nil {
+		return lockFile, primary, nil
+	}
+	fallback := bdListReadFallbackLockPath(dir, env)
+	if fallback == primary {
+		return nil, "", fmt.Errorf("open bd list lock %s: %w", primary, err)
+	}
+	lockFile, fallbackErr := createBDListReadLockFile(fallback)
+	if fallbackErr != nil {
+		return nil, "", fmt.Errorf("open bd list lock %s: %v; fallback %s: %w", primary, err, fallback, fallbackErr)
+	}
+	return lockFile, fallback, nil
+}
+
+func createBDListReadLockFile(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+}
+
+func bdListReadLockPath(dir string, env map[string]string) string {
+	runtimeDir := strings.TrimSpace(env["GC_CITY_RUNTIME_DIR"])
+	if runtimeDir == "" {
+		runtimeDir = filepath.Join(dir, ".gc", "runtime")
+	}
+	target := strings.TrimSpace(env["BEADS_DIR"])
+	if target == "" {
+		target = filepath.Join(dir, ".beads")
+	}
+	return filepath.Join(runtimeDir, bdListReadLockName(target))
+}
+
+func bdListReadFallbackLockPath(dir string, env map[string]string) string {
+	target := strings.TrimSpace(env["BEADS_DIR"])
+	if target == "" {
+		target = filepath.Join(dir, ".beads")
+	}
+	return filepath.Join(os.TempDir(), "gc-"+bdListReadLockName(target))
+}
+
+func bdListReadLockName(target string) string {
+	cleanTarget := filepath.Clean(target)
+	if abs, err := filepath.Abs(cleanTarget); err == nil {
+		cleanTarget = abs
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(cleanTarget))
+	return "bd-list-read-" + strconv.FormatUint(h.Sum64(), 16) + ".flock"
 }
 
 // bdStdoutErrorDetail extracts a human-readable error description from

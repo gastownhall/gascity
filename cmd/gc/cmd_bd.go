@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -93,6 +95,14 @@ var bdBeadExists = func(cityPath string, target execStoreTarget, beadID string) 
 }
 
 func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]string, error) {
+	overrides, err := bdCommandEnvOverrides(cityPath, cfg, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	return mergeRuntimeEnv(os.Environ(), overrides), nil
+}
+
+func bdCommandEnvOverrides(cityPath string, cfg *config.City, target execStoreTarget, bdArgs []string) (map[string]string, error) {
 	var overrides map[string]string
 	var err error
 	if target.ScopeKind == "rig" {
@@ -112,7 +122,7 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]
 	overrides["GC_STORE_SCOPE"] = target.ScopeKind
 	overrides["GC_BEADS_PREFIX"] = target.Prefix
 	applyExportSuppressionEnv(overrides)
-	return mergeRuntimeEnv(os.Environ(), overrides), nil
+	return beads.BdSubprocessEnvForCommand("bd", bdArgs, overrides), nil
 }
 
 func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execStoreTarget) {
@@ -186,12 +196,19 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// (close path) — both go through this handoff.
 	stderrScan := &headLimitedWriter{limit: bdStderrScanLimit}
 	cmd.Stderr = io.MultiWriter(stderr, stderrScan)
-	env, err := bdCommandEnv(cityPath, cfg, target)
+	overrides, err := bdCommandEnvOverrides(cityPath, cfg, target, bdArgs)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	env := mergeRuntimeEnv(os.Environ(), overrides)
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
+	unlockBDList, lockErr := beads.AcquireBdListReadLock(context.Background(), cmd.Dir, "bd", bdArgs, overrides)
+	if lockErr != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", lockErr) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer unlockBDList()
 
 	runErr := cmd.Run()
 

@@ -578,12 +578,28 @@ name = "demo"
 	script := filepath.Join(binDir, "bd")
 	if err := os.WriteFile(script, []byte(`#!/bin/sh
 set -eu
-if [ "${BD_EXPORT_AUTO:-}" != "false" ]; then
-  echo "BD_EXPORT_AUTO=${BD_EXPORT_AUTO:-}" >&2
-  exit 73
-fi
+for kv in \
+  "BD_EXPORT_AUTO=false" \
+  "BD_DOLT_AUTO_PUSH=false" \
+  "BD_BACKUP_ENABLED=false" \
+  "BD_NO_PUSH=true" \
+  "BD_NO_GIT_OPS=true" \
+  "BEADS_NO_AUTO_IMPORT=1"
+do
+  key=${kv%%=*}
+  want=${kv#*=}
+  eval "got=\${$key:-}"
+  if [ "$got" != "$want" ]; then
+    echo "$key=$got want $want" >&2
+    exit 73
+  fi
+done
 case "${1:-}" in
   show)
+    if [ "${BD_DOLT_AUTO_COMMIT:-}" != "off" ] || [ "${BD_READONLY:-}" != "true" ]; then
+      echo "read env BD_DOLT_AUTO_COMMIT=${BD_DOLT_AUTO_COMMIT:-} BD_READONLY=${BD_READONLY:-}" >&2
+      exit 74
+    fi
     printf '[{"id":"gc-1","title":"ok"}]\n'
     ;;
   update)
@@ -599,6 +615,13 @@ esac
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("BD_EXPORT_AUTO", "true")
+	t.Setenv("BD_DOLT_AUTO_PUSH", "true")
+	t.Setenv("BD_BACKUP_ENABLED", "true")
+	t.Setenv("BD_NO_PUSH", "false")
+	t.Setenv("BD_NO_GIT_OPS", "false")
+	t.Setenv("BEADS_NO_AUTO_IMPORT", "0")
+	t.Setenv("BD_DOLT_AUTO_COMMIT", "on")
+	t.Setenv("BD_READONLY", "false")
 
 	for _, args := range [][]string{
 		{"show", "gc-1", "--json"},

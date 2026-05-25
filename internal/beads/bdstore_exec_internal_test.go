@@ -5,6 +5,7 @@ package beads
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,6 +48,12 @@ func TestBDCommandTimeoutForReadCommands(t *testing.T) {
 	if got := bdCommandTimeoutFor("bd", []string{"ready", "--json"}); got != bdReadCommandTimeout {
 		t.Fatalf("bd ready timeout = %s, want %s", got, bdReadCommandTimeout)
 	}
+	if got := bdCommandTimeoutFor("bd", []string{"query", "--json", "ephemeral=true"}); got != bdReadCommandTimeout {
+		t.Fatalf("bd query timeout = %s, want %s", got, bdReadCommandTimeout)
+	}
+	if got := bdCommandTimeoutFor("bd", []string{"dep", "list", "gc-1", "--json"}); got != bdReadCommandTimeout {
+		t.Fatalf("bd dep list timeout = %s, want %s", got, bdReadCommandTimeout)
+	}
 	if got := bdCommandTimeoutFor("bd", []string{"update", "gc-1", "--status", "open"}); got != bdCommandTimeout {
 		t.Fatalf("bd update timeout = %s, want %s", got, bdCommandTimeout)
 	}
@@ -58,6 +65,165 @@ func TestBDCommandTimeoutForReadCommands(t *testing.T) {
 func TestBDCommandTimeoutForGraphApply(t *testing.T) {
 	if got := bdCommandTimeoutFor("bd", []string{"create", "--graph", "/tmp/plan.json", "--json"}); got != bdGraphApplyCommandTimeout {
 		t.Fatalf("bd create --graph timeout = %s, want %s", got, bdGraphApplyCommandTimeout)
+	}
+}
+
+func TestBDSubprocessEnvSuppressesSideEffectsForReadCommands(t *testing.T) {
+	base := map[string]string{
+		"BD_BACKUP_ENABLED":     "true",
+		"BD_DOLT_AUTO_COMMIT":   "on",
+		"BD_DOLT_AUTO_PUSH":     "true",
+		"BD_EXPORT_AUTO":        "true",
+		"BD_NO_GIT_OPS":         "false",
+		"BD_NO_PUSH":            "false",
+		"BD_READONLY":           "false",
+		"BEADS_NO_AUTO_IMPORT":  "0",
+		"GC_CITY_RUNTIME_DIR":   "/city/.gc/runtime",
+		"UNRELATED_TEST_MARKER": "keep",
+	}
+
+	got := bdSubprocessEnvForCommand("bd", []string{"list", "--json"}, base)
+	want := map[string]string{
+		"BD_BACKUP_ENABLED":    "false",
+		"BD_DOLT_AUTO_COMMIT":  "off",
+		"BD_DOLT_AUTO_PUSH":    "false",
+		"BD_EXPORT_AUTO":       "false",
+		"BD_NO_GIT_OPS":        "true",
+		"BD_NO_PUSH":           "true",
+		"BD_READONLY":          "true",
+		"BEADS_NO_AUTO_IMPORT": "1",
+	}
+	for key, wantValue := range want {
+		if got[key] != wantValue {
+			t.Fatalf("%s = %q, want %q in %#v", key, got[key], wantValue, got)
+		}
+	}
+	if got["UNRELATED_TEST_MARKER"] != "keep" {
+		t.Fatalf("unrelated env marker = %q, want keep", got["UNRELATED_TEST_MARKER"])
+	}
+	if base["BD_EXPORT_AUTO"] != "true" {
+		t.Fatalf("bdSubprocessEnvForCommand mutated input map: %#v", base)
+	}
+}
+
+func TestBDSubprocessEnvLeavesMutationAutoCommitPolicyUnset(t *testing.T) {
+	got := bdSubprocessEnvForCommand("bd", []string{"update", "gc-1", "--status", "closed"}, nil)
+	if _, ok := got["BD_DOLT_AUTO_COMMIT"]; ok {
+		t.Fatalf("BD_DOLT_AUTO_COMMIT set for mutation command: %#v", got)
+	}
+	if _, ok := got["BD_READONLY"]; ok {
+		t.Fatalf("BD_READONLY set for mutation command: %#v", got)
+	}
+	if got["BD_EXPORT_AUTO"] != "false" || got["BD_DOLT_AUTO_PUSH"] != "false" || got["BD_NO_PUSH"] != "true" {
+		t.Fatalf("side-effect suppression missing for mutation command: %#v", got)
+	}
+}
+
+func TestExecCommandRunnerAppliesBDReadOnlyEnv(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh unavailable")
+	}
+
+	binDir := t.TempDir()
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf 'BD_EXPORT_AUTO=%s\n' "${BD_EXPORT_AUTO:-}"
+printf 'BD_DOLT_AUTO_PUSH=%s\n' "${BD_DOLT_AUTO_PUSH:-}"
+printf 'BD_BACKUP_ENABLED=%s\n' "${BD_BACKUP_ENABLED:-}"
+printf 'BD_NO_PUSH=%s\n' "${BD_NO_PUSH:-}"
+printf 'BD_NO_GIT_OPS=%s\n' "${BD_NO_GIT_OPS:-}"
+printf 'BEADS_NO_AUTO_IMPORT=%s\n' "${BEADS_NO_AUTO_IMPORT:-}"
+printf 'BD_DOLT_AUTO_COMMIT=%s\n' "${BD_DOLT_AUTO_COMMIT:-}"
+printf 'BD_READONLY=%s\n' "${BD_READONLY:-}"
+`)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_EXPORT_AUTO", "true")
+	t.Setenv("BD_DOLT_AUTO_PUSH", "true")
+	t.Setenv("BD_BACKUP_ENABLED", "true")
+	t.Setenv("BD_DOLT_AUTO_COMMIT", "on")
+	t.Setenv("BD_READONLY", "false")
+
+	dir := t.TempDir()
+	runner := ExecCommandRunnerWithEnv(map[string]string{
+		"BEADS_DIR":           filepath.Join(dir, ".beads"),
+		"GC_CITY_RUNTIME_DIR": filepath.Join(dir, ".gc", "runtime"),
+	})
+	out, err := runner(dir, "bd", "list", "--json")
+	if err != nil {
+		t.Fatalf("ExecCommandRunner bd list: %v", err)
+	}
+	got := parseEnvOutput(string(out))
+	want := map[string]string{
+		"BD_BACKUP_ENABLED":    "false",
+		"BD_DOLT_AUTO_COMMIT":  "off",
+		"BD_DOLT_AUTO_PUSH":    "false",
+		"BD_EXPORT_AUTO":       "false",
+		"BD_NO_GIT_OPS":        "true",
+		"BD_NO_PUSH":           "true",
+		"BD_READONLY":          "true",
+		"BEADS_NO_AUTO_IMPORT": "1",
+	}
+	for key, wantValue := range want {
+		if got[key] != wantValue {
+			t.Fatalf("%s = %q, want %q; output:\n%s", key, got[key], wantValue, out)
+		}
+	}
+}
+
+func TestExecCommandRunnerSerializesBDList(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh unavailable")
+	}
+
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	activeDir := filepath.Join(stateDir, "active")
+	violationPath := filepath.Join(stateDir, "overlap")
+	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "list" ]; then
+  if mkdir %q 2>/dev/null; then
+    sleep 0.15
+    rmdir %q
+    printf '[]\n'
+    exit 0
+  fi
+  printf 'overlap\n' >> %q
+  printf '[]\n'
+  exit 0
+fi
+printf '[]\n'
+`, activeDir, activeDir, violationPath))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dir := t.TempDir()
+	runner := ExecCommandRunnerWithEnv(map[string]string{
+		"BEADS_DIR":           filepath.Join(dir, ".beads"),
+		"GC_CITY_RUNTIME_DIR": filepath.Join(dir, ".gc", "runtime"),
+	})
+	const workers = 4
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := runner(dir, "bd", "list", "--json")
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("bd list runner error: %v", err)
+		}
+	}
+	if data, err := os.ReadFile(violationPath); err == nil {
+		t.Fatalf("bd list subprocesses overlapped despite flock: %s", data)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read overlap marker: %v", err)
 	}
 }
 
@@ -201,6 +367,17 @@ func writeExecutable(t *testing.T, path, body string) {
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatalf("write executable %s: %v", path, err)
 	}
+}
+
+func parseEnvOutput(out string) map[string]string {
+	result := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if ok {
+			result[key] = value
+		}
+	}
+	return result
 }
 
 type beadsRecordingLogExporter struct {
