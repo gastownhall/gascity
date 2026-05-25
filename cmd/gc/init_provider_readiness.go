@@ -502,7 +502,7 @@ var initRunVersion = func(binary string) (string, error) {
 // Minimum versions for beads-provider binaries.
 const (
 	doltMinVersion = doltversion.ManagedMin // sql-server features used by gc-beads-bd
-	bdMinVersion   = "1.0.0"                // BdStore shell-out interface
+	bdMinVersion   = "1.0.4"                // BdStore shell-out interface, including bd create --id
 )
 
 // checkHardDependencies verifies that all required binaries are available

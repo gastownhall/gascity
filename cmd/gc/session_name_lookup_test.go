@@ -99,6 +99,83 @@ func TestCreatePoolSessionBead_UsesExplicitIDThroughCachingStore(t *testing.T) {
 	}
 }
 
+func TestCreatePoolSessionBeadWithAlias_UpdatesExplicitIDBeadToResolvedAlias(t *testing.T) {
+	var created beads.Bead
+	var updatedMetadata string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, fmt.Errorf("unexpected command %q", name)
+		}
+		switch args[0] {
+		case "create":
+			id := testFlagValue(args, "--id")
+			if id == "" {
+				return nil, fmt.Errorf("bd create missing explicit --id: %v", args)
+			}
+			var metadata map[string]string
+			if raw := testFlagValue(args, "--metadata"); raw != "" {
+				if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+					return nil, err
+				}
+			}
+			created = beads.Bead{
+				ID:        id,
+				Title:     args[2],
+				Status:    "open",
+				Type:      "task",
+				CreatedAt: nowForBDJSONTest(),
+				Metadata:  metadata,
+			}
+			return mustMarshalBDIssueJSON(t, created, false), nil
+		case "show":
+			return mustMarshalBDIssueJSON(t, created, true), nil
+		case "list":
+			return []byte(`[]`), nil
+		case "update":
+			if got := args[2]; got != created.ID {
+				return nil, fmt.Errorf("bd update id = %q, want %q", got, created.ID)
+			}
+			updatedMetadata = testFlagValue(args, "--set-metadata")
+			if updatedMetadata == "" {
+				return nil, fmt.Errorf("bd update missing --set-metadata: %v", args)
+			}
+			key, value, ok := strings.Cut(updatedMetadata, "=")
+			if !ok || key != "session_name" {
+				return nil, fmt.Errorf("bd update metadata = %q, want session_name=<alias>", updatedMetadata)
+			}
+			created.Metadata[key] = value
+			return []byte(`{"id":"` + created.ID + `"}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected bd args: %v", args)
+		}
+	}
+	backing := beads.NewBdStoreWithPrefix(t.TempDir(), runner, "mc")
+	store := beads.NewCachingStore(backing, nil)
+	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
+
+	bead, err := createPoolSessionBeadWithAlias(store, "crew-gastown", nil, nil, now, poolSessionCreateIdentity{}, "crew--gastown")
+	if err != nil {
+		t.Fatalf("createPoolSessionBeadWithAlias: %v", err)
+	}
+	if !strings.HasPrefix(bead.ID, "mc-session-") {
+		t.Fatalf("bead.ID = %q, want explicit mc-session-* ID", bead.ID)
+	}
+	if updatedMetadata != "session_name=crew--gastown" {
+		t.Fatalf("updated metadata = %q, want session_name=crew--gastown", updatedMetadata)
+	}
+	if got := bead.Metadata["session_name"]; got != "crew--gastown" {
+		t.Fatalf("session_name = %q, want resolved alias", got)
+	}
+
+	stored, err := backing.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("backing.Get(%s): %v", bead.ID, err)
+	}
+	if got := stored.Metadata["session_name"]; got != "crew--gastown" {
+		t.Fatalf("stored session_name = %q, want resolved alias", got)
+	}
+}
+
 func testFlagValue(args []string, flag string) string {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == flag {
