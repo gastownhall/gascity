@@ -1298,9 +1298,18 @@ func passthroughEnv() map[string]string {
 	}
 	// USER/LOGNAME are required on macOS for Keychain access — without them
 	// providers like Claude Code cannot read stored OAuth credentials.
-	// CLAUDE_CONFIG_DIR and CLAUDE_CODE_OAUTH_TOKEN let managed Claude
-	// sessions find stored credentials and token-based auth.
-	for _, key := range []string{"USER", "LOGNAME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"} {
+	// CLAUDE_CONFIG_DIR and CLAUDE_CODE_* let managed Claude sessions find
+	// stored credentials and keep model-routing settings such as Ollama Cloud
+	// substitutions aligned with the controller environment.
+	for _, key := range []string{
+		"USER",
+		"LOGNAME",
+		"CLAUDE_CONFIG_DIR",
+		"CLAUDE_CODE_OAUTH_TOKEN",
+		"CLAUDE_CODE_SUBAGENT_MODEL",
+		"CLAUDE_CODE_EFFORT_LEVEL",
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+	} {
 		if v := os.Getenv(key); v != "" {
 			m[key] = v
 		}
