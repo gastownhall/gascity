@@ -17,6 +17,8 @@ When implementation and checks are done, run the done sequence immediately.
 There is no approval wait. An idle polecat blocks the refinery and wastes the
 pool slot.
 
+### The Done Sequence
+
 ```bash
 # Explicit opt-out gate: respect mol-pr-from-issue auto_push=false (halt-at-branch-ready).
 AUTO_PUSH=$(gc bd show <work-bead> --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')
