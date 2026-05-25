@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packregistry"
 )
 
 func TestSyncLockFromLockWalksTransitiveImports(t *testing.T) {
@@ -126,6 +127,88 @@ schema = 1
 	}
 	if !strings.Contains(err.Error(), "hash mismatch") {
 		t.Fatalf("SyncLock error = %v, want hash mismatch", err)
+	}
+}
+
+func TestSyncLockSelectiveUpgradePreservesRegistryProvenance(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", home)
+	stubCachedPackGit(t)
+
+	source := "https://packages.example/lighthouse.git"
+	packToml := "[pack]\nname = \"lighthouse\"\nschema = 1\n"
+	stageCachedPack(t, source, commitB, packToml)
+	cachePath, err := RepoCachePath(source, commitB)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	hash, err := HashPackTree(cachePath)
+	if err != nil {
+		t.Fatalf("HashPackTree: %v", err)
+	}
+	if err := packregistry.SaveConfig(home, packregistry.Config{Registries: []packregistry.Registry{{
+		Name:   "main",
+		Source: "file:///tmp/main/registry.toml",
+	}}}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	if err := packregistry.WriteCatalogCache(home, "main", []byte(`schema = 1
+
+[[pack]]
+name = "lighthouse"
+description = "Harbor checks."
+source = "`+source+`"
+source_kind = "git"
+
+  [[pack.release]]
+  version = "1.0.0"
+  ref = "v1.0.0"
+  commit = "`+commitA+`"
+  hash = "`+hash+`"
+  description = "Initial release."
+
+  [[pack.release]]
+  version = "1.1.0"
+  ref = "v1.1.0"
+  commit = "`+commitB+`"
+  hash = "`+hash+`"
+  description = "Second release."
+`)); err != nil {
+		t.Fatalf("WriteCatalogCache: %v", err)
+	}
+	if err := WriteLockfile(fsys.OSFS{}, city, &Lockfile{
+		Schema: LockfileSchemaV2,
+		Packs: map[string]LockedPack{
+			source: {
+				Version:        "1.0.0",
+				Commit:         commitA,
+				Source:         source,
+				SourceKind:     "git",
+				Ref:            "v1.0.0",
+				Hash:           hash,
+				Registry:       "main",
+				RegistrySource: "file:///tmp/main/registry.toml",
+				RegistryPack:   "lighthouse",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	got, err := SyncLockSelectiveUpgrade(city, map[string]config.Import{
+		"lighthouse": {Source: source, Version: "^1.0"},
+	}, map[string]struct{}{source: {}})
+	if err != nil {
+		t.Fatalf("SyncLockSelectiveUpgrade: %v", err)
+	}
+	pack := got.Packs[source]
+	if pack.Version != "1.1.0" || pack.Commit != commitB {
+		t.Fatalf("upgraded pack = %+v, want registry release 1.1.0", pack)
+	}
+	if pack.Registry != "main" || pack.RegistryPack != "lighthouse" || pack.RegistrySource != "file:///tmp/main/registry.toml" || pack.Hash != hash {
+		t.Fatalf("registry metadata was not preserved: %+v", pack)
 	}
 }
 

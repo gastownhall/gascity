@@ -738,6 +738,67 @@ version = "^1.0"
 	}
 }
 
+func TestPackSyncUsesLockedRegistryDependencyOffline(t *testing.T) {
+	clearGCEnv(t)
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", home)
+	t.Setenv("GC_CITY", city)
+	source, commit, hash := writeGitPackRepo(t)
+	writeCityToml(t, city, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, city, `[pack]
+name = "demo"
+schema = 1
+
+[imports.lighthouse]
+source = "`+source+`"
+version = "^1.0"
+`)
+	if err := packregistry.SaveConfig(home, packregistry.Config{Registries: []packregistry.Registry{{
+		Name:   "main",
+		Source: filepath.Join(t.TempDir(), "missing"),
+	}}}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	if err := packman.WriteLockfile(fsys.OSFS{}, city, &packman.Lockfile{
+		Schema: packman.LockfileSchemaV2,
+		Packs: map[string]packman.LockedPack{
+			source: {
+				Version:        "1.2.0",
+				Commit:         commit,
+				Source:         source,
+				SourceKind:     "git",
+				Ref:            "v1.2.0",
+				Hash:           hash,
+				Registry:       "main",
+				RegistrySource: "https://registry.example/registry.toml",
+				RegistryPack:   "lighthouse",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+	cachePath, err := packman.RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	runGitCmd(t, "", "clone", strings.TrimPrefix(source, "file://"), cachePath)
+	runGitCmd(t, cachePath, "checkout", commit)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"pack", "sync"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("pack sync code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "refresh failed") || strings.Contains(stderr.String(), "missing") {
+		t.Fatalf("pack sync attempted registry refresh or emitted registry diagnostics: %q", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Synced 1 remote pack dependencies") {
+		t.Fatalf("pack sync stdout = %q", stdout.String())
+	}
+}
+
 func TestPackOutdatedReportsAllowedUpgrade(t *testing.T) {
 	clearGCEnv(t)
 	home := t.TempDir()

@@ -97,6 +97,9 @@ func parseGitHubTreeURL(s string) (source, subpath, ref string) {
 // resolvePackRef resolves a pack reference to a local directory.
 // Handles local paths, GitHub tree URLs, and git source//sub#ref URLs.
 func resolvePackRef(ref, declDir, cityRoot string) (string, error) {
+	if strings.HasPrefix(strings.TrimSpace(ref), "registry:") {
+		return "", fmt.Errorf("registry selectors are command-time locators, not durable pack sources; use the concrete source in pack.toml")
+	}
 	if isGitHubTreeURL(ref) {
 		source, subpath, gitRef := parseGitHubTreeURL(ref)
 		cacheDir, err := fetchRemoteInclude(source, gitRef, cityRoot)

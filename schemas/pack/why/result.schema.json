@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "description": "Result emitted by gc pack why --json.",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Version of this JSON result shape.",
+      "const": "1"
+    },
+    "ok": {
+      "const": true,
+      "description": "Whether the command completed successfully."
+    },
+    "target": {
+      "type": "string",
+      "description": "Name or source that was explained."
+    },
+    "direct": {
+      "type": "boolean",
+      "description": "Whether the selected dependency is a direct import."
+    },
+    "import": {
+      "$ref": "#/$defs/packDependency",
+      "description": "The dependency that matched the target."
+    },
+    "paths": {
+      "type": "array",
+      "description": "Import paths that explain why the dependency is present.",
+      "items": {
+        "type": "array",
+        "items": { "$ref": "#/$defs/packDependency" }
+      }
+    }
+  },
+  "required": ["schema_version", "ok", "target", "direct", "import", "paths"],
+  "additionalProperties": false,
+  "$defs": {
+    "packDependency": {
+      "type": "object",
+      "description": "One pack dependency in an explanation path.",
+      "properties": {
+        "name": { "type": "string", "description": "Binding or display name for the dependency." },
+        "source": { "type": "string", "description": "Durable pack source recorded in pack.toml or a transitive import." },
+        "origin": { "type": "string", "description": "Where the dependency came from, such as source, path, or registry:name." },
+        "source_kind": { "type": "string", "description": "Kind of source used for resolution, such as git or path." },
+        "constraint": { "type": "string", "description": "Declared version constraint, when present." },
+        "resolved_version": { "type": "string", "description": "Resolved version from packs.lock, when synced." },
+        "ref": { "type": "string", "description": "Internal lock/ref metadata for the resolved release, when present." },
+        "commit": { "type": "string", "description": "Resolved commit from packs.lock, when synced." },
+        "hash": { "type": "string", "description": "Integrity hash from packs.lock, when present." },
+        "synced": { "type": "boolean", "description": "Whether the dependency has a matching packs.lock entry." },
+        "scope": { "type": "string", "description": "Selected or derived scope that exposes the dependency." },
+        "withdrawn": { "type": "boolean", "description": "Whether the locked registry release is withdrawn." },
+        "withdrawn_reason": { "type": "string", "description": "Reason the locked registry release was withdrawn, when known." }
+      },
+      "required": ["name", "source", "origin", "source_kind", "synced", "scope", "withdrawn"],
+      "additionalProperties": false
+    }
+  }
+}

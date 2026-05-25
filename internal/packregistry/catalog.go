@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -253,11 +252,7 @@ func WithCatalogCacheLock(home, registryName string, fn func() error) error {
 		return fmt.Errorf("opening registry cache lock: %w", err)
 	}
 	defer lockFile.Close() //nolint:errcheck
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("acquiring registry cache lock: %w", err)
-	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
-	return fn()
+	return withExclusiveFileLock(lockFile, "registry cache lock", fn)
 }
 
 // ReadCachedCatalog reads and validates a cached catalog by registry name.

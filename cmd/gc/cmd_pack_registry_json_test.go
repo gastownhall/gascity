@@ -74,6 +74,7 @@ transitive = false
 
 	runPackRegistryJSONAndValidate(t, []string{"pack", "list", "--json"})
 	runPackRegistryJSONAndValidate(t, []string{"pack", "show", "tools", "--json"})
+	runPackRegistryJSONAndValidate(t, []string{"pack", "why", "tools", "--json"})
 
 	prevResolve := resolveImportVersion
 	t.Cleanup(func() { resolveImportVersion = prevResolve })
@@ -180,6 +181,7 @@ func TestPackRegistrySchemasHaveDescriptions(t *testing.T) {
 		{"pack", "list"},
 		{"pack", "show"},
 		{"pack", "outdated"},
+		{"pack", "why"},
 		{"pack", "registry", "add"},
 		{"pack", "registry", "list"},
 		{"pack", "registry", "refresh"},

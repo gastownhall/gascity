@@ -874,10 +874,10 @@ func doImportListAs(command, cityPath string, tree bool, stdout, stderr io.Write
 }
 
 func doImportWhy(cityPath, target string, stdout, stderr io.Writer) int {
-	return doImportWhyAs("gc import why", cityPath, target, stdout, stderr)
+	return doImportWhyAs("gc import why", cityPath, target, false, stdout, stderr)
 }
 
-func doImportWhyAs(command string, cityPath, target string, stdout, stderr io.Writer) int {
+func doImportWhyAs(command string, cityPath, target string, jsonOutput bool, stdout, stderr io.Writer) int {
 	scope, err := loadImportScopeFS(fsys.OSFS{}, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
@@ -903,6 +903,13 @@ func doImportWhyAs(command string, cityPath, target string, stdout, stderr io.Wr
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
 		return 1
+	}
+	if jsonOutput {
+		if err := writeImportWhyJSON(stdout, target, matches); err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
+			return 1
+		}
+		return 0
 	}
 	if err := writeImportWhy(stdout, target, matches); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck
@@ -1124,6 +1131,40 @@ func importDisplayName(name string) string {
 		return rest
 	}
 	return name
+}
+
+type packWhyJSONResult struct {
+	SchemaVersion string                 `json:"schema_version"`
+	Target        string                 `json:"target"`
+	Direct        bool                   `json:"direct"`
+	Import        packDependencyJSON     `json:"import"`
+	Paths         [][]packDependencyJSON `json:"paths"`
+}
+
+func writeImportWhyJSON(stdout io.Writer, target string, matches [][]*importGraphNode) error {
+	if len(matches) == 0 {
+		return fmt.Errorf("no matches")
+	}
+	primary := matches[0][len(matches[0])-1]
+	paths := make([][]packDependencyJSON, 0, len(matches))
+	direct := false
+	for _, path := range matches {
+		if len(path) == 1 {
+			direct = true
+		}
+		rows := make([]packDependencyJSON, 0, len(path))
+		for _, node := range path {
+			rows = append(rows, packDependencyJSONRow(node))
+		}
+		paths = append(paths, rows)
+	}
+	return writeCLIJSONLine(stdout, packWhyJSONResult{
+		SchemaVersion: "1",
+		Target:        target,
+		Direct:        direct,
+		Import:        packDependencyJSONRow(primary),
+		Paths:         paths,
+	})
 }
 
 func writeImportWhy(stdout io.Writer, target string, matches [][]*importGraphNode) error {

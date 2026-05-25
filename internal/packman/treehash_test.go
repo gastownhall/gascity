@@ -3,6 +3,7 @@ package packman
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -41,6 +42,9 @@ func TestHashPackTreeLexicalOrderingStableIndependentOfCreationOrder(t *testing.
 }
 
 func TestHashPackTreeExecutableBitAffectsDigest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Chmod does not modify executable bits on Windows")
+	}
 	root := t.TempDir()
 	path := writeTreeHashTestFile(t, root, "bin/tool", "#!/bin/sh\n")
 

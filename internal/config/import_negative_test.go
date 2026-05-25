@@ -43,6 +43,38 @@ includes = ["../mypk"]
 	}
 }
 
+func TestImport_RejectsDurableRegistrySelectorSource(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	mustMkdirAll(t, cityDir, 0o755)
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+`)
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "test"
+schema = 1
+
+[imports.lighthouse]
+source = "registry:main:lighthouse"
+`)
+
+	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err == nil {
+		t.Fatal("expected durable registry selector source to fail during config load")
+	}
+	for _, want := range []string{
+		`city import "lighthouse"`,
+		"registry selectors are command-time locators",
+		"concrete source",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("LoadWithIncludes error = %q, want %q", err.Error(), want)
+		}
+	}
+}
+
 func TestImport_TransitiveFalseSuppressesNestedPackWarnings(t *testing.T) {
 	dir := t.TempDir()
 	cityDir := filepath.Join(dir, "city")

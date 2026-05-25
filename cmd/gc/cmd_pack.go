@@ -244,7 +244,8 @@ func newPackUpgradeCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 func newPackWhyCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "why <name-or-source>",
 		Short: "Explain why a pack dependency is present",
 		Args:  cobra.ExactArgs(1),
@@ -254,12 +255,14 @@ func newPackWhyCmd(stdout, stderr io.Writer) *cobra.Command {
 				fmt.Fprintf(stderr, "gc pack why: %v\n", err) //nolint:errcheck
 				return errExit
 			}
-			if doImportWhyAs("gc pack why", cityPath, args[0], stdout, stderr) != 0 {
+			if doImportWhyAs("gc pack why", cityPath, args[0], jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON result on stdout")
+	return cmd
 }
 
 func doPackAdd(cityPath, rawSource, nameOverride, versionFlag string, stdout, stderr io.Writer) int {

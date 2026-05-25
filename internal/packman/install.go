@@ -217,6 +217,14 @@ func (s *syncState) resolveSource(source, constraint string) (bool, error) {
 	}
 
 	existing, hasExisting := s.existing.Packs[source]
+	var existingMeta *LockedPack
+	var existingForResolution *LockedPack
+	if hasExisting {
+		existingMeta = &existing
+		if !forceUpgrade {
+			existingForResolution = &existing
+		}
+	}
 	switch s.mode {
 	case InstallFromLock:
 		if !hasExisting {
@@ -236,9 +244,9 @@ func (s *syncState) resolveSource(source, constraint string) (bool, error) {
 		return false, fmt.Errorf("unknown install mode %d", s.mode)
 	}
 
-	resolverSource := s.resolverSource(source, existingIf(hasExisting, existing))
+	resolverSource := s.resolverSource(source, existingMeta)
 	resolved, err := ResolveVersionWithOptions(resolverSource, constraint, ResolveOptions{
-		Existing: existingIf(hasExisting, existing),
+		Existing: existingForResolution,
 	})
 	if err != nil {
 		return false, err
@@ -447,13 +455,6 @@ func matchesExisting(pack LockedPack, constraint string) bool {
 		return pack.Commit == strings.TrimPrefix(constraint, "sha:")
 	}
 	return matchesConstraint(pack.Version, constraint)
-}
-
-func existingIf(ok bool, pack LockedPack) *LockedPack {
-	if !ok {
-		return nil
-	}
-	return &pack
 }
 
 func materializedSource(lockSource string, pack LockedPack) string {

@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"syscall"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -201,9 +200,5 @@ func WithConfigLock(home string, fn func() error) error {
 		return fmt.Errorf("opening registry lock: %w", err)
 	}
 	defer lockFile.Close() //nolint:errcheck
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("acquiring registry lock: %w", err)
-	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
-	return fn()
+	return withExclusiveFileLock(lockFile, "registry lock", fn)
 }
