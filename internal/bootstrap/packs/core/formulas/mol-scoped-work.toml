@@ -51,10 +51,10 @@ metadata before doing anything destructive.
 ```bash
 gc prime
 bd prime
-CONVOY_JSON=$(bd show {{convoy_id}} --json)
-WORK_BEAD_ID=$(printf '%s' "$CONVOY_JSON" | jq -r '.[0].metadata["gc.input_bead_id"] // .[0].metadata["gc.drain_member_id"] // empty')
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
 if [ -z "$WORK_BEAD_ID" ]; then
-  echo "mol-scoped-work requires a singleton or drain-unit convoy with gc.input_bead_id or gc.drain_member_id" >&2
+  echo "mol-scoped-work requires an input convoy with exactly one tracked member" >&2
   exit 1
 fi
 bd show "$WORK_BEAD_ID"
@@ -90,10 +90,10 @@ Ensure there is an isolated worktree for this work item.
 
 ```bash
 git fetch --prune origin
-CONVOY_JSON=$(bd show {{convoy_id}} --json)
-WORK_BEAD_ID=$(printf '%s' "$CONVOY_JSON" | jq -r '.[0].metadata["gc.input_bead_id"] // .[0].metadata["gc.drain_member_id"] // empty')
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
 if [ -z "$WORK_BEAD_ID" ]; then
-  echo "mol-scoped-work requires a singleton or drain-unit convoy with gc.input_bead_id or gc.drain_member_id" >&2
+  echo "mol-scoped-work requires an input convoy with exactly one tracked member" >&2
   exit 1
 fi
 WORKTREE=$(bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')
@@ -196,10 +196,10 @@ description = """
 Remove the temporary worktree after the body reaches terminal state.
 
 ```bash
-CONVOY_JSON=$(bd show {{convoy_id}} --json)
-WORK_BEAD_ID=$(printf '%s' "$CONVOY_JSON" | jq -r '.[0].metadata["gc.input_bead_id"] // .[0].metadata["gc.drain_member_id"] // empty')
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
 if [ -z "$WORK_BEAD_ID" ]; then
-  echo "mol-scoped-work requires a singleton or drain-unit convoy with gc.input_bead_id or gc.drain_member_id" >&2
+  echo "mol-scoped-work requires an input convoy with exactly one tracked member" >&2
   exit 1
 fi
 WORKTREE=$(bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')

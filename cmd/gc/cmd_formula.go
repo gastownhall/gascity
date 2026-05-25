@@ -629,17 +629,6 @@ bead into a sub-workflow at runtime.`,
 					storeRef := workflowStoreRefForDir(scope.storeRoot, cityPath, loadedCityName(cfg, cityPath), cfg)
 					var result *molecule.Result
 					err := sourceworkflow.WithLock(cmd.Context(), cityPath, sourceWorkflowLockScopeForStoreRef(cityPath, cfg, scope.storeRoot, storeRef), attach, func() error {
-						roots, err := formulaCookLiveSourceWorkflowRoots(cfg, cityPath, attach, storeRef)
-						if err != nil {
-							return fmt.Errorf("checking live source workflows for %s: %w", attach, err)
-						}
-						if len(roots) > 0 {
-							return &sourceworkflow.ConflictError{
-								SourceBeadID: attach,
-								WorkflowIDs:  sourceworkflow.BlockingWorkflowIDs(roots),
-							}
-						}
-
 						inv, err := graphv2.PrepareInvocation(cmd.Context(), store, args[0], scope.searchPaths, attach, cookVars)
 						if err != nil {
 							return fmt.Errorf("prepare graph.v2 invocation: %w", err)
@@ -672,14 +661,6 @@ bead into a sub-workflow at runtime.`,
 							return ensureFormulaCookAttachDep(store, attach, result.RootID)
 						}
 						if roots, err := formulaCookLiveInputConvoyGraphRoots(store, inv.InputConvoy, graphRootKey); err != nil {
-							return err
-						} else if len(roots) > 0 {
-							return &sourceworkflow.ConflictError{
-								SourceBeadID: attach,
-								WorkflowIDs:  sourceworkflow.BlockingWorkflowIDs(roots),
-							}
-						}
-						if roots, err := formulaCookLiveAttachGraphRoots(store, attach); err != nil {
 							return err
 						} else if len(roots) > 0 {
 							return &sourceworkflow.ConflictError{
@@ -875,38 +856,6 @@ func decorateFormulaCookGraphV2Recipe(recipe *formula.Recipe, vars map[string]st
 	return sling.DecorateGraphWorkflowRecipe(recipe, sling.GraphWorkflowRouteVars(recipe, vars), "", "formula-cook", "", storeRef, "", "", store, cityName, cfg, deps)
 }
 
-func formulaCookLiveSourceWorkflowRoots(cfg *config.City, cityPath, sourceBeadID, sourceStoreRef string) ([]beads.Bead, error) {
-	matches, skips, err := collectSourceWorkflowMatches(cfg, cityPath, sourceBeadID, sourceStoreRef)
-	if err != nil {
-		return nil, err
-	}
-	if err := sourceWorkflowIncompleteScanError(skips); err != nil {
-		return nil, err
-	}
-	seen := make(map[string]struct{})
-	var roots []beads.Bead
-	for _, match := range matches {
-		for _, root := range match.roots {
-			if root.ID == "" {
-				continue
-			}
-			if _, ok := seen[root.ID]; ok {
-				continue
-			}
-			seen[root.ID] = struct{}{}
-			roots = append(roots, root)
-		}
-	}
-	return roots, nil
-}
-
-func sourceWorkflowIncompleteScanError(skips []sourceWorkflowStoreSkip) error {
-	if len(skips) == 0 {
-		return nil
-	}
-	return fmt.Errorf("%s", formatSourceWorkflowStoreSkips(skips))
-}
-
 func ensureFormulaCookAttachDep(store beads.Store, attachBeadID, rootID string) error {
 	if store == nil || strings.TrimSpace(attachBeadID) == "" || strings.TrimSpace(rootID) == "" {
 		return nil
@@ -945,42 +894,6 @@ func formulaCookLiveInputConvoyGraphRoots(store beads.Store, inputConvoyID, allo
 			continue
 		}
 		if allowedRootKey != "" && strings.TrimSpace(root.Metadata["gc.graphv2_root_key"]) == allowedRootKey {
-			continue
-		}
-		roots = append(roots, root)
-	}
-	slices.SortFunc(roots, func(a, b beads.Bead) int {
-		return strings.Compare(a.ID, b.ID)
-	})
-	return roots, nil
-}
-
-func formulaCookLiveAttachGraphRoots(store beads.Store, attachBeadID string) ([]beads.Bead, error) {
-	if store == nil || strings.TrimSpace(attachBeadID) == "" {
-		return nil, nil
-	}
-	deps, err := store.DepList(attachBeadID, "down")
-	if err != nil {
-		return nil, fmt.Errorf("checking attach graph roots for %s: %w", attachBeadID, err)
-	}
-	var roots []beads.Bead
-	seen := make(map[string]struct{}, len(deps))
-	for _, dep := range deps {
-		if dep.IssueID != attachBeadID || dep.Type != "blocks" || strings.TrimSpace(dep.DependsOnID) == "" {
-			continue
-		}
-		if _, ok := seen[dep.DependsOnID]; ok {
-			continue
-		}
-		seen[dep.DependsOnID] = struct{}{}
-		root, err := store.Get(dep.DependsOnID)
-		if err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				continue
-			}
-			return nil, fmt.Errorf("loading attached graph root %s for %s: %w", dep.DependsOnID, attachBeadID, err)
-		}
-		if root.Status == "closed" || !sourceworkflow.IsWorkflowRoot(root) {
 			continue
 		}
 		roots = append(roots, root)

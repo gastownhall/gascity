@@ -212,18 +212,6 @@ func checkNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, re
 		}
 		return fmt.Errorf("bead %s already has attached %s %s", beadID, AttachmentLabel(attached), attached.ID)
 	}
-	if !allowLiveWorkflow {
-		roots, err := liveGraphV2RootsForSingletonSource(store, beadID)
-		if err != nil {
-			return err
-		}
-		if len(roots) > 0 {
-			return &sourceworkflow.ConflictError{
-				SourceBeadID: beadID,
-				WorkflowIDs:  sourceworkflow.BlockingWorkflowIDs(roots),
-			}
-		}
-	}
 	return nil
 }
 
@@ -296,16 +284,6 @@ func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store b
 			}
 			problems = append(problems, fmt.Sprintf("%s (has %s %s)", child.ID, AttachmentLabel(attached), attached.ID))
 		}
-		if !allowLiveWorkflow {
-			roots, err := liveGraphV2RootsForSingletonSource(store, child.ID)
-			if err != nil {
-				return err
-			}
-			for _, root := range roots {
-				problems = append(problems, fmt.Sprintf("%s (has %s %s)", child.ID, AttachmentLabel(root), root.ID))
-				workflowConflicts = append(workflowConflicts, workflowConflict{childID: child.ID, workflowID: root.ID})
-			}
-		}
 	}
 	if len(problems) == 0 {
 		return nil
@@ -340,40 +318,6 @@ func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store b
 	}
 	joined = append(joined, summary)
 	return errors.Join(joined...)
-}
-
-func liveGraphV2RootsForSingletonSource(store beads.Store, sourceID string) ([]beads.Bead, error) {
-	sourceID = strings.TrimSpace(sourceID)
-	if store == nil || sourceID == "" {
-		return nil, nil
-	}
-	singletons, err := store.ListByMetadata(map[string]string{"gc.input_bead_id": sourceID}, 0)
-	if err != nil {
-		return nil, fmt.Errorf("looking up graph.v2 singleton convoy for %s: %w", sourceID, err)
-	}
-	var roots []beads.Bead
-	for _, singleton := range singletons {
-		if singleton.Status == "closed" || singleton.Type != "convoy" || singleton.Metadata["gc.synthetic_kind"] != "singleton-convoy" {
-			continue
-		}
-		matches, err := store.ListByMetadata(map[string]string{"gc.input_convoy_id": singleton.ID}, 0)
-		if err != nil {
-			return nil, fmt.Errorf("looking up graph.v2 roots for singleton convoy %s: %w", singleton.ID, err)
-		}
-		for _, root := range matches {
-			if root.Status == "closed" {
-				continue
-			}
-			if root.Metadata["gc.formula_contract"] != "graph.v2" {
-				continue
-			}
-			if !sourceworkflow.IsWorkflowRoot(root) {
-				continue
-			}
-			roots = append(roots, root)
-		}
-	}
-	return roots, nil
 }
 
 // needsConvoyRecovery reports whether an already-routed bead should re-enter

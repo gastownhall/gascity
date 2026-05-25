@@ -1755,18 +1755,8 @@ func (s *BdStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 // Ready returns open ready beads via bd ready.
 func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	q := readyQueryFromArgs(query)
-	args := []string{"ready", "--json"}
-	if q.TierMode == TierBoth || q.TierMode == TierWisps {
-		args = append(args, "--include-ephemeral")
-	}
-	if q.Assignee != "" {
-		args = append(args, "--assignee", q.Assignee)
-	}
-	if q.Limit > 0 {
-		args = append(args, "--limit", strconv.Itoa(q.Limit))
-	} else {
-		args = append(args, "--limit", "0")
-	}
+	includeEphemeral := q.TierMode == TierBoth || q.TierMode == TierWisps
+	args := bdReadyArgs(q, includeEphemeral)
 	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
 		return nil, fmt.Errorf("bd ready: %w", err)
@@ -1794,6 +1784,22 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		return result, &PartialResultError{Op: "bd ready", Err: parseErr}
 	}
 	return result, nil
+}
+
+func bdReadyArgs(q ReadyQuery, includeEphemeral bool) []string {
+	args := []string{"ready", "--json"}
+	if includeEphemeral {
+		args = append(args, "--include-ephemeral")
+	}
+	if q.Assignee != "" {
+		args = append(args, "--assignee", q.Assignee)
+	}
+	if q.Limit > 0 {
+		args = append(args, "--limit", strconv.Itoa(q.Limit))
+	} else {
+		args = append(args, "--limit", "0")
+	}
+	return args
 }
 
 // DepAdd records a dependency via bd dep add.

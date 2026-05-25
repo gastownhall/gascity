@@ -14,9 +14,8 @@ targeted graph.v2 formulas receive the reserved system variable `convoy_id`,
 not `issue` or `bead_id`.
 
 When the target is already a convoy, that convoy is passed through whole. When
-the target is a normal bead, Gas City creates or reuses a visible synthetic
-singleton convoy that tracks the bead, then passes that singleton convoy ID as
-`convoy_id`.
+the target is a normal bead, Gas City creates a visible real convoy containing
+that one bead, then passes that convoy ID as `convoy_id`.
 
 This v0 also adds a graph.v2-only `drain` step for scatter work. Drain v0
 supports separate drains and shared single-lane drains. The control bead
@@ -29,15 +28,15 @@ also receive only `convoy_id`.
 - Make every targeted graph.v2 formula invocation think in terms of an input
   convoy.
 - Preserve the single-bead operator entry point by normalizing it to a visible
-  singleton convoy.
+  one-item convoy.
 - Fail fast on graph.v2 formulas or caller vars that use legacy bead-scoped
   names: `issue` and `bead_id`.
 - Add a minimal drain primitive that scatters a fixed convoy snapshot into
   generated one-member convoys.
 - Keep item formulas ordinary graph.v2 formulas, with no special `item_bead_id`
   or drain-only template variables.
-- Keep generated singleton and drain-unit convoys visible but inert: ready and
-  hook paths do not return synthetic convoy beads.
+- Keep generated one-item and drain-unit convoys ordinary convoy containers;
+  formulas inspect membership instead of special per-bead metadata.
 
 ## Non-Goals
 
@@ -48,12 +47,12 @@ also receive only `convoy_id`.
   normal graph.v2 steps before and after a drain step.
 - Scripted shredders are not in v0. The only v0 shredder is one-by-one.
 - Typed drain events, API/SSE drain projections, `gc trace` rendering, and
-  `gc convoy gc --synthetic` cleanup are follow-up work.
+  cleanup of system-created convoys are follow-up work.
 - Multi-controller, cross-process uniqueness is not solved in v0. The current
-  implementation serializes graphv2 singleton/root creation with process-local
-  keyed locks plus deterministic metadata lookup and repair. Store-level unique
-  create-or-get primitives remain future work before running multiple
-  materializing controllers against the same store.
+  implementation serializes graph.v2 root and drain materialization with
+  process-local keyed locks. Store-level unique create-or-get primitives remain
+  future work before running multiple materializing controllers against the
+  same store.
 
 ## Graph.v2 Invocation Contract
 
@@ -62,8 +61,8 @@ also receive only `convoy_id`.
 Targeted invocation behavior:
 
 - If the target bead has `type = "convoy"`, use that bead ID as `convoy_id`.
-- Otherwise create or reuse a synthetic singleton convoy for the target bead
-  and use that convoy ID as `convoy_id`.
+- Otherwise create a one-item convoy for the target bead and use that convoy ID
+  as `convoy_id`.
 - Do not inject `issue`.
 - Do not stamp graph.v2 workflow roots with `gc.source_bead_id`.
 - Do not write `workflow_id` back to the original source bead.
@@ -107,37 +106,34 @@ caller cannot supply or override it through CLI vars, rig formula vars, order
 vars, inherited vars, or formula `[vars]`.
 
 `issue` and `bead_id` are never valid in graph.v2 formulas. There is no
-compatibility mapping from either name to a convoy or singleton member.
+compatibility mapping from either name to a convoy member.
 
 Validation runs after formula resolution and `description_file` loading. Missing
 description files are hard errors. The scanner covers descriptions, notes,
 titles, conditions, labels, metadata, drain fields, children, loop bodies, and
 template steps.
 
-## Singleton Convoys
+## Automatic One-Item Convoys
 
-Singleton convoys are visible synthetic convoy beads created for non-convoy
+Automatic one-item convoys are visible real convoy beads created for non-convoy
 graph.v2 targets.
 
 Metadata:
 
 ```text
 gc.synthetic = true
-gc.synthetic_kind = singleton-convoy
-gc.input_bead_id = <source bead>
-gc.graphv2_invocation_key = graphv2-singleton:<source bead>
 ```
 
 Rules:
 
-- The singleton tracks exactly one source bead through the canonical `tracks`
+- The convoy tracks exactly one source bead through the canonical `tracks`
   relation.
-- The singleton does not inherit arbitrary source metadata, routing, molecule,
+- The convoy does not inherit arbitrary source metadata, routing, molecule,
   workflow, assignee, or label state.
-- Repeated invocations against the same source bead reuse the singleton.
-- If a previous retry created the singleton but crashed before writing the
-  `tracks` relation, the next invocation repairs the missing track.
-- Worker ready, hook, and pool-demand paths exclude synthetic convoys.
+- Repeated invocations against the same source bead create separate one-item
+  convoys. A caller that wants stable grouping or dedupe should create and
+  target an explicit convoy.
+- No graph.v2 code branches on a special singleton kind or source-bead metadata.
 
 ## Graph.v2 Root Identity
 
@@ -327,14 +323,14 @@ Existing graph.v2 formulas must migrate:
 Core formula changes in this v0:
 
 - `mol-scoped-work` receives `convoy_id`; when it needs a single underlying
-  bead, it reads the singleton/drain-unit convoy metadata.
+  bead, it reads the convoy membership and requires exactly one tracked member.
 - `mol-review-quorum` receives `convoy_id` and no longer requires a bead-scoped
   `subject` value from graph.v2 callers.
 
 ## Acceptance Criteria
 
-- Targeted graph.v2 invocation on a bead creates or reuses a visible singleton
-  convoy and injects `convoy_id`.
+- Targeted graph.v2 invocation on a bead creates a visible one-item convoy and
+  injects `convoy_id`.
 - Targeted graph.v2 invocation on a convoy passes that convoy whole and does
   not expand members before formula materialization.
 - Targetless graph.v2 formulas that reference `convoy_id` or contain drain fail
@@ -343,17 +339,19 @@ Core formula changes in this v0:
   before creating graph.v2 work.
 - Graph.v2 roots use `gc.input_convoy_id` and `gc.graphv2_root_key`, not
   `gc.source_bead_id`.
-- Repeated identical graph.v2 launches reuse the existing live root.
+- Repeated graph.v2 launches against a bare bead create separate one-item
+  convoys and therefore separate graph.v2 root keys. Reuse applies when the
+  caller targets the same explicit convoy and non-reserved var set.
 - Forced graph.v2 launch closes the existing root and creates a replacement.
 - Separate drain snapshots active convoy members once and replays the same
   snapshot after later membership changes.
-- Drain creates one synthetic drain-unit convoy and one item graph.v2 root per
+- Drain creates one system-created drain-unit convoy and one item graph.v2 root per
   manifest row.
 - Drain item roots receive only `convoy_id` as their system variable.
 - Drain succeeds only after every item root is closed successfully, and fails
   after every reachable item root is terminal if any item root fails.
-- Synthetic singleton and drain-unit convoys are not returned by ready or hook
-  paths.
+- Graph.v2 item formulas receive only `convoy_id` and inspect convoy membership
+  or drain metadata as needed.
 
 ## Follow-Up Work
 
@@ -363,6 +361,6 @@ Core formula changes in this v0:
   enforcement.
 - Scripted shredders that split one input convoy into caller-defined sub-convoys.
 - Typed events, API/SSE projection, dashboard lineage, and `gc trace` rendering.
-- Synthetic singleton and drain-unit cleanup command.
+- System-created one-item and drain-unit cleanup command.
 - Rollback cleanup guidance for downgrading to binaries that do not understand
   `gc.synthetic=true` convoys or `gc.kind=drain` control beads.

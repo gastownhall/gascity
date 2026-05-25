@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/pgauth"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -4238,14 +4239,25 @@ title = "Do work"
 	if got := parent.Metadata["workflow_id"]; got != "" {
 		t.Fatalf("parent workflow_id = %q, want empty for convoy-first graph.v2", got)
 	}
-	inputConvoys, err := deps.Store.ListByMetadata(map[string]string{"gc.input_bead_id": "BL-42"}, 1)
+	inputConvoys, err := deps.Store.List(beads.ListQuery{Type: "convoy"})
 	if err != nil {
-		t.Fatalf("list singleton convoy: %v", err)
+		t.Fatalf("list input convoys: %v", err)
 	}
-	if len(inputConvoys) != 1 {
-		t.Fatalf("singleton convoy count = %d, want 1", len(inputConvoys))
+	var inputConvoy beads.Bead
+	for _, candidate := range inputConvoys {
+		members, err := convoycore.Members(deps.Store, candidate.ID, true)
+		if err != nil {
+			t.Fatalf("members(%s): %v", candidate.ID, err)
+		}
+		if len(members) == 1 && members[0].ID == "BL-42" {
+			inputConvoy = candidate
+			break
+		}
 	}
-	roots, err := deps.Store.ListByMetadata(map[string]string{"gc.input_convoy_id": inputConvoys[0].ID, "gc.kind": "workflow"}, 1)
+	if inputConvoy.ID == "" {
+		t.Fatalf("input convoy for BL-42 not found in %+v", inputConvoys)
+	}
+	roots, err := deps.Store.ListByMetadata(map[string]string{"gc.input_convoy_id": inputConvoy.ID, "gc.kind": "workflow"}, 1)
 	if err != nil {
 		t.Fatalf("list workflow roots: %v", err)
 	}

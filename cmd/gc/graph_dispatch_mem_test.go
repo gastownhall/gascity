@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -265,14 +266,25 @@ func startMemScopedWorkflow(t *testing.T) (*beads.MemStore, string, string) {
 		t.Fatalf("doSling returned %d; stderr=%s", code, stderr.String())
 	}
 
-	inputConvoys, err := store.ListByMetadata(map[string]string{"gc.input_bead_id": issue.ID}, 1)
+	inputConvoys, err := store.List(beads.ListQuery{Type: "convoy"})
 	if err != nil {
-		t.Fatalf("ListByMetadata(singleton convoy): %v", err)
+		t.Fatalf("List input convoys: %v", err)
 	}
-	if len(inputConvoys) != 1 {
-		t.Fatalf("singleton convoy count = %d, want 1", len(inputConvoys))
+	var inputConvoy beads.Bead
+	for _, candidate := range inputConvoys {
+		members, err := convoycore.Members(store, candidate.ID, true)
+		if err != nil {
+			t.Fatalf("Members(%s): %v", candidate.ID, err)
+		}
+		if len(members) == 1 && members[0].ID == issue.ID {
+			inputConvoy = candidate
+			break
+		}
 	}
-	roots, err := store.ListByMetadata(map[string]string{"gc.input_convoy_id": inputConvoys[0].ID, "gc.kind": "workflow"}, 1)
+	if inputConvoy.ID == "" {
+		t.Fatalf("input convoy for %s not found in %+v", issue.ID, inputConvoys)
+	}
+	roots, err := store.ListByMetadata(map[string]string{"gc.input_convoy_id": inputConvoy.ID, "gc.kind": "workflow"}, 1)
 	if err != nil {
 		t.Fatalf("ListByMetadata(workflow root): %v", err)
 	}

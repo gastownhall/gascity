@@ -31,13 +31,8 @@ const (
 	// root received, excluding graph.v2 reserved variables injected by runtime.
 	RuntimeVarsMetadataKey = "gc.graphv2_vars.v1"
 
-	syntheticMetadataKey      = "gc.synthetic"
-	syntheticKindMetadataKey  = "gc.synthetic_kind"
-	syntheticInputBeadKey     = "gc.input_bead_id"
-	graphV2InvocationKey      = "gc.graphv2_invocation_key"
-	singletonSyntheticKind    = "singleton-convoy"
-	singletonInvocationPrefix = "graphv2-singleton:"
-	previewSingletonPrefix    = "preview-singleton:"
+	syntheticMetadataKey     = "gc.synthetic"
+	previewInputConvoyPrefix = "preview-input-convoy:"
 )
 
 // Invocation describes a normalized graph.v2 formula invocation.
@@ -47,7 +42,6 @@ type Invocation struct {
 	InputConvoy string
 	Vars        map[string]string
 	Targeted    bool
-	Singleton   bool
 }
 
 // LoadFormula resolves a formula without compiling it to a recipe.
@@ -140,12 +134,11 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 	if store == nil {
 		return Invocation{}, fmt.Errorf("graph.v2 formula %q requires a bead store to normalize target %s", formulaName, targetID)
 	}
-	convoyID, singleton, err := NormalizeInputConvoy(store, targetID)
+	convoyID, err := NormalizeInputConvoy(store, targetID)
 	if err != nil {
 		return Invocation{}, err
 	}
 	inv.InputConvoy = convoyID
-	inv.Singleton = singleton
 	inv.Vars[ConvoyIDVar] = convoyID
 	return inv, nil
 }
@@ -301,59 +294,43 @@ func ValidateNoReservedUserVars(vars map[string]string) error {
 }
 
 // NormalizeInputConvoy returns targetID when it is already a convoy, otherwise
-// it creates or reuses a visible synthetic singleton convoy tracking targetID.
-func NormalizeInputConvoy(store beads.Store, targetID string) (convoyID string, singleton bool, err error) {
+// it creates a visible system-created one-item convoy tracking targetID.
+func NormalizeInputConvoy(store beads.Store, targetID string) (string, error) {
 	targetID = strings.TrimSpace(targetID)
 	if targetID == "" {
-		return "", false, fmt.Errorf("graph.v2 target is required")
+		return "", fmt.Errorf("graph.v2 target is required")
 	}
 	target, err := store.Get(targetID)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
-			return "", false, fmt.Errorf("graph.v2 target %s not found: %w", targetID, err)
+			return "", fmt.Errorf("graph.v2 target %s not found: %w", targetID, err)
 		}
-		return "", false, fmt.Errorf("loading graph.v2 target %s: %w", targetID, err)
+		return "", fmt.Errorf("loading graph.v2 target %s: %w", targetID, err)
 	}
 	if convoycore.IsTerminalStatus(target.Status) {
-		return "", false, fmt.Errorf("graph.v2 target %s is %s", target.ID, target.Status)
+		return "", fmt.Errorf("graph.v2 target %s is %s", target.ID, target.Status)
 	}
 	if target.Type == "convoy" {
-		return target.ID, false, nil
+		return target.ID, nil
 	}
-	singletonConvoy, err := EnsureSingletonConvoy(store, target)
+	inputConvoy, err := CreateSingleItemInputConvoy(store, target)
 	if err != nil {
-		return "", false, err
+		return "", err
 	}
-	return singletonConvoy.ID, true, nil
+	return inputConvoy.ID, nil
 }
 
-// EnsureSingletonConvoy creates or reuses the synthetic one-item convoy for a
+// CreateSingleItemInputConvoy creates a system-created one-item convoy for a
 // graph.v2 invocation target.
-func EnsureSingletonConvoy(store beads.Store, target beads.Bead) (beads.Bead, error) {
+func CreateSingleItemInputConvoy(store beads.Store, target beads.Bead) (beads.Bead, error) {
 	if convoycore.IsTerminalStatus(target.Status) {
 		return beads.Bead{}, fmt.Errorf("graph.v2 target %s is %s", target.ID, target.Status)
 	}
-	key := singletonInvocationPrefix + strings.TrimSpace(target.ID)
-	if key == singletonInvocationPrefix {
-		return beads.Bead{}, fmt.Errorf("singleton convoy target id is empty")
-	}
-	unlock := lockKey(key)
-	defer unlock()
-	existing, err := findExistingSingleton(store, target.ID)
-	if err != nil {
-		return beads.Bead{}, fmt.Errorf("looking up singleton convoy for %s: %w", target.ID, err)
-	}
-	if existing.ID != "" {
-		if err := ensureTrack(store, existing.ID, target.ID); err != nil {
-			return beads.Bead{}, err
-		}
-		return existing, nil
+	if strings.TrimSpace(target.ID) == "" {
+		return beads.Bead{}, fmt.Errorf("input convoy target id is empty")
 	}
 	metadata := map[string]string{
-		syntheticMetadataKey:     "true",
-		syntheticKindMetadataKey: singletonSyntheticKind,
-		syntheticInputBeadKey:    target.ID,
-		graphV2InvocationKey:     key,
+		syntheticMetadataKey: "true",
 	}
 	created, err := store.Create(beads.Bead{
 		Title:    "input convoy for " + target.ID,
@@ -362,16 +339,16 @@ func EnsureSingletonConvoy(store beads.Store, target beads.Bead) (beads.Bead, er
 		Metadata: metadata,
 	})
 	if err != nil {
-		return beads.Bead{}, fmt.Errorf("creating singleton convoy for %s: %w", target.ID, err)
+		return beads.Bead{}, fmt.Errorf("creating input convoy for %s: %w", target.ID, err)
 	}
 	if err := convoycore.TrackItem(store, created.ID, target.ID); err != nil {
-		return beads.Bead{}, fmt.Errorf("tracking %s from singleton convoy %s: %w", target.ID, created.ID, err)
+		return beads.Bead{}, fmt.Errorf("tracking %s from input convoy %s: %w", target.ID, created.ID, err)
 	}
 	return created, nil
 }
 
 // PreparePreviewInvocation validates graph.v2 preview inputs without creating
-// singleton convoys or workflow roots.
+// input convoys or workflow roots.
 func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, targetID string, userVars map[string]string) (Invocation, error) {
 	resolved, parser, err := loadFormulaWithParser(formulaName, searchPaths)
 	if err != nil {
@@ -421,11 +398,10 @@ func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaNam
 	if err := formula.ValidateGraphV2RecipeReservedSymbols(recipe, true); err != nil {
 		return Invocation{}, err
 	}
-	inputConvoyID, singleton, err := PreviewInputConvoyID(store, targetID)
+	inputConvoyID, err := PreviewInputConvoyID(store, targetID)
 	if err != nil {
 		return Invocation{}, err
 	}
-	inv.Singleton = singleton
 	inv.Targeted = true
 	inv.InputConvoy = inputConvoyID
 	if inv.Vars == nil {
@@ -439,52 +415,26 @@ func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaNam
 }
 
 // PreviewInputConvoyID returns the read-only input convoy ID a graph.v2 preview
-// should use for targetID without creating or repairing singleton state.
-func PreviewInputConvoyID(store beads.Store, targetID string) (inputConvoyID string, singleton bool, err error) {
+// should use for targetID without creating an input convoy.
+func PreviewInputConvoyID(store beads.Store, targetID string) (string, error) {
 	targetID = strings.TrimSpace(targetID)
 	if store == nil {
-		return "", false, fmt.Errorf("graph.v2 preview requires a bead store")
+		return "", fmt.Errorf("graph.v2 preview requires a bead store")
 	}
 	target, err := store.Get(targetID)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
-			return "", false, fmt.Errorf("graph.v2 target %s not found: %w", targetID, err)
+			return "", fmt.Errorf("graph.v2 target %s not found: %w", targetID, err)
 		}
-		return "", false, fmt.Errorf("loading graph.v2 target %s: %w", targetID, err)
+		return "", fmt.Errorf("loading graph.v2 target %s: %w", targetID, err)
 	}
 	if convoycore.IsTerminalStatus(target.Status) {
-		return "", false, fmt.Errorf("graph.v2 target %s is %s", target.ID, target.Status)
+		return "", fmt.Errorf("graph.v2 target %s is %s", target.ID, target.Status)
 	}
 	if target.Type == "convoy" {
-		return target.ID, false, nil
+		return target.ID, nil
 	}
-	existing, err := findExistingSingleton(store, target.ID)
-	if err != nil {
-		return "", false, fmt.Errorf("looking up singleton convoy for %s: %w", target.ID, err)
-	}
-	if existing.ID == "" {
-		return previewSingletonPrefix + target.ID, true, nil
-	}
-	hasTrack, err := convoycore.HasTrack(store, existing.ID, target.ID)
-	if err != nil {
-		return "", false, fmt.Errorf("checking singleton convoy %s track for %s: %w", existing.ID, target.ID, err)
-	}
-	if !hasTrack {
-		return "", false, fmt.Errorf("graph.v2 preview singleton convoy %s is missing track for %s", existing.ID, target.ID)
-	}
-	return existing.ID, true, nil
-}
-
-func findExistingSingleton(store beads.Store, targetID string) (beads.Bead, error) {
-	key := singletonInvocationPrefix + strings.TrimSpace(targetID)
-	if key == singletonInvocationPrefix {
-		return beads.Bead{}, nil
-	}
-	existing, err := store.ListByMetadata(map[string]string{graphV2InvocationKey: key}, 1)
-	if err != nil || len(existing) == 0 {
-		return beads.Bead{}, err
-	}
-	return existing[0], nil
+	return previewInputConvoyPrefix + target.ID, nil
 }
 
 // LockKey serializes process-local graph.v2 materialization for a deterministic
@@ -504,20 +454,6 @@ func lockStripe(key string) uint8 {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(key))
 	return uint8(h.Sum32())
-}
-
-func ensureTrack(store beads.Store, convoyID, itemID string) error {
-	hasTrack, err := convoycore.HasTrack(store, convoyID, itemID)
-	if err != nil {
-		return fmt.Errorf("checking track dependency %s -> %s: %w", convoyID, itemID, err)
-	}
-	if hasTrack {
-		return nil
-	}
-	if err := convoycore.TrackItem(store, convoyID, itemID); err != nil {
-		return fmt.Errorf("repairing track dependency %s -> %s: %w", convoyID, itemID, err)
-	}
-	return nil
 }
 
 // RootKey returns the stable graph.v2 workflow root key for an input convoy and

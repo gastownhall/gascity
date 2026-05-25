@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,7 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
-	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 // TestResolveFormulaScope_RigFlagWins verifies that an explicit --rig flag
@@ -651,7 +649,7 @@ func runGitForFormulaTest(t *testing.T, dir string, args ...string) {
 	}
 }
 
-func TestFormulaCookAttachGraphV2ReusesExistingRoot(t *testing.T) {
+func TestFormulaCookAttachGraphV2CreatesFreshRootForBareBeadTarget(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
@@ -713,28 +711,31 @@ title = "Do work for {{convoy_id}}"
 	if err != nil {
 		t.Fatalf("list workflow roots: %v", err)
 	}
-	if len(roots) != 1 {
-		t.Fatalf("workflow roots = %+v, want one idempotent graph.v2 attach root", roots)
+	if len(roots) != 2 {
+		t.Fatalf("workflow roots = %+v, want two independent graph.v2 attach roots", roots)
 	}
-	if roots[0].Metadata["gc.graphv2_root_key"] == "" {
-		t.Fatalf("root metadata = %#v, missing graphv2 root key", roots[0].Metadata)
-	}
-	if roots[0].ParentID != "" {
-		t.Fatalf("root ParentID = %q, want standalone graph.v2 root", roots[0].ParentID)
+	for _, root := range roots {
+		if root.Metadata["gc.graphv2_root_key"] == "" {
+			t.Fatalf("root metadata = %#v, missing graphv2 root key", root.Metadata)
+		}
+		if root.ParentID != "" {
+			t.Fatalf("root %s ParentID = %q, want standalone graph.v2 root", root.ID, root.ParentID)
+		}
 	}
 	deps, err := store.DepList(source.ID, "down")
 	if err != nil {
 		t.Fatalf("DepList(source): %v", err)
 	}
-	foundBlock := false
+	blockedRoots := map[string]bool{}
 	for _, dep := range deps {
-		if dep.IssueID == source.ID && dep.DependsOnID == roots[0].ID && dep.Type == "blocks" {
-			foundBlock = true
-			break
+		if dep.IssueID == source.ID && dep.Type == "blocks" {
+			blockedRoots[dep.DependsOnID] = true
 		}
 	}
-	if !foundBlock {
-		t.Fatalf("source deps = %+v, want blocks dep to graph root %s", deps, roots[0].ID)
+	for _, root := range roots {
+		if !blockedRoots[root.ID] {
+			t.Fatalf("source deps = %+v, want blocks dep to graph root %s", deps, root.ID)
+		}
 	}
 	sourceAfter, err := store.Get(source.ID)
 	if err != nil {
@@ -745,7 +746,7 @@ title = "Do work for {{convoy_id}}"
 	}
 }
 
-func TestFormulaCookAttachGraphV2RejectsDifferentLiveAttachRoot(t *testing.T) {
+func TestFormulaCookAttachGraphV2AllowsDifferentLiveBareBeadRoots(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	t.Setenv("GC_HOME", t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
@@ -802,189 +803,14 @@ title = "Do work for {{convoy_id}}"
 	stderr.Reset()
 	cmd = newFormulaCookCmd(&stdout, &stderr)
 	cmd.SetArgs([]string{"graph-b", "--attach", source.ID, "--json"})
-	err = cmd.Execute()
-	if err == nil {
-		t.Fatal("formula cook graph-b succeeded, want conflict with live graph-a attach root")
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("formula cook graph-b: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
 	}
-	var conflict *sourceworkflow.ConflictError
-	if !errors.As(err, &conflict) {
-		t.Fatalf("error = %T %[1]v, want ConflictError", err)
-	}
-	if conflict.SourceBeadID != source.ID || len(conflict.WorkflowIDs) != 1 {
-		t.Fatalf("conflict = %#v, want one workflow for source %s", conflict, source.ID)
-	}
-}
-
-func TestFormulaCookAttachGraphV2RejectsLiveSingletonRoot(t *testing.T) {
-	formulatest.EnableV2ForTest(t)
-	t.Setenv("GC_HOME", t.TempDir())
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-	t.Setenv("GC_SESSION", "fake")
-	t.Setenv("GC_BEADS", "file")
-	t.Setenv("GC_DOLT", "skip")
-
-	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
-[workspace]
-name = "my-city"
-provider = "claude"
-
-[daemon]
-formula_v2 = true
-`), 0o644); err != nil {
-		t.Fatalf("write city.toml: %v", err)
-	}
-	formulaDir := filepath.Join(cityDir, "formulas")
-	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
-		t.Fatalf("mkdir formulas: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
-formula = "graph-work"
-version = 2
-contract = "graph.v2"
-
-[[steps]]
-id = "step"
-title = "Do work for {{convoy_id}}"
-`), 0o644); err != nil {
-		t.Fatalf("write formula: %v", err)
-	}
-	t.Chdir(cityDir)
-	store, err := openStoreAtForCity(cityDir, cityDir)
+	roots, err := store.ListByMetadata(map[string]string{"gc.formula_contract": "graph.v2", "gc.kind": "workflow"}, 0)
 	if err != nil {
-		t.Fatalf("open store: %v", err)
+		t.Fatalf("list graph roots: %v", err)
 	}
-	source, err := store.Create(beads.Bead{Title: "target", Type: "task"})
-	if err != nil {
-		t.Fatalf("create source: %v", err)
-	}
-	singleton, err := store.Create(beads.Bead{
-		Title: "singleton",
-		Type:  "convoy",
-		Metadata: map[string]string{
-			"gc.synthetic":              "true",
-			"gc.synthetic_kind":         "singleton-convoy",
-			"gc.input_bead_id":          source.ID,
-			"gc.graphv2_invocation_key": "graphv2-singleton:" + source.ID,
-		},
-	})
-	if err != nil {
-		t.Fatalf("create singleton: %v", err)
-	}
-	if err := store.DepAdd(singleton.ID, source.ID, "tracks"); err != nil {
-		t.Fatalf("track singleton: %v", err)
-	}
-	existingRoot, err := store.Create(beads.Bead{
-		Title: "existing graph root",
-		Type:  "task",
-		Metadata: map[string]string{
-			"gc.kind":             "workflow",
-			"gc.formula_contract": "graph.v2",
-			"gc.input_convoy_id":  singleton.ID,
-			"gc.graphv2_root_key": "graphv2-root:existing",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create existing root: %v", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	cmd := newFormulaCookCmd(&stdout, &stderr)
-	cmd.SetArgs([]string{"graph-work", "--attach", source.ID, "--json"})
-	err = cmd.Execute()
-	if err == nil {
-		t.Fatal("formula cook succeeded, want conflict with live singleton graph root")
-	}
-	var conflict *sourceworkflow.ConflictError
-	if !errors.As(err, &conflict) {
-		t.Fatalf("error = %T %[1]v, want ConflictError", err)
-	}
-	if conflict.SourceBeadID != source.ID || len(conflict.WorkflowIDs) != 1 || conflict.WorkflowIDs[0] != existingRoot.ID {
-		t.Fatalf("conflict = %#v, want source %s workflow %s", conflict, source.ID, existingRoot.ID)
-	}
-}
-
-func TestFormulaCookAttachGraphV2RejectsLiveSourceWorkflow(t *testing.T) {
-	formulatest.EnableV2ForTest(t)
-	t.Setenv("GC_HOME", t.TempDir())
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
-	t.Setenv("GC_SESSION", "fake")
-	t.Setenv("GC_BEADS", "file")
-	t.Setenv("GC_DOLT", "skip")
-
-	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
-[workspace]
-name = "my-city"
-provider = "claude"
-
-[daemon]
-formula_v2 = true
-`), 0o644); err != nil {
-		t.Fatalf("write city.toml: %v", err)
-	}
-	formulaDir := filepath.Join(cityDir, "formulas")
-	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
-		t.Fatalf("mkdir formulas: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
-formula = "graph-work"
-version = 2
-contract = "graph.v2"
-
-[[steps]]
-id = "step"
-title = "Do work for {{convoy_id}}"
-`), 0o644); err != nil {
-		t.Fatalf("write formula: %v", err)
-	}
-	t.Chdir(cityDir)
-	store, err := openStoreAtForCity(cityDir, cityDir)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	source, err := store.Create(beads.Bead{Title: "target", Type: "task"})
-	if err != nil {
-		t.Fatalf("create source: %v", err)
-	}
-	existingRoot, err := store.Create(beads.Bead{
-		Title:  "existing workflow",
-		Type:   "task",
-		Status: "in_progress",
-		Metadata: map[string]string{
-			"gc.kind":           "workflow",
-			"gc.source_bead_id": source.ID,
-		},
-	})
-	if err != nil {
-		t.Fatalf("create existing root: %v", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	cmd := newFormulaCookCmd(&stdout, &stderr)
-	cmd.SetArgs([]string{"graph-work", "--attach", source.ID, "--json"})
-	err = cmd.Execute()
-	if err == nil {
-		t.Fatal("formula cook succeeded, want source workflow conflict")
-	}
-	var conflict *sourceworkflow.ConflictError
-	if !errors.As(err, &conflict) {
-		t.Fatalf("error = %T %[1]v, want ConflictError", err)
-	}
-	if conflict.SourceBeadID != source.ID || len(conflict.WorkflowIDs) != 1 || conflict.WorkflowIDs[0] != existingRoot.ID {
-		t.Fatalf("conflict = %#v, want source %s workflow %s", conflict, source.ID, existingRoot.ID)
-	}
-}
-
-func TestFormulaCookLiveSourceWorkflowRootsFailsOnSkippedStores(t *testing.T) {
-	err := sourceWorkflowIncompleteScanError([]sourceWorkflowStoreSkip{{
-		path: "rigs/broken",
-		err:  errors.New("simulated open failure"),
-	}})
-	if err == nil {
-		t.Fatal("sourceWorkflowIncompleteScanError returned nil, want fail-closed error")
-	}
-	if !strings.Contains(err.Error(), "rigs/broken") || !strings.Contains(err.Error(), "invisible") {
-		t.Fatalf("error = %q, want skipped store visibility", err)
+	if len(roots) != 2 {
+		t.Fatalf("graph roots = %+v, want two independent roots", roots)
 	}
 }

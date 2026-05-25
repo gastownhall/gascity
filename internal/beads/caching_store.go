@@ -283,6 +283,14 @@ func defaultCachePrimeRetryDelay(attempt int) time.Duration {
 	return time.Duration(attempt*5) * time.Second
 }
 
+// IDPrefix returns the bead ID prefix owned by this cache's backing store.
+func (c *CachingStore) IDPrefix() string {
+	if c == nil {
+		return ""
+	}
+	return c.idPrefix
+}
+
 func normalizeIDPrefix(prefix string) string {
 	return strings.Trim(strings.ToLower(strings.TrimSpace(prefix)), "-")
 }

@@ -668,7 +668,7 @@ title = "Inspect {{convoy_id}}"
 	}
 }
 
-func TestFormulaPreviewGraphV2UsesPreviewSingletonForBeadTarget(t *testing.T) {
+func TestFormulaPreviewGraphV2UsesPreviewInputConvoyForBeadTarget(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 
 	state := newFakeState(t)
@@ -707,19 +707,19 @@ title = "Inspect {{convoy_id}}"
 	if err := json.NewDecoder(rec.Body).Decode(&detail); err != nil {
 		t.Fatalf("Decode(detail): %v", err)
 	}
-	want := "preview-singleton:" + target.ID
+	want := "preview-input-convoy:" + target.ID
 	if detail.Description != "Preview "+want {
-		t.Fatalf("description = %q, want preview singleton", detail.Description)
+		t.Fatalf("description = %q, want preview input convoy", detail.Description)
 	}
 	if len(detail.Steps) != 1 || detail.Steps[0].Title != "Inspect "+want {
-		t.Fatalf("steps = %+v, want preview singleton graph.v2 step", detail.Steps)
+		t.Fatalf("steps = %+v, want preview input graph.v2 step", detail.Steps)
 	}
-	matches, err := state.cityBeadStore.ListByMetadata(map[string]string{"gc.input_bead_id": target.ID}, 10)
+	matches, err := state.cityBeadStore.List(beads.ListQuery{Type: "convoy"})
 	if err != nil {
-		t.Fatalf("ListByMetadata(singletons): %v", err)
+		t.Fatalf("List input convoys: %v", err)
 	}
 	if len(matches) != 0 {
-		t.Fatalf("preview persisted singleton convoys = %+v, want none", matches)
+		t.Fatalf("preview persisted input convoys = %+v, want none", matches)
 	}
 }
 

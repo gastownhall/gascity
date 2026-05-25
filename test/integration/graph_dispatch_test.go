@@ -259,7 +259,7 @@ func findGraphWorkflowRootForSource(cityDir, sourceID string) (string, string, e
 
 	inputConvoys := make(map[string]bool)
 	for _, bead := range beads {
-		if bead.Type == "convoy" && metaValue(bead, "gc.input_bead_id") == sourceID {
+		if bead.Type == "convoy" && bead.Title == "input convoy for "+sourceID {
 			inputConvoys[bead.ID] = true
 		}
 	}

@@ -270,7 +270,7 @@ func formulaDetailPreviewVars(ctx context.Context, store beads.Store, name strin
 			return nil, err
 		}
 		out := graphv2.EffectiveRuntimeVars(resolved, vars)
-		inputConvoyID, _, err := graphv2.PreviewInputConvoyID(store, target)
+		inputConvoyID, err := graphv2.PreviewInputConvoyID(store, target)
 		if err != nil {
 			return nil, err
 		}

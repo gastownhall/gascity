@@ -378,16 +378,13 @@ func TestCheckBeadStateRoutedWithLiveTrackingConvoyIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestCheckBeadStateRoutedWithSyntheticTrackingConvoyIsNotIdempotent(t *testing.T) {
+func TestCheckBeadStateRoutedWithSyntheticTrackingConvoyIsIdempotent(t *testing.T) {
 	store := beads.NewMemStore()
 	convoy, err := store.Create(beads.Bead{
-		Title:  "singleton convoy",
-		Type:   "convoy",
-		Status: "open",
-		Metadata: map[string]string{
-			"gc.synthetic":      "true",
-			"gc.synthetic_kind": "singleton-convoy",
-		},
+		Title:    "input convoy",
+		Type:     "convoy",
+		Status:   "open",
+		Metadata: map[string]string{"gc.synthetic": "true"},
 	})
 	if err != nil {
 		t.Fatalf("store.Create(convoy): %v", err)
@@ -407,8 +404,8 @@ func TestCheckBeadStateRoutedWithSyntheticTrackingConvoyIsNotIdempotent(t *testi
 
 	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor"}, SlingDeps{Store: store})
 
-	if result.Idempotent {
-		t.Fatalf("expected Idempotent=false when only synthetic tracking convoy exists, got %+v", result)
+	if !result.Idempotent {
+		t.Fatalf("expected Idempotent=true when routed bead has a live tracking convoy, got %+v", result)
 	}
 }
 
@@ -2093,7 +2090,7 @@ func TestSlingAttachGraphFormulaCreatesConvoyFirstRoot(t *testing.T) {
 	}
 }
 
-func TestSlingAttachGraphFormulaReusesConvoyFirstRoot(t *testing.T) {
+func TestSlingAttachGraphFormulaCreatesFreshRootForBareBeadTarget(t *testing.T) {
 	formulaDir := t.TempDir()
 	writeGraphV2ConvoyFormula(t, formulaDir)
 	cfg := graphV2SlingTestConfig(t, formulaDir)
@@ -2115,12 +2112,12 @@ func TestSlingAttachGraphFormulaReusesConvoyFirstRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second AttachFormula: %v", err)
 	}
-	if second.WorkflowID != first.WorkflowID {
-		t.Fatalf("WorkflowID = %q, want reused %q", second.WorkflowID, first.WorkflowID)
+	if second.WorkflowID == first.WorkflowID {
+		t.Fatalf("WorkflowID = %q, want fresh root for fresh input convoy", second.WorkflowID)
 	}
 }
 
-func TestSlingAttachGraphFormulaRejectsDifferentLiveSingletonRoot(t *testing.T) {
+func TestSlingAttachGraphFormulaAllowsDifferentLiveBareBeadRoots(t *testing.T) {
 	formulaDir := t.TempDir()
 	writeNamedGraphV2ConvoyFormula(t, formulaDir, "graph-a")
 	writeNamedGraphV2ConvoyFormula(t, formulaDir, "graph-b")
@@ -2139,19 +2136,9 @@ func TestSlingAttachGraphFormulaRejectsDifferentLiveSingletonRoot(t *testing.T) 
 	if err != nil {
 		t.Fatalf("first AttachFormula: %v", err)
 	}
-	_, err = s.AttachFormula(context.Background(), "graph-b", source.ID, a, FormulaOpts{})
-	if err == nil {
-		t.Fatal("second AttachFormula error = nil, want conflict")
-	}
-	var conflictErr *sourceworkflow.ConflictError
-	if !errors.As(err, &conflictErr) {
-		t.Fatalf("second AttachFormula error = %v, want ConflictError", err)
-	}
-	if conflictErr.SourceBeadID != source.ID {
-		t.Fatalf("SourceBeadID = %q, want %q", conflictErr.SourceBeadID, source.ID)
-	}
-	if !containsString(conflictErr.WorkflowIDs, first.WorkflowID) {
-		t.Fatalf("WorkflowIDs = %v, want %q", conflictErr.WorkflowIDs, first.WorkflowID)
+	second, err := s.AttachFormula(context.Background(), "graph-b", source.ID, a, FormulaOpts{})
+	if err != nil {
+		t.Fatalf("second AttachFormula: %v", err)
 	}
 	roots, err := deps.Store.ListByMetadata(map[string]string{"gc.formula_contract": "graph.v2"}, 0)
 	if err != nil {
@@ -2163,12 +2150,12 @@ func TestSlingAttachGraphFormulaRejectsDifferentLiveSingletonRoot(t *testing.T) 
 			liveRoots = append(liveRoots, root)
 		}
 	}
-	if len(liveRoots) != 1 || liveRoots[0].ID != first.WorkflowID {
-		t.Fatalf("live graph roots = %+v, want only %s", liveRoots, first.WorkflowID)
+	if len(liveRoots) != 2 {
+		t.Fatalf("live graph roots = %+v, want two roots %s and %s", liveRoots, first.WorkflowID, second.WorkflowID)
 	}
 }
 
-func TestDoSlingDefaultGraphFormulaRejectsDifferentLiveSingletonRoot(t *testing.T) {
+func TestDoSlingDefaultGraphFormulaAllowsDifferentLiveBareBeadRoots(t *testing.T) {
 	formulaDir := t.TempDir()
 	writeNamedGraphV2ConvoyFormula(t, formulaDir, "graph-a")
 	writeNamedGraphV2ConvoyFormula(t, formulaDir, "graph-b")
@@ -2187,19 +2174,12 @@ func TestDoSlingDefaultGraphFormulaRejectsDifferentLiveSingletonRoot(t *testing.
 		t.Fatalf("first AttachFormula: %v", err)
 	}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("graph-b")}
-	_, err = DoSling(SlingOpts{Target: a, BeadOrFormula: source.ID}, deps, deps.Store)
-	if err == nil {
-		t.Fatal("DoSling error = nil, want conflict")
+	result, err := DoSling(SlingOpts{Target: a, BeadOrFormula: source.ID}, deps, deps.Store)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
 	}
-	var conflictErr *sourceworkflow.ConflictError
-	if !errors.As(err, &conflictErr) {
-		t.Fatalf("DoSling error = %v, want ConflictError", err)
-	}
-	if conflictErr.SourceBeadID != source.ID {
-		t.Fatalf("SourceBeadID = %q, want %q", conflictErr.SourceBeadID, source.ID)
-	}
-	if !containsString(conflictErr.WorkflowIDs, first.WorkflowID) {
-		t.Fatalf("WorkflowIDs = %v, want %q", conflictErr.WorkflowIDs, first.WorkflowID)
+	if result.WorkflowID == "" || result.WorkflowID == first.WorkflowID {
+		t.Fatalf("WorkflowID = %q, want fresh root different from %s", result.WorkflowID, first.WorkflowID)
 	}
 }
 
@@ -2262,15 +2242,6 @@ title = "Do work for {{convoy_id}}"
 `, name)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }
 
 func graphV2SlingTestConfig(t *testing.T, formulaDir string) *config.City {

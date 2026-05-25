@@ -250,11 +250,7 @@ func slingOnFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID 
 			return result, fmt.Errorf("instantiating formula %q on %s: %w", opts.OnFormula, beadID, err)
 		}
 		return withGraphV2SourceWorkflowLock(context.Background(), deps, beadID, func() (SlingResult, error) {
-			rootKey := graphv2.RootKey(graphInv.InputConvoy, opts.OnFormula, formulaVars, opts.ScopeKind, opts.ScopeRef)
 			if err := CheckNoMoleculeChildrenAllowLiveWorkflow(querier, beadID, deps.Store, &result); err != nil {
-				return result, fmt.Errorf("%w", err)
-			}
-			if err := checkGraphV2SourceRootConflict(deps.Store, beadID, rootKey); err != nil {
 				return result, fmt.Errorf("%w", err)
 			}
 			if err := checkLegacySourceWorkflowConflict(deps, beadID); err != nil {
@@ -355,11 +351,7 @@ func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			return result, fmt.Errorf("instantiating default formula %q on %s: %w", defaultFormula, beadID, err)
 		}
 		return withGraphV2SourceWorkflowLock(context.Background(), deps, beadID, func() (SlingResult, error) {
-			rootKey := graphv2.RootKey(graphInv.InputConvoy, defaultFormula, defaultVars, opts.ScopeKind, opts.ScopeRef)
 			if err := CheckNoMoleculeChildrenAllowLiveWorkflow(querier, beadID, deps.Store, &result); err != nil {
-				return result, fmt.Errorf("%w", err)
-			}
-			if err := checkGraphV2SourceRootConflict(deps.Store, beadID, rootKey); err != nil {
 				return result, fmt.Errorf("%w", err)
 			}
 			if err := checkLegacySourceWorkflowConflict(deps, beadID); err != nil {
@@ -438,28 +430,6 @@ func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 		return run()
 	}
 	return withSourceWorkflowLaunchLock(context.Background(), deps, beadID, opts.Force, runGraph)
-}
-
-func checkGraphV2SourceRootConflict(store beads.Store, sourceID, allowedRootKey string) error {
-	roots, err := liveGraphV2RootsForSingletonSource(store, sourceID)
-	if err != nil {
-		return err
-	}
-	allowedRootKey = strings.TrimSpace(allowedRootKey)
-	conflicts := make([]beads.Bead, 0, len(roots))
-	for _, root := range roots {
-		if strings.TrimSpace(root.Metadata["gc.graphv2_root_key"]) == allowedRootKey {
-			continue
-		}
-		conflicts = append(conflicts, root)
-	}
-	if len(conflicts) == 0 {
-		return nil
-	}
-	return &sourceworkflow.ConflictError{
-		SourceBeadID: sourceID,
-		WorkflowIDs:  sourceworkflow.BlockingWorkflowIDs(conflicts),
-	}
 }
 
 // slingPlainBead handles plain bead routing (no formula).

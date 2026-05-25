@@ -2,6 +2,7 @@ package graphv2
 
 import (
 	"context"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,7 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formulatest"
 )
 
-func TestPrepareInvocationCreatesSingletonConvoyForBeadTarget(t *testing.T) {
+func TestPrepareInvocationCreatesInputConvoyForBeadTarget(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()
 	writeFormula(t, dir, "work.formula.toml", `
@@ -36,8 +37,8 @@ title = "Inspect {{convoy_id}}"
 	if err != nil {
 		t.Fatalf("PrepareInvocation: %v", err)
 	}
-	if inv.InputConvoy == "" || !inv.Singleton {
-		t.Fatalf("invocation = %+v, want singleton input convoy", inv)
+	if inv.InputConvoy == "" {
+		t.Fatalf("invocation = %+v, want input convoy", inv)
 	}
 	if got := inv.Vars[ConvoyIDVar]; got != inv.InputConvoy {
 		t.Fatalf("vars[%s] = %q, want %q", ConvoyIDVar, got, inv.InputConvoy)
@@ -49,13 +50,24 @@ title = "Inspect {{convoy_id}}"
 	if len(members) != 1 || members[0].ID != target.ID {
 		t.Fatalf("members = %+v, want target %s", members, target.ID)
 	}
+	created, err := store.Get(inv.InputConvoy)
+	if err != nil {
+		t.Fatalf("Get(input convoy): %v", err)
+	}
+	if created.Type != "convoy" {
+		t.Fatalf("input convoy type = %q, want convoy", created.Type)
+	}
+	wantMetadata := map[string]string{"gc.synthetic": "true"}
+	if !maps.Equal(created.Metadata, wantMetadata) {
+		t.Fatalf("input convoy metadata = %+v, want %+v", created.Metadata, wantMetadata)
+	}
 
 	again, err := PrepareInvocation(context.Background(), store, "work", []string{dir}, target.ID, nil)
 	if err != nil {
 		t.Fatalf("PrepareInvocation again: %v", err)
 	}
-	if again.InputConvoy != inv.InputConvoy {
-		t.Fatalf("singleton not reused: first=%s second=%s", inv.InputConvoy, again.InputConvoy)
+	if again.InputConvoy == inv.InputConvoy {
+		t.Fatalf("input convoy was reused: first=%s second=%s", inv.InputConvoy, again.InputConvoy)
 	}
 }
 
@@ -139,7 +151,7 @@ title = "Inspect {{convoy_id}}"
 	}
 }
 
-func TestPrepareInvocationRepairsExistingSingletonConvoyTrack(t *testing.T) {
+func TestPrepareInvocationDoesNotReusePreviousInputConvoy(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()
 	writeFormula(t, dir, "work.formula.toml", `
@@ -158,29 +170,27 @@ title = "Inspect {{convoy_id}}"
 		t.Fatalf("Create target: %v", err)
 	}
 	existing, err := store.Create(beads.Bead{
-		Title: "existing input",
-		Type:  "convoy",
-		Metadata: map[string]string{
-			graphV2InvocationKey: singletonInvocationPrefix + target.ID,
-		},
+		Title:    "existing input",
+		Type:     "convoy",
+		Metadata: map[string]string{"gc.synthetic": "true"},
 	})
 	if err != nil {
-		t.Fatalf("Create existing singleton: %v", err)
+		t.Fatalf("Create existing input convoy: %v", err)
 	}
 
 	inv, err := PrepareInvocation(context.Background(), store, "work", []string{dir}, target.ID, nil)
 	if err != nil {
 		t.Fatalf("PrepareInvocation: %v", err)
 	}
-	if inv.InputConvoy != existing.ID {
-		t.Fatalf("InputConvoy = %q, want existing %q", inv.InputConvoy, existing.ID)
+	if inv.InputConvoy == existing.ID {
+		t.Fatalf("InputConvoy = %q, want a fresh input convoy", inv.InputConvoy)
 	}
-	members, err := convoycore.Members(store, existing.ID, true)
+	members, err := convoycore.Members(store, inv.InputConvoy, true)
 	if err != nil {
 		t.Fatalf("Members: %v", err)
 	}
 	if len(members) != 1 || members[0].ID != target.ID {
-		t.Fatalf("members = %+v, want repaired target %s", members, target.ID)
+		t.Fatalf("members = %+v, want target %s", members, target.ID)
 	}
 }
 
@@ -207,7 +217,7 @@ title = "Inspect {{convoy_id}}"
 	if err != nil {
 		t.Fatalf("PrepareInvocation: %v", err)
 	}
-	if inv.InputConvoy != convoy.ID || inv.Singleton {
+	if inv.InputConvoy != convoy.ID {
 		t.Fatalf("invocation = %+v, want existing convoy", inv)
 	}
 }
@@ -266,12 +276,12 @@ title = "Inspect {{convoy_id}} with {{missing}}"
 	if !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("error = %q, want missing runtime var", err)
 	}
-	singletons, err := store.ListByMetadata(map[string]string{"gc.input_bead_id": target.ID}, 0)
+	inputConvoys, err := store.List(beads.ListQuery{Type: "convoy"})
 	if err != nil {
-		t.Fatalf("ListByMetadata(singletons): %v", err)
+		t.Fatalf("List input convoys: %v", err)
 	}
-	if len(singletons) != 0 {
-		t.Fatalf("singletons = %+v, want none before validation succeeds", singletons)
+	if len(inputConvoys) != 0 {
+		t.Fatalf("input convoys = %+v, want none before validation succeeds", inputConvoys)
 	}
 }
 
@@ -367,7 +377,7 @@ condition = "!{{convoy_id}}"
 	}
 }
 
-func TestPreparePreviewInvocationUsesInMemorySingletonForBeadTarget(t *testing.T) {
+func TestPreparePreviewInvocationUsesPreviewInputConvoyForBeadTarget(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()
 	writeFormula(t, dir, "work.formula.toml", `
@@ -390,19 +400,19 @@ title = "Inspect {{convoy_id}}"
 	if err != nil {
 		t.Fatalf("PreparePreviewInvocation: %v", err)
 	}
-	want := previewSingletonPrefix + target.ID
-	if inv.InputConvoy != want || !inv.Singleton {
-		t.Fatalf("preview invocation = %+v, want in-memory singleton %q", inv, want)
+	want := previewInputConvoyPrefix + target.ID
+	if inv.InputConvoy != want {
+		t.Fatalf("preview invocation = %+v, want preview input convoy %q", inv, want)
 	}
 	if got := inv.Vars[ConvoyIDVar]; got != want {
 		t.Fatalf("vars[%s] = %q, want %q", ConvoyIDVar, got, want)
 	}
-	matches, err := store.ListByMetadata(map[string]string{graphV2InvocationKey: singletonInvocationPrefix + target.ID}, 10)
+	matches, err := store.List(beads.ListQuery{Type: "convoy"})
 	if err != nil {
-		t.Fatalf("ListByMetadata singleton: %v", err)
+		t.Fatalf("List convoys: %v", err)
 	}
 	if len(matches) != 0 {
-		t.Fatalf("preview created singleton convoys = %+v, want none", matches)
+		t.Fatalf("preview created input convoys = %+v, want none", matches)
 	}
 }
 
@@ -458,12 +468,12 @@ title = "Item {{convoy_id}}"
 	if !strings.Contains(err.Error(), `max_units must be <= 100`) {
 		t.Fatalf("error = %q, want expanded drain max_units error", err)
 	}
-	matches, err := store.ListByMetadata(map[string]string{graphV2InvocationKey: singletonInvocationPrefix + target.ID}, 10)
+	matches, err := store.List(beads.ListQuery{Type: "convoy"})
 	if err != nil {
-		t.Fatalf("ListByMetadata singleton: %v", err)
+		t.Fatalf("List input convoys: %v", err)
 	}
 	if len(matches) != 0 {
-		t.Fatalf("singleton convoys = %+v, want none before validation succeeds", matches)
+		t.Fatalf("input convoys = %+v, want none before validation succeeds", matches)
 	}
 }
 
@@ -506,12 +516,12 @@ title = "Legacy item"
 	if !strings.Contains(err.Error(), "must declare contract = \"graph.v2\"") {
 		t.Fatalf("error = %q, want graph.v2 item formula message", err)
 	}
-	matches, err := store.ListByMetadata(map[string]string{graphV2InvocationKey: singletonInvocationPrefix + target.ID}, 10)
+	matches, err := store.List(beads.ListQuery{Type: "convoy"})
 	if err != nil {
-		t.Fatalf("ListByMetadata singleton: %v", err)
+		t.Fatalf("List input convoys: %v", err)
 	}
 	if len(matches) != 0 {
-		t.Fatalf("singleton convoys = %+v, want none before validation succeeds", matches)
+		t.Fatalf("input convoys = %+v, want none before validation succeeds", matches)
 	}
 }
 
