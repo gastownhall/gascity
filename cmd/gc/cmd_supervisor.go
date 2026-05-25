@@ -129,34 +129,59 @@ func newSupervisorStatusCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 // openSupervisorLogForTee opens the supervisor log file in append mode for
-// runSupervisor to tee output into. Returns nil on any error (we never
-// fail supervisor startup just because the log file can't be opened —
-// operators still get journald/launchd-captured stdout/stderr).
-func openSupervisorLogForTee() *os.File {
+// runSupervisor to tee output into.
+func openSupervisorLogForTee() (*os.File, error) {
 	f, err := os.OpenFile(supervisorLogPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("opening supervisor log %s: %w", supervisorLogPath(), err)
 	}
-	return f
+	return f, nil
 }
 
-// shouldTeeSupervisorLog reports whether `w` is distinct from the
-// supervisor log file. When `gc supervisor start` spawns a backgrounded
-// `gc supervisor run` child, it pre-opens the log and points
-// child.Stdout/child.Stderr at it — the child's stdout/stderr are then
-// already the log file, so adding a MultiWriter would double-log every
-// line. By comparing the underlying file (Name() match), we avoid that
-// while still teeing for the systemd/launchd/container path where
-// stdout/stderr arrive as a journal/pipe and need explicit routing.
+// shouldTeeSupervisorLog reports whether w is distinct from supervisor.log.
+// Service managers and manual background start can hand this process
+// fd-backed stdout/stderr that already append to supervisor.log while still
+// carrying cosmetic names like /dev/stdout. Compare open file identity instead
+// of names so those paths do not double-log.
 func shouldTeeSupervisorLog(w io.Writer, logFile *os.File) bool {
 	if w == nil || logFile == nil {
 		return false
 	}
-	wf, ok := w.(*os.File)
+	wf, ok := fileWriterForSupervisorLog(w)
 	if !ok {
 		return true
 	}
-	return wf.Name() != logFile.Name()
+	same, err := sameOpenFile(wf, logFile)
+	if err != nil {
+		return true
+	}
+	return !same
+}
+
+func fileWriterForSupervisorLog(w io.Writer) (*os.File, bool) {
+	switch v := w.(type) {
+	case *os.File:
+		return v, true
+	case *switchableWriter:
+		if v == nil || v.target == nil {
+			return nil, false
+		}
+		return fileWriterForSupervisorLog(v.target)
+	default:
+		return nil, false
+	}
+}
+
+func sameOpenFile(a, b *os.File) (bool, error) {
+	aInfo, err := a.Stat()
+	if err != nil {
+		return false, err
+	}
+	bInfo, err := b.Stat()
+	if err != nil {
+		return false, err
+	}
+	return os.SameFile(aInfo, bInfo), nil
 }
 
 // acquireSupervisorLock takes an exclusive flock on the supervisor lock file.
@@ -245,6 +270,10 @@ const supervisorOmitProviderCredsEnv = "GC_SUPERVISOR_OMIT_PROVIDER_CREDS"
 var supervisorShutdownSettleDelay = 50 * time.Millisecond
 
 var supervisorSignalNotify = signal.Notify
+
+// supervisorLoadConfig follows the package's test-double convention; tests
+// that replace it must not run in parallel.
+var supervisorLoadConfig = supervisor.LoadConfig
 
 // supervisorHardExitCodeRepeatedShutdown is the exit code for repeated
 // destructive shutdown escalation. 130 approximates the shell SIGINT
@@ -983,8 +1012,10 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	// regardless of how the supervisor was invoked. We skip the tee when
 	// stdout/stderr already point at the same file (manual `gc supervisor
 	// start` path) to avoid double-logging.
-	if logFile := openSupervisorLogForTee(); logFile != nil {
-		defer logFile.Close() //nolint:errcheck // best-effort cleanup
+	if logFile, err := openSupervisorLogForTee(); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: tee disabled: %v\n", err) //nolint:errcheck
+	} else {
+		defer logFile.Close() //nolint:errcheck // keep after later run-loop cleanup defers
 		if shouldTeeSupervisorLog(stdout, logFile) {
 			stdout = io.MultiWriter(stdout, logFile)
 		}
@@ -1034,7 +1065,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	}, stderr)
 
 	// Load supervisor config.
-	supCfg, err := supervisor.LoadConfig(supervisor.ConfigPath())
+	supCfg, err := supervisorLoadConfig(supervisor.ConfigPath())
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: config: %v\n", err) //nolint:errcheck
 		return 1
