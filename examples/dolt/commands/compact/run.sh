@@ -1738,6 +1738,7 @@ flatten_database() {
   writer_race_detected=0
   if [ -n "$head" ] && [ -n "$head_before_reset" ] && [ "$head_before_reset" != "$head" ]; then
     writer_race_detected=1
+    compacted_from_head="$head_before_reset"
   fi
   if [ -n "$flatten_head" ] && [ -n "$post_verify_head" ] && [ "$post_verify_head" != "$flatten_head" ]; then
     writer_race_detected=1
@@ -1812,6 +1813,9 @@ flatten_database() {
   post_db_hash_head=$(head_commit "$db" || true)
   db_hash_writer_race_detected=0
   if [ -n "$flatten_head" ] && [ -n "$pre_db_hash_head" ] && [ "$pre_db_hash_head" != "$flatten_head" ]; then
+    db_hash_writer_race_detected=1
+  fi
+  if [ -n "$flatten_head" ] && [ -n "$post_db_hash_head" ] && [ "$post_db_hash_head" != "$flatten_head" ]; then
     db_hash_writer_race_detected=1
   fi
   if [ -n "$pre_db_hash_head" ] && [ -n "$post_db_hash_head" ] && [ "$post_db_hash_head" != "$pre_db_hash_head" ]; then
