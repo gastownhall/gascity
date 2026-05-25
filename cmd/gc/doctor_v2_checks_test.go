@@ -175,6 +175,42 @@ dir = "formulas"
 	}
 }
 
+func TestDoctorFixLeavesCustomFormulasDirFailing(t *testing.T) {
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "custom-formula-city"
+`)
+	packPath := filepath.Join(cityDir, "pack.toml")
+	writeDoctorFile(t, cityDir, "pack.toml", `
+[pack]
+name = "custom-formula-city"
+schema = 2
+
+[formulas]
+dir = "custom-formulas"
+`)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
+
+	var stdout, stderr bytes.Buffer
+	code := doDoctor(true, false, false, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc doctor --fix unexpectedly passed with custom formulas dir; stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "✗ v2-formulas-dir") {
+		t.Fatalf("doctor output missing v2-formulas-dir failure:\n%s", stdout.String())
+	}
+	data, err := os.ReadFile(packPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", packPath, err)
+	}
+	if !strings.Contains(string(data), `dir = "custom-formulas"`) {
+		t.Fatalf("custom formulas dir should remain for manual migration:\n%s", data)
+	}
+}
+
 func TestV2LegacyOrderLayoutCheckReportsSchema1NestedOrder(t *testing.T) {
 	t.Parallel()
 
