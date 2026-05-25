@@ -81,12 +81,11 @@ func TestConditionEnvEnviron(t *testing.T) {
 
 func TestConditionEnvEnvironOptionalEmpty(t *testing.T) {
 	env := ConditionEnv{
-		BeadID:      "bead-789",
-		Iteration:   1,
-		CityPath:    "/city",
-		WispID:      "wisp-abc",
-		ArtifactDir: "/tmp/art",
-		// DocPath, AgentVerdict, AgentProvider, AgentModel all empty.
+		BeadID:    "bead-789",
+		Iteration: 1,
+		CityPath:  "/city",
+		WispID:    "wisp-abc",
+		// ArtifactDir, DocPath, AgentVerdict, AgentProvider, AgentModel all empty.
 	}
 
 	vars := env.Environ()
@@ -98,8 +97,10 @@ func TestConditionEnvEnvironOptionalEmpty(t *testing.T) {
 		}
 	}
 
-	// Optional vars should be absent when empty.
-	for _, key := range []string{"GC_DOC_PATH", "GC_AGENT_VERDICT", "GC_AGENT_PROVIDER", "GC_AGENT_MODEL", "GC_MOLECULE_DIR"} {
+	// Optional vars should be absent when empty. GC_ARTIFACT_DIR is omitted
+	// when ArtifactDir is empty, matching GC_MOLECULE_DIR and the sling-time
+	// contract (a non-molecule bead gets neither var).
+	for _, key := range []string{"GC_DOC_PATH", "GC_AGENT_VERDICT", "GC_AGENT_PROVIDER", "GC_AGENT_MODEL", "GC_MOLECULE_DIR", "GC_ARTIFACT_DIR"} {
 		if _, ok := lookup[key]; ok {
 			t.Errorf("expected %s to be absent for empty value, but it was present", key)
 		}

@@ -230,17 +230,22 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 	}
 
 	conditionBeadID := subject.ID
+	pathBead := subject
 	if conditionBeadID == "" {
 		conditionBeadID = bead.ID
+		pathBead = bead
 	}
 	// gastownhall/gascity#2522: ralph.check scripts read $GC_MOLECULE_DIR and
 	// $GC_ARTIFACT_DIR to access the molecule-scoped working storage where
-	// the per-attempt agent wrote its verdict. Resolve both from the bead's
-	// gc.root_bead_id metadata that molecule.Instantiate stamps onto every
-	// member. Best-effort: when the bead is not a molecule member (no root
-	// stamped) both stay empty and the env vars are omitted, matching the
-	// sling-time GC_ARTIFACT_DIR contract that pack scripts already handle.
-	moleculeDir, artifactDir := resolveRalphCheckMoleculePaths(bead, cityPath)
+	// the per-attempt agent wrote its verdict. Resolve both from the same
+	// bead we expose as GC_BEAD_ID (the subject/attempt, falling back to the
+	// control bead) so the per-step artifact dir matches where that agent
+	// wrote — using the bead's gc.root_bead_id metadata that
+	// molecule.Instantiate stamps onto every member. Best-effort: when the
+	// bead is not a molecule member (no root stamped) both stay empty and
+	// the env vars are omitted, matching the sling-time GC_ARTIFACT_DIR
+	// contract that pack scripts already handle.
+	moleculeDir, artifactDir := resolveRalphCheckMoleculePaths(pathBead, cityPath)
 	result := convergence.RunCondition(context.Background(), scriptPath, convergence.ConditionEnv{
 		BeadID:      conditionBeadID,
 		Iteration:   attempt,
@@ -254,12 +259,12 @@ func runRalphCheck(store beads.Store, bead, subject beads.Bead, attempt int, opt
 }
 
 // resolveRalphCheckMoleculePaths derives the molecule root directory and the
-// per-step artifact directory for a ralph parent bead. Both paths are
-// derived from the bead's gc.root_bead_id metadata (stamped by
-// molecule.Instantiate on every formula-scaffolded member). Returns empty
-// strings when the bead is not a molecule member or when the artifact dir
-// cannot be created; the caller treats empty as "omit the env var", which
-// matches the sling-time GC_ARTIFACT_DIR contract.
+// per-step artifact directory for a ralph bead. Both paths are derived from
+// the bead's gc.root_bead_id metadata (stamped by molecule.Instantiate on
+// every formula-scaffolded member). Returns empty strings when the bead is
+// not a molecule member, when gc.root_bead_id is path-unsafe, or when the
+// artifact dir cannot be created; the caller treats empty as "omit the env
+// var", which matches the sling-time GC_ARTIFACT_DIR contract.
 func resolveRalphCheckMoleculePaths(bead beads.Bead, cityPath string) (string, string) {
 	if strings.TrimSpace(cityPath) == "" {
 		return "", ""
@@ -268,12 +273,20 @@ func resolveRalphCheckMoleculePaths(bead beads.Bead, cityPath string) (string, s
 	if rootID == "" {
 		return "", ""
 	}
+	// Reject a path-traversing/unsafe gc.root_bead_id before joining it so
+	// an unsafe root cannot surface a path-escaping GC_MOLECULE_DIR. This
+	// mirrors the rejection molecule.EnsureArtifactDir applies to rootID and
+	// keeps the omit-on-unsafe contract used by the sling env path.
+	if molecule.ValidateMemberID(rootID) != nil {
+		return "", ""
+	}
 	moleculeDir := molecule.Dir(cityPath, rootID)
 	artifactDir, err := molecule.EnsureArtifactDir(fsys.OSFS{}, cityPath, rootID, bead.ID)
 	if err != nil {
-		// Surface the molecule root even if EnsureArtifactDir failed —
-		// check scripts that only need GC_MOLECULE_DIR (not the per-step
-		// dir) still work, and the artifact-dir omission mirrors the
+		// rootID is already validated, so EnsureArtifactDir failed either
+		// on the per-step bead ID or on mkdir (e.g. permissions). Surface
+		// the (safe) molecule root so check scripts that only need
+		// GC_MOLECULE_DIR still work; the artifact-dir omission mirrors the
 		// sling-time best-effort contract.
 		return moleculeDir, ""
 	}
